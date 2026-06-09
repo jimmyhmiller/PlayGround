@@ -213,11 +213,38 @@ fn build_node(
                 },
             )
             .unwrap(),
-        Element::Bar { width, height, .. } => taffy
+        Element::Tooltip { label, .. } => taffy
+            .new_leaf_with_context(
+                taffy::Style::DEFAULT,
+                MeasureCtx {
+                    value: label.clone(),
+                    font_size: crate::render::DEFAULT_FONT_SIZE,
+                },
+            )
+            .unwrap(),
+        Element::Bar { width, height, .. } | Element::Slider { width, height, .. } => taffy
             .new_leaf(taffy::Style {
                 size: Size {
                     width: Dimension::length(*width),
                     height: Dimension::length(*height),
+                },
+                ..taffy::Style::DEFAULT
+            })
+            .unwrap(),
+        Element::Stepper { .. } => taffy
+            .new_leaf(taffy::Style {
+                size: Size {
+                    width: Dimension::length(crate::render::STEPPER_W),
+                    height: Dimension::length(crate::render::STEPPER_H),
+                },
+                ..taffy::Style::DEFAULT
+            })
+            .unwrap(),
+        Element::Select { width, .. } => taffy
+            .new_leaf(taffy::Style {
+                size: Size {
+                    width: Dimension::length(*width),
+                    height: Dimension::length(crate::render::SELECT_H),
                 },
                 ..taffy::Style::DEFAULT
             })
@@ -273,6 +300,48 @@ fn build_node(
                 )
                 .unwrap()
         }
+        Element::RadioGroup { options, .. } => {
+            // A column of option rows. Each cell measures its label with a left
+            // padding reserving room for the ring (drawn into that padding).
+            let cells: Vec<NodeId> = options
+                .iter()
+                .map(|o| {
+                    taffy
+                        .new_leaf_with_context(
+                            taffy::Style {
+                                padding: Rect {
+                                    left: LengthPercentage::length(
+                                        crate::render::RADIO_RING + crate::render::RADIO_GAP,
+                                    ),
+                                    right: LengthPercentage::length(0.0),
+                                    top: LengthPercentage::length(crate::render::RADIO_PAD_Y),
+                                    bottom: LengthPercentage::length(crate::render::RADIO_PAD_Y),
+                                },
+                                ..taffy::Style::DEFAULT
+                            },
+                            MeasureCtx {
+                                value: o.label.clone(),
+                                font_size: crate::render::DEFAULT_FONT_SIZE,
+                            },
+                        )
+                        .unwrap()
+                })
+                .collect();
+            taffy
+                .new_with_children(
+                    taffy::Style {
+                        display: Display::Flex,
+                        flex_direction: FlexDirection::Column,
+                        gap: Size {
+                            width: LengthPercentage::length(0.0),
+                            height: LengthPercentage::length(crate::render::RADIO_GROUP_GAP),
+                        },
+                        ..taffy::Style::DEFAULT
+                    },
+                    &cells,
+                )
+                .unwrap()
+        }
         Element::Toggle { label, .. } => {
             // The toggle is its own bounding box: track + optional label.
             let track_w = crate::render::TOGGLE_TRACK_W;
@@ -320,6 +389,56 @@ fn build_node(
                             ..taffy::Style::DEFAULT
                         },
                         &[label_node, track_node],
+                    )
+                    .unwrap()
+            }
+        }
+        Element::Checkbox { label, .. } => {
+            // box + optional label, laid out as a centered row (like Toggle).
+            let box_d = crate::render::CHECKBOX_SIZE;
+            if label.is_empty() {
+                taffy
+                    .new_leaf(taffy::Style {
+                        size: Size {
+                            width: Dimension::length(box_d),
+                            height: Dimension::length(box_d),
+                        },
+                        ..taffy::Style::DEFAULT
+                    })
+                    .unwrap()
+            } else {
+                let box_node = taffy
+                    .new_leaf(taffy::Style {
+                        size: Size {
+                            width: Dimension::length(box_d),
+                            height: Dimension::length(box_d),
+                        },
+                        flex_shrink: 0.0,
+                        ..taffy::Style::DEFAULT
+                    })
+                    .unwrap();
+                let label_node = taffy
+                    .new_leaf_with_context(
+                        taffy::Style::DEFAULT,
+                        MeasureCtx {
+                            value: label.clone(),
+                            font_size: crate::render::DEFAULT_FONT_SIZE,
+                        },
+                    )
+                    .unwrap();
+                taffy
+                    .new_with_children(
+                        taffy::Style {
+                            display: Display::Flex,
+                            flex_direction: FlexDirection::Row,
+                            align_items: Some(AlignItems::Center),
+                            gap: Size {
+                                width: LengthPercentage::length(8.0),
+                                height: LengthPercentage::length(0.0),
+                            },
+                            ..taffy::Style::DEFAULT
+                        },
+                        &[box_node, label_node],
                     )
                     .unwrap()
             }

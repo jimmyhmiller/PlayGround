@@ -43,7 +43,10 @@ pub mod parser;
 pub mod shader;
 
 pub use ast::{Expr, FnDef, Item, Program, ShaderBody, StyleDef, TokenDef};
-pub use eval::{BoxStyle, CompiledStyle, Dim, Dir, Layer, Length, Rgba, Value};
+pub use eval::{
+    BoxStyle, CompiledSlots, CompiledStyle, Dim, Dir, GradientStop, Layer, Length, Rgba, Sides,
+    Value,
+};
 pub use parser::parse;
 pub use shader::{Builtin, CompiledShader};
 

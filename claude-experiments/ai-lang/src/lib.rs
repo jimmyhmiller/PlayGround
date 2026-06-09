@@ -15,6 +15,7 @@ pub mod hash;
 pub mod jsonl;
 pub mod knowledge;
 pub mod lexer;
+pub mod metadata;
 pub mod namespace;
 pub mod net;
 pub mod parser;

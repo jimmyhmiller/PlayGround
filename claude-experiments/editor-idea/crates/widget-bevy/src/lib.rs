@@ -222,6 +222,140 @@ pub struct WidgetTargets {
     /// The drag-select systems map a drag onto one of these and copy the
     /// covered substring on Cmd/Ctrl+C.
     pub spans: Vec<TextSpan>,
+    /// Draggable slider hit-regions. A press/drag inside one maps the cursor
+    /// x to a value and emits `SliderChange`.
+    pub sliders: Vec<SliderTarget>,
+    /// `Select` triggers collected this frame (anchor + data for the overlay
+    /// renderer when one is open).
+    pub selects: Vec<SelectTarget>,
+    /// `Tooltip` hover-regions collected this frame.
+    pub tooltips: Vec<TooltipTarget>,
+}
+
+/// A draggable `Element::Slider` hit-region collected during render. `rect` is
+/// the full element box (content_root-local); value maps over the thumb-centre
+/// travel `[value_x0, value_x0 + value_span]`.
+#[derive(Clone, Debug)]
+pub struct SliderTarget {
+    pub id: String,
+    pub rect: Rect,
+    pub value_x0: f32,
+    pub value_span: f32,
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+}
+
+impl SliderTarget {
+    /// Map a content-local cursor x to this slider's clamped, step-snapped value.
+    pub fn value_at(&self, x: f32) -> f32 {
+        let ratio = ((x - self.value_x0) / self.value_span.max(1.0)).clamp(0.0, 1.0);
+        let mut v = self.min + ratio * (self.max - self.min);
+        if self.step > 0.0 {
+            v = self.min + ((v - self.min) / self.step).round() * self.step;
+        }
+        v.clamp(self.min.min(self.max), self.min.max(self.max))
+    }
+}
+
+/// Marker on a widget pane while a slider drag is in progress. Holds the
+/// resolved value mapping so drag events don't need to re-find the target.
+#[derive(Component, Clone)]
+pub struct WidgetSliderDrag {
+    target: SliderTarget,
+    last_value: f32,
+}
+
+// ============================================================
+// Floating overlay layer (Select dropdowns, menus, …)
+// ============================================================
+
+/// The `RenderLayers` id the floating overlay content renders on. Must be a
+/// layer the host (a) reserves in `PaneLayerAllocator` and (b) renders with a
+/// high-order camera (`clear_color: None`). Defaults to 32, which terminal-bevy
+/// already reserves + cameras for (`MENU_OVERLAY_LAYER`).
+#[derive(Resource, Clone, Copy)]
+pub struct WidgetOverlayLayer(pub usize);
+
+impl Default for WidgetOverlayLayer {
+    fn default() -> Self {
+        WidgetOverlayLayer(32)
+    }
+}
+
+/// Which `Select` (if any) currently has its dropdown open. Host-owned (the open
+/// state is transient UI, not widget data), one at a time app-wide.
+#[derive(Resource, Default)]
+pub struct WidgetOpenSelect(pub Option<OpenSelect>);
+
+#[derive(Clone)]
+pub struct OpenSelect {
+    pub pane: Entity,
+    pub id: String,
+}
+
+/// Marks the per-frame floating overlay root entity (rebuilt each frame). The
+/// menu Element subtree renders under it; `stamp_overlay_layers` propagates the
+/// overlay `RenderLayers` to its descendants.
+#[derive(Component)]
+pub struct WidgetOverlayRoot;
+
+/// Marks the per-frame floating tooltip root (separate from `WidgetOverlayRoot`
+/// so the select and tooltip renderers despawn only their own content).
+#[derive(Component)]
+pub struct WidgetTooltipRoot;
+
+/// A `Select` trigger collected during render: its content-local anchor rect plus
+/// the data the overlay renderer needs to draw the open dropdown.
+#[derive(Clone)]
+pub struct SelectTarget {
+    pub id: String,
+    pub anchor: Rect,
+    pub options: Vec<crate::protocol::TabItem>,
+    pub value: String,
+    pub width: f32,
+    pub style: Option<crate::protocol::SelectStyle>,
+}
+
+/// One open-dropdown item's window-space rect, recorded for the overlay input
+/// hit-test (which runs outside the pane framework, like the context menu).
+#[derive(Clone)]
+pub struct SelectMenuHit {
+    pub option_id: String,
+    pub rect: Rect,
+}
+
+/// A `Tooltip` collected during render: its content-local anchor rect plus the
+/// hint text + style. Hovered → shown on the overlay layer.
+#[derive(Clone)]
+pub struct TooltipTarget {
+    pub anchor: Rect,
+    pub text: String,
+    pub style: Option<crate::protocol::TooltipStyle>,
+}
+
+/// Which tooltip (if any) the cursor is hovering, resolved each frame.
+#[derive(Resource, Default)]
+pub struct ActiveTooltip(pub Option<ActiveTip>);
+
+#[derive(Clone)]
+pub struct ActiveTip {
+    pub pane: Entity,
+    pub anchor: Rect,
+    pub text: String,
+    pub style: Option<crate::protocol::TooltipStyle>,
+}
+
+/// Window-space hit-regions for the currently-open dropdown's items, plus the
+/// owning select id. Rebuilt each frame by the overlay renderer.
+#[derive(Resource, Default)]
+pub struct SelectMenuHits {
+    pub select_id: String,
+    pub pane: Option<Entity>,
+    pub items: Vec<SelectMenuHit>,
+    /// The trigger's window-space rect — the dismiss handler ignores the click
+    /// that lands here (it's the toggle, handled by the pane press handler).
+    pub trigger_rect: Rect,
 }
 
 /// One run of rendered, selectable text, collected during render so a
@@ -255,6 +389,13 @@ pub enum ClickKind {
     Button,
     /// Tabs strip: send `TabSelect { id, tab }` with the carried tab.
     TabSelect { tab: String },
+    /// Radio option: send `RadioSelect { id, option }` with the carried option.
+    RadioSelect { option: String },
+    /// Stepper button: send `NumberChange { id, value }` with the carried value.
+    NumberChange { value: f32 },
+    /// Select trigger: toggle the host-owned open-dropdown state (no widget
+    /// event until an option is picked).
+    SelectTrigger,
     /// Toggle: send `Toggle { id, checked: <new value> }`.
     Toggle { new_checked: bool },
     /// Input: send `InputFocus { id, focused: true }`.
@@ -429,6 +570,514 @@ fn end_text_selection(
     }
 }
 
+// ============================================================
+// Slider drag → SliderChange
+// ============================================================
+
+fn send_slider_change(io: &WidgetIO, id: &str, value: f32) {
+    let evt = HostEvent::SliderChange {
+        id: id.to_string(),
+        value,
+    };
+    if let Ok(json) = serde_json::to_string(&evt) {
+        let _ = io.tx.send(json);
+    }
+}
+
+/// Press: if it landed on a slider track, set the value immediately and start
+/// a drag (records the value-mapping on the pane so drag events are cheap).
+fn begin_slider_drag(
+    mut commands: Commands,
+    mut presses: MessageReader<PaneContentPressed>,
+    kinds: Query<&PaneKindMarker>,
+    widgets: Query<(
+        &WidgetTargets,
+        Option<&WidgetIO>,
+        Option<&crate::rhai_widget::RhaiWidget>,
+        Option<&WidgetScroll>,
+    )>,
+) {
+    for ev in presses.read() {
+        let Ok(kind) = kinds.get(ev.pane) else { continue };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        let Ok((targets, io, rhai, scroll)) = widgets.get(ev.pane) else {
+            continue;
+        };
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let hit = ev.local_pt + Vec2::new(0.0, scroll_y);
+        let Some(t) = targets.sliders.iter().find(|s| s.rect.contains(hit)) else {
+            continue;
+        };
+        let value = t.value_at(hit.x);
+        if let Some(io) = io {
+            send_slider_change(io, &t.id, value);
+        }
+        if let Some(rhai) = rhai {
+            rhai.send_slider_change(t.id.clone(), value);
+        }
+        commands.entity(ev.pane).insert(WidgetSliderDrag {
+            target: t.clone(),
+            last_value: value,
+        });
+    }
+}
+
+/// Drag: re-map the cursor x to a value and emit `SliderChange` on change.
+/// Slider value maps over x only, so the vertical scroll offset is irrelevant.
+fn update_slider_drag(
+    mut drags: MessageReader<pane_bevy::PaneContentDragged>,
+    mut q: Query<(
+        &mut WidgetSliderDrag,
+        Option<&WidgetIO>,
+        Option<&crate::rhai_widget::RhaiWidget>,
+    )>,
+) {
+    for ev in drags.read() {
+        let Ok((mut drag, io, rhai)) = q.get_mut(ev.pane) else {
+            continue;
+        };
+        let value = drag.target.value_at(ev.local_pt.x);
+        if (value - drag.last_value).abs() > f32::EPSILON {
+            drag.last_value = value;
+            if let Some(io) = io {
+                send_slider_change(io, &drag.target.id, value);
+            }
+            if let Some(rhai) = rhai {
+                rhai.send_slider_change(drag.target.id.clone(), value);
+            }
+        }
+    }
+}
+
+/// Release: end the drag.
+fn end_slider_drag(
+    mut commands: Commands,
+    mut releases: MessageReader<pane_bevy::PaneContentReleased>,
+    q: Query<Entity, With<WidgetSliderDrag>>,
+) {
+    for ev in releases.read() {
+        if q.get(ev.pane).is_ok() {
+            commands.entity(ev.pane).remove::<WidgetSliderDrag>();
+        }
+    }
+}
+
+/// Base z for floating overlay content (above any pane child z; the overlay
+/// camera's order is what actually composites it above panes).
+const OVERLAY_BASE_Z: f32 = 1.0;
+
+/// Render the open `Select`'s dropdown on the floating overlay layer, anchored
+/// below its trigger. Rebuilt every frame so it tracks pan/zoom/scroll. Records
+/// per-item + trigger window-rects into `SelectMenuHits` for the dismiss handler.
+#[allow(clippy::too_many_arguments)]
+fn render_select_overlay(
+    mut commands: Commands,
+    open: Res<WidgetOpenSelect>,
+    overlay_layer: Res<WidgetOverlayLayer>,
+    pane_font: Res<PaneFont>,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    windows: Query<&Window>,
+    viewport: Option<Res<pane_bevy::PaneViewport>>,
+    panes: Query<(&PaneRect, &WidgetTargets, Option<&WidgetScroll>)>,
+    existing: Query<Entity, With<WidgetOverlayRoot>>,
+    mut hits: ResMut<SelectMenuHits>,
+) {
+    // Tear down last frame's overlay (cheap: a handful of entities).
+    for e in &existing {
+        commands.entity(e).try_despawn();
+    }
+    hits.items.clear();
+    hits.select_id.clear();
+    hits.pane = None;
+    hits.trigger_rect = Rect::default();
+
+    let Some(os) = open.0.as_ref() else {
+        return;
+    };
+    let Ok((rect, targets, scroll)) = panes.get(os.pane) else {
+        return;
+    };
+    let Some(target) = targets.selects.iter().find(|s| s.id == os.id) else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(viewport) = viewport.as_deref() else {
+        return;
+    };
+    let (win_w, win_h) = (window.width(), window.height());
+    let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+    let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
+
+    // content-local (unscrolled) → visual canvas → window.
+    let content_origin = rect.pos + Vec2::new(pane_bevy::MARGIN, pane_bevy::TITLE_H + pane_bevy::MARGIN);
+    let local_to_window = |local: Vec2| {
+        viewport.canvas_to_window(content_origin + Vec2::new(local.x, local.y - scroll_y))
+    };
+    // trigger window rect (so the dismiss handler can ignore the toggling click)
+    let tr_min = local_to_window(target.anchor.min);
+    let tr_max = local_to_window(target.anchor.max);
+    hits.trigger_rect = Rect::from_corners(tr_min, tr_max);
+
+    // Menu anchor: just below the trigger.
+    let menu_top_window = local_to_window(Vec2::new(target.anchor.min.x, target.anchor.max.y + 4.0));
+    let anchor_world = to_world(menu_top_window);
+
+    let pad = render::SELECT_MENU_PAD;
+    let item_h = render::SELECT_ITEM_H;
+    let menu_w = target.width;
+    let n = target.options.len();
+    let menu_h = pad * 2.0 + n as f32 * item_h;
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+
+    // Overlay root at the anchor; children render in content-local (y-down,
+    // negated) under it, dropping downward from the trigger.
+    let root = commands
+        .spawn((
+            WidgetOverlayRoot,
+            Transform::from_xyz(anchor_world.x, anchor_world.y, OVERLAY_BASE_Z),
+            Visibility::Inherited,
+            layer.clone(),
+        ))
+        .id();
+
+    let octx = render::LayoutCtx {
+        font: pane_font.0.clone(),
+        metrics: *metrics,
+        owner_pane: os.pane,
+        content_root: root,
+        content_size: Vec2::new(menu_w, menu_h),
+        palette: render::WidgetPalette::from_theme(&theme),
+        theme: theme.clone(),
+        fonts: fonts.clone(),
+        focused_input: None,
+        caret_visible: false,
+        hovered_click_id: None,
+    };
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+
+    // Menu panel: `menu` slot plan, else a default surface + border.
+    if let Some(plan) = target.style.as_ref().and_then(|s| s.menu.as_ref()) {
+        render::paint_style_background(&mut commands, &octx, Some(plan), Vec2::ZERO, Vec2::new(menu_w, menu_h), 0.0);
+    } else {
+        render::paint_rounded_panel(
+            &mut commands,
+            &octx,
+            Vec2::ZERO,
+            Vec2::new(menu_w, menu_h),
+            8.0,
+            octx.palette.bar_track,
+            octx.palette.divider,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.4),
+            8.0,
+            2.0,
+            0.0,
+        );
+    }
+
+    for (i, opt) in target.options.iter().enumerate() {
+        let y = pad + i as f32 * item_h;
+        let item_origin = Vec2::new(pad, y);
+        let item_size = Vec2::new((menu_w - pad * 2.0).max(0.0), item_h);
+        let is_sel = opt.id == target.value;
+        let plan = if is_sel {
+            target
+                .style
+                .as_ref()
+                .and_then(|s| s.item_selected.as_ref().or(s.item.as_ref()))
+        } else {
+            target.style.as_ref().and_then(|s| s.item.as_ref())
+        };
+        if let Some(plan) = plan {
+            render::paint_style_background(&mut commands, &octx, Some(plan), item_origin, item_size, 0.01);
+        } else if is_sel {
+            render::paint_rounded_panel(
+                &mut commands,
+                &octx,
+                item_origin,
+                item_size,
+                4.0,
+                octx.palette.divider,
+                transparent,
+                0.0,
+                transparent,
+                0.0,
+                0.0,
+                0.01,
+            );
+        }
+        let color = if is_sel {
+            octx.palette.text
+        } else {
+            octx.palette.text_muted
+        };
+        commands.spawn((
+            ChildOf(root),
+            Text2d::new(opt.label.clone()),
+            TextFont {
+                font: pane_font.0.clone(),
+                font_size: render::DEFAULT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(render::line_height(render::DEFAULT_FONT_SIZE)),
+            TextColor(color),
+            bevy::sprite::Anchor::CENTER_LEFT,
+            bevy::text::TextLayout::new_with_no_wrap(),
+            Transform::from_xyz(pad + render::SELECT_PAD_X, -(y + item_h * 0.5), 0.02),
+        ));
+
+        // window-space hit rect (overlay camera is 1:1 with the window).
+        hits.items.push(SelectMenuHit {
+            option_id: opt.id.clone(),
+            rect: Rect::new(
+                menu_top_window.x,
+                menu_top_window.y + y,
+                menu_top_window.x + menu_w,
+                menu_top_window.y + y + item_h,
+            ),
+        });
+    }
+    hits.select_id = os.id.clone();
+    hits.pane = Some(os.pane);
+}
+
+/// Stamp the overlay `RenderLayers` onto every descendant of each overlay root,
+/// so paint helpers (which don't set layers themselves) render on the overlay
+/// camera. Mirrors pane-bevy's content-layer reconciliation.
+fn stamp_overlay_layers(
+    mut commands: Commands,
+    roots: Query<Entity, Or<(With<WidgetOverlayRoot>, With<WidgetTooltipRoot>)>>,
+    children_q: Query<&Children>,
+    overlay_layer: Res<WidgetOverlayLayer>,
+) {
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+    for root in &roots {
+        let mut stack = vec![root];
+        while let Some(e) = stack.pop() {
+            commands.entity(e).insert(layer.clone());
+            if let Ok(ch) = children_q.get(e) {
+                stack.extend(ch.iter());
+            }
+        }
+    }
+}
+
+/// Dismiss / select for the open dropdown: left-click on an item picks it
+/// (emits `SelectChange` + closes); a click outside the menu (and not on the
+/// trigger) closes; Escape closes.
+fn handle_overlay_input(
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    hits: Res<SelectMenuHits>,
+    mut open: ResMut<WidgetOpenSelect>,
+    widgets: Query<(Option<&WidgetIO>, Option<&crate::rhai_widget::RhaiWidget>)>,
+) {
+    if open.0.is_none() {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        open.0 = None;
+        return;
+    }
+    if !buttons.just_pressed(bevy::input::mouse::MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    // The click that opened the dropdown lands on the trigger — ignore it here.
+    if hits.trigger_rect.contains(pt) {
+        return;
+    }
+    if let Some(hit) = hits.items.iter().find(|h| h.rect.contains(pt)) {
+        if let Some(pane) = hits.pane {
+            if let Ok((io, rhai)) = widgets.get(pane) {
+                let evt = HostEvent::SelectChange {
+                    id: hits.select_id.clone(),
+                    value: hit.option_id.clone(),
+                };
+                if let Some(io) = io {
+                    if let Ok(json) = serde_json::to_string(&evt) {
+                        let _ = io.tx.send(json);
+                    }
+                }
+                if let Some(rhai) = rhai {
+                    rhai.send_select_change(hits.select_id.clone(), hit.option_id.clone());
+                }
+            }
+        }
+        open.0 = None;
+    } else {
+        // Outside click → just close.
+        open.0 = None;
+    }
+}
+
+/// Resolve which `Tooltip` the cursor is over (per-frame; the topmost pane under
+/// the cursor wins). The result drives `render_tooltip_overlay`.
+fn update_tooltip_hover(
+    windows: Query<&Window>,
+    viewport: Option<Res<pane_bevy::PaneViewport>>,
+    panes: Query<
+        (
+            Entity,
+            &PaneRect,
+            Option<&Visibility>,
+            &WidgetTargets,
+            Option<&WidgetScroll>,
+        ),
+        With<pane_bevy::PaneTag>,
+    >,
+    mut active: ResMut<ActiveTooltip>,
+) {
+    // Only recompute when there's a real cursor (so a programmatically-forced
+    // tooltip in a headless/no-cursor host isn't clobbered).
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    let Some(viewport) = viewport.as_deref() else {
+        return;
+    };
+    active.0 = None;
+    let pt_canvas = viewport.window_to_canvas(pt);
+    let candidates: Vec<(Entity, PaneRect)> = panes
+        .iter()
+        .filter(|(_, _, vis, _, _)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(e, r, _, _, _)| (e, *r))
+        .collect();
+    let Some(pane) = pane_bevy::topmost_pane_at(pt_canvas, &candidates) else {
+        return;
+    };
+    let Ok((_, rect, _, targets, scroll)) = panes.get(pane) else {
+        return;
+    };
+    let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+    let local = pane_bevy::pt_to_content_local(pt_canvas, rect) + Vec2::new(0.0, scroll_y);
+    if let Some(t) = targets.tooltips.iter().find(|t| t.anchor.contains(local)) {
+        active.0 = Some(ActiveTip {
+            pane,
+            anchor: t.anchor,
+            text: t.text.clone(),
+            style: t.style.clone(),
+        });
+    }
+}
+
+/// Render the active tooltip's bubble on the overlay layer, just below its
+/// anchor. Reuses the overlay layer + stamp; no input (tooltips are passive).
+#[allow(clippy::too_many_arguments)]
+fn render_tooltip_overlay(
+    mut commands: Commands,
+    active: Res<ActiveTooltip>,
+    overlay_layer: Res<WidgetOverlayLayer>,
+    pane_font: Res<PaneFont>,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    windows: Query<&Window>,
+    viewport: Option<Res<pane_bevy::PaneViewport>>,
+    panes: Query<(&PaneRect, Option<&WidgetScroll>)>,
+    existing: Query<Entity, With<WidgetTooltipRoot>>,
+) {
+    for e in &existing {
+        commands.entity(e).try_despawn();
+    }
+    let Some(tip) = active.0.as_ref() else {
+        return;
+    };
+    let Ok((rect, scroll)) = panes.get(tip.pane) else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(viewport) = viewport.as_deref() else {
+        return;
+    };
+    let (win_w, win_h) = (window.width(), window.height());
+    let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+    let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
+    let content_origin =
+        rect.pos + Vec2::new(pane_bevy::MARGIN, pane_bevy::TITLE_H + pane_bevy::MARGIN);
+    let bubble_top_window = viewport.canvas_to_window(
+        content_origin + Vec2::new(tip.anchor.min.x, tip.anchor.max.y - scroll_y + 6.0),
+    );
+    let anchor_world = to_world(bubble_top_window);
+
+    let pad = 8.0;
+    let tw = metrics.measure(&tip.text, render::DEFAULT_FONT_SIZE);
+    let bubble_w = tw + pad * 2.0;
+    let bubble_h = render::line_height(render::DEFAULT_FONT_SIZE) + pad * 2.0;
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+
+    let root = commands
+        .spawn((
+            WidgetTooltipRoot,
+            Transform::from_xyz(anchor_world.x, anchor_world.y, OVERLAY_BASE_Z),
+            Visibility::Inherited,
+            layer.clone(),
+        ))
+        .id();
+    let octx = render::LayoutCtx {
+        font: pane_font.0.clone(),
+        metrics: *metrics,
+        owner_pane: tip.pane,
+        content_root: root,
+        content_size: Vec2::new(bubble_w, bubble_h),
+        palette: render::WidgetPalette::from_theme(&theme),
+        theme: theme.clone(),
+        fonts: fonts.clone(),
+        focused_input: None,
+        caret_visible: false,
+        hovered_click_id: None,
+    };
+    if let Some(plan) = tip.style.as_ref().and_then(|s| s.bubble.as_ref()) {
+        render::paint_style_background(&mut commands, &octx, Some(plan), Vec2::ZERO, Vec2::new(bubble_w, bubble_h), 0.0);
+    } else {
+        render::paint_rounded_panel(
+            &mut commands,
+            &octx,
+            Vec2::ZERO,
+            Vec2::new(bubble_w, bubble_h),
+            6.0,
+            Color::srgb(0.08, 0.09, 0.11),
+            octx.palette.divider,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.4),
+            6.0,
+            2.0,
+            0.0,
+        );
+    }
+    commands.spawn((
+        ChildOf(root),
+        Text2d::new(tip.text.clone()),
+        TextFont {
+            font: pane_font.0.clone(),
+            font_size: render::DEFAULT_FONT_SIZE,
+            ..default()
+        },
+        LineHeight::Px(render::line_height(render::DEFAULT_FONT_SIZE)),
+        TextColor(octx.palette.text),
+        bevy::sprite::Anchor::CENTER_LEFT,
+        bevy::text::TextLayout::new_with_no_wrap(),
+        Transform::from_xyz(pad, -(bubble_h * 0.5), 0.02),
+    ));
+}
+
 /// Repaint the selection band each frame (cheap: one run, one sprite).
 /// Drawn as a translucent accent overlay on top of the glyphs — flow
 /// text z varies by nesting depth, so a reliable "behind" layer isn't
@@ -538,6 +1187,10 @@ impl Plugin for WidgetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WidgetClipDirty>()
             .init_resource::<WidgetImageCache>()
+            .init_resource::<WidgetOverlayLayer>()
+            .init_resource::<WidgetOpenSelect>()
+            .init_resource::<SelectMenuHits>()
+            .init_resource::<ActiveTooltip>()
             .add_plugins(WidgetButtonMaterialPlugin)
             .add_plugins(glaze_material::GlazeMaterialPlugin)
             .add_plugins(msgbus::WidgetMsgBusPlugin)
@@ -557,6 +1210,17 @@ impl Plugin for WidgetPlugin {
                     begin_text_selection,
                     update_text_selection,
                     end_text_selection,
+                    (begin_slider_drag, update_slider_drag, end_slider_drag).chain(),
+                    // Floating overlays: render the open dropdown + handle its
+                    // input, then resolve + render the hovered tooltip. After the
+                    // press handler that toggles the open state.
+                    (
+                        render_select_overlay,
+                        handle_overlay_input,
+                        update_tooltip_hover,
+                        render_tooltip_overlay,
+                    )
+                        .chain(),
                     render_text_selection_highlight,
                     copy_text_selection,
                     handle_widget_input_typing,
@@ -567,6 +1231,11 @@ impl Plugin for WidgetPlugin {
                     update_widget_hot_zones,
                 )
                     .chain(),
+            )
+            .add_systems(
+                PostUpdate,
+                stamp_overlay_layers
+                    .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
             )
             .add_systems(PostUpdate, clip_widget_sprites);
     }
@@ -1336,6 +2005,9 @@ fn rerender_widgets(
         targets.clicks.clear();
         targets.links.clear();
         targets.spans.clear();
+        targets.sliders.clear();
+        targets.selects.clear();
+        targets.tooltips.clear();
 
         let frame_clone = render_state.current_frame.clone().unwrap();
 
@@ -1742,6 +2414,7 @@ fn handle_widget_press(
     metrics: Res<PaneFontMetrics>,
     mut focused: ResMut<FocusedTextInput>,
     mut clip_dirty: ResMut<WidgetClipDirty>,
+    mut open_select: ResMut<WidgetOpenSelect>,
     mut presses: MessageReader<PaneContentPressed>,
     kinds: Query<&PaneKindMarker>,
     pane_rects: Query<&PaneRect>,
@@ -1797,13 +2470,49 @@ fn handle_widget_press(
         let click = targets.clicks.iter().find(|t| t.rect.contains(hit_pt));
         let link = targets.links.iter().find(|t| t.rect.contains(hit_pt));
 
+        // While this pane has an open dropdown, route every non-trigger press to
+        // the overlay (item-select / dismiss) instead of the elements beneath it.
+        if open_select.0.as_ref().is_some_and(|o| o.pane == ev.pane) {
+            let is_trigger = click.is_some_and(|c| matches!(c.kind, ClickKind::SelectTrigger));
+            if !is_trigger {
+                continue;
+            }
+        }
+
         if let Some(ct) = click {
+            // A select trigger toggles the host-owned open-dropdown state — no
+            // widget event until an option is actually picked.
+            if matches!(ct.kind, ClickKind::SelectTrigger) {
+                let already = open_select
+                    .0
+                    .as_ref()
+                    .is_some_and(|o| o.pane == ev.pane && o.id == ct.id);
+                open_select.0 = if already {
+                    None
+                } else {
+                    Some(OpenSelect {
+                        pane: ev.pane,
+                        id: ct.id.clone(),
+                    })
+                };
+                commands.entity(ev.pane).remove::<WidgetInputFocus>();
+                widget.last_press_time = Some(time.elapsed_secs_f64());
+                continue;
+            }
             if let Some(io) = io {
                 let evt = match &ct.kind {
                     ClickKind::Button => HostEvent::Click { id: ct.id.clone() },
                     ClickKind::TabSelect { tab } => HostEvent::TabSelect {
                         id: ct.id.clone(),
                         tab: tab.clone(),
+                    },
+                    ClickKind::RadioSelect { option } => HostEvent::RadioSelect {
+                        id: ct.id.clone(),
+                        option: option.clone(),
+                    },
+                    ClickKind::NumberChange { value } => HostEvent::NumberChange {
+                        id: ct.id.clone(),
+                        value: *value,
                     },
                     ClickKind::Toggle { new_checked } => HostEvent::Toggle {
                         id: ct.id.clone(),
@@ -1813,6 +2522,7 @@ fn handle_widget_press(
                         id: ct.id.clone(),
                         focused: true,
                     },
+                    ClickKind::SelectTrigger => unreachable!("handled above"),
                 };
                 if let Ok(json) = serde_json::to_string(&evt) {
                     let _ = io.tx.send(json);
@@ -2290,6 +3000,7 @@ fn handle_widget_input_typing(
     mut commands: Commands,
     mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
     modifiers: Res<ButtonInput<KeyCode>>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     mut q: Query<(
         Entity,
         &mut WidgetInputFocus,
@@ -2303,6 +3014,12 @@ fn handle_widget_input_typing(
         || modifiers.pressed(KeyCode::ControlLeft)
         || modifiers.pressed(KeyCode::ControlRight);
     for (pane, mut focus, io, rhai) in &mut q {
+        // A widget input can keep `WidgetInputFocus` while another pane is
+        // focused; only consume keys when the keyboard owner allows this
+        // pane (and never while a text modal owns input).
+        if !owner.allows_pane(pane) {
+            continue;
+        }
         let mut value_changed = false;
         let mut submitted = false;
         let mut blurred = false;
@@ -2459,6 +3176,50 @@ fn handle_widget_input_typing(
             }
             commands.entity(pane).remove::<WidgetInputFocus>();
         }
+    }
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+
+    fn target(x0: f32, span: f32, min: f32, max: f32, step: f32) -> SliderTarget {
+        SliderTarget {
+            id: "s".into(),
+            rect: Rect::new(0.0, 0.0, 100.0, 20.0),
+            value_x0: x0,
+            value_span: span,
+            min,
+            max,
+            step,
+        }
+    }
+
+    #[test]
+    fn value_at_maps_and_clamps() {
+        let t = target(10.0, 80.0, 0.0, 100.0, 0.0);
+        assert_eq!(t.value_at(10.0), 0.0); // left edge
+        assert_eq!(t.value_at(90.0), 100.0); // right edge
+        assert!((t.value_at(50.0) - 50.0).abs() < 1e-3); // middle
+        assert_eq!(t.value_at(-50.0), 0.0); // clamp low
+        assert_eq!(t.value_at(500.0), 100.0); // clamp high
+    }
+
+    #[test]
+    fn value_at_snaps_to_step() {
+        let t = target(0.0, 100.0, 0.0, 10.0, 1.0);
+        // 37% → 3.7 → snaps to 4
+        assert_eq!(t.value_at(37.0), 4.0);
+        // 34% → 3.4 → snaps to 3
+        assert_eq!(t.value_at(34.0), 3.0);
+    }
+
+    #[test]
+    fn value_at_handles_nonzero_min() {
+        let t = target(0.0, 100.0, -50.0, 50.0, 0.0);
+        assert!((t.value_at(0.0) - -50.0).abs() < 1e-3);
+        assert!((t.value_at(50.0) - 0.0).abs() < 1e-3);
+        assert!((t.value_at(100.0) - 50.0).abs() < 1e-3);
     }
 }
 

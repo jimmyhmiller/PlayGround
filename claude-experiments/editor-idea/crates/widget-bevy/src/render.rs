@@ -14,7 +14,8 @@ use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::PaneFontMetrics;
 
 use crate::protocol::{
-    Align, ButtonKind, Edges, Element, GlazeLayer, Style, TabItem, Weight, parse_hex_color,
+    Align, ButtonKind, Edges, Element, GlazeLayer, GradientStop, Sides, Style, TabItem, Weight,
+    parse_hex_color,
 };
 use crate::{ClickKind, ClickTarget, LinkTarget, TextSpan, WidgetTargets};
 
@@ -41,6 +42,18 @@ pub const BADGE_FONT_SIZE: f32 = 11.0;
 pub const TOGGLE_TRACK_W: f32 = 34.0;
 pub const TOGGLE_TRACK_H: f32 = 18.0;
 pub const TOGGLE_KNOB_PAD: f32 = 2.0;
+pub const CHECKBOX_SIZE: f32 = 18.0;
+// Stepper: [− button][field][+ button].
+pub const STEPPER_BTN: f32 = 26.0;
+pub const STEPPER_FIELD_W: f32 = 56.0;
+pub const STEPPER_GAP: f32 = 2.0;
+pub const STEPPER_H: f32 = 26.0;
+pub const STEPPER_W: f32 = STEPPER_BTN * 2.0 + STEPPER_FIELD_W + STEPPER_GAP * 2.0;
+// Select trigger + dropdown menu.
+pub const SELECT_H: f32 = 28.0;
+pub const SELECT_PAD_X: f32 = 10.0;
+pub const SELECT_ITEM_H: f32 = 26.0;
+pub const SELECT_MENU_PAD: f32 = 4.0;
 
 // Input height = body text + symmetric padding. Width comes from the
 // element itself (defaults to 160 px).
@@ -62,6 +75,11 @@ pub const TAB_PAD_X: f32 = 10.0;
 pub const TAB_PAD_Y: f32 = 6.0;
 pub const TAB_GAP: f32 = 4.0;
 pub const TAB_INDICATOR_H: f32 = 2.0;
+// Radio group.
+pub const RADIO_RING: f32 = 16.0;
+pub const RADIO_GAP: f32 = 8.0;
+pub const RADIO_PAD_Y: f32 = 5.0;
+pub const RADIO_GROUP_GAP: f32 = 6.0;
 
 pub struct LayoutCtx {
     /// Fallback font (mono). Per-element `family` overrides resolve
@@ -422,6 +440,7 @@ fn render_node(
             max,
             color,
             track,
+            style,
             ..
         } => render_bar_at(
             commands,
@@ -430,6 +449,81 @@ fn render_node(
             *max,
             color.as_deref(),
             track.as_deref(),
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::Slider {
+            id,
+            value,
+            min,
+            max,
+            step,
+            style,
+            ..
+        } => render_slider_at(
+            commands,
+            ctx,
+            targets,
+            id,
+            *value,
+            *min,
+            *max,
+            *step,
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::Stepper {
+            id,
+            value,
+            min,
+            max,
+            step,
+            style,
+        } => render_stepper_at(
+            commands,
+            ctx,
+            targets,
+            id,
+            *value,
+            *min,
+            *max,
+            *step,
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::Tooltip { label, text, style } => render_tooltip_at(
+            commands,
+            ctx,
+            targets,
+            label,
+            text,
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::Select {
+            id,
+            options,
+            value,
+            placeholder,
+            style,
+            ..
+        } => render_select_trigger_at(
+            commands,
+            ctx,
+            targets,
+            id,
+            options,
+            value,
+            placeholder,
+            style.as_ref(),
             origin,
             size,
             z,
@@ -451,14 +545,76 @@ fn render_node(
             id,
             items,
             selected,
-            ..
+            style,
         } => render_tabs_at(
-            commands, ctx, targets, laid, node_id, id, items, selected, origin, z,
+            commands,
+            ctx,
+            targets,
+            laid,
+            node_id,
+            id,
+            items,
+            selected,
+            style.as_ref(),
+            origin,
+            size,
+            z,
         ),
         Element::Toggle {
-            id, label, checked, ..
+            id,
+            label,
+            checked,
+            style,
         } => render_toggle_at(
-            commands, ctx, targets, laid, node_id, id, label, *checked, origin, size, z,
+            commands,
+            ctx,
+            targets,
+            laid,
+            node_id,
+            id,
+            label,
+            *checked,
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::Checkbox {
+            id,
+            label,
+            checked,
+            style,
+        } => render_checkbox_at(
+            commands,
+            ctx,
+            targets,
+            laid,
+            node_id,
+            id,
+            label,
+            *checked,
+            style.as_ref(),
+            origin,
+            size,
+            z,
+        ),
+        Element::RadioGroup {
+            id,
+            options,
+            selected,
+            style,
+        } => render_radio_at(
+            commands,
+            ctx,
+            targets,
+            laid,
+            node_id,
+            id,
+            options,
+            selected,
+            style.as_ref(),
+            origin,
+            z,
         ),
         Element::Input {
             id,
@@ -505,7 +661,7 @@ fn render_node(
             rows,
             zebra,
             selectable,
-            ..
+            style,
         } => render_table_at(
             commands,
             ctx,
@@ -516,6 +672,7 @@ fn render_node(
             rows,
             *zebra,
             *selectable,
+            style.as_ref(),
             origin,
             size,
             z,
@@ -837,7 +994,7 @@ fn render_button_at(
 /// Spawn a rounded-rect SDF panel with optional border + drop shadow.
 /// Shared between Button, Frame, ListItem, Toggle, Input, Tabs.
 #[allow(clippy::too_many_arguments)]
-fn paint_rounded_panel(
+pub(crate) fn paint_rounded_panel(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     origin: Vec2,
@@ -1071,43 +1228,66 @@ fn paint_glaze_layers(
                     layer_z,
                 );
             }
-            GlazeLayer::Border { color, width } => {
-                let border = ctx.resolve_color(color).unwrap_or(transparent);
-                paint_rounded_panel(
-                    commands,
-                    ctx,
-                    origin,
-                    size,
-                    radius,
-                    transparent,
-                    border,
-                    *width,
-                    transparent,
-                    0.0,
-                    0.0,
-                    layer_z,
+            GlazeLayer::LinearGradient { angle, stops } => {
+                // A gradient lowers to a tiny generated WGSL body and rides the
+                // existing shader path (which masks to the rounded rect for us).
+                let body = gradient_wgsl(ctx, *angle, stops);
+                paint_shader_layer(
+                    commands, ctx, &body, origin, size, radius, layer_z, element_id,
                 );
+            }
+            GlazeLayer::Border {
+                color,
+                width,
+                sides,
+            } => {
+                let border = ctx.resolve_color(color).unwrap_or(transparent);
+                if sides.is_all() {
+                    paint_rounded_panel(
+                        commands, ctx, origin, size, radius, transparent, border, *width,
+                        transparent, 0.0, 0.0, layer_z,
+                    );
+                } else {
+                    // Partial borders are sharp edge rects (a rounded corner can't
+                    // belong to a single side).
+                    paint_border_edges(commands, ctx, origin, size, border, *width, sides, layer_z);
+                }
             }
             GlazeLayer::Shadow {
                 color,
                 blur,
+                offset_x,
                 offset_y,
+                spread,
+                inset,
             } => {
                 let shadow = ctx.resolve_color(color).unwrap_or(transparent);
-                paint_rounded_panel(
-                    commands,
-                    ctx,
-                    origin,
-                    size,
-                    radius,
-                    transparent,
-                    transparent,
-                    0.0,
-                    shadow,
-                    *blur,
-                    *offset_y,
-                    layer_z,
-                );
+                if *inset {
+                    // Inner shadow → generated SDF body on the shader path.
+                    let body = inset_shadow_wgsl(shadow, *blur, *offset_x, *offset_y, *spread);
+                    paint_shader_layer(
+                        commands, ctx, &body, origin, size, radius, layer_z, element_id,
+                    );
+                } else {
+                    // Outset drop shadow: grow the box by `spread`, fold offset_x
+                    // into the origin, let the panel SDF apply blur + offset_y.
+                    let so = Vec2::new(origin.x - spread + offset_x, origin.y - spread);
+                    let ss = Vec2::new(size.x + 2.0 * spread, size.y + 2.0 * spread);
+                    paint_rounded_panel(
+                        commands,
+                        ctx,
+                        so,
+                        ss,
+                        radius + spread,
+                        transparent,
+                        transparent,
+                        0.0,
+                        shadow,
+                        *blur,
+                        *offset_y,
+                        layer_z,
+                    );
+                }
             }
             GlazeLayer::Shader { body, .. } => {
                 paint_shader_layer(
@@ -1188,6 +1368,120 @@ fn paint_shader_layer(
     });
 }
 
+/// Paint a per-side border as sharp filled edge rectangles. Used when a Glaze
+/// `border_top`/`border_left`/… targets a subset of edges (a uniform border
+/// keeps the rounded-rect SDF path instead).
+#[allow(clippy::too_many_arguments)]
+fn paint_border_edges(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    origin: Vec2,
+    size: Vec2,
+    color: Color,
+    width: f32,
+    sides: &Sides,
+    z: f32,
+) {
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    let mut edge = |o: Vec2, s: Vec2| {
+        paint_rounded_panel(
+            commands, ctx, o, s, 0.0, color, transparent, 0.0, transparent, 0.0, 0.0, z,
+        );
+    };
+    if sides.top {
+        edge(origin, Vec2::new(size.x, width));
+    }
+    if sides.bottom {
+        edge(
+            Vec2::new(origin.x, origin.y + size.y - width),
+            Vec2::new(size.x, width),
+        );
+    }
+    if sides.left {
+        edge(origin, Vec2::new(width, size.y));
+    }
+    if sides.right {
+        edge(
+            Vec2::new(origin.x + size.x - width, origin.y),
+            Vec2::new(width, size.y),
+        );
+    }
+}
+
+/// Format a float for WGSL source (always a decimal point so it parses as `f32`).
+fn wgsl_f(x: f32) -> String {
+    format!("{x:.6}")
+}
+
+/// Generate the `glaze_body` fragment for a linear gradient. The stop colors are
+/// resolved to linear RGBA and baked in as constants; `t` is the position along
+/// the gradient axis derived from `angle` (0° = left→right, 90° = bottom→top).
+fn gradient_wgsl(ctx: &LayoutCtx, angle_deg: f32, stops: &[GradientStop]) -> String {
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    let vec4_of = |c: Color| {
+        let v = lin_vec4(c);
+        format!(
+            "vec4<f32>({}, {}, {}, {})",
+            wgsl_f(v.x),
+            wgsl_f(v.y),
+            wgsl_f(v.z),
+            wgsl_f(v.w)
+        )
+    };
+    let cols: Vec<(f32, String)> = stops
+        .iter()
+        .map(|s| {
+            let c = ctx.resolve_color(&s.color).unwrap_or(transparent);
+            (s.offset, vec4_of(c))
+        })
+        .collect();
+
+    let mut b = String::new();
+    b.push_str(&format!("    let a = radians({});\n", wgsl_f(angle_deg)));
+    b.push_str("    let dir = vec2<f32>(cos(a), -sin(a));\n");
+    b.push_str(
+        "    let t = clamp(dot(in.uv - vec2<f32>(0.5, 0.5), dir) + 0.5, 0.0, 1.0);\n",
+    );
+    b.push_str(&format!("    var col = {};\n", cols[0].1));
+    for pair in cols.windows(2) {
+        let (o0, _) = &pair[0];
+        let (o1, c1) = &pair[1];
+        let denom = (o1 - o0).max(1e-5);
+        b.push_str(&format!(
+            "    col = mix(col, {}, clamp((t - {}) / {}, 0.0, 1.0));\n",
+            c1,
+            wgsl_f(*o0),
+            wgsl_f(denom)
+        ));
+    }
+    b.push_str("    return col;\n");
+    b
+}
+
+/// Generate the `glaze_body` fragment for an inner (inset) shadow: a rounded-rect
+/// SDF that darkens inward from the edges, offset by `(offx, offy)` and pulled in
+/// by `spread`. The outer rounded clip is still applied by `assemble_wgsl`.
+fn inset_shadow_wgsl(color: Color, blur: f32, offx: f32, offy: f32, spread: f32) -> String {
+    let c = lin_vec4(color);
+    format!(
+        "    let p = (in.uv - vec2<f32>(0.5, 0.5)) * u.size - vec2<f32>({offx}, {offy});\n\
+         \x20   let hh = u.size * 0.5;\n\
+         \x20   let rr = min(u.radius, min(hh.x, hh.y));\n\
+         \x20   let qq = abs(p) - hh + vec2<f32>(rr, rr);\n\
+         \x20   let dd = length(max(qq, vec2<f32>(0.0, 0.0))) + min(max(qq.x, qq.y), 0.0) - rr;\n\
+         \x20   let inner = 1.0 - smoothstep(0.0, max({blur}, 1.0), -dd - {spread});\n\
+         \x20   return vec4<f32>({r}, {g}, {b}, {a} * clamp(inner, 0.0, 1.0));\n",
+        offx = wgsl_f(offx),
+        offy = wgsl_f(offy),
+        blur = wgsl_f(blur),
+        spread = wgsl_f(spread),
+        r = wgsl_f(c.x),
+        g = wgsl_f(c.y),
+        b = wgsl_f(c.z),
+        a = wgsl_f(c.w),
+    )
+}
+
 /// Convert a `Color` to its linear-RGBA `Vec4` for shader uniforms.
 fn lin_vec4(c: Color) -> Vec4 {
     let lin = c.to_linear();
@@ -1229,6 +1523,390 @@ fn render_link_at(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Render an `Element::Slider`: a full-width `track`, a value-driven `range`
+/// fill, and a `thumb` handle centred on the value. Each slot paints from its
+/// Glaze plan when present, else a sensible default. Also registers the drag
+/// hit-region so the host can map cursor x → value.
+#[allow(clippy::too_many_arguments)]
+fn render_slider_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    id: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    style: Option<&crate::protocol::SliderStyle>,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    let span = max - min;
+    let ratio = if span.abs() < 1e-6 {
+        0.0
+    } else {
+        ((value - min) / span).clamp(0.0, 1.0)
+    };
+    let thumb_d = size.y;
+    let thumb_x = origin.x + ratio * (size.x - thumb_d);
+    let thumb_center_x = thumb_x + thumb_d * 0.5;
+
+    let track_plan = style.and_then(|s| s.track.as_ref());
+    let range_plan = style.and_then(|s| s.range.as_ref());
+    let thumb_plan = style.and_then(|s| s.thumb.as_ref());
+
+    // Track height: from the track plan's `height` if given, else a thin groove.
+    let track_h = track_plan
+        .and_then(|p| p.height.as_deref())
+        .and_then(|h| ctx.resolve_f32(h))
+        .unwrap_or((size.y * 0.3).max(4.0));
+    let track_y = origin.y + (size.y - track_h) * 0.5;
+    let track_origin = Vec2::new(origin.x, track_y);
+    let track_size = Vec2::new(size.x, track_h);
+
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+
+    // --- track ---
+    if let Some(plan) = track_plan {
+        paint_style_background(commands, ctx, Some(plan), track_origin, track_size, z);
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            track_origin,
+            track_size,
+            track_h * 0.5,
+            ctx.palette.bar_track,
+            transparent,
+            0.0,
+            transparent,
+            0.0,
+            0.0,
+            z,
+        );
+    }
+
+    // --- range (leading fill up to the thumb centre) ---
+    let range_w = (thumb_center_x - origin.x).max(0.0);
+    if range_w > 0.0 {
+        let range_size = Vec2::new(range_w, track_h);
+        if let Some(plan) = range_plan {
+            paint_style_background(commands, ctx, Some(plan), track_origin, range_size, z + 0.01);
+        } else {
+            let accent = ctx
+                .resolve_color("accent")
+                .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+            paint_rounded_panel(
+                commands,
+                ctx,
+                track_origin,
+                range_size,
+                track_h * 0.5,
+                accent,
+                transparent,
+                0.0,
+                transparent,
+                0.0,
+                0.0,
+                z + 0.01,
+            );
+        }
+    }
+
+    // --- thumb (handle) ---
+    let thumb_origin = Vec2::new(thumb_x, origin.y);
+    let thumb_size = Vec2::splat(thumb_d);
+    if let Some(plan) = thumb_plan {
+        paint_style_background(commands, ctx, Some(plan), thumb_origin, thumb_size, z + 0.02);
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            thumb_origin,
+            thumb_size,
+            thumb_d * 0.5,
+            Color::WHITE,
+            transparent,
+            0.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.25),
+            2.0,
+            1.0,
+            z + 0.02,
+        );
+    }
+
+    // --- drag hit-region ---
+    targets.sliders.push(crate::SliderTarget {
+        id: id.to_string(),
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+        value_x0: origin.x + thumb_d * 0.5,
+        value_span: (size.x - thumb_d).max(1.0),
+        min,
+        max,
+        step,
+    });
+}
+
+/// Render an `Element::Tooltip`'s in-pane label (an underlined hint anchor) and
+/// record its hover-region; the floating hint is drawn by the overlay system.
+#[allow(clippy::too_many_arguments)]
+fn render_tooltip_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    label: &str,
+    text: &str,
+    style: Option<&crate::protocol::TooltipStyle>,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    commands.spawn((
+        ChildOf(ctx.content_root),
+        Text2d::new(label.to_string()),
+        TextFont {
+            font: ctx.font.clone(),
+            font_size: DEFAULT_FONT_SIZE,
+            ..default()
+        },
+        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+        TextColor(ctx.palette.link),
+        Anchor::TOP_LEFT,
+        bevy::text::TextLayout::new_with_no_wrap(),
+        Transform::from_xyz(origin.x, -origin.y, z + 0.01),
+    ));
+    targets.tooltips.push(crate::TooltipTarget {
+        anchor: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+        text: text.to_string(),
+        style: style.cloned(),
+    });
+}
+
+/// Render the closed, in-pane `trigger` of an `Element::Select`: a box showing
+/// the selected option's label (or the placeholder) and a chevron. Records the
+/// trigger as a `SelectTarget` (anchor + data) and a `SelectTrigger` click
+/// target; the floating menu is drawn separately when the host marks it open.
+#[allow(clippy::too_many_arguments)]
+fn render_select_trigger_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    id: &str,
+    options: &[TabItem],
+    value: &str,
+    placeholder: &str,
+    style: Option<&crate::protocol::SelectStyle>,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    if let Some(plan) = style.and_then(|s| s.trigger.as_ref()) {
+        paint_style_background(commands, ctx, Some(plan), origin, size, z);
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            origin,
+            size,
+            6.0,
+            ctx.palette.bar_track,
+            ctx.palette.divider,
+            1.0,
+            transparent,
+            0.0,
+            0.0,
+            z,
+        );
+    }
+
+    let selected = options.iter().find(|o| o.id == value);
+    let (label, color) = match selected {
+        Some(o) => (o.label.clone(), ctx.palette.text),
+        None => (placeholder.to_string(), ctx.palette.text_muted),
+    };
+    let cy = origin.y + size.y * 0.5;
+    // label (left, vertically centred)
+    commands.spawn((
+        ChildOf(ctx.content_root),
+        Text2d::new(label),
+        TextFont {
+            font: ctx.font.clone(),
+            font_size: DEFAULT_FONT_SIZE,
+            ..default()
+        },
+        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+        TextColor(color),
+        Anchor::CENTER_LEFT,
+        bevy::text::TextLayout::new_with_no_wrap(),
+        Transform::from_xyz(origin.x + SELECT_PAD_X, -cy, z + 0.01),
+    ));
+    // chevron (right)
+    commands.spawn((
+        ChildOf(ctx.content_root),
+        Text2d::new("\u{25be}"),
+        TextFont {
+            font: ctx.font.clone(),
+            font_size: DEFAULT_FONT_SIZE,
+            ..default()
+        },
+        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+        TextColor(ctx.palette.text_muted),
+        Anchor::CENTER_RIGHT,
+        bevy::text::TextLayout::new_with_no_wrap(),
+        Transform::from_xyz(origin.x + size.x - SELECT_PAD_X, -cy, z + 0.01),
+    ));
+
+    let rect = Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y);
+    targets.clicks.push(ClickTarget {
+        id: id.to_string(),
+        kind: ClickKind::SelectTrigger,
+        rect,
+    });
+    targets.selects.push(crate::SelectTarget {
+        id: id.to_string(),
+        anchor: rect,
+        options: options.to_vec(),
+        value: value.to_string(),
+        width: size.x,
+        style: style.cloned(),
+    });
+}
+
+/// Spawn a single line of text centred within `(origin, size)`.
+fn spawn_centered_text(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    text: &str,
+    origin: Vec2,
+    size: Vec2,
+    color: Color,
+    z: f32,
+) {
+    let center = origin + size * 0.5;
+    commands.spawn((
+        ChildOf(ctx.content_root),
+        Text2d::new(text.to_string()),
+        TextFont {
+            font: ctx.font.clone(),
+            font_size: DEFAULT_FONT_SIZE,
+            ..default()
+        },
+        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+        TextColor(color),
+        Anchor::CENTER,
+        bevy::text::TextLayout::new_with_no_wrap(),
+        Transform::from_xyz(center.x, -center.y, z),
+    ));
+}
+
+/// Render an `Element::Stepper`: `[− button][value field][+ button]`. The
+/// buttons carry the precomputed (clamped) target value, so a click is a plain
+/// `NumberChange` — the renderer owns the arithmetic.
+#[allow(clippy::too_many_arguments)]
+fn render_stepper_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    id: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    style: Option<&crate::protocol::StepperStyle>,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    let field_plan = style.and_then(|s| s.field.as_ref());
+    let button_plan = style.and_then(|s| s.button.as_ref());
+
+    let minus_origin = origin;
+    let btn_size = Vec2::new(STEPPER_BTN, size.y);
+    let field_origin = Vec2::new(origin.x + STEPPER_BTN + STEPPER_GAP, origin.y);
+    let field_size = Vec2::new(STEPPER_FIELD_W, size.y);
+    let plus_origin = Vec2::new(field_origin.x + STEPPER_FIELD_W + STEPPER_GAP, origin.y);
+
+    let paint_button = |commands: &mut Commands, o: Vec2| {
+        if let Some(plan) = button_plan {
+            paint_style_background(commands, ctx, Some(plan), o, btn_size, z);
+        } else {
+            paint_rounded_panel(
+                commands,
+                ctx,
+                o,
+                btn_size,
+                4.0,
+                ctx.palette.bar_track,
+                ctx.palette.divider,
+                1.0,
+                transparent,
+                0.0,
+                0.0,
+                z,
+            );
+        }
+    };
+    paint_button(commands, minus_origin);
+    paint_button(commands, plus_origin);
+
+    if let Some(plan) = field_plan {
+        paint_style_background(commands, ctx, Some(plan), field_origin, field_size, z);
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            field_origin,
+            field_size,
+            4.0,
+            ctx.palette.bar_track,
+            ctx.palette.divider,
+            1.0,
+            transparent,
+            0.0,
+            0.0,
+            z,
+        );
+    }
+
+    // glyphs + value (whole numbers print without a decimal)
+    let value_str = if (value - value.round()).abs() < 1e-4 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.1}")
+    };
+    spawn_centered_text(commands, ctx, "−", minus_origin, btn_size, ctx.palette.text, z + 0.01);
+    spawn_centered_text(commands, ctx, &value_str, field_origin, field_size, ctx.palette.text, z + 0.01);
+    spawn_centered_text(commands, ctx, "+", plus_origin, btn_size, ctx.palette.text, z + 0.01);
+
+    // click targets carry the clamped target value
+    let dec = (value - step).clamp(min.min(max), min.max(max));
+    let inc = (value + step).clamp(min.min(max), min.max(max));
+    targets.clicks.push(ClickTarget {
+        id: id.to_string(),
+        kind: ClickKind::NumberChange { value: dec },
+        rect: Rect::new(
+            minus_origin.x,
+            minus_origin.y,
+            minus_origin.x + btn_size.x,
+            minus_origin.y + btn_size.y,
+        ),
+    });
+    targets.clicks.push(ClickTarget {
+        id: id.to_string(),
+        kind: ClickKind::NumberChange { value: inc },
+        rect: Rect::new(
+            plus_origin.x,
+            plus_origin.y,
+            plus_origin.x + btn_size.x,
+            plus_origin.y + btn_size.y,
+        ),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_bar_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
@@ -1236,41 +1914,59 @@ fn render_bar_at(
     max: f32,
     color: Option<&str>,
     track: Option<&str>,
+    style: Option<&crate::protocol::BarStyle>,
     origin: Vec2,
     size: Vec2,
     z: f32,
 ) {
-    let fill = color
-        .and_then(parse_hex_color)
-        .map(|[r, g, b]| Color::srgb(r, g, b))
-        .unwrap_or(ctx.palette.bar_fill);
-    let bg = track
-        .and_then(parse_hex_color)
-        .map(|[r, g, b]| Color::srgb(r, g, b))
-        .unwrap_or(ctx.palette.bar_track);
     let ratio = if max <= 0.0 {
         0.0
     } else {
         (value / max).clamp(0.0, 1.0)
     };
     let fill_w = (size.x * ratio).max(0.0);
+    let fill_size = Vec2::new(fill_w, size.y);
 
-    commands.spawn((
-        ChildOf(ctx.content_root),
-        Sprite {
-            color: bg,
-            custom_size: Some(size),
-            ..default()
-        },
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(origin.x, -origin.y, z),
-    ));
-    if fill_w > 0.0 {
+    // Value-driven sub-layout: the `track` slot spans the full rect, the `fill`
+    // slot is the leading `ratio` of it. Each slot paints from its Glaze plan
+    // when present, else from the flat `track`/`color` colors (legacy path).
+    let track_plan = style.and_then(|s| s.track.as_ref());
+    let fill_plan = style.and_then(|s| s.fill.as_ref());
+
+    if let Some(plan) = track_plan {
+        paint_style_background(commands, ctx, Some(plan), origin, size, z);
+    } else {
+        let bg = track
+            .and_then(parse_hex_color)
+            .map(|[r, g, b]| Color::srgb(r, g, b))
+            .unwrap_or(ctx.palette.bar_track);
+        commands.spawn((
+            ChildOf(ctx.content_root),
+            Sprite {
+                color: bg,
+                custom_size: Some(size),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(origin.x, -origin.y, z),
+        ));
+    }
+
+    if fill_w <= 0.0 {
+        return;
+    }
+    if let Some(plan) = fill_plan {
+        paint_style_background(commands, ctx, Some(plan), origin, fill_size, z + 0.01);
+    } else {
+        let fill = color
+            .and_then(parse_hex_color)
+            .map(|[r, g, b]| Color::srgb(r, g, b))
+            .unwrap_or(ctx.palette.bar_fill);
         commands.spawn((
             ChildOf(ctx.content_root),
             Sprite {
                 color: fill,
-                custom_size: Some(Vec2::new(fill_w, size.y)),
+                custom_size: Some(fill_size),
                 ..default()
             },
             Anchor::TOP_LEFT,
@@ -1289,6 +1985,7 @@ fn brighten(c: Color, delta: f32) -> Color {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_tabs_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
@@ -1298,7 +1995,9 @@ fn render_tabs_at(
     id: &str,
     items: &[TabItem],
     selected: &str,
+    style: Option<&crate::protocol::TabsStyle>,
     origin: Vec2,
+    size: Vec2,
     z: f32,
 ) {
     // Walk Taffy's per-tab children — each cell got its own NodeId
@@ -1307,12 +2006,27 @@ fn render_tabs_at(
     let accent = ctx
         .resolve_color("accent")
         .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    // `strip` slot: a background behind the whole tab bar.
+    if let Some(plan) = style.and_then(|s| s.strip.as_ref()) {
+        paint_style_background(commands, ctx, Some(plan), origin, size, z - 0.01);
+    }
     let child_ids = laid.taffy.children(node_id).unwrap_or_default();
     for (cid, tab) in child_ids.iter().zip(items.iter()) {
         let cl = laid.layout(*cid);
         let cell_pos = origin + Vec2::new(cl.location.x, cl.location.y);
         let cell_size = Vec2::new(cl.size.width, cl.size.height);
         let is_selected = tab.id == selected;
+        // `tab` slot: swap the precomputed `:selected` plan in for the active tab.
+        let tab_plan = style.and_then(|s| {
+            if is_selected {
+                s.tab_selected.as_ref().or(s.tab.as_ref())
+            } else {
+                s.tab.as_ref()
+            }
+        });
+        if let Some(plan) = tab_plan {
+            paint_style_background(commands, ctx, Some(plan), cell_pos, cell_size, z);
+        }
         let label_color = if is_selected {
             accent
         } else {
@@ -1333,25 +2047,159 @@ fn render_tabs_at(
             Transform::from_xyz(cell_pos.x + TAB_PAD_X, -(cell_pos.y + TAB_PAD_Y), z + 0.01),
         ));
         if is_selected {
-            commands.spawn((
-                ChildOf(ctx.content_root),
-                Sprite {
-                    color: accent,
-                    custom_size: Some(Vec2::new(cell_size.x, TAB_INDICATOR_H)),
-                    ..default()
-                },
-                Anchor::TOP_LEFT,
-                Transform::from_xyz(
-                    cell_pos.x,
-                    -(cell_pos.y + cell_size.y - TAB_INDICATOR_H),
+            // `indicator` slot: the underline under the active tab (value-driven
+            // position = the selected cell). A styled plan can give it a height,
+            // gradient, glow, etc.; otherwise the flat accent rule.
+            let indicator_plan = style.and_then(|s| s.indicator.as_ref());
+            if let Some(plan) = indicator_plan {
+                let ind_h = plan
+                    .height
+                    .as_deref()
+                    .and_then(|h| ctx.resolve_f32(h))
+                    .unwrap_or(TAB_INDICATOR_H);
+                let ind_origin = Vec2::new(cell_pos.x, cell_pos.y + cell_size.y - ind_h);
+                paint_style_background(
+                    commands,
+                    ctx,
+                    Some(plan),
+                    ind_origin,
+                    Vec2::new(cell_size.x, ind_h),
                     z + 0.02,
-                ),
-            ));
+                );
+            } else {
+                commands.spawn((
+                    ChildOf(ctx.content_root),
+                    Sprite {
+                        color: accent,
+                        custom_size: Some(Vec2::new(cell_size.x, TAB_INDICATOR_H)),
+                        ..default()
+                    },
+                    Anchor::TOP_LEFT,
+                    Transform::from_xyz(
+                        cell_pos.x,
+                        -(cell_pos.y + cell_size.y - TAB_INDICATOR_H),
+                        z + 0.02,
+                    ),
+                ));
+            }
         }
         targets.clicks.push(ClickTarget {
             id: id.to_string(),
             kind: ClickKind::TabSelect {
                 tab: tab.id.clone(),
+            },
+            rect: Rect::new(
+                cell_pos.x,
+                cell_pos.y,
+                cell_pos.x + cell_size.x,
+                cell_pos.y + cell_size.y,
+            ),
+        });
+    }
+}
+
+/// Render an `Element::RadioGroup`: a column of option rows, each a `ring` plus
+/// (when selected) a `dot`, then the label. Emits `RadioSelect` on click.
+#[allow(clippy::too_many_arguments)]
+fn render_radio_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
+    id: &str,
+    options: &[TabItem],
+    selected: &str,
+    style: Option<&crate::protocol::RadioGroupStyle>,
+    origin: Vec2,
+    z: f32,
+) {
+    let accent = ctx
+        .resolve_color("accent")
+        .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    let cells = laid.taffy.children(node_id).unwrap_or_default();
+    for (cid, opt) in cells.iter().zip(options.iter()) {
+        let cl = laid.layout(*cid);
+        let cell_pos = origin + Vec2::new(cl.location.x, cl.location.y);
+        let cell_size = Vec2::new(cl.size.width, cl.size.height);
+        let is_selected = opt.id == selected;
+
+        // ring (left, vertically centred within the row)
+        let ring_pos = Vec2::new(
+            cell_pos.x,
+            cell_pos.y + (cell_size.y - RADIO_RING) * 0.5,
+        );
+        let ring_size = Vec2::splat(RADIO_RING);
+        if let Some(plan) = style.and_then(|s| s.ring.as_ref()) {
+            paint_style_background(commands, ctx, Some(plan), ring_pos, ring_size, z);
+        } else {
+            let border = if is_selected { accent } else { ctx.palette.text_muted };
+            paint_rounded_panel(
+                commands,
+                ctx,
+                ring_pos,
+                ring_size,
+                RADIO_RING * 0.5,
+                ctx.palette.bar_track,
+                border,
+                1.5,
+                transparent,
+                0.0,
+                0.0,
+                z,
+            );
+        }
+
+        // dot (only when selected)
+        if is_selected {
+            let inset = RADIO_RING * 0.3;
+            let dot_pos = ring_pos + Vec2::splat(inset);
+            let dot_size = Vec2::splat(RADIO_RING - inset * 2.0);
+            if let Some(plan) = style.and_then(|s| s.dot.as_ref()) {
+                paint_style_background(commands, ctx, Some(plan), dot_pos, dot_size, z + 0.01);
+            } else {
+                paint_rounded_panel(
+                    commands,
+                    ctx,
+                    dot_pos,
+                    dot_size,
+                    dot_size.x * 0.5,
+                    accent,
+                    transparent,
+                    0.0,
+                    transparent,
+                    0.0,
+                    0.0,
+                    z + 0.01,
+                );
+            }
+        }
+
+        // label, after the ring's reserved padding
+        commands.spawn((
+            ChildOf(ctx.content_root),
+            Text2d::new(opt.label.clone()),
+            TextFont {
+                font: ctx.font.clone(),
+                font_size: DEFAULT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+            TextColor(if is_selected { ctx.palette.text } else { ctx.palette.text_muted }),
+            Anchor::TOP_LEFT,
+            bevy::text::TextLayout::new_with_no_wrap(),
+            Transform::from_xyz(
+                cell_pos.x + RADIO_RING + RADIO_GAP,
+                -(cell_pos.y + RADIO_PAD_Y),
+                z + 0.01,
+            ),
+        ));
+
+        targets.clicks.push(ClickTarget {
+            id: id.to_string(),
+            kind: ClickKind::RadioSelect {
+                option: opt.id.clone(),
             },
             rect: Rect::new(
                 cell_pos.x,
@@ -1373,6 +2221,7 @@ fn render_toggle_at(
     id: &str,
     label: &str,
     checked: bool,
+    style: Option<&crate::protocol::ToggleStyle>,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -1419,45 +2268,179 @@ fn render_toggle_at(
         }
     };
 
-    let track_color = if checked {
-        accent
+    // Track slot: from its Glaze plan (resolved with the `:checked` state) when
+    // present, else the hardcoded accent/muted pill.
+    let track_plan = style.and_then(|s| s.track.as_ref());
+    if let Some(plan) = track_plan {
+        paint_style_background(commands, ctx, Some(plan), track_pos, track_size, z);
     } else {
-        ctx.palette.bar_track
-    };
-    paint_rounded_panel(
-        commands,
-        ctx,
-        track_pos,
-        track_size,
-        track_size.y * 0.5,
-        track_color,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        0.0,
-        z,
-    );
+        let track_color = if checked {
+            accent
+        } else {
+            ctx.palette.bar_track
+        };
+        paint_rounded_panel(
+            commands,
+            ctx,
+            track_pos,
+            track_size,
+            track_size.y * 0.5,
+            track_color,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            0.0,
+            z,
+        );
+    }
+    // Knob slot: value-driven x-position (left when off, right when on); the
+    // slot plan styles the dot itself.
     let knob_d = track_size.y - TOGGLE_KNOB_PAD * 2.0;
     let knob_x = if checked {
         track_pos.x + track_size.x - knob_d - TOGGLE_KNOB_PAD
     } else {
         track_pos.x + TOGGLE_KNOB_PAD
     };
-    paint_rounded_panel(
-        commands,
-        ctx,
-        Vec2::new(knob_x, track_pos.y + TOGGLE_KNOB_PAD),
-        Vec2::new(knob_d, knob_d),
-        knob_d * 0.5,
-        Color::WHITE,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        Color::srgba(0.0, 0.0, 0.0, 0.2),
-        2.0,
-        1.0,
-        z + 0.01,
-    );
+    let knob_pos = Vec2::new(knob_x, track_pos.y + TOGGLE_KNOB_PAD);
+    let knob_size = Vec2::new(knob_d, knob_d);
+    let knob_plan = style.and_then(|s| s.knob.as_ref());
+    if let Some(plan) = knob_plan {
+        paint_style_background(commands, ctx, Some(plan), knob_pos, knob_size, z + 0.01);
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            knob_pos,
+            knob_size,
+            knob_d * 0.5,
+            Color::WHITE,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.2),
+            2.0,
+            1.0,
+            z + 0.01,
+        );
+    }
+
+    targets.clicks.push(ClickTarget {
+        id: id.to_string(),
+        kind: ClickKind::Toggle {
+            new_checked: !checked,
+        },
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+    });
+}
+
+/// Render an `Element::Checkbox`: a `box` square plus, when `checked`, an inner
+/// `check` mark. Both slot-styled; emits the same `Toggle` click event so the
+/// host/script reuse `on_toggle`.
+#[allow(clippy::too_many_arguments)]
+fn render_checkbox_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
+    id: &str,
+    label: &str,
+    checked: bool,
+    style: Option<&crate::protocol::CheckboxStyle>,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    let accent = ctx
+        .resolve_color("accent")
+        .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+
+    // The box is the whole element when unlabeled, else the first Taffy child.
+    let (box_pos, box_size) = if label.is_empty() {
+        (origin, size)
+    } else {
+        let kids = laid.taffy.children(node_id).unwrap_or_default();
+        if let Some(label_id) = kids.get(1) {
+            let ll = laid.layout(*label_id);
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(label.to_string()),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+                TextColor(ctx.palette.text),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                Transform::from_xyz(
+                    origin.x + ll.location.x,
+                    -(origin.y + ll.location.y),
+                    z + 0.01,
+                ),
+            ));
+        }
+        match kids.first() {
+            Some(box_id) => {
+                let bl = laid.layout(*box_id);
+                (
+                    origin + Vec2::new(bl.location.x, bl.location.y),
+                    Vec2::new(bl.size.width, bl.size.height),
+                )
+            }
+            None => (origin, Vec2::splat(CHECKBOX_SIZE)),
+        }
+    };
+
+    // --- box slot ---
+    let box_plan = style.and_then(|s| s.square.as_ref());
+    if let Some(plan) = box_plan {
+        paint_style_background(commands, ctx, Some(plan), box_pos, box_size, z);
+    } else {
+        let border = if checked { accent } else { ctx.palette.text_muted };
+        paint_rounded_panel(
+            commands,
+            ctx,
+            box_pos,
+            box_size,
+            4.0,
+            ctx.palette.bar_track,
+            border,
+            1.5,
+            transparent,
+            0.0,
+            0.0,
+            z,
+        );
+    }
+
+    // --- check mark (only when checked) ---
+    if checked {
+        let inset = box_size * 0.28;
+        let check_pos = box_pos + inset;
+        let check_size = (box_size - inset * 2.0).max(Vec2::ZERO);
+        let check_plan = style.and_then(|s| s.check.as_ref());
+        if let Some(plan) = check_plan {
+            paint_style_background(commands, ctx, Some(plan), check_pos, check_size, z + 0.01);
+        } else {
+            paint_rounded_panel(
+                commands,
+                ctx,
+                check_pos,
+                check_size,
+                2.0,
+                accent,
+                transparent,
+                0.0,
+                transparent,
+                0.0,
+                0.0,
+                z + 0.01,
+            );
+        }
+    }
 
     targets.clicks.push(ClickTarget {
         id: id.to_string(),
@@ -1839,6 +2822,7 @@ fn render_table_at(
     rows: &[Vec<String>],
     zebra: bool,
     selectable: bool,
+    style: Option<&crate::protocol::TableStyle>,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -1873,25 +2857,30 @@ fn render_table_at(
         if content.y > 0.0 { content.y } else { size.y },
     );
 
-    // Outer panel: subtle surface + border.
-    let radius = ctx.resolve_f32("radius_sm").unwrap_or(4.0);
-    let panel_bg = ctx
-        .resolve_color("surface_2")
-        .unwrap_or(Color::srgb(0.10, 0.11, 0.13));
-    paint_rounded_panel(
-        commands,
-        ctx,
-        origin,
-        size,
-        radius,
-        panel_bg,
-        ctx.palette.divider,
-        1.0,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        0.0,
-        z,
-    );
+    // Outer `panel` slot: from its Glaze plan when present, else the hardcoded
+    // surface + border.
+    if let Some(plan) = style.and_then(|s| s.panel.as_ref()) {
+        paint_style_background(commands, ctx, Some(plan), origin, size, z);
+    } else {
+        let radius = ctx.resolve_f32("radius_sm").unwrap_or(4.0);
+        let panel_bg = ctx
+            .resolve_color("surface_2")
+            .unwrap_or(Color::srgb(0.10, 0.11, 0.13));
+        paint_rounded_panel(
+            commands,
+            ctx,
+            origin,
+            size,
+            radius,
+            panel_bg,
+            ctx.palette.divider,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            0.0,
+            z,
+        );
+    }
 
     let line_h = line_height(DEFAULT_FONT_SIZE);
     let nrows_total = cells.len() / ncols; // header + data rows
@@ -1906,6 +2895,8 @@ fn render_table_at(
     // Row backgrounds: header tint + optional zebra on alternate data
     // rows. Row geometry comes from the first cell in each row (grid
     // tracks give every cell in a row the same top + height).
+    let header_plan = style.and_then(|s| s.header.as_ref());
+    let zebra_plan = style.and_then(|s| s.zebra.as_ref());
     for r in 0..nrows_total {
         let Some(&first) = cells.get(r * ncols) else {
             continue;
@@ -1913,24 +2904,35 @@ fn render_table_at(
         let cl = laid.layout(first);
         let row_top = origin.y + cl.location.y;
         let row_h = cl.size.height;
-        let fill = if r == 0 {
-            Some(header_bg)
-        } else if zebra && r % 2 == 0 {
-            Some(zebra_bg)
+        let row_origin = Vec2::new(origin.x, row_top);
+        let row_size = Vec2::new(size.x, row_h);
+        // header / zebra `slot` plans win over the hardcoded fills.
+        let is_header = r == 0;
+        let is_zebra = zebra && r % 2 == 0;
+        if is_header && header_plan.is_some() {
+            paint_style_background(commands, ctx, header_plan, row_origin, row_size, z + 0.001);
+        } else if is_zebra && zebra_plan.is_some() {
+            paint_style_background(commands, ctx, zebra_plan, row_origin, row_size, z + 0.001);
         } else {
-            None
-        };
-        if let Some(color) = fill {
-            commands.spawn((
-                ChildOf(ctx.content_root),
-                Sprite {
-                    color,
-                    custom_size: Some(Vec2::new(size.x, row_h)),
-                    ..default()
-                },
-                Anchor::TOP_LEFT,
-                Transform::from_xyz(origin.x, -row_top, z + 0.001),
-            ));
+            let fill = if is_header {
+                Some(header_bg)
+            } else if is_zebra {
+                Some(zebra_bg)
+            } else {
+                None
+            };
+            if let Some(color) = fill {
+                commands.spawn((
+                    ChildOf(ctx.content_root),
+                    Sprite {
+                        color,
+                        custom_size: Some(row_size),
+                        ..default()
+                    },
+                    Anchor::TOP_LEFT,
+                    Transform::from_xyz(origin.x, -row_top, z + 0.001),
+                ));
+            }
         }
     }
 

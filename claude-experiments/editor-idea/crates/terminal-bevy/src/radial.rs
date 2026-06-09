@@ -25,11 +25,10 @@ use bevy::sprite::Anchor;
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use bevy::text::LineHeight;
 
-use pane_bevy::{
-    topmost_pane_at, InputConsumed, PaneRect, PaneRegistry, PaneTag,
-};
+use pane_bevy::{topmost_pane_at, InputConsumed, PaneRect, PaneTag};
 
-use crate::projects::{NewPaneRequest, PendingActions, Projects, Sidebar};
+use crate::actions::{ActionInvocations, ActionRegistry};
+use crate::projects::Sidebar;
 use crate::MonoFont;
 
 const RADIAL_Z: f32 = 600.0;
@@ -52,25 +51,24 @@ const WEDGE_GAP_RAD: f32 = 0.04;
 pub struct RadialItem {
     pub icon: &'static str,
     pub label: &'static str,
-    /// Pane kind to spawn when this item is picked.
-    pub kind: &'static str,
+    /// Action invoked when this item is picked. May spawn a pane or do
+    /// anything else (e.g. toggle the project cube).
+    pub action_id: &'static str,
 }
 
-/// Snapshot the registry's radial-eligible kinds in a stable order
-/// (alphabetical by kind id) so item indices stay consistent for the
-/// duration of one open menu.
-fn collect_radial_items(registry: &PaneRegistry) -> Vec<RadialItem> {
+/// Snapshot the action registry's radial-eligible actions (those with an
+/// icon) in a stable order (by id) so item indices stay consistent for
+/// the duration of one open menu.
+fn collect_radial_items(registry: &ActionRegistry) -> Vec<RadialItem> {
     let mut items: Vec<RadialItem> = registry
-        .iter()
-        .filter_map(|spec| {
-            spec.radial_icon.map(|icon| RadialItem {
-                icon,
-                label: spec.display_name,
-                kind: spec.kind,
-            })
+        .radial_items()
+        .map(|a| RadialItem {
+            icon: a.radial_icon.unwrap_or("•"),
+            label: a.title,
+            action_id: a.id,
         })
         .collect();
-    items.sort_by_key(|i| i.kind);
+    items.sort_by_key(|i| i.action_id);
     items
 }
 
@@ -99,11 +97,12 @@ pub struct RadialPlugin;
 
 impl Plugin for RadialPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(RadialMenu::default())
-            .add_systems(
-                Update,
-                (radial_open_close, radial_hover, radial_render).chain(),
-            );
+        app.insert_resource(RadialMenu::default()).add_systems(
+            Update,
+            (radial_open_close, radial_hover, radial_render)
+                .chain()
+                .in_set(crate::actions::ActionProducerSet),
+        );
     }
 }
 
@@ -159,9 +158,8 @@ pub fn radial_open_close(
     viewport: Res<pane_bevy::PaneViewport>,
     mut menu: ResMut<RadialMenu>,
     mut consumed: ResMut<InputConsumed>,
-    projects: Res<Projects>,
-    registry: Res<PaneRegistry>,
-    mut pending: ResMut<PendingActions>,
+    registry: Res<ActionRegistry>,
+    mut invocations: ResMut<ActionInvocations>,
     panes: Query<(Entity, &PaneRect, &Visibility), With<PaneTag>>,
 ) {
     let Ok(window) = windows.single() else {
@@ -218,7 +216,7 @@ pub fn radial_open_close(
     if menu.center.is_some() && buttons.just_pressed(MouseButton::Left) {
         if let Some(idx) = menu.hovered {
             if let Some(item) = menu.items.get(idx).cloned() {
-                dispatch_pick(&item, menu.center.unwrap(), &projects, &mut pending);
+                dispatch_pick(&item, menu.center.unwrap(), &mut invocations);
             }
         }
         menu.center = None;
@@ -240,23 +238,11 @@ fn radial_hover(windows: Query<&Window>, mut menu: ResMut<RadialMenu>) {
     }
 }
 
-fn dispatch_pick(
-    item: &RadialItem,
-    center: Vec2,
-    projects: &Projects,
-    pending: &mut PendingActions,
-) {
-    let Some(active) = projects.active else {
-        return;
-    };
+fn dispatch_pick(item: &RadialItem, center: Vec2, invocations: &mut ActionInvocations) {
+    // Offset so a spawned pane's title bar lands under the cursor rather
+    // than its top-left corner. Non-spawn actions ignore the origin.
     let origin = Vec2::new(center.x - 24.0, center.y - 10.0);
-    pending.new_panes.push(NewPaneRequest {
-        kind: item.kind,
-        project_id: active,
-        origin: Some(origin),
-        size: None,
-        config: serde_json::Value::Null,
-    });
+    invocations.request(item.action_id, Some(origin));
 }
 
 // ---------- Render ----------

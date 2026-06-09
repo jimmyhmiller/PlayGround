@@ -232,6 +232,7 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
                     track: Some("#1c1f25".into()),
                     width: bar_w,
                     height: 10.0,
+                    style: None,
                 },
                 Element::Text {
                     value: pct_label,

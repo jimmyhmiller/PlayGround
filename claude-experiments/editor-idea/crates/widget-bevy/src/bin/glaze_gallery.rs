@@ -40,7 +40,7 @@ struct Frames {
 }
 
 fn main() -> ExitCode {
-    let mut out = std::path::PathBuf::from("/tmp/glaze_gallery.png");
+    let mut out = std::env::temp_dir().join("glaze_gallery.png");
     let mut cols = 4usize;
     let mut frames = 80u32;
     let mut it = std::env::args().skip(1);

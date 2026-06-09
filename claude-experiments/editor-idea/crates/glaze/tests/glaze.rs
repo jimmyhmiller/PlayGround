@@ -256,3 +256,182 @@ fn lengths_and_units() {
     // sanity: a bare px length round-trips
     let _ = Length::Px(4.0);
 }
+
+// ---------- Phase 1b: widened layer stack ----------
+
+const STOPS: &str = r#"
+token brand.a = #ff0000
+token brand.b = #00ff00
+token brand.c = #0000ff
+
+style grad {
+    gradient 90 brand.a brand.b brand.c
+}
+style grad_offsets {
+    gradient brand.a 0% brand.b 25% brand.c 100%
+}
+style edges {
+    border_top  brand.a 2px
+    border_left brand.b 3px
+}
+style shadows {
+    shadow brand.a 12px 4px 2px
+    inset_shadow brand.b 8px 0 0
+}
+"#;
+
+#[test]
+fn gradient_distributes_missing_offsets_evenly() {
+    let prog = parse(STOPS).unwrap();
+    let c = prog.resolve("grad", &variant(&[]), &[]).unwrap();
+    match &c.layers[0] {
+        Layer::LinearGradient { angle, stops } => {
+            assert_eq!(*angle, 90.0);
+            assert_eq!(stops.len(), 3);
+            // evenly distributed 0, 0.5, 1
+            assert!((stops[0].offset - 0.0).abs() < 1e-5);
+            assert!((stops[1].offset - 0.5).abs() < 1e-5);
+            assert!((stops[2].offset - 1.0).abs() < 1e-5);
+        }
+        other => panic!("expected gradient, got {other:?}"),
+    }
+}
+
+#[test]
+fn gradient_honors_explicit_offsets_and_default_angle() {
+    let prog = parse(STOPS).unwrap();
+    let c = prog.resolve("grad_offsets", &variant(&[]), &[]).unwrap();
+    match &c.layers[0] {
+        Layer::LinearGradient { angle, stops } => {
+            assert_eq!(*angle, 180.0); // omitted → default
+            let offs: Vec<f32> = stops.iter().map(|s| s.offset).collect();
+            assert_eq!(offs, vec![0.0, 0.25, 1.0]);
+        }
+        other => panic!("expected gradient, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_side_borders_set_only_their_edge() {
+    let prog = parse(STOPS).unwrap();
+    let c = prog.resolve("edges", &variant(&[]), &[]).unwrap();
+    let sides: Vec<glaze::Sides> = c
+        .layers
+        .iter()
+        .filter_map(|l| match l {
+            Layer::Border { sides, .. } => Some(*sides),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sides.len(), 2);
+    assert_eq!(sides[0], glaze::Sides::only(true, false, false, false)); // top
+    assert!(!sides[0].is_all());
+    assert_eq!(sides[1], glaze::Sides::only(false, false, false, true)); // left
+}
+
+#[test]
+fn shadow_and_inset_shadow_carry_params() {
+    let prog = parse(STOPS).unwrap();
+    let c = prog.resolve("shadows", &variant(&[]), &[]).unwrap();
+    match &c.layers[0] {
+        Layer::Shadow { blur, offset_y, spread, inset, .. } => {
+            assert_eq!((*blur, *offset_y, *spread), (12.0, 4.0, 2.0));
+            assert!(!inset);
+        }
+        other => panic!("expected shadow, got {other:?}"),
+    }
+    match &c.layers[1] {
+        Layer::Shadow { blur, inset, .. } => {
+            assert_eq!(*blur, 8.0);
+            assert!(inset);
+        }
+        other => panic!("expected inset shadow, got {other:?}"),
+    }
+}
+
+// ---------- Phase 1c: slots (part {}) ----------
+
+const SLOTTED: &str = r#"
+token track.bg  = #222222
+token fill.lo   = #00ff00
+token fill.hi   = #ff0000
+token r.pill    = 999px
+
+style bar {
+    let h = 8px           // top-level let, visible inside parts
+    radius r.pill         // base (root box) prop
+    height h
+    track {
+        fill   track.bg
+        radius r.pill
+    }
+    fill {
+        fill   fill.lo
+        radius r.pill
+        :active { fill fill.hi }
+    }
+}
+
+style bad_nest {
+    track {
+        inner {
+            fill track.bg
+        }
+    }
+}
+"#;
+
+#[test]
+fn slots_split_base_from_parts() {
+    let prog = parse(SLOTTED).unwrap();
+    let s = prog.resolve_slots("bar", &variant(&[]), &[]).unwrap();
+    // base = the root box props only (radius + height), no part fills
+    assert_eq!(s.base.box_.radius, 999.0);
+    assert!(s.base.layers.is_empty(), "base must not absorb part layers");
+    // two slots, in source order
+    let names: Vec<&str> = s.slot_names().collect();
+    assert_eq!(names, vec!["track", "fill"]);
+    // a part carries its own layers + box
+    let track = s.slot("track").unwrap();
+    assert_eq!(track.box_.radius, 999.0);
+    assert_eq!(track.layers.len(), 1); // one fill
+    assert!(s.slot("nope").is_none());
+}
+
+#[test]
+fn slot_inherits_top_level_let() {
+    let prog = parse(SLOTTED).unwrap();
+    let s = prog.resolve_slots("bar", &variant(&[]), &[]).unwrap();
+    // `height h` where `let h = 8px` at top level — base picks it up
+    assert_eq!(s.base.box_.height, Some(glaze::Dim::Px(8.0)));
+}
+
+#[test]
+fn slot_state_overlay_applies_within_part() {
+    let prog = parse(SLOTTED).unwrap();
+    let off = prog.resolve_slots("bar", &variant(&[]), &[]).unwrap();
+    let on = prog.resolve_slots("bar", &variant(&[]), &["active"]).unwrap();
+    let fill_color = |s: &glaze::CompiledSlots| match s.slot("fill").unwrap().layers.last().unwrap() {
+        Layer::Fill(c) => *c,
+        other => panic!("expected fill, got {other:?}"),
+    };
+    // :active overlay flips the fill slot's color (green → red)
+    assert_ne!(fill_color(&off), fill_color(&on));
+}
+
+#[test]
+fn nested_parts_are_rejected() {
+    let prog = parse(SLOTTED).unwrap();
+    let err = prog.resolve_slots("bad_nest", &variant(&[]), &[]).unwrap_err();
+    assert!(matches!(err, GlazeError::Parse(_)), "got {err:?}");
+}
+
+#[test]
+fn non_slotted_style_still_resolves_flat() {
+    // a style with no parts behaves exactly as before through resolve()
+    let prog = parse(SLOTTED).unwrap();
+    let flat = prog.resolve("bar", &variant(&[]), &[]).unwrap();
+    // resolve() ignores parts: base box only, no part layers leaked in
+    assert_eq!(flat.box_.radius, 999.0);
+    assert!(flat.layers.is_empty());
+}

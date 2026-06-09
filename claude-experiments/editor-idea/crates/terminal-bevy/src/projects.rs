@@ -664,6 +664,10 @@ impl Plugin for ProjectsPlugin {
                     sidebar_input,
                     rename_keyboard,
                     apply_pending_actions,
+                    // Right after the frame's spawns: catch any pane that
+                    // was created without a project before the rest of the
+                    // pipeline (and the cube) relies on membership.
+                    assert_pane_project_invariant,
                     sync_visibility,
                     refocus_on_project_change,
                     mark_terminals_dirty_on_change,
@@ -1597,6 +1601,18 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
             }
         }
     }
+    // Project membership is a hard invariant: a pane without it leaks
+    // across every project (never hidden by `sync_visibility`, no cube
+    // face of its own). A snapshot with no `project_id` is an orphan we
+    // must NOT resurrect as a floating pane — drop it loudly instead.
+    let Some(project_id) = snap.project_id else {
+        eprintln!(
+            "[restore] dropping orphan {} pane: snapshot has no project_id. \
+             Project membership is required; refusing to restore it across projects.",
+            snap.kind
+        );
+        return;
+    };
     let kind_static = kind_to_static(&snap.kind);
     let display = kind_display_name(world, &snap.kind);
     // PaneRect is canvas-space now — restore directly from the snapshot.
@@ -1610,7 +1626,7 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
         kind_static,
         display,
         rect,
-        snap.project_id,
+        Some(project_id),
         &snap.config,
     );
     if let Some(e) = entity {
@@ -1696,6 +1712,32 @@ pub fn project_for_cwd(cwd: &std::path::Path, projects: &Projects) -> Option<u64
 }
 
 // ---------- Visibility sync ----------
+
+/// Enforce the invariant that every pane belongs to a project.
+///
+/// Project membership (`PaneProject`) is what confines a pane to one
+/// project: `sync_visibility` only governs panes that have it, and the
+/// cube buckets each pane onto its project's face by it. A pane WITHOUT
+/// it is invisible to both — it is never hidden when you switch projects
+/// (so it shows in every project) and it cannot be placed on a single
+/// cube face. There is no legitimate way to create such a pane: every
+/// spawn path supplies a project and `restore_pane` rejects orphan
+/// snapshots. So this firing means a NEW spawn path forgot to tag its
+/// pane — fail loud and immediately, at the source, rather than letting
+/// it float across the overview where the cause is invisible.
+pub fn assert_pane_project_invariant(
+    orphans: Query<(Entity, &PaneKindMarker), (With<PaneTag>, Without<PaneProject>)>,
+) {
+    if let Some((entity, kind)) = orphans.iter().next() {
+        panic!(
+            "pane {entity:?} (kind {:?}) has no PaneProject. Project membership is a \
+             hard invariant — every pane MUST be spawned with a project. Some spawn \
+             path is creating panes without one; fix it to pass a project_id rather \
+             than letting the pane leak across every project in the cube.",
+            kind.0
+        );
+    }
+}
 
 /// Hide panes whose project is not the active one.
 pub fn sync_visibility(

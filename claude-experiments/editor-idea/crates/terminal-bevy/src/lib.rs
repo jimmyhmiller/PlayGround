@@ -50,8 +50,10 @@ use pane_bevy::{
 };
 use serde_json::Value;
 
+pub mod actions;
 pub mod atlas;
 pub mod canvas;
+pub mod command_palette;
 pub mod claude_events_pane;
 pub mod command_watch;
 pub mod context_menu;
@@ -61,7 +63,6 @@ pub mod debug_bar;
 pub mod diagnostics;
 pub mod drawer;
 pub mod fps;
-pub mod garden_pane;
 pub mod graph_view;
 pub mod inference_dispatch;
 pub mod inbox;
@@ -78,6 +79,7 @@ pub mod radial;
 pub mod run_button;
 pub mod selection;
 pub mod term_material;
+pub mod tools;
 pub mod vt;
 pub mod window_geometry;
 pub mod worker;
@@ -88,7 +90,7 @@ use term_material::{
 };
 use projects::{
     NewPaneRequest, OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership,
-    Projects, Renaming, Sidebar,
+    Projects, Sidebar,
 };
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
@@ -101,17 +103,50 @@ pub const SCROLLBACK_LINES: usize = 100_000;
 /// in `PaneKindMarker` and referenced by the registry.
 pub const PANE_KIND: &str = "terminal";
 
-/// Path to SF Mono — Apple ships it with Terminal.app, so any Mac that
-/// has launched Terminal.app once has this file. Loaded at startup and
-/// leaked into a `'static` slice so the atlas (which holds a borrow of
-/// the font bytes for `swash`) sees a stable address for the program's
-/// lifetime.
-const PRIMARY_FONT_PATH: &str = "/Library/Fonts/SF-Mono-Regular.otf";
+/// Candidate monospace fonts tried in order, first readable one wins.
+/// SF Mono is preferred — Apple ships it with Terminal.app, so any Mac
+/// that has launched Terminal.app once has it — but we fall back to other
+/// common monospace faces so the terminal still starts on a machine that
+/// lacks it. Override the whole search with the `TERMINAL_BEVY_FONT` env
+/// var (absolute path to a `.otf`/`.ttf`).
+const PRIMARY_FONT_CANDIDATES: &[&str] = &[
+    "/Library/Fonts/SF-Mono-Regular.otf",
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/Library/Fonts/Andale Mono.ttf",
+];
 
+/// Loads the primary monospace font and leaks it into a `'static` slice
+/// so the atlas (which holds a borrow of the font bytes for `swash`) sees
+/// a stable address for the program's lifetime. Tries `TERMINAL_BEVY_FONT`
+/// first, then [`PRIMARY_FONT_CANDIDATES`]; panics with the full list if
+/// none can be read (the terminal cannot render without a font).
 fn load_primary_font() -> &'static [u8] {
-    let bytes = std::fs::read(PRIMARY_FONT_PATH)
-        .unwrap_or_else(|e| panic!("read {}: {}", PRIMARY_FONT_PATH, e));
-    Box::leak(bytes.into_boxed_slice())
+    let mut tried: Vec<String> = Vec::new();
+    let override_path = std::env::var_os("TERMINAL_BEVY_FONT");
+    let candidates = override_path
+        .as_ref()
+        .map(|p| std::path::Path::new(p))
+        .into_iter()
+        .map(std::borrow::Cow::Borrowed)
+        .chain(
+            PRIMARY_FONT_CANDIDATES
+                .iter()
+                .map(|p| std::borrow::Cow::Owned(std::path::PathBuf::from(p))),
+        );
+    for path in candidates {
+        match std::fs::read(path.as_ref()) {
+            Ok(bytes) => return Box::leak(bytes.into_boxed_slice()),
+            Err(e) => tried.push(format!("  {}: {}", path.as_ref().display(), e)),
+        }
+    }
+    panic!(
+        "no usable monospace font found — set TERMINAL_BEVY_FONT to an \
+         absolute .otf/.ttf path. Tried:\n{}",
+        tried.join("\n")
+    );
 }
 
 /// Root for all on-disk persistence (projects + per-terminal scrollback).
@@ -347,20 +382,33 @@ impl Plugin for TerminalPlugin {
             // hit-test). Terminal-specific systems below register the
             // "terminal" kind, render the grid, and handle keyboard +
             // mouse-driven selection inside the content area.
-            // Reserve the menu-overlay layer so no pane is ever allocated
-            // it (the overlay camera renders that layer globally / above
-            // all panes; a collision would draw a pane over menus and
-            // across projects). See `PaneLayerAllocator`.
+            // Reserve EVERY layer that a non-pane, non-project-scoped
+            // camera renders, so no pane is ever allocated one. A collision
+            // draws that pane's content across every project (and over the
+            // cube), because that global camera isn't gated by project:
+            //   - MENU_OVERLAY_LAYER (32): menus / FPS / status bar.
+            //   - cube::CUBE_LAYER (4096): the prism's structural geometry.
+            //   - style_bevy::dynamic::OVERLAY_LAYER (30): the dust/shader
+            //     canvas overlay, drawn at order 1_000_001 above everything.
+            // This is the single registry of global layers; anyone adding a
+            // global overlay camera MUST add its layer here. See
+            // `PaneLayerAllocator`.
             .add_plugins(PanePlugin {
-                reserved_layers: vec![MENU_OVERLAY_LAYER],
+                reserved_layers: vec![
+                    MENU_OVERLAY_LAYER,
+                    cube::CUBE_LAYER,
+                    style_bevy::dynamic::OVERLAY_LAYER,
+                ],
             })
             .add_plugins(TermMaterialPlugin)
             .add_plugins(diagnostics::DiagnosticsPlugin)
             .add_plugins(projects::ProjectsPlugin)
+            .add_plugins(actions::ActionsPlugin)
             .add_plugins(canvas::CanvasPlugin)
             .add_plugins(context_menu::ContextMenuPlugin)
             .add_plugins(cube::CubePlugin)
             .add_plugins(radial::RadialPlugin)
+            .add_plugins(command_palette::CommandPalettePlugin)
             .add_plugins(drawer::DrawerPlugin)
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
@@ -372,12 +420,65 @@ impl Plugin for TerminalPlugin {
             .add_plugins(issues_pane::IssuesPanePlugin)
             .add_plugins(inbox::InboxPanePlugin)
             .add_plugins(inference_dispatch::InferenceDispatchPlugin)
-            .add_plugins(garden_pane::ClaudeGardenPanePlugin)
             .add_plugins(widget_bevy::WidgetPlugin)
             .add_plugins(widget_bevy::rhai_widget::RhaiWidgetPlugin)
             .add_plugins(editor_bevy::EditorEmbedPlugin)
             .add_plugins(style_bevy::StylePlugin)
-            .add_plugins(style_bevy::state::ProjectStatePlugin)
+            .add_plugins(style_bevy::state::ProjectStatePlugin);
+        // Bespoke (non-pane) actions. Pane-spawn actions are auto-
+        // generated from the `PaneRegistry` at PostStartup; these are the
+        // capabilities that aren't "spawn a pane kind". Each was formerly
+        // a hand-rolled keyboard-shortcut system.
+        use actions::{Action, ActionRun, AppActionsExt, KeyChord};
+        app.add_action(Action {
+            id: "file.open",
+            title: "Open File…",
+            category: "File",
+            keywords: &["edit", "buffer"],
+            radial_icon: None,
+            default_keybind: Some(KeyChord::cmd(KeyCode::KeyO)),
+            run: ActionRun::Custom(action_open_file),
+        })
+        .add_action(Action {
+            id: "view.dev_panel",
+            title: "Style Dev Panel",
+            category: "View",
+            keywords: &["debug", "tokens"],
+            radial_icon: None,
+            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyD)),
+            run: ActionRun::Custom(action_open_dev_panel),
+        })
+        .add_action(Action {
+            id: "view.theme_editor",
+            title: "Theme Editor",
+            category: "View",
+            keywords: &["color", "oklch", "palette"],
+            radial_icon: None,
+            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyT)),
+            run: ActionRun::Custom(action_open_theme_editor),
+        })
+        .add_action(Action {
+            id: "view.style_picker",
+            title: "Styles",
+            category: "View",
+            keywords: &["preset", "theme", "skin"],
+            radial_icon: None,
+            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyS)),
+            run: ActionRun::Custom(action_open_style_picker),
+        })
+        .add_action(Action {
+            id: "view.toggle_cube",
+            title: "Toggle Project Cube",
+            category: "View",
+            keywords: &["prism", "3d", "overview", "switch"],
+            // Eligible for the radial ring — proof the ring now hosts
+            // non-pane actions. Keybind stays owned by `cube.rs`
+            // (Cmd+Shift+\) to avoid a double-toggle.
+            radial_icon: Some("◧"),
+            default_keybind: None,
+            run: ActionRun::Custom(action_toggle_cube),
+        });
+        app
             .add_systems(
                 Startup,
                 (
@@ -391,6 +492,7 @@ impl Plugin for TerminalPlugin {
                     // and the caret grid would drift from the rendered text.
                     editor_bevy::setup_editor_font.after(setup_camera_and_font),
                     setup_ipc_listener,
+                    request_microphone_access,
                 ),
             )
             .add_systems(
@@ -399,20 +501,19 @@ impl Plugin for TerminalPlugin {
                     mirror_active_project_to_style,
                     maintain_project_themes,
                     mirror_focus_to_style,
-                    handle_open_dev_panel,
-                    handle_open_style_picker,
-                    handle_open_theme_editor,
                     maintain_winit_mode_for_animation,
                     sync_canvas_clear_color,
                     window_geometry::save_on_change,
                 ),
             )
             .add_systems(PostStartup, release_os_focus)
+            // Single keyboard-ownership authority, before every Update
+            // consumer reads it.
+            .add_systems(PreUpdate, compute_keyboard_owner)
             .add_systems(Update, debug_fps_log)
             .add_systems(
                 Update,
                 (
-                    handle_open_file_shortcut,
                     drain_ipc_open_requests,
                 ),
             )
@@ -524,6 +625,57 @@ fn release_os_focus() {
 #[cfg(not(target_os = "macos"))]
 fn release_os_focus() {}
 
+/// Trigger the macOS microphone permission prompt at startup.
+///
+/// Why this is needed: `claude` (and any other CLI a user runs) records
+/// audio through whichever process the OS deems *responsible* for it.
+/// Our shells run under a launchd-detached daemon (double-fork +
+/// `setsid`, PPID 1), so that responsible process is this app's code
+/// identity — but a headless background daemon can't present the TCC
+/// permission dialog. The foreground GUI can. Calling
+/// `requestAccessForMediaType:` here pops the prompt once while we're
+/// frontmost; the resulting grant is keyed on our code identity, which
+/// the daemon shares (same signed binary), so `claude`'s voice dictation
+/// can capture audio. Requires `NSMicrophoneUsageDescription` in
+/// Info.plist (added by make-bundle.sh) — without it the request is
+/// denied outright. Already-granted launches resolve to a no-op.
+#[cfg(target_os = "macos")]
+fn request_microphone_access() {
+    use objc2::runtime::Bool;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    // winit/Bevy don't load AVFoundation, so the AVCaptureDevice class
+    // wouldn't resolve at runtime. This empty extern forces a framework
+    // load command into the binary.
+    #[link(name = "AVFoundation", kind = "framework")]
+    unsafe extern "C" {}
+
+    // AVMediaTypeAudio's documented constant value is the FourCC "soun";
+    // using the literal avoids linking the Obj-C string symbol.
+    let media_type = NSString::from_str("soun");
+    // Heap block: AVFoundation invokes the completion handler
+    // asynchronously, after this function returns, so it must outlive the
+    // stack frame.
+    let handler = block2::RcBlock::new(|granted: Bool| {
+        eprintln!(
+            "[mic] microphone access request resolved: granted={}",
+            granted.as_bool()
+        );
+    });
+    let cls = class!(AVCaptureDevice);
+    unsafe {
+        let _: () = msg_send![
+            cls,
+            requestAccessForMediaType: &*media_type,
+            completionHandler: &*handler,
+        ];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_microphone_access() {}
+
 /// Holds the receiver half of the IPC channel. `mpsc::Receiver` is
 /// `Send` but `!Sync`, so we install it as a `NonSend` resource and
 /// drain it from a system that always runs on the main thread.
@@ -559,6 +711,7 @@ fn drain_ipc_open_requests(
     mut drawer: ResMut<drawer::Drawer>,
     mut prism: ResMut<cube::Prism>,
     mut msg_bus: ResMut<widget_bevy::WidgetMsgBus>,
+    mut palette_open: ResMut<command_palette::PaletteOpenRequest>,
     mut commands: Commands,
 ) {
     let Some(inbox) = inbox else { return };
@@ -642,6 +795,11 @@ fn drain_ipc_open_requests(
             }
             ipc::IpcRequest::ToggleCube => {
                 prism.pending_toggle = true;
+            }
+            ipc::IpcRequest::OpenPalette { query, ask } => {
+                palette_open.requested = true;
+                palette_open.seed = query;
+                palette_open.ask = ask;
             }
             ipc::IpcRequest::ListProjects => {
                 use std::io::Write as _;
@@ -832,33 +990,26 @@ fn drain_ipc_open_requests(
 /// never sees a stray "o" insert. Both pane keyboard handlers already
 /// skip Cmd-modified keys, but we still bail explicitly here in case
 /// that contract loosens.
-fn handle_open_file_shortcut(
-    _main_thread: bevy::ecs::system::NonSendMarker,
-    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mods: Res<ButtonInput<KeyCode>>,
-    mut pending: ResMut<PendingActions>,
-) {
-    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
-    let mut triggered = false;
-    for ev in events.read() {
-        if ev.state.is_pressed() && cmd && matches!(ev.key_code, KeyCode::KeyO) {
-            triggered = true;
-        }
-    }
-    if !triggered {
-        return;
-    }
+/// `file.open` action (Cmd+O). Opens a native file picker and routes
+/// the chosen file to an editor pane in the active project. Runs on the
+/// main thread via the exclusive action dispatcher, so the blocking
+/// `rfd` dialog is fine. Cmd+O is swallowed by the keybind matcher so
+/// the focused pane never sees a stray "o" insert.
+fn action_open_file(ctx: &mut actions::ActionCtx) {
     let dialog = rfd::FileDialog::new()
         .set_directory(std::env::current_dir().unwrap_or_else(|_| ".".into()))
         .set_title("Open file");
     let Some(path) = dialog.pick_file() else {
         return;
     };
-    pending.open_files.push(OpenFileRequest {
-        path,
-        project: OpenProjectTarget::Active,
-        origin: None,
-    });
+    ctx.world
+        .resource_mut::<PendingActions>()
+        .open_files
+        .push(OpenFileRequest {
+            path,
+            project: OpenProjectTarget::Active,
+            origin: None,
+        });
 }
 
 fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
@@ -947,7 +1098,8 @@ pub fn setup_camera_and_font(world: &mut World) {
 /// Returns the entity so the caller can set focus, tweak z, etc.
 ///
 /// `project_id` tags the terminal with `ProjectMembership` so the sidebar
-/// can group + show/hide it. Pass `None` only in tests / standalone demos.
+/// can group + show/hide it. It is REQUIRED: a terminal with no project
+/// leaks across every project (see `assert_pane_project_invariant`).
 ///
 /// `session_id` is the persistence key — the worker logs raw pty bytes
 /// to `scrollback_path(session_id)` and on restart loads the same file
@@ -955,20 +1107,17 @@ pub fn setup_camera_and_font(world: &mut World) {
 pub fn spawn_terminal(
     world: &mut World,
     rect: PaneRect,
-    project_id: Option<u64>,
+    project_id: u64,
     session_id: u64,
     replay_bytes: Option<Vec<u8>>,
 ) -> Entity {
     let SpawnedPane {
         entity: terminal_entity,
         content_root,
-    } = spawn_pane(world, PANE_KIND, "Terminal", rect, project_id);
-    let initial_cwd = project_id
-        .and_then(|id| {
-            world
-                .get_resource::<Projects>()
-                .and_then(|p| p.default_cwd_of(id).map(str::to_string))
-        });
+    } = spawn_pane(world, PANE_KIND, "Terminal", rect, Some(project_id));
+    let initial_cwd = world
+        .get_resource::<Projects>()
+        .and_then(|p| p.default_cwd_of(project_id).map(str::to_string));
     populate_terminal_pane(
         world,
         terminal_entity,
@@ -1200,8 +1349,8 @@ fn handle_keyboard(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedPane>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     store: Res<TerminalStore>,
-    renaming: Res<Renaming>,
     kinds: Query<&PaneKindMarker>,
     mut last_drop_reason: Local<Option<&'static str>>,
 ) {
@@ -1227,11 +1376,12 @@ fn handle_keyboard(
         report("focused pane is not a terminal");
         return;
     }
-    // While the user is renaming a project the sidebar's keyboard handler
-    // owns input. Drain the events so they don't get re-read next frame
-    // — we explicitly don't want them landing in the focused terminal.
-    if renaming.id.is_some() {
-        report("project is being renamed (sidebar owns input)");
+    // Central keyboard ownership: a text modal (command palette, project
+    // rename) holds `KeyboardOwner::Modal`, so even though this terminal is
+    // still the focused pane, it must not consume keystrokes. (Subsumes the
+    // old explicit `Renaming` check.)
+    if matches!(focused.0, Some(t) if !owner.allows_pane(t)) {
+        report("keyboard owned by a text modal");
         return;
     }
     let Some(target) = focused.0 else {
@@ -2501,43 +2651,67 @@ fn maintain_project_themes(
 /// to pass. Spawning goes through the same `PendingActions.new_panes`
 /// channel the radial menu uses, so all the usual pane-bevy chrome
 /// applies.
-fn handle_open_dev_panel(
-    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mods: Res<ButtonInput<KeyCode>>,
-    mut pending: ResMut<projects::PendingActions>,
-    projects: Res<projects::Projects>,
-    existing_dev_panels: Query<&widget_bevy::rhai_widget::RhaiWidget>,
+/// `view.dev_panel` action (Cmd+Shift+D). Opens the style dev panel
+/// (a Rhai widget). Dedups: each spawn leaves a fresh Rhai worker thread
+/// ticking the script at 30 Hz (~50% CPU per duplicate), so if a dev
+/// panel already exists anywhere on the canvas, silently do nothing.
+fn action_open_dev_panel(ctx: &mut actions::ActionCtx) {
+    let exists = {
+        let mut q = ctx
+            .world
+            .query::<&widget_bevy::rhai_widget::RhaiWidget>();
+        q.iter(ctx.world).any(|w| w.script == "dev_panel.rhai")
+    };
+    if exists {
+        return;
+    }
+    let Some(active) = ctx.world.resource::<projects::Projects>().active else {
+        return;
+    };
+    ctx.world
+        .resource_mut::<projects::PendingActions>()
+        .new_panes
+        .push(projects::NewPaneRequest {
+            kind: widget_bevy::rhai_widget::PANE_KIND,
+            project_id: active,
+            origin: None,
+            size: Some(Vec2::new(420.0, 280.0)),
+            config: serde_json::json!({
+                "script": "dev_panel.rhai",
+                "title": "Style dev panel",
+            }),
+        });
+}
+
+/// `view.toggle_cube` action. Mirrors the `IpcRequest::ToggleCube` path
+/// (and `cube.rs`'s own Cmd+Shift+\ keybind) by flipping the prism's
+/// pending-toggle flag.
+fn action_toggle_cube(ctx: &mut actions::ActionCtx) {
+    ctx.world.resource_mut::<cube::Prism>().pending_toggle = true;
+}
+
+/// The single authority for `pane_bevy::KeyboardOwner` — runs in
+/// `PreUpdate`, before any keyboard consumer in `Update`, so every
+/// handler sees a consistent owner for the frame. Precedence: a text-
+/// entry modal (command palette or project rename) owns everything; else
+/// the focused pane owns typing; else nobody. See the type docs in
+/// `pane-bevy` for why this replaces the old per-handler focus gating.
+fn compute_keyboard_owner(
+    palette: Res<command_palette::CommandPalette>,
+    renaming: Res<projects::Renaming>,
+    focused: Res<pane_bevy::FocusedPane>,
+    mut owner: ResMut<pane_bevy::KeyboardOwner>,
 ) {
-    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
-    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
-    let mut triggered = false;
-    for ev in events.read() {
-        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyD) {
-            triggered = true;
-        }
+    let next = if renaming.id.is_some() || palette.open {
+        pane_bevy::KeyboardOwner::Modal
+    } else if let Some(e) = focused.0 {
+        pane_bevy::KeyboardOwner::Pane(e)
+    } else {
+        pane_bevy::KeyboardOwner::None
+    };
+    if *owner != next {
+        *owner = next;
     }
-    if !triggered {
-        return;
-    }
-    // Dedup: each Cmd+Shift+D used to spawn a new pane, leaving a fresh
-    // Rhai worker thread running the dev-panel script. Multiple presses
-    // = multiple workers, each ticking the script on its own thread at
-    // 30 Hz — burned ~50% CPU per duplicate. If a dev panel already
-    // exists anywhere on the canvas, silently do nothing.
-    if existing_dev_panels.iter().any(|w| w.script == "dev_panel.rhai") {
-        return;
-    }
-    let Some(active) = projects.active else { return };
-    pending.new_panes.push(projects::NewPaneRequest {
-        kind: widget_bevy::rhai_widget::PANE_KIND,
-        project_id: active,
-        origin: None,
-        size: Some(Vec2::new(420.0, 280.0)),
-        config: serde_json::json!({
-            "script": "dev_panel.rhai",
-            "title": "Style dev panel",
-        }),
-    });
 }
 
 /// Track the active theme's `canvas_bg` token in `ClearColor` so a
@@ -2573,6 +2747,7 @@ fn maintain_winit_mode_for_animation(
     registry: Res<style_bevy::StylePresetRegistry>,
     drawer: Res<drawer::Drawer>,
     prism: Res<cube::Prism>,
+    palette: Res<command_palette::CommandPalette>,
     rhai_widgets: Query<&widget_bevy::rhai_widget::RhaiWidget>,
     mut settings: ResMut<bevy::winit::WinitSettings>,
 ) {
@@ -2598,7 +2773,11 @@ fn maintain_winit_mode_for_animation(
         || widget_animating
         || drawer.animating()
         || prism.active
-        || prism.continuous_cooldown > 0;
+        || prism.continuous_cooldown > 0
+        // Keep ticking while the palette is open so its DeepSeek worker
+        // result is polled promptly (reactive mode would wake only every
+        // 5s otherwise) and keystrokes feel instant.
+        || palette.open;
 
     let target = if want_continuous {
         bevy::winit::UpdateMode::Continuous
@@ -2628,75 +2807,61 @@ fn maintain_winit_mode_for_animation(
 /// of L / C / h. Writes propagate to the active preset's `theme.rhai`
 /// via the bridge; notify watcher reloads it and the rest of the
 /// app retones the same frame.
-fn handle_open_theme_editor(
-    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mods: Res<ButtonInput<KeyCode>>,
-    mut pending: ResMut<projects::PendingActions>,
-    projects: Res<projects::Projects>,
-    existing: Query<&widget_bevy::rhai_widget::RhaiWidget>,
-) {
-    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
-    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
-    let mut triggered = false;
-    for ev in events.read() {
-        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyT) {
-            triggered = true;
-        }
-    }
-    if !triggered {
+/// `view.theme_editor` action (Cmd+Shift+T). Opens the live theme editor
+/// (a Rhai widget): OkLCh steppers per color token that write back to the
+/// active preset's `theme.rhai`. Dedups like the dev panel.
+fn action_open_theme_editor(ctx: &mut actions::ActionCtx) {
+    let exists = {
+        let mut q = ctx
+            .world
+            .query::<&widget_bevy::rhai_widget::RhaiWidget>();
+        q.iter(ctx.world).any(|w| w.script == "theme_editor.rhai")
+    };
+    if exists {
         return;
     }
-    if existing.iter().any(|w| w.script == "theme_editor.rhai") {
+    let Some(active) = ctx.world.resource::<projects::Projects>().active else {
         return;
-    }
-    let Some(active) = projects.active else { return };
-    pending.new_panes.push(projects::NewPaneRequest {
-        kind: widget_bevy::rhai_widget::PANE_KIND,
-        project_id: active,
-        origin: None,
-        size: Some(Vec2::new(420.0, 600.0)),
-        config: serde_json::json!({
-            "script": "theme_editor.rhai",
-            "title": "Theme editor",
-        }),
-    });
+    };
+    ctx.world
+        .resource_mut::<projects::PendingActions>()
+        .new_panes
+        .push(projects::NewPaneRequest {
+            kind: widget_bevy::rhai_widget::PANE_KIND,
+            project_id: active,
+            origin: None,
+            size: Some(Vec2::new(420.0, 600.0)),
+            config: serde_json::json!({
+                "script": "theme_editor.rhai",
+                "title": "Theme editor",
+            }),
+        });
 }
 
 /// Cmd+Shift+S opens the style preset picker (a Rhai widget). Lists
 /// every preset under `~/.terminal-bevy/styles/` plus a `(per-project
 /// theme)` entry; clicking switches the active style and persists the
 /// choice. Same dedup logic as the dev panel.
-fn handle_open_style_picker(
-    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mods: Res<ButtonInput<KeyCode>>,
-    mut pending: ResMut<projects::PendingActions>,
-    projects: Res<projects::Projects>,
-) {
-    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
-    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
-    let mut triggered = false;
-    for ev in events.read() {
-        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyS) {
-            triggered = true;
-        }
-    }
-    if !triggered {
+/// `view.style_picker` action (Cmd+Shift+S). Opens the style preset
+/// picker (a Rhai widget). No dedup: each instance is a parked, event-
+/// driven worker (~zero idle CPU), so stacking a few is cheap.
+fn action_open_style_picker(ctx: &mut actions::ActionCtx) {
+    let Some(active) = ctx.world.resource::<projects::Projects>().active else {
         return;
-    }
-    let Some(active) = projects.active else { return };
-    // No dedup: duplicates are allowed. The picker applies styles to the
-    // active project, and each instance is just a parked worker thread
-    // (event-driven, ~zero CPU when idle), so stacking a few is cheap.
-    pending.new_panes.push(projects::NewPaneRequest {
-        kind: widget_bevy::rhai_widget::PANE_KIND,
-        project_id: active,
-        origin: None,
-        size: Some(Vec2::new(280.0, 240.0)),
-        config: serde_json::json!({
-            "script": "style_picker.rhai",
-            "title": "Styles",
-        }),
-    });
+    };
+    ctx.world
+        .resource_mut::<projects::PendingActions>()
+        .new_panes
+        .push(projects::NewPaneRequest {
+            kind: widget_bevy::rhai_widget::PANE_KIND,
+            project_id: active,
+            origin: None,
+            size: Some(Vec2::new(280.0, 240.0)),
+            config: serde_json::json!({
+                "script": "style_picker.rhai",
+                "title": "Styles",
+            }),
+        });
 }
 
 /// When the user focuses any pane, mark that pane's project as

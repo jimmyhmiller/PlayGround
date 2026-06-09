@@ -247,9 +247,14 @@ struct FpsOverlayState {
 fn toggle_overlay(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     mut state: ResMut<FpsOverlayState>,
     forced: Option<Res<ProfForced>>,
 ) {
+    if owner.is_modal() {
+        events.clear();
+        return;
+    }
     let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
     let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
     for ev in events.read() {

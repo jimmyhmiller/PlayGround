@@ -587,7 +587,7 @@ fn read_names_file(path: &Path) -> Result<HashMap<String, Hash>, CodebaseError> 
     Ok(out)
 }
 
-fn parse_hex_hash(hex: &str) -> Option<Hash> {
+pub fn parse_hex_hash(hex: &str) -> Option<Hash> {
     if hex.len() != 64 {
         return None;
     }

@@ -187,6 +187,17 @@ enum HostToWorker {
     /// `on_tab_select(id, tab)` — `id` is the tabs-group id, `tab` the
     /// selected `TabItem.id`.
     TabSelect { id: String, tab: String },
+    /// User picked an option in an `Element::RadioGroup`. Drives
+    /// `on_radio_select(id, option)`.
+    RadioSelect { id: String, option: String },
+    /// User stepped an `Element::Stepper`. Drives `on_number_change(id, value)`.
+    NumberChange { id: String, value: f32 },
+    /// User picked an option in an `Element::Select`. Drives
+    /// `on_select_change(id, value)`.
+    SelectChange { id: String, value: String },
+    /// User dragged an `Element::Slider`. Drives `on_slider_change(id, value)`
+    /// with the new clamped/snapped value.
+    SliderChange { id: String, value: f32 },
     /// An `Element::Input` gained or lost keyboard focus. Drives
     /// `on_input_focus(id, focused)`.
     InputFocus { id: String, focused: bool },
@@ -573,6 +584,30 @@ impl Worker {
                 }
                 self.call_handler("on_tab_select", (id, tab));
             }
+            HostToWorker::RadioSelect { id, option } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_radio_select", (id, option));
+            }
+            HostToWorker::NumberChange { id, value } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_number_change", (id, value as f64));
+            }
+            HostToWorker::SelectChange { id, value } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_select_change", (id, value));
+            }
+            HostToWorker::SliderChange { id, value } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_slider_change", (id, value as f64));
+            }
             HostToWorker::InputFocus { id, focused } => {
                 if !self.ensure_initialized() {
                     return true;
@@ -739,6 +774,10 @@ fn ast_wants_clicks(ast: &AST) -> bool {
         "on_click",
         "on_toggle",
         "on_tab_select",
+        "on_radio_select",
+        "on_number_change",
+        "on_select_change",
+        "on_slider_change",
         "on_input_focus",
         "on_input_change",
         "on_input_submit",
@@ -747,6 +786,16 @@ fn ast_wants_clicks(ast: &AST) -> bool {
 }
 
 impl RhaiWidget {
+    /// Forward a slider value change to the worker (drives `on_slider_change`).
+    pub fn send_slider_change(&self, id: String, value: f32) {
+        self.handle.send(HostToWorker::SliderChange { id, value });
+    }
+
+    /// Forward a select change to the worker (drives `on_select_change`).
+    pub fn send_select_change(&self, id: String, value: String) {
+        self.handle.send(HostToWorker::SelectChange { id, value });
+    }
+
     /// True while the script has opted into per-frame animation via
     /// `set_animating(true)`. The host uses this to decide whether the
     /// app must stay in winit `Continuous` update mode — otherwise the
@@ -1213,6 +1262,14 @@ fn forward_clicks_to_workers(
             Some((id, crate::ClickKind::TabSelect { tab })) => {
                 commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
                 w.handle.send(HostToWorker::TabSelect { id, tab });
+            }
+            Some((id, crate::ClickKind::RadioSelect { option })) => {
+                commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
+                w.handle.send(HostToWorker::RadioSelect { id, option });
+            }
+            Some((id, crate::ClickKind::NumberChange { value })) => {
+                commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
+                w.handle.send(HostToWorker::NumberChange { id, value });
             }
             Some((id, crate::ClickKind::InputFocus)) => {
                 // Seed the host-owned edit buffer from the input's
@@ -1836,7 +1893,7 @@ fn register_host_functions(
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/rhai-worker.log")
+            .open(std::env::temp_dir().join("rhai-worker.log"))
         {
             let _ = writeln!(f, "{}", msg);
         }
@@ -2284,7 +2341,7 @@ fn render(canvas_w, canvas_h) {
             w: 200.0 * scale,    // SPRITE_W
             h: 400.0 * scale,    // SPRITE_H
             image: "tile",
-            path: "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/editor-idea/crates/terminal-bevy/assets/garden/plants.png",
+            path: widget_asset("garden/plants.png"),
             tile_w: 12,
             tile_h: 24,
             col: plant.tile,

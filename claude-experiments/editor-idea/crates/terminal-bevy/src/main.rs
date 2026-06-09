@@ -47,7 +47,7 @@ fn main() {
         .unwrap_or(WindowPosition::default());
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "terminal-bevy".into(),
+            title: "Jim".into(),
             resolution: (init_w, init_h).into(),
             position: init_position,
             ..default()

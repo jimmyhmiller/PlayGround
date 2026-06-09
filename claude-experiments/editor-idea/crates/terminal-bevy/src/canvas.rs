@@ -549,10 +549,15 @@ fn cycle_config_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     mut config: ResMut<CanvasConfig>,
     mut events: MessageReader<KeyboardInput>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     mut view: ResMut<CanvasView>,
     projects: Res<Projects>,
     mut step: Local<usize>,
 ) {
+    if owner.is_modal() {
+        events.clear();
+        return;
+    }
     let cmd = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let mut fire_pan = false;

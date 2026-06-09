@@ -58,15 +58,28 @@ fn usage(code: i32) -> ! {
 ai-lang — generic runner for content-addressed ai-lang programs
 
 usage:
-  ai-lang add <file.ail>                   ingest source into the codebase
-  ai-lang ls                                list named defs in the codebase
-  ai-lang run <name> [--nodes=N] [-- ...]  invoke a `<name>() -> Int` and print it
+  ai-lang add <file.ail> [--prefix <ns>]   ingest source into the codebase.
+                                           --prefix <ns> prepends a namespace
+                                           (e.g. `Bar::`) to every def name.
+  ai-lang ls [<prefix>] [--tag <tag>]       list named defs, optionally filtered by
+                                           namespace prefix or metadata tag
+  ai-lang test [--tag <tag>] [--prefix <ns>]  run tagged tests (default: ai:test).
+                                           Pure tests are cached by hash —
+                                           once passed, never re-run.
+                                           --prefix filters to a namespace.
   ai-lang serve                             become a worker for at() (empty runtime)
 
 structural editing (Phase 1):
   ai-lang rename <from> <to>               INSTANT, unbreakable rename. Moves a
                                            name alias only; recompiles nothing and
                                            breaks no callers (refs are by hash).
+  ai-lang alias <from> <to>                 like rename, but keeps the old name.
+                                           Both names now point to the same hash.
+  ai-lang tag <name> <tag>                  add a tag to a definition's metadata
+  ai-lang untag <name> <tag>                remove a tag
+  ai-lang meta <name>                       print metadata as JSON
+  ai-lang meta set <name> <key> <value>     set a user key in meta
+  ai-lang meta unset <name> <key>           remove a user key from meta
   ai-lang update <name> <file> [--dry-run] replace <name>'s def with <file>'s source.
        [--propagate]                      Dependents are NOT touched by default —
                                            they still reference the old hash.
@@ -83,6 +96,9 @@ structural editing (Phase 1):
   ai-lang eval <name> [<args>...]          JIT-run a def and print its value as
                                            JSON. Args are JSON values matching
                                            the def's parameter types.
+  ai-lang cli                               list all entry points (tagged ai:cli)
+  ai-lang cli <name> [args...] [--help]    run an entry point with CLI arg parsing
+                                           -- flags declared in metadata.
 
   ai-lang propagate <name> [--dry-run]    verify that every transitive dependent of
                                            <name> typechecks against its current hash;
@@ -250,13 +266,42 @@ fn main() {
 
     match subcommand.as_str() {
         "add" => {
-            if args.len() != 1 {
+            // <file> [--prefix <ns>]
+            let mut prefix: Option<String> = None;
+            let mut positional: Vec<&String> = Vec::new();
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--prefix" {
+                    i += 1;
+                    if i < args.len() {
+                        prefix = Some(args[i].clone());
+                    }
+                } else {
+                    positional.push(&args[i]);
+                }
+                i += 1;
+            }
+            if positional.len() != 1 {
                 usage(2);
             }
-            cmd_add(&args[0], &cb_path);
+            cmd_add(&positional[0], prefix.as_deref(), &cb_path);
         }
         "ls" => {
-            cmd_ls(&cb_path);
+            let mut prefix: Option<&str> = None;
+            let mut tag_filter: Option<&str> = None;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--tag" {
+                    i += 1;
+                    if i < args.len() {
+                        tag_filter = Some(&args[i]);
+                    }
+                } else if prefix.is_none() {
+                    prefix = Some(&args[i]);
+                }
+                i += 1;
+            }
+            cmd_ls(prefix, tag_filter, &cb_path);
         }
         "run" => {
             if args.is_empty() {
@@ -269,11 +314,70 @@ fn main() {
                 &cb_path,
             );
         }
+        "test" => {
+            // [--tag <tag>] [--prefix <ns>] [--all]
+            let mut prefix: Option<String> = None;
+            let mut tag: Option<String> = None;
+            let mut all = false;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--tag" {
+                    i += 1;
+                    if i < args.len() {
+                        tag = Some(args[i].clone());
+                    }
+                } else if args[i] == "--prefix" {
+                    i += 1;
+                    if i < args.len() {
+                        prefix = Some(args[i].clone());
+                    }
+                } else if args[i] == "--all" {
+                    all = true;
+                }
+                i += 1;
+            }
+            cmd_test(prefix.as_deref(), tag.as_deref(), all, flags.json, &cb_path);
+        }
         "rename" => {
             if args.len() != 2 {
                 usage(2);
             }
             cmd_rename(&args[0], &args[1], flags.json, &cb_path);
+        }
+        "alias" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_alias(&args[0], &args[1], flags.json, &cb_path);
+        }
+        "tag" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_tag(&args[0], &args[1], &cb_path);
+        }
+        "untag" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_untag(&args[0], &args[1], &cb_path);
+        }
+        "meta" => {
+            // meta <name>
+            // meta set <name> <key> <value>
+            // meta unset <name> <key>
+            if args.is_empty() || args.len() > 4 {
+                usage(2);
+            }
+            if args.len() == 1 {
+                cmd_meta_show(&args[0], flags.json, &cb_path);
+            } else if args.len() == 4 && args[0] == "set" {
+                cmd_meta_set(&args[1], &args[2], &args[3], &cb_path);
+            } else if args.len() == 3 && args[0] == "unset" {
+                cmd_meta_unset(&args[1], &args[2], &cb_path);
+            } else {
+                usage(2);
+            }
         }
         "update" => {
             // Positional: <name> <file>. --dry-run and --propagate may appear anywhere.
@@ -424,6 +528,15 @@ fn main() {
                 usage(2);
             }
             cmd_eval(&args[0], &args[1..], flags.json, &cb_path);
+        }
+        "cli" => {
+            if args.is_empty() {
+                cmd_cli_list(&cb_path);
+            } else if args.len() == 2 && args[1] == "--help" {
+                cmd_cli_help(&args[0], &cb_path);
+            } else {
+                cmd_cli_run(&args[0], &args[1..], &cb_path);
+            }
         }
         "export" => {
             // <name...> --out <path>
@@ -744,19 +857,27 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // `add`
 // =============================================================================
 
-fn cmd_add(file: &str, cb_path: &PathBuf) {
+fn cmd_add(file: &str, prefix: Option<&str>, cb_path: &PathBuf) {
     init_native_target().expect("init native target");
     let user_src = std::fs::read_to_string(file)
         .unwrap_or_else(|e| {
             eprintln!("read {}: {}", file, e);
             std::process::exit(1);
         });
+    // Parse the user source separately to know which names are user-defined.
+    let user_m = parse_module(&user_src).unwrap_or_else(|e| {
+        eprintln!("parse: {:?}", e);
+        std::process::exit(1);
+    });
+    let user_names: std::collections::HashSet<String> =
+        user_m.defs.iter().map(|d| d.name.clone()).collect();
+
     let full_src = format!("{}\n{}", STDLIB, user_src);
     let m = parse_module(&full_src).unwrap_or_else(|e| {
         eprintln!("parse: {:?}", e);
         std::process::exit(1);
     });
-    let r = resolve_module(&m).unwrap_or_else(|e| {
+    let mut r = resolve_module(&m).unwrap_or_else(|e| {
         eprintln!("resolve: {:?}", e);
         std::process::exit(1);
     });
@@ -766,9 +887,25 @@ fn cmd_add(file: &str, cb_path: &PathBuf) {
         std::process::exit(1);
     });
 
+    // Apply namespace prefix: only to user-defined names, not stdlib.
+    if let Some(ns) = prefix {
+        let ns = ns.trim_end_matches(':');
+        let ns_prefix = if ns.is_empty() {
+            String::new()
+        } else {
+            format!("{}::", ns)
+        };
+        for rd in &mut r.defs {
+            if user_names.contains(&rd.name) {
+                rd.name = format!("{}{}", ns_prefix, rd.name);
+            }
+        }
+    }
+
     let mut cb = Codebase::open(cb_path).expect("open codebase");
     cb.store_resolved_module(&r).expect("store resolved module");
     // Persist local names so `view` shows readable parameter/let names.
+    // Use the full module (which includes stdlib) for name resolution.
     if let Ok(names) = ai_lang::resolve::local_names_for_module(&m) {
         let _ = cb.store_local_names_batch(&names);
     }
@@ -799,14 +936,134 @@ fn cmd_add(file: &str, cb_path: &PathBuf) {
 // `ls`
 // =============================================================================
 
-fn cmd_ls(cb_path: &PathBuf) {
+fn cmd_ls(prefix: Option<&str>, tag_filter: Option<&str>, cb_path: &PathBuf) {
     let cb = Codebase::open(cb_path).expect("open codebase");
     let mut entries: Vec<(&String, &Hash)> = cb.names().iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut count = 0;
     for (name, hash) in entries {
+        if let Some(p) = prefix {
+            if !name.starts_with(p) {
+                continue;
+            }
+        }
+        if let Some(tag) = tag_filter {
+            if !ai_lang::metadata::has_tag(&cb, hash, tag) {
+                continue;
+            }
+        }
         println!("{:<32}  {}", name, &hash.to_hex()[..16]);
+        count += 1;
     }
-    eprintln!("\n  {} names in {}", cb.names().len(), cb_path.display());
+    let total = cb.names().len();
+    if let Some(tag) = tag_filter {
+        eprintln!("\n  {} name(s) tagged `{}` ({} total in {})", count, tag, total, cb_path.display());
+    } else if let Some(p) = prefix {
+        eprintln!("\n  {} name(s) matching `{}` ({} total in {})", count, p, total, cb_path.display());
+    } else {
+        eprintln!("\n  {} names in {}", total, cb_path.display());
+    }
+}
+
+fn cmd_alias(from: &str, to: &str, json: bool, cb_path: &PathBuf) {
+    let mut cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(from) {
+        Some(h) => h,
+        None => {
+            eprintln!("alias: unknown name: {}", from);
+            std::process::exit(1);
+        }
+    };
+    cb.set_name(to.to_owned(), hash).unwrap_or_else(|e| {
+        eprintln!("alias: {}", e);
+        std::process::exit(1);
+    });
+    if json {
+        println!(
+            "{{\"ok\":true,\"aliased\":{{\"from\":\"{}\",\"to\":\"{}\",\"hash\":\"{}\"}}}}",
+            json_escape(from),
+            json_escape(to),
+            hash.to_hex()
+        );
+    } else {
+        println!("aliased {} -> {}  (hash {} unchanged)", from, to, &hash.to_hex()[..16]);
+    }
+}
+
+fn cmd_tag(name: &str, tag: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("tag: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::add_tag(&cb, &hash, tag).unwrap_or_else(|e| {
+        eprintln!("tag: {}", e);
+        std::process::exit(1);
+    });
+    println!("tagged {} with `{}`", name, tag);
+}
+
+fn cmd_untag(name: &str, tag: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("untag: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::remove_tag(&cb, &hash, tag).unwrap_or_else(|e| {
+        eprintln!("untag: {}", e);
+        std::process::exit(1);
+    });
+    println!("removed tag `{}` from {}", tag, name);
+}
+
+fn cmd_meta_show(name: &str, json: bool, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    match ai_lang::metadata::load(&cb, &hash) {
+        Some(meta) => println!("{}", meta.to_string()),
+        None => {
+            if json {
+                println!("{{\"tags\":[],\"meta\":{{}}}}");
+            } else {
+                println!("(no metadata)");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_meta_set(name: &str, key: &str, value: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta set: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    // Try to parse as JSON, fall back to string.
+    let v = match ai_lang::jsonl::parse(value) {
+        Ok(j) => j,
+        Err(_) => ai_lang::jsonl::Json::Str(value.to_string()),
+    };
+    ai_lang::metadata::set_meta(&cb, &hash, key, &v).unwrap_or_else(|e| {
+        eprintln!("meta set: {}", e);
+        std::process::exit(1);
+    });
+    println!("set meta.{} on {}", key, name);
+}
+
+fn cmd_meta_unset(name: &str, key: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta unset: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::unset_meta(&cb, &hash, key).unwrap_or_else(|e| {
+        eprintln!("meta unset: {}", e);
+        std::process::exit(1);
+    });
+    println!("unset meta.{} on {}", key, name);
 }
 
 // =============================================================================
@@ -1209,6 +1466,276 @@ fn split_json_array(s: &str) -> Vec<&str> {
 }
 
 // =============================================================================
+// `cli` — entry points with CLI arg parsing
+// =============================================================================
+
+fn cmd_cli_list(cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let tag = "ai:cli";
+    let hashes = match ai_lang::metadata::hashes_with_tag(cb.root(), tag) {
+        Ok(hs) => hs,
+        Err(e) => {
+            eprintln!("cli: cannot scan metadata: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if hashes.is_empty() {
+        println!("no entry points found (tag a def with `ai-lang tag <name> ai:cli`)");
+        return;
+    }
+    println!("{:<32}  {}", "NAME", "DESCRIPTION");
+    println!("{}", "-".repeat(64));
+    for h in &hashes {
+        let name = cb.names().iter()
+            .find(|(_, hh)| *hh == h)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| format!("def_{}", &h.to_hex()[..8]));
+        let loaded = ai_lang::metadata::load(&cb, h);
+        let doc: &str = match &loaded {
+            Some(m) => {
+                if let Some(d) = m.get("doc").and_then(|d| d.as_str()) {
+                    d
+                } else if let Some(mm) = m.get("meta") {
+                    mm.get("doc").and_then(|d| d.as_str()).unwrap_or("")
+                } else {
+                    ""
+                }
+            }
+            None => "",
+        };
+        println!("{:<32}  {}", name, doc);
+    }
+}
+
+fn cmd_cli_help(name: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(name) {
+        Some(h) => h,
+        None => {
+            eprintln!("cli: unknown name: {}", name);
+            std::process::exit(1);
+        }
+    };
+    let scheme = match cb.types().get(&hash) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("cli: no type for {}", name);
+            std::process::exit(1);
+        }
+    };
+    let (params, _ret) = match &scheme {
+        ai_lang::typecheck::TypeScheme::Fn { params, ret, .. } => (params.clone(), ret.clone()),
+        _ => {
+            eprintln!("cli: `{}` is not a function", name);
+            std::process::exit(1);
+        }
+    };
+    // Get param names from localnames side-car.
+    let param_names: Vec<String> = cb.load_local_names(&hash).ok().flatten().unwrap_or_else(|| {
+        (0..params.len()).map(|i| format!("arg{}", i)).collect()
+    });
+    let param_names: Vec<String> = (0..params.len())
+        .map(|i| param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)))
+        .collect();
+
+    let meta = ai_lang::metadata::load(&cb, &hash);
+    let doc: &str = if let Some(ref m) = meta {
+        if let Some(d) = m.get("doc").and_then(|d| d.as_str()) {
+            d
+        } else if let Some(mm) = m.get("meta") {
+            mm.get("doc").and_then(|d| d.as_str()).unwrap_or("")
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
+    let param_meta = meta.as_ref()
+        .and_then(|m| m.get("meta"))
+        .and_then(|m| m.get("params"));
+
+    if !doc.is_empty() {
+        println!("{} — {}", name, doc);
+    } else {
+        println!("{}", name);
+    }
+    println!();
+    print!("Usage: ai-lang cli {} ", name);
+    for (i, p) in params.iter().enumerate() {
+        let pname = &param_names[i];
+        let is_flag = param_meta
+            .and_then(|pm| pm.get(pname))
+            .and_then(|p| p.get("flag").and_then(|f| f.as_bool()))
+            .unwrap_or(false);
+        let has_default = param_meta
+            .and_then(|pm| pm.get(pname))
+            .and_then(|p| p.get("default"))
+            .is_some();
+        if is_flag {
+            print!("[--{}] ", pname);
+        } else if has_default {
+            print!("[<{}>] ", pname);
+        } else {
+            print!("<{}> ", pname);
+        }
+    }
+    println!();
+    println!();
+    println!("Arguments:");
+    for (i, _p) in params.iter().enumerate() {
+        let pname = &param_names[i];
+        let info = param_meta.and_then(|pm| pm.get(pname));
+        let pdoc = info.and_then(|i| i.get("doc").and_then(|d| d.as_str())).unwrap_or("");
+        let is_flag = info.and_then(|i| i.get("flag").and_then(|f| f.as_bool())).unwrap_or(false);
+        let defval = info.and_then(|i| i.get("default").and_then(|d| d.as_str()));
+        if is_flag {
+            println!("  --{:<20} {}", pname, pdoc);
+        } else if let Some(dv) = defval {
+            println!("  --{:<10} (default: {:<8}) {}", pname, dv, pdoc);
+        } else {
+            println!("  {:<12} {}", pname, pdoc);
+        }
+    }
+}
+
+fn cmd_cli_run(name: &str, arg_strs: &[String], cb_path: &PathBuf) {
+    init_native_target().expect("init native target");
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(name) {
+        Some(h) => h,
+        None => {
+            eprintln!("cli: unknown name: {}", name);
+            std::process::exit(1);
+        }
+    };
+    let scheme = match cb.types().get(&hash) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("cli: no type for {}", name);
+            std::process::exit(1);
+        }
+    };
+    let (params, ret) = match &scheme {
+        ai_lang::typecheck::TypeScheme::Fn { params, ret, .. } => (params.clone(), ret.clone()),
+        _ => {
+            eprintln!("cli: `{}` is not a function", name);
+            std::process::exit(1);
+        }
+    };
+
+    let meta = ai_lang::metadata::load(&cb, &hash);
+    // Get param names from localnames side-car.
+    let param_names: Vec<String> = cb.load_local_names(&hash).ok().flatten().unwrap_or_else(|| {
+        (0..params.len()).map(|i| format!("arg{}", i)).collect()
+    });
+    // But localnames has ALL locals (params + lets). Truncate to param count.
+    let param_names: Vec<String> = param_names.into_iter().take(params.len()).collect();
+    // Pad if localnames had fewer entries than params.
+    let param_names: Vec<String> = (0..params.len())
+        .map(|i| param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)))
+        .collect();
+
+    let param_meta = meta.as_ref()
+        .and_then(|m| m.get("meta"))
+        .and_then(|m| m.get("params"));
+
+    // Build default values from metadata.
+    let mut values: Vec<Option<ai_lang::jsonl::Json>> = vec![None; params.len()];
+
+    // Parse CLI args.
+    let mut pos = 0usize;
+    let mut i = 0usize;
+    while i < arg_strs.len() {
+        let a = &arg_strs[i];
+        if a == "--help" {
+            cmd_cli_help(name, cb_path);
+            return;
+        }
+        if let Some(flag) = a.strip_prefix("--") {
+            // Find which param has this name.
+            if let Some(idx) = param_names.iter().position(|n| n == flag) {
+                let ty = params.get(idx).cloned().unwrap_or(ai_lang::ast::Type::Builtin("Bool".to_string()));
+                // Bool flag: map Bool→Int for Int params, Bool→Bool otherwise.
+                let val = match &ty {
+                    ai_lang::ast::Type::Builtin(b) if b == "Int" => ai_lang::jsonl::Json::Int(1),
+                    _ => ai_lang::jsonl::Json::Bool(true),
+                };
+                values[idx] = Some(val);
+            } else {
+                // --key value style: next arg is the value.
+                i += 1;
+                if i < arg_strs.len() {
+                    if let Some(idx) = param_names.iter().position(|n| n == flag) {
+                        let ty = params.get(idx).cloned().unwrap_or(ai_lang::ast::Type::Builtin("String".to_string()));
+                        values[idx] = Some(type_parse(&arg_strs[i], &ty));
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        // Positional arg: assign to next unfilled param.
+        while pos < params.len() && values[pos].is_some() {
+            pos += 1;
+        }
+        if pos < params.len() {
+            values[pos] = Some(type_parse(a, &params[pos]));
+            pos += 1;
+        }
+        i += 1;
+    }
+
+    // Fill defaults from metadata.
+    for idx in 0..params.len() {
+        if values[idx].is_none() {
+            let pname = &param_names[idx];
+            let defval = param_meta
+                .and_then(|pm| pm.get(pname))
+                .and_then(|p| p.get("default"));
+            if let Some(dv) = defval {
+                values[idx] = Some(dv.clone());
+            }
+        }
+    }
+
+    // Check required args are filled.
+    let args_json: Vec<ai_lang::jsonl::Json> = values.iter().enumerate().map(|(idx, v)| {
+        match v {
+            Some(j) => j.clone(),
+            None => {
+                eprintln!("cli: missing required argument: {}", param_names[idx]);
+                eprintln!("  run `ai-lang cli {} --help` for usage", name);
+                std::process::exit(1);
+            }
+        }
+    }).collect();
+
+    match ai_lang::evalrun::eval(&cb, hash, &params, &ret, &args_json) {
+        Ok(result) => {
+            println!("{}", result.value.to_string());
+        }
+        Err(e) => {
+            eprintln!("cli: {}: {}", e.kind(), e.message());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn type_parse(s: &str, ty: &ai_lang::ast::Type) -> ai_lang::jsonl::Json {
+    use ai_lang::ast::Type;
+    use ai_lang::jsonl::Json;
+    match ty {
+        Type::Builtin(name) => match name.as_str() {
+            "Int" => Json::Int(s.parse().unwrap_or(0)),
+            "Float" => Json::Float(s.parse().unwrap_or(0.0)),
+            "Bool" => Json::Bool(s == "true" || s == "1"),
+            "String" | _ => Json::Str(s.to_string()),
+        },
+        _ => Json::Str(s.to_string()),
+    }
+}
+
+// =============================================================================
 // `propagate`
 // =============================================================================
 
@@ -1382,6 +1909,7 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
         at_binding,
         externs,
     };
+    let wanted_hashes: Vec<Hash> = rm.defs.iter().map(|d| d.hash).collect();
 
     // Spawn workers (if requested) and publish their ports to the
     // global table that `get_node_port(i)` reads from.
@@ -1407,7 +1935,14 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
 
     // JIT the reconstructed module and call <name>() -> Int.
     let ctx = Context::create();
-    let cm = CompiledModule::build(&ctx, &rm).expect("build module");
+    let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted_hashes);
+    let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        (cached, true)
+    } else {
+        let built = CompiledModule::build(&ctx, &rm).expect("build module");
+        let _ = ai_lang::codegen::write_bitcode_cache(&built, cb.root(), &wanted_hashes);
+        (built, false)
+    };
     let rt = Runtime::new_with_metadata(
         cm.closure_type_infos.clone(),
         cm.shape_registry.clone(),
@@ -1450,6 +1985,213 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
     clear_current_knowledge_base();
     clear_current_at_binding();
     drop(servers); // kills workers
+}
+
+// =============================================================================
+// `test`
+// =============================================================================
+
+fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_path: &PathBuf) {
+    init_native_target().expect("init native target");
+
+    let cb = Codebase::open(cb_path).expect("open codebase");
+
+    let test_tag = tag.unwrap_or("ai:test");
+    let mut test_names: Vec<(String, Hash)> = Vec::new();
+    if let Ok(tagged_hashes) = ai_lang::metadata::hashes_with_tag(cb.root(), test_tag) {
+        for hash in tagged_hashes {
+            // Find the name(s) for this hash.
+            let names: Vec<&String> = cb.names().iter()
+                .filter(|(_, h)| **h == hash)
+                .map(|(n, _)| n)
+                .collect();
+            let name = match names.first() {
+                Some(n) => (*n).clone(),
+                None => continue,
+            };
+            // Only zero-arg Int-returning functions.
+            let is_test_fn = match cb.types().get(&hash) {
+                Some(ai_lang::typecheck::TypeScheme::Fn { params, ret, .. }) => {
+                    params.is_empty() && *ret == ai_lang::ast::Type::Builtin("Int".to_string())
+                }
+                _ => false,
+            };
+            if is_test_fn {
+                if let Some(p) = prefix {
+                    if !name.starts_with(p) {
+                        continue;
+                    }
+                }
+                test_names.push((name, hash));
+            }
+        }
+    }
+    test_names.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if test_names.is_empty() {
+        println!("no tests found");
+        return;
+    }
+
+    // Compute effects for all tests to know which are pure.
+    let rm = {
+        let mut all_hashes: Vec<Hash> = test_names.iter().map(|(_, h)| *h).collect();
+        all_hashes.sort_by_key(|h| h.to_hex());
+        all_hashes.dedup();
+        let mut seen: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        let mut frontier: Vec<Hash> = all_hashes.clone();
+        for h in &all_hashes {
+            seen.insert(*h);
+        }
+        while let Some(h) = frontier.pop() {
+            if let Ok(def) = cb.load_def(&h) {
+                let mut deps: Vec<Hash> = Vec::new();
+                let mut local_seen = std::collections::HashSet::new();
+                ai_lang::knowledge::walk_def_deps(&def, &mut deps, &mut local_seen);
+                for d in deps {
+                    if seen.insert(d) {
+                        frontier.push(d);
+                    }
+                }
+            }
+        }
+        let defs: Vec<ai_lang::resolve::ResolvedDef> = seen
+            .iter()
+            .filter_map(|h| {
+                cb.load_def(h).ok().map(|def| {
+                    let name = cb
+                        .names()
+                        .iter()
+                        .find(|(_, hh)| *hh == h)
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| format!("def_{}", &h.to_hex()[..8]));
+                    ai_lang::resolve::ResolvedDef {
+                        name,
+                        hash: *h,
+                        def,
+                    }
+                })
+            })
+            .collect();
+        ai_lang::resolve::ResolvedModule {
+            defs,
+            at_binding: None,
+            externs: std::collections::HashMap::new(),
+        }
+    };
+    let effect_sigs = ai_lang::effects::infer_effects(&rm);
+
+    // Ensure test cache directory exists.
+    let cache_dir = cb.root().join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    // Build the full module for JIT (shared across all tests), with cache.
+    let ctx = Context::create();
+    let wanted: Vec<Hash> = rm.defs.iter().map(|d| d.hash).collect();
+    let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted);
+    let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        (cached, true)
+    } else {
+        let built = CompiledModule::build(&ctx, &rm).expect("build module");
+        let _ = ai_lang::codegen::write_bitcode_cache(&built, cb.root(), &wanted);
+        (built, false)
+    };
+    let rt = Runtime::new_with_metadata(
+        cm.closure_type_infos.clone(),
+        cm.shape_registry.clone(),
+        cm.shape_meta.clone(),
+        cm.shape_by_type_id.clone(),
+    );
+    let jit = Jit::new(cm, &rt).expect("jit");
+    install_current_runtime(&rt);
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+    let mut json_results: Vec<String> = Vec::new();
+
+    for (name, hash) in &test_names {
+        let is_pure = effect_sigs.get(hash).map(|s| s.is_pure()).unwrap_or(false);
+        let cache_path = cache_dir.join(format!("{}.passed", hash.to_hex()));
+
+        if is_pure && cache_path.exists() {
+            skipped += 1;
+            if !json {
+                println!("  PASS  {}  (cached)", name);
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"pass\",\"cached\":true}}",
+                json_escape(name),
+                &hash.to_hex()[..16]
+            ));
+            continue;
+        }
+
+        let entry = unsafe {
+            match jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(hash))
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    eprintln!("  FAIL  {}  (not a () -> Int function)", name);
+                    failed += 1;
+                    continue;
+                }
+            }
+        };
+
+        let result = unsafe { entry.call(rt.thread_ptr()) };
+        if result == 0 {
+            passed += 1;
+            if !json {
+                println!("  PASS  {}", name);
+            }
+            if is_pure {
+                let _ = std::fs::write(&cache_path, "");
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"pass\",\"pure\":{}}}",
+                json_escape(name),
+                &hash.to_hex()[..16],
+                is_pure
+            ));
+        } else {
+            failed += 1;
+            if !json {
+                println!("  FAIL  {}  (returned {})", name, result);
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"fail\",\"returned\":{},\"pure\":{}}}",
+                json_escape(name),
+                &hash.to_hex()[..16],
+                result,
+                is_pure
+            ));
+        }
+    }
+
+    clear_current_runtime();
+
+    if json {
+        println!(
+            "{{\"passed\":{},\"failed\":{},\"skipped\":{},\"total\":{},\"results\":[{}]}}",
+            passed,
+            failed,
+            skipped,
+            test_names.len(),
+            json_results.join(",")
+        );
+    } else {
+        eprintln!(
+            "\n  {} passed, {} failed, {} cached",
+            passed, failed, skipped
+        );
+    }
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
 }
 
 // =============================================================================

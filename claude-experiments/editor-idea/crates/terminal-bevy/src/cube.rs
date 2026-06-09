@@ -46,7 +46,12 @@ use crate::projects::Projects;
 
 // ---------- Constants ----------
 
-const CUBE_LAYER: usize = 4096;
+/// Render layer for the prism's structural geometry (boards, face quads,
+/// reflections) — drawn globally by the cube's 3D camera. Reserved in
+/// `PaneLayerAllocator` (see `PanePlugin` setup) so a pane is NEVER
+/// allocated it; otherwise that pane's content would be drawn by the cube
+/// camera across the whole overview.
+pub(crate) const CUBE_LAYER: usize = 4096;
 
 fn render_layer(n: usize) -> RenderLayers {
     RenderLayers::from_layers(&[n])
@@ -441,10 +446,17 @@ fn overview_input(
     mut key_events: MessageReader<KeyboardInput>,
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     mut prism: ResMut<Prism>,
     cam_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     gt_q: Query<&GlobalTransform>,
 ) {
+    // A text modal (command palette / rename) owns the keyboard — don't
+    // toggle/drive the cube while typing.
+    if owner.is_modal() {
+        key_events.clear();
+        return;
+    }
     let cmd = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     for ev in key_events.read() {
@@ -548,7 +560,7 @@ fn overview_apply(
         Res<crate::projects::Sidebar>,
     ),
     windows: Query<&Window>,
-    panes: Query<(Entity, &PaneRect, Option<&PaneProject>, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
+    panes: Query<(Entity, &PaneRect, &PaneProject, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -710,7 +722,7 @@ fn build(
     viewport: &pane_bevy::PaneViewport,
     sidebar_width: f32,
     window: &Window,
-    panes: &Query<(Entity, &PaneRect, Option<&PaneProject>, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
+    panes: &Query<(Entity, &PaneRect, &PaneProject, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
     images: &mut Assets<Image>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -750,11 +762,26 @@ fn build(
     let face_w = FACE_HEIGHT * aspect;
     prism.face_w = face_w;
 
+    // Every pane has a project (enforced invariant — see
+    // `assert_pane_project_invariant`), so a pane lands on exactly its
+    // own project's face. No `.or(active)` fallback: a membership-less
+    // pane must not silently leak onto whatever happens to be active.
+    //
+    // Each pane is also isolated by its unique `PaneLayer` — the per-face
+    // camera renders only that layer. Two live panes sharing a layer
+    // would cross-render onto each other's faces (across projects), so
+    // assert uniqueness here where the cube relies on it.
     let mut by_project: BTreeMap<u64, Vec<(Entity, PaneRect, bool, usize)>> = BTreeMap::new();
+    let mut seen_layers: std::collections::HashMap<usize, Entity> = std::collections::HashMap::new();
     for (e, rect, proj, pinned, layer) in panes.iter() {
-        if let Some(pid) = proj.map(|p| p.0).or(projects.active) {
-            by_project.entry(pid).or_default().push((e, *rect, pinned, layer.0));
+        if let Some(prev) = seen_layers.insert(layer.0, e) {
+            panic!(
+                "panes {prev:?} and {e:?} share render layer {} — per-pane render \
+                 isolation is broken; the cube would cross-render them across projects",
+                layer.0
+            );
         }
+        by_project.entry(proj.0).or_default().push((e, *rect, pinned, layer.0));
     }
 
     // Only switchable (non-parked) projects get a face — the prism is a
@@ -1219,19 +1246,46 @@ fn despawn_cube(prism: &mut Prism, commands: &mut Commands, images: &mut Assets<
 
 // ---------- Per-frame drivers ----------
 
-/// Switch the panes' OWN window cameras off while the cube is up — they'd
-/// render the same pane content to the window (just hidden under the cube),
-/// doubling the per-pane render-to-texture cost. The dedicated face cameras
-/// handle the cube. We turn them back on the instant the cube fully
-/// despawns (root == None). Safe now that panes never move (no origin
-/// pinning) — the reveal lands on the correct, unchanged layout.
+/// Single authority for whether each pane's OWN window camera renders.
+/// A pane camera is active IFF the cube is down AND the pane belongs to
+/// the active project.
+///
+/// This is what STRUCTURALLY confines a pane to its project. The old
+/// behaviour left every flat camera active whenever the cube was down —
+/// every project's pane content was being rendered to the window, and
+/// non-active projects were blanked only by each content entity
+/// inheriting the pane's `Visibility::Hidden`. That made confinement
+/// depend on every pane kind spawning its content with the right
+/// visibility (the terminal grid and widgets do; the editor's text did
+/// not — so editor panes leaked across projects). Gating the CAMERA
+/// instead means content can never render outside its project no matter
+/// how a kind spawns it: the only camera that draws a pane's render
+/// layer is off unless that pane is in the active project.
+///
+/// While the cube is up, ALL flat cameras are off — the dedicated face
+/// cameras render the overview, and leaving these on would double the
+/// per-pane render-to-texture cost.
 ///
 /// MUST run after `overview_apply` (see registration): that's the system
 /// that despawns the cube; if we ran first we'd leave them off for one
 /// frame at the reveal and the panes would vanish.
-fn suppress_window_pane_cams(prism: Res<Prism>, mut cams: Query<&mut Camera, With<PaneCameraOf>>) {
-    let want_active = prism.root.is_none();
-    for mut cam in &mut cams {
+fn suppress_window_pane_cams(
+    prism: Res<Prism>,
+    projects: Res<Projects>,
+    panes: Query<&PaneProject>,
+    mut cams: Query<(&PaneCameraOf, &mut Camera)>,
+) {
+    let cube_up = prism.root.is_some();
+    let active = projects.active;
+    for (owner, mut cam) in &mut cams {
+        // No fallback: a pane whose project isn't the active one (or that
+        // somehow has no membership) does not render. Membership is an
+        // enforced invariant — see `assert_pane_project_invariant`.
+        let want_active = !cube_up
+            && panes
+                .get(owner.0)
+                .map(|p| Some(p.0) == active)
+                .unwrap_or(false);
         if cam.is_active != want_active {
             cam.is_active = want_active;
         }

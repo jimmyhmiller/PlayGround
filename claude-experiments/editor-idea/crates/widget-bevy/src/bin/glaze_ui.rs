@@ -7,9 +7,14 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
 use glaze::{Program, parse};
-use widget_bevy::glaze_style::{hex, to_style};
+use widget_bevy::glaze_style::{
+    hex, resolve_select_style, resolve_tabs_style, to_bar_style, to_checkbox_style, to_radio_style,
+    to_slider_style, to_stepper_style, to_style, to_toggle_style, to_tooltip_style,
+};
+use widget_bevy::glaze_style::to_table_style;
 use widget_bevy::protocol::{
-    Align, Border, ButtonKind, Edges, Element, HostEvent, Style, Weight, WidgetMsg,
+    Align, Border, ButtonKind, Edges, Element, HostEvent, Style, TabItem, TableColumn, Weight,
+    WidgetMsg,
 };
 
 const SHEET: &str = r#"
@@ -83,6 +88,198 @@ const SHEET: &str = r#"
         direction row
         when vw < 560 {
             direction column
+        }
+    }
+
+    // ---- Phase 1b: the widened layer stack (things flat Style can't say) ----
+    // multi-stop linear gradient fill (no shader authored — `gradient` is a layer)
+    style g_linear {
+        radius 12px
+        height 72px
+        grow   1
+        min_width 0
+        pad    space(3)
+        gradient 90 violet teal gold
+    }
+    // angled gradient with explicit stop offsets
+    style g_diag {
+        radius 12px
+        height 72px
+        grow   1
+        min_width 0
+        pad    space(3)
+        gradient 45 rose 0% gold 60% teal 100%
+    }
+    // per-side borders: a thick left accent + a thin bottom rule
+    style edged {
+        fill   surf2
+        radius 0px
+        height 72px
+        grow   1
+        min_width 0
+        pad    space(3)
+        border_left   gold 4px
+        border_bottom teal 2px
+    }
+    // inner (inset) shadow over a solid fill — a "pressed well". Uses a light
+    // teal fill so the dark inner shadow reads clearly.
+    style insets {
+        fill   teal
+        radius 12px
+        height 72px
+        grow   1
+        min_width 0
+        pad    space(3)
+        inset_shadow oklch(0 0 0 / 0.85) 22px 0 3px
+    }
+    // outset drop shadow with spread, on a gold tile
+    style raised {
+        fill   gold
+        radius 12px
+        height 72px
+        grow   1
+        min_width 0
+        pad    space(3)
+        shadow oklch(0 0 0 / 0.55) 20px 9px 2px
+    }
+
+    // ---- Phase 1c: a slot-styled component. `Bar` has two slots (track, fill);
+    // Glaze styles each `part {}` independently. Here the fill is a 1b gradient
+    // and the track carries an inset shadow — composing 1b + 1c.
+    style progress {
+        track {
+            fill   surf2
+            radius 999px
+            inset_shadow oklch(0 0 0 / 0.6) 7px 0 1px
+        }
+        fill {
+            radius 999px
+            gradient 90 teal violet
+        }
+    }
+    style progress_gold {
+        track {
+            fill   surf2
+            radius 999px
+        }
+        fill {
+            fill   gold
+            radius 999px
+        }
+    }
+
+    // ---- Phase 1d: retrofit components, styled by slots + discrete state ----
+    style toggle {
+        track {
+            fill   surf2
+            radius 999px
+            :checked { fill teal }   // discrete state: on → teal track
+        }
+        knob {
+            fill   fg
+            radius 999px
+        }
+    }
+    style tabbar {
+        strip {
+            fill   surf2
+            radius 8px
+        }
+        tab {
+            radius 6px
+            :selected { fill line }  // active tab gets a raised cell
+        }
+        indicator {
+            height 3px
+            radius 999px
+            gradient 90 teal violet  // a 1b gradient under the active tab
+        }
+    }
+    // ---- Phase 2: a net-new component (Slider) built on the slot system ----
+    style slider {
+        track {
+            fill   surf2
+            radius 999px
+        }
+        range {
+            radius 999px
+            gradient 90 teal violet   // value-driven fill is a 1b gradient
+        }
+        thumb {
+            fill   fg
+            radius 999px
+            overlay shader {           // a soft glow on the handle (1b shader)
+                let d = length(uv - vec2(0.5, 0.5))
+                emit vec4(0.55, 0.85, 0.95, smoothstep(0.5, 0.1, d) * 0.5)
+            }
+        }
+    }
+    style tip {
+        bubble {
+            fill   surf2
+            radius 6px
+            border line 1px
+        }
+    }
+    // ---- Phase 3: floating overlay component. The trigger is in-pane; the
+    // menu renders on the overlay layer, escaping pane bounds. item:selected.
+    style picker {
+        trigger {
+            fill   surf2
+            radius 6px
+            border line 1px
+        }
+        menu {
+            fill   surface
+            radius 8px
+            border line 1px
+        }
+        item {
+            radius 5px
+            :selected { fill line }
+        }
+    }
+    style stepper {
+        field {
+            fill   surf2
+            radius 6px
+            border line 1px
+        }
+        button {
+            fill   surf2
+            radius 6px
+            border teal 1px
+        }
+    }
+    style radiogroup {
+        dot {
+            radius 999px
+            gradient 135 teal violet   // the selected dot is a 1b gradient
+        }
+    }
+    style checkbox {
+        box {
+            fill   surf2
+            radius 5px
+            border line 1px
+            :checked { border teal 1px }
+        }
+        check {
+            radius 3px
+            gradient 135 teal violet   // the tick is a 1b gradient
+        }
+    }
+    style datatable {
+        panel {
+            fill   surface
+            radius 10px
+            border line 1px
+        }
+        header {
+            fill   surf2
+        }
+        zebra {
+            fill   surf2
         }
     }
 
@@ -177,6 +374,195 @@ fn bar(frac: f32, accent: &str, track: &str) -> Element {
     }
 }
 
+/// An `Element::Bar` styled by a Glaze slot style (`track` + `fill` parts). A
+/// bad slot name in the `.glz` surfaces as a loud red tile via `glz`/our error
+/// path; here a clean resolve yields a typed `BarStyle`.
+fn glaze_bar(prog: &Program, style_name: &str, frac: f32, width: f32) -> Element {
+    let style = prog
+        .resolve_slots(style_name, &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_bar_style(&s).ok());
+    Element::Bar {
+        value: frac,
+        max: 1.0,
+        color: None,
+        track: None,
+        width,
+        height: 14.0,
+        style,
+    }
+}
+
+/// A slot-styled Slider — the first net-new Phase 2 component. `track`/`range`/
+/// `thumb` come from Glaze; the value is owned by the widget (updated on the
+/// host's `slider-change` events) and echoed back here.
+fn glaze_slider(prog: &Program, id: &str, value: f32) -> Element {
+    let style = prog
+        .resolve_slots("slider", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_slider_style(&s).ok());
+    Element::Slider {
+        id: id.into(),
+        value,
+        min: 0.0,
+        max: 1.0,
+        step: 0.0,
+        width: 320.0,
+        height: 22.0,
+        style,
+    }
+}
+
+/// A slot-styled Tooltip (Phase 3). Hovering the label shows the hint on the
+/// overlay layer.
+fn tooltip(prog: &Program, label: &str, text: &str) -> Element {
+    let style = prog
+        .resolve_slots("tip", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_tooltip_style(&s).ok());
+    Element::Tooltip {
+        label: label.into(),
+        text: text.into(),
+        style,
+    }
+}
+
+/// A slot-styled Select (Phase 3). The trigger is in-pane; the dropdown floats
+/// on the overlay layer (host-owned open state), emitting `select-change`.
+fn glaze_select(prog: &Program, id: &str, options: &[(&str, &str)], value: &str) -> Element {
+    let style = resolve_select_style(prog, "picker").ok();
+    Element::Select {
+        id: id.into(),
+        options: options
+            .iter()
+            .map(|(i, l)| TabItem {
+                id: (*i).into(),
+                label: (*l).into(),
+            })
+            .collect(),
+        value: value.into(),
+        placeholder: "Select…".into(),
+        width: 200.0,
+        style,
+    }
+}
+
+/// A slot-styled Stepper. The +/- buttons carry the precomputed value, so a
+/// click round-trips as `HostEvent::NumberChange`.
+fn glaze_stepper(prog: &Program, id: &str, value: f32) -> Element {
+    let style = prog
+        .resolve_slots("stepper", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_stepper_style(&s).ok());
+    Element::Stepper {
+        id: id.into(),
+        value,
+        min: 0.0,
+        max: 20.0,
+        step: 1.0,
+        style,
+    }
+}
+
+/// A slot-styled RadioGroup. The `dot` is a Glaze slot (gradient here); the
+/// ring uses the default selected-affordance. Emits `radio-select` on click.
+fn glaze_radio(prog: &Program, id: &str, options: &[(&str, &str)], selected: &str) -> Element {
+    let style = prog
+        .resolve_slots("radiogroup", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_radio_style(&s).ok());
+    Element::RadioGroup {
+        id: id.into(),
+        options: options
+            .iter()
+            .map(|(i, l)| TabItem {
+                id: (*i).into(),
+                label: (*l).into(),
+            })
+            .collect(),
+        selected: selected.into(),
+        style,
+    }
+}
+
+/// A slot-styled Checkbox. Like the Toggle, the `:checked` state is resolved at
+/// the widget; the `check` mark renders only when checked. Reuses the `toggle`
+/// event so a click round-trips as `HostEvent::Toggle`.
+fn glaze_checkbox(prog: &Program, id: &str, label: &str, checked: bool) -> Element {
+    let states: &[&str] = if checked { &["checked"] } else { &[] };
+    let style = prog
+        .resolve_slots("checkbox", &HashMap::new(), states)
+        .ok()
+        .and_then(|s| to_checkbox_style(&s).ok());
+    Element::Checkbox {
+        id: id.into(),
+        label: label.into(),
+        checked,
+        style,
+    }
+}
+
+/// A slot-styled Toggle. The track's `:checked` state is resolved here (CPU
+/// discrete-state model): we pass `["checked"]` when on so Glaze lands the
+/// teal track; the knob's value-driven x-position is the renderer's job.
+fn glaze_toggle(prog: &Program, id: &str, label: &str, checked: bool) -> Element {
+    let states: &[&str] = if checked { &["checked"] } else { &[] };
+    let style = prog
+        .resolve_slots("toggle", &HashMap::new(), states)
+        .ok()
+        .and_then(|s| to_toggle_style(&s).ok());
+    Element::Toggle {
+        id: id.into(),
+        label: label.into(),
+        checked,
+        style,
+    }
+}
+
+/// A slot-styled Tabs. `resolve_tabs_style` precomputes the resting and
+/// `:selected` tab plans; the renderer swaps the selected one in for the active
+/// tab and draws the gradient indicator under it.
+fn glaze_tabs(prog: &Program, id: &str, items: &[(&str, &str)], selected: &str) -> Element {
+    let style = resolve_tabs_style(prog, "tabbar").ok();
+    Element::Tabs {
+        id: id.into(),
+        items: items
+            .iter()
+            .map(|(i, l)| TabItem {
+                id: (*i).into(),
+                label: (*l).into(),
+            })
+            .collect(),
+        selected: selected.into(),
+        style,
+    }
+}
+
+/// A slot-styled Table (panel / header / zebra surfaces from Glaze).
+fn glaze_table(prog: &Program) -> Element {
+    let style = prog
+        .resolve_slots("datatable", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_table_style(&s).ok());
+    let col = |h: &str, w: Option<f32>| TableColumn {
+        header: h.into(),
+        width: w,
+        align: Align::Start,
+    };
+    Element::Table {
+        columns: vec![col("Service", Some(140.0)), col("Status", Some(90.0)), col("Latency", None)],
+        rows: vec![
+            vec!["api".into(), "live".into(), "42ms".into()],
+            vec!["worker".into(), "live".into(), "8ms".into()],
+            vec!["cache".into(), "degraded".into(), "120ms".into()],
+            vec!["db".into(), "live".into(), "5ms".into()],
+        ],
+        zebra: true,
+        selectable: true,
+        style,
+    }
+}
+
 fn stat_card(prog: &Program, label: &str, value: &str, tone: &str, frac: f32) -> Element {
     let accent = tok(prog, tone);
     glz(
@@ -219,7 +605,17 @@ fn resp_row(prog: &Program, width: f32, gap: f32, children: Vec<Element>) -> Ele
     Element::Hstack { gap, pad: 0.0, align: Align::Stretch, children, style }
 }
 
-fn build_ui(prog: &Program, width: f32) -> Element {
+fn build_ui(
+    prog: &Program,
+    width: f32,
+    tab: &str,
+    slider: f32,
+    checks: &HashMap<String, bool>,
+    radio: &str,
+    qty: f32,
+    country: &str,
+) -> Element {
+    let checked = |id: &str| checks.get(id).copied().unwrap_or(false);
     let fg = tok(prog, "fg");
     let muted = tok(prog, "muted");
 
@@ -307,6 +703,28 @@ fn build_ui(prog: &Program, width: f32) -> Element {
 
     let middle = resp_row(prog, width, 16.0, vec![pricing, profile]);
 
+    // Phase 1b showcase: gradient / per-side border / inset & spread shadow,
+    // each a pure Glaze layer (no hand-authored shader) flowing through the
+    // widened paint plan.
+    let layers = col(
+        8.0,
+        vec![
+            text("WIDENED LAYER STACK · PHASE 1B", &muted, 10.0, true),
+            resp_row(
+                prog,
+                width,
+                12.0,
+                vec![
+                    glz(prog, "g_linear", 0.0, vec![text("linear gradient", "#fdf6ec", 11.0, true)]),
+                    glz(prog, "g_diag", 0.0, vec![text("angled gradient", "#fdf6ec", 11.0, true)]),
+                    glz(prog, "edged", 0.0, vec![text("per-side border", &fg, 11.0, true)]),
+                    glz(prog, "insets", 0.0, vec![text("inset shadow", "#0c2226", 11.0, true)]),
+                    glz(prog, "raised", 0.0, vec![text("drop shadow · spread", "#1a1407", 11.0, true)]),
+                ],
+            ),
+        ],
+    );
+
     let badges = col(
         8.0,
         vec![
@@ -324,10 +742,131 @@ fn build_ui(prog: &Program, width: f32) -> Element {
         ],
     );
 
+    // Phase 1c: slot-styled Bars. Each is one Element::Bar whose track/fill
+    // surfaces are styled independently by Glaze `part {}` blocks.
+    let slots = col(
+        8.0,
+        vec![
+            text("SLOT-STYLED COMPONENT · PHASE 1C", &muted, 10.0, true),
+            text(
+                "Element::Bar · track + fill parts — gradient fill over an inset-shadow track",
+                &muted,
+                11.0,
+                false,
+            ),
+            glaze_bar(prog, "progress", 0.7, 520.0),
+            glaze_bar(prog, "progress_gold", 0.4, 520.0),
+        ],
+    );
+
+    // Phase 1d: retrofit components whose hardcoded render.rs styling is now
+    // driven by Glaze slots + discrete state (Tabs strip/tab/indicator with
+    // :selected; Toggle track/knob with :checked).
+    let retrofit = col(
+        10.0,
+        vec![
+            text("SLOT-RETROFIT COMPONENTS · PHASE 1D", &muted, 10.0, true),
+            glaze_tabs(
+                prog,
+                "demo-tabs",
+                &[("a", "Overview"), ("b", "Activity"), ("c", "Settings")],
+                tab,
+            ),
+            row(
+                20.0,
+                Align::Center,
+                vec![
+                    glaze_toggle(prog, "notifications", "Notifications", true),
+                    glaze_toggle(prog, "autosync", "Auto-sync", false),
+                ],
+            ),
+            glaze_table(prog),
+        ],
+    );
+
+    // Phase 2: the first net-new interactive component on the slot system.
+    let phase2 = col(
+        8.0,
+        vec![
+            text("NEW COMPONENT · PHASE 2 — DRAGGABLE SLIDER", &muted, 10.0, true),
+            row(
+                14.0,
+                Align::Center,
+                vec![
+                    glaze_slider(prog, "volume", slider),
+                    text(
+                        &format!("{}%", (slider * 100.0).round() as i32),
+                        &tok(prog, "teal"),
+                        13.0,
+                        true,
+                    ),
+                ],
+            ),
+            row(
+                24.0,
+                Align::Center,
+                vec![
+                    glaze_checkbox(prog, "terms", "Accept terms", checked("terms")),
+                    glaze_checkbox(prog, "news", "Email updates", checked("news")),
+                    glaze_checkbox(prog, "beta", "Join beta", checked("beta")),
+                ],
+            ),
+            row(
+                40.0,
+                Align::Start,
+                vec![
+                    glaze_radio(
+                        prog,
+                        "plan",
+                        &[("free", "Free"), ("pro", "Pro"), ("team", "Team")],
+                        radio,
+                    ),
+                    col(
+                        6.0,
+                        vec![
+                            text("SEATS", &muted, 10.0, true),
+                            glaze_stepper(prog, "seats", qty),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    );
+
+    // Phase 3: the floating overlay component — a Select whose dropdown escapes
+    // the pane onto the overlay layer.
+    let phase3 = col(
+        8.0,
+        vec![
+            text("FLOATING OVERLAY · PHASE 3 — SELECT", &muted, 10.0, true),
+            row(
+                14.0,
+                Align::Center,
+                vec![
+                    glaze_select(
+                        prog,
+                        "country",
+                        &[("us", "United States"), ("ca", "Canada"), ("uk", "United Kingdom"), ("de", "Germany")],
+                        country,
+                    ),
+                    text(&format!("→ {country}"), &tok(prog, "teal"), 12.0, true),
+                ],
+            ),
+            row(
+                8.0,
+                Align::Center,
+                vec![
+                    text("Hover the hint:", &muted, 12.0, false),
+                    tooltip(prog, "what is this?", "A floating hint on the overlay layer — it escapes the pane."),
+                ],
+            ),
+        ],
+    );
+
     Element::Vstack {
         gap: 18.0,
         pad: 4.0,
-        children: vec![header, stats, middle, badges],
+        children: vec![header, stats, middle, layers, slots, retrofit, phase2, phase3, badges],
         style: None,
     }
 }
@@ -347,9 +886,17 @@ fn main() {
         "{}",
         serde_json::to_string(&WidgetMsg::Title { value: "Glaze UI".into() }).unwrap()
     );
-    // Track the pane's content width so we can switch row↔column at a breakpoint.
+    // Track the pane's content width (row↔column breakpoint), the active tab,
+    // and the slider value (the widget owns it; the host drives slider-change).
     let mut width = 700.0_f32;
-    emit(&mut out, &prog, width);
+    let mut tab = "a".to_string();
+    let mut slider = 0.65_f32;
+    let mut checks: HashMap<String, bool> =
+        HashMap::from([("terms".into(), true), ("news".into(), false), ("beta".into(), true)]);
+    let mut radio = "pro".to_string();
+    let mut qty = 3.0_f32;
+    let mut country = "ca".to_string();
+    emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country);
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(evt) = serde_json::from_str::<HostEvent>(&line) else { continue };
@@ -357,14 +904,35 @@ fn main() {
             HostEvent::Close => return,
             HostEvent::Init { width: w, .. } => width = w,
             HostEvent::Resize { width: w, .. } => width = w,
+            HostEvent::TabSelect { id, tab: t } if id == "demo-tabs" => tab = t,
+            HostEvent::SliderChange { id, value } if id == "volume" => slider = value,
+            HostEvent::RadioSelect { id, option } if id == "plan" => radio = option,
+            HostEvent::NumberChange { id, value } if id == "seats" => qty = value,
+            HostEvent::SelectChange { id, value } if id == "country" => country = value,
+            HostEvent::Toggle { id, checked } if checks.contains_key(&id) => {
+                checks.insert(id, checked);
+            }
             _ => {}
         }
-        emit(&mut out, &prog, width);
+        emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country);
     }
 }
 
-fn emit<W: Write>(out: &mut W, prog: &Program, width: f32) {
-    if let Ok(s) = serde_json::to_string(&WidgetMsg::Frame { root: build_ui(prog, width) }) {
+#[allow(clippy::too_many_arguments)]
+fn emit<W: Write>(
+    out: &mut W,
+    prog: &Program,
+    width: f32,
+    tab: &str,
+    slider: f32,
+    checks: &HashMap<String, bool>,
+    radio: &str,
+    qty: f32,
+    country: &str,
+) {
+    if let Ok(s) = serde_json::to_string(&WidgetMsg::Frame {
+        root: build_ui(prog, width, tab, slider, checks, radio, qty, country),
+    }) {
         let _ = writeln!(out, "{s}");
         let _ = out.flush();
     }

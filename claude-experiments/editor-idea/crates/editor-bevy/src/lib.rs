@@ -952,6 +952,7 @@ fn handle_input(
     mut keys: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedPane>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     metrics: Option<Res<EditorMetrics>>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
@@ -970,6 +971,12 @@ fn handle_input(
         keys.read().for_each(|_| {});
         return;
     };
+    // A text modal (command palette / rename) owns the keyboard — don't
+    // type into the focused editor while it's up.
+    if !owner.allows_pane(target) {
+        keys.read().for_each(|_| {});
+        return;
+    }
     let Ok((mut state_comp, rect, mut scroll, kind, file_path)) = editors.get_mut(target) else {
         keys.read().for_each(|_| {});
         return;

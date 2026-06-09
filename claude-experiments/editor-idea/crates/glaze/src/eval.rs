@@ -73,11 +73,72 @@ pub struct BoxStyle {
     pub flex_direction: Option<Dir>,
 }
 
+/// Which edges a border paints. `Sides::ALL` (the default) is a uniform border;
+/// any subset paints only those edges (used by per-side `border_top` etc.).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sides {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl Sides {
+    pub const ALL: Sides = Sides {
+        top: true,
+        right: true,
+        bottom: true,
+        left: true,
+    };
+    /// A single edge.
+    pub const fn only(top: bool, right: bool, bottom: bool, left: bool) -> Sides {
+        Sides {
+            top,
+            right,
+            bottom,
+            left,
+        }
+    }
+    pub fn is_all(&self) -> bool {
+        self.top && self.right && self.bottom && self.left
+    }
+}
+
+impl Default for Sides {
+    fn default() -> Self {
+        Sides::ALL
+    }
+}
+
+/// One color stop of a [`Layer::LinearGradient`]. `offset` is 0..1 along the
+/// gradient axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: Rgba,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Layer {
     Fill(Rgba),
-    Border { color: Rgba, width: f32 },
-    Shadow { color: Rgba, blur: f32, offset_y: f32 },
+    /// A linear gradient fill. `angle` is in degrees (0° = left→right, 90° =
+    /// bottom→top); `stops` are sorted by ascending offset.
+    LinearGradient { angle: f32, stops: Vec<GradientStop> },
+    Border {
+        color: Rgba,
+        width: f32,
+        sides: Sides,
+    },
+    Shadow {
+        color: Rgba,
+        blur: f32,
+        offset_x: f32,
+        offset_y: f32,
+        /// grows (outset) or eats into (inset) the shadow rect, in px.
+        spread: f32,
+        /// inner shadow (painted inside the box) vs. a drop shadow.
+        inset: bool,
+    },
     /// A compiled shader layer (Stage 3): generated WGSL + its dynamic inputs.
     Shader(crate::shader::CompiledShader),
 }
@@ -86,6 +147,28 @@ pub enum Layer {
 pub struct CompiledStyle {
     pub box_: BoxStyle,
     pub layers: Vec<Layer>,
+}
+
+/// A resolved multi-slot style: the component's root box (`base`, the top-level
+/// props outside any `part {}`) plus one compiled plan per named slot. Produced
+/// by [`Program::resolve_slots`] for components whose styling addresses multiple
+/// surfaces (a slider's track/range/thumb, a bar's track/fill).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompiledSlots {
+    pub base: CompiledStyle,
+    /// slot name → compiled plan, in source order.
+    pub slots: Vec<(String, CompiledStyle)>,
+}
+
+impl CompiledSlots {
+    /// The compiled plan for a named slot, if the style defined it.
+    pub fn slot(&self, name: &str) -> Option<&CompiledStyle> {
+        self.slots.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+    }
+    /// All slot names this style defined, in source order.
+    pub fn slot_names(&self) -> impl Iterator<Item = &str> {
+        self.slots.iter().map(|(n, _)| n.as_str())
+    }
 }
 
 // ---------- evaluation context ----------
@@ -160,39 +243,50 @@ impl Program {
             vw,
             vh,
         };
-        let mut out = CompiledStyle::default();
-        // pass 1: base props/shaders + let-bindings (skip State/When)
+        compile_items(&def.body, self, variant, &mut ctx, states)
+    }
+
+    /// Resolve a multi-slot style: the root box plus one compiled plan per named
+    /// `part {}`. Top-level props (outside any part) form the `base`; each part
+    /// compiles independently, inheriting the top-level `let` bindings but not
+    /// leaking its own to siblings. Viewport is infinite (no `when` fires).
+    pub fn resolve_slots(
+        &self,
+        style: &str,
+        variant: &HashMap<String, String>,
+        states: &[&str],
+    ) -> Result<CompiledSlots, GlazeError> {
+        let def = self
+            .styles
+            .iter()
+            .find(|s| s.name == style)
+            .ok_or_else(|| GlazeError::Eval(format!("no style named `{}`", style)))?;
+        let mut ctx = Ctx {
+            program: self,
+            variant,
+            resolving: Vec::new(),
+            lets: HashMap::new(),
+            vw: f32::INFINITY,
+            vh: f32::INFINITY,
+        };
+        // `base` accumulates the top-level `let`s into ctx; parts then see them.
+        let base = compile_items(&def.body, self, variant, &mut ctx, states)?;
+        let base_lets = ctx.lets.clone();
+        let mut slots = Vec::new();
         for item in &def.body {
-            match item {
-                Item::Prop { name, args } => apply_prop(name, args, &mut ctx, &mut out)?,
-                Item::Let { name, value } => {
-                    let v = eval(value, &mut ctx)?;
-                    ctx.lets.insert(name.clone(), v);
+            if let Item::Part { name, body } = item {
+                if body.iter().any(|i| matches!(i, Item::Part { .. })) {
+                    return Err(GlazeError::Parse(format!(
+                        "part `{name}` contains a nested part (parts do not nest)"
+                    )));
                 }
-                Item::Shader { overlay, body } => {
-                    let cs = crate::shader::compile_shader(self, variant, body, *overlay)?;
-                    out.layers.push(Layer::Shader(cs));
-                }
-                Item::State { .. } | Item::When { .. } => {}
+                // isolate sibling `let`s; re-inherit only the base bindings
+                ctx.lets = base_lets.clone();
+                let cs = compile_items(body, self, variant, &mut ctx, states)?;
+                slots.push((name.clone(), cs));
             }
         }
-        // pass 2: matching `when` breakpoint overrides, in document order
-        for item in &def.body {
-            if let Item::When { cond, body } = item {
-                if matches!(eval(cond, &mut ctx)?, Value::Bool(true)) {
-                    apply_overlay(body, self, variant, &mut ctx, &mut out)?;
-                }
-            }
-        }
-        // pass 3: matching state overlays
-        for item in &def.body {
-            if let Item::State { state, body } = item {
-                if states.contains(&state.as_str()) {
-                    apply_overlay(body, self, variant, &mut ctx, &mut out)?;
-                }
-            }
-        }
-        Ok(out)
+        Ok(CompiledSlots { base, slots })
     }
 
     /// Evaluate a token by name (used by tests and for inspecting the token graph).
@@ -212,8 +306,54 @@ impl Program {
 use std::sync::LazyLock;
 static EMPTY: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
 
+/// Compile a list of style items into one `CompiledStyle`: base props/shaders/
+/// lets first, then matching `when` breakpoint overrides (doc order), then
+/// matching state overlays. `Part` items are slots — skipped here and compiled
+/// separately by [`Program::resolve_slots`].
+fn compile_items(
+    items: &[Item],
+    program: &Program,
+    variant: &HashMap<String, String>,
+    ctx: &mut Ctx,
+    states: &[&str],
+) -> Result<CompiledStyle, GlazeError> {
+    let mut out = CompiledStyle::default();
+    // pass 1: base props/shaders + let-bindings (skip State/When/Part)
+    for item in items {
+        match item {
+            Item::Prop { name, args } => apply_prop(name, args, ctx, &mut out)?,
+            Item::Let { name, value } => {
+                let v = eval(value, ctx)?;
+                ctx.lets.insert(name.clone(), v);
+            }
+            Item::Shader { overlay, body } => {
+                let cs = crate::shader::compile_shader(program, variant, body, *overlay)?;
+                out.layers.push(Layer::Shader(cs));
+            }
+            Item::State { .. } | Item::When { .. } | Item::Part { .. } => {}
+        }
+    }
+    // pass 2: matching `when` breakpoint overrides, in document order
+    for item in items {
+        if let Item::When { cond, body } = item {
+            if matches!(eval(cond, ctx)?, Value::Bool(true)) {
+                apply_overlay(body, program, variant, ctx, &mut out)?;
+            }
+        }
+    }
+    // pass 3: matching state overlays
+    for item in items {
+        if let Item::State { state, body } = item {
+            if states.contains(&state.as_str()) {
+                apply_overlay(body, program, variant, ctx, &mut out)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Apply the items of a `when`/state overlay block onto `out`. Nested
-/// `when`/state blocks are rejected.
+/// `when`/state/part blocks are rejected.
 fn apply_overlay(
     items: &[Item],
     program: &Program,
@@ -237,6 +377,11 @@ fn apply_overlay(
             }
             Item::When { .. } => {
                 return Err(GlazeError::Parse("nested `when` blocks are not allowed".into()));
+            }
+            Item::Part { .. } => {
+                return Err(GlazeError::Parse(
+                    "`part` blocks are not allowed inside a state/`when` overlay".into(),
+                ));
             }
         }
     }
@@ -267,20 +412,45 @@ fn apply_prop(
             want(1)?;
             out.layers.push(Layer::Fill(as_color(&vals[0], name)?));
         }
-        "border" => {
+        "border" | "border_top" | "border_right" | "border_bottom" | "border_left" => {
             want(2)?;
+            let sides = match name {
+                "border_top" => Sides::only(true, false, false, false),
+                "border_right" => Sides::only(false, true, false, false),
+                "border_bottom" => Sides::only(false, false, true, false),
+                "border_left" => Sides::only(false, false, false, true),
+                _ => Sides::ALL,
+            };
             out.layers.push(Layer::Border {
                 color: as_color(&vals[0], name)?,
                 width: as_px(&vals[1], name)?,
+                sides,
             });
         }
-        "shadow" => {
-            want(1)?;
+        // `shadow <color> [blur] [offset_y] [spread]` — a drop shadow.
+        // `inset_shadow <color> [blur] [offset_y] [spread]` — an inner shadow.
+        "shadow" | "inset_shadow" => {
+            if vals.is_empty() || vals.len() > 4 {
+                return Err(GlazeError::Eval(format!(
+                    "`{name}` expects <color> [blur] [offset_y] [spread], got {} args",
+                    vals.len()
+                )));
+            }
+            let num = |i: usize| -> Result<f32, GlazeError> {
+                vals.get(i).map(|v| as_px(v, name)).unwrap_or(Ok(0.0))
+            };
             out.layers.push(Layer::Shadow {
                 color: as_color(&vals[0], name)?,
-                blur: 0.0,
-                offset_y: 0.0,
+                blur: num(1)?,
+                offset_x: 0.0,
+                offset_y: num(2)?,
+                spread: num(3)?,
+                inset: name == "inset_shadow",
             });
+        }
+        "gradient" => {
+            let (angle, stops) = parse_gradient(&vals)?;
+            out.layers.push(Layer::LinearGradient { angle, stops });
         }
         "radius" => {
             want(1)?;
@@ -371,6 +541,82 @@ fn as_px(v: &Value, prop: &str) -> Result<f32, GlazeError> {
         _ => Err(GlazeError::Eval(format!("`{}` expects a px length, got {:?}", prop, v))),
     }
 }
+/// An optional gradient-stop offset: `%` (→ 0..1) or a bare number (0..1).
+fn as_offset(v: &Value) -> Option<f32> {
+    match v {
+        Value::Len(Length::Pct(p)) => Some(p / 100.0),
+        Value::Num(n) => Some(*n as f32),
+        _ => None,
+    }
+}
+
+/// Parse `gradient [angle] <color> [offset] <color> [offset] …`.
+///
+/// A leading bare number is the angle in degrees (default 180° = top→bottom when
+/// omitted). Each stop is a color optionally followed by an offset; offsets left
+/// unspecified are distributed evenly between their specified neighbors (CSS-like),
+/// with the first defaulting to 0 and the last to 1.
+fn parse_gradient(vals: &[Value]) -> Result<(f32, Vec<GradientStop>), GlazeError> {
+    let (angle, rest) = match vals.first() {
+        Some(Value::Num(deg)) => (*deg as f32, &vals[1..]),
+        _ => (180.0, vals),
+    };
+    // walk colors with optional trailing offsets
+    let mut raw: Vec<(Rgba, Option<f32>)> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let color = as_color(&rest[i], "gradient")?;
+        i += 1;
+        let offset = rest.get(i).and_then(as_offset);
+        if offset.is_some() {
+            i += 1;
+        }
+        raw.push((color, offset));
+    }
+    if raw.len() < 2 {
+        return Err(GlazeError::Eval(format!(
+            "`gradient` needs at least 2 color stops, got {}",
+            raw.len()
+        )));
+    }
+    // Fill unspecified offsets. Anchor ends, then linearly interpolate each gap
+    // between the nearest specified offsets.
+    let n = raw.len();
+    if raw[0].1.is_none() {
+        raw[0].1 = Some(0.0);
+    }
+    if raw[n - 1].1.is_none() {
+        raw[n - 1].1 = Some(1.0);
+    }
+    let mut idx = 0;
+    while idx < n {
+        if raw[idx].1.is_some() {
+            idx += 1;
+            continue;
+        }
+        // find the next specified offset
+        let start = idx - 1;
+        let mut end = idx;
+        while raw[end].1.is_none() {
+            end += 1;
+        }
+        let (a, b) = (raw[start].1.unwrap(), raw[end].1.unwrap());
+        let span = (end - start) as f32;
+        for (k, j) in (start + 1..end).enumerate() {
+            raw[j].1 = Some(a + (b - a) * ((k + 1) as f32 / span));
+        }
+        idx = end;
+    }
+    let stops = raw
+        .into_iter()
+        .map(|(color, off)| GradientStop {
+            offset: off.unwrap().clamp(0.0, 1.0),
+            color,
+        })
+        .collect();
+    Ok((angle, stops))
+}
+
 fn as_dim(v: &Value, prop: &str) -> Result<Dim, GlazeError> {
     match v {
         Value::Len(Length::Px(p)) => Ok(Dim::Px(*p)),

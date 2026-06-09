@@ -112,7 +112,7 @@ struct Frames {
 
 fn main() -> ExitCode {
     // ---- args ----
-    let mut out = PathBuf::from("/tmp/glaze_glow.png");
+    let mut out = std::env::temp_dir().join("glaze_glow.png");
     let mut size = Vec2::new(700.0, 460.0);
     let mut frames = 90u32;
     let mut it = std::env::args().skip(1);

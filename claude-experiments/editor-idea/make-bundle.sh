@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-BUNDLE="TerminalBevy.app"
+BUNDLE="Jim.app"
 CONTENTS="$BUNDLE/Contents"
 MACOS="$CONTENTS/MacOS"
 FRAMEWORKS="$CONTENTS/Frameworks"
@@ -63,16 +63,38 @@ cp "$SRC_DYLIB" "$FRAMEWORKS/libghostty-vt.dylib"
 # bundled Frameworks dir. Tolerate "already present" if we re-run.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/$EXEC_NAME" 2>/dev/null || true
 
-# Re-sign with an ad-hoc signature. install_name_tool invalidates the
-# existing signature; without re-signing, macOS will refuse to launch
-# the binary on recent OS versions.
-codesign --force --sign - "$FRAMEWORKS/libghostty-vt.dylib" >/dev/null 2>&1 || true
-codesign --force --sign - "$MACOS/$EXEC_NAME" >/dev/null 2>&1 || true
+# Pick a signing identity. A STABLE (self-signed) identity keeps the
+# bundle's code identity constant across rebuilds, so macOS TCC grants
+# (Microphone, Documents/Desktop/Downloads, Full Disk Access, …) persist
+# instead of resetting every build — that reset is why the OS re-prompts
+# for file access "all the time" under ad-hoc signing. Falls back to
+# ad-hoc if the identity isn't set up; run ./setup-signing.sh once to
+# create it. Override the name via TB_SIGN_IDENTITY.
+SIGN_ID="${TB_SIGN_IDENTITY:-TerminalBevy Local Signing}"
+# NB: no -v — a self-signed identity is untrusted by Gatekeeper, which
+# -v filters out, but codesign still signs with it and the resulting
+# designated requirement (cert-leaf anchored) is stable across rebuilds.
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+    SIGN_ARG="$SIGN_ID"
+    echo "[make-bundle] signing with stable identity: $SIGN_ID"
+else
+    SIGN_ARG="-"
+    echo "[make-bundle] WARNING: '$SIGN_ID' not found — signing AD-HOC." >&2
+    echo "[make-bundle]          TCC grants (mic, Documents, Full Disk) will reset on each rebuild." >&2
+    echo "[make-bundle]          Run ./setup-signing.sh once to fix." >&2
+fi
 
-# Info.plist — the only thing that matters for Dock identity is
-# CFBundleIdentifier. Everything else is cosmetic / required-by-format.
-# NSHighResolutionCapable is important: without it AppKit upscales
-# everything from 72dpi and the window looks fuzzy on retina.
+# install_name_tool invalidated the existing signature. Re-sign nested
+# code (the dylib) first; the whole bundle is signed at the end, after
+# Info.plist is in place, so the seal covers the usage-description strings.
+codesign --force --sign "$SIGN_ARG" "$FRAMEWORKS/libghostty-vt.dylib" >/dev/null 2>&1 || true
+
+# Info.plist — CFBundleIdentifier drives Dock identity. The NS*UsageDescription
+# keys are REQUIRED for the corresponding TCC access: without
+# NSMicrophoneUsageDescription, any mic request by a process we're
+# responsible for (e.g. Claude Code voice dictation in a child shell) is
+# denied outright. The folder keys supply the prompt text for file access.
+# NSHighResolutionCapable avoids fuzzy 72dpi upscaling on retina.
 cat > "$CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -83,8 +105,8 @@ cat > "$CONTENTS/Info.plist" <<EOF
     <key>CFBundleIconFile</key>               <string>icon</string>
     <key>CFBundleIdentifier</key>             <string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
-    <key>CFBundleName</key>                   <string>TerminalBevy</string>
-    <key>CFBundleDisplayName</key>            <string>TerminalBevy</string>
+    <key>CFBundleName</key>                   <string>Jim</string>
+    <key>CFBundleDisplayName</key>            <string>Jim</string>
     <key>CFBundlePackageType</key>            <string>APPL</string>
     <key>CFBundleShortVersionString</key>     <string>0.1.0</string>
     <key>CFBundleVersion</key>                <string>1</string>
@@ -92,9 +114,22 @@ cat > "$CONTENTS/Info.plist" <<EOF
     <key>NSHighResolutionCapable</key>        <true/>
     <key>NSPrincipalClass</key>               <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
+    <key>NSMicrophoneUsageDescription</key>   <string>Programs you run in Jim (such as Claude Code voice dictation) use the microphone.</string>
+    <key>NSDocumentsFolderUsageDescription</key>  <string>Jim and the programs you run in it work with files in your Documents folder.</string>
+    <key>NSDesktopFolderUsageDescription</key>    <string>Jim and the programs you run in it work with files on your Desktop.</string>
+    <key>NSDownloadsFolderUsageDescription</key>  <string>Jim and the programs you run in it work with files in your Downloads folder.</string>
+    <key>NSRemovableVolumesUsageDescription</key> <string>Jim and the programs you run in it work with files on removable volumes.</string>
+    <key>NSNetworkVolumesUsageDescription</key>   <string>Jim and the programs you run in it work with files on network volumes.</string>
 </dict>
 </plist>
 EOF
+
+# Sign the whole bundle LAST — after the binary, dylib, rpath and
+# Info.plist are all in place — so the signature seals the bundle
+# (including the usage-description strings TCC reads). This also signs
+# the main executable. Nested dylib is already signed above.
+codesign --force --sign "$SIGN_ARG" "$BUNDLE" 2>/dev/null \
+    || echo "[make-bundle] WARNING: bundle codesign failed (app may not launch / TCC unstable)" >&2
 
 # Nudge LaunchServices so the new/updated bundle is registered
 # immediately — otherwise the first `open` after creation can be slow

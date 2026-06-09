@@ -74,6 +74,10 @@ pub enum Item {
     When { cond: Expr, body: Vec<Item> },
     /// A shader layer: `shader { … }` or `overlay shader { … }`.
     Shader { overlay: bool, body: ShaderBody },
+    /// A named slot sub-block: `track { fill …; :hover { … } }`. A component's
+    /// style names one part per styleable surface; each compiles to its own
+    /// plan. Parts do not nest.
+    Part { name: String, body: Vec<Item> },
 }
 
 /// The body of a `shader {}` block: a sequence of `let` bindings and a single

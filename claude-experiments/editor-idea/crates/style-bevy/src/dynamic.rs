@@ -264,8 +264,17 @@ use crate::script_bridge::{
 };
 use crate::shader::ActiveProject;
 
-/// Render layer reserved for the dynamic canvas overlay.
-const OVERLAY_LAYER: usize = 30;
+/// Render layer for the dynamic canvas overlay (the dust/shader effect
+/// that covers the whole canvas, above every pane and even the cube).
+///
+/// CONTRACT: this layer is drawn by a GLOBAL, non-project-scoped camera
+/// (`spawn_overlay_camera`, order 1_000_001). Any host that spawns panes
+/// MUST reserve this id in its `PaneLayerAllocator` — otherwise a pane
+/// could be allocated layer 30, and this overlay camera would draw that
+/// pane's content across the whole canvas and across every project. It is
+/// `pub` precisely so the host can reserve it (see terminal-bevy's
+/// `PanePlugin { reserved_layers }`).
+pub const OVERLAY_LAYER: usize = 30;
 
 /// Path inside the `style://` asset source where the user's canvas
 /// shader lives. The host bootstraps this from an embedded default

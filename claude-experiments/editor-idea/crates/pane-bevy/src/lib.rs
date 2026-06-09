@@ -242,6 +242,49 @@ impl PaneFontMetrics {
 #[derive(Resource, Default)]
 pub struct FocusedPane(pub Option<Entity>);
 
+/// The single owner of the keyboard this frame. Computed once per frame
+/// by the integrating app (terminal-bevy's `compute_keyboard_owner`) with
+/// precedence modal > focused pane > none, and read by every keyboard
+/// consumer so exactly one of them acts. Replaces the ad-hoc, per-handler
+/// focus gating that let keystrokes leak into multiple panes at once.
+///
+/// pane-bevy ships the type but does not compute it; if no authority runs
+/// (e.g. a standalone pane-bevy app), it stays [`KeyboardOwner::Unmanaged`]
+/// and consumers fall back to their local focus logic — so this is a
+/// no-op until an app opts in by writing the resource.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyboardOwner {
+    /// No authority has set ownership this run — consumers use their own
+    /// local focus logic (back-compat / standalone).
+    #[default]
+    Unmanaged,
+    /// A text-entry modal (command palette, project rename) owns all
+    /// keyboard input: pane typing AND global chords are suppressed.
+    Modal,
+    /// This pane entity owns typing; global chords still fire.
+    Pane(Entity),
+    /// Nothing is focused.
+    None,
+}
+
+impl KeyboardOwner {
+    /// May `pane` consume typing this frame? True when unmanaged (no
+    /// authority) or when `pane` is the owner.
+    pub fn allows_pane(self, pane: Entity) -> bool {
+        match self {
+            KeyboardOwner::Unmanaged => true,
+            KeyboardOwner::Pane(p) => p == pane,
+            KeyboardOwner::Modal | KeyboardOwner::None => false,
+        }
+    }
+
+    /// Are global keyboard chords suppressed (a text modal is up)? Always
+    /// false while unmanaged so global shortcuts keep working back-compat.
+    pub fn is_modal(self) -> bool {
+        matches!(self, KeyboardOwner::Modal)
+    }
+}
+
 /// Set by an input handler that just claimed the current frame's mouse
 /// click so other handlers don't double-process it. Reset to false in
 /// PostUpdate.
@@ -572,6 +615,7 @@ pub struct PanePlugin {
 impl Plugin for PanePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusedPane>()
+            .init_resource::<KeyboardOwner>()
             .init_resource::<InputConsumed>()
             .init_resource::<PaneMouseMode>()
             .init_resource::<PendingPaneActions>()
@@ -634,6 +678,13 @@ impl Plugin for PanePlugin {
                 (
                     reset_input_consumed,
                     camera::propagate_render_layers
+                        .before(VisibilitySystems::CheckVisibility),
+                    // Backstop: after the fast-path propagation, GUARANTEE
+                    // no pane content is left on the global layer-0 camera
+                    // (catches content that churns faster than propagation
+                    // observes it). Must also precede CheckVisibility so
+                    // the correction lands the same frame.
+                    camera::reconcile_pane_content_layers
                         .before(VisibilitySystems::CheckVisibility),
                     enforce_pane_content_bounds,
                     // Run BEFORE Bevy's CameraUpdateSystems so that

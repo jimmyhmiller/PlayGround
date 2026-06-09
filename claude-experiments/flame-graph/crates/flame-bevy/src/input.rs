@@ -103,9 +103,14 @@ pub fn forward_input(
                 let dx = cursor.x - origin.x;
                 let dy = cursor.y - origin.y;
                 let r = flame.renderer_mut();
-                r.viewport.pan_x_px(dx);
-                r.viewport.pan_y_px(dy);
-                r.clamp_viewport();
+                if r.active_tab == MainTab::Sequence {
+                    // Drag pans the sequence time axis (wheel is reserved for zoom).
+                    r.pan_sequence(-dy);
+                } else {
+                    r.viewport.pan_x_px(dx);
+                    r.viewport.pan_y_px(dy);
+                    r.clamp_viewport();
+                }
                 r.rebuild_instances();
                 input.drag_origin = Some(cursor);
                 flame.mark_dirty();
@@ -138,8 +143,10 @@ pub fn forward_input(
                     }
                 }
                 MainTab::Sequence => {
+                    // Wheel zooms the time axis toward the cursor; drag pans.
                     if dy != 0.0 {
-                        r.pan_sequence(-dy);
+                        let factor = (1.0 + dy * 0.004).clamp(0.25, 4.0);
+                        r.zoom_sequence(cursor.y, factor);
                         r.rebuild_instances();
                     }
                 }
@@ -215,13 +222,21 @@ pub fn forward_input(
                         r.rebuild_instances();
                     }
                     "+" | "=" => {
-                        r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 0.7);
-                        r.clamp_viewport();
+                        if r.active_tab == MainTab::Sequence {
+                            r.zoom_sequence(r.viewport.size_px.1 * 0.5, 1.5);
+                        } else {
+                            r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 0.7);
+                            r.clamp_viewport();
+                        }
                         r.rebuild_instances();
                     }
                     "-" | "_" => {
-                        r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 1.43);
-                        r.clamp_viewport();
+                        if r.active_tab == MainTab::Sequence {
+                            r.zoom_sequence(r.viewport.size_px.1 * 0.5, 1.0 / 1.5);
+                        } else {
+                            r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 1.43);
+                            r.clamp_viewport();
+                        }
                         r.rebuild_instances();
                     }
                     _ => handled = false,

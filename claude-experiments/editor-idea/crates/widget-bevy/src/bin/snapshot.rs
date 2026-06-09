@@ -30,7 +30,16 @@ struct SnapshotConfig {
     size: Vec2,
     title: String,
     wait_frames: u32,
+    /// If set, force this `Select`'s dropdown open before snapshotting (so the
+    /// floating overlay is visible in the static image).
+    open_select: Option<String>,
+    /// If true, force the first `Tooltip` shown before snapshotting.
+    show_tooltip: bool,
 }
+
+/// The single widget pane the snapshot spawned (for forcing a select open).
+#[derive(Resource)]
+struct SnapshotPane(bevy::prelude::Entity);
 
 #[derive(Resource, Default)]
 struct SnapshotState {
@@ -52,11 +61,15 @@ fn main() -> ExitCode {
     let mut title = "Widget".to_string();
     let mut wait_frames: u32 = 180;
     let mut subprocess_args: Vec<String> = Vec::new();
+    let mut open_select: Option<String> = None;
+    let mut show_tooltip = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
             "--out" => out_path = args.next().map(PathBuf::from),
             "--cmd" => cmd = args.next(),
+            "--open-select" => open_select = args.next(),
+            "--show-tooltip" => show_tooltip = true,
             "--size" => {
                 if let Some(s) = args.next().and_then(|s| parse_size(&s)) {
                     size = s;
@@ -99,6 +112,8 @@ fn main() -> ExitCode {
         size,
         title,
         wait_frames,
+        open_select,
+        show_tooltip,
     };
 
     let mut app = App::new();
@@ -137,13 +152,20 @@ fn main() -> ExitCode {
     // panic on first run.
     app.add_message::<claude_bus_bevy::ClaudeBusEvent>();
 
-    app.add_plugins(PanePlugin::default())
-        .add_plugins(WidgetPlugin);
+    // Reserve the overlay layer (32) so no pane camera claims it, matching how
+    // terminal-bevy reserves MENU_OVERLAY_LAYER for floating content.
+    app.add_plugins(PanePlugin {
+        reserved_layers: vec![32],
+    })
+    .add_plugins(WidgetPlugin);
 
     app.insert_resource(config)
         .init_resource::<SnapshotState>()
         .add_systems(Startup, setup_camera_and_pane.after(editor_bevy::setup_editor_font))
-        .add_systems(Update, take_snapshot_when_ready);
+        .add_systems(
+            Update,
+            (take_snapshot_when_ready, force_open_select, force_show_tooltip),
+        );
 
     app.run();
     ExitCode::SUCCESS
@@ -158,6 +180,18 @@ fn setup_camera_and_pane(world: &mut World) {
     // 2D camera. spawn_pane derives initial position from window size,
     // so it'll center the pane in the window automatically.
     world.spawn(Camera2d);
+
+    // Floating-overlay camera: renders only layer 32 above everything (matches
+    // terminal-bevy's menu-overlay camera), so widget dropdowns are visible.
+    world.spawn((
+        Camera2d,
+        bevy::camera::Camera {
+            order: 100_000,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..Default::default()
+        },
+        bevy::camera::visibility::RenderLayers::layer(32),
+    ));
 
     // PaneFontMetrics — pane-bevy needs this resource for layout. Use
     // JetBrains Mono at 14 px (~8.4 px cell). editor_bevy's setup_*
@@ -188,6 +222,8 @@ fn setup_camera_and_pane(world: &mut World) {
         WidgetScroll::default(),
     );
 
+    world.insert_resource(SnapshotPane(spawned.entity));
+
     // Spawn the widget subprocess and attach its IO components.
     match widget_bevy::spawn_widget_process(&cmd, &args, None) {
         Ok((process, io)) => {
@@ -196,6 +232,62 @@ fn setup_camera_and_pane(world: &mut World) {
         Err(e) => {
             eprintln!("widget-snapshot: spawn_widget_process failed: {}", e);
             world.entity_mut(spawned.entity).insert(bundle);
+        }
+    }
+}
+
+/// Once the widget has rendered (so its `Select` target exists), force the
+/// requested dropdown open so the floating overlay shows in the snapshot.
+fn force_open_select(
+    config: Res<SnapshotConfig>,
+    state: Res<SnapshotState>,
+    pane: Option<Res<SnapshotPane>>,
+    mut open: ResMut<widget_bevy::WidgetOpenSelect>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let (Some(id), Some(pane)) = (config.open_select.as_ref(), pane) else {
+        return;
+    };
+    if state.frames_seen < 40 {
+        return;
+    }
+    open.0 = Some(widget_bevy::OpenSelect {
+        pane: pane.0,
+        id: id.clone(),
+    });
+    *done = true;
+}
+
+/// Force the first rendered `Tooltip` shown (headless has no cursor to hover).
+fn force_show_tooltip(
+    config: Res<SnapshotConfig>,
+    state: Res<SnapshotState>,
+    pane: Option<Res<SnapshotPane>>,
+    targets: Query<&widget_bevy::WidgetTargets>,
+    mut active: ResMut<widget_bevy::ActiveTooltip>,
+    mut done: Local<bool>,
+) {
+    if *done || !config.show_tooltip {
+        return;
+    }
+    let Some(pane) = pane else {
+        return;
+    };
+    if state.frames_seen < 40 {
+        return;
+    }
+    if let Ok(t) = targets.get(pane.0) {
+        if let Some(tip) = t.tooltips.first() {
+            active.0 = Some(widget_bevy::ActiveTip {
+                pane: pane.0,
+                anchor: tip.anchor,
+                text: tip.text.clone(),
+                style: tip.style.clone(),
+            });
+            *done = true;
         }
     }
 }

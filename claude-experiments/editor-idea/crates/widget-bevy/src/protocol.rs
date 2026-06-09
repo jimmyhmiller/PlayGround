@@ -86,6 +86,14 @@ pub enum HostEvent {
     /// User clicked a tab in an `Element::Tabs`. `id` is the tabs
     /// group id; `tab` is the selected `TabItem.id`.
     TabSelect { id: String, tab: String },
+    /// User picked an option in an `Element::RadioGroup`. `id` is the group
+    /// id; `option` is the chosen option's id.
+    RadioSelect { id: String, option: String },
+    /// User stepped an `Element::Stepper`. `value` is the new clamped value.
+    NumberChange { id: String, value: f32 },
+    /// User picked an option in an `Element::Select`. `value` is the chosen
+    /// option's id.
+    SelectChange { id: String, value: String },
     /// User toggled an `Element::Toggle`. `checked` is the new value.
     Toggle { id: String, checked: bool },
     /// User edited an `Element::Input`. `value` is the new full
@@ -96,6 +104,10 @@ pub enum HostEvent {
     InputFocus { id: String, focused: bool },
     /// User submitted an `Element::Input` (typically Enter key).
     InputSubmit { id: String, value: String },
+    /// User dragged (or clicked) an `Element::Slider`. `value` is the new
+    /// value, already clamped to `[min, max]` and snapped to `step`. The
+    /// widget echoes it back in the next frame to reflect the new position.
+    SliderChange { id: String, value: f32 },
     /// A widget↔widget bus message addressed to this widget's project.
     /// Delivered (pushed, not polled) whenever another widget — or the
     /// `tbmsg` CLI — publishes via `emit` / `WidgetMsg::Emit`. `sender`
@@ -203,6 +215,208 @@ pub struct Style {
     pub shader: Option<ShaderSpec>,
 }
 
+/// Which edges a [`GlazeLayer::Border`] paints. Defaults to all four (a uniform
+/// border); a subset paints only those edges.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+pub struct Sides {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl Default for Sides {
+    fn default() -> Self {
+        Sides {
+            top: true,
+            right: true,
+            bottom: true,
+            left: true,
+        }
+    }
+}
+
+impl Sides {
+    pub fn is_all(&self) -> bool {
+        self.top && self.right && self.bottom && self.left
+    }
+}
+
+/// One color stop of a [`GlazeLayer::LinearGradient`]. `offset` is 0..1 along the
+/// gradient axis; `color` is a token name or literal.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: String,
+}
+
+/// Per-slot styling for an `Element::Bar`. Each slot is a full [`Style`] plan.
+/// This is the first concrete `<Name>Style` slot struct (Phase 1c): the renderer
+/// reads the typed fields directly, and the Glaze→protocol adapter validates
+/// `part {}` names against them, so a typo is a load-time error, not a silent miss.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BarStyle {
+    /// The full-width background groove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Style>,
+    /// The value-driven filled portion (its width is `value/max` of the track).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Style>,
+}
+
+impl BarStyle {
+    /// The slot names this component understands — the adapter validates Glaze
+    /// `part {}` names against this list.
+    pub const SLOTS: &'static [&'static str] = &["track", "fill"];
+}
+
+/// Per-slot styling for an `Element::Slider`. `track` is the full groove,
+/// `range` is the filled portion up to the value, `thumb` is the draggable
+/// handle. All three positions are value-driven (computed by the renderer).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SliderStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<Style>,
+}
+
+impl SliderStyle {
+    pub const SLOTS: &'static [&'static str] = &["track", "range", "thumb"];
+}
+
+/// Per-slot styling for an `Element::Toggle`. `track` is the pill groove (style
+/// its `:checked` state in Glaze for the on/off color); `knob` is the sliding
+/// dot (its x-position is value-driven by `checked`, computed by the renderer).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ToggleStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knob: Option<Style>,
+}
+
+impl ToggleStyle {
+    pub const SLOTS: &'static [&'static str] = &["track", "knob"];
+}
+
+/// Per-slot styling for an `Element::Checkbox`. `box` is the square; `check` is
+/// the inner mark shown only when checked (value-driven visibility). The Glaze
+/// slot is named `box`; the Rust field is `square` (a keyword can't be a field).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CheckboxStyle {
+    #[serde(default, rename = "box", skip_serializing_if = "Option::is_none")]
+    pub square: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Style>,
+}
+
+impl CheckboxStyle {
+    pub const SLOTS: &'static [&'static str] = &["box", "check"];
+}
+
+/// Per-slot styling for an `Element::RadioGroup`. `ring` is each option's outer
+/// circle; `dot` is the inner fill shown only on the selected option.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RadioGroupStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dot: Option<Style>,
+}
+
+impl RadioGroupStyle {
+    pub const SLOTS: &'static [&'static str] = &["ring", "dot"];
+}
+
+/// Per-slot styling for an `Element::Stepper`. `field` is the value box; `button`
+/// is the `−`/`+` increment controls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct StepperStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<Style>,
+}
+
+impl StepperStyle {
+    pub const SLOTS: &'static [&'static str] = &["field", "button"];
+}
+
+/// Per-slot styling for an `Element::Select`. `trigger` is the in-pane closed
+/// control; `menu` is the floating dropdown panel; `item` is each option row,
+/// with `item_selected` swapped in for the chosen one (precomputed per-state
+/// plan, like Tabs). The menu renders on the floating overlay layer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SelectStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Style>,
+    /// The `item` slot resolved with `:selected` active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_selected: Option<Style>,
+}
+
+impl SelectStyle {
+    pub const SLOTS: &'static [&'static str] = &["trigger", "menu", "item"];
+}
+
+/// Per-slot styling for an `Element::Tooltip`. `bubble` is the floating hint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TooltipStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble: Option<Style>,
+}
+
+impl TooltipStyle {
+    pub const SLOTS: &'static [&'static str] = &["bubble"];
+}
+
+/// Per-slot styling for an `Element::Tabs`. `strip` is the whole tab bar; `tab`
+/// is each tab cell (style its `:selected` state for the active tab); `indicator`
+/// is the underline under the active tab (value-driven position).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TabsStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip: Option<Style>,
+    /// The `tab` slot in its resting state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<Style>,
+    /// The `tab` slot resolved with `:selected` active — a precomputed per-state
+    /// plan the renderer swaps in for the active tab (the doc's discrete-state
+    /// model: resolve once per state on the CPU, no per-frame uniform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_selected: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indicator: Option<Style>,
+}
+
+impl TabsStyle {
+    pub const SLOTS: &'static [&'static str] = &["strip", "tab", "indicator"];
+}
+
+/// Per-slot styling for an `Element::Table`. `panel` is the outer surface;
+/// `header` is the first row's fill; `zebra` is the alternating data-row fill.
+/// Cell text + dividers + per-cell geometry stay the renderer's job.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TableStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zebra: Option<Style>,
+}
+
+impl TableStyle {
+    pub const SLOTS: &'static [&'static str] = &["panel", "header", "zebra"];
+}
+
 /// One entry in Glaze's ordered paint plan.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -210,14 +424,31 @@ pub enum GlazeLayer {
     Fill {
         color: String,
     },
+    /// A linear gradient fill. `angle` is in degrees (0° = left→right, 90° =
+    /// bottom→top). Something flat `Style` cannot express.
+    LinearGradient {
+        angle: f32,
+        stops: Vec<GradientStop>,
+    },
     Border {
         color: String,
         width: f32,
+        /// Which edges to paint. Defaults to all four.
+        #[serde(default)]
+        sides: Sides,
     },
     Shadow {
         color: String,
         blur: f32,
+        #[serde(default)]
+        offset_x: f32,
         offset_y: f32,
+        /// Grows (outset) or eats into (inset) the shadow rect, in px.
+        #[serde(default)]
+        spread: f32,
+        /// Inner shadow (painted inside the box) vs. a drop shadow.
+        #[serde(default)]
+        inset: bool,
     },
     Shader {
         body: String,
@@ -435,7 +666,7 @@ pub enum Element {
         #[serde(default)]
         selected: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        style: Option<Style>,
+        style: Option<TabsStyle>,
     },
     /// On/off pill toggle. Renders an iOS-style track with a sliding
     /// knob. Click sends `{"event":"toggle","id":"<id>","checked":<bool>}`
@@ -447,7 +678,79 @@ pub enum Element {
         #[serde(default)]
         checked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        style: Option<Style>,
+        style: Option<ToggleStyle>,
+    },
+    /// Square checkbox with an optional label. Click sends the same
+    /// `{"event":"toggle","id":"<id>","checked":<bool>}` as `Toggle` (the new
+    /// value). `box`/`check` are slot-styled; the `check` mark shows only when
+    /// `checked`.
+    Checkbox {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        checked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<CheckboxStyle>,
+    },
+    /// A label that shows a floating `text` hint on hover. The hint renders on
+    /// the overlay layer (escaping pane bounds). `bubble` is slot-styled. No
+    /// event — purely informational.
+    Tooltip {
+        /// The visible in-pane text (e.g. a word or an `ⓘ`).
+        label: String,
+        /// The hint shown on hover.
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<TooltipStyle>,
+    },
+    /// Single-choice dropdown. The closed `trigger` renders in the pane; on
+    /// click a floating `menu` opens on the overlay layer (escaping pane bounds).
+    /// Picking an option sends `{"event":"select-change","id":"<id>","value":"<option id>"}`.
+    /// `trigger`/`menu`/`item` are slot-styled. The open/closed state is owned by
+    /// the host (one dropdown open at a time), so the widget only tracks `value`.
+    Select {
+        id: String,
+        #[serde(default)]
+        options: Vec<TabItem>,
+        /// Currently-selected option id (empty = none → show `placeholder`).
+        #[serde(default)]
+        value: String,
+        #[serde(default)]
+        placeholder: String,
+        #[serde(default = "default_select_width")]
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<SelectStyle>,
+    },
+    /// Numeric stepper: a `−` button, a value field, and a `+` button. Clicking
+    /// a button sends `{"event":"number-change","id":"<id>","value":<f32>}` with
+    /// the new value (already clamped to `[min,max]`). `field`/`button` slot-styled.
+    Stepper {
+        id: String,
+        #[serde(default)]
+        value: f32,
+        #[serde(default)]
+        min: f32,
+        #[serde(default = "default_slider_max")]
+        max: f32,
+        #[serde(default = "default_stepper_step")]
+        step: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<StepperStyle>,
+    },
+    /// Vertical group of single-choice options. Clicking one sends
+    /// `{"event":"radio-select","id":"<group>","option":"<option id>"}`.
+    /// `options` reuses `TabItem { id, label }`. `ring`/`dot` are slot-styled.
+    RadioGroup {
+        id: String,
+        #[serde(default)]
+        options: Vec<TabItem>,
+        /// Id of the selected option. Empty = none.
+        #[serde(default)]
+        selected: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<RadioGroupStyle>,
     },
     /// Selectable row. Functionally a Frame that's click-targetable,
     /// with `selected` driving a visual highlight (the accent border /
@@ -511,6 +814,28 @@ pub enum Element {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Style>,
     },
+    /// Draggable value slider. Click or drag anywhere on the track to set the
+    /// value; the host emits `{"event":"slider-change","id":"<id>","value":<f32>}`
+    /// (clamped to `[min,max]`, snapped to `step`). The widget echoes the new
+    /// `value` back in its next frame. `track`/`range`/`thumb` are slot-styled.
+    Slider {
+        id: String,
+        #[serde(default)]
+        value: f32,
+        #[serde(default)]
+        min: f32,
+        #[serde(default = "default_slider_max")]
+        max: f32,
+        /// Snap increment. `0` (default) = continuous.
+        #[serde(default)]
+        step: f32,
+        #[serde(default = "default_slider_width")]
+        width: f32,
+        #[serde(default = "default_slider_height")]
+        height: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<SliderStyle>,
+    },
     /// Data table: a header row plus data rows laid out on a CSS grid.
     /// `columns` defines the header text, per-column width (fixed px, or
     /// `null` to share remaining space equally), and text alignment.
@@ -531,7 +856,7 @@ pub enum Element {
         #[serde(default = "default_true")]
         selectable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        style: Option<Style>,
+        style: Option<TableStyle>,
     },
     /// Hyperlink. Click opens `url` in the system browser; no event is
     /// delivered back to the widget.
@@ -573,16 +898,24 @@ pub enum Element {
         value: f32,
         #[serde(default = "default_bar_max")]
         max: f32,
-        /// Fill color. Defaults to a neutral accent.
+        /// Fill color. Defaults to a neutral accent. Ignored when
+        /// `style.fill` is set (slot styling wins).
         #[serde(default)]
         color: Option<String>,
-        /// Background-track color. Defaults to a subtle dark fill.
+        /// Background-track color. Defaults to a subtle dark fill. Ignored when
+        /// `style.track` is set.
         #[serde(default)]
         track: Option<String>,
         #[serde(default = "default_bar_width")]
         width: f32,
         #[serde(default = "default_bar_height")]
         height: f32,
+        /// Per-slot styling (`track`, `fill`). Each slot is a full `Style`
+        /// plan, so a Glaze `bar { track {…} fill {…} }` can give the fill a
+        /// gradient, the track an inset shadow, etc. Falls back to the flat
+        /// `color`/`track` colors when a slot is absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<BarStyle>,
     },
     /// Absolute-positioned drawing region. Children are placed by `x,y`
     /// (pixels from the canvas top-left, y down) regardless of any
@@ -735,7 +1068,8 @@ pub enum ImageRef {
     /// One tile of a host-managed sprite sheet referenced by file path
     /// + (col, row) into a `tile_w × tile_h` grid. Lets a widget pick
     /// individual tiles out of a strip like the OGA "Flowers" sheet
-    /// without slicing it itself.
+    /// (CC0, by SpiderDave; see `assets/garden/CREDITS.md`) without
+    /// slicing it itself.
     Tile {
         path: String,
         tile_w: u32,
@@ -793,6 +1127,26 @@ fn default_bar_width() -> f32 {
 
 fn default_bar_height() -> f32 {
     8.0
+}
+
+fn default_slider_max() -> f32 {
+    1.0
+}
+
+fn default_slider_width() -> f32 {
+    200.0
+}
+
+fn default_slider_height() -> f32 {
+    20.0
+}
+
+fn default_stepper_step() -> f32 {
+    1.0
+}
+
+fn default_select_width() -> f32 {
+    180.0
 }
 
 fn default_canvas_anchor() -> CanvasAnchor {

@@ -354,6 +354,74 @@ pub fn propagate_render_layers(
     }
 }
 
+/// Per-frame GUARANTEE that no pane's content escapes onto the global
+/// layer-0 main camera. This is the structural backstop that makes
+/// cross-project confinement hold for EVERY pane kind, not just the ones
+/// that happen to spawn their content correctly.
+///
+/// `propagate_render_layers` stamps content when it is first observed
+/// (`Added`). That is the fast path, but it can miss content that churns
+/// faster than it is observed: a subprocess widget that despawns and
+/// respawns its whole element tree every frame can spawn children AFTER
+/// propagation ran and despawn them before the next pass stamps them, so
+/// they live their entire one-frame life on the DEFAULT layer 0. The main
+/// window camera renders layer 0 globally (it owns chrome shadows, the
+/// sidebar, the scene backdrop), so that content draws across every
+/// project — a leak no amount of per-pane-camera gating can stop, because
+/// the leak is on a different, un-gated camera.
+///
+/// So every frame, for every pane, force any `content_root` descendant
+/// that is on layer 0 (or has no `RenderLayers` at all) onto the pane's
+/// own layer. Content that deliberately chose a different NON-zero layer
+/// is left alone. Runs `.before(CheckVisibility)` so the correction lands
+/// the same frame Bevy decides which camera draws each entity.
+pub fn reconcile_pane_content_layers(
+    panes: Query<(Entity, &PaneLayer, &crate::PaneChrome, &crate::PaneKindMarker)>,
+    layers_q: Query<&RenderLayers>,
+    children_q: Query<&Children>,
+    mut commands: Commands,
+    mut warned: Local<std::collections::HashSet<Entity>>,
+) {
+    let layer0 = RenderLayers::layer(0);
+    for (pane, pane_layer, chrome, kind) in &panes {
+        let want = RenderLayers::layer(pane_layer.0);
+        // Allocator never hands out layer 0 to a pane, but guard anyway:
+        // if a pane WERE on layer 0 there is nothing to confine it to.
+        if want == layer0 {
+            continue;
+        }
+        let mut fixed = 0usize;
+        let mut stack = vec![chrome.content_root];
+        while let Some(e) = stack.pop() {
+            let leaking = match layers_q.get(e) {
+                Ok(rl) => *rl == layer0, // explicitly on the global layer
+                Err(_) => true,          // no layer → defaults to layer 0
+            };
+            if leaking {
+                commands.entity(e).insert(want.clone());
+                fixed += 1;
+            }
+            if let Ok(ch) = children_q.get(e) {
+                stack.extend(ch.iter());
+            }
+        }
+        // Warn once per pane the first time we catch it leaking: a healthy
+        // pane never needs this (propagation stamped its content in time).
+        // Repeated need means that kind spawns content the fast path can't
+        // see — worth fixing at the source — but the leak itself is closed.
+        if fixed > 0 && warned.insert(pane) {
+            eprintln!(
+                "[pane-layers] {} pane {pane:?} had {fixed} content entit{} on the \
+                 global layer 0 (would leak across projects); forced onto pane layer \
+                 {}. Backstop engaged — propagation didn't stamp this kind in time.",
+                kind.0,
+                if fixed == 1 { "y" } else { "ies" },
+                pane_layer.0,
+            );
+        }
+    }
+}
+
 /// Walk up the ChildOf chain from `entity` looking for an ancestor
 /// that carries `PaneLayer`. Returns the layer id, or `None` if the
 /// chain hits a parentless entity first.

@@ -187,6 +187,17 @@ pub enum IpcRequest {
         #[serde(default)]
         retain: bool,
     },
+    /// Open the command palette overlay, optionally pre-filling the search
+    /// query. Used for scripting / verification and (later) as the entry
+    /// point for the DeepSeek "Ask" flow. Fire-and-forget.
+    OpenPalette {
+        #[serde(default)]
+        query: Option<String>,
+        /// Immediately route the query to DeepSeek (the "Ask" flow)
+        /// instead of just opening the action search.
+        #[serde(default)]
+        ask: bool,
+    },
 }
 
 /// One accepted IPC connection: the parsed request plus the open socket,
@@ -201,6 +212,24 @@ pub struct IpcMessage {
 /// Path of the IPC socket. `None` if `$HOME` isn't set.
 pub fn socket_path() -> Option<PathBuf> {
     Some(data_dir()?.join("socket"))
+}
+
+/// Dispatch a request to *this* app's own IPC socket — i.e. drive the
+/// app the same way the `tb*` CLIs do, over the same wire path. Used by
+/// the DeepSeek tool executor so its actions go through the identical
+/// `listener → drain_ipc_open_requests` path rather than a parallel
+/// in-process dispatch that could drift. Blocking, but the write is a
+/// tiny local unix-socket send; the request lands on the next frame.
+pub fn dispatch_local(req: &IpcRequest) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let path = socket_path()
+        .ok_or_else(|| std::io::Error::other("no socket path ($HOME unset)"))?;
+    let mut stream = UnixStream::connect(path)?;
+    let bytes = serde_json::to_vec(req)
+        .map_err(|e| std::io::Error::other(format!("serialize ipc request: {e}")))?;
+    stream.write_all(&bytes)?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    Ok(())
 }
 
 /// Spawn the listener thread. Returns the receiver half of an mpsc

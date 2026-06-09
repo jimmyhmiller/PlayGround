@@ -600,6 +600,7 @@ fn auto_refocus_last_text_input(
     mut focused: ResMut<FocusedTextInput>,
     mut last: ResMut<LastFocusedTextInput>,
     focused_pane: Res<crate::FocusedPane>,
+    owner: Res<crate::KeyboardOwner>,
     events: MessageReader<KeyboardInput>,
     inputs_q: Query<(), With<TextInput>>,
     child_of_q: Query<&ChildOf>,
@@ -611,6 +612,11 @@ fn auto_refocus_last_text_input(
     }
 
     if focused.0.is_some() {
+        return;
+    }
+    // A text-entry modal (command palette, rename) owns the keyboard —
+    // don't let a printable keystroke yank focus back into a field.
+    if owner.is_modal() {
         return;
     }
     let Some(target) = last.0 else { return };
@@ -673,6 +679,9 @@ fn text_input_keyboard(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedTextInput>,
+    owner: Res<crate::KeyboardOwner>,
+    child_of_q: Query<&ChildOf>,
+    pane_q: Query<(), With<crate::PaneTag>>,
     mut inputs: Query<&mut TextInput, With<TextInputFocused>>,
     mut out: MessageWriter<TextInputEvent>,
 ) {
@@ -680,6 +689,16 @@ fn text_input_keyboard(
         events.read().for_each(|_| {});
         return;
     };
+    // A field can keep `FocusedTextInput` set while the user clicks away
+    // to another pane. Only consume keys if the keyboard owner allows this
+    // field's pane — otherwise the focused pane's handler owns them (this
+    // is the fix for typing landing in a field AND a terminal at once).
+    if let Some(pane) = ancestor_pane(target, &child_of_q, &pane_q) {
+        if !owner.allows_pane(pane) {
+            events.read().for_each(|_| {});
+            return;
+        }
+    }
     let Ok(mut ti) = inputs.get_mut(target) else {
         events.read().for_each(|_| {});
         return;

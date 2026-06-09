@@ -215,11 +215,19 @@ impl Parser {
                 }
                 Tok::Ident(name) => {
                     self.bump();
-                    let mut args = Vec::new();
-                    while !matches!(self.peek(), Tok::Newline | Tok::RBrace | Tok::Eof) {
-                        args.push(self.expr(0)?);
+                    // `name { … }` is a named slot (part); `name args…` is a prop.
+                    // `{` cannot start an expression, so the lookahead is unambiguous.
+                    if matches!(self.peek(), Tok::LBrace) {
+                        self.bump();
+                        let body = self.block_items()?;
+                        items.push(Item::Part { name, body });
+                    } else {
+                        let mut args = Vec::new();
+                        while !matches!(self.peek(), Tok::Newline | Tok::RBrace | Tok::Eof) {
+                            args.push(self.expr(0)?);
+                        }
+                        items.push(Item::Prop { name, args });
                     }
-                    items.push(Item::Prop { name, args });
                 }
                 other => return err(format!("unexpected {:?} in style body", other)),
             }

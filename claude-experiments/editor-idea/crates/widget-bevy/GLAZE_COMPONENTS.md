@@ -305,12 +305,85 @@ are named boxes. Sequenced so each step is independently shippable and non-break
   have the host feed per-frame `hover/focus/press/selected/disabled`. After this step,
   Glaze `:hover`/`:press` shader layers actually receive their inputs for the first time.
 
-### 1b. Widen the layer stack beyond what `Style` can say
+### 1b. Widen the layer stack beyond what `Style` can say — **DONE (2026-06-08)**
 - Add `Layer::LinearGradient`, per-side `Border`, `spread`/`inset` `Shadow`, and
   multi-shader stacking to the compositor. These are things the flat `Style` literally
   cannot express — landing them proves the seam is wider than the old shim.
 
-### 1c. Slots — typed per-component style structs
+**Status:** shipped. `glaze::Layer` + `protocol::GlazeLayer` gained
+`LinearGradient { angle, stops }`, `Border { …, sides: Sides }`, and
+`Shadow { …, offset_x, spread, inset }`. New Glaze props (no parser change needed —
+prop parsing is generic): `gradient [angle] <color> [offset] …`,
+`border_top/right/bottom/left`, widened `shadow <color> [blur] [offset_y] [spread]`,
+and `inset_shadow`. Rendering (`render.rs::paint_glaze_layers`): gradients + inset
+shadows lower to generated WGSL through the **existing** `GlazeMaterial` path (rounded
+clip for free); partial-side borders paint as sharp edge rects; outset shadows inflate
+the rounded panel by `spread`. Verified end-to-end via the `glaze_ui` showcase row
+(`widget-snapshot` PNG): both gradients, per-side border, inset "well", and
+drop-shadow+spread all render through the real widget pipeline. 20 glaze tests + 26
+widget_bevy lib tests green. NOTE: `1a` was already in the tree before this work
+(ordered `glaze_layers` stack + hover/focus/press interaction uniforms). Multi-shader
+stacking already worked via the ordered layer list. Still open in Phase 1: `1c` slots
+(typed per-component style structs + `part {}` syntax), `1d` retrofit, and
+`selected`/`disabled` state uniforms.
+
+### 1c. Slots — typed per-component style structs — **STARTED (2026-06-08)**
+
+**Status:** the Glaze language side is shipped, and the first concrete `<Name>Style`
+struct (`BarStyle`) proves the contract end-to-end.
+- **Glaze:** `part {}` blocks parse to `ast::Item::Part { name, body }` (generic prop
+  parsing made this a one-line lookahead — `name {` is a part, `name args…` a prop).
+  `Program::resolve_slots(style, variant, states) -> CompiledSlots { base, slots }`
+  compiles the root box (`base`, top-level props outside any part) plus one
+  `CompiledStyle` per named slot. Parts inherit top-level `let`s but don't leak their
+  own to siblings; nested parts and parts-inside-overlays are hard errors. `:state {}`
+  overlays work inside a part. The 3-pass resolver was extracted into a shared
+  `compile_items`. (`CompiledSlots::slot(name)`, `slot_names()`.) 5 glaze tests.
+- **Protocol/adapter (1d-Bar):** `protocol::BarStyle { track, fill }` (each
+  `Option<Style>`, with `BarStyle::SLOTS`) is the first typed slot struct;
+  `Element::Bar` carries `style: Option<BarStyle>`. `glaze_style::to_bar_style`
+  validates each `part {}` name against `BarStyle::SLOTS` and returns a **load-time
+  error naming the bad slot** (`bar has no slot \`trakc\``) — the typed-fields
+  decision's payoff. `render::render_bar_at` does the value-driven sub-layout (track =
+  full rect, fill = `value/max` of it) and paints each slot via `paint_style_background`
+  (so a slot plan is a full `Style` — a Bar fill can be a 1b gradient), falling back to
+  the flat `color`/`track` colors when a slot is absent. 2 adapter tests.
+- **Verified:** `glaze_ui` Phase-1c section — an `Element::Bar` with a teal→violet
+  gradient `fill` over an inset-shadow `track`, snapshot through the real pipeline
+  (`widget-snapshot`). 25 glaze + 28 widget_bevy lib tests green.
+- **1d retrofit COMPLETE (2026-06-08)** — all four components now slot-driven, hardcoded
+  styling deleted from `render.rs` (fallbacks kept for unstyled use):
+  - **`Bar`** `{track, fill}` — value-driven (fill = value/max of track). First slot struct.
+  - **`Toggle`** `{track, knob}` — `track` resolved with the `:checked` state at the widget
+    (CPU discrete-state model: pass `["checked"]` when on), `knob` x-position value-driven.
+    `Element::Toggle.style` is now `Option<ToggleStyle>` (was `Option<Style>`; serde-graceful,
+    all literal sites passed `None`).
+  - **`Tabs`** `{strip, tab, tab_selected, indicator}` — `resolve_tabs_style(prog, name)`
+    precomputes the resting + `:selected` `tab` plans (the doc's "per-state plan, host swaps"
+    model); renderer swaps `tab_selected` in for the active tab and paints the `indicator`
+    (a 1b gradient in the demo) under it.
+  - **`Table`** `{panel, header, zebra}` — light retrofit of the three background surfaces;
+    cell text / dividers / per-cell geometry stay the renderer's job.
+  - Adapters: `to_bar_style`/`to_toggle_style`/`to_table_style`/`resolve_tabs_style`, each
+    validating `part {}` names via `validate_slots(.., <Name>Style::SLOTS, ..)` → load-time
+    error naming the bad slot.
+  - Verified: `glaze_ui` Phase-1c/1d sections snapshot through the real pipeline. 25 glaze +
+    31 widget_bevy lib tests green.
+- **Still open:** Glaze `part:state` shorthand if wanted (today it's `part { :state { } }`);
+  ListItem retrofit; `selected`/`disabled` *continuous* shader uniforms (only hover/focus/press
+  exist — needs per-element state source into `paint_shader_layer`). Phase 1 is otherwise done;
+  Phase 2 (net-new components: Slider/Checkbox/…) can start — Slider needs new drag-value event
+  plumbing (`slider-change` HostEvent + a drag hit region; ClickKind has no drag-value today).
+
+### The `<Name>Style` template (followed by all four retrofits)
+1. `protocol`: `<Name>Style { slot: Option<Style>, … }` + `Name::SLOTS: &[&str]`; element field
+   `style: Option<<Name>Style>`.
+2. `glaze_style`: `to_<name>_style(&CompiledSlots) -> Result<<Name>Style, String>` calling
+   `validate_slots`, or `resolve_<name>_style(prog, name)` when per-state plans are needed.
+3. `render`: render arm computes slot rects (value-driven or Taffy) → `paint_style_background`
+   each slot plan, falling back to the prior hardcoded paint when the slot is absent.
+
+### 1c (original plan) — Slots — typed per-component style structs
 - Each component declares a `<Name>Style` struct whose fields are exactly its slots
   (`SliderStyle { track, range, thumb }`), each field a `StylePlan`; the element carries
   `style: Option<<Name>Style>` (default field = the element's own box). Keep the existing
@@ -362,7 +435,13 @@ pin down the slot-name→field adapter pattern the rest of the components follow
 No overlay needed; runs alongside Phase 1 as its proving ground. Reuse
 `on_drag`/`on_release`; one new `*-change` event each. All slot-styled from day one.
 
-- **`Slider`** `{id, value, min, max, step}` → `slider-change`. Slots `track`/`range`/`thumb`; states `hover`/`press`/`disabled`. First continuous control — needs a drag-track hit region in `render.rs`.
+- **`Slider`** `{id, value, min, max, step}` → `slider-change`. Slots `track`/`range`/`thumb`; states `hover`/`press`/`disabled`. First continuous control — needs a drag-track hit region in `render.rs`. **DONE (2026-06-08)** — the first net-new component on the slot system. `Element::Slider` + `SliderStyle{track,range,thumb}` + `HostEvent::SliderChange{id,value}`. Drag plumbing: `WidgetTargets.sliders: Vec<SliderTarget>` (each carries the value-mapping `value_x0`/`value_span` + `min/max/step`); `SliderTarget::value_at(x)` does the clamp+step-snap (unit-tested); `begin/update/end_slider_drag` systems map press/drag/release on `PaneContentPressed/Dragged/Released` and emit `SliderChange` through **both** the subprocess (`WidgetIO`) and rhai (`RhaiWidget::send_slider_change` → `HostToWorker::SliderChange` → `on_slider_change(id,value)`) channels. `render_slider_at` does value-driven sub-layout: full `track`, leading `range` to the thumb centre, `thumb` handle — each `paint_style_background`'d from its slot plan with a sensible fallback. Verified: `glaze_ui` slider (gradient range + glowing-thumb overlay shader) snapshot; value round-trips via `slider-change`. NOTE: when adding an `Element` variant, REBUILD all host bins (`widget-snapshot`, the main app) — a stale host rejects the new serde variant and silently drops the whole frame.
+- **`Checkbox`** — **DONE (2026-06-08)**. `Element::Checkbox{id,label,checked,style}` + `CheckboxStyle{box,check}` (Rust field `square`; Glaze slot `box`). Reuses the **`toggle` event** (no new plumbing) — clicking emits `ClickKind::Toggle`. `:checked` resolved at the widget; the `check` mark renders only when checked. Layout mirrors Toggle (box + label row). Verified in `glaze_ui` (gradient tick, teal `:checked` border).
+- **`Radio` / `RadioGroup`** — **DONE (2026-06-08)**. `Element::RadioGroup{id,options:Vec<TabItem>,selected,style}` + `RadioGroupStyle{ring,dot}` + new **`HostEvent::RadioSelect{id,option}`** (mirrors `TabSelect` across all paths: `ClickKind::RadioSelect`, subprocess press handler, rhai `HostToWorker::RadioSelect`→`on_radio_select`). Layout = column of label cells with left-padding reserving the ring (no nesting, like Tabs). Verified in `glaze_ui` (gradient `dot` on the selected option, accent ring affordance).
+- **`Stepper` / `NumberInput`** — **DONE (2026-06-08)**. `Element::Stepper{id,value,min,max,step,style}` + `StepperStyle{field,button}` + new **`HostEvent::NumberChange{id,value}`** (wired like RadioSelect). The `−`/`+` buttons carry the **precomputed clamped target value** in `ClickKind::NumberChange{value}` — the renderer owns the arithmetic, so a click is a plain value-set (same trick as Toggle's `new_checked`). Arithmetic sub-layout (no Taffy children, like Slider): `[− button][value field][+ button]`, fixed `STEPPER_W`. Verified in `glaze_ui` (teal-bordered buttons, live value).
+- **`Rating`** — deferred: poor slot fit (star glyphs aren't box-paintable; would degrade slots to glyph colors). Do later as a glyph-based special case if wanted.
+
+**Phase 2 status: essentially DONE.** Slider, Checkbox, Radio, Stepper shipped — covering drag, toggle-reuse, new select-event, and number-change patterns. The slot system now has **8 components** (Bar, Toggle, Tabs, Table, Slider, Checkbox, RadioGroup, Stepper). Adapters: `to_{bar,toggle,table,slider,checkbox,radio,stepper}_style` + `resolve_tabs_style`. 38 widget_bevy lib + 25 glaze tests. **Next: Phase 3 — the floating overlay layer** (the big remaining gate for Select/Menu/Tooltip/Popover/Dialog/Sheet/Toast/DatePicker).
 - **`Stepper` / `NumberInput`** `{id, value, min, max, step}` → `number-change`. Slots `field`/`button`/`button:press`. Reuses `Button` click; optional drag.
 - **`Checkbox`** `{id, label, checked}` → reuses `toggle`. Slots `box`/`check`; `checked` drives `check` opacity (dynamic → free in Glaze).
 - **`Radio` / `RadioGroup`** `{id, options:[{id,label}], selected}` → `radio-select` (mirrors `tab-select`). Slots `dot`/`ring`/`item:selected`.
@@ -374,9 +453,40 @@ Build a `FloatingLayer` substrate: anchored content rendered above all panes on 
 dedicated `RenderLayers`, with outside-click dismissal and a z-stack. This is the big
 lift; each dependent is then cheap and slot-styled.
 
-- **`Select` / `Combobox`** `{id, options, value, searchable}` → `select-change`. Slots `trigger`/`menu`/`item`/`item:hover`/`item:selected`/`indicator`.
+**SUBSTRATE DONE (2026-06-09) — and the first consumer (`Select`) ships.** Key finding:
+the floating substrate already existed — terminal-bevy's `MENU_OVERLAY_LAYER` (32) + an
+order-100,000 camera (used by the drawer / radial / context menu). Phase 3 is a *portal*:
+widget Elements render their floating part onto that layer via the EXISTING render path.
+- `WidgetOverlayLayer(usize)` resource (default 32) — the host reserves the layer +
+  provides the camera (terminal-bevy already does; the snapshot tool now does too).
+- Open state is **host-owned** (`WidgetOpenSelect` resource, one at a time) — the widget
+  only tracks `value`. `ClickKind::SelectTrigger` toggles it (no widget event).
+- `render_select_overlay` spawns a `WidgetOverlayRoot` at the trigger anchor converted
+  content-local → window → overlay-world (`to_world(p)=(p.x-w/2, h/2-p.y)`), renders the
+  menu via `paint_style_background`/`paint_rounded_panel` (full slot styling: `menu`,
+  `item`, `item_selected`), and records item + trigger **window-space** rects.
+- `stamp_overlay_layers` (PostUpdate, `.before(CheckVisibility)`) propagates the overlay
+  `RenderLayers` to the root's descendants (paint helpers don't set layers themselves).
+- `handle_overlay_input` reads raw mouse (like context_menu, not pane events, so clicks
+  outside the pane still register): item-click → `SelectChange` + close; outside/Escape →
+  close. The trigger rect is recorded so the toggling click is ignored by dismiss.
+- `handle_widget_press` guard: while a dropdown is open on a pane, non-trigger presses
+  route to the overlay (so elements under the menu don't fire).
+- Verified: `widget-snapshot --open-select country` shows the dropdown floating below the
+  trigger, escaping pane bounds, `item:selected` highlight on the chosen row.
+
+- **`Select` / `Combobox`** `{id, options, value}` → `select-change`. **DONE.** Slots
+  `trigger`/`menu`/`item`/`item:selected` (via `SelectStyle` + `resolve_select_style` dual
+  resolve). `searchable` + `item:hover` not yet. The portal generalizes for free to:
 - **`Menu` / `DropdownMenu` / `ContextMenu`** `{trigger, items}` → `menu-select`. Slots `menu`/`item`/`separator`/`shortcut`.
-- **`Tooltip`** — wrap-any-element + hover delay (reuses `on_hover`). Slots `bubble`/`arrow`.
+- **`Tooltip`** — **DONE (2026-06-09)**. `Element::Tooltip{label,text,style:TooltipStyle{bubble}}` —
+  a link-styled in-pane `label` that shows a floating `text` bubble on hover (no event, passive).
+  Proves the portal handles **hover-triggered** content: `update_tooltip_hover` (per-frame
+  cursor→topmost-pane→hit-test, sets `ActiveTooltip`; only recomputes when a real cursor exists so a
+  forced tooltip survives headless) + `render_tooltip_overlay` (bubble on the overlay layer, own
+  `WidgetTooltipRoot` marker so it despawns independently of the select dropdown; `stamp_overlay_layers`
+  now `Or<select-root, tooltip-root>`). `to_tooltip_style`; `widget-snapshot --show-tooltip` forces it.
+  Verified: bubble floats below the label, escapes pane bounds. TODO: hover *delay*, arrow, wrap-any-element.
 - **`Popover` / `HoverCard`** — arbitrary floating child. Slot `surface`.
 - **`Dialog` / `Sheet` / `Alert`** `{open, title, body, actions}` — modal scrim + focus trap. Slots `scrim`/`panel`/`title`/`body`/`footer`.
 - **`Toast`** — transient, auto-dismiss via `on_frame` timer; emitted programmatically. Slots `toast`/`toast:enter`/`toast:exit`.

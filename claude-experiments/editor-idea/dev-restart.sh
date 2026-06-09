@@ -50,7 +50,7 @@ cargo build $CARGO_PROFILE_ARGS -p terminal_bevy --bin terminal --bin tbwidget -
 # Launch via the bundle (not target/$PROFILE/terminal directly) so
 # AppKit walks up to Contents/Info.plist and treats us as a bundled
 # app: stable Dock tile, pin survival, proper icon.
-BIN="TerminalBevy.app/Contents/MacOS/terminal"
+BIN="Jim.app/Contents/MacOS/terminal"
 if [ ! -x "$BIN" ]; then
     echo "[dev-restart] $BIN not found (bundle build failed?)" >&2
     exit 1
@@ -64,7 +64,7 @@ fi
 #   - any `terminal --daemon ...` invocation (the daemon-mode subprocess)
 ABS_BIN="$(pwd)/$BIN"
 KILL=$(ps -ax -o pid,command \
-    | awk '($0 ~ /TerminalBevy\.app\/Contents\/MacOS\/terminal($|[[:space:]])/ \
+    | awk '($0 ~ /Jim\.app\/Contents\/MacOS\/terminal($|[[:space:]])/ \
             || $0 ~ /target\/(debug|release)\/terminal($|[[:space:]])/) \
            && $0 !~ /--daemon/ \
            && $0 !~ /terminal-daemon/ { print $1 }')
@@ -75,7 +75,7 @@ if [ -n "$KILL" ]; then
     sleep 0.4
 fi
 
-LOG=/tmp/terminal-bevy-${PROFILE}.log
+LOG=${TMPDIR:-/tmp}/terminal-bevy-${PROFILE}.log
 echo "[dev-restart] launching → $LOG"
 # The dylib lives inside the bundle (Contents/Frameworks) and the
 # binary's rpath was set to @executable_path/../Frameworks by

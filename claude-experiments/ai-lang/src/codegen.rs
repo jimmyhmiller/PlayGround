@@ -130,6 +130,378 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
     format!("__frame_origin_{}_{}", prefix, hash.to_hex())
 }
 
+// =============================================================================
+// Bitcode cache — skip compilation when the transitive closure hasn't changed
+// =============================================================================
+
+/// Deterministic hash of a set of def hashes (order-independent).
+pub fn module_hash(hashes: &[Hash]) -> Hash {
+    let mut sorted: Vec<&Hash> = hashes.iter().collect();
+    sorted.sort_by_key(|h| h.to_hex());
+    let mut hasher = blake3::Hasher::new();
+    for h in &sorted {
+        hasher.update(&h.0);
+    }
+    let digest = hasher.finalize();
+    Hash(digest.into())
+}
+
+fn bc_cache_path(root: &std::path::Path, mh: &Hash) -> std::path::PathBuf {
+    root.join("obj").join(format!("{}.bc", mh.to_hex()))
+}
+
+fn shapes_cache_path(root: &std::path::Path, mh: &Hash) -> std::path::PathBuf {
+    root.join("obj").join(format!("{}.shapes", mh.to_hex()))
+}
+
+/// Write compiled bitcode + shape metadata to the obj cache.
+pub fn write_bitcode_cache(
+    cm: &CompiledModule,
+    root: &std::path::Path,
+    hashes: &[Hash],
+) -> Result<(), String> {
+    let mh = module_hash(hashes);
+    let obj_dir = root.join("obj");
+    std::fs::create_dir_all(&obj_dir).map_err(|e| format!("create obj dir: {}", e))?;
+
+    let bc_path = bc_cache_path(root, &mh);
+    cm.module.write_bitcode_to_path(&bc_path);
+
+    let shapes = shape_metadata_to_json(cm);
+    let shapes_path = shapes_cache_path(root, &mh);
+    std::fs::write(&shapes_path, shapes.to_string())
+        .map_err(|e| format!("write shapes: {}", e))?;
+
+    Ok(())
+}
+
+/// Try to load a compiled module from the bitcode cache. Returns `None` on miss.
+pub fn load_bitcode_cache<'ctx>(
+    ctx: &'ctx Context,
+    root: &std::path::Path,
+    hashes: &[Hash],
+) -> Option<CompiledModule<'ctx>> {
+    let mh = module_hash(hashes);
+    let bc_path = bc_cache_path(root, &mh);
+    let shapes_path = shapes_cache_path(root, &mh);
+
+    if !bc_path.exists() || !shapes_path.exists() {
+        return None;
+    }
+
+    let bc = inkwell::memory_buffer::MemoryBuffer::create_from_file(&bc_path).ok()?;
+    let module = ctx.create_module_from_ir(bc).ok()?;
+
+    let shapes_text = std::fs::read_to_string(&shapes_path).ok()?;
+    let shapes_json = crate::jsonl::parse(&shapes_text).ok()?;
+    let (
+        closure_type_infos,
+        shape_registry,
+        shape_meta,
+        shape_by_type_id,
+        state_hashes,
+        stateful_hashes,
+    ) = parse_shape_metadata(&shapes_json)?;
+
+    let mut functions: HashMap<Hash, FunctionValue<'ctx>> = HashMap::new();
+    for h in hashes {
+        let sym = def_symbol(h);
+        if let Some(fv) = module.get_function(&sym) {
+            functions.insert(*h, fv);
+        }
+    }
+
+    let mut lifted_lambdas: HashMap<Hash, FunctionValue<'ctx>> = HashMap::new();
+    let mut f = module.get_first_function();
+    while let Some(fv) = f {
+        let name = fv.get_name().to_string_lossy().to_string();
+        if let Some(hex) = name.strip_prefix("lambda_") {
+            if let Some(h) = crate::codebase::parse_hex_hash(hex) {
+                lifted_lambdas.insert(h, fv);
+            }
+        }
+        f = fv.get_next_function();
+    }
+
+    Some(CompiledModule {
+        context: ctx,
+        module,
+        functions,
+        lifted_lambdas,
+        closure_type_infos,
+        shape_registry,
+        shape_meta,
+        shape_by_type_id,
+        state_hashes,
+        stateful_hashes,
+    })
+}
+
+
+fn shape_metadata_to_json(cm: &CompiledModule) -> crate::jsonl::Json {
+    use crate::gc::VarLenKind;
+    use crate::jsonl::Json;
+
+    let tis: Vec<Json> = cm
+        .closure_type_infos
+        .iter()
+        .map(|ti| {
+            let varlen_str = match ti.varlen {
+                VarLenKind::None => "none",
+                VarLenKind::Values => "values",
+                VarLenKind::Bytes => "bytes",
+            };
+            Json::obj([
+                ("type_id", Json::Int(ti.type_id as i64)),
+                ("header_size", Json::Int(ti.header_size as i64)),
+                ("value_field_count", Json::Int(ti.value_field_count as i64)),
+                ("raw_byte_count", Json::Int(ti.raw_byte_count as i64)),
+                ("varlen", Json::Str(varlen_str.to_string())),
+                ("align_log2", Json::Int(ti.align_log2 as i64)),
+            ])
+        })
+        .collect();
+
+    let mut sr_obj = std::collections::BTreeMap::new();
+    for (h, id) in &cm.shape_registry {
+        sr_obj.insert(h.to_hex(), Json::Int(*id as i64));
+    }
+
+    let mut sm_obj = std::collections::BTreeMap::new();
+    for (h, meta) in &cm.shape_meta {
+        sm_obj.insert(h.to_hex(), shape_meta_to_json(meta));
+    }
+
+    let sbti: Vec<Json> = cm
+        .shape_by_type_id
+        .iter()
+        .map(|opt| match opt {
+            Some(h) => Json::Str(h.to_hex()),
+            None => Json::Null,
+        })
+        .collect();
+
+    let state_hs: Vec<Json> = cm.state_hashes.iter().map(|h| Json::Str(h.to_hex())).collect();
+    let sf_hs: Vec<Json> = cm
+        .stateful_hashes
+        .iter()
+        .map(|h| Json::Str(h.to_hex()))
+        .collect();
+
+    Json::obj([
+        ("type_infos", Json::Array(tis)),
+        ("shape_registry", Json::Object(sr_obj)),
+        ("shape_meta", Json::Object(sm_obj)),
+        ("shape_by_type_id", Json::Array(sbti)),
+        ("state_hashes", Json::Array(state_hs)),
+        ("stateful_hashes", Json::Array(sf_hs)),
+    ])
+}
+
+fn shape_meta_to_json(meta: &ShapeMeta) -> crate::jsonl::Json {
+    use crate::jsonl::Json;
+    match meta {
+        ShapeMeta::Closure {
+            code_hash, captures,
+        } => {
+            let caps: Vec<Json> = captures
+                .iter()
+                .map(|c| {
+                    Json::obj([
+                        ("offset", Json::Int(c.offset as i64)),
+                        ("is_pointer", Json::Bool(c.is_pointer)),
+                    ])
+                })
+                .collect();
+            Json::obj([
+                ("kind", Json::Str("closure".to_string())),
+                ("code_hash", Json::Str(code_hash.to_hex())),
+                ("captures", Json::Array(caps)),
+            ])
+        }
+        ShapeMeta::Struct {
+            struct_ref, fields,
+        } => {
+            let fs: Vec<Json> = fields
+                .iter()
+                .map(|f| {
+                    Json::obj([
+                        ("offset", Json::Int(f.offset as i64)),
+                        ("is_pointer", Json::Bool(f.is_pointer)),
+                    ])
+                })
+                .collect();
+            Json::obj([
+                ("kind", Json::Str("struct".to_string())),
+                ("struct_ref", Json::Str(struct_ref.to_hex())),
+                ("fields", Json::Array(fs)),
+            ])
+        }
+        ShapeMeta::EnumVariant {
+            enum_ref,
+            variant_index,
+            tag_offset,
+            payload,
+        } => {
+            let p = match payload {
+                Some(f) => Json::obj([
+                    ("offset", Json::Int(f.offset as i64)),
+                    ("is_pointer", Json::Bool(f.is_pointer)),
+                ]),
+                None => Json::Null,
+            };
+            Json::obj([
+                ("kind", Json::Str("enum_variant".to_string())),
+                ("enum_ref", Json::Str(enum_ref.to_hex())),
+                ("variant_index", Json::Int(*variant_index as i64)),
+                ("tag_offset", Json::Int(*tag_offset as i64)),
+                ("payload", p),
+            ])
+        }
+    }
+}
+
+fn parse_shape_metadata(
+    json: &crate::jsonl::Json,
+) -> Option<(
+    Vec<crate::gc::TypeInfo>,
+    HashMap<Hash, u16>,
+    HashMap<Hash, ShapeMeta>,
+    Vec<Option<Hash>>,
+    Vec<Hash>,
+    Vec<Hash>,
+)> {
+    use crate::gc::{TypeInfo, VarLenKind};
+    use crate::jsonl::Json;
+
+    let parse_hash = |s: &str| crate::codebase::parse_hex_hash(s);
+
+    // TypeInfos
+    let tis_arr = json.get("type_infos")?.as_array()?;
+    let mut type_infos = Vec::new();
+    for ti in tis_arr {
+        let varlen_str = ti.get("varlen")?.as_str()?;
+        let varlen = match varlen_str {
+            "none" => VarLenKind::None,
+            "values" => VarLenKind::Values,
+            "bytes" => VarLenKind::Bytes,
+            _ => return None,
+        };
+        type_infos.push(TypeInfo {
+            type_id: ti.get("type_id")?.as_i64()? as u16,
+            header_size: ti.get("header_size")?.as_i64()? as u16,
+            value_field_count: ti.get("value_field_count")?.as_i64()? as u16,
+            raw_byte_count: ti.get("raw_byte_count")?.as_i64()? as u16,
+            varlen,
+            align_log2: ti.get("align_log2")?.as_i64()? as u8,
+        });
+    }
+
+    // Shape registry
+    let sr_obj = match json.get("shape_registry")? {
+        Json::Object(m) => m,
+        _ => return None,
+    };
+    let mut shape_registry = HashMap::new();
+    for (k, v) in sr_obj {
+        let h = parse_hash(k)?;
+        shape_registry.insert(h, v.as_i64()? as u16);
+    }
+
+    // Shape meta
+    let sm_obj = match json.get("shape_meta")? {
+        Json::Object(m) => m,
+        _ => return None,
+    };
+    let mut shape_meta = HashMap::new();
+    for (k, v) in sm_obj {
+        let h = parse_hash(k)?;
+        shape_meta.insert(h, parse_shape_meta_entry(v)?);
+    }
+
+    // Shape by type ID
+    let sbti_arr = json.get("shape_by_type_id")?.as_array()?;
+    let shape_by_type_id: Vec<Option<Hash>> = sbti_arr
+        .iter()
+        .map(|j| j.as_str().and_then(|s| parse_hash(s)))
+        .collect();
+
+    let state_hashes: Vec<Hash> = json
+        .get("state_hashes")?
+        .as_array()?
+        .iter()
+        .filter_map(|j| j.as_str().and_then(|s| parse_hash(s)))
+        .collect();
+
+    let stateful_hashes: Vec<Hash> = json
+        .get("stateful_hashes")?
+        .as_array()?
+        .iter()
+        .filter_map(|j| j.as_str().and_then(|s| parse_hash(s)))
+        .collect();
+
+    Some((
+        type_infos,
+        shape_registry,
+        shape_meta,
+        shape_by_type_id,
+        state_hashes,
+        stateful_hashes,
+    ))
+}
+
+fn parse_shape_meta_entry(json: &crate::jsonl::Json) -> Option<ShapeMeta> {
+    use crate::jsonl::Json;
+    let parse_hash = |s: &str| crate::codebase::parse_hex_hash(s);
+
+    let kind = json.get("kind")?.as_str()?;
+    match kind {
+        "closure" => {
+            let caps_arr = json.get("captures")?.as_array()?;
+            let mut captures = Vec::new();
+            for c in caps_arr {
+                captures.push(CaptureMeta {
+                    offset: c.get("offset")?.as_i64()? as u32,
+                    is_pointer: c.get("is_pointer")?.as_bool()?,
+                });
+            }
+            Some(ShapeMeta::Closure {
+                code_hash: parse_hash(json.get("code_hash")?.as_str()?)?,
+                captures,
+            })
+        }
+        "struct" => {
+            let fields_arr = json.get("fields")?.as_array()?;
+            let mut fields = Vec::new();
+            for f in fields_arr {
+                fields.push(FieldMeta {
+                    offset: f.get("offset")?.as_i64()? as u32,
+                    is_pointer: f.get("is_pointer")?.as_bool()?,
+                });
+            }
+            Some(ShapeMeta::Struct {
+                struct_ref: parse_hash(json.get("struct_ref")?.as_str()?)?,
+                fields,
+            })
+        }
+        "enum_variant" => {
+            let payload = match json.get("payload")? {
+                Json::Null => None,
+                p => Some(FieldMeta {
+                    offset: p.get("offset")?.as_i64()? as u32,
+                    is_pointer: p.get("is_pointer")?.as_bool()?,
+                }),
+            };
+            Some(ShapeMeta::EnumVariant {
+                enum_ref: parse_hash(json.get("enum_ref")?.as_str()?)?,
+                variant_index: json.get("variant_index")?.as_i64()? as u32,
+                tag_offset: json.get("tag_offset")?.as_i64()? as u32,
+                payload,
+            })
+        }
+        _ => None,
+    }
+}
 /// LLVM symbol name for a user-defined `extern fn`. Same as the
 /// canonical `ext/<name>` builtin name to keep things readable.
 fn user_extern_symbol(name: &str) -> String {

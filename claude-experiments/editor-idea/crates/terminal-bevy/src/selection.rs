@@ -160,11 +160,17 @@ fn copy_paste_keys(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedPane>,
+    owner: Res<pane_bevy::KeyboardOwner>,
     store: Res<TerminalStore>,
     sels: Query<&TerminalSelection>,
     kinds: Query<&PaneKindMarker>,
     clip: Res<ClipboardState>,
 ) {
+    // A text modal owns the keyboard — no terminal copy/paste while typing.
+    if owner.is_modal() {
+        events.read().for_each(|_| {});
+        return;
+    }
     // Skip unless the focused pane is a terminal.
     let target_is_terminal = focused
         .0
