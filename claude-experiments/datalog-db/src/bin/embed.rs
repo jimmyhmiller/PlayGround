@@ -47,7 +47,7 @@ fn parse_args() -> Result<Args, String> {
         vector_field: String::new(),
         model: "BAAI/bge-small-en-v1.5".to_string(),
         revision: None,
-        batch: 16,
+        batch: 32,
         limit: None,
         skip_existing: false,
         query: None,
@@ -142,39 +142,60 @@ fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Pull (entity, text) for every entity of the type. Optionally also pull
-    // the vector field so we can skip already-embedded entities.
-    let mut where_fields = json!({
-        "bind": "?e",
-        "type": args.entity_type,
-        args.text_field.clone(): "?text",
-    });
-    let mut find = vec![json!("?e"), json!("?text")];
-    if args.skip_existing {
-        where_fields[args.vector_field.clone()] = json!("?vec");
-        find.push(json!("?vec"));
-    }
-    let query = json!({ "find": find, "where": [where_fields] });
-    let result = client
-        .query(&query)
-        .map_err(|e| anyhow::anyhow!("query: {e}"))?;
-
-    // Collect (entity_id, text), skipping rows whose vector already exists.
+    // Fetch the work list in PAGES ordered by entity id. Pulling every body in
+    // one query overflows the 64 MB wire limit at corpus scale, so we page
+    // through with limit/offset and embed each page before fetching the next.
+    // (Bodies are large; keep the page small enough that a page's worth of text
+    // stays well under the protocol limit.)
+    const PAGE: usize = 128;
     let mut work: Vec<(u64, String)> = Vec::new();
-    for row in &result.rows {
-        let eid = row[0].get("ref").and_then(|r| r.as_u64());
-        let text = row[1].as_str();
-        let (eid, text) = match (eid, text) {
-            (Some(e), Some(t)) => (e, t.to_string()),
-            _ => continue,
-        };
+    let mut offset = 0usize;
+    loop {
+        let mut where_fields = json!({
+            "bind": "?e",
+            "type": args.entity_type,
+            args.text_field.clone(): "?text",
+        });
+        let mut find = vec![json!("?e"), json!("?text")];
         if args.skip_existing {
-            let has_vec = row.get(2).map(|v| !v.is_null()).unwrap_or(false);
-            if has_vec {
-                continue;
+            where_fields[args.vector_field.clone()] = json!("?vec");
+            find.push(json!("?vec"));
+        }
+        let query = json!({
+            "find": find,
+            "where": [where_fields],
+            "order_by": ["?e"],
+            "limit": PAGE,
+            "offset": offset,
+        });
+        let result = client
+            .query(&query)
+            .map_err(|e| anyhow::anyhow!("query (offset {offset}): {e}"))?;
+        let got = result.rows.len();
+        for row in &result.rows {
+            let eid = row[0].get("ref").and_then(|r| r.as_u64());
+            let text = row[1].as_str();
+            let (eid, text) = match (eid, text) {
+                (Some(e), Some(t)) => (e, t.to_string()),
+                _ => continue,
+            };
+            if args.skip_existing {
+                let has_vec = row.get(2).map(|v| !v.is_null()).unwrap_or(false);
+                if has_vec {
+                    continue;
+                }
+            }
+            work.push((eid, text));
+        }
+        offset += got;
+        if got < PAGE {
+            break; // last page
+        }
+        if let Some(limit) = args.limit {
+            if work.len() >= limit {
+                break;
             }
         }
-        work.push((eid, text));
     }
     if let Some(limit) = args.limit {
         work.truncate(limit);
