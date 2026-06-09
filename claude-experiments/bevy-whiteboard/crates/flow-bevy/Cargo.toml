@@ -6,7 +6,34 @@ default-run = "flow-bevy"
 
 [dependencies]
 arc-swap = "1"
-bevy = { version = "0.18", features = ["default_font", "bevy_dev_tools"] }
+# Trimmed Bevy: this is a pure-2D app (Mesh2d / ColorMaterial / Sprite /
+# Text2d / bevy_ui), so we disable the default meta-features ("2d" + "3d" +
+# "ui", which drag in PBR, glTF, lighting, raytracing, audio, scene, gamepad,
+# x11/wayland/webgl, ...) and enumerate only the leaf features we use. This
+# removes dozens of dependency crates and a large fraction of build artifacts.
+bevy = { version = "0.18", default-features = false, features = [
+    # platform / runtime
+    "std",
+    "multi_threaded",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_log",
+    "bevy_asset",
+    "sysinfo_plugin",        # backs the perf/diagnostics overlay
+    # 2D rendering (pulls common_api: camera, color, mesh, text, gizmos,
+    # image+png, animation; plus render, core_pipeline, sprite_render,
+    # post_process, gizmos_render)
+    "2d_bevy_render",
+    # UI rendering (pulls ui_api: bevy_ui; plus ui_render)
+    "ui_bevy_render",
+    # fonts
+    "default_font",
+    # picking — needed for the UI `Interaction` component
+    "bevy_picking",
+    "ui_picking",
+    # explicitly wanted dev tooling
+    "bevy_dev_tools",
+] }
 bevy_image_font = "0.11"
 flow = { path = "../flow" }
 poster-ui = { path = "../poster-ui" }
