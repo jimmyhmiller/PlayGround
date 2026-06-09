@@ -150,7 +150,7 @@ fn load_primary_font() -> &'static [u8] {
 }
 
 /// Root for all on-disk persistence (projects + per-terminal scrollback).
-/// `~/.terminal-bevy/` on every supported platform.
+/// `~/.jim/` on every supported platform.
 ///
 /// Delegates to `terminal_daemon::data_dir` so the daemon process and
 /// the editor process agree on the location of socket / pid files.
@@ -2965,7 +2965,7 @@ fn action_open_theme_editor(ctx: &mut actions::ActionCtx) {
 }
 
 /// Cmd+Shift+S opens the style preset picker (a Rhai widget). Lists
-/// every preset under `~/.terminal-bevy/styles/` plus a `(per-project
+/// every preset under `~/.jim/styles/` plus a `(per-project
 /// theme)` entry; clicking switches the active style and persists the
 /// choice. Same dedup logic as the dev panel.
 /// `view.style_picker` action (Cmd+Shift+S). Opens the style preset

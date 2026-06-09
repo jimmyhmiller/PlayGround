@@ -3,7 +3,7 @@
 //! One unified data model with optional richness — a row can be a
 //! quick checkbox-todo (just title + done) or expand into a named
 //! issue with body text and arbitrary key/value fields. All issues
-//! for a project live in `~/.terminal-bevy/issues/<project_id>.json`,
+//! for a project live in `~/.jim/issues/<project_id>.json`,
 //! so multiple Issues panes bound to the same project share the same
 //! list. Switching the active project hides issues panes from other
 //! projects via pane-bevy's standard project visibility.
@@ -114,7 +114,7 @@ impl IssuesStore {
 fn storage_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("issues");
     Some(p)
 }

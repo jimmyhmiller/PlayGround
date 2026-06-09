@@ -14,7 +14,7 @@
 //! Session/project resolution mirrors `tbwidget`: `--session <id>` is
 //! the literal numeric `TerminalSession`; `--project <name>` picks
 //! the most-recently-created terminal in that project from
-//! `~/.terminal-bevy/terminals.json`.
+//! `~/.jim/terminals.json`.
 //!
 //! Bytes flag: hex pairs, no separators (`1b`, `0d0a`, `030d`).
 //! Useful for sending Esc, Ctrl-C (`03`), Enter (`0d`), etc.
@@ -41,7 +41,7 @@ struct LiveTerminalEntry {
 fn terminals_path() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = std::path::PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("terminals.json");
     Some(p)
 }

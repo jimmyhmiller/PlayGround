@@ -1,6 +1,6 @@
 //! Persist + restore the OS-window size and position across runs.
 //!
-//! On startup, [`load`] reads `~/.terminal-bevy/window.json` (if any)
+//! On startup, [`load`] reads `~/.jim/window.json` (if any)
 //! and returns the saved geometry so `main.rs` can seed the initial
 //! `Window` resolution + position.
 //!

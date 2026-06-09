@@ -1,16 +1,16 @@
 //! Style **presets** — named bundles of theme tokens (and, in future,
-//! shader overrides) that live under `~/.terminal-bevy/styles/<name>/`.
+//! shader overrides) that live under `~/.jim/styles/<name>/`.
 //!
 //! Each preset is a directory:
 //!
-//!     ~/.terminal-bevy/styles/
+//!     ~/.jim/styles/
 //!         default/
 //!             theme.rhai      # required
 //!         linear/
 //!             theme.rhai
 //!
 //! Scripts switch presets by calling `set_active_style("linear")`. The
-//! choice is persisted to `~/.terminal-bevy/active_style` and survives
+//! choice is persisted to `~/.jim/active_style` and survives
 //! restarts. A preset's `theme.rhai` *overrides* the per-project
 //! theme.rhai whenever a preset is active — switch the preset to
 //! `None` (empty file) to fall back to per-project theming.
@@ -97,7 +97,7 @@ impl Plugin for PresetsPlugin {
 fn styles_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("styles");
     Some(p)
 }

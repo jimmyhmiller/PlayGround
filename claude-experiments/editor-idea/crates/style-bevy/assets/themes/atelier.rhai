@@ -3,13 +3,13 @@
 // Source of truth for the engine's *default* palette AND the
 // `atelier` style preset. style-bevy embeds this file via
 // `include_str!`; presets.rs seeds the same content to
-// `~/.terminal-bevy/styles/atelier/theme.rhai` on startup.
+// `~/.jim/styles/atelier/theme.rhai` on startup.
 //
 // Edits here affect both the in-app default look (taken at startup)
 // and the seed copy on disk (first run only — user copies aren't
 // overwritten).
 //
-// To override per project, write `~/.terminal-bevy/projects/<id>/
+// To override per project, write `~/.jim/projects/<id>/
 // theme.rhai` with the tokens you want to change.
 #{
     // --- core text + accent ---

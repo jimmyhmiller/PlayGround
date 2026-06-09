@@ -92,7 +92,7 @@ pub struct Suggestion {
     pub project_id: Option<u64>,
 }
 
-/// On-disk shape for `~/.terminal-bevy/suggestions.json`.
+/// On-disk shape for `~/.jim/suggestions.json`.
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedDrawer {
     #[serde(default)]

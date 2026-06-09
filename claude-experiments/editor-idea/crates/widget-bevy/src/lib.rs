@@ -14,7 +14,7 @@
 //! - **In-process Rhai** — `rhai_widget.rs`. A `.rhai` script runs on a
 //!   worker thread and the host calls named handlers (`on_click`,
 //!   `on_toggle`, `on_input_change`, `on_bus`, …). Hot-reloaded from
-//!   `~/.terminal-bevy/widgets/`. This is the default for new widgets.
+//!   `~/.jim/widgets/`. This is the default for new widgets.
 //! - **Subprocess** — *this file*. Each pane spawns a child process and
 //!   pipes NDJSON: the host sends one `HostEvent` per line, the child
 //!   replies with `frame` / `state` / `title` messages. See

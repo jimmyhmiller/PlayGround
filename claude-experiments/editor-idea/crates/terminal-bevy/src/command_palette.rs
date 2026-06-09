@@ -172,7 +172,7 @@ impl PaletteUsage {
 fn usage_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("palette_usage.json");
     Some(p)
 }

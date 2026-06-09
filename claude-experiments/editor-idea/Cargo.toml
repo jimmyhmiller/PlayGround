@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["crates/glaze", "crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/style-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject", "crates/inference-bevy", "crates/diff-core", "crates/diff-bevy"]
 
+[workspace.package]
+license = "MIT"
+
 # Pin libghostty-rs to a git rev that includes the zig optimize-mode
 # fix (upstream 3378f0b). Without it, vendored ghostty builds default
 # to zig Debug mode, which makes vt_write 100x+ slower. Crates.io 0.1.1

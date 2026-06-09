@@ -20,7 +20,7 @@ use crate::state::StyleDataDir;
 /// [`register_style_asset_source`].
 pub const STYLE_SOURCE: &str = "style";
 
-/// Asset source rooted at `~/.terminal-bevy/styles/`. Per-preset
+/// Asset source rooted at `~/.jim/styles/`. Per-preset
 /// shaders are loaded via `preset://<name>/chrome.wgsl`. Registered
 /// by [`register_preset_asset_source`].
 pub const PRESET_SOURCE: &str = "preset";
@@ -56,9 +56,9 @@ pub fn register_preset_asset_source(app: &mut App, base_dir: PathBuf) {
 /// hot-reload watching enabled via Bevy's standard file-source
 /// watcher.
 ///
-/// Example: if `base_dir` is `~/.terminal-bevy/projects/`, then
+/// Example: if `base_dir` is `~/.jim/projects/`, then
 /// `asset_server.load("style://42/.editor/shaders/dust.wgsl")` reads
-/// `~/.terminal-bevy/projects/42/.editor/shaders/dust.wgsl` and
+/// `~/.jim/projects/42/.editor/shaders/dust.wgsl` and
 /// hot-reloads on edit.
 pub fn register_style_asset_source(app: &mut App, base_dir: PathBuf) {
     if !base_dir.exists()

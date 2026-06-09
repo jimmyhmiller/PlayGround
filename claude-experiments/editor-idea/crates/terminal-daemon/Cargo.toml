@@ -2,6 +2,7 @@
 name = "terminal_daemon"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 # Deliberately no libghostty / Bevy / GUI deps here. This crate is the
 # headless half of the terminal session daemon: it owns the PTY +

@@ -572,7 +572,7 @@ const DUMP_INTERVAL_SECS: f64 = 1.0;
 /// `TBPROF` headless dump: every second, append the latest frame's
 /// per-pane + subsystem breakdown plus Bevy's own diagnostics (frame
 /// time, and under `TBPROF=all` the render-world GPU pass timings) to
-/// `~/.terminal-bevy/diagnostics.log`. No window required.
+/// `~/.jim/diagnostics.log`. No window required.
 fn dump_profile_log(
     time: Res<Time<Real>>,
     readout: Res<FrameProfileReadout>,

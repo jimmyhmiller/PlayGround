@@ -63,7 +63,7 @@ pub enum IpcRequest {
         /// widget kind (`"widget"`). Pass `"rhai_widget"` to spawn a
         /// Rhai-scripted in-process widget — `command` is then
         /// interpreted as the script filename under
-        /// `~/.terminal-bevy/widgets/` (no shell invocation).
+        /// `~/.jim/widgets/` (no shell invocation).
         #[serde(default)]
         kind: Option<String>,
     },
@@ -78,7 +78,7 @@ pub enum IpcRequest {
     ToggleCube,
     /// `tbinbox --project NAME --sender X --body "..."` — append a
     /// message to a project's inbox. The receiver writes the message
-    /// to `~/.terminal-bevy/inbox/<id>.jsonl`; the running app's
+    /// to `~/.jim/inbox/<id>.jsonl`; the running app's
     /// `InboxPane` picks it up on its next disk poll. Fire-and-forget;
     /// no response body.
     SendInbox {

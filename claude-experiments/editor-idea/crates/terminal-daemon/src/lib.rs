@@ -19,13 +19,13 @@ use std::path::PathBuf;
 pub fn data_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     Some(p)
 }
 
 /// Runtime directory for short-lived ephemera that must respect path-
 /// length limits. On macOS `sockaddr_un.sun_path` is only 104 bytes, so
-/// nested $HOME/.terminal-bevy/... paths blow it out on most systems.
+/// nested $HOME/.jim/... paths blow it out on most systems.
 /// Default `/tmp/.terminal-bevy-<uid>/`; overridable via the
 /// `TERMINAL_BEVY_RUNTIME_DIR` env var (used by tests to isolate).
 pub fn runtime_dir() -> PathBuf {

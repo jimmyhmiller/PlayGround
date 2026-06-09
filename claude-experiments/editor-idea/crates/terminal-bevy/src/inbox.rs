@@ -1,7 +1,7 @@
 //! Per-project inbox.
 //!
 //! Storage: one JSONL file per project at
-//! `~/.terminal-bevy/inbox/<project_id>.jsonl`. Each line is an
+//! `~/.jim/inbox/<project_id>.jsonl`. Each line is an
 //! [`InboxMessage`]. External tools (other projects via IPC, scripts,
 //! CI hooks) append messages by calling [`append_message`]; the inbox
 //! pane reads the file on a slow tick and rerenders when contents
@@ -9,7 +9,7 @@
 //!
 //! The pane also lets the user flag a message for "send to Claude" —
 //! that appends a copy of the message to
-//! `~/.terminal-bevy/claude-outbox/<project_id>.jsonl`. A separate Bun
+//! `~/.jim/claude-outbox/<project_id>.jsonl`. A separate Bun
 //! MCP channel server (under `tools/inbox-channel/`) tails that file
 //! and pushes each new line into the user's Claude Code session as a
 //! `<channel source="terminal-bevy">` notification. See the channels
@@ -106,7 +106,7 @@ impl InboxStore {
 fn data_root() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     Some(p)
 }
 

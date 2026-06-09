@@ -25,12 +25,12 @@ use std::process::ExitCode;
 
 fn socket_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join(".terminal-bevy").join("socket"))
+    Some(Path::new(&home).join(".jim").join("socket"))
 }
 
 fn bus_log_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join(".terminal-bevy").join("widget-bus.log"))
+    Some(Path::new(&home).join(".jim").join("widget-bus.log"))
 }
 
 fn print_usage() {

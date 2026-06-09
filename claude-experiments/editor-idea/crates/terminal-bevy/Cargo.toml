@@ -2,6 +2,7 @@
 name = "terminal_bevy"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 arboard = "3.4"
@@ -23,12 +24,12 @@ nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Hot-reloadable runtime tuning for the project-prism (cube.rs):
-# ~/.terminal-bevy/cube.rhai is evaluated to a params map.
+# ~/.jim/cube.rhai is evaluated to a params map.
 rhai = { version = "1.21", features = ["sync"] }
 bincode = { version = "2", features = ["serde"] }
 libc = "0.2"
 # File-watching for garden sprite hot reload — picks up edits to text
-# files under ~/.terminal-bevy/garden-art/ and rebuilds the relevant
+# files under ~/.jim/garden-art/ and rebuilds the relevant
 # Image assets without restarting the app.
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 # PNG decoding for the embedded garden sprite sheet (CC0 OpenGameArt

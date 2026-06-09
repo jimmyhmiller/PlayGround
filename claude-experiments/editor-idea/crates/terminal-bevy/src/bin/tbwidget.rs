@@ -42,7 +42,7 @@ enum IpcRequest {
         /// Optional widget kind override. Default is the subprocess
         /// widget kind. Pass `"rhai_widget"` to spawn an in-process
         /// Rhai-scripted widget; `command` is then the script filename
-        /// under `~/.terminal-bevy/widgets/`.
+        /// under `~/.jim/widgets/`.
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
     },
@@ -50,7 +50,7 @@ enum IpcRequest {
 
 fn socket_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join(".terminal-bevy").join("socket"))
+    Some(Path::new(&home).join(".jim").join("socket"))
 }
 
 fn main() -> ExitCode {
@@ -218,7 +218,7 @@ fn print_usage() {
          \n\
          `--kind rhai_widget` swaps in the in-process Rhai-scripted\n\
          widget runtime. `<cmd>` is then interpreted as a script filename\n\
-         under `~/.terminal-bevy/widgets/` and no subprocess is spawned.\n\
+         under `~/.jim/widgets/` and no subprocess is spawned.\n\
          \n\
          For the authoring guide, run `widget agent`."
     );

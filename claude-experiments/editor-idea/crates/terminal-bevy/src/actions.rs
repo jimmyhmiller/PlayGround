@@ -22,7 +22,7 @@
 //! Each action carries a [`Action::default_keys`] sequence (empty =
 //! unbound, one chord = a plain shortcut, many = a *sequence* like `⌘K`
 //! then `C`). At startup [`rebuild_keymap`] folds those defaults together
-//! with `~/.terminal-bevy/keybinds.json` into the [`Keymap`] resource —
+//! with `~/.jim/keybinds.json` into the [`Keymap`] resource —
 //! the one place every consumer reads bindings from. The JSON is a flat
 //! `{ "<action id>": "<binding>" }` map; a `null` value unbinds an action
 //! that has a default:
@@ -216,7 +216,7 @@ pub struct Action {
     pub radial_icon: Option<&'static str>,
     /// Default key binding. Empty = unbound; one chord = a simple
     /// shortcut; more = a chord *sequence* (e.g. `⌘K` then `C`). Always
-    /// overridable per-id from `~/.terminal-bevy/keybinds.json`; the
+    /// overridable per-id from `~/.jim/keybinds.json`; the
     /// effective binding lives in [`Keymap`].
     pub default_keys: &'static [KeyChord],
     /// The effect.
@@ -258,7 +258,7 @@ impl ActionRegistry {
 const SEQUENCE_TIMEOUT: f32 = 1.2;
 
 /// The effective key bindings: every action's [`Action::default_keys`],
-/// overlaid by the user's `~/.terminal-bevy/keybinds.json`. The matcher
+/// overlaid by the user's `~/.jim/keybinds.json`. The matcher
 /// and the command palette both read bindings from here (never straight
 /// off `default_keys`) so a disk override is honored everywhere at once.
 /// Rebuilt by [`rebuild_keymap`] at startup and on the `keybinds.reload`
@@ -306,11 +306,11 @@ pub struct PendingSequence {
     pub started_at: f32,
 }
 
-/// `~/.terminal-bevy/keybinds.json`.
+/// `~/.jim/keybinds.json`.
 fn keybinds_path() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = std::path::PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("keybinds.json");
     Some(p)
 }

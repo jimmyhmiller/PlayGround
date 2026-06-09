@@ -129,7 +129,7 @@ impl Material for FloorMaterial {
 
 // ---------- Runtime-tunable params (hot-reloaded from Rhai) ----------
 
-/// Live-tunable overview parameters, driven by `~/.terminal-bevy/cube.rhai`.
+/// Live-tunable overview parameters, driven by `~/.jim/cube.rhai`.
 /// `board_recede` and `cam_tilt`/durations read every frame (apply
 /// instantly); float/fill/pullback bake in on the next overview open.
 #[derive(Resource, Clone, Debug)]
@@ -188,7 +188,7 @@ const CUBE_RHAI_TEMPLATE: &str = "\
 ";
 
 fn cube_rhai_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".terminal-bevy/cube.rhai"))
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".jim/cube.rhai"))
 }
 
 fn rhai_f32(map: &rhai::Map, key: &str, default: f32) -> f32 {

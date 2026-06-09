@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Where per-project asset directories live. Host inserts this at
-/// startup. E.g. `~/.terminal-bevy/projects/`.
+/// startup. E.g. `~/.jim/projects/`.
 #[derive(Resource, Clone, Debug)]
 pub struct StyleDataDir(pub PathBuf);
 

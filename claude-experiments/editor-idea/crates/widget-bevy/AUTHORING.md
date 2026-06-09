@@ -7,7 +7,7 @@ only in where the code runs and how events are delivered:
 
 | | In-process Rhai | Subprocess |
 |---|---|---|
-| Code | a `.rhai` script in `~/.terminal-bevy/widgets/` | any program speaking NDJSON on stdio |
+| Code | a `.rhai` script in `~/.jim/widgets/` | any program speaking NDJSON on stdio |
 | Runs on | a worker thread inside the app | its own OS process |
 | Event delivery | calls into named script **handlers** (`on_click`, …) | one `HostEvent` JSON line per event on stdin |
 | Frame delivery | script `render()` returns an `Element` | program writes a `frame` JSON line on stdout |
@@ -264,7 +264,7 @@ edit buffer and the blinking caret (`WidgetInputFocus`). That means:
 
 ## Writing a Rhai widget
 
-Drop a `.rhai` file in `~/.terminal-bevy/widgets/`. The file watcher
+Drop a `.rhai` file in `~/.jim/widgets/`. The file watcher
 re-parses on save. The top-level body runs **once per load** (initialize
 `state`, define handler `fn`s). All handlers are optional — define only
 what you need.

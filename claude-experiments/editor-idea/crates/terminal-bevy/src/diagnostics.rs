@@ -8,7 +8,7 @@
 //! away.
 //!
 //! Two independent recorders, both appending to
-//! `~/.terminal-bevy/diagnostics.log`:
+//! `~/.jim/diagnostics.log`:
 //!
 //! 1. A **background heartbeat thread** that logs only the process
 //!    physical footprint every few seconds. It does not touch the Bevy
@@ -420,7 +420,7 @@ fn update_warning_overlay(
 }
 
 /// Total size (and file count) of the per-terminal scrollback logs under
-/// `~/.terminal-bevy/scrollback/`. Cheap: directory metadata only.
+/// `~/.jim/scrollback/`. Cheap: directory metadata only.
 fn scrollback_dir_size() -> (usize, u64) {
     let Some(dir) = crate::data_dir().map(|d| d.join("scrollback")) else {
         return (0, 0);

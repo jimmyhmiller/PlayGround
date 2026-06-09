@@ -26,7 +26,7 @@ Same for "the editor" → `editor-bevy`.
   sharing one `Element` vocabulary (`src/protocol.rs`): **in-process
   Rhai** scripts (`src/rhai_widget.rs`, worker thread + named handlers
   like `on_click`/`on_toggle`/`on_input_change`/`on_bus`, hot reload from
-  `~/.terminal-bevy/widgets/`) and **subprocess** widgets (`src/lib.rs`,
+  `~/.jim/widgets/`) and **subprocess** widgets (`src/lib.rs`,
   NDJSON `HostEvent`/`WidgetMsg` over stdio). UI events and the Claude
   Code bus are SEPARATE channels — `on_bus` is the bus, not UI. See
   `crates/widget-bevy/AUTHORING.md` for the full handler/event model.

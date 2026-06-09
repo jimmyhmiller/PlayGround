@@ -6,11 +6,11 @@ Claude Code session as `<channel source="terminal-bevy-inbox">` tags.
 ## How it works
 
 1. terminal-bevy's GUI maintains a per-project inbox at
-   `~/.terminal-bevy/inbox/<project_id>.jsonl`. Messages arrive via
+   `~/.jim/inbox/<project_id>.jsonl`. Messages arrive via
    `tbinbox` (CLI), inter-project sends, or any external POST.
 2. When the user clicks "Send to Claude" on a message in the Inbox
    pane, the message is appended to
-   `~/.terminal-bevy/claude-outbox/<project_id>.jsonl`.
+   `~/.jim/claude-outbox/<project_id>.jsonl`.
 3. This MCP channel server (run by Claude Code as a stdio subprocess)
    tails that outbox file. Each new line becomes one
    `notifications/claude/channel` event, surfaced to Claude as:
@@ -77,7 +77,7 @@ echo "stdin body works too" | tbinbox --project alpha
 ```
 
 From any tool that can open a Unix socket: connect to
-`~/.terminal-bevy/socket` and send a single JSON object:
+`~/.jim/socket` and send a single JSON object:
 
 ```json
 {"action": "send_inbox", "project": "alpha", "sender": "deploy-bot", "body": "..."}

@@ -9,7 +9,7 @@
 //!   per Claude Code statusLine tick. Each file is one session.
 //!   Entries older than `STALE_SECS` are dropped (Claude Code session
 //!   stopped publishing → session ended).
-//! - `~/.terminal-bevy/terminals.json` — written by the host whenever
+//! - `~/.jim/terminals.json` — written by the host whenever
 //!   pane state changes. Tells us project name + pane title for each
 //!   terminal session id.
 //!
@@ -96,7 +96,7 @@ fn feed_dir() -> Option<PathBuf> {
 fn terminals_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("terminals.json");
     Some(p)
 }

@@ -9,9 +9,9 @@
 //! ## Persistence
 //!
 //! Project list + active id + the next id to hand out are serialized to
-//! `~/.terminal-bevy/projects.json`. Terminal *layouts* (position, size,
+//! `~/.jim/projects.json`. Terminal *layouts* (position, size,
 //! z, project membership, session id) are also stored there; their raw
-//! pty byte streams live alongside in `~/.terminal-bevy/scrollback/<id>.bytes`
+//! pty byte streams live alongside in `~/.jim/scrollback/<id>.bytes`
 //! so the visible scrollback survives restarts. The shell process itself
 //! can't survive — restored terminals always get a fresh shell, the
 //! prior session's bytes just paint the screen behind it.
@@ -176,7 +176,7 @@ struct PersistedState {
 fn save_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     Some(p)
 }
 
@@ -1807,7 +1807,7 @@ fn refocus_on_project_change(
 
 // ---------- Live terminals export ----------
 //
-// `~/.terminal-bevy/terminals.json` is a small "what's open right now"
+// `~/.jim/terminals.json` is a small "what's open right now"
 // snapshot that out-of-process widgets (e.g. claude-context-bars) can
 // poll to learn which terminal sessions are open, what project they
 // belong to, and their pane title. The full `projects.json` is too
@@ -1849,7 +1849,7 @@ fn write_live_terminals(state: &LiveTerminals) -> std::io::Result<()> {
     fs::rename(&tmp, &file)
 }
 
-/// Emit `~/.terminal-bevy/terminals.json` whenever the set of open
+/// Emit `~/.jim/terminals.json` whenever the set of open
 /// terminals, their project assignment, their title, or the project
 /// catalog changes. Hashes the snapshot to suppress redundant writes.
 fn publish_live_terminals(

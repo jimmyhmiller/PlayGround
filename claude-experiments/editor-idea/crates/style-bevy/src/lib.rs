@@ -106,7 +106,7 @@ fn dust_script_path() -> std::path::PathBuf {
     let mut p = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("widgets");
     p.push("dust.rhai");
     p

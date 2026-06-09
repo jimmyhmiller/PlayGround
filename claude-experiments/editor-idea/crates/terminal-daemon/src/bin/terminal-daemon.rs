@@ -2,7 +2,7 @@
 //!
 //! Spawned by the editor when no daemon for a given `TerminalSession` is
 //! alive. Detaches into the background and serves the session over a
-//! Unix socket at `~/.terminal-bevy/sessions/<session_id>.sock` until
+//! Unix socket at `~/.jim/sessions/<session_id>.sock` until
 //! the child exits or the editor sends `Kill`.
 //!
 //! Usage:

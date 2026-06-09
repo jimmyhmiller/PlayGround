@@ -124,7 +124,7 @@ const ANIMATION_MIN_FRAME_SECS: f32 = 1.0 / 30.0;
 pub fn widgets_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
+    p.push(".jim");
     p.push("widgets");
     Some(p)
 }

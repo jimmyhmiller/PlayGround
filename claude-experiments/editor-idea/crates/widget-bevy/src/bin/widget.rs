@@ -138,7 +138,7 @@ enum Cmd {
         /// Widget runtime. Default spawns a subprocess widget (runs
         /// `<cmd>`). Pass `rhai_widget` for an in-process Rhai script —
         /// `<cmd>` is then a `.rhai` filename under
-        /// ~/.terminal-bevy/widgets/ (no subprocess is launched).
+        /// ~/.jim/widgets/ (no subprocess is launched).
         #[arg(long, short = 'k')]
         kind: Option<String>,
         /// Command line + args. Use `--` to separate from `spawn`'s own
@@ -243,7 +243,7 @@ fn send_request(req: &IpcRequest) -> Result<UnixStream, String> {
 
 fn socket_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join(".terminal-bevy").join("socket"))
+    Some(Path::new(&home).join(".jim").join("socket"))
 }
 
 fn parse_pair(s: &str) -> Result<(f32, f32), String> {
@@ -402,11 +402,11 @@ fn cmd_agent() -> Result<(), String> {
             .unwrap_or_else(|_| p.display().to_string())
     };
     let widgets_dir = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".terminal-bevy").join("widgets"));
+        .map(|h| PathBuf::from(h).join(".jim").join("widgets"));
     let widgets_str = widgets_dir
         .as_ref()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "~/.terminal-bevy/widgets".to_string());
+        .unwrap_or_else(|| "~/.jim/widgets".to_string());
 
     println!(
         "# Building an editor-idea widget\n\
@@ -475,7 +475,7 @@ fn cmd_agent() -> Result<(), String> {
 /// Bullet list of `.rhai` scripts in the widgets dir, or a hint if none.
 fn list_rhai_examples(dir: Option<&Path>) -> String {
     let Some(dir) = dir else {
-        return "  (set $HOME to locate ~/.terminal-bevy/widgets)".to_string();
+        return "  (set $HOME to locate ~/.jim/widgets)".to_string();
     };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return format!("  (none yet — {} doesn't exist)", dir.display());

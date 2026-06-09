@@ -354,7 +354,7 @@ pub mod tokens {
 
 /// Atelier dark palette, embedded so the engine has a sensible
 /// default look without depending on any on-disk preset. The same
-/// bytes are also seeded to `~/.terminal-bevy/styles/atelier/theme.rhai`
+/// bytes are also seeded to `~/.jim/styles/atelier/theme.rhai`
 /// at first launch so the preset picker has an entry for it.
 pub const ATELIER_DEFAULT_THEME: &str =
     include_str!("../assets/themes/atelier.rhai");
