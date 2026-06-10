@@ -18,8 +18,8 @@ check token, serve/proxy — is linear and auditable.
 ```toml
 # gatekeeper.toml
 bind = "0.0.0.0:443"
-tls_cert = "/etc/letsencrypt/live/example.com/fullchain.pem"
-tls_key  = "/etc/letsencrypt/live/example.com/privkey.pem"
+tls_cert = "/etc/gatekeeper/cert.pem"   # see "TLS and certificates" below
+tls_key  = "/etc/gatekeeper/key.pem"
 unmatched_status = 404            # or 403
 
 [[route]]
@@ -37,8 +37,8 @@ export GATEKEEPER_TOKEN=$(head -c 32 /dev/urandom | base64)
 gatekeeper --config gatekeeper.toml
 ```
 
-- Public:  `curl https://example.com/blog/`
-- Private: `curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://example.com/metrics`
+- Public:  `curl https://computer.jimmyhmiller.com/blog/`
+- Private: `curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://computer.jimmyhmiller.com/metrics`
   (or a `gatekeeper=<token>` cookie for browsers)
 
 ## Config reference
@@ -84,15 +84,15 @@ shell ACME client that installs its own renewal cron.
 
 ```sh
 # install
-curl https://get.acme.sh | sh -s email=you@example.com
+curl https://get.acme.sh | sh -s email=jimmyhmiller@gmail.com
 
-# issue a cert for your domain (standalone briefly binds :80 to prove control;
+# issue a cert for the domain (standalone briefly binds :80 to prove control;
 # alternatively use a DNS challenge — see acme.sh docs)
-acme.sh --issue --standalone -d example.com
+acme.sh --issue --standalone -d computer.jimmyhmiller.com
 
 # install the cert to a stable path AND tell acme.sh to SIGHUP gatekeeper after
 # every renewal, so the new cert is picked up live:
-acme.sh --install-cert -d example.com \
+acme.sh --install-cert -d computer.jimmyhmiller.com \
   --fullchain-file /etc/gatekeeper/cert.pem \
   --key-file       /etc/gatekeeper/key.pem \
   --reloadcmd      "kill -HUP \$(pidof gatekeeper)"
