@@ -212,6 +212,9 @@ fn coerce_numeric_literal(
 /// Running state for one aggregate within one group.
 enum AggState {
     Count(i64),
+    /// Distinct values seen so far, keyed by the stable group-key encoding of
+    /// a single value (reuses `encode_group_key` so f64/list/etc. hash safely).
+    CountDistinct(std::collections::HashSet<String>),
     Sum { i_sum: i64, f_sum: f64, any_float: bool },
     Avg { sum: f64, n: i64 },
     MinMax(Option<Value>),
@@ -221,6 +224,7 @@ impl AggState {
     fn new(func: AggFunc) -> Self {
         match func {
             AggFunc::Count => AggState::Count(0),
+            AggFunc::CountDistinct => AggState::CountDistinct(std::collections::HashSet::new()),
             AggFunc::Sum => AggState::Sum {
                 i_sum: 0,
                 f_sum: 0.0,
@@ -247,6 +251,15 @@ impl AggState {
                 Some(v) if !matches!(v, Value::Null) => *c += 1,
                 _ => {}
             },
+            AggState::CountDistinct(set) => {
+                // Count distinct non-null values. `distinct *` is rejected at
+                // parse time, so `value` is always Some here.
+                if let Some(v) = value {
+                    if !matches!(v, Value::Null) {
+                        set.insert(encode_group_key(std::slice::from_ref(v)));
+                    }
+                }
+            }
             AggState::Sum {
                 i_sum,
                 f_sum,
@@ -295,6 +308,7 @@ impl AggState {
     fn finalize(self) -> Value {
         match self {
             AggState::Count(c) => Value::I64(c),
+            AggState::CountDistinct(set) => Value::I64(set.len() as i64),
             AggState::Sum {
                 i_sum,
                 f_sum,

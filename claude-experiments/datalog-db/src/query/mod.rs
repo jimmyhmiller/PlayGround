@@ -585,6 +585,9 @@ pub struct OrderKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
     Count,
+    /// `count(distinct ?x)` — number of distinct non-null values of `?x` in the
+    /// group. Distinct from `Count`, which counts rows (or non-null values).
+    CountDistinct,
     Sum,
     Avg,
     Min,
@@ -595,6 +598,7 @@ impl AggFunc {
     pub fn from_name(name: &str) -> Option<AggFunc> {
         match name {
             "count" => Some(AggFunc::Count),
+            "count_distinct" => Some(AggFunc::CountDistinct),
             "sum" => Some(AggFunc::Sum),
             "avg" => Some(AggFunc::Avg),
             "min" => Some(AggFunc::Min),
@@ -605,6 +609,7 @@ impl AggFunc {
     pub fn name(&self) -> &'static str {
         match self {
             AggFunc::Count => "count",
+            AggFunc::CountDistinct => "count_distinct",
             AggFunc::Sum => "sum",
             AggFunc::Avg => "avg",
             AggFunc::Min => "min",
@@ -637,14 +642,34 @@ impl FindElem {
                 return Err(format!("malformed aggregate in find: '{}'", token));
             }
             let func_name = t[..open].trim();
-            let func = AggFunc::from_name(func_name)
+            let mut func = AggFunc::from_name(func_name)
                 .ok_or_else(|| format!("unknown aggregate function '{}'", func_name))?;
-            let arg = t[open + 1..t.len() - 1].trim();
+            let mut arg = t[open + 1..t.len() - 1].trim();
+            // `count(distinct ?x)`: a `distinct` prefix on a count argument
+            // promotes it to the distinct-count aggregate. Only `count`
+            // supports the `distinct` modifier.
+            if let Some(rest) = arg.strip_prefix("distinct ") {
+                if func != AggFunc::Count {
+                    return Err(format!(
+                        "'distinct' is only valid with count, not '{}'",
+                        func_name
+                    ));
+                }
+                func = AggFunc::CountDistinct;
+                arg = rest.trim();
+            }
             if arg != "*" && !arg.starts_with('?') {
                 return Err(format!(
                     "aggregate argument must be a variable or '*', got '{}'",
                     arg
                 ));
+            }
+            if func == AggFunc::CountDistinct {
+                return Ok(FindElem::Agg {
+                    func,
+                    var: arg.to_string(),
+                    label: format!("count(distinct {})", arg),
+                });
             }
             if func == AggFunc::Count && arg == "*" {
                 return Ok(FindElem::Agg {

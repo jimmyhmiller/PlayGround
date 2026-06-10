@@ -4821,6 +4821,70 @@ fn test_aggregate_group_by() {
 }
 
 #[test]
+fn test_aggregate_count_distinct_global() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // 5 employees across 2 distinct departments.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["count(?e)", "count(distinct ?dept)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "?dept"}]
+        }),
+    );
+    assert_eq!(r.columns, vec!["count(?e)", "count(distinct ?dept)"]);
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::I64(5));
+    assert_eq!(r.rows[0][1], Value::I64(2));
+}
+
+#[test]
+fn test_aggregate_count_distinct_grouped() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // Distinct salaries per department: eng {100,120}=2, sales {90,95,80}=3.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?dept", "count(distinct ?sal)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "?dept", "salary": "?sal"}],
+            "order_by": ["?dept"]
+        }),
+    );
+    assert_eq!(r.rows.len(), 2);
+    assert_eq!(r.rows[0][0], Value::String("eng".into()));
+    assert_eq!(r.rows[0][1], Value::I64(2));
+    assert_eq!(r.rows[1][0], Value::String("sales".into()));
+    assert_eq!(r.rows[1][1], Value::I64(3));
+}
+
+#[test]
+fn test_order_by_aggregate_column() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // Order groups by their count descending: sales (3) before eng (2).
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?dept", "count(?e)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "?dept"}],
+            "order_by": [{"var": "count(?e)", "desc": true}]
+        }),
+    );
+    assert_eq!(r.rows.len(), 2);
+    assert_eq!(r.rows[0][0], Value::String("sales".into()));
+    assert_eq!(r.rows[0][1], Value::I64(3));
+    assert_eq!(r.rows[1][0], Value::String("eng".into()));
+    assert_eq!(r.rows[1][1], Value::I64(2));
+}
+
+#[test]
 fn test_aggregate_count_over_empty_is_zero() {
     let (db, _dir) = test_db();
     db.define_type(employee_type()).unwrap();

@@ -1,0 +1,20 @@
+define PageView {
+  ts: i64 indexed,
+  day: i64 indexed,
+  project: string indexed,
+  host: string indexed,
+  path: string indexed,
+  route: string indexed,
+  method: string indexed,
+  status: i64 indexed,
+  ip: string indexed,
+  referer: string indexed,
+  userAgent: string indexed,
+  region: string indexed,
+  source: string indexed,
+  cache: string indexed,
+  durationMs: f64,
+  memoryMb: i64,
+  level: string indexed,
+  requestId: string indexed
+}

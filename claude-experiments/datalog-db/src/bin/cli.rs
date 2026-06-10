@@ -804,6 +804,13 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
             if p.peek() == Some('(') {
                 p.advance();
                 p.skip_ws();
+                // Optional `distinct` modifier: count(distinct ?x).
+                let mut distinct = false;
+                if p.peek_ident() == "distinct" {
+                    p.read_ident()?;
+                    distinct = true;
+                }
+                p.skip_ws();
                 let arg = match p.peek() {
                     Some('*') => {
                         p.advance();
@@ -825,7 +832,12 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
                     return Err(format!("expected ')' to close {}(...)", ident));
                 }
                 p.advance();
-                find_vars.push(serde_json::Value::String(format!("{}({})", ident, arg)));
+                let inner = if distinct {
+                    format!("distinct {}", arg)
+                } else {
+                    arg
+                };
+                find_vars.push(serde_json::Value::String(format!("{}({})", ident, inner)));
             } else {
                 p.pos = saved;
                 return Err(format!("expected '?', aggregate, or 'where', got '{}'", ident));
@@ -892,12 +904,60 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
         let mut keys = Vec::new();
         loop {
             p.skip_ws();
-            if p.peek() != Some('?') {
-                return Err("expected '?var' in 'order by'".into());
-            }
-            p.advance();
-            let name = p.read_ident()?;
-            let var = format!("?{}", name);
+            // An order key is either a plain `?var` or an aggregate expression
+            // (`count(?v)`, `count(distinct ?v)`, `avg(?x)`, `count(*)`). The
+            // aggregate form must exactly match a find aggregate's output
+            // label, so the executor can resolve it to that column.
+            let var = if p.peek() == Some('?') {
+                p.advance();
+                format!("?{}", p.read_ident()?)
+            } else {
+                let func = p.read_ident().map_err(|_| {
+                    "expected '?var' or an aggregate in 'order by'".to_string()
+                })?;
+                p.skip_ws();
+                if p.peek() != Some('(') {
+                    return Err(format!(
+                        "expected '(' after '{}' in 'order by' aggregate",
+                        func
+                    ));
+                }
+                p.advance();
+                p.skip_ws();
+                let mut distinct = false;
+                if p.peek_ident() == "distinct" {
+                    p.read_ident()?;
+                    distinct = true;
+                }
+                p.skip_ws();
+                let arg = match p.peek() {
+                    Some('*') => {
+                        p.advance();
+                        "*".to_string()
+                    }
+                    Some('?') => {
+                        p.advance();
+                        format!("?{}", p.read_ident()?)
+                    }
+                    other => {
+                        return Err(format!(
+                            "expected variable or '*' in order by {}(...), got {:?}",
+                            func, other
+                        ))
+                    }
+                };
+                p.skip_ws();
+                if p.peek() != Some(')') {
+                    return Err(format!("expected ')' to close order by {}(...)", func));
+                }
+                p.advance();
+                let inner = if distinct {
+                    format!("distinct {}", arg)
+                } else {
+                    arg
+                };
+                format!("{}({})", func, inner)
+            };
             // Optional direction; default ascending.
             let desc = if p.try_keyword("desc") {
                 true
@@ -1360,6 +1420,7 @@ DSL COMMANDS (REPL):
   find ?name where ?u: User {{ name: ?name }} order by ?name limit 10 offset 20
   find count(*), avg(?age) where ?u: User {{ age: ?age }}
   find ?dept, count(?e), max(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}
+  find ?path, count(?v), count(distinct ?ip) where ?v: PageView {{ path: ?path, ip: ?ip }} order by count(?v) desc limit 20
   find ?name where ?e: Employee {{ name: ?name }} or {{ ?e: Employee {{ dept: "eng" }} }} {{ ?e: Employee {{ salary: < 85 }} }}
   find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}
   find ?n where ?u: User {{ name: ?n }} as_of 100
@@ -1386,14 +1447,18 @@ PATTERN OPERATORS (in find):
   #N                  Entity reference
 
 RESULT SHAPING (after the where clauses):
-  order by ?v [asc|desc], ...   Sort rows (vars must be in find)
+  order by ?v [asc|desc], ...   Sort rows; key is a find variable OR an
+                                aggregate label, e.g. `order by count(?v) desc`
   limit N                       Cap row count (after ordering)
   offset N                      Skip N rows (after ordering)
 
 AGGREGATES (in find):
-  count(*), count(?v), sum(?v), avg(?v), min(?v), max(?v)
+  count(*), count(?v), count(distinct ?v),
+  sum(?v), avg(?v), min(?v), max(?v)
   Plain find variables become the GROUP BY key; with none, the whole
-  result is one group.
+  result is one group. `count(distinct ?v)` counts distinct non-null values
+  (e.g. unique visitors per page: count(distinct ?ip)). Order a top-N
+  leaderboard by the aggregate itself: `... order by count(?v) desc limit 20`.
 
 DISJUNCTION / NEGATION (in where, nestable):
   or  {{ <clauses> }} {{ <clauses> }} ...   Union of bindings from each group
