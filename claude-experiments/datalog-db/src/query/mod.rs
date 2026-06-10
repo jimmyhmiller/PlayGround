@@ -594,6 +594,17 @@ pub enum AggFunc {
     Max,
 }
 
+/// A post-aggregation filter on an aggregate output column (`HAVING`).
+/// `label` matches a find element's output label (e.g. "count(?v)"); rows
+/// whose aggregated value fails `op value` are dropped. `op = None` means
+/// equality. Applied after aggregation and before ordering/paging.
+#[derive(Debug, Clone)]
+pub struct HavingPred {
+    pub label: String,
+    pub op: Option<PredOp>,
+    pub value: Value,
+}
+
 impl AggFunc {
     pub fn from_name(name: &str) -> Option<AggFunc> {
         match name {
@@ -630,6 +641,15 @@ pub enum FindElem {
         var: String,
         label: String,
     },
+    /// A time/numeric bucketing group key: `bucket(?ts, 3600000)` floors the
+    /// value of `?var` to a multiple of `width`. Acts as a GROUP BY key (like
+    /// `Var`) but on the bucketed value, so per-hour/per-N rollups work without
+    /// a precomputed column. `width` must be a positive integer.
+    Bucket {
+        var: String,
+        width: i64,
+        label: String,
+    },
 }
 
 impl FindElem {
@@ -642,6 +662,30 @@ impl FindElem {
                 return Err(format!("malformed aggregate in find: '{}'", token));
             }
             let func_name = t[..open].trim();
+            // Bucketing form: bucket(?var, width). Two args, distinct from the
+            // single-arg aggregates, so handle it before AggFunc parsing.
+            if func_name == "bucket" {
+                let inner = &t[open + 1..t.len() - 1];
+                let (var, width_s) = inner
+                    .split_once(',')
+                    .ok_or("bucket(...) requires two arguments: bucket(?var, width)")?;
+                let var = var.trim();
+                if !var.starts_with('?') {
+                    return Err(format!("bucket first argument must be a variable, got '{}'", var));
+                }
+                let width: i64 = width_s
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("bucket width must be an integer, got '{}'", width_s.trim()))?;
+                if width <= 0 {
+                    return Err("bucket width must be positive".into());
+                }
+                return Ok(FindElem::Bucket {
+                    var: var.to_string(),
+                    width,
+                    label: format!("bucket({}, {})", var, width),
+                });
+            }
             let mut func = AggFunc::from_name(func_name)
                 .ok_or_else(|| format!("unknown aggregate function '{}'", func_name))?;
             let mut arg = t[open + 1..t.len() - 1].trim();
@@ -698,6 +742,7 @@ impl FindElem {
         match self {
             FindElem::Var(v) => v,
             FindElem::Agg { label, .. } => label,
+            FindElem::Bucket { label, .. } => label,
         }
     }
 }
@@ -718,6 +763,9 @@ pub struct Query {
     pub explain: bool,
     /// Sort keys applied to the result rows (each must be a find variable).
     pub order_by: Vec<OrderKey>,
+    /// Post-aggregation filters on aggregate columns (`HAVING`). Applied after
+    /// grouping, before ordering and paging.
+    pub having: Vec<HavingPred>,
     /// Maximum number of rows to return, applied after ordering.
     pub limit: Option<usize>,
     /// Number of rows to skip, applied after ordering and before `limit`.
@@ -813,6 +861,7 @@ impl Query {
             let var = match e {
                 FindElem::Var(v) => Some(v.as_str()),
                 FindElem::Agg { var, .. } if var != "*" => Some(var.as_str()),
+                FindElem::Bucket { var, .. } => Some(var.as_str()),
                 _ => None,
             };
             if let Some(v) = var {
@@ -858,6 +907,40 @@ impl Query {
             }
         };
 
+        // having: array of {"label": "count(?v)", "op": "gt", "value": 100}.
+        // `op` is optional and defaults to equality. `label` must match one of
+        // the aggregate output labels (validated at execution time).
+        let having = match v.get("having") {
+            None => Vec::new(),
+            Some(arr) => {
+                let arr = arr.as_array().ok_or("'having' must be an array")?;
+                let mut preds = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let obj = item
+                        .as_object()
+                        .ok_or("having entry must be an object")?;
+                    let label = obj
+                        .get("label")
+                        .and_then(|x| x.as_str())
+                        .ok_or("having entry missing 'label'")?
+                        .to_string();
+                    let op = match obj.get("op").and_then(|x| x.as_str()) {
+                        None => None,
+                        Some("eq") => None,
+                        Some(k) => Some(
+                            PredOp::from_key(k)
+                                .ok_or_else(|| format!("unknown having op '{}'", k))?,
+                        ),
+                    };
+                    let value = value_from_json(
+                        obj.get("value").ok_or("having entry missing 'value'")?,
+                    );
+                    preds.push(HavingPred { label, op, value });
+                }
+                preds
+            }
+        };
+
         let limit = v
             .get("limit")
             .map(|l| {
@@ -883,6 +966,7 @@ impl Query {
             as_of_time,
             explain,
             order_by,
+            having,
             limit,
             offset,
         })

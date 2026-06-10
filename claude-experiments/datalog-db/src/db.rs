@@ -381,6 +381,22 @@ fn encode_group_key(vals: &[Value]) -> String {
     s
 }
 
+/// Floor a numeric value to a multiple of `width` for bucketed grouping.
+/// `None` width returns the value unchanged. Non-numeric values and Null pass
+/// through untouched (they form their own degenerate bucket). Uses Euclidean
+/// floor so negative values bucket downward correctly.
+fn bucket_value(v: &Value, width: Option<i64>) -> Value {
+    let Some(w) = width else { return v.clone() };
+    match v {
+        Value::I64(n) => Value::I64(n.div_euclid(w) * w),
+        Value::F64(f) => {
+            let b = (f / w as f64).floor() * w as f64;
+            Value::F64(b)
+        }
+        other => other.clone(),
+    }
+}
+
 /// Collapse result rows into aggregate groups when `find` contains any
 /// aggregate. Plain find variables form the grouping key (implicit GROUP BY);
 /// with no plain variables, the whole result is one group. Output columns are
@@ -407,12 +423,18 @@ fn apply_aggregation(qr: &mut QueryResult, query: &Query) -> Result<()> {
         Agg,
     }
     let mut specs: Vec<OutSpec> = Vec::with_capacity(query.find_elems.len());
-    let mut group_cols: Vec<usize> = Vec::new();
+    // Each grouping column: its source column index and an optional bucket
+    // width (Some(w) floors the value to a multiple of w; None = raw value).
+    let mut group_cols: Vec<(usize, Option<i64>)> = Vec::new();
     let mut agg_list: Vec<(AggFunc, Option<usize>)> = Vec::new();
     for e in &query.find_elems {
         match e {
             FindElem::Var(v) => {
-                group_cols.push(col_of(v)?);
+                group_cols.push((col_of(v)?, None));
+                specs.push(OutSpec::Group);
+            }
+            FindElem::Bucket { var, width, .. } => {
+                group_cols.push((col_of(var)?, Some(*width)));
                 specs.push(OutSpec::Group);
             }
             FindElem::Agg { func, var, .. } => {
@@ -427,7 +449,10 @@ fn apply_aggregation(qr: &mut QueryResult, query: &Query) -> Result<()> {
     let mut group_index: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
     for row in &qr.rows {
-        let key_vals: Vec<Value> = group_cols.iter().map(|&c| row[c].clone()).collect();
+        let key_vals: Vec<Value> = group_cols
+            .iter()
+            .map(|&(c, width)| bucket_value(&row[c], width))
+            .collect();
         let key = encode_group_key(&key_vals);
         let gi = *group_index.entry(key).or_insert_with(|| {
             let states = agg_list.iter().map(|(f, _)| AggState::new(*f)).collect();
@@ -467,10 +492,42 @@ fn apply_aggregation(qr: &mut QueryResult, query: &Query) -> Result<()> {
     Ok(())
 }
 
-/// Post-execution shaping: aggregate, then order, then paginate.
+/// Post-execution shaping: aggregate, filter (having), order, then paginate.
 fn post_process(qr: &mut QueryResult, query: &Query) -> Result<()> {
     apply_aggregation(qr, query)?;
+    apply_having(qr, query)?;
     apply_ordering_and_paging(qr, query)?;
+    Ok(())
+}
+
+/// Apply `HAVING` predicates to aggregated rows. Each predicate names an output
+/// column (an aggregate label) and drops rows whose value fails the comparison.
+/// `op = None` means equality. Runs after aggregation, before ordering.
+fn apply_having(qr: &mut QueryResult, query: &Query) -> Result<()> {
+    if query.having.is_empty() {
+        return Ok(());
+    }
+    // Resolve each predicate's label to an output column up front.
+    let mut preds: Vec<(usize, Option<crate::query::PredOp>, Value)> =
+        Vec::with_capacity(query.having.len());
+    for h in &query.having {
+        let col = qr.columns.iter().position(|c| c == &h.label).ok_or_else(|| {
+            DbError::Query(format!(
+                "having label '{}' must be one of the output columns {:?}",
+                h.label, qr.columns
+            ))
+        })?;
+        preds.push((col, h.op.clone(), h.value.clone()));
+    }
+    qr.rows.retain(|row| {
+        preds.iter().all(|(col, op, target)| {
+            let actual = &row[*col];
+            match op {
+                Some(p) => p.evaluate(actual, target),
+                None => crate::query::compare_values(actual, target) == std::cmp::Ordering::Equal,
+            }
+        })
+    });
     Ok(())
 }
 

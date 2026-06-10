@@ -801,7 +801,28 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
             }
             // Aggregate form: ident '(' (?var | '*') ')'
             p.skip_ws();
-            if p.peek() == Some('(') {
+            if p.peek() == Some('(') && ident == "bucket" {
+                // bucket(?var, width): two args, distinct from the aggregates.
+                p.advance();
+                p.skip_ws();
+                if p.peek() != Some('?') {
+                    return Err("expected '?var' as first argument of bucket(...)".into());
+                }
+                p.advance();
+                let var = format!("?{}", p.read_ident()?);
+                p.skip_ws();
+                if p.peek() != Some(',') {
+                    return Err("expected ',' after variable in bucket(?var, width)".into());
+                }
+                p.advance();
+                let width = p.read_number()?;
+                p.skip_ws();
+                if p.peek() != Some(')') {
+                    return Err("expected ')' to close bucket(...)".into());
+                }
+                p.advance();
+                find_vars.push(serde_json::Value::String(format!("bucket({}, {})", var, width)));
+            } else if p.peek() == Some('(') {
                 p.advance();
                 p.skip_ws();
                 // Optional `distinct` modifier: count(distinct ?x).
@@ -908,55 +929,15 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
             // (`count(?v)`, `count(distinct ?v)`, `avg(?x)`, `count(*)`). The
             // aggregate form must exactly match a find aggregate's output
             // label, so the executor can resolve it to that column.
+            // An order key is either a plain `?var` or an aggregate/bucket
+            // expression (`count(?v)`, `count(distinct ?v)`, `bucket(?ts, N)`,
+            // ...). The expression form must exactly match a find element's
+            // output label so the executor can resolve it to that column.
             let var = if p.peek() == Some('?') {
                 p.advance();
                 format!("?{}", p.read_ident()?)
             } else {
-                let func = p.read_ident().map_err(|_| {
-                    "expected '?var' or an aggregate in 'order by'".to_string()
-                })?;
-                p.skip_ws();
-                if p.peek() != Some('(') {
-                    return Err(format!(
-                        "expected '(' after '{}' in 'order by' aggregate",
-                        func
-                    ));
-                }
-                p.advance();
-                p.skip_ws();
-                let mut distinct = false;
-                if p.peek_ident() == "distinct" {
-                    p.read_ident()?;
-                    distinct = true;
-                }
-                p.skip_ws();
-                let arg = match p.peek() {
-                    Some('*') => {
-                        p.advance();
-                        "*".to_string()
-                    }
-                    Some('?') => {
-                        p.advance();
-                        format!("?{}", p.read_ident()?)
-                    }
-                    other => {
-                        return Err(format!(
-                            "expected variable or '*' in order by {}(...), got {:?}",
-                            func, other
-                        ))
-                    }
-                };
-                p.skip_ws();
-                if p.peek() != Some(')') {
-                    return Err(format!("expected ')' to close order by {}(...)", func));
-                }
-                p.advance();
-                let inner = if distinct {
-                    format!("distinct {}", arg)
-                } else {
-                    arg
-                };
-                format!("{}({})", func, inner)
+                parse_aggregate_label(p)?
             };
             // Optional direction; default ascending.
             let desc = if p.try_keyword("desc") {
@@ -975,6 +956,33 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
         }
         query["order_by"] = serde_json::Value::Array(keys);
     }
+    // Optional: having <agg-label> <op> <value> [, ...]
+    // e.g. `having count(?v) > 100, avg(?sal) >= 50000`. Filters aggregated
+    // rows by an aggregate output column.
+    if p.try_keyword("having") {
+        let mut preds = Vec::new();
+        loop {
+            let label = parse_aggregate_label(p)?;
+            // Comparison op: reuse the word/symbol cmp ops, plus bare `=`.
+            p.skip_ws();
+            let op = if p.peek() == Some('=') {
+                p.advance();
+                "eq"
+            } else {
+                p.try_read_cmp_op()
+                    .ok_or("expected a comparison operator after having label")?
+            };
+            let value = p.read_value()?;
+            preds.push(serde_json::json!({"label": label, "op": op, "value": value}));
+            p.skip_ws();
+            if p.peek() == Some(',') {
+                p.advance();
+                continue;
+            }
+            break;
+        }
+        query["having"] = serde_json::Value::Array(preds);
+    }
     if p.try_keyword("limit") {
         query["limit"] = p.read_number()?;
     }
@@ -983,6 +991,68 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
     }
 
     Ok(query)
+}
+
+/// Parse an aggregate label expression — `count(?v)`, `count(distinct ?v)`,
+/// `count(*)`, `sum(?v)`, etc. — into the canonical label string the server
+/// uses as the output column name. Used by `having` (and shareable with
+/// `order by`). The label must match `FindElem::label()` exactly.
+fn parse_aggregate_label(p: &mut Parser) -> Result<String, String> {
+    let func = p.read_ident()?;
+    p.skip_ws();
+    if p.peek() != Some('(') {
+        return Err(format!("expected '(' after '{}' in aggregate label", func));
+    }
+    p.advance();
+    p.skip_ws();
+    // bucket(?var, width): a two-arg grouping label, not an aggregate.
+    if func == "bucket" {
+        if p.peek() != Some('?') {
+            return Err("expected '?var' as first argument of bucket(...)".into());
+        }
+        p.advance();
+        let var = format!("?{}", p.read_ident()?);
+        p.skip_ws();
+        if p.peek() != Some(',') {
+            return Err("expected ',' in bucket(?var, width)".into());
+        }
+        p.advance();
+        let width = p.read_number()?;
+        p.skip_ws();
+        if p.peek() != Some(')') {
+            return Err("expected ')' to close bucket(...)".into());
+        }
+        p.advance();
+        return Ok(format!("bucket({}, {})", var, width));
+    }
+    let mut distinct = false;
+    if p.peek_ident() == "distinct" {
+        p.read_ident()?;
+        distinct = true;
+    }
+    p.skip_ws();
+    let arg = match p.peek() {
+        Some('*') => {
+            p.advance();
+            "*".to_string()
+        }
+        Some('?') => {
+            p.advance();
+            format!("?{}", p.read_ident()?)
+        }
+        other => return Err(format!("expected variable or '*' in {}(...), got {:?}", func, other)),
+    };
+    p.skip_ws();
+    if p.peek() != Some(')') {
+        return Err(format!("expected ')' to close {}(...)", func));
+    }
+    p.advance();
+    let inner = if distinct {
+        format!("distinct {}", arg)
+    } else {
+        arg
+    };
+    Ok(format!("{}({})", func, inner))
 }
 
 /// Parse one clause item: a pattern (`?v: Type { ... }`), an `or { } { } ...`,
@@ -1421,6 +1491,8 @@ DSL COMMANDS (REPL):
   find count(*), avg(?age) where ?u: User {{ age: ?age }}
   find ?dept, count(?e), max(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}
   find ?path, count(?v), count(distinct ?ip) where ?v: PageView {{ path: ?path, ip: ?ip }} order by count(?v) desc limit 20
+  find ?path, count(?v) where ?v: PageView {{ path: ?path }} having count(?v) > 100 order by count(?v) desc
+  find bucket(?ts, 86400000), count(?v), count(distinct ?ip) where ?v: PageView {{ ts: ?ts, ip: ?ip }} order by bucket(?ts, 86400000) desc
   find ?name where ?e: Employee {{ name: ?name }} or {{ ?e: Employee {{ dept: "eng" }} }} {{ ?e: Employee {{ salary: < 85 }} }}
   find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}
   find ?n where ?u: User {{ name: ?n }} as_of 100
@@ -1447,8 +1519,12 @@ PATTERN OPERATORS (in find):
   #N                  Entity reference
 
 RESULT SHAPING (after the where clauses):
-  order by ?v [asc|desc], ...   Sort rows; key is a find variable OR an
-                                aggregate label, e.g. `order by count(?v) desc`
+  order by KEY [asc|desc], ...  Sort rows; KEY is a find variable, an aggregate
+                                label, or a bucket label, e.g.
+                                `order by count(?v) desc`
+  having AGG OP VALUE [, ...]   Filter aggregated rows by an aggregate column,
+                                e.g. `having count(?v) > 100`. OP is
+                                > >= < <= = != . Applied after grouping.
   limit N                       Cap row count (after ordering)
   offset N                      Skip N rows (after ordering)
 
@@ -1459,6 +1535,16 @@ AGGREGATES (in find):
   result is one group. `count(distinct ?v)` counts distinct non-null values
   (e.g. unique visitors per page: count(distinct ?ip)). Order a top-N
   leaderboard by the aggregate itself: `... order by count(?v) desc limit 20`.
+
+GROUPING / TIME BUCKETS (in find):
+  bucket(?v, WIDTH)             Group key floored to a multiple of WIDTH (an
+                                integer). For epoch-ms timestamps: per-hour =
+                                bucket(?ts, 3600000), per-day = bucket(?ts,
+                                86400000). Combine with count/count(distinct)
+                                for traffic-over-time:
+    find bucket(?ts, 86400000), count(?v), count(distinct ?ip)
+      where ?v: PageView {{ ts: ?ts, ip: ?ip }}
+      order by bucket(?ts, 86400000) desc
 
 DISJUNCTION / NEGATION (in where, nestable):
   or  {{ <clauses> }} {{ <clauses> }} ...   Union of bindings from each group

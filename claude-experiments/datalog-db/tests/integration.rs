@@ -4885,6 +4885,67 @@ fn test_order_by_aggregate_column() {
 }
 
 #[test]
+fn test_having_filters_groups() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // eng has 2, sales has 3. having count(?e) > 2 keeps only sales.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?dept", "count(?e)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "?dept"}],
+            "having": [{"label": "count(?e)", "op": "gt", "value": 2}]
+        }),
+    );
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::String("sales".into()));
+    assert_eq!(r.rows[0][1], Value::I64(3));
+}
+
+#[test]
+fn test_having_unknown_label_errors() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    let q = Query::from_json(&serde_json::json!({
+        "find": ["?dept", "count(?e)"],
+        "where": [{"bind": "?e", "type": "Employee", "dept": "?dept"}],
+        "having": [{"label": "count(?nope)", "op": "gt", "value": 0}]
+    }))
+    .unwrap();
+    let err = db.query(&q).unwrap_err().to_string();
+    assert!(err.contains("must be one of the output columns"), "got: {err}");
+}
+
+#[test]
+fn test_bucket_group_key() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    // salaries 80,90,95,100,120 -> bucket by 50 -> {50:[80,90,95],100:[100,120]}
+    seed_employees(&db);
+
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["bucket(?sal, 50)", "count(?e)"],
+            "where": [{"bind": "?e", "type": "Employee", "salary": "?sal"}],
+            "order_by": ["bucket(?sal, 50)"]
+        }),
+    );
+    assert_eq!(r.columns, vec!["bucket(?sal, 50)", "count(?e)"]);
+    assert_eq!(r.rows.len(), 2);
+    // bucket 50: 80,90,95 -> 3 employees
+    assert_eq!(r.rows[0][0], Value::I64(50));
+    assert_eq!(r.rows[0][1], Value::I64(3));
+    // bucket 100: 100,120 -> 2 employees
+    assert_eq!(r.rows[1][0], Value::I64(100));
+    assert_eq!(r.rows[1][1], Value::I64(2));
+}
+
+#[test]
 fn test_aggregate_count_over_empty_is_zero() {
     let (db, _dir) = test_db();
     db.define_type(employee_type()).unwrap();
