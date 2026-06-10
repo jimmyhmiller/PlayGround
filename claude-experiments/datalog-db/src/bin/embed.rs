@@ -34,6 +34,8 @@ struct Args {
     k: usize,
     /// Field to print for each search hit (defaults to the text field).
     show_field: Option<String>,
+    /// Just print the query embedding vector as JSON and exit.
+    emit_vec: bool,
     /// Hybrid mode: fuse BM25 over the (fulltext) text field with vector kNN
     /// over the vector field, via RRF. Requires the text field to be fulltext.
     hybrid: bool,
@@ -54,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
         k: 10,
         show_field: None,
         hybrid: false,
+        emit_vec: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -72,6 +75,7 @@ fn parse_args() -> Result<Args, String> {
             "--k" => a.k = next()?.parse().map_err(|_| "bad --k".to_string())?,
             "--show" => a.show_field = Some(next()?),
             "--hybrid" => a.hybrid = true,
+            "--emit-vec" => a.emit_vec = true,
             "-h" | "--help" => return Err(HELP.to_string()),
             other => return Err(format!("unknown flag: {other}\n{HELP}")),
         }
@@ -106,6 +110,17 @@ fn run() -> anyhow::Result<()> {
 
     let mut client = Client::connect(&args.host)
         .map_err(|e| anyhow::anyhow!("connect to {}: {e}", args.host))?;
+
+    // --- Emit-vec mode: just print the query embedding as JSON and exit.
+    // Lets external tools (e.g. a book-rollup script) run their own joins. ---
+    if args.emit_vec {
+        if let Some(qtext) = &args.query {
+            let qvec = embedder.embed(qtext, Pooling::Mean)?;
+            println!("{}", serde_json::to_string(&qvec)?);
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!("--emit-vec requires --query"));
+    }
 
     // --- Query mode: embed the query text, run a (vector / hybrid) search. ---
     if let Some(qtext) = &args.query {

@@ -1,0 +1,20 @@
+# Example gatekeeper config. Copy to gatekeeper.toml and edit.
+# The shared token is NOT here — set $GATEKEEPER_TOKEN or use --token-file.
+
+bind = "0.0.0.0:443"
+# For HTTPS, point these at PEM files (e.g. from certbot). Omit both for plain
+# HTTP (only behind a TLS terminator or on localhost).
+# tls_cert = "/etc/letsencrypt/live/example.com/fullchain.pem"
+# tls_key  = "/etc/letsencrypt/live/example.com/privkey.pem"
+unmatched_status = 404
+
+# Public: served without a token.
+[[route]]
+path = "/blog"
+static = "./site"
+public = true
+
+# Private (default): token required. Reverse-proxy to a local service.
+[[route]]
+path = "/metrics"
+proxy = "127.0.0.1:5557"
