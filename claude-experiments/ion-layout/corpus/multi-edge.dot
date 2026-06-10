@@ -1,0 +1,8 @@
+digraph MultiEdge {
+  node [shape=box];
+  a -> b [label="first"];
+  a -> b [label="second"];
+  a -> b;
+  b -> c;
+  a -> c;
+}

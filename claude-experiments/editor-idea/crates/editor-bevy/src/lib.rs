@@ -41,6 +41,7 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod highlight;
+pub mod wrap;
 use highlight::{color_for, Highlighter, SyntaxPalette};
 
 pub const FONT_SIZE: f32 = 16.0;
@@ -59,8 +60,18 @@ pub struct EditorFilePath(pub PathBuf);
 #[derive(Component)]
 pub struct EditorStateComp(pub EditorState);
 
+/// Pool of rendered text rows, keyed by **global visual row** (not
+/// logical line — with soft-wrap one logical line spans several rows).
 #[derive(Component, Default)]
 pub struct LineRows(pub HashMap<usize, Entity>);
+
+/// Cached soft-wrap layout for an editor, rebuilt by
+/// [`compute_wrap_layout`] whenever the doc or pane width changes. Every
+/// geometry system (render, caret, selection, click, scroll, vertical
+/// motion) reads this one map so they always agree on where wrapped rows
+/// fall.
+#[derive(Component, Default)]
+pub struct EditorWrapLayout(pub wrap::WrapLayout);
 
 #[derive(Component, Copy, Clone, Default)]
 pub struct EditorScroll {
@@ -115,6 +126,7 @@ impl Plugin for EditorEmbedPlugin {
                     handle_text_select_drag,
                     handle_scroll,
                     handle_input,
+                    compute_wrap_layout,
                     update_highlight,
                     sync_text,
                     sync_content_root,
@@ -180,7 +192,12 @@ pub struct HeadlessEditorPlugin;
 
 impl Plugin for HeadlessEditorPlugin {
     fn build(&self, app: &mut App) {
+        // `handle_input` reads these as required resources; insert them so
+        // a bare headless App (tests) is self-sufficient. `KeyboardOwner`
+        // defaults to `Unmanaged`, which allows the focused pane to type.
         app.init_resource::<FocusedPane>()
+            .init_resource::<pane_bevy::KeyboardOwner>()
+            .init_resource::<pane_bevy::PaneZoom>()
             .add_systems(Update, handle_input);
     }
 }
@@ -410,17 +427,63 @@ fn max_cols(content_width: f32, cell_width: f32) -> usize {
     ((content_width / cell_width).floor() as usize).max(1)
 }
 
-fn byte_offset_for_col(s: &str, col: usize) -> usize {
-    s.char_indices().nth(col).map(|(b, _)| b).unwrap_or(s.len())
+/// Wrap width (in monospace columns) for an editor pane: how many cells
+/// fit across the content area. The single source of truth that both the
+/// layout builder and every consumer compute from, so they never drift.
+fn editor_wrap_cols(rect: &PaneRect, cell_width: f32, zoom: f32) -> usize {
+    let content = content_area_size_zoomed(rect, zoom);
+    max_cols(content.x, cell_width)
 }
 
-fn slice_visible_cols(line_text: &str, start_col: usize, max_cols: usize) -> (usize, &str) {
-    if max_cols == 0 {
-        return (line_text.len(), "");
+/// Rebuild each editor's [`EditorWrapLayout`] when its doc or width
+/// changes. Runs after input edits and before the render/caret/selection
+/// systems, so they all see a layout consistent with the current frame.
+/// Click/drag/scroll handlers (earlier in the chain) read the prior
+/// frame's layout — which is exactly what the user clicked on.
+fn compute_wrap_layout(
+    metrics: Option<Res<EditorMetrics>>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
+    mut commands: Commands,
+    mut editors: Query<
+        (
+            Entity,
+            Ref<EditorStateComp>,
+            Ref<PaneRect>,
+            Option<&mut EditorWrapLayout>,
+            &PaneKindMarker,
+        ),
+        With<PaneTag>,
+    >,
+) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    let zoom = pane_zoom.0;
+    for (entity, state, rect, layout, kind) in &mut editors {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        let cols = editor_wrap_cols(&rect, metrics.cell_width, zoom);
+        let stale = match &layout {
+            Some(l) => l.0.cols != cols || state.is_changed() || rect.is_changed(),
+            None => true,
+        };
+        if !stale {
+            continue;
+        }
+        let effective = effective_line_count(&state.0.doc);
+        let built = wrap::WrapLayout::build(&state.0.doc, cols, effective);
+        match layout {
+            Some(mut l) => l.0 = built,
+            None => {
+                commands.entity(entity).insert(EditorWrapLayout(built));
+            }
+        }
     }
-    let start_byte = byte_offset_for_col(line_text, start_col);
-    let end_byte = byte_offset_for_col(line_text, start_col + max_cols);
-    (start_byte, &line_text[start_byte..end_byte])
+}
+
+fn byte_offset_for_col(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map(|(b, _)| b).unwrap_or(s.len())
 }
 
 // ---------- Systems ----------
@@ -440,32 +503,26 @@ fn ensure_caret_visible(
     state: &EditorState,
     rect: &PaneRect,
     scroll: &mut EditorScroll,
-    cell_width: f32,
+    layout: &wrap::WrapLayout,
     zoom: f32,
 ) {
     let head = state.selection.primary_range().head;
     let (line, col) = char_to_line_col(&state.doc, head);
+    let (row, _x_col) = layout.pos_to_visual(line, col);
     let content = content_area_size_zoomed(rect, zoom);
-    if content.x <= 0.0 || content.y <= 0.0 {
+    if content.y <= 0.0 {
         return;
     }
 
-    let line_top = line as f32 * LINE_HEIGHT;
-    let line_bottom = line_top + LINE_HEIGHT;
-    if line_top < scroll.y {
-        scroll.y = line_top;
-    } else if line_bottom > scroll.y + content.y {
-        scroll.y = line_bottom - content.y;
+    // Soft-wrap means no horizontal scroll: every row fits the width.
+    let row_top = row as f32 * LINE_HEIGHT;
+    let row_bottom = row_top + LINE_HEIGHT;
+    if row_top < scroll.y {
+        scroll.y = row_top;
+    } else if row_bottom > scroll.y + content.y {
+        scroll.y = row_bottom - content.y;
     }
-
-    let cell_left = col as f32 * cell_width;
-    let cell_right = cell_left + cell_width;
-    if cell_left < scroll.x {
-        scroll.x = cell_left;
-    } else if cell_right > scroll.x + content.x {
-        scroll.x = cell_right - content.x;
-    }
-    scroll.x = scroll.x.max(0.0);
+    scroll.x = 0.0;
     scroll.y = scroll.y.max(0.0);
 }
 
@@ -486,6 +543,7 @@ fn sync_text(
             &mut LineRows,
             &PaneKindMarker,
             Option<&pane_bevy::PaneProject>,
+            Option<&EditorWrapLayout>,
         ),
         With<PaneTag>,
     >,
@@ -494,10 +552,13 @@ fn sync_text(
     mut commands: Commands,
 ) {
     let zoom = pane_zoom.0;
-    for (entity, state, rect, chrome, scroll, hl, mut pool, kind, proj) in &mut editors {
+    for (entity, state, rect, chrome, scroll, hl, mut pool, kind, proj, layout) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
         }
+        let Some(layout) = layout else {
+            continue; // layout not built yet (first frame)
+        };
         let _prof = pane_bevy::prof::pane_span(entity.to_bits(), "editor");
         // This editor's project palette if cached, else the global one.
         let pal = proj
@@ -508,6 +569,7 @@ fn sync_text(
             rect,
             chrome,
             *scroll,
+            &layout.0,
             &hl.0,
             pal,
             &mut pool,
@@ -521,11 +583,13 @@ fn sync_text(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_editor_lines(
     state: &EditorState,
     rect: &PaneRect,
     chrome: &PaneChrome,
     scroll: EditorScroll,
+    layout: &wrap::WrapLayout,
     hl: &Highlighter,
     palette: &SyntaxPalette,
     pool: &mut LineRows,
@@ -536,66 +600,68 @@ fn sync_editor_lines(
     commands: &mut Commands,
     zoom: f32,
 ) {
+    let _ = metrics; // cell width is baked into the layout's column model
     let rope = &state.doc;
-    let effective = effective_line_count(rope);
+    let total_rows = layout.total_rows();
     let content_size = content_area_size_zoomed(rect, zoom);
-    let (first, last) = viewport_line_range(content_size.y, scroll.y, effective);
-    let cols = max_cols(content_size.x, metrics.cell_width);
-    let scroll_cols = (scroll.x / metrics.cell_width).max(0.0) as usize;
+    // Pool entries are keyed by GLOBAL VISUAL ROW (one wrapped row each).
+    let (first, last) = viewport_row_range(content_size.y, scroll.y, total_rows);
 
-    pool.0.retain(|&idx, entity| {
-        let keep = idx < effective && idx >= first && idx <= last;
+    pool.0.retain(|&row, entity| {
+        let keep = row < total_rows && row >= first && row <= last;
         if !keep {
             commands.entity(*entity).despawn();
         }
         keep
     });
 
-    for idx in first..=last.min(effective.saturating_sub(1)) {
-        let full = line_text(rope, idx);
-        let (byte_offset, slice) = slice_visible_cols(&full, scroll_cols, cols);
-        let truncated = slice.to_string();
-        if truncated.is_empty() {
-            if let Some(entity) = pool.0.remove(&idx) {
+    if total_rows == 0 {
+        return;
+    }
+
+    for row in first..=last.min(total_rows.saturating_sub(1)) {
+        let Some((line, seg_start, seg_end)) = layout.segment_at_row(row) else {
+            continue;
+        };
+        let full = line_text(rope, line);
+        let start_byte = byte_offset_for_col(&full, seg_start);
+        let end_byte = byte_offset_for_col(&full, seg_end);
+        let slice = full[start_byte..end_byte].to_string();
+        if slice.is_empty() {
+            // Empty visual row (e.g. a blank line) — no glyphs to draw,
+            // but the row still occupies vertical space in the layout.
+            if let Some(entity) = pool.0.remove(&row) {
                 commands.entity(entity).despawn();
             }
             continue;
         }
-        match pool.0.get(&idx).copied() {
+        match pool.0.get(&row).copied() {
             Some(entity) => {
                 let needs_rebuild = line_q
                     .get(entity)
                     .map(|lr| {
-                        lr.text != truncated
-                            || lr.rev != hl.rev
-                            || lr.palette_rev != palette.rev
+                        lr.text != slice || lr.rev != hl.rev || lr.palette_rev != palette.rev
                     })
                     .unwrap_or(true);
                 if needs_rebuild {
                     rebuild_line_spans(
-                        commands,
-                        entity,
-                        children_q,
-                        hl,
-                        palette,
-                        rope,
-                        idx,
-                        byte_offset,
-                        &truncated,
+                        commands, entity, children_q, hl, palette, rope, line, start_byte, &slice,
                         font,
                     );
                     if let Ok(mut lr) = line_q.get_mut(entity) {
-                        lr.text = truncated;
+                        lr.text = slice;
                         lr.rev = hl.rev;
                         lr.palette_rev = palette.rev;
                     } else {
                         commands.entity(entity).insert(LineRender {
-                            text: truncated,
+                            text: slice,
                             rev: hl.rev,
                             palette_rev: palette.rev,
                         });
                     }
                 }
+                // The pool key is the visual row, so the entity already
+                // sits at `-row * LINE_HEIGHT`; no transform update needed.
             }
             None => {
                 let entity = commands
@@ -610,27 +676,18 @@ fn sync_editor_lines(
                         LineHeight::Px(LINE_HEIGHT),
                         TextColor(palette.color_for(highlight::HighlightKind::Default)),
                         Anchor::TOP_LEFT,
-                        Transform::from_xyz(0.0, -(idx as f32) * LINE_HEIGHT, 0.0),
+                        Transform::from_xyz(0.0, -(row as f32) * LINE_HEIGHT, 0.0),
                         LineRender {
-                            text: truncated.clone(),
+                            text: slice.clone(),
                             rev: hl.rev,
                             palette_rev: palette.rev,
                         },
                     ))
                     .id();
                 rebuild_line_spans(
-                    commands,
-                    entity,
-                    children_q,
-                    hl,
-                    palette,
-                    rope,
-                    idx,
-                    byte_offset,
-                    &truncated,
-                    font,
+                    commands, entity, children_q, hl, palette, rope, line, start_byte, &slice, font,
                 );
-                pool.0.insert(idx, entity);
+                pool.0.insert(row, entity);
             }
         }
     }
@@ -679,19 +736,17 @@ fn effective_line_count(rope: &ropey::Rope) -> usize {
     }
 }
 
-fn viewport_line_range(
-    content_height: f32,
-    scroll: f32,
-    effective_lines: usize,
-) -> (usize, usize) {
-    if content_height <= 0.0 || effective_lines == 0 {
+/// Visible global-visual-row range `[first, last]` for a given scroll
+/// and content height. Rows are `LINE_HEIGHT` tall.
+fn viewport_row_range(content_height: f32, scroll: f32, total_rows: usize) -> (usize, usize) {
+    if content_height <= 0.0 || total_rows == 0 {
         return (0, 0);
     }
     let top = scroll.max(0.0);
     let bottom = (scroll + content_height).max(0.0);
-    let first = (top / LINE_HEIGHT).floor().max(0.0) as usize;
+    let first = ((top / LINE_HEIGHT).floor().max(0.0) as usize).min(total_rows - 1);
     let last_excl = (bottom / LINE_HEIGHT).ceil().max(0.0) as usize;
-    let last = last_excl.saturating_sub(1).min(effective_lines - 1);
+    let last = last_excl.saturating_sub(1).min(total_rows - 1);
     (first, last)
 }
 
@@ -717,7 +772,13 @@ fn sync_caret(
     theme: Res<style_bevy::Theme>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
     editors: Query<
-        (&EditorStateComp, &PaneRect, &EditorScroll, &PaneKindMarker),
+        (
+            &EditorStateComp,
+            &PaneRect,
+            &EditorScroll,
+            &PaneKindMarker,
+            Option<&EditorWrapLayout>,
+        ),
         With<PaneTag>,
     >,
     carets: Query<(Entity, &EditorCaret)>,
@@ -729,23 +790,26 @@ fn sync_caret(
     let theme_changed = theme.is_changed();
     let zoom = pane_zoom.0;
     for (caret_entity, parent) in &carets {
-        let Ok((state, rect, scroll, kind)) = editors.get(parent.0) else {
+        let Ok((state, rect, scroll, kind, layout)) = editors.get(parent.0) else {
             continue;
         };
         if kind.0 != PANE_KIND {
             continue;
         }
+        let Some(layout) = layout else { continue };
         let head = state.0.selection.primary_range().head;
         let (line, col) = char_to_line_col(&state.0.doc, head);
-        let caret_x = caret_x_in_line(col, metrics.cell_width);
+        let (row, x_col) = layout.0.pos_to_visual(line, col);
         let content = content_area_size_zoomed(rect, zoom);
 
-        let x = caret_x - scroll.x;
-        let y = line as f32 * LINE_HEIGHT;
+        // No horizontal scroll under wrap: the caret's x is its column
+        // within the wrapped row.
+        let x = x_col as f32 * metrics.cell_width;
+        let y = row as f32 * LINE_HEIGHT;
         let visible = x >= 0.0
             && x <= content.x
-            && (line as f32 + 1.0) * LINE_HEIGHT > scroll.y
-            && (line as f32) * LINE_HEIGHT < scroll.y + content.y;
+            && (row as f32 + 1.0) * LINE_HEIGHT > scroll.y
+            && (row as f32) * LINE_HEIGHT < scroll.y + content.y;
 
         if let Ok(mut t) = t_q.get_mut(caret_entity) {
             t.translation.x = x;
@@ -789,6 +853,7 @@ fn sync_selection(
             &EditorScroll,
             &PaneChrome,
             &PaneKindMarker,
+            Option<&EditorWrapLayout>,
         ),
         With<PaneTag>,
     >,
@@ -800,10 +865,11 @@ fn sync_selection(
         commands.entity(entity).despawn();
     }
 
-    for (editor_entity, state, rect, scroll, chrome, kind) in &editors {
+    for (editor_entity, state, rect, _scroll, chrome, kind, layout) in &editors {
         if kind.0 != PANE_KIND {
             continue;
         }
+        let Some(layout) = layout else { continue };
         let range = state.0.selection.primary_range();
         let (from, to) = (range.from(), range.to());
         if from == to {
@@ -817,32 +883,55 @@ fn sync_selection(
         let rope = &state.0.doc;
         for line in start_line..=end_line {
             let line_chars = line_char_len(rope, line);
+            // Selected column range on this logical line.
             let lo = if line == start_line { start_col } else { 0 };
             let hi = if line == end_line { end_col } else { line_chars };
+            // A line strictly before the selection end also selects its
+            // trailing newline — show a small nub past the line's end.
             let ends_mid_doc = line < end_line;
 
-            let (x0_raw, x1_raw) = line_selection_span(lo, hi, metrics.cell_width);
-            let extra = if ends_mid_doc { LINE_HEIGHT * 0.3 } else { 0.0 };
-            let x0 = (x0_raw - scroll.x).max(0.0);
-            let x1 = (x1_raw + extra - scroll.x).min(content.x);
-            if x1 <= x0 {
+            let Some(segs) = layout.0.line_segs.get(line) else {
                 continue;
+            };
+            let base_row = layout.0.rows_before[line];
+            for (seg_idx, &(s, e)) in segs.iter().enumerate() {
+                // Intersect [lo, hi] with this segment's [s, e].
+                let sel_lo = lo.max(s);
+                let sel_hi = hi.min(e);
+                if sel_hi < sel_lo {
+                    continue;
+                }
+                let is_last_seg = seg_idx + 1 == segs.len();
+                // Empty intersection only renders when it's the newline
+                // nub at the line's true end (last segment).
+                if sel_hi == sel_lo && !(ends_mid_doc && is_last_seg && sel_hi == e) {
+                    continue;
+                }
+                let x0 = (sel_lo - s) as f32 * metrics.cell_width;
+                let mut x1 = (sel_hi - s) as f32 * metrics.cell_width;
+                if ends_mid_doc && is_last_seg && hi <= e {
+                    x1 += LINE_HEIGHT * 0.3;
+                }
+                let x0 = x0.max(0.0);
+                let x1 = x1.min(content.x);
+                if x1 <= x0 {
+                    continue;
+                }
+                let y_top = (base_row + seg_idx) as f32 * LINE_HEIGHT;
+                commands.spawn((
+                    SelRect {
+                        editor: editor_entity,
+                    },
+                    ChildOf(chrome.content_root),
+                    Sprite {
+                        color: Color::LinearRgba(theme.color(style_bevy::tokens::SELECTION)),
+                        custom_size: Some(Vec2::new((x1 - x0).max(1.0), LINE_HEIGHT)),
+                        ..default()
+                    },
+                    Anchor::TOP_LEFT,
+                    Transform::from_xyz(x0, -y_top, 0.5),
+                ));
             }
-
-            let y_top = line as f32 * LINE_HEIGHT;
-            commands.spawn((
-                SelRect {
-                    editor: editor_entity,
-                },
-                ChildOf(chrome.content_root),
-                Sprite {
-                    color: Color::LinearRgba(theme.color(style_bevy::tokens::SELECTION)),
-                    custom_size: Some(Vec2::new((x1 - x0).max(1.0), LINE_HEIGHT)),
-                    ..default()
-                },
-                Anchor::TOP_LEFT,
-                Transform::from_xyz(x0, -y_top, 0.5),
-            ));
         }
     }
 }
@@ -878,7 +967,14 @@ fn handle_scroll(
     viewport: Res<pane_bevy::PaneViewport>,
     all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     mut editors: Query<
-        (Entity, &PaneRect, &EditorStateComp, &mut EditorScroll, &PaneKindMarker),
+        (
+            Entity,
+            &PaneRect,
+            &EditorStateComp,
+            &mut EditorScroll,
+            &PaneKindMarker,
+            Option<&EditorWrapLayout>,
+        ),
         With<PaneTag>,
     >,
 ) {
@@ -916,36 +1012,26 @@ fn handle_scroll(
     else {
         return;
     };
-    let Ok((_, _, _, _, kind)) = editors.get(editor) else {
+    let Ok((_, _, _, _, kind, _)) = editors.get(editor) else {
         return;
     };
     if kind.0 != PANE_KIND {
         return;
     }
+    let _ = dx_px; // soft-wrap: no horizontal scrolling
 
-    if let Ok((_, rect, state, mut scroll, _)) = editors.get_mut(editor) {
+    if let Ok((_, rect, state, mut scroll, _, layout)) = editors.get_mut(editor) {
         let content_size = content_area_size_zoomed(rect, zoom);
-        let doc_height = state.0.doc.len_lines() as f32 * LINE_HEIGHT;
+        // Document height is total *visual* rows (wrapped), falling back
+        // to logical lines until the layout's been built.
+        let total_rows = layout
+            .map(|l| l.0.total_rows())
+            .unwrap_or_else(|| state.0.doc.len_lines());
+        let doc_height = total_rows as f32 * LINE_HEIGHT;
         let y_max = (doc_height - content_size.y).max(0.0);
         scroll.y = (scroll.y - dy_px).clamp(0.0, y_max);
-
-        let widest_cols = widest_line_cols(&state.0.doc);
-        let doc_width = widest_cols as f32 * metrics.cell_width;
-        let x_max = (doc_width - content_size.x).max(0.0);
-        scroll.x = (scroll.x - dx_px).clamp(0.0, x_max);
+        scroll.x = 0.0;
     }
-}
-
-fn widest_line_cols(rope: &ropey::Rope) -> usize {
-    let n = rope.len_lines();
-    let mut widest = 0;
-    for i in 0..n {
-        let w = line_char_len(rope, i);
-        if w > widest {
-            widest = w;
-        }
-    }
-    widest
 }
 
 fn handle_input(
@@ -962,6 +1048,7 @@ fn handle_input(
             &mut EditorScroll,
             &PaneKindMarker,
             Option<&EditorFilePath>,
+            Option<&EditorWrapLayout>,
         ),
         With<PaneTag>,
     >,
@@ -977,7 +1064,9 @@ fn handle_input(
         keys.read().for_each(|_| {});
         return;
     }
-    let Ok((mut state_comp, rect, mut scroll, kind, file_path)) = editors.get_mut(target) else {
+    let Ok((mut state_comp, rect, mut scroll, kind, file_path, wrap_layout)) =
+        editors.get_mut(target)
+    else {
         keys.read().for_each(|_| {});
         return;
     };
@@ -1023,16 +1112,8 @@ fn handle_input(
             } else {
                 run(state, cursor_char_right)
             }),
-            KeyCode::ArrowUp => Some(if shift {
-                run(state, select_line_up)
-            } else {
-                run(state, cursor_line_up)
-            }),
-            KeyCode::ArrowDown => Some(if shift {
-                run(state, select_line_down)
-            } else {
-                run(state, cursor_line_down)
-            }),
+            KeyCode::ArrowUp => Some(visual_vertical_move(state, wrap_layout, shift, -1)),
+            KeyCode::ArrowDown => Some(visual_vertical_move(state, wrap_layout, shift, 1)),
             KeyCode::Home => Some(if shift {
                 if mod_doc {
                     run(state, select_doc_start)
@@ -1132,10 +1213,53 @@ fn handle_input(
     }
 
     if state_mutated {
-        if let Some(metrics) = metrics {
-            ensure_caret_visible(state, rect, &mut scroll, metrics.cell_width, zoom);
+        if let Some(layout) = wrap_layout {
+            ensure_caret_visible(state, rect, &mut scroll, &layout.0, zoom);
         }
     }
+    let _ = metrics;
+}
+
+/// Compute the result of an Up/Down (or shift-extended) caret move that
+/// respects soft-wrap: motion is by *visual* row, not logical line.
+/// Falls back to logical-line motion if the layout isn't built yet.
+fn visual_vertical_move(
+    state: &EditorState,
+    layout: Option<&EditorWrapLayout>,
+    shift: bool,
+    delta: i32,
+) -> Option<(EditorState, bool)> {
+    let Some(layout) = layout else {
+        let cmd = match (shift, delta < 0) {
+            (true, true) => select_line_up,
+            (true, false) => select_line_down,
+            (false, true) => cursor_line_up,
+            (false, false) => cursor_line_down,
+        };
+        return run(state, cmd);
+    };
+    let layout = &layout.0;
+    let range = state.selection.primary_range();
+    let (line, col) = char_to_line_col(&state.doc, range.head);
+    let (row, x_col) = layout.pos_to_visual(line, col);
+    let total = layout.total_rows();
+    let target_row = if delta < 0 {
+        row.saturating_sub(1)
+    } else {
+        (row + 1).min(total.saturating_sub(1))
+    };
+    if target_row == row {
+        return None; // already at the top/bottom visual row
+    }
+    let (tline, tcol) = layout.visual_to_pos(target_row, x_col);
+    let new_head = char_from_line_col(state, tline, tcol);
+    let new_sel = if shift {
+        Selection::single(Range::new(range.anchor, new_head))
+    } else {
+        Selection::cursor(new_head)
+    };
+    let tr = Transaction::new().select(new_sel);
+    Some((state.apply(&tr), true))
 }
 
 pub fn mouse_col_at_x(local_x: f32, cell_width: f32) -> usize {
@@ -1168,6 +1292,7 @@ fn handle_pane_content_press(
             &EditorScroll,
             &mut TextDragAnchor,
             &PaneKindMarker,
+            Option<&EditorWrapLayout>,
         ),
         With<PaneTag>,
     >,
@@ -1177,16 +1302,18 @@ fn handle_pane_content_press(
         return;
     };
     for ev in presses.read() {
-        let Ok((mut state_comp, scroll, mut drag, kind)) = editors.get_mut(ev.pane) else {
+        let Ok((mut state_comp, scroll, mut drag, kind, layout)) = editors.get_mut(ev.pane) else {
             continue;
         };
         if kind.0 != PANE_KIND {
             continue;
         }
+        let Some(layout) = layout else { continue };
         let state = &mut state_comp.0;
-        let local_with_scroll = ev.local_pt + Vec2::new(scroll.x, scroll.y);
-        let line = (local_with_scroll.y / LINE_HEIGHT).floor().max(0.0) as usize;
-        let col = mouse_col_at_x(local_with_scroll.x, metrics.cell_width);
+        // No horizontal scroll under wrap; only scroll.y offsets rows.
+        let row = ((ev.local_pt.y + scroll.y) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let x_col = mouse_col_at_x(ev.local_pt.x, metrics.cell_width);
+        let (line, col) = layout.0.visual_to_pos(row, x_col);
         let pos = char_from_line_col(state, line, col);
         if ev.shift {
             let anchor = state.selection.primary_range().anchor;
@@ -1213,6 +1340,7 @@ fn handle_text_select_drag(
             &EditorScroll,
             &mut TextDragAnchor,
             &PaneKindMarker,
+            Option<&EditorWrapLayout>,
         ),
         With<PaneTag>,
     >,
@@ -1221,7 +1349,7 @@ fn handle_text_select_drag(
         return;
     };
     if buttons.just_released(MouseButton::Left) {
-        for (_, _, _, mut drag, kind) in &mut editors {
+        for (_, _, _, mut drag, kind, _) in &mut editors {
             if kind.0 == PANE_KIND {
                 drag.0 = None;
             }
@@ -1235,14 +1363,16 @@ fn handle_text_select_drag(
     let Some(pt) = window.cursor_position() else { return };
     let pt_canvas = viewport.window_to_canvas(pt);
 
-    for (mut state_comp, rect, scroll, drag, kind) in &mut editors {
+    for (mut state_comp, rect, scroll, drag, kind, layout) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
         }
         let Some(anchor) = drag.0 else { continue };
-        let local = pane_bevy::pt_to_content_local(pt_canvas, rect) + Vec2::new(scroll.x, scroll.y);
-        let line = (local.y / LINE_HEIGHT).floor().max(0.0) as usize;
-        let col = mouse_col_at_x(local.x, metrics.cell_width);
+        let Some(layout) = layout else { continue };
+        let local = pane_bevy::pt_to_content_local(pt_canvas, rect);
+        let row = ((local.y + scroll.y) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let x_col = mouse_col_at_x(local.x, metrics.cell_width);
+        let (line, col) = layout.0.visual_to_pos(row, x_col);
         let head = char_from_line_col(&state_comp.0, line, col);
         let cur = state_comp.0.selection.primary_range();
         if cur.anchor != anchor || cur.head != head {

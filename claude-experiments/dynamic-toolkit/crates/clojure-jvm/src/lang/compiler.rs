@@ -1531,19 +1531,25 @@ impl IParser for ConstantExprParser {
             );
         }
         let v = super::rt::second(&form);
-        match &v {
-            Object::Nil => Box::new(NIL_EXPR),
-            Object::Bool(true) => Box::new(TRUE_EXPR),
-            Object::Bool(false) => Box::new(FALSE_EXPR),
-            Object::Long(_) | Object::Double(_) => NumberExpr::parse(v),
-            Object::Char(code) => Box::new(CharExpr { code: *code }),
-            Object::String(s) => Box::new(StringExpr { str: s.clone() }),
-            // Empty collections (EmptyExpr in Java) — not yet ported as a
-            // distinct Expr; quoted non-empty collections + symbols /
-            // keywords / etc. land in ConstantExpr where the heap path
-            // dispatches per variant.
-            _ => Box::new(ConstantExpr::new(v)),
-        }
+        constant_literal_expr(v)
+    }
+}
+
+/// Build the Expr for a compile-time constant value — the shape dispatch
+/// shared by `(quote v)` (ConstantExprParser) and `case*` test constants.
+fn constant_literal_expr(v: Object) -> Box<dyn Expr> {
+    match &v {
+        Object::Nil => Box::new(NIL_EXPR),
+        Object::Bool(true) => Box::new(TRUE_EXPR),
+        Object::Bool(false) => Box::new(FALSE_EXPR),
+        Object::Long(_) | Object::Double(_) => NumberExpr::parse(v),
+        Object::Char(code) => Box::new(CharExpr { code: *code }),
+        Object::String(s) => Box::new(StringExpr { str: s.clone() }),
+        // Empty collections (EmptyExpr in Java) — not yet ported as a
+        // distinct Expr; quoted non-empty collections + symbols /
+        // keywords / etc. land in ConstantExpr where the heap path
+        // dispatches per variant.
+        _ => Box::new(ConstantExpr::new(v)),
     }
 }
 
@@ -5074,6 +5080,9 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
         if **sym == *specials.ASSIGN {
             return parse_assign_form(context, form);
         }
+        if **sym == *specials.CASE {
+            return parse_case_form(context, form);
+        }
         // `reify` / `reify*` — anonymous instance implementing host
         // interfaces / protocols. The `reify` macro lives in
         // `core_deftype.clj` (not embedded) and `reify*` needs
@@ -5560,6 +5569,353 @@ fn parse_if_form(context: C, form: Object) -> Box<dyn Expr> {
         Box::new(NIL_EXPR) as Box<dyn Expr>
     };
     Box::new(IfExpr::new(0, 0, test_expr, then_expr, else_expr))
+}
+
+// ============================================================================
+// Java line ~9348–9664: `CaseExpr` + its `Parser` — the `case*` special form.
+// ============================================================================
+
+/// One `case*` switch arm: the (pre-shifted/masked) integer key the macro
+/// computed, the test constant to re-check against post-switch (None for
+/// hash-collision buckets, whose `then` is a macro-generated `condp` that
+/// does its own checking — the `skip-check` set), and the result expr.
+#[derive(Debug)]
+struct CaseArm {
+    key: i64,
+    test: Option<Box<dyn Expr>>,
+    then: Box<dyn Expr>,
+}
+
+/// `Compiler.CaseExpr`. `(case ...)` macroexpands to
+/// `(let* [ge e] (case* ge shift mask default case-map switch-type test-type
+/// skip-check?))`; this node compiles the `case*` into a real `Switch`
+/// terminator over a dispatch index computed by the `cljvm_case_dispatch`
+/// runtime helper (`Util.hash` for `:hash-equiv`/`:hash-identity`,
+/// `Number.intValue()` for `:int`, then `(h >> shift) & mask` when masked).
+///
+/// Divergences from Java's emit, none observable:
+///   * compact-vs-sparse (`tableswitch` vs `lookupswitch`) is a JVM
+///     bytecode concern; dynir's `Switch` takes arbitrary sparse keys.
+///   * `:hash-identity`'s `IF_ACMPNE` reference-identity check is emitted
+///     as the same `Util.equiv`-style check as `:hash-equiv`. Java's
+///     identity check is an optimization that relies on constants being
+///     canonical instances (interned Keywords); our keyword heap cells are
+///     non-canonical wrappers, so equivalence is the correct (and equal-
+///     outcome) comparison.
+///   * the dispatch value is emitted ONCE and the SSA value reused for the
+///     post-switch equivalence checks (Java re-loads the local each time).
+#[derive(Debug)]
+pub struct CaseExpr {
+    expr: Box<dyn Expr>,
+    shift: i64,
+    mask: i64,
+    default_expr: Box<dyn Expr>,
+    arms: Vec<CaseArm>,
+    /// `:int` test type? (false → `:hash-equiv` / `:hash-identity`).
+    test_is_int: bool,
+    /// `cljvm_case_dispatch` (switch-index helper).
+    dispatch_fref: dynir::FuncRef,
+    /// `cljvm_equals` — `Util.equiv` for the post-switch constant check.
+    equals_fref: dynir::FuncRef,
+}
+
+impl Expr for CaseExpr {
+    fn eval(&self) -> Object {
+        // Java: throw new UnsupportedOperationException("Can't eval case").
+        panic!(
+            "clojure-jvm: CaseExpr.eval is not a tree-walker — compile via \
+             the JIT pipeline instead"
+        )
+    }
+
+    fn emit(&self, context: C, objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        // Dispatch value: always EXPRESSION context (we need it to switch
+        // on, even when the surrounding context is STATEMENT).
+        let val = self.expr.emit(C::Expression, objx, ir)?;
+
+        // Switch index. RAW i64 (never NanBox-tagged — i32-sign-extended
+        // hashes and the no-match sentinel all fail the tag-pattern check),
+        // so it is GC-inert like other unboxed primitives.
+        let tt = ir.f.fb.iconst(
+            dynir::Type::I64,
+            if self.test_is_int {
+                crate::runtime::CASE_TEST_INT
+            } else {
+                crate::runtime::CASE_TEST_HASH
+            },
+        );
+        let sh = ir.f.fb.iconst(dynir::Type::I64, self.shift);
+        let mk = ir.f.fb.iconst(dynir::Type::I64, self.mask);
+        let disp =
+            ir.f.fb
+                .call(self.dispatch_fref, &[val, tt, sh, mk])
+                .expect("cljvm_case_dispatch returns I64");
+
+        let default_bb = ir.f.fb.create_block(&[]);
+        let arm_bbs: Vec<dynir::BlockId> = self
+            .arms
+            .iter()
+            .map(|_| ir.f.fb.create_block(&[]))
+            .collect();
+
+        // Phi type — same lazy merge-block pattern as IfExpr: only create
+        // the merge block when at least one branch actually reaches it
+        // (every branch may end in recur/throw).
+        let phi_ty_opt: Option<dynir::Type> = if context == C::Statement {
+            None
+        } else {
+            Some(dynir::Type::I64)
+        };
+        let mut merge_bb: Option<dynir::BlockId> = None;
+        let ensure_merge =
+            |ir: &mut IrEmitter<'_>, slot: &mut Option<dynir::BlockId>| -> dynir::BlockId {
+                if let Some(b) = *slot {
+                    return b;
+                }
+                let b = match phi_ty_opt {
+                    Some(ty) => ir.f.fb.create_block(&[ty]),
+                    None => ir.f.fb.create_block(&[]),
+                };
+                *slot = Some(b);
+                b
+            };
+        // Branch tail shared by every arm + the default: jump to the merge
+        // block with/without the branch value, unless already terminated.
+        let finish_branch = |ir: &mut IrEmitter<'_>,
+                             slot: &mut Option<dynir::BlockId>,
+                             branch_val: Option<Value>,
+                             what: &str| {
+            if ir.f.fb.current_block_is_terminated() {
+                return;
+            }
+            let mb = ensure_merge(ir, slot);
+            match (phi_ty_opt.is_some(), branch_val) {
+                (true, Some(v)) => ir.f.fb.jump(mb, &[v]),
+                (false, _) => ir.f.fb.jump(mb, &[]),
+                (true, None) => panic!(
+                    "clojure-jvm: CaseExpr {what} branch produced no value in \
+                     non-STATEMENT context"
+                ),
+            }
+        };
+
+        let cases: Vec<(i64, dynir::BlockId, &[Value])> = self
+            .arms
+            .iter()
+            .zip(&arm_bbs)
+            .map(|(arm, bb)| (arm.key, *bb, &[][..]))
+            .collect();
+        ir.f.fb.switch(disp, &cases, default_bb, &[]);
+
+        for (arm, bb) in self.arms.iter().zip(&arm_bbs) {
+            ir.f.fb.switch_to_block(*bb);
+            // Post-switch equivalence check (Java `emitThenForInts` /
+            // `emitThenForHashes`): `Util.equiv(val, test)` or jump to
+            // default. Skipped for hash-collision buckets (skip-check).
+            if let Some(test) = &arm.test {
+                let test_val = test
+                    .emit(C::Expression, objx, ir)
+                    .expect("case* test constants always produce a value");
+                let eq =
+                    ir.f.fb
+                        .call(self.equals_fref, &[val, test_val])
+                        .expect("cljvm_equals returns I64");
+                let then_bb = ir.f.fb.create_block(&[]);
+                ir.f.br_if_truthy(eq, then_bb, &[], default_bb, &[]);
+                ir.f.fb.switch_to_block(then_bb);
+            }
+            let then_val = arm.then.emit(context, objx, ir);
+            finish_branch(ir, &mut merge_bb, then_val, "then");
+        }
+
+        ir.f.fb.switch_to_block(default_bb);
+        let default_val = self.default_expr.emit(context, objx, ir);
+        finish_branch(ir, &mut merge_bb, default_val, "default");
+
+        let Some(mb) = merge_bb else {
+            // Every branch diverged (recur/throw). Cursor sits on the
+            // terminated default block — callers detect via
+            // `current_block_is_terminated()`, same contract as IfExpr.
+            return None;
+        };
+        ir.f.fb.switch_to_block(mb);
+        if phi_ty_opt.is_some() {
+            Some(ir.f.fb.block_param(mb, 0))
+        } else {
+            None
+        }
+    }
+
+    fn has_java_class(&self) -> bool {
+        self.get_java_class().is_some()
+    }
+
+    fn get_java_class(&self) -> Option<HostClass> {
+        // Java: `returnType = maybeJavaClass(thens + default)` — non-null
+        // only when every branch agrees.
+        let mut found: Option<HostClass> = None;
+        for e in self
+            .arms
+            .iter()
+            .map(|a| &a.then)
+            .chain(std::iter::once(&self.default_expr))
+        {
+            if !e.has_java_class() {
+                return None;
+            }
+            let c = e.get_java_class()?;
+            match &found {
+                None => found = Some(c),
+                Some(prev) if *prev == c => {}
+                Some(_) => return None,
+            }
+        }
+        found
+    }
+}
+
+/// Read an integer out of a `case*` structural slot, panicking with a
+/// clear message otherwise (the form is macro-generated — a non-integer
+/// here means corrupted expansion, not user error).
+fn expect_case_long(o: &Object, what: &str) -> i64 {
+    match o.peel_meta_ref() {
+        Object::Long(n) => *n,
+        other => panic!("clojure-jvm: case* {what} must be an integer, got {other:?}"),
+    }
+}
+
+/// Inline `CaseExpr.Parser.parse` —
+/// `(case* expr shift mask default case-map switch-type test-type skip-check?)`
+/// prepared by the `case` macro and presumed correct (Java line ~9595).
+fn parse_case_form(context: C, form: Object) -> Box<dyn Expr> {
+    // Java: EVAL context wraps the form in an immediately-invoked fn —
+    // `(( fn* [] form))` — and analyzes that (same routing as `let*`).
+    if context == C::Eval {
+        let empty_params: Object = Object::Vector(
+            crate::lang::persistent_vector::PersistentVector::create(Vec::new()),
+        );
+        let inner_call: Object =
+            Object::List(crate::lang::persistent_list::PersistentList::create(vec![
+                Object::Symbol(SPECIAL_SYMBOLS.FN.clone()),
+                empty_params,
+                form.clone(),
+            ]));
+        let outer_call: Object =
+            Object::List(crate::lang::persistent_list::PersistentList::create(vec![
+                inner_call,
+            ]));
+        return analyze(context, outer_call);
+    }
+
+    // Collect the args after the `case*` head.
+    let mut items: Vec<Object> = Vec::new();
+    let mut s = super::rt::next(&form);
+    while !matches!(s, Object::Nil) {
+        items.push(super::rt::first(&s));
+        s = super::rt::next(&s);
+    }
+    if !(7..=8).contains(&items.len()) {
+        panic!(
+            "clojure-jvm: case* expects 7 or 8 args \
+             (expr shift mask default case-map switch-type test-type skip-check?), \
+             got {}",
+            items.len()
+        );
+    }
+
+    let expr_form = items[0].clone();
+    let shift = expect_case_long(&items[1], "shift");
+    let mask = expect_case_long(&items[2], "mask");
+    let default_form = items[3].clone();
+    let case_map_form = items[4].clone();
+    // items[5] = switch-type (:compact / :sparse) — a JVM tableswitch-vs-
+    // lookupswitch concern; dynir's `Switch` handles sparse keys natively,
+    // so the distinction needs no representation here.
+    let test_type_name = match items[6].peel_meta_ref() {
+        Object::Keyword(k) => k.get_name().to_string(),
+        other => panic!("clojure-jvm: case* test-type must be a keyword, got {other:?}"),
+    };
+    let test_is_int = match test_type_name.as_str() {
+        "int" => true,
+        "hash-equiv" | "hash-identity" => false,
+        other => panic!("clojure-jvm: case* — unexpected test type: :{other}"),
+    };
+    let skip_check: std::collections::HashSet<i64> = match items.get(7) {
+        None => std::collections::HashSet::new(),
+        Some(o) => match o.peel_meta_ref() {
+            Object::Nil => std::collections::HashSet::new(),
+            Object::Set(set) => set
+                .iter()
+                .map(|e| expect_case_long(&e, "skip-check entry"))
+                .collect(),
+            Object::TreeSet(set) => set
+                .iter()
+                .map(|e| expect_case_long(&e, "skip-check entry"))
+                .collect(),
+            other => panic!("clojure-jvm: case* skip-check must be a set or nil, got {other:?}"),
+        },
+    };
+
+    // Java analyzes the dispatch expr in EXPRESSION context (it's always
+    // the `let*`-bound local the macro introduced).
+    let expr = analyze(C::Expression, expr_form);
+
+    // case-map: `{switch-key [test-constant then-form]}`, built by the
+    // macro with `sorted-map` (PersistentTreeMap); accept a hash map too.
+    let entries_src: Vec<(Object, Object)> = match case_map_form.peel_meta_ref() {
+        Object::TreeMap(m) => m.iter().collect(),
+        Object::Map(m) => m.iter().collect(),
+        other => panic!("clojure-jvm: case* case-map must be a map, got {other:?}"),
+    };
+    let mut arms: Vec<CaseArm> = Vec::with_capacity(entries_src.len());
+    for (k, v) in entries_src {
+        let key = expect_case_long(&k, "case-map key");
+        if key == crate::runtime::CASE_DISPATCH_NO_MATCH {
+            // Impossible for macro-generated maps (keys are i32-ranged or
+            // shift-masked) — guards the dispatch helper's sentinel.
+            panic!(
+                "clojure-jvm: case* case-map key {key} collides with the \
+                 non-number dispatch sentinel"
+            );
+        }
+        let (test_form, then_form) = match v.peel_meta_ref() {
+            Object::Vector(pair) if pair.count() == 2 => (pair.nth(0), pair.nth(1)),
+            other => panic!(
+                "clojure-jvm: case* case-map value must be a [test then] pair, got {other:?}"
+            ),
+        };
+        let test: Option<Box<dyn Expr>> = if skip_check.contains(&key) {
+            // Hash-collision bucket: `test` is the seq of colliding
+            // constants and `then` is a macro-generated `condp` that does
+            // its own equality checks — no post-switch check is emitted.
+            None
+        } else if test_is_int {
+            // Java: NumberExpr.parse(((Number)RT.first(pair)).intValue()).
+            match test_form.peel_meta_ref() {
+                Object::Long(n) => Some(NumberExpr::parse(Object::Long(*n))),
+                other => panic!(
+                    "clojure-jvm: case* :int test constant must be an integer, got {other:?}"
+                ),
+            }
+        } else {
+            Some(constant_literal_expr(test_form.clone()))
+        };
+        let then = analyze(context, then_form);
+        arms.push(CaseArm { key, test, then });
+    }
+
+    let default_expr = analyze(context, default_form);
+    let (dispatch_fref, equals_fref) = with_active_compiler(|c| (c.case_dispatch, c.num.eq));
+    Box::new(CaseExpr {
+        expr,
+        shift,
+        mask,
+        default_expr,
+        arms,
+        test_is_int,
+        dispatch_fref,
+        equals_fref,
+    })
 }
 
 /// Inline `BodyExpr.Parser.parse` for `(do …)`. Strips the leading `do`,
@@ -8876,7 +9232,7 @@ pub struct Compiler {
     /// non-static head path. Index `i` holds `cljvm_rt_invoke_i`. Supports
     /// arities 0..=3 for now; higher arities expand here as we need them
     /// (Clojure goes to 20-ish positional + variadic).
-    pub invoke_externs: [dynir::FuncRef; 9],
+    pub invoke_externs: [dynir::FuncRef; 11],
     /// Static-method registry for `HostExpr`. Maps `(class_name, method_name,
     /// arity)` → `FuncRef` declared on the DynModule. Populated at
     /// `Compiler::new` time so the same set of methods is available across
@@ -9012,6 +9368,10 @@ pub struct Compiler {
     pub character_type_id: dynlang::ObjTypeId,
     /// FuncRefs for the numeric-tower externs that `PrimOpExpr` calls.
     pub num: NumExterns,
+    /// FuncRef of `cljvm_case_dispatch` — the `case*` switch-index helper
+    /// (hash / intValue + shift/mask). Captured by `parse_case_form` so
+    /// `CaseExpr.emit` can lower the dispatch to a direct call.
+    pub case_dispatch: dynir::FuncRef,
     /// `clojure.lang.UserInstance`: the shared ObjType for every
     /// `deftype`/`defrecord` instance. One Raw64 field carrying the
     /// `UserTypeId` (allocated by `lang::user_types::register_user_type`)
@@ -10021,6 +10381,25 @@ impl Compiler {
             ("clojure.lang.Util".to_string(), "compare".to_string(), 2),
             util_compare,
         );
+        // `Util/hash` — Java's hashCode-based hash. The `case` macro calls
+        // this at EXPANSION time (`prep-hashes` / `merge-hash-collisions`)
+        // to build the `case*` case-map keys; CaseExpr's runtime dispatch
+        // (`cljvm_case_dispatch` below) recomputes the same hash on the
+        // dispatch value. Both externs share `runtime::util_hash_bits`,
+        // which is what keeps the two sides consistent.
+        let util_hash = dm.declare_extern("cljvm_util_hash", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Util".to_string(), "hash".to_string(), 1),
+            util_hash,
+        );
+        // `case*` switch-index helper (not a host method — CaseExpr.emit
+        // calls it directly): (value, test-type, shift, mask) → raw i64
+        // dispatch index.
+        let sig_4i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 4],
+            ret: Some(dynir::Type::I64),
+        };
+        let case_dispatch = dm.declare_extern("cljvm_case_dispatch", sig_4i64);
 
         // `clojure.lang.PersistentList/creator` — Java declares it as a
         // `static IFn` field whose `invoke(Object... args)` returns a list
@@ -10372,6 +10751,16 @@ impl Compiler {
             ret: Some(dynir::Type::I64),
         };
         let invoke_8 = dm.declare_extern("cljvm_rt_invoke_8", sig_9i64);
+        let sig_10i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 10],
+            ret: Some(dynir::Type::I64),
+        };
+        let invoke_9 = dm.declare_extern("cljvm_rt_invoke_9", sig_10i64);
+        let sig_11i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 11],
+            ret: Some(dynir::Type::I64),
+        };
+        let invoke_10 = dm.declare_extern("cljvm_rt_invoke_10", sig_11i64);
 
         // Declare GC-managed heap types. `clojure.lang.String` is a
         // varlen-byte buffer with no fixed fields — the byte count lives in
@@ -10627,7 +11016,7 @@ impl Compiler {
             },
             invoke_externs: [
                 invoke_0, invoke_1, invoke_2, invoke_3, invoke_4, invoke_5, invoke_6, invoke_7,
-                invoke_8,
+                invoke_8, invoke_9, invoke_10,
             ],
             var_fns: std::sync::Mutex::new(HashMap::new()),
             var_fn_infos: std::sync::Mutex::new(HashMap::new()),
@@ -10659,6 +11048,7 @@ impl Compiler {
             long_type_id,
             character_type_id,
             num,
+            case_dispatch,
             user_instance_type_id,
             user_instance_user_type_id_offset,
             user_instance_varlen_base,
@@ -10953,6 +11343,9 @@ fn alloc_object_as_nanbox(
         // (`[1 2]`, `{:a 1}`, `#{1 2}`, `'(1 2)`) box like any other Long.
         // box_long allocs on the same path the `PendingLiteral::Long` arm uses.
         Object::Long(n) => unsafe { crate::runtime::box_long(*n) },
+        // Characters box like Longs (Raw64 codepoint cell) — a `case` over
+        // char constants ships `\a` through macro args / case-map values.
+        Object::Char(c) => unsafe { crate::runtime::box_char(*c) },
         Object::Double(x) => x.to_bits(),
         Object::Symbol(s) => alloc_symbol(gc, obj_types, symbol_type_id, roots, s),
         Object::Keyword(k) => alloc_keyword(gc, obj_types, keyword_type_id, roots, k),
@@ -11455,6 +11848,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_num_ge" => Some(crate::runtime::cljvm_num_ge as *const u8),
         "cljvm_num_equiv" => Some(crate::runtime::cljvm_num_equiv as *const u8),
         "cljvm_equals" => Some(crate::runtime::cljvm_equals as *const u8),
+        "cljvm_util_hash" => Some(crate::runtime::cljvm_util_hash as *const u8),
+        "cljvm_case_dispatch" => Some(crate::runtime::cljvm_case_dispatch as *const u8),
         "cljvm_rt_inc" => Some(crate::runtime::cljvm_rt_inc as *const u8),
         "cljvm_rt_nextID" => Some(crate::runtime::cljvm_rt_nextID as *const u8),
         "cljvm_rt_intCast" => Some(crate::runtime::cljvm_rt_intCast as *const u8),
@@ -11705,6 +12100,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_rt_invoke_6" => Some(crate::runtime::cljvm_rt_invoke_6 as *const u8),
         "cljvm_rt_invoke_7" => Some(crate::runtime::cljvm_rt_invoke_7 as *const u8),
         "cljvm_rt_invoke_8" => Some(crate::runtime::cljvm_rt_invoke_8 as *const u8),
+        "cljvm_rt_invoke_9" => Some(crate::runtime::cljvm_rt_invoke_9 as *const u8),
+        "cljvm_rt_invoke_10" => Some(crate::runtime::cljvm_rt_invoke_10 as *const u8),
         "cljvm_pl_creator" => Some(crate::runtime::cljvm_pl_creator as *const u8),
         "cljvm_inst_meta" => Some(crate::runtime::cljvm_inst_meta as *const u8),
         "cljvm_inst_with_meta" => Some(crate::runtime::cljvm_inst_with_meta as *const u8),

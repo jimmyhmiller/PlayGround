@@ -47,7 +47,12 @@
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Mutex;
 
 use pane_bevy::{KeyboardOwner, PaneRegistry};
 
@@ -199,6 +204,12 @@ pub enum ActionRun {
     /// Arbitrary world mutation. The handler receives an [`ActionCtx`]
     /// and can do anything an old shortcut system did.
     Custom(fn(&mut ActionCtx)),
+    /// Spawn a registered pane kind with a runtime-defined config blob.
+    /// Used by manifest-defined actions (`~/.jim/actions.json`): the
+    /// config can't live in this `Copy` enum, so it's stored in
+    /// [`RuntimeActions::configs`] keyed by the action id and looked up
+    /// at dispatch. This is the data-driven sibling of `SpawnPane`.
+    SpawnConfigured { kind: &'static str },
 }
 
 /// One thing the app can do.
@@ -240,6 +251,15 @@ impl ActionRegistry {
 
     pub fn get(&self, id: &str) -> Option<&Action> {
         self.by_id.get(id)
+    }
+
+    /// Drop a set of actions by id (used when reloading the runtime
+    /// manifest, so removed/renamed entries don't linger).
+    pub fn unregister_many(&mut self, ids: &[&str]) {
+        for id in ids {
+            self.by_id.remove(*id);
+        }
+        self.order.retain(|id| !ids.contains(id));
     }
 
     /// Iterate in registration order.
@@ -424,6 +444,249 @@ impl AppActionsExt for App {
     }
 }
 
+// ============================================================
+// Runtime-defined actions (`~/.jim/actions.json`, hot-reloaded)
+// ============================================================
+//
+// Lets the common "open a specific pane kind with a config" action —
+// e.g. "open the chess rhai widget" — be declared on disk and picked up
+// live, without editing this file + rebuilding. Mirrors the rhai-widget
+// hot reload (`~/.jim/widgets/`).
+//
+// The manifest is a JSON array of entries:
+//
+// ```json
+// [
+//   {
+//     "id": "widget.chess",
+//     "title": "Chess",
+//     "category": "Widgets",
+//     "icon": "♟",
+//     "keys": "cmd+k h",
+//     "kind": "rhai_widget",
+//     "config": { "script": "chess.rhai", "title": "Chess" }
+//   }
+// ]
+// ```
+//
+// `kind` defaults to `rhai_widget`; `config` is handed verbatim to that
+// pane kind's spawn callback. `keys` is a default binding (still
+// overridable per-id from `keybinds.json`); `icon` makes it radial-eligible.
+
+/// One manifest entry as it appears on disk.
+#[derive(Deserialize)]
+struct ManifestAction {
+    id: String,
+    title: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    keys: Option<String>,
+    #[serde(default = "default_manifest_kind")]
+    kind: String,
+    #[serde(default)]
+    config: serde_json::Value,
+}
+
+fn default_manifest_kind() -> String {
+    "rhai_widget".to_string()
+}
+
+/// State + file watcher for the runtime action manifest. The config
+/// blobs live here (they can't ride along in the `Copy` [`Action`]); the
+/// `ids` list lets a reload drop the previous manifest's actions before
+/// registering the new set.
+#[derive(Resource, Default)]
+pub struct RuntimeActions {
+    /// Ids registered from the manifest, so a reload can remove them.
+    ids: Vec<&'static str>,
+    /// Per-id spawn config for [`ActionRun::SpawnConfigured`].
+    configs: HashMap<&'static str, serde_json::Value>,
+    rx: Option<Mutex<Receiver<()>>>,
+    _watcher: Option<RecommendedWatcher>,
+}
+
+fn actions_manifest_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let mut p = PathBuf::from(home);
+    p.push(".jim");
+    p.push("actions.json");
+    Some(p)
+}
+
+/// Default manifest written on first run so the feature is discoverable
+/// and immediately useful (the chess widget script is auto-bootstrapped
+/// by the rhai-widget plugin, so this action works out of the box).
+const DEFAULT_ACTIONS_MANIFEST: &str = r#"[
+  {
+    "id": "widget.chess",
+    "title": "Chess",
+    "category": "Widgets",
+    "icon": "♟",
+    "keys": "cmd+k h",
+    "kind": "rhai_widget",
+    "config": { "script": "chess.rhai", "title": "Chess" }
+  }
+]
+"#;
+
+/// Read + (re)register the manifest, then rebuild the keymap so new
+/// `keys` take effect. Exclusive (mutates the registry, leaks `'static`
+/// strings, calls [`rebuild_keymap`]). Invalid entries are warned about
+/// and skipped; a parse error keeps the previously-loaded set.
+fn apply_actions_manifest(world: &mut World) {
+    let Some(path) = actions_manifest_path() else {
+        return;
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return, // missing file → leave whatever's loaded
+    };
+    let manifest: Vec<ManifestAction> = match serde_json::from_slice(&bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("[actions] {}: invalid JSON ({e}); keeping current actions", path.display());
+            return;
+        }
+    };
+
+    // Drop the previous manifest's actions + configs.
+    let old_ids = std::mem::take(&mut world.resource_mut::<RuntimeActions>().ids);
+    if !old_ids.is_empty() {
+        let refs: Vec<&str> = old_ids.iter().copied().collect();
+        world.resource_mut::<ActionRegistry>().unregister_many(&refs);
+    }
+    world.resource_mut::<RuntimeActions>().configs.clear();
+
+    let mut new_ids: Vec<&'static str> = Vec::new();
+    let mut new_configs: HashMap<&'static str, serde_json::Value> = HashMap::new();
+    for m in manifest {
+        if m.id.trim().is_empty() {
+            warn!("[actions] manifest entry with empty id; skipping");
+            continue;
+        }
+        // Leak owned strings to `'static`, matching the `Box::leak`
+        // already used for dynamic pane-kind ids. Reloads re-leak (a
+        // small, bounded, user-driven cost — same tradeoff as rhai
+        // script recompiles).
+        let id: &'static str = Box::leak(m.id.clone().into_boxed_str());
+        let title: &'static str = Box::leak(m.title.into_boxed_str());
+        let category: &'static str =
+            Box::leak(m.category.unwrap_or_else(|| "Widgets".to_string()).into_boxed_str());
+        let kind: &'static str = Box::leak(m.kind.into_boxed_str());
+        let radial_icon: Option<&'static str> =
+            m.icon.map(|s| &*Box::leak(s.into_boxed_str()));
+        let keywords: &'static [&'static str] = Box::leak(
+            m.keywords
+                .into_iter()
+                .map(|k| &*Box::leak(k.into_boxed_str()))
+                .collect::<Vec<&'static str>>()
+                .into_boxed_slice(),
+        );
+        let default_keys: &'static [KeyChord] = match m.keys.as_deref() {
+            Some(s) if !s.trim().is_empty() => match parse_sequence(s) {
+                Some(seq) => Box::leak(seq.into_boxed_slice()),
+                None => {
+                    warn!("[actions] {id}: could not parse keys {s:?}; leaving unbound");
+                    &[]
+                }
+            },
+            _ => &[],
+        };
+
+        world.resource_mut::<ActionRegistry>().register(Action {
+            id,
+            title,
+            category,
+            keywords,
+            radial_icon,
+            default_keys,
+            run: ActionRun::SpawnConfigured { kind },
+        });
+        new_configs.insert(id, m.config);
+        new_ids.push(id);
+    }
+
+    {
+        let mut ra = world.resource_mut::<RuntimeActions>();
+        ra.ids = new_ids;
+        ra.configs = new_configs;
+    }
+    rebuild_keymap(world);
+}
+
+/// First-run bootstrap (write the default manifest) + start the file
+/// watcher + do the initial load.
+fn setup_actions_watcher(world: &mut World) {
+    let Some(path) = actions_manifest_path() else {
+        warn!("[actions] HOME not set, no runtime actions");
+        return;
+    };
+    let dir = path.parent().map(PathBuf::from);
+    if let Some(dir) = &dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if !path.exists() {
+        if let Err(e) = std::fs::write(&path, DEFAULT_ACTIONS_MANIFEST) {
+            warn!("[actions] couldn't write default manifest {}: {e}", path.display());
+        }
+    }
+
+    // Watch ~/.jim non-recursively but only forward events for
+    // actions.json (the dir sees frequent writes for other state files).
+    if let Some(dir) = dir {
+        let (tx, rx) = mpsc::channel::<()>();
+        let target = path.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(ev) = res else { return };
+            if !matches!(
+                ev.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
+            ) {
+                return;
+            }
+            if ev.paths.iter().any(|p| p == &target) {
+                let _ = tx.send(());
+            }
+        });
+        match watcher {
+            Ok(mut w) => {
+                if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
+                    warn!("[actions] failed to watch {}: {e}", dir.display());
+                } else {
+                    let mut ra = world.resource_mut::<RuntimeActions>();
+                    ra.rx = Some(Mutex::new(rx));
+                    ra._watcher = Some(w);
+                }
+            }
+            Err(e) => warn!("[actions] file watcher failed to start: {e}"),
+        }
+    }
+
+    apply_actions_manifest(world);
+}
+
+/// Drain manifest-change notifications and re-apply (exclusive, since it
+/// re-registers actions + rebuilds the keymap).
+fn poll_actions_watcher(world: &mut World) {
+    let changed = {
+        let Some(ra) = world.get_resource::<RuntimeActions>() else {
+            return;
+        };
+        let Some(rx) = &ra.rx else { return };
+        let rx = rx.lock().expect("actions watcher channel poisoned");
+        rx.try_iter().count() > 0
+    };
+    if changed {
+        apply_actions_manifest(world);
+        eprintln!("[actions] reloaded manifest from external edit");
+    }
+}
+
 pub struct ActionsPlugin;
 
 impl Plugin for ActionsPlugin {
@@ -432,15 +695,18 @@ impl Plugin for ActionsPlugin {
             .init_resource::<ActionInvocations>()
             .init_resource::<Keymap>()
             .init_resource::<PendingSequence>()
+            .init_resource::<RuntimeActions>()
             // Pane registrations land in `Startup`; synthesize their
             // spawn-actions once those are all in, then fold every action's
             // defaults + the disk overrides into the `Keymap`. (Bespoke
             // actions are registered in `App::build` before `PostStartup`,
-            // so they're present too.)
+            // so they're present too.) Finally load the runtime manifest
+            // (`~/.jim/actions.json`) on top + start its watcher.
             .add_systems(
                 PostStartup,
-                (generate_pane_spawn_actions, rebuild_keymap).chain(),
+                (generate_pane_spawn_actions, rebuild_keymap, setup_actions_watcher).chain(),
             )
+            .add_systems(Update, poll_actions_watcher)
             .add_systems(Update, dispatch_action_keybinds.in_set(ActionProducerSet))
             .add_systems(Update, run_requested_actions.after(ActionProducerSet));
     }
@@ -569,6 +835,27 @@ pub fn run_requested_actions(world: &mut World) {
                 let mut ctx = ActionCtx { world, origin: inv.origin };
                 f(&mut ctx);
             }
+            ActionRun::SpawnConfigured { kind } => {
+                let Some(active) = world.resource::<Projects>().active else {
+                    continue;
+                };
+                let config = world
+                    .resource::<RuntimeActions>()
+                    .configs
+                    .get(inv.id.as_str())
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                world
+                    .resource_mut::<PendingActions>()
+                    .new_panes
+                    .push(NewPaneRequest {
+                        kind,
+                        project_id: active,
+                        origin: inv.origin,
+                        size: None,
+                        config,
+                    });
+            }
         }
     }
 }
@@ -634,6 +921,47 @@ mod tests {
             km.bindings.insert(id, parse_sequence(s).unwrap());
         }
         km
+    }
+
+    /// End-to-end (headless): a `SpawnConfigured` action, when invoked,
+    /// resolves its config from `RuntimeActions` and queues a matching
+    /// `NewPaneRequest` for the active project. Covers the dispatch arm
+    /// that manifest-defined actions ride on.
+    #[test]
+    fn spawn_configured_action_queues_pane_request() {
+        let mut world = World::new();
+        world.init_resource::<ActionRegistry>();
+        world.init_resource::<ActionInvocations>();
+        world.init_resource::<RuntimeActions>();
+        world.init_resource::<PendingActions>();
+        world.init_resource::<Projects>();
+        world.resource_mut::<Projects>().active = Some(42);
+
+        world.resource_mut::<ActionRegistry>().register(Action {
+            id: "widget.chess",
+            title: "Chess",
+            category: "Widgets",
+            keywords: &[],
+            radial_icon: Some("♟"),
+            default_keys: &[],
+            run: ActionRun::SpawnConfigured { kind: "rhai_widget" },
+        });
+        let cfg = serde_json::json!({ "script": "chess.rhai", "title": "Chess" });
+        world
+            .resource_mut::<RuntimeActions>()
+            .configs
+            .insert("widget.chess", cfg.clone());
+
+        world
+            .resource_mut::<ActionInvocations>()
+            .request("widget.chess", None);
+        run_requested_actions(&mut world);
+
+        let panes = &world.resource::<PendingActions>().new_panes;
+        assert_eq!(panes.len(), 1, "exactly one pane queued");
+        assert_eq!(panes[0].kind, "rhai_widget");
+        assert_eq!(panes[0].project_id, 42);
+        assert_eq!(panes[0].config, cfg);
     }
 
     #[test]

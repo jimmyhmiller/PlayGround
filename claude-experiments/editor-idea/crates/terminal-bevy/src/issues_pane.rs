@@ -16,11 +16,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Mutex;
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use bevy::sprite::Anchor;
 use bevy::text::{LineHeight, TextBounds};
 use serde::{Deserialize, Serialize};
@@ -56,7 +60,7 @@ const SMALL_WRAP_LINE_H: f32 = SMALL_FONT_SIZE * 1.3;
 
 // ---------- Data model ----------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Issue {
     pub id: u64,
     pub title: String,
@@ -86,6 +90,15 @@ pub struct IssuesStore {
     pub loaded: HashSet<u64>,
     /// Project ids whose in-memory state hasn't been flushed.
     pub dirty: HashSet<u64>,
+    /// Hash of the bytes we last saw on disk for each project. Lets the
+    /// file watcher tell a real external edit from the echo of our own
+    /// write (same bytes → same hash → skip), so saving doesn't trigger
+    /// a needless reload/relayout loop.
+    pub disk_hash: HashMap<u64, u64>,
+    /// Projects whose data changed out-of-band (hot reload, `tbissue`
+    /// IPC) and whose open panes therefore need a relayout. Drained each
+    /// frame by `apply_issues_relayout`.
+    pub relayout: HashSet<u64>,
 }
 
 impl IssuesStore {
@@ -93,9 +106,75 @@ impl IssuesStore {
         if self.loaded.contains(&project_id) {
             return;
         }
-        let file = load_project_issues(project_id);
+        let (file, hash) = read_project_issues(project_id);
+        if let Some(h) = hash {
+            self.disk_hash.insert(project_id, h);
+        }
         self.by_project.insert(project_id, file);
         self.loaded.insert(project_id);
+    }
+
+    /// Re-read a project's file after an external edit. Returns `true`
+    /// if the in-memory state actually changed (so callers can flag the
+    /// affected panes for relayout).
+    ///
+    /// Clobber-safety: if the project has unflushed in-app edits
+    /// (`dirty`), the in-memory copy is authoritative per issue id and
+    /// we only *append* issues that exist on disk but not in memory
+    /// (the common case: a CLI/script added an issue while we were
+    /// editing). Clean projects are replaced wholesale.
+    pub fn reload_from_disk(&mut self, project_id: u64) -> bool {
+        let Some(path) = project_file_path(project_id) else {
+            return false;
+        };
+        let Ok(bytes) = fs::read(&path) else {
+            // File vanished — keep whatever we have in memory rather
+            // than dropping the user's issues.
+            return false;
+        };
+        let h = hash_bytes(&bytes);
+        if self.disk_hash.get(&project_id) == Some(&h) {
+            // Unchanged on disk (includes the echo of our own writes).
+            return false;
+        }
+        let disk: ProjectIssuesFile = match serde_json::from_slice(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "[issues] hot-reload: failed to parse {}: {} — keeping in-memory copy",
+                    path.display(),
+                    e
+                );
+                return false;
+            }
+        };
+        self.disk_hash.insert(project_id, h);
+
+        if !self.loaded.contains(&project_id) {
+            self.by_project.insert(project_id, disk);
+            self.loaded.insert(project_id);
+            return true;
+        }
+
+        if !self.dirty.contains(&project_id) {
+            self.by_project.insert(project_id, disk);
+            return true;
+        }
+
+        // Merge: in-memory wins per id, append disk-only issues.
+        let mem = self.by_project.entry(project_id).or_default();
+        let mem_ids: HashSet<u64> = mem.issues.iter().map(|i| i.id).collect();
+        let mut added = false;
+        for di in disk.issues {
+            if !mem_ids.contains(&di.id) {
+                mem.issues.push(di);
+                added = true;
+            }
+        }
+        if disk.next_id > mem.next_id {
+            mem.next_id = disk.next_id;
+        }
+        added
     }
 
     pub fn get(&self, project_id: u64) -> Option<&ProjectIssuesFile> {
@@ -108,6 +187,165 @@ impl IssuesStore {
 
     pub fn mark_dirty(&mut self, project_id: u64) {
         self.dirty.insert(project_id);
+    }
+
+    /// Append a new issue to a project and persist immediately. Used by
+    /// the `tbissue` CLI path (`IpcRequest::AddIssue`) so an issue filed
+    /// from a terminal shows up live and survives a restart even if the
+    /// user never touches the GUI. Returns the new issue's id.
+    pub fn add_issue(&mut self, project_id: u64, title: String, body: String) -> u64 {
+        self.ensure_loaded(project_id);
+        let file = self.by_project.entry(project_id).or_default();
+        let id = push_issue(file, title, body);
+        // Persist now (keeps disk authoritative + refreshes the hash so
+        // the watcher doesn't echo-reload our own write) and flag open
+        // panes for relayout.
+        self.save_now(project_id);
+        self.relayout.insert(project_id);
+        id
+    }
+
+    /// Flush one project's in-memory state to disk right now and refresh
+    /// its `disk_hash`. Clears it from the `dirty` set.
+    pub fn save_now(&mut self, project_id: u64) {
+        if let Some(data) = self.by_project.get(&project_id).cloned() {
+            if let Some(h) = save_project_issues(project_id, &data) {
+                self.disk_hash.insert(project_id, h);
+            }
+        }
+        self.dirty.remove(&project_id);
+    }
+}
+
+fn hash_bytes(b: &[u8]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    h.finish()
+}
+
+/// Append a new issue at the top of a project file, assigning a fresh
+/// id. `next_id` may lag on a legacy/hand-edited file, so the id is
+/// guarded against colliding with the max existing id. Returns the id.
+fn push_issue(file: &mut ProjectIssuesFile, title: String, body: String) -> u64 {
+    let max_existing = file.issues.iter().map(|i| i.id).max().unwrap_or(0);
+    let id = file.next_id.max(max_existing + 1);
+    file.next_id = id + 1;
+    file.issues.insert(
+        0,
+        Issue {
+            id,
+            title,
+            body,
+            done: false,
+            fields: BTreeMap::new(),
+            expanded: false,
+        },
+    );
+    id
+}
+
+/// Watches `~/.jim/issues/` so external edits (a CLI/script adding an
+/// issue, or hand-editing a `<id>.json`) are picked up live, mirroring
+/// the rhai-widget hot-reload (`ScriptWatcher`). Changed project ids are
+/// pushed over the channel and drained by `poll_issues_watcher`.
+#[derive(Resource)]
+struct IssuesWatcher {
+    rx: Mutex<Receiver<u64>>,
+    _watcher: RecommendedWatcher,
+}
+
+/// Parse the project id out of a watched path like `<id>.json`. Skips
+/// the temp file (`<id>.json.tmp`) used by the atomic write.
+fn project_id_from_path(path: &std::path::Path) -> Option<u64> {
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+fn setup_issues_watcher(world: &mut World) {
+    let Some(dir) = storage_dir() else {
+        warn!("[issues] HOME not set, no hot reload");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(
+            "[issues] couldn't create {}: {} — no hot reload",
+            dir.display(),
+            e
+        );
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<u64>();
+    let watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(ev) = res else { return };
+        if !matches!(
+            ev.kind,
+            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
+        ) {
+            return;
+        }
+        for path in ev.paths {
+            if let Some(pid) = project_id_from_path(&path) {
+                let _ = tx.send(pid);
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("[issues] file watcher failed to start: {}", e);
+            return;
+        }
+    };
+    let mut watcher = watcher;
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+        warn!("[issues] failed to watch {}: {}", dir.display(), e);
+        return;
+    }
+    world.insert_resource(IssuesWatcher {
+        rx: Mutex::new(rx),
+        _watcher: watcher,
+    });
+}
+
+/// Drain external-edit notifications, re-read the affected projects, and
+/// queue them for relayout (applied by `apply_issues_relayout`).
+fn poll_issues_watcher(watcher: Option<Res<IssuesWatcher>>, mut store: ResMut<IssuesStore>) {
+    let Some(watcher) = watcher else { return };
+    let pids: Vec<u64> = {
+        let rx = watcher.rx.lock().expect("issues watcher channel poisoned");
+        rx.try_iter().collect()
+    };
+    if pids.is_empty() {
+        return;
+    }
+    let unique: HashSet<u64> = pids.into_iter().collect();
+    let mut changed: HashSet<u64> = HashSet::new();
+    for pid in unique {
+        if store.reload_from_disk(pid) {
+            changed.insert(pid);
+        }
+    }
+    if changed.is_empty() {
+        return;
+    }
+    eprintln!("[issues] hot-reloaded projects {:?} from external edit", changed);
+    store.relayout.extend(changed);
+}
+
+/// Flag open issue panes whose project changed out-of-band (hot reload
+/// or `tbissue`) for a rebuild, then clear the queue.
+fn apply_issues_relayout(mut store: ResMut<IssuesStore>, mut panes: Query<&mut IssuesPane>) {
+    if store.relayout.is_empty() {
+        return;
+    }
+    let changed = std::mem::take(&mut store.relayout);
+    for mut pane in &mut panes {
+        if changed.contains(&pane.project_id) {
+            pane.dirty_layout = true;
+        }
     }
 }
 
@@ -123,30 +361,36 @@ fn project_file_path(project_id: u64) -> Option<PathBuf> {
     Some(storage_dir()?.join(format!("{}.json", project_id)))
 }
 
-fn load_project_issues(project_id: u64) -> ProjectIssuesFile {
+/// Read a project's file from disk. Returns the parsed contents plus a
+/// hash of the raw bytes (`None` when the file is missing or unreadable,
+/// in which case the parsed value is the empty default).
+fn read_project_issues(project_id: u64) -> (ProjectIssuesFile, Option<u64>) {
     let Some(path) = project_file_path(project_id) else {
-        return ProjectIssuesFile::default();
+        return (ProjectIssuesFile::default(), None);
     };
     let Ok(bytes) = fs::read(&path) else {
-        return ProjectIssuesFile::default();
+        return (ProjectIssuesFile::default(), None);
     };
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+    let h = hash_bytes(&bytes);
+    let file = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
         eprintln!(
             "[issues] failed to parse {}: {} — starting empty",
             path.display(),
             e
         );
         ProjectIssuesFile::default()
-    })
+    });
+    (file, Some(h))
 }
 
-fn save_project_issues(project_id: u64, data: &ProjectIssuesFile) {
-    let Some(dir) = storage_dir() else {
-        return;
-    };
+/// Persist a project's issues. Returns the hash of the bytes written so
+/// the caller can refresh `IssuesStore::disk_hash` and avoid treating
+/// the watcher echo of this write as an external edit.
+fn save_project_issues(project_id: u64, data: &ProjectIssuesFile) -> Option<u64> {
+    let dir = storage_dir()?;
     if let Err(e) = fs::create_dir_all(&dir) {
         eprintln!("[issues] mkdir {}: {}", dir.display(), e);
-        return;
+        return None;
     }
     let file = dir.join(format!("{}.json", project_id));
     let tmp = dir.join(format!("{}.json.tmp", project_id));
@@ -154,16 +398,18 @@ fn save_project_issues(project_id: u64, data: &ProjectIssuesFile) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[issues] serialize {} failed: {}", project_id, e);
-            return;
+            return None;
         }
     };
     if let Err(e) = fs::write(&tmp, &bytes) {
         eprintln!("[issues] write {} failed: {}", tmp.display(), e);
-        return;
+        return None;
     }
     if let Err(e) = fs::rename(&tmp, &file) {
         eprintln!("[issues] rename {} failed: {}", tmp.display(), e);
+        return None;
     }
+    Some(hash_bytes(&bytes))
 }
 
 // ---------- Editing state ----------
@@ -231,10 +477,12 @@ pub struct IssuesPanePlugin;
 impl Plugin for IssuesPanePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<IssuesStore>()
-            .add_systems(Startup, register_kind)
+            .add_systems(Startup, (register_kind, setup_issues_watcher))
             .add_systems(
                 Update,
                 (
+                    poll_issues_watcher,
+                    apply_issues_relayout,
                     mark_dirty_on_project_change,
                     handle_content_press,
                     commit_edit_on_focus_change,
@@ -1590,8 +1838,12 @@ fn save_dirty_projects(
     }
     let pids: Vec<u64> = store.dirty.iter().copied().collect();
     for pid in pids {
-        if let Some(data) = store.by_project.get(&pid) {
-            save_project_issues(pid, data);
+        // Clone the snapshot out so we can borrow the store mutably to
+        // record the written hash without overlapping borrows.
+        if let Some(data) = store.by_project.get(&pid).cloned() {
+            if let Some(h) = save_project_issues(pid, &data) {
+                store.disk_hash.insert(pid, h);
+            }
         }
     }
     store.dirty.clear();
@@ -1601,3 +1853,78 @@ fn save_dirty_projects(
 // needs to gate by it; keeping the import keeps the diff minimal.
 #[allow(dead_code)]
 fn _input_consumed_witness(_c: Res<InputConsumed>, _p: Res<FocusedPane>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_issue_assigns_id_and_inserts_at_top() {
+        let mut f = ProjectIssuesFile {
+            next_id: 5,
+            issues: vec![Issue {
+                id: 4,
+                title: "existing".into(),
+                ..Default::default()
+            }],
+        };
+        let id = push_issue(&mut f, "new one".into(), "body".into());
+        assert_eq!(id, 5, "uses next_id when ahead of max existing");
+        assert_eq!(f.next_id, 6, "next_id bumped");
+        assert_eq!(f.issues.len(), 2);
+        assert_eq!(f.issues[0].id, 5, "inserted at the top");
+        assert_eq!(f.issues[0].title, "new one");
+        assert_eq!(f.issues[0].body, "body");
+        assert!(!f.issues[0].done);
+    }
+
+    #[test]
+    fn push_issue_guards_against_legacy_next_id_collision() {
+        // A hand-edited file whose `next_id` lags the real max id must
+        // not reuse an id already in use.
+        let mut f = ProjectIssuesFile {
+            next_id: 2,
+            issues: vec![
+                Issue { id: 20, title: "a".into(), ..Default::default() },
+                Issue { id: 7, title: "b".into(), ..Default::default() },
+            ],
+        };
+        let id = push_issue(&mut f, "c".into(), String::new());
+        assert_eq!(id, 21, "skips past max existing id, not stale next_id");
+        assert_eq!(f.next_id, 22);
+    }
+
+    #[test]
+    fn merge_reload_appends_disk_only_issues_when_dirty() {
+        // Simulate the clobber-safe merge: a dirty project keeps its
+        // in-memory issues and gains disk-only ones by id.
+        let mut store = IssuesStore::default();
+        store.loaded.insert(1);
+        store.dirty.insert(1);
+        store.by_project.insert(
+            1,
+            ProjectIssuesFile {
+                next_id: 3,
+                issues: vec![Issue { id: 2, title: "local edit".into(), ..Default::default() }],
+            },
+        );
+        // Hand-merge the way reload_from_disk does for a dirty project.
+        let disk = ProjectIssuesFile {
+            next_id: 4,
+            issues: vec![
+                Issue { id: 2, title: "stale disk copy".into(), ..Default::default() },
+                Issue { id: 3, title: "external add".into(), ..Default::default() },
+            ],
+        };
+        let mem = store.by_project.get_mut(&1).unwrap();
+        let mem_ids: HashSet<u64> = mem.issues.iter().map(|i| i.id).collect();
+        for di in disk.issues {
+            if !mem_ids.contains(&di.id) {
+                mem.issues.push(di);
+            }
+        }
+        let titles: Vec<&str> = mem.issues.iter().map(|i| i.title.as_str()).collect();
+        // Local copy of id 2 preserved; external id 3 appended.
+        assert_eq!(titles, vec!["local edit", "external add"]);
+    }
+}

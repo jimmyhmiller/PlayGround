@@ -187,6 +187,21 @@ pub enum IpcRequest {
         #[serde(default)]
         retain: bool,
     },
+    /// `tbissue --title "…" [--body "…"] [--project NAME]` — file an
+    /// issue into a project's Issues pane from the shell. The app appends
+    /// it to `~/.jim/issues/<id>.json` (single-writer, no clobber) and
+    /// any open Issues pane for that project shows it live. When
+    /// `project` is unset the app maps the caller's `from_cwd` to its
+    /// owning project, falling back to the active one.
+    AddIssue {
+        title: String,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        from_cwd: Option<PathBuf>,
+    },
     /// Open the command palette overlay, optionally pre-filling the search
     /// query. Used for scripting / verification and (later) as the entry
     /// point for the DeepSeek "Ask" flow. Fire-and-forget.

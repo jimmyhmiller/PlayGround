@@ -1,0 +1,6 @@
+digraph MultiRoots {
+  node [shape=box];
+  r1 -> m; r2 -> m; r3 -> m;
+  m -> x; m -> y;
+  x -> z; y -> z;
+}

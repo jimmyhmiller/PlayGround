@@ -1,0 +1,1811 @@
+// chess.ft — playable chess board, ported from the rhai widget.
+//
+// Click a piece of the side-to-move, then click a destination square.
+// All UCI engine protocol logic (handshake, position fen, go movetime,
+// bestmove / info score parsing) lives HERE in script, like the original;
+// the host only provides raw subprocess pipes (proc_spawn/write/read/...).
+//
+// Differences from chess.rhai, by language design:
+//  - state is an atom; handlers copy it out (`let mut s = @state`) and
+//    write it back with reset!(state, ...) before returning
+//  - lists/records are immutable: assoc/push return new values
+//  - render items use `kind:` instead of rhai's `type:` (funct keyword)
+//  - promo pending is `()` instead of -1 (a record when a pick is open)
+
+// The host interface this widget needs. When embedded, the host registers
+// these natives; under the bare CLI (e.g. `funct test`) they fault loudly
+// if called — the pure-logic inline tests below never call them.
+extern let canvas_w
+extern let canvas_h
+extern fn request_render()
+extern fn set_animating(on)
+extern fn proc_spawn(cmd)
+extern fn proc_write(handle, line)
+extern fn proc_read(handle)
+extern fn proc_alive(handle)
+extern fn proc_kill(handle)
+extern fn host_env(name)
+extern fn widget_asset(rel)
+extern fn clipboard_set(text)
+
+fn new_board() {
+    [
+        "bR","bN","bB","bQ","bK","bB","bN","bR",
+        "bP","bP","bP","bP","bP","bP","bP","bP",
+        "","","","","","","","",
+        "","","","","","","","",
+        "","","","","","","","",
+        "","","","","","","","",
+        "wP","wP","wP","wP","wP","wP","wP","wP",
+        "wR","wN","wB","wQ","wK","wB","wN","wR",
+    ]
+}
+
+fn initial_castle() = { wK: true, wQ: true, bK: true, bQ: true }
+
+fn init_state() = {
+    board: new_board(),
+    turn: "w",
+    selected: -1,
+    last_from: -1,
+    last_to: -1,
+    castle: initial_castle(),
+    ep: -1,
+    flipped: false,
+    over: false,
+    status: "",
+    promo: (),
+    drag_from: -1,
+    drag_active: false,
+    drag_x: 0.0,
+    drag_y: 0.0,
+    hover_btn: "",
+    bot_side: "",
+    level_idx: 1,
+    thinking: false,
+    engine_ok: true,
+    eng: -1,
+    history: [],
+    review: false,
+    ply: 0,
+    evals: [],
+    sweeping: false,
+    an_ply: -1,
+    copied: false,
+}
+
+let state = atom(init_state())
+
+fn save(s) = reset!(state, s)
+
+export fn on_init() {
+    let mut s = @state
+    // A persisted handle never survives a worker restart, so start clean
+    // and respawn on demand. Come up on the live game, not a stale review.
+    s = { ..s, eng: -1, thinking: false, review: false, sweeping: false,
+          an_ply: -1, evals: [], copied: false }
+    if bot_to_move(s.bot_side, s.over, s.turn) {
+        let eng = ensure_engine(s.eng)
+        if eng == -1 {
+            s = { ..s, eng: eng, engine_ok: false }
+        } else {
+            kick_engine(eng, s.board, s.turn, s.castle, s.ep, s.level_idx)
+            s = { ..s, eng: eng, thinking: true }
+            set_animating(true)
+        }
+    }
+    save(s)
+    request_render()
+}
+
+export fn on_resize(w, h) { request_render() }
+
+// Arrow keys step through the game while reviewing.
+export fn on_key(key) {
+    let mut s = @state
+    if not s.review { return }
+    let n = len(s.history)
+    let mut np = s.ply
+    if key == "ArrowLeft" or key == "ArrowDown" { np = s.ply - 1 }
+    else if key == "ArrowRight" or key == "ArrowUp" { np = s.ply + 1 }
+    else if key == "Home" { np = 0 }
+    else if key == "End" { np = n }
+    else { return }
+    if np < 0 { np = 0 }
+    if np > n { np = n }
+    if np != s.ply {
+        save({ ..s, ply: np })
+        request_render()
+    }
+}
+
+export fn on_hover(x, y) {
+    let mut s = @state
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+    let mut new_hover = ""
+    // a huge x means the cursor left the pane
+    if x < 1000000000.0 and y >= 0.0 and y < l.bar_h {
+        if s.review {
+            if x >= l.btn_prev_x and x <= l.btn_prev_x + l.btn_prev_w { new_hover = "prev" }
+            else if x >= l.btn_next_x and x <= l.btn_next_x + l.btn_next_w { new_hover = "next" }
+            else if x >= l.btn_exit_x and x <= l.btn_exit_x + l.btn_exit_w { new_hover = "exit" }
+        } else {
+            if x >= l.btn_flip_x and x <= l.btn_flip_x + l.btn_flip_w { new_hover = "flip" }
+            else if x >= l.btn_new_x and x <= l.btn_new_x + l.btn_new_w { new_hover = "new" }
+            else if x >= l.btn_bot_x and x <= l.btn_bot_x + l.btn_bot_w { new_hover = "bot" }
+            else if s.bot_side != "" and x >= l.btn_lvl_x and x <= l.btn_lvl_x + l.btn_lvl_w { new_hover = "level" }
+            else if x >= l.btn_review_x and x <= l.btn_review_x + l.btn_review_w { new_hover = "review" }
+            else if x >= l.btn_copy_x and x <= l.btn_copy_x + l.btn_copy_w { new_hover = "copy" }
+        }
+    }
+    let mut dirty = false
+    if s.copied and new_hover != "copy" {
+        s = { ..s, copied: false }
+        dirty = true
+    }
+    if s.hover_btn != new_hover {
+        s = { ..s, hover_btn: new_hover }
+        dirty = true
+    }
+    if dirty {
+        save(s)
+        request_render()
+    }
+}
+
+fn pc(p) = if p == "" { "" } else { slice(p, 0, 1) }
+fn pt(p) = if p == "" { "" } else { slice(p, 1, len(p)) }
+
+fn in_bounds(r, c) = r >= 0 and r < 8 and c >= 0 and c < 8
+fn rc_to_idx(r, c) = r * 8 + c
+fn idx_r(i) = i / 8
+fn idx_c(i) = i % 8
+
+// Squares a piece attacks (pawn attacks differ from pawn pushes;
+// castling is never an attack).
+fn attacks_from(board, from) {
+    let p = board[from]
+    if p == "" { return [] }
+    let color = pc(p)
+    let kind = pt(p)
+    let r = idx_r(from)
+    let c = idx_c(from)
+    let mut out = []
+    if kind == "P" {
+        let dir = if color == "w" { -1 } else { 1 }
+        for dc in [-1, 1] {
+            let rr = r + dir
+            let cc = c + dc
+            if in_bounds(rr, cc) { out = push(out, rc_to_idx(rr, cc)) }
+        }
+    } else if kind == "N" {
+        for j in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)] {
+            let rr = r + j[0]
+            let cc = c + j[1]
+            if in_bounds(rr, cc) { out = push(out, rc_to_idx(rr, cc)) }
+        }
+    } else if kind == "B" or kind == "R" or kind == "Q" {
+        let mut dirs = []
+        if kind != "R" { dirs = dirs + [(-1,-1), (-1,1), (1,-1), (1,1)] }
+        if kind != "B" { dirs = dirs + [(-1,0), (1,0), (0,-1), (0,1)] }
+        for d in dirs {
+            let mut rr = r + d[0]
+            let mut cc = c + d[1]
+            while in_bounds(rr, cc) {
+                let t = rc_to_idx(rr, cc)
+                out = push(out, t)
+                if board[t] != "" { break }
+                rr += d[0]
+                cc += d[1]
+            }
+        }
+    } else if kind == "K" {
+        for dr in [-1, 0, 1] {
+            for dc in [-1, 0, 1] {
+                if dr == 0 and dc == 0 { continue }
+                let rr = r + dr
+                let cc = c + dc
+                if in_bounds(rr, cc) { out = push(out, rc_to_idx(rr, cc)) }
+            }
+        }
+    }
+    out
+}
+
+fn is_attacked(board, sq, by_color) {
+    let mut i = 0
+    while i < 64 {
+        let p = board[i]
+        if p != "" and pc(p) == by_color {
+            if contains(attacks_from(board, i), sq) { return true }
+        }
+        i += 1
+    }
+    false
+}
+
+fn king_sq(board, color) {
+    let target = if color == "w" { "wK" } else { "bK" }
+    let mut i = 0
+    while i < 64 {
+        if board[i] == target { return i }
+        i += 1
+    }
+    -1
+}
+
+// --- Material count -----------------------------------------------
+fn piece_value(k) {
+    if k == "P" { 1 }
+    else if k == "N" or k == "B" { 3 }
+    else if k == "R" { 5 }
+    else if k == "Q" { 9 }
+    else { 0 }
+}
+
+fn material_adv(board) {
+    let mut diff = 0
+    let mut i = 0
+    while i < 64 {
+        let p = board[i]
+        if p != "" {
+            let v = piece_value(pt(p))
+            if pc(p) == "w" { diff += v } else { diff -= v }
+        }
+        i += 1
+    }
+    diff
+}
+
+// --- UCI helpers ----------------------------------------------------
+// Board index 0 = a8 (top-left), 63 = h1.
+
+fn level_elo(idx) {
+    if idx == 0 { 1350 }
+    else if idx == 1 { 1850 }
+    else if idx == 2 { 2350 }
+    else { 2850 }
+}
+fn level_ms(idx) {
+    if idx == 0 { 300 }
+    else if idx == 1 { 500 }
+    else if idx == 2 { 700 }
+    else { 1000 }
+}
+fn level_label(idx) = str(level_elo(idx))
+
+fn files_arr() = ["a", "b", "c", "d", "e", "f", "g", "h"]
+
+fn sq_name(idx) {
+    let f = idx % 8
+    let rank = 8 - (idx / 8)
+    files_arr()[f] + str(rank)
+}
+
+fn digit_val(ch) {
+    match index_of(["1","2","3","4","5","6","7","8"], ch) {
+        Some(i) => i + 1,
+        None => 0,
+    }
+}
+
+// "e2" -> board index; -1 on a malformed square.
+fn name_to_idx(s) {
+    if len(s) < 2 { return -1 }
+    let fc = slice(s, 0, 1)
+    let rank = digit_val(slice(s, 1, 1))
+    if rank == 0 { return -1 }
+    match index_of(files_arr(), fc) {
+        None => -1,
+        Some(col) => (8 - rank) * 8 + col,
+    }
+}
+
+// Full FEN for the position (halfmove/fullmove fixed at "0 1").
+fn board_to_fen(board, turn, castle, ep) {
+    let mut fen = ""
+    let mut r = 0
+    while r < 8 {
+        let mut empty = 0
+        let mut c = 0
+        while c < 8 {
+            let p = board[r * 8 + c]
+            if p == "" {
+                empty += 1
+            } else {
+                if empty > 0 { fen += str(empty); empty = 0 }
+                let letter = pt(p)
+                if pc(p) == "w" { fen += letter } else { fen += to_lower(letter) }
+            }
+            c += 1
+        }
+        if empty > 0 { fen += str(empty) }
+        if r < 7 { fen += "/" }
+        r += 1
+    }
+    let mut cr = ""
+    if castle.wK { cr += "K" }
+    if castle.wQ { cr += "Q" }
+    if castle.bK { cr += "k" }
+    if castle.bQ { cr += "q" }
+    if cr == "" { cr = "-" }
+    let ep_str = if ep == -1 { "-" } else { sq_name(ep) }
+    fen + " " + turn + " " + cr + " " + ep_str + " 0 1"
+}
+
+// "e2e4" / "e7e8q" -> { from, to, promo }. from = -1 for "(none)"/"0000".
+fn parse_engine_move(mv) {
+    if len(mv) < 4 { return { from: -1, to: -1, promo: "" } }
+    let from = name_to_idx(slice(mv, 0, 2))
+    let to = name_to_idx(slice(mv, 2, 2))
+    let promo = if len(mv) >= 5 { to_upper(slice(mv, 4, 1)) } else { "" }
+    { from: from, to: to, promo: promo }
+}
+
+fn bot_to_move(bot_side, over, turn) = bot_side != "" and not over and turn == bot_side
+
+// Engine binaries to try, in order. $CHESS_UCI_ENGINE wins if set.
+fn engine_candidates() {
+    let mut c = []
+    let env = host_env("CHESS_UCI_ENGINE")
+    if env != "" { c = push(c, env) }
+    c = c + ["stockfish", "/opt/homebrew/bin/stockfish", "/usr/local/bin/stockfish",
+             "/usr/bin/stockfish", "lc0", "/opt/homebrew/bin/lc0"]
+    c
+}
+
+// Ensure a live engine process, returning its handle (-1 on failure).
+fn ensure_engine(cur) {
+    if cur != -1 and proc_alive(cur) { return cur }
+    let mut id = -1
+    for cand in engine_candidates() {
+        let h = proc_spawn(cand)
+        if h != -1 { id = h; break }
+    }
+    if id != -1 {
+        proc_write(id, "uci")
+        proc_write(id, "isready")
+        proc_write(id, "ucinewgame")
+    }
+    id
+}
+
+// Kick off an async search at the selected Elo. Sends `stop` and drains
+// buffered output first so a stale reply can't be mistaken for this one.
+fn kick_engine(eng, board, turn, castle, ep, level_idx) {
+    proc_write(eng, "stop")
+    while true { if proc_read(eng) == "" { break } }
+    let fen = board_to_fen(board, turn, castle, ep)
+    proc_write(eng, "setoption name UCI_LimitStrength value true")
+    proc_write(eng, "setoption name UCI_Elo value " + str(level_elo(level_idx)))
+    proc_write(eng, "position fen " + fen)
+    proc_write(eng, "go movetime " + str(level_ms(level_idx)))
+}
+
+// Full-strength analysis (limiter OFF) of the position at `ply`.
+fn analyze_ply(eng, history, ply, movetime) {
+    proc_write(eng, "stop")
+    while true { if proc_read(eng) == "" { break } }
+    proc_write(eng, "setoption name UCI_LimitStrength value false")
+    let v = replay_to(history, ply)
+    let fen = board_to_fen(v.board, v.turn, v.castle, v.ep)
+    proc_write(eng, "position fen " + fen)
+    proc_write(eng, "go movetime " + str(movetime))
+}
+
+// Logistic win probability from a white-relative score.
+fn win_prob(kind, wr) {
+    if kind == "mate" { if wr >= 0 { 0.98 } else { 0.02 } }
+    else if kind == "cp" { 1.0 / (1.0 + exp((0.0 - to_float(wr)) / 350.0)) }
+    else { 0.5 }
+}
+
+fn review_movetime() = 300
+
+// Parse "info ... score cp N" / "score mate M" (side-to-move-relative).
+fn parse_info_score(line) {
+    let toks = split(line, " ")
+    let mut i = 0
+    while i < len(toks) {
+        if toks[i] == "score" and i + 2 < len(toks) {
+            return { kind: toks[i + 1], val: unwrap_or(parse_int(toks[i + 2]), 0) }
+        }
+        i += 1
+    }
+    { kind: "none", val: 0 }
+}
+
+// White-relative eval string from a side-to-move-relative score.
+fn eval_display(kind, val, turn) {
+    let sign = if turn == "b" { -1 } else { 1 }
+    if kind == "mate" {
+        let m = val * sign
+        if m >= 0 { "+M" + str(m) } else { "-M" + str(0 - m) }
+    } else if kind == "cp" {
+        let cp = val * sign
+        let acp = abs(cp)
+        let whole = acp / 100
+        let frac = acp % 100
+        let fs = if frac < 10 { "0" + str(frac) } else { str(frac) }
+        (if cp >= 0 { "+" } else { "-" }) + str(whole) + "." + fs
+    } else { "" }
+}
+
+// --- SAN + PGN ------------------------------------------------------
+
+fn is_check(board, color) {
+    let k = king_sq(board, color)
+    if k == -1 { return false }
+    is_attacked(board, k, if color == "w" { "b" } else { "w" })
+}
+
+// Which of file/rank (or both) disambiguates `from` among same-type
+// pieces that can also reach `to`.
+fn san_disambig(board, castle, ep, from, to) {
+    let me = pc(board[from])
+    let kind = pt(board[from])
+    let mut others = []
+    let mut i = 0
+    while i < 64 {
+        if i != from and board[i] != "" and pc(board[i]) == me and pt(board[i]) == kind {
+            if contains(legal_from(board, castle, ep, i), to) { others = push(others, i) }
+        }
+        i += 1
+    }
+    if len(others) == 0 { return "" }
+    let mut same_file = false
+    let mut same_rank = false
+    for o in others {
+        if idx_c(o) == idx_c(from) { same_file = true }
+        if idx_r(o) == idx_r(from) { same_rank = true }
+    }
+    if not same_file { return files_arr()[idx_c(from)] }
+    if not same_rank { return str(8 - idx_r(from)) }
+    files_arr()[idx_c(from)] + str(8 - idx_r(from))
+}
+
+// SAN without the +/# suffix (computed from the pre-move board).
+fn move_san_core(board, castle, ep, turn, from, to, promo) {
+    let kind = pt(board[from])
+    if kind == "K" {
+        let dc = idx_c(to) - idx_c(from)
+        if dc == 2 { return "O-O" }
+        if dc == -2 { return "O-O-O" }
+    }
+    let dest = sq_name(to)
+    let is_cap = board[to] != "" or (kind == "P" and to == ep and ep != -1)
+    if kind == "P" {
+        let mut s = if is_cap { files_arr()[idx_c(from)] + "x" + dest } else { dest }
+        if idx_r(to) == 0 or idx_r(to) == 7 {
+            let pk = if promo == "" { "Q" } else { promo }
+            s = s + "=" + pk
+        }
+        return s
+    }
+    let disamb = san_disambig(board, castle, ep, from, to)
+    kind + disamb + (if is_cap { "x" } else { "" }) + dest
+}
+
+// Full SAN: core + check/mate suffix from the post-move result.
+fn full_san(board, castle, ep, turn, from, to, promo, res_board, res_turn, res_over, res_status) {
+    let core = move_san_core(board, castle, ep, turn, from, to, promo)
+    if res_over and contains(res_status, "checkmate") { return core + "#" }
+    if is_check(res_board, res_turn) { return core + "+" }
+    core
+}
+
+fn build_pgn(history, over, status, bot_side, level_idx) {
+    let mut result = "*"
+    if over {
+        if contains(status, "White wins") { result = "1-0" }
+        else if contains(status, "Black wins") { result = "0-1" }
+        else { result = "1/2-1/2" }
+    }
+    let mut white = "Player"
+    let mut black = "Player"
+    if bot_side == "w" {
+        white = "Stockfish " + str(level_elo(level_idx))
+        black = "You"
+    } else if bot_side == "b" {
+        white = "You"
+        black = "Stockfish " + str(level_elo(level_idx))
+    }
+    let mut pgn = "[Event \"Casual Game\"]\n"
+    pgn += "[Site \"funct chess widget\"]\n"
+    pgn += "[Date \"????.??.??\"]\n"
+    pgn += "[White \"" + white + "\"]\n"
+    pgn += "[Black \"" + black + "\"]\n"
+    pgn += "[Result \"" + result + "\"]\n\n"
+    let mut body = ""
+    let mut i = 0
+    while i < len(history) {
+        if i % 2 == 0 { body += str((i / 2) + 1) + ". " }
+        body += history[i].san + " "
+        i += 1
+    }
+    body += result
+    pgn + body + "\n"
+}
+
+// --- Review replay ---------------------------------------------------
+
+// Apply a move without mate/stalemate detection (cheap; for replay).
+fn apply_quiet(board, castle, ep, turn, from, to, promo) {
+    let mover = board[from]
+    let kind = pt(mover)
+    let mut new_ep = -1
+    if kind == "P" and abs(idx_r(from) - idx_r(to)) == 2 {
+        new_ep = rc_to_idx((idx_r(from) + idx_r(to)) / 2, idx_c(from))
+    }
+    let b2 = make_move_clone(board, ep, from, to, promo)
+    let mut cr = castle
+    if kind == "K" {
+        if pc(mover) == "w" { cr = { ..cr, wK: false, wQ: false } }
+        else { cr = { ..cr, bK: false, bQ: false } }
+    }
+    if kind == "R" {
+        if from == 56 { cr = { ..cr, wQ: false } }
+        if from == 63 { cr = { ..cr, wK: false } }
+        if from == 0  { cr = { ..cr, bQ: false } }
+        if from == 7  { cr = { ..cr, bK: false } }
+    }
+    if to == 56 { cr = { ..cr, wQ: false } }
+    if to == 63 { cr = { ..cr, wK: false } }
+    if to == 0  { cr = { ..cr, bQ: false } }
+    if to == 7  { cr = { ..cr, bK: false } }
+    { board: b2, castle: cr, ep: new_ep, turn: if turn == "w" { "b" } else { "w" } }
+}
+
+// Position after `ply` half-moves from the start.
+fn replay_to(history, ply) {
+    let mut board = new_board()
+    let mut castle = initial_castle()
+    let mut ep = -1
+    let mut turn = "w"
+    let mut lf = -1
+    let mut lt = -1
+    let mut i = 0
+    while i < ply and i < len(history) {
+        let mv = history[i]
+        let r = apply_quiet(board, castle, ep, turn, mv.from, mv.to, mv.promo)
+        board = r.board
+        castle = r.castle
+        ep = r.ep
+        turn = r.turn
+        lf = mv.from
+        lt = mv.to
+        i += 1
+    }
+    { board: board, castle: castle, ep: ep, turn: turn, last_from: lf, last_to: lt }
+}
+
+// --- Arrow geometry --------------------------------------------------
+
+fn pi_const() = 3.14159265358979
+
+fn atan2_deg(y, x) = atan2(y, x) * 180.0 / pi_const()
+
+// Screen-space center of a board square, honoring perspective flip.
+fn sq_center(l, flipped, idx) {
+    let vr = if flipped { 7 - idx_r(idx) } else { idx_r(idx) }
+    let vc = if flipped { 7 - idx_c(idx) } else { idx_c(idx) }
+    { x: l.board_x + to_float(vc) * l.sq + l.sq / 2.0,
+      y: l.board_y + to_float(vr) * l.sq + l.sq / 2.0 }
+}
+
+fn gen_pseudo(board, castle, ep, from) {
+    let p = board[from]
+    if p == "" { return [] }
+    let me = pc(p)
+    let kind = pt(p)
+    let opp = if me == "w" { "b" } else { "w" }
+    let r = idx_r(from)
+    let c = idx_c(from)
+    let mut out = []
+
+    if kind == "P" {
+        let dir = if me == "w" { -1 } else { 1 }
+        let start_r = if me == "w" { 6 } else { 1 }
+        let r1 = r + dir
+        if in_bounds(r1, c) and board[rc_to_idx(r1, c)] == "" {
+            out = push(out, rc_to_idx(r1, c))
+            let r2 = r + 2 * dir
+            if r == start_r and in_bounds(r2, c) and board[rc_to_idx(r2, c)] == "" {
+                out = push(out, rc_to_idx(r2, c))
+            }
+        }
+        for dc in [-1, 1] {
+            let cc = c + dc
+            if in_bounds(r1, cc) {
+                let t = rc_to_idx(r1, cc)
+                let tgt = board[t]
+                if tgt != "" and pc(tgt) == opp {
+                    out = push(out, t)
+                } else if t == ep and ep != -1 {
+                    out = push(out, t)
+                }
+            }
+        }
+    } else if kind == "N" {
+        for j in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)] {
+            let rr = r + j[0]
+            let cc = c + j[1]
+            if in_bounds(rr, cc) {
+                let t = rc_to_idx(rr, cc)
+                if board[t] == "" or pc(board[t]) == opp { out = push(out, t) }
+            }
+        }
+    } else if kind == "B" or kind == "R" or kind == "Q" {
+        let mut dirs = []
+        if kind != "R" { dirs = dirs + [(-1,-1), (-1,1), (1,-1), (1,1)] }
+        if kind != "B" { dirs = dirs + [(-1,0), (1,0), (0,-1), (0,1)] }
+        for d in dirs {
+            let mut rr = r + d[0]
+            let mut cc = c + d[1]
+            while in_bounds(rr, cc) {
+                let t = rc_to_idx(rr, cc)
+                if board[t] == "" {
+                    out = push(out, t)
+                } else {
+                    if pc(board[t]) == opp { out = push(out, t) }
+                    break
+                }
+                rr += d[0]
+                cc += d[1]
+            }
+        }
+    } else if kind == "K" {
+        for dr in [-1, 0, 1] {
+            for dc in [-1, 0, 1] {
+                if dr == 0 and dc == 0 { continue }
+                let rr = r + dr
+                let cc = c + dc
+                if in_bounds(rr, cc) {
+                    let t = rc_to_idx(rr, cc)
+                    if board[t] == "" or pc(board[t]) == opp { out = push(out, t) }
+                }
+            }
+        }
+        let home_r = if me == "w" { 7 } else { 0 }
+        if r == home_r and c == 4 {
+            let kk = if me == "w" { "wK" } else { "bK" }
+            let qq = if me == "w" { "wQ" } else { "bQ" }
+            if castle[kk]
+                and board[rc_to_idx(home_r, 5)] == ""
+                and board[rc_to_idx(home_r, 6)] == ""
+                and not is_attacked(board, rc_to_idx(home_r, 4), opp)
+                and not is_attacked(board, rc_to_idx(home_r, 5), opp)
+                and not is_attacked(board, rc_to_idx(home_r, 6), opp) {
+                out = push(out, rc_to_idx(home_r, 6))
+            }
+            if castle[qq]
+                and board[rc_to_idx(home_r, 1)] == ""
+                and board[rc_to_idx(home_r, 2)] == ""
+                and board[rc_to_idx(home_r, 3)] == ""
+                and not is_attacked(board, rc_to_idx(home_r, 4), opp)
+                and not is_attacked(board, rc_to_idx(home_r, 3), opp)
+                and not is_attacked(board, rc_to_idx(home_r, 2), opp) {
+                out = push(out, rc_to_idx(home_r, 2))
+            }
+        }
+    }
+    out
+}
+
+// Apply candidate move to a copy of the board. Auto-queens unless a
+// promotion piece is given; handles castling rook hop and en passant.
+fn make_move_clone(board, ep, from, to, promo) {
+    let mut b = board
+    let mover = b[from]
+    let kind = pt(mover)
+    let me = pc(mover)
+    b = assoc(b, from, "")
+    b = assoc(b, to, mover)
+    if kind == "P" and to == ep and ep != -1 {
+        b = assoc(b, rc_to_idx(idx_r(from), idx_c(to)), "")
+    }
+    if kind == "K" {
+        let dc = idx_c(to) - idx_c(from)
+        let r0 = idx_r(from)
+        if dc == 2 {
+            b = assoc(b, rc_to_idx(r0, 5), b[rc_to_idx(r0, 7)])
+            b = assoc(b, rc_to_idx(r0, 7), "")
+        } else if dc == -2 {
+            b = assoc(b, rc_to_idx(r0, 3), b[rc_to_idx(r0, 0)])
+            b = assoc(b, rc_to_idx(r0, 0), "")
+        }
+    }
+    if kind == "P" and (idx_r(to) == 0 or idx_r(to) == 7) {
+        let pick = if promo == "" { "Q" } else { promo }
+        b = assoc(b, to, me + pick)
+    }
+    b
+}
+
+fn is_promotion_move(board, from, to) {
+    let p = board[from]
+    if p == "" { return false }
+    if pt(p) != "P" { return false }
+    idx_r(to) == 0 or idx_r(to) == 7
+}
+
+fn legal_from(board, castle, ep, from) {
+    let p = board[from]
+    if p == "" { return [] }
+    let me = pc(p)
+    let opp = if me == "w" { "b" } else { "w" }
+    let mut legal = []
+    for to in gen_pseudo(board, castle, ep, from) {
+        let b2 = make_move_clone(board, ep, from, to, "")
+        let ksq = king_sq(b2, me)
+        if ksq == -1 { continue }
+        if not is_attacked(b2, ksq, opp) { legal = push(legal, to) }
+    }
+    legal
+}
+
+fn any_legal_for(board, castle, ep, color) {
+    let mut i = 0
+    while i < 64 {
+        let p = board[i]
+        if p != "" and pc(p) == color {
+            if len(legal_from(board, castle, ep, i)) > 0 { return true }
+        }
+        i += 1
+    }
+    false
+}
+
+// Pure: the next game state given a legal move.
+fn make_result(board, castle, ep, turn, from, to, promo) {
+    let mover = board[from]
+    let kind = pt(mover)
+    let mut new_ep = -1
+    if kind == "P" and abs(idx_r(from) - idx_r(to)) == 2 {
+        new_ep = rc_to_idx((idx_r(from) + idx_r(to)) / 2, idx_c(from))
+    }
+    let b2 = make_move_clone(board, ep, from, to, promo)
+    let mut cr = castle
+    if kind == "K" {
+        if pc(mover) == "w" { cr = { ..cr, wK: false, wQ: false } }
+        else { cr = { ..cr, bK: false, bQ: false } }
+    }
+    if kind == "R" {
+        if from == 56 { cr = { ..cr, wQ: false } }
+        if from == 63 { cr = { ..cr, wK: false } }
+        if from == 0  { cr = { ..cr, bQ: false } }
+        if from == 7  { cr = { ..cr, bK: false } }
+    }
+    if to == 56 { cr = { ..cr, wQ: false } }
+    if to == 63 { cr = { ..cr, wK: false } }
+    if to == 0  { cr = { ..cr, bQ: false } }
+    if to == 7  { cr = { ..cr, bK: false } }
+
+    let next_turn = if turn == "w" { "b" } else { "w" }
+    let mut over = false
+    let mut status = ""
+    if not any_legal_for(b2, cr, new_ep, next_turn) {
+        let ksq = king_sq(b2, next_turn)
+        let opp = if next_turn == "w" { "b" } else { "w" }
+        over = true
+        if ksq != -1 and is_attacked(b2, ksq, opp) {
+            status = (if next_turn == "w" { "Black" } else { "White" }) + " wins by checkmate"
+        } else {
+            status = "Stalemate"
+        }
+    }
+    { board: b2, castle: cr, ep: new_ep, last_from: from, last_to: to,
+      turn: next_turn, over: over, status: status }
+}
+
+fn piece_path(p) {
+    let k = pt(p)
+    let prefix = if k == "K" { "k" }
+        else if k == "Q" { "q" }
+        else if k == "R" { "r" }
+        else if k == "B" { "b" }
+        else if k == "N" { "n" }
+        else { "p" }
+    let suffix = if pc(p) == "w" { "lt" } else { "dt" }
+    widget_asset("chess/" + prefix + suffix + ".png")
+}
+
+// Bar layout is mode-aware (review: stepper; play: control buttons).
+// Buttons are laid out right-to-left from a cursor.
+fn compute_layout(w, h, bot_on, review) {
+    let bar_h = 32.0
+    let pad = 8.0
+    let eb_w = if review { 16.0 } else { 0.0 }
+    let eb_gap = if review { 10.0 } else { 0.0 }
+    let gr_h = if review { 58.0 } else { 0.0 }
+    let gr_gap = if review { 10.0 } else { 0.0 }
+    let avail_w = w - 2.0 * pad - eb_w - eb_gap
+    let avail_h = h - bar_h - 2.0 * pad - gr_h - gr_gap
+    let mut sq = (if avail_w < avail_h { avail_w } else { avail_h }) / 8.0
+    if sq < 8.0 { sq = 8.0 }
+    let board_w = sq * 8.0
+    let region_x = pad + eb_w + eb_gap
+    let region_w = w - region_x - pad
+    let mut board_x = region_x + (region_w - board_w) / 2.0
+    if board_x < region_x { board_x = region_x }
+    let region_y = bar_h + pad
+    let region_h = h - bar_h - 2.0 * pad - gr_h - gr_gap
+    let mut board_y = region_y + (region_h - board_w) / 2.0
+    if board_y < region_y { board_y = region_y }
+
+    let gap = 8.0
+    let mut l = { bar_h: bar_h, sq: sq, board_x: board_x, board_y: board_y,
+        eb_x: board_x - eb_gap - eb_w, eb_w: eb_w, eb_y: board_y, eb_h: board_w,
+        gr_x: board_x, gr_y: board_y + board_w + gr_gap, gr_w: board_w, gr_h: gr_h }
+    let mut cursor = w - gap
+    if review {
+        let exit_w = 76.0
+        let step_w = 40.0
+        l = { ..l, btn_exit_x: cursor - exit_w, btn_exit_w: exit_w }
+        cursor = l.btn_exit_x - gap
+        l = { ..l, btn_next_x: cursor - step_w, btn_next_w: step_w }
+        cursor = l.btn_next_x - gap
+        l = { ..l, btn_prev_x: cursor - step_w, btn_prev_w: step_w }
+        cursor = l.btn_prev_x - gap
+    } else {
+        let new_w = 84.0
+        let flip_w = 48.0
+        let bot_w = 70.0
+        let lvl_w = 52.0
+        let rev_w = 76.0
+        let copy_w = 84.0
+        l = { ..l, btn_new_x: cursor - new_w, btn_new_w: new_w }
+        cursor = l.btn_new_x - gap
+        l = { ..l, btn_flip_x: cursor - flip_w, btn_flip_w: flip_w }
+        cursor = l.btn_flip_x - gap
+        l = { ..l, btn_bot_x: cursor - bot_w, btn_bot_w: bot_w }
+        cursor = l.btn_bot_x - gap
+        if bot_on {
+            l = { ..l, btn_lvl_x: cursor - lvl_w, btn_lvl_w: lvl_w }
+            cursor = l.btn_lvl_x - gap
+        } else {
+            l = { ..l, btn_lvl_x: -1000.0, btn_lvl_w: lvl_w }
+        }
+        l = { ..l, btn_review_x: cursor - rev_w, btn_review_w: rev_w }
+        cursor = l.btn_review_x - gap
+        l = { ..l, btn_copy_x: cursor - copy_w, btn_copy_w: copy_w }
+        cursor = l.btn_copy_x - gap
+    }
+    l
+}
+
+fn vis_row_of(flipped, idx) = if flipped { 7 - idx_r(idx) } else { idx_r(idx) }
+fn vis_col_of(flipped, idx) = if flipped { 7 - idx_c(idx) } else { idx_c(idx) }
+
+// 4-cell strip for the promotion picker, in visual (row, col) coords.
+fn promo_strip_cells(flipped, to_idx) {
+    let vr = vis_row_of(flipped, to_idx)
+    let vc = vis_col_of(flipped, to_idx)
+    let dir = if vr == 0 { 1 } else { -1 }
+    [
+        { vr: vr,           vc: vc },
+        { vr: vr + dir,     vc: vc },
+        { vr: vr + 2 * dir, vc: vc },
+        { vr: vr + 3 * dir, vc: vc },
+    ]
+}
+
+fn promo_pieces() = ["Q", "R", "B", "N"]
+
+// Shared "a move was decided" path: record SAN + apply + maybe wake bot.
+fn commit_move(s0, from, to, promo) {
+    let mut s = s0
+    let res = make_result(s.board, s.castle, s.ep, s.turn, from, to, promo)
+    let san = full_san(s.board, s.castle, s.ep, s.turn, from, to, promo,
+                       res.board, res.turn, res.over, res.status)
+    s = { ..s,
+        history: push(s.history, { from: from, to: to, promo: promo, san: san }),
+        board: res.board, castle: res.castle, ep: res.ep,
+        last_from: res.last_from, last_to: res.last_to,
+        turn: res.turn, over: res.over, status: res.status,
+        selected: -1, promo: () }
+    if bot_to_move(s.bot_side, s.over, s.turn) {
+        let eng = ensure_engine(s.eng)
+        if eng == -1 {
+            s = { ..s, eng: eng, engine_ok: false }
+        } else {
+            kick_engine(eng, s.board, s.turn, s.castle, s.ep, s.level_idx)
+            s = { ..s, eng: eng, thinking: true }
+            set_animating(true)
+        }
+    }
+    s
+}
+
+export fn on_click(x, y, shift, cmd, id) {
+    let mut s = @state
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+
+    // Pending-promotion overlay takes precedence: click inside the strip
+    // picks that piece, outside cancels.
+    if s.promo != () {
+        let cells = promo_strip_cells(s.flipped, s.promo.to)
+        let pieces = promo_pieces()
+        let bx = x - l.board_x
+        let by = y - l.board_y
+        let inside = bx >= 0.0 and by >= 0.0 and bx < l.sq * 8.0 and by < l.sq * 8.0
+        if inside {
+            let cv = to_int(bx / l.sq)
+            let rv = to_int(by / l.sq)
+            let mut i = 0
+            while i < 4 {
+                let cell = cells[i]
+                if cell.vr == rv and cell.vc == cv {
+                    save(commit_move(s, s.promo.from, s.promo.to, pieces[i]))
+                    request_render()
+                    return
+                }
+                i += 1
+            }
+        }
+        save({ ..s, promo: (), selected: -1 })
+        request_render()
+        return
+    }
+
+    if y < l.bar_h {
+        if s.review {
+            if x >= l.btn_prev_x and x <= l.btn_prev_x + l.btn_prev_w {
+                let mut np = s.ply - 1
+                if np < 0 { np = 0 }
+                if np != s.ply { save({ ..s, ply: np }) }
+                request_render()
+                return
+            }
+            if x >= l.btn_next_x and x <= l.btn_next_x + l.btn_next_w {
+                let mut np = s.ply + 1
+                if np > len(s.history) { np = len(s.history) }
+                if np != s.ply { save({ ..s, ply: np }) }
+                request_render()
+                return
+            }
+            if x >= l.btn_exit_x and x <= l.btn_exit_x + l.btn_exit_w {
+                if s.eng != -1 {
+                    proc_write(s.eng, "stop")
+                    while true { if proc_read(s.eng) == "" { break } }
+                }
+                save({ ..s, review: false, sweeping: false, an_ply: -1, evals: [] })
+                set_animating(false)
+                request_render()
+                return
+            }
+            return
+        }
+        if x >= l.btn_new_x and x <= l.btn_new_x + l.btn_new_w {
+            s = { ..s, board: new_board(), turn: "w", selected: -1,
+                  last_from: -1, last_to: -1, castle: initial_castle(), ep: -1,
+                  over: false, status: "", promo: (), thinking: false,
+                  history: [], copied: false }
+            if bot_to_move(s.bot_side, s.over, s.turn) {
+                let eng = ensure_engine(s.eng)
+                if eng == -1 {
+                    s = { ..s, eng: eng, engine_ok: false }
+                } else {
+                    kick_engine(eng, s.board, s.turn, s.castle, s.ep, s.level_idx)
+                    s = { ..s, eng: eng, thinking: true }
+                    set_animating(true)
+                }
+            }
+            save(s)
+            request_render()
+            return
+        }
+        if x >= l.btn_flip_x and x <= l.btn_flip_x + l.btn_flip_w {
+            save({ ..s, flipped: not s.flipped, selected: -1 })
+            request_render()
+            return
+        }
+        // Bot button cycles: off -> bot plays Black -> bot plays White -> off.
+        if x >= l.btn_bot_x and x <= l.btn_bot_x + l.btn_bot_w {
+            let next = if s.bot_side == "" { "b" }
+                else if s.bot_side == "b" { "w" }
+                else { "" }
+            if next == "" {
+                if s.eng != -1 { proc_kill(s.eng) }
+                save({ ..s, eng: -1, bot_side: "", thinking: false, selected: -1 })
+                set_animating(false)
+                request_render()
+                return
+            }
+            let eng = ensure_engine(s.eng)
+            if eng == -1 {
+                save({ ..s, eng: -1, engine_ok: false })
+                request_render()
+                return
+            }
+            s = { ..s, eng: eng, engine_ok: true, bot_side: next, selected: -1, thinking: false }
+            if bot_to_move(s.bot_side, s.over, s.turn) {
+                kick_engine(s.eng, s.board, s.turn, s.castle, s.ep, s.level_idx)
+                s = { ..s, thinking: true }
+                set_animating(true)
+            }
+            save(s)
+            request_render()
+            return
+        }
+        if s.bot_side != "" and x >= l.btn_lvl_x and x <= l.btn_lvl_x + l.btn_lvl_w {
+            save({ ..s, level_idx: (s.level_idx + 1) % 4 })
+            request_render()
+            return
+        }
+        // Review button: enter review at the final position, kick off the
+        // background per-ply eval sweep.
+        if x >= l.btn_review_x and x <= l.btn_review_x + l.btn_review_w {
+            if len(s.history) == 0 { return }
+            s = { ..s, review: true, thinking: false, selected: -1, ply: len(s.history) }
+            let mut evals = []
+            let mut i = 0
+            while i <= len(s.history) {
+                evals = push(evals, { done: false, kind: "none", wr: 0, from: -1, to: -1, san: "" })
+                i += 1
+            }
+            s = { ..s, evals: evals }
+            let eng = ensure_engine(s.eng)
+            if eng == -1 {
+                s = { ..s, eng: eng, engine_ok: false, sweeping: false, an_ply: -1 }
+            } else {
+                s = { ..s, eng: eng, engine_ok: true, an_ply: s.ply, sweeping: true }
+                analyze_ply(eng, s.history, s.ply, review_movetime())
+                set_animating(true)
+            }
+            save(s)
+            request_render()
+            return
+        }
+        // Copy PGN to the clipboard.
+        if x >= l.btn_copy_x and x <= l.btn_copy_x + l.btn_copy_w {
+            if len(s.history) > 0 {
+                let pgn = build_pgn(s.history, s.over, s.status, s.bot_side, s.level_idx)
+                save({ ..s, copied: clipboard_set(pgn) })
+            }
+            request_render()
+            return
+        }
+        return
+    }
+    // Board is read-only while reviewing — but clicking the eval graph
+    // jumps to that ply.
+    if s.review {
+        if len(s.history) > 0
+            and x >= l.gr_x and x <= l.gr_x + l.gr_w
+            and y >= l.gr_y and y <= l.gr_y + l.gr_h {
+            let n = len(s.history)
+            let mut np = to_int((x - l.gr_x) / l.gr_w * to_float(n) + 0.5)
+            if np < 0 { np = 0 }
+            if np > n { np = n }
+            if np != s.ply {
+                save({ ..s, ply: np })
+                request_render()
+            }
+        }
+        return
+    }
+    let bx = x - l.board_x
+    let by = y - l.board_y
+    if bx < 0.0 or by < 0.0 or bx >= l.sq * 8.0 or by >= l.sq * 8.0 { return }
+    let col_v = to_int(bx / l.sq)
+    let row_v = to_int(by / l.sq)
+    let r = if s.flipped { 7 - row_v } else { row_v }
+    let c = if s.flipped { 7 - col_v } else { col_v }
+    let idx = rc_to_idx(r, c)
+    if s.over { return }
+    // The bot's move (or it's thinking) — ignore board input.
+    if s.bot_side != "" and s.turn == s.bot_side { return }
+
+    if s.selected != -1 {
+        if contains(legal_from(s.board, s.castle, s.ep, s.selected), idx) {
+            if is_promotion_move(s.board, s.selected, idx) {
+                save({ ..s, promo: { from: s.selected, to: idx } })
+                request_render()
+                return
+            }
+            save(commit_move(s, s.selected, idx, ""))
+            request_render()
+            return
+        }
+    }
+    let p = s.board[idx]
+    if p != "" and pc(p) == s.turn {
+        s = { ..s, selected: idx, drag_from: idx, drag_active: false, drag_x: x, drag_y: y }
+    } else {
+        s = { ..s, selected: -1, drag_from: -1 }
+    }
+    save(s)
+    request_render()
+}
+
+export fn on_drag(x, y) {
+    let s = @state
+    if s.drag_from == -1 { return }
+    save({ ..s, drag_active: true, drag_x: x, drag_y: y })
+    request_render()
+}
+
+export fn on_release(x, y) {
+    let mut s = @state
+    if s.drag_from == -1 { return }
+    if not s.drag_active {
+        // Pure click — leave selection in place; reset drag tracking only.
+        save({ ..s, drag_from: -1 })
+        return
+    }
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+    let from = s.drag_from
+    s = { ..s, drag_from: -1, drag_active: false }
+    save(s)
+
+    // Promotion picker open? Treat release like a click on the picker.
+    if s.promo != () {
+        on_click(x, y, false, false, "")
+        return
+    }
+
+    let bx = x - l.board_x
+    let by = y - l.board_y
+    let inside = bx >= 0.0 and by >= 0.0 and bx < l.sq * 8.0 and by < l.sq * 8.0
+    if not inside {
+        request_render()
+        return
+    }
+    let col_v = to_int(bx / l.sq)
+    let row_v = to_int(by / l.sq)
+    let r = if s.flipped { 7 - row_v } else { row_v }
+    let c = if s.flipped { 7 - col_v } else { col_v }
+    let to = rc_to_idx(r, c)
+    if to == from {
+        request_render()
+        return
+    }
+    if s.over {
+        request_render()
+        return
+    }
+    if not contains(legal_from(s.board, s.castle, s.ep, from), to) {
+        request_render()
+        return
+    }
+    if is_promotion_move(s.board, from, to) {
+        save({ ..s, promo: { from: from, to: to } })
+        request_render()
+        return
+    }
+    save(commit_move(s, from, to, ""))
+    request_render()
+}
+
+// Animation tick — only sent while requested (bot search / review sweep).
+// Drain the engine's stdout; apply a legal bestmove when it lands.
+export fn on_frame(dt) {
+    let mut s = @state
+    // Review-mode background sweep: evaluate one ply at a time.
+    if s.sweeping {
+        if s.eng == -1 or s.an_ply < 0 {
+            save({ ..s, sweeping: false, an_ply: -1 })
+            set_animating(false)
+            return
+        }
+        let n = len(s.history)
+        let cur = s.evals[s.an_ply]
+        let mut kind = cur.kind
+        let mut wr = cur.wr
+        let mut bf = cur.from
+        let mut bt = cur.to
+        let mut bsan = cur.san
+        let v = replay_to(s.history, s.an_ply)
+        let mut got_best = false
+        while true {
+            let line = proc_read(s.eng)
+            if line == "" { break }
+            if starts_with(line, "info ") and contains(line, " score ") {
+                let sc = parse_info_score(line)
+                if sc.kind != "none" {
+                    kind = sc.kind
+                    wr = if v.turn == "b" { 0 - sc.val } else { sc.val } // white-relative
+                }
+            } else if starts_with(line, "bestmove ") {
+                let rest = slice(line, 9, len(line))
+                let mv = match index_of(rest, " ") {
+                    Some(sp) => slice(rest, 0, sp),
+                    None => rest,
+                }
+                let m = parse_engine_move(mv)
+                if m.from != -1 and m.to != -1 {
+                    bf = m.from
+                    bt = m.to
+                    bsan = move_san_core(v.board, v.castle, v.ep, v.turn, m.from, m.to, m.promo)
+                }
+                got_best = true
+                break
+            }
+        }
+        s = { ..s, evals: assoc(s.evals, s.an_ply,
+              { done: got_best, kind: kind, wr: wr, from: bf, to: bt, san: bsan }) }
+        if got_best {
+            // Next ply: the viewed one if pending, else the lowest pending.
+            let mut nxt = -1
+            if not s.evals[s.ply].done { nxt = s.ply }
+            else {
+                let mut i = 0
+                while i <= n {
+                    if not s.evals[i].done { nxt = i; break }
+                    i += 1
+                }
+            }
+            if nxt == -1 {
+                s = { ..s, sweeping: false, an_ply: -1 }
+                set_animating(false)
+            } else {
+                s = { ..s, an_ply: nxt }
+                analyze_ply(s.eng, s.history, nxt, review_movetime())
+            }
+        }
+        save(s)
+        request_render()
+        return
+    }
+    if not s.thinking {
+        set_animating(false)
+        return
+    }
+    if s.eng == -1 {
+        save({ ..s, thinking: false })
+        set_animating(false)
+        return
+    }
+
+    let mut done = false
+    while true {
+        let line = proc_read(s.eng)
+        if line == "" { break } // nothing more buffered this tick
+
+        if starts_with(line, "bestmove ") {
+            let rest = slice(line, 9, len(line))
+            let mv = match index_of(rest, " ") {
+                Some(sp) => slice(rest, 0, sp),
+                None => rest,
+            }
+            let m = parse_engine_move(mv)
+            if m.from == -1 or m.to == -1 {
+                // "(none)" / "0000" — engine has no move.
+                done = true
+                break
+            }
+            // Guard against a stale reply for a different position.
+            if not contains(legal_from(s.board, s.castle, s.ep, m.from), m.to) { continue }
+
+            s = commit_move({ ..s, thinking: false }, m.from, m.to, m.promo)
+            done = true
+            break
+        }
+    }
+    if done {
+        save({ ..s, thinking: false })
+        set_animating(false)
+        request_render()
+    }
+}
+
+export fn render(cw, ch) {
+    let s = @state
+    let l = compute_layout(cw, ch, s.bot_side != "", s.review)
+    let mut items = []
+
+    items = push(items, { kind: "rect", id: "bg", x: 0.0, y: 0.0, w: cw, h: ch,
+        color: "#222831", anchor: "top-left", z: 0.0 })
+    items = push(items, { kind: "rect", id: "bar", x: 0.0, y: 0.0, w: cw, h: l.bar_h,
+        color: "#2b323d", anchor: "top-left", z: 0.1 })
+
+    // Position to draw: the live game, or the reviewed past position.
+    let view = if s.review {
+        replay_to(s.history, s.ply)
+    } else {
+        { board: s.board, castle: s.castle, ep: s.ep, turn: s.turn,
+          last_from: s.last_from, last_to: s.last_to }
+    }
+    let vb = view.board
+    let vturn = view.turn
+    let vlf = view.last_from
+    let vlt = view.last_to
+    let vcastle = view.castle
+    let vep = view.ep
+    let vsel = if s.review { -1 } else { s.selected }
+
+    // Current-ply analysis (review): eval + best move from the cache.
+    let cur = if s.review and s.ply < len(s.evals) {
+        s.evals[s.ply]
+    } else {
+        { done: false, kind: "none", wr: 0, from: -1, to: -1, san: "" }
+    }
+    let cur_from = cur.from
+    let cur_to = cur.to
+    let cur_san = cur.san
+    let cur_eval = if cur.kind != "none" { eval_display(cur.kind, cur.wr, "w") }
+        else if s.sweeping { "…" } else { "" }
+
+    let dot_border = if vturn == "w" { "#1a1a1a" } else { "#f0d9b5" }
+    items = push(items, { kind: "rect", id: "turn_b", x: 9.0, y: 7.0, w: 18.0, h: 18.0,
+        color: dot_border, anchor: "top-left", z: 0.15 })
+    let dot_color = if vturn == "w" { "#f0d9b5" } else { "#1a1a1a" }
+    items = push(items, { kind: "rect", id: "turn", x: 10.0, y: 8.0, w: 16.0, h: 16.0,
+        color: dot_color, anchor: "top-left", z: 0.2 })
+    let turn_label = if not s.engine_ok { "No UCI engine found" }
+        else if s.review { "Move " + str(s.ply) + "/" + str(len(s.history)) }
+        else if s.over { s.status }
+        else if s.thinking { "Bot thinking…" }
+        else if vturn == "w" { "White to move" }
+        else { "Black to move" }
+    items = push(items, { kind: "text", id: "turn_lbl", x: 36.0, y: 8.0,
+        value: turn_label, color: "#e6e8ef", size: 13.0, anchor: "top-left", z: 0.3 })
+
+    // Material lead, beside the turn indicator.
+    let madv = material_adv(vb)
+    if madv != 0 {
+        let mtxt = if madv > 0 { "White +" + str(madv) } else { "Black +" + str(0 - madv) }
+        items = push(items, { kind: "text", id: "mat_lbl", x: 160.0, y: 8.0, value: mtxt,
+            color: "#d8c38a", size: 12.0, anchor: "top-left", z: 0.3 })
+    }
+
+    if s.review {
+        let mut info = ""
+        if cur_eval != "" and cur_eval != "…" { info += "eval " + cur_eval }
+        if cur_san != "" { info += "    best " + cur_san }
+        else if s.sweeping { info += "    analyzing…" }
+        items = push(items, { kind: "text", id: "rev_info", x: 260.0, y: 8.0, value: info,
+            color: "#bfe3c4", size: 12.0, anchor: "top-left", z: 0.3 })
+    }
+
+    if s.review {
+        let prev_bg = if s.hover_btn == "prev" { "#4a546a" } else { "#3a4252" }
+        items = push(items, { kind: "rect", id: "btn_prev",
+            x: l.btn_prev_x, y: 4.0, w: l.btn_prev_w, h: l.bar_h - 8.0,
+            color: prev_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_prev_lbl",
+            x: l.btn_prev_x + l.btn_prev_w / 2.0 - 4.0, y: 7.0,
+            value: "<", color: "#e6e8ef", size: 15.0, anchor: "top-left", z: 0.3 })
+        let next_bg = if s.hover_btn == "next" { "#4a546a" } else { "#3a4252" }
+        items = push(items, { kind: "rect", id: "btn_next",
+            x: l.btn_next_x, y: 4.0, w: l.btn_next_w, h: l.bar_h - 8.0,
+            color: next_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_next_lbl",
+            x: l.btn_next_x + l.btn_next_w / 2.0 - 4.0, y: 7.0,
+            value: ">", color: "#e6e8ef", size: 15.0, anchor: "top-left", z: 0.3 })
+        let exit_bg = if s.hover_btn == "exit" { "#7a5a5a" } else { "#5a4646" }
+        let exit_tw = 4.0 * 12.0 * 0.6
+        items = push(items, { kind: "rect", id: "btn_exit",
+            x: l.btn_exit_x, y: 4.0, w: l.btn_exit_w, h: l.bar_h - 8.0,
+            color: exit_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_exit_lbl",
+            x: l.btn_exit_x + (l.btn_exit_w - exit_tw) / 2.0, y: 9.0,
+            value: "Exit", color: "#f4f4f4", size: 12.0, anchor: "top-left", z: 0.3 })
+    } else {
+        let flip_text_w = 4.0 * 12.0 * 0.6
+        let flip_bg = if s.hover_btn == "flip" { "#4a546a" } else { "#3a4252" }
+        items = push(items, { kind: "rect", id: "btn_flip",
+            x: l.btn_flip_x, y: 4.0, w: l.btn_flip_w, h: l.bar_h - 8.0,
+            color: flip_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_flip_lbl",
+            x: l.btn_flip_x + (l.btn_flip_w - flip_text_w) / 2.0, y: 9.0,
+            value: "Flip", color: "#e6e8ef", size: 12.0, anchor: "top-left", z: 0.3 })
+
+        let new_text_w = 8.0 * 12.0 * 0.6
+        let new_base = if s.over { "#c0703e" } else { "#5a4646" }
+        let new_hover = if s.over { "#d68d52" } else { "#7a5a5a" }
+        let new_color = if s.hover_btn == "new" { new_hover } else { new_base }
+        items = push(items, { kind: "rect", id: "btn_new",
+            x: l.btn_new_x, y: 4.0, w: l.btn_new_w, h: l.bar_h - 8.0,
+            color: new_color, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_new_lbl",
+            x: l.btn_new_x + (l.btn_new_w - new_text_w) / 2.0, y: 9.0,
+            value: "New game", color: "#f4f4f4", size: 12.0, anchor: "top-left", z: 0.3 })
+
+        // Bot toggle: off / plays Black / plays White. Green when on.
+        let bot_label = if s.bot_side == "w" { "Bot: W" }
+            else if s.bot_side == "b" { "Bot: B" }
+            else { "Bot off" }
+        let bot_on = s.bot_side != ""
+        let bot_base = if bot_on { "#3d6b46" } else { "#3a4252" }
+        let bot_hov = if bot_on { "#4c8358" } else { "#4a546a" }
+        let bot_color = if s.hover_btn == "bot" { bot_hov } else { bot_base }
+        items = push(items, { kind: "rect", id: "btn_bot",
+            x: l.btn_bot_x, y: 4.0, w: l.btn_bot_w, h: l.bar_h - 8.0,
+            color: bot_color, anchor: "top-left", z: 0.2 })
+        let bot_text_w = 6.0 * 12.0 * 0.6
+        items = push(items, { kind: "text", id: "btn_bot_lbl",
+            x: l.btn_bot_x + (l.btn_bot_w - bot_text_w) / 2.0, y: 9.0,
+            value: bot_label, color: "#f4f4f4", size: 12.0, anchor: "top-left", z: 0.3 })
+
+        if bot_on {
+            let lvl_color = if s.hover_btn == "level" { "#4a546a" } else { "#3a4252" }
+            items = push(items, { kind: "rect", id: "btn_lvl",
+                x: l.btn_lvl_x, y: 4.0, w: l.btn_lvl_w, h: l.bar_h - 8.0,
+                color: lvl_color, anchor: "top-left", z: 0.2 })
+            let lvl_text_w = 4.0 * 12.0 * 0.6
+            items = push(items, { kind: "text", id: "btn_lvl_lbl",
+                x: l.btn_lvl_x + (l.btn_lvl_w - lvl_text_w) / 2.0, y: 9.0,
+                value: level_label(s.level_idx), color: "#e6e8ef", size: 12.0,
+                anchor: "top-left", z: 0.3 })
+        }
+
+        let rev_tw = 6.0 * 12.0 * 0.6
+        let rev_bg = if s.hover_btn == "review" { "#4a546a" } else { "#3a4252" }
+        items = push(items, { kind: "rect", id: "btn_review",
+            x: l.btn_review_x, y: 4.0, w: l.btn_review_w, h: l.bar_h - 8.0,
+            color: rev_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_review_lbl",
+            x: l.btn_review_x + (l.btn_review_w - rev_tw) / 2.0, y: 9.0,
+            value: "Review", color: "#e6e8ef", size: 12.0, anchor: "top-left", z: 0.3 })
+
+        let copy_label = if s.copied { "Copied!" } else { "Copy PGN" }
+        let copy_tw = to_float(len(copy_label)) * 12.0 * 0.6
+        let copy_bg = if s.copied { "#3d6b46" }
+            else if s.hover_btn == "copy" { "#4a546a" } else { "#3a4252" }
+        items = push(items, { kind: "rect", id: "btn_copy",
+            x: l.btn_copy_x, y: 4.0, w: l.btn_copy_w, h: l.bar_h - 8.0,
+            color: copy_bg, anchor: "top-left", z: 0.2 })
+        items = push(items, { kind: "text", id: "btn_copy_lbl",
+            x: l.btn_copy_x + (l.btn_copy_w - copy_tw) / 2.0, y: 9.0,
+            value: copy_label, color: "#f4f4f4", size: 12.0, anchor: "top-left", z: 0.3 })
+    }
+
+    let legal = if vsel != -1 { legal_from(vb, vcastle, vep, vsel) } else { [] }
+
+    let mut in_check = false
+    let mut check_sq = -1
+    let opp = if vturn == "w" { "b" } else { "w" }
+    let ksq = king_sq(vb, vturn)
+    if ksq != -1 and is_attacked(vb, ksq, opp) {
+        in_check = true
+        check_sq = ksq
+    }
+
+    let mut row = 0
+    while row < 8 {
+        let mut col = 0
+        while col < 8 {
+            let dr = if s.flipped { 7 - row } else { row }
+            let dc = if s.flipped { 7 - col } else { col }
+            let idx = rc_to_idx(dr, dc)
+            let light = (row + col) % 2 == 0
+            let base = if light { "#f0d9b5" } else { "#b58863" }
+            let sx = l.board_x + to_float(col) * l.sq
+            let sy = l.board_y + to_float(row) * l.sq
+            items = push(items, { kind: "rect", id: "sq_{idx}",
+                x: sx, y: sy, w: l.sq, h: l.sq, color: base, anchor: "top-left", z: 1.0 })
+
+            if idx == vlf or idx == vlt {
+                items = push(items, { kind: "rect", id: "lm_{idx}",
+                    x: sx, y: sy, w: l.sq, h: l.sq,
+                    color: "#cdd26b55", anchor: "top-left", z: 1.1 })
+            }
+            if idx == vsel {
+                items = push(items, { kind: "rect", id: "sel_{idx}",
+                    x: sx, y: sy, w: l.sq, h: l.sq,
+                    color: "#f6f66988", anchor: "top-left", z: 1.2 })
+            }
+            if in_check and idx == check_sq {
+                items = push(items, { kind: "rect", id: "chk_{idx}",
+                    x: sx, y: sy, w: l.sq, h: l.sq,
+                    color: "#ff3a3a66", anchor: "top-left", z: 1.2 })
+            }
+            // Review: tint the best-move from/to squares green.
+            if s.review and (idx == cur_from or idx == cur_to) {
+                items = push(items, { kind: "rect", id: "bm_{idx}",
+                    x: sx, y: sy, w: l.sq, h: l.sq,
+                    color: "#3fb95033", anchor: "top-left", z: 1.15 })
+            }
+            if contains(legal, idx) {
+                let has_piece = vb[idx] != ""
+                let dot_r = if has_piece { l.sq * 0.46 } else { l.sq * 0.16 }
+                items = push(items, { kind: "rect", id: "lg_{idx}",
+                    x: sx + l.sq / 2.0 - dot_r, y: sy + l.sq / 2.0 - dot_r,
+                    w: dot_r * 2.0, h: dot_r * 2.0,
+                    color: "#22222255", anchor: "top-left", z: 1.3 })
+            }
+            col += 1
+        }
+        row += 1
+    }
+
+    let lifted = s.drag_from != -1 and s.drag_active
+    let mut row2 = 0
+    while row2 < 8 {
+        let mut col2 = 0
+        while col2 < 8 {
+            let dr = if s.flipped { 7 - row2 } else { row2 }
+            let dc = if s.flipped { 7 - col2 } else { col2 }
+            let idx = rc_to_idx(dr, dc)
+            let p = vb[idx]
+            if p != "" and not (lifted and idx == s.drag_from) {
+                items = push(items, { kind: "sprite", id: "pc_{idx}",
+                    x: l.board_x + to_float(col2) * l.sq + l.sq / 2.0,
+                    y: l.board_y + to_float(row2) * l.sq + l.sq / 2.0,
+                    w: l.sq * 0.92, h: l.sq * 0.92,
+                    image: "path", path: piece_path(p), anchor: "center", z: 2.0 })
+            }
+            col2 += 1
+        }
+        row2 += 1
+    }
+
+    if lifted {
+        let p = vb[s.drag_from]
+        if p != "" {
+            items = push(items, { kind: "sprite", id: "pc_lifted",
+                x: s.drag_x, y: s.drag_y, w: l.sq * 1.05, h: l.sq * 1.05,
+                image: "path", path: piece_path(p), anchor: "center", z: 5.0 })
+        }
+    }
+
+    // Best-move arrow (review): rotated-rect shaft + V head.
+    if s.review and cur_from != -1 and cur_to != -1 {
+        let p0 = sq_center(l, s.flipped, cur_from)
+        let p1 = sq_center(l, s.flipped, cur_to)
+        let dx = p1.x - p0.x
+        let dy = p1.y - p0.y
+        let dist = sqrt(dx * dx + dy * dy)
+        if dist > 1.0 {
+            let ang = atan2_deg(dy, dx)
+            let pi = pi_const()
+            let ux = dx / dist
+            let uy = dy / dist
+            let head_len = l.sq * 0.38
+            let thick = l.sq * 0.15
+            let col = "#2fa84fdd"
+            let mut shaft_len = dist - head_len * 0.6
+            if shaft_len < 2.0 { shaft_len = 2.0 }
+            let scx = p0.x + ux * shaft_len / 2.0
+            let scy = p0.y + uy * shaft_len / 2.0
+            items = push(items, { kind: "rect", id: "bm_shaft",
+                x: scx, y: scy, w: shaft_len, h: thick,
+                color: col, anchor: "center", z: 3.5, rotation: ang })
+            let back = ang + 180.0
+            let spread = 32.0
+            let a1 = (back - spread) * pi / 180.0
+            let a2 = (back + spread) * pi / 180.0
+            items = push(items, { kind: "rect", id: "bm_h1",
+                x: p1.x + cos(a1) * head_len / 2.0, y: p1.y + sin(a1) * head_len / 2.0,
+                w: head_len, h: thick, color: col, anchor: "center", z: 3.6,
+                rotation: back - spread })
+            items = push(items, { kind: "rect", id: "bm_h2",
+                x: p1.x + cos(a2) * head_len / 2.0, y: p1.y + sin(a2) * head_len / 2.0,
+                w: head_len, h: thick, color: col, anchor: "center", z: 3.6,
+                rotation: back + spread })
+        }
+    }
+
+    // Eval bar (left of board) + eval graph (below board), review only.
+    if s.review {
+        let wp = win_prob(cur.kind, cur.wr)
+        items = push(items, { kind: "rect", id: "eb_bg",
+            x: l.eb_x, y: l.eb_y, w: l.eb_w, h: l.eb_h,
+            color: "#23272d", anchor: "top-left", z: 1.0 })
+        let wh = l.eb_h * wp
+        let wy = if s.flipped { l.eb_y } else { l.eb_y + l.eb_h - wh }
+        items = push(items, { kind: "rect", id: "eb_white",
+            x: l.eb_x, y: wy, w: l.eb_w, h: wh,
+            color: "#e8e8e8", anchor: "top-left", z: 1.05 })
+        items = push(items, { kind: "rect", id: "eb_mid",
+            x: l.eb_x, y: l.eb_y + l.eb_h / 2.0 - 0.5, w: l.eb_w, h: 1.0,
+            color: "#8892a0", anchor: "top-left", z: 1.1 })
+
+        let n = len(s.history)
+        items = push(items, { kind: "rect", id: "gr_bg",
+            x: l.gr_x, y: l.gr_y, w: l.gr_w, h: l.gr_h,
+            color: "#1b1f24", anchor: "top-left", z: 1.0 })
+        let mid = l.gr_y + l.gr_h / 2.0
+        items = push(items, { kind: "rect", id: "gr_mid",
+            x: l.gr_x, y: mid - 0.5, w: l.gr_w, h: 1.0,
+            color: "#3a424d", anchor: "top-left", z: 1.05 })
+        if n > 0 {
+            let colw = l.gr_w / to_float(n + 1)
+            let mut i = 0
+            while i <= n {
+                let e = s.evals[i]
+                if e.kind != "none" {
+                    let p = win_prob(e.kind, e.wr)
+                    let dev = p - 0.5
+                    let colx = l.gr_x + to_float(i) * colw
+                    let barh = abs(dev) * l.gr_h
+                    if dev >= 0.0 {
+                        items = push(items, { kind: "rect", id: "gc_{i}",
+                            x: colx, y: mid - barh, w: colw + 0.6, h: barh,
+                            color: "#cfd6dd", anchor: "top-left", z: 1.06 })
+                    } else {
+                        items = push(items, { kind: "rect", id: "gc_{i}",
+                            x: colx, y: mid, w: colw + 0.6, h: barh,
+                            color: "#454d57", anchor: "top-left", z: 1.06 })
+                    }
+                }
+                i += 1
+            }
+            let mx = l.gr_x + to_float(s.ply) * colw
+            items = push(items, { kind: "rect", id: "gr_cursor",
+                x: mx - 1.0, y: l.gr_y, w: 2.0, h: l.gr_h,
+                color: "#f0c050dd", anchor: "top-left", z: 1.2 })
+        }
+    }
+
+    if s.promo != () {
+        let cells = promo_strip_cells(s.flipped, s.promo.to)
+        let pieces = promo_pieces()
+        items = push(items, { kind: "rect", id: "promo_dim",
+            x: l.board_x, y: l.board_y, w: l.sq * 8.0, h: l.sq * 8.0,
+            color: "#0a0c1099", anchor: "top-left", z: 4.0 })
+        let mut i = 0
+        while i < 4 {
+            let cell = cells[i]
+            let sx = l.board_x + to_float(cell.vc) * l.sq
+            let sy = l.board_y + to_float(cell.vr) * l.sq
+            items = push(items, { kind: "rect", id: "promo_bg_{i}",
+                x: sx, y: sy, w: l.sq, h: l.sq,
+                color: "#dfe2ea", anchor: "top-left", z: 4.1 })
+            items = push(items, { kind: "rect", id: "promo_border_{i}",
+                x: sx, y: sy, w: l.sq, h: 3.0,
+                color: "#7c8da6", anchor: "top-left", z: 4.15 })
+            items = push(items, { kind: "sprite", id: "promo_pc_{i}",
+                x: sx + l.sq / 2.0, y: sy + l.sq / 2.0,
+                w: l.sq * 0.92, h: l.sq * 0.92,
+                image: "path", path: piece_path(s.turn + pieces[i]),
+                anchor: "center", z: 4.2 })
+            i += 1
+        }
+    }
+
+    let files = files_arr()
+    let lbl_size = if l.sq >= 36.0 { 11.0 } else { 9.0 }
+    let inset = if l.sq >= 36.0 { 3.0 } else { 2.0 }
+    let mut i = 0
+    while i < 8 {
+        let file_idx = if s.flipped { 7 - i } else { i }
+        let rank_idx = if s.flipped { i + 1 } else { 8 - i }
+        let file_col = if (7 + i) % 2 == 0 { "#74522f" } else { "#dcbb84" }
+        items = push(items, { kind: "text", id: "flbl_{i}",
+            x: l.board_x + to_float(i) * l.sq + l.sq - inset,
+            y: l.board_y + 8.0 * l.sq - inset,
+            value: files[file_idx], color: file_col, size: lbl_size,
+            anchor: "top-left", z: 3.0 })
+        let rank_col = if i % 2 == 0 { "#74522f" } else { "#dcbb84" }
+        items = push(items, { kind: "text", id: "rlbl_{i}",
+            x: l.board_x + inset,
+            y: l.board_y + to_float(i) * l.sq + inset,
+            value: str(rank_idx), color: rank_col, size: lbl_size,
+            anchor: "top-left", z: 3.0 })
+        i += 1
+    }
+
+    { kind: "canvas", children: items }
+}
+
+// --- Test/host accessors --------------------------------------------
+// Exported so a host (or test harness) can drive the REAL interaction
+// paths without duplicating layout math.
+
+// Screen-space center of board square `idx` (honors current flip).
+export fn sq_click_xy(idx) {
+    let s = @state
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+    let p = sq_center(l, s.flipped, idx)
+    (p.x, p.y)
+}
+
+// Center of a named bar button: new/flip/bot/level/review/copy/prev/next/exit.
+export fn btn_xy(name) {
+    let s = @state
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+    let bw = if name == "new" { (l.btn_new_x, l.btn_new_w) }
+        else if name == "flip" { (l.btn_flip_x, l.btn_flip_w) }
+        else if name == "bot" { (l.btn_bot_x, l.btn_bot_w) }
+        else if name == "level" { (l.btn_lvl_x, l.btn_lvl_w) }
+        else if name == "review" { (l.btn_review_x, l.btn_review_w) }
+        else if name == "copy" { (l.btn_copy_x, l.btn_copy_w) }
+        else if name == "prev" { (l.btn_prev_x, l.btn_prev_w) }
+        else if name == "next" { (l.btn_next_x, l.btn_next_w) }
+        else if name == "exit" { (l.btn_exit_x, l.btn_exit_w) }
+        else { (-99999.0, 0.0) }
+    (bw[0] + bw[1] / 2.0, l.bar_h / 2.0)
+}
+
+// Center of promotion-picker cell i (0..3), valid while a pick is open.
+export fn promo_cell_xy(i) {
+    let s = @state
+    let l = compute_layout(canvas_w, canvas_h, s.bot_side != "", s.review)
+    let cell = promo_strip_cells(s.flipped, s.promo.to)[i]
+    (l.board_x + to_float(cell.vc) * l.sq + l.sq / 2.0,
+     l.board_y + to_float(cell.vr) * l.sq + l.sq / 2.0)
+}
+
+export fn board_at(i) = (@state).board[i]
+export fn current_fen() {
+    let s = @state
+    board_to_fen(s.board, s.turn, s.castle, s.ep)
+}
+export fn history_san() = map((@state).history, h => h.san)
+export fn game_state() {
+    let s = @state
+    { turn: s.turn, over: s.over, status: s.status, selected: s.selected,
+      moves: len(s.history), bot_side: s.bot_side, thinking: s.thinking,
+      eng: s.eng, engine_ok: s.engine_ok, review: s.review, ply: s.ply,
+      sweeping: s.sweeping, promo_pending: s.promo != (), copied: s.copied }
+}
+
+// --- Inline tests (run: funct test examples/widgets/chess.ft) --------
+// Pure logic only: these don't touch the host surface (proc_*, render),
+// so the plain CLI test runner can execute them.
+
+#[test]
+fn initial_fen_is_the_standard_position() {
+    let s = init_state()
+    assert_eq(board_to_fen(s.board, s.turn, s.castle, s.ep),
+              "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+}
+
+#[test]
+fn pawns_get_double_push_only_from_home() {
+    let b = new_board()
+    // e2 pawn: e3 and e4
+    assert_eq(sort(gen_pseudo(b, initial_castle(), -1, 52)), [36, 44])
+    // after e4, the e-pawn has only e5
+    let b2 = make_move_clone(b, -1, 52, 36, "")
+    assert_eq(gen_pseudo(b2, initial_castle(), -1, 36), [28])
+}
+
+#[test]
+fn en_passant_is_generated_and_captures() {
+    // white pawn e5, black plays d7d5 -> ep square d6 (19)
+    let mut b = new_board()
+    b = make_move_clone(b, -1, 52, 28, "") // e-pawn to e5 (teleport for test)
+    let r = apply_quiet(b, initial_castle(), -1, "b", 11, 27, "") // d7d5
+    assert_eq(r.ep, 19)
+    assert(contains(gen_pseudo(r.board, r.castle, r.ep, 28), 19), "exd6 e.p. offered")
+    let after = make_move_clone(r.board, r.ep, 28, 19, "")
+    assert_eq(after[27], "", "the d5 pawn was captured en passant")
+}
+
+#[test]
+fn castling_through_check_is_illegal() {
+    // strip squares between white king and h-rook, then aim a black rook at f1
+    let mut b = new_board()
+    b = assoc(b, 61, "") // f1
+    b = assoc(b, 62, "") // g1
+    assert(contains(legal_from(b, initial_castle(), -1, 60), 62), "O-O legal on a clear board")
+    b = assoc(b, 13, "") // open the f-file (f7)
+    b = assoc(b, 53, "") // ... and f2, so the rook's ray reaches f1
+    b = assoc(b, 5, "bR") // black rook on f8
+    assert(not contains(legal_from(b, initial_castle(), -1, 60), 62), "cannot castle through f1")
+}
+
+#[test]
+fn checkmate_is_detected_with_san_suffix() {
+    // fool's mate: 1. f3 e5 2. g4 Qh4#
+    let mut v = { board: new_board(), castle: initial_castle(), ep: -1, turn: "w" }
+    for m in [(53, 45), (12, 28), (54, 38)] {
+        v = apply_quiet(v.board, v.castle, v.ep, v.turn, m[0], m[1], "")
+    }
+    let res = make_result(v.board, v.castle, v.ep, v.turn, 3, 39, "") // Qd8-h4#
+    assert_eq(res.over, true)
+    assert_eq(res.status, "Black wins by checkmate") // fool's mate: Black mates
+    assert_eq(full_san(v.board, v.castle, v.ep, v.turn, 3, 39, "",
+                       res.board, res.turn, res.over, res.status), "Qh4#")
+}
+
+#[test]
+fn engine_move_parsing_round_trips() {
+    assert_eq(parse_engine_move("e2e4"), { from: 52, to: 36, promo: "" })
+    assert_eq(parse_engine_move("e7e8q"), { from: 12, to: 4, promo: "Q" })
+    assert_eq(parse_engine_move("(none)").from, -1)
+    assert_eq(sq_name(52), "e2")
+    assert_eq(name_to_idx("e2"), 52)
+}
+
+#[test]
+fn info_score_lines_parse() {
+    assert_eq(parse_info_score("info depth 12 seldepth 4 score cp 35 nodes 1000"),
+              { kind: "cp", val: 35 })
+    assert_eq(parse_info_score("info score mate -3 pv e2e4"), { kind: "mate", val: -3 })
+    assert_eq(parse_info_score("info depth 1").kind, "none")
+}

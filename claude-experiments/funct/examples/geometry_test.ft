@@ -1,0 +1,27 @@
+// Tests can also live in a separate file that imports the module under test.
+// Run with:  funct test examples/geometry_test.ft
+// Every `#[test]` fn is a test; each runs in a fresh engine.
+
+import { circle, square, area } from "geometry"
+
+#[test]
+fn areas_pipe_through_stdlib() {
+    let total = [circle(1.0), square(2.0)]
+        |> map(area)
+        |> sum
+    assert(abs(total - 7.14159) < 0.001)
+}
+
+#[test]
+fn pattern_matching_on_shapes() {
+    match square(4.0) {
+        Square { side } => assert_eq(side, 4.0),
+        Circle { .. } => fail("a square is not a circle"),
+    }
+}
+
+#[test]
+fn shapes_are_structural_values() {
+    assert_eq(circle(1.0), circle(1.0))
+    assert_ne(circle(1.0), square(1.0))
+}

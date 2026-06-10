@@ -1,0 +1,7 @@
+digraph SkipEdges {
+  node [shape=box];
+  a -> b -> c -> d -> e -> f;
+  a -> f;
+  a -> d;
+  b -> e;
+}

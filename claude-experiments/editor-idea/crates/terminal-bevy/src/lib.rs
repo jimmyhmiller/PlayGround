@@ -778,6 +778,7 @@ fn drain_ipc_open_requests(
     mut prism: ResMut<cube::Prism>,
     mut msg_bus: ResMut<widget_bevy::WidgetMsgBus>,
     mut palette_open: ResMut<command_palette::PaletteOpenRequest>,
+    mut issues: ResMut<issues_pane::IssuesStore>,
     mut commands: Commands,
 ) {
     let Some(inbox) = inbox else { return };
@@ -866,6 +867,36 @@ fn drain_ipc_open_requests(
                 palette_open.requested = true;
                 palette_open.seed = query;
                 palette_open.ask = ask;
+            }
+            ipc::IpcRequest::AddIssue {
+                title,
+                body,
+                project,
+                from_cwd,
+            } => {
+                // Scope like SuggestPane: explicit name wins; else map the
+                // caller's cwd to its owning project; else the active one.
+                let project_id = match &project {
+                    // An explicit name must resolve — don't silently fall
+                    // back to the active project on a typo.
+                    Some(name) => projects::resolve_project(
+                        &OpenProjectTarget::ByName(name.clone()),
+                        &projects,
+                    ),
+                    None => from_cwd
+                        .as_deref()
+                        .and_then(|c| projects::project_for_cwd(c, &projects))
+                        .or(projects.active),
+                };
+                let Some(project_id) = project_id else {
+                    match &project {
+                        Some(name) => eprintln!("[ipc] add_issue: no project named {name:?}"),
+                        None => eprintln!("[ipc] add_issue: no project owns cwd and none active"),
+                    }
+                    continue;
+                };
+                let id = issues.add_issue(project_id, title, body.unwrap_or_default());
+                eprintln!("[ipc] add_issue: filed #{id} into project {project_id}");
             }
             ipc::IpcRequest::ListProjects => {
                 use std::io::Write as _;

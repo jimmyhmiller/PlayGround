@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
 done
 
 echo "[dev-restart] building ($PROFILE)..."
-cargo build $CARGO_PROFILE_ARGS -p terminal_bevy --bin terminal --bin tbwidget --bin tbopen --bin tbinbox --bin tbproject --bin tbsuggest
+cargo build $CARGO_PROFILE_ARGS -p terminal_bevy --bin terminal --bin tbwidget --bin tbopen --bin tbinbox --bin tbproject --bin tbsuggest --bin tbissue
 
 # Refresh the .app bundle so it carries the freshly-built binary and
 # libghostty-vt dylib (copied in, not symlinked into target/).

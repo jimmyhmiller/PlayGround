@@ -1,0 +1,7 @@
+digraph EdgeLabels {
+  node [shape=box];
+  cond -> then [label="true"];
+  cond -> else [label="false"];
+  then -> merge [label="fallthrough"];
+  else -> merge;
+}

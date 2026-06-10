@@ -1,0 +1,7 @@
+digraph SelfLoop {
+  node [shape=box];
+  start -> work;
+  work -> work [label="retry"];
+  work -> done;
+  done -> done;
+}

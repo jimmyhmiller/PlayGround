@@ -1491,6 +1491,63 @@ pub unsafe extern "C" fn cljvm_rt_invoke_8(
     }
 }
 
+/// `IFn.invoke(a..i)` — 9 arity. From here up the C-ABI `transmute` path
+/// is unusable in BOTH dispatch shapes (args ≥ 9 would go to the stack,
+/// but the JIT callee's internal CC reads X0–X15), so everything routes
+/// through `call_with_packed`'s direct-register shim.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_invoke_9(
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
+    h: u64,
+    i: u64,
+) -> u64 {
+    let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 9) };
+    if let Some(packed) =
+        unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g, h, i]) }
+    {
+        return unsafe { call_with_packed(ptr, &packed) };
+    }
+    match self_arg {
+        None => unsafe { call_with_packed(ptr, &[a, b, c, d, e, f, g, h, i]) },
+        Some(s) => unsafe { call_with_packed(ptr, &[s, a, b, c, d, e, f, g, h, i]) },
+    }
+}
+
+/// `IFn.invoke(a..j)` — 10 arity. See `cljvm_rt_invoke_9` for the
+/// packed-register routing rationale.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_invoke_10(
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
+    h: u64,
+    i: u64,
+    j: u64,
+) -> u64 {
+    let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 10) };
+    if let Some(packed) =
+        unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g, h, i, j]) }
+    {
+        return unsafe { call_with_packed(ptr, &packed) };
+    }
+    match self_arg {
+        None => unsafe { call_with_packed(ptr, &[a, b, c, d, e, f, g, h, i, j]) },
+        Some(s) => unsafe { call_with_packed(ptr, &[s, a, b, c, d, e, f, g, h, i, j]) },
+    }
+}
+
 /// `clojure.lang.RT.inc(Object x)` — for now, a primitive Long-only
 /// increment. Real RT.inc dispatches on Number subtypes; we'll widen as
 /// the Numbers port lands. This exists as the bring-up vehicle for the
@@ -1861,14 +1918,18 @@ pub unsafe extern "C" fn cljvm_rt_nth_3(coll_bits: u64, idx_bits: u64, not_found
                         .cast::<u64>()
                         .read_unaligned()
                 }
-            } else if tid == ids.cons {
-                // NOTE: deliberately NOT including `ids.lazy_seq` here. `nth_3`
-                // is what positional destructuring lowers to (`(nth tmp i nil)`),
-                // and macros destructure lazy-seq values at MACROEXPAND time —
-                // forcing a lazy seq there dispatches JIT thunks in a compile
-                // context with no installed call-table base, which aborts
-                // (non-unwinding, uncatchable). Until lazy forcing is safe at
-                // compile time, destructuring over a lazy seq stays unsupported.
+            } else if tid == ids.cons || tid == ids.lazy_seq {
+                // Walk a seq (cons chain or lazy seq) via first/next, same as
+                // `cljvm_rt_nth` above. `nth_3` is what positional
+                // destructuring lowers to (`(nth tmp i nil)`), and macros
+                // destructure lazy-seq values at MACROEXPAND time — e.g. the
+                // `case` macro's `(fn [m [test expr]] …)` over `partition`
+                // output. Historically lazy forcing here aborted (JIT thunk
+                // dispatch without an installed call-table base), but macro
+                // bodies now execute via `run_jit` with the call table live —
+                // the same context where `first`/`next` already force lazy
+                // seqs — so the exclusion only produced silent wrong nils
+                // (destructured bindings = not-found).
                 let mut cur = coll_bits;
                 for _ in 0..idx {
                     cur = unsafe { cljvm_rt_next(cur) };
@@ -4564,6 +4625,233 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
         return a_arc == b_arc;
     }
     false
+}
+
+// ─── `clojure.lang.Util.hash` + `case*` dispatch ─────────────────────────
+//
+// The `case` macro computes `(clojure.lang.Util/hash test-constant)` at
+// EXPANSION time to build the case-map keys, and the compiled `case*`
+// dispatch recomputes the hash of the runtime value to index the switch.
+// Both sides MUST use the same function or every hash-mode `case` silently
+// falls through to its default. `cljvm_util_hash` (the host static method)
+// and `cljvm_case_dispatch` (CaseExpr's switch-index helper) therefore both
+// route through `util_hash_bits` below.
+//
+// The hash itself ports Java's `Util.hash(Object)` (`o.hashCode()`),
+// following each type's documented `hashCode` formula from the upstream
+// sources (Long/Double/Boolean/Character/String per java.lang, Symbol /
+// Keyword / collections per clojure.lang). Exact numeric parity with the
+// JVM holds for the types whose hashCode is specified; identity-based
+// hashes (fns, unmodeled host cells) are arbitrary-but-harmless because no
+// case test constant can be `=` to such a value — a spurious bucket match
+// is rejected by the post-switch equivalence check.
+
+/// Java `String.hashCode()`: `h = 31*h + c` over UTF-16 code units.
+fn java_string_hash_code(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+}
+
+/// Java `Util.hashCombine(seed, hash)` (boost-style):
+/// `seed ^ (hash + 0x9e3779b9 + (seed << 6) + (seed >> 2))`.
+fn java_hash_combine(seed: i32, hash: i32) -> i32 {
+    seed ^ hash
+        .wrapping_add(0x9e3779b9u32 as i32)
+        .wrapping_add(seed.wrapping_shl(6))
+        .wrapping_add(seed >> 2)
+}
+
+/// Java `Symbol.hashCode()`: `hashCombine(name.hashCode(), Util.hash(ns))`.
+fn java_symbol_hash_code(sym: &crate::lang::symbol::Symbol) -> i32 {
+    let name_h = java_string_hash_code(sym.get_name());
+    let ns_h = sym
+        .get_namespace()
+        .map(java_string_hash_code)
+        .unwrap_or(0);
+    java_hash_combine(name_h, ns_h)
+}
+
+/// Java `clojure.lang.Util.hash(Object)` over our host-side `Object`
+/// representation. Total for every value-modeled variant; panics for
+/// variants that have no value hash (callers pre-handle those with
+/// `identity_hash_bits` at the NanBox level).
+pub fn util_hash_object(o: &Object) -> i32 {
+    match o {
+        Object::Nil => 0,
+        // Java `Boolean.hashCode()`.
+        Object::Bool(b) => {
+            if *b {
+                1231
+            } else {
+                1237
+            }
+        }
+        // Java `Long.hashCode()`: `(int)(value ^ (value >>> 32))`.
+        Object::Long(v) => ((*v as u64) ^ ((*v as u64) >> 32)) as u32 as i32,
+        // Java `Double.hashCode()`: same fold over `doubleToLongBits`.
+        Object::Double(x) => {
+            let bits = x.to_bits();
+            (bits ^ (bits >> 32)) as u32 as i32
+        }
+        // Java `Character.hashCode()`: the char value itself.
+        Object::Char(c) => *c as i32,
+        Object::String(s) => java_string_hash_code(s),
+        Object::Symbol(s) => java_symbol_hash_code(s),
+        // Java `Keyword.hashCode()`: `sym.hashCode() + 0x9e3779b9`.
+        Object::Keyword(k) => {
+            java_symbol_hash_code(&k.sym).wrapping_add(0x9e3779b9u32 as i32)
+        }
+        // Java `ASeq.hashCode()` / `APersistentVector.hashCode()`:
+        // `h = 1; h = 31*h + Util.hash(e)` — identical formulas, so a list
+        // and a vector of equal elements hash alike (as on the JVM).
+        Object::List(l) => l
+            .iter()
+            .fold(1i32, |h, e| {
+                h.wrapping_mul(31).wrapping_add(util_hash_object(&e))
+            }),
+        Object::Vector(v) => v
+            .iter()
+            .fold(1i32, |h, e| {
+                h.wrapping_mul(31).wrapping_add(util_hash_object(&e))
+            }),
+        // Java `APersistentMap.mapHash`: sum of `hash(k) ^ hash(v)`.
+        Object::Map(m) => m.iter().fold(0i32, |h, (k, v)| {
+            h.wrapping_add(util_hash_object(&k) ^ util_hash_object(&v))
+        }),
+        Object::TreeMap(m) => m.iter().fold(0i32, |h, (k, v)| {
+            h.wrapping_add(util_hash_object(&k) ^ util_hash_object(&v))
+        }),
+        // Java `APersistentSet.hashCode()`: sum of `Util.hash(e)`.
+        Object::Set(s) => s
+            .iter()
+            .fold(0i32, |h, e| h.wrapping_add(util_hash_object(&e))),
+        Object::TreeSet(s) => s
+            .iter()
+            .fold(0i32, |h, e| h.wrapping_add(util_hash_object(&e))),
+        // `hashCode` ignores metadata.
+        Object::WithMeta(inner, _) => util_hash_object(inner),
+        // Vars/Namespaces are canonical instances — Java uses the default
+        // identity hashCode. Our Arcs are the canonical identities; fold
+        // the pointer the same way Long folds its value.
+        Object::Var(v) => {
+            let p = std::sync::Arc::as_ptr(v) as usize as u64;
+            (p ^ (p >> 32)) as u32 as i32
+        }
+        Object::Namespace(n) => {
+            let p = std::sync::Arc::as_ptr(n) as usize as u64;
+            (p ^ (p >> 32)) as u32 as i32
+        }
+        // Non-value objects (fn handles, unmodeled heap cells) NESTED inside
+        // a collection being hashed (e.g. `case` dispatching on
+        // `[(fn [] 1)]`). At the top level `util_hash_bits` pre-handles them
+        // with the bits-identity hash; nested, the original bits are gone.
+        // Any deterministic value is provably correct here: such an object
+        // can never be `=` to a component of a literal test constant (reader
+        // literals only contain value types), so a colliding bucket is always
+        // rejected by the post-switch equivalence check, and no real bucket
+        // is ever missed (a composite containing a non-value object equals no
+        // constant). This mirrors Java, where `Object.hashCode` is an
+        // arbitrary identity hash with no cross-run meaning.
+        Object::Host(_) | Object::Unported { .. } => 0,
+    }
+}
+
+/// Identity hash for values with no modeled value-hash (fn handles,
+/// unrecognized heap cells): fold the NanBox bits like `Long.hashCode`.
+/// This mirrors Java's default identity `Object.hashCode()` — arbitrary
+/// but harmless for `case` dispatch, since no test constant can be `=`
+/// to such a value and any spurious bucket match fails the post-switch
+/// equivalence check. (Unlike the JVM's, this hash is not stable across
+/// a moving collection — fine for `case*`, which consumes it immediately.)
+fn identity_hash_bits(bits: u64) -> i32 {
+    (bits ^ (bits >> 32)) as u32 as i32
+}
+
+/// `Util.hash` over arbitrary NanBox bits. The single hash function shared
+/// by macro-expansion-time `(clojure.lang.Util/hash x)` and `case*` runtime
+/// dispatch.
+///
+/// # Safety
+/// `bits` must be a valid live NanBox value (heap pointers traced by the
+/// active GC); must run on a registered mutator thread (lazy seqs are
+/// realized, which allocates).
+unsafe fn util_hash_bits(bits: u64) -> i32 {
+    let ids = heap_type_ids();
+    let obj = any_bits_to_object(bits, ids);
+    match obj {
+        // TAG_FN handles and unrecognized heap type_ids decode to
+        // `Unported`; `Host` is defensive (no decode path produces it).
+        Object::Unported { .. } | Object::Host(_) => identity_hash_bits(bits),
+        o => util_hash_object(&o),
+    }
+}
+
+/// `(clojure.lang.Util/hash x)` host static method — returns a boxed Long
+/// holding the (sign-extended) i32 hash, exactly what the `case` macro's
+/// `prep-hashes` / `merge-hash-collisions` arithmetic expects.
+///
+/// # Safety
+/// See [`util_hash_bits`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_util_hash(x_bits: u64) -> u64 {
+    let h = unsafe { util_hash_bits(x_bits) };
+    unsafe { box_long(h as i64) }
+}
+
+/// Switch-index values for [`cljvm_case_dispatch`]'s `test_type` argument.
+pub const CASE_TEST_INT: i64 = 0;
+pub const CASE_TEST_HASH: i64 = 1;
+
+/// Sentinel index returned when an `:int`-mode dispatch value is not a
+/// number (Java: `instanceOf Number` check jumps straight to the default
+/// label). `i64::MIN` can never collide with a real case-map key: int-mode
+/// keys are i32-ranged test values or shift-masked (small, non-negative)
+/// indexes — `parse_case_form` hard-asserts this.
+pub const CASE_DISPATCH_NO_MATCH: i64 = i64::MIN;
+
+/// Compute the `case*` switch index for `val_bits`. Ports the dispatch
+/// half of Java `CaseExpr.doEmit`:
+///   * `:int` (`test_type` = [`CASE_TEST_INT`]): `((Number)v).intValue()`,
+///     non-Numbers go to the default branch (sentinel).
+///   * `:hash-equiv` / `:hash-identity` ([`CASE_TEST_HASH`]): `Util.hash(v)`.
+/// Then `emitShiftMask`: `(h >> shift) & mask` when `mask != 0`.
+///
+/// Returns a RAW i64 (NOT a NanBox). The value never looks like a tagged
+/// pointer (i32-sign-extended values and the sentinel all fail the NanBox
+/// tag-pattern check), so holding it across safepoints is GC-safe — same
+/// contract as `emit_unboxed` primitives.
+///
+/// # Safety
+/// See [`util_hash_bits`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_case_dispatch(
+    val_bits: u64,
+    test_type: u64,
+    shift: u64,
+    mask: u64,
+) -> u64 {
+    let test_type = test_type as i64;
+    let shift = shift as i64;
+    let mask = mask as i64;
+    let h: i64 = match test_type {
+        CASE_TEST_INT => {
+            if is_boxed_long(val_bits) {
+                // Java `Long.intValue()`: truncate to i32, sign-extend.
+                (unsafe { unbox_long(val_bits) }) as i32 as i64
+            } else if nanbox_tag(val_bits).is_none() {
+                // Untagged → double. Java `Double.intValue()` is the JLS
+                // narrowing cast: saturating, NaN → 0 — same as Rust `as`.
+                (f64::from_bits(val_bits) as i32) as i64
+            } else {
+                // Not a Number → default branch.
+                return CASE_DISPATCH_NO_MATCH as u64;
+            }
+        }
+        CASE_TEST_HASH => (unsafe { util_hash_bits(val_bits) }) as i64,
+        other => panic!("clojure-jvm: cljvm_case_dispatch: unknown test_type {other}"),
+    };
+    let idx = if mask != 0 { (h >> shift) & mask } else { h };
+    idx as u64
 }
 
 /// `clojure.lang.Util.nil?(x)` — NanBox tag check.
