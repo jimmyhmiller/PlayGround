@@ -95,27 +95,46 @@ fn run() -> Result<(), String> {
         unmatched_status: cfg.unmatched_status,
     });
 
-    // Build the server (TLS or plain).
-    let server = build_server(&cfg)?;
-    let server = Arc::new(server);
+    // Bind the listening socket ONCE. We keep our own handle so we can rebuild
+    // the tiny_http Server (with a freshly-loaded cert) on SIGHUP without ever
+    // closing the socket — that's what makes cert reload zero-downtime.
+    let listener = std::net::TcpListener::bind(&cfg.bind)
+        .map_err(|e| format!("binding {}: {e}", cfg.bind))?;
+
+    let server = build_server(&listener, &cfg)?;
+    // The current Server lives behind a Mutex so the SIGHUP handler can swap it.
+    let current: Arc<std::sync::Mutex<Arc<tiny_http::Server>>> =
+        Arc::new(std::sync::Mutex::new(Arc::new(server)));
+
     println!(
         "\ngatekeeper listening on {} ({})",
         cfg.bind,
         if cfg.tls_enabled() { "HTTPS" } else { "HTTP" }
     );
+    if cfg.tls_enabled() {
+        println!("  cert reload: send SIGHUP (kill -HUP {}) after renewal", std::process::id());
+    }
 
-    // A small fixed pool of workers, each pulling requests off the server.
+    // SIGHUP -> rebuild the Server with the renewed cert and swap it in. The old
+    // Server is unblocked so its workers release it; in-flight requests finish.
+    install_reload_handler(Arc::clone(&current), listener, cfg.clone());
+
+    // A small fixed pool of workers. Each re-reads the current Server every
+    // iteration (cheap Arc clone) and uses recv_timeout so a swap is picked up
+    // promptly even on an idle connection.
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(2, 16);
     let mut handles = Vec::new();
     for _ in 0..workers {
-        let server = Arc::clone(&server);
+        let current = Arc::clone(&current);
         let gate = Arc::clone(&gate);
         handles.push(std::thread::spawn(move || loop {
-            match server.recv() {
-                Ok(req) => handle(&gate, req),
+            let server = { Arc::clone(&*current.lock().unwrap()) };
+            match server.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(Some(req)) => handle(&gate, req),
+                Ok(None) => {} // timeout or unblocked: loop, re-read current server
                 Err(e) => {
                     eprintln!("gatekeeper: recv error: {e}");
                     break;
@@ -129,21 +148,66 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn build_server(cfg: &Config) -> Result<tiny_http::Server, String> {
-    let addr = tiny_http::ConfigListenAddr::from_socket_addrs(cfg.bind.as_str())
-        .map_err(|e| format!("bad bind address {:?}: {e}", cfg.bind))?;
-    let mut server_config = tiny_http::ServerConfig { addr, ssl: None };
-    if let (Some(cert), Some(key)) = (&cfg.tls_cert, &cfg.tls_key) {
-        let certificate = std::fs::read(cert)
-            .map_err(|e| format!("reading tls_cert {}: {e}", cert.display()))?;
-        let private_key =
-            std::fs::read(key).map_err(|e| format!("reading tls_key {}: {e}", key.display()))?;
-        server_config.ssl = Some(tiny_http::SslConfig {
-            certificate,
-            private_key,
-        });
+/// Spawn a thread that watches for SIGHUP and, on each, rebuilds the TLS Server
+/// from the same listening socket with a freshly-loaded certificate, swapping it
+/// into `current`. Plain-HTTP configs ignore SIGHUP (nothing to reload).
+fn install_reload_handler(
+    current: Arc<std::sync::Mutex<Arc<tiny_http::Server>>>,
+    listener: std::net::TcpListener,
+    cfg: Config,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = Arc::new(AtomicBool::new(false));
+    // signal_hook flips the flag from the real signal handler; we poll it.
+    if signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&flag)).is_err() {
+        eprintln!("gatekeeper: warning: could not install SIGHUP handler; cert reload disabled");
+        return;
     }
-    tiny_http::Server::new(server_config).map_err(|e| format!("starting server: {e}"))
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !flag.swap(false, Ordering::SeqCst) {
+            continue;
+        }
+        match build_server(&listener, &cfg) {
+            Ok(new_server) => {
+                let mut guard = current.lock().unwrap();
+                let old = std::mem::replace(&mut *guard, Arc::new(new_server));
+                drop(guard);
+                old.unblock(); // release workers blocked on the old Server
+                println!("gatekeeper: reloaded certificate (SIGHUP)");
+            }
+            Err(e) => {
+                // Keep serving the old cert rather than dying — fail safe.
+                eprintln!("gatekeeper: cert reload failed, keeping current cert: {e}");
+            }
+        }
+    });
+}
+
+/// Build a tiny_http Server bound to a *clone* of `listener`'s socket, with TLS
+/// if the config has a cert/key. Cloning the fd lets us build a fresh Server on
+/// the same bound socket without closing it.
+fn build_server(
+    listener: &std::net::TcpListener,
+    cfg: &Config,
+) -> Result<tiny_http::Server, String> {
+    let sock = listener
+        .try_clone()
+        .map_err(|e| format!("cloning listener socket: {e}"))?;
+    let ssl = match (&cfg.tls_cert, &cfg.tls_key) {
+        (Some(cert), Some(key)) => {
+            let certificate = std::fs::read(cert)
+                .map_err(|e| format!("reading tls_cert {}: {e}", cert.display()))?;
+            let private_key = std::fs::read(key)
+                .map_err(|e| format!("reading tls_key {}: {e}", key.display()))?;
+            Some(tiny_http::SslConfig {
+                certificate,
+                private_key,
+            })
+        }
+        _ => None,
+    };
+    tiny_http::Server::from_listener(sock, ssl).map_err(|e| format!("starting server: {e}"))
 }
 
 /// Handle a single request: match route, enforce auth on private routes, then

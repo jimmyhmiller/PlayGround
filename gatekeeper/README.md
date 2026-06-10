@@ -64,18 +64,62 @@ Per route:
 The **token is never in the config file** — it comes from `$GATEKEEPER_TOKEN` or
 `--token-file <path>`. Boot fails if any private route exists and no token is set.
 
-## TLS
+## TLS and certificates
 
-gatekeeper terminates TLS with rustls when `tls_cert`/`tls_key` are set; it does
-**not** do ACME itself (keeping the dependency tree tiny). Provision certs
-out-of-band, e.g. certbot:
+For a public `https://` domain, browsers require a certificate signed by a
+trusted Certificate Authority. **Let's Encrypt** is a free CA that issues one
+after you prove you control the domain; the result is two PEM files (a
+certificate chain and a private key) that gatekeeper's `tls_cert`/`tls_key`
+point at.
+
+gatekeeper terminates TLS with rustls but does **not** do ACME in-process (that
+would roughly double the dependency tree and re-add an async runtime). Instead an
+external tool gets and auto-renews the cert, and gatekeeper **hot-reloads it on
+`SIGHUP`** — no restart, no dropped connections.
+
+### One-time setup with acme.sh (zero extra Rust deps)
+
+[`acme.sh`](https://github.com/acmesh-official/acme.sh) is a small, widely-used
+shell ACME client that installs its own renewal cron.
 
 ```sh
-certbot certonly --standalone -d example.com   # writes fullchain.pem + privkey.pem
+# install
+curl https://get.acme.sh | sh -s email=you@example.com
+
+# issue a cert for your domain (standalone briefly binds :80 to prove control;
+# alternatively use a DNS challenge — see acme.sh docs)
+acme.sh --issue --standalone -d example.com
+
+# install the cert to a stable path AND tell acme.sh to SIGHUP gatekeeper after
+# every renewal, so the new cert is picked up live:
+acme.sh --install-cert -d example.com \
+  --fullchain-file /etc/gatekeeper/cert.pem \
+  --key-file       /etc/gatekeeper/key.pem \
+  --reloadcmd      "kill -HUP \$(pidof gatekeeper)"
 ```
 
-then point `tls_cert`/`tls_key` at them and restart on renewal. Alternatively run
-gatekeeper as plain HTTP on localhost behind a TLS terminator (Caddy, a tunnel).
+Then in `gatekeeper.toml`:
+
+```toml
+bind = "0.0.0.0:443"
+tls_cert = "/etc/gatekeeper/cert.pem"
+tls_key  = "/etc/gatekeeper/key.pem"
+```
+
+Let's Encrypt certs last 90 days; acme.sh's cron renews them automatically and
+the `--reloadcmd` SIGHUPs gatekeeper, which re-reads the files in place. On boot
+gatekeeper prints its PID and the exact reload command.
+
+**Fail-safe:** if a reload finds a missing or invalid cert, gatekeeper logs the
+error and **keeps serving the current cert** rather than going down — a botched
+renewal can't take the site offline.
+
+### Without a public CA
+
+If you don't have a public domain — e.g. you're behind a Cloudflare Tunnel,
+Tailscale, or a reverse proxy that already does TLS — omit `tls_cert`/`tls_key`
+and run gatekeeper as plain HTTP on localhost. The terminator in front handles
+certificates.
 
 ## The safety guarantees
 
