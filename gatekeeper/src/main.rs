@@ -54,13 +54,33 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args { config, token_file, check })
 }
 
-/// Everything a worker needs to handle a request, shared across threads.
-struct Gate {
+/// The hot-swappable part of a worker's view: routing table, auth, and the
+/// unmatched status. Rebuilt from the config on SIGHUP and swapped in atomically
+/// so route/token changes take effect without a restart. The function dylib
+/// cache is deliberately NOT here — it lives in [`Gate`] and persists across
+/// reloads so already-loaded dylibs are not re-`dlopen`ed.
+struct Routing {
     router: Router,
     auth: Option<Authenticator>,
     unmatched_status: u16,
-    /// Lazily-loaded cache of function dylibs (the serverless backend).
+}
+
+/// Everything a worker needs to handle a request, shared across threads. The
+/// `routing` is swappable on reload; `functions` persists.
+struct Gate {
+    /// Current routing/auth, swapped wholesale on SIGHUP (config reload).
+    routing: std::sync::Mutex<Arc<Routing>>,
+    /// Lazily-loaded cache of function dylibs (the serverless backend). Shared
+    /// across reloads: reloading the config does not drop loaded functions.
     functions: FunctionRegistry,
+}
+
+impl Gate {
+    /// Snapshot the current routing for a request. Cheap `Arc` clone so a
+    /// concurrent reload swapping in a new `Routing` never tears a request.
+    fn routing(&self) -> Arc<Routing> {
+        Arc::clone(&self.routing.lock().unwrap())
+    }
 }
 
 fn main() {
@@ -93,9 +113,7 @@ fn run() -> Result<(), String> {
     }
 
     let gate = Arc::new(Gate {
-        router: Router::new(cfg.route.clone()),
-        auth: token.as_deref().map(Authenticator::new),
-        unmatched_status: cfg.unmatched_status,
+        routing: std::sync::Mutex::new(Arc::new(build_routing(&cfg, token.as_deref()))),
         functions: FunctionRegistry::new(),
     });
 
@@ -115,13 +133,22 @@ fn run() -> Result<(), String> {
         cfg.bind,
         if cfg.tls_enabled() { "HTTPS" } else { "HTTP" }
     );
-    if cfg.tls_enabled() {
-        println!("  cert reload: send SIGHUP (kill -HUP {}) after renewal", std::process::id());
-    }
+    println!(
+        "  reload (cert + routes): send SIGHUP (kill -HUP {}) or `systemctl reload gatekeeper`",
+        std::process::id()
+    );
 
-    // SIGHUP -> rebuild the Server with the renewed cert and swap it in. The old
-    // Server is unblocked so its workers release it; in-flight requests finish.
-    install_reload_handler(Arc::clone(&current), listener, cfg.clone());
+    // SIGHUP -> reload the config: rebuild the Server with the (possibly renewed)
+    // cert AND rebuild the routing table + auth from the config file, swapping
+    // both in. The old Server is unblocked so its workers release it; in-flight
+    // requests finish. Loaded function dylibs persist across the reload.
+    install_reload_handler(
+        Arc::clone(&current),
+        Arc::clone(&gate),
+        listener,
+        args.config.clone(),
+        args.token_file.clone(),
+    );
 
     // A small fixed pool of workers. Each re-reads the current Server every
     // iteration (cheap Arc clone) and uses recv_timeout so a swap is picked up
@@ -152,19 +179,41 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Spawn a thread that watches for SIGHUP and, on each, rebuilds the TLS Server
-/// from the same listening socket with a freshly-loaded certificate, swapping it
-/// into `current`. Plain-HTTP configs ignore SIGHUP (nothing to reload).
+/// Build the hot-swappable [`Routing`] from a config and optional token. Used at
+/// boot and on every reload, so route/auth construction is identical both times.
+fn build_routing(cfg: &Config, token: Option<&str>) -> Routing {
+    Routing {
+        router: Router::new(cfg.route.clone()),
+        auth: token.map(Authenticator::new),
+        unmatched_status: cfg.unmatched_status,
+    }
+}
+
+/// Spawn a thread that watches for SIGHUP and, on each, **reloads the config**:
+/// it re-reads the config file and token, then rebuilds (a) the TLS Server from
+/// the same socket with the current certificate and (b) the routing table + auth,
+/// swapping both in atomically. This is what makes adding/changing routes (and
+/// rotating the token, and renewing the cert) take effect with no restart.
+///
+/// Fail-safe at every step: if the config is invalid, the token is now missing
+/// for a private route, or the cert can't be read, we log and keep serving the
+/// *current* state rather than going down. A botched edit can't take the gate
+/// offline or accidentally drop auth.
+///
+/// Loaded function dylibs are NOT touched here — they live in the `Gate` and stay
+/// resident across reloads, so a reload never re-`dlopen`s a warm function.
 fn install_reload_handler(
     current: Arc<std::sync::Mutex<Arc<tiny_http::Server>>>,
+    gate: Arc<Gate>,
     listener: std::net::TcpListener,
-    cfg: Config,
+    config_path: PathBuf,
+    token_file: Option<PathBuf>,
 ) {
     use std::sync::atomic::{AtomicBool, Ordering};
     let flag = Arc::new(AtomicBool::new(false));
     // signal_hook flips the flag from the real signal handler; we poll it.
     if signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&flag)).is_err() {
-        eprintln!("gatekeeper: warning: could not install SIGHUP handler; cert reload disabled");
+        eprintln!("gatekeeper: warning: could not install SIGHUP handler; reload disabled");
         return;
     }
     std::thread::spawn(move || loop {
@@ -172,20 +221,76 @@ fn install_reload_handler(
         if !flag.swap(false, Ordering::SeqCst) {
             continue;
         }
-        match build_server(&listener, &cfg) {
-            Ok(new_server) => {
-                let mut guard = current.lock().unwrap();
-                let old = std::mem::replace(&mut *guard, Arc::new(new_server));
-                drop(guard);
-                old.unblock(); // release workers blocked on the old Server
-                println!("gatekeeper: reloaded certificate (SIGHUP)");
-            }
-            Err(e) => {
-                // Keep serving the old cert rather than dying — fail safe.
-                eprintln!("gatekeeper: cert reload failed, keeping current cert: {e}");
-            }
-        }
+        reload_once(&current, &gate, &listener, &config_path, token_file.as_deref());
     });
+}
+
+/// Perform one reload cycle. Separated out so the logic is linear and each
+/// failure mode logs + bails without partially applying a reload.
+fn reload_once(
+    current: &Arc<std::sync::Mutex<Arc<tiny_http::Server>>>,
+    gate: &Arc<Gate>,
+    listener: &std::net::TcpListener,
+    config_path: &std::path::Path,
+    token_file: Option<&std::path::Path>,
+) {
+    // 1. Re-read + validate the config. Invalid -> keep current, don't apply.
+    let cfg = match Config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("gatekeeper: reload: config invalid, keeping current config: {e}");
+            return;
+        }
+    };
+
+    // 2. Re-source the token and re-check the fail-closed invariant. If the new
+    //    config has a private route but no token is available, refuse the reload
+    //    rather than swap in routing that would 401 everything (or worse).
+    let token = match config::load_token(token_file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("gatekeeper: reload: reading token failed, keeping current config: {e}");
+            return;
+        }
+    };
+    if cfg.has_private_route() && token.is_none() {
+        eprintln!(
+            "gatekeeper: reload: new config has private routes but no token configured; \
+             keeping current config (set GATEKEEPER_TOKEN or --token-file)"
+        );
+        return;
+    }
+
+    // 3. Rebuild the TLS server (picks up a renewed cert). Bad cert -> keep
+    //    current cert AND skip the routing swap, so a half-applied reload can't
+    //    happen. We rebuild the server even for plain HTTP (cheap) so a cert
+    //    *added* to the config takes effect.
+    let new_server = match build_server(listener, &cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gatekeeper: reload: building server failed, keeping current: {e}");
+            return;
+        }
+    };
+
+    // 4. Apply: swap routing first, then the server. Both are independent atomic
+    //    swaps; workers snapshot each per-request, so the worst interleaving is a
+    //    single request seeing new routing with the old server (or vice versa) —
+    //    both valid states, never a torn one.
+    let new_routing = Arc::new(build_routing(&cfg, token.as_deref()));
+    {
+        let mut guard = gate.routing.lock().unwrap();
+        *guard = new_routing;
+    }
+    {
+        let mut guard = current.lock().unwrap();
+        let old = std::mem::replace(&mut *guard, Arc::new(new_server));
+        drop(guard);
+        old.unblock(); // release workers blocked on the old Server
+    }
+
+    print_exposure_report(&cfg, token.is_some());
+    println!("gatekeeper: reloaded config (SIGHUP) — routes + cert applied");
 }
 
 /// Build a tiny_http Server bound to a *clone* of `listener`'s socket, with TLS
@@ -223,13 +328,18 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
     let (path, query) = raw_url.split_once('?').unwrap_or((raw_url.as_str(), ""));
     let query = query.to_string();
 
-    let reply = match gate.router.resolve(path) {
+    // Snapshot the current routing for the whole request. A concurrent reload
+    // swaps in a fresh Arc<Routing>; we hold our snapshot so the decision is
+    // consistent even if a SIGHUP lands mid-request.
+    let routing = gate.routing();
+
+    let reply = match routing.router.resolve(path) {
         Match::BadPath => Reply::status(400, "Bad Request"),
-        Match::NoRoute => Reply::status(gate.unmatched_status, "Not Found"),
+        Match::NoRoute => Reply::status(routing.unmatched_status, "Not Found"),
         Match::Route { route, rest, .. } => {
             // The safety gate: private routes require a valid token.
             if !route.public {
-                let ok = gate
+                let ok = routing
                     .auth
                     .as_ref()
                     .map(|a| a.check_headers(request.headers()))

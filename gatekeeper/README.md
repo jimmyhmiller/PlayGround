@@ -139,6 +139,27 @@ a proxy upstream. The gate does not sandbox arbitrary dylibs; don't point a
 `funcs/hello` is a complete worked example. After `cargo build -p hello-fn`, run
 the gate with a route pointing at `target/debug/libhello_fn.so` and `curl` it.
 
+### Adding functions live (no restart)
+
+Routes are **hot-reloaded on `SIGHUP`** along with the cert. To add (or change, or
+remove) a function without dropping a connection:
+
+```sh
+cp libfoo_fn.so /somewhere/the/gate/can/read/   # drop the dylib in
+$EDITOR gatekeeper.toml                          # add a [[route]] function = "..."
+systemctl reload gatekeeper                       # or: kill -HUP $(pidof gatekeeper)
+```
+
+The router and auth are rebuilt and swapped in atomically; the process PID is
+unchanged and in-flight requests finish on the old routing. The function dylib
+cache **persists** across reloads, so already-loaded functions are not
+re-`dlopen`ed.
+
+**Fail-safe, same as the cert reload:** if the new config is invalid, or it now
+has a private route but no token is available, the reload is *refused* and the
+gate keeps serving the previous config — a botched edit can neither take the gate
+down nor accidentally drop auth.
+
 ## TLS and certificates
 
 For a public `https://` domain, browsers require a certificate signed by a
@@ -230,6 +251,7 @@ gatekeeper --config <file> [--token-file <file>] [--check]
 
 ## Not included (by design)
 
-Rate limiting, multiple/per-route tokens, request logging to a sink, hot config
-reload, OIDC/accounts, in-process ACME. Add a tunnel or a terminator in front if
-you need more. This stays a small, legible gate.
+Rate limiting, multiple/per-route tokens, request logging to a sink,
+OIDC/accounts, in-process ACME. Add a tunnel or a terminator in front if you need
+more. This stays a small, legible gate. (Config **is** hot-reloaded on `SIGHUP` —
+see [Adding functions live](#adding-functions-live-no-restart).)
