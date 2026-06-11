@@ -9,11 +9,11 @@ let total = shapes
     |> map(area)
     |> sum
 
-println("total area: {total}")
+println("total area: ${total}")
 
 // atoms: the only escaping mutable state
 let hits = atom(0)
-watch(hits, "log", (old, new) => println("hits: {old} -> {new}"))
+watch(hits, "log", (old, new) => println("hits: ${old} -> ${new}"))
 
 fn record_hit() = swap!(hits, n => n + 1)
 record_hit()
@@ -27,8 +27,8 @@ fn parse_pair(a, b) {
 }
 
 match parse_pair("3", "4") {
-    Ok((x, y)) => println("sum = {x + y}"),
-    Err(msg) => println("oops: {msg}"),
+    Ok((x, y)) => println("sum = ${x + y}"),
+    Err(msg) => println("oops: ${msg}"),
 }
 
-"done with {@hits} hits"
+"done with ${@hits} hits"

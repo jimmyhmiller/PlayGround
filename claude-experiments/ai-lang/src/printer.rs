@@ -1135,6 +1135,7 @@ fn surface_name_for_builtin(name: &str) -> Option<String> {
         "core/string.from_bytes" => "string_from_bytes",
         "core/f64.of_int" => "int_to_float",
         "core/f64.to_int" => "float_to_int",
+        "core/f64.sqrt" => "float_sqrt",
         "core/panic" => "panic",
         "core/ptr.null" => "ptr_null",
         "core/ptr.is_null" => "ptr_is_null",

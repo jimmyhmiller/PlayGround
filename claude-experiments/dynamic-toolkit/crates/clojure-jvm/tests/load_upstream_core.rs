@@ -116,6 +116,13 @@ fn load_upstream_core_progressively() {
             "[upstream] form {i} eval completed (outcome: {})",
             if eval_outcome.is_ok() { "Ok" } else { "Err" }
         );
+        if std::env::var("CLJVM_LOADER_HEAPSTATS").is_ok() {
+            eprintln!(
+                "[upstream] form {i} heapstats: from_used={} collections={}",
+                sess.gc.debug_heap_used(),
+                sess.gc.collection_count()
+            );
+        }
         if let Err(err) = eval_outcome {
             let msg = LAST_PANIC
                 .with(|p| p.borrow().clone())

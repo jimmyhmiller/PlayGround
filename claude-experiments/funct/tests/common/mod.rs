@@ -79,6 +79,8 @@ impl WidgetHost {
 
 /// Register the widget host surface into an engine.
 pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
+    // So `import "host"` inside chess.ft resolves to examples/widgets/host.ft.
+    vm.set_module_root(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/widgets"));
     let registry: Arc<Mutex<ProcRegistry>> = Arc::default();
     let render_requested = Arc::new(AtomicBool::new(false));
     let animating = Arc::new(AtomicBool::new(false));
@@ -214,6 +216,16 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
             other => Err(Fault::new(format!("clipboard_set: expected Str, got {}", other.type_name()))),
         }
     });
+
+    // The rest of the shared host.ft surface. This widget doesn't draw through
+    // it, but the real app has ONE host registering the WHOLE interface for all
+    // widgets — so we mirror that here. It also keeps snapshots portable: a
+    // saved game references every native the imported host.ft binds, so any
+    // worker restoring it must register the same surface (these four included).
+    vm.register2("uniform_set", |_name: String, _value: Value| {});
+    vm.register5("mask_paint", |_name: String, _x: f64, _y: f64, _r: f64, _v: f64| {});
+    vm.register3("oklch", |l: f64, c: f64, h: f64| format!("oklch({l:.3} {c:.3} {h:.1})"));
+    vm.register2("emit", |_kind: String, _payload: Value| {});
 
     WidgetHost { render_requested, animating, clipboard }
 }

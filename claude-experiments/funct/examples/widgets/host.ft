@@ -1,0 +1,41 @@
+// host.ft — the standard jim-editor widget host interface, declared once.
+//
+// A widget pulls the whole surface in with `import "host"` and then calls any
+// of these by bare name with no per-file `extern` block. Externs are also part
+// of the module's export surface, so the selective forms work too:
+//   import { mask_paint } from "host"
+//   import { mask_paint as paint } from "host"
+//   import "host" as h        // then h.mask_paint(...)
+//
+// An embedding host registers the natives it actually provides before it
+// evaluates the widget. Anything declared here but not registered becomes a
+// loud placeholder that faults only if CALLED — so a widget that imports the
+// full interface but uses only part of it (and `funct test` over pure logic)
+// still loads fine.
+
+// --- globals the host injects ---
+extern let canvas_w
+extern let canvas_h
+
+// --- render / animation control ---
+extern fn request_render()
+extern fn set_animating(on)
+
+// --- subprocess bridge (UCI engines, language servers, …) ---
+extern fn proc_spawn(cmd)
+extern fn proc_write(handle, line)
+extern fn proc_read(handle)
+extern fn proc_alive(handle)
+extern fn proc_kill(handle)
+
+// --- style / drawing surface ---
+extern fn uniform_set(name, value)
+extern fn mask_paint(name, x, y, radius, value)
+extern fn oklch(l, c, h)
+
+// --- misc ---
+extern fn emit(kind, payload)
+extern fn host_log(msg)
+extern fn host_env(name)
+extern fn widget_asset(rel)
+extern fn clipboard_set(text)

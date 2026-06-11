@@ -231,6 +231,11 @@ pub struct AtBinding {
     pub crashed_variant_index: u32,
     pub code_missing_variant_index: u32,
     pub cancelled_variant_index: u32,
+    /// `Failure::TimedOut(Node)` is OPTIONAL: declared, it receives
+    /// deadline expirations distinctly; absent, timeouts surface as
+    /// `Unreachable`. Optional so pre-deadline 4-variant `Failure`
+    /// enums keep working (their content hash is unchanged).
+    pub timed_out_variant_index: Option<u32>,
     /// `enum DecodeError { TypeMismatch, Malformed }` — used by the
     /// checked `decode::<T>` to build its `Err`. Optional: `at()`-only
     /// modules need not declare it.
@@ -289,6 +294,7 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "string_from_bytes" => "core/string.from_bytes",
         "int_to_float" => "core/f64.of_int",
         "float_to_int" => "core/f64.to_int",
+        "float_sqrt" => "core/f64.sqrt",
         "ptr_null" => "core/ptr.null",
         "ptr_is_null" => "core/ptr.is_null",
         "ptr_add" => "core/ptr.add",
@@ -320,8 +326,26 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Prefix for the asynchronous twin of `at(...)`: `at_async(node, thunk)`
+/// ships the thunk from a background thread and returns a
+/// `ThreadHandle<Result<T, Failure>>` immediately; the existing `join`
+/// awaits it. Same embedded hashes as the `at` name.
+pub const AT_ASYNC_BUILTIN_PREFIX: &str = "core/net.at_async#";
+
+/// `true` for any at-family builtin name (`core/net.at#...` or
+/// `core/net.at_async#...`). The hash-rename, dependency-index, and
+/// slice walkers treat both identically: the names embed the same
+/// `Result`/`Failure` hashes.
+pub fn is_at_family_builtin(name: &str) -> bool {
+    name.starts_with(AT_BUILTIN_PREFIX) || name.starts_with(AT_ASYNC_BUILTIN_PREFIX)
+}
+
+/// Parse an at-family builtin name (`core/net.at#...` or
+/// `core/net.at_async#...`), returning the embedded hashes.
 pub fn parse_at_builtin_name(name: &str) -> Option<(Hash, Option<Hash>)> {
-    let body = name.strip_prefix(AT_BUILTIN_PREFIX)?;
+    let body = name
+        .strip_prefix(AT_BUILTIN_PREFIX)
+        .or_else(|| name.strip_prefix(AT_ASYNC_BUILTIN_PREFIX))?;
     let parts: Vec<&str> = body.split('#').collect();
     let parse_hex = |s: &str| -> Option<Hash> {
         if s.len() != Hash::SIZE * 2 {
@@ -1924,6 +1948,11 @@ fn build_at_binding(
     let crashed_idx = variant_idx("Crashed")?;
     let code_missing_idx = variant_idx("CodeMissing")?;
     let cancelled_idx = variant_idx("Cancelled")?;
+    // Optional: when declared, it must carry a Node like the others.
+    let timed_out_idx = match find_variant(failure, "TimedOut") {
+        Some(_) => Some(variant_idx("TimedOut")?),
+        None => None,
+    };
 
     // DecodeError is optional (only `decode::<T>` needs it). Discover it
     // opportunistically so the runtime can build `Err(TypeMismatch)` /
@@ -1947,6 +1976,7 @@ fn build_at_binding(
         crashed_variant_index: crashed_idx,
         code_missing_variant_index: code_missing_idx,
         cancelled_variant_index: cancelled_idx,
+        timed_out_variant_index: timed_out_idx,
         decode_error_hash,
         decode_type_mismatch_index: decode_tm_idx,
         decode_malformed_index: decode_mf_idx,
@@ -2572,6 +2602,10 @@ fn resolve_expr_typed(
                         Some("core/f64.to_int"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
+                    "float_sqrt" => (
+                        Some("core/f64.sqrt"),
+                        Some(Type::Builtin("Float".to_owned())),
+                    ),
                     // `panic(msg)` — hard error. Diverges, so its type is
                     // the bottom type `Never`, which unifies with any
                     // expected type (it can sit in any match arm / branch).
@@ -2843,10 +2877,11 @@ fn resolve_expr_typed(
             //
             // v1 signature: at(node: Node, thunk: fn() -> Int) -> Result
             if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
-                if name == "at" {
+                if name == "at" || name == "at_async" {
+                    let is_async = name == "at_async";
                     if args.len() != 2 {
                         return Err(ResolveError::UnknownName {
-                            name: format!("at expects 2 args, got {}", args.len()),
+                            name: format!("{} expects 2 args, got {}", name, args.len()),
                             span: *span,
                         });
                     }
@@ -2880,14 +2915,29 @@ fn resolve_expr_typed(
                     // in the builtin name.
                     let builtin_name = format!(
                         "{}{}#{}",
-                        AT_BUILTIN_PREFIX,
+                        if is_async {
+                            AT_ASYNC_BUILTIN_PREFIX
+                        } else {
+                            AT_BUILTIN_PREFIX
+                        },
                         hex_encode(binding.result_hash.as_bytes()),
                         hex_encode(binding.failure_hash.as_bytes())
                     );
-                    let ret_ty = Type::Apply(
+                    let result_ty = Type::Apply(
                         Box::new(Type::TypeRef(binding.result_hash)),
                         vec![thunk_ret_ty, Type::TypeRef(binding.failure_hash)],
                     );
+                    // `at` yields the Result directly; `at_async` yields a
+                    // handle the existing `join` awaits:
+                    // `ThreadHandle<Result<T, Failure>>`.
+                    let ret_ty = if is_async {
+                        Type::Apply(
+                            Box::new(Type::Builtin("ThreadHandle".to_owned())),
+                            vec![result_ty],
+                        )
+                    } else {
+                        result_ty
+                    };
                     return Ok((
                         Expr::Call(
                             Box::new(Expr::BuiltinRef(builtin_name)),

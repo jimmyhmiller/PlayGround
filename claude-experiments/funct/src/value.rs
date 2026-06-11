@@ -66,6 +66,13 @@ pub mod shared {
 
 use shared::{AnyLock, Lock, NativeBound, Sh};
 
+/// Persistent (structurally-shared) sequence: O(1) clone, ~O(log n) push/index,
+/// amortized O(1) push when uniquely owned. Backs both lists and tuples.
+pub type FList = imbl::Vector<Value>;
+/// Persistent sorted map (structural sharing) backing records; keeps keys
+/// ordered, so `keys()`/iteration stay deterministic.
+pub type FMap = imbl::OrdMap<String, Value>;
+
 #[derive(Clone)]
 pub enum Value {
     Unit,
@@ -73,9 +80,12 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(Sh<str>),
-    List(Sh<Vec<Value>>),
-    Tuple(Sh<Vec<Value>>),
-    Record(Sh<BTreeMap<String, Value>>),
+    // List/Tuple hold the persistent vector behind an `Sh` (Arc) so the `Value`
+    // enum stays small (~32 B not ~72 B): a bare `imbl::Vector` is 64 bytes
+    // inline, and `Value` is moved/cloned/dropped on every stack operation.
+    List(Sh<FList>),
+    Tuple(Sh<FList>),
+    Record(FMap),
     Variant(Sh<Variant>),
     Closure(Sh<Closure>),
     /// Index into the engine's native function table.
@@ -138,15 +148,20 @@ impl Value {
     }
 
     pub fn list(items: Vec<Value>) -> Value {
-        Value::List(Sh::new(items))
+        Value::List(Sh::new(items.into_iter().collect()))
     }
 
     pub fn tuple(items: Vec<Value>) -> Value {
-        Value::Tuple(Sh::new(items))
+        Value::Tuple(Sh::new(items.into_iter().collect()))
+    }
+
+    /// Build a list directly from an already-constructed persistent vector.
+    pub fn list_v(items: FList) -> Value {
+        Value::List(Sh::new(items))
     }
 
     pub fn record(fields: BTreeMap<String, Value>) -> Value {
-        Value::Record(Sh::new(fields))
+        Value::Record(fields.into_iter().collect())
     }
 
     pub fn variant(tag: &str, payload: VariantPayload) -> Value {

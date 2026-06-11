@@ -776,6 +776,8 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // Int <-> Float conversions.
         "core/f64.of_int" => Some((vec![int_t()], float_t())),
         "core/f64.to_int" => Some((vec![float_t()], int_t())),
+        // Float square root (LLVM llvm.sqrt.f64 intrinsic).
+        "core/f64.sqrt" => Some((vec![float_t()], float_t())),
 
         // Raw-pointer / memory intrinsics. `Ptr` is an i64-represented
         // raw address (non-GC). Built on by the C FFI: allocate with
@@ -1749,7 +1751,7 @@ fn typecheck_call(
         }
     }
 
-    // ---- core/net.at#<hex>[#<hex>] special case ----
+    // ---- core/net.at#<hex>[#<hex>] (and at_async) special case ----
     if let Expr::BuiltinRef(name) = callee {
         let parsed = if name == "core/net.at" {
             None
@@ -1757,6 +1759,10 @@ fn typecheck_call(
             crate::resolve::parse_at_builtin_name(name)
         };
         let is_at = parsed.is_some() || name == "core/net.at";
+        // `at_async` shares every check with `at` (same mobility rules —
+        // the thunk still leaves the process); only the return type
+        // differs: a `ThreadHandle<Result<T, Failure>>` for `join`.
+        let is_async = name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX);
         if is_at {
             if args.len() != 2 {
                 return Err(TypeError::ArityMismatch {
@@ -1869,10 +1875,18 @@ fn typecheck_call(
                     });
                 }
             };
-            return Ok(Type::Apply(
+            let result_ty = Type::Apply(
                 Box::new(Type::TypeRef(result_hash)),
                 vec![thunk_ret, Type::TypeRef(failure_hash)],
-            ));
+            );
+            return Ok(if is_async {
+                Type::Apply(
+                    Box::new(Type::Builtin("ThreadHandle".to_owned())),
+                    vec![result_ty],
+                )
+            } else {
+                result_ty
+            });
         }
     }
 

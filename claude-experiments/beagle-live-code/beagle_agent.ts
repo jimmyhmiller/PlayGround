@@ -1,13 +1,48 @@
-// Allow running inside a Claude Code session
-delete (process.env as any).CLAUDECODE;
-
 import * as net from "net";
 import * as readline from "readline";
 import * as child_process from "child_process";
 import * as path from "path";
 import * as fs from "fs";
-import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import OpenAI from "openai";
 import { z } from "zod";
+
+// ---------------------------------------------------------------------------
+// DeepSeek (OpenAI-compatible) configuration
+// ---------------------------------------------------------------------------
+
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+const MODEL_ALIASES: Record<string, string> = {
+  pro: "deepseek-v4-pro",
+  flash: "deepseek-v4-flash",
+};
+
+function resolveModel(name: string): string {
+  return MODEL_ALIASES[name.toLowerCase()] ?? name;
+}
+
+// ---------------------------------------------------------------------------
+// Tool definition helper (replaces the Claude Agent SDK's `tool`)
+// ---------------------------------------------------------------------------
+
+type ToolResult = { content: { type: "text"; text: string }[] };
+
+interface AgentTool {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  handler: (args: any) => Promise<ToolResult>;
+}
+
+function tool<S extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  shape: S,
+  handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
+): AgentTool {
+  const schema = z.toJSONSchema(z.object(shape)) as Record<string, unknown>;
+  delete schema.$schema;
+  return { name, description, schema, handler };
+}
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -1036,16 +1071,62 @@ const beaglePersist = tool(
   }
 );
 
-const server = createSdkMcpServer({
-  name: "beagle-repl",
-  tools: [
-    beagleRun, beagleLoad, beagleEval, beagleDescribe, beagleSessions, beagleInterrupt,
-    beagleResume, beagleAbort, beagleStatus,
-    beagleMainStatus, beagleMainResume, beagleMainAbort,
-    beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
-    beagleSource, beagleNamespaceSource, beagleLocation, beaglePersist,
-  ],
-});
+// ---------------------------------------------------------------------------
+// Directory listing tool
+// ---------------------------------------------------------------------------
+
+const listDirectory = tool(
+  "list_directory",
+  "List the contents of a directory on disk. Directories are shown with a trailing '/'. " +
+  "Use this to find .bg files to pass to beagle_run or beagle_load. " +
+  "This is the only file system access you have — there is no file-read tool; " +
+  "source is read through beagle_source / beagle_namespace_source.",
+  {
+    path: z.string().optional().describe("Directory to list (absolute or relative; default: current working directory)"),
+  },
+  async (args) => {
+    const dir = path.resolve(args.path ?? process.cwd());
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Error listing ${dir}: ${e.message}` }] };
+    }
+    const lines = entries
+      .sort((a, b) => {
+        // Directories first, then alphabetical
+        if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      })
+      .map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
+    const text = `${dir} (${lines.length} entries)\n${lines.join("\n")}`;
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool registry
+// ---------------------------------------------------------------------------
+
+const ALL_TOOLS: AgentTool[] = [
+  beagleRun, beagleLoad, beagleEval, beagleDescribe, beagleSessions, beagleInterrupt,
+  beagleResume, beagleAbort, beagleStatus,
+  beagleMainStatus, beagleMainResume, beagleMainAbort,
+  beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
+  beagleSource, beagleNamespaceSource, beagleLocation, beaglePersist,
+  listDirectory,
+];
+
+const TOOLS_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
+
+const OPENAI_TOOL_SCHEMAS: OpenAI.Chat.Completions.ChatCompletionTool[] = ALL_TOOLS.map((t) => ({
+  type: "function" as const,
+  function: {
+    name: t.name,
+    description: t.description,
+    parameters: t.schema,
+  },
+}));
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -1053,10 +1134,11 @@ const server = createSdkMcpServer({
 
 const SYSTEM_PROMPT = `\
 You are a Beagle live coding agent. You interact with a running Beagle program \
-through a REPL socket connection. You have NO file system tools — no Read, Glob, \
+through a REPL socket connection. You have NO file editing tools — no Read, Glob, \
 Grep, Write, Edit. Everything — reading source, writing source, exploring the \
-running program, testing — goes through the MCP tools below. Source reading happens \
-via beagle_source / beagle_namespace_source, source writing via beagle_persist.
+running program, testing — goes through the tools below. Source reading happens \
+via beagle_source / beagle_namespace_source, source writing via beagle_persist. \
+The only file system tool you have is list_directory, for locating .bg files.
 
 ## Edit loop (the thing you do most)
 
@@ -1103,6 +1185,11 @@ going eval → persist with the same text compiles it twice.
   from main-thread (game loop / GUI) crashes.
 - **beagle_describe**: What ops the REPL server supports.
 - **beagle_sessions**: List active REPL sessions.
+
+### File system
+- **list_directory(path?)**: List a directory's contents (directories shown with a \
+  trailing '/'). Use it to locate .bg files for beagle_run / beagle_load. There is \
+  no file-read tool — read source via beagle_source / beagle_namespace_source.
 
 ### Introspection
 - **beagle_list_namespaces**: All loaded namespaces.
@@ -1253,6 +1340,99 @@ reflect/doc(reflect/type-of(println))       // => "Print a value..."
 `;
 
 // ---------------------------------------------------------------------------
+// DeepSeek agent loop
+// ---------------------------------------------------------------------------
+
+type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+
+function pickStartupModel(): string {
+  const argv = process.argv.slice(2);
+  const idx = argv.indexOf("--model");
+  if (idx !== -1 && argv[idx + 1]) return resolveModel(argv[idx + 1]);
+  if (process.env.DEEPSEEK_MODEL) return resolveModel(process.env.DEEPSEEK_MODEL);
+  return MODEL_ALIASES.pro;
+}
+
+async function executeToolCall(name: string, rawArgs: string): Promise<string> {
+  const toolDef = TOOLS_BY_NAME.get(name);
+  if (!toolDef) return `Error: unknown tool "${name}"`;
+
+  let args: Record<string, unknown> = {};
+  if (rawArgs && rawArgs.trim()) {
+    try {
+      args = JSON.parse(rawArgs);
+    } catch (e: any) {
+      return `Error: tool arguments were not valid JSON: ${e.message}`;
+    }
+  }
+
+  const summary = args.code
+    ? `${name}(${String(args.code).slice(0, 80)}${String(args.code).length > 80 ? "..." : ""})`
+    : `${name}(${JSON.stringify(args).slice(0, 80)})`;
+  console.log(`\x1b[2m⚙ ${summary}\x1b[0m`);
+  log("INFO", "Tool call", { tool: name, input: args });
+
+  try {
+    const result = await toolDef.handler(args);
+    return result.content.map((c) => c.text).join("\n");
+  } catch (e: any) {
+    log("ERROR", "Tool handler threw", { tool: name, message: e.message, stack: e.stack });
+    return `Error: tool ${name} failed: ${e.message}`;
+  }
+}
+
+// Run one user turn: call the model, execute tool calls, repeat until the model
+// answers with plain text (or the user aborts via Escape).
+async function runAgentTurn(
+  client: OpenAI,
+  model: string,
+  messages: ChatMessage[],
+  signal: AbortSignal,
+  isAborted: () => boolean
+): Promise<void> {
+  const MAX_TOOL_ROUNDS = 100;
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await client.chat.completions.create(
+      { model, messages, tools: OPENAI_TOOL_SCHEMAS },
+      { signal }
+    );
+
+    const msg = response.choices[0]?.message;
+    if (!msg) throw new Error("DeepSeek returned no choices");
+    log("INFO", "Received completion", {
+      finishReason: response.choices[0]?.finish_reason,
+      toolCalls: msg.tool_calls?.length ?? 0,
+      usage: response.usage,
+    });
+
+    // Re-append a sanitized copy of the assistant message. Never echo
+    // reasoning_content (or other extra fields) back to the API.
+    const toolCalls = (msg.tool_calls ?? []).filter((tc: any) => tc.type === "function");
+    messages.push({
+      role: "assistant",
+      content: msg.content ?? "",
+      ...(toolCalls.length ? { tool_calls: toolCalls as any } : {}),
+    });
+
+    if (msg.content) console.log(msg.content);
+    if (!toolCalls.length) return;
+
+    for (const tc of toolCalls as any[]) {
+      // Every tool_call needs a matching tool message or the next API call 400s,
+      // so on abort we answer the remaining calls with a placeholder.
+      const text = isAborted()
+        ? "[tool call skipped — query aborted by user]"
+        : await executeToolCall(tc.function.name, tc.function.arguments);
+      messages.push({ role: "tool", tool_call_id: tc.id, content: text });
+    }
+    if (isAborted()) return;
+  }
+
+  console.log(`\x1b[33m[stopped after ${MAX_TOOL_ROUNDS} tool rounds — ask me to continue]\x1b[0m`);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1262,8 +1442,19 @@ async function main() {
   process.on("SIGINT", () => { killBeagleServer(); process.exit(0); });
   process.on("SIGTERM", () => { killBeagleServer(); process.exit(0); });
 
-  console.log("Beagle Live Code Agent");
-  console.log("======================");
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    console.error("Error: DEEPSEEK_API_KEY is not set.");
+    console.error("Export your DeepSeek API key and re-run: export DEEPSEEK_API_KEY=sk-...");
+    process.exit(1);
+  }
+
+  const client = new OpenAI({ baseURL: DEEPSEEK_BASE_URL, apiKey });
+  let model = pickStartupModel();
+
+  console.log("Beagle Live Code Agent (DeepSeek)");
+  console.log("=================================");
+  console.log(`Model: ${model} — switch with /model pro|flash`);
   console.log(`Logging to: ${LOG_FILE}`);
   console.log("Ask me to run a .bg file or start the default REPL server.\n");
 
@@ -1275,7 +1466,8 @@ async function main() {
   const prompt = (): Promise<string> =>
     new Promise((resolve) => rl.question("> ", resolve));
 
-  let sessionId: string | undefined;
+  // The full conversation, persisted across turns (replaces SDK session resume).
+  const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
 
   while (true) {
     let userInput: string;
@@ -1288,45 +1480,20 @@ async function main() {
 
     if (!userInput.trim()) continue;
 
-    // First turn: full options. Subsequent turns: resume the session.
-    // MCP servers and permissions must be passed on every turn (not persisted by session)
-    const baseOptions = {
-      mcpServers: { "beagle-repl": server },
-      permissionMode: "bypassPermissions" as const,
-      allowDangerouslySkipPermissions: true,
-    };
+    // /model — show or switch the active model without losing conversation state.
+    const modelCmd = userInput.trim().match(/^\/model(?:\s+(\S+))?$/);
+    if (modelCmd) {
+      if (modelCmd[1]) {
+        model = resolveModel(modelCmd[1]);
+        console.log(`Model set to ${model}`);
+      } else {
+        console.log(`Current model: ${model} (use /model pro|flash|<full-model-name>)`);
+      }
+      continue;
+    }
 
-    const options = sessionId
-      ? { ...baseOptions, resume: sessionId }
-      : {
-          ...baseOptions,
-          systemPrompt: SYSTEM_PROMPT,
-          allowedTools: [
-            "mcp__beagle-repl__beagle_run",
-            "mcp__beagle-repl__beagle_load",
-            "mcp__beagle-repl__beagle_eval",
-            "mcp__beagle-repl__beagle_describe",
-            "mcp__beagle-repl__beagle_sessions",
-            "mcp__beagle-repl__beagle_interrupt",
-            "mcp__beagle-repl__beagle_resume",
-            "mcp__beagle-repl__beagle_abort",
-            "mcp__beagle-repl__beagle_status",
-            "mcp__beagle-repl__beagle_main_status",
-            "mcp__beagle-repl__beagle_main_resume",
-            "mcp__beagle-repl__beagle_main_abort",
-            "mcp__beagle-repl__beagle_list_namespaces",
-            "mcp__beagle-repl__beagle_namespace_info",
-            "mcp__beagle-repl__beagle_search",
-            "mcp__beagle-repl__beagle_doc",
-            "mcp__beagle-repl__beagle_source",
-            "mcp__beagle-repl__beagle_namespace_source",
-            "mcp__beagle-repl__beagle_location",
-            "mcp__beagle-repl__beagle_persist",
-          ],
-          model: "claude-sonnet-4-6",
-        };
-
-    log("INFO", "Sending query to Claude", { promptLength: userInput.length, hasSession: !!sessionId });
+    messages.push({ role: "user", content: userInput });
+    log("INFO", "Sending query to DeepSeek", { promptLength: userInput.length, model });
 
     // Per-query AbortController so Escape can cancel mid-flight.
     const abortController = new AbortController();
@@ -1356,48 +1523,13 @@ async function main() {
     process.stdin.on("keypress", onKeypress);
 
     try {
-      for await (const message of query({ prompt: userInput, options: { ...options, abortController } })) {
-        log("INFO", "Received message", { type: message.type, subtype: (message as any).subtype });
-
-        if (message.type === "assistant") {
-          // Full assistant message — print text blocks, show tool use calls
-          const msg = message as any;
-          for (const block of msg.message?.content ?? []) {
-            if (block.type === "text" && block.text) {
-              console.log(block.text);
-            } else if (block.type === "tool_use") {
-              const input = block.input as Record<string, unknown>;
-              const summary = input.code
-                ? `${block.name}(${String(input.code).slice(0, 80)}${String(input.code).length > 80 ? "..." : ""})`
-                : `${block.name}(${JSON.stringify(input).slice(0, 80)})`;
-              console.log(`\x1b[2m⚙ ${summary}\x1b[0m`);
-              log("INFO", "Tool call", { tool: block.name, input });
-            }
-          }
-        } else if (message.type === "result") {
-          const result = (message as any).result;
-          // Don't print result text — it duplicates the last assistant message's text block
-          log("INFO", "Query completed with result", { resultLength: result?.length });
-          // The SDK's async iterator sometimes doesn't close after the terminal
-          // `result` message, leaving us hung waiting for a next message that
-          // never arrives. `result` is documented as the end-of-query signal,
-          // so break explicitly. The for-await semantics call iterator.return()
-          // for us, which cleans up the underlying stream.
-          break;
-        } else if (
-          message.type === "system" &&
-          (message as any).subtype === "init" &&
-          !sessionId
-        ) {
-          sessionId = (message as any).session_id;
-          log("INFO", "Session initialized", { sessionId });
-        }
-      }
-      log("INFO", "Query stream ended normally");
+      await runAgentTurn(client, model, messages, abortController.signal, () => aborted);
+      log("INFO", "Turn completed");
     } catch (err: any) {
-      if (aborted) {
-        // The SDK throws when its subprocess is killed by abort — that's
-        // expected, not a real failure. Just log and move on.
+      if (aborted || err instanceof OpenAI.APIUserAbortError) {
+        // Aborting the in-flight request throws — expected, not a real failure.
+        // If the request died before an assistant message landed, the message
+        // list is still valid (it just ends with user/tool messages).
         log("INFO", "Query aborted by user", { message: err.message });
       } else {
         log("ERROR", "Query failed", { message: err.message, stack: err.stack, name: err.name });

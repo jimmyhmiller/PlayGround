@@ -608,17 +608,24 @@ fn remap_type(t: &Type, remap: &HashMap<Hash, Hash>) -> Type {
 }
 
 fn remap_at_builtin_name(name: &str, remap: &HashMap<Hash, Hash>) -> String {
+    // Preserve the family member (`at` vs `at_async`) — only the
+    // embedded hashes are remapped.
+    let prefix = if name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX) {
+        crate::resolve::AT_ASYNC_BUILTIN_PREFIX
+    } else {
+        AT_BUILTIN_PREFIX
+    };
     match parse_at_builtin_name(name) {
         Some((primary, secondary)) => {
             let p = remap_hash(&primary, remap);
             match secondary {
                 Some(s) => format!(
                     "{}{}#{}",
-                    AT_BUILTIN_PREFIX,
+                    prefix,
                     p.to_hex(),
                     remap_hash(&s, remap).to_hex()
                 ),
-                None => format!("{}{}", AT_BUILTIN_PREFIX, p.to_hex()),
+                None => format!("{}{}", prefix, p.to_hex()),
             }
         }
         // A prefix-bearing name that doesn't parse is a hard error — never a
@@ -632,7 +639,7 @@ fn remap_expr(e: &Expr, remap: &HashMap<Hash, Hash>) -> Expr {
         Expr::TopRef(h) => Expr::TopRef(remap_hash(h, remap)),
         Expr::StateRef(h) => Expr::StateRef(remap_hash(h, remap)),
         Expr::StateSelfRef(_) => e.clone(),
-        Expr::BuiltinRef(name) if name.starts_with(AT_BUILTIN_PREFIX) => {
+        Expr::BuiltinRef(name) if crate::resolve::is_at_family_builtin(name) => {
             Expr::BuiltinRef(remap_at_builtin_name(name, remap))
         }
         Expr::Call(callee, args) => Expr::Call(
@@ -772,7 +779,8 @@ fn topo_sort_cone(index: &DependencyIndex, cone: &std::collections::BTreeSet<Has
 
 /// Whether two schemes have the same *signature* (what callers depend on),
 /// ignoring the derived `wire` flag. A scheme-kind change is a signature change.
-fn schemes_signature_eq(a: &TypeScheme, b: &TypeScheme) -> bool {
+/// `pub(crate)`: the deploy layer reuses this as its binding-interface check.
+pub(crate) fn schemes_signature_eq(a: &TypeScheme, b: &TypeScheme) -> bool {
     match (a, b) {
         (
             TypeScheme::Fn { params: pa, ret: ra, .. },

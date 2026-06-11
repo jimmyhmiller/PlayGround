@@ -19,7 +19,10 @@ pub enum CaptureSrc {
     Upval(u16),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// `Copy` so the dispatch loop can read an instruction with a trivial register
+// copy instead of a clone — the `MakeClosure` capture list lives in a side
+// table on `FnProto` (`closure_captures`) rather than inline, to keep this so.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum Instr {
     // constants & locals
     Const(u32),
@@ -80,7 +83,9 @@ pub enum Instr {
     /// patterns). On match: write bindings into locals, fall through.
     /// On fail: jump to `fail`.
     MatchPat { pat: u32, fail: u32 },
-    MakeClosure { fn_id: u32, captures: Vec<CaptureSrc> },
+    /// `captures` indexes `FnProto::closure_captures` (kept out of line so
+    /// `Instr` stays `Copy`).
+    MakeClosure { fn_id: u32, captures: u32 },
     Call(u8),
     TailCall(u8),
     /// UFCS: stack [recv, a1..an]; name const idx. `global` is the fallback
@@ -135,6 +140,8 @@ pub struct FnProto {
     pub pats: Vec<Pat>,
     /// source line per instruction (parallel to `code`)
     pub lines: Vec<u32>,
+    /// out-of-line capture lists for `MakeClosure` (index = the instr's field)
+    pub closure_captures: Vec<Vec<CaptureSrc>>,
 }
 
 impl FnProto {

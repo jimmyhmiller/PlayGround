@@ -131,7 +131,7 @@ impl FromValue for String {
 
 impl<T: ToValue> ToValue for Vec<T> {
     fn to_value(self) -> Value {
-        Value::List(Sh::new(self.into_iter().map(|x| x.to_value()).collect()))
+        Value::list_v(self.into_iter().map(|x| x.to_value()).collect())
     }
 }
 impl<T: FromValue> FromValue for Vec<T> {
@@ -145,7 +145,7 @@ impl<T: FromValue> FromValue for Vec<T> {
 
 impl<T: ToValue> ToValue for BTreeMap<String, T> {
     fn to_value(self) -> Value {
-        Value::Record(Sh::new(self.into_iter().map(|(k, v)| (k, v.to_value())).collect()))
+        Value::Record(self.into_iter().map(|(k, v)| (k, v.to_value())).collect())
     }
 }
 impl<T: FromValue> FromValue for BTreeMap<String, T> {
@@ -213,7 +213,7 @@ macro_rules! tuple_conv {
     ($(($($T:ident . $idx:tt),+ ; $n:expr)),+) => {$(
         impl<$($T: ToValue),+> ToValue for ($($T,)+) {
             fn to_value(self) -> Value {
-                Value::Tuple(Sh::new(vec![$(self.$idx.to_value()),+]))
+                Value::tuple(vec![$(self.$idx.to_value()),+])
             }
         }
         impl<$($T: FromValue),+> FromValue for ($($T,)+) {
@@ -232,7 +232,9 @@ macro_rules! tuple_conv {
 tuple_conv!(
     (A.0, B.1; 2),
     (A.0, B.1, C.2; 3),
-    (A.0, B.1, C.2, D.3; 4)
+    (A.0, B.1, C.2, D.3; 4),
+    (A.0, B.1, C.2, D.3, E.4; 5),
+    (A.0, B.1, C.2, D.3, E.4, F.5; 6)
 );
 
 // ---------- function registration ----------
@@ -290,7 +292,9 @@ impl Funct {
         (register1, A: 0; 1),
         (register2, A: 0, B: 1; 2),
         (register3, A: 0, B: 1, C: 2; 3),
-        (register4, A: 0, B: 1, C: 2, D: 3; 4)
+        (register4, A: 0, B: 1, C: 2, D: 3; 4),
+        (register5, A: 0, B: 1, C: 2, D: 3, E: 4; 5),
+        (register6, A: 0, B: 1, C: 2, D: 3, E: 4, F: 5; 6)
     );
 
     /// Register a host module: a global record whose fields are the module's
@@ -304,7 +308,7 @@ impl Funct {
         let g = self.ctx.ensure_global(name);
         self.ctx.shared.insert(g); // host modules are visible inside modules
         self.sync_globals();
-        self.globals[g as usize] = Some(Value::Record(Sh::new(map)));
+        self.globals[g as usize] = Some(Value::record(map));
         self.register_host_module(name, g);
     }
 
@@ -432,13 +436,17 @@ impl<'a, T: NativeBound> TypeBuilder<'a, T> {
         (method0, ; 0),
         (method1, A: 0; 1),
         (method2, A: 0, B: 1; 2),
-        (method3, A: 0, B: 1, C: 2; 3)
+        (method3, A: 0, B: 1, C: 2; 3),
+        (method4, A: 0, B: 1, C: 2, D: 3; 4),
+        (method5, A: 0, B: 1, C: 2, D: 3, E: 4; 5)
     );
 
     type_ctors!(
         (ctor0, ; 0),
         (ctor1, A: 0; 1),
         (ctor2, A: 0, B: 1; 2),
-        (ctor3, A: 0, B: 1, C: 2; 3)
+        (ctor3, A: 0, B: 1, C: 2; 3),
+        (ctor4, A: 0, B: 1, C: 2, D: 3; 4),
+        (ctor5, A: 0, B: 1, C: 2, D: 3, E: 4; 5)
     );
 }

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jimmyhmiller.host-switch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/host-switch</string>
+    </array>
+
+    <!-- Run once at boot/load... -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- ...then every 30 seconds. -->
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <!-- ...and immediately whenever the network configuration changes, so
+         arriving home / leaving doesn't wait up to 30s. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Preferences/SystemConfiguration</string>
+        <string>/etc/resolv.conf</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/host-switch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/host-switch.log</string>
+</dict>
+</plist>

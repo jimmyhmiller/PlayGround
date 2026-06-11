@@ -12,21 +12,12 @@
 //  - render items use `kind:` instead of rhai's `type:` (funct keyword)
 //  - promo pending is `()` instead of -1 (a record when a pick is open)
 
-// The host interface this widget needs. When embedded, the host registers
-// these natives; under the bare CLI (e.g. `funct test`) they fault loudly
+// The host interface this widget needs comes from the shared host file.
+// `import "host"` pulls in canvas_w/h + request_render/set_animating + the
+// proc_* subprocess bridge etc. by name; the embedding host registers the
+// real natives, and under the bare CLI (`funct test`) they fault loudly only
 // if called — the pure-logic inline tests below never call them.
-extern let canvas_w
-extern let canvas_h
-extern fn request_render()
-extern fn set_animating(on)
-extern fn proc_spawn(cmd)
-extern fn proc_write(handle, line)
-extern fn proc_read(handle)
-extern fn proc_alive(handle)
-extern fn proc_kill(handle)
-extern fn host_env(name)
-extern fn widget_asset(rel)
-extern fn clipboard_set(text)
+import "host"
 
 fn new_board() {
     [
@@ -1474,34 +1465,34 @@ export fn render(cw, ch) {
             let base = if light { "#f0d9b5" } else { "#b58863" }
             let sx = l.board_x + to_float(col) * l.sq
             let sy = l.board_y + to_float(row) * l.sq
-            items = push(items, { kind: "rect", id: "sq_{idx}",
+            items = push(items, { kind: "rect", id: "sq_${idx}",
                 x: sx, y: sy, w: l.sq, h: l.sq, color: base, anchor: "top-left", z: 1.0 })
 
             if idx == vlf or idx == vlt {
-                items = push(items, { kind: "rect", id: "lm_{idx}",
+                items = push(items, { kind: "rect", id: "lm_${idx}",
                     x: sx, y: sy, w: l.sq, h: l.sq,
                     color: "#cdd26b55", anchor: "top-left", z: 1.1 })
             }
             if idx == vsel {
-                items = push(items, { kind: "rect", id: "sel_{idx}",
+                items = push(items, { kind: "rect", id: "sel_${idx}",
                     x: sx, y: sy, w: l.sq, h: l.sq,
                     color: "#f6f66988", anchor: "top-left", z: 1.2 })
             }
             if in_check and idx == check_sq {
-                items = push(items, { kind: "rect", id: "chk_{idx}",
+                items = push(items, { kind: "rect", id: "chk_${idx}",
                     x: sx, y: sy, w: l.sq, h: l.sq,
                     color: "#ff3a3a66", anchor: "top-left", z: 1.2 })
             }
             // Review: tint the best-move from/to squares green.
             if s.review and (idx == cur_from or idx == cur_to) {
-                items = push(items, { kind: "rect", id: "bm_{idx}",
+                items = push(items, { kind: "rect", id: "bm_${idx}",
                     x: sx, y: sy, w: l.sq, h: l.sq,
                     color: "#3fb95033", anchor: "top-left", z: 1.15 })
             }
             if contains(legal, idx) {
                 let has_piece = vb[idx] != ""
                 let dot_r = if has_piece { l.sq * 0.46 } else { l.sq * 0.16 }
-                items = push(items, { kind: "rect", id: "lg_{idx}",
+                items = push(items, { kind: "rect", id: "lg_${idx}",
                     x: sx + l.sq / 2.0 - dot_r, y: sy + l.sq / 2.0 - dot_r,
                     w: dot_r * 2.0, h: dot_r * 2.0,
                     color: "#22222255", anchor: "top-left", z: 1.3 })
@@ -1521,7 +1512,7 @@ export fn render(cw, ch) {
             let idx = rc_to_idx(dr, dc)
             let p = vb[idx]
             if p != "" and not (lifted and idx == s.drag_from) {
-                items = push(items, { kind: "sprite", id: "pc_{idx}",
+                items = push(items, { kind: "sprite", id: "pc_${idx}",
                     x: l.board_x + to_float(col2) * l.sq + l.sq / 2.0,
                     y: l.board_y + to_float(row2) * l.sq + l.sq / 2.0,
                     w: l.sq * 0.92, h: l.sq * 0.92,
@@ -1612,11 +1603,11 @@ export fn render(cw, ch) {
                     let colx = l.gr_x + to_float(i) * colw
                     let barh = abs(dev) * l.gr_h
                     if dev >= 0.0 {
-                        items = push(items, { kind: "rect", id: "gc_{i}",
+                        items = push(items, { kind: "rect", id: "gc_${i}",
                             x: colx, y: mid - barh, w: colw + 0.6, h: barh,
                             color: "#cfd6dd", anchor: "top-left", z: 1.06 })
                     } else {
-                        items = push(items, { kind: "rect", id: "gc_{i}",
+                        items = push(items, { kind: "rect", id: "gc_${i}",
                             x: colx, y: mid, w: colw + 0.6, h: barh,
                             color: "#454d57", anchor: "top-left", z: 1.06 })
                     }
@@ -1641,13 +1632,13 @@ export fn render(cw, ch) {
             let cell = cells[i]
             let sx = l.board_x + to_float(cell.vc) * l.sq
             let sy = l.board_y + to_float(cell.vr) * l.sq
-            items = push(items, { kind: "rect", id: "promo_bg_{i}",
+            items = push(items, { kind: "rect", id: "promo_bg_${i}",
                 x: sx, y: sy, w: l.sq, h: l.sq,
                 color: "#dfe2ea", anchor: "top-left", z: 4.1 })
-            items = push(items, { kind: "rect", id: "promo_border_{i}",
+            items = push(items, { kind: "rect", id: "promo_border_${i}",
                 x: sx, y: sy, w: l.sq, h: 3.0,
                 color: "#7c8da6", anchor: "top-left", z: 4.15 })
-            items = push(items, { kind: "sprite", id: "promo_pc_{i}",
+            items = push(items, { kind: "sprite", id: "promo_pc_${i}",
                 x: sx + l.sq / 2.0, y: sy + l.sq / 2.0,
                 w: l.sq * 0.92, h: l.sq * 0.92,
                 image: "path", path: piece_path(s.turn + pieces[i]),
@@ -1664,13 +1655,13 @@ export fn render(cw, ch) {
         let file_idx = if s.flipped { 7 - i } else { i }
         let rank_idx = if s.flipped { i + 1 } else { 8 - i }
         let file_col = if (7 + i) % 2 == 0 { "#74522f" } else { "#dcbb84" }
-        items = push(items, { kind: "text", id: "flbl_{i}",
+        items = push(items, { kind: "text", id: "flbl_${i}",
             x: l.board_x + to_float(i) * l.sq + l.sq - inset,
             y: l.board_y + 8.0 * l.sq - inset,
             value: files[file_idx], color: file_col, size: lbl_size,
             anchor: "top-left", z: 3.0 })
         let rank_col = if i % 2 == 0 { "#74522f" } else { "#dcbb84" }
-        items = push(items, { kind: "text", id: "rlbl_{i}",
+        items = push(items, { kind: "text", id: "rlbl_${i}",
             x: l.board_x + inset,
             y: l.board_y + to_float(i) * l.sq + inset,
             value: str(rank_idx), color: rank_col, size: lbl_size,

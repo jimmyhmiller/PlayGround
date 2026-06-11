@@ -122,8 +122,8 @@ impl Encoder {
             Value::Int(i) => SValue::Int(*i),
             Value::Float(f) => SValue::Float(*f),
             Value::Str(s) => SValue::Str(s.to_string()),
-            Value::List(items) => SValue::List(self.enc_all(items)?),
-            Value::Tuple(items) => SValue::Tuple(self.enc_all(items)?),
+            Value::List(items) => SValue::List(self.enc_all(items.iter())?),
+            Value::Tuple(items) => SValue::Tuple(self.enc_all(items.iter())?),
             Value::Record(r) => SValue::Record(
                 r.iter()
                     .map(|(k, v)| Ok((k.clone(), self.enc(v)?)))
@@ -194,8 +194,8 @@ impl Encoder {
         })
     }
 
-    fn enc_all(&mut self, vs: &[Value]) -> Result<Vec<SValue>, Fault> {
-        vs.iter().map(|v| self.enc(v)).collect()
+    fn enc_all<'a>(&mut self, vs: impl IntoIterator<Item = &'a Value>) -> Result<Vec<SValue>, Fault> {
+        vs.into_iter().map(|v| self.enc(v)).collect()
     }
 
     fn finish(self) -> (Vec<SAtom>, Vec<SValue>) {
@@ -223,14 +223,14 @@ impl Decoder {
             SValue::Int(i) => Value::Int(*i),
             SValue::Float(f) => Value::Float(*f),
             SValue::Str(s) => Value::str(s.clone()),
-            SValue::List(items) => Value::List(Sh::new(self.dec_all(items)?)),
-            SValue::Tuple(items) => Value::Tuple(Sh::new(self.dec_all(items)?)),
+            SValue::List(items) => Value::list(self.dec_all(items)?),
+            SValue::Tuple(items) => Value::tuple(self.dec_all(items)?),
             SValue::Record(fields) => {
                 let mut map = BTreeMap::new();
                 for (k, v) in fields {
                     map.insert(k.clone(), self.dec(v)?);
                 }
-                Value::Record(Sh::new(map))
+                Value::record(map)
             }
             SValue::VariantUnit(tag) => Value::variant(tag, VariantPayload::Unit),
             SValue::VariantPos(tag, items) => {

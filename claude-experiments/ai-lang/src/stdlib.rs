@@ -3277,6 +3277,63 @@ def serve(listener: Int) -> Int = {
     serve(listener)
 }
 
+// ---- Live service slots: deploy / upgrade / rollback as a library ----
+//
+// A service is node `state` holding a STACK of handler versions — head
+// is the current version, the tail is history. Deployment then needs no
+// protocol at all: ship the install with the existing at() machinery
+// (the handler's code travels by hash; the node JIT-installs it), and
+// rollback is popping the stack — the old version's code is still
+// resident.
+//
+//   state svc: Atom<List<fn(Int) -> Int>> = atom_new(svc_slot())
+//   def install(h: fn(Int) -> Int) -> Int = svc_install(svc, h)
+//   def handle(x: Int) -> Int = { let f = svc_current(svc); f(x) }
+//
+//   at(node, || install(|x: Int| x * 2))   // deploy a new version
+//   at(node, || handle(5))                  // run the node's CURRENT version
+//   at(node, || rollback())                 // instant flip back
+//
+// The slot's type pins the handler interface: an ill-typed handler is a
+// TYPECHECK ERROR at the install call site — no runtime check needed.
+// All of these touch node state, so at() never memoizes them (the
+// stateful-hash cache bypass); repeated installs and calls always run.
+
+def svc_slot<T>() -> List<T> = List::Nil
+
+// Push a new current version. Returns the number of versions live.
+def svc_install<T>(a: Atom<List<T>>, h: T) -> Int = {
+    let vs = swap(a, |vs: List<T>| List::Cons(ListCell { head: h, tail: vs }));
+    list_length(vs)
+}
+
+// The current version. A missing handler is a hard error, never a default.
+def svc_current<T>(a: Atom<List<T>>) -> T =
+    match deref(a) {
+        List::Cons(cell) => cell.head,
+        List::Nil => panic("svc_current: no handler installed in this slot"),
+    }
+
+// Flip back to the previous version (which is still JIT-resident).
+// Returns the number of versions remaining. Rolling back past the first
+// version is a hard error: a service never silently becomes empty.
+def svc_rollback<T>(a: Atom<List<T>>) -> Int = {
+    let vs = swap(a, |vs: List<T>| svc_pop(vs));
+    list_length(vs)
+}
+
+def svc_pop<T>(vs: List<T>) -> List<T> =
+    match vs {
+        List::Cons(cell) => match cell.tail {
+            List::Cons(_prev) => cell.tail,
+            List::Nil => panic("svc_rollback: no previous version to roll back to"),
+        },
+        List::Nil => panic("svc_rollback: nothing installed in this slot"),
+    }
+
+// How many versions a slot holds (current + history).
+def svc_versions<T>(a: Atom<List<T>>) -> Int = list_length(deref(a))
+
 "#;
 
 // =============================================================================
@@ -5008,10 +5065,9 @@ mod tests {
 
     /// `panic` in an *unreached* `if` branch: the other branch is `Int`,
     /// so the `if` typechecks (Never unifies with Int) and codegens (the
-    /// panic branch terminates with `unreachable`; the phi takes only the
-    /// surviving branch). Exercising the happy path proves the panic
-    /// branch doesn't corrupt the reached one. We never actually call the
-    /// panicking path here (it would abort the test process).
+    /// panic branch terminates with the panic early-return; the phi takes
+    /// only the surviving branch). Exercising the happy path proves the
+    /// panic branch doesn't corrupt the reached one.
     #[test]
     fn panic_in_if_branch_happy_path_runs() {
         init();
@@ -5025,6 +5081,84 @@ mod tests {
             let f = jit.get_fn1(&names["guard"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr(), 5), 6);
             assert_eq!(f.call(rt.thread_ptr(), 0), 1);
+        }
+    }
+
+    /// Errors are values: a panic does NOT abort the process. It lands in
+    /// `Thread.pending_panic`, propagates out of JIT'd code through the
+    /// post-call checks (here: through `outer`'s call to `guard`), and
+    /// the boundary takes it as a message. The runtime stays fully usable
+    /// afterwards.
+    #[test]
+    fn panic_is_a_value_taken_at_the_boundary() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_with_stdlib(
+            &ctx,
+            "def guard(x: Int) -> Int =
+                if x < 0 { panic(\"negative input\") } else { x + 1 }
+             def outer(x: Int) -> Int = guard(x) * 10",
+        );
+        unsafe {
+            let f = jit.get_fn1(&names["outer"]).unwrap();
+            // Happy path first.
+            assert_eq!(f.call(rt.thread_ptr(), 4), 50);
+            assert!(crate::runtime::take_pending_panic(rt.thread_ptr()).is_none());
+            // Panic deep in `guard` propagates through `outer` to here.
+            let _dummy = f.call(rt.thread_ptr(), -1);
+            let msg = crate::runtime::take_pending_panic(rt.thread_ptr())
+                .expect("panic should be pending at the boundary");
+            assert_eq!(msg, "negative input");
+            // The runtime is not poisoned: the next call works.
+            assert_eq!(f.call(rt.thread_ptr(), 2), 30);
+            assert!(crate::runtime::take_pending_panic(rt.thread_ptr()).is_none());
+        }
+    }
+
+    /// Out-of-bounds access raises a panic value (no abort), with a
+    /// useful message.
+    #[test]
+    fn bytes_out_of_bounds_panics_as_value() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_with_stdlib(
+            &ctx,
+            "def peek(i: Int) -> Int = {
+                let b = bytes_new(4);
+                bytes_get(b, i)
+            }",
+        );
+        unsafe {
+            let f = jit.get_fn1(&names["peek"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr(), 0), 0);
+            assert!(crate::runtime::take_pending_panic(rt.thread_ptr()).is_none());
+            let _dummy = f.call(rt.thread_ptr(), 9);
+            let msg = crate::runtime::take_pending_panic(rt.thread_ptr())
+                .expect("bounds violation should raise a pending panic");
+            assert!(msg.contains("out of bounds"), "got: {}", msg);
+        }
+    }
+
+    /// A panic in a spawned thread is re-raised on the JOINING thread —
+    /// it crosses the thread boundary as a value, not a dead process.
+    #[test]
+    fn spawn_panic_reraised_on_join() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_with_stdlib(
+            &ctx,
+            "def boom() -> Int = panic(\"worker exploded\")
+             def run() -> Int = {
+                let h = spawn(|| boom());
+                join(h)
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            let _dummy = f.call(rt.thread_ptr());
+            let msg = crate::runtime::take_pending_panic(rt.thread_ptr())
+                .expect("worker panic should re-raise on the joiner");
+            assert!(msg.contains("worker exploded"), "got: {}", msg);
         }
     }
 

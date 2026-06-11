@@ -134,6 +134,11 @@ pub enum EvalError {
     Jit(String),
     /// A codebase / load error while walking the closure.
     Codebase(String),
+    /// The program panicked. Errors are values: the panic propagated out
+    /// of JIT'd code as a pending-panic value and was taken at this
+    /// boundary — the process never aborts. The payload is the panic
+    /// message.
+    Panic(String),
 }
 
 impl EvalError {
@@ -146,6 +151,7 @@ impl EvalError {
             EvalError::Arity(_) => "Arity",
             EvalError::Jit(_) => "Jit",
             EvalError::Codebase(_) => "Codebase",
+            EvalError::Panic(_) => "Panic",
         }
     }
 
@@ -156,7 +162,8 @@ impl EvalError {
             | EvalError::Unsupported(m)
             | EvalError::Arity(m)
             | EvalError::Jit(m)
-            | EvalError::Codebase(m) => m,
+            | EvalError::Codebase(m)
+            | EvalError::Panic(m) => m,
         }
     }
 }
@@ -246,6 +253,7 @@ fn at_binding_from_codebase(cb: &Codebase) -> Option<AtBinding> {
         crashed_variant_index: find(&failure_variants, "Crashed")?,
         code_missing_variant_index: find(&failure_variants, "CodeMissing")?,
         cancelled_variant_index: find(&failure_variants, "Cancelled")?,
+        timed_out_variant_index: find(&failure_variants, "TimedOut"),
         decode_error_hash,
         decode_type_mismatch_index: decode_tm_idx,
         decode_malformed_index: decode_mf_idx,
@@ -582,7 +590,7 @@ impl<'a> RenderCtx<'a> {
         let len = unsafe { crate::runtime::ai_array_len(ptr) };
         let mut out: Vec<Json> = Vec::with_capacity(len.max(0) as usize);
         for i in 0..len {
-            let elem_ptr = unsafe { crate::runtime::ai_array_get(ptr, i) };
+            let elem_ptr = unsafe { crate::runtime::ai_array_get(self.rt.thread_ptr(), ptr, i) };
             // Array slots always hold pointers; an Int element is boxed.
             let rendered = unsafe { self.render_slot(elem_ty, true, elem_ptr as i64)? };
             out.push(rendered);
@@ -1420,6 +1428,16 @@ pub fn eval(
         };
         Ok(result)
     })();
+
+    // A panic that propagated to this boundary is an error value, not a
+    // dead process: take it before rendering (the returned bits are the
+    // propagation dummy, not a real result).
+    let call_result = call_result.and_then(|bits| {
+        match unsafe { crate::runtime::take_pending_panic(thread) } {
+            Some(msg) => Err(EvalError::Panic(msg)),
+            None => Ok(bits),
+        }
+    });
 
     // Render the result BEFORE tearing down the runtime (the heap is still
     // live and `rt` is still installed). Any rendering error is captured here.

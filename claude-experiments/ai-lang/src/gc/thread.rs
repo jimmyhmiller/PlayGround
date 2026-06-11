@@ -286,7 +286,12 @@ impl ThreadState {
             STATE_BLOCKED => true,
             STATE_AT_SAFEPOINT => {
                 let gc_done = self.safepoint_lock.lock().unwrap();
-                !*gc_done
+                // Re-read the state under the lock: enter_safepoint
+                // consumes gc_done and stores RUNNING while holding it,
+                // so the pre-lock state load above can be stale — seeing
+                // (AT_SAFEPOINT, gc_done=false) for a thread that has
+                // already resumed mutating.
+                !*gc_done && self.state.load(Ordering::Acquire) == STATE_AT_SAFEPOINT
             }
             _ => false,
         }
@@ -337,26 +342,77 @@ impl ThreadState {
     /// `enter_safepoint` would observe the residual flag and exit early
     /// without participating in the next collection.
     pub fn exit_blocked(&self, heap: &Heap) {
-        // Wait for any active STW window to fully close before
-        // resuming. Concurrent GC's `barriers_active` is also a
-        // window during which we shouldn't blindly transition: the
-        // collector may still need our state stable.
-        while heap.gc_requested() || heap.barriers_active() {
-            std::thread::yield_now();
+        loop {
+            // Wait for any active STW window to fully close before
+            // resuming. Concurrent GC's `barriers_active` is also a
+            // window during which we shouldn't blindly transition: the
+            // collector may still need our state stable.
+            while heap.gc_requested() || heap.barriers_active() {
+                std::thread::yield_now();
+            }
+            // The check above and the swap below must be atomic w.r.t.
+            // a collector's safepoint census: a collector that raises
+            // gc_requested between them samples us as BLOCKED ("safely
+            // parked, scan in place") while we resume mutating — its
+            // relocations then race our reads/writes and leave stale
+            // from-space pointers behind (garbage type_id one or two
+            // collections later). `transition_outside_gc` revalidates
+            // under the threads lock, which every collector holds while
+            // raising the flag.
+            let transitioned = heap.transition_outside_gc(|| {
+                // Drain any stale resume flag. resume() during our BLOCKED
+                // window left gc_done = true; if we don't consume it, the
+                // next enter_safepoint short-circuits and the next GC
+                // busy-waits for us until we poll a fresh safepoint.
+                {
+                    let mut gc_done = self.safepoint_lock.lock().unwrap();
+                    *gc_done = false;
+                }
+                let prev = self.state.swap(STATE_RUNNING, Ordering::AcqRel);
+                debug_assert_eq!(
+                    prev, STATE_BLOCKED,
+                    "exit_blocked: thread was not in STATE_BLOCKED (was {prev})"
+                );
+            });
+            if transitioned {
+                return;
+            }
         }
-        // Drain any stale resume flag. resume() during our BLOCKED
-        // window left gc_done = true; if we don't consume it, the
-        // next enter_safepoint short-circuits and the next GC
-        // busy-waits for us until we poll a fresh safepoint.
+    }
+
+    /// Permanently park this state on behalf of an owner thread that has
+    /// handed its runtime off to another OS thread and will never mutate
+    /// the heap through it again.
+    ///
+    /// Without this, a handed-off runtime's home `ThreadState` stays
+    /// `STATE_RUNNING` forever while its OS thread runs unrelated code —
+    /// it never polls this heap's safepoints, so every stop-the-world
+    /// collection spins in `is_safely_at_safepoint` waiting for it
+    /// (livelock). Parking it as `STATE_BLOCKED` lets the GC scan its
+    /// (empty) frame chain in place, exactly like a thread blocked in a
+    /// syscall.
+    ///
+    /// CAS `RUNNING → BLOCKED`; idempotent (no-op unless currently
+    /// RUNNING, so concurrent/repeated calls and an in-progress safepoint
+    /// are all safe). May be called from any thread.
+    ///
+    /// # Preconditions (logical, like `enter_blocked`)
+    /// The owning thread must have no live un-rooted heap pointers and
+    /// must never run mutator code on this state again. Violating this
+    /// is a GC-level soundness bug.
+    pub fn park_handed_off(&self) {
+        if self
+            .state
+            .compare_exchange(
+                STATE_RUNNING,
+                STATE_BLOCKED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
         {
-            let mut gc_done = self.safepoint_lock.lock().unwrap();
-            *gc_done = false;
+            self.safepoint_gen.fetch_add(1, Ordering::AcqRel);
         }
-        let prev = self.state.swap(STATE_RUNNING, Ordering::AcqRel);
-        debug_assert_eq!(
-            prev, STATE_BLOCKED,
-            "exit_blocked: thread was not in STATE_BLOCKED (was {prev})"
-        );
     }
 }
 

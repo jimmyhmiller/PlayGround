@@ -345,7 +345,57 @@ fn load_module_api_lists_exports() {
 fn exported_let_with_destructuring() {
     let mut vm = vm_with(&[("cfg", "export let (host, port) = (\"localhost\", 8080)")]);
     assert_eq!(
-        vm.eval("import { host, port } from \"cfg\"\n\"{host}:{port}\"").unwrap(),
+        vm.eval("import { host, port } from \"cfg\"\n\"${host}:${port}\"").unwrap(),
         Value::str("localhost:8080")
     );
+}
+
+// A host-interface module declares `extern` natives the embedding host
+// provides. Those externs are part of the module's export surface, so they
+// resolve through every import form, not just bare `import "host"`.
+const HOST_IFACE: &str = r#"
+extern let canvas_w
+extern fn mask_paint(name, x, y, radius, value)
+"#;
+
+#[test]
+fn externs_are_importable_by_name() {
+    let mut vm = vm_with(&[("host", HOST_IFACE)]);
+    vm.register5("mask_paint", |_n: String, _x: f64, _y: f64, r: f64, _v: f64| r as i64);
+    vm.set_global("canvas_w", int(800));
+    // named import of an extern fn + an extern let
+    assert_eq!(
+        vm.eval("import { mask_paint, canvas_w } from \"host\"\nmask_paint(\"r\", 0.0, 0.0, 48.0, 0.0) + canvas_w")
+            .unwrap(),
+        int(848)
+    );
+}
+
+#[test]
+fn externs_are_importable_with_alias_and_qualified() {
+    let mut vm = vm_with(&[("host", HOST_IFACE)]);
+    vm.register5("mask_paint", |_n: String, _x: f64, _y: f64, r: f64, _v: f64| r as i64);
+    vm.set_global("canvas_w", int(800));
+    assert_eq!(
+        vm.eval("import { mask_paint as paint } from \"host\"\npaint(\"r\", 0.0, 0.0, 7.0, 0.0)").unwrap(),
+        int(7)
+    );
+    let mut vm = vm_with(&[("host", HOST_IFACE)]);
+    vm.register5("mask_paint", |_n: String, _x: f64, _y: f64, r: f64, _v: f64| r as i64);
+    vm.set_global("canvas_w", int(800));
+    assert_eq!(
+        vm.eval("import \"host\" as h\nh.canvas_w").unwrap(),
+        int(800)
+    );
+}
+
+#[test]
+fn unprovided_imported_extern_faults_loudly_when_called() {
+    let mut vm = vm_with(&[("host", HOST_IFACE)]);
+    // host registers nothing: the named import still loads, but calling faults
+    let err = vm
+        .eval("import { mask_paint } from \"host\"\nmask_paint(\"r\", 0.0, 0.0, 1.0, 0.0)")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("declared `extern` but this host does not provide it"), "{}", err);
 }

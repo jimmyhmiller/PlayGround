@@ -417,14 +417,16 @@ impl<'a> Lexer<'a> {
                         b't' => b'\t',
                         b'\\' => b'\\',
                         b'"' => b'"',
-                        b'{' => b'{',
+                        b'$' => b'$',  // \$ → literal $ (e.g. before a { to avoid ${)
+                        b'{' => b'{',  // braces need no escaping now; kept for compatibility
                         b'}' => b'}',
                         b'0' => 0u8,
                         _ => return Err(format!("line {}: bad escape '\\{}'", self.line, e as char)),
                     });
                 }
-                b'{' => {
-                    self.bump();
+                b'$' if self.peek2() == b'{' => {
+                    self.bump(); // $
+                    self.bump(); // {
                     if !cur.is_empty() {
                         let lit = String::from_utf8(std::mem::take(&mut cur))
                             .map_err(|_| format!("line {}: invalid utf8 in string", line))?;

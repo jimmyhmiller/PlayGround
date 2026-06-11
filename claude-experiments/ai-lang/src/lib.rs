@@ -4,6 +4,7 @@ pub mod codebase;
 pub mod codec;
 pub mod codegen;
 pub mod depindex;
+pub mod deploy;
 pub mod edit;
 pub mod effects;
 pub mod evalrun;

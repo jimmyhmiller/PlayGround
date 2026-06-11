@@ -275,6 +275,7 @@ impl Funct {
                         consts: vec![],
                         pats: vec![],
                         lines: vec![],
+                        closure_captures: vec![],
                     })
                 });
             }
@@ -489,11 +490,19 @@ impl Funct {
                             )))
                         })?,
                     Some(ModuleExports::File(list)) => {
+                        // Skip exports with no value yet: an `extern let` the
+                        // host hasn't provided is uninitialized, and a bare
+                        // `import "host"` must still load (the externs' real
+                        // job is declaring the shared globals, a side effect of
+                        // ensure_module above). extern fns always have a
+                        // placeholder value, so they're always included.
                         let mut map = BTreeMap::new();
-                        for (name, _) in &list {
-                            map.insert(name.clone(), self.export_value(&imp.path, name)?);
+                        for (name, gid) in &list {
+                            if let Some(Some(v)) = self.globals.get(*gid as usize) {
+                                map.insert(name.clone(), v.clone());
+                            }
                         }
-                        Value::Record(Sh::new(map))
+                        Value::record(map)
                     }
                     None => unreachable!("ensure_module just loaded it"),
                 };
@@ -604,10 +613,15 @@ impl Funct {
     }
 
     pub fn run(&mut self, st: &mut VmState, stop: StopWhen) -> RunResult {
-        let mut fuel: Option<u64> = match &stop {
-            StopWhen::Fuel(n) => Some(*n),
-            _ => None,
-        };
+        // Fast path: no breakpoints / single-stepping → a tight dispatch loop
+        // with none of the per-instruction line tracking the debug modes need.
+        // This is what `eval`, host calls, and ordinary execution use.
+        match &stop {
+            StopWhen::Never => return self.run_fast(st, None),
+            StopWhen::Fuel(n) => return self.run_fast(st, Some(*n)),
+            _ => {}
+        }
+        let mut fuel: Option<u64> = None;
         // for breakpoints: only trigger when we *enter* the line, so resuming
         // from a breakpoint doesn't immediately re-trigger it
         let mut last_line = st.current_line().unwrap_or(0);
@@ -649,6 +663,44 @@ impl Funct {
         }
     }
 
+    /// Tight execution loop for the common case (no breakpoints / stepping):
+    /// calls `step_inner` directly — no per-instruction line lookup, no extra
+    /// `step()` dispatch layer. `fuel` = Some(budget) caps instruction count.
+    fn run_fast(&mut self, st: &mut VmState, mut fuel: Option<u64>) -> RunResult {
+        loop {
+            // cheap tag check: a native tail-call on the last frame finishes by
+            // setting status (rather than returning a value), so catch it here
+            match &st.status {
+                Status::Done(v) => return RunResult::Done(v.clone()),
+                Status::Faulted(f) => return RunResult::Faulted(f.clone()),
+                Status::Running => {}
+            }
+            if let Some(0) = fuel {
+                return RunResult::Paused(Cause::FuelExhausted);
+            }
+            match self.step_inner(st) {
+                Ok(None) => {}
+                Ok(Some(v)) => {
+                    st.status = Status::Done(v.clone());
+                    return RunResult::Done(v);
+                }
+                Err(mut fault) => {
+                    if fault.at.is_none() {
+                        if let Some(f) = st.frames.last() {
+                            let ip = (f.ip as usize).saturating_sub(1);
+                            fault.at = Some(format!("{}:{}", f.proto.name, f.proto.line_at(ip)));
+                        }
+                    }
+                    st.status = Status::Faulted(fault.clone());
+                    return RunResult::Faulted(fault);
+                }
+            }
+            if let Some(n) = fuel.as_mut() {
+                *n -= 1;
+            }
+        }
+    }
+
     // ---------- the step loop ----------
 
     /// Execute exactly one instruction.
@@ -683,12 +735,13 @@ impl Funct {
             .last_mut()
             .ok_or_else(|| Fault::new("vm has no frames (already finished?)"))?;
         let ip = frame.ip as usize;
-        let instr = frame
+        // `Instr` is `Copy`, so this is a trivial register/stack copy, not a
+        // heap-touching clone — the hottest line in the interpreter.
+        let instr = *frame
             .proto
             .code
             .get(ip)
-            .ok_or_else(|| Fault::new(format!("ip {} out of bounds in {}", ip, frame.proto.name)))?
-            .clone();
+            .ok_or_else(|| Fault::new(format!("ip {} out of bounds in {}", ip, frame.proto.name)))?;
         frame.ip += 1;
 
         macro_rules! pop {
@@ -765,11 +818,11 @@ impl Funct {
             }
             Instr::MakeList(n) => {
                 let items = pop_n(&mut st.stack, n as usize)?;
-                st.stack.push(Value::List(Sh::new(items)));
+                st.stack.push(Value::list(items));
             }
             Instr::MakeTuple(n) => {
                 let items = pop_n(&mut st.stack, n as usize)?;
-                st.stack.push(Value::Tuple(Sh::new(items)));
+                st.stack.push(Value::tuple(items));
             }
             Instr::MakeRecord(names_k) => {
                 let names = self.names_const(st, names_k)?;
@@ -778,14 +831,14 @@ impl Funct {
                 for (n, v) in names.into_iter().zip(vals) {
                     map.insert(n, v);
                 }
-                st.stack.push(Value::Record(Sh::new(map)));
+                st.stack.push(Value::record(map));
             }
             Instr::RecordUpdate(names_k) => {
                 let names = self.names_const(st, names_k)?;
                 let vals = pop_n(&mut st.stack, names.len())?;
                 let base = pop!();
                 let mut map = match base {
-                    Value::Record(r) => (*r).clone(),
+                    Value::Record(r) => r.clone(),
                     other => {
                         return Err(Fault::new(format!(
                             "record update `{{ ..base }}` needs a record, got {}",
@@ -796,7 +849,7 @@ impl Funct {
                 for (n, v) in names.into_iter().zip(vals) {
                     map.insert(n, v);
                 }
-                st.stack.push(Value::Record(Sh::new(map)));
+                st.stack.push(Value::Record(map));
             }
             Instr::GetField(name_k) => {
                 let name = self.name_const(st, name_k)?;
@@ -935,7 +988,8 @@ impl Funct {
             }
             Instr::MakeClosure { fn_id, captures } => {
                 let frame = st.frames.last().unwrap();
-                let upvals: Vec<Value> = captures
+                let caps = &frame.proto.closure_captures[captures as usize];
+                let upvals: Vec<Value> = caps
                     .iter()
                     .map(|c| match c {
                         CaptureSrc::Local(s) => frame.locals[*s as usize].clone(),
@@ -1252,7 +1306,7 @@ fn bin_op(stack: &mut Vec<Value>, kind: BinKind) -> Result<(), Fault> {
         (BinKind::Add, List(x), List(y)) => {
             let mut items = (**x).clone();
             items.extend(y.iter().cloned());
-            List(Sh::new(items))
+            Value::list_v(items)
         }
         (_, Int(x), Int(y)) => match kind {
             BinKind::Add => Int(x.checked_add(*y).ok_or_else(|| Fault::new("integer overflow in +"))?),
@@ -1446,8 +1500,9 @@ pub fn match_pat(pat: &Pat, v: &Value, locals: &mut Vec<Value>) -> bool {
                             return false;
                         }
                         if let Some(slot) = rest_bind {
-                            let rest_items: Vec<Value> = vals[items.len()..].to_vec();
-                            locals[*slot as usize] = Value::List(Sh::new(rest_items));
+                            let rest_items: Vec<Value> =
+                                vals.iter().skip(items.len()).cloned().collect();
+                            locals[*slot as usize] = Value::list(rest_items);
                         }
                         true
                     }
@@ -1477,17 +1532,40 @@ pub fn match_pat(pat: &Pat, v: &Value, locals: &mut Vec<Value>) -> bool {
     }
 }
 
+/// Field lookup shared by record patterns (`FMap`) and named-variant patterns
+/// (still a plain `BTreeMap`), so the matcher works on both.
+trait FieldMap {
+    fn flen(&self) -> usize;
+    fn fget(&self, k: &str) -> Option<&Value>;
+}
+impl FieldMap for BTreeMap<String, Value> {
+    fn flen(&self) -> usize {
+        self.len()
+    }
+    fn fget(&self, k: &str) -> Option<&Value> {
+        self.get(k)
+    }
+}
+impl FieldMap for crate::value::FMap {
+    fn flen(&self) -> usize {
+        self.len()
+    }
+    fn fget(&self, k: &str) -> Option<&Value> {
+        self.get(k)
+    }
+}
+
 fn match_fields(
     fields: &[(String, Pat)],
     rest: bool,
-    vals: &BTreeMap<String, Value>,
+    vals: &impl FieldMap,
     locals: &mut Vec<Value>,
 ) -> bool {
-    if !rest && vals.len() != fields.len() {
+    if !rest && vals.flen() != fields.len() {
         return false;
     }
     for (name, p) in fields {
-        match vals.get(name) {
+        match vals.fget(name) {
             Some(x) => {
                 if !match_pat(p, x, locals) {
                     return false;

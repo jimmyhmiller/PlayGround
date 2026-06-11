@@ -1014,6 +1014,7 @@ struct Codegen<'ctx> {
     extern_alloc_closure: Option<FunctionValue<'ctx>>,
     extern_lookup_code: Option<FunctionValue<'ctx>>,
     extern_net_at: Option<FunctionValue<'ctx>>,
+    extern_net_at_async: Option<FunctionValue<'ctx>>,
     /// Located-state (distributed atom) runtime fns. Each returns a
     /// heap `Result<T, Failure>` pointer, like `ai_net_at`.
     extern_box_int: Option<FunctionValue<'ctx>>,
@@ -1207,6 +1208,7 @@ impl<'ctx> Codegen<'ctx> {
             extern_alloc_closure: None,
             extern_lookup_code: None,
             extern_net_at: None,
+            extern_net_at_async: None,
             extern_box_int: None,
             extern_unbox_int: None,
             extern_force_collect: None,
@@ -1586,6 +1588,25 @@ impl<'ctx> Codegen<'ctx> {
                 .add_function("ai_net_at", net_at_ty, Some(Linkage::External));
         self.extern_net_at = Some(net_at);
 
+        // ai_net_at_async(thread, node_ptr, closure_ptr) -> *u8 — ships
+        // the thunk from a background thread and returns a ThreadHandle
+        // (BoxedInt registry id) immediately; `join` awaits the
+        // Result<T, Failure>.
+        let net_at_async_ty = self.ptr_ty.fn_type(
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+            ],
+            false,
+        );
+        let net_at_async = self.module.add_function(
+            "ai_net_at_async",
+            net_at_async_ty,
+            Some(Linkage::External),
+        );
+        self.extern_net_at_async = Some(net_at_async);
+
         // ai_wire_encode(thread, value_ptr) -> *u8 (Bytes)
         let wire_encode_ty =
             self.ptr_ty.fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
@@ -1729,9 +1750,9 @@ impl<'ctx> Codegen<'ctx> {
                 .add_function("ai_value_eq", value_eq_ty, Some(Linkage::External));
         self.extern_value_eq = Some(value_eq);
 
-        // ai_panic(thread, msg_ptr) -> ! — prints a heap String message
-        // to stderr and aborts. Declared returning void; every call site
-        // emits an `unreachable` after it so LLVM knows control stops.
+        // ai_panic(thread, msg_ptr) -> void — raises a pending panic on
+        // the thread (errors are values; no abort). Every call site
+        // follows it with an early return through the epilogue.
         let panic_ty = self
             .context
             .void_type()
@@ -1795,10 +1816,11 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_bytes_new = Some(bytes_new);
 
-        // ai_bytes_get(bytes, i) -> i64
-        let bytes_get_ty = self
-            .i64_ty
-            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        // ai_bytes_get(thread, bytes, i) -> i64
+        let bytes_get_ty = self.i64_ty.fn_type(
+            &[self.ptr_ty.into(), self.ptr_ty.into(), self.i64_ty.into()],
+            false,
+        );
         let bytes_get = self.module.add_function(
             "ai_bytes_get",
             bytes_get_ty,
@@ -1806,9 +1828,14 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_bytes_get = Some(bytes_get);
 
-        // ai_bytes_set(bytes, i, v) -> i64
+        // ai_bytes_set(thread, bytes, i, v) -> i64
         let bytes_set_ty = self.i64_ty.fn_type(
-            &[self.ptr_ty.into(), self.i64_ty.into(), self.i64_ty.into()],
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.i64_ty.into(),
+                self.i64_ty.into(),
+            ],
             false,
         );
         let bytes_set = self.module.add_function(
@@ -1881,10 +1908,11 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_array_len = Some(array_len);
 
-        // ai_array_get(array, i) -> *u8
-        let array_get_ty = self
-            .ptr_ty
-            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        // ai_array_get(thread, array, i) -> *u8
+        let array_get_ty = self.ptr_ty.fn_type(
+            &[self.ptr_ty.into(), self.ptr_ty.into(), self.i64_ty.into()],
+            false,
+        );
         let array_get = self.module.add_function(
             "ai_array_get",
             array_get_ty,
@@ -1892,9 +1920,14 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_array_get = Some(array_get);
 
-        // ai_array_set(array, i, ptr) -> i64
+        // ai_array_set(thread, array, i, ptr) -> i64
         let array_set_ty = self.i64_ty.fn_type(
-            &[self.ptr_ty.into(), self.i64_ty.into(), self.ptr_ty.into()],
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.i64_ty.into(),
+                self.ptr_ty.into(),
+            ],
             false,
         );
         let array_set = self.module.add_function(
@@ -3542,6 +3575,85 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    /// Terminate the current block with the panic early-return: pop this
+    /// function's shadow-stack frame (normal epilogue) and return a dummy
+    /// value of the function's return type. Callers never read the dummy —
+    /// their own post-call panic check fires first.
+    ///
+    /// Pending `defer` cleanups are deliberately NOT run on the panic
+    /// path (unlike the `?` early-return): the pending-panic flag would
+    /// immediately abort any call the cleanup makes, so running them
+    /// would execute garbage. Panic skips defers; `?` runs them.
+    fn emit_panic_return(&mut self, ctx: CompileCtx<'ctx>) -> Result<(), CodegenError> {
+        self.emit_epilogue(ctx.thread_param, ctx.frame_alloca)?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("panic return must be inside a fn");
+        match parent.get_type().get_return_type() {
+            Some(inkwell::types::BasicTypeEnum::PointerType(p)) => {
+                let null = p.const_null();
+                self.builder
+                    .build_return(Some(&null))
+                    .map_err(|e| CodegenError::JitInit(format!("build_return panic ptr: {}", e)))?;
+            }
+            Some(inkwell::types::BasicTypeEnum::IntType(t)) => {
+                let zero = t.const_zero();
+                self.builder
+                    .build_return(Some(&zero))
+                    .map_err(|e| CodegenError::JitInit(format!("build_return panic int: {}", e)))?;
+            }
+            None => {
+                self.builder
+                    .build_return(None)
+                    .map_err(|e| CodegenError::JitInit(format!("build_return panic void: {}", e)))?;
+            }
+            Some(other) => {
+                return Err(CodegenError::Unsupported {
+                    what: format!("panic return for fn returning {:?}", other),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the errors-are-values propagation check after a call that can
+    /// raise a panic: load `Thread.pending_panic`; if non-null, early-return
+    /// through [`emit_panic_return`] (the callee's result is a dummy and
+    /// must not be touched — this check runs BEFORE any unboxing of the
+    /// call's result). Leaves the builder positioned in the continue block.
+    fn emit_panic_check(&mut self, ctx: CompileCtx<'ctx>) -> Result<(), CodegenError> {
+        let slot = self.thread_field(
+            ctx.thread_param,
+            thread_offsets::PENDING_PANIC,
+            "pending_panic_addr",
+        )?;
+        let pending = self
+            .builder
+            .build_load(self.ptr_ty, slot, "pending_panic")
+            .map_err(|e| CodegenError::JitInit(format!("load pending_panic: {}", e)))?
+            .into_pointer_value();
+        let is_set = self
+            .builder
+            .build_is_not_null(pending, "panic_pending")
+            .map_err(|e| CodegenError::JitInit(format!("is_not_null pending_panic: {}", e)))?;
+        let parent = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("panic check must be inside a fn");
+        let exit_bb = self.context.append_basic_block(parent, "panic_exit");
+        let cont_bb = self.context.append_basic_block(parent, "panic_cont");
+        self.builder
+            .build_conditional_branch(is_set, exit_bb, cont_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br panic check: {}", e)))?;
+        self.builder.position_at_end(exit_bb);
+        self.emit_panic_return(ctx)?;
+        self.builder.position_at_end(cont_bb);
+        Ok(())
+    }
+
     fn thread_field(
         &self,
         thread: PointerValue<'ctx>,
@@ -3753,7 +3865,9 @@ impl<'ctx> Codegen<'ctx> {
 
             // A node `state` reference: resolve the live cell on the
             // executing node via `ai_state_get(thread, &hash)`. The cell
-            // is a heap pointer (typically an `Atom`), never an Int.
+            // is always a heap pointer; a bare-`Int` state is stored
+            // boxed (the installer boxes it), so the load side unboxes
+            // symmetrically and yields an Int value.
             Expr::StateRef(h) => {
                 let hp = self.emit_hash_constant(h).as_pointer_value();
                 let f = self.extern_state_get.expect("ai_state_get declared");
@@ -3763,7 +3877,25 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(format!(
                         "build_call ai_state_get: {}", e
                     )))?;
-                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+                let cell = call.as_any_value_enum().into_pointer_value();
+                let is_int_state = matches!(
+                    self.state_types.get(h),
+                    Some(Type::Builtin(n)) if n == "Int"
+                );
+                if is_int_state {
+                    let unbox = self
+                        .extern_unbox_int
+                        .expect("ai_gc_unbox_int declared");
+                    let v = self
+                        .builder
+                        .build_call(unbox, &[cell.into()], "state_unbox")
+                        .map_err(|e| CodegenError::JitInit(format!(
+                            "build_call ai_gc_unbox_int: {}", e
+                        )))?;
+                    Ok(Value::Int(v.as_any_value_enum().into_int_value()))
+                } else {
+                    Ok(Value::Closure(cell))
+                }
             }
             // StateSelfRef only appears in hashing bytes; the resolver
             // rewrites it to StateRef before storing, so reaching codegen
@@ -4418,30 +4550,38 @@ impl<'ctx> Codegen<'ctx> {
                 if name == "core/net.at"
                     || crate::resolve::parse_at_builtin_name(name).is_some() =>
             {
-                // at(node, thunk) — both are heap pointers. Lower to
-                // an extern call to ai_net_at(thread, node, closure)
-                // which now returns a heap pointer (Result enum).
+                // at(node, thunk) / at_async(node, thunk) — both args are
+                // heap pointers. Lower to the matching extern; `at`
+                // returns a heap Result enum pointer, `at_async` a
+                // ThreadHandle (BoxedInt) that `join` awaits.
                 if args.len() != 2 {
                     return Err(CodegenError::UnknownBuiltin {
                         name: name.clone(),
                         arity: args.len(),
                     });
                 }
-                let node_v = self.compile_expr(&args[0], env, ctx)?;
-                let node_ptr = node_v.as_closure().map_err(|_| {
+                let is_async =
+                    name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX);
+                // Root the node across the thunk's compilation: building
+                // the closure ALLOCATES, and a collection there would
+                // leave a bare-SSA node pointer stale (ai_net_at would
+                // read a forwarding word out of from-space as the port).
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let node_ptr = vals[0].as_closure().map_err(|_| {
                     CodegenError::TypeMismatch {
                         what: "at: first arg must be a Node (struct pointer)".to_owned(),
                     }
                 })?;
-                let thunk_v = self.compile_expr(&args[1], env, ctx)?;
-                let thunk_ptr = thunk_v.as_closure().map_err(|_| {
+                let thunk_ptr = vals[1].as_closure().map_err(|_| {
                     CodegenError::TypeMismatch {
                         what: "at: second arg must be a closure".to_owned(),
                     }
                 })?;
-                let net_at = self
-                    .extern_net_at
-                    .expect("ai_net_at declared");
+                let net_at = if is_async {
+                    self.extern_net_at_async.expect("ai_net_at_async declared")
+                } else {
+                    self.extern_net_at.expect("ai_net_at declared")
+                };
                 let call = self
                     .builder
                     .build_call(
@@ -4451,7 +4591,7 @@ impl<'ctx> Codegen<'ctx> {
                             node_ptr.into(),
                             thunk_ptr.into(),
                         ],
-                        "at_result",
+                        if is_async { "at_async_handle" } else { "at_result" },
                     )
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_net_at: {}", e)))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
@@ -4488,6 +4628,7 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(f, &[ctx.thread_param.into(), val_ptr.into()], "wire_encode")
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_encode: {}", e)))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name == "core/wire.decode_int" => {
@@ -4503,6 +4644,7 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_decode_int")
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_decode_int: {}", e)))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/wire.decode_fn1" => {
@@ -4521,6 +4663,7 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_decode_fn1")
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_decode_ptr: {}", e)))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name == "core/wire.invoke" => {
@@ -4536,6 +4679,7 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_invoke")
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_invoke: {}", e)))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name.starts_with("core/wire.decode#") => {
@@ -4681,6 +4825,7 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_bytes_new: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name == "core/bytes.len" => {
@@ -4714,10 +4859,15 @@ impl<'ctx> Codegen<'ctx> {
                 let fv = self.extern_bytes_get.expect("ai_bytes_get declared");
                 let call = self
                     .builder
-                    .build_call(fv, &[b.into(), i.into()], "bytes_get_result")
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), b.into(), i.into()],
+                        "bytes_get_result",
+                    )
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_bytes_get: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/bytes.set" => {
@@ -4734,10 +4884,15 @@ impl<'ctx> Codegen<'ctx> {
                 let fv = self.extern_bytes_set.expect("ai_bytes_set declared");
                 let call = self
                     .builder
-                    .build_call(fv, &[b.into(), i.into(), v.into()], "bytes_set_result")
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), b.into(), i.into(), v.into()],
+                        "bytes_set_result",
+                    )
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_bytes_set: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/bytes.slice" => {
@@ -4762,6 +4917,7 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_bytes_slice: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name == "core/bytes.concat" => {
@@ -4834,6 +4990,7 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_array_new: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
             Expr::BuiltinRef(name) if name == "core/array.len" => {
@@ -4870,10 +5027,17 @@ impl<'ctx> Codegen<'ctx> {
                 let fv = self.extern_array_get.expect("ai_array_get declared");
                 let call = self
                     .builder
-                    .build_call(fv, &[a.into(), i.into()], "array_get_result")
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), a.into(), i.into()],
+                        "array_get_result",
+                    )
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_array_get: {}", e),
                     ))?;
+                // Check BEFORE unboxing: on out-of-bounds the result is a
+                // null dummy that must not be dereferenced.
+                self.emit_panic_check(ctx)?;
                 let elem_ptr = call.as_any_value_enum().into_pointer_value();
                 if elem_is_int {
                     let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
@@ -4908,12 +5072,13 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(
                         fv,
-                        &[a.into(), i.into(), v_ptr.into()],
+                        &[ctx.thread_param.into(), a.into(), i.into(), v_ptr.into()],
                         "array_set_result",
                     )
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_array_set: {}", e),
                     ))?;
+                self.emit_panic_check(ctx)?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/atom.new" => {
@@ -5089,6 +5254,9 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_thread_join: {}", e),
                     ))?;
+                // A worker panic is re-raised on this (joining) thread by
+                // ai_thread_join; propagate it before unboxing the dummy.
+                self.emit_panic_check(ctx)?;
                 let res_ptr = call.as_any_value_enum().into_pointer_value();
                 if elem_is_int {
                     let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
@@ -5159,11 +5327,14 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/panic" => {
-                // `panic(msg)` — hard error. Compile the message (a
-                // heap String), call ai_panic (which prints + aborts),
-                // then terminate this block with `unreachable`. The
-                // returned value is never used; callers that branch out
-                // of this block (e.g. a match arm) detect the existing
+                // `panic(msg)` — hard error, as a VALUE: compile the
+                // message (a heap String), call ai_panic (which stores it
+                // in Thread.pending_panic and returns), then terminate
+                // this block with the panic early-return (epilogue + ret
+                // dummy). The panic propagates up through the post-call
+                // checks until a boundary takes it. The value returned to
+                // the compiler is never used; callers that branch out of
+                // this block (e.g. a match arm) detect the existing
                 // terminator and skip adding a merge branch/phi value.
                 if args.len() != 1 {
                     return Err(CodegenError::UnknownBuiltin {
@@ -5181,11 +5352,7 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_panic: {}", e),
                     ))?;
-                self.builder
-                    .build_unreachable()
-                    .map_err(|e| CodegenError::JitInit(
-                        format!("build_unreachable after panic: {}", e),
-                    ))?;
+                self.emit_panic_return(ctx)?;
                 Ok(Value::Int(self.i64_ty.const_zero()))
             }
             Expr::BuiltinRef(name)
@@ -5382,6 +5549,10 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_call(target, &call_args, "calltmp")
                     .map_err(|e| CodegenError::JitInit(format!("build_call: {}", e)))?;
+                // Errors are values: if the callee raised a panic, its
+                // result is a dummy — propagate the panic up before
+                // touching (e.g. unboxing) the return value.
+                self.emit_panic_check(ctx)?;
                 let any = call.as_any_value_enum();
                 // Inspect declared return type of the callee to decide.
                 let ret_ty = target.get_type().get_return_type();
@@ -5546,6 +5717,8 @@ impl<'ctx> Codegen<'ctx> {
             .builder
             .build_indirect_call(fn_ty, code_ptr, &call_args, "indirect_call")
             .map_err(|e| CodegenError::JitInit(format!("build_indirect_call: {}", e)))?;
+        // Propagate a callee panic before unboxing the dummy result.
+        self.emit_panic_check(ctx)?;
         let ret_ptr = icall.as_any_value_enum().into_pointer_value();
 
         // Unbox return if the closure's declared ret is Int, OR if it's a
@@ -6106,14 +6279,21 @@ impl<'ctx> Codegen<'ctx> {
                     // and substitutes it through to the Result's
                     // first type arg, so e.g. `at(node, || pair)`
                     // gives `Apply(Result, [Pair, Failure])`.
+                    // at_async wraps the Result in a ThreadHandle.
                     let t_var = Type::TypeVar(0);
-                    let ret = match fopt {
+                    let mut ret = match fopt {
                         Some(f) => Type::Apply(
                             Box::new(Type::TypeRef(r)),
                             vec![t_var.clone(), Type::TypeRef(f)],
                         ),
                         None => Type::TypeRef(r),
                     };
+                    if name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX) {
+                        ret = Type::Apply(
+                            Box::new(Type::Builtin("ThreadHandle".to_owned())),
+                            vec![ret],
+                        );
+                    }
                     Type::FnType {
                         params: vec![
                             Type::TypeRef(Hash([0; 32])),
@@ -6302,14 +6482,16 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// Emit a hard panic with a static message: allocate a heap String
-    /// for `msg`, call `ai_panic`, then terminate the current block with
-    /// `unreachable`. The caller must not emit further instructions into
-    /// this block afterwards.
+    /// for `msg`, call `ai_panic` (which raises the pending panic), then
+    /// terminate the current block with the panic early-return. The
+    /// caller must not emit further instructions into this block
+    /// afterwards.
     fn emit_panic(
         &mut self,
         msg: &str,
-        thread_param: PointerValue<'ctx>,
+        ctx: CompileCtx<'ctx>,
     ) -> Result<(), CodegenError> {
+        let thread_param = ctx.thread_param;
         let bytes = msg.as_bytes();
         let arr_const = self.context.const_string(bytes, false);
         let g = self.module.add_global(
@@ -6345,11 +6527,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder
             .build_call(panic_fn, &[thread_param.into(), msg_str.into()], "")
             .map_err(|e| CodegenError::JitInit(format!("build_call ai_panic: {}", e)))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| {
-                CodegenError::JitInit(format!("build_unreachable after panic: {}", e))
-            })?;
+        self.emit_panic_return(ctx)?;
         Ok(())
     }
 
@@ -6405,7 +6583,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(fail_bb);
         self.emit_panic(
             "non-exhaustive match: value did not match any arm",
-            ctx.thread_param,
+            ctx,
         )?;
 
         // Enter the chain at the first arm's test.
@@ -6903,6 +7081,27 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder
                     .build_float_to_signed_int(f, i64_ty, "to_int")
                     .map_err(|e| CodegenError::JitInit(format!("build_float_to_signed_int: {}", e)))?
+            }
+            "core/f64.sqrt" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.to_owned(),
+                        arity: args.len(),
+                    });
+                }
+                let f = as_f64(args[0], "sqrt_f")?;
+                let intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.sqrt.f64")
+                    .ok_or_else(|| CodegenError::JitInit("llvm.sqrt.f64 intrinsic not found".to_owned()))?;
+                let decl = intrinsic
+                    .get_declaration(&self.module, &[f64_ty.into()])
+                    .ok_or_else(|| CodegenError::JitInit("llvm.sqrt.f64 declaration failed".to_owned()))?;
+                let res = self
+                    .builder
+                    .build_call(decl, &[f.into()], "sqrt")
+                    .map_err(|e| CodegenError::JitInit(format!("build_call llvm.sqrt.f64: {}", e)))?
+                    .as_any_value_enum()
+                    .into_float_value();
+                f64_bits(res, "sqrt_bits")?
             }
 
             // ---- raw pointer / memory intrinsics (the C FFI's hands) ----
@@ -7806,6 +8005,9 @@ impl<'ctx> Jit<'ctx> {
         if let Some(net_at_fn) = cm.module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
         }
+        if let Some(f) = cm.module.get_function("ai_net_at_async") {
+            engine.add_global_mapping(&f, crate::net::ai_net_at_async as usize);
+        }
         if let Some(f) = cm.module.get_function("ai_wire_encode") {
             engine.add_global_mapping(&f, crate::net::ai_wire_encode as usize);
         }
@@ -7955,6 +8157,14 @@ impl<'ctx> Jit<'ctx> {
                     .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?
             };
             unsafe { installer.call(runtime.thread_ptr()) };
+            if let Some(msg) =
+                unsafe { crate::runtime::take_pending_panic(runtime.thread_ptr()) }
+            {
+                return Err(CodegenError::JitInit(format!(
+                    "state initializer {} panicked: {}",
+                    h, msg
+                )));
+            }
         }
 
         Ok(Jit {
@@ -8152,6 +8362,22 @@ impl<'ctx> IncrementalJit<'ctx> {
         })
     }
 
+    /// Every def installed so far, in install order. The deploy layer
+    /// uses this to rebuild the union module for node-side typechecking.
+    pub fn installed_defs(&self) -> &[ResolvedDef] {
+        &self.installed_defs
+    }
+
+    /// Whether a def hash has already been installed.
+    pub fn is_installed_def(&self, h: &Hash) -> bool {
+        self.installed_defs_set.contains(h)
+    }
+
+    /// Extern requirements accumulated across installs.
+    pub fn installed_externs(&self) -> &HashMap<String, crate::resolve::ExternSig> {
+        &self.installed_externs
+    }
+
     fn wire_runtime_externs(engine: &ExecutionEngine<'ctx>, module: &Module<'ctx>) {
         if let Some(alloc_fn) = module.get_function("ai_gc_alloc_closure") {
             engine.add_global_mapping(&alloc_fn, ai_gc_alloc_closure as usize);
@@ -8161,6 +8387,9 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(net_at_fn) = module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
+        }
+        if let Some(f) = module.get_function("ai_net_at_async") {
+            engine.add_global_mapping(&f, crate::net::ai_net_at_async as usize);
         }
         if let Some(f) = module.get_function("ai_wire_encode") {
             engine.add_global_mapping(&f, crate::net::ai_wire_encode as usize);
@@ -8305,6 +8534,22 @@ impl<'ctx> IncrementalJit<'ctx> {
         &mut self,
         runtime: &mut Runtime,
         items: Vec<(crate::net::ItemKind, Hash, Vec<u8>)>,
+    ) -> Result<(), CodegenError> {
+        self.install_with(runtime, items, &HashSet::new())
+    }
+
+    /// Like [`install`](Self::install), but suppresses the `state`
+    /// installer thunk for hashes in `skip_state_init`. The deploy path
+    /// uses this for state cells it provides itself: a carried-over cell
+    /// (aliased to the previous version's live cell) and a migrated cell
+    /// (computed from the old value by a typechecked migration) must not
+    /// have their initializers run — the initializer would create a
+    /// fresh cell and orphan the data the deploy is preserving.
+    pub fn install_with(
+        &mut self,
+        runtime: &mut Runtime,
+        items: Vec<(crate::net::ItemKind, Hash, Vec<u8>)>,
+        skip_state_init: &HashSet<Hash>,
     ) -> Result<(), CodegenError> {
         use crate::codec::{decode_def, decode_expr};
         use crate::net::ItemKind;
@@ -8511,6 +8756,25 @@ impl<'ctx> IncrementalJit<'ctx> {
             }
         }
 
+        // 6.6. Register every lambda the union build lifted out of the new
+        //      def bodies. Shipped (ItemKind::Lambda) items were handled
+        //      above, but a lambda EMBEDDED in a shipped def's body is
+        //      compiled here for the first time and needs its hash -> addr
+        //      entry too, or the first indirect call through a closure it
+        //      produces (`ai_gc_lookup_code`) panics with an unregistered
+        //      hash. Previously-installed lambdas resolve to their original
+        //      address (they're declared external), so re-inserting is a
+        //      no-op.
+        for (h, _fv) in cm.lifted_lambdas.iter() {
+            let sym = lambda_symbol(h);
+            if let Ok(addr) = self.engine.get_function_address(&sym) {
+                runtime.code_table.insert(*h, addr as *const u8);
+                if let Some(&type_id) = cm.shape_registry.get(h) {
+                    runtime.code_table.register_type_id(type_id, *h);
+                }
+            }
+        }
+
         // 7. Push new TypeInfos into runtime + heap.
         //    cm.closure_type_infos lists the new shapes in this batch,
         //    in the order their type_ids were assigned. Type_id of
@@ -8570,6 +8834,11 @@ impl<'ctx> IncrementalJit<'ctx> {
             if !matches!(rd.def, Def::State { .. }) {
                 continue;
             }
+            if skip_state_init.contains(&rd.hash) {
+                // The deploy that requested this install provides the
+                // cell itself (carryover alias or migration result).
+                continue;
+            }
             let sym = state_init_symbol(&rd.hash);
             let addr = self
                 .engine
@@ -8578,6 +8847,14 @@ impl<'ctx> IncrementalJit<'ctx> {
             let installer: unsafe extern "C" fn(*mut Thread) -> i64 =
                 unsafe { core::mem::transmute(addr) };
             unsafe { installer(runtime.thread_ptr()) };
+            if let Some(msg) =
+                unsafe { crate::runtime::take_pending_panic(runtime.thread_ptr()) }
+            {
+                return Err(CodegenError::JitInit(format!(
+                    "state initializer {} panicked: {}",
+                    rd.hash, msg
+                )));
+            }
         }
 
         // 9. Update IncrementalJit state.

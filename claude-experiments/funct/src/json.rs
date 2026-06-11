@@ -10,9 +10,6 @@
 use crate::interop::{FromValue, ToValue};
 use crate::value::Value;
 use crate::vm::Fault;
-use std::collections::BTreeMap;
-
-use crate::value::shared::Sh;
 
 impl Value {
     /// Convert to JSON. Fails loudly on values JSON cannot represent
@@ -63,11 +60,9 @@ impl Value {
                 }
             }
             J::String(s) => Value::str(s.clone()),
-            J::Array(items) => Value::List(Sh::new(items.iter().map(Value::from_json).collect())),
+            J::Array(items) => Value::list_v(items.iter().map(Value::from_json).collect()),
             J::Object(fields) => {
-                let map: BTreeMap<String, Value> =
-                    fields.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect();
-                Value::Record(Sh::new(map))
+                Value::Record(fields.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect())
             }
         }
     }

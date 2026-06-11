@@ -35,10 +35,15 @@ use ai_lang::io_externs::{set_user_args, set_worker_nodes};
 use ai_lang::knowledge::KnowledgeBase;
 use ai_lang::namespace::{self, MergeResult};
 use ai_lang::codec::encode_extern;
+use ai_lang::deploy::{
+    DeployManager, DeployRequest, StateAction, deploy_on_channel, invoke_on_channel,
+    rollback_on_channel, serve_deploy_turn,
+};
 use ai_lang::net::{
     ItemKind, bind, build_at_runtime_binding, clear_at_conn_cache, clear_current_at_binding,
-    clear_current_knowledge_base, clear_current_runtime, install_current_at_binding,
-    install_current_knowledge_base, install_current_runtime, serve_with_install,
+    clear_current_knowledge_base, clear_current_runtime, client_authenticate,
+    install_current_at_binding, install_current_knowledge_base, install_current_runtime,
+    server_expect_auth,
 };
 use ai_lang::parser::parse_module;
 use ai_lang::resolve::{AtBinding, ExternSig, ResolvedDef, ResolvedModule, resolve_module};
@@ -71,6 +76,22 @@ usage:
                                            once passed, never re-run.
                                            --prefix filters to a namespace.
   ai-lang serve                             become a worker for at() (empty runtime)
+       [--bind <addr>] [--token <t>]       --bind = standalone node (no parent
+                                           watchdog); --token = shared-secret auth
+
+live deploy (typed, instant rollback; nodes keep every version resident):
+  ai-lang deploy <file.ail> <addr>          ship a new version to a running node.
+       --bind <binding>=<def>              create/flip a named entry point (its
+                                           signature is pinned at creation)
+       [--migrate <state>=<def>]           required when a state's type changed;
+                                           must be fn(OldT) -> NewT, checked on
+                                           the node against the LIVE cell's type
+       [--allow-state-drop]                permit live states absent from the
+                                           new version (cells stay resident)
+       [--token <t>]                       auth for token-protected nodes
+  ai-lang rollback <addr> <binding>         instant flip to the previous version
+  ai-lang invoke <addr> <binding> [i...]    call a binding by name (Int args, v1)
+
   ai-lang serve-edit                        start the JSONL structural-edit server
                                            (one JSON request per line on stdin,
                                            one JSON response per line on stdout)
@@ -601,7 +622,55 @@ fn main() {
             cmd_merge(&args[0], &args[1], flags.json, &cb_path);
         }
         "serve" => {
-            cmd_serve();
+            let (mut bind_addr, mut token) = (None::<String>, None::<String>);
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--bind" && i + 1 < args.len() {
+                    bind_addr = Some(args[i + 1].clone());
+                    i += 2;
+                } else if let Some(rest) = args[i].strip_prefix("--bind=") {
+                    bind_addr = Some(rest.to_owned());
+                    i += 1;
+                } else if args[i] == "--token" && i + 1 < args.len() {
+                    token = Some(args[i + 1].clone());
+                    i += 2;
+                } else if let Some(rest) = args[i].strip_prefix("--token=") {
+                    token = Some(rest.to_owned());
+                    i += 1;
+                } else {
+                    eprintln!("serve: unexpected argument {}", args[i]);
+                    usage(2);
+                }
+            }
+            cmd_serve(bind_addr.as_deref(), token.as_deref());
+        }
+        "deploy" => {
+            cmd_deploy_cli(&args);
+        }
+        "rollback" => {
+            let (positional, token) = take_token(&args);
+            if positional.len() != 2 {
+                eprintln!("usage: ai-lang rollback <addr> <binding> [--token <t>]");
+                std::process::exit(2);
+            }
+            cmd_rollback(&positional[0], &positional[1], token.as_deref());
+        }
+        "invoke" => {
+            let (positional, token) = take_token(&args);
+            if positional.len() < 2 {
+                eprintln!("usage: ai-lang invoke <addr> <binding> [<int> ...] [--token <t>]");
+                std::process::exit(2);
+            }
+            let ints: Vec<i64> = positional[2..]
+                .iter()
+                .map(|s| {
+                    s.parse().unwrap_or_else(|_| {
+                        eprintln!("invoke: argument `{}` is not an Int", s);
+                        std::process::exit(2);
+                    })
+                })
+                .collect();
+            cmd_invoke(&positional[0], &positional[1], &ints, token.as_deref());
         }
         "serve-edit" => {
             edit_server::serve(&cb_path);
@@ -758,6 +827,9 @@ fn run_handed_code(
     };
     let input_heap = unsafe { ai_lang::ffi::owned_str_to_heap(rt.thread_ptr(), &input) };
     let out = unsafe { task.call(rt.thread_ptr(), input_heap) };
+    if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
+        return Err(format!("task panicked: {}", msg));
+    }
     let result = unsafe { ai_lang::ffi::heap_str_to_owned(out) };
     Ok(result)
 }
@@ -1987,6 +2059,17 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
             })
     };
     let result = unsafe { entry.call(rt.thread_ptr()) };
+    // A panic propagated to this boundary as a value; report it and exit
+    // with a clean error code (the process never aborts).
+    if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
+        eprintln!("ai-lang panic: {}", msg);
+        clear_at_conn_cache();
+        clear_current_runtime();
+        clear_current_knowledge_base();
+        clear_current_at_binding();
+        drop(servers);
+        std::process::exit(101);
+    }
     println!("{}", result);
 
     clear_at_conn_cache();
@@ -2151,6 +2234,20 @@ fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_
         };
 
         let result = unsafe { entry.call(rt.thread_ptr()) };
+        if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
+            failed += 1;
+            if !json {
+                println!("  FAIL  {}  (panicked: {})", name, msg);
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"fail\",\"panic\":\"{}\",\"pure\":{}}}",
+                json_escape(name),
+                &hash.to_hex()[..16],
+                json_escape(&msg),
+                is_pure
+            ));
+            continue;
+        }
         if result == 0 {
             passed += 1;
             if !json {
@@ -2207,7 +2304,17 @@ fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_
 // `serve`
 // =============================================================================
 
-fn cmd_serve() {
+/// Become a node. Two modes:
+///
+/// - **Child worker** (no `--bind`): loopback ephemeral port, exits when
+///   the parent's stdin pipe closes. This is what `run --nodes=N`
+///   spawns.
+/// - **Standalone** (`--bind ADDR`): binds the given address, no
+///   watchdog, optional `--token` shared-secret auth per connection.
+///
+/// Both modes serve the full deploy-capable protocol: `at()` calls with
+/// the code-fetch handshake, plus deploy / rollback / invoke.
+fn cmd_serve(bind_addr: Option<&str>, token: Option<&str>) {
     init_native_target().expect("init native target");
 
     let ctx = Context::create();
@@ -2221,28 +2328,34 @@ fn cmd_serve() {
         empty_cm.shape_by_type_id.clone(),
     );
     let mut jit = IncrementalJit::new(empty_cm, &rt).expect("incremental jit");
+    let mut mgr = DeployManager::default();
 
-    let listener = bind("127.0.0.1:0").expect("bind");
+    let standalone = bind_addr.is_some();
+    let listener = bind(bind_addr.unwrap_or("127.0.0.1:0")).expect("bind");
     let port = listener.local_addr().unwrap().port();
     println!("READY {}", port);
     let _ = io::stdout().flush();
 
-    // Watchdog: parent's stdin pipe closes when parent dies → we exit.
-    std::thread::spawn(|| {
-        let stdin = io::stdin();
-        let mut buf = [0u8; 64];
-        loop {
-            match stdin.lock().read(&mut buf) {
-                Ok(0) | Err(_) => std::process::exit(0),
-                Ok(_) => {}
+    if !standalone {
+        // Watchdog: parent's stdin pipe closes when parent dies → we exit.
+        std::thread::spawn(|| {
+            let stdin = io::stdin();
+            let mut buf = [0u8; 64];
+            loop {
+                match stdin.lock().read(&mut buf) {
+                    Ok(0) | Err(_) => std::process::exit(0),
+                    Ok(_) => {}
+                }
             }
-        }
-    });
+        });
+    }
 
     eprintln!(
-        "[ai-lang serve pid={} port={}] empty runtime, awaiting code",
+        "[ai-lang serve pid={} port={}{}{}] empty runtime, awaiting code/deploys",
         std::process::id(),
-        port
+        port,
+        if standalone { " standalone" } else { "" },
+        if token.is_some() { " auth" } else { "" },
     );
 
     loop {
@@ -2254,8 +2367,15 @@ fn cmd_serve() {
             }
         };
         let _ = stream.set_nodelay(true);
+        if let Some(tok) = token {
+            if server_expect_auth(&mut stream, tok).is_err() {
+                // Drop silently: don't tell a prober why.
+                eprintln!("[ai-lang serve] rejected unauthenticated connection");
+                continue;
+            }
+        }
         loop {
-            match unsafe { serve_with_install(&mut rt, &mut jit, &mut stream) } {
+            match unsafe { serve_deploy_turn(&mut rt, &mut jit, &mut mgr, &mut stream) } {
                 Ok(()) => continue,
                 // Peer closed cleanly between frames — normal shutdown,
                 // not an error. Silently drop the connection and go
@@ -2270,6 +2390,270 @@ fn cmd_serve() {
                     break;
                 }
             }
+        }
+    }
+}
+
+/// Pull `--token <t>` / `--token=<t>` out of `args`; everything else is
+/// returned as positionals.
+fn take_token(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut positional = Vec::new();
+    let mut token = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--token" && i + 1 < args.len() {
+            token = Some(args[i + 1].clone());
+            i += 2;
+        } else if let Some(rest) = args[i].strip_prefix("--token=") {
+            token = Some(rest.to_owned());
+            i += 1;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+    (positional, token)
+}
+
+/// Connect to a node, authenticating if a token was given.
+fn connect_node(addr: &str, token: Option<&str>) -> std::net::TcpStream {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap_or_else(|e| {
+        eprintln!("cannot connect to node {}: {}", addr, e);
+        std::process::exit(1);
+    });
+    let _ = stream.set_nodelay(true);
+    if let Some(tok) = token {
+        if let Err(e) = client_authenticate(&mut stream, tok) {
+            eprintln!("auth to {} failed: {}", addr, e);
+            std::process::exit(1);
+        }
+    }
+    stream
+}
+
+fn short(h: &Hash) -> String {
+    h.to_hex()[..8].to_string()
+}
+
+fn print_deploy_report(report: &ai_lang::deploy::DeployReport) {
+    for (name, action) in &report.states {
+        match action {
+            StateAction::Keep => println!("state {}: kept (cell already live)", name),
+            StateAction::Fresh => println!("state {}: fresh (initializer ran)", name),
+            StateAction::Carryover { from } => {
+                println!("state {}: carried over from {} (initializer skipped)", name, short(from))
+            }
+            StateAction::Migrate { from, via } => {
+                println!("state {}: migrated from {} via {}", name, short(from), short(via))
+            }
+        }
+    }
+    for name in &report.dropped_states {
+        println!("state {}: dropped (cell stays resident, untracked)", name);
+    }
+    for (name, new, prev) in &report.rebound {
+        match prev {
+            Some(p) => println!("binding {} -> {} (was {})", name, short(new), short(p)),
+            None => println!("binding {} -> {} (created)", name, short(new)),
+        }
+    }
+}
+
+/// Parse + run `ai-lang deploy <file.ail> <addr> --bind B=DEF
+/// [--migrate STATE=DEF] [--allow-state-drop] [--token T]`.
+fn cmd_deploy_cli(args: &[String]) {
+    let mut positional: Vec<String> = Vec::new();
+    let mut binds: Vec<(String, String)> = Vec::new();
+    let mut migrates: Vec<(String, String)> = Vec::new();
+    let mut allow_drop = false;
+    let mut token: Option<String> = None;
+
+    fn split_eq(flag: &str, v: &str) -> (String, String) {
+        match v.split_once('=') {
+            Some((a, b)) if !a.is_empty() && !b.is_empty() => (a.to_string(), b.to_string()),
+            _ => {
+                eprintln!("{} expects NAME=DEF, got `{}`", flag, v);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--bind" && i + 1 < args.len() {
+            binds.push(split_eq("--bind", &args[i + 1]));
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--bind=") {
+            binds.push(split_eq("--bind", rest));
+            i += 1;
+        } else if a == "--migrate" && i + 1 < args.len() {
+            migrates.push(split_eq("--migrate", &args[i + 1]));
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--migrate=") {
+            migrates.push(split_eq("--migrate", rest));
+            i += 1;
+        } else if a == "--allow-state-drop" {
+            allow_drop = true;
+            i += 1;
+        } else if a == "--token" && i + 1 < args.len() {
+            token = Some(args[i + 1].clone());
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--token=") {
+            token = Some(rest.to_owned());
+            i += 1;
+        } else {
+            positional.push(a.clone());
+            i += 1;
+        }
+    }
+    if positional.len() != 2 {
+        eprintln!(
+            "usage: ai-lang deploy <file.ail> <addr> --bind <binding>=<def> \
+             [--migrate <state>=<def>] [--allow-state-drop] [--token <t>]"
+        );
+        std::process::exit(2);
+    }
+    cmd_deploy(&positional[0], &positional[1], &binds, &migrates, allow_drop, token.as_deref());
+}
+
+/// Build a deploy from a source file (stdlib in scope) and ship it.
+/// Client-side: parse, resolve, typecheck (fail fast — the node would
+/// refuse anyway), collect the transitive closure of the rebind targets
+/// + migrations + every `state` in the program, and send. No JIT runs
+/// here; the client is bytes-only.
+fn cmd_deploy(
+    file: &str,
+    addr: &str,
+    binds: &[(String, String)],
+    migrates: &[(String, String)],
+    allow_drop: bool,
+    token: Option<&str>,
+) {
+    let source = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("deploy: cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let full = format!("{}\n{}", STDLIB, source);
+    let m = parse_module(&full).unwrap_or_else(|e| {
+        eprintln!("deploy: parse failed: {:?}", e);
+        std::process::exit(1);
+    });
+    let r = resolve_module(&m).unwrap_or_else(|e| {
+        eprintln!("deploy: resolve failed: {}", e);
+        std::process::exit(1);
+    });
+    let mut tc = TypeCache::new();
+    if let Err(e) = typecheck_module(&r, &mut tc) {
+        eprintln!("deploy: program does not typecheck: {:?}", e);
+        std::process::exit(1);
+    }
+
+    let by_name: HashMap<&str, Hash> =
+        r.defs.iter().map(|d| (d.name.as_str(), d.hash)).collect();
+    let lookup = |flag: &str, def_name: &str| -> Hash {
+        *by_name.get(def_name).unwrap_or_else(|| {
+            eprintln!("deploy: {} references `{}`, which is not a def in {}", flag, def_name, file);
+            std::process::exit(1);
+        })
+    };
+
+    let rebinds: Vec<(String, Hash)> = binds
+        .iter()
+        .map(|(b, def)| (b.clone(), lookup("--bind", def)))
+        .collect();
+    let migrations: HashMap<String, Hash> = migrates
+        .iter()
+        .map(|(state, def)| (state.clone(), lookup("--migrate", def)))
+        .collect();
+
+    // Ship the transitive closure of: rebind targets, migrations, and
+    // every `state` in the program (states are roots even when no
+    // shipped fn references them yet).
+    let mut state_names: HashMap<String, Hash> = HashMap::new();
+    let mut roots: Vec<Hash> = rebinds.iter().map(|(_, h)| *h).collect();
+    roots.extend(migrations.values().copied());
+    for d in &r.defs {
+        if matches!(d.def, Def::State { .. }) {
+            state_names.insert(d.name.clone(), d.hash);
+            roots.push(d.hash);
+        }
+    }
+
+    let kb = KnowledgeBase::build(&r);
+    let order = kb.collect_transitive_deps(&roots).unwrap_or_else(|e| {
+        eprintln!("deploy: dependency collection failed: {}", e);
+        std::process::exit(1);
+    });
+    let mut items: Vec<(ItemKind, Hash, Vec<u8>)> = order
+        .iter()
+        .map(|h| {
+            let (k, b) = kb.lookup(h).expect("dep in kb");
+            (*k, *h, b.clone())
+        })
+        .collect();
+    for (name, sig) in kb.extern_requirements(&order) {
+        items.push((
+            ItemKind::Extern,
+            Hash::of_bytes(name.as_bytes()),
+            encode_extern(&name, &sig.params, &sig.ret, sig.library.as_deref(), sig.variadic),
+        ));
+    }
+
+    let req = DeployRequest {
+        items,
+        state_names,
+        migrations,
+        rebinds,
+        allow_state_drop: allow_drop,
+    };
+
+    let mut stream = connect_node(addr, token);
+    match deploy_on_channel(&mut stream, &req) {
+        Ok(report) => {
+            println!("deployed to {}", addr);
+            print_deploy_report(&report);
+        }
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("deploy refused (node unchanged): {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("deploy failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_rollback(addr: &str, binding: &str, token: Option<&str>) {
+    let mut stream = connect_node(addr, token);
+    match rollback_on_channel(&mut stream, binding) {
+        Ok(report) => {
+            println!("rolled back on {}", addr);
+            print_deploy_report(&report);
+        }
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("rollback refused: {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("rollback failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_invoke(addr: &str, binding: &str, args: &[i64], token: Option<&str>) {
+    let mut stream = connect_node(addr, token);
+    match invoke_on_channel(&mut stream, binding, args) {
+        Ok(v) => println!("{}", v),
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("invoke refused: {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("invoke failed: {}", e);
+            std::process::exit(1);
         }
     }
 }
@@ -2328,6 +2712,7 @@ fn at_binding_from_codebase(cb: &Codebase) -> Option<AtBinding> {
         crashed_variant_index: find(&failure_variants, "Crashed")?,
         code_missing_variant_index: find(&failure_variants, "CodeMissing")?,
         cancelled_variant_index: find(&failure_variants, "Cancelled")?,
+        timed_out_variant_index: find(&failure_variants, "TimedOut"),
         decode_error_hash,
         decode_type_mismatch_index: decode_tm_idx,
         decode_malformed_index: decode_mf_idx,

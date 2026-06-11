@@ -277,7 +277,7 @@ fn while_loop_pausable_and_resumable_many_times() {
 fn string_interpolation_with_nested_call_and_string() {
     assert_eq!(
         eval(r#"fn shout(s) = s + "!"
-"hey {shout("you")} there""#),
+"hey ${shout("you")} there""#),
         Value::str("hey you! there")
     );
 }

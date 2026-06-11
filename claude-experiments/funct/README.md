@@ -12,6 +12,16 @@ cargo run -- examples/demo.ft
 cargo test
 ```
 
+## Documentation
+
+* **[Language Guide](docs/guide.md)** — the full language tour and reference:
+  values, functions, closures, pipes/UFCS, pattern matching, atoms, modules,
+  error handling, testing.
+* **[Standard Library Reference](docs/stdlib.md)** — every built-in function,
+  with signatures, behavior, and examples.
+
+The rest of this README is the design overview and the Rust embedding API.
+
 ## The language, in one example
 
 ```text
@@ -220,7 +230,7 @@ vm2.run(&mut st2, StopWhen::Never);  // picks up exactly where it left off
   clamp to_int to_float parse_int parse_float` — UFCS makes `(2.25).sqrt()` work
 * **strings**: `contains starts_with ends_with split chars join slice replace
   trim to_lower to_upper index_of` (→ `Some(i)`/`None`, never -1), `str`,
-  interpolation `"{expr}"`
+  interpolation `"${expr}"`
 * **lists**: `len push first last rest pop insert_at remove_at contains
   index_of is_empty slice sort sort_by`
 * **records**: `has get assoc dissoc merge keys values entries`

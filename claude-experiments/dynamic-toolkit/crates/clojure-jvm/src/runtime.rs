@@ -423,6 +423,43 @@ pub struct HeapTypeIds {
     /// the wrapped value; `(deref r)` / `@r` unwraps it and
     /// `clojure.lang.RT/isReduced` tests for it.
     pub reduced: usize,
+    /// `clojure.lang.Repeat` — a (possibly infinite) seq of one repeated
+    /// value, backing `(repeat x)` / `(repeat n x)`. Layout (dynlang puts
+    /// traced Value fields before Raw64 fields): traced `value` slot at
+    /// offset 8, Raw64 `count` at offset 16 (i64; -1 = infinite, else
+    /// remaining elements, always > 0 — exhaustion yields nil, zero-count
+    /// creation yields nil). `seq` returns the cell itself; `first` reads
+    /// `value`; `next` returns the cell for infinite, a fresh cell with
+    /// `count-1` for bounded > 1, nil at 1.
+    pub repeat_seq: usize,
+    /// `clojure.lang.Atom` — mutable reference cell. Raw64 holds
+    /// `Arc<RefCell<RefState>>`; the held value is GC-traced via the REF
+    /// registry. Backs `atom`/`swap!`/`reset!`/`compare-and-set!`/`deref`.
+    pub atom: usize,
+    /// `clojure.lang.Volatile` — same cell shape as Atom; backs
+    /// `volatile!`/`vreset!`/`vswap!`/`deref`.
+    pub volatile_cell: usize,
+    /// `clojure.lang.Closure` — JIT closure cells (fref + captures).
+    /// Exposed here so host predicates (`fn?`, `ifn?`) can recognize
+    /// first-class fns that aren't bare `TAG_FN` handles.
+    pub closure: usize,
+    /// `clojure.lang.Iterate` — infinite seq of x, (f x), (f (f x)) ….
+    /// Two traced slots: `f`@8, `value`@16. `first` reads `value`;
+    /// `next` allocates a fresh cell with `(f value)`.
+    pub iterate_seq: usize,
+    /// `clojure.lang.Cycle` — infinite repetition of a finite seq.
+    /// Two traced slots: `all`@8 (the head of the cycle), `current`@16
+    /// (the walk position). `first` is `(first current)`; `next` advances
+    /// `current`, wrapping back to `all` at the end.
+    pub cycle_seq: usize,
+    /// `java.util.regex.Matcher` — Raw64 → Arc<RefCell<MatcherState>>.
+    pub matcher: usize,
+    /// `clojure.lang.MultiFn` — Raw64 → Arc<RefCell<MultiFnState>>.
+    pub multifn_cell: usize,
+    /// `clojure.lang.ExceptionInfo` — the `ex-info`/`ex-data` exception
+    /// type. Three traced Value slots: message @8, data @16, cause @24
+    /// (offset constants in `lang::exception_info`).
+    pub exception_info: usize,
 }
 
 /// Process-global type-id registry. `Compiler::new` calls
@@ -579,31 +616,52 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         // or another Cons). Reconstruct a `PersistentList` so the caller
         // gets a familiar Rust shape; if the meta slot holds a non-nil
         // map, wrap the result in `Object::WithMeta`.
-        let first_bits = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
-        let rest_bits = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
-        let meta_bits = unsafe { ptr.add(24).cast::<u64>().read_unaligned() };
-        let first_obj = decode_value_bits(first_bits, ids);
-        let rest_list = decode_rest_to_list(rest_bits, ids);
+        // Decoding `first`/`rest` can FORCE lazy seqs (run JIT thunks →
+        // GC), now that cons tails carry unforced LazySeqs. Stage the
+        // three field bits in a registered chunk buffer so the collector
+        // forwards them, and re-read each one fresh before use.
+        let buf = std::sync::Arc::new(std::cell::RefCell::new(vec![
+            unsafe { ptr.add(8).cast::<u64>().read_unaligned() },
+            unsafe { ptr.add(16).cast::<u64>().read_unaligned() },
+            unsafe { ptr.add(24).cast::<u64>().read_unaligned() },
+        ]));
+        register_chunk_buffer(&buf);
+        let first_now = buf.borrow()[0];
+        let first_obj = decode_value_bits(first_now, ids);
+        let rest_now = buf.borrow()[1];
+        let rest_list = decode_rest_to_list(rest_now, ids);
+        // The decoded rest knows its length — never re-walk raw bits.
+        let count = 1 + rest_list.count();
+        let meta_now = buf.borrow()[2];
+        deregister_chunk_buffer(&buf);
         let list_obj = Object::List(std::sync::Arc::new(
             crate::lang::persistent_list::PersistentList::Cons {
                 first: first_obj,
                 rest: rest_list,
-                count: 1 + count_list(&rest_bits, ids),
+                count,
             },
         ));
-        return wrap_with_meta_bits(list_obj, meta_bits, ids);
+        return wrap_with_meta_bits(list_obj, meta_now, ids);
     }
     if type_id == ids.vector {
         // `clojure.lang.PersistentVector` (our flat varlen-values shape):
         // Header(8) + varlen-count(8) + N * 8 byte slots. The count word
         // lives at offset 8; items start at offset 16.
         let count = unsafe { ptr.add(8).cast::<u64>().read_unaligned() } as usize;
+        // Element decodes can force lazy seqs (GC) — stage all item bits
+        // in a registered chunk buffer and re-read each fresh.
+        let buf = std::sync::Arc::new(std::cell::RefCell::new(
+            (0..count)
+                .map(|i| unsafe { ptr.add(16 + i * 8).cast::<u64>().read_unaligned() })
+                .collect::<Vec<u64>>(),
+        ));
+        register_chunk_buffer(&buf);
         let mut items: Vec<Object> = Vec::with_capacity(count);
         for i in 0..count {
-            let off = 16 + i * 8;
-            let bits = unsafe { ptr.add(off).cast::<u64>().read_unaligned() };
+            let bits = buf.borrow()[i];
             items.push(decode_value_bits(bits, ids));
         }
+        deregister_chunk_buffer(&buf);
         return Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
             items,
         ));
@@ -649,6 +707,29 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         // decode that. `cljvm_rt_seq` fully realizes to a cons chain or nil.
         let forced = unsafe { cljvm_rt_seq(bits) };
         return decode_value_bits(forced, ids);
+    }
+    if type_id == ids.iterate_seq || type_id == ids.cycle_seq {
+        panic!(
+            "clojure-jvm: infinite seq (iterate/cycle) reached host decode — \
+             realize a bounded prefix (e.g. take) first"
+        );
+    }
+    if type_id == ids.repeat_seq {
+        // Bounded `(repeat n x)` reaching host-bound data: realize it as a
+        // PersistentList of n copies. An infinite repeat cannot be decoded
+        // — realizing it would never terminate, so fail loudly.
+        let count = unsafe { ptr.add(16).cast::<u64>().read_unaligned() } as i64;
+        if count < 0 {
+            panic!(
+                "clojure-jvm: infinite (repeat x) reached host decode — \
+                 realize a bounded prefix (e.g. take) before splicing it \
+                 into host-bound data"
+            );
+        }
+        let value_bits = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+        let v = decode_value_bits(value_bits, ids);
+        let items = vec![v; count as usize];
+        return Object::List(crate::lang::persistent_list::PersistentList::create(items));
     }
     Object::Unported {
         java_class: "heap object of unrecognized type_id",
@@ -752,6 +833,8 @@ fn decode_rest_to_list(
             let obj = unsafe { heap_bits_to_object(bits, ids) };
             match obj {
                 Object::List(l) => l,
+                // A lazy rest that forces to the empty seq decodes to Nil.
+                Object::Nil => PersistentList::empty(),
                 other => panic!("clojure-jvm: Cons.rest expected nil or list, got {other:?}"),
             }
         }
@@ -759,24 +842,6 @@ fn decode_rest_to_list(
     }
 }
 
-/// Count the elements of a list-tail bits sequence (for setting count on the
-/// reconstructed `PersistentList::Cons`). O(n) walk through the chain.
-fn count_list(bits: &u64, ids: HeapTypeIds) -> i32 {
-    let payload = nanbox_payload(*bits);
-    if nanbox_tag(*bits) != Some(TAG_PTR) {
-        return 0;
-    }
-    let ptr = payload as *const u8;
-    if ptr.is_null() {
-        return 0;
-    }
-    let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
-    if type_id != ids.cons {
-        return 0;
-    }
-    let next_bits = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
-    1 + count_list(&next_bits, ids)
-}
 
 // ── Host-method externs (clojure.lang.RT) ──────────────────────────────
 //
@@ -887,6 +952,16 @@ unsafe fn dispatch_target_with_idx(handle_bits: u64) -> (*const u8, Option<u64>,
                      reached arity-blind dispatch_target_with_idx — caller \
                      must use dispatch_with_arity(fn_bits, n) instead so we \
                      can pick the right clause."
+                );
+            }
+            if type_id != ids.closure {
+                // Only Closure cells carry a fref_index at offset 16 —
+                // treating any other cell (LazySeq, Repeat, vector, …) as
+                // a closure reads garbage and SIGBUSes on the call-table
+                // load. Java throws ClassCastException here.
+                panic!(
+                    "clojure-jvm: cljvm_rt_invoke_*: receiver type_id {type_id} \
+                     is not invokable (expected a fn/closure)"
                 );
             }
             let fref_idx = unsafe { raw.add(16).cast::<u64>().read_unaligned() } as u32;
@@ -1143,6 +1218,9 @@ unsafe fn call_with_packed(ptr: *const u8, packed: &[u64]) -> u64 {
 /// `IFn.invoke()` — 0 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_0(fn_bits: u64) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 0) };
     // A 0-arg call of a variadic fn (e.g. `(list)` / `(concat)`, both
     // `[& xs]`) must still supply the rest param (an empty/`nil` seq).
@@ -1169,6 +1247,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_0(fn_bits: u64) -> u64 {
 /// doesn't trip the "non-callable heap value" panic.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_1(fn_bits: u64, a: u64) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a]) } {
+        return r;
+    }
     if let Some(v) = unsafe { keyword_as_fn_lookup(fn_bits, a, nanbox_nil()) } {
         return v;
     }
@@ -1301,6 +1382,9 @@ unsafe fn keyword_as_fn_lookup(fn_bits: u64, m_bits: u64, not_found: u64) -> Opt
 /// any variadic target whose call-site arity exceeds its `fixed_arity`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b]) } {
+        return r;
+    }
     if let Some(v) = unsafe { keyword_as_fn_lookup(fn_bits, a, b) } {
         return v;
     }
@@ -1331,6 +1415,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 
 /// `IFn.invoke(arg1, arg2, arg3)` — 3 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_3(fn_bits: u64, a: u64, b: u64, c: u64) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 3) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c]) } {
         return unsafe { call_with_packed(ptr, &packed) };
@@ -1351,6 +1438,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_3(fn_bits: u64, a: u64, b: u64, c: u64)
 /// `IFn.invoke(a..d)` — 4 arity. See `cljvm_rt_invoke_3`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_4(fn_bits: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 4) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d]) } {
         return unsafe { call_with_packed(ptr, &packed) };
@@ -1379,6 +1469,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_5(
     d: u64,
     e: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 5) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e]) } {
         return unsafe { call_with_packed(ptr, &packed) };
@@ -1408,6 +1501,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_6(
     e: u64,
     f: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e, f]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 6) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f]) } {
         return unsafe { call_with_packed(ptr, &packed) };
@@ -1438,6 +1534,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_7(
     f: u64,
     g: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e, f, g]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 7) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g]) }
     {
@@ -1470,6 +1569,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_8(
     g: u64,
     h: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e, f, g, h]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 8) };
     if let Some(packed) =
         unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g, h]) }
@@ -1508,6 +1610,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_9(
     h: u64,
     i: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e, f, g, h, i]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 9) };
     if let Some(packed) =
         unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g, h, i]) }
@@ -1536,6 +1641,9 @@ pub unsafe extern "C" fn cljvm_rt_invoke_10(
     i: u64,
     j: u64,
 ) -> u64 {
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &[a, b, c, d, e, f, g, h, i, j]) } {
+        return r;
+    }
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 10) };
     if let Some(packed) =
         unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g, h, i, j]) }
@@ -1735,6 +1843,47 @@ pub unsafe extern "C" fn cljvm_math_pow(a: u64, b: u64) -> u64 {
 pub unsafe extern "C" fn cljvm_math_sqrt(a: u64) -> u64 {
     nanbox_double(arg_to_f64(a).sqrt())
 }
+/// `java.lang.Math/abs(a)` — Long in → Long out, Double in → Double out
+/// (mirrors the Java overloads).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_math_abs(a: u64) -> u64 {
+    if is_boxed_long(a) {
+        unsafe { box_long(arg_to_i64(a).abs()) }
+    } else {
+        nanbox_double(arg_to_f64(a).abs())
+    }
+}
+/// `java.lang.Math/floor(a)` — always returns a double, like Java.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_math_floor(a: u64) -> u64 {
+    nanbox_double(arg_to_f64(a).floor())
+}
+/// `java.lang.Math/ceil(a)` — always returns a double, like Java.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_math_ceil(a: u64) -> u64 {
+    nanbox_double(arg_to_f64(a).ceil())
+}
+/// `Integer/parseInt(s)` / `Long/parseLong(s)` — parse a base-10 integer.
+/// Panics (like Java throws NumberFormatException) on a malformed string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_long_parse(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = unsafe { read_string_heap(s_bits, ids, "Long/parseLong") };
+    match s.trim().parse::<i64>() {
+        Ok(n) => unsafe { box_long(n) },
+        Err(e) => panic!("clojure-jvm: NumberFormatException — parseLong(\"{s}\"): {e}"),
+    }
+}
+/// `Double/parseDouble(s)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_double_parse(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = unsafe { read_string_heap(s_bits, ids, "Double/parseDouble") };
+    match s.trim().parse::<f64>() {
+        Ok(f) => nanbox_double(f),
+        Err(e) => panic!("clojure-jvm: NumberFormatException — parseDouble(\"{s}\"): {e}"),
+    }
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_identity(a: u64) -> u64 {
     a
@@ -1866,8 +2015,9 @@ pub unsafe extern "C" fn cljvm_rt_nth(coll_bits: u64, idx_bits: u64) -> u64 {
                         .cast::<u64>()
                         .read_unaligned()
                 }
-            } else if tid == ids.cons || tid == ids.lazy_seq {
-                // Walk a seq (cons chain or lazy seq) via first/next, both of
+            } else if tid == ids.cons || tid == ids.lazy_seq || tid == ids.repeat_seq
+                || tid == ids.iterate_seq || tid == ids.cycle_seq {
+                // Walk a seq (cons chain, lazy seq, or repeat) via first/next, both of
                 // which force lazy nodes. `cljvm_rt_next` returns the realized
                 // tail, so `nth` on a lazy seq realizes only as far as `idx`.
                 // `nth` over a lazy seq is what positional destructuring lowers
@@ -1918,8 +2068,9 @@ pub unsafe extern "C" fn cljvm_rt_nth_3(coll_bits: u64, idx_bits: u64, not_found
                         .cast::<u64>()
                         .read_unaligned()
                 }
-            } else if tid == ids.cons || tid == ids.lazy_seq {
-                // Walk a seq (cons chain or lazy seq) via first/next, same as
+            } else if tid == ids.cons || tid == ids.lazy_seq || tid == ids.repeat_seq
+                || tid == ids.iterate_seq || tid == ids.cycle_seq {
+                // Walk a seq (cons chain, lazy seq, or repeat) via first/next, same as
                 // `cljvm_rt_nth` above. `nth_3` is what positional
                 // destructuring lowers to (`(nth tmp i nil)`), and macros
                 // destructure lazy-seq values at MACROEXPAND time — e.g. the
@@ -2114,6 +2265,78 @@ pub unsafe extern "C" fn cljvm_longrange_create_3(start_bits: u64, end_bits: u64
     unsafe { longrange_build(arg_to_i64(start_bits), arg_to_i64(end_bits), arg_to_i64(step_bits)) }
 }
 
+/// Allocate a `clojure.lang.Repeat` cell (see `HeapTypeIds::repeat_seq`
+/// for the layout/semantics). `count` is -1 (infinite) or > 0; callers
+/// handle the <= 0 cases before allocating.
+fn alloc_repeat(count: i64, value_bits: u64) -> u64 {
+    debug_assert!(count == -1 || count > 0);
+    let ids = heap_type_ids();
+    dynobj::roots::gc_enter(2, |heap, scope| {
+        let value = scope.root::<()>(value_bits);
+        let cell = heap_alloc(heap, ids.repeat_seq as u64, 0).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let ptr = nanbox_payload(cell_bits) as *mut u8;
+        unsafe {
+            write_slot(ptr, 8, value.get_raw(&*heap));
+            write_raw_word(ptr, 16, count as u64);
+        }
+        cell_bits
+    })
+}
+
+/// `clojure.lang.Repeat/create(x)` — the INFINITE `(repeat x)`. Safe to
+/// represent now that seq/first/next dispatch on the Repeat type id: lazy
+/// consumers (`take`, `interleave`, …) pull one element per step instead
+/// of structurally walking a cons chain.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_repeat_create_1(x_bits: u64) -> u64 {
+    alloc_repeat(-1, x_bits)
+}
+
+/// `clojure.lang.Repeat/create(n, x)` — bounded `(repeat n x)`. `n <= 0`
+/// yields the empty seq (nil — same compromise as `longrange_build`; Java
+/// returns `PersistentList.EMPTY`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_repeat_create_2(n_bits: u64, x_bits: u64) -> u64 {
+    let n = arg_to_i64(n_bits);
+    if n <= 0 {
+        return nanbox_nil();
+    }
+    alloc_repeat(n, x_bits)
+}
+
+/// Allocate a two-traced-slot seq cell (Iterate / Cycle).
+fn alloc_seq2(type_id: usize, a_bits: u64, b_bits: u64) -> u64 {
+    dynobj::roots::gc_enter(3, |heap, scope| {
+        let a = scope.root::<()>(a_bits);
+        let b = scope.root::<()>(b_bits);
+        let cell = heap_alloc(heap, type_id as u64, 0).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let ptr = nanbox_payload(cell_bits) as *mut u8;
+        unsafe {
+            write_slot(ptr, 8, a.get_raw(&*heap));
+            write_slot(ptr, 16, b.get_raw(&*heap));
+        }
+        cell_bits
+    })
+}
+
+/// `clojure.lang.Iterate/create(f, x)` — backs `clojure.core/iterate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_iterate_create_2(f_bits: u64, x_bits: u64) -> u64 {
+    alloc_seq2(heap_type_ids().iterate_seq, f_bits, x_bits)
+}
+
+/// `clojure.lang.Cycle/create(seq)` — backs `clojure.core/cycle`. The
+/// caller passes `(seq coll)`; nil in → nil out (empty cycle).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_cycle_create_1(seq_bits: u64) -> u64 {
+    if matches!(nanbox_tag(seq_bits), Some(TAG_NIL)) {
+        return nanbox_nil();
+    }
+    alloc_seq2(heap_type_ids().cycle_seq, seq_bits, seq_bits)
+}
+
 /// `(f acc x)` as a GC-causing primitive. The user fn behind `f_bits` may
 /// allocate, so `acc`/`x` arrive rooted and the result is returned as a
 /// fresh `Raw` (the caller re-roots it).
@@ -2137,6 +2360,11 @@ fn cons_inner<'h>(
 ) -> Raw<'h> {
     let ids = heap_type_ids();
 
+    // Mirror Java's RT.cons: an ISeq tail (Cons, LazySeq, Repeat, Iterate,
+    // Cycle) is stored AS-IS — coercing a LazySeq here would force the
+    // whole chain eagerly, which turns `(cons x (map f infinite))` into a
+    // stack overflow. Only non-ISeq collections (vectors, maps, strings,
+    // sets, …) go through RT.seq.
     let needs_coerce = match nanbox_tag(seq.get_raw(&*heap).bits()) {
         Some(TAG_NIL) => false,
         Some(TAG_PTR) => {
@@ -2146,6 +2374,10 @@ fn cons_inner<'h>(
             } else {
                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
                 tid != ids.cons
+                    && tid != ids.lazy_seq
+                    && tid != ids.repeat_seq
+                    && tid != ids.iterate_seq
+                    && tid != ids.cycle_seq
             }
         }
         _ => panic!(
@@ -2535,6 +2767,14 @@ pub unsafe extern "C" fn cljvm_rt_count(bits: u64) -> u64 {
                         }
                     }
                     count
+                } else if type_id == ids.repeat_seq {
+                    let c = unsafe { ptr.add(16).cast::<u64>().read_unaligned() } as i64;
+                    if c < 0 {
+                        panic!("clojure-jvm: count on an infinite (repeat x) never terminates");
+                    }
+                    c
+                } else if type_id == ids.iterate_seq || type_id == ids.cycle_seq {
+                    panic!("clojure-jvm: count on an infinite seq (iterate/cycle) never terminates");
                 } else if type_id == ids.vector {
                     // Vector layout: Header(8) + count word(8) + items.
                     let c = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
@@ -2641,26 +2881,11 @@ pub unsafe extern "C" fn cljvm_phs_create(coll_bits: u64) -> u64 {
             let raw = nanbox_payload(coll_bits) as *const u8;
             if !raw.is_null() {
                 let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                item_bits.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic GC-safe walk — cons tails may be
+                    // unforced LazySeqs (RT.cons stores ISeq tails
+                    // as-is); the old raw walk truncated there.
+                    item_bits = unsafe { seq_to_items(coll_bits) };
                 } else if type_id == ids.vector {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     item_bits.reserve(n);
@@ -2716,26 +2941,11 @@ pub unsafe extern "C" fn cljvm_ptm_create(coll_bits: u64) -> u64 {
             let raw = nanbox_payload(coll_bits) as *const u8;
             if !raw.is_null() {
                 let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic GC-safe walk — cons tails may be
+                    // unforced LazySeqs (RT.cons stores ISeq tails
+                    // as-is); the old raw walk truncated there.
+                    items = unsafe { seq_to_items(coll_bits) };
                 } else if type_id == ids.vector {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     items.reserve(n);
@@ -2866,26 +3076,11 @@ unsafe fn walk_coll_to_bits(coll_bits: u64, ids: HeapTypeIds, caller: &'static s
             let raw = nanbox_payload(coll_bits) as *const u8;
             if !raw.is_null() {
                 let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                out.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic GC-safe walk — cons tails may be
+                    // unforced LazySeqs (RT.cons stores ISeq tails
+                    // as-is); the old raw walk truncated there.
+                    out = unsafe { seq_to_items(coll_bits) };
                 } else if type_id == ids.vector {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     out.reserve(n);
@@ -2918,26 +3113,11 @@ pub unsafe extern "C" fn cljvm_ptm_create_cmp(cmp_bits: u64, coll_bits: u64) -> 
             let raw = nanbox_payload(coll_bits) as *const u8;
             if !raw.is_null() {
                 let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic GC-safe walk — cons tails may be
+                    // unforced LazySeqs (RT.cons stores ISeq tails
+                    // as-is); the old raw walk truncated there.
+                    items = unsafe { seq_to_items(coll_bits) };
                 } else if type_id == ids.vector {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     items.reserve(n);
@@ -3061,26 +3241,11 @@ pub unsafe extern "C" fn cljvm_phm_create(coll_bits: u64) -> u64 {
             let raw = nanbox_payload(coll_bits) as *const u8;
             if !raw.is_null() {
                 let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic GC-safe walk — cons tails may be
+                    // unforced LazySeqs (RT.cons stores ISeq tails
+                    // as-is); the old raw walk truncated there.
+                    items = unsafe { seq_to_items(coll_bits) };
                 } else if type_id == ids.vector {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     items.reserve(n);
@@ -3129,18 +3294,56 @@ pub unsafe extern "C" fn cljvm_phm_create(coll_bits: u64) -> u64 {
     nanbox_ptr(new_raw)
 }
 
+/// Walk any seqable into a Vec of element NanBox bits, GC-safely.
+/// `RT.seq` normalizes/forces the head and `RT.next` forces each tail, so
+/// this realizes lazy seqs (e.g. `partition-all` segments, `map` output)
+/// as well as plain cons chains, strings, maps, sets, and sorted
+/// collections — anything `cljvm_rt_seq` accepts. Forcing runs JIT thunks
+/// that may allocate and move the heap, so the collected element bits live
+/// in a registered chunk buffer that `scan_roots` forwards across GC; the
+/// cursor itself follows the same bare-bits walk `cljvm_rt_count` uses
+/// (verified under EveryPoint), since each step's bits come fresh from
+/// `rt_next`'s return value.
+unsafe fn seq_to_items(coll_bits: u64) -> Vec<u64> {
+    let buf = std::sync::Arc::new(std::cell::RefCell::new(Vec::<u64>::new()));
+    register_chunk_buffer(&buf);
+    let mut cur = unsafe { cljvm_rt_seq(coll_bits) };
+    loop {
+        match nanbox_tag(cur) {
+            Some(TAG_PTR) => {
+                let p = nanbox_payload(cur) as *const u8;
+                if p.is_null() {
+                    break;
+                }
+                let f = unsafe { cljvm_rt_first(cur) };
+                // Short borrow: released before the next (possibly
+                // GC-triggering) rt_next call, per the chunk-buffer
+                // root source's "no cell mutably borrowed at a
+                // safepoint" invariant.
+                buf.borrow_mut().push(f);
+                cur = unsafe { cljvm_rt_next(cur) };
+            }
+            _ => break,
+        }
+    }
+    let items = buf.borrow().clone();
+    deregister_chunk_buffer(&buf);
+    items
+}
+
 /// `clojure.lang.LazilyPersistentVector.create(Object coll)` — Java's
 /// builder produces a lazily-realized vector wrapping the seq; we
 /// eagerly walk the seq into a fresh `PersistentVector` heap cell.
 /// Sufficient for upstream `(defn vector …)`'s variadic clause:
 ///   `(. LazilyPersistentVector (create (cons a (cons b … args))))`
+/// and for `(vec coll)` over ANY seqable, including lazy seqs (which
+/// `seq_to_items` forces tail-by-tail).
 /// Items are copied as raw NanBox bits — preserves any heap pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
     let ids = heap_type_ids();
-    // Collect items by walking the seq via cons-rest. Bottom-out at nil
-    // or any non-cons (per `RT.next`'s contract). For Vector input,
-    // copy items directly.
+    // Vector input: copy items directly (no forcing can occur, so the
+    // bare reads are safe). Everything else: generic GC-safe seq walk.
     let mut items: Vec<u64> = Vec::new();
     match nanbox_tag(coll_bits) {
         Some(TAG_NIL) => {}
@@ -3155,36 +3358,8 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
                         let bits = unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
                         items.push(bits);
                     }
-                } else if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                let f = unsafe { p.add(8).cast::<u64>().read_unaligned() };
-                                items.push(f);
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
                 } else {
-                    // Unsupported source type: produce empty vector
-                    // rather than panic. extern "C" panics here abort
-                    // the process via panic-during-panic.
-                    eprintln!(
-                        "[cljvm-stub] LazilyPersistentVector/create: \
-                         receiver type_id {type_id} not yet supported, \
-                         returning empty vector"
-                    );
+                    items = unsafe { seq_to_items(coll_bits) };
                 }
             }
         }
@@ -3217,8 +3392,9 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
 /// Object[]. We don't model Java arrays distinctly; we use our own
 /// Vector heap cell as the closest analog (callers in Clojure-land
 /// almost always pass the result to seq operations that work on
-/// vectors). Handles nil → empty vector, Vector → copy, Cons → walk
-/// and collect.
+/// vectors). Handles nil → empty vector, Vector → copy, anything else →
+/// generic GC-safe seq walk (forces lazy tails — `apply` over a lazy seq
+/// routes its argument list through here).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
     let ids = heap_type_ids();
@@ -3238,32 +3414,8 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
                         let bits = unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
                         items.push(bits);
                     }
-                } else if type_id == ids.cons {
-                    let mut cur = coll_bits;
-                    loop {
-                        match nanbox_tag(cur) {
-                            Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
-                                let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() {
-                                    break;
-                                }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    break;
-                                }
-                                let f = unsafe { p.add(8).cast::<u64>().read_unaligned() };
-                                items.push(f);
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                            }
-                            _ => break,
-                        }
-                    }
                 } else {
-                    panic!(
-                        "clojure-jvm: RT.toArray — receiver type_id {type_id} not yet \
-                         supported (extend cljvm_rt_toArray)"
-                    );
+                    items = unsafe { seq_to_items(coll_bits) };
                 }
             }
         }
@@ -3500,6 +3652,17 @@ pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
                 let result = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
                 trap_forwarded_first_result("cons.first", bits, result);
                 result
+            } else if type_id == ids.repeat_seq {
+                let result = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+                trap_forwarded_first_result("repeat.first", bits, result);
+                result
+            } else if type_id == ids.iterate_seq {
+                let result = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
+                trap_forwarded_first_result("iterate.first", bits, result);
+                result
+            } else if type_id == ids.cycle_seq {
+                let current = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
+                unsafe { cljvm_rt_first(current) }
             } else if type_id == ids.vector {
                 // Vector: header(8) + count(8) + items at offset 16.
                 let n = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
@@ -3635,11 +3798,21 @@ pub unsafe extern "C" fn cljvm_inst_bindRoot(_recv: u64, _val: u64) -> u64 {
     return nanbox_nil();
 }
 
-/// `(.hasRoot v)` — does this Var have a root binding?
+/// `(.hasRoot v)` — does this Var have a root binding? Backs `defonce`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_hasRoot(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.hasRoot) not yet implemented");
-    return nanbox_nil();
+pub unsafe extern "C" fn cljvm_inst_hasRoot(recv: u64) -> u64 {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.var {
+                let var: std::sync::Arc<crate::lang::var::Var> = unsafe { decode_arc_cell(raw) };
+                return nanbox_bool(var.has_root());
+            }
+        }
+    }
+    panic!("clojure-jvm: (.hasRoot v) — receiver is not a Var (bits 0x{recv:x})");
 }
 
 /// `(.getRawRoot v)` — read Var's root without dynamic-binding lookup.
@@ -3678,20 +3851,95 @@ pub unsafe extern "C" fn cljvm_inst_removeWatch(_recv: u64, _key: u64) -> u64 {
     eprintln!("[cljvm-stub] (.removeWatch) not yet implemented");
     return nanbox_nil();
 }
+/// Decode an Atom/Volatile receiver into its `RefState`. Panics loudly on
+/// any other receiver — these methods are only reachable through the
+/// `atom`/`volatile!` constructors.
+unsafe fn decode_ref_cell(recv: u64, ctx: &str) -> std::sync::Arc<std::cell::RefCell<RefState>> {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.atom || type_id == ids.volatile_cell {
+                return unsafe { decode_arc_cell(raw) };
+            }
+        }
+    }
+    panic!("clojure-jvm: {ctx} — receiver is not an Atom/Volatile (bits 0x{recv:x})");
+}
+
+/// Shared core of `(.swap atom f extra…)`: read the current value, invoke
+/// `f` on it (plus extras), store and return the result. The current-value
+/// read happens under a short borrow released before the (allocating,
+/// GC-triggering) invoke; the GC forwards `RefState.value_bits` in place via
+/// the REF registry, and the invoke's result arrives as fresh bits.
+/// Single-threaded runtime — no CAS retry loop needed.
+unsafe fn ref_swap(recv: u64, invoke: impl FnOnce(u64) -> u64, ctx: &str) -> u64 {
+    let cell = unsafe { decode_ref_cell(recv, ctx) };
+    let cur = cell.borrow().value_bits;
+    let new = invoke(cur);
+    cell.borrow_mut().value_bits = new;
+    new
+}
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_swap(_recv: u64, _f: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.swap) not yet implemented");
-    return nanbox_nil();
+pub unsafe extern "C" fn cljvm_inst_swap(recv: u64, f: u64) -> u64 {
+    unsafe { ref_swap(recv, |cur| cljvm_rt_invoke_1(f, cur), "(.swap a f)") }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_reset(_recv: u64, _new: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.reset) on IAtom not yet implemented");
-    return nanbox_nil();
+pub unsafe extern "C" fn cljvm_inst_swap_3(recv: u64, f: u64, x: u64) -> u64 {
+    unsafe { ref_swap(recv, |cur| cljvm_rt_invoke_2(f, cur, x), "(.swap a f x)") }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_compareAndSet(_recv: u64, _old: u64, _new: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.compareAndSet) not yet implemented");
-    return nanbox_nil();
+pub unsafe extern "C" fn cljvm_inst_swap_4(recv: u64, f: u64, x: u64, y: u64) -> u64 {
+    unsafe { ref_swap(recv, |cur| cljvm_rt_invoke_3(f, cur, x, y), "(.swap a f x y)") }
+}
+/// `(.swap a f x y args-seq)` — the variadic swap! tail: apply `f` to
+/// `cur x y arg…`. Realizes the extra-args seq, then dispatches on total
+/// argument count through the fixed-arity invokes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_swap_5(recv: u64, f: u64, x: u64, y: u64, args: u64) -> u64 {
+    unsafe {
+        ref_swap(
+            recv,
+            |cur| {
+                let extras = seq_to_items(args);
+                let mut all = vec![cur, x, y];
+                all.extend_from_slice(&extras);
+                match all.len() {
+                    3 => cljvm_rt_invoke_3(f, all[0], all[1], all[2]),
+                    4 => cljvm_rt_invoke_4(f, all[0], all[1], all[2], all[3]),
+                    5 => cljvm_rt_invoke_5(f, all[0], all[1], all[2], all[3], all[4]),
+                    6 => cljvm_rt_invoke_6(f, all[0], all[1], all[2], all[3], all[4], all[5]),
+                    n => panic!(
+                        "clojure-jvm: (.swap a f x y args) — {n} total args not \
+                         supported yet (extend cljvm_inst_swap_5)"
+                    ),
+                }
+            },
+            "(.swap a f x y args)",
+        )
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_reset(recv: u64, new: u64) -> u64 {
+    let cell = unsafe { decode_ref_cell(recv, "(.reset a v)") };
+    cell.borrow_mut().value_bits = new;
+    new
+}
+/// `(.compareAndSet a old new)`. Java's Atom CAS is reference identity,
+/// which works there because small Longs/keywords are interned instances;
+/// our boxed values aren't canonical, so value-equiv is the faithful
+/// observable behavior for the cases real programs hit.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_compareAndSet(recv: u64, old: u64, new: u64) -> u64 {
+    let cell = unsafe { decode_ref_cell(recv, "(.compareAndSet a old new)") };
+    let cur = cell.borrow().value_bits;
+    let eq = unsafe { equiv_impl(cur, old) };
+    if eq {
+        cell.borrow_mut().value_bits = new;
+    }
+    nanbox_bool(eq)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_deref(recv: u64) -> u64 {
@@ -3707,6 +3955,13 @@ pub unsafe extern "C" fn cljvm_inst_deref(recv: u64) -> u64 {
             // `@(delay …)` → forced value.
             if type_id == ids.delay {
                 return unsafe { cljvm_delay_force(recv) };
+            }
+            // `@atom` / `@volatile` → the held value.
+            if type_id == ids.atom || type_id == ids.volatile_cell {
+                let cell: std::sync::Arc<std::cell::RefCell<RefState>> =
+                    unsafe { decode_arc_cell(raw) };
+                let v = cell.borrow().value_bits;
+                return v;
             }
         }
     }
@@ -3894,13 +4149,141 @@ pub unsafe extern "C" fn cljvm_inst_multifn_reset(recv: u64) -> u64 {
     eprintln!("[cljvm-stub] MultiFn.reset() — multimethods not modeled; ignoring (recv 0x{recv:x})");
     nanbox_nil()
 }
+/// `(new clojure.lang.MultiFn name dispatch-fn default hierarchy)` —
+/// upstream `defmulti` expands to this. The hierarchy arg (a Var) is
+/// accepted and ignored: dispatch is exact-equiv plus the default key;
+/// `isa?` hierarchies panic in the lookup when no exact match exists
+/// and would be needed.
+pub fn multifn_ctor(args: &[u64], ids: HeapTypeIds) -> u64 {
+    if args.len() != 4 {
+        panic!(
+            "clojure-jvm: (new clojure.lang.MultiFn …) — expected 4 args \
+             (name dispatch default hierarchy), got {}",
+            args.len()
+        );
+    }
+    let name = unsafe { read_string_heap(args[0], ids, "MultiFn ctor — name") }.to_string();
+    let st = std::sync::Arc::new(std::cell::RefCell::new(MultiFnState {
+        name,
+        dispatch_bits: args[1],
+        default_bits: args[2],
+        methods: Vec::new(),
+    }));
+    register_multifn_state(&st);
+    unsafe {
+        alloc_arc_cell(
+            ids.multifn_cell,
+            st,
+            crate::lang::compiler::with_active_session_root_multifn,
+        )
+    }
+}
+
+unsafe fn decode_multifn(recv: u64) -> Option<std::sync::Arc<std::cell::RefCell<MultiFnState>>> {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.multifn_cell {
+                return Some(unsafe { decode_arc_cell(raw) });
+            }
+        }
+    }
+    None
+}
+
+/// If `fn_bits` is a MultiFn cell, dispatch and invoke; None otherwise.
+/// Dispatch: run the dispatch fn on the args, find the method whose key
+/// is equiv to the dispatch value, else the default-key method, else
+/// panic with the dispatch value (mirrors Java's IllegalArgumentException).
+pub unsafe fn try_multifn_invoke(fn_bits: u64, args: &[u64]) -> Option<u64> {
+    let st = unsafe { decode_multifn(fn_bits) }?;
+    // Stage args (and the eventual dispatch value) in a registered chunk
+    // buffer — both invokes below can GC.
+    let buf = std::sync::Arc::new(std::cell::RefCell::new(args.to_vec()));
+    register_chunk_buffer(&buf);
+    let dv = {
+        let dispatch = st.borrow().dispatch_bits;
+        let a = buf.borrow().clone();
+        unsafe { invoke_n(dispatch, &a) }
+    };
+    // equiv_impl is Rust-side (no JIT, no GC) — safe to compare bare bits.
+    let method = {
+        let stb = st.borrow();
+        let exact = stb.methods.iter().find(|(k, _)| unsafe { equiv_impl(*k, dv) });
+        match exact {
+            Some((_, m)) => Some(*m),
+            None => stb
+                .methods
+                .iter()
+                .find(|(k, _)| unsafe { equiv_impl(*k, stb.default_bits) })
+                .map(|(_, m)| *m),
+        }
+    };
+    let method = method.unwrap_or_else(|| {
+        panic!(
+            "clojure-jvm: IllegalArgumentException — No method in multimethod \
+             '{}' for dispatch value: {}",
+            st.borrow().name,
+            pr_str_bits(dv)
+        )
+    });
+    let a = buf.borrow().clone();
+    let out = unsafe { invoke_n(method, &a) };
+    deregister_chunk_buffer(&buf);
+    Some(out)
+}
+
+/// Invoke `f` with a runtime-length arg list via the fixed-arity invokes.
+unsafe fn invoke_n(f: u64, a: &[u64]) -> u64 {
+    unsafe {
+        match a.len() {
+            0 => cljvm_rt_invoke_0(f),
+            1 => cljvm_rt_invoke_1(f, a[0]),
+            2 => cljvm_rt_invoke_2(f, a[0], a[1]),
+            3 => cljvm_rt_invoke_3(f, a[0], a[1], a[2]),
+            4 => cljvm_rt_invoke_4(f, a[0], a[1], a[2], a[3]),
+            5 => cljvm_rt_invoke_5(f, a[0], a[1], a[2], a[3], a[4]),
+            6 => cljvm_rt_invoke_6(f, a[0], a[1], a[2], a[3], a[4], a[5]),
+            n => panic!("clojure-jvm: invoke_n — arity {n} not wired (extend invoke_n)"),
+        }
+    }
+}
+
+/// `(.addMethod multifn dispatch-val f)` — upstream `defmethod` expands
+/// to this. Returns the multifn (Java returns `this`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_multifn_addMethod(recv: u64, _b: u64, _c: u64) -> u64 {
-    eprintln!(
-        "[cljvm-stub] MultiFn.addMethod — multimethods not modeled; method NOT \
-         registered (recv 0x{recv:x})"
-    );
-    nanbox_nil()
+pub unsafe extern "C" fn cljvm_inst_multifn_addMethod(recv: u64, dv: u64, f: u64) -> u64 {
+    match unsafe { decode_multifn(recv) } {
+        Some(st) => {
+            let mut stb = st.borrow_mut();
+            // Re-defining a method for the same dispatch value replaces it.
+            if let Some(slot) = stb.methods.iter_mut().find(|(k, _)| unsafe { equiv_impl(*k, dv) }) {
+                slot.1 = f;
+            } else {
+                stb.methods.push((dv, f));
+            }
+            recv
+        }
+        None => {
+            if matches!(nanbox_tag(recv), Some(TAG_NIL)) {
+                // The multifn var is nil — its defmulti lives in a
+                // sub-file we don't embed (e.g. print-method in
+                // clojure/core_print). Defer instead of aborting the
+                // core load; calling the multimethod still fails loudly.
+                eprintln!(
+                    "[cljvm-defer] (.addMethod nil …) — defmulti not loaded \
+                     (sub-file not embedded); method NOT registered"
+                );
+                return nanbox_nil();
+            }
+            panic!(
+                "clojure-jvm: (.addMethod m dv f) — receiver is not a MultiFn \
+                 (bits 0x{recv:x})"
+            )
+        }
+    }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_multifn_removeMethod(_a: u64, _b: u64) -> u64 {
@@ -4876,14 +5259,59 @@ pub unsafe extern "C" fn cljvm_util_compare(a_bits: u64, b_bits: u64) -> u64 {
     box_long(n)
 }
 
+/// `clojure.lang.Compiler/macroexpand1(form)` — backs the `macroexpand-1`
+/// and `macroexpand` core fns. Decodes the form to a host Object, runs one
+/// expansion step (host intercepts + upstream defmacros, same path the
+/// analyzer uses), and re-encodes. Non-macro forms come back unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_compiler_macroexpand1(form_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let form = any_bits_to_object(form_bits, ids);
+    match crate::lang::compiler::macroexpand1_for_runtime(&form) {
+        Some(expanded) => crate::lang::compiler::with_active_session_encode_object(&expanded),
+        None => form_bits,
+    }
+}
+
+/// `clojure.lang.Compiler/eval(form)` — backs `clojure.core/eval`.
+/// Decodes the form to a host Object and runs a full nested
+/// compile+execute in the active Session (the same reentrant-run_jit
+/// shape macro bodies already exercise during compilation).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_compiler_eval(form_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let form = any_bits_to_object(form_bits, ids);
+    crate::lang::compiler::eval_in_active_session(form)
+}
+
 /// `clojure.lang.Util.identical(a, b)` — Java reference equality.
-/// Bit-equality on NanBox values handles nil/bool/long/double directly,
-/// pointer-identity for heap cells, and (because Symbol/Keyword interning
-/// produces a single Arc per name) reduces to pointer-equality for
-/// interned identity types as well.
+/// Bit-equality on NanBox values handles nil/bool/long/double directly
+/// and pointer-identity for heap cells. Keywords need one more step:
+/// Java interns Keyword INSTANCES (so `(identical? :a :a)` is true), but
+/// our heap cells are per-occurrence wrappers around the interned Arc —
+/// compare the Arc pointer when both sides are keyword cells. (Symbols
+/// are NOT interned instances in Java; `(identical? 'a 'a)` is false
+/// there, and distinct cells give the same answer here.)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_util_identical(a_bits: u64, b_bits: u64) -> u64 {
-    nanbox_bool(a_bits == b_bits)
+    if a_bits == b_bits {
+        return nanbox_bool(true);
+    }
+    let ids = heap_type_ids();
+    if let (Some(TAG_PTR), Some(TAG_PTR)) = (nanbox_tag(a_bits), nanbox_tag(b_bits)) {
+        let pa = nanbox_payload(a_bits) as *const u8;
+        let pb = nanbox_payload(b_bits) as *const u8;
+        if !pa.is_null() && !pb.is_null() {
+            let ta = unsafe { pa.cast::<u16>().read_unaligned() } as usize;
+            let tb = unsafe { pb.cast::<u16>().read_unaligned() } as usize;
+            if ta == ids.keyword && tb == ids.keyword {
+                let aa = unsafe { pa.add(8).cast::<u64>().read_unaligned() };
+                let ab = unsafe { pb.add(8).cast::<u64>().read_unaligned() };
+                return nanbox_bool(aa == ab);
+            }
+        }
+    }
+    nanbox_bool(false)
 }
 
 /// `clojure.lang.RT.more(Object coll)` — same shape as `next` for our
@@ -4914,6 +5342,16 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
             let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
             if type_id == ids.cons {
                 bits
+            } else if type_id == ids.repeat_seq
+                || type_id == ids.iterate_seq
+                || type_id == ids.cycle_seq
+            {
+                // Repeat/Iterate/Cycle cells are already (non-empty) seqs.
+                bits
+            } else if type_id == ids.with_meta {
+                // Metadata wrapper: seq the inner value.
+                let inner = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+                unsafe { cljvm_rt_seq(inner) }
             } else if type_id == ids.vector {
                 // Vector → seq: walk items right-to-left into a cons-list.
                 // Empty vector seqs to nil (matches Java `RT.seq`).
@@ -5129,6 +5567,61 @@ pub unsafe extern "C" fn cljvm_rt_next(bits: u64) -> u64 {
                 // Force to a concrete seq, then take its next.
                 let s = unsafe { cljvm_rt_seq(bits) };
                 unsafe { cljvm_rt_next(s) }
+            } else if type_id == ids.repeat_seq {
+                let count = unsafe { ptr.add(16).cast::<u64>().read_unaligned() } as i64;
+                if count == -1 {
+                    // Infinite: the rest of (repeat x) is (repeat x) itself.
+                    bits
+                } else if count > 1 {
+                    let value = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+                    alloc_repeat(count - 1, value)
+                } else {
+                    nanbox_nil()
+                }
+            } else if type_id == ids.iterate_seq {
+                // next = Iterate(f, (f value)). The invoke may allocate and
+                // move the heap; root f/value across it via the chunk-buffer
+                // root source, then read the forwarded bits back.
+                let buf = std::sync::Arc::new(std::cell::RefCell::new(vec![
+                    unsafe { ptr.add(8).cast::<u64>().read_unaligned() },
+                    unsafe { ptr.add(16).cast::<u64>().read_unaligned() },
+                ]));
+                register_chunk_buffer(&buf);
+                let (f_now, v_now) = {
+                    let v = buf.borrow();
+                    (v[0], v[1])
+                };
+                let new_val = unsafe { cljvm_rt_invoke_1(f_now, v_now) };
+                buf.borrow_mut()[1] = new_val;
+                let (f_final, val_final) = {
+                    let v = buf.borrow();
+                    (v[0], v[1])
+                };
+                deregister_chunk_buffer(&buf);
+                alloc_seq2(ids.iterate_seq, f_final, val_final)
+            } else if type_id == ids.cycle_seq {
+                // next = Cycle(all, (next current)), wrapping to all at the
+                // end. rt_next may force a lazy tail (allocating), so stage
+                // all/current in a registered chunk buffer first.
+                let buf = std::sync::Arc::new(std::cell::RefCell::new(vec![
+                    unsafe { ptr.add(8).cast::<u64>().read_unaligned() },
+                    unsafe { ptr.add(16).cast::<u64>().read_unaligned() },
+                ]));
+                register_chunk_buffer(&buf);
+                let cur_now = buf.borrow()[1];
+                let n = unsafe { cljvm_rt_next(cur_now) };
+                buf.borrow_mut()[1] = n;
+                let (all_final, n_final) = {
+                    let v = buf.borrow();
+                    (v[0], v[1])
+                };
+                deregister_chunk_buffer(&buf);
+                let next_cur = if matches!(nanbox_tag(n_final), Some(TAG_NIL)) {
+                    all_final
+                } else {
+                    n_final
+                };
+                alloc_seq2(ids.cycle_seq, all_final, next_cur)
             } else if type_id == ids.vector {
                 // Vector → seq of items[1..count): build a cons-list so
                 // callers see a Seq, matching upstream's `RT.next` which
@@ -5251,6 +5744,41 @@ pub unsafe extern "C" fn cljvm_inst_meta(recv_bits: u64) -> u64 {
     }
 }
 
+/// `(.empty coll)` — the empty collection of the same category. Backs
+/// `clojure.core/empty`. Cons-backed lists return nil (the same
+/// empty-list-as-nil compromise as `longrange_build`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_empty(recv: u64) -> u64 {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.vector {
+                return dynobj::roots::gc_enter(1, |heap, _scope| {
+                    heap_alloc(heap, ids.vector as u64, 0).bits()
+                });
+            }
+            if type_id == ids.map {
+                return unsafe { cljvm_phm_create(nanbox_nil()) };
+            }
+            if type_id == ids.set {
+                return unsafe { cljvm_phs_create(nanbox_nil()) };
+            }
+            if type_id == ids.tree_map {
+                return unsafe { cljvm_ptm_create(nanbox_nil()) };
+            }
+            if type_id == ids.tree_set {
+                return unsafe { cljvm_pts_create(nanbox_nil()) };
+            }
+            if type_id == ids.cons || type_id == ids.lazy_seq || type_id == ids.repeat_seq {
+                return nanbox_nil();
+            }
+        }
+    }
+    nanbox_nil()
+}
+
 // ── Constructor externs (`(new ClassName args)`) ──────────────────────
 //
 // One extern per arity (class + N args). Each decodes the Class id off
@@ -5279,23 +5807,17 @@ unsafe fn dispatch_new(class_bits: u64, args: &[u64]) -> u64 {
                 crate::lang::host_class::by_id(crate::lang::host_class::ClassId(raw_id as u16));
             match info.ctor {
                 Some(c) => c(args, ids),
-                None => {
-                    eprintln!(
-                        "[cljvm-stub] (new {} ...) — class has no registered \
-                         constructor, returning nil",
-                        info.name
-                    );
-                    nanbox_nil()
-                }
+                None => panic!(
+                    "clojure-jvm: (new {} ...) — class has no registered \
+                     constructor (add `Some(ctor)` to its `host_class` entry)",
+                    info.name
+                ),
             }
         }
-        _ => {
-            eprintln!(
-                "[cljvm-stub] (new ...) — receiver bits 0x{class_bits:x} is \
-                 not a Class heap pointer, returning nil"
-            );
-            nanbox_nil()
-        }
+        _ => panic!(
+            "clojure-jvm: (new ...) — receiver bits 0x{class_bits:x} is \
+             not a Class heap pointer"
+        ),
     }
 }
 
@@ -5312,6 +5834,182 @@ pub unsafe extern "C" fn cljvm_inst_new_2(class_bits: u64, a: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_new_3(class_bits: u64, a: u64, b: u64) -> u64 {
     unsafe { dispatch_new(class_bits, &[a, b]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_new_4(class_bits: u64, a: u64, b: u64, c: u64) -> u64 {
+    unsafe { dispatch_new(class_bits, &[a, b, c]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_new_5(class_bits: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    unsafe { dispatch_new(class_bits, &[a, b, c, d]) }
+}
+
+// ── clojure.lang.ExceptionInfo ─────────────────────────────────────────
+//
+// The `ex-info`/`ex-data` exception type — a real heap-allocated object
+// (three GC-traced Value slots; offsets in `lang::exception_info`), not a
+// host-side Arc cell. Constructed by the registered host-class ctor
+// (`host_class::exception_info_ctor` → `clj_exception_info_{2,3}`); the
+// slots are read back by the `.getData`/`.getMessage`/`.getCause`
+// instance-method externs below.
+
+/// Allocate a `clojure.lang.ExceptionInfo` cell. Mirrors Java's
+/// `ExceptionInfo(String msg, IPersistentMap data, Throwable cause)`
+/// constructor contract: `data` must be non-nil (Java throws
+/// `IllegalArgumentException("Additional data must be non-nil.")`).
+fn exception_info_alloc(msg_bits: u64, data_bits: u64, cause_bits: u64) -> u64 {
+    use crate::lang::exception_info::{
+        CAUSE_OFFSET, DATA_OFFSET, MESSAGE_OFFSET, STACK_TRACE_OFFSET,
+    };
+    let ids = heap_type_ids();
+    if matches!(nanbox_tag(data_bits), Some(TAG_NIL)) {
+        panic!(
+            "clojure-jvm: IllegalArgumentException — \
+             (new clojure.lang.ExceptionInfo …): Additional data must be non-nil."
+        );
+    }
+    dynobj::roots::gc_enter(5, |heap, scope| {
+        let msg = scope.root::<()>(msg_bits);
+        let data = scope.root::<()>(data_bits);
+        let cause = scope.root::<()>(cause_bits);
+        // The trace slot starts as a zero-length Java-array-as-Vector
+        // (this runtime records no JVM frames — the Throwable contract's
+        // zero-length-array case). `Throwable.getStackTrace` never
+        // returns nil, so the slot is never nil.
+        let trace = heap_alloc(heap, ids.vector as u64, 0).root(scope);
+        let cell = heap_alloc(heap, ids.exception_info as u64, 0).root(scope);
+        let owner_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(owner_bits) as *mut u8;
+        unsafe {
+            write_slot(new_ptr, MESSAGE_OFFSET, msg.get_raw(&*heap));
+            write_slot(new_ptr, DATA_OFFSET, data.get_raw(&*heap));
+            write_slot(new_ptr, CAUSE_OFFSET, cause.get_raw(&*heap));
+            write_slot(new_ptr, STACK_TRACE_OFFSET, trace.get_raw(&*heap));
+        }
+        owner_bits
+    })
+}
+
+/// `(ExceptionInfo. msg data)` — 2-arg constructor (no cause).
+pub fn clj_exception_info_2(msg_bits: u64, data_bits: u64) -> u64 {
+    exception_info_alloc(msg_bits, data_bits, nanbox_nil())
+}
+
+/// `(ExceptionInfo. msg data cause)` — 3-arg constructor.
+pub fn clj_exception_info_3(msg_bits: u64, data_bits: u64, cause_bits: u64) -> u64 {
+    exception_info_alloc(msg_bits, data_bits, cause_bits)
+}
+
+/// Shared receiver check + slot read for the ExceptionInfo accessors.
+/// Panics with a clear message when the receiver is not an
+/// ExceptionInfo — in Java these methods don't exist on other types
+/// (core.clj guards each call site with the matching `instance?` test).
+unsafe fn exception_info_slot(recv_bits: u64, off: usize, method: &str) -> u64 {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv_bits) {
+        let raw = nanbox_payload(recv_bits) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.exception_info {
+                return unsafe { raw.add(off).cast::<u64>().read_unaligned() };
+            }
+        }
+    }
+    panic!(
+        "clojure-jvm: (.{method} x) — receiver is not a \
+         clojure.lang.ExceptionInfo (bits 0x{recv_bits:x})"
+    );
+}
+
+/// `(.getData ex)` — `clojure.lang.IExceptionInfo.getData()`. Backs
+/// `clojure.core/ex-data`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_getData(recv_bits: u64) -> u64 {
+    use crate::lang::exception_info::DATA_OFFSET;
+    unsafe { exception_info_slot(recv_bits, DATA_OFFSET, "getData") }
+}
+
+/// `(.getMessage ex)` — `java.lang.Throwable.getMessage()`. Backs
+/// `clojure.core/ex-message` (ExceptionInfo is our only Throwable-shaped
+/// heap type today; other receivers panic).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_getMessage(recv_bits: u64) -> u64 {
+    use crate::lang::exception_info::MESSAGE_OFFSET;
+    unsafe { exception_info_slot(recv_bits, MESSAGE_OFFSET, "getMessage") }
+}
+
+/// `(.getCause ex)` — `java.lang.Throwable.getCause()`. Backs
+/// `clojure.core/ex-cause`. nil when constructed without a cause.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_getCause(recv_bits: u64) -> u64 {
+    use crate::lang::exception_info::CAUSE_OFFSET;
+    unsafe { exception_info_slot(recv_bits, CAUSE_OFFSET, "getCause") }
+}
+
+/// `(.getStackTrace ex)` — `java.lang.Throwable.getStackTrace()`.
+/// Returns the trace slot's Java-array-as-Vector (zero-length at
+/// construction; whatever `.setStackTrace` stored afterwards). Never nil.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_getStackTrace(recv_bits: u64) -> u64 {
+    use crate::lang::exception_info::STACK_TRACE_OFFSET;
+    unsafe { exception_info_slot(recv_bits, STACK_TRACE_OFFSET, "getStackTrace") }
+}
+
+/// `(.setStackTrace ex trace)` — `java.lang.Throwable.setStackTrace`.
+/// Stores `trace` (a Java-array-as-Vector) into the receiver's trace
+/// slot. Java's contract rejects a null trace array with
+/// NullPointerException; we panic the same way. Returns nil (void).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_setStackTrace(recv_bits: u64, trace_bits: u64) -> u64 {
+    use crate::lang::exception_info::STACK_TRACE_OFFSET;
+    let ids = heap_type_ids();
+    if matches!(nanbox_tag(trace_bits), Some(TAG_NIL)) {
+        panic!(
+            "clojure-jvm: NullPointerException — (.setStackTrace ex trace): \
+             stack trace array must be non-nil"
+        );
+    }
+    if let Some(TAG_PTR) = nanbox_tag(recv_bits) {
+        let raw = nanbox_payload(recv_bits) as *mut u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.exception_info {
+                // Plain slot store: no allocation (and hence no safepoint)
+                // happens between reading `raw` and the write, and the slot
+                // is a declared traced Value field, so the GC scans the new
+                // reference on the next collection.
+                unsafe {
+                    raw.add(STACK_TRACE_OFFSET)
+                        .cast::<u64>()
+                        .write_unaligned(trace_bits);
+                }
+                return nanbox_nil();
+            }
+        }
+    }
+    panic!(
+        "clojure-jvm: (.setStackTrace x trace) — receiver is not a \
+         clojure.lang.ExceptionInfo (bits 0x{recv_bits:x})"
+    );
+}
+
+/// `clojure.lang.RT.seqToTypedArray(ISeq seq)` — backs `into-array`.
+/// Arrays are modeled as Vector cells (the same analog `RT.toArray`
+/// uses), so this is exactly toArray's collection walk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_seqToTypedArray(seq_bits: u64) -> u64 {
+    unsafe { cljvm_rt_toArray(seq_bits) }
+}
+
+/// `clojure.lang.RT.seqToTypedArray(Class type, ISeq seq)` — the typed
+/// 2-arity. Our Vector cells are untyped, so the component-type argument
+/// is accepted and unused (Java uses it only to pick the array's
+/// component class; element values are unchanged either way).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_seqToTypedArray2(_type_bits: u64, seq_bits: u64) -> u64 {
+    unsafe { cljvm_rt_toArray(seq_bits) }
 }
 
 /// `(.cast c x)` — Java's `Class.cast`. Returns `x` if `x` is an
@@ -5343,45 +6041,23 @@ pub unsafe extern "C" fn cljvm_inst_cast(c_bits: u64, x_bits: u64) -> u64 {
 /// For non-variadic fns: arg count must equal `fixed_arity`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_applyTo(fn_bits: u64, args_bits: u64) -> u64 {
-    let ids = heap_type_ids();
-    // Coerce non-cons seqables (Vector, etc.) into a cons-list.
-    let coerced = match nanbox_tag(args_bits) {
-        Some(TAG_NIL) => args_bits,
-        Some(TAG_PTR) => {
-            let p = nanbox_payload(args_bits) as *const u8;
-            if p.is_null() {
-                args_bits
-            } else {
-                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                if tid == ids.cons {
-                    args_bits
-                } else {
-                    unsafe { cljvm_rt_seq(args_bits) }
-                }
-            }
-        }
+    // Realize ALL args via the generic GC-safe seq walk — RT.cons stores
+    // ISeq tails unforced now, so an apply args-chain may carry lazy
+    // rests; the old raw cons walk silently truncated at the first one
+    // (dropping the variadic tail of e.g. `load-libs`' interleave opts).
+    // Forcing runs JIT thunks that may GC, and `fn_bits` is a bare
+    // extern-arg copy the collector cannot update — root it in a
+    // registered chunk buffer across the walk and re-read it after.
+    let fnbuf = std::sync::Arc::new(std::cell::RefCell::new(vec![fn_bits]));
+    register_chunk_buffer(&fnbuf);
+    let walked: Vec<u64> = match nanbox_tag(args_bits) {
+        Some(TAG_NIL) | Some(TAG_PTR) => unsafe { seq_to_items(args_bits) },
         _ => panic!("clojure-jvm: applyTo: args must be a seqable, got bits 0x{args_bits:x}"),
     };
-    // Walk all args from the cons-chain.
-    let mut walked: Vec<u64> = Vec::new();
-    let mut cur = coerced;
-    loop {
-        match nanbox_tag(cur) {
-            Some(TAG_NIL) => break,
-            Some(TAG_PTR) => {
-                let p = nanbox_payload(cur) as *const u8;
-                if p.is_null() {
-                    break;
-                }
-                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                if tid != ids.cons {
-                    break;
-                }
-                walked.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-            }
-            _ => break,
-        }
+    let fn_bits = fnbuf.borrow()[0];
+    deregister_chunk_buffer(&fnbuf);
+    if let Some(r) = unsafe { try_multifn_invoke(fn_bits, &walked) } {
+        return r;
     }
 
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, walked.len()) };
@@ -5525,6 +6201,16 @@ fn format_object_for_str(obj: &Object) -> String {
             format!("#{{{}}}", items.join(" "))
         }
         Object::WithMeta(inner, _) => format_object_for_str(inner),
+        // Java `Var.toString()`: `#'ns/sym` when interned, else
+        // `#<Var: sym-or---unnamed-->`. `(pr-str (def x 5))` must print
+        // `#'user/x` like real Clojure, not a Rust Debug dump.
+        Object::Var(v) => match (&v.ns, &v.sym) {
+            (Some(ns), Some(sym)) => {
+                format!("#'{}/{}", ns.name.get_name(), sym.get_name())
+            }
+            (_, Some(sym)) => format!("#<Var: {}>", sym.get_name()),
+            _ => "#<Var: --unnamed-->".to_string(),
+        },
         other => format!("{other:?}"),
     }
 }
@@ -6073,6 +6759,11 @@ pub unsafe extern "C" fn cljvm_inst_getName(recv_bits: u64) -> u64 {
             as *const crate::lang::keyword::Keyword;
         let k: &crate::lang::keyword::Keyword = unsafe { &*arc_ptr };
         k.get_name().to_string()
+    } else if type_id == ids.with_meta {
+        // Metadata wrapper (e.g. defmulti's ^{:doc …} name symbol) —
+        // names ignore meta; recurse on the inner value.
+        let inner = unsafe { raw.add(8).cast::<u64>().read_unaligned() };
+        return unsafe { cljvm_inst_getName(inner) };
     } else {
         let decoded = unsafe { heap_bits_to_object(recv_bits, ids) };
         panic!(
@@ -6233,6 +6924,497 @@ pub unsafe extern "C" fn cljvm_str_reverse(s_bits: u64) -> u64 {
     let s = read_string_heap(s_bits, ids, "string/reverse");
     let r: String = s.chars().rev().collect();
     alloc_string_heap(&r, ids)
+}
+/// Left-trim whitespace. Backs `clojure.string/triml`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_str_triml(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "string/triml");
+    alloc_string_heap(s.trim_start(), ids)
+}
+/// Right-trim whitespace. Backs `clojure.string/trimr`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_str_trimr(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "string/trimr");
+    alloc_string_heap(s.trim_end(), ids)
+}
+
+/// `clojure.string.Native/split(s, re)` — split String `s` on regex `re`,
+/// returning a Vector of Strings. Backs `clojure.string/split` (the shim
+/// passes the reader's regex literal through; our reader models `#"…"` as
+/// a plain String of the pattern source). Mirrors Java's
+/// `Pattern.split(s)` with limit 0: if the pattern never matches the
+/// whole input is returned as a single element, otherwise trailing empty
+/// strings are removed (possibly leaving an empty vector). The pattern is
+/// compiled by the Rust `regex` crate — the common Java syntax subset
+/// (literals, classes, `\d`/`\s`/`\w`, anchors, quantifiers, alternation)
+/// matches; an unsupported pattern panics loudly with the compile error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_string_split(s_bits: u64, re_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    // Copy both heap strings into Rust-owned values BEFORE any allocation:
+    // read_string_heap returns a borrow into the (movable) heap cell.
+    let s: String = read_string_heap(s_bits, ids, "clojure.string/split — s").to_string();
+    let pat: String = read_string_heap(re_bits, ids, "clojure.string/split — re").to_string();
+    let re = regex::Regex::new(&pat).unwrap_or_else(|e| {
+        panic!("clojure-jvm: clojure.string/split — cannot compile regex #\"{pat}\": {e}")
+    });
+    let mut parts: Vec<String> = re.split(&s).map(|p| p.to_string()).collect();
+    if parts.len() > 1 {
+        while parts.last().map(|p| p.is_empty()).unwrap_or(false) {
+            parts.pop();
+        }
+    }
+    // Allocate each piece as a String cell, rooting the accumulated cells
+    // across subsequent allocations, then build the result Vector.
+    let n = parts.len();
+    dynobj::roots::gc_enter(n + 1, |heap, scope| {
+        let mut roots: Vec<dynobj::roots::Rooted<()>> = Vec::with_capacity(n);
+        for p in &parts {
+            let bits = unsafe { alloc_string_heap(p, ids) };
+            roots.push(scope.root::<()>(bits));
+        }
+        let cell = heap_alloc(heap, ids.vector as u64, n as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(cell_bits) as *mut u8;
+        for (i, r) in roots.iter().enumerate() {
+            unsafe {
+                write_slot(new_ptr, 16 + i * 8, r.get_raw(&*heap));
+            }
+        }
+        cell_bits
+    })
+}
+
+// ── java.util.regex.Pattern / Matcher ─────────────────────────────────
+//
+// Our reader models `#"…"` as a plain String of the pattern source, and
+// `re-pattern` treats Strings as already-compiled Patterns (the
+// registered `java.util.regex.Pattern` class predicate accepts strings).
+// `(.matcher re s)` builds a Rust-side `MatcherState` (regex crate);
+// `.find`/`.matches`/`.group`/`.groupCount` drive it, which makes the
+// upstream `re-find`/`re-seq`/`re-matches`/`re-groups` definitions work
+// as written.
+
+/// Rust-side state behind a `java.util.regex.Matcher` cell. Holds owned
+/// copies only (no heap bits), so no GC root registry is needed.
+pub struct MatcherState {
+    re: regex::Regex,
+    /// Lazily-built fully-anchored variant for `.matches`.
+    full_re: Option<regex::Regex>,
+    hay: String,
+    pos: usize,
+    /// Byte ranges of the last successful match's groups (0 = whole).
+    groups: Option<Vec<Option<(usize, usize)>>>,
+}
+
+fn compile_regex(pat: &str) -> regex::Regex {
+    regex::Regex::new(pat).unwrap_or_else(|e| {
+        panic!("clojure-jvm: cannot compile regex #\"{pat}\": {e}")
+    })
+}
+
+/// `java.util.regex.Pattern/compile(s)` — patterns ARE strings here;
+/// validate eagerly (so a bad pattern fails at compile-site like Java)
+/// and return the string unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_pattern_compile(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let pat = read_string_heap(s_bits, ids, "Pattern/compile");
+    let _ = compile_regex(pat);
+    s_bits
+}
+
+/// `(.matcher re s)` — allocate a Matcher cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_matcher(re_bits: u64, s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let pat = read_string_heap(re_bits, ids, "(.matcher re s) — pattern").to_string();
+    let hay = read_string_heap(s_bits, ids, "(.matcher re s) — input").to_string();
+    let st = std::sync::Arc::new(std::cell::RefCell::new(MatcherState {
+        re: compile_regex(&pat),
+        full_re: None,
+        hay,
+        pos: 0,
+        groups: None,
+    }));
+    unsafe {
+        alloc_arc_cell(
+            ids.matcher,
+            st,
+            crate::lang::compiler::with_active_session_root_matcher,
+        )
+    }
+}
+
+unsafe fn decode_matcher(recv: u64, ctx: &str) -> std::sync::Arc<std::cell::RefCell<MatcherState>> {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.matcher {
+                return unsafe { decode_arc_cell(raw) };
+            }
+        }
+    }
+    panic!("clojure-jvm: {ctx} — receiver is not a Matcher (bits 0x{recv:x})");
+}
+
+/// Owned snapshot of a match: per-group byte ranges (0 = whole).
+fn capture_ranges(caps: &regex::Captures<'_>) -> Vec<Option<(usize, usize)>> {
+    (0..caps.len())
+        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+        .collect()
+}
+
+fn record_captures(st: &mut MatcherState, ranges: Vec<Option<(usize, usize)>>) {
+    let (start, end) = ranges[0].expect("group 0 always present");
+    st.groups = Some(ranges);
+    // Advance past the match; an empty match advances one char so the
+    // scan terminates (Java does the same).
+    st.pos = if end > start {
+        end
+    } else {
+        let mut p = end + 1;
+        while p < st.hay.len() && !st.hay.is_char_boundary(p) {
+            p += 1;
+        }
+        p
+    };
+}
+
+/// `(.find m)` — advance to the next match; true on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_find_next(recv: u64) -> u64 {
+    let cell = unsafe { decode_matcher(recv, "(.find m)") };
+    let mut st = cell.borrow_mut();
+    if st.pos > st.hay.len() {
+        st.groups = None;
+        return nanbox_bool(false);
+    }
+    let ranges = {
+        let MatcherState { re, hay, pos, .. } = &*st;
+        re.captures_at(hay, *pos).map(|c| capture_ranges(&c))
+    };
+    match ranges {
+        Some(r) => {
+            record_captures(&mut st, r);
+            nanbox_bool(true)
+        }
+        None => {
+            st.groups = None;
+            st.pos = st.hay.len() + 1;
+            nanbox_bool(false)
+        }
+    }
+}
+
+/// `(.matches m)` — does the regex match the ENTIRE input?
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_matches(recv: u64) -> u64 {
+    let cell = unsafe { decode_matcher(recv, "(.matches m)") };
+    let mut st = cell.borrow_mut();
+    if st.full_re.is_none() {
+        let anchored = format!(r"\A(?:{})\z", st.re.as_str());
+        st.full_re = Some(compile_regex(&anchored));
+    }
+    let ranges = {
+        let MatcherState { full_re, hay, .. } = &*st;
+        full_re.as_ref().unwrap().captures(hay).map(|c| capture_ranges(&c))
+    };
+    match ranges {
+        Some(r) => {
+            record_captures(&mut st, r);
+            nanbox_bool(true)
+        }
+        None => {
+            st.groups = None;
+            nanbox_bool(false)
+        }
+    }
+}
+
+unsafe fn matcher_group(recv: u64, idx: usize) -> u64 {
+    let ids = heap_type_ids();
+    let cell = unsafe { decode_matcher(recv, "(.group m i)") };
+    let piece: Option<String> = {
+        let st = cell.borrow();
+        let groups = st
+            .groups
+            .as_ref()
+            .unwrap_or_else(|| panic!("clojure-jvm: (.group m) — no match available"));
+        groups
+            .get(idx)
+            .unwrap_or_else(|| panic!("clojure-jvm: (.group m {idx}) — no such group"))
+            .map(|(a, b)| st.hay[a..b].to_string())
+    };
+    match piece {
+        Some(p) => unsafe { alloc_string_heap(&p, ids) },
+        None => nanbox_nil(),
+    }
+}
+
+/// `(.group m)` — the whole last match.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_group_0(recv: u64) -> u64 {
+    unsafe { matcher_group(recv, 0) }
+}
+/// `(.group m i)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_group_i(recv: u64, idx_bits: u64) -> u64 {
+    unsafe { matcher_group(recv, arg_to_i64(idx_bits) as usize) }
+}
+/// `(.groupCount m)` — number of capture groups (excluding group 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_groupCount(recv: u64) -> u64 {
+    let cell = unsafe { decode_matcher(recv, "(.groupCount m)") };
+    let n = cell.borrow().re.captures_len() - 1;
+    unsafe { box_long(n as i64) }
+}
+
+/// `String/format(fmt, args-array)` — a printf subset (`%s` `%d` `%f`
+/// `%x` `%%`) sufficient for `clojure.core/format`'s common uses. The
+/// args arrive as our Vector (to-array's result). Unsupported directives
+/// panic loudly.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_string_format(fmt_bits: u64, args_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let fmt = read_string_heap(fmt_bits, ids, "String/format — fmt").to_string();
+    // Snapshot arg bits out of the vector (no allocation between the
+    // reads and each use's decode — decodes don't allocate; only the
+    // final string alloc does, after all reads).
+    let mut args: Vec<u64> = Vec::new();
+    if let Some(TAG_PTR) = nanbox_tag(args_bits) {
+        let raw = nanbox_payload(args_bits) as *const u8;
+        if !raw.is_null() {
+            let tid = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if tid == ids.vector {
+                let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
+                for i in 0..n {
+                    args.push(unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() });
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    let mut ai = 0;
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('s') => {
+                let a = args.get(ai).copied().unwrap_or_else(|| {
+                    panic!("clojure-jvm: format — missing argument for %s")
+                });
+                ai += 1;
+                let obj = any_bits_to_object(a, ids);
+                out.push_str(&format_object_for_str(&obj));
+            }
+            Some('d') => {
+                let a = args.get(ai).copied().unwrap_or_else(|| {
+                    panic!("clojure-jvm: format — missing argument for %d")
+                });
+                ai += 1;
+                out.push_str(&arg_to_i64(a).to_string());
+            }
+            Some('f') => {
+                let a = args.get(ai).copied().unwrap_or_else(|| {
+                    panic!("clojure-jvm: format — missing argument for %f")
+                });
+                ai += 1;
+                out.push_str(&format!("{:.6}", arg_to_f64(a)));
+            }
+            Some('x') => {
+                let a = args.get(ai).copied().unwrap_or_else(|| {
+                    panic!("clojure-jvm: format — missing argument for %x")
+                });
+                ai += 1;
+                out.push_str(&format!("{:x}", arg_to_i64(a)));
+            }
+            other => panic!(
+                "clojure-jvm: format — unsupported directive %{} (extend cljvm_string_format)",
+                other.map(String::from).unwrap_or_default()
+            ),
+        }
+    }
+    unsafe { alloc_string_heap(&out, ids) }
+}
+
+// ── Transducers: TransformerIterator / sequence ───────────────────────
+
+/// `clojure.lang.RT/iter(coll)` — Java returns an Iterator; our
+/// TransformerIterator driver consumes the coll directly, so this is
+/// the identity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_iter(coll_bits: u64) -> u64 {
+    coll_bits
+}
+
+/// `clojure.lang.RT/chunkIteratorSeq(it)` — our TransformerIterator
+/// "iterator" is already the realized result seq; identity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_chunk_iterator_seq(bits: u64) -> u64 {
+    bits
+}
+
+/// `clojure.lang.TransformerIterator/create(xform, coll)` — drives the
+/// transducer protocol for `(sequence xform coll)` (and through it
+/// `dedupe`, `eduction`-style uses):
+///
+///   rf2 = (xform conj)          ; conj is the appending reducing fn
+///   acc = []                    ; fold every element
+///   acc = (rf2 acc x) …         ; unwrap (reduced v) and stop early
+///   acc = (rf2 acc)             ; completion arity
+///   → (seq acc)
+///
+/// EAGER over the (realized) input — Java's TransformerIterator is
+/// incremental, so `(sequence xform infinite)` hangs here instead of
+/// streaming. Correct for every finite input.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_transformer_iterator_create(xform_bits: u64, coll_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    // Stage everything GC-reachable in one registered chunk buffer:
+    // [xform, rf2, acc, item0..itemN]. Every invoke below may GC.
+    let buf = std::sync::Arc::new(std::cell::RefCell::new(vec![xform_bits, 0, 0]));
+    register_chunk_buffer(&buf);
+    let items = unsafe { seq_to_items(coll_bits) };
+    let n = items.len();
+    buf.borrow_mut().extend_from_slice(&items);
+    drop(items);
+
+    let conj_bits = crate::lang::compiler::resolve_core_fn_bits("conj");
+    let rf2 = unsafe { cljvm_rt_invoke_1(buf.borrow()[0], conj_bits) };
+    buf.borrow_mut()[1] = rf2;
+    // acc = [] — empty vector.
+    let empty_vec = dynobj::roots::gc_enter(1, |heap, _scope| {
+        heap_alloc(heap, ids.vector as u64, 0).bits()
+    });
+    buf.borrow_mut()[2] = empty_vec;
+
+    for i in 0..n {
+        let (rf2_now, acc_now, item_now) = {
+            let v = buf.borrow();
+            (v[1], v[2], v[3 + i])
+        };
+        let next_acc = unsafe { cljvm_rt_invoke_2(rf2_now, acc_now, item_now) };
+        // (reduced v) → unwrap and stop.
+        if let Some(TAG_PTR) = nanbox_tag(next_acc) {
+            let raw = nanbox_payload(next_acc) as *const u8;
+            if !raw.is_null() {
+                let tid = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+                if tid == ids.reduced {
+                    buf.borrow_mut()[2] = unsafe { reduced_value(next_acc) };
+                    break;
+                }
+            }
+        }
+        buf.borrow_mut()[2] = next_acc;
+    }
+    // Completion arity.
+    let (rf2_now, acc_now) = {
+        let v = buf.borrow();
+        (v[1], v[2])
+    };
+    let done = unsafe { cljvm_rt_invoke_1(rf2_now, acc_now) };
+    buf.borrow_mut()[2] = done;
+    let final_acc = buf.borrow()[2];
+    let out = unsafe { cljvm_rt_seq(final_acc) };
+    deregister_chunk_buffer(&buf);
+    out
+}
+
+// ── Murmur3 / hasheq ───────────────────────────────────────────────────
+//
+// Faithful port of Clojure's Murmur3.java (the x86 32-bit variant with
+// seed 0) — `hasheq` is Murmur3-based and DIFFERS from `hashCode`
+// (`util_hash_bits`), which `case*` and Java-interop hashing use. Both
+// must exist; do not unify them.
+
+fn m3_mix_k1(k1: i32) -> i32 {
+    k1.wrapping_mul(0xcc9e2d51u32 as i32)
+        .rotate_left(15)
+        .wrapping_mul(0x1b873593u32 as i32)
+}
+fn m3_mix_h1(h1: i32, k1: i32) -> i32 {
+    (h1 ^ k1)
+        .rotate_left(13)
+        .wrapping_mul(5)
+        .wrapping_add(0xe6546b64u32 as i32)
+}
+fn m3_fmix(mut h1: i32, len: i32) -> i32 {
+    h1 ^= len;
+    h1 ^= ((h1 as u32) >> 16) as i32;
+    h1 = h1.wrapping_mul(0x85ebca6bu32 as i32);
+    h1 ^= ((h1 as u32) >> 13) as i32;
+    h1 = h1.wrapping_mul(0xc2b2ae35u32 as i32);
+    h1 ^= ((h1 as u32) >> 16) as i32;
+    h1
+}
+fn m3_hash_int(input: i32) -> i32 {
+    if input == 0 {
+        return 0;
+    }
+    m3_fmix(m3_mix_h1(0, m3_mix_k1(input)), 4)
+}
+fn m3_hash_long(input: i64) -> i32 {
+    if input == 0 {
+        return 0;
+    }
+    let low = input as i32;
+    let high = ((input as u64) >> 32) as i32;
+    let h1 = m3_mix_h1(0, m3_mix_k1(low));
+    m3_fmix(m3_mix_h1(h1, m3_mix_k1(high)), 8)
+}
+
+/// `clojure.lang.Util/hasheq(x)` — backs `clojure.core/hash`. Covers the
+/// scalar types; collections/keywords panic with a clear message until
+/// their (ordered/unordered Murmur3) formulas are ported.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_util_hasheq(bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let h: i32 = match nanbox_tag(bits) {
+        Some(TAG_NIL) => 0,
+        Some(TAG_BOOL) => {
+            if nanbox_payload(bits) != 0 {
+                1231
+            } else {
+                1237
+            }
+        }
+        None => {
+            // Double — hasheq = Double.hashCode().
+            let d = f64::from_bits(bits);
+            let b = d.to_bits() as i64;
+            (b ^ ((b as u64 >> 32) as i64)) as i32
+        }
+        Some(TAG_PTR) => {
+            let raw = nanbox_payload(bits) as *const u8;
+            if raw.is_null() {
+                0
+            } else {
+                let tid = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+                if tid == ids.long {
+                    m3_hash_long(unsafe { raw.add(8).cast::<i64>().read_unaligned() })
+                } else if tid == ids.string {
+                    let st = unsafe { read_string_heap(bits, ids, "Util/hasheq — string") };
+                    m3_hash_int(java_string_hash_code(st))
+                } else {
+                    panic!(
+                        "clojure-jvm: Util/hasheq — receiver type_id {tid} not yet \
+                         ported (collections/keywords need hashOrdered/hashUnordered)"
+                    );
+                }
+            }
+        }
+        _ => panic!("clojure-jvm: Util/hasheq — unsupported NanBox tag"),
+    };
+    unsafe { box_long(h as i64) }
 }
 
 /// `(.lastIndexOf s sub)` — byte index of the LAST occurrence of String
@@ -6466,6 +7648,15 @@ fn walk_seq_into_roots<'scope>(
                     }
                     let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
                     if tid != ids.cons {
+                        // Unforced lazy (or Repeat/Iterate/Cycle) tail —
+                        // keep walking through it instead of truncating.
+                        walk_seq_into_roots(
+                            cur_root.get_raw(&*heap).bits(),
+                            ids,
+                            heap,
+                            scope,
+                            out,
+                        );
                         break;
                     }
                     out.push(scope.root::<()>(unsafe { p.add(8).cast::<u64>().read_unaligned() }));
@@ -6483,8 +7674,27 @@ fn walk_seq_into_roots<'scope>(
                         }),
                     );
                 }
+            } else if tid == ids.lazy_seq
+                || tid == ids.repeat_seq
+                || tid == ids.iterate_seq
+                || tid == ids.cycle_seq
+            {
+                // A seq-typed value: force one step and walk the result.
+                // Empty (nil) contributes NOTHING — pushing the cell
+                // itself here used to inject a phantom element (odd-length
+                // binding vectors out of `~@(interleave …)`).
+                let coerced = heap_seq(heap, seq_root);
+                let s_root = coerced.root(scope);
+                let s_bits = s_root.get_raw(&*heap).bits();
+                if !matches!(nanbox_tag(s_bits), Some(TAG_NIL))
+                    && s_bits != seq_root.get_raw(&*heap).bits()
+                {
+                    walk_seq_into_roots(s_bits, ids, heap, scope, out);
+                }
             } else {
-                // Coerce via cljvm_rt_seq, then walk the result.
+                // Coerce via cljvm_rt_seq, then walk the result; a value
+                // that does not coerce to a seq is appended as a single
+                // element (concat behavior on non-seq args).
                 let coerced = heap_seq(heap, seq_root);
                 let s_root = coerced.root(scope);
                 if !matches!(nanbox_tag(s_root.get_raw(&*heap).bits()), Some(TAG_NIL))
@@ -6536,6 +7746,72 @@ thread_local! {
     /// pointers. Same unrooted-cache hazard as `LazyState`.
     static CHUNK_REGISTRY: std::cell::RefCell<Vec<std::sync::Arc<std::cell::RefCell<Vec<u64>>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// `Atom`/`Volatile` reference cells: the held value is a NaN-boxed
+    /// heap pointer cached Rust-side. Same unrooted-cache hazard as
+    /// `LazyState` — every live `RefState` is scanned/forwarded by the GC.
+    static REF_REGISTRY: std::cell::RefCell<Vec<std::sync::Arc<std::cell::RefCell<RefState>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// `MultiFn` cells: dispatch fn / default / method table, all
+    /// NaN-boxed heap values cached Rust-side.
+    static MULTIFN_REGISTRY: std::cell::RefCell<Vec<std::sync::Arc<std::cell::RefCell<MultiFnState>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register a freshly-created `MultiFnState` for GC scanning.
+pub fn register_multifn_state(arc: &std::sync::Arc<std::cell::RefCell<MultiFnState>>) {
+    MULTIFN_REGISTRY.with(|r| r.borrow_mut().push(arc.clone()));
+}
+
+/// The mutable state behind an `Atom` or `Volatile` cell.
+pub struct RefState {
+    pub value_bits: u64,
+}
+
+/// The state behind a `clojure.lang.MultiFn` cell: dispatch fn, default
+/// dispatch value, and the (dispatch-value, method-fn) table. Every u64
+/// here is a NaN-box that may point into the GC heap — all are scanned
+/// and forwarded via the MULTIFN registry.
+pub struct MultiFnState {
+    pub name: String,
+    pub dispatch_bits: u64,
+    pub default_bits: u64,
+    pub methods: Vec<(u64, u64)>,
+}
+
+/// Register a freshly-created `RefState` so its held value is
+/// scanned/forwarded by the GC. Must be called for every Atom/Volatile cell.
+pub fn register_ref_state(arc: &std::sync::Arc<std::cell::RefCell<RefState>>) {
+    REF_REGISTRY.with(|r| r.borrow_mut().push(arc.clone()));
+}
+
+/// Shared `(new Atom x)` / `(new Volatile x)` constructor body.
+fn ref_ctor(args: &[u64], type_id: usize, class: &str) -> u64 {
+    if args.len() != 1 {
+        panic!(
+            "clojure-jvm: (new clojure.lang.{class} …) — only the 1-arg \
+             constructor is supported, got {} args",
+            args.len()
+        );
+    }
+    let arc = std::sync::Arc::new(std::cell::RefCell::new(RefState { value_bits: args[0] }));
+    register_ref_state(&arc);
+    unsafe {
+        alloc_arc_cell(
+            type_id,
+            arc,
+            crate::lang::compiler::with_active_session_root_ref,
+        )
+    }
+}
+
+/// `(clojure.lang.Atom. x)` — backs `clojure.core/atom`.
+pub fn atom_ctor(args: &[u64], ids: HeapTypeIds) -> u64 {
+    ref_ctor(args, ids.atom, "Atom")
+}
+
+/// `(clojure.lang.Volatile. x)` — backs `clojure.core/volatile!`.
+pub fn volatile_ctor(args: &[u64], ids: HeapTypeIds) -> u64 {
+    ref_ctor(args, ids.volatile_cell, "Volatile")
 }
 
 /// Register a freshly-created `LazyState` so its cached heap pointers are
@@ -6587,6 +7863,28 @@ impl dynobj::RootSource for LazyRootSource {
                     let v = &mut *p;
                     for i in 0..v.len() {
                         visitor(std::ptr::addr_of_mut!(v[i]));
+                    }
+                }
+            }
+        });
+        REF_REGISTRY.with(|r| {
+            for arc in r.borrow().iter() {
+                let p = arc.as_ptr();
+                unsafe {
+                    visitor(std::ptr::addr_of_mut!((*p).value_bits));
+                }
+            }
+        });
+        MULTIFN_REGISTRY.with(|r| {
+            for arc in r.borrow().iter() {
+                let p = arc.as_ptr();
+                unsafe {
+                    visitor(std::ptr::addr_of_mut!((*p).dispatch_bits));
+                    visitor(std::ptr::addr_of_mut!((*p).default_bits));
+                    let methods = &mut (*p).methods;
+                    for pair in methods.iter_mut() {
+                        visitor(std::ptr::addr_of_mut!(pair.0));
+                        visitor(std::ptr::addr_of_mut!(pair.1));
                     }
                 }
             }
@@ -6949,6 +8247,25 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
             "clojure-jvm: (.withMeta x m) — receiver bits 0x{recv_bits:x} \
              is an immediate that does not carry metadata"
         );
+    }
+    // `(.withMeta x nil)`: dropping metadata. A bare (unwrapped, non-cons)
+    // receiver carries none — return it unchanged; an existing WithMeta
+    // wrapper unwraps to its inner value. This keeps the common
+    // `(with-meta ret (meta m))` tail of select-keys/update-vals from
+    // wrapping plain maps in WithMeta cells that the seq walks would
+    // then have to unwrap.
+    if matches!(nanbox_tag(meta_bits), Some(TAG_NIL)) {
+        let ids2 = heap_type_ids();
+        let raw = nanbox_payload(recv_bits) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids2.with_meta {
+                return unsafe { raw.add(8).cast::<u64>().read_unaligned() };
+            }
+            if type_id != ids2.cons {
+                return recv_bits;
+            }
+        }
     }
     dynobj::roots::gc_enter(3, |heap, scope| {
         let recv = scope.root::<()>(recv_bits);

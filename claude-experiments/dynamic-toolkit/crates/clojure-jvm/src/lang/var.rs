@@ -193,6 +193,17 @@ impl Var {
         self.is_macro.load(Ordering::Acquire)
     }
 
+    /// Java: `Var.hasRoot()` — has this Var ever been bound? A never-bound
+    /// Var sits at its initial `VarRoot::Object(Object::Nil)`; any
+    /// `bind_root` (including binding nil) moves it to `Slot` (or a
+    /// non-nil Rust-side `Object`). Backs `defonce`.
+    pub fn has_root(&self) -> bool {
+        match &*self.root.read().unwrap() {
+            VarRoot::Slot => true,
+            VarRoot::Object(o) => !matches!(o, crate::lang::object::Object::Nil),
+        }
+    }
+
     /// `Var.intern(Namespace, Symbol)` — interns (or finds) a Var in the
     /// given namespace.
     pub fn intern_sym(ns: Arc<Namespace>, sym: Arc<Symbol>) -> Arc<Self> {

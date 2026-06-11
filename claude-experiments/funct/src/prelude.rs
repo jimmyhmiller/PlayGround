@@ -72,8 +72,8 @@ pub fn install(vm: &mut Funct) {
         match &args[0] {
             Value::List(items) => {
                 let mut out = (**items).clone();
-                out.push(args[1].clone());
-                Ok(Value::list(out))
+                out.push_back(args[1].clone());
+                Ok(Value::list_v(out))
             }
             other => Err(Fault::new(format!("push: expected List, got {}", other.type_name()))),
         }
@@ -438,7 +438,7 @@ fn install_collections(vm: &mut Funct) {
     vm.register_raw("first", |_vm, args| {
         expect_arity("first", &args, 1)?;
         match &args[0] {
-            Value::List(items) => Ok(items.first().cloned().map(Value::some).unwrap_or_else(Value::none)),
+            Value::List(items) => Ok(items.front().cloned().map(Value::some).unwrap_or_else(Value::none)),
             other => Err(Fault::new(format!("first: expected List, got {}", other.type_name()))),
         }
     });
@@ -463,7 +463,9 @@ fn install_collections(vm: &mut Funct) {
                 if items.is_empty() {
                     return Err(Fault::new("pop: list is empty"));
                 }
-                Ok(Value::list(items[..items.len() - 1].to_vec()))
+                let mut out = (**items).clone();
+                out.pop_back();
+                Ok(Value::list_v(out))
             }
             other => Err(Fault::new(format!("pop: expected List, got {}", other.type_name()))),
         }
@@ -474,7 +476,7 @@ fn install_collections(vm: &mut Funct) {
             (Value::List(items), Value::Int(i)) if *i >= 0 && (*i as usize) <= items.len() => {
                 let mut out = (**items).clone();
                 out.insert(*i as usize, args[2].clone());
-                Ok(Value::list(out))
+                Ok(Value::list_v(out))
             }
             (Value::List(items), Value::Int(i)) => Err(Fault::new(format!(
                 "insert_at: index {} out of bounds (length {})",
@@ -490,7 +492,7 @@ fn install_collections(vm: &mut Funct) {
             (Value::List(items), Value::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
                 let mut out = (**items).clone();
                 out.remove(*i as usize);
-                Ok(Value::list(out))
+                Ok(Value::list_v(out))
             }
             (Value::List(items), Value::Int(i)) => Err(Fault::new(format!(
                 "remove_at: index {} out of bounds (length {})",
@@ -504,7 +506,7 @@ fn install_collections(vm: &mut Funct) {
         expect_arity("sort", &args, 1)?;
         match &args[0] {
             Value::List(items) => {
-                let mut out = (**items).clone();
+                let mut out: Vec<Value> = items.iter().cloned().collect();
                 sort_values("sort", &mut out)?;
                 Ok(Value::list(out))
             }
@@ -547,9 +549,9 @@ fn install_collections(vm: &mut Funct) {
         expect_arity("dissoc", &args, 2)?;
         match (&args[0], &args[1]) {
             (Value::Record(r), Value::Str(k)) => {
-                let mut out = (**r).clone();
+                let mut out = r.clone();
                 out.remove(&**k);
-                Ok(Value::record(out))
+                Ok(Value::Record(out))
             }
             (a, b) => Err(Fault::new(format!("dissoc: expected (Record, Str), got ({}, {})", a.type_name(), b.type_name()))),
         }
@@ -558,11 +560,11 @@ fn install_collections(vm: &mut Funct) {
         expect_arity("merge", &args, 2)?;
         match (&args[0], &args[1]) {
             (Value::Record(a), Value::Record(b)) => {
-                let mut out = (**a).clone();
+                let mut out = a.clone();
                 for (k, v) in b.iter() {
                     out.insert(k.clone(), v.clone());
                 }
-                Ok(Value::record(out))
+                Ok(Value::Record(out))
             }
             (a, b) => Err(Fault::new(format!("merge: expected (Record, Record), got ({}, {})", a.type_name(), b.type_name()))),
         }
@@ -635,15 +637,15 @@ fn get_key(container: &Value, key: &Value) -> Result<Option<Value>, Fault> {
 fn assoc_key(container: &Value, key: &Value, v: Value) -> Result<Value, Fault> {
     match (container, key) {
         (Value::Record(r), Value::Str(k)) => {
-            let mut out = (**r).clone();
+            let mut out = r.clone();
             out.insert(k.to_string(), v);
-            Ok(Value::record(out))
+            Ok(Value::Record(out))
         }
         (Value::List(items), Value::Int(i)) => {
             if *i >= 0 && (*i as usize) < items.len() {
                 let mut out = (**items).clone();
                 out[*i as usize] = v;
-                Ok(Value::list(out))
+                Ok(Value::list_v(out))
             } else {
                 Err(Fault::new(format!("assoc: index {} out of bounds (length {})", i, items.len())))
             }
@@ -658,7 +660,7 @@ fn assoc_key(container: &Value, key: &Value, v: Value) -> Result<Value, Fault> {
 
 fn path_keys(path: &Value) -> Result<Vec<Value>, Fault> {
     match path {
-        Value::List(items) => Ok((**items).clone()),
+        Value::List(items) => Ok(items.iter().cloned().collect()),
         other => Err(Fault::new(format!("path must be a List of keys, got {}", other.type_name()))),
     }
 }

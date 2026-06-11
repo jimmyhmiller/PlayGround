@@ -381,6 +381,24 @@ impl Heap {
         }
     }
 
+    /// Run `f` while holding the threads lock, but only if no collection
+    /// window is open; returns `false` (without running `f`) otherwise.
+    ///
+    /// Collectors raise `gc_requested` under this same lock before
+    /// sampling thread states, so a state transition performed inside `f`
+    /// is atomic w.r.t. the collector's safepoint census: if
+    /// `gc_requested` is still clear while we hold the lock, no in-flight
+    /// collection has sampled (or will sample) the caller's pre-transition
+    /// state. Same pattern as `register_thread` / `safe_deregister_thread`.
+    pub fn transition_outside_gc(&self, f: impl FnOnce()) -> bool {
+        let _threads = self.threads.lock().unwrap();
+        if self.gc_requested() || self.barriers_active() {
+            return false;
+        }
+        f();
+        true
+    }
+
     /// Deregister a mutator thread by its ThreadState pointer.
     ///
     /// The thread must not be running mutator code when this is called.

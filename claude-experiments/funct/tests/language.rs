@@ -51,10 +51,13 @@ fn numeric_separators() {
 #[test]
 fn strings_and_interpolation() {
     assert_eq!(eval(r#""hello" + " " + "world""#), s("hello world"));
-    assert_eq!(eval(r#""1 + 2 = {1 + 2}""#), s("1 + 2 = 3"));
+    assert_eq!(eval(r#""1 + 2 = ${1 + 2}""#), s("1 + 2 = 3"));
     assert_eq!(eval(r#"let name = "ada"
-"hi {name}!""#), s("hi ada!"));
-    assert_eq!(eval(r#""esc \{not interp}""#), s("esc {not interp}"));
+"hi ${name}!""#), s("hi ada!"));
+    // bare braces are literal now (no escaping needed)
+    assert_eq!(eval("\"a brace { and } here\""), s("a brace { and } here"));
+    // `\$` escapes an interpolation
+    assert_eq!(eval(r#""esc \${not interp}""#), s("esc ${not interp}"));
     assert_eq!(eval(r#""a\nb""#), s("a\nb"));
 }
 
@@ -663,4 +666,44 @@ fn comments() {
 #[test]
 fn semicolons_separate_statements() {
     assert_eq!(eval("fn f() { let a = 1; let b = 2; a + b }\nf()"), int(3));
+}
+
+// ---------- escape analysis (let mut → cell only when captured) ----------
+
+#[test]
+fn noncaptured_mut_still_assigns() {
+    // plain-slot mutable (no closure captures it): loop accumulation works
+    assert_eq!(
+        eval("fn f() {\n let mut t = 0\n for i in 1..=4 { t = t + i }\n t\n}\nf()"),
+        int(10)
+    );
+}
+
+#[test]
+fn captured_and_mutated_through_closure() {
+    // mutable captured AND written via a closure, driven by a loop
+    assert_eq!(
+        eval("fn f() {\n let mut acc = 0\n let add = x => { acc = acc + x; acc }\n for i in 1..=4 { add(i) }\n acc\n}\nf()"),
+        int(10)
+    );
+}
+
+#[test]
+fn shadowing_outer_mut_not_captured() {
+    // the lambda's own param `x` shadows the outer mut, so the outer stays a
+    // plain slot and is independently assignable
+    assert_eq!(
+        eval("fn g() {\n let mut x = 100\n let h = x => x + 1\n x = x + 5\n (x, h(7))\n}\ng()"),
+        Value::tuple(vec![int(105), int(8)])
+    );
+}
+
+#[test]
+fn capture_through_nested_lambda() {
+    // a deeper closure captures a function-level mut through an intermediate
+    // lambda — must still resolve to a shared cell
+    assert_eq!(
+        eval("fn outer() {\n let mut total = 0\n let mid = () => {\n  let bump = () => { total = total + 10 }\n  bump(); bump()\n }\n mid()\n total\n}\nouter()"),
+        int(20)
+    );
 }

@@ -227,7 +227,7 @@ impl Alloc {
     /// Store pointer `val` into `arr[i]`.
     #[inline]
     pub fn array_set(&self, arr: Raw<'_>, i: i64, val: Raw<'_>) {
-        unsafe { ai_array_set(arr.ptr, i, val.ptr) };
+        unsafe { ai_array_set(self.thread, arr.ptr, i, val.ptr) };
     }
 
     /// Store pointer `val` into `obj` at byte offset `off`.

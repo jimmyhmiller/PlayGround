@@ -71,8 +71,8 @@ fn reload_while_paused_new_calls_use_new_code() {
 
     match vm.run(&mut st, StopWhen::Never) {
         RunResult::Done(v) => {
-            let items = match v {
-                Value::List(items) => (*items).clone(),
+            let items: Vec<_> = match v {
+                Value::List(items) => items.iter().cloned().collect(),
                 other => panic!("expected list, got {:?}", other),
             };
             // first iterations used old g, later ones the new g

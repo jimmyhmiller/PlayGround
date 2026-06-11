@@ -1,8 +1,9 @@
 //! AST → bytecode compiler.
 //!
-//! Mutable locals (`let mut`) always live in a Cell so closures that capture
-//! them share the slot. Calls in tail position become TailCall (bounded
-//! frames for self/mutual recursion in tail position).
+//! A `let mut` captured by a nested closure lives in a shared Cell so they
+//! share the slot; an escape analysis (`lambda_captured_names`) gives every
+//! other mutable a plain stack slot (no Mutex). Calls in tail position become
+//! TailCall (bounded frames for self/mutual recursion in tail position).
 
 use crate::ast::{Arm, BinOp, Expr, ExprKind, FnDef, InterpPart, Item, Pattern, Program, Stmt, UnOp, VariantCtor};
 use crate::bytecode::{CaptureSrc, Const, FnProto, Instr, Pat};
@@ -88,6 +89,17 @@ pub fn compile_program(
     let mut fn_globals = Vec::new();
     let mut exports = Vec::new();
     let mut tests = Vec::new();
+
+    // Externs are a module's host-interface surface: bare-name globals the host
+    // provides. Add them to the export list so they can be pulled in by name
+    // (`import { mask_paint } from "host"`), not only via bare `import "host"`.
+    for item in &prog.items {
+        if let Item::Extern { name, .. } | Item::ExternLet { name, .. } = item {
+            let g = c.ctx.ensure_global(name);
+            exports.push((name.clone(), g));
+        }
+    }
+
     for item in &prog.items {
         if let Item::Fn(f) = item {
             let full = c.full_name(&f.name);
@@ -122,7 +134,7 @@ pub fn compile_program(
 
 #[derive(Clone, Copy)]
 enum Resolved {
-    Local { slot: u16, cell: bool },
+    Local { slot: u16, mutable: bool, cell: bool },
     Upval { idx: u16, cell: bool },
     Global(u32),
 }
@@ -130,6 +142,9 @@ enum Resolved {
 struct LocalEntry {
     name: String,
     slot: u16,
+    /// declared with `let mut` (assignable)
+    mutable: bool,
+    /// lives in a shared `Cell` because a closure captures it (vs. plain slot)
     cell: bool,
 }
 
@@ -161,6 +176,11 @@ struct FnCtx {
     /// jumping out of the loop
     depth: i32,
     loops: Vec<LoopFrame>,
+    /// names captured by a nested closure (escape analysis); a `let mut` here
+    /// needs a shared `Cell`, otherwise a plain (faster) stack slot suffices
+    captured: HashSet<String>,
+    /// out-of-line `MakeClosure` capture lists (keeps `Instr` `Copy`)
+    closure_captures: Vec<Vec<CaptureSrc>>,
 }
 
 impl FnCtx {
@@ -179,6 +199,8 @@ impl FnCtx {
             cur_line: 0,
             depth: 0,
             loops: Vec::new(),
+            captured: HashSet::new(),
+            closure_captures: Vec::new(),
         }
     }
 
@@ -192,6 +214,7 @@ impl FnCtx {
             consts: self.consts,
             pats: self.pats,
             lines: self.lines,
+            closure_captures: self.closure_captures,
         }
     }
 }
@@ -284,12 +307,12 @@ impl<'a> Compiler<'a> {
         slot
     }
 
-    fn declare(&mut self, name: &str, slot: u16, cell: bool) {
+    fn declare(&mut self, name: &str, slot: u16, mutable: bool, cell: bool) {
         let f = self.f();
         f.scopes
             .last_mut()
             .unwrap()
-            .push(LocalEntry { name: name.to_string(), slot, cell });
+            .push(LocalEntry { name: name.to_string(), slot, mutable, cell });
     }
 
     fn begin_scope(&mut self) {
@@ -315,7 +338,7 @@ impl<'a> Compiler<'a> {
             for scope in f.scopes.iter().rev() {
                 for e in scope.iter().rev() {
                     if e.name == name {
-                        return Some(Resolved::Local { slot: e.slot, cell: e.cell });
+                        return Some(Resolved::Local { slot: e.slot, mutable: e.mutable, cell: e.cell });
                     }
                 }
             }
@@ -330,7 +353,7 @@ impl<'a> Compiler<'a> {
             return self.lookup_global(name).map(Resolved::Global);
         }
         match self.resolve_in(fn_idx - 1, name)? {
-            Resolved::Local { slot, cell } => {
+            Resolved::Local { slot, cell, .. } => {
                 let f = &mut self.fns[fn_idx];
                 f.upvals.push((name.to_string(), CaptureSrc::Local(slot), cell));
                 Some(Resolved::Upval { idx: (f.upvals.len() - 1) as u16, cell })
@@ -366,6 +389,7 @@ impl<'a> Compiler<'a> {
         }
         let mut fctx = FnCtx::new(name, params.len() as u8);
         fctx.cur_line = line;
+        fctx.captured = lambda_captured_names(body);
         self.fns.push(fctx);
 
         // Parameters occupy slots 0..arity. Simple names bind directly;
@@ -374,7 +398,7 @@ impl<'a> Compiler<'a> {
         for p in params {
             let slot = self.alloc_local();
             match p {
-                Pattern::Bind(n) => self.declare(n, slot, false),
+                Pattern::Bind(n) => self.declare(n, slot, false, false),
                 _ => destructure.push((slot, p)),
             }
         }
@@ -489,14 +513,20 @@ impl<'a> Compiler<'a> {
                         Pattern::Bind(n) => n.clone(),
                         _ => return self.err(*line, "`let mut` requires a plain name"),
                     };
-                    self.emit(Instr::NewCell);
+                    // Escape analysis: only a `let mut` captured by a nested
+                    // closure needs a shared Cell. Otherwise a plain stack slot
+                    // (direct load/store, no Mutex) is correct and much faster.
+                    let cell = self.f().captured.contains(&name);
+                    if cell {
+                        self.emit(Instr::NewCell);
+                    }
                     let slot = self.alloc_local();
                     self.emit(Instr::StoreLocal(slot));
-                    self.declare(&name, slot, true);
+                    self.declare(&name, slot, true, cell);
                 } else if let Pattern::Bind(n) = pattern {
                     let slot = self.alloc_local();
                     self.emit(Instr::StoreLocal(slot));
-                    self.declare(n, slot, false);
+                    self.declare(n, slot, false, false);
                 } else {
                     let pat = self.compile_pattern(pattern)?;
                     let pidx = self.add_pat(pat);
@@ -513,10 +543,17 @@ impl<'a> Compiler<'a> {
             Stmt::Assign { name, expr, line } => {
                 self.f().cur_line = *line;
                 match self.resolve(name) {
-                    Some(Resolved::Local { slot, cell: true }) => {
+                    // captured mutable: shared Cell
+                    Some(Resolved::Local { slot, mutable: true, cell: true }) => {
                         self.emit(Instr::LoadLocal(slot));
                         self.compile_expr(expr, false)?;
                         self.emit(Instr::CellSet);
+                        Ok(())
+                    }
+                    // non-captured mutable: plain slot, direct store (no Mutex)
+                    Some(Resolved::Local { slot, mutable: true, cell: false }) => {
+                        self.compile_expr(expr, false)?;
+                        self.emit(Instr::StoreLocal(slot));
                         Ok(())
                     }
                     Some(Resolved::Upval { idx, cell: true }) => {
@@ -525,7 +562,7 @@ impl<'a> Compiler<'a> {
                         self.emit(Instr::CellSet);
                         Ok(())
                     }
-                    Some(Resolved::Local { .. }) | Some(Resolved::Upval { .. }) => self.err(
+                    Some(Resolved::Local { mutable: false, .. }) | Some(Resolved::Upval { .. }) => self.err(
                         *line,
                         &format!("cannot assign to immutable binding `{}` (use `let mut`)", name),
                     ),
@@ -716,7 +753,7 @@ impl<'a> Compiler<'a> {
                     return self.err(e.line, "`_` is only meaningful in patterns and pipe holes");
                 }
                 match self.resolve(name) {
-                    Some(Resolved::Local { slot, cell }) => {
+                    Some(Resolved::Local { slot, cell, .. }) => {
                         self.emit(Instr::LoadLocal(slot));
                         if cell {
                             self.emit(Instr::CellGet);
@@ -1004,7 +1041,7 @@ impl<'a> Compiler<'a> {
             return s;
         }
         let s = self.alloc_local();
-        self.declare(name, s, false);
+        self.declare(name, s, false, false);
         slots.insert(name.to_string(), s);
         s
     }
@@ -1086,13 +1123,14 @@ impl<'a> Compiler<'a> {
         }
         let mut fctx = FnCtx::new("<lambda>", params.len() as u8);
         fctx.cur_line = line;
+        fctx.captured = lambda_captured_names(body);
         self.fns.push(fctx);
 
         let mut destructure: Vec<(u16, &Pattern)> = Vec::new();
         for p in params {
             let slot = self.alloc_local();
             match p {
-                Pattern::Bind(n) => self.declare(n, slot, false),
+                Pattern::Bind(n) => self.declare(n, slot, false, false),
                 _ => destructure.push((slot, p)),
             }
         }
@@ -1119,7 +1157,13 @@ impl<'a> Compiler<'a> {
         self.ctx.fn_count += 1;
         self.protos.push((fn_id, proto));
         self.f().cur_line = line;
-        self.emit(Instr::MakeClosure { fn_id, captures });
+        // stash the capture list out of line so the instruction stays `Copy`
+        let cap_idx = {
+            let f = self.f();
+            f.closure_captures.push(captures);
+            (f.closure_captures.len() - 1) as u32
+        };
+        self.emit(Instr::MakeClosure { fn_id, captures: cap_idx });
         Ok(())
     }
 }
@@ -1184,5 +1228,173 @@ fn instr_effect(consts: &[Const], i: &Instr) -> i32 {
             _ => 0,
         },
         I::Call(argc) | I::TailCall(argc) | I::Invoke { argc, .. } => -(*argc as i32),
+    }
+}
+
+// ---------- escape analysis: which `let mut` locals are captured ----------
+//
+// A `let mut` only needs a shared `Cell` (Arc<Mutex>) if a nested closure
+// captures it; otherwise it can be a plain stack slot (direct load/store, no
+// mutex). `lambda_captured_names` returns every name used as a *free variable*
+// inside some lambda within a function body. Marking a `let mut` as a cell when
+// it isn't truly captured is harmless (just the old behaviour); the analysis is
+// conservative so it never under-marks a genuinely captured local.
+
+fn add_pattern_bounds(p: &Pattern, bound: &mut HashSet<String>) {
+    let mut v = Vec::new();
+    p.bound_names(&mut v);
+    bound.extend(v);
+}
+
+fn lambda_captured_names(body: &Expr) -> HashSet<String> {
+    let mut out = HashSet::new();
+    cap_expr(body, None, &mut out);
+    out
+}
+
+// `inside` is Some(bound) while walking within a lambda — bound = names bound by
+// that lambda's params plus any binders descended through. In that mode every
+// identifier (or assignment target) not in `bound` is a capture. None means we
+// are directly in the function body, only descending to find lambdas.
+fn cap_expr(e: &Expr, inside: Option<&HashSet<String>>, out: &mut HashSet<String>) {
+    use ExprKind::*;
+    match &e.kind {
+        Unit | Bool(_) | Int(_) | Float(_) | Str(_) => {}
+        Ident(n) => {
+            if let Some(b) = inside {
+                if !b.contains(n) {
+                    out.insert(n.clone());
+                }
+            }
+        }
+        Interp(parts) => {
+            for p in parts {
+                if let InterpPart::Expr(x) = p {
+                    cap_expr(x, inside, out);
+                }
+            }
+        }
+        Variant { payload, .. } => match payload {
+            VariantCtor::Unit => {}
+            VariantCtor::Positional(xs) => xs.iter().for_each(|x| cap_expr(x, inside, out)),
+            VariantCtor::Named(fs) => fs.iter().for_each(|(_, x)| cap_expr(x, inside, out)),
+        },
+        List(xs) | Tuple(xs) => xs.iter().for_each(|x| cap_expr(x, inside, out)),
+        Record { spread, fields } => {
+            if let Some(s) = spread {
+                cap_expr(s, inside, out);
+            }
+            fields.iter().for_each(|(_, x)| cap_expr(x, inside, out));
+        }
+        Lambda { params, body } => {
+            let mut b = inside.cloned().unwrap_or_default();
+            for p in params {
+                add_pattern_bounds(p, &mut b);
+            }
+            cap_expr(body, Some(&b), out);
+        }
+        Call { callee, args } => {
+            cap_expr(callee, inside, out);
+            args.iter().for_each(|a| cap_expr(a, inside, out));
+        }
+        MethodCall { recv, args, .. } => {
+            cap_expr(recv, inside, out);
+            args.iter().for_each(|a| cap_expr(a, inside, out));
+        }
+        Field { recv, .. } => cap_expr(recv, inside, out),
+        Index { recv, index } => {
+            cap_expr(recv, inside, out);
+            cap_expr(index, inside, out);
+        }
+        Unary { operand, .. } => cap_expr(operand, inside, out),
+        Binary { lhs, rhs, .. } => {
+            cap_expr(lhs, inside, out);
+            cap_expr(rhs, inside, out);
+        }
+        And(a, b) | Or(a, b) => {
+            cap_expr(a, inside, out);
+            cap_expr(b, inside, out);
+        }
+        Range { lo, hi, .. } => {
+            cap_expr(lo, inside, out);
+            cap_expr(hi, inside, out);
+        }
+        If { cond, then, els } => {
+            cap_expr(cond, inside, out);
+            cap_expr(then, inside, out);
+            if let Some(e) = els {
+                cap_expr(e, inside, out);
+            }
+        }
+        Match { subject, arms } => {
+            cap_expr(subject, inside, out);
+            for arm in arms {
+                match inside {
+                    Some(b) => {
+                        let mut b2 = b.clone();
+                        add_pattern_bounds(&arm.pattern, &mut b2);
+                        if let Some(g) = &arm.guard {
+                            cap_expr(g, Some(&b2), out);
+                        }
+                        cap_expr(&arm.body, Some(&b2), out);
+                    }
+                    None => {
+                        if let Some(g) = &arm.guard {
+                            cap_expr(g, None, out);
+                        }
+                        cap_expr(&arm.body, None, out);
+                    }
+                }
+            }
+        }
+        Block(stmts, tail) => {
+            let mut b = inside.cloned();
+            for s in stmts {
+                cap_stmt(s, b.as_ref(), out);
+                if let (Some(bs), Stmt::Let { pattern, .. }) = (b.as_mut(), s) {
+                    add_pattern_bounds(pattern, bs);
+                }
+            }
+            if let Some(t) = tail {
+                cap_expr(t, b.as_ref(), out);
+            }
+        }
+        Try(x) | Deref(x) => cap_expr(x, inside, out),
+    }
+}
+
+fn cap_stmt(s: &Stmt, inside: Option<&HashSet<String>>, out: &mut HashSet<String>) {
+    match s {
+        Stmt::Let { expr, .. } => cap_expr(expr, inside, out),
+        Stmt::Assign { name, expr, .. } => {
+            if let Some(b) = inside {
+                if !b.contains(name) {
+                    out.insert(name.clone());
+                }
+            }
+            cap_expr(expr, inside, out);
+        }
+        Stmt::While { cond, body, .. } => {
+            cap_expr(cond, inside, out);
+            cap_expr(body, inside, out);
+        }
+        Stmt::For { pattern, iter, body, .. } => {
+            cap_expr(iter, inside, out);
+            match inside {
+                Some(b) => {
+                    let mut b2 = b.clone();
+                    add_pattern_bounds(pattern, &mut b2);
+                    cap_expr(body, Some(&b2), out);
+                }
+                None => cap_expr(body, None, out),
+            }
+        }
+        Stmt::Return { expr, .. } => {
+            if let Some(x) = expr {
+                cap_expr(x, inside, out);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Expr(x) => cap_expr(x, inside, out),
     }
 }

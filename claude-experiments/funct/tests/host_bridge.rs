@@ -92,11 +92,11 @@ let state = atom({ count: 0, label: "ready" })
 
 export fn on_click(x, y) {
     swap_in!(state, ["count"], n => n + 1)
-    reset_in!(state, ["label"], "clicked at {x},{y}")
+    reset_in!(state, ["label"], "clicked at ${x},${y}")
 }
 
 export fn render(w, h) {
-    { kind: "text", value: "{(@state).label} ({(@state).count})", w: w, h: h }
+    { kind: "text", value: "${(@state).label} (${(@state).count})", w: w, h: h }
 }
 "#;
     let mut vm = Funct::new();

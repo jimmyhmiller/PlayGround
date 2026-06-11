@@ -1,0 +1,2 @@
+let xs = to_list(1..=10000)
+println(xs |> map(x => x * x) |> filter(x => x % 2 == 0) |> fold(0, (a, b) => a + b))
