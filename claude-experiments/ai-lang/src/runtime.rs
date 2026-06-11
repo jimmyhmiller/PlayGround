@@ -1469,6 +1469,24 @@ unsafe fn array_kind_and_len(thread: *const Thread, a: *const u8) -> (bool, i64)
         let count_off = <Full as crate::gc::ObjHeader>::SIZE;
         let count = *(a.add(count_off) as *const u64) as i64;
         let prim = is_prim_array(thread, a);
+        if !prim {
+            // Defense in depth: the boxed branch interprets the count
+            // word as a slot count and the tail as pointer slots — on a
+            // NON-array object (type confusion: a typechecker bug, or a
+            // corrupted pointer) that mis-read walks out of the object.
+            // One compare keeps memory safety independent of upstream
+            // soundness. The prim branch needs no extra check (its tid
+            // already matched exactly).
+            let t = &*thread;
+            if t.array_ti.is_null()
+                || (*t.heap).obj_type_id(a) != (*t.array_ti).type_id
+            {
+                runtime_abort(format!(
+                    "array op on a non-array value (type_id {})",
+                    (*t.heap).obj_type_id(a)
+                ));
+            }
+        }
         (prim, if prim { count / 8 } else { count })
     }
 }
