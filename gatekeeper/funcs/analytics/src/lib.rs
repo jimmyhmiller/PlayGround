@@ -56,6 +56,7 @@ fn analytics(req: Request) -> Response {
         "/by-source" => top_field(&mut db, &window, "source", limit(&params, 50)),
         "/by-method" => top_field(&mut db, &window, "method", limit(&params, 20)),
         "/by-host" => top_field(&mut db, &window, "host", limit(&params, 50)),
+        "/blog" => blog(&mut db, &window, limit(&params, 100)),
         "/recent" => recent(&mut db, &window, limit(&params, 50).min(500)),
         other => return err(404, &format!("unknown analytics endpoint {other:?}")),
     };
@@ -225,6 +226,49 @@ fn top_field(
     Ok(json!({"window": window.describe(), "field": field, "top": items}))
 }
 
+/// `/blog` — per-post view counts for the blog. Posts live under `/api/<slug>`;
+/// we count views grouped by path with `path starts_with "/api/"`, drop the
+/// `/api/index` listing page (not a post), prettify the slug, and return them
+/// ranked plus a total. Honors the time window.
+fn blog(db: &mut Client, window: &Window, n: usize) -> Result<Value, String> {
+    // Over-fetch by one so dropping /api/index still leaves a full page of posts.
+    let res = db
+        .query(json!({
+            "find": ["?path", {"agg": "count", "var": "*"}],
+            "where": where_pageview(window, json!({"path": {"var": "?path", "starts_with": "/api/"}})),
+            "order_by": [{"var": "count(*)", "desc": true}],
+            "limit": n + 1,
+        }))
+        .map_err(|e| e.to_string())?;
+
+    let mut posts = Vec::new();
+    let mut total: i64 = 0;
+    for r in &res.rows {
+        let path = r.first().and_then(|v| v.as_str()).unwrap_or("");
+        let views = r.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+        // /api/index is the post listing page, not a post itself.
+        if path == "/api/index" || path == "/api/" {
+            continue;
+        }
+        total += views;
+        if posts.len() < n {
+            let slug = path.strip_prefix("/api/").unwrap_or(path);
+            posts.push(json!({
+                "slug": decode_slug(slug),
+                "path": path,
+                "views": views,
+            }));
+        }
+    }
+
+    Ok(json!({
+        "window": window.describe(),
+        "post_count": posts.len(),
+        "total_views": total,
+        "posts": posts,
+    }))
+}
+
 /// `/recent` — the last N raw pageviews, newest first.
 fn recent(db: &mut Client, window: &Window, n: usize) -> Result<Value, String> {
     // Bind the fields we want to surface. Missing optional fields would drop a
@@ -300,6 +344,12 @@ fn hex(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Decode a post slug for display: undo percent-encoding (some slugs contain
+/// `%2F` path separators, e.g. advent-of-papers entries).
+fn decode_slug(slug: &str) -> String {
+    percent_decode(slug)
 }
 
 fn limit(p: &BTreeMap<String, String>, default: usize) -> usize {
