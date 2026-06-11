@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod function;
 pub mod proxy;
 pub mod reply;
 pub mod route;

@@ -15,6 +15,7 @@ fn route(path: &str, public: bool) -> Route {
         path: path.to_string(),
         static_dir: Some(std::path::PathBuf::from("/tmp")),
         proxy: None,
+        function: None,
         public,
     }
 }

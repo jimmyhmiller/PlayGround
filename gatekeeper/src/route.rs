@@ -259,6 +259,7 @@ mod tests {
             path: path.to_string(),
             static_dir: Some(std::path::PathBuf::from("/tmp")),
             proxy: None,
+            function: None,
             public,
         }
     }

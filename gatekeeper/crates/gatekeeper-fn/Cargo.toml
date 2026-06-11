@@ -1,0 +1,9 @@
+[package]
+name = "gatekeeper-fn"
+version = "0.1.0"
+edition = "2021"
+description = "Write a serverless Rust function for gatekeeper: a clean Request -> Response handler, no ABI boilerplate."
+
+[dependencies]
+gatekeeper-abi = { path = "../gatekeeper-abi" }
+gatekeeper-fn-macro = { path = "../gatekeeper-fn-macro" }

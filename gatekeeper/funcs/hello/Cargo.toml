@@ -1,0 +1,12 @@
+[package]
+name = "hello-fn"
+version = "0.1.0"
+edition = "2021"
+description = "An example gatekeeper serverless function."
+
+[lib]
+# A gatekeeper function is a C-ABI dynamic library the gate dlopens.
+crate-type = ["cdylib"]
+
+[dependencies]
+gatekeeper-fn = { path = "../../crates/gatekeeper-fn" }

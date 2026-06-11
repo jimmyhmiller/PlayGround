@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use gatekeeper::auth::Authenticator;
 use gatekeeper::config::{self, Config, Target};
+use gatekeeper::function::FunctionRegistry;
 use gatekeeper::proxy;
 use gatekeeper::reply::Reply;
 use gatekeeper::route::{Match, Router};
@@ -58,6 +59,8 @@ struct Gate {
     router: Router,
     auth: Option<Authenticator>,
     unmatched_status: u16,
+    /// Lazily-loaded cache of function dylibs (the serverless backend).
+    functions: FunctionRegistry,
 }
 
 fn main() {
@@ -93,6 +96,7 @@ fn run() -> Result<(), String> {
         router: Router::new(cfg.route.clone()),
         auth: token.as_deref().map(Authenticator::new),
         unmatched_status: cfg.unmatched_status,
+        functions: FunctionRegistry::new(),
     });
 
     // Bind the listening socket ONCE. We keep our own handle so we can rebuild
@@ -216,7 +220,8 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
     // tiny_http's url() is the path+query. Split the query off for routing;
     // keep the full thing for proxying.
     let raw_url = request.url().to_string();
-    let (path, _query) = raw_url.split_once('?').unwrap_or((raw_url.as_str(), ""));
+    let (path, query) = raw_url.split_once('?').unwrap_or((raw_url.as_str(), ""));
+    let query = query.to_string();
 
     let reply = match gate.router.resolve(path) {
         Match::BadPath => Reply::status(400, "Bad Request"),
@@ -245,6 +250,22 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
                     let method = request.method().as_str().to_string();
                     // Proxy the full URL (path + query) so upstreams see queries.
                     proxy::forward(&upstream, &method, &raw_url, request.headers(), &body)
+                }
+                Target::Function(lib) => {
+                    // Read the body, then invoke the dylib in process. `rest` is
+                    // the path after the route prefix (already normalized); the
+                    // function sees that plus the query separately.
+                    let mut body = Vec::new();
+                    let _ = request.as_reader().read_to_end(&mut body);
+                    let method = request.method().as_str().to_string();
+                    gate.functions.invoke(
+                        &lib,
+                        &method,
+                        &rest,
+                        &query,
+                        request.headers(),
+                        &body,
+                    )
                 }
             }
         }
@@ -290,9 +311,10 @@ fn print_exposure_report(cfg: &Config, token_configured: bool) {
 }
 
 fn target_desc(r: &config::Route) -> String {
-    match (&r.static_dir, &r.proxy) {
-        (Some(d), _) => format!("static {}", d.display()),
-        (_, Some(u)) => format!("proxy {u}"),
+    match (&r.static_dir, &r.proxy, &r.function) {
+        (Some(d), _, _) => format!("static {}", d.display()),
+        (_, Some(u), _) => format!("proxy {u}"),
+        (_, _, Some(l)) => format!("function {}", l.display()),
         _ => "(invalid)".into(),
     }
 }

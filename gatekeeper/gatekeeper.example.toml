@@ -18,3 +18,10 @@ public = true
 [[route]]
 path = "/metrics"
 proxy = "127.0.0.1:5557"
+
+# Private (default): a Rust function dylib, loaded in process on first request.
+# Build it with `cargo build -p hello-fn` (see funcs/hello). The path after the
+# route prefix is what the handler sees as req.path().
+[[route]]
+path = "/api"
+function = "target/release/libhello_fn.so"

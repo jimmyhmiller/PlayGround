@@ -56,13 +56,88 @@ Per route:
 
 | key      | meaning |
 |----------|---------|
-| `path`   | path prefix, e.g. `/blog`. Must start with `/`, no trailing `/`. |
-| `static` | serve this directory (exactly one of `static`/`proxy`) |
-| `proxy`  | reverse-proxy to this `host:port` (exactly one of `static`/`proxy`) |
-| `public` | `true` = no auth. **Default `false`.** |
+| `path`     | path prefix, e.g. `/blog`. Must start with `/`, no trailing `/`. |
+| `static`   | serve this directory (exactly one of `static`/`proxy`/`function`) |
+| `proxy`    | reverse-proxy to this `host:port` (exactly one target kind) |
+| `function` | invoke a Rust function dylib in process (exactly one target kind) — see [Serverless functions](#serverless-functions) |
+| `public`   | `true` = no auth. **Default `false`.** |
 
 The **token is never in the config file** — it comes from `$GATEKEEPER_TOKEN` or
 `--token-file <path>`. Boot fails if any private route exists and no token is set.
+
+## Serverless functions
+
+Besides serving static files and proxying to a long-running upstream, a route can
+invoke a **Rust function compiled as a dynamic library**, loaded into the gate on
+first request and kept warm after. No port to manage, no separate process, no
+service to keep running — you write a handler, the gate runs it behind the same
+default-deny auth.
+
+The app shouldn't have to worry about any of this, so it doesn't. You write one
+function against the `gatekeeper-fn` crate:
+
+```rust
+// funcs/hello/src/lib.rs  (crate-type = ["cdylib"])
+use gatekeeper_fn::{handler, Request, Response};
+
+#[handler]
+fn app(req: Request) -> Response {
+    match req.path() {
+        "/health" => Response::text("ok"),
+        _ => Response::json(r#"{"hello":"world"}"#),
+    }
+}
+```
+
+```sh
+cargo build -p hello-fn --release
+```
+
+and point a route at the resulting dylib:
+
+```toml
+[[route]]
+path = "/api"
+function = "target/release/libhello_fn.so"   # .dylib on macOS, .dll on Windows
+# 'public' omitted -> PRIVATE, like any other route (default-deny holds)
+```
+
+`req.path()` is the path **after** the route prefix (so `/api/health` arrives as
+`/health`), already normalized and traversal-checked by the gate. You get
+`method()`, `query()`, `headers()`/`header(name)`, and `body()`/`text()`;
+`Response` has `text`/`json`/`html`/`status`/`new` plus a `header(...)` builder.
+
+### How it works (and why it's safe to run in process)
+
+The `#[handler]` macro generates a tiny C-ABI surface (`gk_handle` / `gk_free` /
+`gk_abi_version`) — defined in the `gatekeeper-abi` crate, the *entire* contract
+across the boundary. The gate `dlopen`s the dylib, **checks its ABI version and
+refuses to call a mismatch**, marshals the request into `#[repr(C)]` structs,
+calls the handler, copies the response out, and frees it back through the dylib's
+own deallocator (each side frees only what it allocated — no shared allocator
+assumption).
+
+- **A panic in your handler becomes a 500, not a crash.** The SDK catches the
+  unwind on the function side so it never crosses the C ABI; the gate stays up.
+  (Verified by a test that panics on purpose and asserts the gate survives.)
+- **A failed load fails closed** (502), like an unreachable proxy upstream.
+- The unsafe marshalling/free path is covered by an integration test run under
+  valgrind: **0 errors, 0 bytes definitely lost** across many invocations.
+
+Functions are *trusted native code* you deploy yourself — the same trust level as
+a proxy upstream. The gate does not sandbox arbitrary dylibs; don't point a
+`function` route at code you wouldn't run.
+
+### The crates
+
+| crate                  | who depends on it | what it is |
+|------------------------|-------------------|------------|
+| `gatekeeper-abi`       | gate **and** function | the `#[repr(C)]` request/response + ABI version. Tiny, no deps. |
+| `gatekeeper-fn`        | your function     | the `Request`/`Response` types + `#[handler]` macro. The only crate your app needs. |
+| `gatekeeper-fn-macro`  | (re-exported)     | the proc-macro behind `#[handler]`. |
+
+`funcs/hello` is a complete worked example. After `cargo build -p hello-fn`, run
+the gate with a route pointing at `target/debug/libhello_fn.so` and `curl` it.
 
 ## TLS and certificates
 

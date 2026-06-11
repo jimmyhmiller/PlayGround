@@ -47,9 +47,14 @@ pub struct Route {
     #[serde(default, rename = "static")]
     pub static_dir: Option<PathBuf>,
     /// Reverse-proxy to this `host:port` (typically `127.0.0.1:PORT`).
-    /// Mutually exclusive with `static`.
+    /// Mutually exclusive with `static` and `function`.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Invoke this Rust function dylib (`.so`/`.dylib`/`.dll`, built against
+    /// `gatekeeper-fn`) in process. Serverless: loaded on first request, cached.
+    /// Mutually exclusive with `static` and `proxy`.
+    #[serde(default)]
+    pub function: Option<PathBuf>,
     /// Public routes skip auth. **Defaults to false** — fail safe.
     #[serde(default)]
     pub public: bool,
@@ -60,16 +65,18 @@ pub struct Route {
 pub enum Target {
     Static(PathBuf),
     Proxy(String),
+    Function(PathBuf),
 }
 
 impl Route {
-    /// The validated target. Exactly one of `static`/`proxy` must be set; this
-    /// is enforced by [`Config::validate`], so here we can assume it holds.
+    /// The validated target. Exactly one of `static`/`proxy`/`function` must be
+    /// set; this is enforced by [`Config::validate`], so here we assume it holds.
     pub fn target(&self) -> Target {
-        match (&self.static_dir, &self.proxy) {
-            (Some(dir), None) => Target::Static(dir.clone()),
-            (None, Some(up)) => Target::Proxy(up.clone()),
-            // validate() rejects the other two cases before we ever get here.
+        match (&self.static_dir, &self.proxy, &self.function) {
+            (Some(dir), None, None) => Target::Static(dir.clone()),
+            (None, Some(up), None) => Target::Proxy(up.clone()),
+            (None, None, Some(lib)) => Target::Function(lib.clone()),
+            // validate() rejects every other combination before we get here.
             _ => unreachable!("route target validated at load time"),
         }
     }
@@ -145,20 +152,30 @@ impl Config {
                     r.path.trim_end_matches('/')
                 )));
             }
-            match (&r.static_dir, &r.proxy) {
-                (Some(_), Some(_)) => {
+            // Exactly one target kind per route. Count how many are set so we
+            // can reject both "none" and "more than one" with a clear message.
+            let set = [
+                r.static_dir.is_some(),
+                r.proxy.is_some(),
+                r.function.is_some(),
+            ]
+            .iter()
+            .filter(|b| **b)
+            .count();
+            match set {
+                0 => {
                     return Err(ConfigError(format!(
-                        "route {:?} sets both 'static' and 'proxy' — pick one",
+                        "route {:?} sets none of 'static', 'proxy', 'function' — pick one",
                         r.path
                     )));
                 }
-                (None, None) => {
+                1 => {}
+                _ => {
                     return Err(ConfigError(format!(
-                        "route {:?} sets neither 'static' nor 'proxy'",
+                        "route {:?} sets more than one of 'static'/'proxy'/'function' — pick one",
                         r.path
                     )));
                 }
-                _ => {}
             }
         }
         // Duplicate exact paths are almost certainly a mistake (which one wins

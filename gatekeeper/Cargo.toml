@@ -1,3 +1,11 @@
+[workspace]
+members = [
+    "crates/gatekeeper-abi",
+    "crates/gatekeeper-fn",
+    "crates/gatekeeper-fn-macro",
+    "funcs/hello",
+]
+
 [package]
 name = "gatekeeper"
 version = "0.1.0"
@@ -10,6 +18,8 @@ toml = "1"
 subtle = "2"
 percent-encoding = "2"
 signal-hook = "0.4.4"
+libloading = "0.8"
+gatekeeper-abi = { path = "crates/gatekeeper-abi" }
 
 [dev-dependencies]
 proptest = "1.11.0"
