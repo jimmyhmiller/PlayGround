@@ -17,6 +17,7 @@ use gatekeeper::function::FunctionRegistry;
 use gatekeeper::proxy;
 use gatekeeper::reply::Reply;
 use gatekeeper::route::{Match, Router};
+use gatekeeper::schedule::Scheduler;
 use gatekeeper::serve;
 
 struct Args {
@@ -73,6 +74,9 @@ struct Gate {
     /// Lazily-loaded cache of function dylibs (the serverless backend). Shared
     /// across reloads: reloading the config does not drop loaded functions.
     functions: FunctionRegistry,
+    /// Runs scheduled `[[job]]`s on their intervals. Persists across reloads;
+    /// its `reload` is called with the new job set on each SIGHUP.
+    scheduler: Scheduler,
 }
 
 impl Gate {
@@ -115,7 +119,10 @@ fn run() -> Result<(), String> {
     let gate = Arc::new(Gate {
         routing: std::sync::Mutex::new(Arc::new(build_routing(&cfg, token.as_deref()))),
         functions: FunctionRegistry::new(),
+        scheduler: Scheduler::new(),
     });
+    // Start the scheduled jobs (if any). Re-applied on every config reload.
+    gate.scheduler.reload(&cfg.job);
 
     // Bind the listening socket ONCE. We keep our own handle so we can rebuild
     // the tiny_http Server (with a freshly-loaded cert) on SIGHUP without ever
@@ -289,6 +296,9 @@ fn reload_once(
         old.unblock(); // release workers blocked on the old Server
     }
 
+    // Re-apply scheduled jobs: stale job threads stop, the new set starts.
+    gate.scheduler.reload(&cfg.job);
+
     print_exposure_report(&cfg, token.is_some());
     println!("gatekeeper: reloaded config (SIGHUP) — routes + cert applied");
 }
@@ -416,6 +426,19 @@ fn print_exposure_report(cfg: &Config, token_configured: bool) {
     }
     for r in &private {
         println!("    {}  ->  {}", r.path, target_desc(r));
+    }
+
+    println!("\n  SCHEDULED jobs:");
+    if cfg.job.is_empty() {
+        println!("    (none)");
+    }
+    for j in &cfg.job {
+        let when = if j.run_at_start {
+            format!("every {} (and at start)", j.every)
+        } else {
+            format!("every {}", j.every)
+        };
+        println!("    {}  ->  `{}`  [{}]", j.name, j.command.join(" "), when);
     }
     println!("{line}");
 }

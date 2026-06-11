@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/datalog-client"]
+
+[package]
+name = "axiom-reload"
+version = "0.1.0"
+edition = "2021"
+description = "Incrementally load new Vercel pageviews from Axiom into datalog-db. Idempotent (high-water-mark, no duplicates)."
+
+[dependencies]
+datalog-client = { path = "crates/datalog-client" }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }

@@ -35,6 +35,35 @@ pub struct Config {
     /// The routes. Order does not matter; matching is longest-prefix.
     #[serde(default)]
     pub route: Vec<Route>,
+    /// Scheduled jobs: commands gatekeeper runs on a fixed interval. One place
+    /// to put the periodic things you want to manage alongside the gate.
+    #[serde(default)]
+    pub job: Vec<Job>,
+}
+
+/// One scheduled job: a command run on a fixed interval by the gate's scheduler
+/// thread. Output is logged (with exit status + duration). Jobs are independent
+/// of routing — a gate with only jobs and no routes is valid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Job {
+    /// A short name for logs, e.g. `axiom-reload`.
+    pub name: String,
+    /// The command + args to run. First element is the executable. Run directly
+    /// (no shell), so no shell quoting/globbing — pass explicit args.
+    pub command: Vec<String>,
+    /// How often to run it, e.g. `"15m"`, `"1h"`, `"30s"`, `"90"` (bare = secs).
+    /// Parsed by [`parse_duration`]. The interval is measured between the *start*
+    /// of consecutive runs is avoided: we sleep `every` AFTER each run finishes,
+    /// so a long run never overlaps itself.
+    pub every: String,
+    /// Run the job once immediately at startup (and on reload), in addition to
+    /// every interval. Defaults to false (first run is after one interval).
+    #[serde(default)]
+    pub run_at_start: bool,
+    /// Environment variables to set for the job (e.g. an API key). Merged onto
+    /// the gate's own environment. Optional.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// One route: a path prefix that maps to either a static folder or a proxied
@@ -118,8 +147,8 @@ impl Config {
     /// Boot-time validation. Every check here exists to make accidental
     /// exposure or an outright broken config impossible to start.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.route.is_empty() {
-            return Err(ConfigError("no routes defined".into()));
+        if self.route.is_empty() && self.job.is_empty() {
+            return Err(ConfigError("no routes or jobs defined".into()));
         }
         if self.unmatched_status != 403 && self.unmatched_status != 404 {
             return Err(ConfigError(format!(
@@ -187,6 +216,28 @@ impl Config {
                 return Err(ConfigError(format!("duplicate route path {:?}", w[0])));
             }
         }
+
+        // Validate jobs: non-empty name + command, a parseable interval, and no
+        // duplicate names (so logs are unambiguous).
+        let mut job_names: Vec<&str> = Vec::with_capacity(self.job.len());
+        for j in &self.job {
+            if j.name.trim().is_empty() {
+                return Err(ConfigError("job has an empty name".into()));
+            }
+            if j.command.is_empty() {
+                return Err(ConfigError(format!("job {:?} has an empty command", j.name)));
+            }
+            parse_duration(&j.every).map_err(|e| {
+                ConfigError(format!("job {:?} has invalid 'every' {:?}: {e}", j.name, j.every))
+            })?;
+            job_names.push(j.name.as_str());
+        }
+        job_names.sort_unstable();
+        for w in job_names.windows(2) {
+            if w[0] == w[1] {
+                return Err(ConfigError(format!("duplicate job name {:?}", w[0])));
+            }
+        }
         Ok(())
     }
 
@@ -199,6 +250,33 @@ impl Config {
     pub fn tls_enabled(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
     }
+}
+
+/// Parse a human interval like `"15m"`, `"1h"`, `"30s"`, `"2d"`, or a bare
+/// number (interpreted as seconds). Returns the duration. Rejects zero and
+/// unparseable input so a misconfigured job can't spin in a tight loop.
+pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty duration".into());
+    }
+    let (num_str, mult) = match s.chars().last().unwrap() {
+        's' => (&s[..s.len() - 1], 1u64),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86_400),
+        c if c.is_ascii_digit() => (s, 1), // bare number = seconds
+        c => return Err(format!("unknown duration unit '{c}' (use s/m/h/d)")),
+    };
+    let n: u64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("not a number: {num_str:?}"))?;
+    let secs = n.checked_mul(mult).ok_or("duration overflow")?;
+    if secs == 0 {
+        return Err("duration must be greater than zero".into());
+    }
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 /// Source the shared auth token. Precedence: explicit `--token-file`, then the

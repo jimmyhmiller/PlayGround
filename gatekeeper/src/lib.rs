@@ -7,4 +7,5 @@ pub mod function;
 pub mod proxy;
 pub mod reply;
 pub mod route;
+pub mod schedule;
 pub mod serve;
