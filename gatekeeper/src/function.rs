@@ -43,6 +43,24 @@ struct LoadedFn {
     handle: HandleFn,
     free: FreeFn,
     _lib: libloading::Library,
+    /// Each version is loaded from a UNIQUE private copy of the dylib (see
+    /// `load_library`), so the dynamic linker treats a reloaded build as a
+    /// distinct library instead of returning the still-mapped old handle. We
+    /// own that temp file and delete it when this `LoadedFn` drops (after the
+    /// library is unmapped).
+    temp_path: Option<std::path::PathBuf>,
+}
+
+impl Drop for LoadedFn {
+    fn drop(&mut self) {
+        // The library is unmapped as part of this same drop (fields drop in
+        // order; `_lib` after these). Removing the file now is fine on Unix:
+        // an unlinked-but-mapped file stays valid until unmapped, and the OS
+        // reclaims it after. Best-effort; a leftover temp is harmless.
+        if let Some(p) = &self.temp_path {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 type VersionFn = unsafe extern "C" fn() -> u32;
@@ -55,10 +73,45 @@ type FreeFn = unsafe extern "C" fn(*mut GkResponse);
 unsafe impl Send for LoadedFn {}
 unsafe impl Sync for LoadedFn {}
 
+/// A fingerprint of the dylib file on disk, used to detect that a function has
+/// been rebuilt/replaced so we re-`dlopen` it. We compare modification time,
+/// size, and inode: any change means a different build, even one that reuses the
+/// same path and the same mtime-second (size/inode still move on a fresh write).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    mtime: std::time::SystemTime,
+    size: u64,
+    inode: u64,
+}
+
+impl FileStamp {
+    /// Stat `path` into a stamp. An error (missing file, no perms) yields `None`;
+    /// callers treat that as "can't refresh" and keep any currently-cached lib.
+    fn of(path: &std::path::Path) -> Option<FileStamp> {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(path).ok()?;
+        Some(FileStamp {
+            mtime: md.modified().ok()?,
+            size: md.len(),
+            inode: md.ino(),
+        })
+    }
+}
+
+/// A cache entry: the loaded library plus the stamp of the file it was loaded
+/// from. When the on-disk stamp no longer matches, the entry is stale.
+struct CacheEntry {
+    func: std::sync::Arc<LoadedFn>,
+    stamp: FileStamp,
+}
+
 /// Process-wide cache of loaded function dylibs, keyed by library path. Lazily
-/// populated: a function is loaded on its first request and kept resident.
+/// populated: a function is loaded on its first request and kept resident until
+/// the file on disk changes, at which point it is transparently reloaded — so
+/// shipping a new build of a function (same path) takes effect on the next
+/// request, no restart or reload needed.
 pub struct FunctionRegistry {
-    loaded: Mutex<HashMap<OsString, std::sync::Arc<LoadedFn>>>,
+    loaded: Mutex<HashMap<OsString, CacheEntry>>,
 }
 
 impl FunctionRegistry {
@@ -87,28 +140,76 @@ impl FunctionRegistry {
         call_function(&func, method, path, query, headers, body)
     }
 
-    /// Return the cached function for `lib_path`, loading it if absent.
+    /// Return the function for `lib_path`, (re)loading it if absent or if the
+    /// file on disk has changed since we cached it.
+    ///
+    /// Hot code update: each call stats the file. If the stamp matches the cached
+    /// entry, we return the warm handle (the common, fast path — one stat, no
+    /// dlopen). If it differs, the dylib was rebuilt/replaced, so we load the new
+    /// one and swap it in. The old `Arc<LoadedFn>` lives until in-flight requests
+    /// release it, then unloads — so a request running on the old code finishes
+    /// safely.
+    ///
+    /// Fail-safe: if the new file fails to load (bad build, ABI mismatch) but we
+    /// still hold a working cached version, we keep serving the old one rather
+    /// than erroring — a botched function build can't take the route down.
     fn get_or_load(
         &self,
         lib_path: &std::path::Path,
     ) -> Result<std::sync::Arc<LoadedFn>, String> {
         let key = lib_path.as_os_str().to_os_string();
+        let disk = FileStamp::of(lib_path);
+
+        // Fast path: cached entry whose stamp still matches the file on disk.
         {
             let map = self.loaded.lock().unwrap();
-            if let Some(f) = map.get(&key) {
-                return Ok(std::sync::Arc::clone(f));
+            if let Some(entry) = map.get(&key) {
+                match disk {
+                    // Unchanged (or we couldn't stat — then we can't know it
+                    // changed, so keep the warm copy): serve the cache.
+                    Some(s) if s == entry.stamp => return Ok(std::sync::Arc::clone(&entry.func)),
+                    None => return Ok(std::sync::Arc::clone(&entry.func)),
+                    // Changed on disk: fall through to reload below.
+                    Some(_) => {}
+                }
             }
         }
-        // Load outside any double-checked race: two threads may both load on the
-        // very first concurrent hit; the second insert just wins. Harmless (the
-        // loser's Library drops). Keeping the load off the lock avoids holding it
-        // across dlopen.
-        let loaded = std::sync::Arc::new(load_library(lib_path)?);
-        let mut map = self.loaded.lock().unwrap();
-        let entry = map
-            .entry(key)
-            .or_insert_with(|| std::sync::Arc::clone(&loaded));
-        Ok(std::sync::Arc::clone(entry))
+
+        // Load the (new or first) version off-lock — dlopen can be slow and we
+        // don't want to hold the map mutex across it. Re-stat right before the
+        // load so the stamp we store matches the bytes we actually loaded (closes
+        // a write-during-load race: if it changes again we'll just reload next
+        // time).
+        let pre_stamp = FileStamp::of(lib_path);
+        match load_library(lib_path) {
+            Ok(lib) => {
+                let func = std::sync::Arc::new(lib);
+                let stamp = pre_stamp.or(disk);
+                let mut map = self.loaded.lock().unwrap();
+                if let Some(stamp) = stamp {
+                    map.insert(key, CacheEntry { func: std::sync::Arc::clone(&func), stamp });
+                } else {
+                    // No stamp available at all (file vanished mid-flight); serve
+                    // this load but don't cache it under an unknown identity.
+                    map.remove(&key);
+                }
+                Ok(func)
+            }
+            Err(e) => {
+                // New build failed to load. If we have a working older version,
+                // keep serving it (fail-safe); otherwise surface the error.
+                let map = self.loaded.lock().unwrap();
+                if let Some(entry) = map.get(&key) {
+                    eprintln!(
+                        "gatekeeper: function {}: reload failed, keeping previous version: {e}",
+                        lib_path.display()
+                    );
+                    Ok(std::sync::Arc::clone(&entry.func))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
@@ -121,42 +222,107 @@ impl Default for FunctionRegistry {
 /// Open a dylib and resolve + version-check its symbols. Fails closed on any
 /// missing symbol or ABI mismatch.
 fn load_library(lib_path: &std::path::Path) -> Result<LoadedFn, String> {
+    // Two dynamic-linker hazards make a naive `dlopen(lib_path)` wrong for
+    // hot-reload, and we defuse both here:
+    //
+    // 1. SAME-PATH CACHING. glibc keys loaded libraries by resolved pathname and
+    //    refcounts them. While the OLD build is still mapped (an in-flight
+    //    request holds its Arc), `dlopen` of the SAME path returns the OLD
+    //    handle — so a rebuilt function would keep running the old code. Fix:
+    //    copy the new bytes to a UNIQUE temp path and dlopen THAT, so the linker
+    //    sees a distinct library every time. We delete the temp on drop.
+    //
+    // 2. SHARED SYMBOL NAMES. Every function dylib exports the same
+    //    `gk_handle`/`gk_free`/`gk_abi_version` (from the SDK). Under the default
+    //    RTLD_GLOBAL, those names bind to whichever library loaded first, so a
+    //    second function would call the first one's code. Fix: RTLD_LOCAL keeps
+    //    each library's symbols private to its own handle. RTLD_NOW resolves
+    //    eagerly so a missing symbol fails here, not mid-request.
+    let temp_path = unique_temp_path(lib_path);
+    std::fs::copy(lib_path, &temp_path).map_err(|e| {
+        format!(
+            "staging {} -> {}: {e}",
+            lib_path.display(),
+            temp_path.display()
+        )
+    })?;
+
     // SAFETY: loading a dylib runs its initializers; we trust our own functions
     // (same trust level as a proxy upstream — see module docs).
     let lib = unsafe {
-        libloading::Library::new(lib_path)
-            .map_err(|e| format!("dlopen {}: {e}", lib_path.display()))?
+        use libloading::os::unix as ldunix;
+        match ldunix::Library::open(
+            Some(&temp_path),
+            ldunix::RTLD_NOW | ldunix::RTLD_LOCAL,
+        ) {
+            Ok(l) => libloading::Library::from(l),
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(format!("dlopen {}: {e}", lib_path.display()));
+            }
+        }
     };
 
-    // Resolve symbols. We immediately copy the fn pointers out (they're Copy);
-    // they stay valid as long as `lib` is alive, which we guarantee by storing
-    // `lib` in the same struct.
-    let version: VersionFn = unsafe {
-        *lib.get(gatekeeper_abi::GK_ABI_VERSION_SYMBOL)
-            .map_err(|e| format!("symbol gk_abi_version: {e}"))?
-    };
-    let handle: HandleFn = unsafe {
-        *lib.get(gatekeeper_abi::GK_HANDLE_SYMBOL)
-            .map_err(|e| format!("symbol gk_handle: {e}"))?
-    };
-    let free: FreeFn = unsafe {
-        *lib.get(gatekeeper_abi::GK_FREE_SYMBOL)
-            .map_err(|e| format!("symbol gk_free: {e}"))?
-    };
+    // Resolve symbols + version-check. On any failure here we must delete the
+    // staged temp copy (the early `?`s won't run the Drop, since we haven't built
+    // the LoadedFn yet), so wrap the fallible part and clean up on error.
+    let built = (|| -> Result<LoadedFn, String> {
+        // Resolve symbols. We immediately copy the fn pointers out (they're Copy);
+        // they stay valid as long as `lib` is alive, which we guarantee by storing
+        // `lib` in the same struct.
+        let version: VersionFn = unsafe {
+            *lib.get(gatekeeper_abi::GK_ABI_VERSION_SYMBOL)
+                .map_err(|e| format!("symbol gk_abi_version: {e}"))?
+        };
+        let handle: HandleFn = unsafe {
+            *lib.get(gatekeeper_abi::GK_HANDLE_SYMBOL)
+                .map_err(|e| format!("symbol gk_handle: {e}"))?
+        };
+        let free: FreeFn = unsafe {
+            *lib.get(gatekeeper_abi::GK_FREE_SYMBOL)
+                .map_err(|e| format!("symbol gk_free: {e}"))?
+        };
 
-    let got = unsafe { version() };
-    if got != GK_ABI_VERSION {
-        return Err(format!(
-            "ABI version mismatch: dylib reports {got}, gate expects {GK_ABI_VERSION} \
-             (rebuild the function against this gatekeeper)"
-        ));
+        let got = unsafe { version() };
+        if got != GK_ABI_VERSION {
+            return Err(format!(
+                "ABI version mismatch: dylib reports {got}, gate expects {GK_ABI_VERSION} \
+                 (rebuild the function against this gatekeeper)"
+            ));
+        }
+
+        Ok(LoadedFn {
+            handle,
+            free,
+            _lib: lib,
+            temp_path: Some(temp_path.clone()),
+        })
+    })();
+
+    if built.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
+    built
+}
 
-    Ok(LoadedFn {
-        handle,
-        free,
-        _lib: lib,
-    })
+/// A unique path in the system temp dir to stage a private copy of `lib_path`
+/// before `dlopen`, so each load is a distinct library to the dynamic linker.
+/// Unique across processes and concurrent loads via pid + a counter + nanos.
+fn unique_temp_path(lib_path: &std::path::Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stem = lib_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("gkfn");
+    // Keep a `.so` extension so the loader is happy on all platforms.
+    let name = format!("{stem}.gk.{}.{n}.{nanos}.so", std::process::id());
+    std::env::temp_dir().join(name)
 }
 
 /// Marshal a request, call `gk_handle`, copy the response out, free it. All the

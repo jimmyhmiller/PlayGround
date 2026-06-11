@@ -14,6 +14,9 @@
 //! - `/top-paths`      — most-visited paths        (`?n=` limit, default 20)
 //! - `/top-referrers`  — top referrers
 //! - `/by-status` `/by-region` `/by-source` `/by-method` `/by-host` — breakdowns
+//! - `/blog`           — per-post view counts (`/api/<slug>` posts), ranked
+//! - `/timeline`       — per-page view series over time, for line graphs
+//!                       (`?bucket=day|hour`, `?prefix=`, `?n=`)
 //! - `/recent`         — last N raw pageviews       (`?n=` default 50, max 500)
 //!
 //! The handler opens a fresh datalog-db connection per request (cheap, local
@@ -57,6 +60,7 @@ fn analytics(req: Request) -> Response {
         "/by-method" => top_field(&mut db, &window, "method", limit(&params, 20)),
         "/by-host" => top_field(&mut db, &window, "host", limit(&params, 50)),
         "/blog" => blog(&mut db, &window, limit(&params, 100)),
+        "/timeline" => timeline(&mut db, &window, &params),
         "/recent" => recent(&mut db, &window, limit(&params, 50).min(500)),
         other => return err(404, &format!("unknown analytics endpoint {other:?}")),
     };
@@ -266,6 +270,108 @@ fn blog(db: &mut Client, window: &Window, n: usize) -> Result<Value, String> {
         "post_count": posts.len(),
         "total_views": total,
         "posts": posts,
+    }))
+}
+
+/// `/timeline` — per-page view counts over time, shaped for line graphs: one
+/// series per page, each a list of `{day_start_ms, date, views}` points sorted
+/// by time. A frontend plots each series as a line.
+///
+/// Query params:
+/// - `?bucket=day|hour` — point granularity (default `day`).
+/// - `?prefix=/api/`    — which pages to include (default `/api/` = blog posts;
+///                        use `/` for all pages).
+/// - `?n=10`            — how many pages (the top N by total views in window).
+/// - plus the standard time window (`?days=`/`?from=`/`?to=`).
+///
+/// Buckets with zero views are simply absent from a series (sparse) — the client
+/// can fill gaps with zero against the shared `buckets` axis we also return.
+fn timeline(
+    db: &mut Client,
+    window: &Window,
+    params: &BTreeMap<String, String>,
+) -> Result<Value, String> {
+    let bucket_ms = match params.get("bucket").map(|s| s.as_str()) {
+        Some("hour") => 3_600_000,
+        _ => DAY_MS, // default: per day
+    };
+    let prefix = params.get("prefix").cloned().unwrap_or_else(|| "/api/".into());
+    let n = limit(params, 10);
+
+    // 1. Find the top-N pages by total views in the window (so the timeline
+    //    covers the pages that actually matter, not every long-tail path).
+    let path_pat: Value = if prefix == "/" {
+        json!("?path") // all pages: bare bind, no prefix filter
+    } else {
+        json!({"var": "?path", "starts_with": prefix})
+    };
+    let top = db
+        .query(json!({
+            "find": ["?path", {"agg": "count", "var": "*"}],
+            "where": where_pageview(window, json!({"path": path_pat})),
+            "order_by": [{"var": "count(*)", "desc": true}],
+            "limit": n,
+        }))
+        .map_err(|e| e.to_string())?;
+    let top_paths: Vec<String> = top
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()).map(String::from))
+        // /api/index is the listing page, drop it from a blog timeline.
+        .filter(|p| !(prefix == "/api/" && (p == "/api/index" || p == "/api/")))
+        .collect();
+
+    // 2. One bucketed-count query per page → its time series. (Per-page queries
+    //    keep each series clean and let us bind the exact path as a constant.)
+    let mut series = Vec::with_capacity(top_paths.len());
+    let mut all_buckets: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for path in &top_paths {
+        let res = db
+            .query(json!({
+                "find": [
+                    {"agg": "bucket", "var": format!("?ts, {bucket_ms}")},
+                    {"agg": "count", "var": "*"},
+                ],
+                "where": where_pageview(window, json!({"path": path.clone()})),
+                "order_by": [{"var": format!("bucket(?ts, {bucket_ms})")}],
+            }))
+            .map_err(|e| e.to_string())?;
+
+        let mut points = Vec::with_capacity(res.rows.len());
+        let mut total = 0i64;
+        for r in &res.rows {
+            let b = r.first().and_then(|v| v.as_i64()).unwrap_or(0);
+            let views = r.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+            all_buckets.insert(b);
+            total += views;
+            points.push(json!({
+                "bucket_start_ms": b,
+                "date": iso_date(b),
+                "views": views,
+            }));
+        }
+        let label = path.strip_prefix("/api/").unwrap_or(path);
+        series.push(json!({
+            "path": path,
+            "label": decode_slug(label),
+            "total_views": total,
+            "points": points,
+        }));
+    }
+
+    // Shared time axis (every bucket any series touched), so the client can align
+    // lines and fill missing points with zero.
+    let buckets: Vec<Value> = all_buckets
+        .iter()
+        .map(|b| json!({"bucket_start_ms": b, "date": iso_date(*b)}))
+        .collect();
+
+    Ok(json!({
+        "window": window.describe(),
+        "bucket_ms": bucket_ms,
+        "prefix": prefix,
+        "buckets": buckets,
+        "series": series,
     }))
 }
 
