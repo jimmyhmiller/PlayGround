@@ -187,9 +187,9 @@ curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://host/_gatekeeper/descr
 }
 ```
 
-A function describes itself with an optional `#[describe]` in the SDK, right next
-to its handler — so the catalog stays accurate as you add endpoints (rebuild the
-dylib, `mv` it in, done; no gate change):
+A function describes itself with a `#[describe]` in the SDK, right next to its
+handler — so the catalog stays accurate as you add endpoints (rebuild the dylib,
+`mv` it in, done; no gate change):
 
 ```rust
 use gatekeeper_fn::{describe, Description, Endpoint, Param};
@@ -206,9 +206,10 @@ fn describe() -> Description {
 }
 ```
 
-`#[describe]` is optional — a function without it shows as `"(no description)"`.
-The gate calls the function's `gk_describe` ABI symbol (added in ABI v2) only when
-serving the catalog.
+`#[describe]` is **required** — the gate refuses to load a function dylib that
+doesn't export `gk_describe` (added in ABI v2), exactly as it refuses one missing
+`gk_handle`. So the catalog can never contain an undocumented function. The symbol
+is only *called* when serving the catalog.
 
 ## TLS and certificates
 

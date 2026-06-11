@@ -1,0 +1,11 @@
+[package]
+name = "nodescribe-fn"
+version = "0.1.0"
+edition = "2021"
+description = "Test fixture: a function WITHOUT #[describe] — must be rejected at load (describe is required)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gatekeeper-fn = { path = "../../crates/gatekeeper-fn" }

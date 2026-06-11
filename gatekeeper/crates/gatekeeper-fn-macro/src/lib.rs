@@ -58,10 +58,10 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// Emits the optional `gk_describe` ABI symbol forwarding to it, so the gate can
-/// build its `/_gatekeeper/describe` catalog. At most one `#[describe]` per
-/// cdylib; it is entirely optional — a function with no `#[describe]` simply has
-/// no description.
+/// Emits the `gk_describe` ABI symbol forwarding to it, so the gate can build its
+/// `/_gatekeeper/describe` catalog. **Required**: every function must have exactly
+/// one `#[describe]` — the gate refuses to load a dylib without `gk_describe`, so
+/// the catalog is always complete.
 #[proc_macro_attribute]
 pub fn describe(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = match handler_name(&item) {

@@ -33,9 +33,10 @@ use std::os::raw::c_char;
 /// contract. The gate compares this against the dylib's reported version at load
 /// time and refuses to call a mismatched function (fail closed).
 ///
-/// v2: added the optional [`GK_DESCRIBE_SYMBOL`] (self-description). The gate
-/// treats describe as optional — a v2 dylib without it still works — but the
-/// version bump keeps the contract explicit.
+/// v2: added the REQUIRED [`GK_DESCRIBE_SYMBOL`] (self-description). Every
+/// function must export it (the SDK's `#[describe]` does so) — the gate refuses
+/// to load a dylib without it, so the `/_gatekeeper/describe` catalog is complete
+/// by construction and no function can be silently undocumented.
 pub const GK_ABI_VERSION: u32 = 2;
 
 /// Name of the exported version function: `extern "C" fn() -> u32`.
@@ -44,16 +45,16 @@ pub const GK_ABI_VERSION_SYMBOL: &[u8] = b"gk_abi_version";
 pub const GK_HANDLE_SYMBOL: &[u8] = b"gk_handle";
 /// Name of the exported deallocator: `extern "C" fn(*mut GkResponse)`.
 pub const GK_FREE_SYMBOL: &[u8] = b"gk_free";
-/// Name of the OPTIONAL self-description function:
+/// Name of the REQUIRED self-description function:
 /// `extern "C" fn() -> *mut GkResponse`.
 ///
-/// When present, the gate calls it to learn what the function does — its
-/// endpoints, their query params, and examples — and aggregates that into the
-/// built-in `/_gatekeeper/describe` catalog. The returned [`GkResponse`] is owned
-/// by the function (freed via [`GK_FREE_SYMBOL`], exactly like a handler
-/// response); its body is UTF-8 JSON. A function may omit this symbol entirely;
-/// the gate then reports it as "(no description)". The JSON body SHOULD be an
-/// object like:
+/// The gate calls it to learn what the function does — its endpoints, their query
+/// params, and examples — and aggregates that into the built-in
+/// `/_gatekeeper/describe` catalog. The returned [`GkResponse`] is owned by the
+/// function (freed via [`GK_FREE_SYMBOL`], exactly like a handler response); its
+/// body is UTF-8 JSON. Every function MUST export this (the SDK's `#[describe]`
+/// emits it); a dylib lacking it fails to load. The JSON body SHOULD be an object
+/// like:
 ///
 /// ```json
 /// {

@@ -42,9 +42,10 @@ struct LoadedFn {
     // `_lib` last.
     handle: HandleFn,
     free: FreeFn,
-    /// Optional self-description symbol (ABI v2). `None` if the dylib doesn't
-    /// export `gk_describe` — describing it then yields "(no description)".
-    describe: Option<DescribeFn>,
+    /// Required self-description symbol (ABI v2): every function must export
+    /// `gk_describe` (via the SDK's `#[describe]`), so the describe catalog is
+    /// always complete. Resolved at load time; a missing one fails the load.
+    describe: DescribeFn,
     _lib: libloading::Library,
     /// Each version is loaded from a UNIQUE private copy of the dylib (see
     /// `load_library`), so the dynamic linker treats a reloaded build as a
@@ -145,25 +146,22 @@ impl FunctionRegistry {
     }
 
     /// Ask the function dylib at `lib_path` to describe itself (ABI v2). Loads it
-    /// if needed. Returns `Ok(Some(json))` if it exports `gk_describe`,
-    /// `Ok(None)` if it doesn't (no description), or `Err` if the dylib can't be
-    /// loaded at all. Used to build the `/_gatekeeper/describe` catalog.
-    pub fn describe(&self, lib_path: &std::path::Path) -> Result<Option<String>, String> {
+    /// if needed. Returns the description JSON, or `Err` if the dylib can't be
+    /// loaded (which now includes a missing `gk_describe` — it is required).
+    /// Used to build the `/_gatekeeper/describe` catalog.
+    pub fn describe(&self, lib_path: &std::path::Path) -> Result<String, String> {
         let func = self.get_or_load(lib_path)?;
-        let Some(describe_fn) = func.describe else {
-            return Ok(None);
-        };
-        // SAFETY: describe_fn is a valid fn pointer from the loaded library; the
+        // SAFETY: func.describe is a valid fn pointer from the loaded library; the
         // function side catches its own panics. It returns an owned GkResponse we
         // copy out and then free via the dylib's own gk_free (same contract as a
         // handler response).
-        let resp_ptr = unsafe { describe_fn() };
+        let resp_ptr = unsafe { (func.describe)() };
         if resp_ptr.is_null() {
             return Err("gk_describe returned null".into());
         }
         let reply = unsafe { copy_response(resp_ptr) };
         unsafe { (func.free)(resp_ptr) };
-        Ok(Some(String::from_utf8_lossy(&reply.body).into_owned()))
+        Ok(String::from_utf8_lossy(&reply.body).into_owned())
     }
 
     /// Return the function for `lib_path`, (re)loading it if absent or if the
@@ -317,10 +315,14 @@ fn load_library(lib_path: &std::path::Path) -> Result<LoadedFn, String> {
             ));
         }
 
-        // gk_describe is OPTIONAL (ABI v2). Resolve it if present; a missing
-        // symbol is fine — that function just has no self-description.
-        let describe: Option<DescribeFn> = unsafe {
-            lib.get(gatekeeper_abi::GK_DESCRIBE_SYMBOL).ok().map(|s| *s)
+        // gk_describe is REQUIRED (ABI v2): every function must describe itself so
+        // the /_gatekeeper/describe catalog is complete by construction — no
+        // function can be silently undocumented. A dylib lacking it fails to load,
+        // exactly like one lacking gk_handle. Use `#[describe]` in the SDK.
+        let describe: DescribeFn = unsafe {
+            *lib.get(gatekeeper_abi::GK_DESCRIBE_SYMBOL).map_err(|e| {
+                format!("symbol gk_describe: {e} (every function must have a #[describe])")
+            })?
         };
 
         Ok(LoadedFn {

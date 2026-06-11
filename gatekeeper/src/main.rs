@@ -505,7 +505,7 @@ fn describe_catalog(gate: &Gate, routing: &Routing) -> Reply {
         if let Some(lib) = &r.function {
             entry["kind"] = json!("function");
             match gate.functions.describe(lib) {
-                Ok(Some(desc_json)) => {
+                Ok(desc_json) => {
                     // The function returned JSON text; embed it parsed if valid,
                     // else surface the raw string so nothing is silently lost.
                     match serde_json::from_str::<Value>(&desc_json) {
@@ -513,7 +513,6 @@ fn describe_catalog(gate: &Gate, routing: &Routing) -> Reply {
                         Err(_) => entry["description_raw"] = json!(desc_json),
                     }
                 }
-                Ok(None) => entry["description"] = json!("(no description — function predates ABI v2 or omits gk_describe)"),
                 Err(e) => entry["description_error"] = json!(e),
             }
         } else if r.static_dir.is_some() {
