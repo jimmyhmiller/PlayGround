@@ -1022,6 +1022,14 @@ pub unsafe extern "C" fn ai_gc_box_int(thread: *mut Thread, value: i64) -> *mut 
 /// by `ai_gc_box_int`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_gc_unbox_int(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        // A null here is a read of memory that was never written — e.g.
+        // an uninitialized slot of a boxed array. Die loudly instead of
+        // dereferencing null (a raw SIGSEGV with no message).
+        runtime_abort(
+            "unbox of a null value (read of an uninitialized array slot?)".to_owned(),
+        );
+    }
     unsafe {
         let value_slot = ptr.add(<Full as crate::gc::ObjHeader>::SIZE) as *const i64;
         *value_slot
@@ -1496,7 +1504,17 @@ pub unsafe extern "C" fn ai_array_get(thread: *mut Thread, a: *const u8, i: i64)
             return ai_gc_box_int(thread, v);
         }
         let slot = a.add(array_element_offset(i as usize)) as *const *mut u8;
-        *slot
+        let p = *slot;
+        if p.is_null() {
+            // In-bounds but never written: language code cannot test for
+            // null, so returning it just defers a segfault to the first
+            // field/tag access. An uninitialized read is a BUG; die loudly.
+            runtime_abort(format!(
+                "array_get: read of uninitialized slot {} (len {})",
+                i, len
+            ));
+        }
+        p
     }
 }
 
@@ -1543,6 +1561,12 @@ pub unsafe extern "C" fn ai_array_get_i64(thread: *mut Thread, a: *const u8, i: 
             return *(a.add(array_element_offset(i as usize)) as *const i64);
         }
         let p = *(a.add(array_element_offset(i as usize)) as *const *mut u8);
+        if p.is_null() {
+            runtime_abort(format!(
+                "array_get: read of uninitialized slot {} (len {})",
+                i, len
+            ));
+        }
         ai_gc_unbox_int(p)
     }
 }
