@@ -27,8 +27,95 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use datalog_client::{Client, QueryResult};
-use gatekeeper_fn::{handler, Request, Response};
+use gatekeeper_fn::{describe, handler, Description, Endpoint, Param, Request, Response};
 use serde_json::{json, Value};
+
+/// Self-description for the gate's `/_gatekeeper/describe` catalog: every
+/// endpoint, its query params, an example, and the returned shape. Paths here are
+/// relative to whatever route prefix the gate mounts this function under (e.g.
+/// `/analytics`), so `/summary` is reachable at `/analytics/summary`.
+#[describe]
+fn describe() -> Description {
+    // The time-window params are accepted by every aggregate endpoint; declare
+    // them once and attach to each.
+    let window = |e: Endpoint| -> Endpoint {
+        e.param(Param::int("days", "window: only the last N days").default("(all time)"))
+            .param(Param::new("from", "epoch-ms", "window start (inclusive)"))
+            .param(Param::new("to", "epoch-ms", "window end (inclusive)"))
+    };
+
+    Description::new("analytics", "Website-visit analytics from datalog-db PageViews")
+        .endpoint(window(
+            Endpoint::get("/summary", "headline totals for the window")
+                .example("/summary?days=7")
+                .returns("{ total_views, unique_ips, distinct_paths, earliest_ts, latest_ts }"),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-day", "view counts grouped per UTC day")
+                .example("/by-day?days=30")
+                .returns("{ by_day: [{ date, day_start_ms, views }] }"),
+        ))
+        .endpoint(window(
+            Endpoint::get("/top-paths", "most-visited paths, ranked")
+                .param(Param::int("n", "how many").default("20"))
+                .example("/top-paths?n=10")
+                .returns("{ top: [{ value, views }] }"),
+        ))
+        .endpoint(window(
+            Endpoint::get("/top-referrers", "top referrers, ranked")
+                .param(Param::int("n", "how many").default("20"))
+                .returns("{ top: [{ value, views }] }"),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-status", "breakdown by HTTP status code")
+                .param(Param::int("n", "how many").default("50")),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-region", "breakdown by Vercel region")
+                .param(Param::int("n", "how many").default("50")),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-source", "breakdown by source")
+                .param(Param::int("n", "how many").default("50")),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-method", "breakdown by HTTP method")
+                .param(Param::int("n", "how many").default("20")),
+        ))
+        .endpoint(window(
+            Endpoint::get("/by-host", "breakdown by request host")
+                .param(Param::int("n", "how many").default("50")),
+        ))
+        .endpoint(window(
+            Endpoint::get("/blog", "per-post view counts for blog posts (/api/<slug>)")
+                .param(Param::int("n", "how many posts").default("100"))
+                .example("/blog?days=30")
+                .returns("{ post_count, total_views, posts: [{ slug, path, views }] }"),
+        ))
+        .endpoint(window(
+            Endpoint::get("/timeline", "per-page view series over time, for line graphs")
+                .param(
+                    Param::string("bucket", "point granularity: 'day' or 'hour'")
+                        .default("day"),
+                )
+                .param(
+                    Param::string("prefix", "which pages: path prefix ('/api/' = blog, '/' = all)")
+                        .default("/api/"),
+                )
+                .param(Param::int("n", "how many top pages").default("10"))
+                .example("/timeline?days=7&n=3&bucket=day")
+                .returns(
+                    "{ bucket_ms, buckets: [{date, bucket_start_ms}], \
+                     series: [{ path, label, total_views, points: [{date, views}] }] }",
+                ),
+        ))
+        .endpoint(window(
+            Endpoint::get("/recent", "the last N raw pageviews, newest first")
+                .param(Param::int("n", "how many (max 500)").default("50"))
+                .example("/recent?n=20")
+                .returns("{ count, recent: [{ ts, path, referer, region, status }] }"),
+        ))
+}
 
 /// datalog-db address; overridable via env for non-default deployments.
 fn datalog_addr() -> String {

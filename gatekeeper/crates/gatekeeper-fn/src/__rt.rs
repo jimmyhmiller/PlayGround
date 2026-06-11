@@ -50,6 +50,18 @@ pub unsafe fn dispatch(
     into_raw_response(resp)
 }
 
+/// Call the user's description function, serialize it to JSON, and return it as
+/// an owned `GkResponse` (a 200 with an `application/json` body) — the same
+/// memory contract as a handler response, so the gate frees it via `gk_free`.
+/// Panics are caught and turned into a 500, like `dispatch`.
+pub unsafe fn describe(describer: fn() -> crate::Description) -> *mut GkResponse {
+    let resp = match catch_unwind(AssertUnwindSafe(|| describer().to_json())) {
+        Ok(json) => Response::json(json),
+        Err(_) => Response::status(500, "gatekeeper: describe panicked"),
+    };
+    into_raw_response(resp)
+}
+
 /// Free a response previously produced by [`dispatch`]. Reconstructs every
 /// allocation (headers array + each name/value string + body) so Rust's drop
 /// glue releases them. Idempotent on null.

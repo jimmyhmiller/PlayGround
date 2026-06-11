@@ -20,6 +20,11 @@ use gatekeeper::route::{Match, Router};
 use gatekeeper::schedule::Scheduler;
 use gatekeeper::serve;
 
+/// Reserved built-in meta route: a JSON catalog of every route and each
+/// function's self-description. Private (token required). Lives under a
+/// `/_gatekeeper/` namespace so it can't collide with a real service route.
+const DESCRIBE_PATH: &str = "/_gatekeeper/describe";
+
 struct Args {
     config: PathBuf,
     token_file: Option<PathBuf>,
@@ -343,6 +348,28 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
     // consistent even if a SIGHUP lands mid-request.
     let routing = gate.routing();
 
+    // Built-in meta route: a self-describing API catalog. Reserved path, always
+    // available, and PRIVATE — it requires the same token as any private route,
+    // because it enumerates every route (including private ones) and their
+    // functions' endpoints. Normalize first so `/_gatekeeper/describe/` etc. and
+    // any encoding match the same way the router would.
+    if let Some(norm) = Router::normalize(path) {
+        if norm == DESCRIBE_PATH {
+            let authed = routing
+                .auth
+                .as_ref()
+                .map(|a| a.check_headers(request.headers()))
+                .unwrap_or(false);
+            let reply = if authed {
+                describe_catalog(gate, &routing)
+            } else {
+                Reply::status(401, "Unauthorized").with_header("WWW-Authenticate", "Bearer")
+            };
+            let _ = reply.respond(request);
+            return;
+        }
+    }
+
     let reply = match routing.router.resolve(path) {
         Match::BadPath => Reply::status(400, "Bad Request"),
         Match::NoRoute => Reply::status(routing.unmatched_status, "Not Found"),
@@ -450,4 +477,61 @@ fn target_desc(r: &config::Route) -> String {
         (_, _, Some(l)) => format!("function {}", l.display()),
         _ => "(invalid)".into(),
     }
+}
+
+/// Build the `/_gatekeeper/describe` catalog: a JSON object listing every route
+/// (path, access, target) and, for function routes, the function's own
+/// self-description (endpoints/params/examples) fetched via `gk_describe`.
+///
+/// This is the one place the gate's knowledge (routes, public/private, from the
+/// toml) is joined with each function's knowledge (its endpoints, from the
+/// dylib). Function descriptions are embedded under their route so a caller sees
+/// the full path: route prefix + the function's sub-paths.
+fn describe_catalog(gate: &Gate, routing: &Routing) -> Reply {
+    use serde_json::{json, Value};
+
+    let mut routes = Vec::new();
+    for r in routing.router.routes() {
+        let access = if r.public { "public" } else { "private" };
+        let mut entry = json!({
+            "path": r.path,
+            "access": access,
+            "target": target_desc(r),
+        });
+
+        // For a function route, fetch and embed its self-description. The
+        // function's endpoint paths are RELATIVE to this route's prefix, so we
+        // also surface the prefix to make the full path obvious.
+        if let Some(lib) = &r.function {
+            entry["kind"] = json!("function");
+            match gate.functions.describe(lib) {
+                Ok(Some(desc_json)) => {
+                    // The function returned JSON text; embed it parsed if valid,
+                    // else surface the raw string so nothing is silently lost.
+                    match serde_json::from_str::<Value>(&desc_json) {
+                        Ok(v) => entry["description"] = v,
+                        Err(_) => entry["description_raw"] = json!(desc_json),
+                    }
+                }
+                Ok(None) => entry["description"] = json!("(no description — function predates ABI v2 or omits gk_describe)"),
+                Err(e) => entry["description_error"] = json!(e),
+            }
+        } else if r.static_dir.is_some() {
+            entry["kind"] = json!("static");
+        } else if r.proxy.is_some() {
+            entry["kind"] = json!("proxy");
+        }
+        routes.push(entry);
+    }
+
+    let catalog = json!({
+        "gatekeeper": {
+            "describe_path": DESCRIBE_PATH,
+            "abi_version": gatekeeper_abi::GK_ABI_VERSION,
+        },
+        "routes": routes,
+    });
+
+    let body = serde_json::to_vec_pretty(&catalog).unwrap_or_else(|_| b"{}".to_vec());
+    Reply::new(200, body).with_header("Content-Type", "application/json")
 }

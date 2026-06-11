@@ -125,5 +125,10 @@ impl Response {
     }
 }
 
+pub mod describe;
+pub use describe::{Description, Endpoint, Param};
+
+pub use gatekeeper_fn_macro::describe;
+
 #[doc(hidden)]
 pub mod __rt;

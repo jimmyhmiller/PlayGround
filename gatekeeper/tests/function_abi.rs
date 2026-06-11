@@ -77,6 +77,23 @@ fn invoke_covers_request_shapes() {
 }
 
 #[test]
+fn describe_returns_self_description() {
+    // The hello dylib exports gk_describe (ABI v2). The registry should fetch it
+    // and return valid JSON naming the function and its endpoints.
+    let reg = FunctionRegistry::new();
+    let lib = dylib_path();
+    let desc = reg
+        .describe(&lib)
+        .expect("describe call should not error")
+        .expect("hello exports gk_describe -> Some(json)");
+    assert!(desc.contains("\"name\":\"hello\""), "got: {desc}");
+    assert!(desc.contains("\"/health\""), "should list the /health endpoint: {desc}");
+    // It must be valid JSON.
+    let v: serde_json::Value = serde_json::from_str(&desc).expect("describe is valid JSON");
+    assert!(v.get("endpoints").and_then(|e| e.as_array()).is_some());
+}
+
+#[test]
 fn handler_panic_becomes_500_not_abort() {
     let reg = FunctionRegistry::new();
     let lib = dylib_path();

@@ -32,7 +32,11 @@ use std::os::raw::c_char;
 /// ABI version. Bump on ANY layout change to the structs below or the symbol
 /// contract. The gate compares this against the dylib's reported version at load
 /// time and refuses to call a mismatched function (fail closed).
-pub const GK_ABI_VERSION: u32 = 1;
+///
+/// v2: added the optional [`GK_DESCRIBE_SYMBOL`] (self-description). The gate
+/// treats describe as optional — a v2 dylib without it still works — but the
+/// version bump keeps the contract explicit.
+pub const GK_ABI_VERSION: u32 = 2;
 
 /// Name of the exported version function: `extern "C" fn() -> u32`.
 pub const GK_ABI_VERSION_SYMBOL: &[u8] = b"gk_abi_version";
@@ -40,6 +44,42 @@ pub const GK_ABI_VERSION_SYMBOL: &[u8] = b"gk_abi_version";
 pub const GK_HANDLE_SYMBOL: &[u8] = b"gk_handle";
 /// Name of the exported deallocator: `extern "C" fn(*mut GkResponse)`.
 pub const GK_FREE_SYMBOL: &[u8] = b"gk_free";
+/// Name of the OPTIONAL self-description function:
+/// `extern "C" fn() -> *mut GkResponse`.
+///
+/// When present, the gate calls it to learn what the function does — its
+/// endpoints, their query params, and examples — and aggregates that into the
+/// built-in `/_gatekeeper/describe` catalog. The returned [`GkResponse`] is owned
+/// by the function (freed via [`GK_FREE_SYMBOL`], exactly like a handler
+/// response); its body is UTF-8 JSON. A function may omit this symbol entirely;
+/// the gate then reports it as "(no description)". The JSON body SHOULD be an
+/// object like:
+///
+/// ```json
+/// {
+///   "name": "analytics",
+///   "summary": "Website-visit analytics from datalog-db",
+///   "endpoints": [
+///     {
+///       "path": "/timeline",
+///       "methods": ["GET"],
+///       "summary": "per-page views over time, for line graphs",
+///       "params": [
+///         {"name": "days", "type": "int", "required": false,
+///          "default": null, "description": "window: last N days"}
+///       ],
+///       "example": "/timeline?days=7&n=3",
+///       "returns": "{ series: [{ path, label, points: [{date, views}] }] }"
+///     }
+///   ]
+/// }
+/// ```
+///
+/// The gate does not validate this schema — it passes the JSON through into the
+/// catalog (parsing it if valid, else surfacing the raw text). Keeping the schema
+/// a convention rather than a hard struct lets functions add fields without an
+/// ABI bump.
+pub const GK_DESCRIBE_SYMBOL: &[u8] = b"gk_describe";
 
 /// One HTTP header as a borrowed name/value pair. Pointers are valid only for
 /// the duration of the [`GK_HANDLE_SYMBOL`] call. Not NUL-terminated — use the

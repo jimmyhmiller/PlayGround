@@ -46,6 +46,37 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     out
 }
 
+/// Mark a `fn() -> Description` as the dylib's self-description.
+///
+/// ```ignore
+/// use gatekeeper_fn::{describe, Description, Endpoint, Param};
+///
+/// #[describe]
+/// fn describe() -> Description {
+///     Description::new("analytics", "Website-visit analytics")
+///         .endpoint(Endpoint::get("/summary", "headline numbers"))
+/// }
+/// ```
+///
+/// Emits the optional `gk_describe` ABI symbol forwarding to it, so the gate can
+/// build its `/_gatekeeper/describe` catalog. At most one `#[describe]` per
+/// cdylib; it is entirely optional — a function with no `#[describe]` simply has
+/// no description.
+#[proc_macro_attribute]
+pub fn describe(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let name = match handler_name(&item) {
+        Some(n) => n,
+        None => panic!("#[describe] must be applied to a `fn name() -> Description`"),
+    };
+    let glue = DESCRIBE_GLUE.replace("{NAME}", &name);
+    let generated: TokenStream = glue
+        .parse()
+        .expect("gatekeeper-fn-macro: internal error generating describe glue (please report)");
+    let mut out = item;
+    out.extend(generated);
+    out
+}
+
 /// Find the identifier that immediately follows the `fn` keyword.
 fn handler_name(item: &TokenStream) -> Option<String> {
     let mut saw_fn = false;
@@ -84,5 +115,15 @@ pub unsafe extern "C" fn gk_handle(
 #[no_mangle]
 pub unsafe extern "C" fn gk_free(resp: *mut ::gatekeeper_fn::__rt::GkResponse) {
     ::gatekeeper_fn::__rt::free(resp)
+}
+"#;
+
+/// Glue for `#[describe]`: emit `gk_describe`, forwarding to the user's function
+/// (which returns a `Description`) through the SDK runtime, which serializes it to
+/// a JSON `GkResponse` and catches panics.
+const DESCRIBE_GLUE: &str = r#"
+#[no_mangle]
+pub unsafe extern "C" fn gk_describe() -> *mut ::gatekeeper_fn::__rt::GkResponse {
+    ::gatekeeper_fn::__rt::describe({NAME})
 }
 "#;

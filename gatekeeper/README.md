@@ -160,6 +160,56 @@ has a private route but no token is available, the reload is *refused* and the
 gate keeps serving the previous config — a botched edit can neither take the gate
 down nor accidentally drop auth.
 
+### Self-describing API: `/_gatekeeper/describe`
+
+The gate serves a built-in, **private** (token-required) meta route that returns a
+JSON catalog of every route and — for function routes — each function's own
+description of its endpoints:
+
+```sh
+curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://host/_gatekeeper/describe
+```
+
+```json
+{
+  "gatekeeper": { "describe_path": "/_gatekeeper/describe", "abi_version": 2 },
+  "routes": [
+    { "path": "/analytics", "access": "private", "kind": "function",
+      "description": {
+        "name": "analytics",
+        "endpoints": [
+          { "path": "/timeline", "methods": ["GET"],
+            "summary": "per-page view series over time, for line graphs",
+            "params": [ { "name": "days", "type": "int", "required": false,
+                          "default": "(all time)", "description": "window: last N days" } ],
+            "example": "/timeline?days=7&n=3", "returns": "{ series: [...] }" } ] } }
+  ]
+}
+```
+
+A function describes itself with an optional `#[describe]` in the SDK, right next
+to its handler — so the catalog stays accurate as you add endpoints (rebuild the
+dylib, `mv` it in, done; no gate change):
+
+```rust
+use gatekeeper_fn::{describe, Description, Endpoint, Param};
+
+#[describe]
+fn describe() -> Description {
+    Description::new("analytics", "Website-visit analytics")
+        .endpoint(
+            Endpoint::get("/timeline", "per-page views over time")
+                .param(Param::int("days", "window: last N days").default("(all time)"))
+                .example("/timeline?days=7")
+                .returns("{ series: [...] }"),
+        )
+}
+```
+
+`#[describe]` is optional — a function without it shows as `"(no description)"`.
+The gate calls the function's `gk_describe` ABI symbol (added in ABI v2) only when
+serving the catalog.
+
 ## TLS and certificates
 
 For a public `https://` domain, browsers require a certificate signed by a
