@@ -442,7 +442,6 @@ pub enum NetError {
     /// the pending-panic value after invoking it). The server converts
     /// this into a `KIND_ERR`/`ERR_CRASHED` reply; it never escapes to
     /// a client as this variant.
-    HandlerPanicked(String),
     /// The node reported a failure via a `KIND_ERR` frame: the call
     /// reached the node, the node could not complete it, and the
     /// connection is still healthy. `code` is one of the `ERR_*`
@@ -483,7 +482,6 @@ impl core::fmt::Display for NetError {
             NetError::InstallFailed(msg) => write!(f, "install of fetched code failed: {}", msg),
             NetError::ConnectionClosed => write!(f, "peer closed connection"),
             NetError::DeployRefused(msg) => write!(f, "node refused: {}", msg),
-            NetError::HandlerPanicked(msg) => write!(f, "handler panicked: {}", msg),
             NetError::TimedOut(phase) => write!(f, "timed out: {}", phase),
             NetError::Remote { code, msg } => {
                 let kind = match *code {
@@ -784,7 +782,6 @@ fn err_reply_code(e: &NetError) -> Option<u8> {
     match e {
         // A panicking thunk — THE reason errors must be values: the
         // caller gets `Err(Crashed(node))`, the node keeps serving.
-        NetError::HandlerPanicked(_) => Some(ERR_CRASHED),
         // The node can't materialize the shipped code.
         NetError::UnknownCode(_)
         | NetError::CodeFetchDepthExceeded
@@ -1952,11 +1949,9 @@ pub unsafe extern "C" fn ai_net_at_async(
         let result = unsafe {
             at_call_and_build(rt, kb, binding, wthread, node_now, closure_now)
         };
-        // At-call failures are already VALUES (an Err Result); a pending
-        // panic here would be an internal invariant break, but forward it
-        // as a value anyway rather than losing it.
-        let panic = unsafe { crate::runtime::take_pending_panic(wthread) };
-        crate::runtime::async_task_finish(&worker_slot, result, panic);
+        // At-call failures are already VALUES (an Err Result); there is
+        // no panic channel — an invariant break aborts the process.
+        crate::runtime::async_task_finish(&worker_slot, result);
     });
     crate::runtime::async_task_attach_handle(&slot, jh);
 
@@ -1995,7 +1990,6 @@ fn failure_variant_for<'b>(
         | NetError::ProtocolViolation(_)
         | NetError::ProtocolViolationOwned(_)
         | NetError::InstallFailed(_)
-        | NetError::HandlerPanicked(_)
         | NetError::DeployRefused(_) => &binding.crashed,
     }
 }
@@ -2110,14 +2104,12 @@ unsafe fn invoke_zero_arg_closure(
         .ok_or(NetError::UnknownCode(code_hash))?;
     let lambda: unsafe extern "C" fn(*mut Thread, *const u8) -> *mut u8 =
         unsafe { core::mem::transmute(fn_ptr) };
+    // No panic channel: a handler's modeled failures come back as the
+    // handler's own Result value; a contract violation (a BUG in trusted
+    // code) aborts the node, and the client observes the connection drop
+    // as `Failure::Unreachable`. `KIND_ERR`/`ERR_CRASHED` remains for
+    // node-side runtime faults (decode failure, missing code).
     let ret_ptr = unsafe { lambda(thread, closure_ptr) };
-    // A thunk panic propagates out of JIT'd code as a pending-panic
-    // value; this serve boundary takes it and converts it into an error
-    // the protocol can report (`KIND_ERR`/`ERR_CRASHED`). The node keeps
-    // running — one bad request fails one request.
-    if let Some(msg) = unsafe { crate::runtime::take_pending_panic(thread) } {
-        return Err(NetError::HandlerPanicked(msg));
-    }
     Ok(ret_ptr as *const u8)
 }
 
@@ -2150,8 +2142,7 @@ pub unsafe extern "C" fn ai_wire_encode(
     let mut buf = Vec::with_capacity(256);
     if let Err(e) = unsafe { encode_value(rt, WireValue::Heap(value_ptr), &mut buf) } {
         unsafe {
-            crate::runtime::raise_pending_panic(
-                thread,
+            crate::runtime::runtime_abort(
                 format!("wire_encode: encode failed: {:?}", e),
             )
         };
@@ -2187,8 +2178,7 @@ pub unsafe extern "C" fn ai_wire_decode_int(
         Ok((WireValue::Heap(p), _)) => unsafe { crate::runtime::ai_gc_unbox_int(p) },
         Err(e) => {
             unsafe {
-                crate::runtime::raise_pending_panic(
-                    thread,
+                crate::runtime::runtime_abort(
                     format!("wire_decode_int: decode failed: {:?}", e),
                 )
             };
@@ -2211,7 +2201,7 @@ pub unsafe extern "C" fn ai_wire_decode_ptr(
         .expect("ai_wire_decode_ptr: install_current_runtime must be called first");
     let bytes = unsafe { stable_wire_bytes(bytes_ptr) };
     let raise = |msg: String| -> *const u8 {
-        unsafe { crate::runtime::raise_pending_panic(thread, msg) };
+        unsafe { crate::runtime::runtime_abort(msg) };
         core::ptr::null()
     };
     match unsafe { decode_value(rt, &bytes) } {
@@ -2236,7 +2226,7 @@ pub unsafe extern "C" fn ai_wire_invoke(
         .expect("ai_wire_invoke: install_current_runtime must be called first");
     let bytes = unsafe { stable_wire_bytes(closure_bytes_ptr) };
     let raise = |msg: String| -> *const u8 {
-        unsafe { crate::runtime::raise_pending_panic(thread, msg) };
+        unsafe { crate::runtime::runtime_abort(msg) };
         core::ptr::null()
     };
     let (value, _) = match unsafe { decode_value(rt, &bytes) } {
@@ -2254,14 +2244,8 @@ pub unsafe extern "C" fn ai_wire_invoke(
     // closure builds its frame chain on the right thread rather than on
     // the runtime's shared home `Thread`.
     //
-    // `invoke_zero_arg_closure` converts an invoked-thunk panic into
-    // `HandlerPanicked`; re-raise it here so the (language-level) node
-    // loop's own error handling sees it as a value.
     let result_ptr = match unsafe { invoke_zero_arg_closure(rt, thread, closure_ptr) } {
         Ok(p) => p,
-        Err(NetError::HandlerPanicked(msg)) => {
-            return raise(format!("wire_invoke: shipped thunk panicked: {}", msg));
-        }
         Err(e) => return raise(format!("wire_invoke: closure invocation failed: {}", e)),
     };
     let mut buf = Vec::with_capacity(256);
@@ -3742,8 +3726,8 @@ mod tests {
             crate::codegen::IncrementalJit::new(empty_cm, &server_rt).unwrap();
         // The empty module has no user-defined shapes; the runtime
         // reserves the trailing slots for BoxedInt + String + Array +
-        // Atom + Bytes.
-        assert_eq!(server_rt.shape_by_type_id.len(), 5);
+        // Atom + Bytes + PrimArray.
+        assert_eq!(server_rt.shape_by_type_id.len(), 6);
 
         let listener = bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
@@ -4038,112 +4022,6 @@ mod tests {
         clear_current_at_binding();
     }
 
-    /// A shipped thunk that PANICS on the node:
-    /// - the panic propagates out of JIT'd code as a value (no abort),
-    /// - the serve boundary reports it in a `KIND_ERR` frame,
-    /// - the client maps it onto `Failure::Crashed(node)` — an ordinary
-    ///   enum value the program matches on,
-    /// - and the NODE KEEPS SERVING: the next call on the same node
-    ///   succeeds. One bad request fails one request.
-    #[test]
-    fn at_returns_err_crashed_on_remote_panic_and_node_survives() {
-        init();
-        let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
-            def boom(x: Int) -> Int =
-                if x < 0 { panic(\"remote boom\") } else { x + 1 }
-
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
-
-            def run(node: Node, x: Int) -> Int =
-                match at(node, || boom(x)) {
-                    Result::Ok(n) => n,
-                    Result::Err(f) => match f {
-                        Failure::Crashed(_) => 0 - 2,
-                        Failure::Unreachable(_) => 0 - 3,
-                        Failure::CodeMissing(_) => 0 - 4,
-                        Failure::Cancelled(_) => 0 - 5,
-                    },
-                }
-        ";
-
-        let server_ctx = Context::create();
-        let (server_rt, server_jit, _) = make_compiled_runtime(&server_ctx, src);
-        let _ = server_jit;
-        let listener = bind("127.0.0.1:0").unwrap();
-        let server_port = listener.local_addr().unwrap().port() as i64;
-        // TWO requests on one server: the panicking one, then a healthy
-        // one — proving the node survives the first.
-        let server_handle = unsafe {
-            serve_n_in_thread(Arc::new(RuntimeHandle(server_rt)), listener, 2)
-        };
-
-        let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
-        install_current_runtime(&client_rt);
-        let kb = KnowledgeBase::new();
-        install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
-        let r = resolve_module(&m).unwrap();
-        let rb = r.at_binding.as_ref().expect("at_binding");
-        let rt_binding =
-            build_at_runtime_binding(&client_rt, rb).expect("rt binding");
-        install_current_at_binding(&rt_binding);
-
-        let make_node = unsafe {
-            client_jit
-                .engine
-                .get_function::<unsafe extern "C" fn(
-                    *mut Thread,
-                    i64,
-                    i64,
-                    i64,
-                    i64,
-                    i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
-                .unwrap()
-        };
-        let node = unsafe {
-            make_node.call(client_rt.thread_ptr(), 127, 0, 0, 1, server_port)
-        };
-        let run = unsafe {
-            client_jit
-                .engine
-                .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, i64) -> i64>(
-                    &crate::codegen::def_symbol(&names["run"]),
-                )
-                .unwrap()
-        };
-
-        // First call: the thunk panics on the node → Failure::Crashed.
-        let crashed = unsafe { run.call(client_rt.thread_ptr(), node, -7) };
-        assert_eq!(crashed, -2, "remote panic should arrive as Failure::Crashed");
-        // The client-side runtime is clean (the panic happened on the
-        // node and arrived as a value, not as a local pending panic).
-        assert!(unsafe { crate::runtime::take_pending_panic(client_rt.thread_ptr()) }.is_none());
-
-        // Second call on the SAME node: it survived and still works.
-        let node2 = unsafe {
-            make_node.call(client_rt.thread_ptr(), 127, 0, 0, 1, server_port)
-        };
-        let ok = unsafe { run.call(client_rt.thread_ptr(), node2, 7) };
-        assert_eq!(ok, 8, "node should keep serving after a handler panic");
-
-        server_handle.join().unwrap().expect("server stayed healthy");
-        clear_at_conn_cache();
-        clear_current_runtime();
-        clear_current_knowledge_base();
-        clear_current_at_binding();
-    }
 
     /// Serializes the tests that mutate the process-global at() config
     /// (deadline / retry knobs) so they don't race each other.

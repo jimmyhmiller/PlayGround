@@ -616,7 +616,7 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // its result type is the bottom type `Never`, which is compatible
         // with every expected type (it can appear in any match arm / if
         // branch / function body).
-        "core/panic" => Some((
+        "core/abort" => Some((
             vec![Type::Builtin("String".to_owned())],
             Type::Builtin("Never".to_owned()),
         )),
@@ -714,6 +714,13 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // against `Array<T>` to recover T. Array type = Apply(Builtin
         // "Array", [T]).
         "core/array.new" => Some((
+            vec![int_t()],
+            array_t(Type::TypeVar(0)),
+        )),
+        // Unboxed variant: emitted by the resolver only where the context
+        // pins T to a scalar (Int/Float/Bool); same generic signature, the
+        // surrounding unification supplies the concrete T.
+        "core/array.new_prim" => Some((
             vec![int_t()],
             array_t(Type::TypeVar(0)),
         )),

@@ -587,14 +587,29 @@ impl<'a> RenderCtx<'a> {
         if ptr.is_null() {
             return Ok(Json::Array(Vec::new()));
         }
-        let len = unsafe { crate::runtime::ai_array_len(ptr) };
+        let thread = self.rt.thread_ptr();
+        let len = unsafe { crate::runtime::ai_array_len(thread, ptr) };
         let mut out: Vec<Json> = Vec::with_capacity(len.max(0) as usize);
+        // `ai_array_get` allocates when the array is the unboxed PrimArray
+        // shape (it boxes the scalar), so root `ptr` across the loop and
+        // re-read it after every get.
+        let dyna = unsafe { &*(*thread).dyna_thread };
+        let mark = dyna.scratch_mark();
+        let slot = dyna.push_scratch(ptr);
         for i in 0..len {
-            let elem_ptr = unsafe { crate::runtime::ai_array_get(self.rt.thread_ptr(), ptr, i) };
+            let p = dyna.scratch_at(slot) as *const u8;
+            let elem_ptr = unsafe { crate::runtime::ai_array_get(thread, p, i) };
             // Array slots always hold pointers; an Int element is boxed.
-            let rendered = unsafe { self.render_slot(elem_ty, true, elem_ptr as i64)? };
-            out.push(rendered);
+            let rendered = unsafe { self.render_slot(elem_ty, true, elem_ptr as i64) };
+            match rendered {
+                Ok(r) => out.push(r),
+                Err(e) => {
+                    dyna.scratch_reset(mark);
+                    return Err(e);
+                }
+            }
         }
+        dyna.scratch_reset(mark);
         Ok(Json::Array(out))
     }
 
@@ -1428,16 +1443,6 @@ pub fn eval(
         };
         Ok(result)
     })();
-
-    // A panic that propagated to this boundary is an error value, not a
-    // dead process: take it before rendering (the returned bits are the
-    // propagation dummy, not a real result).
-    let call_result = call_result.and_then(|bits| {
-        match unsafe { crate::runtime::take_pending_panic(thread) } {
-            Some(msg) => Err(EvalError::Panic(msg)),
-            None => Ok(bits),
-        }
-    });
 
     // Render the result BEFORE tearing down the runtime (the heap is still
     // live and `rt` is still installed). Any rendering error is captured here.

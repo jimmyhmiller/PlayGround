@@ -247,7 +247,7 @@ pub fn builtin_effect_sig(name: &str) -> EffectSig {
         // Arrays / Bytes are owned values (copied across boundaries), so
         // they don't break mobility; reads/constructs are pure, in-place
         // writes are a local mutation.
-        "core/array.new" | "core/array.len" | "core/array.get" => pure,
+        "core/array.new" | "core/array.new_prim" | "core/array.len" | "core/array.get" => pure,
         "core/array.set" => just(EffectSet::MUT),
         "core/bytes.new"
         | "core/bytes.len"
@@ -279,7 +279,7 @@ pub fn builtin_effect_sig(name: &str) -> EffectSig {
         // Raw pointer / FFI memory.
         n if n.starts_with("core/ptr.") => just(EffectSet::FFI),
 
-        "core/panic" => just(EffectSet::PANIC),
+        "core/abort" => just(EffectSet::PANIC),
 
         // User `extern fn`s. The conventional stdlib I/O + pure-conversion
         // externs are classified precisely; everything else into C is
@@ -807,15 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn panic_is_tracked() {
+    fn abort_is_tracked() {
         let e = infer(
             "
-            def boom(x: Int) -> Int = panic(\"no\")
+            def boom(x: Int) -> Int = abort(\"no\")
         ",
         );
         assert!(e["boom"].concrete.contains(EffectSet::PANIC));
-        // Panic alone is still mobile + cacheable (it aborts identically
-        // anywhere; a remote panic becomes a Failure).
+        // Abort alone is still mobile + cacheable (it dies identically
+        // anywhere; it never produces a wrong cached value).
         assert!(e["boom"].is_mobile());
         assert!(e["boom"].cacheable());
     }

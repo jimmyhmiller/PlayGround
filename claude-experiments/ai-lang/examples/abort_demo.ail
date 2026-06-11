@@ -1,0 +1,40 @@
+// Abort demo: `abort(msg)` is the language's BUG path. It prints the
+// message to stderr and kills the process — no unwinding, no catching,
+// no hidden channel. Errors a program MODELS are `Result` values (see
+// try_demo.ail); `abort` is only for states that must be impossible.
+// Its type is the bottom type `Never`, so it can sit in any branch /
+// match arm / function body regardless of the surrounding expected type.
+//
+//   ai-lang add examples/abort_demo.ail
+//   ai-lang run main      # happy path: prints and exits 0
+//
+// Change `idx` to a negative number to watch the abort fire.
+
+// A guarded lookup: a negative index here is a programmer error, so we
+// die loudly rather than return a bogus value. The `else` branch is
+// Int; the `then` branch diverges. The `if` still typechecks (Never
+// unifies with Int).
+def checked_get(idx: Int) -> Int =
+    if idx < 0 {
+        abort("index out of range")
+    } else {
+        idx * 10
+    }
+
+// `abort` inside a match arm. The reached arm returns Int; the
+// unreached arm diverges.
+def must_be_positive(x: Int) -> Int =
+    match Option::Some(x) {
+        Option::Some(_) =>
+            if x > 0 { x } else { abort("expected a positive number") },
+        Option::None => abort("impossible: Some is always Some")
+    }
+
+def main() -> Int = {
+    let idx = 4;
+    let _a = println(string_concat("checked_get(4) = ",
+        int_to_string(checked_get(idx))));
+    let _b = println(string_concat("must_be_positive(7) = ",
+        int_to_string(must_be_positive(7))));
+    0
+}

@@ -1,0 +1,33 @@
+// Binary trees (benchmarks-game style) — GC allocation stress.
+// Builds complete trees bottom-up and checksums node counts.
+// Mirrors benchmarks/rust/src/bin/binary_trees.rs exactly.
+
+struct BtNode { left: BtTree, right: BtTree }
+enum BtTree { BtBranch(BtNode), BtLeaf }
+
+def bt_make(d: Int) -> BtTree =
+    if d == 0 { BtTree::BtLeaf } else {
+        BtTree::BtBranch(BtNode { left: bt_make(d - 1), right: bt_make(d - 1) })
+    }
+
+def bt_check(t: BtTree) -> Int =
+    match t {
+        BtTree::BtLeaf => 1,
+        BtTree::BtBranch(n) => 1 + bt_check(n.left) + bt_check(n.right),
+    }
+
+def bt_iters(i: Int, n: Int, depth: Int, acc: Int) -> Int =
+    if i >= n { acc } else {
+        bt_iters(i + 1, n, depth, acc + bt_check(bt_make(depth)))
+    }
+
+def main() -> Int = {
+    let depth = 16;
+    let iters = 40;
+    let t0 = now_unix_millis();
+    let r = bt_iters(0, iters, depth, 0);
+    let t1 = now_unix_millis();
+    println(string_concat("RESULT binary_trees ",
+        string_concat(int_to_string(t1 - t0),
+        string_concat(" ms checksum=", int_to_string(r)))))
+}

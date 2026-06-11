@@ -1,0 +1,40 @@
+// Mandelbrot escape-count over a grid, f64 arithmetic, local (no
+// distribution). Checksum = sum of all per-pixel iteration counts.
+// Mirrors benchmarks/rust/src/bin/mandelbrot.rs exactly.
+
+def escape(c_re: Float, c_im: Float, z_re: Float, z_im: Float,
+           i: Int, max_iter: Int) -> Int =
+    if i >= max_iter { max_iter } else {
+        let zr2 = z_re * z_re;
+        let zi2 = z_im * z_im;
+        if zr2 + zi2 > 4.0 { i } else {
+            escape(c_re, c_im, zr2 - zi2 + c_re,
+                   2.0 * z_re * z_im + c_im, i + 1, max_iter)
+        }
+    }
+
+def px_loop(px: Int, width: Int, c_im: Float, max_iter: Int, acc: Int) -> Int =
+    if px >= width { acc } else {
+        let c_re = 0.0 - 2.0 + 3.0 * int_to_float(px) / int_to_float(width);
+        px_loop(px + 1, width, c_im, max_iter,
+                acc + escape(c_re, c_im, 0.0, 0.0, 0, max_iter))
+    }
+
+def py_loop(py: Int, width: Int, height: Int, max_iter: Int, acc: Int) -> Int =
+    if py >= height { acc } else {
+        let c_im = 0.0 - 1.25 + 2.5 * int_to_float(py) / int_to_float(height);
+        py_loop(py + 1, width, height, max_iter,
+                px_loop(0, width, c_im, max_iter, acc))
+    }
+
+def main() -> Int = {
+    let width = 1000;
+    let height = 1000;
+    let max_iter = 100;
+    let t0 = now_unix_millis();
+    let r = py_loop(0, width, height, max_iter, 0);
+    let t1 = now_unix_millis();
+    println(string_concat("RESULT mandelbrot ",
+        string_concat(int_to_string(t1 - t0),
+        string_concat(" ms checksum=", int_to_string(r)))))
+}

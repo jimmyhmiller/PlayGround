@@ -1,0 +1,15 @@
+// Naive recursive Fibonacci — function-call overhead benchmark.
+// Mirrors benchmarks/rust/src/bin/fib.rs exactly.
+
+def bench_fib(n: Int) -> Int =
+    if n < 2 { n } else { bench_fib(n - 1) + bench_fib(n - 2) }
+
+def main() -> Int = {
+    let n = 32;
+    let t0 = now_unix_millis();
+    let r = bench_fib(n);
+    let t1 = now_unix_millis();
+    println(string_concat("RESULT fib ",
+        string_concat(int_to_string(t1 - t0),
+        string_concat(" ms checksum=", int_to_string(r)))))
+}

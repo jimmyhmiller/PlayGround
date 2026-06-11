@@ -1018,6 +1018,41 @@ pub fn resolve_module_with_env(
         bodies.push(body_canon);
     }
 
+    // 2b'. Type-directed array_new specialization: where the context
+    // (def return type, struct field, call argument) pins an array's
+    // element type to a scalar, `core/array.new` becomes the unboxed
+    // `core/array.new_prim`. Runs before SCC hashing so the choice is
+    // part of each def's content hash.
+    {
+        let fields_by_struct: HashMap<Hash, Vec<Type>> = structs
+            .values()
+            .map(|si| {
+                (
+                    si.hash,
+                    si.fields.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let params_by_self: Vec<Vec<Type>> = pendings
+            .iter()
+            .map(|p| match &p.kind {
+                PendingKind::Fn { params_canon, .. } => params_canon.clone(),
+                PendingKind::State { .. } => Vec::new(),
+            })
+            .collect();
+        let cx = ArraySpecCtx {
+            fields_by_struct: &fields_by_struct,
+            params_by_self: &params_by_self,
+        };
+        for (i, p) in pendings.iter().enumerate() {
+            let expected = match &p.kind {
+                PendingKind::Fn { ret_canon, .. } => ret_canon.clone(),
+                PendingKind::State { ty } => ty.clone(),
+            };
+            bodies[i] = specialize_array_new(&bodies[i], Some(&expected), &cx);
+        }
+    }
+
     // 2c.
     let n = pendings.len();
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -1416,6 +1451,159 @@ fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
 ///   - else: becomes `TopRef(real_hash[global_idx])`, which must be
 ///     populated because earlier (dependency) SCCs were already
 ///     processed.
+/// Whether a type is `Array<scalar>` — the contexts where `array_new`
+/// specializes to the UNBOXED `core/array.new_prim` (raw i64/f64 slots,
+/// no per-element box allocation).
+fn is_prim_array_type(t: &Type) -> bool {
+    match t {
+        Type::Apply(head, args) => {
+            matches!(head.as_ref(), Type::Builtin(n) if n == "Array")
+                && matches!(
+                    args.first(),
+                    Some(Type::Builtin(n)) if n == "Int" || n == "Float" || n == "Bool"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Context for [`specialize_array_new`]: where expected types come from.
+struct ArraySpecCtx<'a> {
+    /// Struct hash → declared field types, for struct-literal positions.
+    fields_by_struct: &'a HashMap<Hash, Vec<Type>>,
+    /// Module-local def (global pending index) → declared param types,
+    /// for call-argument positions. Bodies at this stage reference
+    /// module-local defs via `SelfRef(global)`.
+    params_by_self: &'a [Vec<Type>],
+}
+
+/// Type-directed specialization of `core/array.new`: rewrite it to
+/// `core/array.new_prim` wherever the CONTEXT pins the element type to a
+/// scalar (Int/Float/Bool). Same precedent as the `at#`/`decode#` baking —
+/// the choice is part of the definition, so it lands in the content hash.
+///
+/// `expected` flows down through tail positions (let bodies, if branches,
+/// match arms, defer bodies) and into typed holes (struct-literal fields,
+/// call arguments of known defs). Creation sites with no contextual type
+/// (e.g. an unannotated intermediate) keep the boxed representation —
+/// that's a performance default, never a correctness issue: every array
+/// accessor handles both representations at runtime.
+fn specialize_array_new(e: &Expr, expected: Option<&Type>, cx: &ArraySpecCtx) -> Expr {
+    let down = |sub: &Expr| specialize_array_new(sub, None, cx);
+    match e {
+        Expr::Call(callee, args) => {
+            if let Expr::BuiltinRef(name) = callee.as_ref() {
+                if name == "core/array.new"
+                    && expected.map(is_prim_array_type).unwrap_or(false)
+                {
+                    return Expr::Call(
+                        Box::new(Expr::BuiltinRef("core/array.new_prim".to_owned())),
+                        args.iter().map(down).collect(),
+                    );
+                }
+            }
+            // Known callee: push its declared param types into the args.
+            let param_tys: Option<&Vec<Type>> = match callee.as_ref() {
+                Expr::SelfRef(g) => cx.params_by_self.get(*g as usize),
+                _ => None,
+            };
+            let new_args = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let exp = param_tys.and_then(|ps| ps.get(i));
+                    specialize_array_new(a, exp, cx)
+                })
+                .collect();
+            Expr::Call(Box::new(down(callee)), new_args)
+        }
+        Expr::Let { value, body } => Expr::Let {
+            value: Box::new(down(value)),
+            body: Box::new(specialize_array_new(body, expected, cx)),
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(down(cleanup)),
+            body: Box::new(specialize_array_new(body, expected, cx)),
+        },
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            cond: Box::new(down(cond)),
+            then_branch: Box::new(specialize_array_new(then_branch, expected, cx)),
+            else_branch: Box::new(specialize_array_new(else_branch, expected, cx)),
+        },
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(down(scrutinee)),
+            arms: arms
+                .iter()
+                .map(|arm| MatchArm {
+                    pattern: arm.pattern.clone(),
+                    body: specialize_array_new(&arm.body, expected, cx),
+                })
+                .collect(),
+        },
+        Expr::StructNew { struct_ref, fields } => {
+            let field_tys = cx.fields_by_struct.get(struct_ref);
+            Expr::StructNew {
+                struct_ref: *struct_ref,
+                fields: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let exp = field_tys.and_then(|ts| ts.get(i));
+                        specialize_array_new(f, exp, cx)
+                    })
+                    .collect(),
+            }
+        }
+        Expr::EnumNew {
+            enum_ref,
+            variant_index,
+            payload,
+        } => Expr::EnumNew {
+            enum_ref: *enum_ref,
+            variant_index: *variant_index,
+            payload: payload.as_ref().map(|p| Box::new(down(p))),
+        },
+        Expr::Lambda { params, body } => Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(down(body)),
+        },
+        Expr::Field {
+            base,
+            struct_ref,
+            index,
+        } => Expr::Field {
+            base: Box::new(down(base)),
+            struct_ref: *struct_ref,
+            index: *index,
+        },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(down(expr)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::LocalVar(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
+        | Expr::BuiltinRef(_) => e.clone(),
+    }
+}
+
 fn rewrite_for_canonical(
     e: &Expr,
     local_of: &HashMap<u32, u32>,
@@ -2606,11 +2794,12 @@ fn resolve_expr_typed(
                         Some("core/f64.sqrt"),
                         Some(Type::Builtin("Float".to_owned())),
                     ),
-                    // `panic(msg)` — hard error. Diverges, so its type is
+                    // `abort(msg)` — a reached BUG dies loudly; modeled
+                    // errors are Result values. Diverges, so its type is
                     // the bottom type `Never`, which unifies with any
                     // expected type (it can sit in any match arm / branch).
-                    "panic" => (
-                        Some("core/panic"),
+                    "abort" => (
+                        Some("core/abort"),
                         Some(Type::Builtin("Never".to_owned())),
                     ),
                     // Raw-pointer / memory intrinsics. `Ptr` is an

@@ -613,15 +613,10 @@ pub fn apply_deploy<'ctx>(
                     })?;
                 let mig: unsafe extern "C" fn(*mut Thread, u64) -> u64 =
                     core::mem::transmute(addr);
+                // No panic channel: a contract violation in the migration
+                // fn aborts the process before this returns; modeled
+                // failures should be designed into the migration's types.
                 let res = mig(thread, arg);
-                // A panicking migration fn refuses the deploy (the old
-                // state cell is untouched) instead of killing the node.
-                if let Some(msg) = crate::runtime::take_pending_panic(thread) {
-                    return Err(DeployError::Install(format!(
-                        "migration fn {} panicked: {}",
-                        via, msg
-                    )));
-                }
                 let val: *mut u8 = if is_int(&p.ty) {
                     ai_gc_box_int(thread, res as i64)
                 } else {
@@ -1101,14 +1096,9 @@ pub unsafe fn invoke_binding<'ctx>(
             _ => unreachable!("arity capped above"),
         }
     };
-    // A binding panic propagates here as a value; refuse the invoke
-    // (the node stays alive, the client gets the message).
-    if let Some(msg) = unsafe { crate::runtime::take_pending_panic(thread) } {
-        return Err(DeployError::InvokeUnsupported {
-            name: name.to_string(),
-            why: format!("binding panicked: {}", msg),
-        });
-    }
+    // No panic channel: a contract violation in the binding aborts the
+    // process before this returns; modeled failures are Result values
+    // in the binding's own signature.
     Ok(v)
 }
 

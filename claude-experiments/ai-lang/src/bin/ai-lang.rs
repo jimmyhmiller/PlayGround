@@ -826,10 +826,9 @@ fn run_handed_code(
             .map_err(|_| "task is not a `(String) -> String` fn".to_string())?
     };
     let input_heap = unsafe { ai_lang::ffi::owned_str_to_heap(rt.thread_ptr(), &input) };
+    // No panic channel: a contract violation in the task aborts the
+    // process before this returns.
     let out = unsafe { task.call(rt.thread_ptr(), input_heap) };
-    if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
-        return Err(format!("task panicked: {}", msg));
-    }
     let result = unsafe { ai_lang::ffi::heap_str_to_owned(out) };
     Ok(result)
 }
@@ -2018,12 +2017,38 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
     let ctx = Context::create();
     let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted_hashes);
     let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        // Codegen was skipped, so dlsym-resolve the C externs it would
+        // have registered (clock_gettime, malloc, ... — anything the
+        // program calls through the C FFI).
+        ai_lang::codegen::register_referenced_c_externs(&rm).expect("register C externs");
         (cached, true)
     } else {
         let built = CompiledModule::build(&ctx, &rm).expect("build module");
         let _ = ai_lang::codegen::write_bitcode_cache(&built, cb.root(), &wanted_hashes);
         (built, false)
     };
+    // Diagnostic: dump the (optimized) LLVM IR of the module, or of one
+    // def whose visible name is given (`AI_LANG_DUMP_IR=bfib`).
+    if let Ok(filter) = std::env::var("AI_LANG_DUMP_IR") {
+        let ir = cm.ir();
+        if filter.is_empty() || filter == "1" {
+            eprintln!("{}", ir);
+        } else if let Some(h) = cb.get_name(&filter) {
+            let sym = def_symbol(&h);
+            let mut emit = false;
+            for line in ir.lines() {
+                if line.starts_with("define ") && line.contains(&sym) {
+                    emit = true;
+                }
+                if emit {
+                    eprintln!("{}", line);
+                    if line == "}" {
+                        break;
+                    }
+                }
+            }
+        }
+    }
     let rt = Runtime::new_with_metadata(
         cm.closure_type_infos.clone(),
         cm.shape_registry.clone(),
@@ -2058,18 +2083,9 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
                 std::process::exit(1);
             })
     };
+    // No panic channel: a contract violation in the program aborts the
+    // process with its message before this returns.
     let result = unsafe { entry.call(rt.thread_ptr()) };
-    // A panic propagated to this boundary as a value; report it and exit
-    // with a clean error code (the process never aborts).
-    if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
-        eprintln!("ai-lang panic: {}", msg);
-        clear_at_conn_cache();
-        clear_current_runtime();
-        clear_current_knowledge_base();
-        clear_current_at_binding();
-        drop(servers);
-        std::process::exit(101);
-    }
     println!("{}", result);
 
     clear_at_conn_cache();
@@ -2182,6 +2198,7 @@ fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_
     let wanted: Vec<Hash> = rm.defs.iter().map(|d| d.hash).collect();
     let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted);
     let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        ai_lang::codegen::register_referenced_c_externs(&rm).expect("register C externs");
         (cached, true)
     } else {
         let built = CompiledModule::build(&ctx, &rm).expect("build module");
@@ -2233,21 +2250,9 @@ fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_
             }
         };
 
+        // No panic channel: a contract violation in a test aborts the
+        // whole run with its message (a bug is a bug).
         let result = unsafe { entry.call(rt.thread_ptr()) };
-        if let Some(msg) = unsafe { ai_lang::runtime::take_pending_panic(rt.thread_ptr()) } {
-            failed += 1;
-            if !json {
-                println!("  FAIL  {}  (panicked: {})", name, msg);
-            }
-            json_results.push(format!(
-                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"fail\",\"panic\":\"{}\",\"pure\":{}}}",
-                json_escape(name),
-                &hash.to_hex()[..16],
-                json_escape(&msg),
-                is_pure
-            ));
-            continue;
-        }
         if result == 0 {
             passed += 1;
             if !json {

@@ -1,0 +1,18 @@
+// Tight integer loop with a xor/shift mix so neither compiler can
+// fold the loop into a closed form. Tail recursion is the loop.
+// Mirrors benchmarks/rust/src/bin/loop_mix.rs exactly.
+
+def mix_loop(i: Int, n: Int, acc: Int) -> Int =
+    if i >= n { acc } else {
+        mix_loop(i + 1, n, bit_xor(acc + i, bit_shr(acc, 13)))
+    }
+
+def main() -> Int = {
+    let n = 500000000;
+    let t0 = now_unix_millis();
+    let r = mix_loop(0, n, 0);
+    let t1 = now_unix_millis();
+    println(string_concat("RESULT loop_mix ",
+        string_concat(int_to_string(t1 - t0),
+        string_concat(" ms checksum=", int_to_string(r)))))
+}

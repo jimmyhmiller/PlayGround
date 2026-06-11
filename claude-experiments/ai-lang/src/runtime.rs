@@ -96,20 +96,10 @@ pub struct Thread {
     /// mutable cell apart from immutable data. `ai_atom_new` reads this.
     pub atom_ti: *const TypeInfo,
 
-    /// The panic currently propagating on this thread, or null.
-    ///
-    /// Errors are VALUES in ai-lang: `ai_panic` does not abort — it
-    /// stores the message here (a `Box<String>` raw pointer, NOT a GC
-    /// heap pointer, so it needs no rooting) and returns. Codegen emits
-    /// a check after every call that can raise: if this slot is
-    /// non-null the function early-returns (through its normal
-    /// epilogue) without touching the callee's dummy result, so the
-    /// panic propagates up the stack as ordinary returns until a Rust
-    /// boundary takes it (`take_pending_panic`) and converts it — the
-    /// serve loop into a `Failure::Crashed` reply, `join` into a
-    /// re-raise on the joining thread, the top-level runner into a
-    /// clean error exit.
-    pub pending_panic: *mut u8,
+    /// `TypeInfo` for the `PrimArray` heap shape: header + varlen-bytes
+    /// (count word = byte length `n*8`) holding raw i64/f64 slot bits,
+    /// untraced.
+    pub prim_array_ti: *const TypeInfo,
 }
 
 pub mod thread_offsets {
@@ -124,7 +114,7 @@ pub mod thread_offsets {
     pub const BYTES_TI: usize = 56;
     pub const ARRAY_TI: usize = 64;
     pub const ATOM_TI: usize = 72;
-    pub const PENDING_PANIC: usize = 80;
+    pub const PRIM_ARRAY_TI: usize = 80;
 }
 
 const _: () = {
@@ -138,7 +128,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Thread, bytes_ti) == thread_offsets::BYTES_TI);
     assert!(core::mem::offset_of!(Thread, array_ti) == thread_offsets::ARRAY_TI);
     assert!(core::mem::offset_of!(Thread, atom_ti) == thread_offsets::ATOM_TI);
-    assert!(core::mem::offset_of!(Thread, pending_panic) == thread_offsets::PENDING_PANIC);
+    assert!(core::mem::offset_of!(Thread, prim_array_ti) == thread_offsets::PRIM_ARRAY_TI);
 };
 
 // =============================================================================
@@ -272,6 +262,17 @@ pub fn string_shape_hash() -> Hash {
 /// shape. Part of the wire format.
 pub fn array_shape_hash() -> Hash {
     Hash::of_bytes(b"<runtime:Array>")
+}
+
+/// Canonical shape hash for the heap `PrimArray` shape: an UNBOXED array
+/// of raw 8-byte scalar slots (i64 / f64 bits), untraced by the GC.
+/// Allocated when the element type is statically scalar (Int/Float/Bool)
+/// so `array_set` stores bits instead of allocating a box per element.
+/// NOT part of the wire format — prim arrays are encoded as the boxed
+/// `Array` kind (elements boxed during encode), so peers never see this
+/// hash; it exists for the shape tables' one-hash-per-type_id invariant.
+pub fn prim_array_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:PrimArray>")
 }
 
 /// Canonical shape hash for the heap `Atom` shape: a single GC-traced
@@ -477,6 +478,10 @@ pub struct Runtime {
     /// Stable storage for the `Array` shape's TypeInfo. Heap layout:
     /// header (16 B) + varlen-Values (8 B count + N×8 B pointer slots).
     pub array_ti: Box<TypeInfo>,
+    /// Stable storage for the `PrimArray` shape's TypeInfo. Heap layout:
+    /// header (16 B) + varlen-bytes (8 B count = `n*8` + N×8 B raw scalar
+    /// slots, untraced).
+    pub prim_array_ti: Box<TypeInfo>,
     /// Stable storage for the `Atom` shape's TypeInfo. Heap layout:
     /// header (16 B) + one GC-traced pointer slot (8 B). A distinct shape
     /// from `Array`; `ai_atom_new` allocates it and the CAS in
@@ -547,7 +552,8 @@ impl Runtime {
         // String:   0 value fields, 0 raw bytes, varlen-bytes section.
         // Array:    0 fixed fields, varlen-Values section (pointer slots).
         // Atom:     1 fixed GC-traced pointer field (the mutable cell).
-        // These four are the RUNTIME_RESERVED_SHAPES; the count MUST
+        // PrimArray: 0 fixed fields, varlen-bytes section (raw scalar slots).
+        // These six are the RUNTIME_RESERVED_SHAPES; the count MUST
         // match `RUNTIME_RESERVED_SHAPES` in IncrementalJit so dynamic
         // installs append after this block.
         let boxed_int_type_id = closure_types.len() as u16;
@@ -555,6 +561,7 @@ impl Runtime {
         let array_type_id = string_type_id + 1;
         let atom_type_id = array_type_id + 1;
         let bytes_type_id = atom_type_id + 1;
+        let prim_array_type_id = bytes_type_id + 1;
         let boxed_int = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(boxed_int_type_id)
             .with_fields(0)
@@ -578,6 +585,13 @@ impl Runtime {
             .with_type_id(bytes_type_id)
             .with_fields(0)
             .with_varlen_bytes(0);
+        // PrimArray: varlen-bytes like Bytes (untraced payload, count word
+        // holds the BYTE length n*8), distinct type_id so the accessors can
+        // tell unboxed scalar slots apart from boxed pointer slots.
+        let prim_array_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
+            .with_type_id(prim_array_type_id)
+            .with_fields(0)
+            .with_varlen_bytes(0);
 
         // Register BoxedInt as a synthetic wire shape so the wire
         // encoder/decoder can ship pointers to BoxedInt across nodes.
@@ -589,7 +603,7 @@ impl Runtime {
         // user's `Ok(v)` match arm unboxes back to Int.
         let bi_hash = boxed_int_shape_hash();
         shape_registry.insert(bi_hash, boxed_int_type_id);
-        while shape_by_type_id.len() <= bytes_type_id as usize {
+        while shape_by_type_id.len() <= prim_array_type_id as usize {
             shape_by_type_id.push(None);
         }
         shape_by_type_id[boxed_int_type_id as usize] = Some(bi_hash);
@@ -604,6 +618,8 @@ impl Runtime {
         shape_by_type_id[atom_type_id as usize] = Some(atom_shape_hash());
         shape_by_type_id[bytes_type_id as usize] = Some(bytes_shape_hash());
         shape_registry.insert(bytes_shape_hash(), bytes_type_id);
+        shape_by_type_id[prim_array_type_id as usize] = Some(prim_array_shape_hash());
+        shape_registry.insert(prim_array_shape_hash(), prim_array_type_id);
         shape_meta.insert(
             bi_hash,
             ShapeMeta::Struct {
@@ -621,6 +637,7 @@ impl Runtime {
         all_types.push(array_ti_val);
         all_types.push(atom_ti_val);
         all_types.push(bytes_ti_val);
+        all_types.push(prim_array_ti_val);
 
         // Boxed copies for stable addresses (used by the deserializer
         // when it needs to pass a `*const TypeInfo` to `ai_gc_alloc_closure`).
@@ -634,11 +651,13 @@ impl Runtime {
         let array_ti_box: Box<TypeInfo> = Box::new(array_ti_val);
         let atom_ti_box: Box<TypeInfo> = Box::new(atom_ti_val);
         let bytes_ti_box: Box<TypeInfo> = Box::new(bytes_ti_val);
+        let prim_array_ti_box: Box<TypeInfo> = Box::new(prim_array_ti_val);
         type_infos.push(Box::new(boxed_int));
         type_infos.push(Box::new(string_ti_val));
         type_infos.push(Box::new(array_ti_val));
         type_infos.push(Box::new(atom_ti_val));
         type_infos.push(Box::new(bytes_ti_val));
+        type_infos.push(Box::new(prim_array_ti_val));
 
         // 32 MiB semi-space — plenty for tests, easily reconfigurable later.
         let heap = Arc::new(Heap::new::<Full>(32 * 1024 * 1024, all_types));
@@ -681,7 +700,7 @@ impl Runtime {
             bytes_ti: &*bytes_ti_box,
             array_ti: &*array_ti_box,
             atom_ti: &*atom_ti_box,
-            pending_panic: core::ptr::null_mut(),
+            prim_array_ti: &*prim_array_ti_box,
         });
 
         let _ = &mut *thread;
@@ -705,6 +724,7 @@ impl Runtime {
             string_ti: string_ti_box,
             bytes_ti: bytes_ti_box,
             array_ti: array_ti_box,
+            prim_array_ti: prim_array_ti_box,
             atom_ti: atom_ti_box,
             result_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -794,7 +814,7 @@ impl Runtime {
             bytes_ti: self.thread.bytes_ti,
             array_ti: self.thread.array_ti,
             atom_ti: self.thread.atom_ti,
-            pending_panic: core::ptr::null_mut(),
+            prim_array_ti: self.thread.prim_array_ti,
         });
         // Wire the coordinator's poll flag to this context's own `state`
         // byte (stable: boxed) so a STW request can park this thread even
@@ -1009,81 +1029,44 @@ pub unsafe extern "C" fn ai_gc_unbox_int(ptr: *const u8) -> i64 {
 }
 
 // =============================================================================
-// Panics are values
+// Errors are values; bugs abort
 // =============================================================================
 
-/// Raise an ai-lang panic on `thread`: store the message in the
-/// thread's `pending_panic` slot and return.
-///
-/// The slot holds a `Box<String>` raw pointer — Rust memory, not a GC
-/// heap object — so it needs no GC rooting and survives any collection
-/// untouched. Codegen's post-call checks see the non-null slot and
-/// early-return until a boundary calls [`take_pending_panic`].
-///
-/// If a panic is already pending (possible only from Rust runtime code
-/// that keeps running after a raise — JIT'd code early-returns at the
-/// next check), the first message wins: the original failure is the one
-/// worth reporting.
-///
-/// # Safety
-/// `thread` must be a valid `Thread*`.
-pub unsafe fn raise_pending_panic(thread: *mut Thread, msg: String) {
-    unsafe {
-        if !(*thread).pending_panic.is_null() {
-            return;
-        }
-        (*thread).pending_panic = Box::into_raw(Box::new(msg)) as *mut u8;
-    }
+/// Hard-abort the process with a clear message. The single fate of a
+/// CONTRACT VIOLATION (trusted-tier out-of-bounds, invariant break,
+/// non-exhaustive match at runtime): errors the program models are
+/// `Result` values in the language; a violated contract is a BUG, and a
+/// bug dies loudly here rather than flowing anywhere as a value. There
+/// is deliberately no catch, no unwinding, no pending-panic channel —
+/// and therefore no per-call checks in JIT'd code.
+pub fn runtime_abort(msg: String) -> ! {
+    eprintln!("ai-lang abort: {}", msg);
+    std::process::abort();
 }
 
-/// Take (and clear) the pending panic on `thread`, if any. Boundaries
-/// that invoke JIT'd code call this right after the call returns and
-/// convert the message into their error currency: the serve loop into a
-/// `Failure::Crashed` reply, `join` into a re-raise on the joiner, the
-/// top-level runner into a clean error exit.
-///
-/// # Safety
-/// `thread` must be a valid `Thread*`. The slot value must have been
-/// written by [`raise_pending_panic`] on this thread (always true: the
-/// slot is thread-private).
-pub unsafe fn take_pending_panic(thread: *mut Thread) -> Option<String> {
-    unsafe {
-        let p = (*thread).pending_panic;
-        if p.is_null() {
-            return None;
-        }
-        (*thread).pending_panic = core::ptr::null_mut();
-        Some(*Box::from_raw(p as *mut String))
-    }
-}
-
-/// Raise a panic carrying a heap-`String` message.
+/// Abort the process with a heap-`String` message.
 ///
 /// `msg` is a heap `String` pointer (the same shape `ai_str_new`
 /// produces). This is the single hard-error path for the language:
-/// the user-visible `panic("...")` builtin lowers to it, and codegen
-/// fallthroughs that were previously `build_unreachable` (undefined
+/// the user-visible `abort("...")` builtin lowers to it, and codegen
+/// fallthroughs that would otherwise be `build_unreachable` (undefined
 /// behaviour — e.g. a non-exhaustive match hitting an unhandled
-/// variant at runtime) now call it instead so the failure is a clear
-/// message rather than silent corruption.
-///
-/// Errors are values: this does NOT abort. It copies the message out of
-/// the GC heap into the thread's `pending_panic` slot and returns; the
-/// codegen'd check right after the call early-returns the enclosing
-/// function, and the panic propagates up as ordinary returns until a
-/// boundary takes it.
+/// variant at runtime) call it instead so the failure is a clear
+/// message rather than silent corruption. It never returns: errors a
+/// program models are `Result` values in the language; reaching here is
+/// a BUG.
 ///
 /// # Safety
 /// `thread` must be a valid `Thread*`; `msg` must be null or a valid
 /// heap `String` pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ai_panic(thread: *mut Thread, msg: *const u8) {
+pub unsafe extern "C" fn ai_abort(_thread: *mut Thread, msg: *const u8) -> ! {
     let text = if msg.is_null() {
         "(no message)".to_owned()
     } else {
         unsafe { crate::ffi::heap_str_to_owned(msg) }
     };
-    unsafe { raise_pending_panic(thread, text) };
+    runtime_abort(text)
 }
 
 /// Allocate a heap String containing the bytes at `[src..src+len]`.
@@ -1232,8 +1215,7 @@ fn varlen_payload_offset() -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_bytes_new(thread: *mut Thread, len: i64) -> *mut u8 {
     if len < 0 {
-        unsafe { raise_pending_panic(thread, format!("bytes_new: negative length {}", len)) };
-        return core::ptr::null_mut();
+        runtime_abort(format!("bytes_new: negative length {}", len));
     }
     unsafe {
         let t = &*thread;
@@ -1269,8 +1251,7 @@ pub unsafe extern "C" fn ai_bytes_get(thread: *mut Thread, b: *const u8, i: i64)
     unsafe {
         let len = ai_str_len(b);
         if i < 0 || i >= len {
-            raise_pending_panic(
-                thread,
+            runtime_abort(
                 format!("bytes_get: index {} out of bounds (len {})", i, len),
             );
             return 0;
@@ -1287,8 +1268,7 @@ pub unsafe extern "C" fn ai_bytes_set(thread: *mut Thread, b: *mut u8, i: i64, v
     unsafe {
         let len = ai_str_len(b);
         if i < 0 || i >= len {
-            raise_pending_panic(
-                thread,
+            runtime_abort(
                 format!("bytes_set: index {} out of bounds (len {})", i, len),
             );
             return 0;
@@ -1311,8 +1291,7 @@ pub unsafe extern "C" fn ai_bytes_slice(
     unsafe {
         let src_len = ai_str_len(src);
         if start < 0 || len < 0 || start + len > src_len {
-            raise_pending_panic(
-                thread,
+            runtime_abort(
                 format!(
                     "bytes_slice: range [{}, {}) out of bounds (len {})",
                     start,
@@ -1398,8 +1377,7 @@ fn array_element_offset(i: usize) -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_array_new(thread: *mut Thread, n: i64) -> *mut u8 {
     if n < 0 {
-        unsafe { raise_pending_panic(thread, format!("array_new: negative length {}", n)) };
-        return core::ptr::null_mut();
+        runtime_abort(format!("array_new: negative length {}", n));
     }
     unsafe {
         let t = &*thread;
@@ -1420,30 +1398,102 @@ pub unsafe extern "C" fn ai_array_new(thread: *mut Thread, n: i64) -> *mut u8 {
     }
 }
 
-/// Number of slots in an `Array`.
+/// Allocate an UNBOXED `PrimArray` of `n` raw 8-byte scalar slots (i64 /
+/// f64 bits), zero-filled and untraced by the GC. The count word holds the
+/// BYTE length `n*8` (VarLenKind::Bytes semantics), so the generic GC /
+/// hash / deep-copy machinery sizes it correctly.
+///
+/// Allocated when the creation site's element type is statically a scalar
+/// (Int/Float/Bool). All accessors branch on the shape at runtime, so a
+/// prim array flowing through generic `Array<T>` code stays correct — it
+/// just boxes lazily per access there.
+///
+/// # Safety
+/// `thread` must have `prim_array_ti` initialised (it is, by
+/// `Runtime::new_with_metadata`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ai_array_len(a: *const u8) -> i64 {
-    if a.is_null() {
-        return 0;
+pub unsafe extern "C" fn ai_array_new_prim(thread: *mut Thread, n: i64) -> *mut u8 {
+    if n < 0 {
+        runtime_abort(format!("array_new: negative length {}", n));
     }
     unsafe {
-        let count_off = <Full as crate::gc::ObjHeader>::SIZE;
-        *(a.add(count_off) as *const u64) as i64
+        let t = &*thread;
+        let ti = t.prim_array_ti;
+        if ti.is_null() {
+            panic!("ai_array_new_prim: thread.prim_array_ti is null");
+        }
+        let bytes = n as usize * 8;
+        // No heap-pointer arg to preserve.
+        let ptr = alloc_shape_gc(thread, &*ti, bytes);
+        // alloc_obj writes the varlen count word; zero the slots so a
+        // fresh array reads back as all-zero scalars.
+        if bytes > 0 {
+            let base = ptr.add(array_element_offset(0));
+            core::ptr::write_bytes(base, 0u8, bytes);
+        }
+        ptr
     }
 }
 
+/// Whether `a` is the unboxed `PrimArray` shape (raw scalar slots).
+#[inline]
+unsafe fn is_prim_array(thread: *const Thread, a: *const u8) -> bool {
+    unsafe {
+        let t = &*thread;
+        if t.prim_array_ti.is_null() {
+            return false;
+        }
+        (*t.heap).obj_type_id(a) == (*t.prim_array_ti).type_id
+    }
+}
+
+/// One header inspection shared by every accessor: whether `a` is the
+/// unboxed `PrimArray` shape, and its slot count (a PrimArray's count
+/// word holds the BYTE length `n*8`).
+#[inline]
+unsafe fn array_kind_and_len(thread: *const Thread, a: *const u8) -> (bool, i64) {
+    if a.is_null() {
+        // Null array: report len 0 so the caller's bounds check raises
+        // the ordinary out-of-bounds panic (the pre-existing behavior).
+        return (false, 0);
+    }
+    unsafe {
+        let count_off = <Full as crate::gc::ObjHeader>::SIZE;
+        let count = *(a.add(count_off) as *const u64) as i64;
+        let prim = is_prim_array(thread, a);
+        (prim, if prim { count / 8 } else { count })
+    }
+}
+
+/// Number of slots in an `Array` or `PrimArray` (whose count word holds
+/// the byte length `n*8`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_len(thread: *mut Thread, a: *const u8) -> i64 {
+    if a.is_null() {
+        return 0;
+    }
+    unsafe { array_kind_and_len(thread, a).1 }
+}
+
 /// Load the pointer in slot `i` (0..len). Raises an ai-lang panic on
-/// out-of-bounds.
+/// out-of-bounds. On an unboxed `PrimArray` this is the GENERIC (uniform
+/// pointer) view: the raw scalar is boxed into a fresh BoxedInt so the
+/// caller still receives a heap pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_array_get(thread: *mut Thread, a: *const u8, i: i64) -> *mut u8 {
     unsafe {
-        let len = ai_array_len(a);
+        let (prim, len) = array_kind_and_len(thread, a);
         if i < 0 || i >= len {
-            raise_pending_panic(
-                thread,
+            runtime_abort(
                 format!("array_get: index {} out of bounds (len {})", i, len),
             );
             return core::ptr::null_mut();
+        }
+        if prim {
+            // Read the bits BEFORE boxing — the box allocation can GC and
+            // relocate `a`.
+            let v = *(a.add(array_element_offset(i as usize)) as *const i64);
+            return ai_gc_box_int(thread, v);
         }
         let slot = a.add(array_element_offset(i as usize)) as *const *mut u8;
         *slot
@@ -1452,18 +1502,84 @@ pub unsafe extern "C" fn ai_array_get(thread: *mut Thread, a: *const u8, i: i64)
 
 /// Store pointer `p` into slot `i` (0..len). Returns 0. Raises an
 /// ai-lang panic on out-of-bounds. No write barrier (single-space
-/// copying GC).
+/// copying GC). On an unboxed `PrimArray` this is the GENERIC view: `p`
+/// must be a BoxedInt (guaranteed by typecheck — a prim array's element
+/// type is a scalar), whose bits are stored raw.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_array_set(thread: *mut Thread, a: *mut u8, i: i64, p: *mut u8) -> i64 {
     unsafe {
-        let len = ai_array_len(a);
+        let (prim, len) = array_kind_and_len(thread, a);
         if i < 0 || i >= len {
-            raise_pending_panic(
-                thread,
+            runtime_abort(
                 format!("array_set: index {} out of bounds (len {})", i, len),
             );
             return 0;
         }
+        if prim {
+            let v = ai_gc_unbox_int(p);
+            *(a.add(array_element_offset(i as usize)) as *mut i64) = v;
+            return 0;
+        }
+        let slot = a.add(array_element_offset(i as usize)) as *mut *mut u8;
+        *slot = p;
+        0
+    }
+}
+
+/// Load slot `i` as a raw scalar (i64 / f64 bits). The fast path for a
+/// statically scalar element type: a `PrimArray` slot is a direct load
+/// (no allocation); a boxed `Array` slot is unboxed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_get_i64(thread: *mut Thread, a: *const u8, i: i64) -> i64 {
+    unsafe {
+        let (prim, len) = array_kind_and_len(thread, a);
+        if i < 0 || i >= len {
+            runtime_abort(
+                format!("array_get: index {} out of bounds (len {})", i, len),
+            );
+            return 0;
+        }
+        if prim {
+            return *(a.add(array_element_offset(i as usize)) as *const i64);
+        }
+        let p = *(a.add(array_element_offset(i as usize)) as *const *mut u8);
+        ai_gc_unbox_int(p)
+    }
+}
+
+/// Store raw scalar `v` into slot `i`. The fast path for a statically
+/// scalar element type: a `PrimArray` slot is a direct store (no
+/// allocation); a boxed `Array` slot gets a fresh BoxedInt (rooting `a`
+/// across that allocation).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_set_i64(
+    thread: *mut Thread,
+    a: *mut u8,
+    i: i64,
+    v: i64,
+) -> i64 {
+    unsafe {
+        let (prim, len) = array_kind_and_len(thread, a);
+        if i < 0 || i >= len {
+            runtime_abort(
+                format!("array_set: index {} out of bounds (len {})", i, len),
+            );
+            return 0;
+        }
+        if prim {
+            *(a.add(array_element_offset(i as usize)) as *mut i64) = v;
+            return 0;
+        }
+        // Boxed array reached through a scalar-typed site (e.g. the array
+        // was created by generic code): box the value, keeping `a` rooted
+        // across the allocation.
+        let t = &*thread;
+        let dyna = &*t.dyna_thread;
+        let mark = dyna.scratch_mark();
+        let sa = dyna.push_scratch(a);
+        let p = ai_gc_box_int(thread, v);
+        let a = dyna.scratch_at(sa) as *mut u8;
+        dyna.scratch_reset(mark);
         let slot = a.add(array_element_offset(i as usize)) as *mut *mut u8;
         *slot = p;
         0
@@ -1720,20 +1836,65 @@ fn fnv_u64(acc: u64, v: u64) -> u64 {
     a
 }
 
+/// Reserved type_ids that structural hash/equality must know about:
+/// `atom` is rejected (mutable cell); the array trio lets an unboxed
+/// `PrimArray` hash/compare exactly like the boxed `Array` of the same
+/// scalars — equality is representation-independent.
+#[derive(Clone, Copy)]
+struct ValueTids {
+    atom: u16,
+    array: u16,
+    prim_array: u16,
+    boxed_int: u16,
+}
+
+impl ValueTids {
+    unsafe fn of(thread: *const Thread) -> ValueTids {
+        unsafe {
+            let t = &*thread;
+            ValueTids {
+                atom: (*t.atom_ti).type_id,
+                array: (*t.array_ti).type_id,
+                prim_array: (*t.prim_array_ti).type_id,
+                boxed_int: (*t.boxed_int_ti).type_id,
+            }
+        }
+    }
+}
+
 /// Structurally hash the heap object at `obj`, folding into `acc`.
-/// `atom_tid` is the reserved `Atom` type_id; reaching one is a hard error
-/// (a mutable cell has no stable structural hash).
-unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, atom_tid: u16) -> u64 {
+/// Reaching an `Atom` is a hard error (a mutable cell has no stable
+/// structural hash). An unboxed `PrimArray` folds the SAME stream the
+/// equivalent boxed `Array` of BoxedInts would, so the two
+/// representations of one value hash identically.
+unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, tids: ValueTids) -> u64 {
     unsafe {
         if obj.is_null() {
             return fnv_u64(acc, 0x4e_55_4c_4c); // "NULL"
         }
         let tid = heap.obj_type_id(obj);
+        let atom_tid = tids.atom;
         if tid == atom_tid {
             panic!(
                 "value_hash: cannot hash an `Atom` (a mutable cell has no \
                  stable hash). Key on `deref(atom)` or a stable id instead."
             );
+        }
+        if tid == tids.prim_array {
+            // Normalize to the boxed Array's hash stream: array tid, count,
+            // then per element the BoxedInt's stream (its tid + 8 raw bytes).
+            let info = heap.type_info_by_id(tid);
+            let n = crate::gc::read_varlen_count(obj, info) / 8;
+            let mut a = fnv_u64(acc, tids.array as u64);
+            a = fnv_u64(a, n as u64);
+            for j in 0..n {
+                a = fnv_u64(a, tids.boxed_int as u64);
+                let base = obj.add(array_element_offset(j));
+                for k in 0..8 {
+                    a = fnv_byte(a, *base.add(k));
+                }
+            }
+            return a;
         }
         let info = heap.type_info_by_id(tid);
         // Fold the shape id so values of different shapes don't collide.
@@ -1742,7 +1903,7 @@ unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, atom_tid: u16) -> u64 
         for i in 0..info.value_field_count {
             let off = info.value_field_offset(i);
             let p = *(obj.add(off) as *const *const u8);
-            a = hash_obj(heap, p, a, atom_tid);
+            a = hash_obj(heap, p, a, tids);
         }
         // Untraced raw bytes (e.g. a BoxedInt's i64, an enum tag).
         for &b in crate::gc::read_raw_bytes(obj, info) {
@@ -1764,7 +1925,7 @@ unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, atom_tid: u16) -> u64 
                 for j in 0..n {
                     let off = info.varlen_element_offset(j);
                     let p = *(obj.add(off) as *const *const u8);
-                    a = hash_obj(heap, p, a, atom_tid);
+                    a = hash_obj(heap, p, a, tids);
                 }
             }
         }
@@ -1774,7 +1935,38 @@ unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, atom_tid: u16) -> u64 
 
 /// Structural equality of two heap objects (same shape + same contents).
 /// Reaching an `Atom` (reserved `atom_tid`) is a hard error.
-unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool {
+/// Compare an unboxed `PrimArray` (`p`) against a boxed `Array` (`a`) of
+/// the same element values: lengths match and every boxed slot is a
+/// BoxedInt whose bits equal the raw slot. (A null/uninitialized boxed
+/// slot is unequal — it holds no value.)
+unsafe fn eq_prim_vs_boxed_array(
+    heap: &Heap,
+    p: *const u8,
+    a: *const u8,
+    tids: ValueTids,
+) -> bool {
+    unsafe {
+        let p_info = heap.type_info_by_id(tids.prim_array);
+        let a_info = heap.type_info_by_id(tids.array);
+        let n = crate::gc::read_varlen_count(p, p_info) / 8;
+        if n != crate::gc::read_varlen_count(a, a_info) {
+            return false;
+        }
+        for j in 0..n {
+            let raw = *(p.add(array_element_offset(j)) as *const i64);
+            let slot = *(a.add(array_element_offset(j)) as *const *const u8);
+            if slot.is_null() || heap.obj_type_id(slot) != tids.boxed_int {
+                return false;
+            }
+            if ai_gc_unbox_int(slot) != raw {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, tids: ValueTids) -> bool {
     unsafe {
         if a == b {
             return true; // same object (incl. both null)
@@ -1784,6 +1976,7 @@ unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool
         }
         let ta = heap.obj_type_id(a);
         let tb = heap.obj_type_id(b);
+        let atom_tid = tids.atom;
         if ta == atom_tid || tb == atom_tid {
             panic!(
                 "value_eq: cannot compare an `Atom` by value (a mutable cell \
@@ -1792,6 +1985,14 @@ unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool
             );
         }
         if ta != tb {
+            // One value, two array representations: an unboxed PrimArray
+            // equals the boxed Array holding the same scalars.
+            if ta == tids.prim_array && tb == tids.array {
+                return eq_prim_vs_boxed_array(heap, a, b, tids);
+            }
+            if tb == tids.prim_array && ta == tids.array {
+                return eq_prim_vs_boxed_array(heap, b, a, tids);
+            }
             return false;
         }
         let info = heap.type_info_by_id(ta);
@@ -1799,7 +2000,7 @@ unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool
             let off = info.value_field_offset(i);
             let pa = *(a.add(off) as *const *const u8);
             let pb = *(b.add(off) as *const *const u8);
-            if !eq_obj(heap, pa, pb, atom_tid) {
+            if !eq_obj(heap, pa, pb, tids) {
                 return false;
             }
         }
@@ -1823,7 +2024,7 @@ unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool
                     let off = info.varlen_element_offset(j);
                     let pa = *(a.add(off) as *const *const u8);
                     let pb = *(b.add(off) as *const *const u8);
-                    if !eq_obj(heap, pa, pb, atom_tid) {
+                    if !eq_obj(heap, pa, pb, tids) {
                         return false;
                     }
                 }
@@ -1844,8 +2045,7 @@ pub unsafe extern "C" fn ai_value_hash(thread: *mut Thread, v: *const u8) -> i64
     unsafe {
         let t = &*thread;
         let heap = &*t.heap;
-        let atom_tid = (*t.atom_ti).type_id;
-        hash_obj(heap, v, FNV64_OFFSET, atom_tid) as i64
+        hash_obj(heap, v, FNV64_OFFSET, ValueTids::of(thread)) as i64
     }
 }
 
@@ -1858,8 +2058,7 @@ pub unsafe extern "C" fn ai_value_eq(thread: *mut Thread, a: *const u8, b: *cons
     unsafe {
         let t = &*thread;
         let heap = &*t.heap;
-        let atom_tid = (*t.atom_ti).type_id;
-        if eq_obj(heap, a, b, atom_tid) { 1 } else { 0 }
+        if eq_obj(heap, a, b, ValueTids::of(thread)) { 1 } else { 0 }
     }
 }
 
@@ -1894,7 +2093,6 @@ pub(crate) struct ThreadSlot {
     /// The worker's pending panic, if its thunk panicked. `join`
     /// re-raises it on the joining thread (errors are values — a panic
     /// crosses the thread boundary as data, not as a dead process).
-    panic: Mutex<Option<String>>,
     done: std::sync::atomic::AtomicBool,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -1946,7 +2144,6 @@ pub(crate) fn async_task_register(
         closure: AtomicU64::new(closure as u64),
         extra: AtomicU64::new(extra as u64),
         result: AtomicU64::new(0),
-        panic: Mutex::new(None),
         done: AtomicBool::new(false),
         handle: Mutex::new(None),
     });
@@ -1969,13 +2166,10 @@ pub(crate) fn async_task_roots(slot: &ThreadSlot) -> (*const u8, *const u8) {
 
 /// Publish an async task's outcome. The result stays GC-rooted in the
 /// slot until `join` hands it out; a panic is re-raised on the joiner.
-pub(crate) fn async_task_finish(slot: &ThreadSlot, result: *const u8, panic: Option<String>) {
+pub(crate) fn async_task_finish(slot: &ThreadSlot, result: *const u8) {
     use std::sync::atomic::Ordering;
     if std::env::var_os("AI_LANG_AT_TRACE").is_some() {
-        eprintln!("[at-trace] finish result={result:p} panic={panic:?}");
-    }
-    if let Some(msg) = panic {
-        *slot.panic.lock().unwrap() = Some(msg);
+        eprintln!("[at-trace] finish result={result:p}");
     }
     slot.result.store(result as u64, Ordering::Release);
     slot.done.store(true, Ordering::Release);
@@ -2004,6 +2198,7 @@ unsafe fn build_worker_thread(
     bytes_ti: *const TypeInfo,
     array_ti: *const TypeInfo,
     atom_ti: *const TypeInfo,
+    prim_array_ti: *const TypeInfo,
 ) -> Box<Thread> {
     Box::new(Thread {
         state: 0,
@@ -2017,7 +2212,7 @@ unsafe fn build_worker_thread(
         bytes_ti,
         array_ti,
         atom_ti,
-        pending_panic: core::ptr::null_mut(),
+        prim_array_ti,
     })
 }
 
@@ -2033,6 +2228,7 @@ fn run_worker(
     bytes_ti: usize,
     array_ti: usize,
     atom_ti: usize,
+    prim_array_ti: usize,
     slot: Arc<ThreadSlot>,
 ) {
     use std::sync::atomic::Ordering;
@@ -2049,6 +2245,7 @@ fn run_worker(
             bytes_ti as *const TypeInfo,
             array_ti as *const TypeInfo,
             atom_ti as *const TypeInfo,
+            prim_array_ti as *const TypeInfo,
         )
     };
     // Let the GC coordinator stop us mid-loop via the inline poll.
@@ -2064,13 +2261,9 @@ fn run_worker(
             core::mem::transmute(fn_ptr);
         lambda(tptr, closure)
     };
-    // If the thunk panicked, the panic propagated to this boundary as a
-    // value — move it into the slot so `join` can re-raise it on the
-    // joining thread. The result pointer is the panic path's dummy
-    // (null); `join` won't hand it out.
-    if let Some(msg) = unsafe { take_pending_panic(tptr) } {
-        *slot.panic.lock().unwrap() = Some(msg);
-    }
+    // No panic channel: a contract violation in the thunk aborted the
+    // whole process already; modeled failures came back as an ordinary
+    // Result value in `result`.
     // Publish the result BEFORE deregistering: `safe_deregister_thread` may
     // park us at a safepoint for an in-flight collection, which scans the
     // slot — so the result must already be rooted there.
@@ -2247,6 +2440,7 @@ unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
         let bytes_ti = parent.bytes_ti as usize;
         let array_ti = parent.array_ti as usize;
         let atom_ti = parent.atom_ti as usize;
+        let prim_array_ti = parent.prim_array_ti as usize;
 
         // Create the slot and root the input closure BEFORE any allocation
         // (the box below may GC).
@@ -2254,7 +2448,6 @@ unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
             closure: AtomicU64::new(closure_ptr as u64),
             extra: AtomicU64::new(0),
             result: AtomicU64::new(0),
-            panic: Mutex::new(None),
             done: AtomicBool::new(false),
             handle: Mutex::new(None),
         });
@@ -2274,6 +2467,7 @@ unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
                 bytes_ti,
                 array_ti,
                 atom_ti,
+                prim_array_ti,
                 worker_slot,
             );
         });
@@ -2308,11 +2502,9 @@ pub unsafe extern "C" fn ai_thread_join(thread: *mut Thread, handle_ptr: *const 
         let slot = match slot {
             Some(s) => s,
             None => {
-                raise_pending_panic(
-                    thread,
+                runtime_abort(
                     format!("join: invalid or already-joined thread handle {}", id),
                 );
-                return core::ptr::null_mut();
             }
         };
 
@@ -2350,11 +2542,6 @@ pub unsafe extern "C" fn ai_thread_join(thread: *mut Thread, handle_ptr: *const 
                 slot.done.load(Ordering::Acquire)
             );
         }
-        // Re-raise a worker panic on the joining thread: the panic
-        // crossed the thread boundary as a value in the slot, and now
-        // continues propagating in the joiner exactly as if the panic
-        // had happened locally.
-        let worker_panic = slot.panic.lock().unwrap().take();
         // Drop the slot: the result is returned straight into a JIT root
         // slot with no intervening safepoint, so it stays alive.
         {
@@ -2362,10 +2549,6 @@ pub unsafe extern "C" fn ai_thread_join(thread: *mut Thread, handle_ptr: *const 
             if let Some(s) = slots.get_mut(id) {
                 *s = None;
             }
-        }
-        if let Some(msg) = worker_panic {
-            raise_pending_panic(thread, format!("panic in spawned thread: {}", msg));
-            return core::ptr::null_mut();
         }
         result
     }

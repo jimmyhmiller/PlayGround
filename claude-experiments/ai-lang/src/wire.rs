@@ -152,6 +152,12 @@ unsafe fn encode_heap(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result
     if shape_hash == crate::runtime::array_shape_hash() {
         return unsafe { encode_array(rt, ptr, out) };
     }
+    if shape_hash == crate::runtime::prim_array_shape_hash() {
+        // Unboxed scalar array: ships as the ordinary boxed Array kind
+        // (each raw slot encoded as a BoxedInt), so the wire format and
+        // every peer stay representation-agnostic.
+        return unsafe { encode_prim_array(ptr, out) };
+    }
     if shape_hash == crate::runtime::string_shape_hash() {
         return unsafe { encode_string(ptr, out) };
     }
@@ -265,6 +271,32 @@ unsafe fn encode_array(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Resul
         let slot = unsafe { ptr.add(header + 8 + i * 8) as *const *const u8 };
         let elem = unsafe { *slot };
         unsafe { encode_heap(rt, elem, out)? };
+    }
+    Ok(())
+}
+
+/// Encode an unboxed `PrimArray` as the boxed Array kind (= 4): each raw
+/// 8-byte scalar slot is emitted exactly as a BoxedInt heap value (kind 2
+/// struct with the canonical BoxedInt shape hash and one raw-i64 field).
+/// The count word holds the BYTE length `n*8`. The receiver reconstructs
+/// a boxed Array; the accessors keep that correct for any element type.
+unsafe fn encode_prim_array(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let header = <Full as ObjHeader>::SIZE;
+    let byte_len = unsafe { *(ptr.add(header) as *const u64) };
+    let count = byte_len / 8;
+    let n: u32 = count
+        .try_into()
+        .map_err(|_| WireError::Corrupt("array longer than u32"))?;
+    let bi_hash = crate::runtime::boxed_int_shape_hash();
+    out.push(4); // kind = Array
+    out.extend_from_slice(&n.to_be_bytes());
+    for i in 0..count as usize {
+        let v = unsafe { *(ptr.add(header + 8 + i * 8) as *const i64) };
+        out.push(2); // kind = Struct (a BoxedInt)
+        out.extend_from_slice(bi_hash.as_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.push(0); // field kind = Int
+        out.extend_from_slice(&v.to_be_bytes());
     }
     Ok(())
 }
