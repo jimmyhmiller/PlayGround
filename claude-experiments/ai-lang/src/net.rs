@@ -2609,16 +2609,16 @@ mod tests {
 
             def make_msg() -> Bytes = {{
                 let b = bytes_new(5);
-                let _0 = bytes_set(b, 0, 10);
-                let _1 = bytes_set(b, 1, 20);
-                let _2 = bytes_set(b, 2, 30);
-                let _3 = bytes_set(b, 3, 40);
-                let _4 = bytes_set(b, 4, 50);
+                let _0 = bytes_set_trusted(b, 0, 10);
+                let _1 = bytes_set_trusted(b, 1, 20);
+                let _2 = bytes_set_trusted(b, 2, 30);
+                let _3 = bytes_set_trusted(b, 3, 40);
+                let _4 = bytes_set_trusted(b, 4, 50);
                 b
             }}
 
             def bytes_sum(b: Bytes, i: Int, n: Int, acc: Int) -> Int =
-                if i >= n {{ acc }} else {{ bytes_sum(b, i + 1, n, acc + bytes_get(b, i)) }}
+                if i >= n {{ acc }} else {{ bytes_sum(b, i + 1, n, acc + bytes_get_trusted(b, i)) }}
 
             // Bind+listen; return the listener fd (or negative on error).
             def server_listen() -> Int =

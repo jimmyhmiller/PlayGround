@@ -25,7 +25,7 @@ benchmarks/run.sh [runs]    # default 3, best-of reported
 | `fib` | naive recursive fib(32) — function-call overhead |
 | `loop_mix` | 500M-iteration add/xor/shift loop — tail recursion as the loop construct vs a native loop; the mix defeats closed-form folding |
 | `mandelbrot` | 1000×1000 grid, 100 max iters — f64 arithmetic in hot inner recursion |
-| `nbody` | 5 bodies, 500k steps — f64 + `Array<Float>` columns + `float_sqrt`; arrays use the UNBOXED `PrimArray` representation (raw f64 slots, no per-element box) |
+| `nbody` | 5 bodies, 500k steps — f64 + `Array<Float>` columns + `float_sqrt`; arrays use the UNBOXED `PrimArray` representation, and every access goes through the CHECKED `array_get(..)?` / `array_set(..)?` API (an out-of-bounds would flow out as `Result::Err(IndexError)`) |
 | `binary_trees` | 40 complete trees of depth 16 (~5.2M nodes) — GC allocation/tracing vs malloc/free (Rust) vs generational GC (Go) |
 
 ## Results (2026-06-11, Apple Silicon, best of 3)
@@ -35,7 +35,7 @@ benchmarks/run.sh [runs]    # default 3, best-of reported
 | fib | 9 | 6 | 6 | 1.5× | 1.5× |
 | loop_mix | 433 | 412 | 418 | 1.05× | 1.04× |
 | mandelbrot | 63 | 59 | 59 | 1.07× | 1.07× |
-| nbody | 159 | 24 | 20 | 6.6× | 8.0× |
+| nbody | 329 | 25 | 21 | 13× | 16× |
 | binary_trees | 103 | 88 | 47 | 1.17× | 2.2× |
 
 Notes:
@@ -58,18 +58,23 @@ Notes:
   shape at runtime, so the two representations are interchangeable
   (including `value_eq`/`value_hash`, which are representation-blind).
   This took nbody from 26× Rust (boxed, ~37M allocations) to 15×.
-- Scalar `array_get`/`array_set` compile to an INLINE shape check +
-  unsigned bounds check + raw load/store (the runtime call survives only
-  as the slow path for boxed arrays / out-of-bounds abort), with the
-  immutable header/count loads tagged `!invariant.load`. Frames are
-  memset/scanned only up to the slot high-water mark the body actually
-  uses (the conservative pre-scan reservation was often 100x too big —
-  nbody's `pair()` zeroed 1.3KB per call), and pointer operands skip
-  the volatile spill/reload when every later operand provably cannot
-  allocate. nbody's remaining ~6× is per-use volatile reloads of
-  pointer params + per-access branches LLVM can't CSE across slow-path
-  calls; the next levers are param-liveness-aware reloads and
-  hoisting the shape/len checks per array per region.
+- Indexing is CHECKED and errors are values: the public `array_get` /
+  `array_set` / `bytes_get` / `bytes_set` return
+  `Result<T, IndexError>`, and `?` is FUSED — the happy path compiles
+  to an inline shape check + bounds check + raw load/store with no
+  Result ever built; only an actual out-of-bounds constructs (and
+  early-returns) the `Err(OutOfBounds(OobInfo { index, len }))`. The
+  greppable `*_trusted` tier skips the Result protocol and ABORTS on a
+  violation, for code with proven indices (the stdlib's internals).
+  With trusted accessors nbody runs 159ms (6.6×); the table reports
+  the checked version because that's what user code writes.
+- Frames are EXACT: no conservative pre-scan anywhere — the alloca,
+  the zeroing memset, and the GC's scanned-slot count all equal the
+  body's real slot high-water mark (materialized after compilation via
+  replace-all-uses). nbody's remaining gap is per-use volatile reloads
+  of pointer params (required around potential GC points) which block
+  CSE of the per-access checks; the next lever is call-boundary-aware
+  reloads (stack-map-lite).
 - `binary_trees`: Go's generational GC wins on pure allocation churn
   (46ms vs Rust's 87ms of malloc/free); ai-lang's copying GC lands at
   1.9× Rust / 3.5× Go.

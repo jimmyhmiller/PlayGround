@@ -286,8 +286,8 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "string_concat" => "core/string.concat",
         "bytes_new" => "core/bytes.new",
         "bytes_len" => "core/bytes.len",
-        "bytes_get" => "core/bytes.get",
-        "bytes_set" => "core/bytes.set",
+        "bytes_get_trusted" => "core/bytes.get",
+        "bytes_set_trusted" => "core/bytes.set",
         "bytes_slice" => "core/bytes.slice",
         "bytes_concat" => "core/bytes.concat",
         "bytes_from_string" => "core/bytes.from_string",
@@ -314,8 +314,8 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         // Generic builtins (signatures carry `TypeVar(0)`).
         "array_new" => "core/array.new",
         "array_len" => "core/array.len",
-        "array_get" => "core/array.get",
-        "array_set" => "core/array.set",
+        "array_get_trusted" => "core/array.get",
+        "array_set_trusted" => "core/array.set",
         "atom_new" => "core/atom.new",
         "atom_load" => "core/atom.load",
         "atom_swap" => "core/atom.swap",
@@ -2510,6 +2510,384 @@ fn decode_expected_hash(t: &Type, span: Span) -> Result<Hash, ResolveError> {
     }
 }
 
+/// The checked indexing surface: which accessor, and the builtin trio it
+/// expands over.
+struct CheckedAccessor {
+    /// `core/array.get` / `core/bytes.get` / ... — the trusted accessor.
+    access: &'static str,
+    /// `core/array.len` / `core/bytes.len` — total, used by the bounds
+    /// check and the error payload.
+    len: &'static str,
+    /// Whether this is a SET (3 args, Ok payload is the set's Int).
+    is_set: bool,
+    /// Containers whose element type names the Ok payload ("Array");
+    /// None means the element is always Int (Bytes).
+    container: Option<&'static str>,
+}
+
+fn checked_accessor(name: &str) -> Option<CheckedAccessor> {
+    Some(match name {
+        "array_get" => CheckedAccessor {
+            access: "core/array.get",
+            len: "core/array.len",
+            is_set: false,
+            container: Some("Array"),
+        },
+        "array_set" => CheckedAccessor {
+            access: "core/array.set",
+            len: "core/array.len",
+            is_set: true,
+            container: Some("Array"),
+        },
+        "bytes_get" => CheckedAccessor {
+            access: "core/bytes.get",
+            len: "core/bytes.len",
+            is_set: false,
+            container: None,
+        },
+        "bytes_set" => CheckedAccessor {
+            access: "core/bytes.set",
+            len: "core/bytes.len",
+            is_set: true,
+            container: None,
+        },
+        _ => return None,
+    })
+}
+
+/// Number of locals a canonical pattern binds (mirrors codegen's view).
+fn pattern_binder_count(p: &crate::ast::Pattern) -> u32 {
+    use crate::ast::Pattern;
+    match p {
+        Pattern::Wildcard => 0,
+        Pattern::Var => 1,
+        Pattern::Enum { payload, .. } => {
+            payload.as_deref().map(pattern_binder_count).unwrap_or(0)
+        }
+    }
+}
+
+/// Shift every free de Bruijn local in `e` (index >= `cutoff`) up by
+/// `by`. Used when a resolved expression is re-placed under freshly
+/// introduced `let` binders by the checked-accessor expansion.
+fn shift_free_locals(e: &Expr, by: u32, cutoff: u32) -> Expr {
+    match e {
+        Expr::LocalVar(i) => {
+            if *i >= cutoff {
+                Expr::LocalVar(i + by)
+            } else {
+                Expr::LocalVar(*i)
+            }
+        }
+        Expr::Lambda { params, body } => Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(shift_free_locals(body, by, cutoff + params.len() as u32)),
+        },
+        Expr::Let { value, body } => Expr::Let {
+            value: Box::new(shift_free_locals(value, by, cutoff)),
+            body: Box::new(shift_free_locals(body, by, cutoff + 1)),
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(shift_free_locals(cleanup, by, cutoff)),
+            body: Box::new(shift_free_locals(body, by, cutoff)),
+        },
+        Expr::Call(callee, args) => Expr::Call(
+            Box::new(shift_free_locals(callee, by, cutoff)),
+            args.iter().map(|a| shift_free_locals(a, by, cutoff)).collect(),
+        ),
+        Expr::StructNew { struct_ref, fields } => Expr::StructNew {
+            struct_ref: *struct_ref,
+            fields: fields.iter().map(|f| shift_free_locals(f, by, cutoff)).collect(),
+        },
+        Expr::Field {
+            base,
+            struct_ref,
+            index,
+        } => Expr::Field {
+            base: Box::new(shift_free_locals(base, by, cutoff)),
+            struct_ref: *struct_ref,
+            index: *index,
+        },
+        Expr::EnumNew {
+            enum_ref,
+            variant_index,
+            payload,
+        } => Expr::EnumNew {
+            enum_ref: *enum_ref,
+            variant_index: *variant_index,
+            payload: payload
+                .as_ref()
+                .map(|p| Box::new(shift_free_locals(p, by, cutoff))),
+        },
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(shift_free_locals(scrutinee, by, cutoff)),
+            arms: arms
+                .iter()
+                .map(|arm| crate::ast::MatchArm {
+                    pattern: arm.pattern.clone(),
+                    body: shift_free_locals(
+                        &arm.body,
+                        by,
+                        cutoff + pattern_binder_count(&arm.pattern),
+                    ),
+                })
+                .collect(),
+        },
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            cond: Box::new(shift_free_locals(cond, by, cutoff)),
+            then_branch: Box::new(shift_free_locals(then_branch, by, cutoff)),
+            else_branch: Box::new(shift_free_locals(else_branch, by, cutoff)),
+        },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(shift_free_locals(expr, by, cutoff)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
+        | Expr::BuiltinRef(_) => e.clone(),
+    }
+}
+
+/// Whether a resolved operand is cheap, pure, and total — safe to
+/// duplicate into both the bounds check and the access instead of
+/// let-binding it (locals, literals, field chains over those). Keeps the
+/// hot path of a checked access free of extra root-slot traffic.
+fn duplicable_operand(e: &Expr) -> bool {
+    match e {
+        Expr::LocalVar(_)
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_) => true,
+        Expr::Field { base, .. } => duplicable_operand(base),
+        _ => false,
+    }
+}
+
+/// Resolve a CHECKED accessor call — the public `array_get` /
+/// `array_set` / `bytes_get` / `bytes_set` — into ordinary canonical
+/// AST. Out-of-bounds is a VALUE, not a crash:
+///
+///   array_get(a, i)            : Result<T, IndexError>
+///   array_get(a, i)?           : T        (fused: no Ok is ever built)
+///
+/// expands (with duplicable operands inlined, others let-bound) to
+///
+///   if i < 0      { Err(OutOfBounds(OobInfo { index: i, len: len(a) })) }
+///   else if i >= len(a) { ...same Err... }
+///   else          { Ok(<trusted access>) }
+///
+/// and, under `?` (`fused = true`), the Ok wrapper disappears — the else
+/// arm IS the trusted access, and each Err arm is wrapped in `Try` so it
+/// early-returns through the enclosing function exactly like any other
+/// `?`. The raw `*_trusted` accessors (which ABORT on a violation — a
+/// contract for callers that have proven their indices) remain available
+/// for stdlib internals and hot kernels.
+#[allow(clippy::too_many_arguments)]
+fn resolve_checked_accessor(
+    acc: &CheckedAccessor,
+    args: &[SurfaceExpr],
+    fused: bool,
+    span: Span,
+    env: &mut Vec<(String, Type)>,
+    top: &HashMap<String, TopBinding>,
+    structs: &HashMap<String, StructInfo>,
+    enums: &HashMap<String, EnumInfo>,
+    variants: &HashMap<String, VariantBinding>,
+    at_binding: &mut Option<AtBinding>,
+    type_params: &[String],
+    self_name: &str,
+) -> Result<(Expr, Type), ResolveError> {
+    let want = if acc.is_set { 3 } else { 2 };
+    if args.len() != want {
+        return Err(ResolveError::UnknownName {
+            name: format!(
+                "checked accessor expects {} argument(s), got {}",
+                want,
+                args.len()
+            ),
+            span,
+        });
+    }
+    // The error-shape types come from the stdlib by name.
+    let missing = |what: &str| ResolveError::UnknownName {
+        name: format!(
+            "checked array/bytes accessors need the stdlib type `{}` \
+             (declare it or include the stdlib)",
+            what
+        ),
+        span,
+    };
+    let result_info = enums.get("Result").ok_or_else(|| missing("Result"))?.clone();
+    let ixerr_info = enums
+        .get("IndexError")
+        .ok_or_else(|| missing("IndexError"))?
+        .clone();
+    let oob_info = structs
+        .get("OobInfo")
+        .ok_or_else(|| missing("OobInfo"))?
+        .clone();
+    let ok_index = find_variant(&result_info, "Ok").ok_or_else(|| missing("Result::Ok"))?;
+    let err_index = find_variant(&result_info, "Err").ok_or_else(|| missing("Result::Err"))?;
+    let oob_index =
+        find_variant(&ixerr_info, "OutOfBounds").ok_or_else(|| missing("IndexError::OutOfBounds"))?;
+
+    // Resolve the operands in the CURRENT env.
+    let mut resolved: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
+    for a in args {
+        resolved.push(resolve_expr_typed(
+            a, env, top, structs, enums, variants, at_binding, type_params, self_name,
+        )?);
+    }
+    // The Ok payload type: the container's element for arrays, Int for
+    // bytes and for every set.
+    let elem_ty = if acc.is_set {
+        Type::Builtin("Int".to_owned())
+    } else {
+        match acc.container {
+            Some(container) => match &resolved[0].1 {
+                Type::Apply(head, elt)
+                    if matches!(head.as_ref(), Type::Builtin(n) if n == container) =>
+                {
+                    elt.first().cloned().unwrap_or(Type::Builtin("Int".to_owned()))
+                }
+                _ => Type::Builtin("Int".to_owned()),
+            },
+            None => Type::Builtin("Int".to_owned()),
+        }
+    };
+
+    // Plan the binders: non-duplicable operands are let-bound (outermost
+    // first, in argument order — preserving evaluation order); duplicable
+    // ones are inlined at every use, shifted past the introduced lets.
+    let n_lets: u32 = resolved
+        .iter()
+        .filter(|(e, _)| !duplicable_operand(e))
+        .count() as u32;
+    let mut let_seen = 0u32;
+    let operand_refs: Vec<Expr> = resolved
+        .iter()
+        .map(|(e, _)| {
+            if duplicable_operand(e) {
+                shift_free_locals(e, n_lets, 0)
+            } else {
+                // The let_seen-th let (0-based, outermost first) sits at
+                // de Bruijn distance n_lets - 1 - let_seen from the core.
+                let idx = n_lets - 1 - let_seen;
+                let_seen += 1;
+                Expr::LocalVar(idx)
+            }
+        })
+        .collect();
+
+    let a_ref = &operand_refs[0];
+    let i_ref = &operand_refs[1];
+    let len_call = || {
+        Expr::Call(
+            Box::new(Expr::BuiltinRef(acc.len.to_owned())),
+            vec![a_ref.clone()],
+        )
+    };
+    let err_expr = || -> Expr {
+        Expr::EnumNew {
+            enum_ref: result_info.hash,
+            variant_index: err_index,
+            payload: Some(Box::new(Expr::EnumNew {
+                enum_ref: ixerr_info.hash,
+                variant_index: oob_index,
+                payload: Some(Box::new(Expr::StructNew {
+                    struct_ref: oob_info.hash,
+                    fields: vec![i_ref.clone(), len_call()],
+                })),
+            })),
+        }
+    };
+    // Under `?`, each Err arm early-returns through the enclosing fn.
+    let err_arm = || -> Expr {
+        if fused {
+            Expr::Try {
+                expr: Box::new(err_expr()),
+                enum_ref: result_info.hash,
+                ok_index,
+                err_index,
+            }
+        } else {
+            err_expr()
+        }
+    };
+    let access_call = Expr::Call(
+        Box::new(Expr::BuiltinRef(acc.access.to_owned())),
+        operand_refs.clone(),
+    );
+    let ok_arm = if fused {
+        access_call
+    } else {
+        Expr::EnumNew {
+            enum_ref: result_info.hash,
+            variant_index: ok_index,
+            payload: Some(Box::new(access_call)),
+        }
+    };
+    let lt = |l: Expr, r: Expr| {
+        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.lt".to_owned())), vec![l, r])
+    };
+    let ge = |l: Expr, r: Expr| {
+        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.ge".to_owned())), vec![l, r])
+    };
+    // Ok-first nesting: the happy path is the THEN branch all the way
+    // down, which is also what codegen's `infer_type` reads for an If —
+    // so the expansion's type (and box/unbox decisions downstream) come
+    // from the access, not from the error arms.
+    let mut core = Expr::If {
+        cond: Box::new(ge(i_ref.clone(), Expr::IntLit(0))),
+        then_branch: Box::new(Expr::If {
+            cond: Box::new(lt(i_ref.clone(), len_call())),
+            then_branch: Box::new(ok_arm),
+            else_branch: Box::new(err_arm()),
+        }),
+        else_branch: Box::new(err_arm()),
+    };
+    // Wrap the lets, innermost-last argument outward, shifting each
+    // value past the lets already inside it.
+    let let_values: Vec<&Expr> = resolved
+        .iter()
+        .filter(|(e, _)| !duplicable_operand(e))
+        .map(|(e, _)| e)
+        .collect();
+    for (depth, v) in let_values.iter().enumerate().rev() {
+        core = Expr::Let {
+            value: Box::new(shift_free_locals(v, depth as u32, 0)),
+            body: Box::new(core),
+        };
+    }
+
+    let ty = if fused {
+        elem_ty
+    } else {
+        Type::Apply(
+            Box::new(Type::TypeRef(result_info.hash)),
+            vec![elem_ty, Type::TypeRef(ixerr_info.hash)],
+        )
+    };
+    Ok((core, ty))
+}
+
 /// Resolve `decode::<T>(bytes) -> Result<T, Int>`. `T` is named explicitly
 /// (turbofish) because it cannot be inferred from a `Bytes`-only call. We
 /// bake `T`'s expected identity hash into the builtin name; the runtime
@@ -2688,6 +3066,20 @@ fn resolve_expr_typed(
                     ));
                 }
             }
+            // The CHECKED accessors expand at their call sites (they are
+            // not single builtins), so they have no value form — point
+            // the user at a lambda or the trusted tier.
+            if checked_accessor(name).is_some() {
+                return Err(ResolveError::UnknownName {
+                    name: format!(
+                        "`{}` is a checked operation and can't be used as a bare \
+                         value; wrap it in a lambda (e.g. `|a, i| {}(a, i)`) or \
+                         use `{}_trusted`",
+                        name, name, name
+                    ),
+                    span: *span,
+                });
+            }
             Err(ResolveError::UnknownName {
                 name: name.clone(),
                 span: *span,
@@ -2730,6 +3122,19 @@ fn resolve_expr_typed(
                     );
                 }
             }
+            // CHECKED indexing — the public array/bytes accessors. An
+            // out-of-bounds index is a Result::Err VALUE (errors are
+            // values); the raw `*_trusted` forms abort instead and stay
+            // available for callers with proven indices.
+            if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                if let Some(acc) = checked_accessor(name) {
+                    return resolve_checked_accessor(
+                        &acc, args, false, *span, env, top, structs, enums, variants,
+                        at_binding, type_params, self_name,
+                    );
+                }
+            }
+
             // Built-in string ops mapped to `core/string.*` so users
             // can write `string_len(s)`, `string_eq(a, b)`,
             // `string_concat(a, b)` without an FFI registry.
@@ -2757,11 +3162,11 @@ fn resolve_expr_typed(
                         Some("core/bytes.len"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
-                    "bytes_get" => (
+                    "bytes_get_trusted" => (
                         Some("core/bytes.get"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
-                    "bytes_set" => (
+                    "bytes_set_trusted" => (
                         Some("core/bytes.set"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
@@ -2945,8 +3350,8 @@ fn resolve_expr_typed(
                 let array_builtin = match name.as_str() {
                     "array_new" => Some("core/array.new"),
                     "array_len" => Some("core/array.len"),
-                    "array_get" => Some("core/array.get"),
-                    "array_set" => Some("core/array.set"),
+                    "array_get_trusted" => Some("core/array.get"),
+                    "array_set_trusted" => Some("core/array.set"),
                     // The atom primitives over the dedicated `Atom` cell:
                     //   atom_new(init) -> Atom<T>
                     //   atom_load(a) -> T
@@ -3647,6 +4052,20 @@ fn resolve_expr_typed(
         }
 
         SurfaceExpr::Try { expr, span } => {
+            // FUSED checked indexing: `array_get(a, i)?` skips the Result
+            // entirely on the happy path — the bounds check branches
+            // straight to the trusted access, and only the Err arm builds
+            // (and early-returns) a Result value.
+            if let SurfaceExpr::Call { callee, args, .. } = expr.as_ref() {
+                if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                    if let Some(acc) = checked_accessor(name) {
+                        return resolve_checked_accessor(
+                            &acc, args, true, *span, env, top, structs, enums, variants,
+                            at_binding, type_params, self_name,
+                        );
+                    }
+                }
+            }
             let (inner_canon, inner_ty) = resolve_expr_typed(
                 expr, env, top, structs, enums, variants, at_binding, type_params, self_name,
             )?;

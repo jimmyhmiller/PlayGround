@@ -1203,6 +1203,66 @@ fn unify(
 /// The bottom type for diverging expressions (e.g. `panic`). Represented
 /// as `Builtin("Never")` so it needs no new `Type` variant (and never
 /// reaches serialization — users can't write it; the resolver only
+/// Join two branch types (if-arms / match-arms). Branches don't have to
+/// be syntactically identical: a diverging arm (`Never`) takes the other
+/// arm's type, and a FREE type variable — an unconstrained instantiation
+/// hole, e.g. the `T` of a bare `Result::Err(e)` arm — is grounded by
+/// the other arm (`if c { Err(e) } else { Ok(5) } : Result<Int, E>`).
+/// Returns `None` when the types genuinely conflict.
+fn merge_branch_types(a: &Type, b: &Type) -> Option<Type> {
+    if is_never(a) {
+        return Some(b.clone());
+    }
+    if is_never(b) {
+        return Some(a.clone());
+    }
+    if let Type::TypeVar(_) = a {
+        return Some(b.clone());
+    }
+    if let Type::TypeVar(_) = b {
+        return Some(a.clone());
+    }
+    match (a, b) {
+        (Type::Apply(ha, aa), Type::Apply(hb, ab)) if aa.len() == ab.len() => {
+            let head = merge_branch_types(ha, hb)?;
+            let args = aa
+                .iter()
+                .zip(ab.iter())
+                .map(|(x, y)| merge_branch_types(x, y))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Apply(Box::new(head), args))
+        }
+        (
+            Type::FnType {
+                params: pa,
+                ret: ra,
+            },
+            Type::FnType {
+                params: pb,
+                ret: rb,
+            },
+        ) if pa.len() == pb.len() => {
+            let params = pa
+                .iter()
+                .zip(pb.iter())
+                .map(|(x, y)| merge_branch_types(x, y))
+                .collect::<Option<Vec<_>>>()?;
+            let ret = merge_branch_types(ra, rb)?;
+            Some(Type::FnType {
+                params,
+                ret: Box::new(ret),
+            })
+        }
+        _ => {
+            if types_equiv(a, b) {
+                Some(a.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// produces it for `panic` calls).
 fn is_never(t: &Type) -> bool {
     matches!(t, Type::Builtin(n) if n == "Never")
@@ -1609,18 +1669,12 @@ fn typecheck_expr(
                 }
                 result_ty = Some(match result_ty {
                     None => arm_ty,
-                    Some(first) => {
-                        if !types_equiv(&first, &arm_ty) {
-                            return Err(TypeError::MatchArmsDisagree {
-                                first,
-                                found: arm_ty,
-                            });
-                        }
-                        // Prefer a concrete type over `Never` so the match
-                        // result isn't bottom just because an earlier arm
-                        // diverged (e.g. `panic`).
-                        if is_never(&first) { arm_ty } else { first }
-                    }
+                    Some(first) => merge_branch_types(&first, &arm_ty).ok_or(
+                        TypeError::MatchArmsDisagree {
+                            first,
+                            found: arm_ty,
+                        },
+                    )?,
                 });
             }
             // Safe: arms.is_empty() was checked above.
@@ -1643,15 +1697,10 @@ fn typecheck_expr(
             }
             let then_ty = typecheck_expr(then_branch, locals, cache)?;
             let else_ty = typecheck_expr(else_branch, locals, cache)?;
-            if !types_equiv(&then_ty, &else_ty) {
-                return Err(TypeError::MatchArmsDisagree {
-                    first: then_ty,
-                    found: else_ty,
-                });
-            }
-            // Prefer the concrete branch type when the other diverges
-            // (e.g. `if c { compute() } else { panic("...") }`).
-            Ok(if is_never(&then_ty) { else_ty } else { then_ty })
+            merge_branch_types(&then_ty, &else_ty).ok_or(TypeError::MatchArmsDisagree {
+                first: then_ty,
+                found: else_ty,
+            })
         }
 
         Expr::Try {

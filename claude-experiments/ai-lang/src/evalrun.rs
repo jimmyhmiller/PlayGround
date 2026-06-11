@@ -1621,9 +1621,9 @@ mod tests {
         let cb = cb_with(
             "def mk() -> Array<Int> = { \
                 let a = array_new(3); \
-                let _0 = array_set(a, 0, 10); \
-                let _1 = array_set(a, 1, 20); \
-                let _2 = array_set(a, 2, 30); \
+                let _0 = array_set_trusted(a, 0, 10); \
+                let _1 = array_set_trusted(a, 1, 20); \
+                let _2 = array_set_trusted(a, 2, 30); \
                 a }",
         );
         let r = run(&cb, "mk", &[]).unwrap();
@@ -1792,9 +1792,9 @@ mod tests {
             "def sum(a: Array<Int>) -> Int = { \
                 let n = array_len(a); \
                 let s0 = 0; \
-                let s1 = if n > 0 { s0 + array_get(a, 0) } else { s0 }; \
-                let s2 = if n > 1 { s1 + array_get(a, 1) } else { s1 }; \
-                let s3 = if n > 2 { s2 + array_get(a, 2) } else { s2 }; \
+                let s1 = if n > 0 { s0 + array_get_trusted(a, 0) } else { s0 }; \
+                let s2 = if n > 1 { s1 + array_get_trusted(a, 1) } else { s1 }; \
+                let s3 = if n > 2 { s2 + array_get_trusted(a, 2) } else { s2 }; \
                 s3 }",
         );
         let arr = Json::Array(vec![Json::Int(10), Json::Int(20), Json::Int(30)]);
