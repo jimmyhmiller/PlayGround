@@ -35,8 +35,8 @@ benchmarks/run.sh [runs]    # default 3, best-of reported
 | fib | 9 | 6 | 6 | 1.5× | 1.5× |
 | loop_mix | 433 | 412 | 418 | 1.05× | 1.04× |
 | mandelbrot | 63 | 59 | 59 | 1.07× | 1.07× |
-| nbody | 373 | 24 | 21 | 16× | 18× |
-| binary_trees | 103 | 88 | 47 | 1.17× | 2.2× |
+| nbody | 229 | 24 | 20 | 9.5× | 11× |
+| binary_trees | 47 | 87 | 46 | 0.54× | 1.02× |
 
 Notes:
 
@@ -74,6 +74,16 @@ Notes:
   of pointer params (required around potential GC points) which block
   CSE of the per-access checks; the next lever is call-boundary-aware
   reloads (stack-map-lite).
-- `binary_trees`: Go's generational GC wins on pure allocation churn
-  (46ms vs Rust's 87ms of malloc/free); ai-lang's copying GC lands at
-  1.9× Rust / 3.5× Go.
+- `binary_trees`: allocation is an INLINE bump — one `atomicrmw add`
+  on the active space's cursor + limit check + zeroing, with the
+  runtime call only as the GC/stress slow path (the gc-stress mode
+  closes the window — limit 0 — so collect-per-alloc still fires).
+  ai-lang now BEATS Rust's malloc/free (47ms vs 87ms) and matches
+  Go's generational GC (46ms).
+- Root-slot loads are no longer volatile: the GC frame escapes via
+  `thread->top_frame`, so every potential GC point is an opaque call
+  LLVM already reloads across, and between calls CSE is sound (flips
+  are stop-the-world). Hot bodies keep pointers in registers across
+  dozens of accesses; nbody's remaining ~9× is the per-access checked
+  protocol (bounds + init branches) and Float boxing at Result
+  boundaries.

@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 14;
+const CODEGEN_CACHE_VERSION: u64 = 15;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -3907,16 +3907,23 @@ impl<'ctx> Codegen<'ctx> {
         &self,
         slot: PointerValue<'ctx>,
     ) -> Result<PointerValue<'ctx>, CodegenError> {
+        // NOT volatile, deliberately. Correctness against GC relocation
+        // is carried by the ESCAPE: the frame is linked into
+        // `thread->top_frame` in the prologue, so LLVM must assume every
+        // opaque call (and every potential GC point IS an opaque call —
+        // allocation slow paths, runtime fns, `ai_gc_pollcheck_slow` on
+        // the poll's slow branch) may write the slot, forcing a re-load
+        // after it. Between calls no flip/collection can occur (flips
+        // run under stop-the-world, and parking happens only inside
+        // calls), so CSE-ing repeated loads there is exactly right —
+        // this is what lets a hot body keep `s` in a register across
+        // twenty accesses instead of twenty volatile reloads. Slot
+        // STORES stay volatile so rooting writes are never elided or
+        // sunk past the call they protect.
         let load = self
             .builder
             .build_load(self.ptr_ty, slot, "root_load")
             .map_err(|e| CodegenError::JitInit(format!("load root slot: {}", e)))?;
-        // load is a BasicValueEnum — set_volatile lives on the underlying
-        // InstructionValue.
-        load.as_instruction_value()
-            .expect("load returns an instruction")
-            .set_volatile(true)
-            .map_err(|e| CodegenError::JitInit(format!("set_volatile root load: {}", e)))?;
         Ok(load.into_pointer_value())
     }
 
