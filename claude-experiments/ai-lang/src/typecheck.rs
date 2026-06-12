@@ -607,6 +607,7 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         | "core/i64.eq"
         | "core/i64.ne"
         | "core/i64.lt"
+        | "core/i64.ult"
         | "core/i64.le"
         | "core/i64.gt"
         | "core/i64.ge" => Some((vec![int_t(), int_t()], int_t())),
@@ -739,11 +740,11 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![array_t(Type::TypeVar(0)), int_t()],
             int_t(),
         )),
-        "core/array.get" => Some((
+        "core/array.get" | "core/array.get_scalar" => Some((
             vec![array_t(Type::TypeVar(0)), int_t()],
             Type::TypeVar(0),
         )),
-        "core/array.set" => Some((
+        "core/array.set" | "core/array.set_scalar" => Some((
             vec![array_t(Type::TypeVar(0)), int_t(), Type::TypeVar(0)],
             int_t(),
         )),

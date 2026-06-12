@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 19;
+const CODEGEN_CACHE_VERSION: u64 = 20;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -4238,11 +4238,35 @@ impl<'ctx> Codegen<'ctx> {
                     && Self::expr_cannot_trigger_gc(then_branch)
                     && Self::expr_cannot_trigger_gc(else_branch)
             }
+            Expr::Let { value, body } => {
+                Self::expr_cannot_trigger_gc(value) && Self::expr_cannot_trigger_gc(body)
+            }
+            // A `?` whose operand is SYNTACTICALLY the Err variant (the
+            // checked-accessor expansion's error arms) unconditionally
+            // EARLY-RETURNS. It may allocate the error value — and that
+            // allocation may move the heap — but control never comes
+            // back, so a pointer operand the enclosing call already
+            // evaluated can never be USED stale. For operand-rooting
+            // purposes the whole diverging arm is inert.
+            Expr::Try { expr, err_index, .. } => matches!(
+                expr.as_ref(),
+                Expr::EnumNew { variant_index, .. } if variant_index == err_index
+            ),
             Expr::Call(callee, args) => {
                 matches!(
                     callee.as_ref(),
                     Expr::BuiltinRef(n)
-                        if n.starts_with("core/i64.") || n.starts_with("core/f64.")
+                        if n.starts_with("core/i64.")
+                            || n.starts_with("core/f64.")
+                            // Fully-inline array reads: every path either
+                            // produces the value without allocating
+                            // (prim load / boxed unbox) or ABORTS
+                            // (call + unreachable). `set_scalar` is NOT
+                            // here: its boxed path allocates a BoxedInt
+                            // and returns.
+                            || n == "core/array.get_scalar"
+                            || n == "core/array.len"
+                            || n == "core/array.is_init"
                 ) && args.iter().all(Self::expr_cannot_trigger_gc)
             }
             _ => false,
@@ -5842,6 +5866,38 @@ impl<'ctx> Codegen<'ctx> {
                 let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
                 let v = self.emit_array_len_inline(a, ctx)?;
                 Ok(Value::Int(v))
+            }
+            // The `_scalar` names are pinned by RESOLVE when the array's
+            // element type is statically Int/Float/Bool — no per-site
+            // re-inference. (The plain names remain for already-stored
+            // codebases and pointer-element arrays.)
+            Expr::BuiltinRef(name) if name == "core/array.get_scalar" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
+                let v = self.emit_array_scalar_fastpath(a, i, None, ctx)?;
+                Ok(Value::Int(v))
+            }
+            Expr::BuiltinRef(name) if name == "core/array.set_scalar" => {
+                if args.len() != 3 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let vals =
+                    self.compile_operands_rooted(args, &[false, false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
+                let v = vals[2].as_int()?;
+                let r = self.emit_array_scalar_fastpath(a, i, Some(v), ctx)?;
+                Ok(Value::Int(r))
             }
             Expr::BuiltinRef(name) if name == "core/array.get" => {
                 if args.len() != 2 {
@@ -9142,6 +9198,11 @@ impl<'ctx> Codegen<'ctx> {
             "core/i64.eq" => cmp(IntPredicate::EQ)?,
             "core/i64.ne" => cmp(IntPredicate::NE)?,
             "core/i64.lt" => cmp(IntPredicate::SLT)?,
+            // Unsigned less-than: ONE branch covers the checked-accessor
+            // expansion's whole range test (a negative index wraps to a
+            // huge unsigned and fails), and it is the SAME predicate as the
+            // access protocol's internal bounds check, so GVN folds them.
+            "core/i64.ult" => cmp(IntPredicate::ULT)?,
             "core/i64.le" => cmp(IntPredicate::SLE)?,
             "core/i64.gt" => cmp(IntPredicate::SGT)?,
             "core/i64.ge" => cmp(IntPredicate::SGE)?,

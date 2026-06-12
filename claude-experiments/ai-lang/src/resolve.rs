@@ -2755,22 +2755,45 @@ fn resolve_checked_accessor(
             a, env, top, structs, enums, variants, at_binding, type_params, self_name,
         )?);
     }
+    // The container's statically-known element type, when there is one.
+    let container_elem: Option<Type> = match acc.container {
+        Some(container) => match &resolved[0].1 {
+            Type::Apply(head, elt)
+                if matches!(head.as_ref(), Type::Builtin(n) if n == container) =>
+            {
+                elt.first().cloned()
+            }
+            _ => None,
+        },
+        None => None,
+    };
     // The Ok payload type: the container's element for arrays, Int for
     // bytes and for every set.
     let elem_ty = if acc.is_set {
         Type::Builtin("Int".to_owned())
     } else {
-        match acc.container {
-            Some(container) => match &resolved[0].1 {
-                Type::Apply(head, elt)
-                    if matches!(head.as_ref(), Type::Builtin(n) if n == container) =>
-                {
-                    elt.first().cloned().unwrap_or(Type::Builtin("Int".to_owned()))
-                }
-                _ => Type::Builtin("Int".to_owned()),
-            },
-            None => Type::Builtin("Int".to_owned()),
+        container_elem
+            .clone()
+            .unwrap_or(Type::Builtin("Int".to_owned()))
+    };
+    // A statically-scalar array element pins the access to the SCALAR
+    // builtin variant by NAME (`core/array.get_scalar` / `set_scalar`)
+    // instead of leaving codegen to re-infer it per site. Same lowering,
+    // but the name carries a guarantee the operand-rooting analysis can
+    // use: a scalar GET's every path is allocation-free or aborts, so it
+    // can never make an already-evaluated pointer operand go stale.
+    let elem_scalar = matches!(
+        &container_elem,
+        Some(Type::Builtin(n)) if n == "Int" || n == "Float" || n == "Bool"
+    );
+    let access_name: String = if elem_scalar && acc.container == Some("Array") {
+        if acc.is_set {
+            "core/array.set_scalar".to_owned()
+        } else {
+            "core/array.get_scalar".to_owned()
         }
+    } else {
+        acc.access.to_owned()
     };
 
     // Plan the binders: non-duplicable operands are let-bound (outermost
@@ -2843,7 +2866,7 @@ fn resolve_checked_accessor(
         }
     };
     let access_call = Expr::Call(
-        Box::new(Expr::BuiltinRef(acc.access.to_owned())),
+        Box::new(Expr::BuiltinRef(access_name)),
         inner_refs.clone(),
     );
     let mut ok_arm = if fused {
@@ -2868,23 +2891,23 @@ fn resolve_checked_accessor(
             else_branch: Box::new(err_arm(uninit_index)),
         };
     }
-    let lt = |l: Expr, r: Expr| {
-        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.lt".to_owned())), vec![l, r])
+    let ult = |l: Expr, r: Expr| {
+        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.ult".to_owned())), vec![l, r])
     };
-    let ge = |l: Expr, r: Expr| {
-        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.ge".to_owned())), vec![l, r])
-    };
-    // Ok-first nesting: the happy path is the THEN branch all the way
-    // down, which is also what codegen's `infer_type` reads for an If —
-    // so the expansion's type (and box/unbox decisions downstream) come
-    // from the access, not from the error arms.
+    // ONE unsigned compare is the whole range test: a negative index
+    // wraps to a huge unsigned value and fails it, and `len >= 0` always
+    // holds, so `(i as u64) < (len as u64)` ⟺ `0 <= i < len`. The
+    // negative-index and too-big arms constructed the IDENTICAL
+    // `Err(OutOfBounds(OobInfo { i, len }))` value, so folding them is
+    // exactly semantics-preserving — and the unsigned predicate matches
+    // the access protocol's internal bounds check, so GVN folds those
+    // branches too. Ok-first: the happy path is the THEN branch all the
+    // way down, which is also what codegen's `infer_type` reads for an
+    // If — so the expansion's type (and box/unbox decisions downstream)
+    // come from the access, not from the error arms.
     let mut core = Expr::If {
-        cond: Box::new(ge(i_ref.clone(), Expr::IntLit(0))),
-        then_branch: Box::new(Expr::If {
-            cond: Box::new(lt(i_ref.clone(), len_ref())),
-            then_branch: Box::new(ok_arm),
-            else_branch: Box::new(err_arm(oob_index)),
-        }),
+        cond: Box::new(ult(i_ref.clone(), len_ref())),
+        then_branch: Box::new(ok_arm),
         else_branch: Box::new(err_arm(oob_index)),
     };
     // The len binder sits innermost, directly around the core.
