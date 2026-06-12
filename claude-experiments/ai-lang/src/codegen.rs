@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 17;
+const CODEGEN_CACHE_VERSION: u64 = 18;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -5312,6 +5312,10 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
         }
+        // Captured before the clear below: a tail-position call to a
+        // DIFFERENT dual-ABI def can forward the callee's (tag, payload)
+        // pair as our own return — see the TopRef arm.
+        let is_tail_call = ctx.is_tail;
         // From here on, args are evaluated with is_tail=false. This
         // covers args of arithmetic builtins, indirect calls,
         // externs, etc. The callee's compile_expr also doesn't need
@@ -6299,6 +6303,42 @@ impl<'ctx> Codegen<'ctx> {
                 // applied directly to this call is fused in `compile_try`
                 // and never reaches here.)
                 if let Some(abi) = self.def_result_abi.get(h).copied() {
+                    // Tail forwarding: a tail-position call to another
+                    // dual def of the SAME Result shape returns the
+                    // callee's (tag, payload) pair as our own — no
+                    // box/materialize/unbox round trip (which costs two
+                    // heap allocations per call: measured 5% of nbody).
+                    if is_tail_call {
+                        if let Some(my_abi) = ctx.result_abi {
+                            if my_abi.enum_ref == abi.enum_ref
+                                && my_abi.ok_index == abi.ok_index
+                                && my_abi.err_index == abi.err_index
+                                && my_abi.ok_payload == abi.ok_payload
+                                && my_abi.err_payload == abi.err_payload
+                            {
+                                let pair =
+                                    self.emit_dual_topref_call_pair(h, args, env, ctx)?;
+                                self.emit_epilogue(
+                                    ctx.thread_param,
+                                    ctx.frame_alloca,
+                                    ctx.info,
+                                )?;
+                                self.builder
+                                    .build_return(Some(
+                                        &pair as &dyn inkwell::values::BasicValue,
+                                    ))
+                                    .map_err(|e| {
+                                        CodegenError::JitInit(format!(
+                                            "build_return tail dual forward: {}",
+                                            e
+                                        ))
+                                    })?;
+                                // Block is terminated; dummy value (same
+                                // convention as emit_result_leaf_return).
+                                return Ok(Value::Int(self.i64_ty.const_zero()));
+                            }
+                        }
+                    }
                     let pair = self.emit_dual_topref_call_pair(h, args, env, ctx)?;
                     let obj = self.materialize_result_pair(pair, &abi, ctx)?;
                     return Ok(Value::Closure(obj));
