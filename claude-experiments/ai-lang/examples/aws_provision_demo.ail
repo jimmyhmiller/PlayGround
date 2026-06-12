@@ -12,10 +12,14 @@
 // function. With dummy credentials each request still reaches AWS and
 // comes back 403 (security-token invalid), which proves the create /
 // invoke / delete requests are all well-formed signed AWS calls.
+//
+// The language is TOTAL: `env_get` and `zip_one` return
+// `Result<_, IndexError>`, so `run` threads them with `?` and `main`
+// matches the final Result.
 
-def env_or(name: String, fallback: String) -> String = {
-    let v = env_get(name);
-    if string_is_empty(v) == 1 { fallback } else { v }
+def env_or(name: String, fallback: String) -> Result<String, IndexError> = {
+    let v = env_get(name)?;
+    if string_is_empty(v) == 1 { Result::Ok(fallback) } else { Result::Ok(v) }
 }
 
 def show(label: String, r: Result<HttpResponse, String>) -> Int =
@@ -26,16 +30,22 @@ def show(label: String, r: Result<HttpResponse, String>) -> Int =
         Result::Err(e) => println(str3(label, " transport error: ", e))
     }
 
-def main() -> Int = {
-    let region = env_or("AWS_REGION", "us-east-1");
-    let name = env_or("LAMBDA_FUNCTION", "ai-lang-provision-demo");
-    let role = env_or("LAMBDA_ROLE_ARN", "arn:aws:iam::000000000000:role/none");
-    let ak = env_or("AWS_ACCESS_KEY_ID", "AKIDDUMMYEXAMPLE");
-    let sk = env_or("AWS_SECRET_ACCESS_KEY", "dummysecretdoesnotwork");
-    let token = env_get("AWS_SESSION_TOKEN");
+def run() -> Result<Int, IndexError> = {
+    let region = env_or("AWS_REGION", "us-east-1")?;
+    let name = env_or("LAMBDA_FUNCTION", "ai-lang-provision-demo")?;
+    let role = env_or("LAMBDA_ROLE_ARN", "arn:aws:iam::000000000000:role/none")?;
+    let ak = env_or("AWS_ACCESS_KEY_ID", "AKIDDUMMYEXAMPLE")?;
+    let sk = env_or("AWS_SECRET_ACCESS_KEY", "dummysecretdoesnotwork")?;
+    let token = env_get("AWS_SESSION_TOKEN")?;
     // The deployment package: a bootstrap that runs the ai-lang worker.
-    let zip = zip_one("bootstrap", "#!/bin/sh\nexec ai-lang run main\n");
+    let zip = zip_one("bootstrap", "#!/bin/sh\nexec ai-lang run main\n")?;
     let c = show("create", lambda_create_function(region, name, role, zip, ak, sk, token));
     let i = show("invoke", lambda_invoke(region, name, "{\"name\":\"world\"}", ak, sk, token));
-    show("delete", lambda_delete_function(region, name, ak, sk, token))
+    Result::Ok(show("delete", lambda_delete_function(region, name, ak, sk, token)))
 }
+
+def main() -> Int =
+    match run() {
+        Result::Ok(v) => v,
+        Result::Err(_) => println("environment error"),
+    }

@@ -5,26 +5,29 @@
 //   ai-lang add examples/crypto_demo.ail
 //   ai-lang run main
 //
-// Returns 0 when both digests match their published test vectors, so the
-// runner prints 0 on success.
+// The language is TOTAL: `sha256_hex` / `hmac_sha256_hex` return
+// `Result<String, IndexError>`, so the digests are threaded with `?`
+// through `run`. Returns 0 when both digests match their published test
+// vectors, so the runner prints 0 on success.
 
-def sha_ok() -> Int =
-    string_eq(
-        sha256_hex("abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-
-def hmac_ok() -> Int =
-    string_eq(
-        hmac_sha256_hex("key", "The quick brown fox jumps over the lazy dog"),
-        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
-
-def main() -> Int = {
-    let s = println(string_concat("sha256(\"abc\") = ", sha256_hex("abc")));
-    let h = println(string_concat(
-        "hmac(\"key\", fox) = ", hmac_sha256_hex("key", "The quick brown fox jumps over the lazy dog")));
-    if sha_ok() == 1 {
-        if hmac_ok() == 1 { 0 } else { 0 - 1 }
+def run() -> Result<Int, IndexError> = {
+    let sha = sha256_hex("abc")?;
+    let mac = hmac_sha256_hex("key", "The quick brown fox jumps over the lazy dog")?;
+    let _s = println(string_concat("sha256(\"abc\") = ", sha));
+    let _h = println(string_concat("hmac(\"key\", fox) = ", mac));
+    let sha_ok = string_eq(
+        sha, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    let mac_ok = string_eq(
+        mac, "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
+    if sha_ok == 1 {
+        if mac_ok == 1 { Result::Ok(0) } else { Result::Ok(0 - 1) }
     } else {
-        0 - 1
+        Result::Ok(0 - 1)
     }
 }
+
+def main() -> Int =
+    match run() {
+        Result::Ok(v) => v,
+        Result::Err(_) => 0 - 1,
+    }

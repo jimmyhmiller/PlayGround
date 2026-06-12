@@ -2607,18 +2607,21 @@ mod tests {
             // Probe the (Int)->Int / ()->Int top-level ABI up front.
             def probe_abi() -> Int = 41 + 1
 
-            def make_msg() -> Bytes = {{
+            def make_msg() -> Result<Bytes, IndexError> = {{
                 let b = bytes_new(5);
-                let _0 = bytes_set_trusted(b, 0, 10);
-                let _1 = bytes_set_trusted(b, 1, 20);
-                let _2 = bytes_set_trusted(b, 2, 30);
-                let _3 = bytes_set_trusted(b, 3, 40);
-                let _4 = bytes_set_trusted(b, 4, 50);
-                b
+                let _0 = bytes_set(b, 0, 10)?;
+                let _1 = bytes_set(b, 1, 20)?;
+                let _2 = bytes_set(b, 2, 30)?;
+                let _3 = bytes_set(b, 3, 40)?;
+                let _4 = bytes_set(b, 4, 50)?;
+                Result::Ok(b)
             }}
 
-            def bytes_sum(b: Bytes, i: Int, n: Int, acc: Int) -> Int =
-                if i >= n {{ acc }} else {{ bytes_sum(b, i + 1, n, acc + bytes_get_trusted(b, i)) }}
+            def bytes_sum(b: Bytes, i: Int, n: Int, acc: Int) -> Result<Int, IndexError> =
+                if i >= n {{ Result::Ok(acc) }} else {{
+                    let v = bytes_get(b, i)?;
+                    bytes_sum(b, i + 1, n, acc + v)
+                }}
 
             // Bind+listen; return the listener fd (or negative on error).
             def server_listen() -> Int =
@@ -2644,19 +2647,25 @@ mod tests {
 
             // Connect, send a frame, read the echo, return the byte sum.
             def client_roundtrip() -> Int =
-                match tcp_connect(127, 0, 0, 1, {port}) {{
-                    Result::Ok(conn) => match send_frame(conn, make_msg()) {{
-                        Result::Ok(_w) => match recv_frame(conn) {{
-                            Result::Ok(echo) => {{
-                                let s = bytes_sum(echo, 0, bytes_len(echo), 0);
-                                let _c = conn_close(conn);
-                                s
+                match make_msg() {{
+                    Result::Ok(msg) => match tcp_connect(127, 0, 0, 1, {port}) {{
+                        Result::Ok(conn) => match send_frame(conn, msg) {{
+                            Result::Ok(_w) => match recv_frame(conn) {{
+                                Result::Ok(echo) => {{
+                                    let s = match bytes_sum(echo, 0, bytes_len(echo), 0) {{
+                                        Result::Ok(v) => v,
+                                        Result::Err(_e) => 0 - 999,
+                                    }};
+                                    let _c = conn_close(conn);
+                                    s
+                                }},
+                                Result::Err(_e) => 0 - 5,
                             }},
-                            Result::Err(_e) => 0 - 5,
+                            Result::Err(_e) => 0 - 6,
                         }},
-                        Result::Err(_e) => 0 - 6,
+                        Result::Err(_e) => 0 - 4,
                     }},
-                    Result::Err(_e) => 0 - 4,
+                    Result::Err(_e) => 0 - 7,
                 }}
             "#,
             port = port
@@ -3540,10 +3549,14 @@ mod tests {
             state svc: Atom<List<fn(Int) -> Int>> = atom_new(svc_slot())
             def sv_install(h: fn(Int) -> Int) -> Int = svc_install(svc, h)
             def sv_rollback() -> Int = svc_rollback(svc)
-            def sv_handle(x: Int) -> Int = {
-                let f = svc_current(svc);
-                f(x)
-            }
+            // svc_current returns Option: a missing handler is a value.
+            // The test only calls sv_handle after an install, so None is
+            // a distinct sentinel asserting the Some path.
+            def sv_handle(x: Int) -> Int =
+                match svc_current(svc) {
+                    Option::Some(f) => f(x),
+                    Option::None => 0 - 999,
+                }
             // Handler versions are named defs — content-addressed, like
             // any deployable code.
             def handler_v1(x: Int) -> Int = x + 1

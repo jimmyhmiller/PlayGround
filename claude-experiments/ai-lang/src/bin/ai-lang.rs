@@ -1370,7 +1370,6 @@ fn cmd_effects(target: &str, json: bool, cb_path: &PathBuf) {
             (EffectSet::ATOM, "Atom"),
             (EffectSet::MUT, "Mut"),
             (EffectSet::FFI, "FFI"),
-            (EffectSet::PANIC, "Panic"),
         ]
         .into_iter()
         .filter(|(bit, _)| sig.concrete.contains(*bit))

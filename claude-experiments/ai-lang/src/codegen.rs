@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 11;
+const CODEGEN_CACHE_VERSION: u64 = 13;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -7134,13 +7134,19 @@ impl<'ctx> Codegen<'ctx> {
                         Some(Hash(hb))
                     };
                     let parsed = if parts.len() >= 4 {
-                        match (hex32(parts[1]), hex32(parts[3])) {
-                            (Some(result_h), Some(decode_err_h)) => {
+                        match (hex32(parts[0]), hex32(parts[1]), hex32(parts[3])) {
+                            (Some(expected_h), Some(result_h), Some(decode_err_h)) => {
                                 let okint = parts[2] == "1";
+                                // A scalar T unboxes from the Ok slot; any
+                                // other T is an opaque heap value. Stand in
+                                // with the expected-identity TypeRef — NOT
+                                // Builtin("Ptr"), which is a boxed scalar
+                                // and would make the call site's match
+                                // wrongly unbox a struct/enum payload.
                                 let ok_ty = if okint {
                                     Type::Builtin("Int".to_owned())
                                 } else {
-                                    Type::Builtin("Ptr".to_owned())
+                                    Type::TypeRef(expected_h)
                                 };
                                 Some(Type::FnType {
                                     params: vec![Type::Builtin("Bytes".to_owned())],
@@ -8335,8 +8341,13 @@ fn is_int_type(t: &Type) -> bool {
 /// the i64 representation, so the same box/unbox path serves both
 /// (`Float` is the f64 bit-pattern). Used to decide where generic code
 /// must box on the way in and unbox on the way out.
+/// 8-byte i64-represented scalars that get BOXED (a BoxedInt carrying
+/// the raw bits) when crossing a generic (TypeVar) boundary, and unboxed
+/// on extraction. `Ptr` is a raw address — i64-repr like Int — so a
+/// generic payload instantiated to Ptr boxes/unboxes identically (e.g.
+/// `cstr(s)? : Ptr` out of a `Result<Ptr, IndexError>`).
 fn is_boxed_scalar(n: &str) -> bool {
-    n == "Int" || n == "Float"
+    n == "Int" || n == "Float" || n == "Bool" || n == "Ptr"
 }
 
 
@@ -9789,6 +9800,14 @@ mod tests {
         crate::ffi::clear_externs();
         crate::io_externs::register_io_externs();
     }
+
+    /// Type declarations the CHECKED accessors (`array_get`, `array_set`,
+    /// `bytes_get`, `bytes_set`) resolve against by name — snippets that
+    /// index arrays/bytes prepend this instead of pulling in the whole
+    /// stdlib.
+    const INDEX_PRELUDE: &str = "enum Result<T, E> { Ok(T), Err(E) }
+         struct OobInfo { index: Int, len: Int }
+         enum IndexError { OutOfBounds(OobInfo), Uninitialized(OobInfo) }";
 
     fn build_for<'ctx>(
         ctx: &'ctx Context,
@@ -11375,6 +11394,12 @@ mod tests {
         let r = resolve_module(&m).unwrap();
         let mut cache = crate::typecheck::TypeCache::new();
         let err = crate::typecheck::typecheck_module(&r, &mut cache).expect_err("should err");
+        // Module-level errors are wrapped in `InDef { name, err }`; peel
+        // the wrapper to assert on the underlying error.
+        let err = match err {
+            crate::typecheck::TypeError::InDef { err, .. } => *err,
+            other => other,
+        };
         match err {
             crate::typecheck::TypeError::MatchArmsDisagree { .. } => {}
             other => panic!("expected MatchArmsDisagree, got {:?}", other),
@@ -11398,7 +11423,17 @@ mod tests {
     fn jit_bytes_new_is_zero_filled() {
         init();
         let ctx = Context::create();
-        let (rt, jit, names) = build_for(&ctx, "def run() -> Int = bytes_get_trusted(bytes_new(8), 5)");
+        let (rt, jit, names) = build_for(
+            &ctx,
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = bytes_get(bytes_new(8), 5)
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
+        );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr()), 0);
@@ -11411,11 +11446,18 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def run() -> Int = {
-                let b = bytes_new(4);
-                let _x = bytes_set_trusted(b, 2, 99);
-                bytes_get_trusted(b, 2)
-            }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = {{
+                     let b = bytes_new(4);
+                     let _x = bytes_set(b, 2, 99)?;
+                     bytes_get(b, 2)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11430,11 +11472,18 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def run() -> Int = {
-                let b = bytes_new(1);
-                let _x = bytes_set_trusted(b, 0, 511);
-                bytes_get_trusted(b, 0)
-            }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = {{
+                     let b = bytes_new(1);
+                     let _x = bytes_set(b, 0, 511)?;
+                     bytes_get(b, 0)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11448,16 +11497,23 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def run() -> Int = {
-                let b = bytes_new(5);
-                let _x = bytes_set_trusted(b, 0, 10);
-                let _x = bytes_set_trusted(b, 1, 20);
-                let _x = bytes_set_trusted(b, 2, 30);
-                let _x = bytes_set_trusted(b, 3, 40);
-                let _x = bytes_set_trusted(b, 4, 50);
-                let s = bytes_slice(b, 1, 3);
-                bytes_get_trusted(s, 0) + bytes_len(s) * 100
-            }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = {{
+                     let b = bytes_new(5);
+                     let _x = bytes_set(b, 0, 10)?;
+                     let _x = bytes_set(b, 1, 20)?;
+                     let _x = bytes_set(b, 2, 30)?;
+                     let _x = bytes_set(b, 3, 40)?;
+                     let _x = bytes_set(b, 4, 50)?;
+                     let s = bytes_slice(b, 1, 3);
+                     Result::Ok(bytes_get(s, 0)? + bytes_len(s) * 100)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         // slice = [20, 30, 40] → 20 + 3*100 = 320
         unsafe {
@@ -11472,15 +11528,22 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def run() -> Int = {
-                let a = bytes_new(2);
-                let _x = bytes_set_trusted(a, 0, 1);
-                let _x = bytes_set_trusted(a, 1, 2);
-                let b = bytes_new(3);
-                let _x = bytes_set_trusted(b, 0, 3);
-                let c = bytes_concat(a, b);
-                bytes_len(c) * 100 + bytes_get_trusted(c, 2)
-            }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = {{
+                     let a = bytes_new(2);
+                     let _x = bytes_set(a, 0, 1)?;
+                     let _x = bytes_set(a, 1, 2)?;
+                     let b = bytes_new(3);
+                     let _x = bytes_set(b, 0, 3)?;
+                     let c = bytes_concat(a, b);
+                     Result::Ok(bytes_len(c) * 100 + bytes_get(c, 2)?)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         // len 5, c[2] = b[0] = 3 → 503
         unsafe {
@@ -11498,10 +11561,17 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def run() -> Int = {
-                let b = bytes_from_string(\"ABC\");
-                bytes_get_trusted(b, 0) * 10000 + bytes_get_trusted(b, 1) * 100 + bytes_get_trusted(b, 2)
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def go() -> Result<Int, IndexError> = {{
+                     let b = bytes_from_string(\"ABC\");
+                     Result::Ok(bytes_get(b, 0)? * 10000 + bytes_get(b, 1)? * 100 + bytes_get(b, 2)?)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         // 'A'=65, 'B'=66, 'C'=67 → 656667
         unsafe {
@@ -11532,19 +11602,26 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def alloc_garbage(n: Int) -> Int =
-                if n <= 0 { 0 } else {
-                    let junk = bytes_new(64);
-                    let _x = bytes_set_trusted(junk, 0, n);
-                    alloc_garbage(n - 1)
-                }
-             def run() -> Int = {
-                let keep = bytes_new(8);
-                let _x = bytes_set_trusted(keep, 3, 123);
-                let _x = alloc_garbage(2000);
-                let _x = gc_collect();
-                bytes_get_trusted(keep, 3)
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def alloc_garbage(n: Int) -> Result<Int, IndexError> =
+                     if n <= 0 {{ Result::Ok(0) }} else {{
+                         let junk = bytes_new(64);
+                         let _x = bytes_set(junk, 0, n)?;
+                         alloc_garbage(n - 1)
+                     }}
+                 def go() -> Result<Int, IndexError> = {{
+                     let keep = bytes_new(8);
+                     let _x = bytes_set(keep, 3, 123)?;
+                     let _g = alloc_garbage(2000)?;
+                     let _c = gc_collect();
+                     bytes_get(keep, 3)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11573,13 +11650,20 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def make4() -> Array<Int> = array_new(4)
-             def run() -> Int = {
-                let a = make4();
-                let _x = array_set_trusted(a, 0, 10);
-                let _y = array_set_trusted(a, 1, 32);
-                array_get_trusted(a, 0) + array_get_trusted(a, 1)
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def make4() -> Array<Int> = array_new(4)
+                 def go() -> Result<Int, IndexError> = {{
+                     let a = make4();
+                     let _x = array_set(a, 0, 10)?;
+                     let _y = array_set(a, 1, 32)?;
+                     Result::Ok(array_get(a, 0)? + array_get(a, 1)?)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11594,14 +11678,21 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "struct P { x: Int, y: Int }
-             def make() -> Array<P> = array_new(2)
-             def run() -> Int = {
-                let a = make();
-                let _s = array_set_trusted(a, 0, P { x: 7, y: 9 });
-                let p = array_get_trusted(a, 0);
-                p.x + p.y
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 struct P {{ x: Int, y: Int }}
+                 def make() -> Array<P> = array_new(2)
+                 def go() -> Result<Int, IndexError> = {{
+                     let a = make();
+                     let _s = array_set(a, 0, P {{ x: 7, y: 9 }})?;
+                     let p = array_get(a, 0)?;
+                     Result::Ok(p.x + p.y)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11616,16 +11707,23 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "def make4() -> Array<Int> = array_new(4)
-             def garbage(n: Int) -> Int =
-                if n <= 0 { 0 } else { let j = array_new(16); garbage(n - 1) }
-             def run() -> Int = {
-                let a = make4();
-                let _x = array_set_trusted(a, 0, 111);
-                let _g = garbage(2000);
-                let _c = gc_collect();
-                array_get_trusted(a, 0)
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 def make4() -> Array<Int> = array_new(4)
+                 def garbage(n: Int) -> Int =
+                     if n <= 0 {{ 0 }} else {{ let j = array_new(16); garbage(n - 1) }}
+                 def go() -> Result<Int, IndexError> = {{
+                     let a = make4();
+                     let _x = array_set(a, 0, 111)?;
+                     let _g = garbage(2000);
+                     let _c = gc_collect();
+                     array_get(a, 0)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();
@@ -11642,18 +11740,25 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_for(
             &ctx,
-            "struct Box { v: Int }
-             def make() -> Array<Box> = array_new(4)
-             def garbage(n: Int) -> Int =
-                if n <= 0 { 0 } else { let j = array_new(16); garbage(n - 1) }
-             def run() -> Int = {
-                let a = make();
-                let _s = array_set_trusted(a, 1, Box { v: 99 });
-                let _g = garbage(2000);
-                let _c = gc_collect();
-                let b = array_get_trusted(a, 1);
-                b.v
-             }",
+            &format!(
+                "{INDEX_PRELUDE}
+                 struct Box {{ v: Int }}
+                 def make() -> Array<Box> = array_new(4)
+                 def garbage(n: Int) -> Int =
+                     if n <= 0 {{ 0 }} else {{ let j = array_new(16); garbage(n - 1) }}
+                 def go() -> Result<Int, IndexError> = {{
+                     let a = make();
+                     let _s = array_set(a, 1, Box {{ v: 99 }})?;
+                     let _g = garbage(2000);
+                     let _c = gc_collect();
+                     let b = array_get(a, 1)?;
+                     Result::Ok(b.v)
+                 }}
+                 def run() -> Int = match go() {{
+                     Result::Ok(v) => v,
+                     Result::Err(_e) => 0 - 999,
+                 }}"
+            ),
         );
         unsafe {
             let f = jit.get_fn0(&names["run"]).unwrap();

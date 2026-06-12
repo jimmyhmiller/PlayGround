@@ -1619,12 +1619,20 @@ mod tests {
         // sequentially rather than recursively because `edit::add` currently
         // can't commit a self-recursive helper — unrelated to eval.)
         let cb = cb_with(
-            "def mk() -> Array<Int> = { \
+            "enum Result<T, E> { Ok(T), Err(E) } \
+             struct OobInfo { index: Int, len: Int } \
+             enum IndexError { OutOfBounds(OobInfo), Uninitialized(OobInfo) } \
+             def fill() -> Result<Array<Int>, IndexError> = { \
                 let a = array_new(3); \
-                let _0 = array_set_trusted(a, 0, 10); \
-                let _1 = array_set_trusted(a, 1, 20); \
-                let _2 = array_set_trusted(a, 2, 30); \
-                a }",
+                let _0 = array_set(a, 0, 10)?; \
+                let _1 = array_set(a, 1, 20)?; \
+                let _2 = array_set(a, 2, 30)?; \
+                Result::Ok(a) } \
+             def mk() -> Array<Int> = \
+                match fill() { \
+                    Result::Ok(a) => a, \
+                    Result::Err(_e) => array_new(0), \
+                }",
         );
         let r = run(&cb, "mk", &[]).unwrap();
         assert_eq!(
@@ -1789,13 +1797,21 @@ mod tests {
         // `ai_gc_box_int` + `ai_array_set`. Summing the array proves the boxed
         // Int elements are CORRECT (round-trips with the renderer's unbox).
         let cb = cb_with(
-            "def sum(a: Array<Int>) -> Int = { \
+            "enum Result<T, E> { Ok(T), Err(E) } \
+             struct OobInfo { index: Int, len: Int } \
+             enum IndexError { OutOfBounds(OobInfo), Uninitialized(OobInfo) } \
+             def sum3(a: Array<Int>) -> Result<Int, IndexError> = { \
                 let n = array_len(a); \
                 let s0 = 0; \
-                let s1 = if n > 0 { s0 + array_get_trusted(a, 0) } else { s0 }; \
-                let s2 = if n > 1 { s1 + array_get_trusted(a, 1) } else { s1 }; \
-                let s3 = if n > 2 { s2 + array_get_trusted(a, 2) } else { s2 }; \
-                s3 }",
+                let s1 = if n > 0 { s0 + array_get(a, 0)? } else { s0 }; \
+                let s2 = if n > 1 { s1 + array_get(a, 1)? } else { s1 }; \
+                let s3 = if n > 2 { s2 + array_get(a, 2)? } else { s2 }; \
+                Result::Ok(s3) } \
+             def sum(a: Array<Int>) -> Int = \
+                match sum3(a) { \
+                    Result::Ok(v) => v, \
+                    Result::Err(_e) => 0 - 1, \
+                }",
         );
         let arr = Json::Array(vec![Json::Int(10), Json::Int(20), Json::Int(30)]);
         let r = run_json(&cb, "sum", &[arr]).unwrap();

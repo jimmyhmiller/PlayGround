@@ -7,11 +7,10 @@
 // get an UNBOXED representation when the creation site's type is known
 // (here, via the `-> Array<Int>` / `-> Array<Point>` return types).
 //
-// Indexing is CHECKED: `array_get`/`array_set` return
-// `Result<_, IndexError>`, and `?` threads an out-of-bounds error out as
-// a value (fused — the happy path never builds a Result). Code that has
-// proven its indices can use `array_get_trusted`/`array_set_trusted`,
-// which skip nothing but ABORT the process on a violation (a bug).
+// Indexing is CHECKED and the language is TOTAL: `array_get`/`array_set`
+// return `Result<_, IndexError>`, and `?` threads an out-of-bounds (or
+// uninitialized-slot) error out as a value — fused, so the happy path
+// never builds a Result. There is no unchecked tier and no abort.
 
 def make_ints(n: Int) -> Array<Int> = array_new(n)
 

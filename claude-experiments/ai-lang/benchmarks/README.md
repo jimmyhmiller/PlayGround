@@ -35,7 +35,7 @@ benchmarks/run.sh [runs]    # default 3, best-of reported
 | fib | 9 | 6 | 6 | 1.5× | 1.5× |
 | loop_mix | 433 | 412 | 418 | 1.05× | 1.04× |
 | mandelbrot | 63 | 59 | 59 | 1.07× | 1.07× |
-| nbody | 329 | 25 | 21 | 13× | 16× |
+| nbody | 373 | 24 | 21 | 16× | 18× |
 | binary_trees | 103 | 88 | 47 | 1.17× | 2.2× |
 
 Notes:
@@ -58,16 +58,15 @@ Notes:
   shape at runtime, so the two representations are interchangeable
   (including `value_eq`/`value_hash`, which are representation-blind).
   This took nbody from 26× Rust (boxed, ~37M allocations) to 15×.
-- Indexing is CHECKED and errors are values: the public `array_get` /
-  `array_set` / `bytes_get` / `bytes_set` return
-  `Result<T, IndexError>`, and `?` is FUSED — the happy path compiles
-  to an inline shape check + bounds check + raw load/store with no
-  Result ever built; only an actual out-of-bounds constructs (and
-  early-returns) the `Err(OutOfBounds(OobInfo { index, len }))`. The
-  greppable `*_trusted` tier skips the Result protocol and ABORTS on a
-  violation, for code with proven indices (the stdlib's internals).
-  With trusted accessors nbody runs 159ms (6.6×); the table reports
-  the checked version because that's what user code writes.
+- The language is FULLY TOTAL: there is no abort, no panic, and no
+  unchecked tier. `array_get`/`array_set`/`bytes_get`/`bytes_set`
+  return `Result<T, IndexError>` — out-of-bounds AND reads of
+  uninitialized non-scalar slots are `Err` values — and `?` is FUSED:
+  the happy path compiles to inline shape + bounds + init checks and a
+  raw load/store with no Result ever built. The entire stdlib (HAMT,
+  JSON, HTTP/AWS, codecs) threads its errors honestly; provably
+  impossible Errs are threaded out, never swallowed. nbody pays ~13%
+  for the per-access init check on top of the checked protocol.
 - Frames are EXACT: no conservative pre-scan anywhere — the alloca,
   the zeroing memset, and the GC's scanned-slot count all equal the
   body's real slot high-water mark (materialized after compilation via

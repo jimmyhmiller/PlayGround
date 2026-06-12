@@ -1,26 +1,41 @@
 // Program B for distributed map-reduce: each invocation sums one range
 // [lo, hi). Deploy this once; Program A (lambda_mapreduce_demo.ail) fans
 // out many ranges across parallel invocations and adds up the partials.
+//
+// The language is TOTAL: `json_get` returns
+// `Result<Option<Json>, IndexError>`, so the field reads thread errors
+// with `?` and the handler turns any index error into an error JSON
+// response (it never crashes and never silently defaults).
 
 def sum_range(lo: Int, hi: Int, acc: Int) -> Int =
     if lo >= hi { acc } else { sum_range(lo + 1, hi, acc + lo) }
 
 // Read an integer field from the event JSON (json_field is for strings;
-// numbers go through parse_json + json_int).
-def field_int(event: String, key: String) -> Int =
+// numbers go through parse_json + json_get + json_int). A missing or
+// non-numeric field reads as 0 (an empty range); an indexing error
+// propagates as a value via `?`.
+def field_int(event: String, key: String) -> Result<Int, IndexError> =
     match parse_json(event) {
         Result::Ok(j) =>
-            match json_get(j, key) {
-                Option::Some(v) => match json_int(v) { Option::Some(n) => n, Option::None => 0 },
-                Option::None => 0
+            match json_get(j, key)? {
+                Option::Some(v) => Result::Ok(opt_unwrap_or(json_int(v), 0)),
+                Option::None => Result::Ok(0)
             },
-        Result::Err(e) => 0
+        Result::Err(e) => Result::Ok(0)
     }
 
-def handler(event: String) -> String = {
-    let lo = field_int(event, "lo");
-    let hi = field_int(event, "hi");
-    str3("{\"sum\":", int_to_string(sum_range(lo, hi, 0)), "}")
+def handler(event: String) -> Result<String, IndexError> = {
+    let lo = field_int(event, "lo")?;
+    let hi = field_int(event, "hi")?;
+    Result::Ok(str3("{\"sum\":", int_to_string(sum_range(lo, hi, 0)), "}"))
 }
 
-def main() -> Int = lambda_serve(|e: String| handler(e))
+// `lambda_serve` wants a total fn(String) -> String, so the Result is
+// matched here: an Err becomes an error JSON body.
+def respond(event: String) -> String =
+    match handler(event) {
+        Result::Ok(body) => body,
+        Result::Err(_) => "{\"error\":\"index error\"}",
+    }
+
+def main() -> Int = lambda_serve(|e: String| respond(e))

@@ -54,11 +54,9 @@ impl EffectSet {
     pub const MUT: EffectSet = EffectSet(1 << 4);
     /// Raw C call / `Ptr` op — opaque, assume the worst.
     pub const FFI: EffectSet = EffectSet(1 << 5);
-    /// May abort the process (`panic`).
-    pub const PANIC: EffectSet = EffectSet(1 << 6);
     /// Every effect — the sound over-approximation for anything we can't
     /// see through (an unknown computed function value, an external def).
-    pub const ALL: EffectSet = EffectSet(0b111_1111);
+    pub const ALL: EffectSet = EffectSet(0b11_1111);
 
     pub fn is_empty(self) -> bool {
         self.0 == 0
@@ -100,7 +98,6 @@ impl std::fmt::Debug for EffectSet {
             (EffectSet::ATOM, "Atom"),
             (EffectSet::MUT, "Mut"),
             (EffectSet::FFI, "FFI"),
-            (EffectSet::PANIC, "Panic"),
         ];
         let mut first = true;
         write!(f, "{{")?;
@@ -156,14 +153,11 @@ impl EffectSig {
         !self.concrete.contains(EffectSet::FFI) && !self.concrete.contains(EffectSet::ATOM)
     }
     /// Cacheable / idempotent for the `at` result cache: deterministic and
-    /// free of external/observable effects. Local `Mut` (on copied values)
-    /// and `Panic` are allowed.
+    /// free of external/observable effects. Local `Mut` (on copied
+    /// values) is allowed.
     pub fn cacheable(&self) -> bool {
         self.param_deps == 0
-            && self
-                .concrete
-                .without(EffectSet::MUT.union(EffectSet::PANIC))
-                .is_empty()
+            && self.concrete.without(EffectSet::MUT).is_empty()
     }
 }
 
@@ -279,9 +273,7 @@ pub fn builtin_effect_sig(name: &str) -> EffectSig {
         // Raw pointer / FFI memory.
         n if n.starts_with("core/ptr.") => just(EffectSet::FFI),
 
-        "core/abort" => just(EffectSet::PANIC),
-
-        // User `extern fn`s. The conventional stdlib I/O + pure-conversion
+                // User `extern fn`s. The conventional stdlib I/O + pure-conversion
         // externs are classified precisely; everything else into C is
         // opaque → FFI. (A user could shadow these names; that's an
         // accepted stage-1 imprecision.)
@@ -806,19 +798,6 @@ mod tests {
         assert!(!e["reader"].cacheable());
     }
 
-    #[test]
-    fn abort_is_tracked() {
-        let e = infer(
-            "
-            def boom(x: Int) -> Int = abort(\"no\")
-        ",
-        );
-        assert!(e["boom"].concrete.contains(EffectSet::PANIC));
-        // Abort alone is still mobile + cacheable (it dies identically
-        // anywhere; it never produces a wrong cached value).
-        assert!(e["boom"].is_mobile());
-        assert!(e["boom"].cacheable());
-    }
 
     #[test]
     fn recursion_reaches_fixpoint() {

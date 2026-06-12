@@ -202,6 +202,10 @@ impl TypeCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeError {
+    /// A type error wrapped with the NAME of the definition it occurred
+    /// in — attached by `typecheck_module` so a failure in a 400-def
+    /// module says where to look.
+    InDef { name: String, err: Box<TypeError> },
     /// A `TopRef(h)` references a hash that hasn't been typed yet.
     UnknownTopRef(Hash),
     /// A struct hash referenced by `StructNew`/`Field` isn't a struct in cache.
@@ -320,6 +324,9 @@ impl core::fmt::Display for TypeError {
                 "variant index {} out of range (enum {} has {} variants)",
                 index, enum_ref, variant_count
             ),
+            TypeError::InDef { name, err } => {
+                write!(f, "in `{}`: {}", name, err)
+            }
             TypeError::MatchArmsDisagree { first, found } => write!(
                 f,
                 "match arms produced different types: first arm {:?}, later arm {:?}",
@@ -2292,7 +2299,10 @@ pub fn typecheck_module(
     }
 
     for rdef in needs_check {
-        let scheme = typecheck_def(&rdef.def, cache)?;
+        let scheme = typecheck_def(&rdef.def, cache).map_err(|e| TypeError::InDef {
+            name: rdef.name.clone(),
+            err: Box::new(e),
+        })?;
         cache.insert(rdef.hash, scheme);
         newly_typed += 1;
     }
@@ -2655,7 +2665,17 @@ mod tests {
         let m = parse_module(src).unwrap();
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
-        typecheck_module(&rm, &mut cache).expect_err("typecheck must fail")
+        unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("typecheck must fail"))
+    }
+
+    /// Module-level typecheck errors are wrapped in `InDef { name, err }` to
+    /// point at the failing def; peel that wrapper so tests can assert on
+    /// the underlying error variant.
+    fn unwrap_in_def(err: TypeError) -> TypeError {
+        match err {
+            TypeError::InDef { err, .. } => unwrap_in_def(*err),
+            other => other,
+        }
     }
 
     #[test]
@@ -2756,7 +2776,7 @@ mod tests {
             }
         }
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("should fail");
+        let err = unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("should fail"));
         match err {
             TypeError::FieldIndexOutOfRange {
                 index, field_count, ..
@@ -2798,7 +2818,7 @@ mod tests {
             }
         }
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("arms disagree");
+        let err = unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("arms disagree"));
         match err {
             TypeError::MatchArmsDisagree { .. } => {}
             other => panic!("expected MatchArmsDisagree, got {:?}", other),
@@ -2851,7 +2871,9 @@ mod tests {
         let m = parse_module(bad).unwrap();
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("non-thunk 2nd arg rejected");
+        let err = unwrap_in_def(
+            typecheck_module(&rm, &mut cache).expect_err("non-thunk 2nd arg rejected"),
+        );
         match err {
             TypeError::TypeMismatch { context, .. } => {
                 assert!(

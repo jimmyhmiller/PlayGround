@@ -477,35 +477,36 @@ extern "C" lib "c" {
 
 // Copy `s` into a fresh malloc'd, NUL-terminated C buffer. The caller
 // owns the buffer and must `free` it.
-def cstr(s: String) -> Ptr = {
+def cstr(s: String) -> Result<Ptr, IndexError> = {
     let b = bytes_from_string(s);
     let n = bytes_len(b);
     let p = malloc(n + 1);
     cstr_fill(p, b, 0, n)
 }
 
-def cstr_fill(p: Ptr, b: Bytes, i: Int, n: Int) -> Ptr =
+def cstr_fill(p: Ptr, b: Bytes, i: Int, n: Int) -> Result<Ptr, IndexError> =
     if i == n {
         let t = ptr_write_u8(p, n, 0);
-        p
+        Result::Ok(p)
     } else {
         let w = ptr_write_u8(p, i, bytes_get(b, i)?);
         cstr_fill(p, b, i + 1, n)
     }
 
 // Read a NUL-terminated C string at `p` into a fresh GC String.
-def cstr_to_string(p: Ptr) -> String = {
+def cstr_to_string(p: Ptr) -> Result<String, IndexError> = {
     let n = cstr_len(p, 0);
     let b = bytes_new(n);
-    string_from_bytes(cstr_copy_out(p, b, 0, n))
+    let filled = cstr_copy_out(p, b, 0, n)?;
+    Result::Ok(string_from_bytes(filled))
 }
 
 def cstr_len(p: Ptr, i: Int) -> Int =
     if ptr_read_u8(p, i) == 0 { i } else { cstr_len(p, i + 1) }
 
-def cstr_copy_out(p: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
+def cstr_copy_out(p: Ptr, b: Bytes, i: Int, n: Int) -> Result<Bytes, IndexError> =
     if i == n {
-        b
+        Result::Ok(b)
     } else {
         let w = bytes_set(b, i, ptr_read_u8(p, i))?;
         cstr_copy_out(p, b, i + 1, n)
@@ -514,9 +515,10 @@ def cstr_copy_out(p: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
 // Copy exactly `len` raw bytes at `p` into a fresh GC String. Unlike
 // `cstr_to_string` this does not stop at a NUL, so it preserves binary
 // content (used when the length is known, e.g. a file's size).
-def ptr_to_string(p: Ptr, len: Int) -> String = {
+def ptr_to_string(p: Ptr, len: Int) -> Result<String, IndexError> = {
     let b = bytes_new(len);
-    string_from_bytes(cstr_copy_out(p, b, 0, len))
+    let filled = cstr_copy_out(p, b, 0, len)?;
+    Result::Ok(string_from_bytes(filled))
 }
 
 // ---- HTTP client — libcurl, called entirely through the C FFI ----
@@ -561,18 +563,18 @@ def curlopt_headerdata() -> Int = 10029
 def curlinfo_response_code() -> Int = 2097154
 
 // Build a curl_slist from newline-separated "Key: Value" header lines.
-// Returns a null Ptr when `headers` is empty (no headers to set).
-def http_build_headers(headers: String) -> Ptr = {
+// Returns Ok(null Ptr) when `headers` is empty (no headers to set).
+def http_build_headers(headers: String) -> Result<Ptr, IndexError> = {
     let b = bytes_from_string(headers);
     http_headers_scan(b, 0, 0, bytes_len(b), ptr_null())
 }
 
-def http_headers_scan(b: Bytes, i: Int, start: Int, len: Int, list: Ptr) -> Ptr =
+def http_headers_scan(b: Bytes, i: Int, start: Int, len: Int, list: Ptr) -> Result<Ptr, IndexError> =
     if i == len {
         http_slist_add_line(b, start, len, list)
     } else {
         if bytes_get(b, i)? == 10 {
-            let list2 = http_slist_add_line(b, start, i, list);
+            let list2 = http_slist_add_line(b, start, i, list)?;
             http_headers_scan(b, i + 1, i + 1, len, list2)
         } else {
             http_headers_scan(b, i + 1, start, len, list)
@@ -580,15 +582,15 @@ def http_headers_scan(b: Bytes, i: Int, start: Int, len: Int, list: Ptr) -> Ptr 
     }
 
 // Append bytes[start..end) as one header line, skipping empty lines.
-def http_slist_add_line(b: Bytes, start: Int, end: Int, list: Ptr) -> Ptr =
+def http_slist_add_line(b: Bytes, start: Int, end: Int, list: Ptr) -> Result<Ptr, IndexError> =
     if end == start {
-        list
+        Result::Ok(list)
     } else {
         let line = string_from_bytes(bytes_slice(b, start, end - start));
-        let linec = cstr(line);
+        let linec = cstr(line)?;
         let list2 = curl_slist_append(list, linec);
         let f = free(linec);
-        list2
+        Result::Ok(list2)
     }
 
 def http_maybe_set_headers(h: Ptr, list: Ptr) -> Int =
@@ -644,18 +646,18 @@ def http_request_full(method: String, url: String, headers: String, body: String
     let hfp = open_memstream(hbufp, hsizep);
     let h = curl_easy_init();
     defer curl_easy_cleanup(h);
-    let urlc = cstr(url);
+    let urlc = ix(cstr(url))?;
     defer free(urlc);
-    let methodc = cstr(method);
+    let methodc = ix(cstr(method))?;
     defer free(methodc);
-    let bodyc = cstr(body);
+    let bodyc = ix(cstr(body))?;
     defer free(bodyc);
     let s_url = curl_easy_setopt(h, curlopt_url(), urlc);
     let s_wd = curl_easy_setopt(h, curlopt_writedata(), fp);
     let s_hd = curl_easy_setopt(h, curlopt_headerdata(), hfp);
     let s_fl = curl_easy_setopt(h, curlopt_followlocation(), 1);
     let s_cr = curl_easy_setopt(h, curlopt_customrequest(), methodc);
-    let hdr_list = http_build_headers(headers);
+    let hdr_list = ix(http_build_headers(headers))?;
     defer http_free_slist(hdr_list);
     let s_hdr = http_maybe_set_headers(h, hdr_list);
     let s_body = http_maybe_set_body(h, body, bodyc);
@@ -672,56 +674,60 @@ def http_request_full(method: String, url: String, headers: String, body: String
     defer free(bufptr);
     let hbufptr = ptr_read_ptr(hbufp, 0);
     defer free(hbufptr);
+    let resp_headers = ix(cstr_to_string(hbufptr))?;
+    let resp_body = ix(cstr_to_string(bufptr))?;
     if rc == 0 {
         Result::Ok(HttpResponse {
             status: code,
-            headers: cstr_to_string(hbufptr),
-            body: cstr_to_string(bufptr)
+            headers: resp_headers,
+            body: resp_body
         })
     } else {
         Result::Err(string_concat("curl error ", int_to_string(rc)))
     }
 }
 
-// Extract a response header value by (case-insensitive) name, or "" if
-// absent. `headers` is the raw block from `HttpResponse.headers`.
-def http_header(headers: String, name: String) -> String = {
+// Extract a response header value by (case-insensitive) name, or Ok("")
+// if absent. `headers` is the raw block from `HttpResponse.headers`.
+def http_header(headers: String, name: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(headers);
-    http_header_lines(b, 0, bytes_len(b), string_lower(name))
+    let want = string_lower(name)?;
+    http_header_lines(b, 0, bytes_len(b), want)
 }
 
-def http_header_lines(b: Bytes, i: Int, len: Int, want: String) -> String =
+def http_header_lines(b: Bytes, i: Int, len: Int, want: String) -> Result<String, IndexError> =
     if i >= len {
-        ""
+        Result::Ok("")
     } else {
-        let nl = http_find_byte(b, i, len, 10);
+        let nl = http_find_byte(b, i, len, 10)?;
         let line_end = if nl > i { if bytes_get(b, nl - 1)? == 13 { nl - 1 } else { nl } } else { nl };
-        let v = http_header_match(string_from_bytes(bytes_slice(b, i, line_end - i)), want);
+        let v = http_header_match(string_from_bytes(bytes_slice(b, i, line_end - i)), want)?;
         if string_is_empty(v) == 1 {
-            if nl >= len { "" } else { http_header_lines(b, nl + 1, len, want) }
+            if nl >= len { Result::Ok("") } else { http_header_lines(b, nl + 1, len, want) }
         } else {
-            v
+            Result::Ok(v)
         }
     }
 
-def http_header_match(line: String, want: String) -> String = {
+def http_header_match(line: String, want: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(line);
     let n = bytes_len(b);
-    let colon = http_find_byte(b, 0, n, 58);
+    let colon = http_find_byte(b, 0, n, 58)?;
     if colon >= n {
-        ""
+        Result::Ok("")
     } else {
-        let key = string_lower(string_trim(string_from_bytes(bytes_slice(b, 0, colon))));
+        let key_raw = string_trim(string_from_bytes(bytes_slice(b, 0, colon)))?;
+        let key = string_lower(key_raw)?;
         if string_eq(key, want) == 1 {
             string_trim(string_from_bytes(bytes_slice(b, colon + 1, n - colon - 1)))
         } else {
-            ""
+            Result::Ok("")
         }
     }
 }
 
-def http_find_byte(b: Bytes, i: Int, len: Int, target: Int) -> Int =
-    if i >= len { len } else { if bytes_get(b, i)? == target { i } else { http_find_byte(b, i + 1, len, target) } }
+def http_find_byte(b: Bytes, i: Int, len: Int, target: Int) -> Result<Int, IndexError> =
+    if i >= len { Result::Ok(len) } else { if bytes_get(b, i)? == target { Result::Ok(i) } else { http_find_byte(b, i + 1, len, target) } }
 
 // ---- Concurrent requests (libcurl multi interface) ----
 //
@@ -739,47 +745,50 @@ struct ReqState {
     urlc: Ptr, methodc: Ptr, bodyc: Ptr, slist: Ptr
 }
 
-def http_request_many(reqs: List<HttpReq>) -> List<HttpResponse> = {
+def http_request_many(reqs: List<HttpReq>) -> Result<List<HttpResponse>, IndexError> = {
     let multi = curl_multi_init();
-    let states = hrm_setup(reqs, multi);
+    let states = hrm_setup(reqs, multi)?;
     let runningp = malloc(8);
     let drive = hrm_drive(multi, runningp);
     let fr = free(runningp);
-    let rev = hrm_collect(states, List::Nil);
+    let rev = hrm_collect(states, List::Nil)?;
     let cleanup = hrm_cleanup(multi, states);
     let fm = curl_multi_cleanup(multi);
-    list_reverse(rev)
+    Result::Ok(list_reverse(rev))
 }
 
 // Build one easy handle for `req`, configure it, add it to `multi`.
-def hrm_one(req: HttpReq, multi: Ptr) -> ReqState = {
+def hrm_one(req: HttpReq, multi: Ptr) -> Result<ReqState, IndexError> = {
     let bufp = malloc(8);
     let sizep = malloc(8);
     let fp = open_memstream(bufp, sizep);
     let h = curl_easy_init();
-    let urlc = cstr(req.url);
-    let methodc = cstr(req.method);
-    let bodyc = cstr(req.body);
+    let urlc = cstr(req.url)?;
+    let methodc = cstr(req.method)?;
+    let bodyc = cstr(req.body)?;
     let su = curl_easy_setopt(h, curlopt_url(), urlc);
     let sw = curl_easy_setopt(h, curlopt_writedata(), fp);
     let sf = curl_easy_setopt(h, curlopt_followlocation(), 1);
     let sc = curl_easy_setopt(h, curlopt_customrequest(), methodc);
-    let slist = http_build_headers(req.headers);
+    let slist = http_build_headers(req.headers)?;
     let sh = http_maybe_set_headers(h, slist);
     let sb = http_maybe_set_body(h, req.body, bodyc);
     let add = curl_multi_add_handle(multi, h);
-    ReqState { easy: h, bufp: bufp, sizep: sizep, fp: fp,
-               urlc: urlc, methodc: methodc, bodyc: bodyc, slist: slist }
+    Result::Ok(ReqState { easy: h, bufp: bufp, sizep: sizep, fp: fp,
+               urlc: urlc, methodc: methodc, bodyc: bodyc, slist: slist })
 }
 
-def hrm_setup(reqs: List<HttpReq>, multi: Ptr) -> List<ReqState> =
+def hrm_setup(reqs: List<HttpReq>, multi: Ptr) -> Result<List<ReqState>, IndexError> =
     match reqs {
-        List::Nil => List::Nil,
-        List::Cons(cell) =>
-            List::Cons(ListCell {
-                head: hrm_one(cell.head, multi),
-                tail: hrm_setup(cell.tail, multi)
-            })
+        List::Nil => Result::Ok(List::Nil),
+        List::Cons(cell) => {
+            let head_state = hrm_one(cell.head, multi)?;
+            let tail_states = hrm_setup(cell.tail, multi)?;
+            Result::Ok(List::Cons(ListCell {
+                head: head_state,
+                tail: tail_states
+            }))
+        }
     }
 
 // Drive all transfers to completion: perform, and while any are still
@@ -798,9 +807,9 @@ def hrm_drive(multi: Ptr, runningp: Ptr) -> Int = {
 }
 
 // Read each response (status + body) in order, prepending to `acc`.
-def hrm_collect(states: List<ReqState>, acc: List<HttpResponse>) -> List<HttpResponse> =
+def hrm_collect(states: List<ReqState>, acc: List<HttpResponse>) -> Result<List<HttpResponse>, IndexError> =
     match states {
-        List::Nil => acc,
+        List::Nil => Result::Ok(acc),
         List::Cons(cell) => {
             let st = cell.head;
             let fl = fflush(st.fp);
@@ -810,7 +819,8 @@ def hrm_collect(states: List<ReqState>, acc: List<HttpResponse>) -> List<HttpRes
             let g = curl_easy_getinfo(st.easy, curlinfo_response_code(), codep);
             let code = ptr_read_i64(codep, 0);
             let fcp = free(codep);
-            let resp = HttpResponse { status: code, headers: "", body: cstr_to_string(bufptr) };
+            let body_str = cstr_to_string(bufptr)?;
+            let resp = HttpResponse { status: code, headers: "", body: body_str };
             hrm_collect(cell.tail, List::Cons(ListCell { head: resp, tail: acc }))
         }
     }
@@ -886,6 +896,9 @@ enum JObj { JONil, JOCons(JObjCell) }
 struct JObjCell { key: String, val: Json, rest: JObj }
 
 // Parser result carriers (value/array/object/string + cursor + ok flag).
+// The `ok` flag is the parser's own "invalid JSON" signal; the parser
+// functions additionally return Result<P*, IndexError> so out-of-bounds
+// indexing surfaces as a value, never an abort.
 struct PJson { val: Json, pos: Int, ok: Int }
 struct PArr { arr: JArr, pos: Int, ok: Int }
 struct PObj { obj: JObj, pos: Int, ok: Int }
@@ -904,19 +917,19 @@ def pstr_fail() -> PStr = PStr { str: "", pos: 0, ok: 0 }
 def parse_json(text: String) -> Result<Json, String> = {
     let b = bytes_from_string(text);
     let len = bytes_len(b);
-    let i = json_skip_ws(b, 0, len);
-    let r = json_parse_value(b, i, len);
+    let i = ix(json_skip_ws(b, 0, len))?;
+    let r = ix(json_parse_value(b, i, len))?;
     if r.ok == 1 {
-        let j = json_skip_ws(b, r.pos, len);
+        let j = ix(json_skip_ws(b, r.pos, len))?;
         if j == len { Result::Ok(r.val) } else { Result::Err("invalid JSON") }
     } else {
         Result::Err("invalid JSON")
     }
 }
 
-def json_skip_ws(b: Bytes, i: Int, len: Int) -> Int =
+def json_skip_ws(b: Bytes, i: Int, len: Int) -> Result<Int, IndexError> =
     if i >= len {
-        i
+        Result::Ok(i)
     } else {
         let c = bytes_get(b, i)?;
         if c == 32 {
@@ -928,15 +941,15 @@ def json_skip_ws(b: Bytes, i: Int, len: Int) -> Int =
                 if c == 10 {
                     json_skip_ws(b, i + 1, len)
                 } else {
-                    if c == 13 { json_skip_ws(b, i + 1, len) } else { i }
+                    if c == 13 { json_skip_ws(b, i + 1, len) } else { Result::Ok(i) }
                 }
             }
         }
     }
 
-def json_parse_value(b: Bytes, i: Int, len: Int) -> PJson =
+def json_parse_value(b: Bytes, i: Int, len: Int) -> Result<PJson, IndexError> =
     if i >= len {
-        pjson_fail()
+        Result::Ok(pjson_fail())
     } else {
         let c = bytes_get(b, i)?;
         if c == 34 {
@@ -960,7 +973,7 @@ def json_parse_value(b: Bytes, i: Int, len: Int) -> PJson =
                                 if json_is_num_start(c) == 1 {
                                     json_parse_number(b, i, len)
                                 } else {
-                                    pjson_fail()
+                                    Result::Ok(pjson_fail())
                                 }
                             }
                         }
@@ -973,74 +986,80 @@ def json_parse_value(b: Bytes, i: Int, len: Int) -> PJson =
 def json_is_num_start(c: Int) -> Int =
     if c == 45 { 1 } else { if c >= 48 { if c <= 57 { 1 } else { 0 } } else { 0 } }
 
-def json_parse_lit(b: Bytes, i: Int, len: Int, lit: String, val: Json) -> PJson = {
+def json_parse_lit(b: Bytes, i: Int, len: Int, lit: String, val: Json) -> Result<PJson, IndexError> = {
     let lb = bytes_from_string(lit);
     let ll = bytes_len(lb);
-    if json_match_lit(b, i, len, lb, 0, ll) == 1 {
-        pjson_ok(val, i + ll)
+    let m = json_match_lit(b, i, len, lb, 0, ll)?;
+    if m == 1 {
+        Result::Ok(pjson_ok(val, i + ll))
     } else {
-        pjson_fail()
+        Result::Ok(pjson_fail())
     }
 }
 
-def json_match_lit(b: Bytes, i: Int, len: Int, lb: Bytes, k: Int, ll: Int) -> Int =
+def json_match_lit(b: Bytes, i: Int, len: Int, lb: Bytes, k: Int, ll: Int) -> Result<Int, IndexError> =
     if k == ll {
-        1
+        Result::Ok(1)
     } else {
         if i + k >= len {
-            0
+            Result::Ok(0)
         } else {
-            if bytes_get(b, i + k)? == bytes_get(lb, k)? {
+            let c1 = bytes_get(b, i + k)?;
+            let c2 = bytes_get(lb, k)?;
+            if c1 == c2 {
                 json_match_lit(b, i, len, lb, k + 1, ll)
             } else {
-                0
+                Result::Ok(0)
             }
         }
     }
 
 // Integer-valued numbers: parse the leading integer, then consume (and
 // ignore) any fractional/exponent tail so the document stays valid.
-def json_parse_number(b: Bytes, i: Int, len: Int) -> PJson = {
-    let neg = if bytes_get(b, i)? == 45 { 1 } else { 0 };
+def json_parse_number(b: Bytes, i: Int, len: Int) -> Result<PJson, IndexError> = {
+    let c0 = bytes_get(b, i)?;
+    let neg = if c0 == 45 { 1 } else { 0 };
     let start = i + neg;
-    let endpos = json_scan_digits(b, start, len);
+    let endpos = json_scan_digits(b, start, len)?;
     if endpos == start {
-        pjson_fail()
+        Result::Ok(pjson_fail())
     } else {
-        let mag = json_digits_to_int(b, start, endpos, 0);
+        let mag = json_digits_to_int(b, start, endpos, 0)?;
         let v = if neg == 1 { 0 - mag } else { mag };
-        let after = json_skip_number_tail(b, endpos, len);
-        pjson_ok(Json::JNumber(v), after)
+        let after = json_skip_number_tail(b, endpos, len)?;
+        Result::Ok(pjson_ok(Json::JNumber(v), after))
     }
 }
 
-def json_scan_digits(b: Bytes, i: Int, len: Int) -> Int =
+def json_scan_digits(b: Bytes, i: Int, len: Int) -> Result<Int, IndexError> =
     if i >= len {
-        i
+        Result::Ok(i)
     } else {
         let c = bytes_get(b, i)?;
         if c >= 48 {
-            if c <= 57 { json_scan_digits(b, i + 1, len) } else { i }
+            if c <= 57 { json_scan_digits(b, i + 1, len) } else { Result::Ok(i) }
         } else {
-            i
+            Result::Ok(i)
         }
     }
 
-def json_digits_to_int(b: Bytes, i: Int, end: Int, acc: Int) -> Int =
+def json_digits_to_int(b: Bytes, i: Int, end: Int, acc: Int) -> Result<Int, IndexError> =
     if i >= end {
-        acc
+        Result::Ok(acc)
     } else {
-        json_digits_to_int(b, i + 1, end, acc * 10 + (bytes_get(b, i)? - 48))
+        let d = bytes_get(b, i)?;
+        json_digits_to_int(b, i + 1, end, acc * 10 + (d - 48))
     }
 
-def json_skip_number_tail(b: Bytes, i: Int, len: Int) -> Int =
+def json_skip_number_tail(b: Bytes, i: Int, len: Int) -> Result<Int, IndexError> =
     if i >= len {
-        i
+        Result::Ok(i)
     } else {
-        if json_is_num_tail(bytes_get(b, i)?) == 1 {
+        let c = bytes_get(b, i)?;
+        if json_is_num_tail(c) == 1 {
             json_skip_number_tail(b, i + 1, len)
         } else {
-            i
+            Result::Ok(i)
         }
     }
 
@@ -1067,157 +1086,161 @@ def json_is_num_tail(c: Int) -> Int =
         }
     }
 
-def json_parse_array(b: Bytes, i: Int, len: Int) -> PJson = {
-    let j = json_skip_ws(b, i + 1, len);
+def json_parse_array(b: Bytes, i: Int, len: Int) -> Result<PJson, IndexError> = {
+    let j = json_skip_ws(b, i + 1, len)?;
     if j >= len {
-        pjson_fail()
+        Result::Ok(pjson_fail())
     } else {
-        if bytes_get(b, j)? == 93 {
-            pjson_ok(Json::JArray(JArr::JANil), j + 1)
+        let c = bytes_get(b, j)?;
+        if c == 93 {
+            Result::Ok(pjson_ok(Json::JArray(JArr::JANil), j + 1))
         } else {
-            let r = json_parse_array_elems(b, j, len);
-            if r.ok == 1 { pjson_ok(Json::JArray(r.arr), r.pos) } else { pjson_fail() }
+            let r = json_parse_array_elems(b, j, len)?;
+            if r.ok == 1 { Result::Ok(pjson_ok(Json::JArray(r.arr), r.pos)) } else { Result::Ok(pjson_fail()) }
         }
     }
 }
 
-def json_parse_array_elems(b: Bytes, i: Int, len: Int) -> PArr = {
-    let r = json_parse_value(b, i, len);
+def json_parse_array_elems(b: Bytes, i: Int, len: Int) -> Result<PArr, IndexError> = {
+    let r = json_parse_value(b, i, len)?;
     if r.ok == 0 {
-        parr_fail()
+        Result::Ok(parr_fail())
     } else {
-        let j = json_skip_ws(b, r.pos, len);
+        let j = json_skip_ws(b, r.pos, len)?;
         if j >= len {
-            parr_fail()
+            Result::Ok(parr_fail())
         } else {
             let c = bytes_get(b, j)?;
             if c == 44 {
-                let k = json_skip_ws(b, j + 1, len);
-                let rest = json_parse_array_elems(b, k, len);
+                let k = json_skip_ws(b, j + 1, len)?;
+                let rest = json_parse_array_elems(b, k, len)?;
                 if rest.ok == 0 {
-                    parr_fail()
+                    Result::Ok(parr_fail())
                 } else {
-                    parr_ok(JArr::JACons(JArrCell { head: r.val, tail: rest.arr }), rest.pos)
+                    Result::Ok(parr_ok(JArr::JACons(JArrCell { head: r.val, tail: rest.arr }), rest.pos))
                 }
             } else {
                 if c == 93 {
-                    parr_ok(JArr::JACons(JArrCell { head: r.val, tail: JArr::JANil }), j + 1)
+                    Result::Ok(parr_ok(JArr::JACons(JArrCell { head: r.val, tail: JArr::JANil }), j + 1))
                 } else {
-                    parr_fail()
+                    Result::Ok(parr_fail())
                 }
             }
         }
     }
 }
 
-def json_parse_object(b: Bytes, i: Int, len: Int) -> PJson = {
-    let j = json_skip_ws(b, i + 1, len);
+def json_parse_object(b: Bytes, i: Int, len: Int) -> Result<PJson, IndexError> = {
+    let j = json_skip_ws(b, i + 1, len)?;
     if j >= len {
-        pjson_fail()
+        Result::Ok(pjson_fail())
     } else {
-        if bytes_get(b, j)? == 125 {
-            pjson_ok(Json::JObject(JObj::JONil), j + 1)
+        let c = bytes_get(b, j)?;
+        if c == 125 {
+            Result::Ok(pjson_ok(Json::JObject(JObj::JONil), j + 1))
         } else {
-            let r = json_parse_object_members(b, j, len);
-            if r.ok == 1 { pjson_ok(Json::JObject(r.obj), r.pos) } else { pjson_fail() }
+            let r = json_parse_object_members(b, j, len)?;
+            if r.ok == 1 { Result::Ok(pjson_ok(Json::JObject(r.obj), r.pos)) } else { Result::Ok(pjson_fail()) }
         }
     }
 }
 
-def json_parse_object_members(b: Bytes, i: Int, len: Int) -> PObj = {
-    let ks = json_parse_string_raw(b, i, len);
+def json_parse_object_members(b: Bytes, i: Int, len: Int) -> Result<PObj, IndexError> = {
+    let ks = json_parse_string_raw(b, i, len)?;
     if ks.ok == 0 {
-        pobj_fail()
+        Result::Ok(pobj_fail())
     } else {
-        let j = json_skip_ws(b, ks.pos, len);
+        let j = json_skip_ws(b, ks.pos, len)?;
         if j >= len {
-            pobj_fail()
+            Result::Ok(pobj_fail())
         } else {
-            if bytes_get(b, j)? == 58 {
-                let k = json_skip_ws(b, j + 1, len);
-                let v = json_parse_value(b, k, len);
+            let c = bytes_get(b, j)?;
+            if c == 58 {
+                let k = json_skip_ws(b, j + 1, len)?;
+                let v = json_parse_value(b, k, len)?;
                 if v.ok == 0 {
-                    pobj_fail()
+                    Result::Ok(pobj_fail())
                 } else {
                     json_object_after_value(b, len, ks.str, v)
                 }
             } else {
-                pobj_fail()
+                Result::Ok(pobj_fail())
             }
         }
     }
 }
 
-def json_object_after_value(b: Bytes, len: Int, key: String, v: PJson) -> PObj = {
-    let m = json_skip_ws(b, v.pos, len);
+def json_object_after_value(b: Bytes, len: Int, key: String, v: PJson) -> Result<PObj, IndexError> = {
+    let m = json_skip_ws(b, v.pos, len)?;
     if m >= len {
-        pobj_fail()
+        Result::Ok(pobj_fail())
     } else {
         let c = bytes_get(b, m)?;
         if c == 44 {
-            let n = json_skip_ws(b, m + 1, len);
-            let rest = json_parse_object_members(b, n, len);
+            let n = json_skip_ws(b, m + 1, len)?;
+            let rest = json_parse_object_members(b, n, len)?;
             if rest.ok == 0 {
-                pobj_fail()
+                Result::Ok(pobj_fail())
             } else {
-                pobj_ok(JObj::JOCons(JObjCell { key: key, val: v.val, rest: rest.obj }), rest.pos)
+                Result::Ok(pobj_ok(JObj::JOCons(JObjCell { key: key, val: v.val, rest: rest.obj }), rest.pos))
             }
         } else {
             if c == 125 {
-                pobj_ok(JObj::JOCons(JObjCell { key: key, val: v.val, rest: JObj::JONil }), m + 1)
+                Result::Ok(pobj_ok(JObj::JOCons(JObjCell { key: key, val: v.val, rest: JObj::JONil }), m + 1))
             } else {
-                pobj_fail()
+                Result::Ok(pobj_fail())
             }
         }
     }
 }
 
-def json_parse_string_val(b: Bytes, i: Int, len: Int) -> PJson = {
-    let r = json_parse_string_raw(b, i, len);
-    if r.ok == 1 { pjson_ok(Json::JString(r.str), r.pos) } else { pjson_fail() }
+def json_parse_string_val(b: Bytes, i: Int, len: Int) -> Result<PJson, IndexError> = {
+    let r = json_parse_string_raw(b, i, len)?;
+    if r.ok == 1 { Result::Ok(pjson_ok(Json::JString(r.str), r.pos)) } else { Result::Ok(pjson_fail()) }
 }
 
 // `i` points at the opening quote. Scan to the closing quote (respecting
 // backslash escapes), then decode the content into a fresh String.
-def json_parse_string_raw(b: Bytes, i: Int, len: Int) -> PStr =
+def json_parse_string_raw(b: Bytes, i: Int, len: Int) -> Result<PStr, IndexError> =
     if i >= len {
-        pstr_fail()
-    } else {
-        if bytes_get(b, i)? == 34 {
-            let start = i + 1;
-            let endq = json_str_end(b, start, len);
-            if endq < 0 {
-                pstr_fail()
-            } else {
-                let cap = endq - start;
-                let buf = bytes_new(cap);
-                let w = json_decode_str(b, start, endq, buf, 0);
-                pstr_ok(string_from_bytes(bytes_slice(buf, 0, w)), endq + 1)
-            }
-        } else {
-            pstr_fail()
-        }
-    }
-
-def json_str_end(b: Bytes, i: Int, len: Int) -> Int =
-    if i >= len {
-        0 - 1
+        Result::Ok(pstr_fail())
     } else {
         let c = bytes_get(b, i)?;
         if c == 34 {
-            i
+            let start = i + 1;
+            let endq = json_str_end(b, start, len)?;
+            if endq < 0 {
+                Result::Ok(pstr_fail())
+            } else {
+                let cap = endq - start;
+                let buf = bytes_new(cap);
+                let w = json_decode_str(b, start, endq, buf, 0)?;
+                Result::Ok(pstr_ok(string_from_bytes(bytes_slice(buf, 0, w)), endq + 1))
+            }
+        } else {
+            Result::Ok(pstr_fail())
+        }
+    }
+
+def json_str_end(b: Bytes, i: Int, len: Int) -> Result<Int, IndexError> =
+    if i >= len {
+        Result::Ok(0 - 1)
+    } else {
+        let c = bytes_get(b, i)?;
+        if c == 34 {
+            Result::Ok(i)
         } else {
             if c == 92 {
-                if i + 1 >= len { 0 - 1 } else { json_str_end(b, i + 2, len) }
+                if i + 1 >= len { Result::Ok(0 - 1) } else { json_str_end(b, i + 2, len) }
             } else {
                 json_str_end(b, i + 1, len)
             }
         }
     }
 
-def json_decode_str(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Int =
+def json_decode_str(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Result<Int, IndexError> =
     if i >= end {
-        w
+        Result::Ok(w)
     } else {
         let c = bytes_get(b, i)?;
         if c == 92 {
@@ -1228,11 +1251,11 @@ def json_decode_str(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Int =
         }
     }
 
-def json_decode_escape(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Int = {
+def json_decode_escape(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Result<Int, IndexError> = {
     let e = bytes_get(b, i)?;
     if e == 117 {
-        let cp = json_hex4(b, i + 1);
-        let w2 = json_utf8_encode(buf, w, cp);
+        let cp = json_hex4(b, i + 1)?;
+        let w2 = json_utf8_encode(buf, w, cp)?;
         json_decode_str(b, i + 5, end, buf, w2)
     } else {
         let x = bytes_set(buf, w, json_escape_byte(e))?;
@@ -1259,30 +1282,35 @@ def json_escape_byte(e: Int) -> Int =
         }
     }
 
-def json_hex4(b: Bytes, i: Int) -> Int =
-    json_hex(bytes_get(b, i)?) * 4096
-        + json_hex(bytes_get(b, i + 1)?) * 256
-        + json_hex(bytes_get(b, i + 2)?) * 16
-        + json_hex(bytes_get(b, i + 3)?)
+def json_hex4(b: Bytes, i: Int) -> Result<Int, IndexError> = {
+    let h0 = bytes_get(b, i)?;
+    let h1 = bytes_get(b, i + 1)?;
+    let h2 = bytes_get(b, i + 2)?;
+    let h3 = bytes_get(b, i + 3)?;
+    Result::Ok(json_hex(h0) * 4096
+        + json_hex(h1) * 256
+        + json_hex(h2) * 16
+        + json_hex(h3))
+}
 
 def json_hex(c: Int) -> Int =
     if c <= 57 { c - 48 } else { if c <= 70 { c - 55 } else { c - 87 } }
 
-def json_utf8_encode(buf: Bytes, w: Int, cp: Int) -> Int =
+def json_utf8_encode(buf: Bytes, w: Int, cp: Int) -> Result<Int, IndexError> =
     if cp < 128 {
         let a = bytes_set(buf, w, cp)?;
-        w + 1
+        Result::Ok(w + 1)
     } else {
         if cp < 2048 {
             let a = bytes_set(buf, w, 192 + cp / 64)?;
             let b2 = bytes_set(buf, w + 1, 128 + cp - (cp / 64) * 64)?;
-            w + 2
+            Result::Ok(w + 2)
         } else {
             let a = bytes_set(buf, w, 224 + cp / 4096)?;
             let mid = cp / 64;
             let b2 = bytes_set(buf, w + 1, 128 + mid - (mid / 64) * 64)?;
             let c2 = bytes_set(buf, w + 2, 128 + cp - (cp / 64) * 64)?;
-            w + 3
+            Result::Ok(w + 3)
         }
     }
 
@@ -1352,31 +1380,33 @@ def json_step(j: Json, seg: String) -> Option<Json> =
         _ => Option::None
     }
 
-// Navigate a dot-separated path ("meta.version", "tags.0"). The empty
-// path yields the value unchanged.
-def json_get(j: Json, path: String) -> Option<Json> = {
+// Navigate a dot-separated path ("meta.version", "tags.0"), returning
+// `Ok(Some(value))` when found, `Ok(None)` when the path is missing.
+// The empty path yields the value unchanged.
+def json_get(j: Json, path: String) -> Result<Option<Json>, IndexError> = {
     let pb = bytes_from_string(path);
     json_get_walk(j, pb, 0, bytes_len(pb))
 }
 
-def json_get_walk(j: Json, pb: Bytes, i: Int, len: Int) -> Option<Json> =
+def json_get_walk(j: Json, pb: Bytes, i: Int, len: Int) -> Result<Option<Json>, IndexError> =
     if i >= len {
-        Option::Some(j)
+        Result::Ok(Option::Some(j))
     } else {
-        let dot = json_find_dot(pb, i, len);
+        let dot = json_find_dot(pb, i, len)?;
         let seg = string_from_bytes(bytes_slice(pb, i, dot - i));
         match json_step(j, seg) {
-            Option::None => Option::None,
+            Option::None => Result::Ok(Option::None),
             Option::Some(next) =>
-                if dot >= len { Option::Some(next) } else { json_get_walk(next, pb, dot + 1, len) }
+                if dot >= len { Result::Ok(Option::Some(next)) } else { json_get_walk(next, pb, dot + 1, len) }
         }
     }
 
-def json_find_dot(pb: Bytes, i: Int, len: Int) -> Int =
+def json_find_dot(pb: Bytes, i: Int, len: Int) -> Result<Int, IndexError> =
     if i >= len {
-        len
+        Result::Ok(len)
     } else {
-        if bytes_get(pb, i)? == 46 { i } else { json_find_dot(pb, i + 1, len) }
+        let c = bytes_get(pb, i)?;
+        if c == 46 { Result::Ok(i) } else { json_find_dot(pb, i + 1, len) }
     }
 
 // Parse `text` and read the string value at `path`, returning
@@ -1385,7 +1415,7 @@ def json_field(text: String, path: String) -> Result<String, String> =
     match parse_json(text) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(j) =>
-            match json_get(j, path) {
+            match ix(json_get(j, path))? {
                 Option::None => Result::Err(string_concat("no such JSON path: ", path)),
                 Option::Some(v) =>
                     match json_string(v) {
@@ -1400,21 +1430,21 @@ def json_field(text: String, path: String) -> Result<String, String> =
 // All of these are ordinary ai-lang calling libc directly through the C
 // FFI (getenv / clock_gettime / fopen / ...). No Rust glue.
 
-// Value of an environment variable, or "" if unset.
-def env_get(name: String) -> String = {
-    let namec = cstr(name);
+// Value of an environment variable: `Ok("")` if unset.
+def env_get(name: String) -> Result<String, IndexError> = {
+    let namec = cstr(name)?;
     defer free(namec);
     env_get_value(getenv(namec))
 }
 
-def env_get_value(v: Ptr) -> String =
-    if ptr_is_null(v) == 1 { "" } else { cstr_to_string(v) }
+def env_get_value(v: Ptr) -> Result<String, IndexError> =
+    if ptr_is_null(v) == 1 { Result::Ok("") } else { cstr_to_string(v) }
 
-// 1 if the environment variable is set, else 0.
-def env_has(name: String) -> Int = {
-    let namec = cstr(name);
+// Ok(1) if the environment variable is set, else Ok(0).
+def env_has(name: String) -> Result<Int, IndexError> = {
+    let namec = cstr(name)?;
     defer free(namec);
-    if ptr_is_null(getenv(namec)) == 1 { 0 } else { 1 }
+    if ptr_is_null(getenv(namec)) == 1 { Result::Ok(0) } else { Result::Ok(1) }
 }
 
 // Seconds since the Unix epoch (libc `time(NULL)`).
@@ -1434,21 +1464,21 @@ def now_unix_millis() -> Int = {
 
 // Read a file's contents, returning `Ok(contents)` or `Err(message)`.
 def read_file(path: String) -> Result<String, String> = {
-    let pathc = cstr(path);
+    let pathc = ix(cstr(path))?;
     defer free(pathc);
-    let modec = cstr("rb");
+    let modec = ix(cstr("rb"))?;
     defer free(modec);
     let fp = fopen(pathc, modec);
     if ptr_is_null(fp) == 1 {
         Result::Err(string_concat("cannot open file: ", path))
     } else {
-        Result::Ok(read_file_open(fp))
+        ix(read_file_open(fp))
     }
 }
 
 // Read an open FILE* to end: seek to end for the size, rewind, read it
 // all into a fresh String. SEEK_END = 2, SEEK_SET = 0.
-def read_file_open(fp: Ptr) -> String = {
+def read_file_open(fp: Ptr) -> Result<String, IndexError> = {
     let s1 = fseek(fp, 0, 2);
     let size = ftell(fp);
     let s2 = fseek(fp, 0, 0);
@@ -1459,32 +1489,32 @@ def read_file_open(fp: Ptr) -> String = {
     ptr_to_string(buf, nread)
 }
 
-// Write `contents` to `path` (truncating). Returns 0 on success, -1 on
-// failure (could not open, or short write).
-def fs_write(path: String, contents: String) -> Int = {
-    let pathc = cstr(path);
+// Write `contents` to `path` (truncating). Returns Ok(0) on success,
+// Ok(-1) on failure (could not open, or short write).
+def fs_write(path: String, contents: String) -> Result<Int, IndexError> = {
+    let pathc = cstr(path)?;
     defer free(pathc);
-    let modec = cstr("wb");
+    let modec = cstr("wb")?;
     defer free(modec);
     let fp = fopen(pathc, modec);
-    if ptr_is_null(fp) == 1 { 0 - 1 } else { fs_write_open(fp, contents) }
+    if ptr_is_null(fp) == 1 { Result::Ok(0 - 1) } else { fs_write_open(fp, contents) }
 }
 
-def fs_write_open(fp: Ptr, contents: String) -> Int = {
+def fs_write_open(fp: Ptr, contents: String) -> Result<Int, IndexError> = {
     let b = bytes_from_string(contents);
     let n = bytes_len(b);
-    let datac = cstr(contents);
+    let datac = cstr(contents)?;
     defer free(datac);
     defer fclose(fp);
     let w = fwrite(datac, 1, n, fp);
-    if w == n { 0 } else { 0 - 1 }
+    if w == n { Result::Ok(0) } else { Result::Ok(0 - 1) }
 }
 
-// 1 if the path exists (libc `access(path, F_OK)`; F_OK = 0), else 0.
-def fs_exists(path: String) -> Int = {
-    let pathc = cstr(path);
+// Ok(1) if the path exists (libc `access(path, F_OK)`; F_OK = 0), else Ok(0).
+def fs_exists(path: String) -> Result<Int, IndexError> = {
+    let pathc = cstr(path)?;
     defer free(pathc);
-    if access(pathc, 0) == 0 { 1 } else { 0 }
+    if access(pathc, 0) == 0 { Result::Ok(1) } else { Result::Ok(0) }
 }
 
 // ---- Crypto: SHA-256 and HMAC-SHA256 (OpenSSL libcrypto via the FFI) --
@@ -1502,16 +1532,17 @@ extern "C" lib "crypto" {
 }
 
 // Render a raw byte-buffer String as lowercase hex.
-def hex_encode(data: String) -> String = {
+def hex_encode(data: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(data);
     let n = bytes_len(b);
     let out = bytes_new(n * 2);
-    string_from_bytes(hex_fill(b, out, 0, n))
+    let filled = hex_fill(b, out, 0, n)?;
+    Result::Ok(string_from_bytes(filled))
 }
 
-def hex_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Bytes =
+def hex_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Result<Bytes, IndexError> =
     if i == n {
-        out
+        Result::Ok(out)
     } else {
         let byte = bytes_get(b, i)?;
         let hi = bytes_set(out, i * 2, hex_digit(byte / 16))?;
@@ -1539,17 +1570,18 @@ def base64_char(v: Int) -> Int =
         }
     }
 
-def base64_encode(data: String) -> String = {
+def base64_encode(data: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(data);
     let n = bytes_len(b);
     let groups = (n + 2) / 3;
     let out = bytes_new(groups * 4);
-    string_from_bytes(base64_fill(b, out, 0, n, 0))
+    let filled = base64_fill(b, out, 0, n, 0)?;
+    Result::Ok(string_from_bytes(filled))
 }
 
-def base64_fill(b: Bytes, out: Bytes, i: Int, n: Int, o: Int) -> Bytes =
+def base64_fill(b: Bytes, out: Bytes, i: Int, n: Int, o: Int) -> Result<Bytes, IndexError> =
     if i >= n {
-        out
+        Result::Ok(out)
     } else {
         let rem = n - i;
         let b0 = bytes_get(b, i)?;
@@ -1568,19 +1600,20 @@ def base64_fill(b: Bytes, out: Bytes, i: Int, n: Int, o: Int) -> Bytes =
     }
 
 // ---- CRC-32 (IEEE, reflected, polynomial 0xEDB88320) ----
-// Bit-by-bit (no table). Returns the 32-bit CRC as an Int.
+// Bit-by-bit (no table). Returns the 32-bit CRC as an Int (Ok-wrapped).
 
-def crc32(data: String) -> Int = {
+def crc32(data: String) -> Result<Int, IndexError> = {
     let b = bytes_from_string(data);
-    let crc = crc32_bytes(b, 0, bytes_len(b), 4294967295);
-    bit_xor(crc, 4294967295)
+    let crc = crc32_bytes(b, 0, bytes_len(b), 4294967295)?;
+    Result::Ok(bit_xor(crc, 4294967295))
 }
 
-def crc32_bytes(b: Bytes, i: Int, n: Int, crc: Int) -> Int =
+def crc32_bytes(b: Bytes, i: Int, n: Int, crc: Int) -> Result<Int, IndexError> =
     if i >= n {
-        crc
+        Result::Ok(crc)
     } else {
-        crc32_bytes(b, i + 1, n, crc32_bits(bit_xor(crc, bytes_get(b, i)?), 0))
+        let byte = bytes_get(b, i)?;
+        crc32_bytes(b, i + 1, n, crc32_bits(bit_xor(crc, byte), 0))
     }
 
 def crc32_bits(crc: Int, k: Int) -> Int =
@@ -1602,91 +1635,93 @@ def crc32_bits(crc: Int, k: Int) -> Int =
 // custom-runtime `bootstrap`). Little-endian throughout. The single file
 // is marked executable (Unix mode 0755) via the external-attributes field.
 
-// Write little-endian u16 / u32 into `b` at `off`. Returns 0.
-def put_le16(b: Bytes, off: Int, v: Int) -> Int = {
+// Write little-endian u16 / u32 into `b` at `off`. Returns Ok(0).
+def put_le16(b: Bytes, off: Int, v: Int) -> Result<Int, IndexError> = {
     let w0 = bytes_set(b, off, bit_and(v, 255))?;
     let w1 = bytes_set(b, off + 1, bit_and(bit_shr(v, 8), 255))?;
-    0
+    Result::Ok(0)
 }
-def put_le32(b: Bytes, off: Int, v: Int) -> Int = {
+def put_le32(b: Bytes, off: Int, v: Int) -> Result<Int, IndexError> = {
     let w0 = bytes_set(b, off, bit_and(v, 255))?;
     let w1 = bytes_set(b, off + 1, bit_and(bit_shr(v, 8), 255))?;
     let w2 = bytes_set(b, off + 2, bit_and(bit_shr(v, 16), 255))?;
     let w3 = bytes_set(b, off + 3, bit_and(bit_shr(v, 24), 255))?;
-    0
+    Result::Ok(0)
 }
 
-def zip_local_header(crc: Int, size: Int, fnlen: Int) -> Bytes = {
+def zip_local_header(crc: Int, size: Int, fnlen: Int) -> Result<Bytes, IndexError> = {
     let h = bytes_new(30);
-    let a = put_le32(h, 0, 67324752);
-    let b = put_le16(h, 4, 20);
-    let c = put_le16(h, 6, 0);
-    let d = put_le16(h, 8, 0);
-    let e = put_le16(h, 10, 0);
-    let f = put_le16(h, 12, 33);
-    let g = put_le32(h, 14, crc);
-    let i = put_le32(h, 18, size);
-    let j = put_le32(h, 22, size);
-    let k = put_le16(h, 26, fnlen);
-    let l = put_le16(h, 28, 0);
-    h
+    let a = put_le32(h, 0, 67324752)?;
+    let b = put_le16(h, 4, 20)?;
+    let c = put_le16(h, 6, 0)?;
+    let d = put_le16(h, 8, 0)?;
+    let e = put_le16(h, 10, 0)?;
+    let f = put_le16(h, 12, 33)?;
+    let g = put_le32(h, 14, crc)?;
+    let i = put_le32(h, 18, size)?;
+    let j = put_le32(h, 22, size)?;
+    let k = put_le16(h, 26, fnlen)?;
+    let l = put_le16(h, 28, 0)?;
+    Result::Ok(h)
 }
 
-def zip_central_header(crc: Int, size: Int, fnlen: Int, offset: Int) -> Bytes = {
+def zip_central_header(crc: Int, size: Int, fnlen: Int, offset: Int) -> Result<Bytes, IndexError> = {
     let h = bytes_new(46);
-    let a = put_le32(h, 0, 33639248);
-    let b = put_le16(h, 4, 20);
-    let c = put_le16(h, 6, 20);
-    let d = put_le16(h, 8, 0);
-    let e = put_le16(h, 10, 0);
-    let f = put_le16(h, 12, 0);
-    let g = put_le16(h, 14, 33);
-    let i = put_le32(h, 16, crc);
-    let j = put_le32(h, 20, size);
-    let k = put_le32(h, 24, size);
-    let l = put_le16(h, 28, fnlen);
-    let m = put_le16(h, 30, 0);
-    let n = put_le16(h, 32, 0);
-    let o = put_le16(h, 34, 0);
-    let p = put_le16(h, 36, 0);
-    let q = put_le32(h, 38, 2179792896);
-    let r = put_le32(h, 42, offset);
-    h
+    let a = put_le32(h, 0, 33639248)?;
+    let b = put_le16(h, 4, 20)?;
+    let c = put_le16(h, 6, 20)?;
+    let d = put_le16(h, 8, 0)?;
+    let e = put_le16(h, 10, 0)?;
+    let f = put_le16(h, 12, 0)?;
+    let g = put_le16(h, 14, 33)?;
+    let i = put_le32(h, 16, crc)?;
+    let j = put_le32(h, 20, size)?;
+    let k = put_le32(h, 24, size)?;
+    let l = put_le16(h, 28, fnlen)?;
+    let m = put_le16(h, 30, 0)?;
+    let n = put_le16(h, 32, 0)?;
+    let o = put_le16(h, 34, 0)?;
+    let p = put_le16(h, 36, 0)?;
+    let q = put_le32(h, 38, 2179792896)?;
+    let r = put_le32(h, 42, offset)?;
+    Result::Ok(h)
 }
 
-def zip_eocd(count: Int, cd_size: Int, cd_offset: Int) -> Bytes = {
+def zip_eocd(count: Int, cd_size: Int, cd_offset: Int) -> Result<Bytes, IndexError> = {
     let h = bytes_new(22);
-    let a = put_le32(h, 0, 101010256);
-    let b = put_le16(h, 4, 0);
-    let c = put_le16(h, 6, 0);
-    let d = put_le16(h, 8, count);
-    let e = put_le16(h, 10, count);
-    let f = put_le32(h, 12, cd_size);
-    let g = put_le32(h, 16, cd_offset);
-    let i = put_le16(h, 20, 0);
-    h
+    let a = put_le32(h, 0, 101010256)?;
+    let b = put_le16(h, 4, 0)?;
+    let c = put_le16(h, 6, 0)?;
+    let d = put_le16(h, 8, count)?;
+    let e = put_le16(h, 10, count)?;
+    let f = put_le32(h, 12, cd_size)?;
+    let g = put_le32(h, 16, cd_offset)?;
+    let i = put_le16(h, 20, 0)?;
+    Result::Ok(h)
 }
 
 // Build a one-file ZIP archive (filename + content) and return the raw
 // archive bytes as a byte-string.
-def zip_one(filename: String, content: String) -> String = {
+def zip_one(filename: String, content: String) -> Result<String, IndexError> = {
     let fnb = bytes_from_string(filename);
     let datab = bytes_from_string(content);
-    let crc = crc32(content);
+    let crc = crc32(content)?;
     let size = bytes_len(datab);
     let fnlen = bytes_len(fnb);
-    let loc = bytes_concat(zip_local_header(crc, size, fnlen), bytes_concat(fnb, datab));
+    let lhdr = zip_local_header(crc, size, fnlen)?;
+    let loc = bytes_concat(lhdr, bytes_concat(fnb, datab));
     let loc_size = bytes_len(loc);
-    let central = bytes_concat(zip_central_header(crc, size, fnlen, 0), fnb);
-    let eocd = zip_eocd(1, bytes_len(central), loc_size);
-    string_from_bytes(bytes_concat(loc, bytes_concat(central, eocd)))
+    let chdr = zip_central_header(crc, size, fnlen, 0)?;
+    let central = bytes_concat(chdr, fnb);
+    let eocd = zip_eocd(1, bytes_len(central), loc_size)?;
+    Result::Ok(string_from_bytes(bytes_concat(loc, bytes_concat(central, eocd))))
 }
 
 // SHA-256 of `data`, returned as the raw 32 binary bytes.
-def sha256_raw(data: String) -> String = {
+def sha256_raw(data: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(data);
     let n = bytes_len(b);
-    let datac = cstr(data);
+    let datac = cstr(data)?;
     defer free(datac);
     let md = malloc(32);
     defer free(md);
@@ -1694,17 +1729,20 @@ def sha256_raw(data: String) -> String = {
     ptr_to_string(md, 32)
 }
 
-def sha256_hex(data: String) -> String = hex_encode(sha256_raw(data))
+def sha256_hex(data: String) -> Result<String, IndexError> = {
+    let raw = sha256_raw(data)?;
+    hex_encode(raw)
+}
 
 // HMAC-SHA256 of `data` under `key`, as the raw 32 binary bytes.
-def hmac_sha256_raw(key: String, data: String) -> String = {
+def hmac_sha256_raw(key: String, data: String) -> Result<String, IndexError> = {
     let kb = bytes_from_string(key);
     let kn = bytes_len(kb);
     let db = bytes_from_string(data);
     let dn = bytes_len(db);
-    let keyc = cstr(key);
+    let keyc = cstr(key)?;
     defer free(keyc);
-    let datac = cstr(data);
+    let datac = cstr(data)?;
     defer free(datac);
     let md = malloc(32);
     defer free(md);
@@ -1715,25 +1753,29 @@ def hmac_sha256_raw(key: String, data: String) -> String = {
     ptr_to_string(md, 32)
 }
 
-def hmac_sha256_hex(key: String, data: String) -> String =
-    hex_encode(hmac_sha256_raw(key, data))
+def hmac_sha256_hex(key: String, data: String) -> Result<String, IndexError> = {
+    let raw = hmac_sha256_raw(key, data)?;
+    hex_encode(raw)
+}
 
 // Derive the AWS SigV4 signing key (raw 32 bytes) from a secret access
 // key, an 8-digit date stamp (YYYYMMDD), a region, and a service. This is
 // the `kSigning = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region),
 // service), "aws4_request")` chain — the crux of authenticating to AWS.
 def aws_sigv4_signing_key_raw(
-    secret: String, date: String, region: String, service: String) -> String = {
-    let k_date = hmac_sha256_raw(string_concat("AWS4", secret), date);
-    let k_region = hmac_sha256_raw(k_date, region);
-    let k_service = hmac_sha256_raw(k_region, service);
+    secret: String, date: String, region: String, service: String) -> Result<String, IndexError> = {
+    let k_date = hmac_sha256_raw(string_concat("AWS4", secret), date)?;
+    let k_region = hmac_sha256_raw(k_date, region)?;
+    let k_service = hmac_sha256_raw(k_region, service)?;
     hmac_sha256_raw(k_service, "aws4_request")
 }
 
 // The signing key as lowercase hex (the published-test-vector form).
 def aws_sigv4_signing_key(
-    secret: String, date: String, region: String, service: String) -> String =
-    hex_encode(aws_sigv4_signing_key_raw(secret, date, region, service))
+    secret: String, date: String, region: String, service: String) -> Result<String, IndexError> = {
+    let raw = aws_sigv4_signing_key_raw(secret, date, region, service)?;
+    hex_encode(raw)
+}
 
 // ---- String helpers (for request canonicalization) ----
 
@@ -1749,15 +1791,16 @@ def str7(a: String, b: String, c: String, d: String, e: String, f: String, g: St
     string_concat(a, str6(b, c, d, e, f, g))
 
 // Lowercase the ASCII letters in `s`.
-def string_lower(s: String) -> String = {
+def string_lower(s: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(s);
     let n = bytes_len(b);
     let out = bytes_new(n);
-    string_from_bytes(string_lower_fill(b, out, 0, n))
+    let filled = string_lower_fill(b, out, 0, n)?;
+    Result::Ok(string_from_bytes(filled))
 }
-def string_lower_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Bytes =
+def string_lower_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Result<Bytes, IndexError> =
     if i == n {
-        out
+        Result::Ok(out)
     } else {
         let c = bytes_get(b, i)?;
         let lc = if c >= 65 { if c <= 90 { c + 32 } else { c } } else { c };
@@ -1766,34 +1809,42 @@ def string_lower_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Bytes =
     }
 
 // Strip leading and trailing ASCII spaces.
-def string_trim(s: String) -> String = {
+def string_trim(s: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(s);
     let n = bytes_len(b);
-    let start = string_trim_start(b, 0, n);
-    let end = string_trim_end(b, n);
-    if end <= start { "" } else { string_from_bytes(bytes_slice(b, start, end - start)) }
+    let start = string_trim_start(b, 0, n)?;
+    let end = string_trim_end(b, n)?;
+    if end <= start { Result::Ok("") } else {
+        Result::Ok(string_from_bytes(bytes_slice(b, start, end - start)))
+    }
 }
-def string_trim_start(b: Bytes, i: Int, n: Int) -> Int =
-    if i >= n { n } else { if bytes_get(b, i)? == 32 { string_trim_start(b, i + 1, n) } else { i } }
-def string_trim_end(b: Bytes, e: Int) -> Int =
-    if e <= 0 { 0 } else { if bytes_get(b, e - 1)? == 32 { string_trim_end(b, e - 1) } else { e } }
+def string_trim_start(b: Bytes, i: Int, n: Int) -> Result<Int, IndexError> =
+    if i >= n { Result::Ok(n) } else {
+        if bytes_get(b, i)? == 32 { string_trim_start(b, i + 1, n) } else { Result::Ok(i) }
+    }
+def string_trim_end(b: Bytes, e: Int) -> Result<Int, IndexError> =
+    if e <= 0 { Result::Ok(0) } else {
+        if bytes_get(b, e - 1)? == 32 { string_trim_end(b, e - 1) } else { Result::Ok(e) }
+    }
 
 // 1 if `a` sorts strictly before `b` byte-lexicographically, else 0.
-def string_lt(a: String, b: String) -> Int = {
+def string_lt(a: String, b: String) -> Result<Int, IndexError> = {
     let ba = bytes_from_string(a);
     let bb = bytes_from_string(b);
     string_lt_go(ba, bb, 0, bytes_len(ba), bytes_len(bb))
 }
-def string_lt_go(ba: Bytes, bb: Bytes, i: Int, na: Int, nb: Int) -> Int =
+def string_lt_go(ba: Bytes, bb: Bytes, i: Int, na: Int, nb: Int) -> Result<Int, IndexError> =
     if i >= na {
-        if i >= nb { 0 } else { 1 }
+        if i >= nb { Result::Ok(0) } else { Result::Ok(1) }
     } else {
         if i >= nb {
-            0
+            Result::Ok(0)
         } else {
             let ca = bytes_get(ba, i)?;
             let cb = bytes_get(bb, i)?;
-            if ca < cb { 1 } else { if ca > cb { 0 } else { string_lt_go(ba, bb, i + 1, na, nb) } }
+            if ca < cb { Result::Ok(1) } else {
+                if ca > cb { Result::Ok(0) } else { string_lt_go(ba, bb, i + 1, na, nb) }
+            }
         }
     }
 
@@ -1809,44 +1860,55 @@ def sig_header(name: String, value: String) -> SigHeader =
     SigHeader { name: name, value: value }
 
 // Insertion sort the headers by lowercased name.
-def sig_sort(xs: RequestHeaders) -> RequestHeaders =
+def sig_sort(xs: RequestHeaders) -> Result<RequestHeaders, IndexError> =
     match xs {
-        RequestHeaders::RHNil => RequestHeaders::RHNil,
-        RequestHeaders::RHCons(cell) => sig_insert(cell.head, sig_sort(cell.tail))
+        RequestHeaders::RHNil => Result::Ok(RequestHeaders::RHNil),
+        RequestHeaders::RHCons(cell) => {
+            let rest = sig_sort(cell.tail)?;
+            sig_insert(cell.head, rest)
+        },
     }
-def sig_insert(x: SigHeader, sorted: RequestHeaders) -> RequestHeaders =
+def sig_insert(x: SigHeader, sorted: RequestHeaders) -> Result<RequestHeaders, IndexError> =
     match sorted {
-        RequestHeaders::RHNil => RequestHeaders::RHCons(RHCell { head: x, tail: RequestHeaders::RHNil }),
-        RequestHeaders::RHCons(cell) =>
-            if string_lt(string_lower(x.name), string_lower(cell.head.name)) == 1 {
-                RequestHeaders::RHCons(RHCell { head: x, tail: sorted })
+        RequestHeaders::RHNil => Result::Ok(RequestHeaders::RHCons(RHCell { head: x, tail: RequestHeaders::RHNil })),
+        RequestHeaders::RHCons(cell) => {
+            let xl = string_lower(x.name)?;
+            let cl = string_lower(cell.head.name)?;
+            let lt = string_lt(xl, cl)?;
+            if lt == 1 {
+                Result::Ok(RequestHeaders::RHCons(RHCell { head: x, tail: sorted }))
             } else {
-                RequestHeaders::RHCons(RHCell { head: cell.head, tail: sig_insert(x, cell.tail) })
+                let rest = sig_insert(x, cell.tail)?;
+                Result::Ok(RequestHeaders::RHCons(RHCell { head: cell.head, tail: rest }))
             }
+        },
     }
 
 // `lower(name):trim(value)\n` for each header, in order.
-def sig_canonical_headers(xs: RequestHeaders) -> String =
+def sig_canonical_headers(xs: RequestHeaders) -> Result<String, IndexError> =
     match xs {
-        RequestHeaders::RHNil => "",
-        RequestHeaders::RHCons(cell) =>
-            str5(
-                string_lower(cell.head.name),
-                ":",
-                string_trim(cell.head.value),
-                "\n",
-                sig_canonical_headers(cell.tail))
+        RequestHeaders::RHNil => Result::Ok(""),
+        RequestHeaders::RHCons(cell) => {
+            let ln = string_lower(cell.head.name)?;
+            let tv = string_trim(cell.head.value)?;
+            let rest = sig_canonical_headers(cell.tail)?;
+            Result::Ok(str5(ln, ":", tv, "\n", rest))
+        },
     }
 
 // `lower(name)` joined by ";".
-def sig_signed_headers(xs: RequestHeaders) -> String =
+def sig_signed_headers(xs: RequestHeaders) -> Result<String, IndexError> =
     match xs {
-        RequestHeaders::RHNil => "",
+        RequestHeaders::RHNil => Result::Ok(""),
         RequestHeaders::RHCons(cell) =>
             match cell.tail {
                 RequestHeaders::RHNil => string_lower(cell.head.name),
-                RequestHeaders::RHCons(rest) => str3(string_lower(cell.head.name), ";", sig_signed_headers(cell.tail))
-            }
+                RequestHeaders::RHCons(rest) => {
+                    let ln = string_lower(cell.head.name)?;
+                    let joined = sig_signed_headers(cell.tail)?;
+                    Result::Ok(str3(ln, ";", joined))
+                },
+            },
     }
 
 // Compute the AWS SigV4 `Authorization` header value for a request. The
@@ -1857,11 +1919,11 @@ def sigv4_authorization(
     headers: RequestHeaders, payload: String,
     access_key: String, secret_key: String,
     region: String, service: String,
-    amzdate: String, datestamp: String) -> String = {
-    let sorted = sig_sort(headers);
-    let canon_h = sig_canonical_headers(sorted);
-    let signed_h = sig_signed_headers(sorted);
-    let payload_hash = sha256_hex(payload);
+    amzdate: String, datestamp: String) -> Result<String, IndexError> = {
+    let sorted = sig_sort(headers)?;
+    let canon_h = sig_canonical_headers(sorted)?;
+    let signed_h = sig_signed_headers(sorted)?;
+    let payload_hash = sha256_hex(payload)?;
     let canonical_request =
         str7(
             string_concat(method, "\n"),
@@ -1872,30 +1934,31 @@ def sigv4_authorization(
             string_concat(signed_h, "\n"),
             payload_hash);
     let scope = str5(datestamp, "/", region, "/", string_concat(service, "/aws4_request"));
+    let cr_hash = sha256_hex(canonical_request)?;
     let string_to_sign =
-        str6("AWS4-HMAC-SHA256\n", amzdate, "\n", scope, "\n", sha256_hex(canonical_request));
-    let k_signing = aws_sigv4_signing_key_raw(secret_key, datestamp, region, service);
-    let signature = hmac_sha256_hex(k_signing, string_to_sign);
-    str7(
+        str6("AWS4-HMAC-SHA256\n", amzdate, "\n", scope, "\n", cr_hash);
+    let k_signing = aws_sigv4_signing_key_raw(secret_key, datestamp, region, service)?;
+    let signature = hmac_sha256_hex(k_signing, string_to_sign)?;
+    Result::Ok(str7(
         "AWS4-HMAC-SHA256 Credential=",
         string_concat(access_key, "/"),
         string_concat(scope, ", SignedHeaders="),
         signed_h,
         ", Signature=",
         signature,
-        "")
+        ""))
 }
 
 // ---- UTC date formatting (libc gmtime_r + strftime) ----
 
-def sigv4_strftime(epoch: Int, fmt: String) -> String = {
+def sigv4_strftime(epoch: Int, fmt: String) -> Result<String, IndexError> = {
     let tp = malloc(8);
     defer free(tp);
     let w = ptr_write_i64(tp, 0, epoch);
     let tm = malloc(64);
     defer free(tm);
     let g = gmtime_r(tp, tm);
-    let fmtc = cstr(fmt);
+    let fmtc = cstr(fmt)?;
     defer free(fmtc);
     let buf = malloc(40);
     defer free(buf);
@@ -1904,8 +1967,8 @@ def sigv4_strftime(epoch: Int, fmt: String) -> String = {
 }
 
 // `YYYYMMDDTHHMMSSZ` (X-Amz-Date) and `YYYYMMDD` (credential-scope date).
-def amz_datetime(epoch: Int) -> String = sigv4_strftime(epoch, "%Y%m%dT%H%M%SZ")
-def amz_datestamp(epoch: Int) -> String = sigv4_strftime(epoch, "%Y%m%d")
+def amz_datetime(epoch: Int) -> Result<String, IndexError> = sigv4_strftime(epoch, "%Y%m%dT%H%M%SZ")
+def amz_datestamp(epoch: Int) -> Result<String, IndexError> = sigv4_strftime(epoch, "%Y%m%d")
 
 // ---- AWS Lambda client ----
 //
@@ -1941,9 +2004,9 @@ def aws_signed_request(
     method: String, url: String, host: String, canonical_uri: String,
     region: String, service: String, payload: String,
     access_key: String, secret_key: String, token: String) -> Result<HttpResponse, String> = {
-    let req = aws_signed_req(
+    let req = ix(aws_signed_req(
         method, url, host, canonical_uri, region, service, payload,
-        access_key, secret_key, token);
+        access_key, secret_key, token))?;
     http_request_full(req.method, req.url, req.headers, req.body)
 }
 
@@ -1953,11 +2016,11 @@ def aws_signed_request(
 def aws_signed_req(
     method: String, url: String, host: String, canonical_uri: String,
     region: String, service: String, payload: String,
-    access_key: String, secret_key: String, token: String) -> HttpReq = {
+    access_key: String, secret_key: String, token: String) -> Result<HttpReq, IndexError> = {
     let now = now_unix();
-    let amzdate = amz_datetime(now);
-    let datestamp = amz_datestamp(now);
-    let payload_hash = sha256_hex(payload);
+    let amzdate = amz_datetime(now)?;
+    let datestamp = amz_datestamp(now)?;
+    let payload_hash = sha256_hex(payload)?;
     let base = RequestHeaders::RHCons(RHCell { head: sig_header("host", host), tail:
                RequestHeaders::RHCons(RHCell { head: sig_header("x-amz-content-sha256", payload_hash), tail:
                RequestHeaders::RHCons(RHCell { head: sig_header("x-amz-date", amzdate), tail: RequestHeaders::RHNil }) }) });
@@ -1969,9 +2032,9 @@ def aws_signed_req(
         };
     let auth = sigv4_authorization(
         method, canonical_uri, "", headers, payload,
-        access_key, secret_key, region, service, amzdate, datestamp);
+        access_key, secret_key, region, service, amzdate, datestamp)?;
     let block = lambda_header_block(amzdate, payload_hash, token, auth);
-    HttpReq { method: method, url: url, headers: block, body: payload }
+    Result::Ok(HttpReq { method: method, url: url, headers: block, body: payload })
 }
 
 // ---- Parallel Lambda fan-out (map-reduce over Lambda) ----
@@ -1981,24 +2044,26 @@ def aws_signed_req(
 // to N parallel execution environments. Returns the N responses in order.
 def lambda_invoke_many(
     region: String, name: String, payloads: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpResponse> =
-    http_request_many(lambda_invoke_reqs(region, name, payloads, access_key, secret_key, token))
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpResponse>, IndexError> = {
+    let reqs = lambda_invoke_reqs(region, name, payloads, access_key, secret_key, token)?;
+    http_request_many(reqs)
+}
 
 def lambda_invoke_reqs(
     region: String, name: String, payloads: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpReq> =
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpReq>, IndexError> =
     match payloads {
-        List::Nil => List::Nil,
-        List::Cons(cell) =>
-            List::Cons(ListCell {
-                head: lambda_one_req(region, name, cell.head, access_key, secret_key, token),
-                tail: lambda_invoke_reqs(region, name, cell.tail, access_key, secret_key, token)
-            })
+        List::Nil => Result::Ok(List::Nil),
+        List::Cons(cell) => {
+            let head = lambda_one_req(region, name, cell.head, access_key, secret_key, token)?;
+            let tail = lambda_invoke_reqs(region, name, cell.tail, access_key, secret_key, token)?;
+            Result::Ok(List::Cons(ListCell { head: head, tail: tail }))
+        },
     }
 
 def lambda_one_req(
     region: String, name: String, payload: String,
-    access_key: String, secret_key: String, token: String) -> HttpReq = {
+    access_key: String, secret_key: String, token: String) -> Result<HttpReq, IndexError> = {
     let host = str3("lambda.", region, ".amazonaws.com");
     let path = str3("/2015-03-31/functions/", name, "/invocations");
     let url = str3("https://", host, path);
@@ -2013,35 +2078,43 @@ def lambda_one_req(
 // an input in the invoke payload; it compiles and runs it. So one generic
 // function serves any computation, decided per-invocation.
 
-def lambda_code_payload(source: String, input: String) -> String =
-    str5("{\"src64\":\"", base64_encode(source), "\",\"in64\":\"", base64_encode(input), "\"}")
+def lambda_code_payload(source: String, input: String) -> Result<String, IndexError> = {
+    let src64 = base64_encode(source)?;
+    let in64 = base64_encode(input)?;
+    Result::Ok(str5("{\"src64\":\"", src64, "\",\"in64\":\"", in64, "\"}"))
+}
 
 // Run `source`'s `task(input)` on the generic worker. The response body is
 // the String the task returned.
 def lambda_run_code(
     region: String, name: String, source: String, input: String,
-    access_key: String, secret_key: String, token: String) -> Result<String, String> =
-    match lambda_invoke(region, name, lambda_code_payload(source, input), access_key, secret_key, token) {
+    access_key: String, secret_key: String, token: String) -> Result<String, String> = {
+    let payload = ix(lambda_code_payload(source, input))?;
+    match lambda_invoke(region, name, payload, access_key, secret_key, token) {
         Result::Ok(resp) => if resp.status == 200 { Result::Ok(resp.body) } else { Result::Err(resp.body) },
         Result::Err(e) => Result::Err(e)
     }
+}
 
 // Fan out the SAME code across N inputs, all invocations in parallel.
 def lambda_run_code_many(
     region: String, name: String, source: String, inputs: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpResponse> =
-    http_request_many(lambda_code_reqs(region, name, source, inputs, access_key, secret_key, token))
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpResponse>, IndexError> = {
+    let reqs = lambda_code_reqs(region, name, source, inputs, access_key, secret_key, token)?;
+    http_request_many(reqs)
+}
 
 def lambda_code_reqs(
     region: String, name: String, source: String, inputs: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpReq> =
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpReq>, IndexError> =
     match inputs {
-        List::Nil => List::Nil,
-        List::Cons(cell) =>
-            List::Cons(ListCell {
-                head: lambda_one_req(region, name, lambda_code_payload(source, cell.head), access_key, secret_key, token),
-                tail: lambda_code_reqs(region, name, source, cell.tail, access_key, secret_key, token)
-            })
+        List::Nil => Result::Ok(List::Nil),
+        List::Cons(cell) => {
+            let payload = lambda_code_payload(source, cell.head)?;
+            let head = lambda_one_req(region, name, payload, access_key, secret_key, token)?;
+            let tail = lambda_code_reqs(region, name, source, cell.tail, access_key, secret_key, token)?;
+            Result::Ok(List::Cons(ListCell { head: head, tail: tail }))
+        },
     }
 
 // Create a Lambda function from a deployment zip (custom runtime,
@@ -2063,12 +2136,13 @@ def lambda_create_at(
     url: String, host: String, path: String,
     region: String, name: String, role_arn: String, zip_bytes: String,
     access_key: String, secret_key: String, token: String) -> Result<HttpResponse, String> = {
+    let zip64 = ix(base64_encode(zip_bytes))?;
     let body = str6(
         str3("{\"FunctionName\":\"", name, "\","),
         str3("\"Role\":\"", role_arn, "\","),
         "\"Runtime\":\"provided.al2\",\"Handler\":\"bootstrap\",",
         "\"Code\":{\"ZipFile\":\"",
-        base64_encode(zip_bytes),
+        zip64,
         "\"}}");
     aws_signed_request("POST", url, host, path, region, "lambda", body,
         access_key, secret_key, token)
@@ -2127,10 +2201,10 @@ def lambda_create_from_s3(
 
 // ---- URI encoding (for S3 canonical request paths) ----
 
-def char_str(c: Int) -> String = {
+def char_str(c: Int) -> Result<String, IndexError> = {
     let b = bytes_new(1);
     let w = bytes_set(b, 0, c)?;
-    string_from_bytes(b)
+    Result::Ok(string_from_bytes(b))
 }
 
 def hex_upper(v: Int) -> Int = if v < 10 { 48 + v } else { 55 + v }
@@ -2172,24 +2246,27 @@ def uri_unreserved(c: Int) -> Int =
     }
 
 // Percent-encode `s` for an S3 canonical URI, keeping "/" separators.
-def uri_encode_path(s: String) -> String = {
+def uri_encode_path(s: String) -> Result<String, IndexError> = {
     let b = bytes_from_string(s);
     uri_encode_go(b, 0, bytes_len(b), "")
 }
 
-def uri_encode_go(b: Bytes, i: Int, n: Int, acc: String) -> String =
+def uri_encode_go(b: Bytes, i: Int, n: Int, acc: String) -> Result<String, IndexError> =
     if i >= n {
-        acc
+        Result::Ok(acc)
     } else {
         let c = bytes_get(b, i)?;
         let piece =
             if uri_unreserved(c) == 1 {
-                char_str(c)
+                let lit = char_str(c)?;
+                lit
             } else {
                 if c == 47 {
                     "/"
                 } else {
-                    str3("%", char_str(hex_upper(bit_shr(c, 4))), char_str(hex_upper(bit_and(c, 15))))
+                    let hi = char_str(hex_upper(bit_shr(c, 4)))?;
+                    let lo = char_str(hex_upper(bit_and(c, 15)))?;
+                    str3("%", hi, lo)
                 }
             };
         uri_encode_go(b, i + 1, n, string_concat(acc, piece))
@@ -2209,7 +2286,8 @@ def s3_put_object(
     region: String, bucket: String, key: String, content: String,
     access_key: String, secret_key: String, token: String) -> Result<HttpResponse, String> = {
     let host = s3_host(region, bucket);
-    let path = string_concat("/", uri_encode_path(key));
+    let enc = ix(uri_encode_path(key))?;
+    let path = string_concat("/", enc);
     let url = str3("https://", host, path);
     aws_signed_request("PUT", url, host, path, region, "s3", content,
         access_key, secret_key, token)
@@ -2219,7 +2297,8 @@ def s3_get_object(
     region: String, bucket: String, key: String,
     access_key: String, secret_key: String, token: String) -> Result<HttpResponse, String> = {
     let host = s3_host(region, bucket);
-    let path = string_concat("/", uri_encode_path(key));
+    let enc = ix(uri_encode_path(key))?;
+    let path = string_concat("/", enc);
     let url = str3("https://", host, path);
     aws_signed_request("GET", url, host, path, region, "s3", "",
         access_key, secret_key, token)
@@ -2229,7 +2308,8 @@ def s3_delete_object(
     region: String, bucket: String, key: String,
     access_key: String, secret_key: String, token: String) -> Result<HttpResponse, String> = {
     let host = s3_host(region, bucket);
-    let path = string_concat("/", uri_encode_path(key));
+    let enc = ix(uri_encode_path(key))?;
+    let path = string_concat("/", enc);
     let url = str3("https://", host, path);
     aws_signed_request("DELETE", url, host, path, region, "s3", "",
         access_key, secret_key, token)
@@ -2239,26 +2319,29 @@ def s3_delete_object(
 // at once). Returns the responses in key order.
 def s3_get_many(
     region: String, bucket: String, keys: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpResponse> =
-    http_request_many(s3_get_reqs(region, bucket, keys, access_key, secret_key, token))
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpResponse>, IndexError> = {
+    let reqs = s3_get_reqs(region, bucket, keys, access_key, secret_key, token)?;
+    http_request_many(reqs)
+}
 
 def s3_get_reqs(
     region: String, bucket: String, keys: List<String>,
-    access_key: String, secret_key: String, token: String) -> List<HttpReq> =
+    access_key: String, secret_key: String, token: String) -> Result<List<HttpReq>, IndexError> =
     match keys {
-        List::Nil => List::Nil,
-        List::Cons(cell) =>
-            List::Cons(ListCell {
-                head: s3_one_get_req(region, bucket, cell.head, access_key, secret_key, token),
-                tail: s3_get_reqs(region, bucket, cell.tail, access_key, secret_key, token)
-            })
+        List::Nil => Result::Ok(List::Nil),
+        List::Cons(cell) => {
+            let head = s3_one_get_req(region, bucket, cell.head, access_key, secret_key, token)?;
+            let tail = s3_get_reqs(region, bucket, cell.tail, access_key, secret_key, token)?;
+            Result::Ok(List::Cons(ListCell { head: head, tail: tail }))
+        },
     }
 
 def s3_one_get_req(
     region: String, bucket: String, key: String,
-    access_key: String, secret_key: String, token: String) -> HttpReq = {
+    access_key: String, secret_key: String, token: String) -> Result<HttpReq, IndexError> = {
     let host = s3_host(region, bucket);
-    let path = string_concat("/", uri_encode_path(key));
+    let enc = uri_encode_path(key)?;
+    let path = string_concat("/", enc);
     let url = str3("https://", host, path);
     aws_signed_req("GET", url, host, path, region, "s3", "",
         access_key, secret_key, token)
@@ -2294,7 +2377,7 @@ def lambda_header_block(amzdate: String, payload_hash: String, token: String, au
 def lambda_run_once(api_base: String, handler: fn(String) -> String) -> Result<Int, String> = {
     let next_url = str3("http://", api_base, "/2018-06-01/runtime/invocation/next");
     let inv = http_request_full("GET", next_url, "", "")?;
-    let req_id = http_header(inv.headers, "Lambda-Runtime-Aws-Request-Id");
+    let req_id = ix(http_header(inv.headers, "Lambda-Runtime-Aws-Request-Id"))?;
     let result = handler(inv.body);
     let resp_url = str5("http://", api_base, "/2018-06-01/runtime/invocation/", req_id, "/response");
     let posted = http_request_full("POST", resp_url, "", result)?;
@@ -2312,8 +2395,13 @@ def lambda_run_forever(api_base: String, handler: fn(String) -> String) -> Int =
 // The custom-runtime entry point: read the Runtime API endpoint from the
 // environment (AWS sets `AWS_LAMBDA_RUNTIME_API`) and serve forever. A
 // deployed worker's `main` is just `lambda_serve(|e| my_handler(e))`.
+// (Same convention as `lambda_run_forever`: a transport/environment
+// failure surfaces as the -1 return, never a crash.)
 def lambda_serve(handler: fn(String) -> String) -> Int =
-    lambda_run_forever(env_get("AWS_LAMBDA_RUNTIME_API"), handler)
+    match env_get("AWS_LAMBDA_RUNTIME_API") {
+        Result::Ok(api) => lambda_run_forever(api, handler),
+        Result::Err(_e) => 0 - 1,
+    }
 
 // `println_int(n)` — print an Int followed by newline. Reuses the
 // existing string-formatting and println paths.
@@ -2352,11 +2440,28 @@ enum Result<T, E> { Ok(T), Err(E) }
 // `array_set`, `bytes_get`, `bytes_set`): an out-of-bounds index is a
 // `Result::Err(IndexError::OutOfBounds(OobInfo { index, len }))` VALUE
 // flowing through `?`/match like any other error — never a hidden
-// channel. The `*_trusted` accessors skip the check and ABORT on a
-// violation; they are for code that has proven its indices (stdlib
-// internals, hot kernels).
+// channel. There is no trusted/unchecked tier and no abort: the language
+// is TOTAL — every indexing failure, including a read of an
+// uninitialized (never-written) non-scalar slot, is an `Err` the caller
+// handles or threads out with `?`.
 struct OobInfo { index: Int, len: Int }
 enum IndexError { OutOfBounds(OobInfo), Uninitialized(OobInfo) }
+
+// Adapt an indexing Result into a String-error context (read_file, the
+// HTTP layer, ... predate IndexError and use Result<_, String>): the
+// index/len land in the message, so `let v = ix(bytes_get(b, i))?;`
+// composes with their `?` without losing the evidence.
+def ix<T>(r: Result<T, IndexError>) -> Result<T, String> =
+    match r {
+        Result::Ok(v) => Result::Ok(v),
+        Result::Err(e) => match e {
+            IndexError::OutOfBounds(o) => Result::Err(string_concat(
+                "index out of bounds: ", string_concat(int_to_string(o.index),
+                string_concat(" (len ", string_concat(int_to_string(o.len), ")"))))),
+            IndexError::Uninitialized(o) => Result::Err(string_concat(
+                "uninitialized slot: ", int_to_string(o.index))),
+        },
+    }
 
 // Error returned by the checked, generic `decode::<T>(bytes)`:
 // `TypeMismatch` = the bytes held a value of a different type than `T`;
@@ -2554,9 +2659,10 @@ def dataset_reduce<T>(d: List<Value<List<T>>>, init: T, op: fn(T, T) -> T) -> T 
 // Linear probing over an `Array<SBucket<V>>`; every slot holds SEmpty
 // or SFull(entry). Load factor > 0.7 triggers a 2x resize + rehash.
 //
-// Maps are threaded functionally: `insert` returns a new StringMap.
-// The backing array is mutated in place, so callers must use the
-// returned value (`let m = smap_insert(m, k, v)`).
+// Maps are threaded functionally: `insert` returns a new StringMap
+// (wrapped in Result, since probing indexes the backing array). The
+// backing array is mutated in place, so callers must use the
+// returned value (`let m = smap_insert(m, k, v)?`).
 //
 // NOTE: deletion / tombstones are not implemented yet (probing assumes
 // Empty terminates a chain). Add an SDeleted variant + two-phase probe
@@ -2568,92 +2674,108 @@ struct StringMap<V> { sbuckets: Array<SBucket<V>>, scount: Int, scap: Int }
 
 // Bounded polynomial hash over the key bytes. Stays < 1000003 so the
 // i64 multiply never overflows, and is always non-negative.
-def str_hash(s: String) -> Int = str_hash_acc(bytes_from_string(s), 0, 0)
+def str_hash(s: String) -> Result<Int, IndexError> = str_hash_acc(bytes_from_string(s), 0, 0)
 
-def str_hash_acc(b: Bytes, i: Int, h: Int) -> Int =
-    if i >= bytes_len(b) { h }
+def str_hash_acc(b: Bytes, i: Int, h: Int) -> Result<Int, IndexError> =
+    if i >= bytes_len(b) { Result::Ok(h) }
     else { str_hash_acc(b, i + 1, (h * 31 + bytes_get(b, i)?) % 1000003) }
 
 // Fill slots [i, cap) with SEmpty.
-def smap_fill<V>(a: Array<SBucket<V>>, i: Int, cap: Int) -> Array<SBucket<V>> =
-    if i >= cap { a }
+def smap_fill<V>(a: Array<SBucket<V>>, i: Int, cap: Int) -> Result<Array<SBucket<V>>, IndexError> =
+    if i >= cap { Result::Ok(a) }
     else {
         let _x = array_set(a, i, SBucket::SEmpty)?;
         smap_fill(a, i + 1, cap)
     }
 
-def smap_with_cap<V>(cap: Int) -> StringMap<V> =
-    StringMap { sbuckets: smap_fill(array_new(cap), 0, cap), scount: 0, scap: cap }
+def smap_with_cap<V>(cap: Int) -> Result<StringMap<V>, IndexError> = {
+    let buckets = smap_fill(array_new(cap), 0, cap)?;
+    Result::Ok(StringMap { sbuckets: buckets, scount: 0, scap: cap })
+}
 
-def smap_new<V>() -> StringMap<V> = smap_with_cap(8)
+def smap_new<V>() -> Result<StringMap<V>, IndexError> = smap_with_cap(8)
 
 def smap_size<V>(m: StringMap<V>) -> Int = m.scount
 
 // Probe for `key` from `idx`: index of the slot holding `key`, else
 // the first SEmpty slot. `steps` bounds the loop (load < 1 guarantees
 // an Empty slot is found first).
-def smap_probe<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Int =
-    if steps >= cap { 0 - 1 }
+def smap_probe<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Result<Int, IndexError> =
+    if steps >= cap { Result::Ok(0 - 1) }
     else {
         match array_get(a, idx)? {
-            SBucket::SEmpty => idx,
+            SBucket::SEmpty => Result::Ok(idx),
             SBucket::SFull(e) =>
-                if string_eq(e.skey, key) == 1 { idx }
+                if string_eq(e.skey, key) == 1 { Result::Ok(idx) }
                 else { smap_probe(a, cap, key, (idx + 1) % cap, steps + 1) },
         }
     }
 
-def smap_get<V>(m: StringMap<V>, key: String) -> Option<V> =
-    smap_get_at(m.sbuckets, m.scap, key, str_hash(key) % m.scap, 0)
+def smap_get<V>(m: StringMap<V>, key: String) -> Result<Option<V>, IndexError> = {
+    let h = str_hash(key)?;
+    smap_get_at(m.sbuckets, m.scap, key, h % m.scap, 0)
+}
 
-def smap_get_at<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Option<V> =
-    if steps >= cap { Option::None }
+def smap_get_at<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Result<Option<V>, IndexError> =
+    if steps >= cap { Result::Ok(Option::None) }
     else {
         match array_get(a, idx)? {
-            SBucket::SEmpty => Option::None,
+            SBucket::SEmpty => Result::Ok(Option::None),
             SBucket::SFull(e) =>
-                if string_eq(e.skey, key) == 1 { Option::Some(e.sval) }
+                if string_eq(e.skey, key) == 1 { Result::Ok(Option::Some(e.sval)) }
                 else { smap_get_at(a, cap, key, (idx + 1) % cap, steps + 1) },
         }
     }
 
-def smap_contains<V>(m: StringMap<V>, key: String) -> Int =
-    opt_is_some(smap_get(m, key))
+def smap_contains<V>(m: StringMap<V>, key: String) -> Result<Int, IndexError> = {
+    let found = smap_get(m, key)?;
+    Result::Ok(opt_is_some(found))
+}
 
 // Insert/update. Resizes first if adding would exceed 0.7 load.
-def smap_insert<V>(m: StringMap<V>, key: String, val: V) -> StringMap<V> =
-    smap_insert_grown(smap_maybe_grow(m), key, val)
+def smap_insert<V>(m: StringMap<V>, key: String, val: V) -> Result<StringMap<V>, IndexError> = {
+    let grown = smap_maybe_grow(m)?;
+    smap_insert_grown(grown, key, val)
+}
 
-def smap_maybe_grow<V>(m: StringMap<V>) -> StringMap<V> =
-    if (m.scount + 1) * 10 >= m.scap * 7 { smap_resize(m, m.scap * 2) } else { m }
+def smap_maybe_grow<V>(m: StringMap<V>) -> Result<StringMap<V>, IndexError> =
+    if (m.scount + 1) * 10 >= m.scap * 7 { smap_resize(m, m.scap * 2) } else { Result::Ok(m) }
 
-def smap_resize<V>(m: StringMap<V>, newcap: Int) -> StringMap<V> =
-    smap_rehash(m.sbuckets, m.scap, 0, smap_with_cap(newcap))
+def smap_resize<V>(m: StringMap<V>, newcap: Int) -> Result<StringMap<V>, IndexError> = {
+    let fresh = smap_with_cap(newcap)?;
+    smap_rehash(m.sbuckets, m.scap, 0, fresh)
+}
 
-def smap_rehash<V>(old: Array<SBucket<V>>, oldcap: Int, i: Int, dst: StringMap<V>) -> StringMap<V> =
-    if i >= oldcap { dst }
+def smap_rehash<V>(old: Array<SBucket<V>>, oldcap: Int, i: Int, dst: StringMap<V>) -> Result<StringMap<V>, IndexError> =
+    if i >= oldcap { Result::Ok(dst) }
     else {
         match array_get(old, i)? {
             SBucket::SEmpty => smap_rehash(old, oldcap, i + 1, dst),
-            SBucket::SFull(e) => smap_rehash(old, oldcap, i + 1, smap_insert_grown(dst, e.skey, e.sval)),
+            SBucket::SFull(e) => {
+                let next = smap_insert_grown(dst, e.skey, e.sval)?;
+                smap_rehash(old, oldcap, i + 1, next)
+            },
         }
     }
 
 // Insert assuming capacity is sufficient (no resize check).
-def smap_insert_grown<V>(m: StringMap<V>, key: String, val: V) -> StringMap<V> =
-    smap_place(m, smap_probe(m.sbuckets, m.scap, key, str_hash(key) % m.scap, 0), key, val)
+def smap_insert_grown<V>(m: StringMap<V>, key: String, val: V) -> Result<StringMap<V>, IndexError> = {
+    let h = str_hash(key)?;
+    let idx = smap_probe(m.sbuckets, m.scap, key, h % m.scap, 0)?;
+    smap_place(m, idx, key, val)
+}
 
-def smap_place<V>(m: StringMap<V>, idx: Int, key: String, val: V) -> StringMap<V> =
+def smap_place<V>(m: StringMap<V>, idx: Int, key: String, val: V) -> Result<StringMap<V>, IndexError> =
     match array_get(m.sbuckets, idx)? {
         // Overwriting an existing key: count unchanged.
         SBucket::SFull(_) => {
             let _x = array_set(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }))?;
-            m
+            Result::Ok(m)
         },
         // Fresh slot: count grows.
         SBucket::SEmpty => {
             let _x = array_set(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }))?;
-            StringMap { sbuckets: m.sbuckets, scount: m.scount + 1, scap: m.scap }
+            Result::Ok(StringMap { sbuckets: m.sbuckets, scount: m.scount + 1, scap: m.scap })
         },
     }
 
@@ -2671,78 +2793,91 @@ struct IntMap<V> { ibuckets: Array<IBucket<V>>, icount: Int, icap: Int }
 // stays well within i64, and keep the result non-negative.
 def int_hash(k: Int) -> Int = (abs(k) % 1000003) * 2654435 % 1000003
 
-def imap_fill<V>(a: Array<IBucket<V>>, i: Int, cap: Int) -> Array<IBucket<V>> =
-    if i >= cap { a }
+def imap_fill<V>(a: Array<IBucket<V>>, i: Int, cap: Int) -> Result<Array<IBucket<V>>, IndexError> =
+    if i >= cap { Result::Ok(a) }
     else {
         let _x = array_set(a, i, IBucket::IEmpty)?;
         imap_fill(a, i + 1, cap)
     }
 
-def imap_with_cap<V>(cap: Int) -> IntMap<V> =
-    IntMap { ibuckets: imap_fill(array_new(cap), 0, cap), icount: 0, icap: cap }
+def imap_with_cap<V>(cap: Int) -> Result<IntMap<V>, IndexError> = {
+    let buckets = imap_fill(array_new(cap), 0, cap)?;
+    Result::Ok(IntMap { ibuckets: buckets, icount: 0, icap: cap })
+}
 
-def imap_new<V>() -> IntMap<V> = imap_with_cap(8)
+def imap_new<V>() -> Result<IntMap<V>, IndexError> = imap_with_cap(8)
 
 def imap_size<V>(m: IntMap<V>) -> Int = m.icount
 
-def imap_probe<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Int =
-    if steps >= cap { 0 - 1 }
+def imap_probe<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Result<Int, IndexError> =
+    if steps >= cap { Result::Ok(0 - 1) }
     else {
         match array_get(a, idx)? {
-            IBucket::IEmpty => idx,
+            IBucket::IEmpty => Result::Ok(idx),
             IBucket::IFull(e) =>
-                if e.ikey == key { idx }
+                if e.ikey == key { Result::Ok(idx) }
                 else { imap_probe(a, cap, key, (idx + 1) % cap, steps + 1) },
         }
     }
 
-def imap_get<V>(m: IntMap<V>, key: Int) -> Option<V> =
+def imap_get<V>(m: IntMap<V>, key: Int) -> Result<Option<V>, IndexError> =
     imap_get_at(m.ibuckets, m.icap, key, int_hash(key) % m.icap, 0)
 
-def imap_get_at<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Option<V> =
-    if steps >= cap { Option::None }
+def imap_get_at<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Result<Option<V>, IndexError> =
+    if steps >= cap { Result::Ok(Option::None) }
     else {
         match array_get(a, idx)? {
-            IBucket::IEmpty => Option::None,
+            IBucket::IEmpty => Result::Ok(Option::None),
             IBucket::IFull(e) =>
-                if e.ikey == key { Option::Some(e.ival) }
+                if e.ikey == key { Result::Ok(Option::Some(e.ival)) }
                 else { imap_get_at(a, cap, key, (idx + 1) % cap, steps + 1) },
         }
     }
 
-def imap_contains<V>(m: IntMap<V>, key: Int) -> Int =
-    opt_is_some(imap_get(m, key))
+def imap_contains<V>(m: IntMap<V>, key: Int) -> Result<Int, IndexError> = {
+    let found = imap_get(m, key)?;
+    Result::Ok(opt_is_some(found))
+}
 
-def imap_insert<V>(m: IntMap<V>, key: Int, val: V) -> IntMap<V> =
-    imap_insert_grown(imap_maybe_grow(m), key, val)
+def imap_insert<V>(m: IntMap<V>, key: Int, val: V) -> Result<IntMap<V>, IndexError> = {
+    let grown = imap_maybe_grow(m)?;
+    imap_insert_grown(grown, key, val)
+}
 
-def imap_maybe_grow<V>(m: IntMap<V>) -> IntMap<V> =
-    if (m.icount + 1) * 10 >= m.icap * 7 { imap_resize(m, m.icap * 2) } else { m }
+def imap_maybe_grow<V>(m: IntMap<V>) -> Result<IntMap<V>, IndexError> =
+    if (m.icount + 1) * 10 >= m.icap * 7 { imap_resize(m, m.icap * 2) } else { Result::Ok(m) }
 
-def imap_resize<V>(m: IntMap<V>, newcap: Int) -> IntMap<V> =
-    imap_rehash(m.ibuckets, m.icap, 0, imap_with_cap(newcap))
+def imap_resize<V>(m: IntMap<V>, newcap: Int) -> Result<IntMap<V>, IndexError> = {
+    let fresh = imap_with_cap(newcap)?;
+    imap_rehash(m.ibuckets, m.icap, 0, fresh)
+}
 
-def imap_rehash<V>(old: Array<IBucket<V>>, oldcap: Int, i: Int, dst: IntMap<V>) -> IntMap<V> =
-    if i >= oldcap { dst }
+def imap_rehash<V>(old: Array<IBucket<V>>, oldcap: Int, i: Int, dst: IntMap<V>) -> Result<IntMap<V>, IndexError> =
+    if i >= oldcap { Result::Ok(dst) }
     else {
         match array_get(old, i)? {
             IBucket::IEmpty => imap_rehash(old, oldcap, i + 1, dst),
-            IBucket::IFull(e) => imap_rehash(old, oldcap, i + 1, imap_insert_grown(dst, e.ikey, e.ival)),
+            IBucket::IFull(e) => {
+                let next = imap_insert_grown(dst, e.ikey, e.ival)?;
+                imap_rehash(old, oldcap, i + 1, next)
+            },
         }
     }
 
-def imap_insert_grown<V>(m: IntMap<V>, key: Int, val: V) -> IntMap<V> =
-    imap_place(m, imap_probe(m.ibuckets, m.icap, key, int_hash(key) % m.icap, 0), key, val)
+def imap_insert_grown<V>(m: IntMap<V>, key: Int, val: V) -> Result<IntMap<V>, IndexError> = {
+    let idx = imap_probe(m.ibuckets, m.icap, key, int_hash(key) % m.icap, 0)?;
+    imap_place(m, idx, key, val)
+}
 
-def imap_place<V>(m: IntMap<V>, idx: Int, key: Int, val: V) -> IntMap<V> =
+def imap_place<V>(m: IntMap<V>, idx: Int, key: Int, val: V) -> Result<IntMap<V>, IndexError> =
     match array_get(m.ibuckets, idx)? {
         IBucket::IFull(_) => {
             let _x = array_set(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }))?;
-            m
+            Result::Ok(m)
         },
         IBucket::IEmpty => {
             let _x = array_set(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }))?;
-            IntMap { ibuckets: m.ibuckets, icount: m.icount + 1, icap: m.icap }
+            Result::Ok(IntMap { ibuckets: m.ibuckets, icount: m.icount + 1, icap: m.icap })
         },
     }
 
@@ -2777,35 +2912,35 @@ def frag(h: Int, shift: Int) -> Int = bit_and(bit_shr(h, shift), 31)
 def bitpos(h: Int, shift: Int) -> Int = bit_shl(1, frag(h, shift))
 def index_of(bitmap: Int, bit: Int) -> Int = popcount(bit_and(bitmap, bit - 1))
 
-def arr1<K, V>(x: HNode<K, V>) -> Array<HNode<K, V>> = {
+def arr1<K, V>(x: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> = {
     let a = array_new(1);
     let _s = array_set(a, 0, x)?;
-    a
+    Result::Ok(a)
 }
-def arr2<K, V>(a: HNode<K, V>, b: HNode<K, V>) -> Array<HNode<K, V>> = {
+def arr2<K, V>(a: HNode<K, V>, b: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> = {
     let arr = array_new(2);
     let _s0 = array_set(arr, 0, a)?;
     let _s1 = array_set(arr, 1, b)?;
-    arr
+    Result::Ok(arr)
 }
-def arr_set_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
+def arr_set_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> = {
     let n = array_len(a);
     let out = array_new(n);
     arr_copy_set(a, out, 0, n, idx, v)
 }
-def arr_copy_set<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, i: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
-    if i == n { let _s = array_set(dst, idx, v)?; dst }
+def arr_copy_set<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, i: Int, n: Int, idx: Int, v: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> =
+    if i == n { let _s = array_set(dst, idx, v)?; Result::Ok(dst) }
     else {
         let _s = array_set(dst, i, array_get(src, i)?)?;
         arr_copy_set(src, dst, i + 1, n, idx, v)
     }
-def arr_insert_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
+def arr_insert_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> = {
     let n = array_len(a);
     let out = array_new(n + 1);
     arr_ins_fill(a, out, 0, n, idx, v)
 }
-def arr_ins_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
-    if j == n + 1 { dst }
+def arr_ins_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int, v: HNode<K, V>) -> Result<Array<HNode<K, V>>, IndexError> =
+    if j == n + 1 { Result::Ok(dst) }
     else {
         let chosen = if j < idx { array_get(src, j)? }
             else { if j == idx { v } else { array_get(src, j - 1)? } };
@@ -2816,28 +2951,29 @@ def arr_ins_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int,
 def hashmap_empty<K, V>() -> HashMap<K, V> = HashMap { root: HNode::HEmpty, size: 0 }
 def hashmap_size<K, V>(m: HashMap<K, V>) -> Int = m.size
 
-def hashmap_get<K, V>(m: HashMap<K, V>, key: K) -> Option<V> =
+def hashmap_get<K, V>(m: HashMap<K, V>, key: K) -> Result<Option<V>, IndexError> =
     node_get(m.root, value_hash(key), 0, key)
-def node_get<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> Option<V> =
+def node_get<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> Result<Option<V>, IndexError> =
     match node {
-        HNode::HEmpty => Option::None,
+        HNode::HEmpty => Result::Ok(Option::None),
         HNode::HL(leaf) =>
-            if value_eq(leaf.hkey, key) { Option::Some(leaf.val) } else { Option::None },
+            if value_eq(leaf.hkey, key) { Result::Ok(Option::Some(leaf.val)) } else { Result::Ok(Option::None) },
         HNode::HC(coll) => coll_get(coll.items, 0, array_len(coll.items), key),
         HNode::HB(bm) => {
             let bit = bitpos(h, shift);
-            if bit_and(bm.bitmap, bit) == 0 { Option::None }
+            if bit_and(bm.bitmap, bit) == 0 { Result::Ok(Option::None) }
             else {
-                node_get(array_get(bm.kids, index_of(bm.bitmap, bit))?, h, shift + 5, key)
+                let kid = array_get(bm.kids, index_of(bm.bitmap, bit))?;
+                node_get(kid, h, shift + 5, key)
             }
         },
     }
-def coll_get<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Option<V> =
-    if i == n { Option::None }
+def coll_get<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Result<Option<V>, IndexError> =
+    if i == n { Result::Ok(Option::None) }
     else {
         match array_get(items, i)? {
             HNode::HL(leaf) =>
-                if value_eq(leaf.hkey, key) { Option::Some(leaf.val) }
+                if value_eq(leaf.hkey, key) { Result::Ok(Option::Some(leaf.val)) }
                 else { coll_get(items, i + 1, n, key) },
             HNode::HEmpty => coll_get(items, i + 1, n, key),
             HNode::HB(b) => coll_get(items, i + 1, n, key),
@@ -2845,21 +2981,23 @@ def coll_get<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Option<
         }
     }
 
-def hashmap_assoc<K, V>(m: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> = {
-    let out = node_assoc(m.root, value_hash(key), 0, key, val);
-    HashMap { root: out.node, size: m.size + out.added }
+def hashmap_assoc<K, V>(m: HashMap<K, V>, key: K, val: V) -> Result<HashMap<K, V>, IndexError> = {
+    let out = node_assoc(m.root, value_hash(key), 0, key, val)?;
+    Result::Ok(HashMap { root: out.node, size: m.size + out.added })
 }
-def node_assoc<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K, val: V) -> AssocOut<K, V> =
+def node_assoc<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K, val: V) -> Result<AssocOut<K, V>, IndexError> =
     match node {
-        HNode::HEmpty => AssocOut { node: HNode::HL(HLeaf { kh: h, hkey: key, val: val }), added: 1 },
+        HNode::HEmpty => Result::Ok(AssocOut { node: HNode::HL(HLeaf { kh: h, hkey: key, val: val }), added: 1 }),
         HNode::HL(leaf) =>
             if value_eq(leaf.hkey, key) {
-                AssocOut { node: HNode::HL(HLeaf { kh: h, hkey: key, val: val }), added: 0 }
+                Result::Ok(AssocOut { node: HNode::HL(HLeaf { kh: h, hkey: key, val: val }), added: 0 })
             } else {
                 if leaf.kh == h {
-                    AssocOut { node: make_coll(leaf, h, key, val), added: 1 }
+                    let c = make_coll(leaf, h, key, val)?;
+                    Result::Ok(AssocOut { node: c, added: 1 })
                 } else {
-                    AssocOut { node: split_leaf(leaf, h, key, val, shift), added: 1 }
+                    let s = split_leaf(leaf, h, key, val, shift)?;
+                    Result::Ok(AssocOut { node: s, added: 1 })
                 }
             },
         HNode::HC(coll) => coll_assoc(coll, key, val),
@@ -2867,48 +3005,49 @@ def node_assoc<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K, val: V) -> A
             let bit = bitpos(h, shift);
             let idx = index_of(bm.bitmap, bit);
             if bit_and(bm.bitmap, bit) == 0 {
-                let nk = arr_insert_copy(bm.kids, idx, HNode::HL(HLeaf { kh: h, hkey: key, val: val }));
-                AssocOut { node: HNode::HB(HBitmap { bitmap: bit_or(bm.bitmap, bit), kids: nk }), added: 1 }
+                let nk = arr_insert_copy(bm.kids, idx, HNode::HL(HLeaf { kh: h, hkey: key, val: val }))?;
+                Result::Ok(AssocOut { node: HNode::HB(HBitmap { bitmap: bit_or(bm.bitmap, bit), kids: nk }), added: 1 })
             } else {
-                let sub = node_assoc(array_get(bm.kids, idx)?, h, shift + 5, key, val);
-                let nk = arr_set_copy(bm.kids, idx, sub.node);
-                AssocOut { node: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), added: sub.added }
+                let sub = node_assoc(array_get(bm.kids, idx)?, h, shift + 5, key, val)?;
+                let nk = arr_set_copy(bm.kids, idx, sub.node)?;
+                Result::Ok(AssocOut { node: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), added: sub.added })
             }
         },
     }
-def split_leaf<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V, shift: Int) -> HNode<K, V> = {
+def split_leaf<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V, shift: Int) -> Result<HNode<K, V>, IndexError> = {
     let f1 = frag(leaf.kh, shift);
     let f2 = frag(h, shift);
     if f1 == f2 {
-        let child = split_leaf(leaf, h, key, val, shift + 5);
-        HNode::HB(HBitmap { bitmap: bit_shl(1, f1), kids: arr1(child) })
+        let child = split_leaf(leaf, h, key, val, shift + 5)?;
+        let kids = arr1(child)?;
+        Result::Ok(HNode::HB(HBitmap { bitmap: bit_shl(1, f1), kids: kids }))
     } else {
         let n1 = HNode::HL(leaf);
         let n2 = HNode::HL(HLeaf { kh: h, hkey: key, val: val });
-        let kids = if f1 < f2 { arr2(n1, n2) } else { arr2(n2, n1) };
-        HNode::HB(HBitmap { bitmap: bit_or(bit_shl(1, f1), bit_shl(1, f2)), kids: kids })
+        let kids = if f1 < f2 { arr2(n1, n2)? } else { arr2(n2, n1)? };
+        Result::Ok(HNode::HB(HBitmap { bitmap: bit_or(bit_shl(1, f1), bit_shl(1, f2)), kids: kids }))
     }
 }
-def make_coll<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V) -> HNode<K, V> = {
-    let items = arr2(HNode::HL(leaf), HNode::HL(HLeaf { kh: h, hkey: key, val: val }));
-    HNode::HC(HColl { kh: h, items: items })
+def make_coll<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V) -> Result<HNode<K, V>, IndexError> = {
+    let items = arr2(HNode::HL(leaf), HNode::HL(HLeaf { kh: h, hkey: key, val: val }))?;
+    Result::Ok(HNode::HC(HColl { kh: h, items: items }))
 }
-def coll_assoc<K, V>(coll: HColl<K, V>, key: K, val: V) -> AssocOut<K, V> = {
-    let found = coll_find(coll.items, 0, array_len(coll.items), key);
+def coll_assoc<K, V>(coll: HColl<K, V>, key: K, val: V) -> Result<AssocOut<K, V>, IndexError> = {
+    let found = coll_find(coll.items, 0, array_len(coll.items), key)?;
     let leaf = HNode::HL(HLeaf { kh: coll.kh, hkey: key, val: val });
     if found < 0 {
-        let nk = arr_insert_copy(coll.items, array_len(coll.items), leaf);
-        AssocOut { node: HNode::HC(HColl { kh: coll.kh, items: nk }), added: 1 }
+        let nk = arr_insert_copy(coll.items, array_len(coll.items), leaf)?;
+        Result::Ok(AssocOut { node: HNode::HC(HColl { kh: coll.kh, items: nk }), added: 1 })
     } else {
-        let nk = arr_set_copy(coll.items, found, leaf);
-        AssocOut { node: HNode::HC(HColl { kh: coll.kh, items: nk }), added: 0 }
+        let nk = arr_set_copy(coll.items, found, leaf)?;
+        Result::Ok(AssocOut { node: HNode::HC(HColl { kh: coll.kh, items: nk }), added: 0 })
     }
 }
-def coll_find<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Int =
-    if i == n { 0 - 1 }
+def coll_find<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Result<Int, IndexError> =
+    if i == n { Result::Ok(0 - 1) }
     else {
         match array_get(items, i)? {
-            HNode::HL(leaf) => if value_eq(leaf.hkey, key) { i } else { coll_find(items, i + 1, n, key) },
+            HNode::HL(leaf) => if value_eq(leaf.hkey, key) { Result::Ok(i) } else { coll_find(items, i + 1, n, key) },
             HNode::HEmpty => coll_find(items, i + 1, n, key),
             HNode::HB(b) => coll_find(items, i + 1, n, key),
             HNode::HC(c) => coll_find(items, i + 1, n, key),
@@ -2917,93 +3056,96 @@ def coll_find<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Int =
 
 // ---- HashMap<K, V> operations: remove, fold, keys, contains ----
 
-def hashmap_fold<K, V, A>(m: HashMap<K, V>, init: A, f: fn(A, K, V) -> A) -> A =
+def hashmap_fold<K, V, A>(m: HashMap<K, V>, init: A, f: fn(A, K, V) -> A) -> Result<A, IndexError> =
     node_fold(m.root, init, f)
-def node_fold<K, V, A>(node: HNode<K, V>, acc: A, f: fn(A, K, V) -> A) -> A =
+def node_fold<K, V, A>(node: HNode<K, V>, acc: A, f: fn(A, K, V) -> A) -> Result<A, IndexError> =
     match node {
-        HNode::HEmpty => acc,
-        HNode::HL(leaf) => f(acc, leaf.hkey, leaf.val),
+        HNode::HEmpty => Result::Ok(acc),
+        HNode::HL(leaf) => Result::Ok(f(acc, leaf.hkey, leaf.val)),
         HNode::HC(coll) => arr_fold(coll.items, 0, array_len(coll.items), acc, f),
         HNode::HB(bm) => arr_fold(bm.kids, 0, array_len(bm.kids), acc, f),
     }
-def arr_fold<K, V, A>(a: Array<HNode<K, V>>, i: Int, n: Int, acc: A, f: fn(A, K, V) -> A) -> A =
-    if i == n { acc }
-    else { arr_fold(a, i + 1, n, node_fold(array_get(a, i)?, acc, f), f) }
+def arr_fold<K, V, A>(a: Array<HNode<K, V>>, i: Int, n: Int, acc: A, f: fn(A, K, V) -> A) -> Result<A, IndexError> =
+    if i == n { Result::Ok(acc) }
+    else {
+        let next = node_fold(array_get(a, i)?, acc, f)?;
+        arr_fold(a, i + 1, n, next, f)
+    }
 
 struct RemoveOut<K, V> { rnode: HNode<K, V>, removed: Int }
-def arr_remove_at<K, V>(a: Array<HNode<K, V>>, idx: Int) -> Array<HNode<K, V>> = {
+def arr_remove_at<K, V>(a: Array<HNode<K, V>>, idx: Int) -> Result<Array<HNode<K, V>>, IndexError> = {
     let n = array_len(a);
     let out = array_new(n - 1);
     arr_rm_fill(a, out, 0, n, idx)
 }
-def arr_rm_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int) -> Array<HNode<K, V>> =
-    if j == n { dst }
+def arr_rm_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int) -> Result<Array<HNode<K, V>>, IndexError> =
+    if j == n { Result::Ok(dst) }
     else {
         let _w = if j < idx { array_set(dst, j, array_get(src, j)?)? }
             else { if j == idx { 0 } else { array_set(dst, j - 1, array_get(src, j)?)? } };
         arr_rm_fill(src, dst, j + 1, n, idx)
     }
-def hashmap_remove<K, V>(m: HashMap<K, V>, key: K) -> HashMap<K, V> = {
-    let out = node_remove(m.root, value_hash(key), 0, key);
-    HashMap { root: out.rnode, size: m.size - out.removed }
+def hashmap_remove<K, V>(m: HashMap<K, V>, key: K) -> Result<HashMap<K, V>, IndexError> = {
+    let out = node_remove(m.root, value_hash(key), 0, key)?;
+    Result::Ok(HashMap { root: out.rnode, size: m.size - out.removed })
 }
-def node_remove<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> RemoveOut<K, V> =
+def node_remove<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> Result<RemoveOut<K, V>, IndexError> =
     match node {
-        HNode::HEmpty => RemoveOut { rnode: HNode::HEmpty, removed: 0 },
+        HNode::HEmpty => Result::Ok(RemoveOut { rnode: HNode::HEmpty, removed: 0 }),
         HNode::HL(leaf) =>
-            if value_eq(leaf.hkey, key) { RemoveOut { rnode: HNode::HEmpty, removed: 1 } }
-            else { RemoveOut { rnode: HNode::HL(leaf), removed: 0 } },
+            if value_eq(leaf.hkey, key) { Result::Ok(RemoveOut { rnode: HNode::HEmpty, removed: 1 }) }
+            else { Result::Ok(RemoveOut { rnode: HNode::HL(leaf), removed: 0 }) },
         HNode::HC(coll) => coll_remove(coll, key),
         HNode::HB(bm) => {
             let bit = bitpos(h, shift);
-            if bit_and(bm.bitmap, bit) == 0 { RemoveOut { rnode: HNode::HB(bm), removed: 0 } }
+            if bit_and(bm.bitmap, bit) == 0 { Result::Ok(RemoveOut { rnode: HNode::HB(bm), removed: 0 }) }
             else {
                 let idx = index_of(bm.bitmap, bit);
-                let sub = node_remove(array_get(bm.kids, idx)?, h, shift + 5, key);
+                let sub = node_remove(array_get(bm.kids, idx)?, h, shift + 5, key)?;
                 match sub.rnode {
                     HNode::HEmpty => {
-                        let nk = arr_remove_at(bm.kids, idx);
+                        let nk = arr_remove_at(bm.kids, idx)?;
                         let nbm = bit_xor(bm.bitmap, bit);
-                        if nbm == 0 { RemoveOut { rnode: HNode::HEmpty, removed: sub.removed } }
-                        else { RemoveOut { rnode: HNode::HB(HBitmap { bitmap: nbm, kids: nk }), removed: sub.removed } }
+                        if nbm == 0 { Result::Ok(RemoveOut { rnode: HNode::HEmpty, removed: sub.removed }) }
+                        else { Result::Ok(RemoveOut { rnode: HNode::HB(HBitmap { bitmap: nbm, kids: nk }), removed: sub.removed }) }
                     },
                     HNode::HL(l) => {
-                        let nk = arr_set_copy(bm.kids, idx, HNode::HL(l));
-                        RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                        let nk = arr_set_copy(bm.kids, idx, HNode::HL(l))?;
+                        Result::Ok(RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed })
                     },
                     HNode::HB(b2) => {
-                        let nk = arr_set_copy(bm.kids, idx, HNode::HB(b2));
-                        RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                        let nk = arr_set_copy(bm.kids, idx, HNode::HB(b2))?;
+                        Result::Ok(RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed })
                     },
                     HNode::HC(c2) => {
-                        let nk = arr_set_copy(bm.kids, idx, HNode::HC(c2));
-                        RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                        let nk = arr_set_copy(bm.kids, idx, HNode::HC(c2))?;
+                        Result::Ok(RemoveOut { rnode: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed })
                     },
                 }
             }
         },
     }
-def coll_remove<K, V>(coll: HColl<K, V>, key: K) -> RemoveOut<K, V> = {
-    let found = coll_find(coll.items, 0, array_len(coll.items), key);
-    if found < 0 { RemoveOut { rnode: HNode::HC(coll), removed: 0 } }
+def coll_remove<K, V>(coll: HColl<K, V>, key: K) -> Result<RemoveOut<K, V>, IndexError> = {
+    let found = coll_find(coll.items, 0, array_len(coll.items), key)?;
+    if found < 0 { Result::Ok(RemoveOut { rnode: HNode::HC(coll), removed: 0 }) }
     else {
         let n = array_len(coll.items);
         if n - 1 == 1 {
             let keep_idx = if found == 0 { 1 } else { 0 };
-            RemoveOut { rnode: array_get(coll.items, keep_idx)?, removed: 1 }
+            Result::Ok(RemoveOut { rnode: array_get(coll.items, keep_idx)?, removed: 1 })
         } else {
-            let nk = arr_remove_at(coll.items, found);
-            RemoveOut { rnode: HNode::HC(HColl { kh: coll.kh, items: nk }), removed: 1 }
+            let nk = arr_remove_at(coll.items, found)?;
+            Result::Ok(RemoveOut { rnode: HNode::HC(HColl { kh: coll.kh, items: nk }), removed: 1 })
         }
     }
 }
 
 // hashmap_contains: is the key present?
-def hashmap_contains<K, V>(m: HashMap<K, V>, key: K) -> Int =
-    match hashmap_get(m, key) { Option::Some(v) => 1, Option::None => 0 }
+def hashmap_contains<K, V>(m: HashMap<K, V>, key: K) -> Result<Int, IndexError> =
+    match hashmap_get(m, key)? { Option::Some(v) => Result::Ok(1), Option::None => Result::Ok(0) }
 
 // hashmap_keys: all keys as a List<K> (fold collecting into a list).
-def hashmap_keys<K, V>(m: HashMap<K, V>) -> List<K> =
+def hashmap_keys<K, V>(m: HashMap<K, V>) -> Result<List<K>, IndexError> =
     hashmap_fold(m, List::Nil, |acc: List<K>, k: K, v: V| List::Cons(ListCell { head: k, tail: acc }))
 
 // ---- Atom<T>: a local, lock-free atomic reference (Clojure-style) ----
@@ -3179,37 +3321,52 @@ def net_read_into(fd: Int, buf: Ptr, got: Int, n: Int) -> Result<Int, NetErr> =
     }
 
 // Copy `n` raw bytes from `buf` into Bytes `b`.
-def net_buf_to_bytes(buf: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
-    if i >= n { b } else {
+def net_buf_to_bytes(buf: Ptr, b: Bytes, i: Int, n: Int) -> Result<Bytes, IndexError> =
+    if i >= n { Result::Ok(b) } else {
         let _s = bytes_set(b, i, ptr_read_u8(buf, i))?;
         net_buf_to_bytes(buf, b, i + 1, n)
     }
 
-// Receive exactly `n` bytes as a Bytes.
+// Receive exactly `n` bytes as a Bytes. A copy IndexError is mapped to
+// `NetErr::ConnClosed` (structurally unreachable: `b` is freshly sized
+// to `n`), keeping the NetErr boundary callers pattern-match intact.
 def net_recv_exact(fd: Int, n: Int) -> Result<Bytes, NetErr> = {
     let buf = malloc(n);
     defer free(buf);
     let _got = net_read_into(fd, buf, 0, n)?;
     let b = bytes_new(n);
-    Result::Ok(net_buf_to_bytes(buf, b, 0, n))
+    match net_buf_to_bytes(buf, b, 0, n) {
+        Result::Ok(filled) => Result::Ok(filled),
+        Result::Err(_e) => Result::Err(NetErr::ConnClosed),
+    }
 }
 
 // Decode a 4-byte big-endian length.
-def net_be32(b: Bytes) -> Int =
-    bytes_get(b, 0)? * 16777216 + bytes_get(b, 1)? * 65536
-        + bytes_get(b, 2)? * 256 + bytes_get(b, 3)?
+def net_be32(b: Bytes) -> Result<Int, IndexError> = {
+    let b0 = bytes_get(b, 0)?;
+    let b1 = bytes_get(b, 1)?;
+    let b2 = bytes_get(b, 2)?;
+    let b3 = bytes_get(b, 3)?;
+    Result::Ok(b0 * 16777216 + b1 * 65536 + b2 * 256 + b3)
+}
 
-// Receive one length-prefixed frame.
+// Receive one length-prefixed frame. A header that fails to decode (a
+// short header can never index all four bytes) surfaces as ConnClosed —
+// the connection did not deliver a usable frame.
 def recv_frame(fd: Int) -> Result<Bytes, NetErr> = {
     let hdr = net_recv_exact(fd, 4)?;
-    let len = net_be32(hdr);
-    if len > net_max_frame() { Result::Err(NetErr::FrameTooLarge) } else { net_recv_exact(fd, len) }
+    match net_be32(hdr) {
+        Result::Ok(len) =>
+            if len > net_max_frame() { Result::Err(NetErr::FrameTooLarge) } else { net_recv_exact(fd, len) },
+        Result::Err(_e) => Result::Err(NetErr::ConnClosed),
+    }
 }
 
 // Copy Bytes `b` into raw buffer `buf`.
-def net_bytes_to_buf(b: Bytes, buf: Ptr, i: Int, n: Int) -> Int =
-    if i >= n { 0 } else {
-        let _w = ptr_write_u8(buf, i, bytes_get(b, i)?);
+def net_bytes_to_buf(b: Bytes, buf: Ptr, i: Int, n: Int) -> Result<Int, IndexError> =
+    if i >= n { Result::Ok(0) } else {
+        let v = bytes_get(b, i)?;
+        let _w = ptr_write_u8(buf, i, v);
         net_bytes_to_buf(b, buf, i + 1, n)
     }
 
@@ -3221,30 +3378,37 @@ def net_write_all(fd: Int, buf: Ptr, sent: Int, n: Int) -> Result<Int, NetErr> =
         if w <= 0 { Result::Err(NetErr::WriteFailed) } else { net_write_all(fd, buf, sent + w, n) }
     }
 
-// Send all bytes of `b` over `fd`.
+// Send all bytes of `b` over `fd`. A copy that fails to index `b`
+// (impossible while `n` is `b`'s own length) means nothing was written,
+// surfaced as WriteFailed.
 def net_send_bytes(fd: Int, b: Bytes) -> Result<Int, NetErr> = {
     let n = bytes_len(b);
     let buf = malloc(n);
     defer free(buf);
-    let _c = net_bytes_to_buf(b, buf, 0, n);
-    net_write_all(fd, buf, 0, n)
+    match net_bytes_to_buf(b, buf, 0, n) {
+        Result::Ok(_c) => net_write_all(fd, buf, 0, n),
+        Result::Err(_e) => Result::Err(NetErr::WriteFailed),
+    }
 }
 
 // Encode a 4-byte big-endian length header.
-def net_be32_bytes(n: Int) -> Bytes = {
+def net_be32_bytes(n: Int) -> Result<Bytes, IndexError> = {
     let h = bytes_new(4);
     let _0 = bytes_set(h, 0, (n / 16777216) % 256)?;
     let _1 = bytes_set(h, 1, (n / 65536) % 256)?;
     let _2 = bytes_set(h, 2, (n / 256) % 256)?;
     let _3 = bytes_set(h, 3, n % 256)?;
-    h
+    Result::Ok(h)
 }
 
-// Send one length-prefixed frame.
-def send_frame(fd: Int, payload: Bytes) -> Result<Int, NetErr> = {
-    let hdr = net_be32_bytes(bytes_len(payload));
-    net_send_bytes(fd, bytes_concat(hdr, payload))
-}
+// Send one length-prefixed frame. A header that fails to encode (the
+// four stores into a fresh 4-byte buffer cannot go out of bounds) means
+// the frame was never written, surfaced as WriteFailed.
+def send_frame(fd: Int, payload: Bytes) -> Result<Int, NetErr> =
+    match net_be32_bytes(bytes_len(payload)) {
+        Result::Ok(hdr) => net_send_bytes(fd, bytes_concat(hdr, payload)),
+        Result::Err(_e) => Result::Err(NetErr::WriteFailed),
+    }
 
 // ---- Generic at() handler server ----
 //
@@ -3317,16 +3481,19 @@ def svc_install<T>(a: Atom<List<T>>, h: T) -> Int = {
     list_length(vs)
 }
 
-// The current version. A missing handler is a hard error, never a default.
-def svc_current<T>(a: Atom<List<T>>) -> T =
+// The current version, or `None` when nothing is installed — a missing
+// handler is a VALUE the caller decides about, never a crash and never
+// a default.
+def svc_current<T>(a: Atom<List<T>>) -> Option<T> =
     match deref(a) {
-        List::Cons(cell) => cell.head,
-        List::Nil => abort("svc_current: no handler installed in this slot"),
+        List::Cons(cell) => Option::Some(cell.head),
+        List::Nil => Option::None,
     }
 
 // Flip back to the previous version (which is still JIT-resident).
-// Returns the number of versions remaining. Rolling back past the first
-// version is a hard error: a service never silently becomes empty.
+// Returns the number of versions remaining. A slot holding zero or one
+// version is left UNCHANGED (a service never becomes empty); the
+// returned count tells the caller whether anything was popped.
 def svc_rollback<T>(a: Atom<List<T>>) -> Int = {
     let vs = swap(a, |vs: List<T>| svc_pop(vs));
     list_length(vs)
@@ -3336,9 +3503,10 @@ def svc_pop<T>(vs: List<T>) -> List<T> =
     match vs {
         List::Cons(cell) => match cell.tail {
             List::Cons(_prev) => cell.tail,
-            List::Nil => abort("svc_rollback: no previous version to roll back to"),
+            // A single version stays: never pop a service to empty.
+            List::Nil => vs,
         },
-        List::Nil => abort("svc_rollback: nothing installed in this slot"),
+        List::Nil => List::Nil,
     }
 
 // How many versions a slot holds (current + history).
@@ -3411,20 +3579,39 @@ mod tests {
         init();
         let ctx = Context::create();
         let driver = "
-            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
-                match hashmap_get(m, k) { Option::Some(v) => v, Option::None => d }
-            def build3() -> HashMap<String, Int> =
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
-            def t_a() -> Int = get_or(build3(), \"apple\", 0 - 1)
-            def t_b() -> Int = get_or(build3(), \"banana\", 0 - 1)
-            def t_c() -> Int = get_or(build3(), \"cherry\", 0 - 1)
-            def t_missing() -> Int = get_or(build3(), \"zebra\", 0 - 1)
-            def t_size() -> Int = hashmap_size(build3())
-            def t_replace() -> Int = {
-                let m = hashmap_assoc(build3(), \"apple\", 100);
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Result<Int, IndexError> = {
+                let o = hashmap_get(m, k)?;
+                Result::Ok(opt_unwrap_or(o, d))
+            }
+            def build3() -> Result<HashMap<String, Int>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"apple\", 1)?;
+                let m2 = hashmap_assoc(m1, \"banana\", 2)?;
+                hashmap_assoc(m2, \"cherry\", 3)
+            }
+            def t_a_go() -> Result<Int, IndexError> = { let m = build3()?; get_or(m, \"apple\", 0 - 1) }
+            def t_a() -> Int = chk(t_a_go())
+            def t_b_go() -> Result<Int, IndexError> = { let m = build3()?; get_or(m, \"banana\", 0 - 1) }
+            def t_b() -> Int = chk(t_b_go())
+            def t_c_go() -> Result<Int, IndexError> = { let m = build3()?; get_or(m, \"cherry\", 0 - 1) }
+            def t_c() -> Int = chk(t_c_go())
+            def t_missing_go() -> Result<Int, IndexError> = { let m = build3()?; get_or(m, \"zebra\", 0 - 1) }
+            def t_missing() -> Int = chk(t_missing_go())
+            def t_size_go() -> Result<Int, IndexError> = { let m = build3()?; Result::Ok(hashmap_size(m)) }
+            def t_size() -> Int = chk(t_size_go())
+            def t_replace_go() -> Result<Int, IndexError> = {
+                let m0 = build3()?;
+                let m = hashmap_assoc(m0, \"apple\", 100)?;
                 get_or(m, \"apple\", 0 - 1)
             }
-            def t_replace_size() -> Int = hashmap_size(hashmap_assoc(build3(), \"apple\", 100))
+            def t_replace() -> Int = chk(t_replace_go())
+            def t_replace_size_go() -> Result<Int, IndexError> = {
+                let m0 = build3()?;
+                let m = hashmap_assoc(m0, \"apple\", 100)?;
+                Result::Ok(hashmap_size(m))
+            }
+            def t_replace_size() -> Int = chk(t_replace_size_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3452,29 +3639,46 @@ mod tests {
         let ctx = Context::create();
         // assoc on a derived map must NOT mutate the original.
         let driver = "
-            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
-                match hashmap_get(m, k) { Option::Some(v) => v, Option::None => d }
-            def k10() -> HashMap<String, Int> =
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
-                    hashmap_empty(),
-                    \"alpha\", 1), \"beta\", 2), \"gamma\", 3), \"delta\", 4), \"epsilon\", 5),
-                    \"zeta\", 6), \"eta\", 7), \"theta\", 8), \"iota\", 9), \"kappa\", 10)
-            def old_beta() -> Int = get_or(k10(), \"beta\", 0 - 1)
-            def new_beta() -> Int = {
-                let m11 = hashmap_assoc(k10(), \"beta\", 999);
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Result<Int, IndexError> = {
+                let o = hashmap_get(m, k)?;
+                Result::Ok(opt_unwrap_or(o, d))
+            }
+            def k10() -> Result<HashMap<String, Int>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"alpha\", 1)?;
+                let m2 = hashmap_assoc(m1, \"beta\", 2)?;
+                let m3 = hashmap_assoc(m2, \"gamma\", 3)?;
+                let m4 = hashmap_assoc(m3, \"delta\", 4)?;
+                let m5 = hashmap_assoc(m4, \"epsilon\", 5)?;
+                let m6 = hashmap_assoc(m5, \"zeta\", 6)?;
+                let m7 = hashmap_assoc(m6, \"eta\", 7)?;
+                let m8 = hashmap_assoc(m7, \"theta\", 8)?;
+                let m9 = hashmap_assoc(m8, \"iota\", 9)?;
+                hashmap_assoc(m9, \"kappa\", 10)
+            }
+            def old_beta_go() -> Result<Int, IndexError> = { let m = k10()?; get_or(m, \"beta\", 0 - 1) }
+            def old_beta() -> Int = chk(old_beta_go())
+            def new_beta_go() -> Result<Int, IndexError> = {
+                let m10 = k10()?;
+                let m11 = hashmap_assoc(m10, \"beta\", 999)?;
                 get_or(m11, \"beta\", 0 - 1)
             }
-            def old_after_new() -> Int = {
-                let m10 = k10();
-                let m11 = hashmap_assoc(m10, \"beta\", 999);
+            def new_beta() -> Int = chk(new_beta_go())
+            def old_after_new_go() -> Result<Int, IndexError> = {
+                let m10 = k10()?;
+                let m11 = hashmap_assoc(m10, \"beta\", 999)?;
                 get_or(m10, \"beta\", 0 - 1)
             }
-            def shared_kappa() -> Int = {
-                let m11 = hashmap_assoc(k10(), \"beta\", 999);
+            def old_after_new() -> Int = chk(old_after_new_go())
+            def shared_kappa_go() -> Result<Int, IndexError> = {
+                let m10 = k10()?;
+                let m11 = hashmap_assoc(m10, \"beta\", 999)?;
                 get_or(m11, \"kappa\", 0 - 1)
             }
-            def size10() -> Int = hashmap_size(k10())
+            def shared_kappa() -> Int = chk(shared_kappa_go())
+            def size10_go() -> Result<Int, IndexError> = { let m = k10()?; Result::Ok(hashmap_size(m)) }
+            def size10() -> Int = chk(size10_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3504,9 +3708,19 @@ mod tests {
         let ctx = Context::create();
         let driver = "
             def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
-                match hashmap_get(m, k) { Option::Some(v) => v, Option::None => d }
+                match hashmap_get(m, k) {
+                    Result::Ok(o) => opt_unwrap_or(o, d),
+                    Result::Err(_) => 0 - 999
+                }
+            def build3_go() -> Result<HashMap<String, Int>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"apple\", 1)?;
+                let m2 = hashmap_assoc(m1, \"banana\", 2)?;
+                hashmap_assoc(m2, \"cherry\", 3)
+            }
+            // Err fallback is an EMPTY map: every Rust-side lookup assertion
+            // then fails loudly (get_or returns the -1 default).
             def build3() -> HashMap<String, Int> =
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
+                match build3_go() { Result::Ok(m) => m, Result::Err(_) => hashmap_empty() }
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3570,30 +3784,41 @@ mod tests {
         let ctx = Context::create();
         let driver = "
             struct Point { x: Int, y: Int }
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
 
             // Int keys (boxed Ints hashed/compared by content).
-            def hm_int() -> Int = {
-                let m = hashmap_assoc(hashmap_assoc(hashmap_empty(), 10, 100), 20, 200);
-                match hashmap_get(m, 20) { Option::Some(v) => v, Option::None => 0 - 1 }
+            def hm_int_go() -> Result<Int, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), 10, 100)?;
+                let m = hashmap_assoc(m1, 20, 200)?;
+                let o = hashmap_get(m, 20)?;
+                Result::Ok(opt_unwrap_or(o, 0 - 1))
             }
-            def hm_int_overwrite() -> Int = {
-                let m = hashmap_assoc(hashmap_assoc(hashmap_empty(), 7, 1), 7, 2);
-                hashmap_size(m) * 1000 + match hashmap_get(m, 7) { Option::Some(v) => v, Option::None => 0 - 1 }
+            def hm_int() -> Int = chk(hm_int_go())
+            def hm_int_overwrite_go() -> Result<Int, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), 7, 1)?;
+                let m = hashmap_assoc(m1, 7, 2)?;
+                let o = hashmap_get(m, 7)?;
+                Result::Ok(hashmap_size(m) * 1000 + opt_unwrap_or(o, 0 - 1))
             }
+            def hm_int_overwrite() -> Int = chk(hm_int_overwrite_go())
 
             // Struct keys: a DIFFERENT Point object that is structurally
             // equal must resolve to the same entry (value equality, not
-            // pointer identity).
-            // Struct literals appear as a MID call arg and inside a `match`
-            // head — both unambiguous inside the call's parens.
-            def hm_struct_hit() -> Int = {
-                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42);
-                match hashmap_get(m, Point { x: 1, y: 2 }) { Option::Some(v) => v, Option::None => 0 - 1 }
+            // pointer identity). Struct literals appear as MID call args —
+            // unambiguous inside the call's parens.
+            def hm_struct_hit_go() -> Result<Int, IndexError> = {
+                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42)?;
+                let o = hashmap_get(m, Point { x: 1, y: 2 })?;
+                Result::Ok(opt_unwrap_or(o, 0 - 1))
             }
-            def hm_struct_miss() -> Int = {
-                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42);
-                match hashmap_get(m, Point { x: 1, y: 9 }) { Option::Some(v) => v, Option::None => 0 - 1 }
+            def hm_struct_hit() -> Int = chk(hm_struct_hit_go())
+            def hm_struct_miss_go() -> Result<Int, IndexError> = {
+                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42)?;
+                let o = hashmap_get(m, Point { x: 1, y: 9 })?;
+                Result::Ok(opt_unwrap_or(o, 0 - 1))
             }
+            def hm_struct_miss() -> Int = chk(hm_struct_miss_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3619,20 +3844,51 @@ mod tests {
         // prove struct values ride too.
         let driver = "
             struct Pair { a: Int, b: Int }
-            def get_or_str(m: HashMap<String, String>, k: String, d: String) -> String =
-                match hashmap_get(m, k) { Option::Some(v) => v, Option::None => d }
-            def build_strs() -> HashMap<String, String> =
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(),
-                    \"name\", \"ada\"), \"lang\", \"ai-lang\"), \"x\", \"y\")
-            def t_lang_len() -> Int = string_len(get_or_str(build_strs(), \"lang\", \"?\"))
-            def t_name_len() -> Int = string_len(get_or_str(build_strs(), \"name\", \"?\"))
-            def t_str_miss() -> Int = string_len(get_or_str(build_strs(), \"nope\", \"MISS\"))
-            def t_str_size() -> Int = hashmap_size(build_strs())
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+            def get_or_str(m: HashMap<String, String>, k: String, d: String) -> Result<String, IndexError> = {
+                let o = hashmap_get(m, k)?;
+                Result::Ok(opt_unwrap_or(o, d))
+            }
+            def build_strs() -> Result<HashMap<String, String>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"name\", \"ada\")?;
+                let m2 = hashmap_assoc(m1, \"lang\", \"ai-lang\")?;
+                hashmap_assoc(m2, \"x\", \"y\")
+            }
+            def t_lang_len_go() -> Result<Int, IndexError> = {
+                let m = build_strs()?;
+                let s = get_or_str(m, \"lang\", \"?\")?;
+                Result::Ok(string_len(s))
+            }
+            def t_lang_len() -> Int = chk(t_lang_len_go())
+            def t_name_len_go() -> Result<Int, IndexError> = {
+                let m = build_strs()?;
+                let s = get_or_str(m, \"name\", \"?\")?;
+                Result::Ok(string_len(s))
+            }
+            def t_name_len() -> Int = chk(t_name_len_go())
+            def t_str_miss_go() -> Result<Int, IndexError> = {
+                let m = build_strs()?;
+                let s = get_or_str(m, \"nope\", \"MISS\")?;
+                Result::Ok(string_len(s))
+            }
+            def t_str_miss() -> Int = chk(t_str_miss_go())
+            def t_str_size_go() -> Result<Int, IndexError> = {
+                let m = build_strs()?;
+                Result::Ok(hashmap_size(m))
+            }
+            def t_str_size() -> Int = chk(t_str_size_go())
 
-            def build_pairs() -> HashMap<String, Pair> =
-                hashmap_assoc(hashmap_assoc(hashmap_empty(), \"p\", Pair { a: 3, b: 4 }), \"q\", Pair { a: 10, b: 20 })
-            def t_pair_sum() -> Int =
-                match hashmap_get(build_pairs(), \"q\") { Option::Some(p) => p.a + p.b, Option::None => 0 - 1 }
+            def build_pairs() -> Result<HashMap<String, Pair>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"p\", Pair { a: 3, b: 4 })?;
+                hashmap_assoc(m1, \"q\", Pair { a: 10, b: 20 })
+            }
+            def t_pair_sum_go() -> Result<Int, IndexError> = {
+                let m = build_pairs()?;
+                let o = hashmap_get(m, \"q\")?;
+                match o { Option::Some(p) => Result::Ok(p.a + p.b), Option::None => Result::Ok(0 - 1) }
+            }
+            def t_pair_sum() -> Int = chk(t_pair_sum_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3657,42 +3913,88 @@ mod tests {
         init();
         let ctx = Context::create();
         let driver = "
-            def build4() -> HashMap<String, Int> =
-                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
-                    hashmap_empty(), \"a\", 1), \"b\", 2), \"c\", 3), \"d\", 4)
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+            def build4() -> Result<HashMap<String, Int>, IndexError> = {
+                let m1 = hashmap_assoc(hashmap_empty(), \"a\", 1)?;
+                let m2 = hashmap_assoc(m1, \"b\", 2)?;
+                let m3 = hashmap_assoc(m2, \"c\", 3)?;
+                hashmap_assoc(m3, \"d\", 4)
+            }
 
             // remove: size shrinks, key gone, others survive, original intact
-            def t_rm_size() -> Int = hashmap_size(hashmap_remove(build4(), \"b\"))
-            def t_rm_gone() -> Int =
-                match hashmap_get(hashmap_remove(build4(), \"b\"), \"b\") { Option::Some(v) => 0 - 100, Option::None => 0 }
-            def t_rm_survivors() -> Int = {
-                let m2 = hashmap_remove(build4(), \"b\");
-                match hashmap_get(m2, \"a\") {
-                    Option::Some(va) => match hashmap_get(m2, \"d\") { Option::Some(vd) => va + vd, Option::None => 0 - 1 },
-                    Option::None => 0 - 2
+            def t_rm_size_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let m2 = hashmap_remove(m, \"b\")?;
+                Result::Ok(hashmap_size(m2))
+            }
+            def t_rm_size() -> Int = chk(t_rm_size_go())
+            def t_rm_gone_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let m2 = hashmap_remove(m, \"b\")?;
+                let o = hashmap_get(m2, \"b\")?;
+                match o { Option::Some(v) => Result::Ok(0 - 100), Option::None => Result::Ok(0) }
+            }
+            def t_rm_gone() -> Int = chk(t_rm_gone_go())
+            def t_rm_survivors_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let m2 = hashmap_remove(m, \"b\")?;
+                let oa = hashmap_get(m2, \"a\")?;
+                let od = hashmap_get(m2, \"d\")?;
+                match oa {
+                    Option::Some(va) => match od { Option::Some(vd) => Result::Ok(va + vd), Option::None => Result::Ok(0 - 1) },
+                    Option::None => Result::Ok(0 - 2)
                 }
             }
-            def t_rm_immutable() -> Int =
-                match hashmap_get(build4(), \"b\") { Option::Some(v) => v, Option::None => 0 - 9 }
-            def t_rm_missing_size() -> Int = hashmap_size(hashmap_remove(build4(), \"zzz\"))
-            def t_rm_then_readd() -> Int = {
-                let m2 = hashmap_assoc(hashmap_remove(build4(), \"b\"), \"b\", 99);
-                match hashmap_get(m2, \"b\") { Option::Some(v) => v, Option::None => 0 - 1 }
+            def t_rm_survivors() -> Int = chk(t_rm_survivors_go())
+            def t_rm_immutable_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let _m2 = hashmap_remove(m, \"b\")?;
+                let o = hashmap_get(m, \"b\")?;
+                Result::Ok(opt_unwrap_or(o, 0 - 9))
             }
+            def t_rm_immutable() -> Int = chk(t_rm_immutable_go())
+            def t_rm_missing_size_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let m2 = hashmap_remove(m, \"zzz\")?;
+                Result::Ok(hashmap_size(m2))
+            }
+            def t_rm_missing_size() -> Int = chk(t_rm_missing_size_go())
+            def t_rm_then_readd_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let m1 = hashmap_remove(m, \"b\")?;
+                let m2 = hashmap_assoc(m1, \"b\", 99)?;
+                let o = hashmap_get(m2, \"b\")?;
+                Result::Ok(opt_unwrap_or(o, 0 - 1))
+            }
+            def t_rm_then_readd() -> Int = chk(t_rm_then_readd_go())
 
             // contains
-            def t_has() -> Int = hashmap_contains(build4(), \"c\")
-            def t_hasnt() -> Int = hashmap_contains(build4(), \"nope\")
+            def t_has_go() -> Result<Int, IndexError> = { let m = build4()?; hashmap_contains(m, \"c\") }
+            def t_has() -> Int = chk(t_has_go())
+            def t_hasnt_go() -> Result<Int, IndexError> = { let m = build4()?; hashmap_contains(m, \"nope\") }
+            def t_hasnt() -> Int = chk(t_hasnt_go())
 
             // fold: sum of all values
-            def t_fold_sum() -> Int =
-                hashmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + v)
+            def t_fold_sum_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                hashmap_fold(m, 0, |acc: Int, k: String, v: Int| acc + v)
+            }
+            def t_fold_sum() -> Int = chk(t_fold_sum_go())
             // fold: total key-length (string V-agnostic over keys)
-            def t_fold_keylen() -> Int =
-                hashmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + string_len(k))
+            def t_fold_keylen_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                hashmap_fold(m, 0, |acc: Int, k: String, v: Int| acc + string_len(k))
+            }
+            def t_fold_keylen() -> Int = chk(t_fold_keylen_go())
 
             // keys: count via list length
-            def t_key_count() -> Int = list_length(hashmap_keys(build4()))
+            def t_key_count_go() -> Result<Int, IndexError> = {
+                let m = build4()?;
+                let ks = hashmap_keys(m)?;
+                Result::Ok(list_length(ks))
+            }
+            def t_key_count() -> Int = chk(t_key_count_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3736,12 +4038,19 @@ mod tests {
             // A PMap-valued state, to show it's not Int-specific. Driven
             // entirely inside ail so the test calls a plain `() -> Int`.
             state nstore: Atom<HashMap<String, Int>> = atom(hashmap_empty())
+            // Err keeps the old map: the later ns_get then misses (-1) and
+            // the Rust assertion fails loudly.
+            def ns_assoc(m: HashMap<String, Int>, k: String, v: Int) -> HashMap<String, Int> =
+                match hashmap_assoc(m, k, v) { Result::Ok(m2) => m2, Result::Err(_) => m }
             def ns_put(k: String, v: Int) -> Int = {
-                let _s = swap(nstore, |m: HashMap<String, Int>| hashmap_assoc(m, k, v));
+                let _s = swap(nstore, |m: HashMap<String, Int>| ns_assoc(m, k, v));
                 v
             }
             def ns_get(k: String) -> Int =
-                match hashmap_get(deref(nstore), k) { Option::Some(v) => v, Option::None => 0 - 1 }
+                match hashmap_get(deref(nstore), k) {
+                    Result::Ok(o) => opt_unwrap_or(o, 0 - 1),
+                    Result::Err(_) => 0 - 999
+                }
             def ns_t_store() -> Int = {
                 let _a = ns_put(\"x\", 41);
                 let _b = ns_put(\"y\", 1);
@@ -3797,12 +4106,19 @@ mod tests {
                 swap(a, |x: Int| x + 1)             // returns 11
             }
             def empty_int_map() -> HashMap<String, Int> = hashmap_empty()
+            // Err keeps the old map, so the final lookup misses (-1) and the
+            // Rust assertion fails loudly.
+            def assoc_or_self(m: HashMap<String, Int>, k: String, v: Int) -> HashMap<String, Int> =
+                match hashmap_assoc(m, k, v) { Result::Ok(m2) => m2, Result::Err(_) => m }
             def t_pmap() -> Int = {
                 let a = atom(empty_int_map());
-                let _1 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 7));
-                let _2 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 9));
+                let _1 = swap(a, |m: HashMap<String, Int>| assoc_or_self(m, \"k\", 7));
+                let _2 = swap(a, |m: HashMap<String, Int>| assoc_or_self(m, \"k\", 9));
                 let m = deref(a);
-                match hashmap_get(m, \"k\") { Option::Some(v) => v, Option::None => 0 - 1 }
+                match hashmap_get(m, \"k\") {
+                    Result::Ok(o) => opt_unwrap_or(o, 0 - 1),
+                    Result::Err(_) => 0 - 999
+                }
             }
             def t_string() -> Int = {
                 let a = atom(\"hi\");
@@ -3891,20 +4207,26 @@ mod tests {
         init();
         let ctx = Context::create();
         let driver = "
-            def isolated() -> Int = {
+            def chk(r: Result<Int, IndexError>) -> Int =
+                match r { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+            def set0(b: Bytes, v: Int) -> Int =
+                match bytes_set(b, 0, v) { Result::Ok(x) => x, Result::Err(_) => 0 - 999 }
+            def isolated_go() -> Result<Int, IndexError> = {
                 let b = bytes_new(1);
                 let _z = bytes_set(b, 0, 7)?;
-                let h = spawn(|| bytes_set(b, 0, 99)?);
+                let h = spawn(|| set0(b, 99));
                 let _j = join(h);
-                bytes_get(b, 0)?
+                bytes_get(b, 0)
             }
-            def shared() -> Int = {
+            def isolated() -> Int = chk(isolated_go())
+            def shared_go() -> Result<Int, IndexError> = {
                 let b = bytes_new(1);
                 let _z = bytes_set(b, 0, 7)?;
-                let h = spawn_shared(|| bytes_set(b, 0, 99)?);
+                let h = spawn_shared(|| set0(b, 99));
                 let _j = join(h);
-                bytes_get(b, 0)?
+                bytes_get(b, 0)
             }
+            def shared() -> Int = chk(shared_go())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -4059,14 +4381,21 @@ mod tests {
             }
             // Same for a PMap (deep reference value) carried through GC.
             def empty_im() -> HashMap<String, Int> = hashmap_empty()
+            // Err keeps the old map: the final lookup then misses (-1) and
+            // the Rust assertion fails loudly.
+            def assoc_or_self(m: HashMap<String, Int>, k: String, v: Int) -> HashMap<String, Int> =
+                match hashmap_assoc(m, k, v) { Result::Ok(m2) => m2, Result::Err(_) => m }
             def t_hashmap_gc() -> Int = {
                 let a = atom(empty_im());
-                let _1 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 41));
+                let _1 = swap(a, |m: HashMap<String, Int>| assoc_or_self(m, \"k\", 41));
                 let _c = churn(200);
                 let _t = gc_collect();
-                let _2 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 9));
+                let _2 = swap(a, |m: HashMap<String, Int>| assoc_or_self(m, \"k\", 9));
                 let m = deref(a);
-                match hashmap_get(m, \"k\") { Option::Some(v) => v, Option::None => 0 - 1 }
+                match hashmap_get(m, \"k\") {
+                    Result::Ok(o) => opt_unwrap_or(o, 0 - 1),
+                    Result::Err(_) => 0 - 999
+                }
             }
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
@@ -4173,29 +4502,29 @@ mod tests {
     fn generic_builtin_as_first_class_value() {
         init();
         let ctx = Context::create();
-        // Generic core builtins (`array_get`, `atom_swap`) used as bare
+        // Generic core builtins (`array_len`, `atom_swap`) used as bare
         // VALUES. Their signatures carry a `TypeVar`, so the adapter closure
         // is polymorphic and composes through the uniform closure ABI; the
         // concrete (un)boxing is settled at the call site that pins the
         // TypeVars — for an indirect call that's `compile_indirect_call`'s
         // instantiation-aware unboxing, for a direct call the `TopRef` path.
+        // (The CHECKED accessors `array_get`/`array_set` are by design NOT
+        // usable as bare values — see the rejection assertion below.)
         let driver = "
-            // array_get passed into a monomorphic higher-order fn.
-            def first_int(a: Array<Int>, g: fn(Array<Int>, Int) -> Int) -> Int = g(a, 0)
+            // array_len passed into a monomorphic higher-order fn.
+            def len_of(a: Array<Int>, g: fn(Array<Int>) -> Int) -> Int = g(a)
             def t_hof() -> Int = {
                 let arr = array_new(2);
-                let _1 = array_set(arr, 0, 42)?;
-                first_int(arr, array_get_trusted)
+                len_of(arr, array_len)
             }
-            // array_get_trusted let-bound, then called where the array type pins T=Int.
-            def get0(a: Array<Int>) -> Int = {
-                let g = array_get_trusted;
-                g(a, 0)
+            // array_len let-bound, then called where the array type pins T=Int.
+            def len0(a: Array<Int>) -> Int = {
+                let g = array_len;
+                g(a)
             }
             def t_letbound() -> Int = {
                 let arr = array_new(1);
-                let _1 = array_set(arr, 0, 7)?;
-                get0(arr)
+                len0(arr)
             }
             // atom_swap passed by value (the lock-free CAS primitive).
             def do_swap(a: Atom<Int>, f: fn(Atom<Int>, fn(Int) -> Int) -> Int) -> Int =
@@ -4213,10 +4542,24 @@ mod tests {
                     .unwrap()
                     .call(rt.thread_ptr())
             };
-            assert_eq!(f("t_hof"), 42, "array_get passed by value to a monomorphic HOF");
-            assert_eq!(f("t_letbound"), 7, "let-bound array_get called where T pins to Int");
+            assert_eq!(f("t_hof"), 2, "array_len passed by value to a monomorphic HOF");
+            assert_eq!(f("t_letbound"), 1, "let-bound array_len called where T pins to Int");
             assert_eq!(f("t_atom"), 105, "atom_swap passed by value (5 + 100)");
         }
+
+        // The checked accessors are NOT bare values: the resolver rejects
+        // them with a wrap-it-in-a-lambda suggestion rather than silently
+        // producing an unchecked function value.
+        let combined = format!(
+            "{}\n{}",
+            SOURCE, "def bad() -> Int = { let g = array_get; 0 }"
+        );
+        let m = parse_module(&combined).expect("parse");
+        let err = resolve_module(&m);
+        assert!(
+            err.is_err(),
+            "expected bare-value `array_get` to be rejected at resolve time"
+        );
     }
 
     #[test]
@@ -4228,13 +4571,22 @@ mod tests {
         let driver = "
             enum Op { OGet(String), OPut(Pair), OBump(String) }
             struct Pair { pk: String, pv: Int }
+            def hm_get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
+                match hashmap_get(m, k) {
+                    Result::Ok(o) => opt_unwrap_or(o, d),
+                    Result::Err(_) => 0 - 999
+                }
+            // Err keeps the old map: later OGets then miss and the packed
+            // result diverges from the Rust assertion.
+            def hm_assoc_or_self(m: HashMap<String, Int>, k: String, v: Int) -> HashMap<String, Int> =
+                match hashmap_assoc(m, k, v) { Result::Ok(m2) => m2, Result::Err(_) => m }
             def op(store: Atom<HashMap<String, Int>>, msg: Op) -> Int =
                 match msg {
-                    Op::OGet(k) => match hashmap_get(deref(store), k) { Option::Some(v) => v, Option::None => 0 - 1 },
-                    Op::OPut(p) => { let _s = swap(store, |m: HashMap<String, Int>| hashmap_assoc(m, p.pk, p.pv)); p.pv },
+                    Op::OGet(k) => hm_get_or(deref(store), k, 0 - 1),
+                    Op::OPut(p) => { let _s = swap(store, |m: HashMap<String, Int>| hm_assoc_or_self(m, p.pk, p.pv)); p.pv },
                     Op::OBump(k) => {
-                        let cur = match hashmap_get(deref(store), k) { Option::Some(v) => v, Option::None => 0 };
-                        let _s = swap(store, |m: HashMap<String, Int>| hashmap_assoc(m, k, cur + 1));
+                        let cur = hm_get_or(deref(store), k, 0);
+                        let _s = swap(store, |m: HashMap<String, Int>| hm_assoc_or_self(m, k, cur + 1));
                         cur + 1
                     },
                 }
@@ -4911,20 +5263,24 @@ mod tests {
             &ctx,
             "struct GPair<V> { gk: String, gv: V }
              enum GWrap<V> { GNone, GSome(GPair<V>) }
-             def fill_one<V>(a: Array<GWrap<V>>, w: GWrap<V>) -> Int = array_set(a, 0, w)?
-             def find_rec<V>(a: Array<GWrap<V>>, i: Int, n: Int) -> Option<V> =
-                if i >= n { Option::None }
+             def fill_one<V>(a: Array<GWrap<V>>, w: GWrap<V>) -> Result<Int, IndexError> =
+                array_set(a, 0, w)
+             def find_rec<V>(a: Array<GWrap<V>>, i: Int, n: Int) -> Result<Option<V>, IndexError> =
+                if i >= n { Result::Ok(Option::None) }
                 else {
                     match array_get(a, i)? {
                         GWrap::GNone => find_rec(a, i + 1, n),
-                        GWrap::GSome(p) => Option::Some(p.gv),
+                        GWrap::GSome(p) => Result::Ok(Option::Some(p.gv)),
                     }
                 }
-             def t() -> Int = {
+             def t_go() -> Result<Int, IndexError> = {
                 let a = array_new(2);
-                let _x = fill_one(a, GWrap::GSome(GPair { gk: \"x\", gv: 5 }));
-                opt_unwrap_or(find_rec(a, 0, 2), 0)
-             }",
+                let _x = fill_one(a, GWrap::GSome(GPair { gk: \"x\", gv: 5 }))?;
+                let o = find_rec(a, 0, 2)?;
+                Result::Ok(opt_unwrap_or(o, 0))
+             }
+             def t() -> Int =
+                match t_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             let f = jit.get_fn0(&names["t"]).unwrap();
@@ -4940,16 +5296,18 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def t() -> Int = {
-                let m0 = smap_new();
-                let m1 = smap_insert(m0, \"alpha\", 10);
-                let m2 = smap_insert(m1, \"beta\", 20);
-                let m3 = smap_insert(m2, \"alpha\", 99);
-                let a = opt_unwrap_or(smap_get(m3, \"alpha\"), 0);
-                let b = opt_unwrap_or(smap_get(m3, \"beta\"), 0);
-                let miss = opt_unwrap_or(smap_get(m3, \"gamma\"), 0);
-                a * 1000 + b * 10 + miss + smap_size(m3) * 100000
-             }",
+            "def t_go() -> Result<Int, IndexError> = {
+                let m0 = smap_new()?;
+                let m1 = smap_insert(m0, \"alpha\", 10)?;
+                let m2 = smap_insert(m1, \"beta\", 20)?;
+                let m3 = smap_insert(m2, \"alpha\", 99)?;
+                let a = opt_unwrap_or(smap_get(m3, \"alpha\")?, 0);
+                let b = opt_unwrap_or(smap_get(m3, \"beta\")?, 0);
+                let miss = opt_unwrap_or(smap_get(m3, \"gamma\")?, 0);
+                Result::Ok(a * 1000 + b * 10 + miss + smap_size(m3) * 100000)
+             }
+             def t() -> Int =
+                match t_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             let f = jit.get_fn0(&names["t"]).unwrap();
@@ -4967,20 +5325,33 @@ mod tests {
         // resizes, then sum all looked-up values back.
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def key_of(i: Int) -> String = {
+            "def key_of(i: Int) -> Result<String, IndexError> = {
                 let b = bytes_new(1);
                 let _x = bytes_set(b, 0, 65 + i)?;
-                string_from_bytes(b)
+                Result::Ok(string_from_bytes(b))
              }
-             def build(m: StringMap<Int>, i: Int, n: Int) -> StringMap<Int> =
-                if i >= n { m } else { build(smap_insert(m, key_of(i), i * i), i + 1, n) }
-             def check(m: StringMap<Int>, i: Int, n: Int, acc: Int) -> Int =
-                if i >= n { acc }
-                else { check(m, i + 1, n, acc + opt_unwrap_or(smap_get(m, key_of(i)), 0 - 999)) }
-             def t() -> Int = {
-                let m = build(smap_new(), 0, 26);
-                check(m, 0, 26, 0) + smap_size(m) * 1000000
-             }",
+             def build(m: StringMap<Int>, i: Int, n: Int) -> Result<StringMap<Int>, IndexError> =
+                if i >= n { Result::Ok(m) }
+                else {
+                    let k = key_of(i)?;
+                    let m2 = smap_insert(m, k, i * i)?;
+                    build(m2, i + 1, n)
+                }
+             def check(m: StringMap<Int>, i: Int, n: Int, acc: Int) -> Result<Int, IndexError> =
+                if i >= n { Result::Ok(acc) }
+                else {
+                    let k = key_of(i)?;
+                    let v = opt_unwrap_or(smap_get(m, k)?, 0 - 999);
+                    check(m, i + 1, n, acc + v)
+                }
+             def t_go() -> Result<Int, IndexError> = {
+                let m0 = smap_new()?;
+                let m = build(m0, 0, 26)?;
+                let c = check(m, 0, 26, 0)?;
+                Result::Ok(c + smap_size(m) * 1000000)
+             }
+             def t() -> Int =
+                match t_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             let f = jit.get_fn0(&names["t"]).unwrap();
@@ -5004,12 +5375,16 @@ mod tests {
             "def make() -> Array<Float> = array_new(3)
              def opt_test() -> Int =
                 float_to_int(opt_unwrap_or(Option::Some(2.5), 0.0) * 4.0)
-             def arr_test() -> Int = {
+             def arr_go() -> Result<Int, IndexError> = {
                 let a = make();
                 let _x = array_set(a, 0, 1.25)?;
                 let _y = array_set(a, 1, 3.75)?;
-                float_to_int((array_get(a, 0)? + array_get(a, 1)?) * 2.0)
-             }",
+                let v0 = array_get(a, 0)?;
+                let v1 = array_get(a, 1)?;
+                Result::Ok(float_to_int((v0 + v1) * 2.0))
+             }
+             def arr_test() -> Int =
+                match arr_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             // Some(2.5) -> 2.5 * 4 = 10
@@ -5027,16 +5402,18 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def t() -> Int = {
-                let m0 = imap_new();
-                let m1 = imap_insert(m0, 100, 10);
-                let m2 = imap_insert(m1, 200, 20);
-                let m3 = imap_insert(m2, 100, 99);
-                let a = opt_unwrap_or(imap_get(m3, 100), 0);
-                let b = opt_unwrap_or(imap_get(m3, 200), 0);
-                let miss = opt_unwrap_or(imap_get(m3, 300), 0);
-                a * 1000 + b * 10 + miss + imap_size(m3) * 100000
-             }",
+            "def t_go() -> Result<Int, IndexError> = {
+                let m0 = imap_new()?;
+                let m1 = imap_insert(m0, 100, 10)?;
+                let m2 = imap_insert(m1, 200, 20)?;
+                let m3 = imap_insert(m2, 100, 99)?;
+                let a = opt_unwrap_or(imap_get(m3, 100)?, 0);
+                let b = opt_unwrap_or(imap_get(m3, 200)?, 0);
+                let miss = opt_unwrap_or(imap_get(m3, 300)?, 0);
+                Result::Ok(a * 1000 + b * 10 + miss + imap_size(m3) * 100000)
+             }
+             def t() -> Int =
+                match t_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             let f = jit.get_fn0(&names["t"]).unwrap();
@@ -5053,15 +5430,26 @@ mod tests {
         // collide mod small caps exercise probing), then sum gets back.
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def build(m: IntMap<Int>, i: Int, n: Int) -> IntMap<Int> =
-                if i >= n { m } else { build(imap_insert(m, i, i * 2), i + 1, n) }
-             def check(m: IntMap<Int>, i: Int, n: Int, acc: Int) -> Int =
-                if i >= n { acc }
-                else { check(m, i + 1, n, acc + opt_unwrap_or(imap_get(m, i), 0 - 999)) }
-             def t() -> Int = {
-                let m = build(imap_new(), 0, 40);
-                check(m, 0, 40, 0) + imap_size(m) * 1000000
-             }",
+            "def build(m: IntMap<Int>, i: Int, n: Int) -> Result<IntMap<Int>, IndexError> =
+                if i >= n { Result::Ok(m) }
+                else {
+                    let m2 = imap_insert(m, i, i * 2)?;
+                    build(m2, i + 1, n)
+                }
+             def check(m: IntMap<Int>, i: Int, n: Int, acc: Int) -> Result<Int, IndexError> =
+                if i >= n { Result::Ok(acc) }
+                else {
+                    let v = opt_unwrap_or(imap_get(m, i)?, 0 - 999);
+                    check(m, i + 1, n, acc + v)
+                }
+             def t_go() -> Result<Int, IndexError> = {
+                let m0 = imap_new()?;
+                let m = build(m0, 0, 40)?;
+                let c = check(m, 0, 40, 0)?;
+                Result::Ok(c + imap_size(m) * 1000000)
+             }
+             def t() -> Int =
+                match t_go() { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }",
         );
         unsafe {
             let f = jit.get_fn0(&names["t"]).unwrap();
@@ -5069,72 +5457,6 @@ mod tests {
             let expected: i64 = (0..40).map(|i: i64| i * 2).sum::<i64>() + 40_000_000;
             assert_eq!(f.call(rt.thread_ptr()), expected);
         }
-    }
-
-    // ---- abort / Never ----
-    //
-    // There is no panic channel: errors a program models are `Result`
-    // values, and `abort(msg)` (a reached BUG) kills the process — which
-    // an in-process test cannot observe. These tests cover the COMPILE
-    // and happy-path behavior of diverging branches; the abort path
-    // itself is exercised end-to-end by running a crashing program in a
-    // subprocess (see the e2e harness).
-
-    /// `abort` in an *unreached* `if` branch: the other branch is `Int`,
-    /// so the `if` typechecks (Never unifies with Int) and codegens (the
-    /// abort branch terminates with `unreachable`; the phi takes only
-    /// the surviving branch). Exercising the happy path proves the
-    /// abort branch doesn't corrupt the reached one.
-    #[test]
-    fn abort_in_if_branch_happy_path_runs() {
-        init();
-        let ctx = Context::create();
-        let (rt, jit, names) = build_with_stdlib(
-            &ctx,
-            "def guard(x: Int) -> Int =
-                if x < 0 { abort(\"negative input\") } else { x + 1 }",
-        );
-        unsafe {
-            let f = jit.get_fn1(&names["guard"]).unwrap();
-            assert_eq!(f.call(rt.thread_ptr(), 5), 6);
-            assert_eq!(f.call(rt.thread_ptr(), 0), 1);
-        }
-    }
-
-    /// `abort` in an *unreached* match arm. The `Some` arm returns Int;
-    /// the `None` arm diverges. Typechecks (arm types Int vs Never agree
-    /// → Int) and the reached arm returns the right value.
-    #[test]
-    fn abort_in_match_arm_happy_path_runs() {
-        init();
-        let ctx = Context::create();
-        let (rt, jit, names) = build_with_stdlib(
-            &ctx,
-            "def classify(x: Int) -> Int =
-                match Option::Some(x) {
-                    Option::Some(_) => 100,
-                    Option::None => abort(\"impossible\")
-                }",
-        );
-        unsafe {
-            let f = jit.get_fn1(&names["classify"]).unwrap();
-            assert_eq!(f.call(rt.thread_ptr(), 7), 100);
-            assert_eq!(f.call(rt.thread_ptr(), -3), 100);
-        }
-    }
-
-    /// A function whose entire body is `abort` typechecks against ANY
-    /// declared return type (Never is the bottom type). It compiles to a
-    /// well-formed function; we don't call it.
-    #[test]
-    fn abort_as_whole_body_typechecks_against_any_return() {
-        init();
-        let ctx = Context::create();
-        let (_rt, _jit, names) = build_with_stdlib(
-            &ctx,
-            "def boom() -> String = abort(\"always\")",
-        );
-        assert!(names.contains_key("boom"));
     }
 
     // ---- checked indexing: Result-returning array/bytes accessors ----
@@ -5160,6 +5482,7 @@ mod tests {
                     Result::Ok(v) => v,
                     Result::Err(e) => match e {
                         IndexError::OutOfBounds(o) => 0 - (o.index * 1000 + o.len),
+                        IndexError::Uninitialized(o) => 0 - (o.index * 1000 + o.len) - 500000,
                     },
                 }",
         );
@@ -5185,7 +5508,10 @@ mod tests {
             "def mk(n: Int) -> Array<Int> = array_new(n)
              def run(i: Int) -> Int = {
                 let a = mk(2);
-                let _s = array_set(a, 0, 7)?;
+                let _s = match array_set(a, 0, 7) {
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 999,
+                };
                 let r = array_get(a, i);
                 match r {
                     Result::Ok(v) => v,
@@ -5449,15 +5775,24 @@ mod tests {
             &ctx,
             "def int_at(j: Json, path: String) -> Int =
                 match json_get(j, path) {
-                    Option::Some(v) => match json_int(v) { Option::Some(n) => n, Option::None => 0 - 1 },
-                    Option::None => 0 - 1
+                    Result::Ok(o) => match o {
+                        Option::Some(v) => match json_int(v) { Option::Some(n) => n, Option::None => 0 - 1 },
+                        Option::None => 0 - 1
+                    },
+                    Result::Err(_) => 0 - 999
                 }
              def len_at(j: Json, path: String) -> Int =
-                match json_get(j, path) { Option::Some(v) => json_len(v), Option::None => 0 - 1 }
+                match json_get(j, path) {
+                    Result::Ok(o) => match o { Option::Some(v) => json_len(v), Option::None => 0 - 1 },
+                    Result::Err(_) => 0 - 999
+                }
              def strlen_at(j: Json, path: String) -> Int =
                 match json_get(j, path) {
-                    Option::Some(v) => match json_string(v) { Option::Some(s) => string_len(s), Option::None => 0 - 1 },
-                    Option::None => 0 - 1
+                    Result::Ok(o) => match o {
+                        Option::Some(v) => match json_string(v) { Option::Some(s) => string_len(s), Option::None => 0 - 1 },
+                        Option::None => 0 - 1
+                    },
+                    Result::Err(_) => 0 - 999
                 }
              def test_json() -> Int =
                 match parse_json(\"{\\\"name\\\":\\\"ai-lang\\\",\\\"meta\\\":{\\\"version\\\":2},\\\"tags\\\":[\\\"a\\\",\\\"b\\\",\\\"c\\\"]}\") {
@@ -5466,7 +5801,10 @@ mod tests {
                         let tags = len_at(j, \"tags\");
                         let ver = int_at(j, \"meta.version\");
                         let namelen = strlen_at(j, \"name\");
-                        let missing = match json_get(j, \"nope\") { Option::Some(x) => 1, Option::None => 0 };
+                        let missing = match json_get(j, \"nope\") {
+                            Result::Ok(o) => match o { Option::Some(x) => 1, Option::None => 0 },
+                            Result::Err(_) => 0 - 999
+                        };
                         tags * 10000 + ver * 1000 + namelen * 10 + missing
                     }
                 }
@@ -5561,12 +5899,17 @@ mod tests {
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
             "def test_sha256() -> Int =
-                string_eq(sha256_hex(\"abc\"),
-                  \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\")
+                match sha256_hex(\"abc\") {
+                    Result::Ok(h) => string_eq(h,
+                      \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"),
+                    Result::Err(_) => 0 - 999
+                }
              def test_hmac() -> Int =
-                string_eq(
-                  hmac_sha256_hex(\"key\", \"The quick brown fox jumps over the lazy dog\"),
-                  \"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\")",
+                match hmac_sha256_hex(\"key\", \"The quick brown fox jumps over the lazy dog\") {
+                    Result::Ok(h) => string_eq(h,
+                      \"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\"),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         unsafe {
             assert_eq!(jit.get_fn0(&names["test_sha256"]).unwrap().call(rt.thread_ptr()), 1);
@@ -5586,13 +5929,16 @@ mod tests {
         // date 20150830, region us-east-1, service iam.
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def sigkey() -> String =
+            "def sigkey() -> Result<String, IndexError> =
                 aws_sigv4_signing_key(
                     \"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY\",
                     \"20150830\", \"us-east-1\", \"iam\")
              def matches() -> Int =
-                string_eq(sigkey(),
-                  \"c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9\")",
+                match sigkey() {
+                    Result::Ok(k) => string_eq(k,
+                      \"c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9\"),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         unsafe {
             assert_eq!(jit.get_fn0(&names["matches"]).unwrap().call(rt.thread_ptr()), 1);
@@ -5662,7 +6008,10 @@ mod tests {
                     }
                 }
              def run(port: Int, n: Int) -> Int =
-                check(http_request_many(build_reqs(port, 0, n)), 0)",
+                match http_request_many(build_reqs(port, 0, n)) {
+                    Result::Ok(resps) => check(resps, 0),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         let correct = unsafe {
             jit.engine
@@ -5741,7 +6090,10 @@ mod tests {
                 }
              def partial(resp: HttpResponse) -> Int =
                 match parse_json(resp.body) {
-                    Result::Ok(j) => match json_get(j, \"sum\") { Option::Some(v) => match json_int(v) { Option::Some(x) => x, Option::None => 0 }, Option::None => 0 },
+                    Result::Ok(j) => match json_get(j, \"sum\") {
+                        Result::Ok(o) => match o { Option::Some(v) => match json_int(v) { Option::Some(x) => x, Option::None => 0 }, Option::None => 0 },
+                        Result::Err(_) => 0 - 999
+                    },
                     Result::Err(e) => 0
                 }
              def reduce_sum(resps: List<HttpResponse>, acc: Int) -> Int =
@@ -5750,7 +6102,10 @@ mod tests {
                     List::Cons(cell) => reduce_sum(cell.tail, acc + partial(cell.head))
                 }
              def run(port: Int, total: Int, per: Int) -> Int =
-                reduce_sum(http_request_many(chunk_reqs(port, 0, total, per, List::Nil)), 0)",
+                match http_request_many(chunk_reqs(port, 0, total, per, List::Nil)) {
+                    Result::Ok(resps) => reduce_sum(resps, 0),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         let result = unsafe {
             jit.engine
@@ -5773,8 +6128,13 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def t_plain() -> Int = string_eq(uri_encode_path(\"ai-lang/test.txt\"), \"ai-lang/test.txt\")
-             def t_special() -> Int = string_eq(uri_encode_path(\"a b/c+d.txt\"), \"a%20b/c%2Bd.txt\")",
+            "def enc_eq(s: String, want: String) -> Int =
+                match uri_encode_path(s) {
+                    Result::Ok(e) => string_eq(e, want),
+                    Result::Err(_) => 0 - 999
+                }
+             def t_plain() -> Int = enc_eq(\"ai-lang/test.txt\", \"ai-lang/test.txt\")
+             def t_special() -> Int = enc_eq(\"a b/c+d.txt\", \"a%20b/c%2Bd.txt\")",
         );
         unsafe {
             assert_eq!(jit.get_fn0(&names["t_plain"]).unwrap().call(rt.thread_ptr()), 1);
@@ -5795,13 +6155,20 @@ mod tests {
              def t_xor() -> Int = bit_xor(12, 10)
              def t_shl() -> Int = bit_shl(1, 4)
              def t_shr() -> Int = bit_shr(256, 4)
-             def t_b64_foobar() -> Int = string_eq(base64_encode(\"foobar\"), \"Zm9vYmFy\")
-             def t_b64_foob() -> Int = string_eq(base64_encode(\"foob\"), \"Zm9vYg==\")
-             def t_b64_fooba() -> Int = string_eq(base64_encode(\"fooba\"), \"Zm9vYmE=\")
-             def t_b64_empty() -> Int = string_eq(base64_encode(\"\"), \"\")
-             def t_crc_foobar() -> Int = crc32(\"foobar\")
-             def t_crc_foo() -> Int = crc32(\"foo\")
-             def t_crc_empty() -> Int = crc32(\"\")",
+             def b64_eq(s: String, want: String) -> Int =
+                match base64_encode(s) {
+                    Result::Ok(e) => string_eq(e, want),
+                    Result::Err(_) => 0 - 999
+                }
+             def crc_of(s: String) -> Int =
+                match crc32(s) { Result::Ok(v) => v, Result::Err(_) => 0 - 999 }
+             def t_b64_foobar() -> Int = b64_eq(\"foobar\", \"Zm9vYmFy\")
+             def t_b64_foob() -> Int = b64_eq(\"foob\", \"Zm9vYg==\")
+             def t_b64_fooba() -> Int = b64_eq(\"fooba\", \"Zm9vYmE=\")
+             def t_b64_empty() -> Int = b64_eq(\"\", \"\")
+             def t_crc_foobar() -> Int = crc_of(\"foobar\")
+             def t_crc_foo() -> Int = crc_of(\"foo\")
+             def t_crc_empty() -> Int = crc_of(\"\")",
         );
         unsafe {
             let g = |n: &str| jit.get_fn0(&names[n]).unwrap().call(rt.thread_ptr());
@@ -5862,12 +6229,15 @@ mod tests {
                 let host = string_concat(\"127.0.0.1:\", p);
                 let path = \"/2015-03-31/functions\";
                 let url = str3(\"http://\", host, path);
-                let zip = zip_one(\"bootstrap\", \"#!/bin/sh\\nexec ai-lang run main\\n\");
-                match lambda_create_at(url, host, path, \"us-east-1\",
-                        \"prog-b\", \"arn:aws:iam::0:role/r\", zip,
-                        \"AKIDEXAMPLE\", \"SECRETKEY\", \"\") {
-                    Result::Ok(resp) => resp.status,
-                    Result::Err(e) => 0 - 1
+                match zip_one(\"bootstrap\", \"#!/bin/sh\\nexec ai-lang run main\\n\") {
+                    Result::Err(_) => 0 - 999,
+                    Result::Ok(zip) =>
+                        match lambda_create_at(url, host, path, \"us-east-1\",
+                                \"prog-b\", \"arn:aws:iam::0:role/r\", zip,
+                                \"AKIDEXAMPLE\", \"SECRETKEY\", \"\") {
+                            Result::Ok(resp) => resp.status,
+                            Result::Err(e) => 0 - 1
+                        }
                 }
              }",
         );
@@ -5928,7 +6298,13 @@ mod tests {
         let ctx = Context::create();
         let src = format!(
             "def make_zip() -> Int =
-                fs_write(\"{path}\", zip_one(\"bootstrap\", \"#!/bin/sh\\necho hello-from-ai-lang\\n\"))",
+                match zip_one(\"bootstrap\", \"#!/bin/sh\\necho hello-from-ai-lang\\n\") {{
+                    Result::Err(_) => 0 - 999,
+                    Result::Ok(z) => match fs_write(\"{path}\", z) {{
+                        Result::Ok(w) => w,
+                        Result::Err(_) => 0 - 998
+                    }}
+                }}",
             path = path_str
         );
         let (rt, jit, names) = build_with_stdlib(&ctx, &src);
@@ -5970,7 +6346,7 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def authz() -> String =
+            "def authz() -> Result<String, IndexError> =
                 sigv4_authorization(
                     \"GET\", \"/\", \"\",
                     RequestHeaders::RHCons(RHCell { head: sig_header(\"x-amz-date\", \"20150830T123600Z\"), tail:
@@ -5980,8 +6356,11 @@ mod tests {
                     \"us-east-1\", \"service\",
                     \"20150830T123600Z\", \"20150830\")
              def matches() -> Int =
-                string_eq(authz(),
-                  \"AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31\")",
+                match authz() {
+                    Result::Ok(a) => string_eq(a,
+                      \"AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31\"),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         unsafe {
             assert_eq!(jit.get_fn0(&names["matches"]).unwrap().call(rt.thread_ptr()), 1);
@@ -6254,8 +6633,16 @@ mod tests {
         let ctx = Context::create();
         let (rt, jit, names) = build_with_stdlib(
             &ctx,
-            "def dt() -> Int = string_eq(amz_datetime(1440937560), \"20150830T122600Z\")
-             def ds() -> Int = string_eq(amz_datestamp(1440937560), \"20150830\")",
+            "def dt() -> Int =
+                match amz_datetime(1440937560) {
+                    Result::Ok(s) => string_eq(s, \"20150830T122600Z\"),
+                    Result::Err(_) => 0 - 999
+                }
+             def ds() -> Int =
+                match amz_datestamp(1440937560) {
+                    Result::Ok(s) => string_eq(s, \"20150830\"),
+                    Result::Err(_) => 0 - 999
+                }",
         );
         unsafe {
             assert_eq!(jit.get_fn0(&names["dt"]).unwrap().call(rt.thread_ptr()), 1);
@@ -6281,19 +6668,32 @@ mod tests {
         let ctx = Context::create();
         let src = format!(
             "def fs_roundtrip() -> Int = {{
-                let w = fs_write(\"{path}\", \"roundtrip!\");
+                let w = match fs_write(\"{path}\", \"roundtrip!\") {{
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 999
+                }};
                 match read_file(\"{path}\") {{
                     Result::Ok(c) => w + string_len(c),
                     Result::Err(e) => 0 - 1
                 }}
              }}
-             def env_len() -> Int = string_len(env_get(\"AI_LANG_TEST_VAR_OSXYZ\"))
-             def env_missing() -> Int = env_has(\"AI_LANG_DEFINITELY_UNSET_VAR_QQQ\")
+             def env_len() -> Int =
+                match env_get(\"AI_LANG_TEST_VAR_OSXYZ\") {{
+                    Result::Ok(s) => string_len(s),
+                    Result::Err(_) => 0 - 999
+                }}
+             def env_missing() -> Int =
+                match env_has(\"AI_LANG_DEFINITELY_UNSET_VAR_QQQ\") {{
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 999
+                }}
              def clock_ok() -> Int = if now_unix() > 1700000000 {{ 1 }} else {{ 0 }}
              def clock_millis_ok() -> Int =
                 if now_unix_millis() > 1700000000000 {{ 1 }} else {{ 0 }}
-             def fs_exists_ok() -> Int = fs_exists(\"{path}\")
-             def fs_missing() -> Int = fs_exists(\"/no/such/path/qqzz_unlikely\")",
+             def exists_of(p: String) -> Int =
+                match fs_exists(p) {{ Result::Ok(v) => v, Result::Err(_) => 0 - 999 }}
+             def fs_exists_ok() -> Int = exists_of(\"{path}\")
+             def fs_missing() -> Int = exists_of(\"/no/such/path/qqzz_unlikely\")",
             path = path_str
         );
         let (rt, jit, names) = build_with_stdlib(&ctx, &src);
