@@ -3231,6 +3231,30 @@ impl<'ctx> Codegen<'ctx> {
                     self.write_root_slot(frame_alloca, info, next_root_slot, ptr)?;
                 next_root_slot += 1;
                 param_slots.push(TailParamSlot::Ptr(slot));
+            } else if matches!(ty, Type::Builtin(n) if n == "Float") {
+                // Float params get a DOUBLE slot so a self-tail-call's
+                // loop-carried accumulator stays in the FP register file
+                // (see TailParamSlot::Float). The fn ABI still passes
+                // raw i64 bits; bitcast at the boundary.
+                let f64_ty = self.context.f64_type();
+                let slot = self
+                    .builder
+                    .build_alloca(f64_ty, &format!("param{}_fslot", i))
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_alloca float param slot: {}", e),
+                    ))?;
+                let as_f = self
+                    .builder
+                    .build_bit_cast(pv.into_int_value(), f64_ty, "param_f64")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("bitcast initial float param: {}", e),
+                    ))?;
+                self.builder
+                    .build_store(slot, as_f)
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("store initial float param: {}", e),
+                    ))?;
+                param_slots.push(TailParamSlot::Float(slot));
             } else {
                 let slot = self
                     .builder
@@ -3283,6 +3307,27 @@ impl<'ctx> Codegen<'ctx> {
                         ))?
                         .into_int_value();
                     env.push(EnvSlot::Int(loaded), ty.clone());
+                }
+                TailParamSlot::Float(slot) => {
+                    // Load the double, present it to the body as i64 bits
+                    // (the uniform Float value model). The bitcasts fold
+                    // into the body's own float-op bitcasts after mem2reg.
+                    let f64_ty = self.context.f64_type();
+                    let loaded = self
+                        .builder
+                        .build_load(f64_ty, slot, &format!("p{}_fload", i))
+                        .map_err(|e| CodegenError::JitInit(
+                            format!("load float param slot: {}", e),
+                        ))?
+                        .into_float_value();
+                    let bits = self
+                        .builder
+                        .build_bit_cast(loaded, self.i64_ty, &format!("p{}_fbits", i))
+                        .map_err(|e| CodegenError::JitInit(
+                            format!("bitcast float param load: {}", e),
+                        ))?
+                        .into_int_value();
+                    env.push(EnvSlot::Int(bits), ty.clone());
                 }
                 TailParamSlot::Ptr(slot) => {
                     env.push(EnvSlot::Closure(slot), ty.clone());
@@ -4924,23 +4969,57 @@ impl<'ctx> Codegen<'ctx> {
         env: &mut Env<'ctx>,
         ctx: CompileCtx<'ctx>,
     ) -> Result<Value<'ctx>, CodegenError> {
-        // Evaluate every arg first (to fresh SSA values), THEN write them
-        // all into the param slots. Evaluating-before-storing handles the
-        // case where an arg references a param that's about to be
-        // overwritten. `compile_operands_rooted` additionally spills each
-        // pointer arg to a TEMPORARY root slot across the evaluation of
-        // later args — without it, an earlier pointer arg (e.g. `cell.tail`)
-        // goes stale when a later arg (e.g. `List::Cons(...)`) allocates and
+        // PASS-THROUGH args are skipped entirely: when arg `j` is
+        // syntactically param `j` itself (`loop(a, i + 1, n, acc2)`'s `a`
+        // — a LocalVar resolving to env index j), its param slot already
+        // holds the live value, and for pointer params the GC maintains
+        // that slot in place across any allocation in the OTHER args.
+        // Evaluating + re-rooting it would emit a volatile spill/reload
+        // shuffle (slot_j → scratch → slot_j) on every loop iteration —
+        // measured as a large share of checked-array loop time. Skipping
+        // is sound precisely because the slot is never written: later
+        // args that READ param j still see its (only) value.
+        let passthrough: Vec<bool> = args
+            .iter()
+            .enumerate()
+            .map(|(j, a)| {
+                matches!(a, Expr::LocalVar(i)
+                    if (*i as usize) < env.len()
+                        && env.len() - 1 - (*i as usize) == j)
+            })
+            .collect();
+
+        // Evaluate every (non-pass-through) arg first (to fresh SSA
+        // values), THEN write them all into the param slots.
+        // Evaluating-before-storing handles the case where an arg
+        // references a param that's about to be overwritten.
+        // `compile_operands_rooted` additionally spills each pointer arg
+        // to a TEMPORARY root slot across the evaluation of later args —
+        // without it, an earlier pointer arg (e.g. `cell.tail`) goes
+        // stale when a later arg (e.g. `List::Cons(...)`) allocates and
         // triggers a relocating GC. It also boxes Int args bound for a
         // pointer-typed param slot (uniform ABI).
+        let eval_args: Vec<Expr> = args
+            .iter()
+            .zip(&passthrough)
+            .filter(|&(_, &p)| !p)
+            .map(|(a, _)| a.clone())
+            .collect();
         let box_flags: Vec<bool> = tail
             .param_slots
             .iter()
             .take(args.len())
-            .map(|s| matches!(s, TailParamSlot::Ptr(_)))
+            .zip(&passthrough)
+            .filter(|&(_, &p)| !p)
+            .map(|(s, _)| matches!(s, TailParamSlot::Ptr(_)))
             .collect();
-        let arg_vals = self.compile_operands_rooted(args, &box_flags, env, ctx)?;
-        for (i, v) in arg_vals.into_iter().enumerate() {
+        let arg_vals = self.compile_operands_rooted(&eval_args, &box_flags, env, ctx)?;
+        let mut vals = arg_vals.into_iter();
+        for (i, &is_pass) in passthrough.iter().enumerate() {
+            if is_pass {
+                continue;
+            }
+            let v = vals.next().expect("one value per non-pass-through arg");
             match tail.param_slots[i] {
                 TailParamSlot::Int(slot) => {
                     let iv = v.as_int().map_err(|_| CodegenError::TypeMismatch {
@@ -4951,6 +5030,26 @@ impl<'ctx> Codegen<'ctx> {
                     })?;
                     self.builder.build_store(slot, iv).map_err(|e| {
                         CodegenError::JitInit(format!("store tail arg {}: {}", i, e))
+                    })?;
+                }
+                TailParamSlot::Float(slot) => {
+                    // The arg value is i64 Float bits; store as double so
+                    // the slot's mem2reg phi stays in the FP domain. The
+                    // bitcast cancels the producer's double→i64 bitcast.
+                    let iv = v.as_int().map_err(|_| CodegenError::TypeMismatch {
+                        what: format!(
+                            "self-tail-call arg {} must be Float bits (param is Float-typed)",
+                            i
+                        ),
+                    })?;
+                    let as_f = self
+                        .builder
+                        .build_bit_cast(iv, self.context.f64_type(), "tail_f64")
+                        .map_err(|e| {
+                            CodegenError::JitInit(format!("bitcast tail float arg {}: {}", i, e))
+                        })?;
+                    self.builder.build_store(slot, as_f).map_err(|e| {
+                        CodegenError::JitInit(format!("store tail float arg {}: {}", i, e))
                     })?;
                 }
                 TailParamSlot::Ptr(slot) => {
@@ -9165,6 +9264,13 @@ struct TailCtx<'ctx> {
 #[derive(Clone, Copy)]
 enum TailParamSlot<'ctx> {
     Int(PointerValue<'ctx>),
+    /// A `Float` param's slot is alloca'd as `double` (value-model bits
+    /// are still i64 everywhere else; load/store sites bitcast). Keeping
+    /// the slot — and hence the mem2reg phi — in the FP domain keeps the
+    /// loop-carried accumulator of a self-tail-call out of the integer
+    /// register file: the int↔fp `fmov` pair is ~5-6 cycles EACH on
+    /// Apple Silicon and sits squarely on the loop's critical path.
+    Float(PointerValue<'ctx>),
     /// The root slot (already pointer-shaped). For pointer params we
     /// also need to know whether it's a real heap pointer vs. a
     /// String-typed value etc.; we just reuse the slot.
