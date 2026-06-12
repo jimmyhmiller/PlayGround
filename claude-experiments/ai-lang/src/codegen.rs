@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 15;
+const CODEGEN_CACHE_VERSION: u64 = 16;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -5367,20 +5367,8 @@ impl<'ctx> Codegen<'ctx> {
                 let i = vals[1].as_int()?;
                 if elem_is_int {
                     if let Value::Int(v) = vals[2] {
-                        let fv = self
-                            .extern_array_set_i64
-                            .expect("ai_array_set_i64 declared");
-                        let call = self
-                            .builder
-                            .build_call(
-                                fv,
-                                &[ctx.thread_param.into(), a.into(), i.into(), v.into()],
-                                "array_set_i64_result",
-                            )
-                            .map_err(|e| CodegenError::JitInit(
-                                format!("build_call ai_array_set_i64: {}", e),
-                            ))?;
-                            return Ok(Value::Int(call.as_any_value_enum().into_int_value()));
+                        let r = self.emit_array_scalar_fastpath(a, i, Some(v), ctx)?;
+                        return Ok(Value::Int(r));
                     }
                 }
                 // Reaching here, the value is a pointer: either the element
