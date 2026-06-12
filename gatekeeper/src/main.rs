@@ -362,7 +362,10 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
             let reply = if authed {
                 describe_catalog(gate, &routing)
             } else {
-                Reply::status(401, "Unauthorized").with_header("WWW-Authenticate", "Bearer")
+                // Unlike a normal private route's bare 401, the discovery
+                // endpoint explains HOW to authenticate (never the token itself)
+                // so a caller knows what to do next.
+                describe_auth_help()
             };
             let _ = reply.respond(request);
             return;
@@ -532,4 +535,27 @@ fn describe_catalog(gate: &Gate, routing: &Routing) -> Reply {
 
     let body = serde_json::to_vec_pretty(&catalog).unwrap_or_else(|_| b"{}".to_vec());
     Reply::new(200, body).with_header("Content-Type", "application/json")
+}
+
+/// The 401 body for an unauthenticated request to `/describe`: a JSON object that
+/// explains HOW to authenticate (never the token value itself), so a caller hitting
+/// the discovery endpoint without credentials learns what to do next.
+fn describe_auth_help() -> Reply {
+    use serde_json::json;
+    let help = json!({
+        "error": "unauthorized",
+        "message": "This endpoint requires a shared-secret token. Present it one of two ways:",
+        "auth": {
+            "scheme": "shared-secret bearer token",
+            "header": "Authorization: Bearer <token>",
+            "cookie": "gatekeeper=<token>",
+            "precedence": "the Authorization header is checked first; if present it is used and the cookie is NOT consulted",
+            "note": "the token is a single shared secret for ALL private routes; it is provisioned out-of-band and is never returned by this API"
+        },
+        "example": "curl -H 'Authorization: Bearer <token>' https://<host>/describe"
+    });
+    let body = serde_json::to_vec_pretty(&help).unwrap_or_else(|_| b"{}".to_vec());
+    Reply::new(401, body)
+        .with_header("Content-Type", "application/json")
+        .with_header("WWW-Authenticate", "Bearer")
 }
