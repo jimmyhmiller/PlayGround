@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 13;
+const CODEGEN_CACHE_VERSION: u64 = 14;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -1244,6 +1244,11 @@ struct DefInfo<'ctx> {
 struct StructInfo<'ctx> {
     /// LLVM global holding the TypeInfo for this struct shape.
     ti_global: GlobalValue<'ctx>,
+    /// allocation_size(0) rounded to 8 — the constant the INLINE bump
+    /// allocation fast path adds to the cursor.
+    alloc_size: u64,
+    /// The shape's type_id, stored into the header by the inline path.
+    type_id: u16,
     /// Physical byte offset (from start of heap object, i.e. including
     /// the GC header) of each field, indexed by declaration position.
     /// Pointer fields are packed first (at header_size + i*8), value
@@ -1263,6 +1268,10 @@ struct EnumInfo<'ctx> {
 struct VariantInfo<'ctx> {
     /// LLVM global holding this variant's TypeInfo (used at alloc time).
     ti_global: GlobalValue<'ctx>,
+    /// allocation_size(0) rounded to 8, for the inline allocation path.
+    alloc_size: u64,
+    /// The variant shape's type_id, for the inline header store.
+    type_id: u16,
     /// Byte offset (from object start, post-header) of the tag word.
     /// Varies by variant: pointer-payload variants have the pointer
     /// first (in value_fields), so the tag follows.
@@ -2740,6 +2749,8 @@ impl<'ctx> Codegen<'ctx> {
             *hash,
             StructInfo {
                 ti_global,
+                alloc_size: (ti.allocation_size(0) as u64 + 7) & !7,
+                type_id,
                 field_offsets,
                 field_is_pointer,
             },
@@ -2865,6 +2876,8 @@ impl<'ctx> Codegen<'ctx> {
 
             info.variants.push(VariantInfo {
                 ti_global,
+                alloc_size: (ti.allocation_size(0) as u64 + 7) & !7,
+                type_id,
                 tag_offset,
                 payload_offset,
                 payload_is_pointer,
@@ -6043,21 +6056,29 @@ impl<'ctx> Codegen<'ctx> {
                 lambda_hash
             )))?;
         let ti_global = self.closure_type_info_globals[&lambda_hash];
-
-        // ai_gc_alloc_closure(thread, &type_info)
-        let alloc = self.extern_alloc_closure.expect("alloc declared");
-        let call = self
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    ctx.thread_param.into(),
-                    ti_global.as_pointer_value().into(),
-                ],
-                "closure",
-            )
-            .map_err(|e| CodegenError::JitInit(format!("build_call alloc_closure: {}", e)))?;
-        let closure_ptr = call.as_any_value_enum().into_pointer_value();
+        // The shape registry's type_id is ABSOLUTE; `closure_type_infos`
+        // is module-local (incremental installs start at a watermark), so
+        // recompute the closure's size from its spec — the same formula
+        // `declare_closure_shape` used.
+        let cl_type_id = self.shape_registry[&lambda_hash];
+        let cl_ptr_count: u16 = spec
+            .capture_is_pointer
+            .iter()
+            .filter(|p| **p)
+            .count() as u16;
+        let cl_int_count: u16 =
+            (spec.capture_is_pointer.len() as u16) - cl_ptr_count;
+        let cl_raw_bytes: u16 =
+            closure_offsets::NON_POINTER_CAPTURES as u16 + 8 * cl_int_count;
+        let cl_ti = crate::gc::TypeInfo::for_header(crate::gc::Full::SIZE as usize)
+            .with_fields(cl_ptr_count)
+            .with_raw_bytes(cl_raw_bytes);
+        let closure_ptr = self.emit_alloc_fixed(
+            ti_global,
+            (cl_ti.allocation_size(0) as u64 + 7) & !7,
+            cl_type_id,
+            ctx,
+        )?;
 
         // Pointer captures live in `value_field` slots BEFORE the
         // closure-header (code_hash, n_captures, pad). Their count
@@ -6211,21 +6232,8 @@ impl<'ctx> Codegen<'ctx> {
             });
         }
 
-        // ai_gc_alloc_closure is misnamed but actually generic over heap
-        // objects. Reuse for struct allocation.
-        let alloc = self.extern_alloc_closure.expect("alloc declared");
-        let call = self
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    ctx.thread_param.into(),
-                    info.ti_global.as_pointer_value().into(),
-                ],
-                "struct_alloc",
-            )
-            .map_err(|e| CodegenError::JitInit(format!("build_call alloc struct: {}", e)))?;
-        let obj_ptr = call.as_any_value_enum().into_pointer_value();
+        let obj_ptr =
+            self.emit_alloc_fixed(info.ti_global, info.alloc_size, info.type_id, ctx)?;
 
         // The object is allocated FIRST, but evaluating the field values
         // (and boxing Int fields) allocates too — a collection there would
@@ -6456,20 +6464,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
             };
 
-        // Allocate the variant's heap object.
-        let alloc = self.extern_alloc_closure.expect("alloc declared");
-        let call = self
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    ctx.thread_param.into(),
-                    v.ti_global.as_pointer_value().into(),
-                ],
-                "enum_alloc",
-            )
-            .map_err(|e| CodegenError::JitInit(format!("build_call alloc enum: {}", e)))?;
-        let obj_ptr = call.as_any_value_enum().into_pointer_value();
+        // Allocate the variant's heap object (inline bump fast path).
+        let obj_ptr = self.emit_alloc_fixed(v.ti_global, v.alloc_size, v.type_id, ctx)?;
 
         // Store the tag.
         let tag_off = self.i64_ty.const_int(v.tag_offset as u64, false);
@@ -6521,6 +6517,153 @@ impl<'ctx> Codegen<'ctx> {
             let node = self.context.metadata_node(&[]);
             let _ = iv.set_metadata(node, kind);
         }
+    }
+
+    /// Emit the INLINE bump-allocation fast path for a FIXED-SIZE shape
+    /// (closure / struct / enum variant): one `atomicrmw add` on the
+    /// active space's cursor, a limit check, an inline zeroing memset and
+    /// the type_id header store. Everything else — space exhausted (GC +
+    /// retry), gc-stress (window closed: limit 0), generational mode —
+    /// falls to the out-of-line `ai_gc_alloc_closure`, exactly as before.
+    /// Flips re-point the window only under stop-the-world, and this
+    /// sequence contains no safepoint, so the loads cannot straddle one.
+    fn emit_alloc_fixed(
+        &mut self,
+        ti_global: GlobalValue<'ctx>,
+        alloc_size: u64,
+        type_id: u16,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let j = |e: String| CodegenError::JitInit(e);
+        let i8_ty = self.context.i8_type();
+        let i16_ty = self.context.i16_type();
+        let tid_off = <crate::gc::Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET as u64;
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("alloc inside a fn");
+        let fast_bb = self.context.append_basic_block(cur_fn, "alloc_fast");
+        let slow_bb = self.context.append_basic_block(cur_fn, "alloc_slow");
+        let merge_bb = self.context.append_basic_block(cur_fn, "alloc_merge");
+
+        // The window address never changes for a thread's lifetime.
+        let win_slot = self.thread_field(
+            ctx.thread_param,
+            thread_offsets::ALLOC_WINDOW,
+            "alloc_win_slot",
+        )?;
+        let win_load = self
+            .builder
+            .build_load(self.ptr_ty, win_slot, "alloc_win")
+            .map_err(|e| j(format!("load alloc window: {}", e)))?;
+        self.mark_invariant_load(win_load);
+        let win = win_load.into_pointer_value();
+        // window: { cursor_ptr @0, base @8, limit @16 } — re-pointed only
+        // under STW, so plain loads are coherent within this sequence.
+        let cursor_ptr = self
+            .builder
+            .build_load(self.ptr_ty, win, "alloc_cursor_ptr")
+            .map_err(|e| j(format!("load cursor ptr: {}", e)))?
+            .into_pointer_value();
+        let base_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, win, &[self.i64_ty.const_int(8, false)], "alloc_base_slot")
+                .map_err(|e| j(format!("gep base slot: {}", e)))?
+        };
+        let base = self
+            .builder
+            .build_load(self.ptr_ty, base_slot, "alloc_base")
+            .map_err(|e| j(format!("load alloc base: {}", e)))?
+            .into_pointer_value();
+        let limit_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, win, &[self.i64_ty.const_int(16, false)], "alloc_limit_slot")
+                .map_err(|e| j(format!("gep limit slot: {}", e)))?
+        };
+        let limit = self
+            .builder
+            .build_load(self.i64_ty, limit_slot, "alloc_limit")
+            .map_err(|e| j(format!("load alloc limit: {}", e)))?
+            .into_int_value();
+
+        let size_const = self.i64_ty.const_int(alloc_size, false);
+        let old = self
+            .builder
+            .build_atomicrmw(
+                inkwell::AtomicRMWBinOp::Add,
+                cursor_ptr,
+                size_const,
+                inkwell::AtomicOrdering::Monotonic,
+            )
+            .map_err(|e| j(format!("atomicrmw alloc bump: {}", e)))?;
+        let end = self
+            .builder
+            .build_int_add(old, size_const, "alloc_end")
+            .map_err(|e| j(format!("add alloc end: {}", e)))?;
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::ULE, end, limit, "alloc_ok")
+            .map_err(|e| j(format!("icmp alloc ok: {}", e)))?;
+        self.builder
+            .build_conditional_branch(ok, fast_bb, slow_bb)
+            .map_err(|e| j(format!("br alloc: {}", e)))?;
+
+        // Fast: obj = base + old; zero it; write the type_id (the rest of
+        // the Full header — gc_word + pads — is the zeroing).
+        self.builder.position_at_end(fast_bb);
+        let obj = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, base, &[old], "alloc_obj")
+                .map_err(|e| j(format!("gep alloc obj: {}", e)))?
+        };
+        self.builder
+            .build_memset(
+                obj,
+                8,
+                i8_ty.const_zero(),
+                self.i64_ty.const_int(alloc_size, false),
+            )
+            .map_err(|e| j(format!("memset alloc obj: {}", e)))?;
+        let tid_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, obj, &[self.i64_ty.const_int(tid_off, false)], "alloc_tid_ptr")
+                .map_err(|e| j(format!("gep alloc tid: {}", e)))?
+        };
+        self.builder
+            .build_store(tid_ptr, i16_ty.const_int(type_id as u64, false))
+            .map_err(|e| j(format!("store alloc tid: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| j(format!("br alloc fast→merge: {}", e)))?;
+        let fast_end = self.builder.get_insert_block().unwrap();
+
+        // Slow: the full runtime path (GC + retry + stress hook).
+        self.builder.position_at_end(slow_bb);
+        let alloc_fn = self.extern_alloc_closure.expect("alloc declared");
+        let slow_obj = self
+            .builder
+            .build_call(
+                alloc_fn,
+                &[ctx.thread_param.into(), ti_global.as_pointer_value().into()],
+                "alloc_slow_obj",
+            )
+            .map_err(|e| j(format!("build_call alloc slow: {}", e)))?
+            .as_any_value_enum()
+            .into_pointer_value();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| j(format!("br alloc slow→merge: {}", e)))?;
+        let slow_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.ptr_ty, "alloc_result")
+            .map_err(|e| j(format!("phi alloc: {}", e)))?;
+        phi.add_incoming(&[(&obj, fast_end), (&slow_obj, slow_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
     }
 
     /// Inline `core/array.is_init(a, i) -> Int`: 1 when slot `i` holds a

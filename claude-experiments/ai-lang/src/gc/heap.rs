@@ -46,6 +46,12 @@ struct NurseryState {
 
 pub struct Heap {
     spaces: [AtomicBumpAllocator; 2],
+    /// JIT-facing allocation mirror: cursor-pointer/base/limit of the
+    /// ACTIVE from-space, re-pointed at every flip (under STW) and set
+    /// to limit=0 under gc-stress so the inline fast path always defers
+    /// to the slow path (which runs the collect-per-alloc hook). Boxed
+    /// for a stable address that Threads can hold.
+    alloc_window: Box<crate::gc::alloc::AllocWindow>,
     /// Index into `spaces` for the current from-space (0 or 1).
     from_idx: AtomicUsize,
 
@@ -121,11 +127,12 @@ unsafe impl Send for Heap {}
 impl Heap {
     /// Create a new heap with two spaces of `space_size` bytes each.
     pub fn new<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
-        Heap {
+        let heap = Heap {
             spaces: [
                 AtomicBumpAllocator::new::<H>(space_size),
                 AtomicBumpAllocator::new::<H>(space_size),
             ],
+            alloc_window: Box::new(crate::gc::alloc::AllocWindow::empty()),
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
@@ -142,7 +149,9 @@ impl Heap {
             gc_every_alloc: AtomicBool::new(false),
             nursery_state: None,
             jit_frame_walker: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-        }
+        };
+        heap.alloc_window.point_at(&heap.spaces[0], space_size);
+        heap
     }
 
     /// Create a new generational heap with a nursery (young generation)
@@ -160,8 +169,9 @@ impl Heap {
             CardTable::new(spaces[0].base(), tenured_size),
             CardTable::new(spaces[1].base(), tenured_size),
         ];
-        Heap {
+        let heap = Heap {
             spaces,
+            alloc_window: Box::new(crate::gc::alloc::AllocWindow::empty()),
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
@@ -182,7 +192,12 @@ impl Heap {
                 minor_collections: AtomicUsize::new(0),
             }),
             jit_frame_walker: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-        }
+        };
+        // Generational mode allocates via the nursery path, which the
+        // JIT inline window does not model — leave the window CLOSED
+        // (limit 0) so inline allocation always defers to the runtime.
+        heap.alloc_window.point_at(&heap.spaces[0], 0);
+        heap
     }
 
     /// Install a walker for JIT frames pointed to by parked threads.
@@ -221,6 +236,12 @@ impl Heap {
     /// Enable or disable GC-on-every-allocation (stress testing mode).
     pub fn set_gc_every_alloc(&self, enabled: bool) {
         self.gc_every_alloc.store(enabled, Ordering::Release);
+        if enabled {
+            // Close the JIT inline-allocation window: every allocation
+            // takes the out-of-line path, which runs the
+            // collect-before-every-alloc stress hook.
+            self.alloc_window.limit.store(0, Ordering::Release);
+        }
     }
 
     /// Dynamically register a new `TypeInfo`, growing `type_table` in place.
@@ -309,10 +330,17 @@ impl Heap {
         }
     }
 
-    /// Swap from-space and to-space by flipping the index.
+    /// Swap from-space and to-space by flipping the index. Runs under
+    /// stop-the-world only; also re-points the JIT allocation window at
+    /// the new from-space (preserving a CLOSED window — limit 0 — for
+    /// stress/generational modes).
     fn swap_spaces(&self) {
         let old = self.from_idx.load(Ordering::Acquire);
         self.from_idx.store(1 - old, Ordering::Release);
+        let closed = self.alloc_window.limit.load(Ordering::Acquire) == 0;
+        let space = self.from_space();
+        let limit = if closed { 0 } else { space.size() };
+        self.alloc_window.point_at(space, limit);
     }
 
     /// Create a new heap with statemap tracing enabled.
@@ -481,6 +509,25 @@ impl Heap {
     }
 
     // ─── Generational helpers ────────────────────────────────────
+
+    /// Address of the JIT-facing allocation window (stable: boxed).
+    pub fn alloc_window_ptr(&self) -> *const crate::gc::alloc::AllocWindow {
+        &*self.alloc_window
+    }
+
+    /// Re-point the allocation window at the active from-space. MUST be
+    /// called once the heap has reached its final address (the
+    /// constructors run before the move into `Arc`, so the cursor
+    /// pointer they record would dangle). Preserves a CLOSED window
+    /// (limit 0: stress / generational).
+    pub fn sync_alloc_window(&self) {
+        let closed = self.alloc_window.limit.load(Ordering::Acquire) == 0
+            || self.nursery_state.is_some()
+            || self.gc_every_alloc();
+        let space = self.from_space();
+        let limit = if closed { 0 } else { space.size() };
+        self.alloc_window.point_at(space, limit);
+    }
 
     /// Check if this heap has a nursery (generational mode).
     #[inline(always)]

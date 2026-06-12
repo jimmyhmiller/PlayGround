@@ -100,6 +100,12 @@ pub struct Thread {
     /// (count word = byte length `n*8`) holding raw i64/f64 slot bits,
     /// untraced.
     pub prim_array_ti: *const TypeInfo,
+    /// The heap's JIT-facing allocation window (`gc::alloc::AllocWindow`):
+    /// cursor-pointer / base / limit of the active from-space, re-pointed
+    /// at flips under STW. The JIT's inline allocation fast path reads it;
+    /// limit 0 (stress / generational) closes it so every allocation
+    /// takes the out-of-line slow path.
+    pub alloc_window: *const crate::gc::AllocWindow,
 }
 
 pub mod thread_offsets {
@@ -115,6 +121,7 @@ pub mod thread_offsets {
     pub const ARRAY_TI: usize = 64;
     pub const ATOM_TI: usize = 72;
     pub const PRIM_ARRAY_TI: usize = 80;
+    pub const ALLOC_WINDOW: usize = 88;
 }
 
 const _: () = {
@@ -129,6 +136,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Thread, array_ti) == thread_offsets::ARRAY_TI);
     assert!(core::mem::offset_of!(Thread, atom_ti) == thread_offsets::ATOM_TI);
     assert!(core::mem::offset_of!(Thread, prim_array_ti) == thread_offsets::PRIM_ARRAY_TI);
+    assert!(core::mem::offset_of!(Thread, alloc_window) == thread_offsets::ALLOC_WINDOW);
 };
 
 // =============================================================================
@@ -662,6 +670,9 @@ impl Runtime {
         // 32 MiB semi-space — plenty for tests, easily reconfigurable later.
         let heap = Arc::new(Heap::new::<Full>(32 * 1024 * 1024, all_types));
         heap.set_jit_frame_walker(walk_jit_frames);
+        // The window recorded a cursor pointer into the pre-move Heap;
+        // re-point it now that the heap lives at its final Arc address.
+        heap.sync_alloc_window();
         // Every heap scans the process-global thread registry: `spawn` /
         // `at_async` slots root in-flight closures and results there.
         // (Registering at construction — rather than lazily on first
@@ -701,6 +712,7 @@ impl Runtime {
             array_ti: &*array_ti_box,
             atom_ti: &*atom_ti_box,
             prim_array_ti: &*prim_array_ti_box,
+            alloc_window: heap.alloc_window_ptr(),
         });
 
         let _ = &mut *thread;
@@ -815,6 +827,7 @@ impl Runtime {
             array_ti: self.thread.array_ti,
             atom_ti: self.thread.atom_ti,
             prim_array_ti: self.thread.prim_array_ti,
+            alloc_window: self.thread.alloc_window,
         });
         // Wire the coordinator's poll flag to this context's own `state`
         // byte (stable: boxed) so a STW request can park this thread even
@@ -2241,6 +2254,7 @@ unsafe fn build_worker_thread(
     array_ti: *const TypeInfo,
     atom_ti: *const TypeInfo,
     prim_array_ti: *const TypeInfo,
+    alloc_window: *const crate::gc::AllocWindow,
 ) -> Box<Thread> {
     Box::new(Thread {
         state: 0,
@@ -2255,6 +2269,7 @@ unsafe fn build_worker_thread(
         array_ti,
         atom_ti,
         prim_array_ti,
+        alloc_window,
     })
 }
 
@@ -2271,6 +2286,7 @@ fn run_worker(
     array_ti: usize,
     atom_ti: usize,
     prim_array_ti: usize,
+    alloc_window: usize,
     slot: Arc<ThreadSlot>,
 ) {
     use std::sync::atomic::Ordering;
@@ -2288,6 +2304,7 @@ fn run_worker(
             array_ti as *const TypeInfo,
             atom_ti as *const TypeInfo,
             prim_array_ti as *const TypeInfo,
+            alloc_window as *const crate::gc::AllocWindow,
         )
     };
     // Let the GC coordinator stop us mid-loop via the inline poll.
@@ -2483,6 +2500,7 @@ unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
         let array_ti = parent.array_ti as usize;
         let atom_ti = parent.atom_ti as usize;
         let prim_array_ti = parent.prim_array_ti as usize;
+        let alloc_window = parent.alloc_window as usize;
 
         // Create the slot and root the input closure BEFORE any allocation
         // (the box below may GC).
@@ -2510,6 +2528,7 @@ unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
                 array_ti,
                 atom_ti,
                 prim_array_ti,
+                alloc_window,
                 worker_slot,
             );
         });

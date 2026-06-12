@@ -13,7 +13,7 @@ pub mod statemap;
 mod thread;
 mod type_info;
 
-pub use alloc::{Alloc, AtomicBumpAllocator, BumpAllocator, HeapWalker, alloc_obj};
+pub use alloc::{Alloc, AllocWindow, AtomicBumpAllocator, BumpAllocator, HeapWalker, alloc_obj};
 pub use barrier::{SATBBuffer, SATBQueue, read_barrier, read_barrier_atomic};
 pub use card_table::CardTable;
 pub use field::{
