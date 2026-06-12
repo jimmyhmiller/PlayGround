@@ -39,7 +39,10 @@ fn main() {
 
     let s = surface.clone();
     vm.register2("uniform_set", move |name: String, value: Value| {
-        s.lock().unwrap().uniforms.insert(name, format!("{}", value));
+        s.lock()
+            .unwrap()
+            .uniforms
+            .insert(name, format!("{}", value));
     });
 
     // THE headline: a 5-argument native. Before bumping the arity cap this
@@ -67,7 +70,9 @@ fn main() {
     vm.register1("host_log", |msg: String| println!("  [script] {msg}"));
 
     let an = animating.clone();
-    vm.register1("set_animating", move |on: bool| an.store(on, Ordering::SeqCst));
+    vm.register1("set_animating", move |on: bool| {
+        an.store(on, Ordering::SeqCst)
+    });
 
     // ----- globals the host injects into the script's world -----
     vm.set_global("canvas_w", Value::Float(800.0));
@@ -83,10 +88,7 @@ fn main() {
     println!("== load glow.ft ==");
     vm.eval(src).expect("glow.ft compiles + runs top-level");
     vm.call("on_init", vec![]).expect("on_init");
-    println!(
-        "  host: animating = {}\n",
-        animating.load(Ordering::SeqCst)
-    );
+    println!("  host: animating = {}\n", animating.load(Ordering::SeqCst));
 
     // Drive a few frames at a fixed 60fps dt, like the style ticker would.
     println!("== run 5 frames ==");
@@ -95,7 +97,10 @@ fn main() {
         vm.call("tick", vec![dt.clone()]).expect("tick");
     }
     // Pull persistent state back out, the way the host inspects it.
-    println!("  host: frame_count = {}", vm.call("frame_count", vec![]).unwrap());
+    println!(
+        "  host: frame_count = {}",
+        vm.call("frame_count", vec![]).unwrap()
+    );
     report(&surface, "after 5 frames");
 
     // ----- hot reload: same atom, fresh code -----
@@ -108,7 +113,8 @@ fn main() {
     vm.eval(&patched).expect("patched glow.ft re-evals");
     surface.lock().unwrap().paints.clear();
     for _ in 0..3 {
-        vm.call("tick", vec![dt.clone()]).expect("tick after reload");
+        vm.call("tick", vec![dt.clone()])
+            .expect("tick after reload");
     }
     println!(
         "  host: frame_count = {} (kept counting across the reload)",

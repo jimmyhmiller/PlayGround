@@ -14,7 +14,10 @@ fn set_global_injects_host_values() {
     let mut vm = Funct::new();
     vm.set_global("canvas_w", Value::Float(800.0));
     vm.set_global("canvas_h", Value::Float(600.0));
-    assert_eq!(vm.eval("canvas_w / canvas_h").unwrap(), Value::Float(800.0 / 600.0));
+    assert_eq!(
+        vm.eval("canvas_w / canvas_h").unwrap(),
+        Value::Float(800.0 / 600.0)
+    );
     // host can update it between calls
     vm.set_global("canvas_w", Value::Float(1024.0));
     assert_eq!(vm.eval("canvas_w").unwrap(), Value::Float(1024.0));
@@ -29,7 +32,8 @@ fn set_globals_are_visible_in_modules() {
     vm.set_module_root(&dir);
     vm.set_global("canvas_w", Value::Float(100.0));
     assert_eq!(
-        vm.eval("import { double_w } from \"m\"\ndouble_w()").unwrap(),
+        vm.eval("import { double_w } from \"m\"\ndouble_w()")
+            .unwrap(),
         Value::Float(200.0)
     );
 }
@@ -106,21 +110,32 @@ export fn render(w, h) {
     assert!(vm.global("on_hover").is_none());
     assert!(vm.global("on_click").is_some());
 
-    vm.call("on_click", vec![Value::Float(10.0), Value::Float(20.0)]).unwrap();
-    vm.call("on_click", vec![Value::Float(1.0), Value::Float(2.0)]).unwrap();
+    vm.call("on_click", vec![Value::Float(10.0), Value::Float(20.0)])
+        .unwrap();
+    vm.call("on_click", vec![Value::Float(1.0), Value::Float(2.0)])
+        .unwrap();
 
-    let frame = vm.call("render", vec![Value::Float(640.0), Value::Float(480.0)]).unwrap();
+    let frame = vm
+        .call("render", vec![Value::Float(640.0), Value::Float(480.0)])
+        .unwrap();
     let j = frame.to_json().unwrap();
     assert_eq!(j["kind"], "text");
     assert_eq!(j["value"], "clicked at 1.0,2.0 (2)");
     assert_eq!(j["w"], 640.0);
 
     // and the whole widget (code + atom state) snapshots to disk
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let saved = vm.save_state(&st).unwrap();
     let mut vm2 = Funct::new();
     vm2.restore_state(&saved).unwrap();
-    vm2.call("on_click", vec![Value::Float(0.0), Value::Float(0.0)]).unwrap();
-    let frame2 = vm2.call("render", vec![Value::Float(100.0), Value::Float(100.0)]).unwrap();
+    vm2.call("on_click", vec![Value::Float(0.0), Value::Float(0.0)])
+        .unwrap();
+    let frame2 = vm2
+        .call("render", vec![Value::Float(100.0), Value::Float(100.0)])
+        .unwrap();
     assert_eq!(frame2.to_json().unwrap()["value"], "clicked at 0.0,0.0 (3)");
 }

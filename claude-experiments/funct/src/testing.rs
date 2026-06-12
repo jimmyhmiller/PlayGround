@@ -65,7 +65,9 @@ pub fn discover_files(path: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_ft_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -124,7 +126,11 @@ pub fn run_test_file(path: &Path) -> TestReport {
         };
         outcomes.push(TestOutcome { name, error });
     }
-    TestReport { file: path.to_path_buf(), load_error: None, outcomes }
+    TestReport {
+        file: path.to_path_buf(),
+        load_error: None,
+        outcomes,
+    }
 }
 
 /// Run a file or directory of tests, printing cargo-test-style output.

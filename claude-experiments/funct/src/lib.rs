@@ -1,4 +1,4 @@
-//! **funct** — a small functional embeddable language (see `funct-spec.md`).
+//! **funct** — a small functional embeddable language (see `docs/funct-spec.md`).
 //!
 //! Highlights:
 //! - stack-based bytecode VM with fully reified state: pause between any two

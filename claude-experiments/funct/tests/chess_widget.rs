@@ -40,7 +40,13 @@ fn xy(vm: &mut Funct, f: &str, arg: Value) -> (f64, f64) {
 fn click_at(vm: &mut Funct, x: f64, y: f64) {
     vm.call(
         "on_click",
-        vec![Value::Float(x), Value::Float(y), Value::Bool(false), Value::Bool(false), Value::str("")],
+        vec![
+            Value::Float(x),
+            Value::Float(y),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::str(""),
+        ],
     )
     .unwrap();
 }
@@ -111,13 +117,22 @@ fn pump_until(vm: &mut Funct, secs: f64, mut pred: impl FnMut(&mut Funct) -> boo
 #[test]
 fn initial_render_and_fen() {
     let (mut vm, host) = setup();
-    assert_eq!(fen(&mut vm), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    assert_eq!(
+        fen(&mut vm),
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    );
     assert!(host.take_render_request());
-    let frame = vm.call("render", vec![Value::Float(800.0), Value::Float(640.0)]).unwrap();
+    let frame = vm
+        .call("render", vec![Value::Float(800.0), Value::Float(640.0)])
+        .unwrap();
     let j = frame.to_json().unwrap();
     assert_eq!(j["kind"], "canvas");
     let children = j["children"].as_array().unwrap();
-    assert!(children.len() > 100, "expected a full frame, got {} items", children.len());
+    assert!(
+        children.len() > 100,
+        "expected a full frame, got {} items",
+        children.len()
+    );
     let sprites = children.iter().filter(|c| c["kind"] == "sprite").count();
     assert_eq!(sprites, 32, "all pieces drawn");
     assert!(children.iter().any(|c| c["id"] == "sq_0"));
@@ -141,7 +156,10 @@ fn click_to_move_updates_board_fen_and_san() {
     assert_eq!(board_at(&mut vm, 52), "");
     assert_eq!(sans(&mut vm), vec!["e4"]);
     // full FEN including the en-passant square
-    assert_eq!(fen(&mut vm), "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+    assert_eq!(
+        fen(&mut vm),
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+    );
 }
 
 #[test]
@@ -195,9 +213,15 @@ fn promotion_picker_flow() {
     assert_eq!(g["promo_pending"], true);
     assert_eq!(g["moves"], 8, "move not committed until a piece is picked");
     // the render shows the picker strip
-    let frame = vm.call("render", vec![Value::Float(800.0), Value::Float(640.0)]).unwrap();
+    let frame = vm
+        .call("render", vec![Value::Float(800.0), Value::Float(640.0)])
+        .unwrap();
     let j = frame.to_json().unwrap();
-    assert!(j["children"].as_array().unwrap().iter().any(|c| c["id"] == "promo_dim"));
+    assert!(j["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "promo_dim"));
     // pick cell 1 = rook (strip order Q, R, B, N)
     let (x, y) = xy(&mut vm, "promo_cell_xy", Value::Int(1));
     click_at(&mut vm, x, y);
@@ -240,7 +264,10 @@ fn bar_buttons_flip_new_level() {
     let g = gs(&mut vm);
     assert_eq!(g["moves"], 0);
     assert_eq!(g["turn"], "w");
-    assert_eq!(fen(&mut vm), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    assert_eq!(
+        fen(&mut vm),
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    );
 }
 
 #[test]
@@ -260,7 +287,11 @@ fn snapshot_round_trip_preserves_the_game() {
     let (mut vm, _host) = setup();
     mv(&mut vm, 52, 36); // e4
     mv(&mut vm, 12, 28); // e5
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let saved = vm.save_state(&st).unwrap();
 
     // fresh engine, same host surface registered, restore, keep playing
@@ -271,7 +302,10 @@ fn snapshot_round_trip_preserves_the_game() {
     vm2.restore_state(&saved).unwrap();
     vm2.call("on_init", vec![]).unwrap();
     assert_eq!(sans(&mut vm2), vec!["e4", "e5"]);
-    assert_eq!(fen(&mut vm2), "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 1");
+    assert_eq!(
+        fen(&mut vm2),
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 1"
+    );
     mv(&mut vm2, 62, 45); // 2. Nf3 still works after restore
     assert_eq!(sans(&mut vm2).last().unwrap(), "Nf3");
 }
@@ -318,7 +352,10 @@ fn plays_against_real_stockfish() {
 
     // second exchange to prove the loop is stable: 2. Nf3
     mv(&mut vm, 62, 45);
-    assert!(pump_until(&mut vm, 30.0, |vm| gs(vm)["moves"] == 4), "no reply to 2. Nf3");
+    assert!(
+        pump_until(&mut vm, 30.0, |vm| gs(vm)["moves"] == 4),
+        "no reply to 2. Nf3"
+    );
     assert_eq!(gs(&mut vm)["turn"], "w");
 }
 
@@ -342,12 +379,23 @@ fn review_mode_runs_real_analysis_sweep() {
     assert!(done, "analysis sweep never finished");
 
     // the review frame shows the eval bar, graph, and a best-move arrow
-    let frame = vm.call("render", vec![Value::Float(800.0), Value::Float(640.0)]).unwrap();
+    let frame = vm
+        .call("render", vec![Value::Float(800.0), Value::Float(640.0)])
+        .unwrap();
     let j = frame.to_json().unwrap();
     let children = j["children"].as_array().unwrap();
-    assert!(children.iter().any(|c| c["id"] == "eb_bg"), "eval bar present");
-    assert!(children.iter().any(|c| c["id"] == "gr_bg"), "eval graph present");
-    assert!(children.iter().any(|c| c["id"] == "bm_shaft"), "best-move arrow present");
+    assert!(
+        children.iter().any(|c| c["id"] == "eb_bg"),
+        "eval bar present"
+    );
+    assert!(
+        children.iter().any(|c| c["id"] == "gr_bg"),
+        "eval graph present"
+    );
+    assert!(
+        children.iter().any(|c| c["id"] == "bm_shaft"),
+        "best-move arrow present"
+    );
 
     // stepping back works through the real prev button
     click_btn(&mut vm, "prev");

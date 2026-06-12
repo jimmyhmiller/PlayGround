@@ -10,7 +10,8 @@ fn int(i: i64) -> Value {
 #[test]
 fn save_and_resume_in_same_engine() {
     let mut vm = Funct::new();
-    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }").unwrap();
+    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }")
+        .unwrap();
     let mut st = vm.start("go", vec![int(200), int(0)]).unwrap();
     match vm.run(&mut st, StopWhen::Fuel(500)) {
         RunResult::Paused(Cause::FuelExhausted) => {}
@@ -28,7 +29,8 @@ fn save_and_resume_in_same_engine() {
 fn save_to_disk_and_resume_in_fresh_engine() {
     // engine 1: run halfway, save to an actual file
     let mut vm1 = Funct::new();
-    vm1.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }").unwrap();
+    vm1.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }")
+        .unwrap();
     let mut st = vm1.start("go", vec![int(300), int(0)]).unwrap();
     match vm1.run(&mut st, StopWhen::Fuel(700)) {
         RunResult::Paused(Cause::FuelExhausted) => {}
@@ -91,7 +93,11 @@ fn closure_cell_sharing_survives_round_trip() {
     )
     .unwrap();
     vm.call("inc", vec![]).unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
 
     let mut vm2 = Funct::new();
@@ -106,13 +112,20 @@ fn closure_cell_sharing_survives_round_trip() {
 fn atoms_survive_with_shared_identity() {
     let mut vm = Funct::new();
     vm.eval("let a = atom(5)\nlet pair = (a, a)").unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
 
     let mut vm2 = Funct::new();
     vm2.restore_state(&json).unwrap();
     // mutating through one tuple slot is visible through the other -> same atom
-    assert_eq!(vm2.eval("reset!(pair[0], 99)\n@(pair[1])").unwrap(), int(99));
+    assert_eq!(
+        vm2.eval("reset!(pair[0], 99)\n@(pair[1])").unwrap(),
+        int(99)
+    );
     // and through the original binding
     assert_eq!(vm2.eval("@a").unwrap(), int(99));
 }
@@ -157,12 +170,17 @@ fn watchers_survive_serialization() {
     let mut vm = Funct::new();
     vm.eval("let a = atom(0)\nlet count = atom(0)\nwatch(a, \"w\", (old, new) => swap!(count, n => n + 1))")
         .unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
 
     let mut vm2 = Funct::new();
     vm2.restore_state(&json).unwrap();
-    vm2.eval("swap!(a, x => x + 1)\nswap!(a, x => x + 1)").unwrap();
+    vm2.eval("swap!(a, x => x + 1)\nswap!(a, x => x + 1)")
+        .unwrap();
     assert_eq!(vm2.eval("@count").unwrap(), int(2));
 }
 
@@ -170,9 +188,14 @@ fn watchers_survive_serialization() {
 fn native_value_in_state_fails_loudly() {
     struct Handle;
     let mut vm = Funct::new();
-    vm.register_type::<Handle>("Handle").ctor0("make_handle", || Handle);
+    vm.register_type::<Handle>("Handle")
+        .ctor0("make_handle", || Handle);
     vm.eval("let h = make_handle()").unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let err = vm.save_state(&st).unwrap_err();
     assert!(
         err.msg.contains("cannot serialize native host value") && err.msg.contains("Handle"),
@@ -186,7 +209,11 @@ fn restore_without_required_native_fails_loudly() {
     let mut vm = Funct::new();
     vm.register1("custom_native", |x: i64| x * 2);
     vm.eval("let f = custom_native").unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
 
     let mut vm2 = Funct::new(); // does NOT register custom_native
@@ -209,7 +236,8 @@ fn restore_without_required_native_fails_loudly() {
 
 #[test]
 fn capture_and_restore_atoms() {
-    let program = "let counter = atom(0)\nlet name = atom(\"x\")\nfn bump() = swap!(counter, n => n + 1)";
+    let program =
+        "let counter = atom(0)\nlet name = atom(\"x\")\nfn bump() = swap!(counter, n => n + 1)";
 
     let mut vm = Funct::new();
     vm.eval(program).unwrap();

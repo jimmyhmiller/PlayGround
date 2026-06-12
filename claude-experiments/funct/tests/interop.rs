@@ -61,7 +61,10 @@ fn rust_result_becomes_script_result() {
             other => Err(format!("no key {}", other)),
         }
     });
-    assert_eq!(vm.eval("read_config(\"port\")").unwrap(), Value::ok(int(8080)));
+    assert_eq!(
+        vm.eval("read_config(\"port\")").unwrap(),
+        Value::ok(int(8080))
+    );
     // works with `?` in script
     let src = r#"
 fn port_plus_one() {
@@ -72,13 +75,17 @@ port_plus_one()
 "#;
     assert_eq!(vm.eval(src).unwrap(), Value::ok(int(8081)));
     let src2 = "fn f() {\n let v = read_config(\"missing\")?\n Ok(v)\n}\nf()";
-    assert_eq!(vm.eval(src2).unwrap(), Value::err(Value::str("no key missing")));
+    assert_eq!(
+        vm.eval(src2).unwrap(),
+        Value::err(Value::str("no key missing"))
+    );
 }
 
 #[test]
 fn call_script_from_rust() {
     let mut vm = Funct::new();
-    vm.eval("fn compute_damage(weapon, target) = weapon * 2 + target").unwrap();
+    vm.eval("fn compute_damage(weapon, target) = weapon * 2 + target")
+        .unwrap();
     let dmg: i64 = vm.call_typed("compute_damage", vals![20, 2]).unwrap();
     assert_eq!(dmg, 42);
     // typed conversion of richer results
@@ -86,7 +93,8 @@ fn call_script_from_rust() {
     let (a, b): (i64, i64) = vm.call_typed("pair", vals![1, 2]).unwrap();
     assert_eq!((a, b), (1, 3));
     // script Result -> Rust Result
-    vm.eval("fn checked(n) = if n > 0 { Ok(n) } else { Err(\"neg\") }").unwrap();
+    vm.eval("fn checked(n) = if n > 0 { Ok(n) } else { Err(\"neg\") }")
+        .unwrap();
     let ok: Result<i64, String> = vm.call_typed("checked", vals![5]).unwrap();
     assert_eq!(ok, Ok(5));
     let err: Result<i64, String> = vm.call_typed("checked", vals![-1]).unwrap();
@@ -105,7 +113,10 @@ fn native_taking_script_closure() {
     });
     assert_eq!(vm.eval("apply_twice(x => x * 3, 2)").unwrap(), int(18));
     // and with a script-defined named fn
-    assert_eq!(vm.eval("fn inc(x) = x + 1\napply_twice(inc, 40)").unwrap(), int(42));
+    assert_eq!(
+        vm.eval("fn inc(x) = x + 1\napply_twice(inc, 40)").unwrap(),
+        int(42)
+    );
 }
 
 #[test]
@@ -160,7 +171,8 @@ fn host_value_mutations_visible_from_rust() {
         vm.register_raw("the_counter", move |_vm, _args| Ok(c2.clone()));
         "the_counter()"
     };
-    vm.eval(&format!("let c = {}\nc.incr()\nc.incr()\nc.incr()", g)).unwrap();
+    vm.eval(&format!("let c = {}\nc.incr()\nc.incr()\nc.incr()", g))
+        .unwrap();
     match &counter {
         Value::Native(n) => {
             let count = n.with_ref::<Counter, _>(|c| c.n).unwrap();
@@ -187,8 +199,27 @@ fn register_module() {
     let lerp = vm.native_fn("lerp_impl").unwrap();
     let abs = vm.native_fn("abs_impl").unwrap();
     vm.register_module("math", vec![("lerp", lerp), ("abs", abs)]);
-    assert_eq!(vm.eval("math.lerp(0.0, 10.0, 0.5)").unwrap(), Value::Float(5.0));
-    assert_eq!(vm.eval("math.abs(0.0 - 3.0)").unwrap(), Value::Float(3.0));
+    // A host module is reachable ONLY through an explicit import.
+    assert_eq!(
+        vm.eval("import { lerp } from \"math\"\nlerp(0.0, 10.0, 0.5)")
+            .unwrap(),
+        Value::Float(5.0)
+    );
+    assert_eq!(
+        vm.eval("import \"math\" as m\nm.abs(0.0 - 3.0)").unwrap(),
+        Value::Float(3.0)
+    );
+}
+
+#[test]
+fn host_module_not_visible_without_import() {
+    let mut vm = Funct::new();
+    vm.register3("lerp_impl", |a: f64, b: f64, t: f64| a + (b - a) * t);
+    let lerp = vm.native_fn("lerp_impl").unwrap();
+    vm.register_module("math", vec![("lerp", lerp)]);
+    // No `import` => the bare module name does not resolve.
+    assert!(vm.eval("math.lerp(0.0, 10.0, 0.5)").is_err());
+    assert!(vm.eval("math").is_err());
 }
 
 #[test]

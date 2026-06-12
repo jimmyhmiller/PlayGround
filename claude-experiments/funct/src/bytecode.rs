@@ -51,11 +51,19 @@ pub enum Instr {
     GetField(u32),
     Index,
     /// tag const idx, positional payload count
-    MakeVariantPos { tag: u32, count: u16 },
+    MakeVariantPos {
+        tag: u32,
+        count: u16,
+    },
     /// tag const idx, field-names const idx
-    MakeVariantNamed { tag: u32, names: u32 },
+    MakeVariantNamed {
+        tag: u32,
+        names: u32,
+    },
     /// bare tag (no payload)
-    MakeVariantUnit { tag: u32 },
+    MakeVariantUnit {
+        tag: u32,
+    },
     // operators
     Add,
     Sub,
@@ -72,7 +80,9 @@ pub enum Instr {
     Neg,
     Not,
     /// pops hi, lo; pushes Range
-    MakeRange { inclusive: bool },
+    MakeRange {
+        inclusive: bool,
+    },
     // control (absolute targets within the proto)
     Jump(u32),
     JumpIfFalse(u32),
@@ -82,16 +92,26 @@ pub enum Instr {
     /// Peek subject at top of stack, try pattern `pat` (index into proto
     /// patterns). On match: write bindings into locals, fall through.
     /// On fail: jump to `fail`.
-    MatchPat { pat: u32, fail: u32 },
+    MatchPat {
+        pat: u32,
+        fail: u32,
+    },
     /// `captures` indexes `FnProto::closure_captures` (kept out of line so
     /// `Instr` stays `Copy`).
-    MakeClosure { fn_id: u32, captures: u32 },
+    MakeClosure {
+        fn_id: u32,
+        captures: u32,
+    },
     Call(u8),
     TailCall(u8),
     /// UFCS: stack [recv, a1..an]; name const idx. `global` is the fallback
     /// function's slot resolved at compile time with module-aware scoping
     /// (a record field named `name` still wins at runtime).
-    Invoke { name: u32, global: Option<u32>, argc: u8 },
+    Invoke {
+        name: u32,
+        global: Option<u32>,
+        argc: u8,
+    },
     Ret,
     // atoms / cells
     Deref,
@@ -105,7 +125,11 @@ pub enum Instr {
     Dup,
     /// Iterate local[iter] at index local[idx]: if exhausted jump `end`,
     /// else push next element and increment idx.
-    IterNext { iter: u16, idx: u16, end: u32 },
+    IterNext {
+        iter: u16,
+        idx: u16,
+        end: u32,
+    },
     Nop,
 }
 
@@ -119,12 +143,29 @@ pub enum Pat {
     LitStr(String),
     LitBool(bool),
     LitUnit,
-    VariantPos { tag: String, items: Vec<Pat> },
-    VariantNamed { tag: String, fields: Vec<(String, Pat)>, rest: bool },
-    Record { fields: Vec<(String, Pat)>, rest: bool },
+    VariantPos {
+        tag: String,
+        items: Vec<Pat>,
+    },
+    VariantNamed {
+        tag: String,
+        fields: Vec<(String, Pat)>,
+        rest: bool,
+    },
+    Record {
+        fields: Vec<(String, Pat)>,
+        rest: bool,
+    },
     Tuple(Vec<Pat>),
-    List { items: Vec<Pat>, rest: Option<Option<u16>> },
-    Range { lo: i64, hi: i64, inclusive: bool },
+    List {
+        items: Vec<Pat>,
+        rest: Option<Option<u16>>,
+    },
+    Range {
+        lo: i64,
+        hi: i64,
+        inclusive: bool,
+    },
     Or(Vec<Pat>),
     As(Box<Pat>, u16),
 }

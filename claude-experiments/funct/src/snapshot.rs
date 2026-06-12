@@ -11,10 +11,10 @@
 //! calling `restore_state`. Missing natives fail loudly.
 
 use crate::bytecode::FnProto;
+use crate::value::shared::{Lock, Sh};
 use crate::value::{AtomCell, Closure, Value, Variant, VariantPayload};
 use crate::vm::{Fault, Frame, Funct, FunctError, Status, VmState};
 use serde::{Deserialize, Serialize};
-use crate::value::shared::{Lock, Sh};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,10 @@ pub enum SValue {
     VariantUnit(String),
     VariantPos(String, Vec<SValue>),
     VariantNamed(String, Vec<(String, SValue)>),
-    Closure { fn_id: u32, upvals: Vec<SValue> },
+    Closure {
+        fn_id: u32,
+        upvals: Vec<SValue>,
+    },
     /// index into `native_names`
     NativeFn(u32),
     AtomRef(usize),
@@ -165,7 +168,11 @@ impl Encoder {
                             .map(|(k, f)| Ok((k.clone(), self.enc(f)?)))
                             .collect::<Result<Vec<_>, Fault>>()?
                     };
-                    self.atoms[i] = Some(SAtom { id: a.id, value, watchers });
+                    self.atoms[i] = Some(SAtom {
+                        id: a.id,
+                        value,
+                        watchers,
+                    });
                     SValue::AtomRef(i)
                 }
             }
@@ -194,14 +201,23 @@ impl Encoder {
         })
     }
 
-    fn enc_all<'a>(&mut self, vs: impl IntoIterator<Item = &'a Value>) -> Result<Vec<SValue>, Fault> {
+    fn enc_all<'a>(
+        &mut self,
+        vs: impl IntoIterator<Item = &'a Value>,
+    ) -> Result<Vec<SValue>, Fault> {
         vs.into_iter().map(|v| self.enc(v)).collect()
     }
 
     fn finish(self) -> (Vec<SAtom>, Vec<SValue>) {
         (
-            self.atoms.into_iter().map(|a| a.expect("atom slot filled")).collect(),
-            self.cells.into_iter().map(|c| c.expect("cell slot filled")).collect(),
+            self.atoms
+                .into_iter()
+                .map(|a| a.expect("atom slot filled"))
+                .collect(),
+            self.cells
+                .into_iter()
+                .map(|c| c.expect("cell slot filled"))
+                .collect(),
         )
     }
 }
@@ -243,15 +259,18 @@ impl Decoder {
                 }
                 Value::variant(tag, VariantPayload::Named(map))
             }
-            SValue::Closure { fn_id, upvals } => {
-                Value::Closure(Sh::new(Closure { fn_id: *fn_id, upvals: self.dec_all(upvals)? }))
-            }
+            SValue::Closure { fn_id, upvals } => Value::Closure(Sh::new(Closure {
+                fn_id: *fn_id,
+                upvals: self.dec_all(upvals)?,
+            })),
             SValue::NativeFn(old_id) => {
                 let new_id = self
                     .native_map
                     .get(*old_id as usize)
                     .copied()
-                    .ok_or_else(|| Fault::new(format!("snapshot references unknown native id {}", old_id)))?;
+                    .ok_or_else(|| {
+                        Fault::new(format!("snapshot references unknown native id {}", old_id))
+                    })?;
                 Value::NativeFn(new_id)
             }
             SValue::AtomRef(i) => Value::Atom(
@@ -296,9 +315,10 @@ fn dec_status(d: &Decoder, s: &SStatus) -> Result<Status, Fault> {
     Ok(match s {
         SStatus::Running => Status::Running,
         SStatus::Done(v) => Status::Done(d.dec(v)?),
-        SStatus::Faulted { msg, at } => {
-            Status::Faulted(Fault { msg: msg.clone(), at: at.clone() })
-        }
+        SStatus::Faulted { msg, at } => Status::Faulted(Fault {
+            msg: msg.clone(),
+            at: at.clone(),
+        }),
     })
 }
 
@@ -328,7 +348,10 @@ impl Funct {
         let status = match &st.status {
             Status::Running => SStatus::Running,
             Status::Done(v) => SStatus::Done(enc.enc(v)?),
-            Status::Faulted(f) => SStatus::Faulted { msg: f.msg.clone(), at: f.at.clone() },
+            Status::Faulted(f) => SStatus::Faulted {
+                msg: f.msg.clone(),
+                at: f.at.clone(),
+            },
         };
         // include host-held registry atoms not reachable from the state
         for a in self.live_atoms() {
@@ -338,7 +361,12 @@ impl Funct {
         let snap = StateSnapshot {
             version: SNAPSHOT_VERSION,
             fns: self.fns.iter().map(|p| (**p).clone()).collect(),
-            fn_ids: self.ctx.fn_ids.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            fn_ids: self
+                .ctx
+                .fn_ids
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
             fn_count: self.ctx.fn_count,
             global_names: self.ctx.global_names.clone(),
             globals,
@@ -357,14 +385,17 @@ impl Funct {
                     (
                         k.clone(),
                         match v {
-                            crate::vm::ModuleExports::File(list) => SModuleExports::File(list.clone()),
+                            crate::vm::ModuleExports::File(list) => {
+                                SModuleExports::File(list.clone())
+                            }
                             crate::vm::ModuleExports::Host(g) => SModuleExports::Host(*g),
                         },
                     )
                 })
                 .collect(),
         };
-        serde_json::to_string(&snap).map_err(|e| Fault::new(format!("snapshot encode failed: {}", e)))
+        serde_json::to_string(&snap)
+            .map_err(|e| Fault::new(format!("snapshot encode failed: {}", e)))
     }
 
     /// Restore a snapshot produced by `save_state`. Replaces this engine's
@@ -421,9 +452,16 @@ impl Funct {
                 })
             })
             .collect();
-        let cells: Vec<Sh<Lock<Value>>> =
-            snap.cell_table.iter().map(|_| Sh::new(Lock::new(Value::Unit))).collect();
-        let dec = Decoder { atoms, cells, native_map };
+        let cells: Vec<Sh<Lock<Value>>> = snap
+            .cell_table
+            .iter()
+            .map(|_| Sh::new(Lock::new(Value::Unit)))
+            .collect();
+        let dec = Decoder {
+            atoms,
+            cells,
+            native_map,
+        };
 
         for (i, sa) in snap.atom_table.iter().enumerate() {
             *dec.atoms[i].value.write() = dec.dec(&sa.value).map_err(FunctError::Fault)?;
@@ -447,11 +485,12 @@ impl Funct {
 
         let mut frames = Vec::with_capacity(snap.frames.len());
         for sf in &snap.frames {
-            let proto = self
-                .fns
-                .get(sf.fn_id as usize)
-                .cloned()
-                .ok_or_else(|| FunctError::Fault(Fault::new(format!("snapshot frame references unknown fn id {}", sf.fn_id))))?;
+            let proto = self.fns.get(sf.fn_id as usize).cloned().ok_or_else(|| {
+                FunctError::Fault(Fault::new(format!(
+                    "snapshot frame references unknown fn id {}",
+                    sf.fn_id
+                )))
+            })?;
             frames.push(Frame {
                 fn_id: sf.fn_id,
                 proto,
@@ -466,7 +505,11 @@ impl Funct {
         self.atom_counter = snap.atom_counter;
         self.atoms = dec.atoms.iter().map(Sh::downgrade).collect();
 
-        Ok(VmState { frames, stack, status })
+        Ok(VmState {
+            frames,
+            stack,
+            status,
+        })
     }
 
     /// Serialize every live atom (spec §7). The program's complete mutable
@@ -484,7 +527,8 @@ impl Funct {
             cell_table,
             atom_counter: self.atom_counter,
         };
-        serde_json::to_string(&snap).map_err(|e| Fault::new(format!("atom snapshot encode failed: {}", e)))
+        serde_json::to_string(&snap)
+            .map_err(|e| Fault::new(format!("atom snapshot encode failed: {}", e)))
     }
 
     /// Rehydrate atom values into the *current* program's live atoms,
@@ -518,9 +562,16 @@ impl Funct {
                 }
             }
         }
-        let cells: Vec<Sh<Lock<Value>>> =
-            snap.cell_table.iter().map(|_| Sh::new(Lock::new(Value::Unit))).collect();
-        let dec = Decoder { atoms, cells, native_map };
+        let cells: Vec<Sh<Lock<Value>>> = snap
+            .cell_table
+            .iter()
+            .map(|_| Sh::new(Lock::new(Value::Unit)))
+            .collect();
+        let dec = Decoder {
+            atoms,
+            cells,
+            native_map,
+        };
         for (i, sc) in snap.cell_table.iter().enumerate() {
             *dec.cells[i].write() = dec.dec(sc)?;
         }

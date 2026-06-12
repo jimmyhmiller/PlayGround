@@ -51,7 +51,14 @@ impl ProcRegistry {
         });
         self.next += 1;
         let id = self.next;
-        self.procs.insert(id, Proc { child, stdin, lines });
+        self.procs.insert(
+            id,
+            Proc {
+                child,
+                stdin,
+                lines,
+            },
+        );
         id
     }
 }
@@ -88,14 +95,23 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
 
     let need = |name: &str, args: &[Value], n: usize| -> Result<(), Fault> {
         if args.len() != n {
-            return Err(Fault::new(format!("{} expects {} argument(s), got {}", name, n, args.len())));
+            return Err(Fault::new(format!(
+                "{} expects {} argument(s), got {}",
+                name,
+                n,
+                args.len()
+            )));
         }
         Ok(())
     };
     let handle_of = |name: &str, v: &Value| -> Result<i64, Fault> {
         match v {
             Value::Int(i) => Ok(*i),
-            other => Err(Fault::new(format!("{}: handle must be Int, got {}", name, other.type_name()))),
+            other => Err(Fault::new(format!(
+                "{}: handle must be Int, got {}",
+                name,
+                other.type_name()
+            ))),
         }
     };
 
@@ -129,11 +145,18 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
         let id = handle_of("proc_write", &args[0])?;
         let line = match &args[1] {
             Value::Str(s) => s.to_string(),
-            other => return Err(Fault::new(format!("proc_write: expected Str, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "proc_write: expected Str, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let mut r = reg.lock().unwrap();
         let ok = match r.procs.get_mut(&id) {
-            Some(p) => writeln!(p.stdin, "{}", line).and_then(|_| p.stdin.flush()).is_ok(),
+            Some(p) => writeln!(p.stdin, "{}", line)
+                .and_then(|_| p.stdin.flush())
+                .is_ok(),
             None => false,
         };
         Ok(Value::Bool(ok))
@@ -187,7 +210,10 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
                 an.store(*b, Ordering::SeqCst);
                 Ok(Value::Unit)
             }
-            other => Err(Fault::new(format!("set_animating: expected Bool, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "set_animating: expected Bool, got {}",
+                other.type_name()
+            ))),
         }
     });
 
@@ -198,7 +224,9 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0)
     });
-    vm.register1("host_env", |name: String| std::env::var(name).unwrap_or_default());
+    vm.register1("host_env", |name: String| {
+        std::env::var(name).unwrap_or_default()
+    });
     vm.register1("widget_asset", |rel: String| format!("assets/{}", rel));
     vm.register_raw("host_log", |_vm, args| {
         let parts: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
@@ -213,7 +241,10 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
                 *cb.lock().unwrap() = s.to_string();
                 Ok(Value::Bool(true))
             }
-            other => Err(Fault::new(format!("clipboard_set: expected Str, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "clipboard_set: expected Str, got {}",
+                other.type_name()
+            ))),
         }
     });
 
@@ -223,9 +254,18 @@ pub fn install_widget_host(vm: &mut Funct) -> WidgetHost {
     // saved game references every native the imported host.ft binds, so any
     // worker restoring it must register the same surface (these four included).
     vm.register2("uniform_set", |_name: String, _value: Value| {});
-    vm.register5("mask_paint", |_name: String, _x: f64, _y: f64, _r: f64, _v: f64| {});
-    vm.register3("oklch", |l: f64, c: f64, h: f64| format!("oklch({l:.3} {c:.3} {h:.1})"));
+    vm.register5(
+        "mask_paint",
+        |_name: String, _x: f64, _y: f64, _r: f64, _v: f64| {},
+    );
+    vm.register3("oklch", |l: f64, c: f64, h: f64| {
+        format!("oklch({l:.3} {c:.3} {h:.1})")
+    });
     vm.register2("emit", |_kind: String, _payload: Value| {});
 
-    WidgetHost { render_requested, animating, clipboard }
+    WidgetHost {
+        render_requested,
+        animating,
+        clipboard,
+    }
 }

@@ -4,7 +4,8 @@ use funct::{Funct, FunctError, Value};
 
 fn eval(src: &str) -> Value {
     let mut vm = Funct::new();
-    vm.eval(src).unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
+    vm.eval(src)
+        .unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
 }
 
 fn eval_err(src: &str) -> String {
@@ -52,8 +53,13 @@ fn numeric_separators() {
 fn strings_and_interpolation() {
     assert_eq!(eval(r#""hello" + " " + "world""#), s("hello world"));
     assert_eq!(eval(r#""1 + 2 = ${1 + 2}""#), s("1 + 2 = 3"));
-    assert_eq!(eval(r#"let name = "ada"
-"hi ${name}!""#), s("hi ada!"));
+    assert_eq!(
+        eval(
+            r#"let name = "ada"
+"hi ${name}!""#
+        ),
+        s("hi ada!")
+    );
     // bare braces are literal now (no escaping needed)
     assert_eq!(eval("\"a brace { and } here\""), s("a brace { and } here"));
     // `\$` escapes an interpolation
@@ -100,10 +106,7 @@ fn let_and_shadowing() {
 
 #[test]
 fn blocks_are_expressions() {
-    assert_eq!(
-        eval("let y = {\n let a = 2\n a * 3\n}\ny"),
-        int(6)
-    );
+    assert_eq!(eval("let y = {\n let a = 2\n a * 3\n}\ny"), int(6));
     // block without trailing expr is ()
     assert_eq!(eval("{ let a = 1\n}"), Value::Unit);
 }
@@ -139,7 +142,10 @@ fn destructuring_let() {
     assert_eq!(eval("let (a, b) = (1, 2)\na + b"), int(3));
     assert_eq!(eval("let [x, y, z] = [1, 2, 3]\nx + y + z"), int(6));
     assert_eq!(eval("let { x, y } = { x: 1, y: 2 }\nx + y"), int(3));
-    assert_eq!(eval("fn f() {\n let (a, b) = (4, 5)\n a * b\n}\nf()"), int(20));
+    assert_eq!(
+        eval("fn f() {\n let (a, b) = (4, 5)\n a * b\n}\nf()"),
+        int(20)
+    );
 }
 
 // ---------- functions & closures ----------
@@ -169,7 +175,10 @@ fn lambdas() {
     assert_eq!(eval("let f = (x, y) => x * y\nf(6, 7)"), int(42));
     assert_eq!(eval("let f = () => 42\nf()"), int(42));
     // lambda with block body
-    assert_eq!(eval("let f = x => {\n let y = x * 2\n y + 1\n}\nf(20)"), int(41));
+    assert_eq!(
+        eval("let f = x => {\n let y = x * 2\n y + 1\n}\nf(20)"),
+        int(41)
+    );
 }
 
 #[test]
@@ -232,7 +241,10 @@ fn deep_non_tail_recursion_uses_heap_frames() {
 #[test]
 fn pattern_params() {
     assert_eq!(eval("fn first((a, _)) = a\nfirst((7, 8))"), int(7));
-    assert_eq!(eval("fn norm({ x, y }) = x * x + y * y\nnorm({ x: 3, y: 4 })"), int(25));
+    assert_eq!(
+        eval("fn norm({ x, y }) = x * x + y * y\nnorm({ x: 3, y: 4 })"),
+        int(25)
+    );
 }
 
 #[test]
@@ -280,10 +292,7 @@ fn ufcs_method_call() {
 #[test]
 fn record_field_wins_over_ufcs() {
     // spec §4.1: field access wins when `f` is a field of the record
-    assert_eq!(
-        eval("let r = { double: x => x * 3 }\nr.double(5)"),
-        int(15)
-    );
+    assert_eq!(eval("let r = { double: x => x * 3 }\nr.double(5)"), int(15));
 }
 
 #[test]
@@ -346,7 +355,9 @@ fn if_else() {
     assert_eq!(eval("if 1 < 2 { \"yes\" } else { \"no\" }"), s("yes"));
     assert_eq!(eval("if false { 1 }"), Value::Unit);
     assert_eq!(
-        eval("fn grade(n) = if n > 89 { \"A\" } else if n > 79 { \"B\" } else { \"C\" }\ngrade(85)"),
+        eval(
+            "fn grade(n) = if n > 89 { \"A\" } else if n > 79 { \"B\" } else { \"C\" }\ngrade(85)"
+        ),
         s("B")
     );
 }
@@ -437,10 +448,15 @@ fn match_guards() {
 #[test]
 fn match_list_patterns() {
     assert_eq!(
-        eval("match [1, 2, 3, 4] {\n [] => 0,\n [x] => x,\n [first, ..rest] => first + len(rest)\n}"),
+        eval(
+            "match [1, 2, 3, 4] {\n [] => 0,\n [x] => x,\n [first, ..rest] => first + len(rest)\n}"
+        ),
         int(4)
     );
-    assert_eq!(eval("match [] {\n [] => \"empty\",\n _ => \"no\"\n}"), s("empty"));
+    assert_eq!(
+        eval("match [] {\n [] => \"empty\",\n _ => \"no\"\n}"),
+        s("empty")
+    );
     // exact length
     assert_eq!(
         eval("match [1, 2] {\n [a, b, c] => 3,\n [a, b] => 2,\n _ => 0\n}"),
@@ -565,7 +581,10 @@ fn unknown_variable_is_compile_error() {
     let mut vm = Funct::new();
     match vm.eval("nope + 1") {
         Err(FunctError::Compile(m)) => assert!(m.contains("nope"), "{}", m),
-        other => panic!("expected compile error, got {:?}", other.map(|v| format!("{:?}", v))),
+        other => panic!(
+            "expected compile error, got {:?}",
+            other.map(|v| format!("{:?}", v))
+        ),
     }
 }
 
@@ -588,7 +607,10 @@ fn atom_swap_returns_new_value() {
 #[test]
 fn atom_pipes() {
     // spec §4.4: a |> swap!(_, f)
-    assert_eq!(eval("let a = atom(10)\na |> swap!(_, x => x + 1)\n@a"), int(11));
+    assert_eq!(
+        eval("let a = atom(10)\na |> swap!(_, x => x + 1)\n@a"),
+        int(11)
+    );
 }
 
 #[test]
@@ -601,10 +623,7 @@ swap!(a, x => x + 1)
 reset!(a, 10)
 @log
 "#;
-    assert_eq!(
-        eval(src),
-        eval("[(0, 1), (1, 10)]")
-    );
+    assert_eq!(eval(src), eval("[(0, 1), (1, 10)]"));
 }
 
 #[test]
@@ -639,7 +658,10 @@ bump()
 #[test]
 fn prelude_functions() {
     assert_eq!(eval("map([1, 2, 3], x => x * x)"), eval("[1, 4, 9]"));
-    assert_eq!(eval("filter([1, 2, 3, 4], x => x % 2 == 0)"), eval("[2, 4]"));
+    assert_eq!(
+        eval("filter([1, 2, 3, 4], x => x % 2 == 0)"),
+        eval("[2, 4]")
+    );
     assert_eq!(eval("fold([1, 2, 3], 10, (a, b) => a + b)"), int(16));
     assert_eq!(eval("sum([1, 2, 3])"), int(6));
     assert_eq!(eval("reverse([1, 2, 3])"), eval("[3, 2, 1]"));

@@ -6,7 +6,8 @@ use funct::{Funct, Value};
 
 fn eval(src: &str) -> Value {
     let mut vm = Funct::new();
-    vm.eval(src).unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
+    vm.eval(src)
+        .unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
 }
 
 fn eval_err(src: &str) -> String {

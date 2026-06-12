@@ -29,7 +29,11 @@ pub trait FromValue: Sized {
 }
 
 fn conv_err<T>(expected: &str, got: &Value) -> Result<T, Fault> {
-    Err(Fault::new(format!("expected {}, got {}", expected, got.type_name())))
+    Err(Fault::new(format!(
+        "expected {}, got {}",
+        expected,
+        got.type_name()
+    )))
 }
 
 impl ToValue for Value {
@@ -271,12 +275,18 @@ impl Funct {
         let f: crate::vm::NativeImpl = Sh::new(f);
         let id = match self.native_ids.get(name) {
             Some(&id) => {
-                self.natives[id as usize] = NativeEntry { name: name.to_string(), f };
+                self.natives[id as usize] = NativeEntry {
+                    name: name.to_string(),
+                    f,
+                };
                 id
             }
             None => {
                 let id = self.natives.len() as u32;
-                self.natives.push(NativeEntry { name: name.to_string(), f });
+                self.natives.push(NativeEntry {
+                    name: name.to_string(),
+                    f,
+                });
                 self.native_ids.insert(name.to_string(), id);
                 id
             }
@@ -297,19 +307,24 @@ impl Funct {
         (register6, A: 0, B: 1, C: 2, D: 3, E: 4, F: 5; 6)
     );
 
-    /// Register a host module: a global record whose fields are the module's
-    /// functions, usable directly as `math.lerp(a, b, t)` and importable with
-    /// `import { lerp } from "math"` / `import "math" as m`.
+    /// Register a host module: a record of functions reachable ONLY through an
+    /// explicit import — `import { lerp } from "math"` / `import "math" as m`.
+    /// Like file modules, it is NOT visible as a bare `math.lerp(..)` and NOT
+    /// auto-visible inside other modules; imports are explicit.
     pub fn register_module(&mut self, name: &str, fns: Vec<(&str, Value)>) {
         let mut map = BTreeMap::new();
         for (fname, v) in fns {
             map.insert(fname.to_string(), v);
         }
-        let g = self.ctx.ensure_global(name);
-        self.ctx.shared.insert(g); // host modules are visible inside modules
+        // Store the record in an internal global slot whose name can never be
+        // written as an identifier (no `<`/space in the grammar), so the script
+        // cannot reach it by name — only `import ... from "<name>"` resolves it,
+        // via the host-module entry registered below. It is deliberately NOT
+        // added to `ctx.shared`, so module code can't see it without importing.
+        let slot = self.ctx.ensure_global(&format!("<host-module {}>", name));
         self.sync_globals();
-        self.globals[g as usize] = Some(Value::record(map));
-        self.register_host_module(name, g);
+        self.globals[slot as usize] = Some(Value::record(map));
+        self.register_host_module(name, slot);
     }
 
     /// Look up a registered native fn as a Value (for register_module).
@@ -318,14 +333,22 @@ impl Funct {
     }
 
     /// Call a global function and convert the result.
-    pub fn call_typed<R: FromValue>(&mut self, name: &str, args: Vec<Value>) -> Result<R, FunctError> {
+    pub fn call_typed<R: FromValue>(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<R, FunctError> {
         let v = self.call(name, args)?;
         R::from_value(v).map_err(FunctError::Fault)
     }
 
     /// Register a host type: field getters + UFCS methods (`T: Send`).
     pub fn register_type<T: NativeBound>(&mut self, name: &str) -> TypeBuilder<'_, T> {
-        TypeBuilder { vm: self, type_name: name.to_string(), _p: PhantomData }
+        TypeBuilder {
+            vm: self,
+            type_name: name.to_string(),
+            _p: PhantomData,
+        }
     }
 }
 
@@ -352,7 +375,10 @@ fn with_native<T: 'static, R>(
 ) -> Result<R, Fault> {
     match v {
         Value::Native(n) => n.with_mut(f).ok_or_else(|| {
-            Fault::new(format!("expected native {}, got native {}", type_name, n.type_name))
+            Fault::new(format!(
+                "expected native {}, got native {}",
+                type_name, n.type_name
+            ))
         }),
         other => Err(Fault::new(format!(
             "expected native {}, got {}",
@@ -423,11 +449,16 @@ macro_rules! type_ctors {
 #[allow(non_snake_case)]
 impl<'a, T: NativeBound> TypeBuilder<'a, T> {
     /// Register a field getter: `obj.name` in script.
-    pub fn field<R: ToValue + 'static>(self, name: &str, get: impl Fn(&T) -> R + HostBound) -> Self {
+    pub fn field<R: ToValue + 'static>(
+        self,
+        name: &str,
+        get: impl Fn(&T) -> R + HostBound,
+    ) -> Self {
         let key = (self.type_name.clone(), name.to_string());
         let tname = self.type_name.clone();
-        let getter: crate::vm::Getter =
-            Sh::new(move |_vm: &mut Funct, v: &Value| with_native::<T, R>(&tname, v, |t| get(t)).map(|r| r.to_value()));
+        let getter: crate::vm::Getter = Sh::new(move |_vm: &mut Funct, v: &Value| {
+            with_native::<T, R>(&tname, v, |t| get(t)).map(|r| r.to_value())
+        });
         self.vm.getters.insert(key, getter);
         self
     }

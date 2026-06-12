@@ -75,14 +75,22 @@ pub fn install(vm: &mut Funct) {
                 out.push_back(args[1].clone());
                 Ok(Value::list_v(out))
             }
-            other => Err(Fault::new(format!("push: expected List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "push: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("keys", |_vm, args| {
         expect_arity("keys", &args, 1)?;
         match &args[0] {
-            Value::Record(r) => Ok(Value::list(r.keys().map(|k| Value::str(k.clone())).collect())),
-            other => Err(Fault::new(format!("keys: expected Record, got {}", other.type_name()))),
+            Value::Record(r) => Ok(Value::list(
+                r.keys().map(|k| Value::str(k.clone())).collect(),
+            )),
+            other => Err(Fault::new(format!(
+                "keys: expected Record, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("parse_int", |_vm, args| {
@@ -92,7 +100,10 @@ pub fn install(vm: &mut Funct) {
                 Ok(i) => Ok(Value::ok(Value::Int(i))),
                 Err(_) => Ok(Value::err(Value::str(format!("not an integer: {}", s)))),
             },
-            other => Err(Fault::new(format!("parse_int: expected Str, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "parse_int: expected Str, got {}",
+                other.type_name()
+            ))),
         }
     });
 
@@ -105,14 +116,22 @@ pub fn install(vm: &mut Funct) {
         expect_arity("deref", &args, 1)?;
         match &args[0] {
             Value::Atom(a) => Ok(a.value.read().clone()),
-            other => Err(Fault::new(format!("deref: expected Atom, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "deref: expected Atom, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("swap!", |vm, args| {
         expect_arity("swap!", &args, 2)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("swap!: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "swap!: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let old = atom.value.read().clone();
         // single-threaded VM: apply-and-set is atomic w.r.t. script code
@@ -125,7 +144,12 @@ pub fn install(vm: &mut Funct) {
         expect_arity("reset!", &args, 2)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("reset!: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "reset!: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let old = atom.value.read().clone();
         let new = args[1].clone();
@@ -137,15 +161,30 @@ pub fn install(vm: &mut Funct) {
         expect_arity("watch", &args, 3)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("watch: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "watch: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let key = match &args[1] {
             Value::Str(s) => s.to_string(),
-            other => return Err(Fault::new(format!("watch: key must be Str, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "watch: key must be Str, got {}",
+                    other.type_name()
+                )))
+            }
         };
         match &args[2] {
             Value::Closure(_) | Value::NativeFn(_) => {}
-            other => return Err(Fault::new(format!("watch: watcher must be a function, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "watch: watcher must be a function, got {}",
+                    other.type_name()
+                )))
+            }
         }
         let mut ws = atom.watchers.write();
         ws.retain(|(k, _)| k != &key);
@@ -156,11 +195,21 @@ pub fn install(vm: &mut Funct) {
         expect_arity("unwatch", &args, 2)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("unwatch: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "unwatch: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let key = match &args[1] {
             Value::Str(s) => s.to_string(),
-            other => return Err(Fault::new(format!("unwatch: key must be Str, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "unwatch: key must be Str, got {}",
+                    other.type_name()
+                )))
+            }
         };
         atom.watchers.write().retain(|(k, _)| k != &key);
         Ok(args[0].clone())
@@ -181,12 +230,17 @@ pub fn install(vm: &mut Funct) {
                 };
                 Err(Fault::new(msg))
             }
-            other => Err(Fault::new(format!("assert: condition must be Bool, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "assert: condition must be Bool, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("assert_eq", |_vm, args| {
         if args.len() < 2 || args.len() > 3 {
-            return Err(Fault::new("assert_eq expects (left, right) or (left, right, msg)"));
+            return Err(Fault::new(
+                "assert_eq expects (left, right) or (left, right, msg)",
+            ));
         }
         if args[0] == args[1] {
             return Ok(Value::Unit);
@@ -202,7 +256,9 @@ pub fn install(vm: &mut Funct) {
     });
     vm.register_raw("assert_ne", |_vm, args| {
         if args.len() < 2 || args.len() > 3 {
-            return Err(Fault::new("assert_ne expects (left, right) or (left, right, msg)"));
+            return Err(Fault::new(
+                "assert_ne expects (left, right) or (left, right, msg)",
+            ));
         }
         if args[0] != args[1] {
             return Ok(Value::Unit);
@@ -252,9 +308,15 @@ fn install_math(vm: &mut Funct) {
     vm.register_raw("abs", |_vm, args| {
         expect_arity("abs", &args, 1)?;
         match &args[0] {
-            Value::Int(i) => Ok(Value::Int(i.checked_abs().ok_or_else(|| Fault::new("abs: integer overflow"))?)),
+            Value::Int(i) => Ok(Value::Int(
+                i.checked_abs()
+                    .ok_or_else(|| Fault::new("abs: integer overflow"))?,
+            )),
             Value::Float(f) => Ok(Value::Float(f.abs())),
-            other => Err(Fault::new(format!("abs: expected a number, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "abs: expected a number, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("min", |_vm, args| {
@@ -281,7 +343,10 @@ fn install_math(vm: &mut Funct) {
                     Err(Fault::new(format!("to_int: {} is out of integer range", f)))
                 }
             }
-            other => Err(Fault::new(format!("to_int: expected a number, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "to_int: expected a number, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("to_float", |_vm, args| {
@@ -289,7 +354,10 @@ fn install_math(vm: &mut Funct) {
         match &args[0] {
             Value::Int(i) => Ok(Value::Float(*i as f64)),
             Value::Float(f) => Ok(Value::Float(*f)),
-            other => Err(Fault::new(format!("to_float: expected a number, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "to_float: expected a number, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("parse_float", |_vm, args| {
@@ -299,7 +367,10 @@ fn install_math(vm: &mut Funct) {
                 Ok(f) => Ok(Value::ok(Value::Float(f))),
                 Err(_) => Ok(Value::err(Value::str(format!("not a number: {}", s)))),
             },
-            other => Err(Fault::new(format!("parse_float: expected Str, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "parse_float: expected Str, got {}",
+                other.type_name()
+            ))),
         }
     });
 }
@@ -312,7 +383,12 @@ fn as_num(v: &Value) -> Option<f64> {
     }
 }
 
-fn num_pick(name: &str, a: &Value, b: &Value, take_a: fn(f64, f64) -> bool) -> Result<Value, Fault> {
+fn num_pick(
+    name: &str,
+    a: &Value,
+    b: &Value,
+    take_a: fn(f64, f64) -> bool,
+) -> Result<Value, Fault> {
     match (as_num(a), as_num(b)) {
         (Some(x), Some(y)) => Ok(if take_a(x, y) { a.clone() } else { b.clone() }),
         _ => Err(Fault::new(format!(
@@ -332,24 +408,37 @@ fn install_strings(vm: &mut Funct) {
     vm.register1("to_lower", |s: String| s.to_lowercase());
     vm.register1("to_upper", |s: String| s.to_uppercase());
     vm.register1("trim", |s: String| s.trim().to_string());
-    vm.register3("replace", |s: String, from: String, to: String| s.replace(&from, &to));
+    vm.register3("replace", |s: String, from: String, to: String| {
+        s.replace(&from, &to)
+    });
     vm.register_raw("split", |_vm, args| {
         expect_arity("split", &args, 2)?;
         match (&args[0], &args[1]) {
             (Value::Str(s), Value::Str(sep)) => {
                 if sep.is_empty() {
-                    return Err(Fault::new("split: separator must be non-empty (use chars() for characters)"));
+                    return Err(Fault::new(
+                        "split: separator must be non-empty (use chars() for characters)",
+                    ));
                 }
                 Ok(Value::list(s.split(&**sep).map(Value::str).collect()))
             }
-            (a, b) => Err(Fault::new(format!("split: expected (Str, Str), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "split: expected (Str, Str), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("chars", |_vm, args| {
         expect_arity("chars", &args, 1)?;
         match &args[0] {
-            Value::Str(s) => Ok(Value::list(s.chars().map(|c| Value::str(c.to_string())).collect())),
-            other => Err(Fault::new(format!("chars: expected Str, got {}", other.type_name()))),
+            Value::Str(s) => Ok(Value::list(
+                s.chars().map(|c| Value::str(c.to_string())).collect(),
+            )),
+            other => Err(Fault::new(format!(
+                "chars: expected Str, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("join", |_vm, args| {
@@ -368,7 +457,11 @@ fn install_strings(vm: &mut Funct) {
                     .collect();
                 Ok(Value::str(parts?.join(&**sep)))
             }
-            (a, b) => Err(Fault::new(format!("join: expected (List, Str), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "join: expected (List, Str), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
 }
@@ -381,10 +474,16 @@ fn install_collections(vm: &mut Funct) {
         match &args[0] {
             Value::Str(s) => match &args[1] {
                 Value::Str(needle) => Ok(Value::Bool(s.contains(&**needle))),
-                other => Err(Fault::new(format!("contains: needle for a Str must be Str, got {}", other.type_name()))),
+                other => Err(Fault::new(format!(
+                    "contains: needle for a Str must be Str, got {}",
+                    other.type_name()
+                ))),
             },
             Value::List(items) => Ok(Value::Bool(items.iter().any(|v| v == &args[1]))),
-            other => Err(Fault::new(format!("contains: expected Str or List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "contains: expected Str or List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("index_of", |_vm, args| {
@@ -396,13 +495,19 @@ fn install_collections(vm: &mut Funct) {
                     Some(byte) => Value::some(Value::Int(s[..byte].chars().count() as i64)),
                     None => Value::none(),
                 }),
-                other => Err(Fault::new(format!("index_of: needle for a Str must be Str, got {}", other.type_name()))),
+                other => Err(Fault::new(format!(
+                    "index_of: needle for a Str must be Str, got {}",
+                    other.type_name()
+                ))),
             },
             Value::List(items) => Ok(match items.iter().position(|v| v == &args[1]) {
                 Some(i) => Value::some(Value::Int(i as i64)),
                 None => Value::none(),
             }),
-            other => Err(Fault::new(format!("index_of: expected Str or List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "index_of: expected Str or List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("is_empty", |_vm, args| {
@@ -411,7 +516,12 @@ fn install_collections(vm: &mut Funct) {
             Value::Str(s) => s.is_empty(),
             Value::List(items) | Value::Tuple(items) => items.is_empty(),
             Value::Record(r) => r.is_empty(),
-            other => return Err(Fault::new(format!("is_empty: not sized: {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "is_empty: not sized: {}",
+                    other.type_name()
+                )))
+            }
         };
         Ok(Value::Bool(empty))
     });
@@ -428,32 +538,54 @@ fn install_collections(vm: &mut Funct) {
             }
         };
         match &args[0] {
-            Value::Str(s) => Ok(Value::str(s.chars().skip(start).take(count).collect::<String>())),
+            Value::Str(s) => Ok(Value::str(
+                s.chars().skip(start).take(count).collect::<String>(),
+            )),
             Value::List(items) => Ok(Value::list(
                 items.iter().skip(start).take(count).cloned().collect(),
             )),
-            other => Err(Fault::new(format!("slice: expected Str or List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "slice: expected Str or List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("first", |_vm, args| {
         expect_arity("first", &args, 1)?;
         match &args[0] {
-            Value::List(items) => Ok(items.front().cloned().map(Value::some).unwrap_or_else(Value::none)),
-            other => Err(Fault::new(format!("first: expected List, got {}", other.type_name()))),
+            Value::List(items) => Ok(items
+                .front()
+                .cloned()
+                .map(Value::some)
+                .unwrap_or_else(Value::none)),
+            other => Err(Fault::new(format!(
+                "first: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("last", |_vm, args| {
         expect_arity("last", &args, 1)?;
         match &args[0] {
-            Value::List(items) => Ok(items.last().cloned().map(Value::some).unwrap_or_else(Value::none)),
-            other => Err(Fault::new(format!("last: expected List, got {}", other.type_name()))),
+            Value::List(items) => Ok(items
+                .last()
+                .cloned()
+                .map(Value::some)
+                .unwrap_or_else(Value::none)),
+            other => Err(Fault::new(format!(
+                "last: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("rest", |_vm, args| {
         expect_arity("rest", &args, 1)?;
         match &args[0] {
             Value::List(items) => Ok(Value::list(items.iter().skip(1).cloned().collect())),
-            other => Err(Fault::new(format!("rest: expected List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "rest: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("pop", |_vm, args| {
@@ -467,7 +599,10 @@ fn install_collections(vm: &mut Funct) {
                 out.pop_back();
                 Ok(Value::list_v(out))
             }
-            other => Err(Fault::new(format!("pop: expected List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "pop: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("insert_at", |_vm, args| {
@@ -483,7 +618,11 @@ fn install_collections(vm: &mut Funct) {
                 i,
                 items.len()
             ))),
-            (a, b) => Err(Fault::new(format!("insert_at: expected (List, Int), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "insert_at: expected (List, Int), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("remove_at", |_vm, args| {
@@ -499,7 +638,11 @@ fn install_collections(vm: &mut Funct) {
                 i,
                 items.len()
             ))),
-            (a, b) => Err(Fault::new(format!("remove_at: expected (List, Int), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "remove_at: expected (List, Int), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("sort", |_vm, args| {
@@ -510,7 +653,10 @@ fn install_collections(vm: &mut Funct) {
                 sort_values("sort", &mut out)?;
                 Ok(Value::list(out))
             }
-            other => Err(Fault::new(format!("sort: expected List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "sort: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("sort_by", |vm, args| {
@@ -524,22 +670,33 @@ fn install_collections(vm: &mut Funct) {
                 }
                 let mut keys: Vec<Value> = keyed.iter().map(|(k, _)| k.clone()).collect();
                 sort_values("sort_by", &mut keys)?; // validates key types
-                keyed.sort_by(|(a, _), (b, _)| cmp_values(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                keyed.sort_by(|(a, _), (b, _)| {
+                    cmp_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 Ok(Value::list(keyed.into_iter().map(|(_, v)| v).collect()))
             }
-            other => Err(Fault::new(format!("sort_by: expected List, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "sort_by: expected List, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("has", |_vm, args| {
         expect_arity("has", &args, 2)?;
         match (&args[0], &args[1]) {
             (Value::Record(r), Value::Str(k)) => Ok(Value::Bool(r.contains_key(&**k))),
-            (a, b) => Err(Fault::new(format!("has: expected (Record, Str), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "has: expected (Record, Str), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("get", |_vm, args| {
         expect_arity("get", &args, 2)?;
-        Ok(get_key(&args[0], &args[1])?.map(Value::some).unwrap_or_else(Value::none))
+        Ok(get_key(&args[0], &args[1])?
+            .map(Value::some)
+            .unwrap_or_else(Value::none))
     });
     vm.register_raw("assoc", |_vm, args| {
         expect_arity("assoc", &args, 3)?;
@@ -553,7 +710,11 @@ fn install_collections(vm: &mut Funct) {
                 out.remove(&**k);
                 Ok(Value::Record(out))
             }
-            (a, b) => Err(Fault::new(format!("dissoc: expected (Record, Str), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "dissoc: expected (Record, Str), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("merge", |_vm, args| {
@@ -566,14 +727,21 @@ fn install_collections(vm: &mut Funct) {
                 }
                 Ok(Value::Record(out))
             }
-            (a, b) => Err(Fault::new(format!("merge: expected (Record, Record), got ({}, {})", a.type_name(), b.type_name()))),
+            (a, b) => Err(Fault::new(format!(
+                "merge: expected (Record, Record), got ({}, {})",
+                a.type_name(),
+                b.type_name()
+            ))),
         }
     });
     vm.register_raw("values", |_vm, args| {
         expect_arity("values", &args, 1)?;
         match &args[0] {
             Value::Record(r) => Ok(Value::list(r.values().cloned().collect())),
-            other => Err(Fault::new(format!("values: expected Record, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "values: expected Record, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("entries", |_vm, args| {
@@ -584,7 +752,10 @@ fn install_collections(vm: &mut Funct) {
                     .map(|(k, v)| Value::tuple(vec![Value::str(k.clone()), v.clone()]))
                     .collect(),
             )),
-            other => Err(Fault::new(format!("entries: expected Record, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "entries: expected Record, got {}",
+                other.type_name()
+            ))),
         }
     });
 }
@@ -647,7 +818,11 @@ fn assoc_key(container: &Value, key: &Value, v: Value) -> Result<Value, Fault> {
                 out[*i as usize] = v;
                 Ok(Value::list_v(out))
             } else {
-                Err(Fault::new(format!("assoc: index {} out of bounds (length {})", i, items.len())))
+                Err(Fault::new(format!(
+                    "assoc: index {} out of bounds (length {})",
+                    i,
+                    items.len()
+                )))
             }
         }
         (c, k) => Err(Fault::new(format!(
@@ -661,7 +836,10 @@ fn assoc_key(container: &Value, key: &Value, v: Value) -> Result<Value, Fault> {
 fn path_keys(path: &Value) -> Result<Vec<Value>, Fault> {
     match path {
         Value::List(items) => Ok(items.iter().cloned().collect()),
-        other => Err(Fault::new(format!("path must be a List of keys, got {}", other.type_name()))),
+        other => Err(Fault::new(format!(
+            "path must be a List of keys, got {}",
+            other.type_name()
+        ))),
     }
 }
 
@@ -716,7 +894,9 @@ fn install_paths(vm: &mut Funct) {
     vm.register_raw("get_in", |_vm, args| {
         expect_arity("get_in", &args, 2)?;
         let keys = path_keys(&args[1])?;
-        Ok(get_in(&args[0], &keys)?.map(Value::some).unwrap_or_else(Value::none))
+        Ok(get_in(&args[0], &keys)?
+            .map(Value::some)
+            .unwrap_or_else(Value::none))
     });
     vm.register_raw("assoc_in", |_vm, args| {
         expect_arity("assoc_in", &args, 3)?;
@@ -729,7 +909,10 @@ fn install_paths(vm: &mut Funct) {
     vm.register_raw("update", |vm, args| {
         expect_arity("update", &args, 3)?;
         let cur = get_key(&args[0], &args[1])?.ok_or_else(|| {
-            Fault::new(format!("update: no value at key {:?} (use assoc to add one)", args[1]))
+            Fault::new(format!(
+                "update: no value at key {:?} (use assoc to add one)",
+                args[1]
+            ))
         })?;
         let new = vm.call_value(&args[2], vec![cur])?;
         assoc_key(&args[0], &args[1], new)
@@ -741,7 +924,10 @@ fn install_paths(vm: &mut Funct) {
             return Err(Fault::new("update_in: path must not be empty"));
         }
         let cur = get_in(&args[0], &keys)?.ok_or_else(|| {
-            Fault::new(format!("update_in: no value at path {} (use assoc_in to add one)", args[1]))
+            Fault::new(format!(
+                "update_in: no value at path {} (use assoc_in to add one)",
+                args[1]
+            ))
         })?;
         let new = vm.call_value(&args[2], vec![cur])?;
         assoc_in(&args[0], &keys, new)
@@ -750,12 +936,20 @@ fn install_paths(vm: &mut Funct) {
         expect_arity("swap_in!", &args, 3)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("swap_in!: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "swap_in!: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let keys = path_keys(&args[1])?;
         let old = atom.value.read().clone();
         let cur = get_in(&old, &keys)?.ok_or_else(|| {
-            Fault::new(format!("swap_in!: no value at path {} (use reset_in! to create it)", args[1]))
+            Fault::new(format!(
+                "swap_in!: no value at path {} (use reset_in! to create it)",
+                args[1]
+            ))
         })?;
         let new_leaf = vm.call_value(&args[2], vec![cur])?;
         let new = assoc_in(&old, &keys, new_leaf)?;
@@ -767,7 +961,12 @@ fn install_paths(vm: &mut Funct) {
         expect_arity("reset_in!", &args, 3)?;
         let atom = match &args[0] {
             Value::Atom(a) => a.clone(),
-            other => return Err(Fault::new(format!("reset_in!: expected Atom, got {}", other.type_name()))),
+            other => {
+                return Err(Fault::new(format!(
+                    "reset_in!: expected Atom, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let keys = path_keys(&args[1])?;
         let old = atom.value.read().clone();
@@ -788,7 +987,10 @@ fn install_json(vm: &mut Funct) {
                 Ok(j) => Ok(Value::ok(Value::from_json(&j))),
                 Err(e) => Ok(Value::err(Value::str(format!("invalid JSON: {}", e)))),
             },
-            other => Err(Fault::new(format!("json_parse: expected Str, got {}", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "json_parse: expected Str, got {}",
+                other.type_name()
+            ))),
         }
     });
     vm.register_raw("json_stringify", |_vm, args| {
@@ -802,7 +1004,12 @@ fn install_json(vm: &mut Funct) {
 
 fn expect_arity(name: &str, args: &[Value], n: usize) -> Result<(), Fault> {
     if args.len() != n {
-        return Err(Fault::new(format!("{} expects {} argument(s), got {}", name, n, args.len())));
+        return Err(Fault::new(format!(
+            "{} expects {} argument(s), got {}",
+            name,
+            n,
+            args.len()
+        )));
     }
     Ok(())
 }

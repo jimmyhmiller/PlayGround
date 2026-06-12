@@ -221,7 +221,7 @@ interface ReplResponse {
 
 interface PendingEval {
   messages: ReplResponse[];
-  resolve: (value: string) => void;
+  resolve: (messages: ReplResponse[]) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -239,7 +239,7 @@ function disconnectRepl() {
     // Reject all pending evals
     for (const [id, pending] of pendingEvals) {
       clearTimeout(pending.timer);
-      pending.resolve(JSON.stringify({ error: "Connection closed" }));
+      pending.resolve([...pending.messages, { err: "Connection closed", status: ["error"] }]);
     }
     pendingEvals.clear();
   }
@@ -279,7 +279,7 @@ function connectRepl(): Promise<void> {
       replSocket = undefined;
       for (const [id, pending] of pendingEvals) {
         clearTimeout(pending.timer);
-        pending.resolve(formatReplResponse(pending.messages));
+        pending.resolve(pending.messages);
       }
       pendingEvals.clear();
     });
@@ -289,7 +289,7 @@ function connectRepl(): Promise<void> {
       replSocket = undefined;
       for (const [id, pending] of pendingEvals) {
         clearTimeout(pending.timer);
-        pending.resolve(JSON.stringify({ error: err.message }));
+        pending.resolve([...pending.messages, { err: err.message, status: ["error"] }]);
       }
       pendingEvals.clear();
       reject(err);
@@ -307,11 +307,14 @@ function handleReplMessage(msg: ReplResponse) {
   if (msg.status?.includes("done") || msg.status?.includes("error")) {
     clearTimeout(pending.timer);
     pendingEvals.delete(id);
-    pending.resolve(formatReplResponse(pending.messages));
+    pending.resolve(pending.messages);
   }
 }
 
-async function replRequest(op: string, extra: Record<string, string> = {}): Promise<string> {
+// Low-level request: resolves with the raw nREPL message stream. Callers that
+// want a human-readable string use replRequest(); callers that want structured
+// data (introspectJson) read the messages directly.
+async function replSend(op: string, extra: Record<string, string> = {}): Promise<ReplResponse[]> {
   if (!replConnected) {
     try {
       await connectRepl();
@@ -320,7 +323,7 @@ async function replRequest(op: string, extra: Record<string, string> = {}): Prom
       if (lastCrash) {
         msg += `\n\n${formatCrashInfo(lastCrash)}`;
       }
-      return JSON.stringify({ error: msg });
+      return [{ err: msg, status: ["error"] }];
     }
   }
 
@@ -329,13 +332,18 @@ async function replRequest(op: string, extra: Record<string, string> = {}): Prom
 
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
+      const pending = pendingEvals.get(id);
       pendingEvals.delete(id);
-      resolve(JSON.stringify({ error: "Timed out after 30s" }));
+      resolve([...(pending?.messages ?? []), { err: "Timed out after 30s", status: ["error"] }]);
     }, 30_000);
 
     pendingEvals.set(id, { messages: [], resolve, timer });
     replSocket!.write(msg);
   });
+}
+
+async function replRequest(op: string, extra: Record<string, string> = {}): Promise<string> {
+  return formatReplResponse(await replSend(op, extra));
 }
 
 function formatReplResponse(messages: ReplResponse[]): string {
@@ -834,15 +842,104 @@ async function introspectEval(code: string): Promise<string> {
   return replRequest("eval", { code, session: INTROSPECT_SESSION });
 }
 
+// Thrown by introspectJson when the reflection eval raises a (resumable)
+// exception or otherwise returns no value. The introspect session's suspend
+// behavior is intentional and left untouched — we just surface the error text.
+class IntrospectError extends Error {}
+
+// Evaluate `code` in the introspect session wrapped in json-encode and return
+// the parsed result. Reflection functions already return structured maps and
+// vectors, so this hands the data to TypeScript intact rather than formatting
+// it inside Beagle.
+async function introspectJson<T = unknown>(code: string): Promise<T> {
+  await ensureIntrospectSession();
+  const messages = await replSend("eval", {
+    code: `json-encode(${code})`,
+    session: INTROSPECT_SESSION,
+  });
+
+  // Surface Beagle-side errors (unknown namespace, undefined reference, ...).
+  const exMsg = messages.find((m) => m.ex !== undefined)?.ex;
+  if (exMsg !== undefined) throw new IntrospectError(String(exMsg));
+  const errMsg = messages.find((m) => m.err !== undefined)?.err;
+  if (errMsg !== undefined) throw new IntrospectError(String(errMsg));
+
+  const valueMsg = [...messages].reverse().find((m) => m.value !== undefined);
+  if (valueMsg?.value === undefined) {
+    throw new IntrospectError("Reflection eval returned no value");
+  }
+  return JSON.parse(valueMsg.value as string) as T;
+}
+
+// Wrap a tool body that uses introspectJson, turning IntrospectErrors into a
+// clean text response instead of crashing the agent loop.
+function introspectResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
 const beagleListNamespaces = tool(
   "beagle_list_namespaces",
   "List all namespaces loaded in the running Beagle program.",
   {},
   async () => {
-    const result = await introspectEval("sort(reflect/all-namespaces())");
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      const namespaces = await introspectJson<string[]>("reflect/all-namespaces()");
+      namespaces.sort();
+      return introspectResult(namespaces.join("\n"));
+    } catch (err: any) {
+      return introspectResult(`Error listing namespaces: ${err.message}`);
+    }
   }
 );
+
+// Shapes returned by beagle.reflect, JSON-encoded. Note the function flag key
+// is `variadic?` (with the question mark) — the runtime interns it that way.
+interface ReflectFn { name: string; doc?: string | null; args?: string[] | null; "variadic?"?: boolean }
+interface ReflectStruct { name: string; doc?: string | null; fields?: string[] | null }
+interface ReflectEnum { name: string; doc?: string | null; variants?: string[] | null }
+interface ReflectNsInfo {
+  name?: string;
+  functions?: ReflectFn[] | null;
+  structs?: ReflectStruct[] | null;
+  enums?: ReflectEnum[] | null;
+}
+
+function formatNamespaceInfo(ns: string, info: ReflectNsInfo): string {
+  const lines: string[] = [`Namespace: ${ns}`];
+
+  const fns = info.functions ?? [];
+  if (fns.length > 0) {
+    lines.push(`\nFunctions (${fns.length}):`);
+    for (const f of [...fns].sort((a, b) => a.name.localeCompare(b.name))) {
+      const params = (f.args ?? []).join(", ");
+      const variadic = f["variadic?"] ? "..." : "";
+      let sig = `  ${f.name}(${params}${variadic})`;
+      if (f.doc) sig += ` — ${f.doc}`;
+      lines.push(sig);
+    }
+  }
+
+  const structs = info.structs ?? [];
+  if (structs.length > 0) {
+    lines.push(`\nStructs (${structs.length}):`);
+    for (const s of [...structs].sort((a, b) => a.name.localeCompare(b.name))) {
+      const fields = s.fields && s.fields.length > 0 ? ` { ${s.fields.join(", ")} }` : "";
+      lines.push(`  ${s.name}${fields}`);
+    }
+  }
+
+  const enums = info.enums ?? [];
+  if (enums.length > 0) {
+    lines.push(`\nEnums (${enums.length}):`);
+    for (const e of [...enums].sort((a, b) => a.name.localeCompare(b.name))) {
+      const variants = e.variants && e.variants.length > 0 ? ` { ${e.variants.join(" | ")} }` : "";
+      lines.push(`  ${e.name}${variants}`);
+    }
+  }
+
+  if (lines.length === 1) lines.push("(no functions, structs, or enums)");
+  return lines.join("\n");
+}
 
 const beagleNamespaceInfo = tool(
   "beagle_namespace_info",
@@ -850,64 +947,14 @@ const beagleNamespaceInfo = tool(
   "Use this to understand what's available before writing code.",
   { namespace: z.string().describe("Namespace name, e.g. \"beagle.core\"") },
   async (args) => {
-    // Get members list, then for each member get doc/args info
-    const code = `
-let ns = "${args.namespace.replace(/"/g, '\\"')}"
-let members = sort(reflect/namespace-members(ns))
-let info = reflect/namespace-info(ns)
-let result = "Namespace: " + ns + "\\n"
-let fns = get(info, :functions)
-if fns != null {
-  result = result + "\\nFunctions (" + to_string(length(fns)) + "):\\n"
-  for f in fns {
-    let name = get(f, :name)
-    let args_list = get(f, :args)
-    let doc = get(f, :doc)
-    let variadic = get(f, :variadic)
-    let sig = "  " + name + "("
-    if args_list != null {
-      sig = sig + join(args_list, ", ")
+    try {
+      const info = await introspectJson<ReflectNsInfo>(
+        `reflect/namespace-info("${beagleStringEscape(args.namespace)}")`,
+      );
+      return introspectResult(formatNamespaceInfo(args.namespace, info));
+    } catch (err: any) {
+      return introspectResult(`Error inspecting namespace "${args.namespace}": ${err.message}`);
     }
-    if variadic == true {
-      sig = sig + "..."
-    }
-    sig = sig + ")"
-    if doc != null {
-      sig = sig + " — " + doc
-    }
-    result = result + sig + "\\n"
-  }
-}
-let structs = get(info, :structs)
-if structs != null {
-  result = result + "\\nStructs (" + to_string(length(structs)) + "):\\n"
-  for s in structs {
-    let name = get(s, :name)
-    let fields = get(s, :fields)
-    result = result + "  " + name
-    if fields != null {
-      result = result + " { " + join(fields, ", ") + " }"
-    }
-    result = result + "\\n"
-  }
-}
-let enums = get(info, :enums)
-if enums != null {
-  result = result + "\\nEnums (" + to_string(length(enums)) + "):\\n"
-  for e in enums {
-    let name = get(e, :name)
-    let variants = get(e, :variants)
-    result = result + "  " + name
-    if variants != null {
-      result = result + " { " + join(variants, " | ") + " }"
-    }
-    result = result + "\\n"
-  }
-}
-result
-`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
   }
 );
 
@@ -916,11 +963,29 @@ const beagleSearch = tool(
   "Search for functions by name or docstring substring. Returns matching fully-qualified function names.",
   { query: z.string().describe("Search term to match against function names and docstrings") },
   async (args) => {
-    const code = `sort(reflect/apropos("${args.query.replace(/"/g, '\\"')}"))`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      const matches = await introspectJson<string[]>(
+        `reflect/apropos("${beagleStringEscape(args.query)}")`,
+      );
+      matches.sort();
+      return introspectResult(
+        matches.length > 0 ? matches.join("\n") : `No matches for "${args.query}"`,
+      );
+    } catch (err: any) {
+      return introspectResult(`Error searching for "${args.query}": ${err.message}`);
+    }
   }
 );
+
+interface ReflectInfo {
+  name?: string;
+  kind?: string;
+  doc?: string | null;
+  args?: string[] | null;
+  "variadic?"?: boolean;
+  fields?: string[] | null;
+  variants?: string[] | null;
+}
 
 const beagleDoc = tool(
   "beagle_doc",
@@ -928,36 +993,22 @@ const beagleDoc = tool(
   "Pass the fully-qualified name or a direct reference.",
   { name: z.string().describe("Fully-qualified function name, e.g. \"beagle.core/map\" or just \"map\" if in scope") },
   async (args) => {
-    const code = `
-let val = ${args.name}
-let descriptor = reflect/type-of(val)
-let info = reflect/info(descriptor)
-let result = "Name: " + "${args.name.replace(/"/g, '\\"')}" + "\\n"
-result = result + "Kind: " + to_string(get(info, :kind)) + "\\n"
-let doc = reflect/doc(descriptor)
-if doc != null {
-  result = result + "Doc: " + doc + "\\n"
-}
-let args_list = reflect/args(descriptor)
-if args_list != null {
-  result = result + "Args: (" + join(args_list, ", ")
-  if reflect/variadic?(descriptor) {
-    result = result + "..."
-  }
-  result = result + ")\\n"
-}
-let fields = reflect/fields(descriptor)
-if fields != null {
-  result = result + "Fields: " + to_string(fields) + "\\n"
-}
-let variants = reflect/variants(descriptor)
-if variants != null {
-  result = result + "Variants: " + to_string(variants) + "\\n"
-}
-result
-`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      // `name` is a Beagle reference (resolved in the introspect session), not
+      // a string literal — reflect/info takes the value directly.
+      const info = await introspectJson<ReflectInfo>(`reflect/info(${args.name})`);
+      const lines: string[] = [`Name: ${info.name ?? args.name}`];
+      if (info.kind) lines.push(`Kind: ${info.kind}`);
+      if (info.doc) lines.push(`Doc: ${info.doc}`);
+      if (info.args) {
+        lines.push(`Args: (${info.args.join(", ")}${info["variadic?"] ? "..." : ""})`);
+      }
+      if (info.fields) lines.push(`Fields: ${info.fields.join(", ")}`);
+      if (info.variants) lines.push(`Variants: ${info.variants.join(" | ")}`);
+      return introspectResult(lines.join("\n"));
+    } catch (err: any) {
+      return introspectResult(`Error getting doc for "${args.name}": ${err.message}`);
+    }
   }
 );
 
@@ -970,9 +1021,14 @@ const beagleSource = tool(
   "builtins, and FFI. This is how you READ a definition before editing it — no file I/O needed.",
   { name: z.string().describe("Reference to a function, struct, or enum") },
   async (args) => {
-    const code = `reflect/source(${args.name})`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      const source = await introspectJson<string | null>(`reflect/source(${args.name})`);
+      return introspectResult(
+        source ?? `No stored source for "${args.name}" (REPL/eval def, builtin, or FFI).`,
+      );
+    } catch (err: any) {
+      return introspectResult(`Error reading source for "${args.name}": ${err.message}`);
+    }
   }
 );
 
@@ -983,9 +1039,16 @@ const beagleNamespaceSource = tool(
   "skipped. Use this when you want to understand or refactor a whole file.",
   { namespace: z.string().describe("Namespace name, e.g. 'my.module'") },
   async (args) => {
-    const code = `reflect/namespace-source("${beagleStringEscape(args.namespace)}")`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      const source = await introspectJson<string | null>(
+        `reflect/namespace-source("${beagleStringEscape(args.namespace)}")`,
+      );
+      return introspectResult(
+        source ?? `No stored source for namespace "${args.namespace}".`,
+      );
+    } catch (err: any) {
+      return introspectResult(`Error reading source for namespace "${args.namespace}": ${err.message}`);
+    }
   }
 );
 
@@ -997,9 +1060,16 @@ const beagleLocation = tool(
   "dispatch internally.",
   { name: z.string().describe("Reference to a function, struct, or enum") },
   async (args) => {
-    const code = `reflect/location(${args.name})`;
-    const result = await introspectEval(code);
-    return { content: [{ type: "text" as const, text: result }] };
+    try {
+      const loc = await introspectJson<Record<string, unknown> | null>(
+        `reflect/location(${args.name})`,
+      );
+      return introspectResult(
+        loc ? JSON.stringify(loc, null, 2) : `No location for "${args.name}" (REPL/builtin/FFI).`,
+      );
+    } catch (err: any) {
+      return introspectResult(`Error getting location for "${args.name}": ${err.message}`);
+    }
   }
 );
 

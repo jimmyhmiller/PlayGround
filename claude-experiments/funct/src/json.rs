@@ -27,9 +27,12 @@ impl Value {
                 .map(J::Number)
                 .ok_or_else(|| Fault::new(format!("cannot represent {} in JSON", f)))?,
             Value::Str(s) => J::String(s.to_string()),
-            Value::List(items) | Value::Tuple(items) => {
-                J::Array(items.iter().map(|v| v.to_json()).collect::<Result<_, _>>()?)
-            }
+            Value::List(items) | Value::Tuple(items) => J::Array(
+                items
+                    .iter()
+                    .map(|v| v.to_json())
+                    .collect::<Result<_, _>>()?,
+            ),
             Value::Record(r) => J::Object(
                 r.iter()
                     .map(|(k, v)| Ok((k.clone(), v.to_json()?)))
@@ -61,9 +64,12 @@ impl Value {
             }
             J::String(s) => Value::str(s.clone()),
             J::Array(items) => Value::list_v(items.iter().map(Value::from_json).collect()),
-            J::Object(fields) => {
-                Value::Record(fields.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect())
-            }
+            J::Object(fields) => Value::Record(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::from_json(v)))
+                    .collect(),
+            ),
         }
     }
 }

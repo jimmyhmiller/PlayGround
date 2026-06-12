@@ -26,7 +26,11 @@ fn single_stepping_to_completion() {
             StepResult::Faulted(f) => panic!("fault: {}", f),
         }
     }
-    assert!(steps >= 4, "should take several instructions, took {}", steps);
+    assert!(
+        steps >= 4,
+        "should take several instructions, took {}",
+        steps
+    );
     // stepping a finished state stays Done
     assert_eq!(vm.step(&mut st), StepResult::Done(int(7)));
 }
@@ -34,7 +38,8 @@ fn single_stepping_to_completion() {
 #[test]
 fn fuel_pauses_and_resumes() {
     let mut vm = Funct::new();
-    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }").unwrap();
+    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }")
+        .unwrap();
     let mut st = vm.start("go", vec![int(1000), int(0)]).unwrap();
     let mut pauses = 0;
     let result = loop {
@@ -78,7 +83,8 @@ fn inspect_state_while_paused() {
 #[test]
 fn snapshot_time_travel() {
     let mut vm = Funct::new();
-    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }").unwrap();
+    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }")
+        .unwrap();
     let mut st = vm.start("go", vec![int(500), int(0)]).unwrap();
     // run halfway
     match vm.run(&mut st, StopWhen::Fuel(1000)) {
@@ -115,7 +121,11 @@ fn breakpoints() {
     }
     // `a` is already bound at the breakpoint
     let frame = st.frames.last().unwrap();
-    assert!(frame.locals.contains(&int(11)), "locals: {:?}", frame.locals);
+    assert!(
+        frame.locals.contains(&int(11)),
+        "locals: {:?}",
+        frame.locals
+    );
     // resuming doesn't re-trigger the same breakpoint
     match vm.run(&mut st, StopWhen::Breakpoints(bps)) {
         RunResult::Done(v) => assert_eq!(v, int(25)),
@@ -126,7 +136,8 @@ fn breakpoints() {
 #[test]
 fn next_line_stepping() {
     let mut vm = Funct::new();
-    vm.load("fn f() {\n let a = 1\n let b = 2\n a + b\n}").unwrap();
+    vm.load("fn f() {\n let a = 1\n let b = 2\n a + b\n}")
+        .unwrap();
     let mut st = vm.start("f", vec![]).unwrap();
     let mut lines = Vec::new();
     loop {
@@ -144,7 +155,11 @@ fn next_line_stepping() {
     }
     // we should have visited each source line in order
     assert!(lines.windows(2).all(|w| w[0] <= w[1]), "lines: {:?}", lines);
-    assert!(lines.contains(&3) && lines.contains(&4), "lines: {:?}", lines);
+    assert!(
+        lines.contains(&3) && lines.contains(&4),
+        "lines: {:?}",
+        lines
+    );
 }
 
 #[test]
@@ -155,7 +170,11 @@ fn fault_state_is_preserved() {
     match vm.run(&mut st, StopWhen::Never) {
         RunResult::Faulted(f) => {
             assert!(f.msg.contains("division by zero"));
-            assert!(f.at.as_deref().unwrap_or("").contains("f:1"), "at: {:?}", f.at);
+            assert!(
+                f.at.as_deref().unwrap_or("").contains("f:1"),
+                "at: {:?}",
+                f.at
+            );
         }
         other => panic!("unexpected: {:?}", other),
     }
@@ -171,14 +190,19 @@ fn suspension_across_calls() {
     // CALL pushes a frame in the same step loop — no host recursion — so we
     // can pause inside deeply nested script calls.
     let mut vm = Funct::new();
-    vm.load("fn f(n) = if n == 0 { 0 } else { g(n) }\nfn g(n) = f(n - 1) + 1").unwrap();
+    vm.load("fn f(n) = if n == 0 { 0 } else { g(n) }\nfn g(n) = f(n - 1) + 1")
+        .unwrap();
     let mut st = vm.start("f", vec![int(50)]).unwrap();
     // pause somewhere in the middle
     match vm.run(&mut st, StopWhen::Fuel(200)) {
         RunResult::Paused(Cause::FuelExhausted) => {}
         other => panic!("unexpected: {:?}", other),
     }
-    assert!(st.depth() > 3, "should be paused deep in nested calls, depth {}", st.depth());
+    assert!(
+        st.depth() > 3,
+        "should be paused deep in nested calls, depth {}",
+        st.depth()
+    );
     match vm.run(&mut st, StopWhen::Never) {
         RunResult::Done(v) => assert_eq!(v, int(50)),
         other => panic!("unexpected: {:?}", other),
@@ -197,4 +221,137 @@ fn host_can_abandon_a_run() {
     }
     drop(st); // and the engine is still fine:
     assert_eq!(vm.eval("1 + 1").unwrap(), int(2));
+}
+
+// ---------- epoch / time budgets ----------
+
+const SPIN: &str = "fn spin() {\n let mut n = 0\n while true { n = n + 1 }\n n\n}";
+
+#[test]
+fn host_driven_epoch_pauses_and_resumes() {
+    // The host advances the epoch itself; no timer thread, fully deterministic.
+    let mut vm = Funct::new();
+    vm.load(SPIN).unwrap();
+    let mut st = vm.start("spin", vec![]).unwrap();
+
+    // Arm a deadline one tick ahead, then trip it by bumping the epoch.
+    vm.set_deadline(vm.epoch_now() + 1);
+    vm.bump_epoch();
+    assert_eq!(
+        vm.run(&mut st, StopWhen::Epoch),
+        RunResult::Paused(Cause::DeadlineReached)
+    );
+    assert!(st.is_running(), "an infinite loop is not finished");
+
+    // The paused state still resumes (e.g. under a gas budget).
+    assert_eq!(
+        vm.run(&mut st, StopWhen::Fuel(100)),
+        RunResult::Paused(Cause::FuelExhausted)
+    );
+}
+
+#[test]
+fn epoch_handle_bumped_from_another_thread() {
+    let mut vm = Funct::new();
+    vm.load(SPIN).unwrap();
+    let mut st = vm.start("spin", vec![]).unwrap();
+
+    let epoch = vm.epoch();
+    vm.set_deadline(vm.epoch_now() + 5);
+    // A separate thread drives the counter past the deadline.
+    let bumper = std::thread::spawn(move || {
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    assert_eq!(
+        vm.run(&mut st, StopWhen::Epoch),
+        RunResult::Paused(Cause::DeadlineReached)
+    );
+    bumper.join().unwrap();
+}
+
+#[test]
+fn wall_clock_deadline_interrupts_a_spin() {
+    // The opt-in ticker turns a Duration into an epoch target.
+    let mut vm = Funct::new();
+    vm.load(SPIN).unwrap();
+    let mut st = vm.start("spin", vec![]).unwrap();
+    let t0 = std::time::Instant::now();
+    assert_eq!(
+        vm.run(
+            &mut st,
+            StopWhen::Deadline(std::time::Duration::from_millis(25))
+        ),
+        RunResult::Paused(Cause::DeadlineReached)
+    );
+    let elapsed = t0.elapsed();
+    assert!(st.is_running());
+    assert!(
+        elapsed.as_millis() < 2000,
+        "took far too long: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn budget_fuel_trips_before_deadline() {
+    let mut vm = Funct::new();
+    vm.load(SPIN).unwrap();
+    let mut st = vm.start("spin", vec![]).unwrap();
+    // Tiny gas, huge time budget → gas wins.
+    assert_eq!(
+        vm.run(
+            &mut st,
+            StopWhen::Budget {
+                fuel: Some(50),
+                deadline: Some(std::time::Duration::from_secs(60)),
+            }
+        ),
+        RunResult::Paused(Cause::FuelExhausted)
+    );
+}
+
+#[test]
+fn budget_deadline_trips_before_fuel() {
+    let mut vm = Funct::new();
+    vm.load(SPIN).unwrap();
+    let mut st = vm.start("spin", vec![]).unwrap();
+    // Effectively unlimited gas, short time budget → the clock wins.
+    assert_eq!(
+        vm.run(
+            &mut st,
+            StopWhen::Budget {
+                fuel: Some(u64::MAX),
+                deadline: Some(std::time::Duration::from_millis(25)),
+            }
+        ),
+        RunResult::Paused(Cause::DeadlineReached)
+    );
+}
+
+#[test]
+fn budget_without_deadline_runs_to_completion() {
+    // Budget with no time limit is just gas; a finite program completes.
+    let mut vm = Funct::new();
+    vm.load("fn go(n, acc) = if n == 0 { acc } else { go(n - 1, acc + n) }")
+        .unwrap();
+    let mut st = vm.start("go", vec![int(1000), int(0)]).unwrap();
+    loop {
+        match vm.run(
+            &mut st,
+            StopWhen::Budget {
+                fuel: Some(100),
+                deadline: None,
+            },
+        ) {
+            RunResult::Paused(Cause::FuelExhausted) => assert!(st.is_running()),
+            RunResult::Done(v) => {
+                assert_eq!(v, int(500500));
+                break;
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
 }

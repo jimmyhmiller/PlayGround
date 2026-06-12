@@ -616,10 +616,7 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // its result type is the bottom type `Never`, which is compatible
         // with every expected type (it can appear in any match arm / if
         // branch / function body).
-        "core/abort" => Some((
-            vec![Type::Builtin("String".to_owned())],
-            Type::Builtin("Never".to_owned()),
-        )),
+
 
         // String ops. Strings are pointer-typed (TypeRef-like) heap
         // values; we represent the type as Type::Builtin("String").
@@ -726,6 +723,13 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         )),
         "core/array.len" => Some((
             vec![array_t(Type::TypeVar(0))],
+            int_t(),
+        )),
+        // Internal (expansion-emitted only): 1 if slot `i` holds a value —
+        // prim arrays always do (zero-filled); boxed arrays iff non-null.
+        // The checked-get expansion pre-checks bounds.
+        "core/array.is_init" => Some((
+            vec![array_t(Type::TypeVar(0)), int_t()],
             int_t(),
         )),
         "core/array.get" => Some((

@@ -489,7 +489,7 @@ def cstr_fill(p: Ptr, b: Bytes, i: Int, n: Int) -> Ptr =
         let t = ptr_write_u8(p, n, 0);
         p
     } else {
-        let w = ptr_write_u8(p, i, bytes_get_trusted(b, i));
+        let w = ptr_write_u8(p, i, bytes_get(b, i)?);
         cstr_fill(p, b, i + 1, n)
     }
 
@@ -507,7 +507,7 @@ def cstr_copy_out(p: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
     if i == n {
         b
     } else {
-        let w = bytes_set_trusted(b, i, ptr_read_u8(p, i));
+        let w = bytes_set(b, i, ptr_read_u8(p, i))?;
         cstr_copy_out(p, b, i + 1, n)
     }
 
@@ -571,7 +571,7 @@ def http_headers_scan(b: Bytes, i: Int, start: Int, len: Int, list: Ptr) -> Ptr 
     if i == len {
         http_slist_add_line(b, start, len, list)
     } else {
-        if bytes_get_trusted(b, i) == 10 {
+        if bytes_get(b, i)? == 10 {
             let list2 = http_slist_add_line(b, start, i, list);
             http_headers_scan(b, i + 1, i + 1, len, list2)
         } else {
@@ -695,7 +695,7 @@ def http_header_lines(b: Bytes, i: Int, len: Int, want: String) -> String =
         ""
     } else {
         let nl = http_find_byte(b, i, len, 10);
-        let line_end = if nl > i { if bytes_get_trusted(b, nl - 1) == 13 { nl - 1 } else { nl } } else { nl };
+        let line_end = if nl > i { if bytes_get(b, nl - 1)? == 13 { nl - 1 } else { nl } } else { nl };
         let v = http_header_match(string_from_bytes(bytes_slice(b, i, line_end - i)), want);
         if string_is_empty(v) == 1 {
             if nl >= len { "" } else { http_header_lines(b, nl + 1, len, want) }
@@ -721,7 +721,7 @@ def http_header_match(line: String, want: String) -> String = {
 }
 
 def http_find_byte(b: Bytes, i: Int, len: Int, target: Int) -> Int =
-    if i >= len { len } else { if bytes_get_trusted(b, i) == target { i } else { http_find_byte(b, i + 1, len, target) } }
+    if i >= len { len } else { if bytes_get(b, i)? == target { i } else { http_find_byte(b, i + 1, len, target) } }
 
 // ---- Concurrent requests (libcurl multi interface) ----
 //
@@ -918,7 +918,7 @@ def json_skip_ws(b: Bytes, i: Int, len: Int) -> Int =
     if i >= len {
         i
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         if c == 32 {
             json_skip_ws(b, i + 1, len)
         } else {
@@ -938,7 +938,7 @@ def json_parse_value(b: Bytes, i: Int, len: Int) -> PJson =
     if i >= len {
         pjson_fail()
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         if c == 34 {
             json_parse_string_val(b, i, len)
         } else {
@@ -990,7 +990,7 @@ def json_match_lit(b: Bytes, i: Int, len: Int, lb: Bytes, k: Int, ll: Int) -> In
         if i + k >= len {
             0
         } else {
-            if bytes_get_trusted(b, i + k) == bytes_get_trusted(lb, k) {
+            if bytes_get(b, i + k)? == bytes_get(lb, k)? {
                 json_match_lit(b, i, len, lb, k + 1, ll)
             } else {
                 0
@@ -1001,7 +1001,7 @@ def json_match_lit(b: Bytes, i: Int, len: Int, lb: Bytes, k: Int, ll: Int) -> In
 // Integer-valued numbers: parse the leading integer, then consume (and
 // ignore) any fractional/exponent tail so the document stays valid.
 def json_parse_number(b: Bytes, i: Int, len: Int) -> PJson = {
-    let neg = if bytes_get_trusted(b, i) == 45 { 1 } else { 0 };
+    let neg = if bytes_get(b, i)? == 45 { 1 } else { 0 };
     let start = i + neg;
     let endpos = json_scan_digits(b, start, len);
     if endpos == start {
@@ -1018,7 +1018,7 @@ def json_scan_digits(b: Bytes, i: Int, len: Int) -> Int =
     if i >= len {
         i
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         if c >= 48 {
             if c <= 57 { json_scan_digits(b, i + 1, len) } else { i }
         } else {
@@ -1030,14 +1030,14 @@ def json_digits_to_int(b: Bytes, i: Int, end: Int, acc: Int) -> Int =
     if i >= end {
         acc
     } else {
-        json_digits_to_int(b, i + 1, end, acc * 10 + (bytes_get_trusted(b, i) - 48))
+        json_digits_to_int(b, i + 1, end, acc * 10 + (bytes_get(b, i)? - 48))
     }
 
 def json_skip_number_tail(b: Bytes, i: Int, len: Int) -> Int =
     if i >= len {
         i
     } else {
-        if json_is_num_tail(bytes_get_trusted(b, i)) == 1 {
+        if json_is_num_tail(bytes_get(b, i)?) == 1 {
             json_skip_number_tail(b, i + 1, len)
         } else {
             i
@@ -1072,7 +1072,7 @@ def json_parse_array(b: Bytes, i: Int, len: Int) -> PJson = {
     if j >= len {
         pjson_fail()
     } else {
-        if bytes_get_trusted(b, j) == 93 {
+        if bytes_get(b, j)? == 93 {
             pjson_ok(Json::JArray(JArr::JANil), j + 1)
         } else {
             let r = json_parse_array_elems(b, j, len);
@@ -1090,7 +1090,7 @@ def json_parse_array_elems(b: Bytes, i: Int, len: Int) -> PArr = {
         if j >= len {
             parr_fail()
         } else {
-            let c = bytes_get_trusted(b, j);
+            let c = bytes_get(b, j)?;
             if c == 44 {
                 let k = json_skip_ws(b, j + 1, len);
                 let rest = json_parse_array_elems(b, k, len);
@@ -1115,7 +1115,7 @@ def json_parse_object(b: Bytes, i: Int, len: Int) -> PJson = {
     if j >= len {
         pjson_fail()
     } else {
-        if bytes_get_trusted(b, j) == 125 {
+        if bytes_get(b, j)? == 125 {
             pjson_ok(Json::JObject(JObj::JONil), j + 1)
         } else {
             let r = json_parse_object_members(b, j, len);
@@ -1133,7 +1133,7 @@ def json_parse_object_members(b: Bytes, i: Int, len: Int) -> PObj = {
         if j >= len {
             pobj_fail()
         } else {
-            if bytes_get_trusted(b, j) == 58 {
+            if bytes_get(b, j)? == 58 {
                 let k = json_skip_ws(b, j + 1, len);
                 let v = json_parse_value(b, k, len);
                 if v.ok == 0 {
@@ -1153,7 +1153,7 @@ def json_object_after_value(b: Bytes, len: Int, key: String, v: PJson) -> PObj =
     if m >= len {
         pobj_fail()
     } else {
-        let c = bytes_get_trusted(b, m);
+        let c = bytes_get(b, m)?;
         if c == 44 {
             let n = json_skip_ws(b, m + 1, len);
             let rest = json_parse_object_members(b, n, len);
@@ -1183,7 +1183,7 @@ def json_parse_string_raw(b: Bytes, i: Int, len: Int) -> PStr =
     if i >= len {
         pstr_fail()
     } else {
-        if bytes_get_trusted(b, i) == 34 {
+        if bytes_get(b, i)? == 34 {
             let start = i + 1;
             let endq = json_str_end(b, start, len);
             if endq < 0 {
@@ -1203,7 +1203,7 @@ def json_str_end(b: Bytes, i: Int, len: Int) -> Int =
     if i >= len {
         0 - 1
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         if c == 34 {
             i
         } else {
@@ -1219,23 +1219,23 @@ def json_decode_str(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Int =
     if i >= end {
         w
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         if c == 92 {
             json_decode_escape(b, i + 1, end, buf, w)
         } else {
-            let x = bytes_set_trusted(buf, w, c);
+            let x = bytes_set(buf, w, c)?;
             json_decode_str(b, i + 1, end, buf, w + 1)
         }
     }
 
 def json_decode_escape(b: Bytes, i: Int, end: Int, buf: Bytes, w: Int) -> Int = {
-    let e = bytes_get_trusted(b, i);
+    let e = bytes_get(b, i)?;
     if e == 117 {
         let cp = json_hex4(b, i + 1);
         let w2 = json_utf8_encode(buf, w, cp);
         json_decode_str(b, i + 5, end, buf, w2)
     } else {
-        let x = bytes_set_trusted(buf, w, json_escape_byte(e));
+        let x = bytes_set(buf, w, json_escape_byte(e))?;
         json_decode_str(b, i + 1, end, buf, w + 1)
     }
 }
@@ -1260,28 +1260,28 @@ def json_escape_byte(e: Int) -> Int =
     }
 
 def json_hex4(b: Bytes, i: Int) -> Int =
-    json_hex(bytes_get_trusted(b, i)) * 4096
-        + json_hex(bytes_get_trusted(b, i + 1)) * 256
-        + json_hex(bytes_get_trusted(b, i + 2)) * 16
-        + json_hex(bytes_get_trusted(b, i + 3))
+    json_hex(bytes_get(b, i)?) * 4096
+        + json_hex(bytes_get(b, i + 1)?) * 256
+        + json_hex(bytes_get(b, i + 2)?) * 16
+        + json_hex(bytes_get(b, i + 3)?)
 
 def json_hex(c: Int) -> Int =
     if c <= 57 { c - 48 } else { if c <= 70 { c - 55 } else { c - 87 } }
 
 def json_utf8_encode(buf: Bytes, w: Int, cp: Int) -> Int =
     if cp < 128 {
-        let a = bytes_set_trusted(buf, w, cp);
+        let a = bytes_set(buf, w, cp)?;
         w + 1
     } else {
         if cp < 2048 {
-            let a = bytes_set_trusted(buf, w, 192 + cp / 64);
-            let b2 = bytes_set_trusted(buf, w + 1, 128 + cp - (cp / 64) * 64);
+            let a = bytes_set(buf, w, 192 + cp / 64)?;
+            let b2 = bytes_set(buf, w + 1, 128 + cp - (cp / 64) * 64)?;
             w + 2
         } else {
-            let a = bytes_set_trusted(buf, w, 224 + cp / 4096);
+            let a = bytes_set(buf, w, 224 + cp / 4096)?;
             let mid = cp / 64;
-            let b2 = bytes_set_trusted(buf, w + 1, 128 + mid - (mid / 64) * 64);
-            let c2 = bytes_set_trusted(buf, w + 2, 128 + cp - (cp / 64) * 64);
+            let b2 = bytes_set(buf, w + 1, 128 + mid - (mid / 64) * 64)?;
+            let c2 = bytes_set(buf, w + 2, 128 + cp - (cp / 64) * 64)?;
             w + 3
         }
     }
@@ -1376,7 +1376,7 @@ def json_find_dot(pb: Bytes, i: Int, len: Int) -> Int =
     if i >= len {
         len
     } else {
-        if bytes_get_trusted(pb, i) == 46 { i } else { json_find_dot(pb, i + 1, len) }
+        if bytes_get(pb, i)? == 46 { i } else { json_find_dot(pb, i + 1, len) }
     }
 
 // Parse `text` and read the string value at `path`, returning
@@ -1513,9 +1513,9 @@ def hex_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Bytes =
     if i == n {
         out
     } else {
-        let byte = bytes_get_trusted(b, i);
-        let hi = bytes_set_trusted(out, i * 2, hex_digit(byte / 16));
-        let lo = bytes_set_trusted(out, i * 2 + 1, hex_digit(byte - (byte / 16) * 16));
+        let byte = bytes_get(b, i)?;
+        let hi = bytes_set(out, i * 2, hex_digit(byte / 16))?;
+        let lo = bytes_set(out, i * 2 + 1, hex_digit(byte - (byte / 16) * 16))?;
         hex_fill(b, out, i + 1, n)
     }
 
@@ -1552,18 +1552,18 @@ def base64_fill(b: Bytes, out: Bytes, i: Int, n: Int, o: Int) -> Bytes =
         out
     } else {
         let rem = n - i;
-        let b0 = bytes_get_trusted(b, i);
-        let b1 = if rem > 1 { bytes_get_trusted(b, i + 1) } else { 0 };
-        let b2 = if rem > 2 { bytes_get_trusted(b, i + 2) } else { 0 };
+        let b0 = bytes_get(b, i)?;
+        let b1 = if rem > 1 { bytes_get(b, i + 1)? } else { 0 };
+        let b2 = if rem > 2 { bytes_get(b, i + 2)? } else { 0 };
         let triple = bit_or(bit_or(bit_shl(b0, 16), bit_shl(b1, 8)), b2);
         let c0 = base64_char(bit_and(bit_shr(triple, 18), 63));
         let c1 = base64_char(bit_and(bit_shr(triple, 12), 63));
         let c2 = if rem > 1 { base64_char(bit_and(bit_shr(triple, 6), 63)) } else { 61 };
         let c3 = if rem > 2 { base64_char(bit_and(triple, 63)) } else { 61 };
-        let w0 = bytes_set_trusted(out, o, c0);
-        let w1 = bytes_set_trusted(out, o + 1, c1);
-        let w2 = bytes_set_trusted(out, o + 2, c2);
-        let w3 = bytes_set_trusted(out, o + 3, c3);
+        let w0 = bytes_set(out, o, c0)?;
+        let w1 = bytes_set(out, o + 1, c1)?;
+        let w2 = bytes_set(out, o + 2, c2)?;
+        let w3 = bytes_set(out, o + 3, c3)?;
         base64_fill(b, out, i + 3, n, o + 4)
     }
 
@@ -1580,7 +1580,7 @@ def crc32_bytes(b: Bytes, i: Int, n: Int, crc: Int) -> Int =
     if i >= n {
         crc
     } else {
-        crc32_bytes(b, i + 1, n, crc32_bits(bit_xor(crc, bytes_get_trusted(b, i)), 0))
+        crc32_bytes(b, i + 1, n, crc32_bits(bit_xor(crc, bytes_get(b, i)?), 0))
     }
 
 def crc32_bits(crc: Int, k: Int) -> Int =
@@ -1604,15 +1604,15 @@ def crc32_bits(crc: Int, k: Int) -> Int =
 
 // Write little-endian u16 / u32 into `b` at `off`. Returns 0.
 def put_le16(b: Bytes, off: Int, v: Int) -> Int = {
-    let w0 = bytes_set_trusted(b, off, bit_and(v, 255));
-    let w1 = bytes_set_trusted(b, off + 1, bit_and(bit_shr(v, 8), 255));
+    let w0 = bytes_set(b, off, bit_and(v, 255))?;
+    let w1 = bytes_set(b, off + 1, bit_and(bit_shr(v, 8), 255))?;
     0
 }
 def put_le32(b: Bytes, off: Int, v: Int) -> Int = {
-    let w0 = bytes_set_trusted(b, off, bit_and(v, 255));
-    let w1 = bytes_set_trusted(b, off + 1, bit_and(bit_shr(v, 8), 255));
-    let w2 = bytes_set_trusted(b, off + 2, bit_and(bit_shr(v, 16), 255));
-    let w3 = bytes_set_trusted(b, off + 3, bit_and(bit_shr(v, 24), 255));
+    let w0 = bytes_set(b, off, bit_and(v, 255))?;
+    let w1 = bytes_set(b, off + 1, bit_and(bit_shr(v, 8), 255))?;
+    let w2 = bytes_set(b, off + 2, bit_and(bit_shr(v, 16), 255))?;
+    let w3 = bytes_set(b, off + 3, bit_and(bit_shr(v, 24), 255))?;
     0
 }
 
@@ -1759,9 +1759,9 @@ def string_lower_fill(b: Bytes, out: Bytes, i: Int, n: Int) -> Bytes =
     if i == n {
         out
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         let lc = if c >= 65 { if c <= 90 { c + 32 } else { c } } else { c };
-        let w = bytes_set_trusted(out, i, lc);
+        let w = bytes_set(out, i, lc)?;
         string_lower_fill(b, out, i + 1, n)
     }
 
@@ -1774,9 +1774,9 @@ def string_trim(s: String) -> String = {
     if end <= start { "" } else { string_from_bytes(bytes_slice(b, start, end - start)) }
 }
 def string_trim_start(b: Bytes, i: Int, n: Int) -> Int =
-    if i >= n { n } else { if bytes_get_trusted(b, i) == 32 { string_trim_start(b, i + 1, n) } else { i } }
+    if i >= n { n } else { if bytes_get(b, i)? == 32 { string_trim_start(b, i + 1, n) } else { i } }
 def string_trim_end(b: Bytes, e: Int) -> Int =
-    if e <= 0 { 0 } else { if bytes_get_trusted(b, e - 1) == 32 { string_trim_end(b, e - 1) } else { e } }
+    if e <= 0 { 0 } else { if bytes_get(b, e - 1)? == 32 { string_trim_end(b, e - 1) } else { e } }
 
 // 1 if `a` sorts strictly before `b` byte-lexicographically, else 0.
 def string_lt(a: String, b: String) -> Int = {
@@ -1791,8 +1791,8 @@ def string_lt_go(ba: Bytes, bb: Bytes, i: Int, na: Int, nb: Int) -> Int =
         if i >= nb {
             0
         } else {
-            let ca = bytes_get_trusted(ba, i);
-            let cb = bytes_get_trusted(bb, i);
+            let ca = bytes_get(ba, i)?;
+            let cb = bytes_get(bb, i)?;
             if ca < cb { 1 } else { if ca > cb { 0 } else { string_lt_go(ba, bb, i + 1, na, nb) } }
         }
     }
@@ -2129,7 +2129,7 @@ def lambda_create_from_s3(
 
 def char_str(c: Int) -> String = {
     let b = bytes_new(1);
-    let w = bytes_set_trusted(b, 0, c);
+    let w = bytes_set(b, 0, c)?;
     string_from_bytes(b)
 }
 
@@ -2181,7 +2181,7 @@ def uri_encode_go(b: Bytes, i: Int, n: Int, acc: String) -> String =
     if i >= n {
         acc
     } else {
-        let c = bytes_get_trusted(b, i);
+        let c = bytes_get(b, i)?;
         let piece =
             if uri_unreserved(c) == 1 {
                 char_str(c)
@@ -2356,7 +2356,7 @@ enum Result<T, E> { Ok(T), Err(E) }
 // violation; they are for code that has proven its indices (stdlib
 // internals, hot kernels).
 struct OobInfo { index: Int, len: Int }
-enum IndexError { OutOfBounds(OobInfo) }
+enum IndexError { OutOfBounds(OobInfo), Uninitialized(OobInfo) }
 
 // Error returned by the checked, generic `decode::<T>(bytes)`:
 // `TypeMismatch` = the bytes held a value of a different type than `T`;
@@ -2572,13 +2572,13 @@ def str_hash(s: String) -> Int = str_hash_acc(bytes_from_string(s), 0, 0)
 
 def str_hash_acc(b: Bytes, i: Int, h: Int) -> Int =
     if i >= bytes_len(b) { h }
-    else { str_hash_acc(b, i + 1, (h * 31 + bytes_get_trusted(b, i)) % 1000003) }
+    else { str_hash_acc(b, i + 1, (h * 31 + bytes_get(b, i)?) % 1000003) }
 
 // Fill slots [i, cap) with SEmpty.
 def smap_fill<V>(a: Array<SBucket<V>>, i: Int, cap: Int) -> Array<SBucket<V>> =
     if i >= cap { a }
     else {
-        let _x = array_set_trusted(a, i, SBucket::SEmpty);
+        let _x = array_set(a, i, SBucket::SEmpty)?;
         smap_fill(a, i + 1, cap)
     }
 
@@ -2595,7 +2595,7 @@ def smap_size<V>(m: StringMap<V>) -> Int = m.scount
 def smap_probe<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Int =
     if steps >= cap { 0 - 1 }
     else {
-        match array_get_trusted(a, idx) {
+        match array_get(a, idx)? {
             SBucket::SEmpty => idx,
             SBucket::SFull(e) =>
                 if string_eq(e.skey, key) == 1 { idx }
@@ -2609,7 +2609,7 @@ def smap_get<V>(m: StringMap<V>, key: String) -> Option<V> =
 def smap_get_at<V>(a: Array<SBucket<V>>, cap: Int, key: String, idx: Int, steps: Int) -> Option<V> =
     if steps >= cap { Option::None }
     else {
-        match array_get_trusted(a, idx) {
+        match array_get(a, idx)? {
             SBucket::SEmpty => Option::None,
             SBucket::SFull(e) =>
                 if string_eq(e.skey, key) == 1 { Option::Some(e.sval) }
@@ -2633,7 +2633,7 @@ def smap_resize<V>(m: StringMap<V>, newcap: Int) -> StringMap<V> =
 def smap_rehash<V>(old: Array<SBucket<V>>, oldcap: Int, i: Int, dst: StringMap<V>) -> StringMap<V> =
     if i >= oldcap { dst }
     else {
-        match array_get_trusted(old, i) {
+        match array_get(old, i)? {
             SBucket::SEmpty => smap_rehash(old, oldcap, i + 1, dst),
             SBucket::SFull(e) => smap_rehash(old, oldcap, i + 1, smap_insert_grown(dst, e.skey, e.sval)),
         }
@@ -2644,15 +2644,15 @@ def smap_insert_grown<V>(m: StringMap<V>, key: String, val: V) -> StringMap<V> =
     smap_place(m, smap_probe(m.sbuckets, m.scap, key, str_hash(key) % m.scap, 0), key, val)
 
 def smap_place<V>(m: StringMap<V>, idx: Int, key: String, val: V) -> StringMap<V> =
-    match array_get_trusted(m.sbuckets, idx) {
+    match array_get(m.sbuckets, idx)? {
         // Overwriting an existing key: count unchanged.
         SBucket::SFull(_) => {
-            let _x = array_set_trusted(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }));
+            let _x = array_set(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }))?;
             m
         },
         // Fresh slot: count grows.
         SBucket::SEmpty => {
-            let _x = array_set_trusted(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }));
+            let _x = array_set(m.sbuckets, idx, SBucket::SFull(SEntry { skey: key, sval: val }))?;
             StringMap { sbuckets: m.sbuckets, scount: m.scount + 1, scap: m.scap }
         },
     }
@@ -2674,7 +2674,7 @@ def int_hash(k: Int) -> Int = (abs(k) % 1000003) * 2654435 % 1000003
 def imap_fill<V>(a: Array<IBucket<V>>, i: Int, cap: Int) -> Array<IBucket<V>> =
     if i >= cap { a }
     else {
-        let _x = array_set_trusted(a, i, IBucket::IEmpty);
+        let _x = array_set(a, i, IBucket::IEmpty)?;
         imap_fill(a, i + 1, cap)
     }
 
@@ -2688,7 +2688,7 @@ def imap_size<V>(m: IntMap<V>) -> Int = m.icount
 def imap_probe<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Int =
     if steps >= cap { 0 - 1 }
     else {
-        match array_get_trusted(a, idx) {
+        match array_get(a, idx)? {
             IBucket::IEmpty => idx,
             IBucket::IFull(e) =>
                 if e.ikey == key { idx }
@@ -2702,7 +2702,7 @@ def imap_get<V>(m: IntMap<V>, key: Int) -> Option<V> =
 def imap_get_at<V>(a: Array<IBucket<V>>, cap: Int, key: Int, idx: Int, steps: Int) -> Option<V> =
     if steps >= cap { Option::None }
     else {
-        match array_get_trusted(a, idx) {
+        match array_get(a, idx)? {
             IBucket::IEmpty => Option::None,
             IBucket::IFull(e) =>
                 if e.ikey == key { Option::Some(e.ival) }
@@ -2725,7 +2725,7 @@ def imap_resize<V>(m: IntMap<V>, newcap: Int) -> IntMap<V> =
 def imap_rehash<V>(old: Array<IBucket<V>>, oldcap: Int, i: Int, dst: IntMap<V>) -> IntMap<V> =
     if i >= oldcap { dst }
     else {
-        match array_get_trusted(old, i) {
+        match array_get(old, i)? {
             IBucket::IEmpty => imap_rehash(old, oldcap, i + 1, dst),
             IBucket::IFull(e) => imap_rehash(old, oldcap, i + 1, imap_insert_grown(dst, e.ikey, e.ival)),
         }
@@ -2735,13 +2735,13 @@ def imap_insert_grown<V>(m: IntMap<V>, key: Int, val: V) -> IntMap<V> =
     imap_place(m, imap_probe(m.ibuckets, m.icap, key, int_hash(key) % m.icap, 0), key, val)
 
 def imap_place<V>(m: IntMap<V>, idx: Int, key: Int, val: V) -> IntMap<V> =
-    match array_get_trusted(m.ibuckets, idx) {
+    match array_get(m.ibuckets, idx)? {
         IBucket::IFull(_) => {
-            let _x = array_set_trusted(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }));
+            let _x = array_set(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }))?;
             m
         },
         IBucket::IEmpty => {
-            let _x = array_set_trusted(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }));
+            let _x = array_set(m.ibuckets, idx, IBucket::IFull(IEntry { ikey: key, ival: val }))?;
             IntMap { ibuckets: m.ibuckets, icount: m.icount + 1, icap: m.icap }
         },
     }
@@ -2779,13 +2779,13 @@ def index_of(bitmap: Int, bit: Int) -> Int = popcount(bit_and(bitmap, bit - 1))
 
 def arr1<K, V>(x: HNode<K, V>) -> Array<HNode<K, V>> = {
     let a = array_new(1);
-    let _s = array_set_trusted(a, 0, x);
+    let _s = array_set(a, 0, x)?;
     a
 }
 def arr2<K, V>(a: HNode<K, V>, b: HNode<K, V>) -> Array<HNode<K, V>> = {
     let arr = array_new(2);
-    let _s0 = array_set_trusted(arr, 0, a);
-    let _s1 = array_set_trusted(arr, 1, b);
+    let _s0 = array_set(arr, 0, a)?;
+    let _s1 = array_set(arr, 1, b)?;
     arr
 }
 def arr_set_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
@@ -2794,9 +2794,9 @@ def arr_set_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array
     arr_copy_set(a, out, 0, n, idx, v)
 }
 def arr_copy_set<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, i: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
-    if i == n { let _s = array_set_trusted(dst, idx, v); dst }
+    if i == n { let _s = array_set(dst, idx, v)?; dst }
     else {
-        let _s = array_set_trusted(dst, i, array_get_trusted(src, i));
+        let _s = array_set(dst, i, array_get(src, i)?)?;
         arr_copy_set(src, dst, i + 1, n, idx, v)
     }
 def arr_insert_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
@@ -2807,9 +2807,9 @@ def arr_insert_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Ar
 def arr_ins_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
     if j == n + 1 { dst }
     else {
-        let chosen = if j < idx { array_get_trusted(src, j) }
-            else { if j == idx { v } else { array_get_trusted(src, j - 1) } };
-        let _s = array_set_trusted(dst, j, chosen);
+        let chosen = if j < idx { array_get(src, j)? }
+            else { if j == idx { v } else { array_get(src, j - 1)? } };
+        let _s = array_set(dst, j, chosen)?;
         arr_ins_fill(src, dst, j + 1, n, idx, v)
     }
 
@@ -2828,14 +2828,14 @@ def node_get<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> Option<V> =
             let bit = bitpos(h, shift);
             if bit_and(bm.bitmap, bit) == 0 { Option::None }
             else {
-                node_get(array_get_trusted(bm.kids, index_of(bm.bitmap, bit)), h, shift + 5, key)
+                node_get(array_get(bm.kids, index_of(bm.bitmap, bit))?, h, shift + 5, key)
             }
         },
     }
 def coll_get<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Option<V> =
     if i == n { Option::None }
     else {
-        match array_get_trusted(items, i) {
+        match array_get(items, i)? {
             HNode::HL(leaf) =>
                 if value_eq(leaf.hkey, key) { Option::Some(leaf.val) }
                 else { coll_get(items, i + 1, n, key) },
@@ -2870,7 +2870,7 @@ def node_assoc<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K, val: V) -> A
                 let nk = arr_insert_copy(bm.kids, idx, HNode::HL(HLeaf { kh: h, hkey: key, val: val }));
                 AssocOut { node: HNode::HB(HBitmap { bitmap: bit_or(bm.bitmap, bit), kids: nk }), added: 1 }
             } else {
-                let sub = node_assoc(array_get_trusted(bm.kids, idx), h, shift + 5, key, val);
+                let sub = node_assoc(array_get(bm.kids, idx)?, h, shift + 5, key, val);
                 let nk = arr_set_copy(bm.kids, idx, sub.node);
                 AssocOut { node: HNode::HB(HBitmap { bitmap: bm.bitmap, kids: nk }), added: sub.added }
             }
@@ -2907,7 +2907,7 @@ def coll_assoc<K, V>(coll: HColl<K, V>, key: K, val: V) -> AssocOut<K, V> = {
 def coll_find<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Int =
     if i == n { 0 - 1 }
     else {
-        match array_get_trusted(items, i) {
+        match array_get(items, i)? {
             HNode::HL(leaf) => if value_eq(leaf.hkey, key) { i } else { coll_find(items, i + 1, n, key) },
             HNode::HEmpty => coll_find(items, i + 1, n, key),
             HNode::HB(b) => coll_find(items, i + 1, n, key),
@@ -2928,7 +2928,7 @@ def node_fold<K, V, A>(node: HNode<K, V>, acc: A, f: fn(A, K, V) -> A) -> A =
     }
 def arr_fold<K, V, A>(a: Array<HNode<K, V>>, i: Int, n: Int, acc: A, f: fn(A, K, V) -> A) -> A =
     if i == n { acc }
-    else { arr_fold(a, i + 1, n, node_fold(array_get_trusted(a, i), acc, f), f) }
+    else { arr_fold(a, i + 1, n, node_fold(array_get(a, i)?, acc, f), f) }
 
 struct RemoveOut<K, V> { rnode: HNode<K, V>, removed: Int }
 def arr_remove_at<K, V>(a: Array<HNode<K, V>>, idx: Int) -> Array<HNode<K, V>> = {
@@ -2939,8 +2939,8 @@ def arr_remove_at<K, V>(a: Array<HNode<K, V>>, idx: Int) -> Array<HNode<K, V>> =
 def arr_rm_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int) -> Array<HNode<K, V>> =
     if j == n { dst }
     else {
-        let _w = if j < idx { array_set_trusted(dst, j, array_get_trusted(src, j)) }
-            else { if j == idx { 0 } else { array_set_trusted(dst, j - 1, array_get_trusted(src, j)) } };
+        let _w = if j < idx { array_set(dst, j, array_get(src, j)?)? }
+            else { if j == idx { 0 } else { array_set(dst, j - 1, array_get(src, j)?)? } };
         arr_rm_fill(src, dst, j + 1, n, idx)
     }
 def hashmap_remove<K, V>(m: HashMap<K, V>, key: K) -> HashMap<K, V> = {
@@ -2959,7 +2959,7 @@ def node_remove<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> RemoveOu
             if bit_and(bm.bitmap, bit) == 0 { RemoveOut { rnode: HNode::HB(bm), removed: 0 } }
             else {
                 let idx = index_of(bm.bitmap, bit);
-                let sub = node_remove(array_get_trusted(bm.kids, idx), h, shift + 5, key);
+                let sub = node_remove(array_get(bm.kids, idx)?, h, shift + 5, key);
                 match sub.rnode {
                     HNode::HEmpty => {
                         let nk = arr_remove_at(bm.kids, idx);
@@ -2990,7 +2990,7 @@ def coll_remove<K, V>(coll: HColl<K, V>, key: K) -> RemoveOut<K, V> = {
         let n = array_len(coll.items);
         if n - 1 == 1 {
             let keep_idx = if found == 0 { 1 } else { 0 };
-            RemoveOut { rnode: array_get_trusted(coll.items, keep_idx), removed: 1 }
+            RemoveOut { rnode: array_get(coll.items, keep_idx)?, removed: 1 }
         } else {
             let nk = arr_remove_at(coll.items, found);
             RemoveOut { rnode: HNode::HC(HColl { kh: coll.kh, items: nk }), removed: 1 }
@@ -3181,7 +3181,7 @@ def net_read_into(fd: Int, buf: Ptr, got: Int, n: Int) -> Result<Int, NetErr> =
 // Copy `n` raw bytes from `buf` into Bytes `b`.
 def net_buf_to_bytes(buf: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
     if i >= n { b } else {
-        let _s = bytes_set_trusted(b, i, ptr_read_u8(buf, i));
+        let _s = bytes_set(b, i, ptr_read_u8(buf, i))?;
         net_buf_to_bytes(buf, b, i + 1, n)
     }
 
@@ -3196,8 +3196,8 @@ def net_recv_exact(fd: Int, n: Int) -> Result<Bytes, NetErr> = {
 
 // Decode a 4-byte big-endian length.
 def net_be32(b: Bytes) -> Int =
-    bytes_get_trusted(b, 0) * 16777216 + bytes_get_trusted(b, 1) * 65536
-        + bytes_get_trusted(b, 2) * 256 + bytes_get_trusted(b, 3)
+    bytes_get(b, 0)? * 16777216 + bytes_get(b, 1)? * 65536
+        + bytes_get(b, 2)? * 256 + bytes_get(b, 3)?
 
 // Receive one length-prefixed frame.
 def recv_frame(fd: Int) -> Result<Bytes, NetErr> = {
@@ -3209,7 +3209,7 @@ def recv_frame(fd: Int) -> Result<Bytes, NetErr> = {
 // Copy Bytes `b` into raw buffer `buf`.
 def net_bytes_to_buf(b: Bytes, buf: Ptr, i: Int, n: Int) -> Int =
     if i >= n { 0 } else {
-        let _w = ptr_write_u8(buf, i, bytes_get_trusted(b, i));
+        let _w = ptr_write_u8(buf, i, bytes_get(b, i)?);
         net_bytes_to_buf(b, buf, i + 1, n)
     }
 
@@ -3233,10 +3233,10 @@ def net_send_bytes(fd: Int, b: Bytes) -> Result<Int, NetErr> = {
 // Encode a 4-byte big-endian length header.
 def net_be32_bytes(n: Int) -> Bytes = {
     let h = bytes_new(4);
-    let _0 = bytes_set_trusted(h, 0, (n / 16777216) % 256);
-    let _1 = bytes_set_trusted(h, 1, (n / 65536) % 256);
-    let _2 = bytes_set_trusted(h, 2, (n / 256) % 256);
-    let _3 = bytes_set_trusted(h, 3, n % 256);
+    let _0 = bytes_set(h, 0, (n / 16777216) % 256)?;
+    let _1 = bytes_set(h, 1, (n / 65536) % 256)?;
+    let _2 = bytes_set(h, 2, (n / 256) % 256)?;
+    let _3 = bytes_set(h, 3, n % 256)?;
     h
 }
 
@@ -3893,17 +3893,17 @@ mod tests {
         let driver = "
             def isolated() -> Int = {
                 let b = bytes_new(1);
-                let _z = bytes_set_trusted(b, 0, 7);
-                let h = spawn(|| bytes_set_trusted(b, 0, 99));
+                let _z = bytes_set(b, 0, 7)?;
+                let h = spawn(|| bytes_set(b, 0, 99)?);
                 let _j = join(h);
-                bytes_get_trusted(b, 0)
+                bytes_get(b, 0)?
             }
             def shared() -> Int = {
                 let b = bytes_new(1);
-                let _z = bytes_set_trusted(b, 0, 7);
-                let h = spawn_shared(|| bytes_set_trusted(b, 0, 99));
+                let _z = bytes_set(b, 0, 7)?;
+                let h = spawn_shared(|| bytes_set(b, 0, 99)?);
                 let _j = join(h);
-                bytes_get_trusted(b, 0)
+                bytes_get(b, 0)?
             }
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
@@ -4184,7 +4184,7 @@ mod tests {
             def first_int(a: Array<Int>, g: fn(Array<Int>, Int) -> Int) -> Int = g(a, 0)
             def t_hof() -> Int = {
                 let arr = array_new(2);
-                let _1 = array_set_trusted(arr, 0, 42);
+                let _1 = array_set(arr, 0, 42)?;
                 first_int(arr, array_get_trusted)
             }
             // array_get_trusted let-bound, then called where the array type pins T=Int.
@@ -4194,7 +4194,7 @@ mod tests {
             }
             def t_letbound() -> Int = {
                 let arr = array_new(1);
-                let _1 = array_set_trusted(arr, 0, 7);
+                let _1 = array_set(arr, 0, 7)?;
                 get0(arr)
             }
             // atom_swap passed by value (the lock-free CAS primitive).
@@ -4911,11 +4911,11 @@ mod tests {
             &ctx,
             "struct GPair<V> { gk: String, gv: V }
              enum GWrap<V> { GNone, GSome(GPair<V>) }
-             def fill_one<V>(a: Array<GWrap<V>>, w: GWrap<V>) -> Int = array_set_trusted(a, 0, w)
+             def fill_one<V>(a: Array<GWrap<V>>, w: GWrap<V>) -> Int = array_set(a, 0, w)?
              def find_rec<V>(a: Array<GWrap<V>>, i: Int, n: Int) -> Option<V> =
                 if i >= n { Option::None }
                 else {
-                    match array_get_trusted(a, i) {
+                    match array_get(a, i)? {
                         GWrap::GNone => find_rec(a, i + 1, n),
                         GWrap::GSome(p) => Option::Some(p.gv),
                     }
@@ -4969,7 +4969,7 @@ mod tests {
             &ctx,
             "def key_of(i: Int) -> String = {
                 let b = bytes_new(1);
-                let _x = bytes_set_trusted(b, 0, 65 + i);
+                let _x = bytes_set(b, 0, 65 + i)?;
                 string_from_bytes(b)
              }
              def build(m: StringMap<Int>, i: Int, n: Int) -> StringMap<Int> =
@@ -5006,9 +5006,9 @@ mod tests {
                 float_to_int(opt_unwrap_or(Option::Some(2.5), 0.0) * 4.0)
              def arr_test() -> Int = {
                 let a = make();
-                let _x = array_set_trusted(a, 0, 1.25);
-                let _y = array_set_trusted(a, 1, 3.75);
-                float_to_int((array_get_trusted(a, 0) + array_get_trusted(a, 1)) * 2.0)
+                let _x = array_set(a, 0, 1.25)?;
+                let _y = array_set(a, 1, 3.75)?;
+                float_to_int((array_get(a, 0)? + array_get(a, 1)?) * 2.0)
              }",
         );
         unsafe {
@@ -5185,7 +5185,7 @@ mod tests {
             "def mk(n: Int) -> Array<Int> = array_new(n)
              def run(i: Int) -> Int = {
                 let a = mk(2);
-                let _s = array_set_trusted(a, 0, 7);
+                let _s = array_set(a, 0, 7)?;
                 let r = array_get(a, i);
                 match r {
                     Result::Ok(v) => v,

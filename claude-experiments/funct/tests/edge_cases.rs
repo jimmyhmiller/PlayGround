@@ -6,7 +6,8 @@ use funct::{Cause, Funct, RunResult, StopWhen, Value};
 
 fn eval(src: &str) -> Value {
     let mut vm = Funct::new();
-    vm.eval(src).unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
+    vm.eval(src)
+        .unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
 }
 
 fn int(i: i64) -> Value {
@@ -126,10 +127,7 @@ fn shadowing_inside_blocks_restores_outer() {
 
 #[test]
 fn nested_closures_capture_through_two_levels() {
-    assert_eq!(
-        eval("fn f(a) = b => c => a + b + c\nf(1)(2)(3)"),
-        int(6)
-    );
+    assert_eq!(eval("fn f(a) = b => c => a + b + c\nf(1)(2)(3)"), int(6));
 }
 
 #[test]
@@ -204,7 +202,10 @@ fn fuel_zero_pauses_immediately() {
 #[test]
 fn chained_comparison_is_rejected() {
     let mut vm = Funct::new();
-    assert!(vm.eval("1 < 2 < 3").is_err(), "comparison is non-associative");
+    assert!(
+        vm.eval("1 < 2 < 3").is_err(),
+        "comparison is non-associative"
+    );
 }
 
 #[test]
@@ -231,12 +232,20 @@ fn variant_payload_arity_mismatch_does_not_match() {
 #[test]
 fn deeply_nested_data_round_trips_through_snapshot() {
     let mut vm = Funct::new();
-    vm.eval("let data = { xs: [1, (2, [3, { y: Some(4) }])], z: atom([5]) }").unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    vm.eval("let data = { xs: [1, (2, [3, { y: Some(4) }])], z: atom([5]) }")
+        .unwrap();
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
     let mut vm2 = Funct::new();
     vm2.restore_state(&json).unwrap();
-    assert_eq!(vm2.eval("data.xs[1]").unwrap(), vm2.eval("(2, [3, { y: Some(4) }])").unwrap());
+    assert_eq!(
+        vm2.eval("data.xs[1]").unwrap(),
+        vm2.eval("(2, [3, { y: Some(4) }])").unwrap()
+    );
     assert_eq!(vm2.eval("@(data.z)").unwrap(), vm2.eval("[5]").unwrap());
 }
 
@@ -245,18 +254,27 @@ fn atom_containing_itself_serializes() {
     // cycle through the atom table must not hang or stack-overflow
     let mut vm = Funct::new();
     vm.eval("let a = atom(0)\nreset!(a, [a])").unwrap();
-    let st = funct::VmState { frames: vec![], stack: vec![], status: funct::Status::Done(Value::Unit) };
+    let st = funct::VmState {
+        frames: vec![],
+        stack: vec![],
+        status: funct::Status::Done(Value::Unit),
+    };
     let json = vm.save_state(&st).unwrap();
     let mut vm2 = Funct::new();
     vm2.restore_state(&json).unwrap();
     // the cycle survives: @a is a list whose element is `a` itself
-    assert_eq!(vm2.eval("match @a { [inner] => inner == a, _ => false }").unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm2.eval("match @a { [inner] => inner == a, _ => false }")
+            .unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn while_loop_pausable_and_resumable_many_times() {
     let mut vm = Funct::new();
-    vm.load("fn count(n) {\n let mut i = 0\n while i < n { i = i + 1 }\n i\n}").unwrap();
+    vm.load("fn count(n) {\n let mut i = 0\n while i < n { i = i + 1 }\n i\n}")
+        .unwrap();
     let mut st = vm.start("count", vec![int(10_000)]).unwrap();
     let mut pauses = 0u32;
     loop {
@@ -276,8 +294,10 @@ fn while_loop_pausable_and_resumable_many_times() {
 #[test]
 fn string_interpolation_with_nested_call_and_string() {
     assert_eq!(
-        eval(r#"fn shout(s) = s + "!"
-"hey ${shout("you")} there""#),
+        eval(
+            r#"fn shout(s) = s + "!"
+"hey ${shout("you")} there""#
+        ),
         Value::str("hey you! there")
     );
 }

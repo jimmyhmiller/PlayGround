@@ -38,8 +38,8 @@ pub enum Tok {
     Not,
     As,
     // operators / punctuation
-    Pipe,      // |>
-    FatArrow,  // =>
+    Pipe,     // |>
+    FatArrow, // =>
     Plus,
     Minus,
     Star,
@@ -52,7 +52,7 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
-    Assign,    // =
+    Assign, // =
     PlusEq,
     MinusEq,
     StarEq,
@@ -104,7 +104,11 @@ pub struct Lexer<'a> {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, String> {
-    let mut lx = Lexer { src: src.as_bytes(), pos: 0, line: 1 };
+    let mut lx = Lexer {
+        src: src.as_bytes(),
+        pos: 0,
+        line: 1,
+    };
     let mut raw = Vec::new();
     loop {
         if let Some(t) = lx.next_token()? {
@@ -239,11 +243,17 @@ impl<'a> Lexer<'a> {
         let line = self.line;
         let c = self.peek();
         if c == 0 {
-            return Ok(Some(Token { tok: Tok::Eof, line }));
+            return Ok(Some(Token {
+                tok: Tok::Eof,
+                line,
+            }));
         }
         if c == b'\n' {
             self.bump();
-            return Ok(Some(Token { tok: Tok::Newline, line }));
+            return Ok(Some(Token {
+                tok: Tok::Newline,
+                line,
+            }));
         }
         if c.is_ascii_digit() {
             return Ok(Some(self.number()?));
@@ -367,7 +377,12 @@ impl<'a> Lexer<'a> {
             b';' => Tok::Newline, // ';' acts as a statement terminator
             b':' => Tok::Colon,
             b'#' => Tok::Hash,
-            _ => return Err(format!("line {}: unexpected character '{}'", line, c as char)),
+            _ => {
+                return Err(format!(
+                    "line {}: unexpected character '{}'",
+                    line, c as char
+                ))
+            }
         };
         Ok(Some(Token { tok: t, line }))
     }
@@ -389,11 +404,21 @@ impl<'a> Lexer<'a> {
                     s.push(c as char);
                 }
             }
-            let f: f64 = s.parse().map_err(|e| format!("line {}: bad float: {}", line, e))?;
-            Ok(Token { tok: Tok::Float(f), line })
+            let f: f64 = s
+                .parse()
+                .map_err(|e| format!("line {}: bad float: {}", line, e))?;
+            Ok(Token {
+                tok: Tok::Float(f),
+                line,
+            })
         } else {
-            let i: i64 = s.parse().map_err(|e| format!("line {}: bad int: {}", line, e))?;
-            Ok(Token { tok: Tok::Int(i), line })
+            let i: i64 = s
+                .parse()
+                .map_err(|e| format!("line {}: bad int: {}", line, e))?;
+            Ok(Token {
+                tok: Tok::Int(i),
+                line,
+            })
         }
     }
 
@@ -417,11 +442,13 @@ impl<'a> Lexer<'a> {
                         b't' => b'\t',
                         b'\\' => b'\\',
                         b'"' => b'"',
-                        b'$' => b'$',  // \$ → literal $ (e.g. before a { to avoid ${)
-                        b'{' => b'{',  // braces need no escaping now; kept for compatibility
+                        b'$' => b'$', // \$ → literal $ (e.g. before a { to avoid ${)
+                        b'{' => b'{', // braces need no escaping now; kept for compatibility
                         b'}' => b'}',
                         b'0' => 0u8,
-                        _ => return Err(format!("line {}: bad escape '\\{}'", self.line, e as char)),
+                        _ => {
+                            return Err(format!("line {}: bad escape '\\{}'", self.line, e as char))
+                        }
                     });
                 }
                 b'$' if self.peek2() == b'{' => {
@@ -498,7 +525,10 @@ impl<'a> Lexer<'a> {
                 .map_err(|_| format!("line {}: invalid utf8 in string", line))?;
             parts.push(StrPart::Lit(lit));
         }
-        Ok(Token { tok: Tok::Str(parts), line })
+        Ok(Token {
+            tok: Tok::Str(parts),
+            line,
+        })
     }
 
     fn ident_or_kw(&mut self) -> Token {
@@ -536,7 +566,11 @@ impl<'a> Lexer<'a> {
             "as" => Tok::As,
             "_" => Tok::Underscore,
             _ => {
-                if s.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                if s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+                {
                     Tok::TypeName(s)
                 } else {
                     Tok::Ident(s)

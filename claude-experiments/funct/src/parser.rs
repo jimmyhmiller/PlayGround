@@ -6,7 +6,12 @@ use crate::lexer::{lex, StrPart, Tok, Token};
 
 pub fn parse(src: &str) -> Result<Program, String> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0, no_struct: 0, no_bare_lambda: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        no_struct: 0,
+        no_bare_lambda: 0,
+    };
     p.parse_program()
 }
 
@@ -27,7 +32,10 @@ impl Parser {
     }
 
     fn peek_at(&self, n: usize) -> &Tok {
-        self.toks.get(self.pos + n).map(|t| &t.tok).unwrap_or(&Tok::Eof)
+        self.toks
+            .get(self.pos + n)
+            .map(|t| &t.tok)
+            .unwrap_or(&Tok::Eof)
     }
 
     fn line(&self) -> u32 {
@@ -35,7 +43,11 @@ impl Parser {
     }
 
     fn bump(&mut self) -> Tok {
-        let t = self.toks.get(self.pos).map(|t| t.tok.clone()).unwrap_or(Tok::Eof);
+        let t = self
+            .toks
+            .get(self.pos)
+            .map(|t| t.tok.clone())
+            .unwrap_or(Tok::Eof);
         self.pos += 1;
         t
     }
@@ -57,7 +69,12 @@ impl Parser {
         if self.eat(t) {
             Ok(())
         } else {
-            Err(format!("line {}: expected {:?}, found {:?}", self.line(), t, self.peek()))
+            Err(format!(
+                "line {}: expected {:?}, found {:?}",
+                self.line(),
+                t,
+                self.peek()
+            ))
         }
     }
 
@@ -92,10 +109,12 @@ impl Parser {
         self.skip_nl();
         while !self.at(&Tok::Eof) {
             items.push(self.parse_item()?);
-            if !self.at(&Tok::Eof)
-                && !self.eat(&Tok::Newline) {
-                    return self.err(&format!("expected end of statement, found {:?}", self.peek()));
-                }
+            if !self.at(&Tok::Eof) && !self.eat(&Tok::Newline) {
+                return self.err(&format!(
+                    "expected end of statement, found {:?}",
+                    self.peek()
+                ));
+            }
             self.skip_nl();
         }
         Ok(Program { items })
@@ -109,7 +128,13 @@ impl Parser {
             self.expect(&Tok::LBracket)?;
             let name = match self.bump() {
                 Tok::Ident(n) => n,
-                t => return Err(format!("line {}: expected attribute name, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected attribute name, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             };
             self.expect(&Tok::RBracket)?;
             if name != "test" {
@@ -150,12 +175,18 @@ impl Parser {
                 let line = self.line();
                 self.bump();
                 if self.at(&Tok::Mut) {
-                    return self.err("`mut` is not allowed at top level; use an atom: let x = atom(v)");
+                    return self
+                        .err("`mut` is not allowed at top level; use an atom: let x = atom(v)");
                 }
                 let pattern = self.parse_pattern()?;
                 self.expect(&Tok::Assign)?;
                 let expr = self.parse_expr()?;
-                Ok(Item::Let { pattern, expr, exported, line })
+                Ok(Item::Let {
+                    pattern,
+                    expr,
+                    exported,
+                    line,
+                })
             }
             _ => {
                 if exported {
@@ -164,9 +195,16 @@ impl Parser {
                 let e = self.parse_expr()?;
                 if matches!(
                     self.peek(),
-                    Tok::Assign | Tok::PlusEq | Tok::MinusEq | Tok::StarEq | Tok::SlashEq | Tok::PercentEq
+                    Tok::Assign
+                        | Tok::PlusEq
+                        | Tok::MinusEq
+                        | Tok::StarEq
+                        | Tok::SlashEq
+                        | Tok::PercentEq
                 ) {
-                    return self.err("assignment is not allowed at top level (top-level bindings are immutable)");
+                    return self.err(
+                        "assignment is not allowed at top level (top-level bindings are immutable)",
+                    );
                 }
                 Ok(Item::Expr(e))
             }
@@ -181,17 +219,28 @@ impl Parser {
         if self.eat(&Tok::Let) {
             let name = match self.bump() {
                 Tok::Ident(n) => n,
-                t => return Err(format!("line {}: expected name after `extern let`, found {:?}", line, t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected name after `extern let`, found {:?}",
+                        line, t
+                    ))
+                }
             };
             if self.at(&Tok::Assign) {
-                return self.err("`extern let` declares a host-provided value and has no initializer");
+                return self
+                    .err("`extern let` declares a host-provided value and has no initializer");
             }
             return Ok(Item::ExternLet { name, line });
         }
         self.expect(&Tok::Fn)?;
         let name = match self.bump() {
             Tok::Ident(n) => n,
-            t => return Err(format!("line {}: expected function name after `extern fn`, found {:?}", line, t)),
+            t => {
+                return Err(format!(
+                    "line {}: expected function name after `extern fn`, found {:?}",
+                    line, t
+                ))
+            }
         };
         self.expect(&Tok::LParen)?;
         let mut params = Vec::new();
@@ -199,7 +248,13 @@ impl Parser {
             match self.bump() {
                 Tok::Ident(n) => params.push(n),
                 Tok::Underscore => params.push("_".to_string()),
-                t => return Err(format!("line {}: extern parameters are plain names, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: extern parameters are plain names, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             }
             if !self.eat(&Tok::Comma) {
                 break;
@@ -232,12 +287,24 @@ impl Parser {
                 }
                 let name = match self.bump() {
                     Tok::Ident(n) => n,
-                    t => return Err(format!("line {}: expected import name, found {:?}", self.line(), t)),
+                    t => {
+                        return Err(format!(
+                            "line {}: expected import name, found {:?}",
+                            self.line(),
+                            t
+                        ))
+                    }
                 };
                 let alias = if self.eat(&Tok::As) {
                     match self.bump() {
                         Tok::Ident(n) => Some(n),
-                        t => return Err(format!("line {}: expected alias after `as`, found {:?}", self.line(), t)),
+                        t => {
+                            return Err(format!(
+                                "line {}: expected alias after `as`, found {:?}",
+                                self.line(),
+                                t
+                            ))
+                        }
                     }
                 } else {
                     None
@@ -254,24 +321,44 @@ impl Parser {
             // contextual keyword `from`
             match self.bump() {
                 Tok::Ident(k) if k == "from" => {}
-                t => return Err(format!("line {}: expected `from` after import list, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected `from` after import list, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             }
             let path = self.parse_import_path()?;
             if names.is_empty() {
                 return self.err("import list must name at least one export");
             }
-            Ok(Item::Import(ImportDef { path, kind: ImportKind::Named(names), line }))
+            Ok(Item::Import(ImportDef {
+                path,
+                kind: ImportKind::Named(names),
+                line,
+            }))
         } else if matches!(self.peek(), Tok::Str(_)) {
             let path = self.parse_import_path()?;
             let alias = if self.eat(&Tok::As) {
                 match self.bump() {
                     Tok::Ident(n) => Some(n),
-                    t => return Err(format!("line {}: expected alias after `as`, found {:?}", self.line(), t)),
+                    t => {
+                        return Err(format!(
+                            "line {}: expected alias after `as`, found {:?}",
+                            self.line(),
+                            t
+                        ))
+                    }
                 }
             } else {
                 None
             };
-            Ok(Item::Import(ImportDef { path, kind: ImportKind::Qualified(alias), line }))
+            Ok(Item::Import(ImportDef {
+                path,
+                kind: ImportKind::Qualified(alias),
+                line,
+            }))
         } else {
             self.err("expected `{ names }` or a \"path\" string after `import`")
         }
@@ -282,9 +369,15 @@ impl Parser {
         match self.bump() {
             Tok::Str(parts) => match parts.as_slice() {
                 [StrPart::Lit(s)] => Ok(s.clone()),
-                _ => Err(format!("line {}: import path must be a plain string (no interpolation)", line)),
+                _ => Err(format!(
+                    "line {}: import path must be a plain string (no interpolation)",
+                    line
+                )),
             },
-            t => Err(format!("line {}: expected a \"path\" string, found {:?}", line, t)),
+            t => Err(format!(
+                "line {}: expected a \"path\" string, found {:?}",
+                line, t
+            )),
         }
     }
 
@@ -293,7 +386,12 @@ impl Parser {
         self.expect(&Tok::Fn)?;
         let name = match self.bump() {
             Tok::Ident(n) => n,
-            t => return Err(format!("line {}: expected function name, found {:?}", line, t)),
+            t => {
+                return Err(format!(
+                    "line {}: expected function name, found {:?}",
+                    line, t
+                ))
+            }
         };
         self.expect(&Tok::LParen)?;
         let params = self.parse_params()?;
@@ -305,7 +403,14 @@ impl Parser {
         } else {
             return self.err("expected `=` or `{` after function signature");
         };
-        Ok(FnDef { name, params, body, exported, attrs, line })
+        Ok(FnDef {
+            name,
+            params,
+            body,
+            exported,
+            attrs,
+            line,
+        })
     }
 
     fn parse_params(&mut self) -> Result<Vec<Pattern>, String> {
@@ -345,7 +450,13 @@ impl Parser {
             self.skip_nl();
             let tag = match self.bump() {
                 Tok::TypeName(n) => n,
-                t => return Err(format!("line {}: expected variant name, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected variant name, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             };
             let fields = if self.at(&Tok::LBrace) {
                 self.bump();
@@ -354,7 +465,13 @@ impl Parser {
                 while !self.at(&Tok::RBrace) {
                     let fname = match self.bump() {
                         Tok::Ident(n) => n,
-                        t => return Err(format!("line {}: expected field name, found {:?}", self.line(), t)),
+                        t => {
+                            return Err(format!(
+                                "line {}: expected field name, found {:?}",
+                                self.line(),
+                                t
+                            ))
+                        }
                     };
                     if self.eat(&Tok::Colon) {
                         self.skip_type_expr()?;
@@ -379,14 +496,24 @@ impl Parser {
                 break;
             }
         }
-        Ok(TypeDef { name, variants, line })
+        Ok(TypeDef {
+            name,
+            variants,
+            line,
+        })
     }
 
     /// Type annotations are parsed and discarded (gradual typing, M7 deferred).
     fn skip_type_expr(&mut self) -> Result<(), String> {
         match self.bump() {
             Tok::TypeName(_) | Tok::Ident(_) => {}
-            t => return Err(format!("line {}: expected type, found {:?}", self.line(), t)),
+            t => {
+                return Err(format!(
+                    "line {}: expected type, found {:?}",
+                    self.line(),
+                    t
+                ))
+            }
         }
         // optional simple type application: `List Int`, `Option a`, `[Int]`, `(..)`
         loop {
@@ -438,7 +565,10 @@ impl Parser {
             stmts.push(stmt);
         }
         self.expect(&Tok::RBrace)?;
-        Ok(Expr { kind: ExprKind::Block(stmts, tail), line })
+        Ok(Expr {
+            kind: ExprKind::Block(stmts, tail),
+            line,
+        })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
@@ -454,7 +584,12 @@ impl Parser {
                 }
                 self.expect(&Tok::Assign)?;
                 let expr = self.parse_expr()?;
-                Ok(Stmt::Let { mutable, pattern, expr, line })
+                Ok(Stmt::Let {
+                    mutable,
+                    pattern,
+                    expr,
+                    line,
+                })
             }
             Tok::While => {
                 self.bump();
@@ -472,11 +607,17 @@ impl Parser {
                 let iter = self.parse_expr()?;
                 self.no_struct -= 1;
                 let body = self.parse_block_forced()?;
-                Ok(Stmt::For { pattern, iter, body, line })
+                Ok(Stmt::For {
+                    pattern,
+                    iter,
+                    body,
+                    line,
+                })
             }
             Tok::Return => {
                 self.bump();
-                let expr = if self.at(&Tok::Newline) || self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                let expr = if self.at(&Tok::Newline) || self.at(&Tok::RBrace) || self.at(&Tok::Eof)
+                {
                     None
                 } else {
                     Some(self.parse_expr()?)
@@ -505,7 +646,9 @@ impl Parser {
                 if let Some(compound) = op {
                     let name = match &e.kind {
                         ExprKind::Ident(n) => n.clone(),
-                        _ => return self.err("assignment target must be a `let mut` variable name"),
+                        _ => {
+                            return self.err("assignment target must be a `let mut` variable name")
+                        }
                     };
                     self.bump();
                     let rhs = self.parse_expr()?;
@@ -552,7 +695,10 @@ impl Parser {
             let line = self.line();
             self.bump();
             let rhs = self.parse_and()?;
-            lhs = Expr { kind: ExprKind::Or(Box::new(lhs), Box::new(rhs)), line };
+            lhs = Expr {
+                kind: ExprKind::Or(Box::new(lhs), Box::new(rhs)),
+                line,
+            };
         }
         Ok(lhs)
     }
@@ -563,7 +709,10 @@ impl Parser {
             let line = self.line();
             self.bump();
             let rhs = self.parse_cmp()?;
-            lhs = Expr { kind: ExprKind::And(Box::new(lhs), Box::new(rhs)), line };
+            lhs = Expr {
+                kind: ExprKind::And(Box::new(lhs), Box::new(rhs)),
+                line,
+            };
         }
         Ok(lhs)
     }
@@ -584,7 +733,14 @@ impl Parser {
             self.bump();
             let rhs = self.parse_range()?;
             // non-associative: no chaining
-            Ok(Expr { kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, line })
+            Ok(Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                line,
+            })
         } else {
             Ok(lhs)
         }
@@ -601,7 +757,11 @@ impl Parser {
         self.bump();
         let rhs = self.parse_add()?;
         Ok(Expr {
-            kind: ExprKind::Range { lo: Box::new(lhs), hi: Box::new(rhs), inclusive },
+            kind: ExprKind::Range {
+                lo: Box::new(lhs),
+                hi: Box::new(rhs),
+                inclusive,
+            },
             line,
         })
     }
@@ -617,7 +777,14 @@ impl Parser {
             let line = self.line();
             self.bump();
             let rhs = self.parse_mul()?;
-            lhs = Expr { kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, line };
+            lhs = Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                line,
+            };
         }
         Ok(lhs)
     }
@@ -634,7 +801,14 @@ impl Parser {
             let line = self.line();
             self.bump();
             let rhs = self.parse_pow()?;
-            lhs = Expr { kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, line };
+            lhs = Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                line,
+            };
         }
         Ok(lhs)
     }
@@ -646,7 +820,11 @@ impl Parser {
             self.bump();
             let rhs = self.parse_pow()?; // right-assoc
             return Ok(Expr {
-                kind: ExprKind::Binary { op: BinOp::Pow, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                kind: ExprKind::Binary {
+                    op: BinOp::Pow,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 line,
             });
         }
@@ -659,17 +837,32 @@ impl Parser {
             Tok::Not => {
                 self.bump();
                 let e = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::Unary { op: UnOp::Not, operand: Box::new(e) }, line })
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnOp::Not,
+                        operand: Box::new(e),
+                    },
+                    line,
+                })
             }
             Tok::Minus => {
                 self.bump();
                 let e = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::Unary { op: UnOp::Neg, operand: Box::new(e) }, line })
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnOp::Neg,
+                        operand: Box::new(e),
+                    },
+                    line,
+                })
             }
             Tok::At => {
                 self.bump();
                 let e = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::Deref(Box::new(e)), line })
+                Ok(Expr {
+                    kind: ExprKind::Deref(Box::new(e)),
+                    line,
+                })
             }
             _ => self.parse_postfix(),
         }
@@ -684,21 +877,45 @@ impl Parser {
                     self.bump();
                     let args = self.parse_args()?;
                     self.expect(&Tok::RParen)?;
-                    e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, line };
+                    e = Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(e),
+                            args,
+                        },
+                        line,
+                    };
                 }
                 Tok::Dot => {
                     self.bump();
                     let name = match self.bump() {
                         Tok::Ident(n) => n,
-                        t => return Err(format!("line {}: expected field/method name after '.', found {:?}", line, t)),
+                        t => {
+                            return Err(format!(
+                                "line {}: expected field/method name after '.', found {:?}",
+                                line, t
+                            ))
+                        }
                     };
                     if self.at(&Tok::LParen) {
                         self.bump();
                         let args = self.parse_args()?;
                         self.expect(&Tok::RParen)?;
-                        e = Expr { kind: ExprKind::MethodCall { recv: Box::new(e), name, args }, line };
+                        e = Expr {
+                            kind: ExprKind::MethodCall {
+                                recv: Box::new(e),
+                                name,
+                                args,
+                            },
+                            line,
+                        };
                     } else {
-                        e = Expr { kind: ExprKind::Field { recv: Box::new(e), name }, line };
+                        e = Expr {
+                            kind: ExprKind::Field {
+                                recv: Box::new(e),
+                                name,
+                            },
+                            line,
+                        };
                     }
                 }
                 Tok::LBracket => {
@@ -709,11 +926,20 @@ impl Parser {
                     self.skip_nl();
                     self.restore_flags(saved);
                     self.expect(&Tok::RBracket)?;
-                    e = Expr { kind: ExprKind::Index { recv: Box::new(e), index: Box::new(idx) }, line };
+                    e = Expr {
+                        kind: ExprKind::Index {
+                            recv: Box::new(e),
+                            index: Box::new(idx),
+                        },
+                        line,
+                    };
                 }
                 Tok::Question => {
                     self.bump();
-                    e = Expr { kind: ExprKind::Try(Box::new(e)), line };
+                    e = Expr {
+                        kind: ExprKind::Try(Box::new(e)),
+                        line,
+                    };
                 }
                 _ => break,
             }
@@ -751,19 +977,31 @@ impl Parser {
         match self.peek().clone() {
             Tok::Int(i) => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Int(i), line })
+                Ok(Expr {
+                    kind: ExprKind::Int(i),
+                    line,
+                })
             }
             Tok::Float(f) => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Float(f), line })
+                Ok(Expr {
+                    kind: ExprKind::Float(f),
+                    line,
+                })
             }
             Tok::True => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Bool(true), line })
+                Ok(Expr {
+                    kind: ExprKind::Bool(true),
+                    line,
+                })
             }
             Tok::False => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Bool(false), line })
+                Ok(Expr {
+                    kind: ExprKind::Bool(false),
+                    line,
+                })
             }
             Tok::Str(parts) => {
                 self.bump();
@@ -771,7 +1009,10 @@ impl Parser {
             }
             Tok::Underscore => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Ident("_".into()), line })
+                Ok(Expr {
+                    kind: ExprKind::Ident("_".into()),
+                    line,
+                })
             }
             Tok::Ident(name) => {
                 if self.peek_at(1) == &Tok::FatArrow && self.no_bare_lambda == 0 {
@@ -779,12 +1020,18 @@ impl Parser {
                     self.bump();
                     let body = self.parse_expr()?;
                     Ok(Expr {
-                        kind: ExprKind::Lambda { params: vec![Pattern::Bind(name)], body: Box::new(body) },
+                        kind: ExprKind::Lambda {
+                            params: vec![Pattern::Bind(name)],
+                            body: Box::new(body),
+                        },
                         line,
                     })
                 } else {
                     self.bump();
-                    Ok(Expr { kind: ExprKind::Ident(name), line })
+                    Ok(Expr {
+                        kind: ExprKind::Ident(name),
+                        line,
+                    })
                 }
             }
             Tok::TypeName(tag) => {
@@ -793,7 +1040,13 @@ impl Parser {
                     self.bump();
                     let args = self.parse_args()?;
                     self.expect(&Tok::RParen)?;
-                    Ok(Expr { kind: ExprKind::Variant { tag, payload: VariantCtor::Positional(args) }, line })
+                    Ok(Expr {
+                        kind: ExprKind::Variant {
+                            tag,
+                            payload: VariantCtor::Positional(args),
+                        },
+                        line,
+                    })
                 } else if self.at(&Tok::LBrace) && self.no_struct == 0 {
                     self.bump();
                     let mut fields = Vec::new();
@@ -801,13 +1054,22 @@ impl Parser {
                     while !self.at(&Tok::RBrace) {
                         let fname = match self.bump() {
                             Tok::Ident(n) => n,
-                            t => return Err(format!("line {}: expected field name, found {:?}", self.line(), t)),
+                            t => {
+                                return Err(format!(
+                                    "line {}: expected field name, found {:?}",
+                                    self.line(),
+                                    t
+                                ))
+                            }
                         };
                         let val = if self.eat(&Tok::Colon) {
                             self.skip_nl();
                             self.parse_expr()?
                         } else {
-                            Expr { kind: ExprKind::Ident(fname.clone()), line }
+                            Expr {
+                                kind: ExprKind::Ident(fname.clone()),
+                                line,
+                            }
                         };
                         fields.push((fname, val));
                         self.skip_nl();
@@ -818,9 +1080,21 @@ impl Parser {
                     }
                     self.skip_nl();
                     self.expect(&Tok::RBrace)?;
-                    Ok(Expr { kind: ExprKind::Variant { tag, payload: VariantCtor::Named(fields) }, line })
+                    Ok(Expr {
+                        kind: ExprKind::Variant {
+                            tag,
+                            payload: VariantCtor::Named(fields),
+                        },
+                        line,
+                    })
                 } else {
-                    Ok(Expr { kind: ExprKind::Variant { tag, payload: VariantCtor::Unit }, line })
+                    Ok(Expr {
+                        kind: ExprKind::Variant {
+                            tag,
+                            payload: VariantCtor::Unit,
+                        },
+                        line,
+                    })
                 }
             }
             Tok::LParen => self.parse_paren(),
@@ -840,7 +1114,10 @@ impl Parser {
                 self.skip_nl();
                 self.restore_flags(saved);
                 self.expect(&Tok::RBracket)?;
-                Ok(Expr { kind: ExprKind::List(items), line })
+                Ok(Expr {
+                    kind: ExprKind::List(items),
+                    line,
+                })
             }
             Tok::LBrace => self.parse_brace(),
             Tok::If => self.parse_if(),
@@ -852,7 +1129,10 @@ impl Parser {
     fn parse_string(&mut self, parts: Vec<StrPart>, line: u32) -> Result<Expr, String> {
         if parts.len() == 1 {
             if let StrPart::Lit(s) = &parts[0] {
-                return Ok(Expr { kind: ExprKind::Str(s.clone()), line });
+                return Ok(Expr {
+                    kind: ExprKind::Str(s.clone()),
+                    line,
+                });
             }
         }
         let mut out = Vec::new();
@@ -860,8 +1140,16 @@ impl Parser {
             match p {
                 StrPart::Lit(s) => out.push(InterpPart::Lit(s)),
                 StrPart::Interp(mut toks) => {
-                    toks.push(Token { tok: Tok::Eof, line });
-                    let mut sub = Parser { toks, pos: 0, no_struct: 0, no_bare_lambda: 0 };
+                    toks.push(Token {
+                        tok: Tok::Eof,
+                        line,
+                    });
+                    let mut sub = Parser {
+                        toks,
+                        pos: 0,
+                        no_struct: 0,
+                        no_bare_lambda: 0,
+                    };
                     let e = sub.parse_expr()?;
                     if !sub.at(&Tok::Eof) {
                         return Err(format!("line {}: trailing tokens in interpolation", line));
@@ -870,7 +1158,10 @@ impl Parser {
                 }
             }
         }
-        Ok(Expr { kind: ExprKind::Interp(out), line })
+        Ok(Expr {
+            kind: ExprKind::Interp(out),
+            line,
+        })
     }
 
     /// `(` already peeked: unit, grouped expr, tuple, or lambda params.
@@ -883,12 +1174,21 @@ impl Parser {
             self.expect(&Tok::RParen)?;
             self.expect(&Tok::FatArrow)?;
             let body = self.parse_expr()?;
-            return Ok(Expr { kind: ExprKind::Lambda { params, body: Box::new(body) }, line });
+            return Ok(Expr {
+                kind: ExprKind::Lambda {
+                    params,
+                    body: Box::new(body),
+                },
+                line,
+            });
         }
         self.expect(&Tok::LParen)?;
         self.skip_nl();
         if self.eat(&Tok::RParen) {
-            return Ok(Expr { kind: ExprKind::Unit, line });
+            return Ok(Expr {
+                kind: ExprKind::Unit,
+                line,
+            });
         }
         let saved = self.save_flags(); // parens reset subject-position restrictions
         let first = self.parse_expr()?;
@@ -903,7 +1203,10 @@ impl Parser {
                 items.push(self.parse_expr()?);
                 self.skip_nl();
             }
-            Expr { kind: ExprKind::Tuple(items), line }
+            Expr {
+                kind: ExprKind::Tuple(items),
+                line,
+            }
         } else {
             first
         };
@@ -923,7 +1226,11 @@ impl Parser {
                 Tok::RParen | Tok::RBracket | Tok::RBrace => {
                     depth -= 1;
                     if depth == 0 {
-                        return self.toks.get(i + 1).map(|t| t.tok == Tok::FatArrow).unwrap_or(false);
+                        return self
+                            .toks
+                            .get(i + 1)
+                            .map(|t| t.tok == Tok::FatArrow)
+                            .unwrap_or(false);
                     }
                 }
                 Tok::Eof => return false,
@@ -939,14 +1246,24 @@ impl Parser {
         let line = self.line();
         // decide record vs block by lookahead (skipping newlines)
         let mut i = self.pos + 1;
-        while self.toks.get(i).map(|t| t.tok == Tok::Newline).unwrap_or(false) {
+        while self
+            .toks
+            .get(i)
+            .map(|t| t.tok == Tok::Newline)
+            .unwrap_or(false)
+        {
             i += 1;
         }
         let is_record = match self.toks.get(i).map(|t| &t.tok) {
             Some(Tok::RBrace) | Some(Tok::DotDot) => true,
             Some(Tok::Ident(_)) => {
                 let mut j = i + 1;
-                while self.toks.get(j).map(|t| t.tok == Tok::Newline).unwrap_or(false) {
+                while self
+                    .toks
+                    .get(j)
+                    .map(|t| t.tok == Tok::Newline)
+                    .unwrap_or(false)
+                {
                     j += 1;
                 }
                 matches!(
@@ -974,13 +1291,22 @@ impl Parser {
         while !self.at(&Tok::RBrace) {
             let fname = match self.bump() {
                 Tok::Ident(n) => n,
-                t => return Err(format!("line {}: expected field name, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected field name, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             };
             let val = if self.eat(&Tok::Colon) {
                 self.skip_nl();
                 self.parse_expr()?
             } else {
-                Expr { kind: ExprKind::Ident(fname.clone()), line }
+                Expr {
+                    kind: ExprKind::Ident(fname.clone()),
+                    line,
+                }
             };
             fields.push((fname, val));
             self.skip_nl();
@@ -991,7 +1317,10 @@ impl Parser {
         }
         self.skip_nl();
         self.expect(&Tok::RBrace)?;
-        Ok(Expr { kind: ExprKind::Record { spread, fields }, line })
+        Ok(Expr {
+            kind: ExprKind::Record { spread, fields },
+            line,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Expr, String> {
@@ -1011,7 +1340,11 @@ impl Parser {
             None
         };
         Ok(Expr {
-            kind: ExprKind::If { cond: Box::new(cond), then: Box::new(then), els },
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                els,
+            },
             line,
         })
     }
@@ -1051,14 +1384,25 @@ impl Parser {
             let body = match self.peek() {
                 Tok::Break | Tok::Continue | Tok::Return => {
                     let stmt = self.parse_stmt()?;
-                    Expr { kind: ExprKind::Block(vec![stmt], None), line: arm_line }
+                    Expr {
+                        kind: ExprKind::Block(vec![stmt], None),
+                        line: arm_line,
+                    }
                 }
                 _ => self.parse_expr()?,
             };
-            arms.push(Arm { pattern, guard, body, line: arm_line });
+            arms.push(Arm {
+                pattern,
+                guard,
+                body,
+                line: arm_line,
+            });
             // a comma, a newline, or the closing brace ends an arm
             if !self.eat(&Tok::Comma) && !self.at(&Tok::RBrace) && !self.at(&Tok::Newline) {
-                return self.err(&format!("expected ',' or '}}' after match arm, found {:?}", self.peek()));
+                return self.err(&format!(
+                    "expected ',' or '}}' after match arm, found {:?}",
+                    self.peek()
+                ));
             }
         }
         self.restore_flags(saved);
@@ -1068,13 +1412,25 @@ impl Parser {
         }
         match subject {
             Some(s) => Ok(Expr {
-                kind: ExprKind::Match { subject: Box::new(s), arms },
+                kind: ExprKind::Match {
+                    subject: Box::new(s),
+                    arms,
+                },
                 line,
             }),
             None => {
                 // subjectless match = matching function (spec §4.2)
-                let subj = Expr { kind: ExprKind::Ident("__subject".into()), line };
-                let m = Expr { kind: ExprKind::Match { subject: Box::new(subj), arms }, line };
+                let subj = Expr {
+                    kind: ExprKind::Ident("__subject".into()),
+                    line,
+                };
+                let m = Expr {
+                    kind: ExprKind::Match {
+                        subject: Box::new(subj),
+                        arms,
+                    },
+                    line,
+                };
                 Ok(Expr {
                     kind: ExprKind::Lambda {
                         params: vec![Pattern::Bind("__subject".into())],
@@ -1118,7 +1474,13 @@ impl Parser {
         if self.eat(&Tok::As) {
             let name = match self.bump() {
                 Tok::Ident(n) => n,
-                t => return Err(format!("line {}: expected name after 'as', found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected name after 'as', found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             };
             return Ok(Pattern::As(Box::new(p), name));
         }
@@ -1145,7 +1507,12 @@ impl Parser {
                     Tok::Float(f) => {
                         return Ok(Pattern::LitFloat(if neg { -f } else { f }));
                     }
-                    t => return Err(format!("line {}: expected number after '-', found {:?}", line, t)),
+                    t => {
+                        return Err(format!(
+                            "line {}: expected number after '-', found {:?}",
+                            line, t
+                        ))
+                    }
                 };
                 match self.peek() {
                     Tok::DotDot | Tok::DotDotEq => {
@@ -1160,7 +1527,12 @@ impl Parser {
                                     i
                                 }
                             }
-                            t => return Err(format!("line {}: expected int in range pattern, found {:?}", line, t)),
+                            t => {
+                                return Err(format!(
+                                    "line {}: expected int in range pattern, found {:?}",
+                                    line, t
+                                ))
+                            }
                         };
                         Ok(Pattern::Range { lo, hi, inclusive })
                     }
@@ -1274,7 +1646,10 @@ impl Parser {
                 let (fields, rest) = self.parse_field_patterns()?;
                 Ok(Pattern::Record { fields, rest })
             }
-            t => Err(format!("line {}: unexpected token in pattern: {:?}", line, t)),
+            t => Err(format!(
+                "line {}: unexpected token in pattern: {:?}",
+                line, t
+            )),
         }
     }
 
@@ -1291,7 +1666,13 @@ impl Parser {
             }
             let fname = match self.bump() {
                 Tok::Ident(n) => n,
-                t => return Err(format!("line {}: expected field name in pattern, found {:?}", self.line(), t)),
+                t => {
+                    return Err(format!(
+                        "line {}: expected field name in pattern, found {:?}",
+                        self.line(),
+                        t
+                    ))
+                }
             };
             let pat = if self.eat(&Tok::Colon) {
                 self.parse_pattern()?
@@ -1323,25 +1704,44 @@ fn desugar_pipe(lhs: Expr, rhs: Expr, line: u32) -> Result<Expr, String> {
             } else {
                 args.insert(0, lhs);
             }
-            Ok(Expr { kind: ExprKind::Call { callee, args }, line })
+            Ok(Expr {
+                kind: ExprKind::Call { callee, args },
+                line,
+            })
         }
-        ExprKind::MethodCall { recv, name, mut args } => {
+        ExprKind::MethodCall {
+            recv,
+            name,
+            mut args,
+        } => {
             if let Some(slot) = args.iter().position(is_hole) {
                 args[slot] = lhs;
             } else {
                 args.insert(0, lhs);
             }
-            Ok(Expr { kind: ExprKind::MethodCall { recv, name, args }, line })
+            Ok(Expr {
+                kind: ExprKind::MethodCall { recv, name, args },
+                line,
+            })
         }
-        ExprKind::Variant { tag, payload: VariantCtor::Unit } => {
+        ExprKind::Variant {
+            tag,
+            payload: VariantCtor::Unit,
+        } => {
             // `x |> Some` builds Some(x)
             Ok(Expr {
-                kind: ExprKind::Variant { tag, payload: VariantCtor::Positional(vec![lhs]) },
+                kind: ExprKind::Variant {
+                    tag,
+                    payload: VariantCtor::Positional(vec![lhs]),
+                },
                 line,
             })
         }
         _ => Ok(Expr {
-            kind: ExprKind::Call { callee: Box::new(rhs), args: vec![lhs] },
+            kind: ExprKind::Call {
+                callee: Box::new(rhs),
+                args: vec![lhs],
+            },
             line,
         }),
     }

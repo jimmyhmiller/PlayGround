@@ -11,15 +11,27 @@ pub enum Item {
     Fn(FnDef),
     Type(TypeDef),
     /// Top-level `let pattern = expr` (no `mut` allowed).
-    Let { pattern: Pattern, expr: Expr, exported: bool, line: u32 },
+    Let {
+        pattern: Pattern,
+        expr: Expr,
+        exported: bool,
+        line: u32,
+    },
     Expr(Expr),
     Import(ImportDef),
     /// `extern fn name(args)` — declares a host-provided function. Binds to
     /// the registered native when present; otherwise calling it faults.
-    Extern { name: String, params: Vec<String>, line: u32 },
+    Extern {
+        name: String,
+        params: Vec<String>,
+        line: u32,
+    },
     /// `extern let name` — declares a host-injected value (vm.set_global);
     /// reading it before the host provides one faults.
-    ExternLet { name: String, line: u32 },
+    ExternLet {
+        name: String,
+        line: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -65,14 +77,39 @@ pub struct VariantDef {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let { mutable: bool, pattern: Pattern, expr: Expr, line: u32 },
+    Let {
+        mutable: bool,
+        pattern: Pattern,
+        expr: Expr,
+        line: u32,
+    },
     /// `x = e` / `x += e` (desugared to plain assign by parser)
-    Assign { name: String, expr: Expr, line: u32 },
-    While { cond: Expr, body: Expr, line: u32 },
-    For { pattern: Pattern, iter: Expr, body: Expr, line: u32 },
-    Return { expr: Option<Expr>, line: u32 },
-    Break { line: u32 },
-    Continue { line: u32 },
+    Assign {
+        name: String,
+        expr: Expr,
+        line: u32,
+    },
+    While {
+        cond: Expr,
+        body: Expr,
+        line: u32,
+    },
+    For {
+        pattern: Pattern,
+        iter: Expr,
+        body: Expr,
+        line: u32,
+    },
+    Return {
+        expr: Option<Expr>,
+        line: u32,
+    },
+    Break {
+        line: u32,
+    },
+    Continue {
+        line: u32,
+    },
     Expr(Expr),
 }
 
@@ -93,24 +130,64 @@ pub enum ExprKind {
     Interp(Vec<InterpPart>),
     Ident(String),
     /// `Foo`, `Foo(a, b)`, `Foo { x: 1 }`
-    Variant { tag: String, payload: VariantCtor },
+    Variant {
+        tag: String,
+        payload: VariantCtor,
+    },
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
     /// Record literal; `spread` is the `{ ..base, x: 1 }` base.
-    Record { spread: Option<Box<Expr>>, fields: Vec<(String, Expr)> },
-    Lambda { params: Vec<Pattern>, body: Box<Expr> },
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Record {
+        spread: Option<Box<Expr>>,
+        fields: Vec<(String, Expr)>,
+    },
+    Lambda {
+        params: Vec<Pattern>,
+        body: Box<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
     /// UFCS / method call: `x.name(args)`
-    MethodCall { recv: Box<Expr>, name: String, args: Vec<Expr> },
-    Field { recv: Box<Expr>, name: String },
-    Index { recv: Box<Expr>, index: Box<Expr> },
-    Unary { op: UnOp, operand: Box<Expr> },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    MethodCall {
+        recv: Box<Expr>,
+        name: String,
+        args: Vec<Expr>,
+    },
+    Field {
+        recv: Box<Expr>,
+        name: String,
+    },
+    Index {
+        recv: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
-    Range { lo: Box<Expr>, hi: Box<Expr>, inclusive: bool },
-    If { cond: Box<Expr>, then: Box<Expr>, els: Option<Box<Expr>> },
-    Match { subject: Box<Expr>, arms: Vec<Arm> },
+    Range {
+        lo: Box<Expr>,
+        hi: Box<Expr>,
+        inclusive: bool,
+    },
+    If {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Option<Box<Expr>>,
+    },
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<Arm>,
+    },
     Block(Vec<Stmt>, Option<Box<Expr>>),
     /// postfix `?`
     Try(Box<Expr>),
@@ -171,15 +248,32 @@ pub enum Pattern {
     LitBool(bool),
     LitUnit,
     /// `Some(x)` / bare `None`
-    VariantPos { tag: String, items: Vec<Pattern> },
+    VariantPos {
+        tag: String,
+        items: Vec<Pattern>,
+    },
     /// `Circle { radius: r, .. }`
-    VariantNamed { tag: String, fields: Vec<(String, Pattern)>, rest: bool },
+    VariantNamed {
+        tag: String,
+        fields: Vec<(String, Pattern)>,
+        rest: bool,
+    },
     /// `{ x, y: p }` record pattern
-    Record { fields: Vec<(String, Pattern)>, rest: bool },
+    Record {
+        fields: Vec<(String, Pattern)>,
+        rest: bool,
+    },
     Tuple(Vec<Pattern>),
     /// `[a, b, ..rest]`; rest: None = exact, Some(None) = `..`, Some(Some(name)) = `..rest`
-    List { items: Vec<Pattern>, rest: Option<Option<String>> },
-    Range { lo: i64, hi: i64, inclusive: bool },
+    List {
+        items: Vec<Pattern>,
+        rest: Option<Option<String>>,
+    },
+    Range {
+        lo: i64,
+        hi: i64,
+        inclusive: bool,
+    },
     Or(Vec<Pattern>),
     As(Box<Pattern>, String),
 }

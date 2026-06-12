@@ -16,6 +16,9 @@ use crate::value::{AtomCell, Closure, Value, Variant, VariantPayload};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fault {
@@ -26,7 +29,10 @@ pub struct Fault {
 
 impl Fault {
     pub fn new(msg: impl Into<String>) -> Fault {
-        Fault { msg: msg.into(), at: None }
+        Fault {
+            msg: msg.into(),
+            at: None,
+        }
     }
 }
 
@@ -115,20 +121,41 @@ pub enum RunResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cause {
+    /// The instruction-count (gas) budget hit zero.
     FuelExhausted,
+    /// The epoch counter reached the deadline (a time budget elapsed, or the
+    /// host bumped the epoch past `set_deadline`).
+    DeadlineReached,
     Breakpoint(u32),
     NextLine(u32),
 }
 
 #[derive(Debug, Clone)]
 pub enum StopWhen {
+    /// Run to completion (or fault). The tightest dispatch loop.
     Never,
+    /// Deterministic gas: pause after this many instructions.
     Fuel(u64),
+    /// Wall-clock budget: pause once roughly this much time has elapsed. funct
+    /// lazily starts one background ticker thread that advances the epoch; the
+    /// loop pauses with `Cause::DeadlineReached`. Granularity ≈ 1ms.
+    Deadline(Duration),
+    /// Host-driven epoch: pause once the epoch counter reaches the value set
+    /// with `set_deadline`. The host advances the epoch itself (its own timer,
+    /// a frame loop, an OS signal) via the handle from `epoch()`.
+    Epoch,
+    /// Combine an instruction budget and/or a wall-clock budget; whichever
+    /// trips first wins, and the `Cause` says which it was.
+    Budget {
+        fuel: Option<u64>,
+        deadline: Option<Duration>,
+    },
     Breakpoints(HashSet<u32>),
     NextLine,
 }
 
-pub(crate) type NativeImpl = Sh<dyn Fn(&mut Funct, Vec<Value>) -> Result<Value, Fault> + Send + Sync>;
+pub(crate) type NativeImpl =
+    Sh<dyn Fn(&mut Funct, Vec<Value>) -> Result<Value, Fault> + Send + Sync>;
 
 /// Bound for host callbacks registered into the engine (see `register_raw`).
 pub trait HostFn: Fn(&mut Funct, Vec<Value>) -> Result<Value, Fault> + HostBound {}
@@ -174,6 +201,32 @@ pub struct Funct {
     loading: Vec<String>,
     /// `#[test]` functions seen in top-level (non-module) loads
     pub(crate) test_fns: Vec<String>,
+    /// Monotonic interrupt counter. `run` compares it against a deadline at
+    /// safe points; the host (or the `Deadline` ticker thread) advances it.
+    /// Shared so a timer thread and the host can bump it concurrently.
+    epoch: Arc<AtomicU64>,
+    /// Epoch value at which `StopWhen::Epoch` pauses. `u64::MAX` = no deadline.
+    epoch_deadline: u64,
+    /// Lazily-started ticker for `StopWhen::Deadline`; advances `epoch`.
+    ticker: Option<Ticker>,
+}
+
+/// Background thread that advances the epoch on a fixed interval, so a
+/// wall-clock `Deadline` can be expressed as an epoch target. Started on first
+/// use and stopped when the engine is dropped.
+struct Ticker {
+    running: Arc<AtomicBool>,
+    tick: Duration,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Funct {
@@ -209,12 +262,78 @@ impl Funct {
             module_root: PathBuf::from("."),
             loading: Vec::new(),
             test_fns: Vec::new(),
+            epoch: Arc::new(AtomicU64::new(0)),
+            epoch_deadline: u64::MAX,
+            ticker: None,
         }
     }
 
     /// Set the directory module import paths resolve against.
     pub fn set_module_root(&mut self, root: impl Into<PathBuf>) {
         self.module_root = root.into();
+    }
+
+    // ---------- epoch / time budgets ----------
+
+    /// A handle to the interrupt counter `run` checks at safe points. The host
+    /// can advance it (`fetch_add`) from any thread — a timer, a frame loop, a
+    /// signal handler — to make `StopWhen::Epoch` pause a long-running call.
+    /// `run` reads it with `Relaxed` ordering, so bumping it never blocks.
+    pub fn epoch(&self) -> Arc<AtomicU64> {
+        self.epoch.clone()
+    }
+
+    /// Current epoch value.
+    pub fn epoch_now(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Advance the epoch by one and return the new value. Convenience for hosts
+    /// driving `StopWhen::Epoch` from their own loop.
+    pub fn bump_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Set the epoch value at which `StopWhen::Epoch` pauses. Pass it the result
+    /// of `epoch_now() + n`, then bump the epoch `n` times (or let a timer) to
+    /// trip it.
+    pub fn set_deadline(&mut self, epoch: u64) {
+        self.epoch_deadline = epoch;
+    }
+
+    /// Clear any epoch deadline set with `set_deadline`.
+    pub fn clear_deadline(&mut self) {
+        self.epoch_deadline = u64::MAX;
+    }
+
+    /// Ensure the background ticker (for wall-clock `Deadline`s) is running at
+    /// `tick` granularity, and return the epoch target for `after` from now.
+    fn ticker_target(&mut self, after: Duration) -> u64 {
+        const TICK: Duration = Duration::from_millis(1);
+        if self.ticker.is_none() {
+            let running = Arc::new(AtomicBool::new(true));
+            let epoch = self.epoch.clone();
+            let flag = running.clone();
+            let handle = std::thread::Builder::new()
+                .name("funct-epoch-ticker".into())
+                .spawn(move || {
+                    while flag.load(Ordering::Relaxed) {
+                        std::thread::sleep(TICK);
+                        epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .ok();
+            self.ticker = Some(Ticker {
+                running,
+                tick: TICK,
+                handle,
+            });
+        }
+        let tick = self.ticker.as_ref().map(|t| t.tick).unwrap_or(TICK);
+        // round the duration up to whole ticks (at least 1) so a sub-tick
+        // budget still pauses promptly rather than effectively never.
+        let ticks = after.as_nanos().div_ceil(tick.as_nanos().max(1)).max(1) as u64;
+        self.epoch_now().saturating_add(ticks)
     }
 
     // ---------- compiling & running ----------
@@ -242,7 +361,11 @@ impl Funct {
         self.load_with_prefix(src, None).map(|r| r.main)
     }
 
-    fn load_with_prefix(&mut self, src: &str, prefix: Option<&str>) -> Result<LoadResult, FunctError> {
+    fn load_with_prefix(
+        &mut self,
+        src: &str,
+        prefix: Option<&str>,
+    ) -> Result<LoadResult, FunctError> {
         let prog = parse(src).map_err(FunctError::Parse)?;
         // imports and extern declarations first, so the bindings exist when
         // the rest compiles
@@ -283,8 +406,10 @@ impl Funct {
         }
         self.sync_globals();
         for (gslot, fn_id) in compiled.fn_globals {
-            self.globals[gslot as usize] =
-                Some(Value::Closure(Sh::new(Closure { fn_id, upvals: vec![] })));
+            self.globals[gslot as usize] = Some(Value::Closure(Sh::new(Closure {
+                fn_id,
+                upvals: vec![],
+            })));
         }
         // tests register for the runner only from top-level files, not from
         // imported modules (run a module file directly to run its tests)
@@ -295,7 +420,10 @@ impl Funct {
                 }
             }
         }
-        Ok(LoadResult { main: compiled.main, exports: compiled.exports })
+        Ok(LoadResult {
+            main: compiled.main,
+            exports: compiled.exports,
+        })
     }
 
     /// `extern fn name(...)`: if the host registered a native with this name
@@ -304,7 +432,12 @@ impl Funct {
     /// interface still load (e.g. for `funct test` over pure logic).
     fn process_extern(&mut self, name: &str) {
         if let Some(&g) = self.ctx.global_ids.get(name) {
-            if self.globals.get(g as usize).map(|v| v.is_some()).unwrap_or(false) {
+            if self
+                .globals
+                .get(g as usize)
+                .map(|v| v.is_some())
+                .unwrap_or(false)
+            {
                 return; // host already provided it
             }
         }
@@ -347,7 +480,8 @@ impl Funct {
 
     /// Make a host record (already stored at global `gid`) importable.
     pub(crate) fn register_host_module(&mut self, name: &str, gid: u32) {
-        self.modules.insert(name.to_string(), ModuleExports::Host(gid));
+        self.modules
+            .insert(name.to_string(), ModuleExports::Host(gid));
     }
 
     fn module_export_names(&self, path: &str) -> Vec<String> {
@@ -365,7 +499,10 @@ impl Funct {
         if self.modules.contains_key(path) {
             return Ok(());
         }
-        if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        if path
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
             return Err(FunctError::Fault(Fault::new(format!(
                 "invalid module path `{}`: segments must be plain names (no `..`, `.` or empty)",
                 path
@@ -404,7 +541,8 @@ impl Funct {
         })();
         self.loading.pop();
         let exports = result?;
-        self.modules.insert(path.to_string(), ModuleExports::File(exports));
+        self.modules
+            .insert(path.to_string(), ModuleExports::File(exports));
         Ok(())
     }
 
@@ -415,7 +553,11 @@ impl Funct {
                 "module `{}` has no export `{}` (exports: {})",
                 path,
                 name,
-                if available.is_empty() { "none".to_string() } else { available.join(", ") }
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                }
             )))
         };
         match self.modules.get(path) {
@@ -443,7 +585,10 @@ impl Funct {
                     path
                 )))),
             },
-            None => Err(FunctError::Fault(Fault::new(format!("module `{}` not loaded", path)))),
+            None => Err(FunctError::Fault(Fault::new(format!(
+                "module `{}` not loaded",
+                path
+            )))),
         }
     }
 
@@ -466,7 +611,11 @@ impl Funct {
                     None => {
                         let last = imp.path.rsplit('/').next().unwrap_or(&imp.path);
                         let valid = !last.is_empty()
-                            && last.chars().next().map(|c| c.is_ascii_lowercase() || c == '_').unwrap_or(false)
+                            && last
+                                .chars()
+                                .next()
+                                .map(|c| c.is_ascii_lowercase() || c == '_')
+                                .unwrap_or(false)
                             && last.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
                         if !valid {
                             return Err(FunctError::Fault(Fault::new(format!(
@@ -542,7 +691,11 @@ impl Funct {
             .cloned()
             .ok_or_else(|| FunctError::Fault(Fault::new(format!("unknown fn id {}", fn_id))))?;
         let frame = make_frame(fn_id, proto, args).map_err(FunctError::Fault)?;
-        Ok(VmState { frames: vec![frame], stack: vec![], status: Status::Running })
+        Ok(VmState {
+            frames: vec![frame],
+            stack: vec![],
+            status: Status::Running,
+        })
     }
 
     pub fn global(&self, name: &str) -> Option<Value> {
@@ -574,13 +727,21 @@ impl Funct {
                 let proto = self.fns[c.fn_id as usize].clone();
                 let mut frame = make_frame(c.fn_id, proto, args).map_err(FunctError::Fault)?;
                 frame.upvals = c.upvals.clone();
-                Ok(VmState { frames: vec![frame], stack: vec![], status: Status::Running })
+                Ok(VmState {
+                    frames: vec![frame],
+                    stack: vec![],
+                    status: Status::Running,
+                })
             }
             Value::NativeFn(id) => {
                 // no script frames; run it now and produce a Done state
                 let f = self.natives[*id as usize].f.clone();
                 match f(self, args) {
-                    Ok(v) => Ok(VmState { frames: vec![], stack: vec![], status: Status::Done(v) }),
+                    Ok(v) => Ok(VmState {
+                        frames: vec![],
+                        stack: vec![],
+                        status: Status::Done(v),
+                    }),
                     Err(e) => Err(FunctError::Fault(e)),
                 }
             }
@@ -619,6 +780,24 @@ impl Funct {
         match &stop {
             StopWhen::Never => return self.run_fast(st, None),
             StopWhen::Fuel(n) => return self.run_fast(st, Some(*n)),
+            StopWhen::Epoch => {
+                let dl = self.epoch_deadline;
+                return self.run_with_deadline(st, None, dl);
+            }
+            StopWhen::Deadline(d) => {
+                let dl = self.ticker_target(*d);
+                return self.run_with_deadline(st, None, dl);
+            }
+            StopWhen::Budget { fuel, deadline } => {
+                return match deadline {
+                    // no time limit → reuse the untouched gas-only fast path
+                    None => self.run_fast(st, *fuel),
+                    Some(d) => {
+                        let dl = self.ticker_target(*d);
+                        self.run_with_deadline(st, *fuel, dl)
+                    }
+                };
+            }
             _ => {}
         }
         let mut fuel: Option<u64> = None;
@@ -701,6 +880,58 @@ impl Funct {
         }
     }
 
+    /// Like `run_fast`, but also pauses with `Cause::DeadlineReached` once the
+    /// epoch counter reaches `deadline`. The epoch is sampled every
+    /// `EPOCH_POLL` instructions (not every one) so the atomic load stays off
+    /// the hot per-instruction path; budget granularity is therefore ≈ the poll
+    /// interval, which is far finer than any useful wall-clock budget.
+    fn run_with_deadline(
+        &mut self,
+        st: &mut VmState,
+        mut fuel: Option<u64>,
+        deadline: u64,
+    ) -> RunResult {
+        const EPOCH_POLL: u32 = 256;
+        let mut since_poll: u32 = 0;
+        loop {
+            match &st.status {
+                Status::Done(v) => return RunResult::Done(v.clone()),
+                Status::Faulted(f) => return RunResult::Faulted(f.clone()),
+                Status::Running => {}
+            }
+            if let Some(0) = fuel {
+                return RunResult::Paused(Cause::FuelExhausted);
+            }
+            since_poll += 1;
+            if since_poll >= EPOCH_POLL {
+                since_poll = 0;
+                if self.epoch.load(Ordering::Relaxed) >= deadline {
+                    return RunResult::Paused(Cause::DeadlineReached);
+                }
+            }
+            match self.step_inner(st) {
+                Ok(None) => {}
+                Ok(Some(v)) => {
+                    st.status = Status::Done(v.clone());
+                    return RunResult::Done(v);
+                }
+                Err(mut fault) => {
+                    if fault.at.is_none() {
+                        if let Some(f) = st.frames.last() {
+                            let ip = (f.ip as usize).saturating_sub(1);
+                            fault.at = Some(format!("{}:{}", f.proto.name, f.proto.line_at(ip)));
+                        }
+                    }
+                    st.status = Status::Faulted(fault.clone());
+                    return RunResult::Faulted(fault);
+                }
+            }
+            if let Some(n) = fuel.as_mut() {
+                *n -= 1;
+            }
+        }
+    }
+
     // ---------- the step loop ----------
 
     /// Execute exactly one instruction.
@@ -737,16 +968,16 @@ impl Funct {
         let ip = frame.ip as usize;
         // `Instr` is `Copy`, so this is a trivial register/stack copy, not a
         // heap-touching clone — the hottest line in the interpreter.
-        let instr = *frame
-            .proto
-            .code
-            .get(ip)
-            .ok_or_else(|| Fault::new(format!("ip {} out of bounds in {}", ip, frame.proto.name)))?;
+        let instr = *frame.proto.code.get(ip).ok_or_else(|| {
+            Fault::new(format!("ip {} out of bounds in {}", ip, frame.proto.name))
+        })?;
         frame.ip += 1;
 
         macro_rules! pop {
             () => {
-                st.stack.pop().ok_or_else(|| Fault::new("operand stack underflow"))?
+                st.stack
+                    .pop()
+                    .ok_or_else(|| Fault::new("operand stack underflow"))?
             };
         }
 
@@ -778,15 +1009,20 @@ impl Funct {
                 st.stack.push(v);
             }
             Instr::LoadGlobal(g) => {
-                let v = self.globals.get(g as usize).cloned().flatten().ok_or_else(|| {
-                    let name = self
-                        .ctx
-                        .global_names
-                        .get(g as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("#{}", g));
-                    Fault::new(format!("global `{}` used before it was initialized", name))
-                })?;
+                let v = self
+                    .globals
+                    .get(g as usize)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| {
+                        let name = self
+                            .ctx
+                            .global_names
+                            .get(g as usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("#{}", g));
+                        Fault::new(format!("global `{}` used before it was initialized", name))
+                    })?;
                 st.stack.push(v);
             }
             Instr::StoreGlobal(g) => {
@@ -864,13 +1100,18 @@ impl Funct {
             }
             Instr::MakeVariantUnit { tag } => {
                 let tag = self.name_const(st, tag)?;
-                st.stack.push(Value::Variant(Sh::new(Variant { tag, payload: VariantPayload::Unit })));
+                st.stack.push(Value::Variant(Sh::new(Variant {
+                    tag,
+                    payload: VariantPayload::Unit,
+                })));
             }
             Instr::MakeVariantPos { tag, count } => {
                 let tag = self.name_const(st, tag)?;
                 let items = pop_n(&mut st.stack, count as usize)?;
-                st.stack
-                    .push(Value::Variant(Sh::new(Variant { tag, payload: VariantPayload::Positional(items) })));
+                st.stack.push(Value::Variant(Sh::new(Variant {
+                    tag,
+                    payload: VariantPayload::Positional(items),
+                })));
             }
             Instr::MakeVariantNamed { tag, names } => {
                 let tag = self.name_const(st, tag)?;
@@ -880,8 +1121,10 @@ impl Funct {
                 for (n, v) in names.into_iter().zip(vals) {
                     map.insert(n, v);
                 }
-                st.stack
-                    .push(Value::Variant(Sh::new(Variant { tag, payload: VariantPayload::Named(map) })));
+                st.stack.push(Value::Variant(Sh::new(Variant {
+                    tag,
+                    payload: VariantPayload::Named(map),
+                })));
             }
             Instr::Add => bin_op(&mut st.stack, BinKind::Add)?,
             Instr::Sub => bin_op(&mut st.stack, BinKind::Sub)?,
@@ -907,17 +1150,25 @@ impl Funct {
                 let v = pop!();
                 st.stack.push(match v {
                     Value::Int(i) => Value::Int(
-                        i.checked_neg().ok_or_else(|| Fault::new("integer overflow in negation"))?,
+                        i.checked_neg()
+                            .ok_or_else(|| Fault::new("integer overflow in negation"))?,
                     ),
                     Value::Float(f) => Value::Float(-f),
-                    other => return Err(Fault::new(format!("cannot negate {}", other.type_name()))),
+                    other => {
+                        return Err(Fault::new(format!("cannot negate {}", other.type_name())))
+                    }
                 });
             }
             Instr::Not => {
                 let v = pop!();
                 match v {
                     Value::Bool(b) => st.stack.push(Value::Bool(!b)),
-                    other => return Err(Fault::new(format!("`not` needs a Bool, got {}", other.type_name()))),
+                    other => {
+                        return Err(Fault::new(format!(
+                            "`not` needs a Bool, got {}",
+                            other.type_name()
+                        )))
+                    }
                 }
             }
             Instr::MakeRange { inclusive } => {
@@ -948,32 +1199,28 @@ impl Funct {
                     }
                 }
             }
-            Instr::JumpIfFalsePeek(t) => {
-                match st.stack.last() {
-                    Some(Value::Bool(false)) => st.frames.last_mut().unwrap().ip = t,
-                    Some(Value::Bool(true)) => {}
-                    Some(other) => {
-                        return Err(Fault::new(format!(
-                            "`and`/`or` operands must be Bool, got {}",
-                            other.type_name()
-                        )))
-                    }
-                    None => return Err(Fault::new("operand stack underflow")),
+            Instr::JumpIfFalsePeek(t) => match st.stack.last() {
+                Some(Value::Bool(false)) => st.frames.last_mut().unwrap().ip = t,
+                Some(Value::Bool(true)) => {}
+                Some(other) => {
+                    return Err(Fault::new(format!(
+                        "`and`/`or` operands must be Bool, got {}",
+                        other.type_name()
+                    )))
                 }
-            }
-            Instr::JumpIfTruePeek(t) => {
-                match st.stack.last() {
-                    Some(Value::Bool(true)) => st.frames.last_mut().unwrap().ip = t,
-                    Some(Value::Bool(false)) => {}
-                    Some(other) => {
-                        return Err(Fault::new(format!(
-                            "`and`/`or` operands must be Bool, got {}",
-                            other.type_name()
-                        )))
-                    }
-                    None => return Err(Fault::new("operand stack underflow")),
+                None => return Err(Fault::new("operand stack underflow")),
+            },
+            Instr::JumpIfTruePeek(t) => match st.stack.last() {
+                Some(Value::Bool(true)) => st.frames.last_mut().unwrap().ip = t,
+                Some(Value::Bool(false)) => {}
+                Some(other) => {
+                    return Err(Fault::new(format!(
+                        "`and`/`or` operands must be Bool, got {}",
+                        other.type_name()
+                    )))
                 }
-            }
+                None => return Err(Fault::new("operand stack underflow")),
+            },
             Instr::MatchPat { pat, fail } => {
                 let subject = st
                     .stack
@@ -996,7 +1243,8 @@ impl Funct {
                         CaptureSrc::Upval(i) => frame.upvals[*i as usize].clone(),
                     })
                     .collect();
-                st.stack.push(Value::Closure(Sh::new(Closure { fn_id, upvals })));
+                st.stack
+                    .push(Value::Closure(Sh::new(Closure { fn_id, upvals })));
             }
             Instr::Call(argc) => {
                 let args = pop_n(&mut st.stack, argc as usize)?;
@@ -1072,7 +1320,8 @@ impl Funct {
                 let v = pop!();
                 match &v {
                     Value::Variant(var) => match (var.tag.as_str(), &var.payload) {
-                        ("Ok", VariantPayload::Positional(p)) | ("Some", VariantPayload::Positional(p))
+                        ("Ok", VariantPayload::Positional(p))
+                        | ("Some", VariantPayload::Positional(p))
                             if p.len() == 1 =>
                         {
                             st.stack.push(p[0].clone());
@@ -1108,14 +1357,23 @@ impl Funct {
                 pop!();
             }
             Instr::Dup => {
-                let v = st.stack.last().cloned().ok_or_else(|| Fault::new("stack underflow"))?;
+                let v = st
+                    .stack
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| Fault::new("stack underflow"))?;
                 st.stack.push(v);
             }
             Instr::IterNext { iter, idx, end } => {
                 let frame = st.frames.last_mut().unwrap();
                 let i = match &frame.locals[idx as usize] {
                     Value::Int(i) => *i,
-                    other => return Err(Fault::new(format!("loop index corrupted: {}", other.type_name()))),
+                    other => {
+                        return Err(Fault::new(format!(
+                            "loop index corrupted: {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 let item: Option<Value> = match &frame.locals[iter as usize] {
                     Value::List(items) | Value::Tuple(items) => items.get(i as usize).cloned(),
@@ -1148,7 +1406,13 @@ impl Funct {
         Ok(None)
     }
 
-    fn do_call(&mut self, st: &mut VmState, callee: Value, args: Vec<Value>, tail: bool) -> Result<(), Fault> {
+    fn do_call(
+        &mut self,
+        st: &mut VmState,
+        callee: Value,
+        args: Vec<Value>,
+        tail: bool,
+    ) -> Result<(), Fault> {
         match callee {
             Value::Closure(c) => {
                 let proto = self
@@ -1183,7 +1447,10 @@ impl Funct {
                 st.stack.push(result);
                 Ok(())
             }
-            other => Err(Fault::new(format!("value of type {} is not callable", other.type_name()))),
+            other => Err(Fault::new(format!(
+                "value of type {} is not callable",
+                other.type_name()
+            ))),
         }
     }
 
@@ -1194,10 +1461,9 @@ impl Funct {
                 .cloned()
                 .ok_or_else(|| Fault::new(format!("record has no field `{}`", name))),
             Value::Variant(v) => match &v.payload {
-                VariantPayload::Named(fields) => fields
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| Fault::new(format!("variant {} has no field `{}`", v.tag, name))),
+                VariantPayload::Named(fields) => fields.get(name).cloned().ok_or_else(|| {
+                    Fault::new(format!("variant {} has no field `{}`", v.tag, name))
+                }),
                 _ => Err(Fault::new(format!("variant {} has no named fields", v.tag))),
             },
             Value::Atom(a) if name == "value" => Ok(a.value.read().clone()),
@@ -1245,8 +1511,18 @@ impl Funct {
         Value::Atom(cell)
     }
 
-    pub(crate) fn fire_watchers(&mut self, atom: &Sh<AtomCell>, old: Value, new: Value) -> Result<(), Fault> {
-        let watchers: Vec<Value> = atom.watchers.read().iter().map(|(_, f)| f.clone()).collect();
+    pub(crate) fn fire_watchers(
+        &mut self,
+        atom: &Sh<AtomCell>,
+        old: Value,
+        new: Value,
+    ) -> Result<(), Fault> {
+        let watchers: Vec<Value> = atom
+            .watchers
+            .read()
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect();
         for w in watchers {
             self.call_value(&w, vec![old.clone(), new.clone()])?;
         }
@@ -1276,7 +1552,13 @@ fn make_frame(fn_id: u32, proto: Sh<FnProto>, args: Vec<Value>) -> Result<Frame,
     }
     let mut locals = args;
     locals.resize(proto.num_locals as usize, Value::Unit);
-    Ok(Frame { fn_id, proto, ip: 0, locals, upvals: vec![] })
+    Ok(Frame {
+        fn_id,
+        proto,
+        ip: 0,
+        locals,
+        upvals: vec![],
+    })
 }
 
 fn pop_n(stack: &mut Vec<Value>, n: usize) -> Result<Vec<Value>, Fault> {
@@ -1296,8 +1578,12 @@ enum BinKind {
 }
 
 fn bin_op(stack: &mut Vec<Value>, kind: BinKind) -> Result<(), Fault> {
-    let b = stack.pop().ok_or_else(|| Fault::new("operand stack underflow"))?;
-    let a = stack.pop().ok_or_else(|| Fault::new("operand stack underflow"))?;
+    let b = stack
+        .pop()
+        .ok_or_else(|| Fault::new("operand stack underflow"))?;
+    let a = stack
+        .pop()
+        .ok_or_else(|| Fault::new("operand stack underflow"))?;
     use Value::*;
     let v = match (&kind, &a, &b) {
         // string concat
@@ -1309,9 +1595,15 @@ fn bin_op(stack: &mut Vec<Value>, kind: BinKind) -> Result<(), Fault> {
             Value::list_v(items)
         }
         (_, Int(x), Int(y)) => match kind {
-            BinKind::Add => Int(x.checked_add(*y).ok_or_else(|| Fault::new("integer overflow in +"))?),
-            BinKind::Sub => Int(x.checked_sub(*y).ok_or_else(|| Fault::new("integer overflow in -"))?),
-            BinKind::Mul => Int(x.checked_mul(*y).ok_or_else(|| Fault::new("integer overflow in *"))?),
+            BinKind::Add => Int(x
+                .checked_add(*y)
+                .ok_or_else(|| Fault::new("integer overflow in +"))?),
+            BinKind::Sub => Int(x
+                .checked_sub(*y)
+                .ok_or_else(|| Fault::new("integer overflow in -"))?),
+            BinKind::Mul => Int(x
+                .checked_mul(*y)
+                .ok_or_else(|| Fault::new("integer overflow in *"))?),
             BinKind::Div => {
                 if *y == 0 {
                     return Err(Fault::new("division by zero"));
@@ -1329,7 +1621,9 @@ fn bin_op(stack: &mut Vec<Value>, kind: BinKind) -> Result<(), Fault> {
                     let e: u32 = (*y)
                         .try_into()
                         .map_err(|_| Fault::new("exponent too large"))?;
-                    Int(x.checked_pow(e).ok_or_else(|| Fault::new("integer overflow in **"))?)
+                    Int(x
+                        .checked_pow(e)
+                        .ok_or_else(|| Fault::new("integer overflow in **"))?)
                 } else {
                     Float((*x as f64).powi(*y as i32))
                 }
@@ -1388,8 +1682,12 @@ fn as_f64(v: &Value) -> Option<f64> {
 }
 
 fn cmp_op(stack: &mut Vec<Value>, test: fn(std::cmp::Ordering) -> bool) -> Result<(), Fault> {
-    let b = stack.pop().ok_or_else(|| Fault::new("operand stack underflow"))?;
-    let a = stack.pop().ok_or_else(|| Fault::new("operand stack underflow"))?;
+    let b = stack
+        .pop()
+        .ok_or_else(|| Fault::new("operand stack underflow"))?;
+    let a = stack
+        .pop()
+        .ok_or_else(|| Fault::new("operand stack underflow"))?;
     let ord = match (&a, &b) {
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (x, y) => match (as_f64(x), as_f64(y)) {
@@ -1467,9 +1765,7 @@ pub fn match_pat(pat: &Pat, v: &Value, locals: &mut Vec<Value>) -> bool {
         },
         Pat::VariantNamed { tag, fields, rest } => match v {
             Value::Variant(var) if var.tag == *tag => match &var.payload {
-                VariantPayload::Named(vals) => {
-                    match_fields(fields, *rest, vals, locals)
-                }
+                VariantPayload::Named(vals) => match_fields(fields, *rest, vals, locals),
                 _ => false,
             },
             _ => false,
@@ -1481,33 +1777,41 @@ pub fn match_pat(pat: &Pat, v: &Value, locals: &mut Vec<Value>) -> bool {
         Pat::Tuple(items) => match v {
             Value::Tuple(vals) => {
                 vals.len() == items.len()
-                    && items.iter().zip(vals.iter()).all(|(p, x)| match_pat(p, x, locals))
+                    && items
+                        .iter()
+                        .zip(vals.iter())
+                        .all(|(p, x)| match_pat(p, x, locals))
             }
             _ => false,
         },
         Pat::List { items, rest } => match v {
-            Value::List(vals) => {
-                match rest {
-                    None => {
-                        vals.len() == items.len()
-                            && items.iter().zip(vals.iter()).all(|(p, x)| match_pat(p, x, locals))
-                    }
-                    Some(rest_bind) => {
-                        if vals.len() < items.len() {
-                            return false;
-                        }
-                        if !items.iter().zip(vals.iter()).all(|(p, x)| match_pat(p, x, locals)) {
-                            return false;
-                        }
-                        if let Some(slot) = rest_bind {
-                            let rest_items: Vec<Value> =
-                                vals.iter().skip(items.len()).cloned().collect();
-                            locals[*slot as usize] = Value::list(rest_items);
-                        }
-                        true
-                    }
+            Value::List(vals) => match rest {
+                None => {
+                    vals.len() == items.len()
+                        && items
+                            .iter()
+                            .zip(vals.iter())
+                            .all(|(p, x)| match_pat(p, x, locals))
                 }
-            }
+                Some(rest_bind) => {
+                    if vals.len() < items.len() {
+                        return false;
+                    }
+                    if !items
+                        .iter()
+                        .zip(vals.iter())
+                        .all(|(p, x)| match_pat(p, x, locals))
+                    {
+                        return false;
+                    }
+                    if let Some(slot) = rest_bind {
+                        let rest_items: Vec<Value> =
+                            vals.iter().skip(items.len()).cloned().collect();
+                        locals[*slot as usize] = Value::list(rest_items);
+                    }
+                    true
+                }
+            },
             _ => false,
         },
         Pat::Range { lo, hi, inclusive } => match v {

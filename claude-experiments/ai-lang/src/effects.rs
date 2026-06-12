@@ -247,7 +247,7 @@ pub fn builtin_effect_sig(name: &str) -> EffectSig {
         // Arrays / Bytes are owned values (copied across boundaries), so
         // they don't break mobility; reads/constructs are pure, in-place
         // writes are a local mutation.
-        "core/array.new" | "core/array.new_prim" | "core/array.len" | "core/array.get" => pure,
+        "core/array.new" | "core/array.new_prim" | "core/array.len" | "core/array.get" | "core/array.is_init" => pure,
         "core/array.set" => just(EffectSet::MUT),
         "core/bytes.new"
         | "core/bytes.len"

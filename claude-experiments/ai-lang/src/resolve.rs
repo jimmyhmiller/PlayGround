@@ -286,8 +286,7 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "string_concat" => "core/string.concat",
         "bytes_new" => "core/bytes.new",
         "bytes_len" => "core/bytes.len",
-        "bytes_get_trusted" => "core/bytes.get",
-        "bytes_set_trusted" => "core/bytes.set",
+
         "bytes_slice" => "core/bytes.slice",
         "bytes_concat" => "core/bytes.concat",
         "bytes_from_string" => "core/bytes.from_string",
@@ -314,8 +313,7 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         // Generic builtins (signatures carry `TypeVar(0)`).
         "array_new" => "core/array.new",
         "array_len" => "core/array.len",
-        "array_get_trusted" => "core/array.get",
-        "array_set_trusted" => "core/array.set",
+
         "atom_new" => "core/atom.new",
         "atom_load" => "core/atom.load",
         "atom_swap" => "core/atom.swap",
@@ -2747,6 +2745,8 @@ fn resolve_checked_accessor(
     let err_index = find_variant(&result_info, "Err").ok_or_else(|| missing("Result::Err"))?;
     let oob_index =
         find_variant(&ixerr_info, "OutOfBounds").ok_or_else(|| missing("IndexError::OutOfBounds"))?;
+    let uninit_index = find_variant(&ixerr_info, "Uninitialized")
+        .ok_or_else(|| missing("IndexError::Uninitialized"))?;
 
     // Resolve the operands in the CURRENT env.
     let mut resolved: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
@@ -2804,13 +2804,13 @@ fn resolve_checked_accessor(
             vec![a_ref.clone()],
         )
     };
-    let err_expr = || -> Expr {
+    let err_expr = |variant: u32| -> Expr {
         Expr::EnumNew {
             enum_ref: result_info.hash,
             variant_index: err_index,
             payload: Some(Box::new(Expr::EnumNew {
                 enum_ref: ixerr_info.hash,
-                variant_index: oob_index,
+                variant_index: variant,
                 payload: Some(Box::new(Expr::StructNew {
                     struct_ref: oob_info.hash,
                     fields: vec![i_ref.clone(), len_call()],
@@ -2819,23 +2819,23 @@ fn resolve_checked_accessor(
         }
     };
     // Under `?`, each Err arm early-returns through the enclosing fn.
-    let err_arm = || -> Expr {
+    let err_arm = |variant: u32| -> Expr {
         if fused {
             Expr::Try {
-                expr: Box::new(err_expr()),
+                expr: Box::new(err_expr(variant)),
                 enum_ref: result_info.hash,
                 ok_index,
                 err_index,
             }
         } else {
-            err_expr()
+            err_expr(variant)
         }
     };
     let access_call = Expr::Call(
         Box::new(Expr::BuiltinRef(acc.access.to_owned())),
         operand_refs.clone(),
     );
-    let ok_arm = if fused {
+    let mut ok_arm = if fused {
         access_call
     } else {
         Expr::EnumNew {
@@ -2844,6 +2844,19 @@ fn resolve_checked_accessor(
             payload: Some(Box::new(access_call)),
         }
     };
+    // Array GET: a slot that was never written has no value to return —
+    // prim arrays are zero-filled (always initialized), boxed arrays
+    // report `Err(Uninitialized)`. SETs initialize; bytes are zero-filled.
+    if !acc.is_set && acc.container.is_some() {
+        ok_arm = Expr::If {
+            cond: Box::new(Expr::Call(
+                Box::new(Expr::BuiltinRef("core/array.is_init".to_owned())),
+                vec![a_ref.clone(), i_ref.clone()],
+            )),
+            then_branch: Box::new(ok_arm),
+            else_branch: Box::new(err_arm(uninit_index)),
+        };
+    }
     let lt = |l: Expr, r: Expr| {
         Expr::Call(Box::new(Expr::BuiltinRef("core/i64.lt".to_owned())), vec![l, r])
     };
@@ -2859,9 +2872,9 @@ fn resolve_checked_accessor(
         then_branch: Box::new(Expr::If {
             cond: Box::new(lt(i_ref.clone(), len_call())),
             then_branch: Box::new(ok_arm),
-            else_branch: Box::new(err_arm()),
+            else_branch: Box::new(err_arm(oob_index)),
         }),
-        else_branch: Box::new(err_arm()),
+        else_branch: Box::new(err_arm(oob_index)),
     };
     // Wrap the lets, innermost-last argument outward, shifting each
     // value past the lets already inside it.
@@ -3073,9 +3086,8 @@ fn resolve_expr_typed(
                 return Err(ResolveError::UnknownName {
                     name: format!(
                         "`{}` is a checked operation and can't be used as a bare \
-                         value; wrap it in a lambda (e.g. `|a, i| {}(a, i)`) or \
-                         use `{}_trusted`",
-                        name, name, name
+                         value; wrap it in a lambda (e.g. `|a, i| {}(a, i)`)",
+                        name, name
                     ),
                     span: *span,
                 });
@@ -3162,14 +3174,6 @@ fn resolve_expr_typed(
                         Some("core/bytes.len"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
-                    "bytes_get_trusted" => (
-                        Some("core/bytes.get"),
-                        Some(Type::Builtin("Int".to_owned())),
-                    ),
-                    "bytes_set_trusted" => (
-                        Some("core/bytes.set"),
-                        Some(Type::Builtin("Int".to_owned())),
-                    ),
                     "bytes_slice" => (
                         Some("core/bytes.slice"),
                         Some(Type::Builtin("Bytes".to_owned())),
@@ -3198,14 +3202,6 @@ fn resolve_expr_typed(
                     "float_sqrt" => (
                         Some("core/f64.sqrt"),
                         Some(Type::Builtin("Float".to_owned())),
-                    ),
-                    // `abort(msg)` — a reached BUG dies loudly; modeled
-                    // errors are Result values. Diverges, so its type is
-                    // the bottom type `Never`, which unifies with any
-                    // expected type (it can sit in any match arm / branch).
-                    "abort" => (
-                        Some("core/abort"),
-                        Some(Type::Builtin("Never".to_owned())),
                     ),
                     // Raw-pointer / memory intrinsics. `Ptr` is an
                     // i64-represented raw address (non-GC). These are the
@@ -3350,8 +3346,7 @@ fn resolve_expr_typed(
                 let array_builtin = match name.as_str() {
                     "array_new" => Some("core/array.new"),
                     "array_len" => Some("core/array.len"),
-                    "array_get_trusted" => Some("core/array.get"),
-                    "array_set_trusted" => Some("core/array.set"),
+
                     // The atom primitives over the dedicated `Atom` cell:
                     //   atom_new(init) -> Atom<T>
                     //   atom_load(a) -> T

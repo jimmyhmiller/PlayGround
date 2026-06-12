@@ -11,7 +11,8 @@ fn int(i: i64) -> Value {
 #[test]
 fn redefining_a_fn_swaps_it_for_all_callers() {
     let mut vm = Funct::new();
-    vm.eval("fn greet() = \"v1\"\nfn use_it() = greet() + \"!\"").unwrap();
+    vm.eval("fn greet() = \"v1\"\nfn use_it() = greet() + \"!\"")
+        .unwrap();
     assert_eq!(vm.eval("use_it()").unwrap(), Value::str("v1!"));
     // reload just `greet` — `use_it` is untouched but picks up the new code
     vm.eval("fn greet() = \"v2\"").unwrap();
@@ -21,7 +22,8 @@ fn redefining_a_fn_swaps_it_for_all_callers() {
 #[test]
 fn closures_see_reloaded_functions() {
     let mut vm = Funct::new();
-    vm.eval("fn f(x) = x + 1\nlet stored = y => f(y) * 10").unwrap();
+    vm.eval("fn f(x) = x + 1\nlet stored = y => f(y) * 10")
+        .unwrap();
     assert_eq!(vm.eval("stored(1)").unwrap(), int(20));
     vm.eval("fn f(x) = x + 5").unwrap();
     // `stored` was created before the reload, but resolves f by name->id
@@ -31,7 +33,8 @@ fn closures_see_reloaded_functions() {
 #[test]
 fn atom_state_survives_reload() {
     let mut vm = Funct::new();
-    vm.eval("let counter = atom(0)\nfn bump() = swap!(counter, n => n + 1)").unwrap();
+    vm.eval("let counter = atom(0)\nfn bump() = swap!(counter, n => n + 1)")
+        .unwrap();
     vm.eval("bump()\nbump()").unwrap();
     assert_eq!(vm.eval("@counter").unwrap(), int(2));
     // reload bump with different behavior; the atom keeps its value
@@ -89,7 +92,8 @@ fn in_flight_frame_finishes_on_old_code() {
     let mut vm = Funct::new();
     // `slow` computes its result across many instructions; pause inside it,
     // redefine it, and the in-flight call still returns the OLD result
-    vm.load("fn slow() {\n let mut t = 0\n for i in 1..=10 { t = t + i }\n t\n}").unwrap();
+    vm.load("fn slow() {\n let mut t = 0\n for i in 1..=10 { t = t + i }\n t\n}")
+        .unwrap();
     let mut st = vm.start("slow", vec![]).unwrap();
     match vm.run(&mut st, StopWhen::Fuel(20)) {
         RunResult::Paused(Cause::FuelExhausted) => {}

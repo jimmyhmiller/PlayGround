@@ -165,7 +165,10 @@ impl Value {
     }
 
     pub fn variant(tag: &str, payload: VariantPayload) -> Value {
-        Value::Variant(Sh::new(Variant { tag: tag.to_string(), payload }))
+        Value::Variant(Sh::new(Variant {
+            tag: tag.to_string(),
+            payload,
+        }))
     }
 
     pub fn ok(v: Value) -> Value {

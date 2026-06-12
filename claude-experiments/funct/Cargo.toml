@@ -2,6 +2,16 @@
 name = "funct"
 version = "0.1.0"
 edition = "2021"
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+description = "A small, functional, embeddable scripting language with a fully reified bytecode VM you can pause, snapshot, and resume."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/jimmyhmiller/funct"
+homepage = "https://github.com/jimmyhmiller/funct"
+documentation = "https://docs.rs/funct"
+keywords = ["language", "interpreter", "scripting", "embeddable", "bytecode"]
+categories = ["compilers", "development-tools"]
+exclude = ["/.github", "/docs/jim-editor-integration.md"]
 
 [dependencies]
 imbl = "7.0.0"

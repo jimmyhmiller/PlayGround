@@ -56,7 +56,14 @@ impl ProcRegistry {
         });
         self.next += 1;
         let id = self.next;
-        self.procs.insert(id, Proc { child, stdin, lines });
+        self.procs.insert(
+            id,
+            Proc {
+                child,
+                stdin,
+                lines,
+            },
+        );
         id
     }
 }
@@ -83,20 +90,27 @@ fn install_host(vm: &mut Funct) -> Host {
     let handle = |v: &Value| -> Result<i64, Fault> {
         match v {
             Value::Int(i) => Ok(*i),
-            o => Err(Fault::new(format!("handle must be Int, got {}", o.type_name()))),
+            o => Err(Fault::new(format!(
+                "handle must be Int, got {}",
+                o.type_name()
+            ))),
         }
     };
 
     // ---- subprocess bridge (the bit the chess widget really needs) ----
     let r = reg.clone();
-    vm.register1("proc_spawn", move |cmd: String| r.lock().unwrap().spawn(&cmd));
+    vm.register1("proc_spawn", move |cmd: String| {
+        r.lock().unwrap().spawn(&cmd)
+    });
     let r = reg.clone();
     vm.register_raw("proc_write", move |_vm, args| {
         let id = handle(&args[0])?;
         let line = String::from_value_str(&args[1])?;
         let mut g = r.lock().unwrap();
         let ok = match g.procs.get_mut(&id) {
-            Some(p) => writeln!(p.stdin, "{line}").and_then(|_| p.stdin.flush()).is_ok(),
+            Some(p) => writeln!(p.stdin, "{line}")
+                .and_then(|_| p.stdin.flush())
+                .is_ok(),
             None => false,
         };
         Ok(Value::Bool(ok))
@@ -116,7 +130,10 @@ fn install_host(vm: &mut Funct) -> Host {
     vm.register_raw("proc_alive", move |_vm, args| {
         let id = handle(&args[0])?;
         let mut g = r.lock().unwrap();
-        let alive = matches!(g.procs.get_mut(&id).map(|p| p.child.try_wait()), Some(Ok(None)));
+        let alive = matches!(
+            g.procs.get_mut(&id).map(|p| p.child.try_wait()),
+            Some(Ok(None))
+        );
         Ok(Value::Bool(alive))
     });
     let r = reg.clone();
@@ -133,12 +150,19 @@ fn install_host(vm: &mut Funct) -> Host {
     let rr = render_requested.clone();
     vm.register0("request_render", move || rr.store(true, Ordering::SeqCst));
     let an = animating.clone();
-    vm.register1("set_animating", move |on: bool| an.store(on, Ordering::SeqCst));
-    vm.register1("host_env", |name: String| std::env::var(name).unwrap_or_default());
+    vm.register1("set_animating", move |on: bool| {
+        an.store(on, Ordering::SeqCst)
+    });
+    vm.register1("host_env", |name: String| {
+        std::env::var(name).unwrap_or_default()
+    });
     vm.register1("widget_asset", |rel: String| format!("assets/{rel}"));
     vm.register1("clipboard_set", |_text: String| true);
 
-    Host { render_requested, animating }
+    Host {
+        render_requested,
+        animating,
+    }
 }
 
 // tiny helper so register_raw closures can pull a String out of a Value
@@ -185,9 +209,17 @@ fn xy(vm: &mut Funct, f: &str, arg: Value) -> (f64, f64) {
 }
 
 fn click_xy(vm: &mut Funct, x: f64, y: f64) {
-    call(vm, "on_click", vec![
-        Value::Float(x), Value::Float(y), Value::Bool(false), Value::Bool(false), Value::str(""),
-    ]);
+    call(
+        vm,
+        "on_click",
+        vec![
+            Value::Float(x),
+            Value::Float(y),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::str(""),
+        ],
+    );
 }
 
 fn click_sq(vm: &mut Funct, idx: i64) {
@@ -201,10 +233,9 @@ fn click_btn(vm: &mut Funct, name: &str) {
 }
 
 fn moves_played(vm: &mut Funct) -> i64 {
-    match call(vm, "game_state", vec![]).to_json().unwrap()["moves"].as_i64() {
-        Some(n) => n,
-        None => -1,
-    }
+    call(vm, "game_state", vec![]).to_json().unwrap()["moves"]
+        .as_i64()
+        .unwrap_or(-1)
 }
 
 fn last_san(vm: &mut Funct) -> String {
@@ -243,7 +274,11 @@ fn print_board(vm: &mut Funct) {
                 '.'
             } else {
                 let t = piece.as_bytes()[1] as char;
-                if piece.starts_with('w') { t.to_ascii_uppercase() } else { t.to_ascii_lowercase() }
+                if piece.starts_with('w') {
+                    t.to_ascii_uppercase()
+                } else {
+                    t.to_ascii_lowercase()
+                }
             };
             print!(" {glyph}");
         }
@@ -262,9 +297,13 @@ fn main() {
     vm.set_global("canvas_h", Value::Float(640.0));
 
     println!("== load chess.ft + on_init ==");
-    vm.eval(include_str!("widgets/chess.ft")).expect("chess.ft compiles + runs");
+    vm.eval(include_str!("widgets/chess.ft"))
+        .expect("chess.ft compiles + runs");
     call(&mut vm, "on_init", vec![]);
-    println!("  host: render_requested = {}", host.render_requested.swap(false, Ordering::SeqCst));
+    println!(
+        "  host: render_requested = {}",
+        host.render_requested.swap(false, Ordering::SeqCst)
+    );
 
     // Turn the bot on via the real toolbar button — it spawns Stockfish over
     // the host's proc pipe and takes Black.
@@ -274,7 +313,10 @@ fn main() {
     if g["engine_ok"] == false {
         println!("  no UCI engine could be spawned — install `stockfish`. Playing human-only.");
     } else {
-        println!("  bot_side = {}, engine handle = {}", g["bot_side"], g["eng"]);
+        println!(
+            "  bot_side = {}, engine handle = {}",
+            g["bot_side"], g["eng"]
+        );
     }
     let bot = g["engine_ok"] != false;
 
@@ -288,7 +330,11 @@ fn main() {
         click_sq(&mut vm, from);
         click_sq(&mut vm, to);
         if moves_played(&mut vm) <= before {
-            println!("\n  {}. {} is not legal in this position — stopping.", i + 1, mv);
+            println!(
+                "\n  {}. {} is not legal in this position — stopping.",
+                i + 1,
+                mv
+            );
             break;
         }
         println!("\n== White {}. {} ({}) ==", i + 1, last_san(&mut vm), mv);
@@ -322,7 +368,10 @@ fn main() {
         _ => String::new(),
     };
     let sans = match call(&mut vm, "history_san", vec![]) {
-        Value::List(items) => items.iter().map(|v| format!("{v}").trim_matches('"').to_string()).collect::<Vec<_>>(),
+        Value::List(items) => items
+            .iter()
+            .map(|v| format!("{v}").trim_matches('"').to_string())
+            .collect::<Vec<_>>(),
         _ => vec![],
     };
     println!("\n== final ==");

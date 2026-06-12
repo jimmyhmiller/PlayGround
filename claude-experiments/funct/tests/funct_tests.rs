@@ -69,8 +69,16 @@ fn still_passes() {
     assert_eq!(report.failed(), 1);
     let err = report.outcomes[0].error.as_deref().unwrap();
     assert!(err.contains("assert_eq failed"), "{}", err);
-    assert!(err.contains("left:  6") && err.contains("right: 4"), "{}", err);
-    assert!(err.contains("doubles:"), "should point at the failing fn: {}", err);
+    assert!(
+        err.contains("left:  6") && err.contains("right: 4"),
+        "{}",
+        err
+    );
+    assert!(
+        err.contains("doubles:"),
+        "should point at the failing fn: {}",
+        err
+    );
 }
 
 #[test]
@@ -95,7 +103,15 @@ fn second_bump_sees_fresh_state() {
 "#,
     )]);
     let report = run_test_file(&dir.join("m.ft"));
-    assert!(report.ok(), "{:?}", report.outcomes.iter().filter_map(|o| o.error.clone()).collect::<Vec<_>>());
+    assert!(
+        report.ok(),
+        "{:?}",
+        report
+            .outcomes
+            .iter()
+            .filter_map(|o| o.error.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -171,7 +187,8 @@ fn attribute_validation() {
 #[test]
 fn annotated_fns_are_ordinary_fns() {
     let mut vm = Funct::new();
-    vm.eval("#[test]\nfn check() { assert_eq(1, 1) }\nfn plain() = 2").unwrap();
+    vm.eval("#[test]\nfn check() { assert_eq(1, 1) }\nfn plain() = 2")
+        .unwrap();
     // callable like any fn; evaluating the file never auto-runs tests
     vm.call("check", vec![]).unwrap();
     assert_eq!(vm.test_names(), vec!["check".to_string()]);
@@ -183,10 +200,20 @@ fn assertion_builtins() {
     vm.eval("assert(1 < 2)").unwrap();
     vm.eval("assert_eq([1, 2], [1, 2])").unwrap();
     vm.eval("assert_ne(1, 2)").unwrap();
-    let e = vm.eval("assert(1 > 2, \"one is not bigger\")").unwrap_err().to_string();
+    let e = vm
+        .eval("assert(1 > 2, \"one is not bigger\")")
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("one is not bigger"), "{}", e);
-    let e = vm.eval("assert_eq(\"a\", \"b\", \"labels differ\")").unwrap_err().to_string();
-    assert!(e.contains("labels differ") && e.contains("\"a\"") && e.contains("\"b\""), "{}", e);
+    let e = vm
+        .eval("assert_eq(\"a\", \"b\", \"labels differ\")")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("labels differ") && e.contains("\"a\"") && e.contains("\"b\""),
+        "{}",
+        e
+    );
     let e = vm.eval("fail(\"nope\")").unwrap_err().to_string();
     assert!(e.contains("nope"), "{}", e);
 }
@@ -202,7 +229,11 @@ fn example_files_pass() {
             report.ok(),
             "{}: {:?}",
             f,
-            report.outcomes.iter().filter_map(|o| o.error.clone()).collect::<Vec<_>>()
+            report
+                .outcomes
+                .iter()
+                .filter_map(|o| o.error.clone())
+                .collect::<Vec<_>>()
         );
     }
 }

@@ -5,7 +5,9 @@
 //! other mutable a plain stack slot (no Mutex). Calls in tail position become
 //! TailCall (bounded frames for self/mutual recursion in tail position).
 
-use crate::ast::{Arm, BinOp, Expr, ExprKind, FnDef, InterpPart, Item, Pattern, Program, Stmt, UnOp, VariantCtor};
+use crate::ast::{
+    Arm, BinOp, Expr, ExprKind, FnDef, InterpPart, Item, Pattern, Program, Stmt, UnOp, VariantCtor,
+};
 use crate::bytecode::{CaptureSrc, Const, FnProto, Instr, Pat};
 use std::collections::{HashMap, HashSet};
 
@@ -118,7 +120,10 @@ pub fn compile_program(
     }
 
     // Pass 3: top-level lets & expressions form the main proto.
-    let has_top_code = prog.items.iter().any(|i| matches!(i, Item::Let { .. } | Item::Expr(_)));
+    let has_top_code = prog
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Let { .. } | Item::Expr(_)));
     let main = if has_top_code {
         let full = c.full_name("__main__");
         let fn_id = c.alloc_fn_id(&full);
@@ -129,13 +134,26 @@ pub fn compile_program(
         None
     };
 
-    Ok(CompiledProgram { protos: c.protos, fn_globals, main, exports, tests })
+    Ok(CompiledProgram {
+        protos: c.protos,
+        fn_globals,
+        main,
+        exports,
+        tests,
+    })
 }
 
 #[derive(Clone, Copy)]
 enum Resolved {
-    Local { slot: u16, mutable: bool, cell: bool },
-    Upval { idx: u16, cell: bool },
+    Local {
+        slot: u16,
+        mutable: bool,
+        cell: bool,
+    },
+    Upval {
+        idx: u16,
+        cell: bool,
+    },
     Global(u32),
 }
 
@@ -240,7 +258,12 @@ impl<'a> Compiler<'a> {
             if let Some(&g) = self.ctx.global_ids.get(&format!("{}::{}", p, name)) {
                 return Some(g);
             }
-            return self.ctx.global_ids.get(name).copied().filter(|g| self.ctx.shared.contains(g));
+            return self
+                .ctx
+                .global_ids
+                .get(name)
+                .copied()
+                .filter(|g| self.ctx.shared.contains(g));
         }
         self.ctx.global_ids.get(name).copied()
     }
@@ -309,10 +332,12 @@ impl<'a> Compiler<'a> {
 
     fn declare(&mut self, name: &str, slot: u16, mutable: bool, cell: bool) {
         let f = self.f();
-        f.scopes
-            .last_mut()
-            .unwrap()
-            .push(LocalEntry { name: name.to_string(), slot, mutable, cell });
+        f.scopes.last_mut().unwrap().push(LocalEntry {
+            name: name.to_string(),
+            slot,
+            mutable,
+            cell,
+        });
     }
 
     fn begin_scope(&mut self) {
@@ -338,14 +363,21 @@ impl<'a> Compiler<'a> {
             for scope in f.scopes.iter().rev() {
                 for e in scope.iter().rev() {
                     if e.name == name {
-                        return Some(Resolved::Local { slot: e.slot, mutable: e.mutable, cell: e.cell });
+                        return Some(Resolved::Local {
+                            slot: e.slot,
+                            mutable: e.mutable,
+                            cell: e.cell,
+                        });
                     }
                 }
             }
             // already-captured upval?
             for (i, (n, _, cell)) in f.upvals.iter().enumerate() {
                 if n == name {
-                    return Some(Resolved::Upval { idx: i as u16, cell: *cell });
+                    return Some(Resolved::Upval {
+                        idx: i as u16,
+                        cell: *cell,
+                    });
                 }
             }
         }
@@ -355,13 +387,21 @@ impl<'a> Compiler<'a> {
         match self.resolve_in(fn_idx - 1, name)? {
             Resolved::Local { slot, cell, .. } => {
                 let f = &mut self.fns[fn_idx];
-                f.upvals.push((name.to_string(), CaptureSrc::Local(slot), cell));
-                Some(Resolved::Upval { idx: (f.upvals.len() - 1) as u16, cell })
+                f.upvals
+                    .push((name.to_string(), CaptureSrc::Local(slot), cell));
+                Some(Resolved::Upval {
+                    idx: (f.upvals.len() - 1) as u16,
+                    cell,
+                })
             }
             Resolved::Upval { idx, cell } => {
                 let f = &mut self.fns[fn_idx];
-                f.upvals.push((name.to_string(), CaptureSrc::Upval(idx), cell));
-                Some(Resolved::Upval { idx: (f.upvals.len() - 1) as u16, cell })
+                f.upvals
+                    .push((name.to_string(), CaptureSrc::Upval(idx), cell));
+                Some(Resolved::Upval {
+                    idx: (f.upvals.len() - 1) as u16,
+                    cell,
+                })
             }
             Resolved::Global(g) => Some(Resolved::Global(g)),
         }
@@ -410,7 +450,10 @@ impl<'a> Compiler<'a> {
             let m = self.emit(Instr::MatchPat { pat: pidx, fail: 0 });
             let j = self.emit(Instr::Jump(0));
             self.patch(m);
-            let msg = self.konst(Const::Name(format!("parameter pattern did not match in fn {}", name)));
+            let msg = self.konst(Const::Name(format!(
+                "parameter pattern did not match in fn {}",
+                name
+            )));
             self.emit(Instr::Fault(msg));
             self.patch(j);
             self.emit(Instr::Pop); // subject
@@ -441,7 +484,12 @@ impl<'a> Compiler<'a> {
         for (i, item) in top_items.iter().enumerate() {
             let is_last = i == last;
             match item {
-                Item::Let { pattern, expr, exported, line } => {
+                Item::Let {
+                    pattern,
+                    expr,
+                    exported,
+                    line,
+                } => {
                     self.f().cur_line = *line;
                     self.compile_expr(expr, false)?;
                     // bind via pattern into locals, then copy to globals
@@ -505,7 +553,12 @@ impl<'a> Compiler<'a> {
 
     fn compile_stmt_inner(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Let { mutable, pattern, expr, line } => {
+            Stmt::Let {
+                mutable,
+                pattern,
+                expr,
+                line,
+            } => {
                 self.f().cur_line = *line;
                 self.compile_expr(expr, false)?;
                 if *mutable {
@@ -595,7 +648,12 @@ impl<'a> Compiler<'a> {
                 self.f().depth = entry_depth;
                 Ok(())
             }
-            Stmt::For { pattern, iter, body, line } => {
+            Stmt::For {
+                pattern,
+                iter,
+                body,
+                line,
+            } => {
                 self.f().cur_line = *line;
                 self.compile_expr(iter, false)?;
                 let iter_slot = self.alloc_local();
@@ -606,7 +664,11 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::StoreLocal(idx_slot));
                 let start = self.here();
                 let entry_depth = self.f().depth;
-                let next = self.emit(Instr::IterNext { iter: iter_slot, idx: idx_slot, end: 0 });
+                let next = self.emit(Instr::IterNext {
+                    iter: iter_slot,
+                    idx: idx_slot,
+                    end: 0,
+                });
                 self.begin_scope();
                 let pat = self.compile_pattern(pattern)?;
                 let pidx = self.add_pat(pat);
@@ -733,12 +795,9 @@ impl<'a> Compiler<'a> {
                         }
                         InterpPart::Expr(inner) => {
                             // str(inner)
-                            let g = self
-                                .ctx
-                                .global_ids
-                                .get("str")
-                                .copied()
-                                .ok_or_else(|| format!("line {}: `str` is not defined (prelude missing?)", e.line))?;
+                            let g = self.ctx.global_ids.get("str").copied().ok_or_else(|| {
+                                format!("line {}: `str` is not defined (prelude missing?)", e.line)
+                            })?;
                             self.emit(Instr::LoadGlobal(g));
                             self.compile_expr(inner, false)?;
                             self.f().cur_line = e.line;
@@ -769,7 +828,8 @@ impl<'a> Compiler<'a> {
                         self.emit(Instr::LoadGlobal(g));
                     }
                     None => {
-                        if self.prefix.is_some() && self.ctx.global_ids.contains_key(name.as_str()) {
+                        if self.prefix.is_some() && self.ctx.global_ids.contains_key(name.as_str())
+                        {
                             return self.err(
                                 e.line,
                                 &format!(
@@ -795,14 +855,19 @@ impl<'a> Compiler<'a> {
                     }
                     let t = self.konst(Const::Name(tag.clone()));
                     self.f().cur_line = e.line;
-                    self.emit(Instr::MakeVariantPos { tag: t, count: args.len() as u16 });
+                    self.emit(Instr::MakeVariantPos {
+                        tag: t,
+                        count: args.len() as u16,
+                    });
                 }
                 VariantCtor::Named(fields) => {
                     for (_, v) in fields {
                         self.compile_expr(v, false)?;
                     }
                     let t = self.konst(Const::Name(tag.clone()));
-                    let names = self.konst(Const::Names(fields.iter().map(|(n, _)| n.clone()).collect()));
+                    let names = self.konst(Const::Names(
+                        fields.iter().map(|(n, _)| n.clone()).collect(),
+                    ));
                     self.f().cur_line = e.line;
                     self.emit(Instr::MakeVariantNamed { tag: t, names });
                 }
@@ -828,7 +893,9 @@ impl<'a> Compiler<'a> {
                 for (_, v) in fields {
                     self.compile_expr(v, false)?;
                 }
-                let names = self.konst(Const::Names(fields.iter().map(|(n, _)| n.clone()).collect()));
+                let names = self.konst(Const::Names(
+                    fields.iter().map(|(n, _)| n.clone()).collect(),
+                ));
                 self.f().cur_line = e.line;
                 if spread.is_some() {
                     self.emit(Instr::RecordUpdate(names));
@@ -864,7 +931,11 @@ impl<'a> Compiler<'a> {
                 // compile time (a record field still wins at runtime)
                 let global = self.lookup_global(name);
                 self.f().cur_line = e.line;
-                self.emit(Instr::Invoke { name: n, global, argc: args.len() as u8 });
+                self.emit(Instr::Invoke {
+                    name: n,
+                    global,
+                    argc: args.len() as u8,
+                });
             }
             ExprKind::Field { recv, name } => {
                 self.compile_expr(recv, false)?;
@@ -923,7 +994,9 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(lo, false)?;
                 self.compile_expr(hi, false)?;
                 self.f().cur_line = e.line;
-                self.emit(Instr::MakeRange { inclusive: *inclusive });
+                self.emit(Instr::MakeRange {
+                    inclusive: *inclusive,
+                });
             }
             ExprKind::If { cond, then, els } => {
                 self.compile_expr(cond, false)?;
@@ -1098,7 +1171,11 @@ impl<'a> Compiler<'a> {
                     Some(Some(n)) => Some(Some(self.slot_for(n, slots))),
                 },
             },
-            Pattern::Range { lo, hi, inclusive } => Pat::Range { lo: *lo, hi: *hi, inclusive: *inclusive },
+            Pattern::Range { lo, hi, inclusive } => Pat::Range {
+                lo: *lo,
+                hi: *hi,
+                inclusive: *inclusive,
+            },
             Pattern::Or(alts) => Pat::Or(
                 alts.iter()
                     .map(|a| self.compile_pattern_inner(a, slots))
@@ -1142,7 +1219,9 @@ impl<'a> Compiler<'a> {
             let m = self.emit(Instr::MatchPat { pat: pidx, fail: 0 });
             let j = self.emit(Instr::Jump(0));
             self.patch(m);
-            let msg = self.konst(Const::Name("parameter pattern did not match in lambda".into()));
+            let msg = self.konst(Const::Name(
+                "parameter pattern did not match in lambda".into(),
+            ));
             self.emit(Instr::Fault(msg));
             self.patch(j);
             self.emit(Instr::Pop);
@@ -1163,7 +1242,10 @@ impl<'a> Compiler<'a> {
             f.closure_captures.push(captures);
             (f.closure_captures.len() - 1) as u32
         };
-        self.emit(Instr::MakeClosure { fn_id, captures: cap_idx });
+        self.emit(Instr::MakeClosure {
+            fn_id,
+            captures: cap_idx,
+        });
         Ok(())
     }
 }
@@ -1378,7 +1460,12 @@ fn cap_stmt(s: &Stmt, inside: Option<&HashSet<String>>, out: &mut HashSet<String
             cap_expr(cond, inside, out);
             cap_expr(body, inside, out);
         }
-        Stmt::For { pattern, iter, body, .. } => {
+        Stmt::For {
+            pattern,
+            iter,
+            body,
+            ..
+        } => {
             cap_expr(iter, inside, out);
             match inside {
                 Some(b) => {

@@ -5257,6 +5257,23 @@ impl<'ctx> Codegen<'ctx> {
                     ))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
+            Expr::BuiltinRef(name) if name == "core/array.is_init" => {
+                // Internal, expansion-emitted. INLINE: prim arrays are
+                // zero-filled (always initialized); boxed arrays are
+                // initialized iff the slot is non-null. Bounds are
+                // pre-checked by the enclosing expansion.
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
+                let v = self.emit_array_is_init_inline(a, i, ctx)?;
+                Ok(Value::Int(v))
+            }
             Expr::BuiltinRef(name) if name == "core/array.len" => {
                 // Fully inline — len needs no slow path: null → 0, the
                 // count word holds slots (boxed) or bytes (prim, >>3).
@@ -5608,38 +5625,6 @@ impl<'ctx> Codegen<'ctx> {
                         format!("build_call ai_gc_force_collect: {}", e),
                     ))?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
-            }
-            Expr::BuiltinRef(name) if name == "core/abort" => {
-                // `abort(msg)` — a reached BUG, not an error value:
-                // compile the message (a heap String), call ai_abort
-                // (which never returns), and terminate this block with
-                // `unreachable`. Errors a program models are `Result`
-                // values; this is for impossible states only. The value
-                // returned to the compiler is never used; callers that
-                // branch out of this block (e.g. a match arm) detect the
-                // existing terminator and skip the merge branch/phi.
-                if args.len() != 1 {
-                    return Err(CodegenError::UnknownBuiltin {
-                        name: name.clone(),
-                        arity: args.len(),
-                    });
-                }
-                let msg = self.compile_expr(&args[0], env, ctx)?;
-                let mp = msg.as_closure().map_err(|_| CodegenError::TypeMismatch {
-                    what: "core/abort: arg must be a String".to_owned(),
-                })?;
-                let abort_fn = self.extern_abort.expect("ai_abort declared");
-                self.builder
-                    .build_call(abort_fn, &[ctx.thread_param.into(), mp.into()], "")
-                    .map_err(|e| CodegenError::JitInit(
-                        format!("build_call ai_abort: {}", e),
-                    ))?;
-                self.builder
-                    .build_unreachable()
-                    .map_err(|e| CodegenError::JitInit(
-                        format!("build_unreachable (abort): {}", e),
-                    ))?;
-                Ok(Value::Int(self.i64_ty.const_zero()))
             }
             Expr::BuiltinRef(name)
                 if name.starts_with("ext/")
@@ -6536,6 +6521,142 @@ impl<'ctx> Codegen<'ctx> {
             let node = self.context.metadata_node(&[]);
             let _ = iv.set_metadata(node, kind);
         }
+    }
+
+    /// Inline `core/array.is_init(a, i) -> Int`: 1 when slot `i` holds a
+    /// value. Prim arrays are zero-filled → always 1; boxed arrays → the
+    /// slot pointer is non-null. Null array → 0. Bounds are the caller's
+    /// (the checked-get expansion pre-checks them).
+    fn emit_array_is_init_inline(
+        &mut self,
+        a: PointerValue<'ctx>,
+        i: IntValue<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let j = |e: String| CodegenError::JitInit(e);
+        let i8_ty = self.context.i8_type();
+        let i16_ty = self.context.i16_type();
+        let header_size = <crate::gc::Full as crate::gc::ObjHeader>::SIZE as u64;
+        let tid_off = <crate::gc::Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET as u64;
+        let ti_tid_off = core::mem::offset_of!(crate::gc::TypeInfo, type_id) as u64;
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("is_init inside a fn");
+        let read_bb = self.context.append_basic_block(cur_fn, "init_read");
+        let slot_bb = self.context.append_basic_block(cur_fn, "init_slot");
+        let merge_bb = self.context.append_basic_block(cur_fn, "init_merge");
+        let entry_end = self.builder.get_insert_block().unwrap();
+
+        let nonnull = self
+            .builder
+            .build_is_not_null(a, "init_nonnull")
+            .map_err(|e| j(format!("init nonnull: {}", e)))?;
+        self.builder
+            .build_conditional_branch(nonnull, read_bb, merge_bb)
+            .map_err(|e| j(format!("br init nonnull: {}", e)))?;
+
+        self.builder.position_at_end(read_bb);
+        let tid_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    i8_ty,
+                    a,
+                    &[self.i64_ty.const_int(tid_off, false)],
+                    "init_tid_ptr",
+                )
+                .map_err(|e| j(format!("gep init tid: {}", e)))?
+        };
+        let tid_load = self
+            .builder
+            .build_load(i16_ty, tid_ptr, "init_tid")
+            .map_err(|e| j(format!("load init tid: {}", e)))?;
+        self.mark_invariant_load(tid_load);
+        let tid = tid_load.into_int_value();
+        let prim_ti_slot = self.thread_field(
+            ctx.thread_param,
+            thread_offsets::PRIM_ARRAY_TI,
+            "init_prim_ti_slot",
+        )?;
+        let prim_ti_load = self
+            .builder
+            .build_load(self.ptr_ty, prim_ti_slot, "init_prim_ti")
+            .map_err(|e| j(format!("load init prim_ti: {}", e)))?;
+        self.mark_invariant_load(prim_ti_load);
+        let prim_ti = prim_ti_load.into_pointer_value();
+        let prim_tid_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    i8_ty,
+                    prim_ti,
+                    &[self.i64_ty.const_int(ti_tid_off, false)],
+                    "init_prim_tid_ptr",
+                )
+                .map_err(|e| j(format!("gep init prim tid: {}", e)))?
+        };
+        let prim_tid_load = self
+            .builder
+            .build_load(i16_ty, prim_tid_ptr, "init_prim_tid")
+            .map_err(|e| j(format!("load init prim tid: {}", e)))?;
+        self.mark_invariant_load(prim_tid_load);
+        let prim_tid = prim_tid_load.into_int_value();
+        let is_prim = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tid, prim_tid, "init_is_prim")
+            .map_err(|e| j(format!("icmp init prim: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_prim, merge_bb, slot_bb)
+            .map_err(|e| j(format!("br init prim: {}", e)))?;
+        let read_end = self.builder.get_insert_block().unwrap();
+
+        // Boxed: initialized iff the slot pointer is non-null.
+        self.builder.position_at_end(slot_bb);
+        let scaled = self
+            .builder
+            .build_int_mul(i, self.i64_ty.const_int(8, false), "init_i8")
+            .map_err(|e| j(format!("mul init idx: {}", e)))?;
+        let base_off = self
+            .builder
+            .build_int_add(
+                scaled,
+                self.i64_ty.const_int(header_size + 8, false),
+                "init_off",
+            )
+            .map_err(|e| j(format!("add init off: {}", e)))?;
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, a, &[base_off], "init_slot_ptr")
+                .map_err(|e| j(format!("gep init slot: {}", e)))?
+        };
+        let p = self
+            .builder
+            .build_load(self.ptr_ty, slot, "init_slot_val")
+            .map_err(|e| j(format!("load init slot: {}", e)))?
+            .into_pointer_value();
+        let slot_nonnull = self
+            .builder
+            .build_is_not_null(p, "init_slot_nonnull")
+            .map_err(|e| j(format!("isnull init slot: {}", e)))?;
+        let slot_int = self
+            .builder
+            .build_int_z_extend(slot_nonnull, self.i64_ty, "init_slot_i64")
+            .map_err(|e| j(format!("zext init: {}", e)))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| j(format!("br init slot→merge: {}", e)))?;
+        let slot_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.i64_ty, "init_result")
+            .map_err(|e| j(format!("phi init: {}", e)))?;
+        let zero = self.i64_ty.const_zero();
+        let one = self.i64_ty.const_int(1, false);
+        phi.add_incoming(&[(&zero, entry_end), (&one, read_end), (&slot_int, slot_end)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// Inline `array_len`: branch-free except for the null guard. Reads

@@ -5,7 +5,8 @@ use funct::{Funct, Value};
 
 fn eval(src: &str) -> Value {
     let mut vm = Funct::new();
-    vm.eval(src).unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
+    vm.eval(src)
+        .unwrap_or_else(|e| panic!("eval failed: {}\nsource:\n{}", e, src))
 }
 
 fn eval_err(src: &str) -> String {
@@ -30,7 +31,10 @@ fn s(x: &str) -> Value {
 fn math_functions() {
     assert_eq!(eval("sqrt(9)"), Value::Float(3.0));
     assert_eq!(eval("sqrt(2.25)"), Value::Float(1.5));
-    assert_eq!(eval("floor(2.7) + ceil(2.1) + round(2.5)"), Value::Float(2.0 + 3.0 + 3.0));
+    assert_eq!(
+        eval("floor(2.7) + ceil(2.1) + round(2.5)"),
+        Value::Float(2.0 + 3.0 + 3.0)
+    );
     assert_eq!(eval("abs(-5)"), int(5));
     assert_eq!(eval("abs(-2.5)"), Value::Float(2.5));
     assert_eq!(eval("min(3, 7)"), int(3));
@@ -72,7 +76,10 @@ fn string_functions() {
     assert_eq!(eval("to_upper(\"abc\") + to_lower(\"DEF\")"), s("ABCdef"));
     assert_eq!(eval("trim(\"  x  \")"), s("x"));
     assert_eq!(eval("replace(\"a-b-c\", \"-\", \"+\")"), s("a+b+c"));
-    assert_eq!(eval("split(\"a,b,c\", \",\")"), eval("[\"a\", \"b\", \"c\"]"));
+    assert_eq!(
+        eval("split(\"a,b,c\", \",\")"),
+        eval("[\"a\", \"b\", \"c\"]")
+    );
     assert_eq!(eval("chars(\"héy\")"), eval("[\"h\", \"é\", \"y\"]"));
     assert_eq!(eval("join([\"a\", \"b\"], \"-\")"), s("a-b"));
     assert_eq!(eval("slice(\"hello\", 1, 3)"), s("ell"));
@@ -146,7 +153,10 @@ fn record_functions() {
     assert_eq!(eval("assoc({ x: 1 }, \"y\", 2)"), eval("{ x: 1, y: 2 }"));
     assert_eq!(eval("assoc([1, 2], 0, 9)"), eval("[9, 2]"));
     assert_eq!(eval("dissoc({ x: 1, y: 2 }, \"y\")"), eval("{ x: 1 }"));
-    assert_eq!(eval("merge({ x: 1, y: 2 }, { y: 9, z: 3 })"), eval("{ x: 1, y: 9, z: 3 }"));
+    assert_eq!(
+        eval("merge({ x: 1, y: 2 }, { y: 9, z: 3 })"),
+        eval("{ x: 1, y: 9, z: 3 }")
+    );
     assert_eq!(eval("values({ a: 1, b: 2 })"), eval("[1, 2]"));
     assert_eq!(eval("entries({ a: 1 })"), eval("[(\"a\", 1)]"));
 }
@@ -177,7 +187,10 @@ fn get_in_and_assoc_in() {
 
 #[test]
 fn update_and_update_in() {
-    assert_eq!(eval("update({ n: 1 }, \"n\", x => x + 1)"), eval("{ n: 2 }"));
+    assert_eq!(
+        eval("update({ n: 1 }, \"n\", x => x + 1)"),
+        eval("{ n: 2 }")
+    );
     assert_eq!(
         eval("update_in({ a: { n: 1 } }, [\"a\", \"n\"], x => x * 10)"),
         eval("{ a: { n: 10 } }")
@@ -233,11 +246,13 @@ fn json_parse_and_stringify() {
     );
     // round trip
     assert_eq!(
-        eval(r#"
+        eval(
+            r#"
 let data = { xs: [1, 2], name: "hi", flag: true }
 let encoded = unwrap_or(json_stringify(data), "")
 unwrap_or(json_parse(encoded), ()) == data
-"#),
+"#
+        ),
         Value::Bool(true)
     );
     // bad json is an Err, not a fault
