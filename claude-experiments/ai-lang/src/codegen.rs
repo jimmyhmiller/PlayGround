@@ -2107,6 +2107,24 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_array_new_prim = Some(array_new_prim);
 
+        // `memory(read)` (LLVM 21 encoding: Ref for ArgMem/InaccessibleMem/
+        // ErrnoMem/Other = 0b01_01_01_01). The pure-read runtime accessors
+        // (`ai_array_len`, `ai_array_get_i64`) never allocate, never GC,
+        // never write — they read array memory and at worst ABORT the
+        // process (writes on a never-returning path are unobservable; we
+        // deliberately do NOT add `willreturn`, so the call can't be
+        // deleted or speculated). Without this, every inline-fastpath
+        // slow-branch CALL clobbers LLVM's memory state at its merge, so
+        // NOTHING (root-slot loads, invariant header/len loads) was CSE-
+        // able across consecutive array accesses — measured as the
+        // dominant share of nbody's gap vs Rust. ai_array_set_i64 must
+        // NOT get this: its boxed-array path allocates (can GC and
+        // rewrite frame root slots).
+        let memory_read = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("memory"),
+            0b01_01_01_01,
+        );
+
         // ai_array_len(thread, array) -> i64
         let array_len_ty = self
             .i64_ty
@@ -2116,6 +2134,7 @@ impl<'ctx> Codegen<'ctx> {
             array_len_ty,
             Some(Linkage::External),
         );
+        array_len.add_attribute(inkwell::attributes::AttributeLoc::Function, memory_read);
         self.extern_array_len = Some(array_len);
 
         // ai_array_get_i64(thread, array, i) -> i64 (scalar fast path)
@@ -2128,6 +2147,8 @@ impl<'ctx> Codegen<'ctx> {
             array_get_i64_ty,
             Some(Linkage::External),
         );
+        array_get_i64
+            .add_attribute(inkwell::attributes::AttributeLoc::Function, memory_read);
         self.extern_array_get_i64 = Some(array_get_i64);
 
         // ai_array_set_i64(thread, array, i, v) -> i64 (scalar fast path)
@@ -8335,11 +8356,17 @@ impl<'ctx> Codegen<'ctx> {
                     ret: Box::new(ret_ty),
                 }
             }
-            Expr::Let { value, body: _ } => {
-                // Body inference would require pushing into env; that's
-                // overkill for current callers. Return the value's type
-                // as a conservative approximation.
-                self.infer_type(value, env)
+            Expr::Let { value, body } => {
+                // A Let's type is its BODY's type, inferred with the
+                // binder in scope. (This used to approximate with the
+                // VALUE's type, which broke once the checked-accessor
+                // expansion gained an outer `let len = ...` binder — a
+                // `match array_get(..)` scrutinee then inferred as Int
+                // instead of Result and payload extraction miscompiled.)
+                let value_ty = self.infer_type(value, env);
+                let mut inner = env.clone();
+                inner.push(EnvSlot::Int(self.i64_ty.const_zero()), value_ty);
+                self.infer_type(body, &inner)
             }
             Expr::StructNew { struct_ref, .. } => Type::TypeRef(*struct_ref),
             Expr::EnumNew {

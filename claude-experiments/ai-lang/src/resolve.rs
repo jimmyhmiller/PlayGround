@@ -2796,14 +2796,25 @@ fn resolve_checked_accessor(
         })
         .collect();
 
-    let a_ref = &operand_refs[0];
-    let i_ref = &operand_refs[1];
-    let len_call = || {
-        Expr::Call(
-            Box::new(Expr::BuiltinRef(acc.len.to_owned())),
-            vec![a_ref.clone()],
-        )
-    };
+    // The container length is LET-BOUND once per site (immediately inside
+    // the operand lets) and referenced by the bounds check AND every error
+    // arm. Before this, `len()` was re-called at each of those positions —
+    // up to 4 full inline len-protocol derivations (null check + shape
+    // discrimination + count load) per access site, which both re-derived
+    // on the hot path and bloated the cold arms. The extra binder means
+    // every operand ref used INSIDE the len-let shifts by 1; the len-let's
+    // own value uses the unshifted refs.
+    let len_value = Expr::Call(
+        Box::new(Expr::BuiltinRef(acc.len.to_owned())),
+        vec![operand_refs[0].clone()],
+    );
+    let inner_refs: Vec<Expr> = operand_refs
+        .iter()
+        .map(|e| shift_free_locals(e, 1, 0))
+        .collect();
+    let a_ref = &inner_refs[0];
+    let i_ref = &inner_refs[1];
+    let len_ref = || Expr::LocalVar(0);
     let err_expr = |variant: u32| -> Expr {
         Expr::EnumNew {
             enum_ref: result_info.hash,
@@ -2813,7 +2824,7 @@ fn resolve_checked_accessor(
                 variant_index: variant,
                 payload: Some(Box::new(Expr::StructNew {
                     struct_ref: oob_info.hash,
-                    fields: vec![i_ref.clone(), len_call()],
+                    fields: vec![i_ref.clone(), len_ref()],
                 })),
             })),
         }
@@ -2833,7 +2844,7 @@ fn resolve_checked_accessor(
     };
     let access_call = Expr::Call(
         Box::new(Expr::BuiltinRef(acc.access.to_owned())),
-        operand_refs.clone(),
+        inner_refs.clone(),
     );
     let mut ok_arm = if fused {
         access_call
@@ -2870,11 +2881,16 @@ fn resolve_checked_accessor(
     let mut core = Expr::If {
         cond: Box::new(ge(i_ref.clone(), Expr::IntLit(0))),
         then_branch: Box::new(Expr::If {
-            cond: Box::new(lt(i_ref.clone(), len_call())),
+            cond: Box::new(lt(i_ref.clone(), len_ref())),
             then_branch: Box::new(ok_arm),
             else_branch: Box::new(err_arm(oob_index)),
         }),
         else_branch: Box::new(err_arm(oob_index)),
+    };
+    // The len binder sits innermost, directly around the core.
+    core = Expr::Let {
+        value: Box::new(len_value),
+        body: Box::new(core),
     };
     // Wrap the lets, innermost-last argument outward, shifting each
     // value past the lets already inside it.
