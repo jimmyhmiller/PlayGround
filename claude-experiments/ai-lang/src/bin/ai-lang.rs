@@ -2054,6 +2054,9 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
         cm.shape_meta.clone(),
         cm.shape_by_type_id.clone(),
     );
+    // The entry point's dual-register `{i64, i64}` Result ABI (if any),
+    // captured before `cm` moves into the JIT so we call it correctly.
+    let root_abi = cm.def_result_abi.get(&root_hash).copied();
     let jit = Jit::new(cm, &rt).expect("jit");
 
     install_current_runtime(&rt);
@@ -2072,20 +2075,47 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
         install_current_at_binding(&_rb_storage);
     }
 
-    let entry = unsafe {
-        jit.engine
-            .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
-                &root_hash,
-            ))
-            .unwrap_or_else(|_| {
-                eprintln!("`{}` is not a `() -> Int` function", name);
-                std::process::exit(1);
-            })
-    };
     // No panic channel: a contract violation in the program aborts the
     // process with its message before this returns.
-    let result = unsafe { entry.call(rt.thread_ptr()) };
-    println!("{}", result);
+    //
+    // A `-> Result<T, E>` entry uses the dual-register `{i64, i64}`
+    // (tag, payload) ABI, so it must be called with the matching
+    // signature. We print the Ok payload register on success and a
+    // `Err(<bits>)` marker otherwise (a dev convenience — `ai-lang eval`
+    // renders the full structured value).
+    let sym = def_symbol(&root_hash);
+    if let Some(abi) = root_abi {
+        #[repr(C)]
+        struct ResultPair {
+            tag: i64,
+            payload: i64,
+        }
+        let entry = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> ResultPair>(&sym)
+                .unwrap_or_else(|_| {
+                    eprintln!("`{}` is not a callable entry function", name);
+                    std::process::exit(1);
+                })
+        };
+        let r = unsafe { entry.call(rt.thread_ptr()) };
+        if r.tag == abi.ok_index as i64 {
+            println!("{}", r.payload);
+        } else {
+            println!("Err({})", r.payload);
+        }
+    } else {
+        let entry = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&sym)
+                .unwrap_or_else(|_| {
+                    eprintln!("`{}` is not a `() -> Int` function", name);
+                    std::process::exit(1);
+                })
+        };
+        let result = unsafe { entry.call(rt.thread_ptr()) };
+        println!("{}", result);
+    }
 
     clear_at_conn_cache();
     clear_current_runtime();

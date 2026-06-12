@@ -602,6 +602,19 @@ pub fn apply_deploy<'ctx>(
                 } else {
                     old_val as u64
                 };
+                // A migration fn whose return type is itself `Result<..>`
+                // compiles to the dual-register `{i64, i64}` ABI — the
+                // single-register transmute below would silently read the
+                // variant TAG as the migrated value. No Rust-side
+                // materialization path exists yet, so reject it loudly.
+                if jit.def_result_abi(via).is_some() {
+                    return Err(DeployError::Install(format!(
+                        "migration fn {} returns Result<_, _> (dual-register ABI); \
+                         migrating a state to a Result-typed value is not supported — \
+                         store the payload type instead",
+                        via
+                    )));
+                }
                 let addr = jit
                     .engine
                     .get_function_address(&def_symbol(via))

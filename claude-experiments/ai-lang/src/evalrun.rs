@@ -333,6 +333,16 @@ fn build_resolved_module(cb: &Codebase, root_hash: Hash) -> Result<ResolvedModul
 
 /// A returned scalar slot is either a raw i64 or a heap pointer. The caller's
 /// declared type tells us which interpretation is honest.
+/// The dual-register `{i64, i64}` return shape: a `-> Result<T, E>` def
+/// returns (tag = variant index, payload) here. Also used to call any
+/// single-register def (it leaves `payload` undefined; we ignore it).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ResultPair {
+    tag: i64,
+    payload: i64,
+}
+
 struct RenderCtx<'a> {
     rt: &'a Runtime,
     cb: &'a Codebase,
@@ -413,6 +423,75 @@ impl<'a> RenderCtx<'a> {
     /// Render a `TypeRef(h)` value, substituting `type_args` for any `TypeVar`
     /// references that appear in the struct's field types or the enum's
     /// variant payload types.
+    /// Render a dual-register Result `{i64, i64}` (tag, payload) pair —
+    /// the def returned through the dual ABI, so no materialized heap
+    /// object exists. The tag selects the variant; the payload register
+    /// holds raw scalar bits (RawScalar arm) or a heap pointer (Pointer
+    /// arm) per the codegen `ResultAbi`.
+    unsafe fn render_result_pair(
+        &self,
+        ret: &Type,
+        abi: &crate::codegen::ResultAbi,
+        tag: i64,
+        payload: i64,
+    ) -> Result<Json, EvalError> {
+        let (enum_hash, type_args): (Hash, Vec<Type>) = match ret {
+            Type::Apply(head, args) => match head.as_ref() {
+                Type::TypeRef(h) => (*h, args.clone()),
+                _ => {
+                    return Err(EvalError::Unsupported(
+                        "dual Result return: applied type head is not a TypeRef".to_string(),
+                    ));
+                }
+            },
+            Type::TypeRef(h) => (*h, Vec::new()),
+            _ => {
+                return Err(EvalError::Unsupported(
+                    "dual Result return type is not an enum reference".to_string(),
+                ));
+            }
+        };
+        let def = self
+            .cb
+            .load_def(&enum_hash)
+            .map_err(|e| EvalError::Codebase(format!("load_def {}: {:?}", enum_hash, e)))?;
+        let variants = match def {
+            Def::Enum { variants, .. } => variants,
+            _ => {
+                return Err(EvalError::Unsupported(format!(
+                    "dual Result return: {} is not an enum",
+                    enum_hash
+                )));
+            }
+        };
+        let variant_idx = tag as usize;
+        let (vname, vpayload) = variants.get(variant_idx).ok_or_else(|| {
+            EvalError::Unsupported(format!(
+                "dual Result tag {} out of range ({} variants)",
+                tag,
+                variants.len()
+            ))
+        })?;
+        match vpayload {
+            None => Ok(Json::Str(vname.clone())),
+            Some(pty) => {
+                let kind = if variant_idx as u32 == abi.ok_index {
+                    abi.ok_payload
+                } else {
+                    abi.err_payload
+                };
+                // RawScalar => the register holds raw bits (NOT a boxed
+                // pointer): render with `is_pointer = false` so `render_slot`
+                // reads them directly. Pointer => a heap pointer to the
+                // payload object.
+                let is_pointer = matches!(kind, crate::codegen::PayloadKind::Pointer);
+                let concrete = subst(pty, &type_args);
+                let rendered = unsafe { self.render_slot(&concrete, is_pointer, payload)? };
+                Ok(Json::obj([(vname.clone(), rendered)]))
+            }
+        }
+    }
+
     unsafe fn render_ref_with_subst(
         &self,
         h: Hash,
@@ -1149,6 +1228,11 @@ pub fn eval(
         cm.shape_meta.clone(),
         cm.shape_by_type_id.clone(),
     );
+    // If the entry point declares `-> Result<T, E>` it uses the dual
+    // register `{i64, i64}` (tag, payload) ABI, so we must call it with
+    // the matching signature and render the pair directly. Captured
+    // before `cm` moves into the JIT.
+    let root_abi = cm.def_result_abi.get(&root_hash).copied();
     let jit = Jit::new(cm, &rt).map_err(|e| EvalError::Jit(format!("jit: {}", e)))?;
 
     install_current_runtime(&rt);
@@ -1214,14 +1298,24 @@ pub fn eval(
     };
 
     // Call at the matching arity. The kernel's uniform ABI threads the
-    // `*mut Thread` first; the raw i64 result is interpreted per `ret` below.
-    let call_result: Result<i64, EvalError> = (|| {
+    // `*mut Thread` first; the result is interpreted per `ret` below.
+    //
+    // Every entry is called through a `{i64, i64}` (tag, payload) return
+    // signature. A `-> Result<T, E>` def genuinely uses that dual-register
+    // ABI; a scalar/pointer-returning def returns its single value in the
+    // first register (`tag`) and leaves the second (`payload`) undefined —
+    // calling it through this wider signature is ABI-safe because a 16-byte
+    // two-field aggregate is returned in the same two integer registers
+    // with no hidden sret pointer, and the argument registers are
+    // unaffected by the return type. We read `payload` only when `root_abi`
+    // says the def is genuinely dual.
+    let call_result: Result<ResultPair, EvalError> = (|| {
         let result = unsafe {
             match av.len() {
                 0 => {
                     let f = jit
                         .engine
-                        .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&symbol)
+                        .get_function::<unsafe extern "C" fn(*mut Thread) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 0-arg function", symbol))
                         })?;
@@ -1230,7 +1324,7 @@ pub fn eval(
                 1 => {
                     let f = jit
                         .engine
-                        .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(&symbol)
+                        .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 1-arg function", symbol))
                         })?;
@@ -1239,7 +1333,7 @@ pub fn eval(
                 2 => {
                     let f = jit
                         .engine
-                        .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> i64>(&symbol)
+                        .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 2-arg function", symbol))
                         })?;
@@ -1248,7 +1342,7 @@ pub fn eval(
                 3 => {
                     let f = jit
                         .engine
-                        .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64, i64) -> i64>(
+                        .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64, i64) -> ResultPair>(
                             &symbol,
                         )
                         .map_err(|_| {
@@ -1265,7 +1359,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 4-arg function", symbol))
                         })?;
@@ -1281,7 +1375,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 5-arg function", symbol))
                         })?;
@@ -1298,7 +1392,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 6-arg function", symbol))
                         })?;
@@ -1316,7 +1410,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 7-arg function", symbol))
                         })?;
@@ -1335,7 +1429,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not an 8-arg function", symbol))
                         })?;
@@ -1355,7 +1449,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 9-arg function", symbol))
                         })?;
@@ -1378,7 +1472,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 10-arg function", symbol))
                         })?;
@@ -1403,7 +1497,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not an 11-arg function", symbol))
                         })?;
@@ -1429,7 +1523,7 @@ pub fn eval(
                             i64,
                             i64,
                             i64,
-                        ) -> i64>(&symbol)
+                        ) -> ResultPair>(&symbol)
                         .map_err(|_| {
                             EvalError::Jit(format!("`{}` is not a 12-arg function", symbol))
                         })?;
@@ -1446,9 +1540,16 @@ pub fn eval(
 
     // Render the result BEFORE tearing down the runtime (the heap is still
     // live and `rt` is still installed). Any rendering error is captured here.
-    let rendered: Result<Evaluated, EvalError> = call_result.and_then(|bits| {
+    let rendered: Result<Evaluated, EvalError> = call_result.and_then(|raw| {
         let rc = RenderCtx { rt: &rt, cb };
-        let value = unsafe { rc.render(ret, bits)? };
+        let value = match root_abi {
+            // Dual-register Result: render the (tag, payload) pair directly
+            // — no materialized heap object exists to walk.
+            Some(abi) => unsafe { rc.render_result_pair(ret, &abi, raw.tag, raw.payload)? },
+            // Single-register return: the value is in `tag`; `payload` is
+            // undefined and ignored.
+            None => unsafe { rc.render(ret, raw.tag)? },
+        };
         Ok(Evaluated {
             value,
             type_str: render_ret_type(cb, ret),

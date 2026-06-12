@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 16;
+const CODEGEN_CACHE_VERSION: u64 = 17;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -231,6 +231,7 @@ pub fn load_bitcode_cache<'ctx>(
         shape_by_type_id,
         state_hashes,
         stateful_hashes,
+        def_result_abi,
     ) = parse_shape_metadata(&shapes_json)?;
 
     let mut functions: HashMap<Hash, FunctionValue<'ctx>> = HashMap::new();
@@ -264,6 +265,7 @@ pub fn load_bitcode_cache<'ctx>(
         shape_by_type_id,
         state_hashes,
         stateful_hashes,
+        def_result_abi,
     })
 }
 
@@ -318,6 +320,11 @@ fn shape_metadata_to_json(cm: &CompiledModule) -> crate::jsonl::Json {
         .map(|h| Json::Str(h.to_hex()))
         .collect();
 
+    let mut abi_obj = std::collections::BTreeMap::new();
+    for (h, abi) in &cm.def_result_abi {
+        abi_obj.insert(h.to_hex(), result_abi_to_json(abi));
+    }
+
     Json::obj([
         ("type_infos", Json::Array(tis)),
         ("shape_registry", Json::Object(sr_obj)),
@@ -325,7 +332,44 @@ fn shape_metadata_to_json(cm: &CompiledModule) -> crate::jsonl::Json {
         ("shape_by_type_id", Json::Array(sbti)),
         ("state_hashes", Json::Array(state_hs)),
         ("stateful_hashes", Json::Array(sf_hs)),
+        ("def_result_abi", Json::Object(abi_obj)),
     ])
+}
+
+fn payload_kind_str(k: PayloadKind) -> &'static str {
+    match k {
+        PayloadKind::RawScalar => "raw",
+        PayloadKind::Pointer => "ptr",
+    }
+}
+
+fn payload_kind_from_str(s: &str) -> Option<PayloadKind> {
+    match s {
+        "raw" => Some(PayloadKind::RawScalar),
+        "ptr" => Some(PayloadKind::Pointer),
+        _ => None,
+    }
+}
+
+fn result_abi_to_json(abi: &ResultAbi) -> crate::jsonl::Json {
+    use crate::jsonl::Json;
+    Json::obj([
+        ("enum_ref", Json::Str(abi.enum_ref.to_hex())),
+        ("ok_index", Json::Int(abi.ok_index as i64)),
+        ("err_index", Json::Int(abi.err_index as i64)),
+        ("ok_payload", Json::Str(payload_kind_str(abi.ok_payload).to_string())),
+        ("err_payload", Json::Str(payload_kind_str(abi.err_payload).to_string())),
+    ])
+}
+
+fn result_abi_from_json(json: &crate::jsonl::Json) -> Option<ResultAbi> {
+    Some(ResultAbi {
+        enum_ref: crate::codebase::parse_hex_hash(json.get("enum_ref")?.as_str()?)?,
+        ok_index: json.get("ok_index")?.as_i64()? as u32,
+        err_index: json.get("err_index")?.as_i64()? as u32,
+        ok_payload: payload_kind_from_str(json.get("ok_payload")?.as_str()?)?,
+        err_payload: payload_kind_from_str(json.get("err_payload")?.as_str()?)?,
+    })
 }
 
 fn shape_meta_to_json(meta: &ShapeMeta) -> crate::jsonl::Json {
@@ -400,6 +444,7 @@ fn parse_shape_metadata(
     Vec<Option<Hash>>,
     Vec<Hash>,
     Vec<Hash>,
+    HashMap<Hash, ResultAbi>,
 )> {
     use crate::gc::{TypeInfo, VarLenKind};
     use crate::jsonl::Json;
@@ -470,6 +515,19 @@ fn parse_shape_metadata(
         .filter_map(|j| j.as_str().and_then(|s| parse_hash(s)))
         .collect();
 
+    // `def_result_abi` was added in cache version 17; an older cache that
+    // somehow survived the version bump just yields an empty map (every
+    // such def is then treated as uniform-ABI — wrong, but the version
+    // salt makes this unreachable in practice).
+    let mut def_result_abi: HashMap<Hash, ResultAbi> = HashMap::new();
+    if let Some(Json::Object(m)) = json.get("def_result_abi") {
+        for (k, v) in m {
+            if let (Some(h), Some(abi)) = (parse_hash(k), result_abi_from_json(v)) {
+                def_result_abi.insert(h, abi);
+            }
+        }
+    }
+
     Some((
         type_infos,
         shape_registry,
@@ -477,6 +535,7 @@ fn parse_shape_metadata(
         shape_by_type_id,
         state_hashes,
         stateful_hashes,
+        def_result_abi,
     ))
 }
 
@@ -754,6 +813,13 @@ pub struct CompiledModule<'ctx> {
     /// cell and so must bypass the `at()` result cache. Copied into
     /// `Runtime.stateful_hashes` at JIT install.
     pub stateful_hashes: Vec<Hash>,
+
+    /// Defs declared `-> Result<T, E>` that use the dual-register
+    /// `{i64, i64}` (tag, payload) ABI instead of the uniform
+    /// one-register return. Any external caller that invokes such a def
+    /// by raw fn-ptr transmute (evalrun, deploy, net) MUST call it with
+    /// the pair signature and re-interpret the result accordingly.
+    pub def_result_abi: HashMap<Hash, ResultAbi>,
 }
 
 /// Layout metadata for one heap shape, used by the wire encoder/decoder.
@@ -914,12 +980,21 @@ impl<'ctx> CompiledModule<'ctx> {
 
         // ---- Pass 1: declare every def's prototype ----
         //
-        // Defs are declared BEFORE lambdas because the lambda
-        // capture-pointer-inference walker (`infer_capture_pointer_flags`)
-        // consults `def_signatures`, `struct_field_types`, and
-        // `enum_variant_types`, all populated here.
+        // Types (structs/enums) FIRST: fn prototypes consult enum shapes
+        // to pick the dual-register Result ABI, so every Result-shaped
+        // enum must be known before any fn is declared. Then fns/states.
+        // (Defs are declared before lambdas because the lambda
+        // capture-pointer-inference walker consults `def_signatures`,
+        // `struct_field_types`, and `enum_variant_types`.)
         for rd in &rm.defs {
-            cg.declare_def(rd)?;
+            if matches!(rd.def, Def::Struct { .. } | Def::Enum { .. }) {
+                cg.declare_def(rd)?;
+            }
+        }
+        for rd in &rm.defs {
+            if !matches!(rd.def, Def::Struct { .. } | Def::Enum { .. }) {
+                cg.declare_def(rd)?;
+            }
         }
 
         // ---- Eta-expand first-class function references ----
@@ -1029,6 +1104,7 @@ impl<'ctx> CompiledModule<'ctx> {
             shape_by_type_id,
             state_hashes,
             stateful_hashes,
+            def_result_abi: cg.def_result_abi,
         })
     }
 
@@ -1163,6 +1239,11 @@ struct Codegen<'ctx> {
     /// `infer_type` when crossing generic call boundaries to decide
     /// where to box/unbox.
     def_signatures: HashMap<Hash, FnSigSimple>,
+    /// Per-enum (Ok, Err) variant indices, recorded at declare time for
+    /// enums that are Result-shaped. Drives [`ResultAbi`] detection.
+    enum_okerr: HashMap<Hash, (u32, u32)>,
+    /// Defs compiled with the dual-register Result ABI, by hash.
+    def_result_abi: HashMap<Hash, ResultAbi>,
     /// Declared type of each node `state` binding, keyed by content hash.
     /// `infer_type` consults this so `StateRef`-based boxing decisions
     /// (e.g. `deref`/`swap` over `Atom<Int>`) are correct.
@@ -1360,6 +1441,8 @@ impl<'ctx> Codegen<'ctx> {
             extern_wire_invoke: None,
             tail_ctx: None,
             def_signatures: HashMap::new(),
+            enum_okerr: HashMap::new(),
+            def_result_abi: HashMap::new(),
             state_types: HashMap::new(),
             struct_field_types: HashMap::new(),
             enum_variant_types: HashMap::new(),
@@ -2884,8 +2967,57 @@ impl<'ctx> Codegen<'ctx> {
             });
         }
         self.enums.insert(*hash, info);
+        // Result-shaped enums (an `Ok` and an `Err` variant, both with
+        // payloads) qualify for the dual-register ABI on defs returning
+        // them.
+        let ok = variants.iter().position(|(n, p)| n == "Ok" && p.is_some());
+        let err = variants.iter().position(|(n, p)| n == "Err" && p.is_some());
+        if let (Some(o), Some(e)) = (ok, err) {
+            self.enum_okerr.insert(*hash, (o as u32, e as u32));
+        }
         let _ = name;
         Ok(())
+    }
+
+    /// The dual-register ABI for a def whose DECLARED return type is a
+    /// Result-shaped enum, else None. Payload kinds come from the
+    /// signature's instantiation (`Result<Float, IndexError>` puts raw
+    /// f64 bits in the Ok register; a generic `Result<T, E>` keeps the
+    /// uniform boxed pointer).
+    fn result_abi_of(&self, ret: &Type) -> Option<ResultAbi> {
+        let (enum_ref, args): (Hash, &[Type]) = match ret {
+            Type::TypeRef(h) => (*h, &[]),
+            Type::Apply(head, args) => match head.as_ref() {
+                Type::TypeRef(h) => (*h, args.as_slice()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let (ok_index, err_index) = *self.enum_okerr.get(&enum_ref)?;
+        // Declared payload types, with the signature's instantiation
+        // substituted in.
+        let declared = self.enum_variant_types.get(&enum_ref)?;
+        let arm = |idx: u32| -> PayloadKind {
+            let d = declared.get(idx as usize).cloned().flatten();
+            match d {
+                Some(t) => {
+                    let inst = if args.is_empty() {
+                        t
+                    } else {
+                        substitute_type(&t, args)
+                    };
+                    payload_kind_of(&inst)
+                }
+                None => PayloadKind::RawScalar,
+            }
+        };
+        Some(ResultAbi {
+            enum_ref,
+            ok_index,
+            err_index,
+            ok_payload: arm(ok_index),
+            err_payload: arm(err_index),
+        })
     }
 
     // -------------------------------------------------------------------------
@@ -2994,13 +3126,27 @@ impl<'ctx> Codegen<'ctx> {
                 self.i64_ty.into()
             });
         }
-        let fn_ty = if is_pointer_type(ret) {
+        // Dual-register Result ABI: a def declared `-> Result<T, E>`
+        // returns {i64, i64} = (variant tag, payload). Ok values in tail
+        // position never allocate; the Result materializes only where
+        // the program treats it as a first-class value.
+        let result_abi = self.result_abi_of(ret);
+        let fn_ty = if let Some(_abi) = result_abi {
+            let pair_ty = self.context.struct_type(
+                &[self.i64_ty.into(), self.i64_ty.into()],
+                false,
+            );
+            pair_ty.fn_type(&param_tys, false)
+        } else if is_pointer_type(ret) {
             self.ptr_ty.fn_type(&param_tys, false)
         } else {
             self.i64_ty.fn_type(&param_tys, false)
         };
         let symbol = def_symbol(&rd.hash);
         let fv = self.module.add_function(&symbol, fn_ty, None);
+        if let Some(abi) = result_abi {
+            self.def_result_abi.insert(rd.hash, abi);
+        }
 
         let frame_ty = self.placeholder_frame_ty();
         let name_global = self.emit_name_string(&symbol, &rd.hash, "def");
@@ -3162,6 +3308,7 @@ impl<'ctx> Codegen<'ctx> {
                 info,
                 next_root_slot,
                 is_tail: true,
+                result_abi: self.def_result_abi.get(&rd.hash).copied(),
             },
         );
 
@@ -3170,17 +3317,60 @@ impl<'ctx> Codegen<'ctx> {
         self.tail_ctx = None;
         let result = result?;
 
-        // If the body already terminated its block (e.g. the whole body
-        // is a diverging `panic`), there is nothing to return — emitting
-        // an epilogue + return here would add instructions after the
-        // `unreachable` terminator. The process aborts before any caller
-        // resumes, so skipping the shadow-stack pop is correct.
+        // If the body already terminated its block, there is nothing to
+        // return here — every path already returned (a diverging `panic`,
+        // or — for a dual `-> Result` def — a zero-alloc `Ok`/`Err` leaf
+        // and/or a self-tail-call on every branch). Emitting an epilogue +
+        // return now would add instructions after the terminator.
+        //
+        // We STILL finalize frame zeroing: the body may have stored live
+        // root slots and triggered a collection BEFORE diverging (e.g.
+        // `let a = mk(); gc_heavy(); Ok(use(a))`), so the frame must be
+        // right-sized and its origin's scanned-slot count set — otherwise
+        // the slots are written past a `[0 x ptr]` placeholder and the GC
+        // walker scans zero roots, corrupting `a`.
         if self
             .builder
             .get_insert_block()
             .and_then(|b| b.get_terminator())
             .is_some()
         {
+            self.finalize_frame_zeroing(&origin_sym)?;
+            return Ok(());
+        }
+
+        // Dual-register Result ABI: a def declared `-> Result<T, E>`
+        // returns `{i64, i64}` = (tag, payload). The body's tail produced
+        // a MATERIALIZED Result pointer (the zero-alloc leaf cases
+        // terminate the block earlier and never reach here); lower it to
+        // the pair, branching on the tag. Returns BEFORE the generic
+        // pointer/Int handling below.
+        if let Some(abi) = self.def_result_abi.get(&rd.hash).copied() {
+            let ptr = match result {
+                Value::Closure(p) => p,
+                Value::Int(_) => {
+                    return Err(CodegenError::TypeMismatch {
+                        what: format!(
+                            "dual Result def `{}` body returned Int, expected a Result value",
+                            rd.name
+                        ),
+                    });
+                }
+            };
+            let last_ctx = CompileCtx {
+                thread_param,
+                frame_alloca,
+                info,
+                next_root_slot,
+                is_tail: false,
+                result_abi: Some(abi),
+            };
+            let pair = self.lower_materialized_result_to_pair(ptr, &abi, last_ctx)?;
+            self.emit_epilogue(thread_param, frame_alloca, info)?;
+            self.builder
+                .build_return(Some(&pair as &dyn inkwell::values::BasicValue))
+                .map_err(|e| CodegenError::JitInit(format!("build_return dual: {}", e)))?;
+            self.finalize_frame_zeroing(&origin_sym)?;
             return Ok(());
         }
 
@@ -3280,6 +3470,7 @@ impl<'ctx> Codegen<'ctx> {
                 info,
                 next_root_slot: 0,
                 is_tail: false,
+                result_abi: None,
             },
         )?;
         // Box an Int initializer so the cell holds a uniform pointer.
@@ -3521,17 +3712,24 @@ impl<'ctx> Codegen<'ctx> {
                 next_root_slot,
                 // Lambda bodies are tail position for the lambda itself.
                 is_tail: true,
+                // Lambdas keep the uniform boxed ABI: their Result
+                // returns materialize (the hot paths are named defs).
+                result_abi: None,
             },
         )?;
 
         // A diverging lambda body (e.g. one that `panic`s) already
-        // terminated its block; skip the epilogue + return.
+        // terminated its block; skip the epilogue + return — but STILL
+        // finalize frame zeroing, since the body may have stored live root
+        // slots and collected before diverging (see the matching note in
+        // `compile_def`).
         if self
             .builder
             .get_insert_block()
             .and_then(|b| b.get_terminator())
             .is_some()
         {
+            self.finalize_frame_zeroing(&origin_sym)?;
             return Ok(());
         }
 
@@ -4231,7 +4429,26 @@ impl<'ctx> Codegen<'ctx> {
                 enum_ref,
                 variant_index,
                 payload,
-            } => self.compile_enum_new(enum_ref, *variant_index, payload.as_deref(), env, ctx),
+            } => {
+                // Zero-alloc dual-register Result leaf: an `Ok(x)`/`Err(e)`
+                // in tail position of a `-> Result<T, E>` def returns the
+                // `{i64, i64}` pair directly — no heap enum is allocated.
+                if let Some(abi) = ctx.result_abi {
+                    if ctx.is_tail
+                        && *enum_ref == abi.enum_ref
+                        && (*variant_index == abi.ok_index || *variant_index == abi.err_index)
+                    {
+                        return self.emit_result_leaf_return(
+                            &abi,
+                            *variant_index,
+                            payload.as_deref(),
+                            env,
+                            ctx,
+                        );
+                    }
+                }
+                self.compile_enum_new(enum_ref, *variant_index, payload.as_deref(), env, ctx)
+            }
 
             Expr::Match { scrutinee, arms } => self.compile_match(scrutinee, arms, env, ctx),
 
@@ -4396,6 +4613,18 @@ impl<'ctx> Codegen<'ctx> {
             }
             self.read_root_slot(scratch)?
         };
+        // If the enclosing def uses the dual-register Result ABI, the `?`
+        // early-return must hand back the `{i64, i64}` pair, not a raw
+        // Result pointer. The Err operand is a materialized Result here
+        // (it came from a value-position evaluation), so lower it.
+        if let Some(abi) = ctx.result_abi {
+            let pair = self.lower_materialized_result_to_pair(err_result_ptr, &abi, ctx)?;
+            self.emit_epilogue(ctx.thread_param, ctx.frame_alloca, ctx.info)?;
+            self.builder
+                .build_return(Some(&pair as &dyn inkwell::values::BasicValue))
+                .map_err(|e| CodegenError::JitInit(format!("build_return try err dual: {}", e)))?;
+            return Ok(());
+        }
         self.emit_epilogue(ctx.thread_param, ctx.frame_alloca, ctx.info)?;
         self.builder
             .build_return(Some(&err_result_ptr as &dyn inkwell::values::BasicValue))
@@ -4418,6 +4647,30 @@ impl<'ctx> Codegen<'ctx> {
             Type::Apply(_, args) => args,
             _ => Vec::new(),
         };
+
+        // Fused `?` on a DIRECT call to a dual-register Result def: call it,
+        // branch on the tag REGISTER, and use the payload register straight
+        // — the hot Ok path allocates nothing (no heap Result is ever
+        // materialized). The cold Err path materializes only to reuse the
+        // shared early-return + `defer` machinery.
+        if let Expr::Call(callee, call_args) = operand {
+            if let Expr::TopRef(h) = callee.as_ref() {
+                if let Some(abi) = self.def_result_abi.get(h).copied() {
+                    if abi.enum_ref == *enum_ref {
+                        return self.compile_try_fused_dual_call(
+                            h,
+                            call_args,
+                            &abi,
+                            ok_index,
+                            err_index,
+                            &instantiation,
+                            env,
+                            ctx,
+                        );
+                    }
+                }
+            }
+        }
 
         // Compile the operand — not in tail position.
         let op_ctx = CompileCtx {
@@ -4559,6 +4812,101 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Fused `expr?` where `expr` is a direct call to a dual-register
+    /// Result def. The call returns the `{i64, i64}` (tag, payload) pair;
+    /// we branch on the tag register and:
+    ///   - Ok: hand back the payload register as the `?` value (raw scalar,
+    ///     or pointer, unboxing a generic boxed-scalar arm) — NO heap
+    ///     Result is allocated on this hot path.
+    ///   - Err: materialize the Err variant (cold) and early-return through
+    ///     the shared `defer`-aware path (which re-returns a pair when the
+    ///     enclosing def is itself dual).
+    fn compile_try_fused_dual_call(
+        &mut self,
+        h: &Hash,
+        call_args: &[Expr],
+        abi: &ResultAbi,
+        ok_index: u32,
+        err_index: u32,
+        instantiation: &[Type],
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<Value<'ctx>, CodegenError> {
+        let pair = self.emit_dual_topref_call_pair(h, call_args, env, ctx)?;
+        let tag = self
+            .builder
+            .build_extract_value(pair, 0, "try_tag")
+            .map_err(|e| CodegenError::JitInit(format!("extract try tag: {}", e)))?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(pair, 1, "try_payload")
+            .map_err(|e| CodegenError::JitInit(format!("extract try payload: {}", e)))?
+            .into_int_value();
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("fused try inside a fn");
+        let err_bb = self.context.append_basic_block(cur_fn, "try_err");
+        let ok_bb = self.context.append_basic_block(cur_fn, "try_ok");
+
+        let err_tag = self.i64_ty.const_int(err_index as u64, false);
+        let is_err = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, err_tag, "try_is_err")
+            .map_err(|e| CodegenError::JitInit(format!("cmp try tag: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_err, err_bb, ok_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br fused try: {}", e)))?;
+
+        // ---- err_bb: materialize Err (cold) + early-return via the
+        // shared `defer`-aware path. ----
+        self.builder.position_at_end(err_bb);
+        let err_ptr =
+            self.build_one_result_variant(abi.enum_ref, err_index, abi.err_payload, payload, ctx)?;
+        self.emit_try_err_return(err_ptr, ctx)?;
+
+        // ---- ok_bb: payload register IS the `?` value. ----
+        self.builder.position_at_end(ok_bb);
+        let ok_value = match abi.ok_payload {
+            // RawScalar: the callee's compiled body put raw scalar bits in
+            // the register (the dual ABI never boxes a concrete scalar arm).
+            PayloadKind::RawScalar => Value::Int(payload),
+            PayloadKind::Pointer => {
+                let ptr = self
+                    .builder
+                    .build_int_to_ptr(payload, self.ptr_ty, "try_ok_ptr")
+                    .map_err(|e| CodegenError::JitInit(format!("inttoptr try ok: {}", e)))?;
+                // A generic (TypeVar) Ok arm travels BOXED in the pointer
+                // register; if the caller's instantiation pins it to a
+                // scalar, unbox to recover the raw value (mirrors the
+                // materialized `?` path's `needs_unbox`).
+                let declared_ok = self
+                    .enum_variant_types
+                    .get(&abi.enum_ref)
+                    .and_then(|vs| vs.get(ok_index as usize).cloned().flatten());
+                let needs_unbox = matches!(&declared_ok, Some(Type::TypeVar(_)))
+                    && matches!(
+                        substitute_type(declared_ok.as_ref().unwrap(), instantiation),
+                        Type::Builtin(ref n) if is_boxed_scalar(n)
+                    );
+                if needs_unbox {
+                    let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                    let call = self
+                        .builder
+                        .build_call(unbox_fn, &[ptr.into()], "try_ok_unbox")
+                        .map_err(|e| CodegenError::JitInit(format!("call unbox try ok: {}", e)))?;
+                    Value::Int(call.as_any_value_enum().into_int_value())
+                } else {
+                    Value::Closure(ptr)
+                }
+            }
+        };
+        Ok(ok_value)
+    }
+
     /// Emit a self-tail-call as a branch back to `loop_body`. Computes
     /// each new argument expression, writes it into the corresponding
     /// param slot, then branches. Positions the builder at an
@@ -4646,14 +4994,18 @@ impl<'ctx> Codegen<'ctx> {
         let dead_bb = self.context.append_basic_block(cur_fn, "after_tail_call");
         self.builder.position_at_end(dead_bb);
 
-        // Return a placeholder of the same shape as the fn's return.
-        // The fn's LLVM return type tells us whether to use an Int or
-        // a Closure placeholder.
+        // Return a placeholder of the same shape as the body's VALUE-level
+        // result (which the caller may feed into a phi with a sibling
+        // branch). A dual-register Result def returns LLVM `{i64, i64}`,
+        // but its body expressions still produce a MATERIALIZED Result
+        // pointer at the value level (the pair is only assembled at the
+        // real return), so the placeholder is a Closure — matching an
+        // `Ok(...)`/`Err(...)` in a sibling `if`/`match` arm. Otherwise the
+        // fn's LLVM return type tells us Int vs Closure.
         let ret_ty = cur_fn.get_type().get_return_type();
-        if matches!(
-            ret_ty,
-            Some(inkwell::types::BasicTypeEnum::PointerType(_))
-        ) {
+        if ctx.result_abi.is_some()
+            || matches!(ret_ty, Some(inkwell::types::BasicTypeEnum::PointerType(_)))
+        {
             Ok(Value::Closure(self.ptr_ty.const_null()))
         } else {
             Ok(Value::Int(self.i64_ty.const_zero()))
@@ -4746,8 +5098,20 @@ impl<'ctx> Codegen<'ctx> {
         let incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             [then_incoming, else_incoming].into_iter().flatten().collect();
         if incoming.is_empty() {
-            // Both branches diverge; merge_bb is unreachable. Return a
-            // dummy value — the block is dead and LLVM eliminates it.
+            // Both branches diverge (each already returned — a dual Result
+            // leaf, a self-tail-call, or a `panic`); merge_bb is
+            // unreachable. In TAIL position the whole `if` is the body's
+            // tail, so every path has returned and the enclosing def must
+            // emit no further return — terminate merge_bb so its
+            // terminator check fires. (Crucial for a dual `-> Result` def:
+            // otherwise its return path would see the dummy `Int` below
+            // instead of a real value.) In NON-tail position the value is
+            // dead but the caller keeps emitting at merge_bb.
+            if ctx.is_tail {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::JitInit(format!("unreachable if-merge: {}", e)))?;
+            }
             return Ok(Value::Int(self.i64_ty.const_zero()));
         }
         let phi_ty = incoming[0].0.get_type();
@@ -4777,6 +5141,52 @@ impl<'ctx> Codegen<'ctx> {
                 what: format!("unexpected if-result type: {:?}", other),
             }),
         }
+    }
+
+    /// Build a direct call to a dual-register Result def (`-> Result<T, E>`)
+    /// and return the raw `{i64, i64}` (tag, payload) pair WITHOUT
+    /// materializing it. Shared by `compile_call` (which materializes the
+    /// pair into a heap Result) and the fused `?` path in `compile_try`
+    /// (which branches on the tag register directly, allocating nothing on
+    /// the hot Ok path). `args` are evaluated NOT in tail position.
+    fn emit_dual_topref_call_pair(
+        &mut self,
+        h: &Hash,
+        args: &[Expr],
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<inkwell::values::StructValue<'ctx>, CodegenError> {
+        let ctx = CompileCtx {
+            is_tail: false,
+            ..ctx
+        };
+        let target = *self
+            .functions
+            .get(h)
+            .ok_or(CodegenError::UnknownTopRef { hash: *h })?;
+        let sig = self.def_signatures.get(h).cloned();
+        let param_decls = match &sig {
+            Some(s) => s.params.clone(),
+            None => Vec::new(),
+        };
+        // Box an Int arg flowing into a generic (TypeVar) param, mirroring
+        // the regular TopRef call path.
+        let box_flags: Vec<bool> = args
+            .iter()
+            .enumerate()
+            .map(|(i, _)| matches!(param_decls.get(i), Some(Type::TypeVar(_))))
+            .collect();
+        let arg_vals = self.compile_operands_rooted(args, &box_flags, env, ctx)?;
+        let mut call_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+        call_args.push(ctx.thread_param.into());
+        for v in arg_vals {
+            call_args.push(v.into_basic().into());
+        }
+        let call = self
+            .builder
+            .build_call(target, &call_args, "dualcall")
+            .map_err(|e| CodegenError::JitInit(format!("build_call dual: {}", e)))?;
+        Ok(call.as_any_value_enum().into_struct_value())
     }
 
     fn compile_call(
@@ -5782,6 +6192,19 @@ impl<'ctx> Codegen<'ctx> {
                     .get(h)
                     .ok_or(CodegenError::UnknownTopRef { hash: *h })?;
 
+                // Dual-register Result ABI: the callee returns `{i64, i64}`
+                // = (tag, payload). The universal consumption path
+                // materializes the pair back into a heap Result object so
+                // every downstream use (match, store, capture, wire, a
+                // value-position `?`) sees an ordinary pointer. (A `?`
+                // applied directly to this call is fused in `compile_try`
+                // and never reaches here.)
+                if let Some(abi) = self.def_result_abi.get(h).copied() {
+                    let pair = self.emit_dual_topref_call_pair(h, args, env, ctx)?;
+                    let obj = self.materialize_result_pair(pair, &abi, ctx)?;
+                    return Ok(Value::Closure(obj));
+                }
+
                 // Look up the callee's declared signature so we can
                 // tell which parameters are generic (TypeVar). Box
                 // any `Int` argument flowing into a TypeVar slot, and
@@ -6500,6 +6923,401 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         Ok(Value::Closure(obj_ptr))
+    }
+
+    /// Zero-alloc dual-register Result leaf: lower an `Ok(x)`/`Err(e)` in
+    /// tail position of a dual def into `ret {variant_idx, payload}` with
+    /// NO heap allocation. Compiles the payload, converts it to the
+    /// register per the arm's [`PayloadKind`], emits the epilogue, returns
+    /// the pair, and leaves the block terminated (returns a dummy value).
+    fn emit_result_leaf_return(
+        &mut self,
+        abi: &ResultAbi,
+        variant_index: u32,
+        payload: Option<&Expr>,
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<Value<'ctx>, CodegenError> {
+        let kind = if variant_index == abi.ok_index {
+            abi.ok_payload
+        } else {
+            abi.err_payload
+        };
+        // Evaluate the payload (NOT in tail position).
+        let payload_ctx = CompileCtx {
+            is_tail: false,
+            ..ctx
+        };
+        let payload_reg = match payload {
+            None => self.i64_ty.const_zero(),
+            Some(e) => {
+                let pv = self.compile_expr(e, env, payload_ctx)?;
+                match (kind, pv) {
+                    // RawScalar: the raw bits ARE the register (Float is
+                    // an i64 bit-pattern in our value model, so this also
+                    // covers Float/Bool/Int).
+                    (PayloadKind::RawScalar, Value::Int(iv)) => iv,
+                    (PayloadKind::RawScalar, Value::Closure(_)) => {
+                        return Err(CodegenError::TypeMismatch {
+                            what: "dual Result Ok/Err RawScalar payload was a pointer".to_owned(),
+                        });
+                    }
+                    // Pointer: ptrtoint a heap pointer into the register;
+                    // box a bare Int (a generic TypeVar arm instantiated
+                    // to a scalar travels boxed, like the materialized slot).
+                    (PayloadKind::Pointer, Value::Closure(p)) => self
+                        .builder
+                        .build_ptr_to_int(p, self.i64_ty, "leaf_ptr_bits")
+                        .map_err(|e| CodegenError::JitInit(format!("ptrtoint leaf: {}", e)))?,
+                    (PayloadKind::Pointer, Value::Int(iv)) => {
+                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                        let boxed = self
+                            .builder
+                            .build_call(box_fn, &[ctx.thread_param.into(), iv.into()], "leaf_box")
+                            .map_err(|e| CodegenError::JitInit(format!("call box leaf: {}", e)))?
+                            .as_any_value_enum()
+                            .into_pointer_value();
+                        self.builder
+                            .build_ptr_to_int(boxed, self.i64_ty, "leaf_box_bits")
+                            .map_err(|e| CodegenError::JitInit(format!("ptrtoint leaf box: {}", e)))?
+                    }
+                }
+            }
+        };
+        let tag = self.i64_ty.const_int(variant_index as u64, false);
+        let pair = self.build_result_pair(tag, payload_reg)?;
+        self.emit_epilogue(ctx.thread_param, ctx.frame_alloca, ctx.info)?;
+        self.builder
+            .build_return(Some(&pair as &dyn inkwell::values::BasicValue))
+            .map_err(|e| CodegenError::JitInit(format!("build_return leaf: {}", e)))?;
+        // Block is terminated; the dummy value is never used (compile_def /
+        // compile_if detect the terminator).
+        Ok(Value::Int(self.i64_ty.const_zero()))
+    }
+
+    /// The dual-register Result return type: `{i64, i64}` = (tag, payload).
+    fn result_pair_ty(&self) -> inkwell::types::StructType<'ctx> {
+        self.context
+            .struct_type(&[self.i64_ty.into(), self.i64_ty.into()], false)
+    }
+
+    /// Read one variant's payload from a MATERIALIZED Result enum object
+    /// and convert it to the dual-ABI payload register (an `i64`),
+    /// per `kind` (RawScalar => raw bits, possibly unboxed; Pointer =>
+    /// `ptrtoint`). `v` is the variant's layout in the materialized enum.
+    fn materialized_payload_to_register(
+        &mut self,
+        obj_ptr: PointerValue<'ctx>,
+        v: &VariantInfo<'ctx>,
+        kind: PayloadKind,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let payload_off = v.payload_offset.ok_or(CodegenError::TypeMismatch {
+            what: "dual Result variant has no payload to extract".to_owned(),
+        })?;
+        let off_const = self.i64_ty.const_int(payload_off as u64, false);
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[off_const], "res_payload_ptr")
+                .map_err(|e| CodegenError::JitInit(format!("gep res payload: {}", e)))?
+        };
+        match kind {
+            PayloadKind::RawScalar => {
+                if v.payload_is_pointer {
+                    // Materialized slot is a boxed scalar pointer; unbox
+                    // to recover the raw i64 the register wants.
+                    let boxed = self
+                        .builder
+                        .build_load(self.ptr_ty, slot, "res_boxed")
+                        .map_err(|e| CodegenError::JitInit(format!("load res boxed: {}", e)))?
+                        .into_pointer_value();
+                    let unbox = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                    let call = self
+                        .builder
+                        .build_call(unbox, &[boxed.into()], "res_unbox")
+                        .map_err(|e| CodegenError::JitInit(format!("call unbox res: {}", e)))?;
+                    Ok(call.as_any_value_enum().into_int_value())
+                } else {
+                    Ok(self
+                        .builder
+                        .build_load(self.i64_ty, slot, "res_raw")
+                        .map_err(|e| CodegenError::JitInit(format!("load res raw: {}", e)))?
+                        .into_int_value())
+                }
+            }
+            PayloadKind::Pointer => {
+                let p = self
+                    .builder
+                    .build_load(self.ptr_ty, slot, "res_ptr")
+                    .map_err(|e| CodegenError::JitInit(format!("load res ptr: {}", e)))?
+                    .into_pointer_value();
+                Ok(self
+                    .builder
+                    .build_ptr_to_int(p, self.i64_ty, "res_ptr_bits")
+                    .map_err(|e| CodegenError::JitInit(format!("ptrtoint res: {}", e)))?)
+            }
+        }
+    }
+
+    /// Lower a MATERIALIZED Result enum pointer into the dual-register
+    /// `{i64, i64}` pair, branching on the variant tag so each arm reads
+    /// its own payload with the right (un)boxing. The fallback for a
+    /// dual def whose tail isn't a recognized zero-alloc leaf. Leaves the
+    /// builder positioned at a fresh merge block holding the pair.
+    fn lower_materialized_result_to_pair(
+        &mut self,
+        obj_ptr: PointerValue<'ctx>,
+        abi: &ResultAbi,
+        _ctx: CompileCtx<'ctx>,
+    ) -> Result<inkwell::values::StructValue<'ctx>, CodegenError> {
+        let einfo = self
+            .enums
+            .get(&abi.enum_ref)
+            .cloned()
+            .ok_or(CodegenError::UnknownTopRef { hash: abi.enum_ref })?;
+        let ok_v = einfo.variants[abi.ok_index as usize];
+        let err_v = einfo.variants[abi.err_index as usize];
+
+        // Read the tag (i32, shared offset) and zext to the i64 register.
+        let tag_off = self.i64_ty.const_int(ok_v.tag_offset as u64, false);
+        let tag_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[tag_off], "res_tag_ptr")
+                .map_err(|e| CodegenError::JitInit(format!("gep res tag: {}", e)))?
+        };
+        let tag32 = self
+            .builder
+            .build_load(self.context.i32_type(), tag_ptr, "res_tag")
+            .map_err(|e| CodegenError::JitInit(format!("load res tag: {}", e)))?
+            .into_int_value();
+        let tag64 = self
+            .builder
+            .build_int_z_extend(tag32, self.i64_ty, "res_tag64")
+            .map_err(|e| CodegenError::JitInit(format!("zext res tag: {}", e)))?;
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("lower result pair inside a fn");
+        let ok_bb = self.context.append_basic_block(cur_fn, "res_ok");
+        let err_bb = self.context.append_basic_block(cur_fn, "res_err");
+        let merge_bb = self.context.append_basic_block(cur_fn, "res_merge");
+
+        let ok_tag = self.context.i32_type().const_int(abi.ok_index as u64, false);
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag32, ok_tag, "res_is_ok")
+            .map_err(|e| CodegenError::JitInit(format!("cmp res tag: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_ok, ok_bb, err_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br res: {}", e)))?;
+
+        self.builder.position_at_end(ok_bb);
+        let ok_reg = self.materialized_payload_to_register(obj_ptr, &ok_v, abi.ok_payload)?;
+        let ok_from = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br res ok→merge: {}", e)))?;
+
+        self.builder.position_at_end(err_bb);
+        let err_reg = self.materialized_payload_to_register(obj_ptr, &err_v, abi.err_payload)?;
+        let err_from = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br res err→merge: {}", e)))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.i64_ty, "res_payload")
+            .map_err(|e| CodegenError::JitInit(format!("phi res payload: {}", e)))?;
+        phi.add_incoming(&[(&ok_reg, ok_from), (&err_reg, err_from)]);
+        let payload = phi.as_basic_value().into_int_value();
+        self.build_result_pair(tag64, payload)
+    }
+
+    /// Assemble a `{i64, i64}` aggregate from a tag and payload register.
+    fn build_result_pair(
+        &self,
+        tag: IntValue<'ctx>,
+        payload: IntValue<'ctx>,
+    ) -> Result<inkwell::values::StructValue<'ctx>, CodegenError> {
+        let pair_ty = self.result_pair_ty();
+        let agg0 = self
+            .builder
+            .build_insert_value(pair_ty.get_undef(), tag, 0, "res_pair0")
+            .map_err(|e| CodegenError::JitInit(format!("insert res tag: {}", e)))?;
+        let agg1 = self
+            .builder
+            .build_insert_value(agg0, payload, 1, "res_pair1")
+            .map_err(|e| CodegenError::JitInit(format!("insert res payload: {}", e)))?;
+        Ok(agg1.into_struct_value())
+    }
+
+    /// Materialize a dual-register Result `{i64, i64}` pair back into a
+    /// heap-allocated enum object (a `Value::Closure` pointer) — the
+    /// universal path for a dual call whose result is consumed as a
+    /// first-class value (matched later, stored, captured, wired).
+    /// Branches on the tag and allocates the matching variant, boxing a
+    /// RawScalar payload back into the materialized slot's box form.
+    fn materialize_result_pair(
+        &mut self,
+        pair: inkwell::values::StructValue<'ctx>,
+        abi: &ResultAbi,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let tag = self
+            .builder
+            .build_extract_value(pair, 0, "mres_tag")
+            .map_err(|e| CodegenError::JitInit(format!("extract mres tag: {}", e)))?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(pair, 1, "mres_payload")
+            .map_err(|e| CodegenError::JitInit(format!("extract mres payload: {}", e)))?
+            .into_int_value();
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("materialize result inside a fn");
+        let ok_bb = self.context.append_basic_block(cur_fn, "mres_ok");
+        let err_bb = self.context.append_basic_block(cur_fn, "mres_err");
+        let merge_bb = self.context.append_basic_block(cur_fn, "mres_merge");
+
+        let ok_tag = self.i64_ty.const_int(abi.ok_index as u64, false);
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, ok_tag, "mres_is_ok")
+            .map_err(|e| CodegenError::JitInit(format!("cmp mres tag: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_ok, ok_bb, err_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br mres: {}", e)))?;
+
+        self.builder.position_at_end(ok_bb);
+        let ok_ptr =
+            self.build_one_result_variant(abi.enum_ref, abi.ok_index, abi.ok_payload, payload, ctx)?;
+        let ok_from = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br mres ok→merge: {}", e)))?;
+
+        self.builder.position_at_end(err_bb);
+        let err_ptr =
+            self.build_one_result_variant(abi.enum_ref, abi.err_index, abi.err_payload, payload, ctx)?;
+        let err_from = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br mres err→merge: {}", e)))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.ptr_ty, "mres_obj")
+            .map_err(|e| CodegenError::JitInit(format!("phi mres obj: {}", e)))?;
+        phi.add_incoming(&[(&ok_ptr, ok_from), (&err_ptr, err_from)]);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
+    /// Allocate ONE materialized Result variant from a dual-ABI payload
+    /// register. RawScalar payloads going into a boxed slot are boxed
+    /// first (and that box pointer is rooted across the variant alloc).
+    fn build_one_result_variant(
+        &mut self,
+        enum_ref: Hash,
+        variant_index: u32,
+        kind: PayloadKind,
+        payload_reg: IntValue<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let einfo = self
+            .enums
+            .get(&enum_ref)
+            .cloned()
+            .ok_or(CodegenError::UnknownTopRef { hash: enum_ref })?;
+        let v = einfo.variants[variant_index as usize];
+
+        // Compute the slot value BEFORE the variant alloc, rooting any
+        // pointer that must survive the (potentially collecting) alloc.
+        enum Spilled<'c> {
+            /// Boxed/real pointer spilled to a root slot (the alloca);
+            /// reload it AFTER the variant alloc, which may have moved it.
+            Ptr(PointerValue<'c>),
+            /// Raw i64 stored directly into a non-pointer slot.
+            Raw(IntValue<'c>),
+        }
+        let spilled = match (kind, v.payload_is_pointer) {
+            (PayloadKind::RawScalar, true) => {
+                // Box the raw scalar, then root the box across the alloc.
+                let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                let boxed = self
+                    .builder
+                    .build_call(box_fn, &[ctx.thread_param.into(), payload_reg.into()], "mres_box")
+                    .map_err(|e| CodegenError::JitInit(format!("call box mres: {}", e)))?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+                let slot =
+                    self.write_root_slot(ctx.frame_alloca, ctx.info, ctx.next_root_slot, boxed)?;
+                Spilled::Ptr(slot)
+            }
+            (PayloadKind::RawScalar, false) => Spilled::Raw(payload_reg),
+            (PayloadKind::Pointer, _) => {
+                let p = self
+                    .builder
+                    .build_int_to_ptr(payload_reg, self.ptr_ty, "mres_payload_ptr")
+                    .map_err(|e| CodegenError::JitInit(format!("inttoptr mres: {}", e)))?;
+                let slot =
+                    self.write_root_slot(ctx.frame_alloca, ctx.info, ctx.next_root_slot, p)?;
+                Spilled::Ptr(slot)
+            }
+        };
+        // The spill consumed one root slot; the alloc must not reuse it.
+        let alloc_ctx = CompileCtx {
+            next_root_slot: ctx.next_root_slot + 1,
+            ..ctx
+        };
+
+        let obj_ptr = self.emit_alloc_fixed(v.ti_global, v.alloc_size, v.type_id, alloc_ctx)?;
+
+        // Store the tag.
+        let tag_off = self.i64_ty.const_int(v.tag_offset as u64, false);
+        let tag_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[tag_off], "mres_tag_ptr")
+                .map_err(|e| CodegenError::JitInit(format!("gep mres tag: {}", e)))?
+        };
+        let tag_val = self.context.i32_type().const_int(variant_index as u64, false);
+        self.builder
+            .build_store(tag_ptr, tag_val)
+            .map_err(|e| CodegenError::JitInit(format!("store mres tag: {}", e)))?;
+
+        // Store the payload. Reload the spilled pointer (alloc may have
+        // moved it).
+        if let Some(off) = v.payload_offset {
+            let off_const = self.i64_ty.const_int(off as u64, false);
+            let payload_slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[off_const], "mres_pslot")
+                    .map_err(|e| CodegenError::JitInit(format!("gep mres payload: {}", e)))?
+            };
+            match spilled {
+                Spilled::Ptr(root_slot) => {
+                    // Reload the (possibly relocated) payload pointer from
+                    // its root slot — AFTER the alloc above.
+                    let reloaded = self.read_root_slot(root_slot)?;
+                    self.builder
+                        .build_store(payload_slot, reloaded)
+                        .map_err(|e| CodegenError::JitInit(format!("store mres ptr: {}", e)))?;
+                }
+                Spilled::Raw(iv) => {
+                    self.builder
+                        .build_store(payload_slot, iv)
+                        .map_err(|e| CodegenError::JitInit(format!("store mres raw: {}", e)))?;
+                }
+            }
+        }
+        Ok(obj_ptr)
     }
 
     /// Tag a load with `!invariant.load` — the loaded location is
@@ -7647,9 +8465,20 @@ impl<'ctx> Codegen<'ctx> {
             Some(t) => t,
             None => {
                 // Every arm terminated its own block (e.g. all arms
-                // `panic`). merge_bb has no incoming values, so there is
-                // no phi to build — the block is unreachable. Return a
-                // dummy value; LLVM eliminates the dead block.
+                // `panic`, or — in a dual `-> Result` def — every arm is a
+                // zero-alloc `Ok`/`Err` leaf or a self-tail-call).
+                // merge_bb is unreachable. In TAIL position the whole match
+                // is the body's tail and every path has already returned,
+                // so terminate merge_bb (`unreachable`) — the enclosing
+                // def's terminator check then emits no return (and its dual
+                // path won't see the dummy `Int` below as a "result"). In
+                // non-tail position the value is dead but the caller keeps
+                // emitting at merge_bb.
+                if ctx.is_tail {
+                    self.builder.build_unreachable().map_err(|e| {
+                        CodegenError::JitInit(format!("unreachable match-end: {}", e))
+                    })?;
+                }
                 return Ok(Value::Int(self.i64_ty.const_zero()));
             }
         };
@@ -8294,6 +9123,11 @@ impl<'ctx> EnvSlot<'ctx> {
 #[derive(Copy, Clone)]
 struct CompileCtx<'ctx> {
     thread_param: PointerValue<'ctx>,
+    /// The enclosing def's dual-register Result ABI, when it has one.
+    /// Tail-position Ok/Err literals and tail calls to same-enum dual
+    /// defs return the (tag, payload) pair directly; `?` error paths
+    /// re-return the pair.
+    result_abi: Option<ResultAbi>,
     frame_alloca: PointerValue<'ctx>,
     info: DefInfo<'ctx>,
     next_root_slot: u32,
@@ -8344,6 +9178,42 @@ enum TailParamSlot<'ctx> {
 struct FnSigSimple {
     params: Vec<Type>,
     ret: Type,
+}
+
+/// How a Result arm's payload travels in the DUAL-REGISTER Result ABI's
+/// payload register, decided by the SIGNATURE's arm type (caller and
+/// callee both read the signature, so interpretation is symmetric).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PayloadKind {
+    /// Concrete Int/Float/Bool/Ptr: raw 8-byte bits in the register.
+    /// (The MATERIALIZED enum slot for the generic stdlib Result is a
+    /// boxed pointer, so materialize boxes and extraction unboxes.)
+    RawScalar,
+    /// Everything else (TypeRef/String/Apply/FnType/TypeVar): a heap
+    /// pointer in the register, identical to the materialized slot.
+    Pointer,
+}
+
+fn payload_kind_of(t: &Type) -> PayloadKind {
+    match t {
+        Type::Builtin(n) if n == "Int" || n == "Float" || n == "Bool" || n == "Ptr" => {
+            PayloadKind::RawScalar
+        }
+        _ => PayloadKind::Pointer,
+    }
+}
+
+/// The dual-register ABI of a def declared `-> Result<T, E>`: such defs
+/// return LLVM `{i64, i64}` = (tag = variant index, payload). `Ok(x)`
+/// in tail position is `ret (ok_idx, x)` — no enum is ever allocated;
+/// the Result only materializes where the program treats it as a value.
+#[derive(Clone, Copy, Debug)]
+pub struct ResultAbi {
+    pub enum_ref: Hash,
+    pub ok_index: u32,
+    pub err_index: u32,
+    pub ok_payload: PayloadKind,
+    pub err_payload: PayloadKind,
 }
 
 /// `max_typevar_in_types(params, ret) = 1 + max index of any TypeVar
@@ -9259,6 +10129,12 @@ pub struct IncrementalJit<'ctx> {
     /// human-readable runtime errors. Mirrors `ResolvedDef.name` for
     /// installed defs.
     next_type_id: u16,
+
+    /// Dual-register Result ABI per installed def (accumulated across
+    /// install batches). Anything that invokes an installed def by raw
+    /// fn-ptr transmute MUST consult this: a def in this map returns
+    /// `{i64, i64}` (tag, payload), not a single register.
+    def_result_abi: HashMap<Hash, ResultAbi>,
 }
 
 impl<'ctx> IncrementalJit<'ctx> {
@@ -9323,7 +10199,16 @@ impl<'ctx> IncrementalJit<'ctx> {
             installed_lambdas_set: HashSet::new(),
             installed_externs: HashMap::new(),
             next_type_id,
+            def_result_abi: cm.def_result_abi.clone(),
         })
+    }
+
+    /// The dual-register Result ABI of an installed def, if it has one.
+    /// `Some` means the def returns `{i64, i64}` (tag, payload) — calling
+    /// it through a single-register `-> i64` fn pointer misreads the tag
+    /// as the value.
+    pub fn def_result_abi(&self, h: &Hash) -> Option<ResultAbi> {
+        self.def_result_abi.get(h).copied()
     }
 
     /// Every def installed so far, in install order. The deploy layer
@@ -9829,6 +10714,11 @@ impl<'ctx> IncrementalJit<'ctx> {
             .next_type_id
             .checked_add(cm.closure_type_infos.len() as u16)
             .expect("type_id watermark overflow");
+        // Accumulate the batch's dual-register Result ABIs so raw-fn-ptr
+        // callers (deploy invoke/migrate) can detect pair-returning defs.
+        for (h, abi) in &cm.def_result_abi {
+            self.def_result_abi.insert(*h, *abi);
+        }
         for rd in new_defs {
             self.installed_defs_set.insert(rd.hash);
             self.installed_defs.push(rd);
