@@ -124,7 +124,6 @@ function killBeagleServer() {
     log("INFO", "Killing beagle server", { pid: beagProcess.pid });
     beagProcess.kill();
     beagProcess = undefined;
-    introspectReady = false;
     serverOutput = [];
   }
 }
@@ -170,14 +169,10 @@ function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_proc
         bgFile,
       };
       beagProcess = undefined;
-      introspectReady = false;
     }
   });
   return proc;
 }
-
-// Reset introspect session state (declared here, used later)
-let introspectReady = false;
 
 function waitForPort(host: string, port: number, timeoutMs = 15_000): Promise<void> {
   const start = Date.now();
@@ -830,21 +825,45 @@ const beagleLoad = tool(
 
 const INTROSPECT_SESSION = "introspect";
 
-async function ensureIntrospectSession() {
-  if (!introspectReady) {
-    await replRequest("eval", { code: "use beagle.reflect as reflect", session: INTROSPECT_SESSION });
-    introspectReady = true;
+// Every reflection / persist eval runs through the helpers below. They prefix
+// `use beagle.reflect as reflect` so the alias is (re)established in whatever
+// namespace happens to be current at compile time. REPL sessions share ONE
+// global current-namespace, so a `beagle_load` — or any `namespace X` eval in
+// any session — can otherwise strand the alias and make the very next reflect
+// call fail with "Namespace alias not found: reflect". The import and the call
+// that uses it are compiled together, so the alias is always in scope.
+const REFLECT_PRELUDE = "use beagle.reflect as reflect\n";
+
+// A failed reflection/persist eval (e.g. a drift error) throws, and the session
+// machinery turns an uncaught throw into a *resumable suspension*. Left alone,
+// each retry stacks another suspension and the introspect session's
+// suspend-depth climbs without bound (the runaway "suspend-depth: 14" seen in
+// the wild). Abort the suspension so the session returns to a clean state for
+// the next call — a reflection failure is "fix and retry", never "resume".
+async function abortIfSuspended(messages: ReplResponse[]): Promise<void> {
+  if (messages.some((m) => m.status?.includes("resumable"))) {
+    await replSend("abort", { session: INTROSPECT_SESSION });
   }
 }
 
+// Run reflection code in the introspect session with the reflect prelude, then
+// clear any suspension it left behind. Returns the raw message stream.
+async function introspectSend(code: string): Promise<ReplResponse[]> {
+  const messages = await replSend("eval", {
+    code: REFLECT_PRELUDE + code,
+    session: INTROSPECT_SESSION,
+  });
+  await abortIfSuspended(messages);
+  return messages;
+}
+
 async function introspectEval(code: string): Promise<string> {
-  await ensureIntrospectSession();
-  return replRequest("eval", { code, session: INTROSPECT_SESSION });
+  return formatReplResponse(await introspectSend(code));
 }
 
 // Thrown by introspectJson when the reflection eval raises a (resumable)
-// exception or otherwise returns no value. The introspect session's suspend
-// behavior is intentional and left untouched — we just surface the error text.
+// exception or otherwise returns no value. The suspension is already aborted by
+// introspectSend — we just surface the error text.
 class IntrospectError extends Error {}
 
 // Evaluate `code` in the introspect session wrapped in json-encode and return
@@ -852,11 +871,7 @@ class IntrospectError extends Error {}
 // vectors, so this hands the data to TypeScript intact rather than formatting
 // it inside Beagle.
 async function introspectJson<T = unknown>(code: string): Promise<T> {
-  await ensureIntrospectSession();
-  const messages = await replSend("eval", {
-    code: `json-encode(${code})`,
-    session: INTROSPECT_SESSION,
-  });
+  const messages = await introspectSend(`json-encode(${code})`);
 
   // Surface Beagle-side errors (unknown namespace, undefined reference, ...).
   const exMsg = messages.find((m) => m.ex !== undefined)?.ex;
@@ -1022,7 +1037,13 @@ const beagleSource = tool(
   { name: z.string().describe("Reference to a function, struct, or enum") },
   async (args) => {
     try {
-      const source = await introspectJson<string | null>(`reflect/source(${args.name})`);
+      // Pass the name as a STRING literal: reflect/source resolves it via
+      // resolve_by_name (which handles "ns/name" forms), so it works without
+      // the target's namespace being imported as an alias in the introspect
+      // session — more robust than evaluating it as a bare reference.
+      const source = await introspectJson<string | null>(
+        `reflect/source("${beagleStringEscape(args.name)}")`,
+      );
       return introspectResult(
         source ?? `No stored source for "${args.name}" (REPL/eval def, builtin, or FFI).`,
       );
@@ -1061,8 +1082,10 @@ const beagleLocation = tool(
   { name: z.string().describe("Reference to a function, struct, or enum") },
   async (args) => {
     try {
+      // String literal → resolved via resolve_by_name (handles "ns/name"),
+      // so no alias for the target namespace is required. See beagle_source.
       const loc = await introspectJson<Record<string, unknown> | null>(
-        `reflect/location(${args.name})`,
+        `reflect/location("${beagleStringEscape(args.name)}")`,
       );
       return introspectResult(
         loc ? JSON.stringify(loc, null, 2) : `No location for "${args.name}" (REPL/builtin/FFI).`,
@@ -1281,18 +1304,39 @@ going eval → persist with the same text compiles it twice.
 5. **Think in terms of a live program**: every persist changes both disk and memory \
    atomically. You're editing a running system, not a dead tree of files.
 
+## Update vs. append
+
+beagle_persist reports \`:action "updated"\` when the def already existed on disk (it \
+was spliced in place) and \`:action "appended"\` when it was brand-new to the file (added \
+at the end). **"appended" is NORMAL and not an error** — it just means that name had no \
+prior on-disk definition. A def you created earlier with **beagle_eval** lives only in \
+memory and has no disk origin, so its first beagle_persist will "append", not "update". \
+If you're unsure whether a def is on disk, beagle_location returns null for in-memory / \
+builtin / FFI defs.
+
 ## Drift errors
 
-If beagle_persist returns something like \
-\`reflect/write-source: file contents have changed since this definition was loaded\`, \
-the file was modified outside the runtime (another editor, git checkout, etc.) since \
-Beagle loaded that def. Do NOT retry with the same text. Instead:
+If beagle_persist fails with \
+\`reflect/persist: file ... has changed since <name> was loaded (re-load and retry)\`, the \
+file on disk no longer matches what the runtime recorded when it loaded that def. The \
+runtime tracks each def's exact byte range; a drift means the bytes there changed out \
+from under it. Common causes:
 
-1. Call **beagle_source** (or **beagle_namespace_source**) to get the current state.
-2. Re-derive your edit against the fresh source — whatever else changed might affect it.
-3. Call beagle_persist again with the updated text.
+- **You edited the source file directly** (e.g. via beagle.fs/blocking-write-file or \
+  blocking-append-file). DON'T do that for source you also persist — write source ONLY \
+  through beagle_persist so disk and the runtime's byte tracking stay in sync.
+- Another editor or a git checkout changed the file.
 
-Tell the user what drifted if it looks surprising.
+To recover: do NOT retry the same text blindly.
+
+1. Call **beagle_source** / **beagle_namespace_source** to see the current state.
+2. Re-derive your edit against the fresh source — whatever else changed may affect it.
+3. beagle_persist again with the updated text.
+
+Note: **beagle_load re-evaluates a file's text but does NOT refresh the runtime's on-disk \
+byte tracking** (it has no file context), so it will not clear a drift. A fresh \
+**beagle_run** reloads the file with file context and re-syncs tracking — use it if drift \
+persists after you've reconciled the source. Tell the user what drifted if it's surprising.
 
 ## Resumable exceptions
 
