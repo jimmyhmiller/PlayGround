@@ -249,6 +249,72 @@ def load_record(out_dir: Path, source: Path) -> CorpusRecord | None:
         return None
 
 
+def find_record_by_stem(out_dir: Path, source: Path) -> dict | None:
+    """Find a corpus record for `source` by matching its filename stem.
+
+    The corpus stores records under nested subdirs mirroring their S3 key
+    (e.g. `corpus/pdfs/philosophy-unsorted/.../X.json`), so a flat
+    `record_path` lookup misses them. We search recursively and match on the
+    record's `source_name` stem or its `stem` tail — i.e. the same filename the
+    audio pipeline was handed. Returns the raw JSON dict (not a `CorpusRecord`,
+    to tolerate schema drift), or None.
+    """
+    cdir = corpus_dir(out_dir)
+    if not cdir.exists():
+        return None
+    target = source.stem
+    # Fast path: a flat record at the conventional location.
+    flat = record_path(out_dir, source)
+    if flat.exists():
+        try:
+            return json.loads(flat.read_text())
+        except Exception:
+            pass
+    # Recursive match by stem of source_name / stem field.
+    for path in cdir.rglob("*.json"):
+        if path.name == "index.jsonl":
+            continue
+        try:
+            d = json.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        src_name = d.get("source_name") or ""
+        stem_field = d.get("stem") or ""
+        if Path(src_name).stem == target or Path(stem_field).name == target:
+            return d
+    return None
+
+
+def reconstruct_markdown_from_record(record: dict) -> str | None:
+    """Rebuild the extraction markdown from a corpus record's stored chapters.
+
+    The corpus keeps each chapter's `body` verbatim (it already contains the
+    heading markers and `<span id="page-N-0">` anchors the audio pipeline's
+    chapter splitter expects), so we just re-join them under their titles. This
+    is the bridge that lets the audio pipeline REUSE text we already extracted
+    instead of re-running the slow marker/PyMuPDF step. Returns None if the
+    record has no usable chapter bodies.
+    """
+    chapters = record.get("chapters") or []
+    parts: list[str] = []
+    for ch in chapters:
+        body = ch.get("body") or ch.get("text") or ""
+        if not body.strip():
+            continue
+        title = (ch.get("title") or "").strip()
+        # Only add a heading if the body doesn't already start with one for it,
+        # so chapter splitting (by header / by-pdf-toc) still finds boundaries.
+        if title and not body.lstrip().startswith("#"):
+            parts.append(f"# {title}\n\n{body}")
+        else:
+            parts.append(body)
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
 def is_record_fresh(out_dir: Path, source: Path, markdown: str) -> bool:
     """True if an existing record matches the current schema AND the current
     extracted content (so we can skip re-enriching unchanged documents)."""

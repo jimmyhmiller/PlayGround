@@ -40,10 +40,55 @@ def paths_for(source: Path, out_dir: Path, fmt: str) -> PipelinePaths:
     )
 
 
-def stage_extract(paths: PipelinePaths, *, skip: bool = False, max_pages: int | None = None) -> str:
+def _repo_output_dir() -> Path:
+    """The pipeline repo's `output/` dir, where the corpus lives, regardless of
+    the pipeline's -o out_dir. Allow override via $PAPER_AUDIOBOOKS_OUTPUT.
+    `pipeline.py` is at <repo>/src/paper_audiobooks/, so the repo root is three
+    parents up."""
+    import os
+    env = os.environ.get("PAPER_AUDIOBOOKS_OUTPUT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "output"
+
+
+def stage_extract(
+    paths: PipelinePaths,
+    *,
+    skip: bool = False,
+    max_pages: int | None = None,
+    corpus_out_dir: Path | None = None,
+    use_corpus: bool = True,
+) -> str:
     if skip and paths.md.exists():
         click.echo(f"[extract] reusing {paths.md}")
         return paths.md.read_text()
+
+    # Corpus reuse: if we already extracted this document's full text into the
+    # corpus (the search/index store), rebuild the .md from it instead of
+    # re-running the slow extractor. Only when not page-limited (the corpus is
+    # always the full document). Falls through to fresh extraction on any miss.
+    #
+    # The corpus is keyed to the REPO's output dir, which is NOT necessarily the
+    # pipeline's -o out_dir (e.g. the watcher writes m4b to ~/audiobooks/m4b).
+    # So default the lookup to the repo output dir, not paths.md.parent.
+    if use_corpus and max_pages is None:
+        from . import corpus as corpus_mod
+        cdir = corpus_out_dir if corpus_out_dir is not None else _repo_output_dir()
+        record = corpus_mod.find_record_by_stem(cdir, paths.source)
+        if record is not None:
+            md = corpus_mod.reconstruct_markdown_from_record(record)
+            if md:
+                title = record.get("title") or paths.source.stem
+                click.echo(
+                    f"[extract] reusing corpus extraction for {title!r} "
+                    f"({len(md)} chars, {record.get('n_chapters')} chapters) "
+                    f"-> {paths.md}"
+                )
+                paths.md.parent.mkdir(parents=True, exist_ok=True)
+                paths.md.write_text(md)
+                return md
+
     click.echo(f"[extract] {paths.source} -> {paths.md}"
                + (f" (first {max_pages} pages)" if max_pages else ""))
     page_range = list(range(max_pages)) if max_pages else None
