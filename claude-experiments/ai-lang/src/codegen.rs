@@ -160,7 +160,7 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// it compiles against (Thread layout, runtime fn signatures, builtin
 /// lowering). Salted into [`module_hash`] so stale cached bitcode from an
 /// older compiler can never be loaded against a newer runtime.
-const CODEGEN_CACHE_VERSION: u64 = 18;
+const CODEGEN_CACHE_VERSION: u64 = 19;
 
 /// Deterministic hash of a set of def hashes (order-independent),
 /// salted with [`CODEGEN_CACHE_VERSION`].
@@ -7896,18 +7896,28 @@ impl<'ctx> Codegen<'ctx> {
         Ok(phi.as_basic_value().into_int_value())
     }
 
-    /// Emit the INLINE unboxed-array fast path for a scalar-element
+    /// Emit the INLINE array access for a scalar-element
     /// `array_get`/`array_set`: null-check, shape check against the
     /// PrimArray type_id (two dependent loads off the thread, both
     /// cache-hot), unsigned bounds check, then a raw 8-byte load/store.
-    /// Everything else — boxed arrays, out-of-bounds (which aborts with
-    /// a message), null — falls to the out-of-line runtime call, which
-    /// re-derives all of it. Turns the ~5ns call per hot array access
-    /// into a couple of predictable branches + one memory op.
+    ///
+    /// Path discipline (this is what makes hot fns compile like Rust's):
+    /// every edge that can only ABORT (null array, out-of-bounds, type
+    /// confusion, uninitialized boxed slot) ends in `call runtime;
+    /// unreachable` — the runtime provably aborts for those inputs, so
+    /// no values live across the call and nothing merges back. A GET on
+    /// a runtime-BOXED array (a scalar-typed site can meet one when the
+    /// array was created by generic code) is read INLINE too: tid
+    /// defense against the boxed-Array type_id, slot-count bounds, slot
+    /// load, BoxedInt unbox — still no returning call. The ONLY
+    /// returning call left is a SET on a boxed array (it must box the
+    /// value, which allocates). Result: on get-only stretches the
+    /// register allocator sees a call-free CFG (no callee-saved
+    /// spill-fest in the prologue) and `memory(read)`-friendly merges,
+    /// so consecutive accesses CSE.
     ///
     /// `store` = None → get (returns the loaded value); Some(v) → set
-    /// (returns the runtime's 0). The slow call's result is merged via a
-    /// phi either way.
+    /// (returns 0; the boxed slow call's 0 merges via the phi).
     fn emit_array_scalar_fastpath(
         &mut self,
         a: PointerValue<'ctx>,
@@ -7931,16 +7941,18 @@ impl<'ctx> Codegen<'ctx> {
         let tid_bb = self.context.append_basic_block(cur_fn, "arr_tid");
         let bounds_bb = self.context.append_basic_block(cur_fn, "arr_bounds");
         let fast_bb = self.context.append_basic_block(cur_fn, "arr_fast");
-        let slow_bb = self.context.append_basic_block(cur_fn, "arr_slow");
+        let boxed_bb = self.context.append_basic_block(cur_fn, "arr_boxed");
+        let boxed_op_bb = self.context.append_basic_block(cur_fn, "arr_boxed_op");
+        let abort_bb = self.context.append_basic_block(cur_fn, "arr_abort");
         let merge_bb = self.context.append_basic_block(cur_fn, "arr_merge");
 
-        // null → slow (the runtime aborts with the proper message).
+        // null → abort (the runtime reports len 0 → out-of-bounds).
         let nonnull = self
             .builder
             .build_is_not_null(a, "arr_nonnull")
             .map_err(|e| j(format!("arr nonnull: {}", e)))?;
         self.builder
-            .build_conditional_branch(nonnull, tid_bb, slow_bb)
+            .build_conditional_branch(nonnull, tid_bb, abort_bb)
             .map_err(|e| j(format!("br arr nonnull: {}", e)))?;
 
         // Shape check: header type_id == (*thread.prim_array_ti).type_id.
@@ -7992,13 +8004,11 @@ impl<'ctx> Codegen<'ctx> {
             .builder
             .build_int_compare(IntPredicate::EQ, tid, prim_tid, "arr_is_prim")
             .map_err(|e| j(format!("icmp arr prim: {}", e)))?;
-        self.builder
-            .build_conditional_branch(is_prim, bounds_bb, slow_bb)
-            .map_err(|e| j(format!("br arr prim: {}", e)))?;
-
-        // Bounds: unsigned i < (count_bytes >> 3). Negative i wraps to a
-        // huge unsigned and fails into the slow path's abort.
-        self.builder.position_at_end(bounds_bb);
+        // Count word + slot offset, computed HERE so they dominate both
+        // the prim and the boxed paths. (Loading the count before the
+        // shape is confirmed matches the old len-protocol: any non-null
+        // heap object has mapped memory at +header; the value is only
+        // USED after the tid checks pass.)
         let count_ptr = unsafe {
             self.builder
                 .build_in_bounds_gep(
@@ -8024,16 +8034,6 @@ impl<'ctx> Codegen<'ctx> {
                 "arr_len",
             )
             .map_err(|e| j(format!("lshr arr len: {}", e)))?;
-        let in_bounds = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, i, len, "arr_in_bounds")
-            .map_err(|e| j(format!("icmp arr bounds: {}", e)))?;
-        self.builder
-            .build_conditional_branch(in_bounds, fast_bb, slow_bb)
-            .map_err(|e| j(format!("br arr bounds: {}", e)))?;
-
-        // Fast: raw 8-byte slot at header + 8 (count word) + i*8.
-        self.builder.position_at_end(fast_bb);
         let scaled = self
             .builder
             .build_int_mul(i, self.i64_ty.const_int(8, false), "arr_i8")
@@ -8046,6 +8046,23 @@ impl<'ctx> Codegen<'ctx> {
                 "arr_off",
             )
             .map_err(|e| j(format!("add arr off: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_prim, bounds_bb, boxed_bb)
+            .map_err(|e| j(format!("br arr prim: {}", e)))?;
+
+        // Bounds: unsigned i < (count_bytes >> 3). Negative i wraps to a
+        // huge unsigned and fails into the abort path.
+        self.builder.position_at_end(bounds_bb);
+        let in_bounds = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, i, len, "arr_in_bounds")
+            .map_err(|e| j(format!("icmp arr bounds: {}", e)))?;
+        self.builder
+            .build_conditional_branch(in_bounds, fast_bb, abort_bb)
+            .map_err(|e| j(format!("br arr bounds: {}", e)))?;
+
+        // Fast: raw 8-byte slot at header + 8 (count word) + i*8.
+        self.builder.position_at_end(fast_bb);
         let slot = unsafe {
             self.builder
                 .build_in_bounds_gep(i8_ty, a, &[base_off], "arr_slot")
@@ -8069,9 +8086,144 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| j(format!("br arr fast→merge: {}", e)))?;
         let fast_end = self.builder.get_insert_block().unwrap();
 
-        // Slow: the runtime fn (boxed arrays; aborts on bounds/null).
-        self.builder.position_at_end(slow_bb);
-        let slow_val = match store {
+        // Boxed array reached through a scalar-typed site (created by
+        // generic code). Type-confusion defense first: the header tid
+        // must be the boxed-Array type_id, else only the runtime's abort
+        // message is right. Then a slot-count bounds check (the boxed
+        // count word IS the slot count — no shift).
+        self.builder.position_at_end(boxed_bb);
+        let arr_ti_slot = self.thread_field(
+            ctx.thread_param,
+            thread_offsets::ARRAY_TI,
+            "boxed_ti_slot",
+        )?;
+        let arr_ti_load = self
+            .builder
+            .build_load(self.ptr_ty, arr_ti_slot, "boxed_ti")
+            .map_err(|e| j(format!("load boxed_ti: {}", e)))?;
+        self.mark_invariant_load(arr_ti_load);
+        let arr_ti = arr_ti_load.into_pointer_value();
+        let arr_ti_nonnull = self
+            .builder
+            .build_is_not_null(arr_ti, "boxed_ti_nonnull")
+            .map_err(|e| j(format!("boxed ti nonnull: {}", e)))?;
+        let boxed_tid_bb = self.context.append_basic_block(cur_fn, "arr_boxed_tid");
+        self.builder
+            .build_conditional_branch(arr_ti_nonnull, boxed_tid_bb, abort_bb)
+            .map_err(|e| j(format!("br boxed ti nonnull: {}", e)))?;
+
+        self.builder.position_at_end(boxed_tid_bb);
+        let boxed_tid_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    i8_ty,
+                    arr_ti,
+                    &[self.i64_ty.const_int(ti_tid_off, false)],
+                    "boxed_tid_ptr",
+                )
+                .map_err(|e| j(format!("gep boxed tid: {}", e)))?
+        };
+        let boxed_tid_load = self
+            .builder
+            .build_load(i16_ty, boxed_tid_ptr, "boxed_tid")
+            .map_err(|e| j(format!("load boxed tid: {}", e)))?;
+        self.mark_invariant_load(boxed_tid_load);
+        let boxed_tid = boxed_tid_load.into_int_value();
+        let is_boxed_arr = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tid, boxed_tid, "arr_is_boxed")
+            .map_err(|e| j(format!("icmp arr boxed: {}", e)))?;
+        let boxed_bounds_bb =
+            self.context.append_basic_block(cur_fn, "arr_boxed_bounds");
+        self.builder
+            .build_conditional_branch(is_boxed_arr, boxed_bounds_bb, abort_bb)
+            .map_err(|e| j(format!("br arr boxed: {}", e)))?;
+
+        self.builder.position_at_end(boxed_bounds_bb);
+        let boxed_in_bounds = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, i, count, "boxed_in_bounds")
+            .map_err(|e| j(format!("icmp boxed bounds: {}", e)))?;
+        self.builder
+            .build_conditional_branch(boxed_in_bounds, boxed_op_bb, abort_bb)
+            .map_err(|e| j(format!("br boxed bounds: {}", e)))?;
+
+        // Boxed op. GET: load the slot pointer and unbox it inline (null
+        // slot = uninitialized read → abort edge; expansion callers have
+        // already screened it via is_init). SET: the runtime call (it
+        // must allocate a BoxedInt — the one returning call left).
+        self.builder.position_at_end(boxed_op_bb);
+        let boxed_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(i8_ty, a, &[base_off], "boxed_slot")
+                .map_err(|e| j(format!("gep boxed slot: {}", e)))?
+        };
+        let (boxed_val, boxed_end) = match store {
+            None => {
+                let slot_ptr = self
+                    .builder
+                    .build_load(self.ptr_ty, boxed_slot, "boxed_slot_ptr")
+                    .map_err(|e| j(format!("load boxed slot: {}", e)))?
+                    .into_pointer_value();
+                let slot_nonnull = self
+                    .builder
+                    .build_is_not_null(slot_ptr, "boxed_slot_nonnull")
+                    .map_err(|e| j(format!("boxed slot nonnull: {}", e)))?;
+                let unbox_bb =
+                    self.context.append_basic_block(cur_fn, "arr_boxed_unbox");
+                self.builder
+                    .build_conditional_branch(slot_nonnull, unbox_bb, abort_bb)
+                    .map_err(|e| j(format!("br boxed slot nonnull: {}", e)))?;
+                self.builder.position_at_end(unbox_bb);
+                let val_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            slot_ptr,
+                            &[self.i64_ty.const_int(header_size, false)],
+                            "boxed_val_ptr",
+                        )
+                        .map_err(|e| j(format!("gep boxed val: {}", e)))?
+                };
+                let v = self
+                    .builder
+                    .build_load(self.i64_ty, val_ptr, "boxed_val")
+                    .map_err(|e| j(format!("load boxed val: {}", e)))?
+                    .into_int_value();
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| j(format!("br boxed unbox→merge: {}", e)))?;
+                (v, self.builder.get_insert_block().unwrap())
+            }
+            Some(v) => {
+                let fv = self
+                    .extern_array_set_i64
+                    .expect("ai_array_set_i64 declared");
+                let r = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), a.into(), i.into(), v.into()],
+                        "boxed_slow_set",
+                    )
+                    .map_err(|e| j(format!("call ai_array_set_i64: {}", e)))?
+                    .as_any_value_enum()
+                    .into_int_value();
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| j(format!("br boxed set→merge: {}", e)))?;
+                (r, self.builder.get_insert_block().unwrap())
+            }
+        };
+
+        // Abort: every edge in here is a PROVEN abort in the runtime fn
+        // (null → len 0 → OOB; prim/boxed OOB; non-array type confusion;
+        // null boxed slot = uninitialized read). The call re-derives the
+        // failure and dies with the precise message; `unreachable` tells
+        // LLVM nothing lives past this point, so these edges impose no
+        // register pressure on the happy path.
+        self.builder.position_at_end(abort_bb);
+        match store {
             None => {
                 let fv = self
                     .extern_array_get_i64
@@ -8080,11 +8232,9 @@ impl<'ctx> Codegen<'ctx> {
                     .build_call(
                         fv,
                         &[ctx.thread_param.into(), a.into(), i.into()],
-                        "arr_slow_get",
+                        "arr_abort_get",
                     )
-                    .map_err(|e| j(format!("call ai_array_get_i64: {}", e)))?
-                    .as_any_value_enum()
-                    .into_int_value()
+                    .map_err(|e| j(format!("call ai_array_get_i64: {}", e)))?;
             }
             Some(v) => {
                 let fv = self
@@ -8094,24 +8244,21 @@ impl<'ctx> Codegen<'ctx> {
                     .build_call(
                         fv,
                         &[ctx.thread_param.into(), a.into(), i.into(), v.into()],
-                        "arr_slow_set",
+                        "arr_abort_set",
                     )
-                    .map_err(|e| j(format!("call ai_array_set_i64: {}", e)))?
-                    .as_any_value_enum()
-                    .into_int_value()
+                    .map_err(|e| j(format!("call ai_array_set_i64: {}", e)))?;
             }
-        };
+        }
         self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| j(format!("br arr slow→merge: {}", e)))?;
-        let slow_end = self.builder.get_insert_block().unwrap();
+            .build_unreachable()
+            .map_err(|e| j(format!("unreachable arr abort: {}", e)))?;
 
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
             .build_phi(self.i64_ty, "arr_result")
             .map_err(|e| j(format!("phi arr: {}", e)))?;
-        phi.add_incoming(&[(&fast_val, fast_end), (&slow_val, slow_end)]);
+        phi.add_incoming(&[(&fast_val, fast_end), (&boxed_val, boxed_end)]);
         Ok(phi.as_basic_value().into_int_value())
     }
 
