@@ -30,7 +30,7 @@ use datalog_client::{Client, QueryResult};
 use gatekeeper_fn::{describe, handler, Description, Endpoint, Param, Request, Response};
 use serde_json::{json, Value};
 
-/// Self-description for the gate's `/_gatekeeper/describe` catalog: every
+/// Self-description for the gate's `/describe` catalog: every
 /// endpoint, its query params, an example, and the returned shape. Paths here are
 /// relative to whatever route prefix the gate mounts this function under (e.g.
 /// `/analytics`), so `/summary` is reachable at `/analytics/summary`.

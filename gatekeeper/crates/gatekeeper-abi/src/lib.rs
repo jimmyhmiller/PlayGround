@@ -35,7 +35,7 @@ use std::os::raw::c_char;
 ///
 /// v2: added the REQUIRED [`GK_DESCRIBE_SYMBOL`] (self-description). Every
 /// function must export it (the SDK's `#[describe]` does so) — the gate refuses
-/// to load a dylib without it, so the `/_gatekeeper/describe` catalog is complete
+/// to load a dylib without it, so the `/describe` catalog is complete
 /// by construction and no function can be silently undocumented.
 pub const GK_ABI_VERSION: u32 = 2;
 
@@ -50,7 +50,7 @@ pub const GK_FREE_SYMBOL: &[u8] = b"gk_free";
 ///
 /// The gate calls it to learn what the function does — its endpoints, their query
 /// params, and examples — and aggregates that into the built-in
-/// `/_gatekeeper/describe` catalog. The returned [`GkResponse`] is owned by the
+/// `/describe` catalog. The returned [`GkResponse`] is owned by the
 /// function (freed via [`GK_FREE_SYMBOL`], exactly like a handler response); its
 /// body is UTF-8 JSON. Every function MUST export this (the SDK's `#[describe]`
 /// emits it); a dylib lacking it fails to load. The JSON body SHOULD be an object

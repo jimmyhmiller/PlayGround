@@ -160,19 +160,19 @@ has a private route but no token is available, the reload is *refused* and the
 gate keeps serving the previous config — a botched edit can neither take the gate
 down nor accidentally drop auth.
 
-### Self-describing API: `/_gatekeeper/describe`
+### Self-describing API: `/describe`
 
 The gate serves a built-in, **private** (token-required) meta route that returns a
 JSON catalog of every route and — for function routes — each function's own
 description of its endpoints:
 
 ```sh
-curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://host/_gatekeeper/describe
+curl -H "Authorization: Bearer $GATEKEEPER_TOKEN" https://host/describe
 ```
 
 ```json
 {
-  "gatekeeper": { "describe_path": "/_gatekeeper/describe", "abi_version": 2 },
+  "gatekeeper": { "describe_path": "/describe", "abi_version": 2 },
   "routes": [
     { "path": "/analytics", "access": "private", "kind": "function",
       "description": {

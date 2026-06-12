@@ -148,7 +148,7 @@ impl FunctionRegistry {
     /// Ask the function dylib at `lib_path` to describe itself (ABI v2). Loads it
     /// if needed. Returns the description JSON, or `Err` if the dylib can't be
     /// loaded (which now includes a missing `gk_describe` — it is required).
-    /// Used to build the `/_gatekeeper/describe` catalog.
+    /// Used to build the `/describe` catalog.
     pub fn describe(&self, lib_path: &std::path::Path) -> Result<String, String> {
         let func = self.get_or_load(lib_path)?;
         // SAFETY: func.describe is a valid fn pointer from the loaded library; the
@@ -316,7 +316,7 @@ fn load_library(lib_path: &std::path::Path) -> Result<LoadedFn, String> {
         }
 
         // gk_describe is REQUIRED (ABI v2): every function must describe itself so
-        // the /_gatekeeper/describe catalog is complete by construction — no
+        // the /describe catalog is complete by construction — no
         // function can be silently undocumented. A dylib lacking it fails to load,
         // exactly like one lacking gk_handle. Use `#[describe]` in the SDK.
         let describe: DescribeFn = unsafe {

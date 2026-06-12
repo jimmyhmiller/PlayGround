@@ -23,7 +23,7 @@ fn app(req: Request) -> Response {
     }
 }
 
-/// Self-description (optional) — shows up in `/_gatekeeper/describe`.
+/// Self-description (optional) — shows up in `/describe`.
 #[describe]
 fn describe() -> Description {
     Description::new("hello", "Example gatekeeper function")

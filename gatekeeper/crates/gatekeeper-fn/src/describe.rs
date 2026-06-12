@@ -1,5 +1,5 @@
 //! Self-description for a gatekeeper function: declare your endpoints, their
-//! query params, and examples, so the gate's `/_gatekeeper/describe` catalog can
+//! query params, and examples, so the gate's `/describe` catalog can
 //! show callers what your function does.
 //!
 //! You build a [`Description`] in a `#[describe]`-annotated function; the macro

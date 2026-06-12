@@ -21,9 +21,8 @@ use gatekeeper::schedule::Scheduler;
 use gatekeeper::serve;
 
 /// Reserved built-in meta route: a JSON catalog of every route and each
-/// function's self-description. Private (token required). Lives under a
-/// `/_gatekeeper/` namespace so it can't collide with a real service route.
-const DESCRIBE_PATH: &str = "/_gatekeeper/describe";
+/// function's self-description. Private (token required).
+const DESCRIBE_PATH: &str = "/describe";
 
 struct Args {
     config: PathBuf,
@@ -351,7 +350,7 @@ fn handle(gate: &Gate, mut request: tiny_http::Request) {
     // Built-in meta route: a self-describing API catalog. Reserved path, always
     // available, and PRIVATE — it requires the same token as any private route,
     // because it enumerates every route (including private ones) and their
-    // functions' endpoints. Normalize first so `/_gatekeeper/describe/` etc. and
+    // functions' endpoints. Normalize first so `/describe/` etc. and
     // any encoding match the same way the router would.
     if let Some(norm) = Router::normalize(path) {
         if norm == DESCRIBE_PATH {
@@ -479,7 +478,7 @@ fn target_desc(r: &config::Route) -> String {
     }
 }
 
-/// Build the `/_gatekeeper/describe` catalog: a JSON object listing every route
+/// Build the `/describe` catalog: a JSON object listing every route
 /// (path, access, target) and, for function routes, the function's own
 /// self-description (endpoints/params/examples) fetched via `gk_describe`.
 ///
