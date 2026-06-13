@@ -1517,7 +1517,28 @@ impl Heap {
         let size = info.allocation_size(varlen_len);
 
         let new = self.to_space().alloc(info, varlen_len);
-        assert!(!new.is_null(), "to-space exhausted during collection");
+        if new.is_null() {
+            eprintln!(
+                "[dynalloc] copy_or_forward failure backtrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        assert!(
+            !new.is_null(),
+            "to-space exhausted during collection: copying old={:p} type_id={} varlen_len={} \
+             size={} bytes; to-space used {}/{} bytes, from-space used {}/{} bytes (base {:p}), \
+             collection #{}",
+            old,
+            type_id,
+            varlen_len,
+            size,
+            self.to_space().used(),
+            self.to_space().size(),
+            self.from_space().used(),
+            self.from_space().size(),
+            self.from_space().base(),
+            self.collections.load(Ordering::Relaxed),
+        );
 
         unsafe {
             core::ptr::copy_nonoverlapping(old, new, size);

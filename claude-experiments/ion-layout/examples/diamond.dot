@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=TB]
+  node [
+    shape=box
+    style=rounded
+    fontname="Menlo"
+    fontsize=16
+    margin="0.18,0.12"
+  ]
+
+  A [label="Block 0\n\nv1 = Parameter(0)\nv2 = Parameter(1)\nGotoIf v1 ? B1 : B2"]
+  B [label="Block 1\n\nv3 = Add(v1, v2)\nv4 = Mul(v3, 2)\nv5 = Int32ToDouble(v4)\nGoto B3"]
+  C [label="Block 2\n\nv6 = Sub(v2, v1)\nv7 = Mul(v6, 3)\nv8 = Int32ToDouble(v7)\nGoto B3"]
+  D [label="Block 3\n\nv9 = Phi(v5, v8)\nReturn v9"]
+
+  A -> B
+  A -> C
+  B -> D
+  C -> D
+}

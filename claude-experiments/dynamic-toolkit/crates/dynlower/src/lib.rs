@@ -301,6 +301,15 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
                         let slot = unsafe {
                             (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
                         };
+                        if trace_walk {
+                            eprintln!(
+                                "[walk-anc-slot] frame_fp={:p} ret_off={:#x} slot_off={} bits={:#x}",
+                                saved_fp,
+                                return_offset,
+                                slot_offset,
+                                unsafe { *slot },
+                            );
+                        }
                         visitor(slot);
                     }
                 }

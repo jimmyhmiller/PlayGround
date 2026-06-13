@@ -52,7 +52,7 @@ use crate::codebase::{Codebase, CodebaseError};
 use crate::codec::{decode_def, encode_def};
 use crate::depindex::DependencyIndex;
 use crate::hash::Hash;
-use crate::resolve::{parse_at_builtin_name, AT_BUILTIN_PREFIX};
+use crate::resolve::parse_at_builtin_name;
 use crate::typecheck::{decode_scheme, encode_scheme, TypeScheme};
 
 use std::collections::BTreeSet;
@@ -264,11 +264,11 @@ fn collect_expr_refs(e: &Expr, acc: &mut BTreeSet<Hash>) {
             acc.insert(*h);
         }
         Expr::BuiltinRef(name) => {
-            // `core/net.at#<hex>` (optionally `#<hex>#<hex>`) embeds the
-            // Result type hash(es). Those name stored type defs, so they ARE
-            // reference targets. A prefix match with malformed hex is a hard
-            // error (mirrors `depindex`).
-            if name.starts_with(AT_BUILTIN_PREFIX) {
+            // `core/net.at#<hex>` / `core/net.at_async#<hex>` (optionally
+            // `#<hex>#<hex>`) embed the Result type hash(es). Those name
+            // stored type defs, so they ARE reference targets. A prefix
+            // match with malformed hex is a hard error (mirrors `depindex`).
+            if crate::resolve::is_at_family_builtin(name) {
                 match parse_at_builtin_name(name) {
                     Some((primary, secondary)) => {
                         acc.insert(primary);

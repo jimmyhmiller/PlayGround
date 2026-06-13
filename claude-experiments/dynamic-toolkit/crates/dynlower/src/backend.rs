@@ -398,6 +398,35 @@ impl Arm64Backend {
         buf.emit(Arm64Inst::sub_imm(SP, SP, 0)); // placeholder for low bits
         buf.emit(Arm64Inst::stp(X29, X30, SP, 0, StpMode::SignedOffset));
         buf.emit(Arm64Inst::mov(X29, SP));
+        // Zero the frame's locals region [FP+16, FP+frame_size) — every
+        // spill slot and stack slot. REQUIRED FOR GC SOUNDNESS: safepoint
+        // records over-approximate (emission-order liveness +
+        // `record_materialized_gc_spill_slots` keeps every ever-written
+        // GC-capable slot recorded), so a recorded slot whose defining
+        // store sits on a branch the execution didn't take would otherwise
+        // hold leftover stack junk. If that junk bit-patterns like a
+        // NaN-boxed heap pointer, a moving collection chases it and reads
+        // garbage ("to-space exhausted", type_id corruption). Zeroed slots
+        // decode as non-pointers and are skipped by the root walk.
+        //
+        // The byte count is unknown until lowering finishes, so emit a
+        // fixed-shape loop with a movz/movk placeholder patched by
+        // `emit_frame_size_patch` (count = frame_size - 16, always a
+        // multiple of 16). X16/X17 are scratch (never argument or
+        // allocatable registers at function entry).
+        buf.emit(Arm64Inst::movz(X16, 0, 0)); // patched: zero_bytes[15:0]
+        buf.emit(Arm64Inst::movk(X16, 0, 16)); // patched: zero_bytes[31:16]
+        buf.emit(Arm64Inst::add_imm(X17, X29, 16));
+        buf.emit(Arm64Inst::cbz(X16, 4)); // empty locals region: skip loop
+        buf.emit(Arm64Inst::stp(XZR, XZR, X17, 16, StpMode::PostIndex));
+        buf.emit(Arm64Inst::SubsImm {
+            sf: 1,
+            sh: 0,
+            imm12: 16,
+            rn: X16,
+            rd: X16,
+        });
+        buf.emit(Arm64Inst::cbnz(X16, -2)); // back to the stp
         patch_offset
     }
 
@@ -443,6 +472,16 @@ impl Arm64Backend {
         };
         buf.patch_bytes(prologue_offset, &sub_hi.encode().to_le_bytes());
         buf.patch_bytes(prologue_offset + 4, &sub_lo.encode().to_le_bytes());
+
+        // Patch the locals-zeroing loop count (see emit_prologue). The
+        // movz/movk pair sits 2 instructions after the frame-size subs
+        // (stp X29,X30 + mov X29,SP are between). Count = everything above
+        // the FP/LR pair; frame_size is 16-aligned so this is too.
+        let zero_bytes = (frame_size - 16).max(0) as u32;
+        let movz = Arm64Inst::movz(X16, (zero_bytes & 0xFFFF) as u16, 0);
+        let movk = Arm64Inst::movk(X16, (zero_bytes >> 16) as u16, 16);
+        buf.patch_bytes(prologue_offset + 16, &movz.encode().to_le_bytes());
+        buf.patch_bytes(prologue_offset + 20, &movk.encode().to_le_bytes());
 
         // Epilogue: add SP, SP, #hi, LSL #12 ; add SP, SP, #lo
         let add_hi = Arm64Inst::AddImm {
@@ -1503,6 +1542,11 @@ impl LoweringBackend for X64Backend {
             offset: 48,
         });
         let patch = buf.emit(X64Inst::SubRI { dest: RSP, imm: 24 });
+        // Zero-loop count placeholder, patched by `emit_frame_size_patch`.
+        // MUST immediately follow the SubRI so the patch site is at
+        // `prologue_offset + len(SubRI)`. See the Arm64 prologue for why
+        // zeroing the locals region is required for GC soundness.
+        buf.emit(X64Inst::MovRI32 { dest: R11, imm: 0 });
         buf.emit(X64Inst::MovRR {
             dest: RBP,
             src: RSP,
@@ -1527,6 +1571,37 @@ impl LoweringBackend for X64Backend {
             offset: 8,
             src: R10,
         });
+        // Zero the locals region [RBP+16, RBP+16+R11). R10/R11/RAX are
+        // scratch at function entry (args arrive in RDI/RSI/RDX/RCX/R8/R9
+        // and on the stack).
+        buf.emit(X64Inst::Lea {
+            dest: R10,
+            base: RBP,
+            offset: 16,
+        });
+        buf.emit(X64Inst::MovRI32 { dest: RAX, imm: 0 });
+        buf.emit(X64Inst::TestRR { a: R11, b: R11 });
+        let skip = buf.create_label();
+        let jz = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::E,
+        });
+        buf.add_reloc(jz + 2, skip, X64RelocKind::Rel32);
+        let loop_top = buf.create_label();
+        buf.bind_label(loop_top);
+        buf.emit(X64Inst::MovMR {
+            base: R10,
+            offset: 0,
+            src: RAX,
+        });
+        buf.emit(X64Inst::AddRI { dest: R10, imm: 8 });
+        buf.emit(X64Inst::SubRI { dest: R11, imm: 8 });
+        let jnz = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::NE,
+        });
+        buf.add_reloc(jnz + 2, loop_top, X64RelocKind::Rel32);
+        buf.bind_label(skip);
         patch
     }
 
@@ -1558,7 +1633,17 @@ impl LoweringBackend for X64Backend {
             imm: aligned_frame_size,
         }
         .encode();
+        let sub_len = sub.len();
         buf.patch_bytes(prologue_offset, &sub);
+        // Patch the locals-zeroing loop count (the MovRI32 immediately
+        // after the SubRI — see emit_prologue).
+        let zero_bytes = (frame_size - 16).max(0);
+        let zero_mov = X64Inst::MovRI32 {
+            dest: R11,
+            imm: zero_bytes,
+        }
+        .encode();
+        buf.patch_bytes(prologue_offset + sub_len, &zero_mov);
         let add = X64Inst::AddRI {
             dest: RSP,
             imm: aligned_frame_size,

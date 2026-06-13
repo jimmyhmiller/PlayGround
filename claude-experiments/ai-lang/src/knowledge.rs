@@ -569,7 +569,7 @@ fn expr_is_non_cacheable(e: &Expr, set: &HashSet<Hash>) -> bool {
         Expr::TopRef(h) => set.contains(h),
         Expr::BuiltinRef(name) => {
             let c = crate::effects::builtin_effect_sig(name).concrete;
-            !c.without(EffectSet::MUT.union(EffectSet::PANIC)).is_empty()
+            !c.without(EffectSet::MUT).is_empty()
         }
         _ => {
             let mut found = false;

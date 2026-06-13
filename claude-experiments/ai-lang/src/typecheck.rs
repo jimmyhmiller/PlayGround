@@ -202,6 +202,10 @@ impl TypeCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeError {
+    /// A type error wrapped with the NAME of the definition it occurred
+    /// in — attached by `typecheck_module` so a failure in a 400-def
+    /// module says where to look.
+    InDef { name: String, err: Box<TypeError> },
     /// A `TopRef(h)` references a hash that hasn't been typed yet.
     UnknownTopRef(Hash),
     /// A struct hash referenced by `StructNew`/`Field` isn't a struct in cache.
@@ -320,6 +324,9 @@ impl core::fmt::Display for TypeError {
                 "variant index {} out of range (enum {} has {} variants)",
                 index, enum_ref, variant_count
             ),
+            TypeError::InDef { name, err } => {
+                write!(f, "in `{}`: {}", name, err)
+            }
             TypeError::MatchArmsDisagree { first, found } => write!(
                 f,
                 "match arms produced different types: first arm {:?}, later arm {:?}",
@@ -600,6 +607,7 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         | "core/i64.eq"
         | "core/i64.ne"
         | "core/i64.lt"
+        | "core/i64.ult"
         | "core/i64.le"
         | "core/i64.gt"
         | "core/i64.ge" => Some((vec![int_t(), int_t()], int_t())),
@@ -616,10 +624,7 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // its result type is the bottom type `Never`, which is compatible
         // with every expected type (it can appear in any match arm / if
         // branch / function body).
-        "core/panic" => Some((
-            vec![Type::Builtin("String".to_owned())],
-            Type::Builtin("Never".to_owned()),
-        )),
+
 
         // String ops. Strings are pointer-typed (TypeRef-like) heap
         // values; we represent the type as Type::Builtin("String").
@@ -717,15 +722,29 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![int_t()],
             array_t(Type::TypeVar(0)),
         )),
+        // Unboxed variant: emitted by the resolver only where the context
+        // pins T to a scalar (Int/Float/Bool); same generic signature, the
+        // surrounding unification supplies the concrete T.
+        "core/array.new_prim" => Some((
+            vec![int_t()],
+            array_t(Type::TypeVar(0)),
+        )),
         "core/array.len" => Some((
             vec![array_t(Type::TypeVar(0))],
             int_t(),
         )),
-        "core/array.get" => Some((
+        // Internal (expansion-emitted only): 1 if slot `i` holds a value —
+        // prim arrays always do (zero-filled); boxed arrays iff non-null.
+        // The checked-get expansion pre-checks bounds.
+        "core/array.is_init" => Some((
+            vec![array_t(Type::TypeVar(0)), int_t()],
+            int_t(),
+        )),
+        "core/array.get" | "core/array.get_scalar" => Some((
             vec![array_t(Type::TypeVar(0)), int_t()],
             Type::TypeVar(0),
         )),
-        "core/array.set" => Some((
+        "core/array.set" | "core/array.set_scalar" => Some((
             vec![array_t(Type::TypeVar(0)), int_t(), Type::TypeVar(0)],
             int_t(),
         )),
@@ -776,6 +795,8 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // Int <-> Float conversions.
         "core/f64.of_int" => Some((vec![int_t()], float_t())),
         "core/f64.to_int" => Some((vec![float_t()], int_t())),
+        // Float square root (LLVM llvm.sqrt.f64 intrinsic).
+        "core/f64.sqrt" => Some((vec![float_t()], float_t())),
 
         // Raw-pointer / memory intrinsics. `Ptr` is an i64-represented
         // raw address (non-GC). Built on by the C FFI: allocate with
@@ -1194,6 +1215,66 @@ fn unify(
 /// The bottom type for diverging expressions (e.g. `panic`). Represented
 /// as `Builtin("Never")` so it needs no new `Type` variant (and never
 /// reaches serialization — users can't write it; the resolver only
+/// Join two branch types (if-arms / match-arms). Branches don't have to
+/// be syntactically identical: a diverging arm (`Never`) takes the other
+/// arm's type, and a FREE type variable — an unconstrained instantiation
+/// hole, e.g. the `T` of a bare `Result::Err(e)` arm — is grounded by
+/// the other arm (`if c { Err(e) } else { Ok(5) } : Result<Int, E>`).
+/// Returns `None` when the types genuinely conflict.
+fn merge_branch_types(a: &Type, b: &Type) -> Option<Type> {
+    if is_never(a) {
+        return Some(b.clone());
+    }
+    if is_never(b) {
+        return Some(a.clone());
+    }
+    if let Type::TypeVar(_) = a {
+        return Some(b.clone());
+    }
+    if let Type::TypeVar(_) = b {
+        return Some(a.clone());
+    }
+    match (a, b) {
+        (Type::Apply(ha, aa), Type::Apply(hb, ab)) if aa.len() == ab.len() => {
+            let head = merge_branch_types(ha, hb)?;
+            let args = aa
+                .iter()
+                .zip(ab.iter())
+                .map(|(x, y)| merge_branch_types(x, y))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Apply(Box::new(head), args))
+        }
+        (
+            Type::FnType {
+                params: pa,
+                ret: ra,
+            },
+            Type::FnType {
+                params: pb,
+                ret: rb,
+            },
+        ) if pa.len() == pb.len() => {
+            let params = pa
+                .iter()
+                .zip(pb.iter())
+                .map(|(x, y)| merge_branch_types(x, y))
+                .collect::<Option<Vec<_>>>()?;
+            let ret = merge_branch_types(ra, rb)?;
+            Some(Type::FnType {
+                params,
+                ret: Box::new(ret),
+            })
+        }
+        _ => {
+            if types_equiv(a, b) {
+                Some(a.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// produces it for `panic` calls).
 fn is_never(t: &Type) -> bool {
     matches!(t, Type::Builtin(n) if n == "Never")
@@ -1600,18 +1681,12 @@ fn typecheck_expr(
                 }
                 result_ty = Some(match result_ty {
                     None => arm_ty,
-                    Some(first) => {
-                        if !types_equiv(&first, &arm_ty) {
-                            return Err(TypeError::MatchArmsDisagree {
-                                first,
-                                found: arm_ty,
-                            });
-                        }
-                        // Prefer a concrete type over `Never` so the match
-                        // result isn't bottom just because an earlier arm
-                        // diverged (e.g. `panic`).
-                        if is_never(&first) { arm_ty } else { first }
-                    }
+                    Some(first) => merge_branch_types(&first, &arm_ty).ok_or(
+                        TypeError::MatchArmsDisagree {
+                            first,
+                            found: arm_ty,
+                        },
+                    )?,
                 });
             }
             // Safe: arms.is_empty() was checked above.
@@ -1634,15 +1709,10 @@ fn typecheck_expr(
             }
             let then_ty = typecheck_expr(then_branch, locals, cache)?;
             let else_ty = typecheck_expr(else_branch, locals, cache)?;
-            if !types_equiv(&then_ty, &else_ty) {
-                return Err(TypeError::MatchArmsDisagree {
-                    first: then_ty,
-                    found: else_ty,
-                });
-            }
-            // Prefer the concrete branch type when the other diverges
-            // (e.g. `if c { compute() } else { panic("...") }`).
-            Ok(if is_never(&then_ty) { else_ty } else { then_ty })
+            merge_branch_types(&then_ty, &else_ty).ok_or(TypeError::MatchArmsDisagree {
+                first: then_ty,
+                found: else_ty,
+            })
         }
 
         Expr::Try {
@@ -1749,7 +1819,7 @@ fn typecheck_call(
         }
     }
 
-    // ---- core/net.at#<hex>[#<hex>] special case ----
+    // ---- core/net.at#<hex>[#<hex>] (and at_async) special case ----
     if let Expr::BuiltinRef(name) = callee {
         let parsed = if name == "core/net.at" {
             None
@@ -1757,6 +1827,10 @@ fn typecheck_call(
             crate::resolve::parse_at_builtin_name(name)
         };
         let is_at = parsed.is_some() || name == "core/net.at";
+        // `at_async` shares every check with `at` (same mobility rules —
+        // the thunk still leaves the process); only the return type
+        // differs: a `ThreadHandle<Result<T, Failure>>` for `join`.
+        let is_async = name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX);
         if is_at {
             if args.len() != 2 {
                 return Err(TypeError::ArityMismatch {
@@ -1869,10 +1943,18 @@ fn typecheck_call(
                     });
                 }
             };
-            return Ok(Type::Apply(
+            let result_ty = Type::Apply(
                 Box::new(Type::TypeRef(result_hash)),
                 vec![thunk_ret, Type::TypeRef(failure_hash)],
-            ));
+            );
+            return Ok(if is_async {
+                Type::Apply(
+                    Box::new(Type::Builtin("ThreadHandle".to_owned())),
+                    vec![result_ty],
+                )
+            } else {
+                result_ty
+            });
         }
     }
 
@@ -2218,7 +2300,10 @@ pub fn typecheck_module(
     }
 
     for rdef in needs_check {
-        let scheme = typecheck_def(&rdef.def, cache)?;
+        let scheme = typecheck_def(&rdef.def, cache).map_err(|e| TypeError::InDef {
+            name: rdef.name.clone(),
+            err: Box::new(e),
+        })?;
         cache.insert(rdef.hash, scheme);
         newly_typed += 1;
     }
@@ -2581,7 +2666,17 @@ mod tests {
         let m = parse_module(src).unwrap();
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
-        typecheck_module(&rm, &mut cache).expect_err("typecheck must fail")
+        unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("typecheck must fail"))
+    }
+
+    /// Module-level typecheck errors are wrapped in `InDef { name, err }` to
+    /// point at the failing def; peel that wrapper so tests can assert on
+    /// the underlying error variant.
+    fn unwrap_in_def(err: TypeError) -> TypeError {
+        match err {
+            TypeError::InDef { err, .. } => unwrap_in_def(*err),
+            other => other,
+        }
     }
 
     #[test]
@@ -2682,7 +2777,7 @@ mod tests {
             }
         }
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("should fail");
+        let err = unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("should fail"));
         match err {
             TypeError::FieldIndexOutOfRange {
                 index, field_count, ..
@@ -2724,7 +2819,7 @@ mod tests {
             }
         }
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("arms disagree");
+        let err = unwrap_in_def(typecheck_module(&rm, &mut cache).expect_err("arms disagree"));
         match err {
             TypeError::MatchArmsDisagree { .. } => {}
             other => panic!("expected MatchArmsDisagree, got {:?}", other),
@@ -2777,7 +2872,9 @@ mod tests {
         let m = parse_module(bad).unwrap();
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("non-thunk 2nd arg rejected");
+        let err = unwrap_in_def(
+            typecheck_module(&rm, &mut cache).expect_err("non-thunk 2nd arg rejected"),
+        );
         match err {
             TypeError::TypeMismatch { context, .. } => {
                 assert!(

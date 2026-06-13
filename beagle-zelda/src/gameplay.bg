@@ -39,13 +39,6 @@ struct Tuning {
     camera_smoothing
     run_multiplier
     sneak_multiplier
-    stamina_drain       // per second while sprinting
-    stamina_regen       // per second while not sprinting
-    stamina_regen_delay // seconds after stopping sprint before regen starts
-    noise_sprint        // noise level while sprinting
-    noise_walk          // noise level while walking
-    noise_sneak         // noise level while sneaking
-    noise_still         // noise level while standing still
 }
 
 fn default_tuning() {
@@ -79,8 +72,6 @@ struct Player {
     speed_mult    // 1.0 normal, run_multiplier, sneak_multiplier
     hp            // hit points — attacks subtract, respawn on 0
     iframes       // invulnerability timer (seconds) after being hit
-    stamina       // 0.0–1.0, drains while sprinting, recharges otherwise
-    noise         // 0.0–1.0, current noise level (affects enemy detection)
 }
 
 struct Wall {
@@ -131,25 +122,14 @@ fn default_walls() {
 // Input → desired direction
 // ============================================================
 
-let autoplay_frame = atom(0)
-
 fn read_desired_dir() {
-    if r/getenv("BEAGLE_AUTOPLAY") != null {
-        let f = deref(autoplay_frame)
-        swap!(autoplay_frame, fn(x) { x + 1 })
-        let phase = f - (f / 240) * 240
-        let dx = if phase < 60 { 1.0 } else if phase < 120 { 0.0 } else if phase < 180 { 0.0 - 1.0 } else { 0.0 }
-        let dy = if phase < 60 { 0.0 } else if phase < 120 { 1.0 } else if phase < 180 { 0.0 } else { 0.0 - 1.0 }
-        v/normalize_or_zero(v/make(dx, dy))
-    } else {
-        let mut dx = 0.0
-        let mut dy = 0.0
-        if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { dy = dy + 1.0 }
-        if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { dy = dy - 1.0 }
-        if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { dx = dx - 1.0 }
-        if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { dx = dx + 1.0 }
-        v/normalize_or_zero(v/make(dx, dy))
-    }
+    let mut dx = 0.0
+    let mut dy = 0.0
+    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { dy = dy + 1.0 }
+    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { dy = dy - 1.0 }
+    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { dx = dx - 1.0 }
+    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { dx = dx + 1.0 }
+    v/normalize_or_zero(v/make(dx, dy))
 }
 
 fn read_speed_mult(tuning) {

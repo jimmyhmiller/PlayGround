@@ -231,6 +231,11 @@ pub struct AtBinding {
     pub crashed_variant_index: u32,
     pub code_missing_variant_index: u32,
     pub cancelled_variant_index: u32,
+    /// `Failure::TimedOut(Node)` is OPTIONAL: declared, it receives
+    /// deadline expirations distinctly; absent, timeouts surface as
+    /// `Unreachable`. Optional so pre-deadline 4-variant `Failure`
+    /// enums keep working (their content hash is unchanged).
+    pub timed_out_variant_index: Option<u32>,
     /// `enum DecodeError { TypeMismatch, Malformed }` — used by the
     /// checked `decode::<T>` to build its `Err`. Optional: `at()`-only
     /// modules need not declare it.
@@ -281,14 +286,14 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "string_concat" => "core/string.concat",
         "bytes_new" => "core/bytes.new",
         "bytes_len" => "core/bytes.len",
-        "bytes_get" => "core/bytes.get",
-        "bytes_set" => "core/bytes.set",
+
         "bytes_slice" => "core/bytes.slice",
         "bytes_concat" => "core/bytes.concat",
         "bytes_from_string" => "core/bytes.from_string",
         "string_from_bytes" => "core/string.from_bytes",
         "int_to_float" => "core/f64.of_int",
         "float_to_int" => "core/f64.to_int",
+        "float_sqrt" => "core/f64.sqrt",
         "ptr_null" => "core/ptr.null",
         "ptr_is_null" => "core/ptr.is_null",
         "ptr_add" => "core/ptr.add",
@@ -308,8 +313,7 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         // Generic builtins (signatures carry `TypeVar(0)`).
         "array_new" => "core/array.new",
         "array_len" => "core/array.len",
-        "array_get" => "core/array.get",
-        "array_set" => "core/array.set",
+
         "atom_new" => "core/atom.new",
         "atom_load" => "core/atom.load",
         "atom_swap" => "core/atom.swap",
@@ -320,8 +324,26 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Prefix for the asynchronous twin of `at(...)`: `at_async(node, thunk)`
+/// ships the thunk from a background thread and returns a
+/// `ThreadHandle<Result<T, Failure>>` immediately; the existing `join`
+/// awaits it. Same embedded hashes as the `at` name.
+pub const AT_ASYNC_BUILTIN_PREFIX: &str = "core/net.at_async#";
+
+/// `true` for any at-family builtin name (`core/net.at#...` or
+/// `core/net.at_async#...`). The hash-rename, dependency-index, and
+/// slice walkers treat both identically: the names embed the same
+/// `Result`/`Failure` hashes.
+pub fn is_at_family_builtin(name: &str) -> bool {
+    name.starts_with(AT_BUILTIN_PREFIX) || name.starts_with(AT_ASYNC_BUILTIN_PREFIX)
+}
+
+/// Parse an at-family builtin name (`core/net.at#...` or
+/// `core/net.at_async#...`), returning the embedded hashes.
 pub fn parse_at_builtin_name(name: &str) -> Option<(Hash, Option<Hash>)> {
-    let body = name.strip_prefix(AT_BUILTIN_PREFIX)?;
+    let body = name
+        .strip_prefix(AT_BUILTIN_PREFIX)
+        .or_else(|| name.strip_prefix(AT_ASYNC_BUILTIN_PREFIX))?;
     let parts: Vec<&str> = body.split('#').collect();
     let parse_hex = |s: &str| -> Option<Hash> {
         if s.len() != Hash::SIZE * 2 {
@@ -994,6 +1016,41 @@ pub fn resolve_module_with_env(
         bodies.push(body_canon);
     }
 
+    // 2b'. Type-directed array_new specialization: where the context
+    // (def return type, struct field, call argument) pins an array's
+    // element type to a scalar, `core/array.new` becomes the unboxed
+    // `core/array.new_prim`. Runs before SCC hashing so the choice is
+    // part of each def's content hash.
+    {
+        let fields_by_struct: HashMap<Hash, Vec<Type>> = structs
+            .values()
+            .map(|si| {
+                (
+                    si.hash,
+                    si.fields.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let params_by_self: Vec<Vec<Type>> = pendings
+            .iter()
+            .map(|p| match &p.kind {
+                PendingKind::Fn { params_canon, .. } => params_canon.clone(),
+                PendingKind::State { .. } => Vec::new(),
+            })
+            .collect();
+        let cx = ArraySpecCtx {
+            fields_by_struct: &fields_by_struct,
+            params_by_self: &params_by_self,
+        };
+        for (i, p) in pendings.iter().enumerate() {
+            let expected = match &p.kind {
+                PendingKind::Fn { ret_canon, .. } => ret_canon.clone(),
+                PendingKind::State { ty } => ty.clone(),
+            };
+            bodies[i] = specialize_array_new(&bodies[i], Some(&expected), &cx);
+        }
+    }
+
     // 2c.
     let n = pendings.len();
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -1392,6 +1449,159 @@ fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
 ///   - else: becomes `TopRef(real_hash[global_idx])`, which must be
 ///     populated because earlier (dependency) SCCs were already
 ///     processed.
+/// Whether a type is `Array<scalar>` — the contexts where `array_new`
+/// specializes to the UNBOXED `core/array.new_prim` (raw i64/f64 slots,
+/// no per-element box allocation).
+fn is_prim_array_type(t: &Type) -> bool {
+    match t {
+        Type::Apply(head, args) => {
+            matches!(head.as_ref(), Type::Builtin(n) if n == "Array")
+                && matches!(
+                    args.first(),
+                    Some(Type::Builtin(n)) if n == "Int" || n == "Float" || n == "Bool"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Context for [`specialize_array_new`]: where expected types come from.
+struct ArraySpecCtx<'a> {
+    /// Struct hash → declared field types, for struct-literal positions.
+    fields_by_struct: &'a HashMap<Hash, Vec<Type>>,
+    /// Module-local def (global pending index) → declared param types,
+    /// for call-argument positions. Bodies at this stage reference
+    /// module-local defs via `SelfRef(global)`.
+    params_by_self: &'a [Vec<Type>],
+}
+
+/// Type-directed specialization of `core/array.new`: rewrite it to
+/// `core/array.new_prim` wherever the CONTEXT pins the element type to a
+/// scalar (Int/Float/Bool). Same precedent as the `at#`/`decode#` baking —
+/// the choice is part of the definition, so it lands in the content hash.
+///
+/// `expected` flows down through tail positions (let bodies, if branches,
+/// match arms, defer bodies) and into typed holes (struct-literal fields,
+/// call arguments of known defs). Creation sites with no contextual type
+/// (e.g. an unannotated intermediate) keep the boxed representation —
+/// that's a performance default, never a correctness issue: every array
+/// accessor handles both representations at runtime.
+fn specialize_array_new(e: &Expr, expected: Option<&Type>, cx: &ArraySpecCtx) -> Expr {
+    let down = |sub: &Expr| specialize_array_new(sub, None, cx);
+    match e {
+        Expr::Call(callee, args) => {
+            if let Expr::BuiltinRef(name) = callee.as_ref() {
+                if name == "core/array.new"
+                    && expected.map(is_prim_array_type).unwrap_or(false)
+                {
+                    return Expr::Call(
+                        Box::new(Expr::BuiltinRef("core/array.new_prim".to_owned())),
+                        args.iter().map(down).collect(),
+                    );
+                }
+            }
+            // Known callee: push its declared param types into the args.
+            let param_tys: Option<&Vec<Type>> = match callee.as_ref() {
+                Expr::SelfRef(g) => cx.params_by_self.get(*g as usize),
+                _ => None,
+            };
+            let new_args = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let exp = param_tys.and_then(|ps| ps.get(i));
+                    specialize_array_new(a, exp, cx)
+                })
+                .collect();
+            Expr::Call(Box::new(down(callee)), new_args)
+        }
+        Expr::Let { value, body } => Expr::Let {
+            value: Box::new(down(value)),
+            body: Box::new(specialize_array_new(body, expected, cx)),
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(down(cleanup)),
+            body: Box::new(specialize_array_new(body, expected, cx)),
+        },
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            cond: Box::new(down(cond)),
+            then_branch: Box::new(specialize_array_new(then_branch, expected, cx)),
+            else_branch: Box::new(specialize_array_new(else_branch, expected, cx)),
+        },
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(down(scrutinee)),
+            arms: arms
+                .iter()
+                .map(|arm| MatchArm {
+                    pattern: arm.pattern.clone(),
+                    body: specialize_array_new(&arm.body, expected, cx),
+                })
+                .collect(),
+        },
+        Expr::StructNew { struct_ref, fields } => {
+            let field_tys = cx.fields_by_struct.get(struct_ref);
+            Expr::StructNew {
+                struct_ref: *struct_ref,
+                fields: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let exp = field_tys.and_then(|ts| ts.get(i));
+                        specialize_array_new(f, exp, cx)
+                    })
+                    .collect(),
+            }
+        }
+        Expr::EnumNew {
+            enum_ref,
+            variant_index,
+            payload,
+        } => Expr::EnumNew {
+            enum_ref: *enum_ref,
+            variant_index: *variant_index,
+            payload: payload.as_ref().map(|p| Box::new(down(p))),
+        },
+        Expr::Lambda { params, body } => Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(down(body)),
+        },
+        Expr::Field {
+            base,
+            struct_ref,
+            index,
+        } => Expr::Field {
+            base: Box::new(down(base)),
+            struct_ref: *struct_ref,
+            index: *index,
+        },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(down(expr)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::LocalVar(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
+        | Expr::BuiltinRef(_) => e.clone(),
+    }
+}
+
 fn rewrite_for_canonical(
     e: &Expr,
     local_of: &HashMap<u32, u32>,
@@ -1924,6 +2134,11 @@ fn build_at_binding(
     let crashed_idx = variant_idx("Crashed")?;
     let code_missing_idx = variant_idx("CodeMissing")?;
     let cancelled_idx = variant_idx("Cancelled")?;
+    // Optional: when declared, it must carry a Node like the others.
+    let timed_out_idx = match find_variant(failure, "TimedOut") {
+        Some(_) => Some(variant_idx("TimedOut")?),
+        None => None,
+    };
 
     // DecodeError is optional (only `decode::<T>` needs it). Discover it
     // opportunistically so the runtime can build `Err(TypeMismatch)` /
@@ -1947,6 +2162,7 @@ fn build_at_binding(
         crashed_variant_index: crashed_idx,
         code_missing_variant_index: code_missing_idx,
         cancelled_variant_index: cancelled_idx,
+        timed_out_variant_index: timed_out_idx,
         decode_error_hash,
         decode_type_mismatch_index: decode_tm_idx,
         decode_malformed_index: decode_mf_idx,
@@ -2292,6 +2508,438 @@ fn decode_expected_hash(t: &Type, span: Span) -> Result<Hash, ResolveError> {
     }
 }
 
+/// The checked indexing surface: which accessor, and the builtin trio it
+/// expands over.
+struct CheckedAccessor {
+    /// `core/array.get` / `core/bytes.get` / ... — the trusted accessor.
+    access: &'static str,
+    /// `core/array.len` / `core/bytes.len` — total, used by the bounds
+    /// check and the error payload.
+    len: &'static str,
+    /// Whether this is a SET (3 args, Ok payload is the set's Int).
+    is_set: bool,
+    /// Containers whose element type names the Ok payload ("Array");
+    /// None means the element is always Int (Bytes).
+    container: Option<&'static str>,
+}
+
+fn checked_accessor(name: &str) -> Option<CheckedAccessor> {
+    Some(match name {
+        "array_get" => CheckedAccessor {
+            access: "core/array.get",
+            len: "core/array.len",
+            is_set: false,
+            container: Some("Array"),
+        },
+        "array_set" => CheckedAccessor {
+            access: "core/array.set",
+            len: "core/array.len",
+            is_set: true,
+            container: Some("Array"),
+        },
+        "bytes_get" => CheckedAccessor {
+            access: "core/bytes.get",
+            len: "core/bytes.len",
+            is_set: false,
+            container: None,
+        },
+        "bytes_set" => CheckedAccessor {
+            access: "core/bytes.set",
+            len: "core/bytes.len",
+            is_set: true,
+            container: None,
+        },
+        _ => return None,
+    })
+}
+
+/// Number of locals a canonical pattern binds (mirrors codegen's view).
+fn pattern_binder_count(p: &crate::ast::Pattern) -> u32 {
+    use crate::ast::Pattern;
+    match p {
+        Pattern::Wildcard => 0,
+        Pattern::Var => 1,
+        Pattern::Enum { payload, .. } => {
+            payload.as_deref().map(pattern_binder_count).unwrap_or(0)
+        }
+    }
+}
+
+/// Shift every free de Bruijn local in `e` (index >= `cutoff`) up by
+/// `by`. Used when a resolved expression is re-placed under freshly
+/// introduced `let` binders by the checked-accessor expansion.
+fn shift_free_locals(e: &Expr, by: u32, cutoff: u32) -> Expr {
+    match e {
+        Expr::LocalVar(i) => {
+            if *i >= cutoff {
+                Expr::LocalVar(i + by)
+            } else {
+                Expr::LocalVar(*i)
+            }
+        }
+        Expr::Lambda { params, body } => Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(shift_free_locals(body, by, cutoff + params.len() as u32)),
+        },
+        Expr::Let { value, body } => Expr::Let {
+            value: Box::new(shift_free_locals(value, by, cutoff)),
+            body: Box::new(shift_free_locals(body, by, cutoff + 1)),
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(shift_free_locals(cleanup, by, cutoff)),
+            body: Box::new(shift_free_locals(body, by, cutoff)),
+        },
+        Expr::Call(callee, args) => Expr::Call(
+            Box::new(shift_free_locals(callee, by, cutoff)),
+            args.iter().map(|a| shift_free_locals(a, by, cutoff)).collect(),
+        ),
+        Expr::StructNew { struct_ref, fields } => Expr::StructNew {
+            struct_ref: *struct_ref,
+            fields: fields.iter().map(|f| shift_free_locals(f, by, cutoff)).collect(),
+        },
+        Expr::Field {
+            base,
+            struct_ref,
+            index,
+        } => Expr::Field {
+            base: Box::new(shift_free_locals(base, by, cutoff)),
+            struct_ref: *struct_ref,
+            index: *index,
+        },
+        Expr::EnumNew {
+            enum_ref,
+            variant_index,
+            payload,
+        } => Expr::EnumNew {
+            enum_ref: *enum_ref,
+            variant_index: *variant_index,
+            payload: payload
+                .as_ref()
+                .map(|p| Box::new(shift_free_locals(p, by, cutoff))),
+        },
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(shift_free_locals(scrutinee, by, cutoff)),
+            arms: arms
+                .iter()
+                .map(|arm| crate::ast::MatchArm {
+                    pattern: arm.pattern.clone(),
+                    body: shift_free_locals(
+                        &arm.body,
+                        by,
+                        cutoff + pattern_binder_count(&arm.pattern),
+                    ),
+                })
+                .collect(),
+        },
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            cond: Box::new(shift_free_locals(cond, by, cutoff)),
+            then_branch: Box::new(shift_free_locals(then_branch, by, cutoff)),
+            else_branch: Box::new(shift_free_locals(else_branch, by, cutoff)),
+        },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(shift_free_locals(expr, by, cutoff)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
+        | Expr::BuiltinRef(_) => e.clone(),
+    }
+}
+
+/// Whether a resolved operand is cheap, pure, and total — safe to
+/// duplicate into both the bounds check and the access instead of
+/// let-binding it (locals, literals, field chains over those). Keeps the
+/// hot path of a checked access free of extra root-slot traffic.
+fn duplicable_operand(e: &Expr) -> bool {
+    match e {
+        Expr::LocalVar(_)
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_) => true,
+        Expr::Field { base, .. } => duplicable_operand(base),
+        _ => false,
+    }
+}
+
+/// Resolve a CHECKED accessor call — the public `array_get` /
+/// `array_set` / `bytes_get` / `bytes_set` — into ordinary canonical
+/// AST. Out-of-bounds is a VALUE, not a crash:
+///
+///   array_get(a, i)            : Result<T, IndexError>
+///   array_get(a, i)?           : T        (fused: no Ok is ever built)
+///
+/// expands (with duplicable operands inlined, others let-bound) to
+///
+///   if i < 0      { Err(OutOfBounds(OobInfo { index: i, len: len(a) })) }
+///   else if i >= len(a) { ...same Err... }
+///   else          { Ok(<trusted access>) }
+///
+/// and, under `?` (`fused = true`), the Ok wrapper disappears — the else
+/// arm IS the trusted access, and each Err arm is wrapped in `Try` so it
+/// early-returns through the enclosing function exactly like any other
+/// `?`. The raw `*_trusted` accessors (which ABORT on a violation — a
+/// contract for callers that have proven their indices) remain available
+/// for stdlib internals and hot kernels.
+#[allow(clippy::too_many_arguments)]
+fn resolve_checked_accessor(
+    acc: &CheckedAccessor,
+    args: &[SurfaceExpr],
+    fused: bool,
+    span: Span,
+    env: &mut Vec<(String, Type)>,
+    top: &HashMap<String, TopBinding>,
+    structs: &HashMap<String, StructInfo>,
+    enums: &HashMap<String, EnumInfo>,
+    variants: &HashMap<String, VariantBinding>,
+    at_binding: &mut Option<AtBinding>,
+    type_params: &[String],
+    self_name: &str,
+) -> Result<(Expr, Type), ResolveError> {
+    let want = if acc.is_set { 3 } else { 2 };
+    if args.len() != want {
+        return Err(ResolveError::UnknownName {
+            name: format!(
+                "checked accessor expects {} argument(s), got {}",
+                want,
+                args.len()
+            ),
+            span,
+        });
+    }
+    // The error-shape types come from the stdlib by name.
+    let missing = |what: &str| ResolveError::UnknownName {
+        name: format!(
+            "checked array/bytes accessors need the stdlib type `{}` \
+             (declare it or include the stdlib)",
+            what
+        ),
+        span,
+    };
+    let result_info = enums.get("Result").ok_or_else(|| missing("Result"))?.clone();
+    let ixerr_info = enums
+        .get("IndexError")
+        .ok_or_else(|| missing("IndexError"))?
+        .clone();
+    let oob_info = structs
+        .get("OobInfo")
+        .ok_or_else(|| missing("OobInfo"))?
+        .clone();
+    let ok_index = find_variant(&result_info, "Ok").ok_or_else(|| missing("Result::Ok"))?;
+    let err_index = find_variant(&result_info, "Err").ok_or_else(|| missing("Result::Err"))?;
+    let oob_index =
+        find_variant(&ixerr_info, "OutOfBounds").ok_or_else(|| missing("IndexError::OutOfBounds"))?;
+    let uninit_index = find_variant(&ixerr_info, "Uninitialized")
+        .ok_or_else(|| missing("IndexError::Uninitialized"))?;
+
+    // Resolve the operands in the CURRENT env.
+    let mut resolved: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
+    for a in args {
+        resolved.push(resolve_expr_typed(
+            a, env, top, structs, enums, variants, at_binding, type_params, self_name,
+        )?);
+    }
+    // The container's statically-known element type, when there is one.
+    let container_elem: Option<Type> = match acc.container {
+        Some(container) => match &resolved[0].1 {
+            Type::Apply(head, elt)
+                if matches!(head.as_ref(), Type::Builtin(n) if n == container) =>
+            {
+                elt.first().cloned()
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    // The Ok payload type: the container's element for arrays, Int for
+    // bytes and for every set.
+    let elem_ty = if acc.is_set {
+        Type::Builtin("Int".to_owned())
+    } else {
+        container_elem
+            .clone()
+            .unwrap_or(Type::Builtin("Int".to_owned()))
+    };
+    // A statically-scalar array element pins the access to the SCALAR
+    // builtin variant by NAME (`core/array.get_scalar` / `set_scalar`)
+    // instead of leaving codegen to re-infer it per site. Same lowering,
+    // but the name carries a guarantee the operand-rooting analysis can
+    // use: a scalar GET's every path is allocation-free or aborts, so it
+    // can never make an already-evaluated pointer operand go stale.
+    let elem_scalar = matches!(
+        &container_elem,
+        Some(Type::Builtin(n)) if n == "Int" || n == "Float" || n == "Bool"
+    );
+    let access_name: String = if elem_scalar && acc.container == Some("Array") {
+        if acc.is_set {
+            "core/array.set_scalar".to_owned()
+        } else {
+            "core/array.get_scalar".to_owned()
+        }
+    } else {
+        acc.access.to_owned()
+    };
+
+    // Plan the binders: non-duplicable operands are let-bound (outermost
+    // first, in argument order — preserving evaluation order); duplicable
+    // ones are inlined at every use, shifted past the introduced lets.
+    let n_lets: u32 = resolved
+        .iter()
+        .filter(|(e, _)| !duplicable_operand(e))
+        .count() as u32;
+    let mut let_seen = 0u32;
+    let operand_refs: Vec<Expr> = resolved
+        .iter()
+        .map(|(e, _)| {
+            if duplicable_operand(e) {
+                shift_free_locals(e, n_lets, 0)
+            } else {
+                // The let_seen-th let (0-based, outermost first) sits at
+                // de Bruijn distance n_lets - 1 - let_seen from the core.
+                let idx = n_lets - 1 - let_seen;
+                let_seen += 1;
+                Expr::LocalVar(idx)
+            }
+        })
+        .collect();
+
+    // The container length is LET-BOUND once per site (immediately inside
+    // the operand lets) and referenced by the bounds check AND every error
+    // arm. Before this, `len()` was re-called at each of those positions —
+    // up to 4 full inline len-protocol derivations (null check + shape
+    // discrimination + count load) per access site, which both re-derived
+    // on the hot path and bloated the cold arms. The extra binder means
+    // every operand ref used INSIDE the len-let shifts by 1; the len-let's
+    // own value uses the unshifted refs.
+    let len_value = Expr::Call(
+        Box::new(Expr::BuiltinRef(acc.len.to_owned())),
+        vec![operand_refs[0].clone()],
+    );
+    let inner_refs: Vec<Expr> = operand_refs
+        .iter()
+        .map(|e| shift_free_locals(e, 1, 0))
+        .collect();
+    let a_ref = &inner_refs[0];
+    let i_ref = &inner_refs[1];
+    let len_ref = || Expr::LocalVar(0);
+    let err_expr = |variant: u32| -> Expr {
+        Expr::EnumNew {
+            enum_ref: result_info.hash,
+            variant_index: err_index,
+            payload: Some(Box::new(Expr::EnumNew {
+                enum_ref: ixerr_info.hash,
+                variant_index: variant,
+                payload: Some(Box::new(Expr::StructNew {
+                    struct_ref: oob_info.hash,
+                    fields: vec![i_ref.clone(), len_ref()],
+                })),
+            })),
+        }
+    };
+    // Under `?`, each Err arm early-returns through the enclosing fn.
+    let err_arm = |variant: u32| -> Expr {
+        if fused {
+            Expr::Try {
+                expr: Box::new(err_expr(variant)),
+                enum_ref: result_info.hash,
+                ok_index,
+                err_index,
+            }
+        } else {
+            err_expr(variant)
+        }
+    };
+    let access_call = Expr::Call(
+        Box::new(Expr::BuiltinRef(access_name)),
+        inner_refs.clone(),
+    );
+    let mut ok_arm = if fused {
+        access_call
+    } else {
+        Expr::EnumNew {
+            enum_ref: result_info.hash,
+            variant_index: ok_index,
+            payload: Some(Box::new(access_call)),
+        }
+    };
+    // Array GET: a slot that was never written has no value to return —
+    // prim arrays are zero-filled (always initialized), boxed arrays
+    // report `Err(Uninitialized)`. SETs initialize; bytes are zero-filled.
+    if !acc.is_set && acc.container.is_some() {
+        ok_arm = Expr::If {
+            cond: Box::new(Expr::Call(
+                Box::new(Expr::BuiltinRef("core/array.is_init".to_owned())),
+                vec![a_ref.clone(), i_ref.clone()],
+            )),
+            then_branch: Box::new(ok_arm),
+            else_branch: Box::new(err_arm(uninit_index)),
+        };
+    }
+    let ult = |l: Expr, r: Expr| {
+        Expr::Call(Box::new(Expr::BuiltinRef("core/i64.ult".to_owned())), vec![l, r])
+    };
+    // ONE unsigned compare is the whole range test: a negative index
+    // wraps to a huge unsigned value and fails it, and `len >= 0` always
+    // holds, so `(i as u64) < (len as u64)` ⟺ `0 <= i < len`. The
+    // negative-index and too-big arms constructed the IDENTICAL
+    // `Err(OutOfBounds(OobInfo { i, len }))` value, so folding them is
+    // exactly semantics-preserving — and the unsigned predicate matches
+    // the access protocol's internal bounds check, so GVN folds those
+    // branches too. Ok-first: the happy path is the THEN branch all the
+    // way down, which is also what codegen's `infer_type` reads for an
+    // If — so the expansion's type (and box/unbox decisions downstream)
+    // come from the access, not from the error arms.
+    let mut core = Expr::If {
+        cond: Box::new(ult(i_ref.clone(), len_ref())),
+        then_branch: Box::new(ok_arm),
+        else_branch: Box::new(err_arm(oob_index)),
+    };
+    // The len binder sits innermost, directly around the core.
+    core = Expr::Let {
+        value: Box::new(len_value),
+        body: Box::new(core),
+    };
+    // Wrap the lets, innermost-last argument outward, shifting each
+    // value past the lets already inside it.
+    let let_values: Vec<&Expr> = resolved
+        .iter()
+        .filter(|(e, _)| !duplicable_operand(e))
+        .map(|(e, _)| e)
+        .collect();
+    for (depth, v) in let_values.iter().enumerate().rev() {
+        core = Expr::Let {
+            value: Box::new(shift_free_locals(v, depth as u32, 0)),
+            body: Box::new(core),
+        };
+    }
+
+    let ty = if fused {
+        elem_ty
+    } else {
+        Type::Apply(
+            Box::new(Type::TypeRef(result_info.hash)),
+            vec![elem_ty, Type::TypeRef(ixerr_info.hash)],
+        )
+    };
+    Ok((core, ty))
+}
+
 /// Resolve `decode::<T>(bytes) -> Result<T, Int>`. `T` is named explicitly
 /// (turbofish) because it cannot be inferred from a `Bytes`-only call. We
 /// bake `T`'s expected identity hash into the builtin name; the runtime
@@ -2329,7 +2977,14 @@ fn resolve_checked_decode(
         });
     }
     let t = resolve_type(&type_args[0], structs, enums, type_params)?;
-    let expected = decode_expected_hash(&t, span)?;
+    // A type variable (a generic `decode::<T>`, e.g. inside `at_via<T>`)
+    // has no concrete identity hash; bake the all-zero "no-check" sentinel
+    // so the runtime trusts the bytes (same model as `at`). Concrete types
+    // keep their checked identity hash.
+    let expected = match &t {
+        Type::TypeVar(_) => Hash([0u8; 32]),
+        _ => decode_expected_hash(&t, span)?,
+    };
     // Ensure the Result/Failure binding exists so the runtime can build
     // the Result and the runtime-side binding gets installed at startup.
     let binding = match at_binding.as_ref() {
@@ -2470,6 +3125,19 @@ fn resolve_expr_typed(
                     ));
                 }
             }
+            // The CHECKED accessors expand at their call sites (they are
+            // not single builtins), so they have no value form — point
+            // the user at a lambda or the trusted tier.
+            if checked_accessor(name).is_some() {
+                return Err(ResolveError::UnknownName {
+                    name: format!(
+                        "`{}` is a checked operation and can't be used as a bare \
+                         value; wrap it in a lambda (e.g. `|a, i| {}(a, i)`)",
+                        name, name
+                    ),
+                    span: *span,
+                });
+            }
             Err(ResolveError::UnknownName {
                 name: name.clone(),
                 span: *span,
@@ -2512,6 +3180,19 @@ fn resolve_expr_typed(
                     );
                 }
             }
+            // CHECKED indexing — the public array/bytes accessors. An
+            // out-of-bounds index is a Result::Err VALUE (errors are
+            // values); the raw `*_trusted` forms abort instead and stay
+            // available for callers with proven indices.
+            if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                if let Some(acc) = checked_accessor(name) {
+                    return resolve_checked_accessor(
+                        &acc, args, false, *span, env, top, structs, enums, variants,
+                        at_binding, type_params, self_name,
+                    );
+                }
+            }
+
             // Built-in string ops mapped to `core/string.*` so users
             // can write `string_len(s)`, `string_eq(a, b)`,
             // `string_concat(a, b)` without an FFI registry.
@@ -2539,14 +3220,6 @@ fn resolve_expr_typed(
                         Some("core/bytes.len"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
-                    "bytes_get" => (
-                        Some("core/bytes.get"),
-                        Some(Type::Builtin("Int".to_owned())),
-                    ),
-                    "bytes_set" => (
-                        Some("core/bytes.set"),
-                        Some(Type::Builtin("Int".to_owned())),
-                    ),
                     "bytes_slice" => (
                         Some("core/bytes.slice"),
                         Some(Type::Builtin("Bytes".to_owned())),
@@ -2572,12 +3245,9 @@ fn resolve_expr_typed(
                         Some("core/f64.to_int"),
                         Some(Type::Builtin("Int".to_owned())),
                     ),
-                    // `panic(msg)` — hard error. Diverges, so its type is
-                    // the bottom type `Never`, which unifies with any
-                    // expected type (it can sit in any match arm / branch).
-                    "panic" => (
-                        Some("core/panic"),
-                        Some(Type::Builtin("Never".to_owned())),
+                    "float_sqrt" => (
+                        Some("core/f64.sqrt"),
+                        Some(Type::Builtin("Float".to_owned())),
                     ),
                     // Raw-pointer / memory intrinsics. `Ptr` is an
                     // i64-represented raw address (non-GC). These are the
@@ -2722,8 +3392,7 @@ fn resolve_expr_typed(
                 let array_builtin = match name.as_str() {
                     "array_new" => Some("core/array.new"),
                     "array_len" => Some("core/array.len"),
-                    "array_get" => Some("core/array.get"),
-                    "array_set" => Some("core/array.set"),
+
                     // The atom primitives over the dedicated `Atom` cell:
                     //   atom_new(init) -> Atom<T>
                     //   atom_load(a) -> T
@@ -2843,10 +3512,11 @@ fn resolve_expr_typed(
             //
             // v1 signature: at(node: Node, thunk: fn() -> Int) -> Result
             if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
-                if name == "at" {
+                if name == "at" || name == "at_async" {
+                    let is_async = name == "at_async";
                     if args.len() != 2 {
                         return Err(ResolveError::UnknownName {
-                            name: format!("at expects 2 args, got {}", args.len()),
+                            name: format!("{} expects 2 args, got {}", name, args.len()),
                             span: *span,
                         });
                     }
@@ -2880,14 +3550,29 @@ fn resolve_expr_typed(
                     // in the builtin name.
                     let builtin_name = format!(
                         "{}{}#{}",
-                        AT_BUILTIN_PREFIX,
+                        if is_async {
+                            AT_ASYNC_BUILTIN_PREFIX
+                        } else {
+                            AT_BUILTIN_PREFIX
+                        },
                         hex_encode(binding.result_hash.as_bytes()),
                         hex_encode(binding.failure_hash.as_bytes())
                     );
-                    let ret_ty = Type::Apply(
+                    let result_ty = Type::Apply(
                         Box::new(Type::TypeRef(binding.result_hash)),
                         vec![thunk_ret_ty, Type::TypeRef(binding.failure_hash)],
                     );
+                    // `at` yields the Result directly; `at_async` yields a
+                    // handle the existing `join` awaits:
+                    // `ThreadHandle<Result<T, Failure>>`.
+                    let ret_ty = if is_async {
+                        Type::Apply(
+                            Box::new(Type::Builtin("ThreadHandle".to_owned())),
+                            vec![result_ty],
+                        )
+                    } else {
+                        result_ty
+                    };
                     return Ok((
                         Expr::Call(
                             Box::new(Expr::BuiltinRef(builtin_name)),
@@ -3408,6 +4093,20 @@ fn resolve_expr_typed(
         }
 
         SurfaceExpr::Try { expr, span } => {
+            // FUSED checked indexing: `array_get(a, i)?` skips the Result
+            // entirely on the happy path — the bounds check branches
+            // straight to the trusted access, and only the Err arm builds
+            // (and early-returns) a Result value.
+            if let SurfaceExpr::Call { callee, args, .. } = expr.as_ref() {
+                if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                    if let Some(acc) = checked_accessor(name) {
+                        return resolve_checked_accessor(
+                            &acc, args, true, *span, env, top, structs, enums, variants,
+                            at_binding, type_params, self_name,
+                        );
+                    }
+                }
+            }
             let (inner_canon, inner_ty) = resolve_expr_typed(
                 expr, env, top, structs, enums, variants, at_binding, type_params, self_name,
             )?;

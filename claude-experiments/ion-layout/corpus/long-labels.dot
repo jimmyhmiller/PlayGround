@@ -1,0 +1,8 @@
+digraph LongLabels {
+  node [shape=box, fontname="Menlo"];
+  a [label="This is a very long single-line label that goes on and on and should size its node"];
+  b [label="multi\nline\nlabel\nwith\nsix\nrows"];
+  c [label="short"];
+  d [label="v12 = LoadElement elements:v8 index:v11 (hoisted from loop)\lv13 = BoundsCheck index:v11 length:v9\lv14 = ToNumberInt32 input:v13\l"];
+  a -> b; a -> c; b -> d; c -> d;
+}

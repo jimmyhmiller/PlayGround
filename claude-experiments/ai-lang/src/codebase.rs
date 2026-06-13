@@ -56,7 +56,7 @@ use crate::ast::Def;
 use crate::codec::{DecodeError, decode_def, encode_def};
 use crate::hash::Hash;
 use crate::resolve::ResolvedModule;
-use crate::typecheck::{SchemeCodecError, TypeCache, TypeScheme, decode_scheme, encode_scheme};
+use crate::typecheck::{SchemeCodecError, TypeCache, TypeScheme, decode_scheme, encode_scheme, typecheck_def};
 
 use std::collections::HashMap;
 use std::fs;
@@ -543,13 +543,21 @@ fn read_types_dir(path: &Path) -> Result<TypeCache, CodebaseError> {
             Ok(scheme) => {
                 cache.insert(hash, scheme);
             }
-            Err(e) => {
-                eprintln!(
-                    "warning: ignoring stale/undecodable typescheme cache {} ({}); \
-                     it will be rebuilt on next `add`",
-                    entry.path().display(),
-                    e,
-                );
+            Err(_) => {
+                // Corrupted cache — auto-repair from the corresponding .def file.
+                let def_path = path.parent()
+                    .unwrap_or(path)
+                    .join("defs")
+                    .join(format!("{}.def", hash.to_hex()));
+                if let Ok(def_bytes) = fs::read(&def_path) {
+                    if let Ok(def) = decode_def(&def_bytes) {
+                        if let Ok(scheme) = typecheck_def(&def, &cache) {
+                            cache.insert(hash, scheme.clone());
+                            let encoded = encode_scheme(&scheme);
+                            let _ = fs::write(entry.path(), &encoded);
+                        }
+                    }
+                }
             }
         }
     }
@@ -587,7 +595,7 @@ fn read_names_file(path: &Path) -> Result<HashMap<String, Hash>, CodebaseError> 
     Ok(out)
 }
 
-fn parse_hex_hash(hex: &str) -> Option<Hash> {
+pub fn parse_hex_hash(hex: &str) -> Option<Hash> {
     if hex.len() != 64 {
         return None;
     }

@@ -1,0 +1,14 @@
+[package]
+name = "rhai-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rhai-run"
+path = "src/main.rs"
+
+[dependencies]
+rhai = "1.21"
+
+[profile.release]
+opt-level = 3

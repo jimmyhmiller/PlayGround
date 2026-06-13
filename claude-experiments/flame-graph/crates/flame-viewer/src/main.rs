@@ -575,9 +575,13 @@ impl ApplicationHandler for App {
                     let dx = self.cursor.0 - origin.0;
                     let dy = self.cursor.1 - origin.1;
                     if let Some(r) = &mut self.renderer {
-                        r.viewport.pan_x_px(dx);
-                        r.viewport.pan_y_px(dy);
-                        r.clamp_viewport();
+                        if r.active_tab == flame_render::MainTab::Sequence {
+                            r.pan_sequence(-dy);
+                        } else {
+                            r.viewport.pan_x_px(dx);
+                            r.viewport.pan_y_px(dy);
+                            r.clamp_viewport();
+                        }
                         r.rebuild_instances();
                     }
                     self.drag_origin = Some(self.cursor);
@@ -715,11 +719,12 @@ impl ApplicationHandler for App {
                             }
                         }
                     } else if r.active_tab == flame_render::MainTab::Sequence {
-                        // SEQUENCE: vertical scroll pans the diagram down the
-                        // time axis. (Picker has no overflow yet, so a single
-                        // pan handler is enough.)
+                        // SEQUENCE: wheel zooms the time axis toward the cursor
+                        // so dense bursts of activity can be spread out and read.
+                        // Drag pans.
                         if dy != 0.0 {
-                            r.pan_sequence(-dy);
+                            let factor = (1.0 + dy * 0.004).clamp(0.25, 4.0);
+                            r.zoom_sequence(self.cursor.1, factor);
                             r.rebuild_instances();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
@@ -761,16 +766,22 @@ impl ApplicationHandler for App {
                 // event (positive = pinch out / zoom in). zoom_at takes a factor
                 // where < 1 zooms in, so invert.
                 if let Some(r) = &mut self.renderer {
-                    let factor = (1.0 - delta).clamp(0.5, 2.0);
-                    r.viewport.zoom_at(self.cursor.0, factor);
-                    // Pinch in (zoom in): grow row height back toward default
-                    // if it was squashed by an explicit fit-all reset.
-                    if factor < 1.0 && r.viewport.row_height_px < flame_render::ROW_HEIGHT_PX {
-                        r.viewport.row_height_px = ((r.viewport.row_height_px as f64 / factor)
-                            as f32)
-                            .min(flame_render::ROW_HEIGHT_PX);
+                    if r.active_tab == flame_render::MainTab::Sequence {
+                        // Pinch out (delta > 0) zooms the time axis in.
+                        let factor = (1.0 + delta).clamp(0.5, 2.0) as f32;
+                        r.zoom_sequence(self.cursor.1, factor);
+                    } else {
+                        let factor = (1.0 - delta).clamp(0.5, 2.0);
+                        r.viewport.zoom_at(self.cursor.0, factor);
+                        // Pinch in (zoom in): grow row height back toward default
+                        // if it was squashed by an explicit fit-all reset.
+                        if factor < 1.0 && r.viewport.row_height_px < flame_render::ROW_HEIGHT_PX {
+                            r.viewport.row_height_px = ((r.viewport.row_height_px as f64 / factor)
+                                as f32)
+                                .min(flame_render::ROW_HEIGHT_PX);
+                        }
+                        r.clamp_viewport();
                     }
-                    r.clamp_viewport();
                     r.rebuild_instances();
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -819,13 +830,21 @@ impl ApplicationHandler for App {
                             r.rebuild_instances();
                         }
                         Key::Character(ref s) if s.as_str() == "+" || s.as_str() == "=" => {
-                            r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 0.7);
-                            r.clamp_viewport();
+                            if r.active_tab == flame_render::MainTab::Sequence {
+                                r.zoom_sequence(r.viewport.size_px.1 * 0.5, 1.5);
+                            } else {
+                                r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 0.7);
+                                r.clamp_viewport();
+                            }
                             r.rebuild_instances();
                         }
                         Key::Character(ref s) if s.as_str() == "-" || s.as_str() == "_" => {
-                            r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 1.43);
-                            r.clamp_viewport();
+                            if r.active_tab == flame_render::MainTab::Sequence {
+                                r.zoom_sequence(r.viewport.size_px.1 * 0.5, 1.0 / 1.5);
+                            } else {
+                                r.viewport.zoom_at(r.viewport.size_px.0 * 0.5, 1.43);
+                                r.clamp_viewport();
+                            }
                             r.rebuild_instances();
                         }
                         Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("f") => {

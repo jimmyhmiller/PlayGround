@@ -1,0 +1,29 @@
+[package]
+name = "ail-benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "fib"
+path = "src/bin/fib.rs"
+
+[[bin]]
+name = "loop_mix"
+path = "src/bin/loop_mix.rs"
+
+[[bin]]
+name = "mandelbrot"
+path = "src/bin/mandelbrot.rs"
+
+[[bin]]
+name = "nbody"
+path = "src/bin/nbody.rs"
+
+[[bin]]
+name = "binary_trees"
+path = "src/bin/binary_trees.rs"

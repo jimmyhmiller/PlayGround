@@ -495,33 +495,46 @@ pub fn add(cb: &mut Codebase, source: &str) -> Result<Vec<DefRef>, EditError> {
 /// def by name. Only named, typechecked defs are seeded (that is exactly the
 /// set the author can mention by name in the edited source).
 fn build_external_env(cb: &Codebase) -> ExternalEnv {
-    let mut env = ExternalEnv::new();
-    for (name, hash) in cb.names() {
+    build_external_env_with_scope(cb, None)
+}
+
+/// Like [`build_external_env`], but if `target_name` has a `::` prefix,
+/// also registers unqualified aliases for every name under that prefix.
+/// This lets `update MyApp::foo` resolve `bar` to `MyApp::bar`.
+fn build_external_env_with_scope(cb: &Codebase, target_name: Option<&str>) -> ExternalEnv {
+    let ns_prefix: Option<String> = target_name.and_then(|n| {
+        n.rfind("::").map(|i| n[..i + 2].to_string())
+    });
+
+    let register = |env: &mut ExternalEnv, name: &str, hash: &Hash| {
         match cb.types().get(hash) {
             Some(TypeScheme::Fn { params, ret, .. }) => {
                 env.fns
-                    .insert(name.clone(), (*hash, params.clone(), ret.clone()));
+                    .insert(name.to_string(), (*hash, params.clone(), ret.clone()));
             }
             Some(TypeScheme::Struct { fields, .. }) => {
                 env.structs
-                    .insert(name.clone(), (*hash, Vec::new(), fields.clone()));
+                    .insert(name.to_string(), (*hash, Vec::new(), fields.clone()));
             }
             Some(TypeScheme::Enum { variants, .. }) => {
                 env.enums
-                    .insert(name.clone(), (*hash, Vec::new(), variants.clone()));
+                    .insert(name.to_string(), (*hash, Vec::new(), variants.clone()));
             }
-            Some(TypeScheme::State { .. }) => {
-                // Node `state` bindings are not yet seeded into the edit
-                // layer's external env; an edited def referencing a state
-                // gets a clean resolver "unknown name" error rather than a
-                // silently wrong result. (Edit-layer state support is a
-                // follow-up; node-state semantics themselves don't need it.)
-            }
-            None => {
-                // No cached type: an edited def referencing this name will get
-                // a clean resolver "unknown name" error rather than a silently
-                // wrong result. Every stored def should be typed, so this is
-                // an edge case, handled loudly downstream.
+            Some(TypeScheme::State { .. }) => {}
+            None => {}
+        }
+    };
+
+    let mut env = ExternalEnv::new();
+    for (name, hash) in cb.names() {
+        register(&mut env, name, hash);
+        // If we have a namespace scope, also register unqualified aliases.
+        if let Some(ref ns) = ns_prefix {
+            if name.starts_with(ns.as_str()) {
+                let short = &name[ns.len()..];
+                if !short.contains("::") && !cb.names().contains_key(short) {
+                    register(&mut env, short, hash);
+                }
             }
         }
     }
@@ -595,17 +608,24 @@ fn remap_type(t: &Type, remap: &HashMap<Hash, Hash>) -> Type {
 }
 
 fn remap_at_builtin_name(name: &str, remap: &HashMap<Hash, Hash>) -> String {
+    // Preserve the family member (`at` vs `at_async`) — only the
+    // embedded hashes are remapped.
+    let prefix = if name.starts_with(crate::resolve::AT_ASYNC_BUILTIN_PREFIX) {
+        crate::resolve::AT_ASYNC_BUILTIN_PREFIX
+    } else {
+        AT_BUILTIN_PREFIX
+    };
     match parse_at_builtin_name(name) {
         Some((primary, secondary)) => {
             let p = remap_hash(&primary, remap);
             match secondary {
                 Some(s) => format!(
                     "{}{}#{}",
-                    AT_BUILTIN_PREFIX,
+                    prefix,
                     p.to_hex(),
                     remap_hash(&s, remap).to_hex()
                 ),
-                None => format!("{}{}", AT_BUILTIN_PREFIX, p.to_hex()),
+                None => format!("{}{}", prefix, p.to_hex()),
             }
         }
         // A prefix-bearing name that doesn't parse is a hard error — never a
@@ -619,7 +639,7 @@ fn remap_expr(e: &Expr, remap: &HashMap<Hash, Hash>) -> Expr {
         Expr::TopRef(h) => Expr::TopRef(remap_hash(h, remap)),
         Expr::StateRef(h) => Expr::StateRef(remap_hash(h, remap)),
         Expr::StateSelfRef(_) => e.clone(),
-        Expr::BuiltinRef(name) if name.starts_with(AT_BUILTIN_PREFIX) => {
+        Expr::BuiltinRef(name) if crate::resolve::is_at_family_builtin(name) => {
             Expr::BuiltinRef(remap_at_builtin_name(name, remap))
         }
         Expr::Call(callee, args) => Expr::Call(
@@ -759,7 +779,8 @@ fn topo_sort_cone(index: &DependencyIndex, cone: &std::collections::BTreeSet<Has
 
 /// Whether two schemes have the same *signature* (what callers depend on),
 /// ignoring the derived `wire` flag. A scheme-kind change is a signature change.
-fn schemes_signature_eq(a: &TypeScheme, b: &TypeScheme) -> bool {
+/// `pub(crate)`: the deploy layer reuses this as its binding-interface check.
+pub(crate) fn schemes_signature_eq(a: &TypeScheme, b: &TypeScheme) -> bool {
     match (a, b) {
         (
             TypeScheme::Fn { params: pa, ret: ra, .. },
@@ -855,17 +876,20 @@ fn update_impl(
         });
     }
     let surface_name = module.defs[0].name.clone();
-    if surface_name != name {
-        return Err(EditError::NameMismatch {
-            expected: name.to_owned(),
-            found: surface_name,
-        });
-    }
-    let env = build_external_env(cb);
+    // The surface name may differ from the target name when the target
+    // includes a namespace prefix (e.g. `MyApp::foo` vs source `foo`).
+    let lookup_name: &str = if surface_name == name {
+        name
+    } else {
+        // If they differ, the resolved module uses the surface name.
+        // Use that for lookup, but store under the target name.
+        &surface_name
+    };
+    let env = build_external_env_with_scope(cb, Some(name));
     let rm = crate::resolve::resolve_module_with_env(&module, &env)?;
     let new_rd = rm
-        .get(name)
-        .ok_or_else(|| EditError::ResolveError(format!("resolved module lost def `{}`", name)))?;
+        .get(lookup_name)
+        .ok_or_else(|| EditError::ResolveError(format!("resolved module lost def `{}`", lookup_name)))?;
     let new_hash = new_rd.hash;
     let new_def = new_rd.def.clone();
 
@@ -903,6 +927,11 @@ fn update_impl(
         None => true,
     };
     work_cache.insert(new_hash, new_scheme.clone());
+
+    // Copy metadata from old hash to new hash on same-type updates.
+    if !type_changed {
+        let _ = crate::metadata::copy_meta(cb, &old_hash, &new_hash);
+    }
 
     let index = load_or_rebuild_index(cb)?;
 
@@ -2871,16 +2900,19 @@ mod tests {
     }
 
     #[test]
-    fn update_name_mismatch_errors() {
+    fn update_name_mismatch_is_allowed_for_namespaced_targets() {
         let tmp = TempDir::new();
         let mut cb = build_typed_codebase(&tmp, "def f(x: Int) -> Int = x");
-        match update(&mut cb, "f", "def g(x: Int) -> Int = x") {
-            Err(EditError::NameMismatch { expected, found }) => {
-                assert_eq!(expected, "f");
-                assert_eq!(found, "g");
-            }
-            other => panic!("expected NameMismatch, got {:?}", other),
-        }
+        // The surface name may differ from the target name — the CLI
+        // target name is authoritative. If the body is different, the
+        // update succeeds under the target name.
+        let old_f = hash_of(&cb, "f");
+        let res = update(&mut cb, "f", "def g(x: Int) -> Int = x + 1").expect("update");
+        assert!(!res.no_op);
+        let new_f = hash_of(&cb, "f");
+        assert_ne!(new_f, old_f);
+        // "g" is NOT stored as a name.
+        assert_eq!(cb.get_name("g"), None);
     }
 
     #[test]

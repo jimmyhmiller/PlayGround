@@ -1103,10 +1103,20 @@ impl CausalRateSampled {
             return;
         };
         if p.is_self_loop {
+            // Clamp the dwell's emit to its triggering arrival BEFORE recording
+            // the causal arrival it produces — otherwise the dwell arrival lands
+            // at unscaled real time and a downstream hop clamped to it emits
+            // before its cause has visibly arrived (effect before cause).
+            let clamp = self
+                .visible_arrivals
+                .get(&p.from)
+                .and_then(|n| n.trigger_for(p.at_ns))
+                .unwrap_or(f64::NEG_INFINITY);
+            let emit_real = real_now.max(clamp);
             self.visible_arrivals
                 .entry(p.to)
                 .or_default()
-                .push(p.arrives_at_ns, real_now + p.sim_latency_s);
+                .push(p.arrives_at_ns, emit_real + p.sim_latency_s);
             return;
         }
 
@@ -1288,10 +1298,19 @@ impl BundleSummarized {
             return;
         };
         if p.is_self_loop {
+            // Clamp the dwell's emit to its triggering arrival before recording
+            // the causal arrival it produces (see CausalRate for the rationale)
+            // so a downstream hop doesn't emit before its cause is visible.
+            let clamp = self
+                .visible_arrivals
+                .get(&p.from)
+                .and_then(|n| n.trigger_for(p.at_ns))
+                .unwrap_or(f64::NEG_INFINITY);
+            let emit_real = real_now.max(clamp);
             self.visible_arrivals
                 .entry(p.to)
                 .or_default()
-                .push(p.arrives_at_ns, real_now + p.sim_latency_s);
+                .push(p.arrives_at_ns, emit_real + p.sim_latency_s);
             return;
         }
         let key = (p.from, p.to);
@@ -1421,6 +1440,47 @@ mod tests {
         let gen_pkt = &tl.packets[0];
         let resp = &tl.packets[1];
         assert!((resp.emit_real - gen_pkt.arrive_real).abs() < 1e-9);
+    }
+
+    // A mid-chain service dwell (self-loop) must not let the hop after it emit
+    // before its cause has visibly arrived. Models fan-in: src(0)→K(3),
+    // dwell at K, K(3)→D(4), with k=100 stretch.
+    fn fan_chain() -> [Event; 3] {
+        [
+            emit(1, 0, 3, 0, 8_000_000, data_pkt(0)),          // src → K
+            emit(2, 3, 3, 8_000_000, 33_000_000, data_pkt(0)), // K dwell (self-loop)
+            emit(3, 3, 4, 33_000_000, 39_000_000, data_pkt(0)),// K → D (after dwell)
+        ]
+    }
+
+    #[test]
+    fn causal_rate_dwell_keeps_post_dwell_hop_causal() {
+        let mut s = CausalRateSampled::new(100.0);
+        for ev in fan_chain() {
+            s.ingest(&ev, real_now_for_event(&ev, &TimeCursor { sim_now_ns: 0, visual_now: 0.0, k: 100.0 }));
+        }
+        let src_k = s.packets.iter().find(|p| p.from == NodeId(0) && p.to == NodeId(3)).unwrap();
+        let k_d = s.packets.iter().find(|p| p.from == NodeId(3) && p.to == NodeId(4)).unwrap();
+        assert!(
+            k_d.emit_real >= src_k.arrive_real - 1e-9,
+            "K→D emits {} before its cause src→K arrives {}",
+            k_d.emit_real, src_k.arrive_real
+        );
+    }
+
+    #[test]
+    fn bundle_dwell_keeps_post_dwell_hop_causal() {
+        let mut s = BundleSummarized::new(100.0);
+        for ev in fan_chain() {
+            s.ingest(&ev, real_now_for_event(&ev, &TimeCursor { sim_now_ns: 0, visual_now: 0.0, k: 100.0 }));
+        }
+        let src_k = s.packets.iter().find(|p| p.from == NodeId(0) && p.to == NodeId(3)).unwrap();
+        let k_d = s.packets.iter().find(|p| p.from == NodeId(3) && p.to == NodeId(4)).unwrap();
+        assert!(
+            k_d.emit_real >= src_k.arrive_real - 1e-9,
+            "K→D emits {} before its cause src→K arrives {}",
+            k_d.emit_real, src_k.arrive_real
+        );
     }
 
     #[test]

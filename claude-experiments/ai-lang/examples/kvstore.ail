@@ -26,16 +26,34 @@ state db: Atom<HashMap<String, Val>> = atom(hashmap_empty())
 
 // ---- Handlers (run ON the node, mutate its own db) -----------------------
 // These are the whole "engine". Each is one function; there is no dispatcher.
+// The hashmap ops return Result; inside a `swap` an Err KEEPS the old map, so
+// a failed write surfaces as a loud miss in the caller's next read — never as
+// a silently "successful" mutation.
+def kv_assoc(m: HashMap<String, Val>, k: String, v: Val) -> HashMap<String, Val> =
+    match hashmap_assoc(m, k, v) { Result::Ok(m2) => m2, Result::Err(_e) => m }
+
+def kv_remove(m: HashMap<String, Val>, k: String) -> HashMap<String, Val> =
+    match hashmap_remove(m, k) { Result::Ok(m2) => m2, Result::Err(_e) => m }
+
 def do_set(k: String, v: Val) -> Val = {
-    let _u = swap(db, |m: HashMap<String, Val>| hashmap_assoc(m, k, v));
+    let _u = swap(db, |m: HashMap<String, Val>| kv_assoc(m, k, v));
     v
 }
 
-def do_get(k: String) -> Option<Val> = hashmap_get(deref(db), k)
+// Err maps to a DISTINCT sentinel (Some(VInt(-909))), not None: a lookup
+// error must not be mistaken for "key missing".
+def do_get(k: String) -> Option<Val> =
+    match hashmap_get(deref(db), k) {
+        Result::Ok(ov) => ov,
+        Result::Err(_e) => Option::Some(Val::VInt(0 - 909)),
+    }
 
 def do_del(k: String) -> Int = {
-    let had = hashmap_contains(deref(db), k);
-    let _u = swap(db, |m: HashMap<String, Val>| hashmap_remove(m, k));
+    let had = match hashmap_contains(deref(db), k) {
+        Result::Ok(h) => h,
+        Result::Err(_e) => 0 - 909,
+    };
+    let _u = swap(db, |m: HashMap<String, Val>| kv_remove(m, k));
     had
 }
 

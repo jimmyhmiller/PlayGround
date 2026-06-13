@@ -777,6 +777,10 @@ pub struct DefExpr {
     pub init: Option<Box<dyn Expr>>,
     pub init_provided: bool,
     pub is_dynamic: bool,
+    /// Literal-pool slot holding this Var as a value — `def` RETURNS the
+    /// Var in Java (`(def x 5)` ⇒ `#'user/x`), and `defonce` depends on
+    /// `(let [v# (def ~name)] (.hasRoot v#))` receiving the Var.
+    pub var_literal_idx: u32,
 }
 
 impl Expr for DefExpr {
@@ -830,24 +834,29 @@ impl Expr for DefExpr {
 
             let val = init.emit(C::Expression, objx, ir)?;
             let bind_root_fref = with_active_compiler(|c| c.externs.var_bind_root);
-            let ret =
-                ir.f.fb
-                    .call(bind_root_fref, &[var_ptr_val, val])
-                    .expect("cljvm_var_bind_root returns I64");
+            ir.f.fb
+                .call(bind_root_fref, &[var_ptr_val, val])
+                .expect("cljvm_var_bind_root returns I64");
+            // Java's DefExpr leaves the VAR on the stack — `(def x 5)`
+            // evaluates to `#'user/x`, not 5. Load the Var literal.
             match context {
                 C::Statement => None,
-                _ => Some(ret),
+                _ => {
+                    let lit = dynir::ir::LiteralRef::from_u32(self.var_literal_idx);
+                    Some(ir.f.fb.gc_literal(lit))
+                }
             }
         } else {
-            // `(def name)` — declare-only. Java leaves the Var on the stack
-            // and pops in STATEMENT context. Without a Var-value tag we don't
-            // have a sensible Value to return; the Var has been interned as a
-            // side effect of `parse_def_form` already, so emitting nil is the
-            // pragmatic choice until Var values get a NanBox tag.
-            let nil_val = ir.f.nil();
+            // `(def name)` — declare-only. The Var was interned at
+            // `parse_def_form` time; return it as a value (defonce reads
+            // `(.hasRoot v#)` off it).
+            let _ = var_ptr_val;
             match context {
                 C::Statement => None,
-                _ => Some(nil_val),
+                _ => {
+                    let lit = dynir::ir::LiteralRef::from_u32(self.var_literal_idx);
+                    Some(ir.f.fb.gc_literal(lit))
+                }
             }
         }
     }
@@ -1030,11 +1039,14 @@ fn parse_def_form(context: C, form: Object) -> Box<dyn Expr> {
         }
     }
 
+    let var_literal_idx =
+        with_active_compiler(|c| c.intern_literal(PendingLiteral::Var(v.clone())));
     Box::new(DefExpr {
         var: v,
         init,
         init_provided,
         is_dynamic: false,
+        var_literal_idx,
     })
 }
 
@@ -1531,19 +1543,25 @@ impl IParser for ConstantExprParser {
             );
         }
         let v = super::rt::second(&form);
-        match &v {
-            Object::Nil => Box::new(NIL_EXPR),
-            Object::Bool(true) => Box::new(TRUE_EXPR),
-            Object::Bool(false) => Box::new(FALSE_EXPR),
-            Object::Long(_) | Object::Double(_) => NumberExpr::parse(v),
-            Object::Char(code) => Box::new(CharExpr { code: *code }),
-            Object::String(s) => Box::new(StringExpr { str: s.clone() }),
-            // Empty collections (EmptyExpr in Java) — not yet ported as a
-            // distinct Expr; quoted non-empty collections + symbols /
-            // keywords / etc. land in ConstantExpr where the heap path
-            // dispatches per variant.
-            _ => Box::new(ConstantExpr::new(v)),
-        }
+        constant_literal_expr(v)
+    }
+}
+
+/// Build the Expr for a compile-time constant value — the shape dispatch
+/// shared by `(quote v)` (ConstantExprParser) and `case*` test constants.
+fn constant_literal_expr(v: Object) -> Box<dyn Expr> {
+    match &v {
+        Object::Nil => Box::new(NIL_EXPR),
+        Object::Bool(true) => Box::new(TRUE_EXPR),
+        Object::Bool(false) => Box::new(FALSE_EXPR),
+        Object::Long(_) | Object::Double(_) => NumberExpr::parse(v),
+        Object::Char(code) => Box::new(CharExpr { code: *code }),
+        Object::String(s) => Box::new(StringExpr { str: s.clone() }),
+        // Empty collections (EmptyExpr in Java) — not yet ported as a
+        // distinct Expr; quoted non-empty collections + symbols /
+        // keywords / etc. land in ConstantExpr where the heap path
+        // dispatches per variant.
+        _ => Box::new(ConstantExpr::new(v)),
     }
 }
 
@@ -2237,10 +2255,13 @@ pub fn analyze_named(context: C, form: Object, name: Option<&str>) -> Box<dyn Ex
             analyze_seq(context, form)
         }
         Object::Symbol(s) => analyze_symbol(s),
-        Object::Var(_) => crate::unimplemented_port!(
-            "Compiler.analyze on Var",
-            "treated as ConstantExpr in Java — wire when Var-as-constant lands"
-        ),
+        Object::Var(v) => {
+            // Java treats a Var in source position as a constant. Reached
+            // when macro output embeds a Var value (e.g. the result of a
+            // nested `(def …)` spliced by defmulti-style macros).
+            let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Var(v.clone())));
+            Box::new(ConstantLiteralExpr { idx })
+        }
         Object::Vector(v) => analyze_vector(context, v),
         Object::Map(m) => analyze_map(context, m),
         Object::Set(s) => analyze_set(context, s),
@@ -2270,6 +2291,58 @@ pub fn analyze_named(context: C, form: Object, name: Option<&str>) -> Box<dyn Ex
 /// `(when-let [form tst] body…)` → `(let [tmp tst] (when tmp (let [form tmp] body…)))`.
 /// Host-side because the upstream JIT'd defmacro hits a gc_literal
 /// corruption that produces a corrupt head symbol in its expansion.
+/// `(when-some [x tst] body…)` →
+/// `(let* [tmp tst] (if (nil? tmp) nil (let* [x tmp] (do body…))))`.
+/// nil-test (not truthiness): `(when-some [x false] …)` runs the body.
+fn expand_when_some(form: &Object) -> Object {
+    expand_some_let(form, true)
+}
+
+/// `(if-some [x tst] then else?)` →
+/// `(let* [tmp tst] (if (nil? tmp) else (let* [x tmp] then)))`.
+fn expand_if_some(form: &Object) -> Object {
+    expand_some_let(form, false)
+}
+
+fn expand_some_let(form: &Object, when_style: bool) -> Object {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = o_sym(&format!("temp__some{id}__"));
+    let after = super::rt::next(form);
+    let bindings = super::rt::first(&after);
+    let rest = super::rt::next(&after);
+    let (form_sym, tst) = match bindings.peel_meta_ref() {
+        Object::Vector(v) if v.count() == 2 => (v.nth(0), v.nth(1)),
+        other => panic!("clojure-jvm: when-some/if-some needs [form tst], got {other:?}"),
+    };
+    let (then_body, else_form) = if when_style {
+        // All remaining forms are the body.
+        let mut do_body: Vec<Object> = vec![o_sym("do")];
+        let mut cur = rest;
+        while !matches!(cur, Object::Nil) {
+            do_body.push(super::rt::first(&cur));
+            cur = super::rt::next(&cur);
+        }
+        (o_list(do_body), Object::Nil)
+    } else {
+        let then = super::rt::first(&rest);
+        let else_f = super::rt::first(&super::rt::next(&rest));
+        (then, else_f)
+    };
+    let inner_let = o_list(vec![
+        o_sym("let*"),
+        o_vec(vec![form_sym, tmp.clone()]),
+        then_body,
+    ]);
+    let nil_test = o_list(vec![o_sym("nil?"), tmp.clone()]);
+    let if_form = o_list(vec![o_sym("if"), nil_test, else_form, inner_let]);
+    o_list(vec![
+        o_sym("let*"),
+        o_vec(vec![tmp, tst]),
+        if_form,
+    ])
+}
+
 fn expand_when_let(form: &Object) -> Object {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2366,18 +2439,37 @@ fn expand_dotdot(form: &Object) -> Object {
     acc
 }
 
-/// `(defonce name init)` → `(def name nil)`. Skip the init expression
-/// entirely — defonce semantics say "only init if no root", and our
-/// runtime ref/atom/agent constructors are stubs that return nil
-/// anyway. The downstream code that uses these vars will see nil,
-/// but the declaration succeeds and subsequent forms can analyze.
+/// `(defonce name expr)` → the upstream semantics:
+/// `(let* [v (def name)] (if (.hasRoot v) nil (def name expr)))`.
+/// Host-side expansion (the upstream defmacro is bypassed by this
+/// intercept table); `def` returns the Var, so `.hasRoot` sees it.
 fn expand_defonce(form: &Object) -> Object {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let v = Symbol::intern(&format!("defonce__v{id}__"));
     let after = super::rt::next(form);
     let name = super::rt::first(&after);
-    Object::List(PersistentList::create(vec![
-        Object::Symbol(Symbol::intern("def")),
-        name,
+    let expr = super::rt::second(&after);
+    let def_sym = Object::Symbol(Symbol::intern("def"));
+    let declare = Object::List(PersistentList::create(vec![def_sym.clone(), name.clone()]));
+    let has_root = Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern(".hasRoot")),
+        Object::Symbol(v.clone()),
+    ]));
+    let bind = Object::List(PersistentList::create(vec![def_sym, name, expr]));
+    let if_form = Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("if")),
+        has_root,
         Object::Nil,
+        bind,
+    ]));
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("let*")),
+        Object::Vector(crate::lang::persistent_vector::PersistentVector::create(vec![
+            Object::Symbol(v),
+            declare,
+        ])),
+        if_form,
     ]))
 }
 
@@ -2601,7 +2693,42 @@ fn expand_while(form: &Object) -> Object {
 /// support mutual recursion the way upstream's letfn does (which uses
 /// a single `letfn*` special form), but for code that only references
 /// each fn after its declaration this is enough.
+/// Substitute every unqualified occurrence of a letfn-bound name with
+/// `(. NAME__cell (deref))`. Syntactic — does not honor shadowing of the
+/// letfn names inside the fn specs (rare in practice; a shadowing param
+/// with the same name would be rewritten too).
+fn letfn_subst(o: &Object, cells: &std::collections::HashMap<String, Object>) -> Object {
+    match o {
+        Object::Symbol(s) if s.get_namespace().is_none() => match cells.get(s.get_name()) {
+            Some(cell_sym) => o_list(vec![
+                o_sym("."),
+                cell_sym.clone(),
+                o_list(vec![o_sym("deref")]),
+            ]),
+            None => o.clone(),
+        },
+        Object::List(l) => o_list(l.iter().map(|x| letfn_subst(&x, cells)).collect()),
+        Object::Vector(v) => o_vec((0..v.count()).map(|i| letfn_subst(&v.nth(i), cells)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `(letfn [(f …) (g …)] body…)` — REAL mutual-recursion semantics via
+/// indirection cells (upstream's letfn* creates uninitialized locals and
+/// back-patches them; we model that with one Atom cell per name):
+///
+///   (let* [f__cell (new clojure.lang.Atom nil)
+///          g__cell (new clojure.lang.Atom nil)]
+///     (. f__cell (reset (fn* f-tail-with-names-substituted)))
+///     (. g__cell (reset (fn* g-tail-with-names-substituted)))
+///     (let* [f (. f__cell (deref)) g (. g__cell (deref))] body…))
+///
+/// Inside the fn bodies each letfn name is rewritten to
+/// `(. name__cell (deref))`, so forward and mutual references resolve at
+/// call time. The outer body sees the names bound normally.
 fn expand_letfn(form: &Object) -> Object {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let after = super::rt::next(form);
     let bindings = super::rt::first(&after);
     let body_seq = super::rt::next(&after);
@@ -2609,7 +2736,12 @@ fn expand_letfn(form: &Object) -> Object {
         Object::Vector(v) => v,
         other => panic!("letfn needs vector of fnspecs, got {other:?}"),
     };
-    let mut binding_pairs: Vec<Object> = Vec::new();
+    // Parse specs: (name [params] body…) possibly multi-arity.
+    struct Spec {
+        name: String,
+        items: Vec<Object>,
+    }
+    let mut specs: Vec<Spec> = Vec::new();
     for i in 0..bindings_v.count() {
         let spec = bindings_v.nth(i);
         if let Object::List(l) = &spec {
@@ -2617,28 +2749,65 @@ fn expand_letfn(form: &Object) -> Object {
             if items.is_empty() {
                 continue;
             }
-            let name = items[0].clone();
-            let mut fn_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("fn*"))];
-            for x in items.iter().skip(0) {
-                fn_items.push(x.clone());
-            }
-            binding_pairs.push(name);
-            binding_pairs.push(Object::List(PersistentList::create(fn_items)));
+            let name = match items[0].peel_meta_ref() {
+                Object::Symbol(s) => s.get_name().to_string(),
+                other => panic!("letfn fnspec needs a symbol name, got {other:?}"),
+            };
+            specs.push(Spec { name, items });
         }
     }
-    let mut body_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("do"))];
+    let mut cells: std::collections::HashMap<String, Object> = std::collections::HashMap::new();
+    for sp in &specs {
+        cells.insert(
+            sp.name.clone(),
+            o_sym(&format!("{}__letfn_cell{id}__", sp.name)),
+        );
+    }
+    // Outer bindings: each cell ← (new clojure.lang.Atom nil).
+    let mut outer_bindings: Vec<Object> = Vec::new();
+    for sp in &specs {
+        outer_bindings.push(cells[&sp.name].clone());
+        outer_bindings.push(o_list(vec![
+            o_sym("new"),
+            o_sym("clojure.lang.Atom"),
+            Object::Nil,
+        ]));
+    }
+    let mut outer_items: Vec<Object> = vec![o_sym("let*"), o_vec(outer_bindings)];
+    // Back-patch each cell with its closure (names substituted in the
+    // fn TAIL — params vectors of the spec itself are positions 1.., and
+    // substitution skips nothing structurally; acceptable per the
+    // shadowing limitation documented on letfn_subst).
+    for sp in &specs {
+        let mut fn_items: Vec<Object> = vec![o_sym("fn*")];
+        for x in sp.items.iter().skip(1) {
+            fn_items.push(letfn_subst(x, &cells));
+        }
+        let fn_form = o_list(fn_items);
+        outer_items.push(o_list(vec![
+            o_sym("."),
+            cells[&sp.name].clone(),
+            o_list(vec![o_sym("reset"), fn_form]),
+        ]));
+    }
+    // Inner let*: bind the real names to the deref'd closures, run body.
+    let mut inner_bindings: Vec<Object> = Vec::new();
+    for sp in &specs {
+        inner_bindings.push(o_sym(&sp.name));
+        inner_bindings.push(o_list(vec![
+            o_sym("."),
+            cells[&sp.name].clone(),
+            o_list(vec![o_sym("deref")]),
+        ]));
+    }
+    let mut inner_items: Vec<Object> = vec![o_sym("let*"), o_vec(inner_bindings)];
     let mut cur = body_seq;
     while !matches!(cur, Object::Nil) {
-        body_items.push(super::rt::first(&cur));
+        inner_items.push(super::rt::first(&cur));
         cur = super::rt::next(&cur);
     }
-    Object::List(PersistentList::create(vec![
-        Object::Symbol(Symbol::intern("let*")),
-        Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
-            binding_pairs,
-        )),
-        Object::List(PersistentList::create(body_items)),
-    ]))
+    outer_items.push(o_list(inner_items));
+    o_list(outer_items)
 }
 
 /// `(case e v1 r1 v2 r2 default)` → nested if. Simplistic: uses `=`
@@ -2912,11 +3081,12 @@ fn expand_when(form: &Object) -> Object {
         body_items.push(super::rt::first(&cur));
         cur = super::rt::next(&cur);
     }
+    // 3-element `if` (no explicit nil else) so `(macroexpand-1
+    // (quote (when ...)))` prints exactly like upstream.
     Object::List(PersistentList::create(vec![
         Object::Symbol(Symbol::intern("if")),
         test,
         Object::List(PersistentList::create(body_items)),
-        Object::Nil,
     ]))
 }
 
@@ -3060,22 +3230,13 @@ fn expand_cond(form: &Object) -> Object {
     build(&clauses)
 }
 
-/// `(defmulti name dispatch-fn ...)` → `(def name nil)`. We don't
-/// model multimethods; defining the var lets `(defmethod ...)` calls
-/// analyze (they're intercepted as nil too).
-fn expand_defmulti(form: &Object) -> Object {
-    let after = super::rt::next(form);
-    let name_form = super::rt::first(&after);
-    let name_sym = match name_form.peel_meta_ref() {
-        Object::Symbol(s) => s.clone(),
-        other => panic!("clojure-jvm: defmulti needs a symbol name, got {other:?}"),
-    };
-    Object::List(PersistentList::create(vec![
-        Object::Symbol(Symbol::intern("def")),
-        Object::Symbol(name_sym),
-        Object::Nil,
-    ]))
-}
+// NOTE: there is deliberately NO host-side `defmulti`/`defmethod`
+// intercept. Multimethods are real: upstream core.clj's `defmacro
+// defmulti` / `defmacro defmethod` expand through the normal macro-Var
+// path (`resolve_var` → macro fn), building `clojure.lang.MultiFn`
+// instances. A host intercept here would SHADOW the real upstream
+// macros (the intercept table runs before `resolve_var`). If core.clj
+// is not loaded, `(defmulti …)` fails loudly as an unresolved symbol.
 
 /// `(defprotocol name docstring? methods…)` → declare each method as
 /// a separate `(def m nil)` plus the protocol name itself. Methods
@@ -3801,40 +3962,155 @@ fn expand_doseq(form: &Object) -> Object {
 /// `(for [x coll] body)` → simplified single-binding lazy comprehension.
 /// Real `for` supports many modifiers; this version handles only the
 /// single-binding form by mapping body over (seq coll) via lazy-seq.
+// Small Object-tree builders shared by the host-side macro expanders.
+fn o_sym(name: &str) -> Object {
+    Object::Symbol(Symbol::intern(name))
+}
+fn o_list(items: Vec<Object>) -> Object {
+    Object::List(PersistentList::create(items))
+}
+fn o_vec(items: Vec<Object>) -> Object {
+    Object::Vector(crate::lang::persistent_vector::PersistentVector::create(items))
+}
+
+/// Build `(fn* [bind] body)`. A non-symbol (destructuring) binding form
+/// goes through a gensym param + `let`: `(fn* [g] (let [bind g] body))`.
+fn o_fn1(bind: &Object, body: Object, gensym_tag: &str, id: u64) -> Object {
+    match bind {
+        Object::Symbol(_) => o_list(vec![o_sym("fn*"), o_vec(vec![bind.clone()]), body]),
+        pattern => {
+            let g = o_sym(&format!("{gensym_tag}__p{id}__"));
+            let let_form = o_list(vec![
+                o_sym("let"),
+                o_vec(vec![pattern.clone(), g.clone()]),
+                body,
+            ]);
+            o_list(vec![o_sym("fn*"), o_vec(vec![g]), let_form])
+        }
+    }
+}
+
+/// `(for [seq-exprs…] body)` — the REAL expansion, mirroring upstream's
+/// shape: one self-recursive lazy iterator fn per binding level.
+///
+///   (fn* iter_k [s]
+///     (lazy-seq
+///       (let [ss (seq s)]
+///         (if ss
+///           (let [bind (first ss)]
+///             E)            ; see below
+///           nil))))
+///
+/// where E for the innermost level is `(cons body (iter_k (rest ss)))`
+/// and for outer levels `(concat (iter_{k+1} coll_{k+1}) (iter_k (rest
+/// ss)))`; `:let` wraps E, `:when` is `(if pred E (iter_k (rest ss)))`
+/// (skip), `:while` is `(if pred E nil)` (stop). Each modifier sees the
+/// `:let` bindings declared before it. Fully lazy — no `mapcat`/`apply`
+/// involved, so `(take 3 (for [x (iterate inc 0)] …))` terminates.
 fn expand_for_simple(form: &Object) -> Object {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let after = super::rt::next(form);
     let bindings = super::rt::first(&after);
     let body = super::rt::first(&super::rt::next(&after));
-    let bindings_v = match bindings.peel_meta_ref() {
+    let bv = match bindings.peel_meta_ref() {
         Object::Vector(v) => v,
-        other => panic!("clojure-jvm: for needs a vector, got {other:?}"),
+        other => panic!("clojure-jvm: for needs a binding vector, got {other:?}"),
     };
-    if bindings_v.count() != 2 {
-        // Multi-binding for: just emit nil. Real expansion is complex
-        // (cartesian product with :let / :when / :while modifiers).
-        // The defns that use it analyze cleanly; runtime invocation
-        // returns nil rather than the actual sequence.
-        eprintln!(
-            "[cljvm-stub] multi-binding `for` ({} bindings) — returning nil",
-            bindings_v.count() / 2
-        );
-        return Object::Nil;
+    struct Group {
+        bind: Object,
+        coll: Object,
+        mods: Vec<(String, Object)>,
     }
-    let bind_sym = bindings_v.nth(0);
-    let coll = bindings_v.nth(1);
-    // (map (fn [bind_sym] body) coll)
-    let fn_form = Object::List(PersistentList::create(vec![
-        Object::Symbol(Symbol::intern("fn*")),
-        Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
-            vec![bind_sym],
-        )),
-        body,
-    ]));
-    Object::List(PersistentList::create(vec![
-        Object::Symbol(Symbol::intern("map")),
-        fn_form,
-        coll,
-    ]))
+    let mut groups: Vec<Group> = Vec::new();
+    let mut i = 0;
+    while i < bv.count() {
+        let item = bv.nth(i);
+        if let Object::Keyword(k) = &item {
+            let name = k.get_name().to_string();
+            let arg = bv.nth(i + 1);
+            groups
+                .last_mut()
+                .unwrap_or_else(|| {
+                    panic!("clojure-jvm: for — :{name} modifier before any binding")
+                })
+                .mods
+                .push((name, arg));
+        } else {
+            let coll = bv.nth(i + 1);
+            groups.push(Group {
+                bind: item,
+                coll,
+                mods: Vec::new(),
+            });
+        }
+        i += 2;
+    }
+    // Build level fns innermost-out. `chain` is the EXPRESSION that
+    // produces level k's seq given its coll (i.e. `(iter_k coll_k)`).
+    let mut inner_call: Option<Object> = None;
+    for (k, g) in groups.iter().enumerate().rev() {
+        let iter_sym = o_sym(&format!("for__iter{id}_{k}__"));
+        let s_sym = o_sym(&format!("for__s{id}_{k}__"));
+        let ss_sym = o_sym(&format!("for__ss{id}_{k}__"));
+        let rest_call = o_list(vec![
+            iter_sym.clone(),
+            o_list(vec![o_sym("rest"), ss_sym.clone()]),
+        ]);
+        // E: innermost conses the body; outer levels concat the next
+        // level's seq with this level's continuation.
+        let mut e = match &inner_call {
+            None => o_list(vec![o_sym("cons"), body.clone(), rest_call.clone()]),
+            Some(inner) => o_list(vec![o_sym("concat"), inner.clone(), rest_call.clone()]),
+        };
+        // Fold modifiers reversed (so the FIRST mod ends up outermost and
+        // each :when/:while predicate sees the :let bindings before it).
+        for (kw, arg) in g.mods.iter().rev() {
+            match kw.as_str() {
+                "let" => e = o_list(vec![o_sym("let"), arg.clone(), e]),
+                "when" => {
+                    e = o_list(vec![o_sym("if"), arg.clone(), e, rest_call.clone()]);
+                }
+                "while" => {
+                    e = o_list(vec![o_sym("if"), arg.clone(), e, Object::Nil]);
+                }
+                other => panic!("clojure-jvm: for — unsupported modifier :{other}"),
+            }
+        }
+        // (let [bind (first ss)] E) — destructuring binds go through let.
+        let bind_let = o_list(vec![
+            o_sym("let"),
+            o_vec(vec![
+                g.bind.clone(),
+                o_list(vec![o_sym("first"), ss_sym.clone()]),
+            ]),
+            e,
+        ]);
+        let body_if = o_list(vec![
+            o_sym("if"),
+            ss_sym.clone(),
+            bind_let,
+            Object::Nil,
+        ]);
+        let seq_let = o_list(vec![
+            o_sym("let"),
+            o_vec(vec![
+                ss_sym.clone(),
+                o_list(vec![o_sym("seq"), s_sym.clone()]),
+            ]),
+            body_if,
+        ]);
+        let lazy = o_list(vec![o_sym("lazy-seq"), seq_let]);
+        let iter_fn = o_list(vec![
+            o_sym("fn*"),
+            iter_sym.clone(),
+            o_vec(vec![s_sym.clone()]),
+            lazy,
+        ]);
+        // ((fn* iter [s] …) coll)
+        inner_call = Some(o_list(vec![iter_fn, g.coll.clone()]));
+    }
+    inner_call.expect("for needs at least one binding")
 }
 
 /// `(lazy-seq body…)` → `(new clojure.lang.LazySeq (fn* [] body…))`.
@@ -4212,6 +4488,20 @@ fn expand_defmacro(form: &Object) -> Object {
 ///
 /// The macro fn signature mirrors microlisp's: it takes ONE arg, the
 /// unevaluated args list (the form's `next`), and returns a form Object.
+/// Runtime-facing wrapper for the `macroexpand-1` core fn (the extern
+/// `cljvm_compiler_macroexpand1` calls this). One expansion step or None.
+pub fn macroexpand1_for_runtime(form: &Object) -> Option<Object> {
+    macroexpand_once(form)
+}
+
+/// Runtime-facing `eval` (the extern `cljvm_compiler_eval` calls this):
+/// compile + run `form` in the active Session.
+pub fn eval_in_active_session(form: Object) -> u64 {
+    with_active_session_ref(|sess| sess.eval_form(form)).unwrap_or_else(|| {
+        panic!("clojure-jvm: eval — no active Session")
+    })
+}
+
 fn macroexpand_once(form: &Object) -> Option<Object> {
     use dynlower::JitOutcome;
     use dynruntime::GcPolicy;
@@ -4260,12 +4550,13 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             "binding" => return Some(expand_binding_to_do(form)),
             "when-let" => return Some(expand_when_let(form)),
             "if-let" => return Some(expand_if_let(form)),
+            "when-some" => return Some(expand_when_some(form)),
+            "if-some" => return Some(expand_if_some(form)),
             "dotimes" => return Some(expand_dotimes(form)),
             "declare" => return Some(expand_declare(form)),
             "lazy-seq" => return Some(expand_lazy_seq(form)),
             "doseq" => return Some(expand_doseq(form)),
             "for" => return Some(expand_for_simple(form)),
-            "defmulti" => return Some(expand_defmulti(form)),
             "defprotocol" => return Some(expand_defprotocol(form)),
             "extend-type" => return Some(expand_extend_type(form)),
             "extend-protocol" => return Some(expand_extend_protocol(form)),
@@ -4561,6 +4852,15 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                             long: sess.compiler.long_type_id.0,
             character: sess.compiler.character_type_id.0,
                             user_instance: sess.compiler.user_instance_type_id.0,
+                            repeat_seq: sess.compiler.repeat_type_id.0,
+                            atom: sess.compiler.atom_type_id.0,
+                            volatile_cell: sess.compiler.volatile_type_id.0,
+                            closure: sess.compiler.closure_type_id.0,
+                            iterate_seq: sess.compiler.iterate_type_id.0,
+                            cycle_seq: sess.compiler.cycle_type_id.0,
+                            matcher: sess.compiler.matcher_type_id.0,
+                            multifn_cell: sess.compiler.multifn_type_id.0,
+                            exception_info: sess.compiler.exception_info_type_id.0,
                         };
                         let exc_obj = crate::runtime::any_bits_to_object(e, ids);
                         // Defer instead of aborting the load: stash the macro's
@@ -4609,6 +4909,15 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             long: sess.compiler.long_type_id.0,
             character: sess.compiler.character_type_id.0,
             user_instance: sess.compiler.user_instance_type_id.0,
+            repeat_seq: sess.compiler.repeat_type_id.0,
+            atom: sess.compiler.atom_type_id.0,
+            volatile_cell: sess.compiler.volatile_type_id.0,
+            closure: sess.compiler.closure_type_id.0,
+            iterate_seq: sess.compiler.iterate_type_id.0,
+            cycle_seq: sess.compiler.cycle_type_id.0,
+            matcher: sess.compiler.matcher_type_id.0,
+            multifn_cell: sess.compiler.multifn_type_id.0,
+            exception_info: sess.compiler.exception_info_type_id.0,
         };
         crate::runtime::any_bits_to_object(result_bits, ids)
     });
@@ -5074,6 +5383,9 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
         if **sym == *specials.ASSIGN {
             return parse_assign_form(context, form);
         }
+        if **sym == *specials.CASE {
+            return parse_case_form(context, form);
+        }
         // `reify` / `reify*` — anonymous instance implementing host
         // interfaces / protocols. The `reify` macro lives in
         // `core_deftype.clj` (not embedded) and `reify*` needs
@@ -5165,12 +5477,18 @@ impl Expr for ThrowExpr {
 /// body Expr already analyzed in a scope that has the binding visible.
 #[derive(Debug)]
 pub struct CatchClause {
-    /// `(catch <class> binding body…)` — the class symbol. Reserved for
-    /// future type-based dispatch; currently every catch arm acts as a
-    /// catch-all (in Clojure, the JVM's class hierarchy decides; without
-    /// a JVM here we'd need a host class registry).
+    /// `(catch <class> binding body…)` — the class symbol, kept for
+    /// diagnostics.
     #[allow(dead_code)]
     pub class_sym: Option<Arc<Symbol>>,
+    /// The class symbol analyzed as an expression (a host-class
+    /// reference). `None` means the arm is a catch-all: `Throwable`
+    /// sits at the top of the hierarchy, so its test would always be
+    /// true and is elided. Non-`None` arms emit an
+    /// `isInstance(class, thrown)` test and fall through to the next
+    /// arm (or a re-raise) when it fails — Java's first-assignable-
+    /// catch semantics.
+    pub class_expr: Option<Box<dyn Expr>>,
     /// The binding's LocalBinding entry — its `idx` gives the slot name.
     pub binding: Arc<LocalBinding>,
     /// Catch body, analyzed in a scope with `binding` registered.
@@ -5203,9 +5521,12 @@ pub struct TryExpr {
     pub body: Box<dyn Expr>,
     /// Catch arms, in order. Empty if there's only a `finally`.
     pub catches: Vec<CatchClause>,
-    /// Optional finally body (not yet implemented — panics if present).
+    /// Optional finally body.
     #[allow(dead_code)]
     pub finally: Option<Box<dyn Expr>>,
+    /// `cljvm_inst_isInstance` — the same extern `instance?` uses.
+    /// `Some` whenever at least one catch arm carries a class test.
+    pub is_instance_fref: Option<dynir::FuncRef>,
 }
 
 impl Expr for TryExpr {
@@ -5297,29 +5618,97 @@ impl Expr for TryExpr {
             // so the outer finally handler runs and propagates.
             ir.f.fb.raise(thrown);
         } else {
-            // Single-arm case (simplest): bind `thrown` to the arm's
-            // local binding slot, emit the arm body, jump to merge.
-            // Multi-arm case extends this with class-based dispatch
-            // between arms; we don't have a host class registry yet,
-            // so every arm acts as a catch-all and the FIRST arm wins.
-            if self.catches.len() > 1 {
-                crate::unimplemented_port!(
-                    "TryExpr.emit with multiple catch arms",
-                    "needs host-class registry for type-filter dispatch"
-                );
-            }
-            let arm = &self.catches[0];
-            ir.f.def_var(&local_slot_name(arm.binding.idx), thrown);
-            let arm_val = arm.body.emit(context, objx, ir);
-            if !ir.f.fb.current_block_is_terminated() {
-                any_reached = true;
-                match (phi_ty.is_some(), arm_val) {
-                    (true, Some(v)) => ir.f.fb.jump(body_join_bb, &[v]),
-                    (false, _) => ir.f.fb.jump(body_join_bb, &[]),
-                    (true, None) => panic!(
-                        "clojure-jvm: TryExpr catch arm produced no value in non-STATEMENT context"
-                    ),
+            // Class-based dispatch, Java's first-assignable-catch
+            // semantics: each arm with a class test calls the same
+            // `isInstance` extern that backs `instance?` and falls
+            // through to the next arm on mismatch; a `Throwable` arm
+            // is a catch-all (`class_expr` is `None`) and ends the
+            // chain. If no arm matches, re-raise so the exception
+            // propagates to the next enclosing try (running any
+            // finally on the way out).
+            //
+            // The thrown value rides along the chain as a block
+            // param so every block reads it from its own param,
+            // never across blocks.
+            let mut cur_thrown = thrown;
+            let mut chain_terminated = false;
+            for arm in &self.catches {
+                let (bound_thrown, next_bb_opt): (Value, Option<dynir::BlockId>) =
+                    match &arm.class_expr {
+                        None => {
+                            // Catch-all. Later arms are unreachable —
+                            // Java rejects them at compile time; we
+                            // simply stop the chain.
+                            chain_terminated = true;
+                            (cur_thrown, None)
+                        }
+                        Some(class_expr) => {
+                            let class_val = match class_expr.emit(C::Expression, objx, ir) {
+                                Some(v) => v,
+                                None => {
+                                    // The class expression terminated the
+                                    // block — an unresolved class deferred
+                                    // to a runtime ThrowExpr (the loader's
+                                    // standard deferral). Reaching this
+                                    // catch dispatch at runtime throws the
+                                    // unresolved-class error; the rest of
+                                    // the chain is unreachable.
+                                    assert!(
+                                        ir.f.fb.current_block_is_terminated(),
+                                        "clojure-jvm: catch class expression produced no value \
+                                         without terminating the block"
+                                    );
+                                    chain_terminated = true;
+                                    break;
+                                }
+                            };
+                            let arm_bb = ir.f.fb.create_block(&[dynir::Type::I64]);
+                            let next_bb = ir.f.fb.create_block(&[dynir::Type::I64]);
+                            let fref = self.is_instance_fref.expect(
+                                "TryExpr: class-tested arm without is_instance_fref (parse bug)",
+                            );
+                            let cond =
+                                ir.f.fb
+                                    .call(fref, &[class_val, cur_thrown])
+                                    .expect("cljvm_inst_isInstance returns I64 (NanBox bool)");
+                            ir.f.br_if_truthy(
+                                cond,
+                                arm_bb,
+                                &[cur_thrown],
+                                next_bb,
+                                &[cur_thrown],
+                            );
+                            ir.f.fb.switch_to_block(arm_bb);
+                            let v = ir.f.fb.block_param(arm_bb, 0);
+                            (v, Some(next_bb))
+                        }
+                    };
+                // Emit the arm body in the current block (arm_bb for
+                // tested arms, catch_bb/next_bb for a catch-all).
+                ir.f
+                    .def_var(&local_slot_name(arm.binding.idx), bound_thrown);
+                let arm_val = arm.body.emit(context, objx, ir);
+                if !ir.f.fb.current_block_is_terminated() {
+                    any_reached = true;
+                    match (phi_ty.is_some(), arm_val) {
+                        (true, Some(v)) => ir.f.fb.jump(body_join_bb, &[v]),
+                        (false, _) => ir.f.fb.jump(body_join_bb, &[]),
+                        (true, None) => panic!(
+                            "clojure-jvm: TryExpr catch arm produced no value in non-STATEMENT context"
+                        ),
+                    }
                 }
+                match next_bb_opt {
+                    Some(next_bb) => {
+                        ir.f.fb.switch_to_block(next_bb);
+                        cur_thrown = ir.f.fb.block_param(next_bb, 0);
+                    }
+                    None => break,
+                }
+            }
+            if !chain_terminated {
+                // No arm matched — propagate outward.
+                ir.f.fb.raise(cur_thrown);
             }
         }
 
@@ -5490,6 +5879,21 @@ fn parse_try_form(context: C, form: Object) -> Box<dyn Expr> {
     // Analyze each catch arm in a scope with its binding registered.
     let mut catches: Vec<CatchClause> = Vec::new();
     for (_orig, class_sym, bind_sym, arm_body_forms) in catch_specs {
+        // `Throwable` tops the hierarchy — its isInstance test is
+        // always true, so the arm is a catch-all and needs no class
+        // expression. Anything else resolves through the normal
+        // symbol analysis (host-class registry); an unknown class is
+        // a hard analysis error, same as `(instance? Unknown x)`.
+        let n = class_sym.get_name();
+        let class_expr = if n == "Throwable" || n == "java.lang.Throwable" {
+            None
+        } else {
+            Some(analyze(
+                C::Expression,
+                Object::Symbol(class_sym.clone()),
+            ))
+        };
+
         Var::push_thread_bindings(vec![
             (
                 COMPILER_VARS.LOCAL_ENV.clone(),
@@ -5507,10 +5911,27 @@ fn parse_try_form(context: C, form: Object) -> Box<dyn Expr> {
 
         catches.push(CatchClause {
             class_sym: Some(class_sym),
+            class_expr,
             binding: arm_lb,
             body: arm_body_expr,
         });
     }
+
+    // The class tests share `instance?`'s extern. Only fetched when
+    // some arm actually tests a class, so class-test-free tries (and
+    // the bare-session JIT unit tests) don't depend on it.
+    let is_instance_fref = if catches.iter().any(|c| c.class_expr.is_some()) {
+        Some(
+            with_active_compiler(|c| c.instance_method("isInstance", 2)).unwrap_or_else(|| {
+                panic!(
+                    "clojure-jvm: catch-class dispatch needs the `cljvm_inst_isInstance` extern \
+                     (registered in Compiler::new) but it is missing"
+                )
+            }),
+        )
+    } else {
+        None
+    };
 
     let finally = finally_forms.map(|forms| {
         let seq = Object::List(PersistentList::create(forms));
@@ -5521,6 +5942,7 @@ fn parse_try_form(context: C, form: Object) -> Box<dyn Expr> {
         body,
         catches,
         finally,
+        is_instance_fref,
     })
 }
 
@@ -5560,6 +5982,353 @@ fn parse_if_form(context: C, form: Object) -> Box<dyn Expr> {
         Box::new(NIL_EXPR) as Box<dyn Expr>
     };
     Box::new(IfExpr::new(0, 0, test_expr, then_expr, else_expr))
+}
+
+// ============================================================================
+// Java line ~9348–9664: `CaseExpr` + its `Parser` — the `case*` special form.
+// ============================================================================
+
+/// One `case*` switch arm: the (pre-shifted/masked) integer key the macro
+/// computed, the test constant to re-check against post-switch (None for
+/// hash-collision buckets, whose `then` is a macro-generated `condp` that
+/// does its own checking — the `skip-check` set), and the result expr.
+#[derive(Debug)]
+struct CaseArm {
+    key: i64,
+    test: Option<Box<dyn Expr>>,
+    then: Box<dyn Expr>,
+}
+
+/// `Compiler.CaseExpr`. `(case ...)` macroexpands to
+/// `(let* [ge e] (case* ge shift mask default case-map switch-type test-type
+/// skip-check?))`; this node compiles the `case*` into a real `Switch`
+/// terminator over a dispatch index computed by the `cljvm_case_dispatch`
+/// runtime helper (`Util.hash` for `:hash-equiv`/`:hash-identity`,
+/// `Number.intValue()` for `:int`, then `(h >> shift) & mask` when masked).
+///
+/// Divergences from Java's emit, none observable:
+///   * compact-vs-sparse (`tableswitch` vs `lookupswitch`) is a JVM
+///     bytecode concern; dynir's `Switch` takes arbitrary sparse keys.
+///   * `:hash-identity`'s `IF_ACMPNE` reference-identity check is emitted
+///     as the same `Util.equiv`-style check as `:hash-equiv`. Java's
+///     identity check is an optimization that relies on constants being
+///     canonical instances (interned Keywords); our keyword heap cells are
+///     non-canonical wrappers, so equivalence is the correct (and equal-
+///     outcome) comparison.
+///   * the dispatch value is emitted ONCE and the SSA value reused for the
+///     post-switch equivalence checks (Java re-loads the local each time).
+#[derive(Debug)]
+pub struct CaseExpr {
+    expr: Box<dyn Expr>,
+    shift: i64,
+    mask: i64,
+    default_expr: Box<dyn Expr>,
+    arms: Vec<CaseArm>,
+    /// `:int` test type? (false → `:hash-equiv` / `:hash-identity`).
+    test_is_int: bool,
+    /// `cljvm_case_dispatch` (switch-index helper).
+    dispatch_fref: dynir::FuncRef,
+    /// `cljvm_equals` — `Util.equiv` for the post-switch constant check.
+    equals_fref: dynir::FuncRef,
+}
+
+impl Expr for CaseExpr {
+    fn eval(&self) -> Object {
+        // Java: throw new UnsupportedOperationException("Can't eval case").
+        panic!(
+            "clojure-jvm: CaseExpr.eval is not a tree-walker — compile via \
+             the JIT pipeline instead"
+        )
+    }
+
+    fn emit(&self, context: C, objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        // Dispatch value: always EXPRESSION context (we need it to switch
+        // on, even when the surrounding context is STATEMENT).
+        let val = self.expr.emit(C::Expression, objx, ir)?;
+
+        // Switch index. RAW i64 (never NanBox-tagged — i32-sign-extended
+        // hashes and the no-match sentinel all fail the tag-pattern check),
+        // so it is GC-inert like other unboxed primitives.
+        let tt = ir.f.fb.iconst(
+            dynir::Type::I64,
+            if self.test_is_int {
+                crate::runtime::CASE_TEST_INT
+            } else {
+                crate::runtime::CASE_TEST_HASH
+            },
+        );
+        let sh = ir.f.fb.iconst(dynir::Type::I64, self.shift);
+        let mk = ir.f.fb.iconst(dynir::Type::I64, self.mask);
+        let disp =
+            ir.f.fb
+                .call(self.dispatch_fref, &[val, tt, sh, mk])
+                .expect("cljvm_case_dispatch returns I64");
+
+        let default_bb = ir.f.fb.create_block(&[]);
+        let arm_bbs: Vec<dynir::BlockId> = self
+            .arms
+            .iter()
+            .map(|_| ir.f.fb.create_block(&[]))
+            .collect();
+
+        // Phi type — same lazy merge-block pattern as IfExpr: only create
+        // the merge block when at least one branch actually reaches it
+        // (every branch may end in recur/throw).
+        let phi_ty_opt: Option<dynir::Type> = if context == C::Statement {
+            None
+        } else {
+            Some(dynir::Type::I64)
+        };
+        let mut merge_bb: Option<dynir::BlockId> = None;
+        let ensure_merge =
+            |ir: &mut IrEmitter<'_>, slot: &mut Option<dynir::BlockId>| -> dynir::BlockId {
+                if let Some(b) = *slot {
+                    return b;
+                }
+                let b = match phi_ty_opt {
+                    Some(ty) => ir.f.fb.create_block(&[ty]),
+                    None => ir.f.fb.create_block(&[]),
+                };
+                *slot = Some(b);
+                b
+            };
+        // Branch tail shared by every arm + the default: jump to the merge
+        // block with/without the branch value, unless already terminated.
+        let finish_branch = |ir: &mut IrEmitter<'_>,
+                             slot: &mut Option<dynir::BlockId>,
+                             branch_val: Option<Value>,
+                             what: &str| {
+            if ir.f.fb.current_block_is_terminated() {
+                return;
+            }
+            let mb = ensure_merge(ir, slot);
+            match (phi_ty_opt.is_some(), branch_val) {
+                (true, Some(v)) => ir.f.fb.jump(mb, &[v]),
+                (false, _) => ir.f.fb.jump(mb, &[]),
+                (true, None) => panic!(
+                    "clojure-jvm: CaseExpr {what} branch produced no value in \
+                     non-STATEMENT context"
+                ),
+            }
+        };
+
+        let cases: Vec<(i64, dynir::BlockId, &[Value])> = self
+            .arms
+            .iter()
+            .zip(&arm_bbs)
+            .map(|(arm, bb)| (arm.key, *bb, &[][..]))
+            .collect();
+        ir.f.fb.switch(disp, &cases, default_bb, &[]);
+
+        for (arm, bb) in self.arms.iter().zip(&arm_bbs) {
+            ir.f.fb.switch_to_block(*bb);
+            // Post-switch equivalence check (Java `emitThenForInts` /
+            // `emitThenForHashes`): `Util.equiv(val, test)` or jump to
+            // default. Skipped for hash-collision buckets (skip-check).
+            if let Some(test) = &arm.test {
+                let test_val = test
+                    .emit(C::Expression, objx, ir)
+                    .expect("case* test constants always produce a value");
+                let eq =
+                    ir.f.fb
+                        .call(self.equals_fref, &[val, test_val])
+                        .expect("cljvm_equals returns I64");
+                let then_bb = ir.f.fb.create_block(&[]);
+                ir.f.br_if_truthy(eq, then_bb, &[], default_bb, &[]);
+                ir.f.fb.switch_to_block(then_bb);
+            }
+            let then_val = arm.then.emit(context, objx, ir);
+            finish_branch(ir, &mut merge_bb, then_val, "then");
+        }
+
+        ir.f.fb.switch_to_block(default_bb);
+        let default_val = self.default_expr.emit(context, objx, ir);
+        finish_branch(ir, &mut merge_bb, default_val, "default");
+
+        let Some(mb) = merge_bb else {
+            // Every branch diverged (recur/throw). Cursor sits on the
+            // terminated default block — callers detect via
+            // `current_block_is_terminated()`, same contract as IfExpr.
+            return None;
+        };
+        ir.f.fb.switch_to_block(mb);
+        if phi_ty_opt.is_some() {
+            Some(ir.f.fb.block_param(mb, 0))
+        } else {
+            None
+        }
+    }
+
+    fn has_java_class(&self) -> bool {
+        self.get_java_class().is_some()
+    }
+
+    fn get_java_class(&self) -> Option<HostClass> {
+        // Java: `returnType = maybeJavaClass(thens + default)` — non-null
+        // only when every branch agrees.
+        let mut found: Option<HostClass> = None;
+        for e in self
+            .arms
+            .iter()
+            .map(|a| &a.then)
+            .chain(std::iter::once(&self.default_expr))
+        {
+            if !e.has_java_class() {
+                return None;
+            }
+            let c = e.get_java_class()?;
+            match &found {
+                None => found = Some(c),
+                Some(prev) if *prev == c => {}
+                Some(_) => return None,
+            }
+        }
+        found
+    }
+}
+
+/// Read an integer out of a `case*` structural slot, panicking with a
+/// clear message otherwise (the form is macro-generated — a non-integer
+/// here means corrupted expansion, not user error).
+fn expect_case_long(o: &Object, what: &str) -> i64 {
+    match o.peel_meta_ref() {
+        Object::Long(n) => *n,
+        other => panic!("clojure-jvm: case* {what} must be an integer, got {other:?}"),
+    }
+}
+
+/// Inline `CaseExpr.Parser.parse` —
+/// `(case* expr shift mask default case-map switch-type test-type skip-check?)`
+/// prepared by the `case` macro and presumed correct (Java line ~9595).
+fn parse_case_form(context: C, form: Object) -> Box<dyn Expr> {
+    // Java: EVAL context wraps the form in an immediately-invoked fn —
+    // `(( fn* [] form))` — and analyzes that (same routing as `let*`).
+    if context == C::Eval {
+        let empty_params: Object = Object::Vector(
+            crate::lang::persistent_vector::PersistentVector::create(Vec::new()),
+        );
+        let inner_call: Object =
+            Object::List(crate::lang::persistent_list::PersistentList::create(vec![
+                Object::Symbol(SPECIAL_SYMBOLS.FN.clone()),
+                empty_params,
+                form.clone(),
+            ]));
+        let outer_call: Object =
+            Object::List(crate::lang::persistent_list::PersistentList::create(vec![
+                inner_call,
+            ]));
+        return analyze(context, outer_call);
+    }
+
+    // Collect the args after the `case*` head.
+    let mut items: Vec<Object> = Vec::new();
+    let mut s = super::rt::next(&form);
+    while !matches!(s, Object::Nil) {
+        items.push(super::rt::first(&s));
+        s = super::rt::next(&s);
+    }
+    if !(7..=8).contains(&items.len()) {
+        panic!(
+            "clojure-jvm: case* expects 7 or 8 args \
+             (expr shift mask default case-map switch-type test-type skip-check?), \
+             got {}",
+            items.len()
+        );
+    }
+
+    let expr_form = items[0].clone();
+    let shift = expect_case_long(&items[1], "shift");
+    let mask = expect_case_long(&items[2], "mask");
+    let default_form = items[3].clone();
+    let case_map_form = items[4].clone();
+    // items[5] = switch-type (:compact / :sparse) — a JVM tableswitch-vs-
+    // lookupswitch concern; dynir's `Switch` handles sparse keys natively,
+    // so the distinction needs no representation here.
+    let test_type_name = match items[6].peel_meta_ref() {
+        Object::Keyword(k) => k.get_name().to_string(),
+        other => panic!("clojure-jvm: case* test-type must be a keyword, got {other:?}"),
+    };
+    let test_is_int = match test_type_name.as_str() {
+        "int" => true,
+        "hash-equiv" | "hash-identity" => false,
+        other => panic!("clojure-jvm: case* — unexpected test type: :{other}"),
+    };
+    let skip_check: std::collections::HashSet<i64> = match items.get(7) {
+        None => std::collections::HashSet::new(),
+        Some(o) => match o.peel_meta_ref() {
+            Object::Nil => std::collections::HashSet::new(),
+            Object::Set(set) => set
+                .iter()
+                .map(|e| expect_case_long(&e, "skip-check entry"))
+                .collect(),
+            Object::TreeSet(set) => set
+                .iter()
+                .map(|e| expect_case_long(&e, "skip-check entry"))
+                .collect(),
+            other => panic!("clojure-jvm: case* skip-check must be a set or nil, got {other:?}"),
+        },
+    };
+
+    // Java analyzes the dispatch expr in EXPRESSION context (it's always
+    // the `let*`-bound local the macro introduced).
+    let expr = analyze(C::Expression, expr_form);
+
+    // case-map: `{switch-key [test-constant then-form]}`, built by the
+    // macro with `sorted-map` (PersistentTreeMap); accept a hash map too.
+    let entries_src: Vec<(Object, Object)> = match case_map_form.peel_meta_ref() {
+        Object::TreeMap(m) => m.iter().collect(),
+        Object::Map(m) => m.iter().collect(),
+        other => panic!("clojure-jvm: case* case-map must be a map, got {other:?}"),
+    };
+    let mut arms: Vec<CaseArm> = Vec::with_capacity(entries_src.len());
+    for (k, v) in entries_src {
+        let key = expect_case_long(&k, "case-map key");
+        if key == crate::runtime::CASE_DISPATCH_NO_MATCH {
+            // Impossible for macro-generated maps (keys are i32-ranged or
+            // shift-masked) — guards the dispatch helper's sentinel.
+            panic!(
+                "clojure-jvm: case* case-map key {key} collides with the \
+                 non-number dispatch sentinel"
+            );
+        }
+        let (test_form, then_form) = match v.peel_meta_ref() {
+            Object::Vector(pair) if pair.count() == 2 => (pair.nth(0), pair.nth(1)),
+            other => panic!(
+                "clojure-jvm: case* case-map value must be a [test then] pair, got {other:?}"
+            ),
+        };
+        let test: Option<Box<dyn Expr>> = if skip_check.contains(&key) {
+            // Hash-collision bucket: `test` is the seq of colliding
+            // constants and `then` is a macro-generated `condp` that does
+            // its own equality checks — no post-switch check is emitted.
+            None
+        } else if test_is_int {
+            // Java: NumberExpr.parse(((Number)RT.first(pair)).intValue()).
+            match test_form.peel_meta_ref() {
+                Object::Long(n) => Some(NumberExpr::parse(Object::Long(*n))),
+                other => panic!(
+                    "clojure-jvm: case* :int test constant must be an integer, got {other:?}"
+                ),
+            }
+        } else {
+            Some(constant_literal_expr(test_form.clone()))
+        };
+        let then = analyze(context, then_form);
+        arms.push(CaseArm { key, test, then });
+    }
+
+    let default_expr = analyze(context, default_form);
+    let (dispatch_fref, equals_fref) = with_active_compiler(|c| (c.case_dispatch, c.num.eq));
+    Box::new(CaseExpr {
+        expr,
+        shift,
+        mask,
+        default_expr,
+        arms,
+        test_is_int,
+        dispatch_fref,
+        equals_fref,
+    })
 }
 
 /// Inline `BodyExpr.Parser.parse` for `(do …)`. Strips the leading `do`,
@@ -8876,7 +9645,7 @@ pub struct Compiler {
     /// non-static head path. Index `i` holds `cljvm_rt_invoke_i`. Supports
     /// arities 0..=3 for now; higher arities expand here as we need them
     /// (Clojure goes to 20-ish positional + variadic).
-    pub invoke_externs: [dynir::FuncRef; 9],
+    pub invoke_externs: [dynir::FuncRef; 11],
     /// Static-method registry for `HostExpr`. Maps `(class_name, method_name,
     /// arity)` → `FuncRef` declared on the DynModule. Populated at
     /// `Compiler::new` time so the same set of methods is available across
@@ -8972,6 +9741,14 @@ pub struct Compiler {
     pub i_chunk_type_id: dynlang::ObjTypeId,
     pub lazy_seq_type_id: dynlang::ObjTypeId,
     pub delay_type_id: dynlang::ObjTypeId,
+    pub repeat_type_id: dynlang::ObjTypeId,
+    pub atom_type_id: dynlang::ObjTypeId,
+    pub volatile_type_id: dynlang::ObjTypeId,
+    pub iterate_type_id: dynlang::ObjTypeId,
+    pub cycle_type_id: dynlang::ObjTypeId,
+    pub matcher_type_id: dynlang::ObjTypeId,
+    pub multifn_type_id: dynlang::ObjTypeId,
+    pub exception_info_type_id: dynlang::ObjTypeId,
     pub reduced_type_id: dynlang::ObjTypeId,
     pub multi_arity_fn_type_id: dynlang::ObjTypeId,
     /// Cached `ObjTypeHandle` for `clojure.lang.Closure`. Captured at
@@ -9012,6 +9789,10 @@ pub struct Compiler {
     pub character_type_id: dynlang::ObjTypeId,
     /// FuncRefs for the numeric-tower externs that `PrimOpExpr` calls.
     pub num: NumExterns,
+    /// FuncRef of `cljvm_case_dispatch` — the `case*` switch-index helper
+    /// (hash / intValue + shift/mask). Captured by `parse_case_form` so
+    /// `CaseExpr.emit` can lower the dispatch to a direct call.
+    pub case_dispatch: dynir::FuncRef,
     /// `clojure.lang.UserInstance`: the shared ObjType for every
     /// `deftype`/`defrecord` instance. One Raw64 field carrying the
     /// `UserTypeId` (allocated by `lang::user_types::register_user_type`)
@@ -9774,18 +10555,98 @@ impl Compiler {
             ("clojure.lang.LongRange".to_string(), "create".to_string(), 3),
             lr3,
         );
-        // NOTE: `clojure.lang.Repeat/create` (infinite `(repeat x)`) is
-        // deliberately NOT registered. A self-referential-cons representation
-        // hangs because `take`/`into` over it realize eagerly here (our
-        // lazy-seq forcing isn't lazy enough on this path), so the infinite
-        // seq never terminates. Needs a real lazy/bounded Repeat seq type
-        // before `repeat`/`interpose` can be unblocked.
+        // `clojure.lang.Repeat/create` — backs `clojure.core/repeat`.
+        // Arity 1 = the infinite `(repeat x)`, arity 2 = bounded
+        // `(repeat n x)`. A real Repeat heap type (count + value) whose
+        // seq/first/next dispatch lazily, so `take`/`interleave`/`drop`
+        // (and therefore `interpose`) pull elements one step at a time.
+        let rp1 = dm.declare_extern("cljvm_repeat_create_1", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Repeat".to_string(), "create".to_string(), 1),
+            rp1,
+        );
+        let rp2 = dm.declare_extern("cljvm_repeat_create_2", sig_2i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Repeat".to_string(), "create".to_string(), 2),
+            rp2,
+        );
+        let it2 = dm.declare_extern("cljvm_iterate_create_2", sig_2i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Iterate".to_string(), "create".to_string(), 2),
+            it2,
+        );
+        let cy1 = dm.declare_extern("cljvm_cycle_create_1", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Cycle".to_string(), "create".to_string(), 1),
+            cy1,
+        );
+        // Regex: Pattern/compile (identity over pattern-source strings,
+        // validated) + Util/hasheq (Murmur3) + String/format.
+        let pat_compile = dm.declare_extern("cljvm_pattern_compile", sig_1i64.clone());
+        host_methods.insert(
+            ("java.util.regex.Pattern".to_string(), "compile".to_string(), 1),
+            pat_compile,
+        );
+        let util_hasheq = dm.declare_extern("cljvm_util_hasheq", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Util".to_string(), "hasheq".to_string(), 1),
+            util_hasheq,
+        );
+        for cls in ["String", "java.lang.String"] {
+            let str_format = dm.declare_extern("cljvm_string_format", sig_2i64.clone());
+            host_methods.insert((cls.to_string(), "format".to_string(), 2), str_format);
+        }
+        // Transducer driving for `(sequence xform coll)` / `dedupe`.
+        let rt_iter = dm.declare_extern("cljvm_rt_iter", sig_1i64.clone());
+        host_methods.insert(("clojure.lang.RT".to_string(), "iter".to_string(), 1), rt_iter);
+        let ti_create = dm.declare_extern("cljvm_transformer_iterator_create", sig_2i64.clone());
+        host_methods.insert(
+            ("clojure.lang.TransformerIterator".to_string(), "create".to_string(), 2),
+            ti_create,
+        );
+        let chunk_iter_seq = dm.declare_extern("cljvm_rt_chunk_iterator_seq", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "chunkIteratorSeq".to_string(), 1),
+            chunk_iter_seq,
+        );
+        // `clojure.lang.Compiler/eval` — backs `clojure.core/eval`.
+        let ceval = dm.declare_extern("cljvm_compiler_eval", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Compiler".to_string(), "eval".to_string(), 1),
+            ceval,
+        );
+        // `clojure.lang.Compiler/macroexpand1` — backs `macroexpand-1` /
+        // `macroexpand` the FUNCTIONS (call-site expansion uses
+        // macroexpand_once directly).
+        let mexp1 = dm.declare_extern("cljvm_compiler_macroexpand1", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Compiler".to_string(), "macroexpand1".to_string(), 1),
+            mexp1,
+        );
+        // Regex-backed String split for `clojure.string/split` (the shim
+        // calls `clojure.string.Native/split`; the reader models `#"…"`
+        // as a String of the pattern source).
+        let str_split = dm.declare_extern("cljvm_string_split", sig_2i64.clone());
+        host_methods.insert(
+            ("clojure.string.Native".to_string(), "split".to_string(), 2),
+            str_split,
+        );
         // String reverse helper for `clojure.string/reverse` (the shim calls
         // `clojure.string.Native/reverse`).
         let str_rev = dm.declare_extern("cljvm_str_reverse", sig_1i64.clone());
         host_methods.insert(
             ("clojure.string.Native".to_string(), "reverse".to_string(), 1),
             str_rev,
+        );
+        let str_triml = dm.declare_extern("cljvm_str_triml", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.string.Native".to_string(), "triml".to_string(), 1),
+            str_triml,
+        );
+        let str_trimr = dm.declare_extern("cljvm_str_trimr", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.string.Native".to_string(), "trimr".to_string(), 1),
+            str_trimr,
         );
         // Register under both the short (`Math/pow`) and qualified
         // (`java.lang.Math/pow`) class names — call sites use either.
@@ -9794,6 +10655,30 @@ impl Compiler {
             host_methods.insert((cls.to_string(), "pow".to_string(), 2), math_pow);
             let math_sqrt = dm.declare_extern("cljvm_math_sqrt", sig_1i64.clone());
             host_methods.insert((cls.to_string(), "sqrt".to_string(), 1), math_sqrt);
+            let math_abs = dm.declare_extern("cljvm_math_abs", sig_1i64.clone());
+            host_methods.insert((cls.to_string(), "abs".to_string(), 1), math_abs);
+            let math_floor = dm.declare_extern("cljvm_math_floor", sig_1i64.clone());
+            host_methods.insert((cls.to_string(), "floor".to_string(), 1), math_floor);
+            let math_ceil = dm.declare_extern("cljvm_math_ceil", sig_1i64.clone());
+            host_methods.insert((cls.to_string(), "ceil".to_string(), 1), math_ceil);
+        }
+        // Integer/Long/Double string parsing (Java's NumberFormatException
+        // becomes a panic). `parse-long`/`parse-double` additionally need
+        // try/catch, but direct `(Integer/parseInt s)` calls work.
+        for (cls, m, ext) in [
+            ("Integer", "parseInt", "cljvm_long_parse"),
+            ("java.lang.Integer", "parseInt", "cljvm_long_parse"),
+            ("Long", "parseLong", "cljvm_long_parse"),
+            ("java.lang.Long", "parseLong", "cljvm_long_parse"),
+            ("Long", "valueOf", "cljvm_long_parse"),
+            ("java.lang.Long", "valueOf", "cljvm_long_parse"),
+            ("Double", "parseDouble", "cljvm_double_parse"),
+            ("java.lang.Double", "parseDouble", "cljvm_double_parse"),
+            ("Double", "valueOf", "cljvm_double_parse"),
+            ("java.lang.Double", "valueOf", "cljvm_double_parse"),
+        ] {
+            let f = dm.declare_extern(ext, sig_1i64.clone());
+            host_methods.insert((cls.to_string(), m.to_string(), 1), f);
         }
         let delay_force = dm.declare_extern("cljvm_delay_force", sig_1i64.clone());
         host_methods.insert(
@@ -9857,6 +10742,30 @@ impl Compiler {
         host_methods.insert(
             ("clojure.lang.RT".to_string(), "toArray".to_string(), 1),
             rt_to_array,
+        );
+        // `clojure.lang.RT/seqToTypedArray` — backs `into-array`. Arrays
+        // are modeled as Vector cells (the same analog RT.toArray uses);
+        // the 2-arity's component-type argument is accepted and unused
+        // since our vectors are untyped.
+        let rt_seq_to_typed_array =
+            dm.declare_extern("cljvm_rt_seqToTypedArray", sig_1i64.clone());
+        host_methods.insert(
+            (
+                "clojure.lang.RT".to_string(),
+                "seqToTypedArray".to_string(),
+                1,
+            ),
+            rt_seq_to_typed_array,
+        );
+        let rt_seq_to_typed_array2 =
+            dm.declare_extern("cljvm_rt_seqToTypedArray2", sig_2i64.clone());
+        host_methods.insert(
+            (
+                "clojure.lang.RT".to_string(),
+                "seqToTypedArray".to_string(),
+                2,
+            ),
+            rt_seq_to_typed_array2,
         );
         // `java.util.Arrays/sort(array, comparator)` — backs `sort`/`sort-by`,
         // which `to-array` then `(. java.util.Arrays (sort a comp))`.
@@ -10021,6 +10930,25 @@ impl Compiler {
             ("clojure.lang.Util".to_string(), "compare".to_string(), 2),
             util_compare,
         );
+        // `Util/hash` — Java's hashCode-based hash. The `case` macro calls
+        // this at EXPANSION time (`prep-hashes` / `merge-hash-collisions`)
+        // to build the `case*` case-map keys; CaseExpr's runtime dispatch
+        // (`cljvm_case_dispatch` below) recomputes the same hash on the
+        // dispatch value. Both externs share `runtime::util_hash_bits`,
+        // which is what keeps the two sides consistent.
+        let util_hash = dm.declare_extern("cljvm_util_hash", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.Util".to_string(), "hash".to_string(), 1),
+            util_hash,
+        );
+        // `case*` switch-index helper (not a host method — CaseExpr.emit
+        // calls it directly): (value, test-type, shift, mask) → raw i64
+        // dispatch index.
+        let sig_4i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 4],
+            ret: Some(dynir::Type::I64),
+        };
+        let case_dispatch = dm.declare_extern("cljvm_case_dispatch", sig_4i64.clone());
 
         // `clojure.lang.PersistentList/creator` — Java declares it as a
         // `static IFn` field whose `invoke(Object... args)` returns a list
@@ -10105,6 +11033,25 @@ impl Compiler {
         instance_methods.insert(("assoc".to_string(), 3), rt_assoc);
         instance_methods.insert(("conj".to_string(), 2), rt_conj);
         instance_methods.insert(("without".to_string(), 2), rt_dissoc);
+        // `clojure.lang.ExceptionInfo` accessors — back `ex-data` /
+        // `ex-message` / `ex-cause`. Each panics with a clear message on a
+        // non-ExceptionInfo receiver (core.clj guards every call site with
+        // the matching `instance?` check, exactly like upstream).
+        let inst_get_data = dm.declare_extern("cljvm_inst_getData", sig_1i64.clone());
+        instance_methods.insert(("getData".to_string(), 1), inst_get_data);
+        let inst_get_message = dm.declare_extern("cljvm_inst_getMessage", sig_1i64.clone());
+        instance_methods.insert(("getMessage".to_string(), 1), inst_get_message);
+        let inst_get_cause = dm.declare_extern("cljvm_inst_getCause", sig_1i64.clone());
+        instance_methods.insert(("getCause".to_string(), 1), inst_get_cause);
+        // Throwable stack-trace surface (used by core.clj's private
+        // `elide-top-frames` inside `ex-info`). Traces are Java-array-as-
+        // Vector values held in the ExceptionInfo `stack_trace` slot.
+        let inst_get_stack_trace =
+            dm.declare_extern("cljvm_inst_getStackTrace", sig_1i64.clone());
+        instance_methods.insert(("getStackTrace".to_string(), 1), inst_get_stack_trace);
+        let inst_set_stack_trace =
+            dm.declare_extern("cljvm_inst_setStackTrace", sig_2i64.clone());
+        instance_methods.insert(("setStackTrace".to_string(), 2), inst_set_stack_trace);
         let inst_get_key = dm.declare_extern("cljvm_inst_getKey", sig_1i64.clone());
         instance_methods.insert(("getKey".to_string(), 1), inst_get_key);
         let inst_get_value = dm.declare_extern("cljvm_inst_getValue", sig_1i64.clone());
@@ -10163,6 +11110,14 @@ impl Compiler {
         instance_methods.insert(("removeWatch".to_string(), 2), inst_remove_watch);
         let inst_swap = dm.declare_extern("cljvm_inst_swap", sig_2i64.clone());
         instance_methods.insert(("swap".to_string(), 2), inst_swap);
+        // swap! threads extra args through: (.swap a f x), (.swap a f x y),
+        // (.swap a f x y args-seq).
+        let inst_swap3 = dm.declare_extern("cljvm_inst_swap_3", sig_3i64.clone());
+        instance_methods.insert(("swap".to_string(), 3), inst_swap3);
+        let inst_swap4 = dm.declare_extern("cljvm_inst_swap_4", sig_4i64.clone());
+        instance_methods.insert(("swap".to_string(), 4), inst_swap4);
+        let inst_swap5 = dm.declare_extern("cljvm_inst_swap_5", sig_5i64.clone());
+        instance_methods.insert(("swap".to_string(), 5), inst_swap5);
         // ("reset", 1) is already used by MultiFn.reset above; atom-side
         // reset is `(.reset atom new)` arity-2.
         let inst_reset_atom_2 = dm.declare_extern("cljvm_inst_reset", sig_2i64.clone());
@@ -10171,6 +11126,21 @@ impl Compiler {
         instance_methods.insert(("compareAndSet".to_string(), 3), inst_cas);
         let inst_deref = dm.declare_extern("cljvm_inst_deref", sig_1i64.clone());
         instance_methods.insert(("deref".to_string(), 1), inst_deref);
+        let inst_empty = dm.declare_extern("cljvm_inst_empty", sig_1i64.clone());
+        instance_methods.insert(("empty".to_string(), 1), inst_empty);
+        // java.util.regex.Matcher methods (re-find/re-seq/re-matches).
+        let inst_matcher = dm.declare_extern("cljvm_inst_matcher", sig_2i64.clone());
+        instance_methods.insert(("matcher".to_string(), 2), inst_matcher);
+        let inst_find_next = dm.declare_extern("cljvm_inst_find_next", sig_1i64.clone());
+        instance_methods.insert(("find".to_string(), 1), inst_find_next);
+        let inst_matches = dm.declare_extern("cljvm_inst_matches", sig_1i64.clone());
+        instance_methods.insert(("matches".to_string(), 1), inst_matches);
+        let inst_group0 = dm.declare_extern("cljvm_inst_group_0", sig_1i64.clone());
+        instance_methods.insert(("group".to_string(), 1), inst_group0);
+        let inst_groupi = dm.declare_extern("cljvm_inst_group_i", sig_2i64.clone());
+        instance_methods.insert(("group".to_string(), 2), inst_groupi);
+        let inst_gc = dm.declare_extern("cljvm_inst_groupCount", sig_1i64.clone());
+        instance_methods.insert(("groupCount".to_string(), 1), inst_gc);
         let inst_iter = dm.declare_extern("cljvm_inst_iterator", sig_1i64.clone());
         instance_methods.insert(("iterator".to_string(), 1), inst_iter);
         // Agent error-handling stubs.
@@ -10284,6 +11254,10 @@ impl Compiler {
         };
         let inst_new_3 = dm.declare_extern("cljvm_inst_new_3", sig_3i64_new);
         instance_methods.insert(("__new__".to_string(), 3), inst_new_3);
+        let inst_new_4 = dm.declare_extern("cljvm_inst_new_4", sig_4i64.clone());
+        instance_methods.insert(("__new__".to_string(), 4), inst_new_4);
+        let inst_new_5 = dm.declare_extern("cljvm_inst_new_5", sig_5i64.clone());
+        instance_methods.insert(("__new__".to_string(), 5), inst_new_5);
 
         // First-class fn invocation. One extern per arity (Java models this
         // with `IFn.invoke(args...)` overloads). The receiver is a NanBox
@@ -10372,6 +11346,16 @@ impl Compiler {
             ret: Some(dynir::Type::I64),
         };
         let invoke_8 = dm.declare_extern("cljvm_rt_invoke_8", sig_9i64);
+        let sig_10i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 10],
+            ret: Some(dynir::Type::I64),
+        };
+        let invoke_9 = dm.declare_extern("cljvm_rt_invoke_9", sig_10i64);
+        let sig_11i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 11],
+            ret: Some(dynir::Type::I64),
+        };
+        let invoke_10 = dm.declare_extern("cljvm_rt_invoke_10", sig_11i64);
 
         // Declare GC-managed heap types. `clojure.lang.String` is a
         // varlen-byte buffer with no fixed fields — the byte count lives in
@@ -10574,6 +11558,80 @@ impl Compiler {
             .field("value", dynlang::FieldKind::Raw64)
             .build();
 
+        // `clojure.lang.Repeat`: a (possibly infinite) seq of one repeated
+        // value, backing `(repeat x)`/`(repeat n x)` via
+        // `clojure.lang.Repeat/create`. Raw64 `count` (-1 = infinite, else
+        // remaining elements > 0) + one traced `value` slot. Registered
+        // after Character so existing ids don't shift.
+        let repeat_type_id = dm
+            .obj_type("clojure.lang.Repeat")
+            .field("value", dynlang::FieldKind::Value)
+            .field("count", dynlang::FieldKind::Raw64)
+            .build();
+
+        // `clojure.lang.Atom` / `clojure.lang.Volatile`: mutable reference
+        // cells. Raw64 holds `Arc<RefCell<RefState>>` (same shape as
+        // LazySeq); the held value lives in `RefState.value_bits`, which the
+        // GC traces via the REF registry (see `LazyRootSource::scan_roots`),
+        // exactly like lazy-seq thunk/value bits.
+        let atom_type_id = dm
+            .obj_type("clojure.lang.Atom")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
+        let volatile_type_id = dm
+            .obj_type("clojure.lang.Volatile")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
+
+        // `clojure.lang.Iterate` / `clojure.lang.Cycle`: infinite seqs
+        // with two traced slots each (see HeapTypeIds docs).
+        let iterate_type_id = dm
+            .obj_type("clojure.lang.Iterate")
+            .field("f", dynlang::FieldKind::Value)
+            .field("value", dynlang::FieldKind::Value)
+            .build();
+        let cycle_type_id = dm
+            .obj_type("clojure.lang.Cycle")
+            .field("all", dynlang::FieldKind::Value)
+            .field("current", dynlang::FieldKind::Value)
+            .build();
+
+        // `java.util.regex.Matcher`: Raw64 → Arc<RefCell<MatcherState>>
+        // (Rust-side regex state; holds no heap bits).
+        let matcher_type_id = dm
+            .obj_type("java.util.regex.Matcher")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
+
+        // `clojure.lang.MultiFn`: Raw64 → Arc<RefCell<MultiFnState>>
+        // (dispatch fn + default + method table, GC-scanned via the
+        // MULTIFN registry).
+        let multifn_type_id = dm
+            .obj_type("clojure.lang.MultiFn")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
+
+        // `clojure.lang.ExceptionInfo`: the `ex-info`/`ex-data` exception
+        // type — a RuntimeException carrying a persistent map of data.
+        // Four GC-traced Value slots (see `lang::exception_info` for the
+        // layout constants): `message` @8 (String or nil), `data` @16
+        // (persistent map, non-nil per the Java ctor contract), `cause` @24
+        // (nil or another exception), `stack_trace` @32 (Java-array-as-
+        // Vector, the same analog RT.toArray uses; empty at construction
+        // since this runtime records no JVM frames — the Throwable
+        // contract's zero-length-array case). Constructed via the
+        // registered host-class ctor (`(ExceptionInfo. msg map)` / 3-arg
+        // with cause); read back by `.getData` / `.getMessage` /
+        // `.getCause` / `.getStackTrace`; `.setStackTrace` replaces the
+        // trace slot.
+        let exception_info_type_id = dm
+            .obj_type("clojure.lang.ExceptionInfo")
+            .field("message", dynlang::FieldKind::Value)
+            .field("data", dynlang::FieldKind::Value)
+            .field("cause", dynlang::FieldKind::Value)
+            .field("stack_trace", dynlang::FieldKind::Value)
+            .build();
+
         // Stash type_ids globally so Rust externs called from JIT-executing
         // code (`cljvm_rt_cons` etc.) can allocate the right ObjType without
         // threading the Compiler through.
@@ -10601,6 +11659,15 @@ impl Compiler {
             long: long_type_id.0,
             character: character_type_id.0,
             user_instance: user_instance_type_id.0,
+            repeat_seq: repeat_type_id.0,
+            atom: atom_type_id.0,
+            volatile_cell: volatile_type_id.0,
+            closure: closure_type_id.0,
+            iterate_seq: iterate_type_id.0,
+            cycle_seq: cycle_type_id.0,
+            matcher: matcher_type_id.0,
+            multifn_cell: multifn_type_id.0,
+            exception_info: exception_info_type_id.0,
         });
         crate::runtime::set_user_instance_layout(crate::runtime::UserInstanceLayout {
             user_type_id_offset: user_instance_user_type_id_offset,
@@ -10627,7 +11694,7 @@ impl Compiler {
             },
             invoke_externs: [
                 invoke_0, invoke_1, invoke_2, invoke_3, invoke_4, invoke_5, invoke_6, invoke_7,
-                invoke_8,
+                invoke_8, invoke_9, invoke_10,
             ],
             var_fns: std::sync::Mutex::new(HashMap::new()),
             var_fn_infos: std::sync::Mutex::new(HashMap::new()),
@@ -10646,6 +11713,14 @@ impl Compiler {
             chunk_buffer_type_id,
             i_chunk_type_id,
             lazy_seq_type_id,
+            repeat_type_id,
+            atom_type_id,
+            volatile_type_id,
+            iterate_type_id,
+            cycle_type_id,
+            matcher_type_id,
+            multifn_type_id,
+            exception_info_type_id,
             delay_type_id,
             multi_arity_fn_type_id,
             reduced_type_id,
@@ -10659,6 +11734,7 @@ impl Compiler {
             long_type_id,
             character_type_id,
             num,
+            case_dispatch,
             user_instance_type_id,
             user_instance_user_type_id_offset,
             user_instance_varlen_base,
@@ -10920,6 +11996,14 @@ pub struct CompileRoots {
     pub _chunk_buffers: Vec<Arc<std::cell::RefCell<Vec<u64>>>>,
     /// `Arc<RefCell<LazyState>>` for LazySeq/Delay cells.
     pub _lazy_states: Vec<Arc<std::cell::RefCell<crate::runtime::LazyState>>>,
+    /// Atom/Volatile `RefState`s — same lifetime contract as `_lazy_states`.
+    pub _ref_states: Vec<Arc<std::cell::RefCell<crate::runtime::RefState>>>,
+    /// Regex `MatcherState`s (Rust-side only — no heap bits to root, the
+    /// Vec just keeps the Arcs alive for the cells' lifetime).
+    pub _matcher_states: Vec<Arc<std::cell::RefCell<crate::runtime::MatcherState>>>,
+    /// MultiFn states — heap bits inside are GC-scanned via the MULTIFN
+    /// registry; this Vec keeps the Arcs alive.
+    pub _multifn_states: Vec<Arc<std::cell::RefCell<crate::runtime::MultiFnState>>>,
     /// `Arc<Vec<MultiArityEntry>>` for MultiArityFn cells.
     pub _multi_arity_tables: Vec<Arc<Vec<crate::runtime::MultiArityEntry>>>,
     /// `Arc<Namespace>`s referenced by `clojure.lang.Namespace` heap cells.
@@ -10953,6 +12037,9 @@ fn alloc_object_as_nanbox(
         // (`[1 2]`, `{:a 1}`, `#{1 2}`, `'(1 2)`) box like any other Long.
         // box_long allocs on the same path the `PendingLiteral::Long` arm uses.
         Object::Long(n) => unsafe { crate::runtime::box_long(*n) },
+        // Characters box like Longs (Raw64 codepoint cell) — a `case` over
+        // char constants ships `\a` through macro args / case-map values.
+        Object::Char(c) => unsafe { crate::runtime::box_char(*c) },
         Object::Double(x) => x.to_bits(),
         Object::Symbol(s) => alloc_symbol(gc, obj_types, symbol_type_id, roots, s),
         Object::Keyword(k) => alloc_keyword(gc, obj_types, keyword_type_id, roots, k),
@@ -11455,6 +12542,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_num_ge" => Some(crate::runtime::cljvm_num_ge as *const u8),
         "cljvm_num_equiv" => Some(crate::runtime::cljvm_num_equiv as *const u8),
         "cljvm_equals" => Some(crate::runtime::cljvm_equals as *const u8),
+        "cljvm_util_hash" => Some(crate::runtime::cljvm_util_hash as *const u8),
+        "cljvm_case_dispatch" => Some(crate::runtime::cljvm_case_dispatch as *const u8),
         "cljvm_rt_inc" => Some(crate::runtime::cljvm_rt_inc as *const u8),
         "cljvm_rt_nextID" => Some(crate::runtime::cljvm_rt_nextID as *const u8),
         "cljvm_rt_intCast" => Some(crate::runtime::cljvm_rt_intCast as *const u8),
@@ -11534,6 +12623,21 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_identity" => Some(crate::runtime::cljvm_inst_identity as *const u8),
         "cljvm_inst_getKey" => Some(crate::runtime::cljvm_inst_getKey as *const u8),
         "cljvm_inst_getValue" => Some(crate::runtime::cljvm_inst_getValue as *const u8),
+        "cljvm_inst_getData" => Some(crate::runtime::cljvm_inst_getData as *const u8),
+        "cljvm_inst_getMessage" => Some(crate::runtime::cljvm_inst_getMessage as *const u8),
+        "cljvm_inst_getCause" => Some(crate::runtime::cljvm_inst_getCause as *const u8),
+        "cljvm_inst_getStackTrace" => {
+            Some(crate::runtime::cljvm_inst_getStackTrace as *const u8)
+        }
+        "cljvm_inst_setStackTrace" => {
+            Some(crate::runtime::cljvm_inst_setStackTrace as *const u8)
+        }
+        "cljvm_rt_seqToTypedArray" => {
+            Some(crate::runtime::cljvm_rt_seqToTypedArray as *const u8)
+        }
+        "cljvm_rt_seqToTypedArray2" => {
+            Some(crate::runtime::cljvm_rt_seqToTypedArray2 as *const u8)
+        }
         "cljvm_inst_rseq" => Some(crate::runtime::cljvm_inst_rseq as *const u8),
         "cljvm_inst_getNamespace" => Some(crate::runtime::cljvm_inst_getNamespace as *const u8),
         "cljvm_inst_ns" => Some(crate::runtime::cljvm_inst_ns as *const u8),
@@ -11553,6 +12657,9 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_addWatch" => Some(crate::runtime::cljvm_inst_addWatch as *const u8),
         "cljvm_inst_removeWatch" => Some(crate::runtime::cljvm_inst_removeWatch as *const u8),
         "cljvm_inst_swap" => Some(crate::runtime::cljvm_inst_swap as *const u8),
+        "cljvm_inst_swap_3" => Some(crate::runtime::cljvm_inst_swap_3 as *const u8),
+        "cljvm_inst_swap_4" => Some(crate::runtime::cljvm_inst_swap_4 as *const u8),
+        "cljvm_inst_swap_5" => Some(crate::runtime::cljvm_inst_swap_5 as *const u8),
         "cljvm_inst_reset" => Some(crate::runtime::cljvm_inst_reset as *const u8),
         "cljvm_inst_compareAndSet" => Some(crate::runtime::cljvm_inst_compareAndSet as *const u8),
         "cljvm_inst_deref" => Some(crate::runtime::cljvm_inst_deref as *const u8),
@@ -11653,12 +12760,43 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_longrange_create_1" => Some(crate::runtime::cljvm_longrange_create_1 as *const u8),
         "cljvm_longrange_create_2" => Some(crate::runtime::cljvm_longrange_create_2 as *const u8),
         "cljvm_longrange_create_3" => Some(crate::runtime::cljvm_longrange_create_3 as *const u8),
+        "cljvm_repeat_create_1" => Some(crate::runtime::cljvm_repeat_create_1 as *const u8),
+        "cljvm_repeat_create_2" => Some(crate::runtime::cljvm_repeat_create_2 as *const u8),
+        "cljvm_iterate_create_2" => Some(crate::runtime::cljvm_iterate_create_2 as *const u8),
+        "cljvm_cycle_create_1" => Some(crate::runtime::cljvm_cycle_create_1 as *const u8),
+        "cljvm_pattern_compile" => Some(crate::runtime::cljvm_pattern_compile as *const u8),
+        "cljvm_util_hasheq" => Some(crate::runtime::cljvm_util_hasheq as *const u8),
+        "cljvm_string_format" => Some(crate::runtime::cljvm_string_format as *const u8),
+        "cljvm_inst_matcher" => Some(crate::runtime::cljvm_inst_matcher as *const u8),
+        "cljvm_inst_find_next" => Some(crate::runtime::cljvm_inst_find_next as *const u8),
+        "cljvm_inst_matches" => Some(crate::runtime::cljvm_inst_matches as *const u8),
+        "cljvm_inst_group_0" => Some(crate::runtime::cljvm_inst_group_0 as *const u8),
+        "cljvm_inst_group_i" => Some(crate::runtime::cljvm_inst_group_i as *const u8),
+        "cljvm_inst_groupCount" => Some(crate::runtime::cljvm_inst_groupCount as *const u8),
+        "cljvm_rt_iter" => Some(crate::runtime::cljvm_rt_iter as *const u8),
+        "cljvm_transformer_iterator_create" => {
+            Some(crate::runtime::cljvm_transformer_iterator_create as *const u8)
+        }
+        "cljvm_rt_chunk_iterator_seq" => {
+            Some(crate::runtime::cljvm_rt_chunk_iterator_seq as *const u8)
+        }
+        "cljvm_string_split" => Some(crate::runtime::cljvm_string_split as *const u8),
+        "cljvm_compiler_macroexpand1" => Some(crate::runtime::cljvm_compiler_macroexpand1 as *const u8),
+        "cljvm_compiler_eval" => Some(crate::runtime::cljvm_compiler_eval as *const u8),
         "cljvm_inst_toUpperCase" => Some(crate::runtime::cljvm_inst_toUpperCase as *const u8),
         "cljvm_inst_toLowerCase" => Some(crate::runtime::cljvm_inst_toLowerCase as *const u8),
         "cljvm_inst_trim" => Some(crate::runtime::cljvm_inst_trim as *const u8),
         "cljvm_str_reverse" => Some(crate::runtime::cljvm_str_reverse as *const u8),
+        "cljvm_str_triml" => Some(crate::runtime::cljvm_str_triml as *const u8),
+        "cljvm_str_trimr" => Some(crate::runtime::cljvm_str_trimr as *const u8),
         "cljvm_math_pow" => Some(crate::runtime::cljvm_math_pow as *const u8),
         "cljvm_math_sqrt" => Some(crate::runtime::cljvm_math_sqrt as *const u8),
+        "cljvm_math_abs" => Some(crate::runtime::cljvm_math_abs as *const u8),
+        "cljvm_math_floor" => Some(crate::runtime::cljvm_math_floor as *const u8),
+        "cljvm_math_ceil" => Some(crate::runtime::cljvm_math_ceil as *const u8),
+        "cljvm_long_parse" => Some(crate::runtime::cljvm_long_parse as *const u8),
+        "cljvm_double_parse" => Some(crate::runtime::cljvm_double_parse as *const u8),
+        "cljvm_inst_empty" => Some(crate::runtime::cljvm_inst_empty as *const u8),
         "cljvm_rt_cons" => Some(crate::runtime::cljvm_rt_cons as *const u8),
         "cljvm_rt_load" => Some(crate::runtime::cljvm_rt_load as *const u8),
         "cljvm_rt_isReduced" => Some(crate::runtime::cljvm_rt_isReduced as *const u8),
@@ -11705,6 +12843,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_rt_invoke_6" => Some(crate::runtime::cljvm_rt_invoke_6 as *const u8),
         "cljvm_rt_invoke_7" => Some(crate::runtime::cljvm_rt_invoke_7 as *const u8),
         "cljvm_rt_invoke_8" => Some(crate::runtime::cljvm_rt_invoke_8 as *const u8),
+        "cljvm_rt_invoke_9" => Some(crate::runtime::cljvm_rt_invoke_9 as *const u8),
+        "cljvm_rt_invoke_10" => Some(crate::runtime::cljvm_rt_invoke_10 as *const u8),
         "cljvm_pl_creator" => Some(crate::runtime::cljvm_pl_creator as *const u8),
         "cljvm_inst_meta" => Some(crate::runtime::cljvm_inst_meta as *const u8),
         "cljvm_inst_with_meta" => Some(crate::runtime::cljvm_inst_with_meta as *const u8),
@@ -11748,6 +12888,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_new_1" => Some(crate::runtime::cljvm_inst_new_1 as *const u8),
         "cljvm_inst_new_2" => Some(crate::runtime::cljvm_inst_new_2 as *const u8),
         "cljvm_inst_new_3" => Some(crate::runtime::cljvm_inst_new_3 as *const u8),
+        "cljvm_inst_new_4" => Some(crate::runtime::cljvm_inst_new_4 as *const u8),
+        "cljvm_inst_new_5" => Some(crate::runtime::cljvm_inst_new_5 as *const u8),
         _ => None,
     }
 }
@@ -11864,6 +13006,9 @@ pub fn compile_form_to_jit(
         _string_builders: Vec::new(),
         _chunk_buffers: Vec::new(),
         _lazy_states: Vec::new(),
+        _ref_states: Vec::new(),
+        _matcher_states: Vec::new(),
+        _multifn_states: Vec::new(),
         _multi_arity_tables: Vec::new(),
         _namespaces: Vec::new(),
         _vars: Vec::new(),
@@ -12449,6 +13594,39 @@ pub fn with_active_session_root_delay(d: Arc<std::cell::RefCell<crate::runtime::
     });
 }
 
+pub fn with_active_session_root_ref(r: Arc<std::cell::RefCell<crate::runtime::RefState>>) {
+    with_active_session_ref(|sess| sess.roots._ref_states.push(r)).unwrap_or_else(|| {
+        panic!("clojure-jvm: with_active_session_root_ref: no active Session")
+    });
+}
+
+pub fn with_active_session_root_matcher(
+    m: Arc<std::cell::RefCell<crate::runtime::MatcherState>>,
+) {
+    with_active_session_ref(|sess| sess.roots._matcher_states.push(m)).unwrap_or_else(|| {
+        panic!("clojure-jvm: with_active_session_root_matcher: no active Session")
+    });
+}
+
+pub fn with_active_session_root_multifn(
+    m: Arc<std::cell::RefCell<crate::runtime::MultiFnState>>,
+) {
+    with_active_session_ref(|sess| sess.roots._multifn_states.push(m)).unwrap_or_else(|| {
+        panic!("clojure-jvm: with_active_session_root_multifn: no active Session")
+    });
+}
+
+/// Resolve a clojure.core fn by name and return its current value bits.
+/// Used by runtime drivers that need a real Clojure fn as a building
+/// block (e.g. `conj` as the transducer reducing fn).
+pub fn resolve_core_fn_bits(name: &str) -> u64 {
+    let sym = Symbol::intern(name);
+    match resolve_var(&sym) {
+        Some(v) => v.deref_bits(),
+        None => panic!("clojure-jvm: resolve_core_fn_bits — cannot resolve clojure.core/{name}"),
+    }
+}
+
 pub fn with_active_session_root_multi_arity_fn(t: Arc<Vec<crate::runtime::MultiArityEntry>>) {
     with_active_session_ref(|sess| sess.roots._multi_arity_tables.push(t)).unwrap_or_else(|| {
         panic!("clojure-jvm: with_active_session_root_multi_arity_fn: no active Session")
@@ -12645,6 +13823,9 @@ impl Session {
                 _string_builders: Vec::new(),
                 _chunk_buffers: Vec::new(),
                 _lazy_states: Vec::new(),
+                _ref_states: Vec::new(),
+                _matcher_states: Vec::new(),
+                _multifn_states: Vec::new(),
                 _multi_arity_tables: Vec::new(),
                 _namespaces: Vec::new(),
                 _vars: Vec::new(),
@@ -13775,6 +14956,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         unsafe { crate::runtime::heap_bits_to_object(bits, ids) }
     }
@@ -14542,15 +15732,29 @@ mod tests {
     }
 
     #[test]
-    fn jit_e2e_def_returns_bound_value() {
-        // The `(def x 42)` form itself returns the bound value (our divergence
-        // from Java, which returns the Var). Without `do`/sequencing it should
-        // still produce 42.
+    fn jit_e2e_def_returns_the_var() {
+        // `(def x 99)` returns the VAR (Java semantics — `#'user/x`), with
+        // the value bound and readable through it. The old divergence
+        // (returning the bound value) broke `defonce`, which reads
+        // `(.hasRoot v#)` off the `(def name)` result.
         let v = with_fresh_ns("test.def.return", || {
             let form = list_of(vec![sym("def"), sym("x"), Object::Long(99)]);
             eval_form_via_jit(form)
         });
-        assert_eq!(nanbox_to_f64(v), 99.0);
+        // Use the process-global ids (set by Compiler::new) — authoritative
+        // for whatever compiler instance this test spun up.
+        let ids = crate::runtime::heap_type_ids();
+        let raw = crate::runtime::nanbox_payload(v) as *const u8;
+        let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+        assert_eq!(type_id, ids.var, "(def x 99) should return a Var cell");
+        let var: std::sync::Arc<crate::lang::var::Var> =
+            unsafe { crate::runtime::decode_arc_cell(raw) };
+        assert!(var.has_root(), "def must bind the root");
+        assert_eq!(
+            nanbox_to_f64(var.deref_bits()),
+            99.0,
+            "the returned Var must deref to the bound value"
+        );
     }
 
     #[test]
@@ -14773,6 +15977,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
@@ -14881,6 +16094,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
@@ -14955,6 +16177,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         let obj = unsafe { crate::runtime::heap_bits_to_object(nanbox_bits, ids) };
         match obj {
@@ -15060,6 +16291,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
@@ -17671,6 +18911,15 @@ mod tests {
             user_instance: 19,
             reduced: 21,
             namespace: 22,
+            repeat_seq: 24,
+            atom: 25,
+            volatile_cell: 26,
+            closure: 4,
+            iterate_seq: 27,
+            cycle_seq: 28,
+            matcher: 29,
+            multifn_cell: 30,
+            exception_info: 31,
         };
         // Nil isn't a TAG_PTR — handled in object_to_nanbox roundtrip.
         // For tests just check it's the nil tag pattern.

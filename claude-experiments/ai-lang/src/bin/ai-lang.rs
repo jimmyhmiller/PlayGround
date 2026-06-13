@@ -19,6 +19,9 @@
 //! Defaults to `./.ai-lang`. Override with `--codebase <path>` or env
 //! `AI_LANG_CODEBASE=<path>`.
 
+#[path = "../edit_server.rs"]
+mod edit_server;
+
 use ai_lang::Hash;
 use ai_lang::ast::{Def, Type};
 use ai_lang::codebase::Codebase;
@@ -32,10 +35,15 @@ use ai_lang::io_externs::{set_user_args, set_worker_nodes};
 use ai_lang::knowledge::KnowledgeBase;
 use ai_lang::namespace::{self, MergeResult};
 use ai_lang::codec::encode_extern;
+use ai_lang::deploy::{
+    DeployManager, DeployRequest, StateAction, deploy_on_channel, invoke_on_channel,
+    rollback_on_channel, serve_deploy_turn,
+};
 use ai_lang::net::{
     ItemKind, bind, build_at_runtime_binding, clear_at_conn_cache, clear_current_at_binding,
-    clear_current_knowledge_base, clear_current_runtime, install_current_at_binding,
-    install_current_knowledge_base, install_current_runtime, serve_with_install,
+    clear_current_knowledge_base, clear_current_runtime, client_authenticate,
+    install_current_at_binding, install_current_knowledge_base, install_current_runtime,
+    server_expect_auth,
 };
 use ai_lang::parser::parse_module;
 use ai_lang::resolve::{AtBinding, ExternSig, ResolvedDef, ResolvedModule, resolve_module};
@@ -58,15 +66,47 @@ fn usage(code: i32) -> ! {
 ai-lang — generic runner for content-addressed ai-lang programs
 
 usage:
-  ai-lang add <file.ail>                   ingest source into the codebase
-  ai-lang ls                                list named defs in the codebase
-  ai-lang run <name> [--nodes=N] [-- ...]  invoke a `<name>() -> Int` and print it
+  ai-lang add <file.ail> [--prefix <ns>]   ingest source into the codebase.
+                                           --prefix <ns> prepends a namespace
+                                           (e.g. `Bar::`) to every def name.
+  ai-lang ls [<prefix>] [--tag <tag>]       list named defs, optionally filtered by
+                                           namespace prefix or metadata tag
+  ai-lang test [--tag <tag>] [--prefix <ns>]  run tagged tests (default: ai:test).
+                                           Pure tests are cached by hash —
+                                           once passed, never re-run.
+                                           --prefix filters to a namespace.
   ai-lang serve                             become a worker for at() (empty runtime)
+       [--bind <addr>] [--token <t>]       --bind = standalone node (no parent
+                                           watchdog); --token = shared-secret auth
+
+live deploy (typed, instant rollback; nodes keep every version resident):
+  ai-lang deploy <file.ail> <addr>          ship a new version to a running node.
+       --bind <binding>=<def>              create/flip a named entry point (its
+                                           signature is pinned at creation)
+       [--migrate <state>=<def>]           required when a state's type changed;
+                                           must be fn(OldT) -> NewT, checked on
+                                           the node against the LIVE cell's type
+       [--allow-state-drop]                permit live states absent from the
+                                           new version (cells stay resident)
+       [--token <t>]                       auth for token-protected nodes
+  ai-lang rollback <addr> <binding>         instant flip to the previous version
+  ai-lang invoke <addr> <binding> [i...]    call a binding by name (Int args, v1)
+
+  ai-lang serve-edit                        start the JSONL structural-edit server
+                                           (one JSON request per line on stdin,
+                                           one JSON response per line on stdout)
 
 structural editing (Phase 1):
   ai-lang rename <from> <to>               INSTANT, unbreakable rename. Moves a
                                            name alias only; recompiles nothing and
                                            breaks no callers (refs are by hash).
+  ai-lang alias <from> <to>                 like rename, but keeps the old name.
+                                           Both names now point to the same hash.
+  ai-lang tag <name> <tag>                  add a tag to a definition's metadata
+  ai-lang untag <name> <tag>                remove a tag
+  ai-lang meta <name>                       print metadata as JSON
+  ai-lang meta set <name> <key> <value>     set a user key in meta
+  ai-lang meta unset <name> <key>           remove a user key from meta
   ai-lang update <name> <file> [--dry-run] replace <name>'s def with <file>'s source.
        [--propagate]                      Dependents are NOT touched by default —
                                            they still reference the old hash.
@@ -83,6 +123,9 @@ structural editing (Phase 1):
   ai-lang eval <name> [<args>...]          JIT-run a def and print its value as
                                            JSON. Args are JSON values matching
                                            the def's parameter types.
+  ai-lang cli                               list all entry points (tagged ai:cli)
+  ai-lang cli <name> [args...] [--help]    run an entry point with CLI arg parsing
+                                           -- flags declared in metadata.
 
   ai-lang propagate <name> [--dry-run]    verify that every transitive dependent of
                                            <name> typechecks against its current hash;
@@ -250,13 +293,42 @@ fn main() {
 
     match subcommand.as_str() {
         "add" => {
-            if args.len() != 1 {
+            // <file> [--prefix <ns>]
+            let mut prefix: Option<String> = None;
+            let mut positional: Vec<&String> = Vec::new();
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--prefix" {
+                    i += 1;
+                    if i < args.len() {
+                        prefix = Some(args[i].clone());
+                    }
+                } else {
+                    positional.push(&args[i]);
+                }
+                i += 1;
+            }
+            if positional.len() != 1 {
                 usage(2);
             }
-            cmd_add(&args[0], &cb_path);
+            cmd_add(&positional[0], prefix.as_deref(), &cb_path);
         }
         "ls" => {
-            cmd_ls(&cb_path);
+            let mut prefix: Option<&str> = None;
+            let mut tag_filter: Option<&str> = None;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--tag" {
+                    i += 1;
+                    if i < args.len() {
+                        tag_filter = Some(&args[i]);
+                    }
+                } else if prefix.is_none() {
+                    prefix = Some(&args[i]);
+                }
+                i += 1;
+            }
+            cmd_ls(prefix, tag_filter, &cb_path);
         }
         "run" => {
             if args.is_empty() {
@@ -269,11 +341,70 @@ fn main() {
                 &cb_path,
             );
         }
+        "test" => {
+            // [--tag <tag>] [--prefix <ns>] [--all]
+            let mut prefix: Option<String> = None;
+            let mut tag: Option<String> = None;
+            let mut all = false;
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--tag" {
+                    i += 1;
+                    if i < args.len() {
+                        tag = Some(args[i].clone());
+                    }
+                } else if args[i] == "--prefix" {
+                    i += 1;
+                    if i < args.len() {
+                        prefix = Some(args[i].clone());
+                    }
+                } else if args[i] == "--all" {
+                    all = true;
+                }
+                i += 1;
+            }
+            cmd_test(prefix.as_deref(), tag.as_deref(), all, flags.json, &cb_path);
+        }
         "rename" => {
             if args.len() != 2 {
                 usage(2);
             }
             cmd_rename(&args[0], &args[1], flags.json, &cb_path);
+        }
+        "alias" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_alias(&args[0], &args[1], flags.json, &cb_path);
+        }
+        "tag" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_tag(&args[0], &args[1], &cb_path);
+        }
+        "untag" => {
+            if args.len() != 2 {
+                usage(2);
+            }
+            cmd_untag(&args[0], &args[1], &cb_path);
+        }
+        "meta" => {
+            // meta <name>
+            // meta set <name> <key> <value>
+            // meta unset <name> <key>
+            if args.is_empty() || args.len() > 4 {
+                usage(2);
+            }
+            if args.len() == 1 {
+                cmd_meta_show(&args[0], flags.json, &cb_path);
+            } else if args.len() == 4 && args[0] == "set" {
+                cmd_meta_set(&args[1], &args[2], &args[3], &cb_path);
+            } else if args.len() == 3 && args[0] == "unset" {
+                cmd_meta_unset(&args[1], &args[2], &cb_path);
+            } else {
+                usage(2);
+            }
         }
         "update" => {
             // Positional: <name> <file>. --dry-run and --propagate may appear anywhere.
@@ -425,6 +556,15 @@ fn main() {
             }
             cmd_eval(&args[0], &args[1..], flags.json, &cb_path);
         }
+        "cli" => {
+            if args.is_empty() {
+                cmd_cli_list(&cb_path);
+            } else if args.len() == 2 && args[1] == "--help" {
+                cmd_cli_help(&args[0], &cb_path);
+            } else {
+                cmd_cli_run(&args[0], &args[1..], &cb_path);
+            }
+        }
         "export" => {
             // <name...> --out <path>
             if args.is_empty() {
@@ -482,7 +622,58 @@ fn main() {
             cmd_merge(&args[0], &args[1], flags.json, &cb_path);
         }
         "serve" => {
-            cmd_serve();
+            let (mut bind_addr, mut token) = (None::<String>, None::<String>);
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "--bind" && i + 1 < args.len() {
+                    bind_addr = Some(args[i + 1].clone());
+                    i += 2;
+                } else if let Some(rest) = args[i].strip_prefix("--bind=") {
+                    bind_addr = Some(rest.to_owned());
+                    i += 1;
+                } else if args[i] == "--token" && i + 1 < args.len() {
+                    token = Some(args[i + 1].clone());
+                    i += 2;
+                } else if let Some(rest) = args[i].strip_prefix("--token=") {
+                    token = Some(rest.to_owned());
+                    i += 1;
+                } else {
+                    eprintln!("serve: unexpected argument {}", args[i]);
+                    usage(2);
+                }
+            }
+            cmd_serve(bind_addr.as_deref(), token.as_deref());
+        }
+        "deploy" => {
+            cmd_deploy_cli(&args);
+        }
+        "rollback" => {
+            let (positional, token) = take_token(&args);
+            if positional.len() != 2 {
+                eprintln!("usage: ai-lang rollback <addr> <binding> [--token <t>]");
+                std::process::exit(2);
+            }
+            cmd_rollback(&positional[0], &positional[1], token.as_deref());
+        }
+        "invoke" => {
+            let (positional, token) = take_token(&args);
+            if positional.len() < 2 {
+                eprintln!("usage: ai-lang invoke <addr> <binding> [<int> ...] [--token <t>]");
+                std::process::exit(2);
+            }
+            let ints: Vec<i64> = positional[2..]
+                .iter()
+                .map(|s| {
+                    s.parse().unwrap_or_else(|_| {
+                        eprintln!("invoke: argument `{}` is not an Int", s);
+                        std::process::exit(2);
+                    })
+                })
+                .collect();
+            cmd_invoke(&positional[0], &positional[1], &ints, token.as_deref());
+        }
+        "serve-edit" => {
+            edit_server::serve(&cb_path);
         }
         "lambda-worker" => {
             cmd_lambda_worker();
@@ -635,6 +826,8 @@ fn run_handed_code(
             .map_err(|_| "task is not a `(String) -> String` fn".to_string())?
     };
     let input_heap = unsafe { ai_lang::ffi::owned_str_to_heap(rt.thread_ptr(), &input) };
+    // No panic channel: a contract violation in the task aborts the
+    // process before this returns.
     let out = unsafe { task.call(rt.thread_ptr(), input_heap) };
     let result = unsafe { ai_lang::ffi::heap_str_to_owned(out) };
     Ok(result)
@@ -744,19 +937,27 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // `add`
 // =============================================================================
 
-fn cmd_add(file: &str, cb_path: &PathBuf) {
+fn cmd_add(file: &str, prefix: Option<&str>, cb_path: &PathBuf) {
     init_native_target().expect("init native target");
     let user_src = std::fs::read_to_string(file)
         .unwrap_or_else(|e| {
             eprintln!("read {}: {}", file, e);
             std::process::exit(1);
         });
+    // Parse the user source separately to know which names are user-defined.
+    let user_m = parse_module(&user_src).unwrap_or_else(|e| {
+        eprintln!("parse: {:?}", e);
+        std::process::exit(1);
+    });
+    let user_names: std::collections::HashSet<String> =
+        user_m.defs.iter().map(|d| d.name.clone()).collect();
+
     let full_src = format!("{}\n{}", STDLIB, user_src);
     let m = parse_module(&full_src).unwrap_or_else(|e| {
         eprintln!("parse: {:?}", e);
         std::process::exit(1);
     });
-    let r = resolve_module(&m).unwrap_or_else(|e| {
+    let mut r = resolve_module(&m).unwrap_or_else(|e| {
         eprintln!("resolve: {:?}", e);
         std::process::exit(1);
     });
@@ -766,9 +967,25 @@ fn cmd_add(file: &str, cb_path: &PathBuf) {
         std::process::exit(1);
     });
 
+    // Apply namespace prefix: only to user-defined names, not stdlib.
+    if let Some(ns) = prefix {
+        let ns = ns.trim_end_matches(':');
+        let ns_prefix = if ns.is_empty() {
+            String::new()
+        } else {
+            format!("{}::", ns)
+        };
+        for rd in &mut r.defs {
+            if user_names.contains(&rd.name) {
+                rd.name = format!("{}{}", ns_prefix, rd.name);
+            }
+        }
+    }
+
     let mut cb = Codebase::open(cb_path).expect("open codebase");
     cb.store_resolved_module(&r).expect("store resolved module");
     // Persist local names so `view` shows readable parameter/let names.
+    // Use the full module (which includes stdlib) for name resolution.
     if let Ok(names) = ai_lang::resolve::local_names_for_module(&m) {
         let _ = cb.store_local_names_batch(&names);
     }
@@ -799,14 +1016,134 @@ fn cmd_add(file: &str, cb_path: &PathBuf) {
 // `ls`
 // =============================================================================
 
-fn cmd_ls(cb_path: &PathBuf) {
+fn cmd_ls(prefix: Option<&str>, tag_filter: Option<&str>, cb_path: &PathBuf) {
     let cb = Codebase::open(cb_path).expect("open codebase");
     let mut entries: Vec<(&String, &Hash)> = cb.names().iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut count = 0;
     for (name, hash) in entries {
+        if let Some(p) = prefix {
+            if !name.starts_with(p) {
+                continue;
+            }
+        }
+        if let Some(tag) = tag_filter {
+            if !ai_lang::metadata::has_tag(&cb, hash, tag) {
+                continue;
+            }
+        }
         println!("{:<32}  {}", name, &hash.to_hex()[..16]);
+        count += 1;
     }
-    eprintln!("\n  {} names in {}", cb.names().len(), cb_path.display());
+    let total = cb.names().len();
+    if let Some(tag) = tag_filter {
+        eprintln!("\n  {} name(s) tagged `{}` ({} total in {})", count, tag, total, cb_path.display());
+    } else if let Some(p) = prefix {
+        eprintln!("\n  {} name(s) matching `{}` ({} total in {})", count, p, total, cb_path.display());
+    } else {
+        eprintln!("\n  {} names in {}", total, cb_path.display());
+    }
+}
+
+fn cmd_alias(from: &str, to: &str, json: bool, cb_path: &PathBuf) {
+    let mut cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(from) {
+        Some(h) => h,
+        None => {
+            eprintln!("alias: unknown name: {}", from);
+            std::process::exit(1);
+        }
+    };
+    cb.set_name(to.to_owned(), hash).unwrap_or_else(|e| {
+        eprintln!("alias: {}", e);
+        std::process::exit(1);
+    });
+    if json {
+        println!(
+            "{{\"ok\":true,\"aliased\":{{\"from\":\"{}\",\"to\":\"{}\",\"hash\":\"{}\"}}}}",
+            json_escape(from),
+            json_escape(to),
+            hash.to_hex()
+        );
+    } else {
+        println!("aliased {} -> {}  (hash {} unchanged)", from, to, &hash.to_hex()[..16]);
+    }
+}
+
+fn cmd_tag(name: &str, tag: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("tag: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::add_tag(&cb, &hash, tag).unwrap_or_else(|e| {
+        eprintln!("tag: {}", e);
+        std::process::exit(1);
+    });
+    println!("tagged {} with `{}`", name, tag);
+}
+
+fn cmd_untag(name: &str, tag: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("untag: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::remove_tag(&cb, &hash, tag).unwrap_or_else(|e| {
+        eprintln!("untag: {}", e);
+        std::process::exit(1);
+    });
+    println!("removed tag `{}` from {}", tag, name);
+}
+
+fn cmd_meta_show(name: &str, json: bool, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    match ai_lang::metadata::load(&cb, &hash) {
+        Some(meta) => println!("{}", meta.to_string()),
+        None => {
+            if json {
+                println!("{{\"tags\":[],\"meta\":{{}}}}");
+            } else {
+                println!("(no metadata)");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_meta_set(name: &str, key: &str, value: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta set: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    // Try to parse as JSON, fall back to string.
+    let v = match ai_lang::jsonl::parse(value) {
+        Ok(j) => j,
+        Err(_) => ai_lang::jsonl::Json::Str(value.to_string()),
+    };
+    ai_lang::metadata::set_meta(&cb, &hash, key, &v).unwrap_or_else(|e| {
+        eprintln!("meta set: {}", e);
+        std::process::exit(1);
+    });
+    println!("set meta.{} on {}", key, name);
+}
+
+fn cmd_meta_unset(name: &str, key: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = cb.get_name(name).unwrap_or_else(|| {
+        eprintln!("meta unset: unknown name: {}", name);
+        std::process::exit(1);
+    });
+    ai_lang::metadata::unset_meta(&cb, &hash, key).unwrap_or_else(|e| {
+        eprintln!("meta unset: {}", e);
+        std::process::exit(1);
+    });
+    println!("unset meta.{} on {}", key, name);
 }
 
 // =============================================================================
@@ -1033,7 +1370,6 @@ fn cmd_effects(target: &str, json: bool, cb_path: &PathBuf) {
             (EffectSet::ATOM, "Atom"),
             (EffectSet::MUT, "Mut"),
             (EffectSet::FFI, "FFI"),
-            (EffectSet::PANIC, "Panic"),
         ]
         .into_iter()
         .filter(|(bit, _)| sig.concrete.contains(*bit))
@@ -1206,6 +1542,276 @@ fn split_json_array(s: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
+}
+
+// =============================================================================
+// `cli` — entry points with CLI arg parsing
+// =============================================================================
+
+fn cmd_cli_list(cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let tag = "ai:cli";
+    let hashes = match ai_lang::metadata::hashes_with_tag(cb.root(), tag) {
+        Ok(hs) => hs,
+        Err(e) => {
+            eprintln!("cli: cannot scan metadata: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if hashes.is_empty() {
+        println!("no entry points found (tag a def with `ai-lang tag <name> ai:cli`)");
+        return;
+    }
+    println!("{:<32}  {}", "NAME", "DESCRIPTION");
+    println!("{}", "-".repeat(64));
+    for h in &hashes {
+        let name = cb.names().iter()
+            .find(|(_, hh)| *hh == h)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| format!("def_{}", &h.to_hex()[..8]));
+        let loaded = ai_lang::metadata::load(&cb, h);
+        let doc: &str = match &loaded {
+            Some(m) => {
+                if let Some(d) = m.get("doc").and_then(|d| d.as_str()) {
+                    d
+                } else if let Some(mm) = m.get("meta") {
+                    mm.get("doc").and_then(|d| d.as_str()).unwrap_or("")
+                } else {
+                    ""
+                }
+            }
+            None => "",
+        };
+        println!("{:<32}  {}", name, doc);
+    }
+}
+
+fn cmd_cli_help(name: &str, cb_path: &PathBuf) {
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(name) {
+        Some(h) => h,
+        None => {
+            eprintln!("cli: unknown name: {}", name);
+            std::process::exit(1);
+        }
+    };
+    let scheme = match cb.types().get(&hash) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("cli: no type for {}", name);
+            std::process::exit(1);
+        }
+    };
+    let (params, _ret) = match &scheme {
+        ai_lang::typecheck::TypeScheme::Fn { params, ret, .. } => (params.clone(), ret.clone()),
+        _ => {
+            eprintln!("cli: `{}` is not a function", name);
+            std::process::exit(1);
+        }
+    };
+    // Get param names from localnames side-car.
+    let param_names: Vec<String> = cb.load_local_names(&hash).ok().flatten().unwrap_or_else(|| {
+        (0..params.len()).map(|i| format!("arg{}", i)).collect()
+    });
+    let param_names: Vec<String> = (0..params.len())
+        .map(|i| param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)))
+        .collect();
+
+    let meta = ai_lang::metadata::load(&cb, &hash);
+    let doc: &str = if let Some(ref m) = meta {
+        if let Some(d) = m.get("doc").and_then(|d| d.as_str()) {
+            d
+        } else if let Some(mm) = m.get("meta") {
+            mm.get("doc").and_then(|d| d.as_str()).unwrap_or("")
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
+    let param_meta = meta.as_ref()
+        .and_then(|m| m.get("meta"))
+        .and_then(|m| m.get("params"));
+
+    if !doc.is_empty() {
+        println!("{} — {}", name, doc);
+    } else {
+        println!("{}", name);
+    }
+    println!();
+    print!("Usage: ai-lang cli {} ", name);
+    for (i, _p) in params.iter().enumerate() {
+        let pname = &param_names[i];
+        let is_flag = param_meta
+            .and_then(|pm| pm.get(pname))
+            .and_then(|p| p.get("flag").and_then(|f| f.as_bool()))
+            .unwrap_or(false);
+        let has_default = param_meta
+            .and_then(|pm| pm.get(pname))
+            .and_then(|p| p.get("default"))
+            .is_some();
+        if is_flag {
+            print!("[--{}] ", pname);
+        } else if has_default {
+            print!("[<{}>] ", pname);
+        } else {
+            print!("<{}> ", pname);
+        }
+    }
+    println!();
+    println!();
+    println!("Arguments:");
+    for (i, _p) in params.iter().enumerate() {
+        let pname = &param_names[i];
+        let info = param_meta.and_then(|pm| pm.get(pname));
+        let pdoc = info.and_then(|i| i.get("doc").and_then(|d| d.as_str())).unwrap_or("");
+        let is_flag = info.and_then(|i| i.get("flag").and_then(|f| f.as_bool())).unwrap_or(false);
+        let defval = info.and_then(|i| i.get("default").and_then(|d| d.as_str()));
+        if is_flag {
+            println!("  --{:<20} {}", pname, pdoc);
+        } else if let Some(dv) = defval {
+            println!("  --{:<10} (default: {:<8}) {}", pname, dv, pdoc);
+        } else {
+            println!("  {:<12} {}", pname, pdoc);
+        }
+    }
+}
+
+fn cmd_cli_run(name: &str, arg_strs: &[String], cb_path: &PathBuf) {
+    init_native_target().expect("init native target");
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(name) {
+        Some(h) => h,
+        None => {
+            eprintln!("cli: unknown name: {}", name);
+            std::process::exit(1);
+        }
+    };
+    let scheme = match cb.types().get(&hash) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("cli: no type for {}", name);
+            std::process::exit(1);
+        }
+    };
+    let (params, ret) = match &scheme {
+        ai_lang::typecheck::TypeScheme::Fn { params, ret, .. } => (params.clone(), ret.clone()),
+        _ => {
+            eprintln!("cli: `{}` is not a function", name);
+            std::process::exit(1);
+        }
+    };
+
+    let meta = ai_lang::metadata::load(&cb, &hash);
+    // Get param names from localnames side-car.
+    let param_names: Vec<String> = cb.load_local_names(&hash).ok().flatten().unwrap_or_else(|| {
+        (0..params.len()).map(|i| format!("arg{}", i)).collect()
+    });
+    // But localnames has ALL locals (params + lets). Truncate to param count.
+    let param_names: Vec<String> = param_names.into_iter().take(params.len()).collect();
+    // Pad if localnames had fewer entries than params.
+    let param_names: Vec<String> = (0..params.len())
+        .map(|i| param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)))
+        .collect();
+
+    let param_meta = meta.as_ref()
+        .and_then(|m| m.get("meta"))
+        .and_then(|m| m.get("params"));
+
+    // Build default values from metadata.
+    let mut values: Vec<Option<ai_lang::jsonl::Json>> = vec![None; params.len()];
+
+    // Parse CLI args.
+    let mut pos = 0usize;
+    let mut i = 0usize;
+    while i < arg_strs.len() {
+        let a = &arg_strs[i];
+        if a == "--help" {
+            cmd_cli_help(name, cb_path);
+            return;
+        }
+        if let Some(flag) = a.strip_prefix("--") {
+            // Find which param has this name.
+            if let Some(idx) = param_names.iter().position(|n| n == flag) {
+                let ty = params.get(idx).cloned().unwrap_or(ai_lang::ast::Type::Builtin("Bool".to_string()));
+                // Bool flag: map Bool→Int for Int params, Bool→Bool otherwise.
+                let val = match &ty {
+                    ai_lang::ast::Type::Builtin(b) if b == "Int" => ai_lang::jsonl::Json::Int(1),
+                    _ => ai_lang::jsonl::Json::Bool(true),
+                };
+                values[idx] = Some(val);
+            } else {
+                // --key value style: next arg is the value.
+                i += 1;
+                if i < arg_strs.len() {
+                    if let Some(idx) = param_names.iter().position(|n| n == flag) {
+                        let ty = params.get(idx).cloned().unwrap_or(ai_lang::ast::Type::Builtin("String".to_string()));
+                        values[idx] = Some(type_parse(&arg_strs[i], &ty));
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        // Positional arg: assign to next unfilled param.
+        while pos < params.len() && values[pos].is_some() {
+            pos += 1;
+        }
+        if pos < params.len() {
+            values[pos] = Some(type_parse(a, &params[pos]));
+            pos += 1;
+        }
+        i += 1;
+    }
+
+    // Fill defaults from metadata.
+    for idx in 0..params.len() {
+        if values[idx].is_none() {
+            let pname = &param_names[idx];
+            let defval = param_meta
+                .and_then(|pm| pm.get(pname))
+                .and_then(|p| p.get("default"));
+            if let Some(dv) = defval {
+                values[idx] = Some(dv.clone());
+            }
+        }
+    }
+
+    // Check required args are filled.
+    let args_json: Vec<ai_lang::jsonl::Json> = values.iter().enumerate().map(|(idx, v)| {
+        match v {
+            Some(j) => j.clone(),
+            None => {
+                eprintln!("cli: missing required argument: {}", param_names[idx]);
+                eprintln!("  run `ai-lang cli {} --help` for usage", name);
+                std::process::exit(1);
+            }
+        }
+    }).collect();
+
+    match ai_lang::evalrun::eval(&cb, hash, &params, &ret, &args_json) {
+        Ok(result) => {
+            println!("{}", result.value.to_string());
+        }
+        Err(e) => {
+            eprintln!("cli: {}: {}", e.kind(), e.message());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn type_parse(s: &str, ty: &ai_lang::ast::Type) -> ai_lang::jsonl::Json {
+    use ai_lang::ast::Type;
+    use ai_lang::jsonl::Json;
+    match ty {
+        Type::Builtin(name) => match name.as_str() {
+            "Int" => Json::Int(s.parse().unwrap_or(0)),
+            "Float" => Json::Float(s.parse().unwrap_or(0.0)),
+            "Bool" => Json::Bool(s == "true" || s == "1"),
+            "String" | _ => Json::Str(s.to_string()),
+        },
+        _ => Json::Str(s.to_string()),
+    }
 }
 
 // =============================================================================
@@ -1382,6 +1988,7 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
         at_binding,
         externs,
     };
+    let wanted_hashes: Vec<Hash> = rm.defs.iter().map(|d| d.hash).collect();
 
     // Spawn workers (if requested) and publish their ports to the
     // global table that `get_node_port(i)` reads from.
@@ -1407,13 +2014,49 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
 
     // JIT the reconstructed module and call <name>() -> Int.
     let ctx = Context::create();
-    let cm = CompiledModule::build(&ctx, &rm).expect("build module");
+    let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted_hashes);
+    let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        // Codegen was skipped, so dlsym-resolve the C externs it would
+        // have registered (clock_gettime, malloc, ... — anything the
+        // program calls through the C FFI).
+        ai_lang::codegen::register_referenced_c_externs(&rm).expect("register C externs");
+        (cached, true)
+    } else {
+        let built = CompiledModule::build(&ctx, &rm).expect("build module");
+        let _ = ai_lang::codegen::write_bitcode_cache(&built, cb.root(), &wanted_hashes);
+        (built, false)
+    };
+    // Diagnostic: dump the (optimized) LLVM IR of the module, or of one
+    // def whose visible name is given (`AI_LANG_DUMP_IR=bfib`).
+    if let Ok(filter) = std::env::var("AI_LANG_DUMP_IR") {
+        let ir = cm.ir();
+        if filter.is_empty() || filter == "1" {
+            eprintln!("{}", ir);
+        } else if let Some(h) = cb.get_name(&filter) {
+            let sym = def_symbol(&h);
+            let mut emit = false;
+            for line in ir.lines() {
+                if line.starts_with("define ") && line.contains(&sym) {
+                    emit = true;
+                }
+                if emit {
+                    eprintln!("{}", line);
+                    if line == "}" {
+                        break;
+                    }
+                }
+            }
+        }
+    }
     let rt = Runtime::new_with_metadata(
         cm.closure_type_infos.clone(),
         cm.shape_registry.clone(),
         cm.shape_meta.clone(),
         cm.shape_by_type_id.clone(),
     );
+    // The entry point's dual-register `{i64, i64}` Result ABI (if any),
+    // captured before `cm` moves into the JIT so we call it correctly.
+    let root_abi = cm.def_result_abi.get(&root_hash).copied();
     let jit = Jit::new(cm, &rt).expect("jit");
 
     install_current_runtime(&rt);
@@ -1432,18 +2075,47 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
         install_current_at_binding(&_rb_storage);
     }
 
-    let entry = unsafe {
-        jit.engine
-            .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
-                &root_hash,
-            ))
-            .unwrap_or_else(|_| {
-                eprintln!("`{}` is not a `() -> Int` function", name);
-                std::process::exit(1);
-            })
-    };
-    let result = unsafe { entry.call(rt.thread_ptr()) };
-    println!("{}", result);
+    // No panic channel: a contract violation in the program aborts the
+    // process with its message before this returns.
+    //
+    // A `-> Result<T, E>` entry uses the dual-register `{i64, i64}`
+    // (tag, payload) ABI, so it must be called with the matching
+    // signature. We print the Ok payload register on success and a
+    // `Err(<bits>)` marker otherwise (a dev convenience — `ai-lang eval`
+    // renders the full structured value).
+    let sym = def_symbol(&root_hash);
+    if let Some(abi) = root_abi {
+        #[repr(C)]
+        struct ResultPair {
+            tag: i64,
+            payload: i64,
+        }
+        let entry = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> ResultPair>(&sym)
+                .unwrap_or_else(|_| {
+                    eprintln!("`{}` is not a callable entry function", name);
+                    std::process::exit(1);
+                })
+        };
+        let r = unsafe { entry.call(rt.thread_ptr()) };
+        if r.tag == abi.ok_index as i64 {
+            println!("{}", r.payload);
+        } else {
+            println!("Err({})", r.payload);
+        }
+    } else {
+        let entry = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&sym)
+                .unwrap_or_else(|_| {
+                    eprintln!("`{}` is not a `() -> Int` function", name);
+                    std::process::exit(1);
+                })
+        };
+        let result = unsafe { entry.call(rt.thread_ptr()) };
+        println!("{}", result);
+    }
 
     clear_at_conn_cache();
     clear_current_runtime();
@@ -1453,10 +2125,230 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
 }
 
 // =============================================================================
+// `test`
+// =============================================================================
+
+fn cmd_test(prefix: Option<&str>, tag: Option<&str>, _all: bool, json: bool, cb_path: &PathBuf) {
+    init_native_target().expect("init native target");
+
+    let cb = Codebase::open(cb_path).expect("open codebase");
+
+    let test_tag = tag.unwrap_or("ai:test");
+    let mut test_names: Vec<(String, Hash)> = Vec::new();
+    if let Ok(tagged_hashes) = ai_lang::metadata::hashes_with_tag(cb.root(), test_tag) {
+        for hash in tagged_hashes {
+            // Find the name(s) for this hash.
+            let names: Vec<&String> = cb.names().iter()
+                .filter(|(_, h)| **h == hash)
+                .map(|(n, _)| n)
+                .collect();
+            let name = match names.first() {
+                Some(n) => (*n).clone(),
+                None => continue,
+            };
+            // Only zero-arg Int-returning functions.
+            let is_test_fn = match cb.types().get(&hash) {
+                Some(ai_lang::typecheck::TypeScheme::Fn { params, ret, .. }) => {
+                    params.is_empty() && *ret == ai_lang::ast::Type::Builtin("Int".to_string())
+                }
+                _ => false,
+            };
+            if is_test_fn {
+                if let Some(p) = prefix {
+                    if !name.starts_with(p) {
+                        continue;
+                    }
+                }
+                test_names.push((name, hash));
+            }
+        }
+    }
+    test_names.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if test_names.is_empty() {
+        println!("no tests found");
+        return;
+    }
+
+    // Compute effects for all tests to know which are pure.
+    let rm = {
+        let mut all_hashes: Vec<Hash> = test_names.iter().map(|(_, h)| *h).collect();
+        all_hashes.sort_by_key(|h| h.to_hex());
+        all_hashes.dedup();
+        let mut seen: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        let mut frontier: Vec<Hash> = all_hashes.clone();
+        for h in &all_hashes {
+            seen.insert(*h);
+        }
+        while let Some(h) = frontier.pop() {
+            if let Ok(def) = cb.load_def(&h) {
+                let mut deps: Vec<Hash> = Vec::new();
+                let mut local_seen = std::collections::HashSet::new();
+                ai_lang::knowledge::walk_def_deps(&def, &mut deps, &mut local_seen);
+                for d in deps {
+                    if seen.insert(d) {
+                        frontier.push(d);
+                    }
+                }
+            }
+        }
+        let defs: Vec<ai_lang::resolve::ResolvedDef> = seen
+            .iter()
+            .filter_map(|h| {
+                cb.load_def(h).ok().map(|def| {
+                    let name = cb
+                        .names()
+                        .iter()
+                        .find(|(_, hh)| *hh == h)
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| format!("def_{}", &h.to_hex()[..8]));
+                    ai_lang::resolve::ResolvedDef {
+                        name,
+                        hash: *h,
+                        def,
+                    }
+                })
+            })
+            .collect();
+        ai_lang::resolve::ResolvedModule {
+            defs,
+            at_binding: None,
+            externs: std::collections::HashMap::new(),
+        }
+    };
+    let effect_sigs = ai_lang::effects::infer_effects(&rm);
+
+    // Ensure test cache directory exists.
+    let cache_dir = cb.root().join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    // Build the full module for JIT (shared across all tests), with cache.
+    let ctx = Context::create();
+    let wanted: Vec<Hash> = rm.defs.iter().map(|d| d.hash).collect();
+    let cache_hit = ai_lang::codegen::load_bitcode_cache(&ctx, cb.root(), &wanted);
+    let (cm, _from_cache) = if let Some(cached) = cache_hit {
+        ai_lang::codegen::register_referenced_c_externs(&rm).expect("register C externs");
+        (cached, true)
+    } else {
+        let built = CompiledModule::build(&ctx, &rm).expect("build module");
+        let _ = ai_lang::codegen::write_bitcode_cache(&built, cb.root(), &wanted);
+        (built, false)
+    };
+    let rt = Runtime::new_with_metadata(
+        cm.closure_type_infos.clone(),
+        cm.shape_registry.clone(),
+        cm.shape_meta.clone(),
+        cm.shape_by_type_id.clone(),
+    );
+    let jit = Jit::new(cm, &rt).expect("jit");
+    install_current_runtime(&rt);
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+    let mut json_results: Vec<String> = Vec::new();
+
+    for (name, hash) in &test_names {
+        let is_pure = effect_sigs.get(hash).map(|s| s.is_pure()).unwrap_or(false);
+        let cache_path = cache_dir.join(format!("{}.passed", hash.to_hex()));
+
+        if is_pure && cache_path.exists() {
+            skipped += 1;
+            if !json {
+                println!("  PASS  {}  (cached)", name);
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"pass\",\"cached\":true}}",
+                json_escape(name),
+                &hash.to_hex()[..16]
+            ));
+            continue;
+        }
+
+        let entry = unsafe {
+            match jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(hash))
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    eprintln!("  FAIL  {}  (not a () -> Int function)", name);
+                    failed += 1;
+                    continue;
+                }
+            }
+        };
+
+        // No panic channel: a contract violation in a test aborts the
+        // whole run with its message (a bug is a bug).
+        let result = unsafe { entry.call(rt.thread_ptr()) };
+        if result == 0 {
+            passed += 1;
+            if !json {
+                println!("  PASS  {}", name);
+            }
+            if is_pure {
+                let _ = std::fs::write(&cache_path, "");
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"pass\",\"pure\":{}}}",
+                json_escape(name),
+                &hash.to_hex()[..16],
+                is_pure
+            ));
+        } else {
+            failed += 1;
+            if !json {
+                println!("  FAIL  {}  (returned {})", name, result);
+            }
+            json_results.push(format!(
+                "{{\"name\":\"{}\",\"hash\":\"{}\",\"result\":\"fail\",\"returned\":{},\"pure\":{}}}",
+                json_escape(name),
+                &hash.to_hex()[..16],
+                result,
+                is_pure
+            ));
+        }
+    }
+
+    clear_current_runtime();
+
+    if json {
+        println!(
+            "{{\"passed\":{},\"failed\":{},\"skipped\":{},\"total\":{},\"results\":[{}]}}",
+            passed,
+            failed,
+            skipped,
+            test_names.len(),
+            json_results.join(",")
+        );
+    } else {
+        eprintln!(
+            "\n  {} passed, {} failed, {} cached",
+            passed, failed, skipped
+        );
+    }
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+// =============================================================================
 // `serve`
 // =============================================================================
 
-fn cmd_serve() {
+/// Become a node. Two modes:
+///
+/// - **Child worker** (no `--bind`): loopback ephemeral port, exits when
+///   the parent's stdin pipe closes. This is what `run --nodes=N`
+///   spawns.
+/// - **Standalone** (`--bind ADDR`): binds the given address, no
+///   watchdog, optional `--token` shared-secret auth per connection.
+///
+/// Both modes serve the full deploy-capable protocol: `at()` calls with
+/// the code-fetch handshake, plus deploy / rollback / invoke.
+fn cmd_serve(bind_addr: Option<&str>, token: Option<&str>) {
     init_native_target().expect("init native target");
 
     let ctx = Context::create();
@@ -1470,28 +2362,34 @@ fn cmd_serve() {
         empty_cm.shape_by_type_id.clone(),
     );
     let mut jit = IncrementalJit::new(empty_cm, &rt).expect("incremental jit");
+    let mut mgr = DeployManager::default();
 
-    let listener = bind("127.0.0.1:0").expect("bind");
+    let standalone = bind_addr.is_some();
+    let listener = bind(bind_addr.unwrap_or("127.0.0.1:0")).expect("bind");
     let port = listener.local_addr().unwrap().port();
     println!("READY {}", port);
     let _ = io::stdout().flush();
 
-    // Watchdog: parent's stdin pipe closes when parent dies → we exit.
-    std::thread::spawn(|| {
-        let stdin = io::stdin();
-        let mut buf = [0u8; 64];
-        loop {
-            match stdin.lock().read(&mut buf) {
-                Ok(0) | Err(_) => std::process::exit(0),
-                Ok(_) => {}
+    if !standalone {
+        // Watchdog: parent's stdin pipe closes when parent dies → we exit.
+        std::thread::spawn(|| {
+            let stdin = io::stdin();
+            let mut buf = [0u8; 64];
+            loop {
+                match stdin.lock().read(&mut buf) {
+                    Ok(0) | Err(_) => std::process::exit(0),
+                    Ok(_) => {}
+                }
             }
-        }
-    });
+        });
+    }
 
     eprintln!(
-        "[ai-lang serve pid={} port={}] empty runtime, awaiting code",
+        "[ai-lang serve pid={} port={}{}{}] empty runtime, awaiting code/deploys",
         std::process::id(),
-        port
+        port,
+        if standalone { " standalone" } else { "" },
+        if token.is_some() { " auth" } else { "" },
     );
 
     loop {
@@ -1503,8 +2401,15 @@ fn cmd_serve() {
             }
         };
         let _ = stream.set_nodelay(true);
+        if let Some(tok) = token {
+            if server_expect_auth(&mut stream, tok).is_err() {
+                // Drop silently: don't tell a prober why.
+                eprintln!("[ai-lang serve] rejected unauthenticated connection");
+                continue;
+            }
+        }
         loop {
-            match unsafe { serve_with_install(&mut rt, &mut jit, &mut stream) } {
+            match unsafe { serve_deploy_turn(&mut rt, &mut jit, &mut mgr, &mut stream) } {
                 Ok(()) => continue,
                 // Peer closed cleanly between frames — normal shutdown,
                 // not an error. Silently drop the connection and go
@@ -1519,6 +2424,270 @@ fn cmd_serve() {
                     break;
                 }
             }
+        }
+    }
+}
+
+/// Pull `--token <t>` / `--token=<t>` out of `args`; everything else is
+/// returned as positionals.
+fn take_token(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut positional = Vec::new();
+    let mut token = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--token" && i + 1 < args.len() {
+            token = Some(args[i + 1].clone());
+            i += 2;
+        } else if let Some(rest) = args[i].strip_prefix("--token=") {
+            token = Some(rest.to_owned());
+            i += 1;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+    (positional, token)
+}
+
+/// Connect to a node, authenticating if a token was given.
+fn connect_node(addr: &str, token: Option<&str>) -> std::net::TcpStream {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap_or_else(|e| {
+        eprintln!("cannot connect to node {}: {}", addr, e);
+        std::process::exit(1);
+    });
+    let _ = stream.set_nodelay(true);
+    if let Some(tok) = token {
+        if let Err(e) = client_authenticate(&mut stream, tok) {
+            eprintln!("auth to {} failed: {}", addr, e);
+            std::process::exit(1);
+        }
+    }
+    stream
+}
+
+fn short(h: &Hash) -> String {
+    h.to_hex()[..8].to_string()
+}
+
+fn print_deploy_report(report: &ai_lang::deploy::DeployReport) {
+    for (name, action) in &report.states {
+        match action {
+            StateAction::Keep => println!("state {}: kept (cell already live)", name),
+            StateAction::Fresh => println!("state {}: fresh (initializer ran)", name),
+            StateAction::Carryover { from } => {
+                println!("state {}: carried over from {} (initializer skipped)", name, short(from))
+            }
+            StateAction::Migrate { from, via } => {
+                println!("state {}: migrated from {} via {}", name, short(from), short(via))
+            }
+        }
+    }
+    for name in &report.dropped_states {
+        println!("state {}: dropped (cell stays resident, untracked)", name);
+    }
+    for (name, new, prev) in &report.rebound {
+        match prev {
+            Some(p) => println!("binding {} -> {} (was {})", name, short(new), short(p)),
+            None => println!("binding {} -> {} (created)", name, short(new)),
+        }
+    }
+}
+
+/// Parse + run `ai-lang deploy <file.ail> <addr> --bind B=DEF
+/// [--migrate STATE=DEF] [--allow-state-drop] [--token T]`.
+fn cmd_deploy_cli(args: &[String]) {
+    let mut positional: Vec<String> = Vec::new();
+    let mut binds: Vec<(String, String)> = Vec::new();
+    let mut migrates: Vec<(String, String)> = Vec::new();
+    let mut allow_drop = false;
+    let mut token: Option<String> = None;
+
+    fn split_eq(flag: &str, v: &str) -> (String, String) {
+        match v.split_once('=') {
+            Some((a, b)) if !a.is_empty() && !b.is_empty() => (a.to_string(), b.to_string()),
+            _ => {
+                eprintln!("{} expects NAME=DEF, got `{}`", flag, v);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--bind" && i + 1 < args.len() {
+            binds.push(split_eq("--bind", &args[i + 1]));
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--bind=") {
+            binds.push(split_eq("--bind", rest));
+            i += 1;
+        } else if a == "--migrate" && i + 1 < args.len() {
+            migrates.push(split_eq("--migrate", &args[i + 1]));
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--migrate=") {
+            migrates.push(split_eq("--migrate", rest));
+            i += 1;
+        } else if a == "--allow-state-drop" {
+            allow_drop = true;
+            i += 1;
+        } else if a == "--token" && i + 1 < args.len() {
+            token = Some(args[i + 1].clone());
+            i += 2;
+        } else if let Some(rest) = a.strip_prefix("--token=") {
+            token = Some(rest.to_owned());
+            i += 1;
+        } else {
+            positional.push(a.clone());
+            i += 1;
+        }
+    }
+    if positional.len() != 2 {
+        eprintln!(
+            "usage: ai-lang deploy <file.ail> <addr> --bind <binding>=<def> \
+             [--migrate <state>=<def>] [--allow-state-drop] [--token <t>]"
+        );
+        std::process::exit(2);
+    }
+    cmd_deploy(&positional[0], &positional[1], &binds, &migrates, allow_drop, token.as_deref());
+}
+
+/// Build a deploy from a source file (stdlib in scope) and ship it.
+/// Client-side: parse, resolve, typecheck (fail fast — the node would
+/// refuse anyway), collect the transitive closure of the rebind targets
+/// + migrations + every `state` in the program, and send. No JIT runs
+/// here; the client is bytes-only.
+fn cmd_deploy(
+    file: &str,
+    addr: &str,
+    binds: &[(String, String)],
+    migrates: &[(String, String)],
+    allow_drop: bool,
+    token: Option<&str>,
+) {
+    let source = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("deploy: cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let full = format!("{}\n{}", STDLIB, source);
+    let m = parse_module(&full).unwrap_or_else(|e| {
+        eprintln!("deploy: parse failed: {:?}", e);
+        std::process::exit(1);
+    });
+    let r = resolve_module(&m).unwrap_or_else(|e| {
+        eprintln!("deploy: resolve failed: {}", e);
+        std::process::exit(1);
+    });
+    let mut tc = TypeCache::new();
+    if let Err(e) = typecheck_module(&r, &mut tc) {
+        eprintln!("deploy: program does not typecheck: {:?}", e);
+        std::process::exit(1);
+    }
+
+    let by_name: HashMap<&str, Hash> =
+        r.defs.iter().map(|d| (d.name.as_str(), d.hash)).collect();
+    let lookup = |flag: &str, def_name: &str| -> Hash {
+        *by_name.get(def_name).unwrap_or_else(|| {
+            eprintln!("deploy: {} references `{}`, which is not a def in {}", flag, def_name, file);
+            std::process::exit(1);
+        })
+    };
+
+    let rebinds: Vec<(String, Hash)> = binds
+        .iter()
+        .map(|(b, def)| (b.clone(), lookup("--bind", def)))
+        .collect();
+    let migrations: HashMap<String, Hash> = migrates
+        .iter()
+        .map(|(state, def)| (state.clone(), lookup("--migrate", def)))
+        .collect();
+
+    // Ship the transitive closure of: rebind targets, migrations, and
+    // every `state` in the program (states are roots even when no
+    // shipped fn references them yet).
+    let mut state_names: HashMap<String, Hash> = HashMap::new();
+    let mut roots: Vec<Hash> = rebinds.iter().map(|(_, h)| *h).collect();
+    roots.extend(migrations.values().copied());
+    for d in &r.defs {
+        if matches!(d.def, Def::State { .. }) {
+            state_names.insert(d.name.clone(), d.hash);
+            roots.push(d.hash);
+        }
+    }
+
+    let kb = KnowledgeBase::build(&r);
+    let order = kb.collect_transitive_deps(&roots).unwrap_or_else(|e| {
+        eprintln!("deploy: dependency collection failed: {}", e);
+        std::process::exit(1);
+    });
+    let mut items: Vec<(ItemKind, Hash, Vec<u8>)> = order
+        .iter()
+        .map(|h| {
+            let (k, b) = kb.lookup(h).expect("dep in kb");
+            (*k, *h, b.clone())
+        })
+        .collect();
+    for (name, sig) in kb.extern_requirements(&order) {
+        items.push((
+            ItemKind::Extern,
+            Hash::of_bytes(name.as_bytes()),
+            encode_extern(&name, &sig.params, &sig.ret, sig.library.as_deref(), sig.variadic),
+        ));
+    }
+
+    let req = DeployRequest {
+        items,
+        state_names,
+        migrations,
+        rebinds,
+        allow_state_drop: allow_drop,
+    };
+
+    let mut stream = connect_node(addr, token);
+    match deploy_on_channel(&mut stream, &req) {
+        Ok(report) => {
+            println!("deployed to {}", addr);
+            print_deploy_report(&report);
+        }
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("deploy refused (node unchanged): {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("deploy failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_rollback(addr: &str, binding: &str, token: Option<&str>) {
+    let mut stream = connect_node(addr, token);
+    match rollback_on_channel(&mut stream, binding) {
+        Ok(report) => {
+            println!("rolled back on {}", addr);
+            print_deploy_report(&report);
+        }
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("rollback refused: {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("rollback failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_invoke(addr: &str, binding: &str, args: &[i64], token: Option<&str>) {
+    let mut stream = connect_node(addr, token);
+    match invoke_on_channel(&mut stream, binding, args) {
+        Ok(v) => println!("{}", v),
+        Err(ai_lang::net::NetError::DeployRefused(msg)) => {
+            eprintln!("invoke refused: {}", msg);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("invoke failed: {}", e);
+            std::process::exit(1);
         }
     }
 }
@@ -1577,6 +2746,7 @@ fn at_binding_from_codebase(cb: &Codebase) -> Option<AtBinding> {
         crashed_variant_index: find(&failure_variants, "Crashed")?,
         code_missing_variant_index: find(&failure_variants, "CodeMissing")?,
         cancelled_variant_index: find(&failure_variants, "Cancelled")?,
+        timed_out_variant_index: find(&failure_variants, "TimedOut"),
         decode_error_hash,
         decode_type_mismatch_index: decode_tm_idx,
         decode_malformed_index: decode_mf_idx,

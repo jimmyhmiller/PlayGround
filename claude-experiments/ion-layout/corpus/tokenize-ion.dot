@@ -1,0 +1,438 @@
+digraph IonMega {
+  graph [rankdir=TB, label="tokenize / SimplifyCfg-final.after (150 blocks)", labelloc=t]
+  node [shape=box, style=rounded, fontname="Menlo", fontsize=13, margin="0.18,0.12"]
+  edge [fontname="Menlo", fontsize=10]
+
+  B0 [label="Block 0\l\lv0 = _2 = Vec::<i32>::new()\l", ion_loop_depth=0]
+  B1 [label="Block 1\l\lv1 = _4 = copy _1\lv2 = _3 = core::str::<impl str>::as_bytes(move _4)\l", ion_loop_depth=0]
+  B2 [label="Block 2\l\lv3 = _5 = const 0_usize\lv4 = goto\l", ion_loop_depth=0]
+  B3 [label="Block 3\l\lv5 = _7 = copy _5\lv6 = _9 = copy _3\lv7 = _8 = PtrMetadata(move _9)\lv8 = _6 = Lt(move _7, move _8)\lv9 = switchInt(move _6)\l", ion_loop_depth=0]
+  B4 [label="Block 4\l\lv10 = _11 = copy _5\lv11 = _12 = PtrMetadata(copy _3)\lv12 = _13 = Lt(copy _11, copy _12)\lv13 = assert(move _13, \"index out of bounds: the length is {} but the index is {}\", move _12, copy _11)\l", ion_loop_depth=0]
+  B5 [label="Block 5\l\lv14 = _10 = copy (*_3)[_11]\lv15 = _18 = Le(const 48_u8, copy _10)\lv16 = switchInt(move _18)\l", ion_loop_depth=0]
+  B6 [label="Block 6\l\lv17 = _204 = &_10\lv18 = _203 = (move _204,)\lv19 = _213 = copy (_203.0: &u8)\lv20 = _207 = copy _213\lv21 = _206 = core::fmt::rt::Argument::<'_>::new_display::<u8>(move _207)\l", ion_loop_depth=0]
+  B7 [label="Block 7\l\lv22 = _20 = copy _5\lv23 = goto\l", ion_loop_depth=0]
+  B8 [label="Block 8\l\lv24 = switchInt(copy _10)\l", ion_loop_depth=0]
+  B9 [label="Block 9\l\lv25 = _16 = Le(const 97_u8, copy _10)\lv26 = switchInt(move _16)\l", ion_loop_depth=0]
+  B10 [label="Block 10\l\lv27 = _14 = Le(const 65_u8, copy _10)\lv28 = switchInt(move _14)\l", ion_loop_depth=0]
+  B11 [label="Block 11\l\lv29 = _15 = Le(copy _10, const 90_u8)\lv30 = switchInt(move _15)\l", ion_loop_depth=0]
+  B12 [label="Block 12\l\lv31 = _17 = Le(copy _10, const 122_u8)\lv32 = switchInt(move _17)\l", ion_loop_depth=0]
+  B13 [label="Block 13\l\lv33 = _19 = Le(copy _10, const 57_u8)\lv34 = switchInt(move _19)\l", ion_loop_depth=0]
+  B14 [label="Block 14\l\lv35 = _112 = copy _5\lv36 = goto\l", ion_loop_depth=0]
+  B15 [label="Block 15\l\lv37 = _102 = &mut _2\lv38 = _101 = Vec::<i32>::push(move _102, const -1001_i32)\l", ion_loop_depth=0]
+  B16 [label="Block 16\l\lv39 = _91 = &mut _2\lv40 = _90 = Vec::<i32>::push(move _91, const -1000_i32)\l", ion_loop_depth=0]
+  B17 [label="Block 17\l\lv41 = _85 = copy _5\lv42 = _84 = core::num::<impl usize>::checked_add(move _85, const 1_usize)\l", ion_loop_depth=0]
+  B18 [label="Block 18\l\lv43 = _67 = &mut _2\lv44 = _70 = copy _10\lv45 = _69 = move _70 as i32 (IntToInt)\lv46 = _71 = Eq(copy _69, const i32::MIN)\lv47 = assert(!move _71, \"attempt to negate `{}`, which would overflow\", copy _69)\l", ion_loop_depth=0]
+  B19 [label="Block 19\l\lv48 = _22 = copy _5\lv49 = _24 = copy _3\lv50 = _23 = PtrMetadata(move _24)\lv51 = _21 = Lt(move _22, move _23)\lv52 = switchInt(move _21)\l", ion_loop_depth=0]
+  B20 [label="Block 20\l\lv53 = _27 = copy _5\lv54 = _28 = PtrMetadata(copy _3)\lv55 = _29 = Lt(copy _27, copy _28)\lv56 = assert(move _29, \"index out of bounds: the length is {} but the index is {}\", move _28, copy _27)\l", ion_loop_depth=0]
+  B21 [label="Block 21\l\lv57 = _26 = &(*_3)[_27]\lv58 = _25 = core::num::<impl u8>::is_ascii_digit(move _26)\l", ion_loop_depth=0]
+  B22 [label="Block 22\l\lv59 = switchInt(move _25)\l", ion_loop_depth=0]
+  B23 [label="Block 23\l\lv60 = _34 = copy _5\lv61 = _33 = core::num::<impl usize>::checked_add(move _34, const 1_usize)\l", ion_loop_depth=0]
+  B24 [label="Block 24\l\lv62 = _32 = Option::<usize>::ok_or::<&str>(move _33, const \"overflow i\")\l", ion_loop_depth=0]
+  B25 [label="Block 25\l\lv63 = _31 = <Result<usize, &str> as Try>::branch(move _32)\l", ion_loop_depth=0]
+  B26 [label="Block 26\l\lv64 = _35 = discriminant(_31)\lv65 = switchInt(move _35)\l", ion_loop_depth=0]
+  B27 [label="Block 27\l\lv66 = unreachable\l", ion_loop_depth=0]
+  B28 [label="Block 28\l\lv67 = _38 = copy ((_31 as Continue).0: usize)\lv68 = _30 = copy _38\lv69 = _5 = move _30\lv70 = goto\l", ion_loop_depth=0]
+  B29 [label="Block 29\l\lv71 = _36 = copy ((_31 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv72 = _37 = copy _36\lv73 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _37)\l", ion_loop_depth=0]
+  B30 [label="Block 30\l\lv74 = _46 = copy _3\lv75 = _48 = copy _20\lv76 = _49 = copy _5\lv77 = _47 = std::ops::Range::<usize> { start: move _48, end: move _49 }\lv78 = _45 = <[u8] as Index<std::ops::Range<usize>>>::index(move _46, move _47)\l", ion_loop_depth=0]
+  B31 [label="Block 31\l\lv79 = _44 = copy _45\lv80 = _43 = copy _44\lv81 = _42 = from_utf8(move _43)\l", ion_loop_depth=0]
+  B32 [label="Block 32\l\lv82 = _41 = Result::<&str, Utf8Error>::map_err::<String, {closure@/tmp/big_mir.rs:13:75: 13:78}>(move _42, const ZeroSized: {closure@/tmp/big_mir.rs:13:75: 13:78})\l", ion_loop_depth=0]
+  B33 [label="Block 33\l\lv83 = _40 = <Result<&str, String> as Try>::branch(move _41)\l", ion_loop_depth=0]
+  B34 [label="Block 34\l\lv84 = _50 = discriminant(_40)\lv85 = switchInt(move _50)\l", ion_loop_depth=0]
+  B35 [label="Block 35\l\lv86 = _53 = copy ((_40 as Continue).0: &str)\lv87 = _39 = copy _53\lv88 = _58 = copy _39\lv89 = _57 = core::str::<impl str>::parse::<i32>(move _58)\l", ion_loop_depth=0]
+  B36 [label="Block 36\l\lv90 = _51 = move ((_40 as Break).0: std::result::Result<std::convert::Infallible, std::string::String>)\lv91 = _52 = move _51\lv92 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, String>>>::from_residual(move _52)\l", ion_loop_depth=0]
+  B37 [label="Block 37\l\lv93 = _56 = Result::<i32, ParseIntError>::map_err::<String, {closure@/tmp/big_mir.rs:14:52: 14:55}>(move _57, const ZeroSized: {closure@/tmp/big_mir.rs:14:52: 14:55})\l", ion_loop_depth=0]
+  B38 [label="Block 38\l\lv94 = _55 = <Result<i32, String> as Try>::branch(move _56)\l", ion_loop_depth=0]
+  B39 [label="Block 39\l\lv95 = _59 = discriminant(_55)\lv96 = switchInt(move _59)\l", ion_loop_depth=0]
+  B40 [label="Block 40\l\lv97 = _62 = copy ((_55 as Continue).0: i32)\lv98 = _54 = copy _62\lv99 = _64 = &mut _2\lv100 = _65 = copy _54\lv101 = _63 = Vec::<i32>::push(move _64, move _65)\l", ion_loop_depth=0]
+  B41 [label="Block 41\l\lv102 = _60 = move ((_55 as Break).0: std::result::Result<std::convert::Infallible, std::string::String>)\lv103 = _61 = move _60\lv104 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, String>>>::from_residual(move _61)\l", ion_loop_depth=0]
+  B42 [label="Block 42\l\lv105 = _68 = Neg(move _69)\lv106 = _66 = Vec::<i32>::push(move _67, move _68)\l", ion_loop_depth=0]
+  B43 [label="Block 43\l\lv107 = _76 = copy _5\lv108 = _75 = core::num::<impl usize>::checked_add(move _76, const 1_usize)\l", ion_loop_depth=0]
+  B44 [label="Block 44\l\lv109 = _74 = Option::<usize>::ok_or::<&str>(move _75, const \"overflow i\")\l", ion_loop_depth=0]
+  B45 [label="Block 45\l\lv110 = _73 = <Result<usize, &str> as Try>::branch(move _74)\l", ion_loop_depth=0]
+  B46 [label="Block 46\l\lv111 = _77 = discriminant(_73)\lv112 = switchInt(move _77)\l", ion_loop_depth=0]
+  B47 [label="Block 47\l\lv113 = _80 = copy ((_73 as Continue).0: usize)\lv114 = _72 = copy _80\lv115 = _5 = move _72\lv116 = goto\l", ion_loop_depth=0]
+  B48 [label="Block 48\l\lv117 = _78 = copy ((_73 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv118 = _79 = copy _78\lv119 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _79)\l", ion_loop_depth=0]
+  B49 [label="Block 49\l\lv120 = _83 = Option::<usize>::ok_or::<&str>(move _84, const \"overflow i\")\l", ion_loop_depth=0]
+  B50 [label="Block 50\l\lv121 = _82 = <Result<usize, &str> as Try>::branch(move _83)\l", ion_loop_depth=0]
+  B51 [label="Block 51\l\lv122 = _86 = discriminant(_82)\lv123 = switchInt(move _86)\l", ion_loop_depth=0]
+  B52 [label="Block 52\l\lv124 = _89 = copy ((_82 as Continue).0: usize)\lv125 = _81 = copy _89\lv126 = _5 = move _81\lv127 = goto\l", ion_loop_depth=0]
+  B53 [label="Block 53\l\lv128 = _87 = copy ((_82 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv129 = _88 = copy _87\lv130 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _88)\l", ion_loop_depth=0]
+  B54 [label="Block 54\l\lv131 = _96 = copy _5\lv132 = _95 = core::num::<impl usize>::checked_add(move _96, const 1_usize)\l", ion_loop_depth=0]
+  B55 [label="Block 55\l\lv133 = _94 = Option::<usize>::ok_or::<&str>(move _95, const \"overflow i\")\l", ion_loop_depth=0]
+  B56 [label="Block 56\l\lv134 = _93 = <Result<usize, &str> as Try>::branch(move _94)\l", ion_loop_depth=0]
+  B57 [label="Block 57\l\lv135 = _97 = discriminant(_93)\lv136 = switchInt(move _97)\l", ion_loop_depth=0]
+  B58 [label="Block 58\l\lv137 = _100 = copy ((_93 as Continue).0: usize)\lv138 = _92 = copy _100\lv139 = _5 = move _92\lv140 = goto\l", ion_loop_depth=0]
+  B59 [label="Block 59\l\lv141 = _98 = copy ((_93 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv142 = _99 = copy _98\lv143 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _99)\l", ion_loop_depth=0]
+  B60 [label="Block 60\l\lv144 = _107 = copy _5\lv145 = _106 = core::num::<impl usize>::checked_add(move _107, const 1_usize)\l", ion_loop_depth=0]
+  B61 [label="Block 61\l\lv146 = _105 = Option::<usize>::ok_or::<&str>(move _106, const \"overflow i\")\l", ion_loop_depth=0]
+  B62 [label="Block 62\l\lv147 = _104 = <Result<usize, &str> as Try>::branch(move _105)\l", ion_loop_depth=0]
+  B63 [label="Block 63\l\lv148 = _108 = discriminant(_104)\lv149 = switchInt(move _108)\l", ion_loop_depth=0]
+  B64 [label="Block 64\l\lv150 = _111 = copy ((_104 as Continue).0: usize)\lv151 = _103 = copy _111\lv152 = _5 = move _103\lv153 = goto\l", ion_loop_depth=0]
+  B65 [label="Block 65\l\lv154 = _109 = copy ((_104 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv155 = _110 = copy _109\lv156 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _110)\l", ion_loop_depth=0]
+  B66 [label="Block 66\l\lv157 = _114 = copy _5\lv158 = _116 = copy _3\lv159 = _115 = PtrMetadata(move _116)\lv160 = _113 = Lt(move _114, move _115)\lv161 = switchInt(move _113)\l", ion_loop_depth=0]
+  B67 [label="Block 67\l\lv162 = _118 = copy _5\lv163 = _119 = PtrMetadata(copy _3)\lv164 = _120 = Lt(copy _118, copy _119)\lv165 = assert(move _120, \"index out of bounds: the length is {} but the index is {}\", move _119, copy _118)\l", ion_loop_depth=0]
+  B68 [label="Block 68\l\lv166 = _117 = copy (*_3)[_118]\lv167 = _122 = &_117\lv168 = _121 = core::num::<impl u8>::is_ascii_alphanumeric(move _122)\l", ion_loop_depth=0]
+  B69 [label="Block 69\l\lv169 = switchInt(move _121)\l", ion_loop_depth=0]
+  B70 [label="Block 70\l\lv170 = _124 = copy _117\lv171 = _123 = Eq(move _124, const 95_u8)\lv172 = switchInt(move _123)\l", ion_loop_depth=0]
+  B71 [label="Block 71\l\lv173 = _129 = copy _5\lv174 = _128 = core::num::<impl usize>::checked_add(move _129, const 1_usize)\l", ion_loop_depth=0]
+  B72 [label="Block 72\l\lv175 = _127 = Option::<usize>::ok_or::<&str>(move _128, const \"overflow i\")\l", ion_loop_depth=0]
+  B73 [label="Block 73\l\lv176 = _126 = <Result<usize, &str> as Try>::branch(move _127)\l", ion_loop_depth=0]
+  B74 [label="Block 74\l\lv177 = _130 = discriminant(_126)\lv178 = switchInt(move _130)\l", ion_loop_depth=0]
+  B75 [label="Block 75\l\lv179 = _133 = copy ((_126 as Continue).0: usize)\lv180 = _125 = copy _133\lv181 = _5 = move _125\lv182 = goto\l", ion_loop_depth=0]
+  B76 [label="Block 76\l\lv183 = _131 = copy ((_126 as Break).0: std::result::Result<std::convert::Infallible, &str>)\lv184 = _132 = copy _131\lv185 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, &str>>>::from_residual(move _132)\l", ion_loop_depth=0]
+  B77 [label="Block 77\l\lv186 = _141 = copy _3\lv187 = _143 = copy _112\lv188 = _144 = copy _5\lv189 = _142 = std::ops::Range::<usize> { start: move _143, end: move _144 }\lv190 = _140 = <[u8] as Index<std::ops::Range<usize>>>::index(move _141, move _142)\l", ion_loop_depth=0]
+  B78 [label="Block 78\l\lv191 = _139 = copy _140\lv192 = _138 = copy _139\lv193 = _137 = from_utf8(move _138)\l", ion_loop_depth=0]
+  B79 [label="Block 79\l\lv194 = _136 = Result::<&str, Utf8Error>::map_err::<String, {closure@/tmp/big_mir.rs:41:75: 41:78}>(move _137, const ZeroSized: {closure@/tmp/big_mir.rs:41:75: 41:78})\l", ion_loop_depth=0]
+  B80 [label="Block 80\l\lv195 = _135 = <Result<&str, String> as Try>::branch(move _136)\l", ion_loop_depth=0]
+  B81 [label="Block 81\l\lv196 = _145 = discriminant(_135)\lv197 = switchInt(move _145)\l", ion_loop_depth=0]
+  B82 [label="Block 82\l\lv198 = _148 = copy ((_135 as Continue).0: &str)\lv199 = _134 = copy _148\lv200 = _180 = copy _134\lv201 = _181 = <str as PartialEq>::eq(copy _180, const \"if\")\l", ion_loop_depth=0]
+  B83 [label="Block 83\l\lv202 = _146 = move ((_135 as Break).0: std::result::Result<std::convert::Infallible, std::string::String>)\lv203 = _147 = move _146\lv204 = _0 = <Result<Vec<i32>, String> as FromResidual<Result<Infallible, String>>>::from_residual(move _147)\l", ion_loop_depth=0]
+  B84 [label="Block 84\l\lv205 = _182 = const 0_i32\lv206 = _185 = copy _134\lv207 = _184 = core::str::<impl str>::as_bytes(move _185)\l", ion_loop_depth=0]
+  B85 [label="Block 85\l\lv208 = _149 = const -2000_i32\lv209 = goto\l", ion_loop_depth=0]
+  B86 [label="Block 86\l\lv210 = _178 = copy _134\lv211 = _179 = <str as PartialEq>::eq(copy _178, const \"else\")\l", ion_loop_depth=0]
+  B87 [label="Block 87\l\lv212 = _149 = const -2001_i32\lv213 = goto\l", ion_loop_depth=0]
+  B88 [label="Block 88\l\lv214 = _176 = copy _134\lv215 = _177 = <str as PartialEq>::eq(copy _176, const \"while\")\l", ion_loop_depth=0]
+  B89 [label="Block 89\l\lv216 = _149 = const -2002_i32\lv217 = goto\l", ion_loop_depth=0]
+  B90 [label="Block 90\l\lv218 = _174 = copy _134\lv219 = _175 = <str as PartialEq>::eq(copy _174, const \"for\")\l", ion_loop_depth=0]
+  B91 [label="Block 91\l\lv220 = _149 = const -2003_i32\lv221 = goto\l", ion_loop_depth=0]
+  B92 [label="Block 92\l\lv222 = _172 = copy _134\lv223 = _173 = <str as PartialEq>::eq(copy _172, const \"let\")\l", ion_loop_depth=0]
+  B93 [label="Block 93\l\lv224 = _149 = const -2004_i32\lv225 = goto\l", ion_loop_depth=0]
+  B94 [label="Block 94\l\lv226 = _170 = copy _134\lv227 = _171 = <str as PartialEq>::eq(copy _170, const \"mut\")\l", ion_loop_depth=0]
+  B95 [label="Block 95\l\lv228 = _149 = const -2005_i32\lv229 = goto\l", ion_loop_depth=0]
+  B96 [label="Block 96\l\lv230 = _168 = copy _134\lv231 = _169 = <str as PartialEq>::eq(copy _168, const \"fn\")\l", ion_loop_depth=0]
+  B97 [label="Block 97\l\lv232 = _149 = const -2006_i32\lv233 = goto\l", ion_loop_depth=0]
+  B98 [label="Block 98\l\lv234 = _166 = copy _134\lv235 = _167 = <str as PartialEq>::eq(copy _166, const \"return\")\l", ion_loop_depth=0]
+  B99 [label="Block 99\l\lv236 = _149 = const -2007_i32\lv237 = goto\l", ion_loop_depth=0]
+  B100 [label="Block 100\l\lv238 = _164 = copy _134\lv239 = _165 = <str as PartialEq>::eq(copy _164, const \"true\")\l", ion_loop_depth=0]
+  B101 [label="Block 101\l\lv240 = _149 = const -2008_i32\lv241 = goto\l", ion_loop_depth=0]
+  B102 [label="Block 102\l\lv242 = _162 = copy _134\lv243 = _163 = <str as PartialEq>::eq(copy _162, const \"false\")\l", ion_loop_depth=0]
+  B103 [label="Block 103\l\lv244 = _149 = const -2009_i32\lv245 = goto\l", ion_loop_depth=0]
+  B104 [label="Block 104\l\lv246 = _160 = copy _134\lv247 = _161 = <str as PartialEq>::eq(copy _160, const \"break\")\l", ion_loop_depth=0]
+  B105 [label="Block 105\l\lv248 = _149 = const -2010_i32\lv249 = goto\l", ion_loop_depth=0]
+  B106 [label="Block 106\l\lv250 = _158 = copy _134\lv251 = _159 = <str as PartialEq>::eq(copy _158, const \"continue\")\l", ion_loop_depth=0]
+  B107 [label="Block 107\l\lv252 = _149 = const -2011_i32\lv253 = goto\l", ion_loop_depth=0]
+  B108 [label="Block 108\l\lv254 = _156 = copy _134\lv255 = _157 = <str as PartialEq>::eq(copy _156, const \"match\")\l", ion_loop_depth=0]
+  B109 [label="Block 109\l\lv256 = _149 = const -2012_i32\lv257 = goto\l", ion_loop_depth=0]
+  B110 [label="Block 110\l\lv258 = _154 = copy _134\lv259 = _155 = <str as PartialEq>::eq(copy _154, const \"loop\")\l", ion_loop_depth=0]
+  B111 [label="Block 111\l\lv260 = _149 = const -2013_i32\lv261 = goto\l", ion_loop_depth=0]
+  B112 [label="Block 112\l\lv262 = _152 = copy _134\lv263 = _153 = <str as PartialEq>::eq(copy _152, const \"const\")\l", ion_loop_depth=0]
+  B113 [label="Block 113\l\lv264 = _149 = const -2014_i32\lv265 = goto\l", ion_loop_depth=0]
+  B114 [label="Block 114\l\lv266 = _150 = copy _134\lv267 = _151 = <str as PartialEq>::eq(copy _150, const \"static\")\l", ion_loop_depth=0]
+  B115 [label="Block 115\l\lv268 = _149 = const -2015_i32\lv269 = goto\l", ion_loop_depth=0]
+  B116 [label="Block 116\l\lv270 = switchInt(move _151)\l", ion_loop_depth=0]
+  B117 [label="Block 117\l\lv271 = switchInt(move _153)\l", ion_loop_depth=0]
+  B118 [label="Block 118\l\lv272 = switchInt(move _155)\l", ion_loop_depth=0]
+  B119 [label="Block 119\l\lv273 = switchInt(move _157)\l", ion_loop_depth=0]
+  B120 [label="Block 120\l\lv274 = switchInt(move _159)\l", ion_loop_depth=0]
+  B121 [label="Block 121\l\lv275 = switchInt(move _161)\l", ion_loop_depth=0]
+  B122 [label="Block 122\l\lv276 = switchInt(move _163)\l", ion_loop_depth=0]
+  B123 [label="Block 123\l\lv277 = switchInt(move _165)\l", ion_loop_depth=0]
+  B124 [label="Block 124\l\lv278 = switchInt(move _167)\l", ion_loop_depth=0]
+  B125 [label="Block 125\l\lv279 = switchInt(move _169)\l", ion_loop_depth=0]
+  B126 [label="Block 126\l\lv280 = switchInt(move _171)\l", ion_loop_depth=0]
+  B127 [label="Block 127\l\lv281 = switchInt(move _173)\l", ion_loop_depth=0]
+  B128 [label="Block 128\l\lv282 = switchInt(move _175)\l", ion_loop_depth=0]
+  B129 [label="Block 129\l\lv283 = switchInt(move _177)\l", ion_loop_depth=0]
+  B130 [label="Block 130\l\lv284 = switchInt(move _179)\l", ion_loop_depth=0]
+  B131 [label="Block 131\l\lv285 = switchInt(move _181)\l", ion_loop_depth=0]
+  B132 [label="Block 132\l\lv286 = _183 = <&[u8] as IntoIterator>::into_iter(move _184)\l", ion_loop_depth=0]
+  B133 [label="Block 133\l\lv287 = _186 = move _183\lv288 = goto\l", ion_loop_depth=0]
+  B134 [label="Block 134\l\lv289 = _189 = &mut _186\lv290 = _188 = copy _189\lv291 = _187 = <std::slice::Iter<'_, u8> as Iterator>::next(move _188)\l", ion_loop_depth=0]
+  B135 [label="Block 135\l\lv292 = _190 = discriminant(_187)\lv293 = switchInt(move _190)\l", ion_loop_depth=0]
+  B136 [label="Block 136\l\lv294 = _214 = copy ((_187 as Some).0: &u8)\lv295 = _191 = copy (*_214)\lv296 = _194 = copy _182\lv297 = _193 = core::num::<impl i32>::wrapping_mul(move _194, const 31_i32)\l", ion_loop_depth=0]
+  B137 [label="Block 137\l\lv298 = _149 = copy _182\lv299 = goto\l", ion_loop_depth=0]
+  B138 [label="Block 138\l\lv300 = _196 = copy _191\lv301 = _195 = move _196 as i32 (IntToInt)\lv302 = _192 = core::num::<impl i32>::wrapping_add(move _193, move _195)\l", ion_loop_depth=0]
+  B139 [label="Block 139\l\lv303 = _182 = move _192\lv304 = goto\l", ion_loop_depth=0]
+  B140 [label="Block 140\l\lv305 = _198 = &mut _2\lv306 = _199 = copy _149\lv307 = _197 = Vec::<i32>::push(move _198, move _199)\l", ion_loop_depth=0]
+  B141 [label="Block 141\l\lv308 = _205 = [move _206]\lv309 = _208 = const b\"\\x11unexpected byte: \\xc0\\x00\"\lv310 = _211 = &_205\lv311 = _210 = copy _211\lv312 = _202 = Arguments::<'_>::new::<20, 1>(move _208, move _210)\l", ion_loop_depth=0]
+  B142 [label="Block 142\l\lv313 = _201 = format(move _202)\l", ion_loop_depth=0]
+  B143 [label="Block 143\l\lv314 = _200 = must_use::<String>(move _201)\l", ion_loop_depth=0]
+  B144 [label="Block 144\l\lv315 = _0 = Result::<Vec<i32>, String>::Err(move _200)\lv316 = goto\l", ion_loop_depth=0]
+  B145 [label="Block 145\l\lv317 = _212 = move _2\lv318 = _0 = Result::<Vec<i32>, String>::Ok(move _212)\lv319 = goto\l", ion_loop_depth=0]
+  B146 [label="Block 146\l\lv320 = drop(_2)\l", ion_loop_depth=0]
+  B147 [label="Block 147\l\lv321 = return\l", ion_loop_depth=0]
+  B148 [label="Block 148\l\lv322 = 148 (cleanup)\lv323 = drop(_2)\l", ion_loop_depth=0]
+  B149 [label="Block 149\l\lv324 = 149 (cleanup)\lv325 = resume\l", ion_loop_depth=0]
+
+  B0 -> B1
+  B1 -> B2
+  B1 -> B148
+  B2 -> B3
+  B3 -> B145
+  B3 -> B4
+  B4 -> B5
+  B4 -> B148
+  B5 -> B8
+  B5 -> B13
+  B6 -> B141
+  B6 -> B148
+  B7 -> B19
+  B8 -> B18
+  B8 -> B18
+  B8 -> B18
+  B8 -> B18
+  B8 -> B17
+  B8 -> B17
+  B8 -> B17
+  B8 -> B17
+  B8 -> B16
+  B8 -> B15
+  B8 -> B14
+  B8 -> B9
+  B9 -> B10
+  B9 -> B12
+  B10 -> B6
+  B10 -> B11
+  B11 -> B6
+  B11 -> B14
+  B12 -> B10
+  B12 -> B14
+  B13 -> B8
+  B13 -> B7
+  B14 -> B66
+  B15 -> B60
+  B15 -> B148
+  B16 -> B54
+  B16 -> B148
+  B17 -> B49
+  B17 -> B148
+  B18 -> B42
+  B18 -> B148
+  B19 -> B30
+  B19 -> B20
+  B20 -> B21
+  B20 -> B148
+  B21 -> B22
+  B21 -> B148
+  B22 -> B30
+  B22 -> B23
+  B23 -> B24
+  B23 -> B148
+  B24 -> B25
+  B24 -> B148
+  B25 -> B26
+  B25 -> B148
+  B26 -> B28
+  B26 -> B29
+  B26 -> B27
+  B28 -> B19
+  B29 -> B146
+  B29 -> B148
+  B30 -> B31
+  B30 -> B148
+  B31 -> B32
+  B31 -> B148
+  B32 -> B33
+  B32 -> B148
+  B33 -> B34
+  B33 -> B148
+  B34 -> B35
+  B34 -> B36
+  B34 -> B27
+  B35 -> B37
+  B35 -> B148
+  B36 -> B146
+  B36 -> B148
+  B37 -> B38
+  B37 -> B148
+  B38 -> B39
+  B38 -> B148
+  B39 -> B40
+  B39 -> B41
+  B39 -> B27
+  B40 -> B3
+  B40 -> B148
+  B41 -> B146
+  B41 -> B148
+  B42 -> B43
+  B42 -> B148
+  B43 -> B44
+  B43 -> B148
+  B44 -> B45
+  B44 -> B148
+  B45 -> B46
+  B45 -> B148
+  B46 -> B47
+  B46 -> B48
+  B46 -> B27
+  B47 -> B3
+  B48 -> B146
+  B48 -> B148
+  B49 -> B50
+  B49 -> B148
+  B50 -> B51
+  B50 -> B148
+  B51 -> B52
+  B51 -> B53
+  B51 -> B27
+  B52 -> B3
+  B53 -> B146
+  B53 -> B148
+  B54 -> B55
+  B54 -> B148
+  B55 -> B56
+  B55 -> B148
+  B56 -> B57
+  B56 -> B148
+  B57 -> B58
+  B57 -> B59
+  B57 -> B27
+  B58 -> B3
+  B59 -> B146
+  B59 -> B148
+  B60 -> B61
+  B60 -> B148
+  B61 -> B62
+  B61 -> B148
+  B62 -> B63
+  B62 -> B148
+  B63 -> B64
+  B63 -> B65
+  B63 -> B27
+  B64 -> B3
+  B65 -> B146
+  B65 -> B148
+  B66 -> B77
+  B66 -> B67
+  B67 -> B68
+  B67 -> B148
+  B68 -> B69
+  B68 -> B148
+  B69 -> B70
+  B69 -> B71
+  B70 -> B77
+  B70 -> B71
+  B71 -> B72
+  B71 -> B148
+  B72 -> B73
+  B72 -> B148
+  B73 -> B74
+  B73 -> B148
+  B74 -> B75
+  B74 -> B76
+  B74 -> B27
+  B75 -> B66
+  B76 -> B146
+  B76 -> B148
+  B77 -> B78
+  B77 -> B148
+  B78 -> B79
+  B78 -> B148
+  B79 -> B80
+  B79 -> B148
+  B80 -> B81
+  B80 -> B148
+  B81 -> B82
+  B81 -> B83
+  B81 -> B27
+  B82 -> B131
+  B82 -> B148
+  B83 -> B146
+  B83 -> B148
+  B84 -> B132
+  B84 -> B148
+  B85 -> B140
+  B86 -> B130
+  B86 -> B148
+  B87 -> B140
+  B88 -> B129
+  B88 -> B148
+  B89 -> B140
+  B90 -> B128
+  B90 -> B148
+  B91 -> B140
+  B92 -> B127
+  B92 -> B148
+  B93 -> B140
+  B94 -> B126
+  B94 -> B148
+  B95 -> B140
+  B96 -> B125
+  B96 -> B148
+  B97 -> B140
+  B98 -> B124
+  B98 -> B148
+  B99 -> B140
+  B100 -> B123
+  B100 -> B148
+  B101 -> B140
+  B102 -> B122
+  B102 -> B148
+  B103 -> B140
+  B104 -> B121
+  B104 -> B148
+  B105 -> B140
+  B106 -> B120
+  B106 -> B148
+  B107 -> B140
+  B108 -> B119
+  B108 -> B148
+  B109 -> B140
+  B110 -> B118
+  B110 -> B148
+  B111 -> B140
+  B112 -> B117
+  B112 -> B148
+  B113 -> B140
+  B114 -> B116
+  B114 -> B148
+  B115 -> B140
+  B116 -> B84
+  B116 -> B115
+  B117 -> B114
+  B117 -> B113
+  B118 -> B112
+  B118 -> B111
+  B119 -> B110
+  B119 -> B109
+  B120 -> B108
+  B120 -> B107
+  B121 -> B106
+  B121 -> B105
+  B122 -> B104
+  B122 -> B103
+  B123 -> B102
+  B123 -> B101
+  B124 -> B100
+  B124 -> B99
+  B125 -> B98
+  B125 -> B97
+  B126 -> B96
+  B126 -> B95
+  B127 -> B94
+  B127 -> B93
+  B128 -> B92
+  B128 -> B91
+  B129 -> B90
+  B129 -> B89
+  B130 -> B88
+  B130 -> B87
+  B131 -> B86
+  B131 -> B85
+  B132 -> B133
+  B132 -> B148
+  B133 -> B134
+  B134 -> B135
+  B134 -> B148
+  B135 -> B137
+  B135 -> B136
+  B135 -> B27
+  B136 -> B138
+  B136 -> B148
+  B137 -> B140
+  B138 -> B139
+  B138 -> B148
+  B139 -> B134
+  B140 -> B3
+  B140 -> B148
+  B141 -> B142
+  B141 -> B148
+  B142 -> B143
+  B142 -> B148
+  B143 -> B144
+  B143 -> B148
+  B144 -> B146
+  B145 -> B147
+  B146 -> B147
+  B148 -> B149
+}

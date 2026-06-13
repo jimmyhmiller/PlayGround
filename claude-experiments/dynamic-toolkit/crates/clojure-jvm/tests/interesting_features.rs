@@ -472,7 +472,7 @@ fn reduce_via_protocols() {
         &mut sess,
         "(clojure.core.protocols/coll-reduce (list 1 2 3 4 5 6 7 8) \
            (fn [acc x] (if (>= acc 6) (reduced acc) (+ acc x))) 0)",
-        10,
+        6,
     );
 }
 
@@ -521,5 +521,44 @@ fn probe_interesting_features() {
         &mut sess,
         "(->> (list 1 2 3 4 5) (filter odd?) (map inc) (reduce1 +))",
         12,
+    );
+}
+#[test]
+#[ignore = "ExceptionInfo ctor + ex-data / ex-message / ex-cause round trip"]
+fn test_ex_info() {
+    let mut sess = load_core_prefix();
+    let s = |sess: &mut Session, src: &str| clojure_jvm::runtime::pr_str_bits(sess.eval_str(src));
+    // ex-info → throw → catch → ex-data (the conformance corpus expr).
+    let result_str = s(
+        &mut sess,
+        "(try (throw (ex-info \"boom\" {:k 1})) (catch Exception e (:k (ex-data e))))",
+    );
+    println!("ex-data round trip: {result_str}");
+    assert_eq!(result_str, "1");
+    // Direct accessors, oracle-verified against real Clojure.
+    assert_eq!(s(&mut sess, "(ex-data (ex-info \"m\" {:a 2}))"), "{:a 2}");
+    assert_eq!(s(&mut sess, "(ex-message (ex-info \"m\" {}))"), "\"m\"");
+    assert_eq!(s(&mut sess, "(ex-data \"not an exception\")"), "nil");
+    assert_eq!(s(&mut sess, "(ex-cause (ex-info \"m\" {}))"), "nil");
+    assert_eq!(
+        s(
+            &mut sess,
+            "(ex-message (ex-cause (ex-info \"outer\" {} (ex-info \"inner\" {:i 1}))))"
+        ),
+        "\"inner\""
+    );
+    // instance? hierarchy: ExceptionInfo is an IExceptionInfo, a
+    // RuntimeException, an Exception and a Throwable; a String is none.
+    assert_eq!(
+        s(
+            &mut sess,
+            "[(instance? clojure.lang.IExceptionInfo (ex-info \"m\" {}))\
+              (instance? ExceptionInfo (ex-info \"m\" {}))\
+              (instance? Throwable (ex-info \"m\" {}))\
+              (instance? RuntimeException (ex-info \"m\" {}))\
+              (instance? Exception (ex-info \"m\" {}))\
+              (instance? Throwable \"s\")]"
+        ),
+        "[true true true true true false]"
     );
 }

@@ -122,8 +122,10 @@ fn heap_type_id(bits: u64) -> Option<usize> {
 
 fn is_seq(bits: u64, ids: HeapTypeIds) -> bool {
     // Java's `RT.seq` returns nil for empty/nil, so `(instance? ISeq nil)`
-    // is false. A non-empty seq today means a Cons heap cell.
-    heap_type_id(bits) == Some(ids.cons)
+    // is false. A non-empty seq means a Cons/Repeat/Iterate/Cycle cell.
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.cons || t == ids.repeat_seq || t == ids.iterate_seq
+            || t == ids.cycle_seq)
 }
 
 fn is_persistent_map(bits: u64, ids: HeapTypeIds) -> bool {
@@ -135,9 +137,59 @@ fn is_persistent_vector(bits: u64, ids: HeapTypeIds) -> bool {
 }
 
 /// `(instance? clojure.lang.IDeref x)` — the deref-able heap cells we
-/// support: `Reduced` (via `@`) and `Delay`.
+/// support: `Reduced`/`Delay`/`Atom`/`Volatile`.
 fn is_ideref(bits: u64, ids: HeapTypeIds) -> bool {
-    matches!(heap_type_id(bits), Some(t) if t == ids.reduced || t == ids.delay)
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.reduced || t == ids.delay || t == ids.atom
+            || t == ids.volatile_cell)
+}
+
+fn is_atom(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.atom)
+}
+
+fn is_volatile(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.volatile_cell)
+}
+
+fn is_multifn(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.multifn_cell)
+}
+
+/// `(instance? clojure.lang.Fn x)` — backs `fn?`: real function values
+/// only (bare fn handles, closures, multi-arity dispatchers), NOT
+/// keywords/colls (those are IFn but not Fn).
+fn is_fn(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(nanbox_tag(bits), Some(TAG_FN))
+        || matches!(heap_type_id(bits),
+            Some(t) if t == ids.closure || t == ids.multi_arity_fn)
+}
+
+/// `(instance? clojure.lang.Counted x)` — O(1)-countable collections.
+/// Our cons cells double as PersistentList (which IS Counted in Java),
+/// so cons is included even though Java's Cons isn't.
+fn is_counted(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.cons || t == ids.vector || t == ids.map
+            || t == ids.set || t == ids.tree_map || t == ids.tree_set)
+}
+
+fn is_associative(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.vector || t == ids.map || t == ids.tree_map)
+}
+
+fn is_sorted(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits), Some(t) if t == ids.tree_map || t == ids.tree_set)
+}
+
+fn is_indexed(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.vector)
+}
+
+fn is_reversible(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.vector || t == ids.tree_map || t == ids.tree_set)
 }
 
 fn is_persistent_set(bits: u64, ids: HeapTypeIds) -> bool {
@@ -150,7 +202,8 @@ fn is_persistent_set(bits: u64, ids: HeapTypeIds) -> bool {
 /// (which recurses via `tree-seq sequential?`) skip vectors.
 fn is_sequential(bits: u64, ids: HeapTypeIds) -> bool {
     matches!(heap_type_id(bits),
-        Some(t) if t == ids.cons || t == ids.lazy_seq || t == ids.vector)
+        Some(t) if t == ids.cons || t == ids.lazy_seq || t == ids.vector
+            || t == ids.repeat_seq || t == ids.iterate_seq || t == ids.cycle_seq)
 }
 
 /// `(instance? clojure.lang.IPersistentCollection x)` — backs `coll?`.
@@ -161,6 +214,9 @@ fn is_persistent_collection(bits: u64, ids: HeapTypeIds) -> bool {
         Some(t) => {
             t == ids.cons
                 || t == ids.lazy_seq
+                || t == ids.repeat_seq
+                || t == ids.iterate_seq
+                || t == ids.cycle_seq
                 || t == ids.vector
                 || t == ids.map
                 || t == ids.set
@@ -183,18 +239,29 @@ fn is_keyword(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.keyword)
 }
 
-fn is_ifn(bits: u64, _ids: HeapTypeIds) -> bool {
-    // TAG_FN values are direct fn handles. Closures are TAG_PTR with a
-    // dedicated type_id, but we don't have that id in HeapTypeIds yet
-    // — when closures grow IObj support add it here.
+fn is_ifn(bits: u64, ids: HeapTypeIds) -> bool {
+    // Everything invokable: fn handles, closures, multi-arity
+    // dispatchers, plus the collection/identity types that implement
+    // IFn in Java (keywords, symbols, maps, sets, vectors).
     matches!(nanbox_tag(bits), Some(TAG_FN))
+        || matches!(heap_type_id(bits),
+            Some(t) if t == ids.closure || t == ids.multi_arity_fn
+                || t == ids.multifn_cell
+                || t == ids.keyword || t == ids.symbol || t == ids.map
+                || t == ids.set || t == ids.tree_map || t == ids.tree_set
+                || t == ids.vector)
 }
 
 fn is_iobj(bits: u64, ids: HeapTypeIds) -> bool {
-    // Anything that can carry metadata. Today only Cons does (per the
-    // heap-meta-slot work in compiler.rs). Extend as Symbol/Vector/Map
-    // etc. grow meta slots.
-    heap_type_id(bits) == Some(ids.cons)
+    // Anything that can carry metadata: Cons has a dedicated meta slot;
+    // everything else IObj-shaped gets the generic `WithMeta` wrapper
+    // from `(.withMeta x m)` (collections, symbols, seqs). Keywords are
+    // NOT IObj in Java.
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.cons || t == ids.with_meta || t == ids.vector
+            || t == ids.map || t == ids.set || t == ids.tree_map
+            || t == ids.tree_set || t == ids.symbol || t == ids.lazy_seq
+            || t == ids.repeat_seq || t == ids.iterate_seq || t == ids.cycle_seq)
 }
 
 fn is_imeta(bits: u64, ids: HeapTypeIds) -> bool {
@@ -254,6 +321,29 @@ fn is_var(bits: u64, ids: HeapTypeIds) -> bool {
 
 fn is_namespace(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.namespace)
+}
+
+/// `(instance? clojure.lang.ExceptionInfo x)` — also the predicate for
+/// `clojure.lang.IExceptionInfo` (ExceptionInfo is the interface's only
+/// implementor, as in upstream Clojure) and for the Throwable /
+/// Exception / RuntimeException superclasses (ExceptionInfo extends
+/// RuntimeException; it is our only Throwable-shaped heap type today —
+/// the legacy map-represented exceptions are plain maps and stay false).
+fn is_exception_info(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.exception_info)
+}
+
+/// `(new clojure.lang.ExceptionInfo msg data)` /
+/// `(new clojure.lang.ExceptionInfo msg data cause)` — backs `ex-info`.
+fn exception_info_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    match args.len() {
+        2 => crate::runtime::clj_exception_info_2(args[0], args[1]),
+        3 => crate::runtime::clj_exception_info_3(args[0], args[1], args[2]),
+        n => panic!(
+            "clojure-jvm: (new clojure.lang.ExceptionInfo …) expects 2 \
+             (msg data) or 3 (msg data cause) args, got {n}"
+        ),
+    }
 }
 
 // ── Registration ───────────────────────────────────────────────────────
@@ -343,10 +433,10 @@ fn register_classes() -> Vec<HostClassInfo> {
     );
     push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
     push(&mut v, "clojure.lang.Sequential", &[], is_sequential, None);
-    push(&mut v, "clojure.lang.Reversible", &[], always_false, None);
-    push(&mut v, "clojure.lang.Counted", &[], always_false, None);
-    push(&mut v, "clojure.lang.Indexed", &[], always_false, None);
-    push(&mut v, "clojure.lang.Associative", &[], always_false, None);
+    push(&mut v, "clojure.lang.Reversible", &[], is_reversible, None);
+    push(&mut v, "clojure.lang.Counted", &[], is_counted, None);
+    push(&mut v, "clojure.lang.Indexed", &[], is_indexed, None);
+    push(&mut v, "clojure.lang.Associative", &[], is_associative, None);
     push(&mut v, "clojure.lang.IPending", &[], always_false, None);
     push(
         &mut v,
@@ -358,9 +448,21 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(&mut v, "clojure.lang.IDeref", &[], is_ideref, None);
     push(&mut v, "clojure.lang.IRef", &[], always_false, None);
     push(&mut v, "clojure.lang.Ref", &[], always_false, None);
-    push(&mut v, "clojure.lang.Atom", &[], always_false, None);
+    push(
+        &mut v,
+        "clojure.lang.Atom",
+        &[],
+        is_atom,
+        Some(crate::runtime::atom_ctor),
+    );
     push(&mut v, "clojure.lang.Agent", &[], always_false, None);
-    push(&mut v, "clojure.lang.Volatile", &[], always_false, None);
+    push(
+        &mut v,
+        "clojure.lang.Volatile",
+        &[],
+        is_volatile,
+        Some(crate::runtime::volatile_ctor),
+    );
     push(&mut v, "clojure.lang.Namespace", &[], is_namespace, None);
     push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
     push(&mut v, "clojure.lang.IReduce", &[], always_false, None);
@@ -373,7 +475,13 @@ fn register_classes() -> Vec<HostClassInfo> {
         always_false,
         None,
     );
-    push(&mut v, "clojure.lang.MultiFn", &[], always_false, None);
+    push(
+        &mut v,
+        "clojure.lang.MultiFn",
+        &[],
+        is_multifn,
+        Some(crate::runtime::multifn_ctor),
+    );
     push(&mut v, "clojure.lang.Named", &[], always_false, None);
     push(
         &mut v,
@@ -475,7 +583,10 @@ fn register_classes() -> Vec<HostClassInfo> {
         &mut v,
         "java.lang.Throwable",
         &["Throwable"],
-        always_false,
+        // ExceptionInfo (extends RuntimeException) is our only
+        // Throwable-shaped heap type; map-represented exceptions from
+        // `build_exception` are plain maps and stay false.
+        is_exception_info,
         None,
     );
     push(&mut v, "java.lang.Class", &["Class"], always_false, None);
@@ -582,16 +693,16 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(
         &mut v,
         "clojure.lang.IExceptionInfo",
-        &[],
-        always_false,
+        &["IExceptionInfo"],
+        is_exception_info,
         None,
     );
     push(
         &mut v,
         "clojure.lang.ExceptionInfo",
-        &[],
-        always_false,
-        None,
+        &["ExceptionInfo"],
+        is_exception_info,
+        Some(exception_info_ctor),
     );
     push(&mut v, "clojure.lang.IHashEq", &[], always_false, None);
     push(
@@ -674,89 +785,89 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(
         &mut v,
         "java.lang.UnsupportedOperationException",
-        &[],
+        &["UnsupportedOperationException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.NullPointerException",
-        &[],
+        &["NullPointerException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.IndexOutOfBoundsException",
-        &[],
+        &["IndexOutOfBoundsException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.ArrayIndexOutOfBoundsException",
-        &[],
+        &["ArrayIndexOutOfBoundsException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.StringIndexOutOfBoundsException",
-        &[],
+        &["StringIndexOutOfBoundsException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.ClassCastException",
-        &[],
+        &["ClassCastException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.ArithmeticException",
-        &[],
+        &["ArithmeticException"],
         always_false,
         None,
     );
-    push(&mut v, "java.lang.AssertionError", &[], always_false, None);
+    push(&mut v, "java.lang.AssertionError", &["AssertionError"], always_false, None);
     push(
         &mut v,
         "java.lang.NumberFormatException",
-        &[],
+        &["NumberFormatException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.SecurityException",
-        &[],
+        &["SecurityException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.InterruptedException",
-        &[],
+        &["InterruptedException"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.OutOfMemoryError",
-        &[],
+        &["OutOfMemoryError"],
         always_false,
         None,
     );
     push(
         &mut v,
         "java.lang.StackOverflowError",
-        &[],
+        &["StackOverflowError"],
         always_false,
         None,
     );
-    push(&mut v, "java.lang.Error", &[], always_false, None);
+    push(&mut v, "java.lang.Error", &["Error"], always_false, None);
     push(
         &mut v,
         "java.util.concurrent.TimeUnit",
@@ -943,14 +1054,16 @@ fn register_classes() -> Vec<HostClassInfo> {
         &mut v,
         "java.lang.RuntimeException",
         &["RuntimeException"],
-        always_false,
+        // ExceptionInfo extends RuntimeException — see the Throwable entry.
+        is_exception_info,
         Some(make_exception_ctor("java.lang.RuntimeException")),
     );
     push(
         &mut v,
         "java.lang.Exception",
         &["Exception"],
-        always_false,
+        // ExceptionInfo extends RuntimeException extends Exception.
+        is_exception_info,
         Some(make_exception_ctor("java.lang.Exception")),
     );
     push(
@@ -967,6 +1080,20 @@ fn register_classes() -> Vec<HostClassInfo> {
         "clojure.lang.IPersistentCollection",
         &[],
         is_persistent_collection,
+        None,
+    );
+    // `fn?` → `(instance? clojure.lang.Fn x)`; `sorted?` →
+    // `(instance? clojure.lang.Sorted x)`. Appended last (ids baked).
+    push(&mut v, "clojure.lang.Fn", &[], is_fn, None);
+    push(&mut v, "clojure.lang.Sorted", &[], is_sorted, None);
+    // Patterns ARE strings here (the reader keeps `#"…"` as the pattern
+    // source), so `re-pattern`'s `(instance? Pattern s)` accepts strings
+    // and returns them unchanged.
+    push(
+        &mut v,
+        "java.util.regex.Pattern",
+        &["Pattern"],
+        is_string,
         None,
     );
 

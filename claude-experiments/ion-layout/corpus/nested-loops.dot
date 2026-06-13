@@ -1,0 +1,12 @@
+digraph NestedLoops {
+  node [shape=box];
+  entry -> outer;
+  outer -> inner;
+  inner -> work;
+  work -> inner;
+  work -> outer_latch;
+  outer_latch -> outer;
+  outer -> done;
+  inner -> brk;
+  brk -> done;
+}

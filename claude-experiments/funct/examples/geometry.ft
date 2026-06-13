@@ -1,0 +1,28 @@
+// a funct module — only exported items are importable
+
+type Shape = Circle { radius: Float } | Square { side: Float }
+
+export fn circle(radius) = Circle { radius }
+export fn square(side) = Square { side }
+
+export fn area(s) = match s {
+    Circle { radius } => pi() * radius * radius,
+    Square { side } => side * side,
+}
+
+// module-private: not importable
+fn pi() = 3.14159
+
+// Tests live right next to the code (run: funct test examples/geometry.ft).
+// They're ordinary functions otherwise — importing this module never runs them.
+
+#[test]
+fn square_area_is_side_squared() {
+    assert_eq(area(square(3.0)), 9.0)
+}
+
+#[test]
+fn circle_area_is_pi_r_squared() {
+    let a = area(circle(2.0))
+    assert(abs(a - 12.56636) < 0.001, "expected ~4pi, got ${a}")
+}

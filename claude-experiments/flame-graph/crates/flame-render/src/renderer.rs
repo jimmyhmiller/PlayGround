@@ -352,6 +352,11 @@ pub struct Renderer {
     pub sequence_lifeline_key: Option<StringId>,
     /// Vertical scroll offset (px) for the sequence diagram body.
     pub sequence_scroll_y_px: f32,
+    /// Time-axis zoom for the sequence diagram. 1.0 fits the whole capture
+    /// into the body height; larger expands the time axis so dense bursts of
+    /// activity spread out and become legible. Anchored on zoom via
+    /// [`Renderer::zoom_sequence`].
+    pub sequence_time_zoom: f32,
     /// Pre-computed left-heavy slice table (one per profile load). Wrapped in
     /// `Arc` so the renderer can take a cheap reference into the GPU rebuild
     /// loop alongside `&mut self` for `self.instances.push(...)`.
@@ -570,6 +575,7 @@ impl Renderer {
             sidebar_content_h_px: 0.0,
             sequence_lifeline_key: None,
             sequence_scroll_y_px: 0.0,
+            sequence_time_zoom: 1.0,
             aggregated_slices: None,
             aggregated_time_range: (0, 0),
             aggregated_track_rows: Vec::new(),
@@ -642,6 +648,7 @@ impl Renderer {
             selected,
             sidebar_scroll_y_px: self.sidebar_scroll_y_px,
             sequence_scroll_y_px: self.sequence_scroll_y_px,
+            sequence_time_zoom: self.sequence_time_zoom,
             call_tree_scroll_y_px: self.call_tree_scroll_y_px,
         }
     }
@@ -653,6 +660,11 @@ impl Renderer {
         self.direction = s.direction;
         self.sidebar_scroll_y_px = s.sidebar_scroll_y_px;
         self.sequence_scroll_y_px = s.sequence_scroll_y_px;
+        self.sequence_time_zoom = if s.sequence_time_zoom > 0.0 {
+            s.sequence_time_zoom
+        } else {
+            1.0
+        };
         self.call_tree_scroll_y_px = s.call_tree_scroll_y_px;
         // Preserve vertical scroll and row height. Do NOT restore the
         // horizontal viewport (start_ns / ns_per_pixel) — in live mode the
@@ -732,6 +744,7 @@ impl Renderer {
         self.sidebar_scroll_y_px = 0.0;
         self.sidebar_content_h_px = 0.0;
         self.sequence_scroll_y_px = 0.0;
+        self.sequence_time_zoom = 1.0;
         // Default the SEQUENCE lifeline key to "service" if present, else
         // first available attr key alphabetically.
         self.sequence_lifeline_key = profile
@@ -1226,6 +1239,11 @@ impl Renderer {
         self.viewport.row_height_px = row_h;
         self.viewport.scroll_y_px = 0.0;
         self.clamp_viewport();
+
+        // Also reset the SEQUENCE time axis so 'a' / Home / Esc give a clean
+        // fit on that tab too.
+        self.sequence_scroll_y_px = 0.0;
+        self.sequence_time_zoom = 1.0;
     }
 
     fn refresh_status_for_idle(&mut self) {
@@ -1263,12 +1281,49 @@ impl Renderer {
         TAB_BAR_HEIGHT_PX + SIDEBAR_TAB_BAR_H
     }
 
+    /// Body geometry (top, height) of the SEQUENCE diagram for the current
+    /// viewport. Shared by the emit pass and the pan/zoom handlers so scroll
+    /// clamping and focal-point math stay consistent.
+    fn sequence_body_geometry(&self) -> (f32, f32) {
+        let top = TAB_BAR_HEIGHT_PX;
+        let bot = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX;
+        let body_top = top + SEQUENCE_HEADER_H;
+        let body_bot = bot - 16.0;
+        (body_top, (body_bot - body_top).max(1.0))
+    }
+
+    /// Max scroll for the SEQUENCE body at the current zoom.
+    fn sequence_max_scroll(&self) -> f32 {
+        let (_, body_h) = self.sequence_body_geometry();
+        (body_h * self.sequence_time_zoom - body_h).max(0.0)
+    }
+
     /// Vertical scroll on the SEQUENCE diagram. `dy > 0` moves content up.
+    /// Clamped to the zoomed content height so you can't scroll into the void.
     pub fn pan_sequence(&mut self, dy: f32) {
-        // Clamping is approximate (no precomputed content height); we just
-        // floor at zero. Over-scrolling past the end is harmless visually
-        // since out-of-band activation boxes are culled.
-        self.sequence_scroll_y_px = (self.sequence_scroll_y_px + dy).max(0.0);
+        let max_scroll = self.sequence_max_scroll();
+        self.sequence_scroll_y_px = (self.sequence_scroll_y_px + dy).clamp(0.0, max_scroll);
+    }
+
+    /// Zoom the SEQUENCE time axis around `focus_y` (screen px). `factor > 1`
+    /// zooms in (spreads the time axis out), `< 1` zooms out. The time under
+    /// `focus_y` is kept stationary so wheel / keyboard zoom feels anchored.
+    pub fn zoom_sequence(&mut self, focus_y: f32, factor: f32) {
+        let (body_top, body_h) = self.sequence_body_geometry();
+        let old_zoom = self.sequence_time_zoom;
+        let new_zoom = (old_zoom * factor).clamp(1.0, 5000.0);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            return;
+        }
+        // Fraction of the whole capture currently sitting under the focus line.
+        let old_content_h = body_h * old_zoom;
+        let focus = (focus_y - body_top).max(0.0);
+        let frac = ((focus + self.sequence_scroll_y_px) / old_content_h).clamp(0.0, 1.0);
+
+        self.sequence_time_zoom = new_zoom;
+        let new_content_h = body_h * new_zoom;
+        let max_scroll = (new_content_h - body_h).max(0.0);
+        self.sequence_scroll_y_px = (frac * new_content_h - focus).clamp(0.0, max_scroll);
     }
 
     pub fn set_sidebar_tab(&mut self, tab: SidebarTab) {
@@ -2069,13 +2124,18 @@ impl Renderer {
         let body_top = top + header_h;
         let body_bot = bot - 16.0;
         let body_h = (body_bot - body_top).max(1.0);
-        let scroll = self.sequence_scroll_y_px;
 
-        // Time scale: fit `duration` into `body_h` minus scroll. Vertical
-        // panning shifts content; horizontal pan / zoom are follow-ups.
+        // Time scale: the whole capture spans `content_h = body_h * zoom`. At
+        // zoom 1 it fits the body exactly; zooming in spreads dense bursts of
+        // activity apart. `scroll` shifts the window down the (taller) content,
+        // re-clamped here in case the viewport was resized since the last pan.
+        let content_h = body_h * self.sequence_time_zoom;
+        let max_scroll = (content_h - body_h).max(0.0);
+        let scroll = self.sequence_scroll_y_px.clamp(0.0, max_scroll);
+        self.sequence_scroll_y_px = scroll;
         let ns_to_y = |ns: u64| -> f32 {
             let dt = ns.saturating_sub(cap_start) as f64;
-            body_top + (dt / duration as f64) as f32 * body_h - scroll
+            body_top + (dt / duration as f64) as f32 * content_h - scroll
         };
 
         let n_lanes = lifelines.len() as f32;
@@ -2153,7 +2213,7 @@ impl Renderer {
                 palette::color_for_blend(cat_name, name)
             };
             let x = lifeline_x(li as usize) - box_w * 0.5;
-            let h = (y1 - y0).max(1.5);
+            let h = (y1 - y0).max(3.0);
             let inst_id = self.instances.len() as u32;
             self.instances.push(SliceInstance {
                 rect_px: [x, y0, box_w, h],
@@ -2832,6 +2892,22 @@ impl Renderer {
                         12.0,
                         top_offset + 4.0,
                         self.window_w_px - 24.0,
+                        Metric::InspectorBody,
+                        dim_color,
+                        Zone::Below,
+                    ));
+                    // Right-aligned controls hint + current time-axis zoom so
+                    // the zoom/pan affordance is discoverable.
+                    let hint = format!(
+                        "scroll/pinch = zoom · drag = pan · {:.1}×",
+                        self.sequence_time_zoom
+                    );
+                    let hint_w = (hint.len() as f32 * 7.0).min(self.window_w_px - 24.0);
+                    labels.push((
+                        hint,
+                        self.window_w_px - 12.0 - hint_w,
+                        top_offset + 4.0,
+                        hint_w,
                         Metric::InspectorBody,
                         dim_color,
                         Zone::Below,
@@ -3978,6 +4054,7 @@ struct LiveState {
     selected: Option<SliceIdentity>,
     sidebar_scroll_y_px: f32,
     sequence_scroll_y_px: f32,
+    sequence_time_zoom: f32,
     call_tree_scroll_y_px: f32,
 }
 

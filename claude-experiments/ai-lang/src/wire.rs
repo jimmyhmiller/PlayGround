@@ -152,6 +152,12 @@ unsafe fn encode_heap(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result
     if shape_hash == crate::runtime::array_shape_hash() {
         return unsafe { encode_array(rt, ptr, out) };
     }
+    if shape_hash == crate::runtime::prim_array_shape_hash() {
+        // Unboxed scalar array: ships as the ordinary boxed Array kind
+        // (each raw slot encoded as a BoxedInt), so the wire format and
+        // every peer stay representation-agnostic.
+        return unsafe { encode_prim_array(ptr, out) };
+    }
     if shape_hash == crate::runtime::string_shape_hash() {
         return unsafe { encode_string(ptr, out) };
     }
@@ -269,6 +275,32 @@ unsafe fn encode_array(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Resul
     Ok(())
 }
 
+/// Encode an unboxed `PrimArray` as the boxed Array kind (= 4): each raw
+/// 8-byte scalar slot is emitted exactly as a BoxedInt heap value (kind 2
+/// struct with the canonical BoxedInt shape hash and one raw-i64 field).
+/// The count word holds the BYTE length `n*8`. The receiver reconstructs
+/// a boxed Array; the accessors keep that correct for any element type.
+unsafe fn encode_prim_array(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let header = <Full as ObjHeader>::SIZE;
+    let byte_len = unsafe { *(ptr.add(header) as *const u64) };
+    let count = byte_len / 8;
+    let n: u32 = count
+        .try_into()
+        .map_err(|_| WireError::Corrupt("array longer than u32"))?;
+    let bi_hash = crate::runtime::boxed_int_shape_hash();
+    out.push(4); // kind = Array
+    out.extend_from_slice(&n.to_be_bytes());
+    for i in 0..count as usize {
+        let v = unsafe { *(ptr.add(header + 8 + i * 8) as *const i64) };
+        out.push(2); // kind = Struct (a BoxedInt)
+        out.extend_from_slice(bi_hash.as_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.push(0); // field kind = Int
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    Ok(())
+}
+
 /// Encode a `String` heap object (kind = 5). Layout: GC header, then an
 /// 8-byte byte count, then the raw bytes.
 unsafe fn encode_string(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
@@ -346,6 +378,17 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The `Thread` to allocate and scratch-root through for the CURRENT OS
+/// thread (`net::serve_thread_ptr`). The decoder runs on server threads
+/// too; reaching for `rt.thread_ptr()` (the HOME `Thread`) from a foreign
+/// thread attributes its allocations to the home `ThreadState` while the
+/// thread's own `SERVE_CTX` state stays a separate "running" mutator —
+/// a GC triggered mid-decode then waits forever on a ThreadState owned
+/// by the very OS thread that is spinning (the GC-stress serve livelock).
+fn decode_thread(rt: &Runtime) -> *mut crate::runtime::Thread {
+    crate::net::serve_thread_ptr(rt)
+}
+
 unsafe fn decode_one(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let kind = r.read_u8()?;
     match kind {
@@ -364,11 +407,12 @@ unsafe fn decode_one(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErro
 /// Mirrors the encoder's layout; rebuilds via the runtime allocator.
 unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let n = r.read_u32()? as i64;
-    let arr = unsafe { ai_array_new(rt.thread_ptr(), n) };
+    let thread = decode_thread(rt);
+    let arr = unsafe { ai_array_new(thread, n) };
     // Root the array across each element decode (which allocates and, under
     // gc-every-alloc, may relocate it) — re-read before each store. The
     // scope auto-resets on every exit path (incl. the `?` below).
-    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let dyna = unsafe { &*(*thread).dyna_thread };
     let scope = dyna.scratch_scope();
     let arr_slot = scope.push(arr);
     for i in 0..n {
@@ -382,7 +426,7 @@ unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireEr
             }
         };
         let arr = scope.get(arr_slot);
-        unsafe { ai_array_set(arr, i, p as *mut u8) };
+        unsafe { ai_array_set(thread, arr, i, p as *mut u8) };
     }
     Ok(WireValue::Heap(scope.get(arr_slot) as *const u8))
 }
@@ -392,7 +436,7 @@ unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireEr
 unsafe fn decode_string(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let n = r.read_u32()? as usize;
     let bytes = r.take(n)?;
-    let s = unsafe { ai_str_new(rt.thread_ptr(), bytes.as_ptr(), n as i64) };
+    let s = unsafe { ai_str_new(decode_thread(rt), bytes.as_ptr(), n as i64) };
     Ok(WireValue::Heap(s as *const u8))
 }
 
@@ -401,7 +445,7 @@ unsafe fn decode_string(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireE
 unsafe fn decode_bytes(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let n = r.read_u32()? as usize;
     let bytes = r.take(n)?;
-    let b = unsafe { ai_bytes_new(rt.thread_ptr(), n as i64) };
+    let b = unsafe { ai_bytes_new(decode_thread(rt), n as i64) };
     if n > 0 {
         let payload = unsafe { b.add(<Full as ObjHeader>::SIZE + 8) };
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), payload, n) };
@@ -441,7 +485,8 @@ unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, Wire
     let header_base = Full::SIZE + ptr_count * 8;
 
     // Allocate a fresh closure object via the runtime allocator.
-    let ptr = unsafe { ai_gc_alloc_closure(rt.thread_ptr(), ti) };
+    let thread = decode_thread(rt);
+    let ptr = unsafe { ai_gc_alloc_closure(thread, ti) };
 
     unsafe {
         let dst_hash = ptr.add(header_base) as *mut u8;
@@ -454,7 +499,7 @@ unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, Wire
     // heap-pointer (the decoder allocates sub-objects); Int slots
     // get a raw i64. Root the closure across each child decode (it
     // allocates and may relocate `ptr`); re-read before each store.
-    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let dyna = unsafe { &*(*thread).dyna_thread };
     let scope = dyna.scratch_scope();
     let ptr_slot = scope.push(ptr);
     for cap in &captures {
@@ -499,7 +544,8 @@ unsafe fn decode_struct(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireE
     let ti = rt
         .type_info_for(&struct_ref)
         .ok_or(WireError::MissingShape(struct_ref))?;
-    let ptr = unsafe { ai_gc_alloc_closure(rt.thread_ptr(), ti) };
+    let thread = decode_thread(rt);
+    let ptr = unsafe { ai_gc_alloc_closure(thread, ti) };
 
     let meta = rt
         .shape_meta
@@ -518,7 +564,7 @@ unsafe fn decode_struct(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireE
 
     // Root the struct across each field decode (which allocates and may
     // relocate it); re-read before each store. Auto-resets on `?`/return.
-    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let dyna = unsafe { &*(*thread).dyna_thread };
     let scope = dyna.scratch_scope();
     let ptr_slot = scope.push(ptr);
     for field in &fields {
@@ -542,7 +588,8 @@ unsafe fn decode_enum(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErr
     let ti = rt
         .type_info_for(&variant_hash)
         .ok_or(WireError::MissingShape(variant_hash))?;
-    let ptr = unsafe { ai_gc_alloc_closure(rt.thread_ptr(), ti) };
+    let thread = decode_thread(rt);
+    let ptr = unsafe { ai_gc_alloc_closure(thread, ti) };
 
     let meta = rt
         .shape_meta
@@ -566,7 +613,7 @@ unsafe fn decode_enum(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErr
 
     // Root the variant across the payload decode (which allocates and may
     // relocate it); re-read before the store and the return.
-    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let dyna = unsafe { &*(*thread).dyna_thread };
     let scope = dyna.scratch_scope();
     let ptr_slot = scope.push(ptr);
     match (has_payload, payload_field) {

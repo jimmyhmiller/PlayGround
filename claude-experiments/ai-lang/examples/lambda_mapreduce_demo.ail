@@ -8,10 +8,16 @@
 //
 //   ai-lang add examples/lambda_mapreduce_demo.ail
 //   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ai-lang run main
+//
+// The language is TOTAL: `env_get` returns `Result<String, IndexError>`
+// and `lambda_run_code_many` returns
+// `Result<List<HttpResponse>, IndexError>`, so `run` threads them with
+// `?` and `main` matches the final Result. The shipped task source is
+// total too: `json_get` there returns `Result<Option<Json>, IndexError>`.
 
-def env_or(name: String, fallback: String) -> String = {
-    let v = env_get(name);
-    if string_is_empty(v) == 1 { fallback } else { v }
+def env_or(name: String, fallback: String) -> Result<String, IndexError> = {
+    let v = env_get(name)?;
+    if string_is_empty(v) == 1 { Result::Ok(fallback) } else { Result::Ok(v) }
 }
 
 // The code we hand the worker: sum the half-open range [lo, hi).
@@ -20,7 +26,7 @@ def task_source() -> String =
       "def task(input: String) -> String = int_to_string(sum_range(field_int(input, \"lo\"), field_int(input, \"hi\"), 0)) ",
       string_concat(
         "def sum_range(lo: Int, hi: Int, acc: Int) -> Int = if lo >= hi { acc } else { sum_range(lo + 1, hi, acc + lo) } ",
-        "def field_int(s: String, k: String) -> Int = match parse_json(s) { Ok(j) => match json_get(j, k) { Some(v) => match json_int(v) { Some(n) => n, None => 0 }, None => 0 }, Err(e) => 0 }"))
+        "def field_int(s: String, k: String) -> Int = match parse_json(s) { Result::Ok(j) => match json_get(j, k) { Result::Ok(o) => match o { Option::Some(v) => match json_int(v) { Option::Some(n) => n, Option::None => 0 }, Option::None => 0 }, Result::Err(e) => 0 }, Result::Err(e) => 0 }"))
 
 def chunk_input(lo: Int, hi: Int) -> String =
     str4("{\"lo\":", int_to_string(lo), ",\"hi\":", string_concat(int_to_string(hi), "}"))
@@ -45,17 +51,23 @@ def reduce_sum(resps: List<HttpResponse>, acc: Int) -> Int =
         List::Cons(cell) => reduce_sum(cell.tail, acc + partial(cell.head))
     }
 
-def main() -> Int = {
-    let region = env_or("AWS_REGION", "us-east-1");
-    let name = env_or("LAMBDA_FUNCTION", "ai-lang-worker");
-    let ak = env_get("AWS_ACCESS_KEY_ID");
-    let sk = env_get("AWS_SECRET_ACCESS_KEY");
-    let token = env_get("AWS_SESSION_TOKEN");
+def run() -> Result<Int, IndexError> = {
+    let region = env_or("AWS_REGION", "us-east-1")?;
+    let name = env_or("LAMBDA_FUNCTION", "ai-lang-worker")?;
+    let ak = env_get("AWS_ACCESS_KEY_ID")?;
+    let sk = env_get("AWS_SECRET_ACCESS_KEY")?;
+    let token = env_get("AWS_SESSION_TOKEN")?;
     let total = 2000;
     let per = 100;                       // 20 chunks -> 20 parallel invocations
     let inputs = chunks(0, total, per, List::Nil);
     let a = println(str3("shipping code to ", int_to_string(list_length(inputs)), " parallel generic-worker invocations..."));
-    let resps = lambda_run_code_many(region, name, task_source(), inputs, ak, sk, token);
+    let resps = lambda_run_code_many(region, name, task_source(), inputs, ak, sk, token)?;
     let result = reduce_sum(resps, 0);
-    println(str4("sum 0..", int_to_string(total), " = ", int_to_string(result)))
+    Result::Ok(println(str4("sum 0..", int_to_string(total), " = ", int_to_string(result))))
 }
+
+def main() -> Int =
+    match run() {
+        Result::Ok(v) => v,
+        Result::Err(_) => println("environment error"),
+    }

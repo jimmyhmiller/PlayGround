@@ -28,7 +28,7 @@
 use crate::ast::{Def, Expr, MatchArm};
 use crate::hash::Hash;
 use crate::knowledge::walk_def_deps;
-use crate::resolve::{parse_at_builtin_name, AT_BUILTIN_PREFIX};
+use crate::resolve::parse_at_builtin_name;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -96,10 +96,11 @@ pub fn def_dependencies(def: &Def) -> BTreeSet<Hash> {
 fn collect_at_builtin_deps(expr: &Expr, acc: &mut BTreeSet<Hash>) {
     match expr {
         Expr::BuiltinRef(name) => {
-            // Only `#`-bearing builtin names carry embedded hashes. The
-            // `core/net.at#<hex>` form is the only one the resolver mints today;
-            // we gate on the prefix and treat any `#` after it as load-bearing.
-            if name.starts_with(AT_BUILTIN_PREFIX) {
+            // Only `#`-bearing builtin names carry embedded hashes:
+            // `core/net.at#<hex>` and its async twin
+            // `core/net.at_async#<hex>`. We gate on the family prefix and
+            // treat any `#` after it as load-bearing.
+            if crate::resolve::is_at_family_builtin(name) {
                 match parse_at_builtin_name(name) {
                     Some((primary, secondary)) => {
                         acc.insert(primary);

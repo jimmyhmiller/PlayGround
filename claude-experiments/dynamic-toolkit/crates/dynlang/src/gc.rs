@@ -461,6 +461,14 @@ impl DynGcRuntime {
         }
     }
 
+    /// Diagnostic: bytes currently allocated in the active (from) space.
+    /// Immediately after a collection this is the retained live-set size.
+    pub fn debug_heap_used(&self) -> usize {
+        match &self.backend {
+            Backend::Generational(heap) => heap.from_used(),
+        }
+    }
+
     /// Force a collection.
     pub fn collect(&self) {
         match &self.backend {

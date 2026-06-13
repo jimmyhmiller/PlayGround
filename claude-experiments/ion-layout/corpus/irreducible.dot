@@ -1,0 +1,9 @@
+digraph Irreducible {
+  node [shape=box];
+  start -> a;
+  start -> b;
+  a -> b;
+  b -> a;
+  a -> exit;
+  b -> exit;
+}

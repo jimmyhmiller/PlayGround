@@ -1,0 +1,19 @@
+fn steps(n) {
+    let mut x = n
+    let mut c = 0
+    while x > 1 {
+        if x % 2 == 0 { x = x / 2 } else { x = 3 * x + 1 }
+        c = c + 1
+    }
+    c
+}
+fn run() {
+    let mut total = 0
+    let mut n = 1
+    while n <= 100000 {
+        total = total + steps(n)
+        n = n + 1
+    }
+    total
+}
+println(run())

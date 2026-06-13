@@ -1,0 +1,34 @@
+// funct demo — run with: cargo run -- examples/demo.ft
+
+import { circle, square, area } from "geometry"   // explicit imports only — no wildcards
+import "geometry" as geo                          // ...or qualified via an alias
+
+let shapes = [circle(1.0), square(2.0), geo.circle(0.5)]
+
+let total = shapes
+    |> map(area)
+    |> sum
+
+println("total area: ${total}")
+
+// atoms: the only escaping mutable state
+let hits = atom(0)
+watch(hits, "log", (old, new) => println("hits: ${old} -> ${new}"))
+
+fn record_hit() = swap!(hits, n => n + 1)
+record_hit()
+record_hit()
+
+// Result + ? + pattern matching
+fn parse_pair(a, b) {
+    let x = parse_int(a)?
+    let y = parse_int(b)?
+    Ok((x, y))
+}
+
+match parse_pair("3", "4") {
+    Ok((x, y)) => println("sum = ${x + y}"),
+    Err(msg) => println("oops: ${msg}"),
+}
+
+"done with ${@hits} hits"

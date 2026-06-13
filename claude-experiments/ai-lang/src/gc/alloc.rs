@@ -53,6 +53,45 @@ pub unsafe fn alloc_obj<H: ObjHeader>(
     ptr
 }
 
+// ─── AllocWindow (JIT-facing allocation mirror) ──────────────────────
+
+/// The three words the JIT's INLINE allocation fast path reads, mirrored
+/// from the active from-space and updated only under stop-the-world (at
+/// space flips). Layout is ABI: codegen reads fields at fixed offsets.
+///
+///   offset 0: cursor — pointer to the active space's atomic cursor
+///             (the JIT `atomicrmw add`s it directly)
+///   offset 8: base   — the active space's base address
+///   offset 16: limit — allocation limit in bytes; 0 forces EVERY
+///             allocation through the out-of-line slow path (used by
+///             gc-stress mode so collect-per-alloc still fires)
+#[repr(C)]
+pub struct AllocWindow {
+    pub cursor: core::sync::atomic::AtomicPtr<u8>,
+    pub base: core::sync::atomic::AtomicPtr<u8>,
+    pub limit: AtomicUsize,
+}
+
+impl AllocWindow {
+    pub fn empty() -> Self {
+        AllocWindow {
+            cursor: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            base: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            limit: AtomicUsize::new(0),
+        }
+    }
+    /// Point the window at `space` (called at construction and at every
+    /// flip, both under STW or before any mutator runs).
+    pub fn point_at(&self, space: &AtomicBumpAllocator, limit: usize) {
+        self.cursor.store(
+            &space.cursor as *const AtomicUsize as *mut u8,
+            Ordering::Release,
+        );
+        self.base.store(space.base, Ordering::Release);
+        self.limit.store(limit, Ordering::Release);
+    }
+}
+
 // ─── BumpAllocator ───────────────────────────────────────────────────
 
 /// A bump (linear) allocator for heap objects.
@@ -271,12 +310,16 @@ impl AtomicBumpAllocator {
 
     /// Number of bytes currently used.
     pub fn used(&self) -> usize {
-        self.cursor.load(Ordering::Acquire)
+        // The JIT's inline fast path bumps with fetch_add and may
+        // overshoot `size` when it loses the race for the last bytes
+        // (those claims take the slow path); clamp so walkers and
+        // accounting never see a cursor past the space.
+        self.cursor.load(Ordering::Acquire).min(self.size)
     }
 
     /// Number of bytes remaining.
     pub fn remaining(&self) -> usize {
-        self.size - self.cursor.load(Ordering::Acquire)
+        self.size.saturating_sub(self.cursor.load(Ordering::Acquire))
     }
 
     /// Base pointer of the region.

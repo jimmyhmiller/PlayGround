@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Living Whiteboard — Sim ↔ Visual Strategy Explorer</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#2a2f3a;
+    --ink:#e6e9ef; --dim:#8b94a7; --dim2:#646d7e;
+    --req:#46c6ff; --resp:#ffb24d; --promo:#c08bff; --bundle:#7ee787; --orphan:#ff4d6d;
+    --accent:#46c6ff; --warn:#ff6b6b; --ok:#7ee787;
+    --node:#39414f; --nodeline:#5a6577;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent)}
+  code{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:.86em;
+    background:#0b0d11;padding:1px 5px;border-radius:4px;color:#cdd6e4}
+  .wrap{max-width:1280px;margin:0 auto;padding:24px 22px 80px}
+  header h1{font-size:21px;margin:0 0 4px;font-weight:650;letter-spacing:.2px}
+  header p{margin:0;color:var(--dim);max-width:880px}
+  .lede{margin:14px 0 0;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:14px 16px}
+  .lede b{color:var(--ink)}
+  .lede .axis{display:flex;gap:22px;flex-wrap:wrap;margin-top:10px}
+  .lede .axis div{flex:1;min-width:230px}
+  .lede .axis h4{margin:0 0 2px;font-size:12.5px;color:var(--accent);
+    text-transform:uppercase;letter-spacing:.08em}
+  .lede .axis p{font-size:13px;color:var(--dim)}
+
+  /* controls */
+  .controls{position:sticky;top:0;z-index:30;margin:18px 0 10px;
+    background:#10131a;box-shadow:0 6px 18px -8px #000;
+    border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .ctl-row{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .ctl{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .ctl label{font-size:11px;color:var(--dim);text-transform:uppercase;
+    letter-spacing:.06em;display:flex;justify-content:space-between;gap:10px}
+  .ctl label .val{color:var(--accent);font-variant-numeric:tabular-nums}
+  .ctl input[type=range]{width:160px;accent-color:var(--accent)}
+  button{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:7px 13px;font-size:13px;cursor:pointer;font-weight:550}
+  button:hover{border-color:var(--nodeline)}
+  button.primary{background:var(--accent);color:#06121b;border-color:var(--accent)}
+  .chip{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim);
+    cursor:pointer;user-select:none}
+  .chip input{accent-color:var(--accent)}
+  select{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:6px 9px;font-size:13px}
+  .insight{margin-top:10px;font-size:13px;line-height:1.45;color:var(--dim);
+    border-top:1px solid var(--line);padding-top:9px;
+    height:46px;overflow:hidden;display:flex;align-items:flex-start}
+  .measRate-line{margin-left:auto}
+  .insight b{color:var(--warn)}
+  .insight.calm b{color:var(--ok)}
+
+  /* legend */
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:6px 2px 0;font-size:12px;color:var(--dim)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .ring{width:11px;height:11px;border-radius:50%;border:2px solid var(--promo);box-sizing:border-box}
+
+  /* grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px}
+  @media(max-width:980px){.grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:660px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    overflow:hidden;display:flex;flex-direction:column}
+  .panel.flood{border-color:#3a2a2a}
+  .phead{padding:10px 12px 8px;border-bottom:1px solid var(--line)}
+  .phead .t{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .phead h3{margin:0;font-size:14.5px;font-weight:650}
+  .phead .tag{font-size:10.5px;color:var(--dim2);font-family:ui-monospace,monospace}
+  .phead .desc{margin:3px 0 0;font-size:12px;color:var(--dim);min-height:32px}
+  canvas.viz{display:block;width:100%;height:200px;background:
+    radial-gradient(120% 90% at 50% 0%,#191d26,#13161d)}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+  .metrics div{background:var(--panel2);padding:7px 8px;text-align:center}
+  .metrics .k{font-size:9.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.05em}
+  .metrics .v{font-size:15px;font-variant-numeric:tabular-nums;font-weight:600;margin-top:1px}
+  .metrics .v.good{color:var(--ok)} .metrics .v.warn{color:var(--warn)}
+  .bar{height:3px;background:#0b0d11}
+  .bar i{display:block;height:100%;background:var(--accent);transition:width .2s}
+
+  /* cards */
+  .cards{margin-top:34px}
+  .cards h2{font-size:16px;margin:0 0 4px}
+  .cards .sub{color:var(--dim);margin:0 0 14px}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    margin-bottom:10px;overflow:hidden}
+  summary{padding:12px 14px;cursor:pointer;font-weight:600;list-style:none;
+    display:flex;align-items:center;gap:10px}
+  summary::-webkit-details-marker{display:none}
+  summary .pill{font-size:10.5px;font-family:ui-monospace,monospace;color:var(--dim2);
+    border:1px solid var(--line);border-radius:20px;padding:2px 9px;margin-left:auto}
+  summary .sw{width:10px;height:10px;border-radius:3px;flex:none}
+  details .body{padding:0 14px 14px;color:var(--dim);font-size:13.5px}
+  details .body p{margin:8px 0}
+  details .body .gives,details .body .costs{margin:6px 0}
+  details .body b.g{color:var(--ok)} details .body b.c{color:var(--warn)}
+  details .body .when{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);color:var(--ink)}
+  /* causality scenarios */
+  .scen{display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 18px;margin-bottom:14px}
+  @media(max-width:820px){.scen{grid-template-columns:1fr}}
+  .scen-text h3{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:9px}
+  .scen-text h3 .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  .scen-text p{margin:6px 0;color:var(--dim);font-size:13.5px}
+  .scen-ctl{margin:12px 0 6px}
+  .scen-ctl label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;
+    display:flex;justify-content:space-between;gap:10px}
+  .scen-ctl label .val{color:var(--accent);font-variant-numeric:tabular-nums}
+  .scen-ctl input[type=range]{width:100%;accent-color:var(--accent);margin-top:3px}
+  .scen-metrics{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:1px;
+    background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:12px}
+  .scen-metrics div{background:var(--panel2);padding:8px 8px;text-align:center}
+  .scen-metrics .k{font-size:9.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.04em;line-height:1.25}
+  .scen-metrics .v{font-size:16px;font-variant-numeric:tabular-nums;font-weight:600;margin-top:3px}
+  .scen-metrics .v.warn{color:var(--warn)}
+  .scen-viz canvas{display:block;width:100%;height:220px;border-radius:8px 8px 0 0;background:
+    radial-gradient(120% 90% at 50% 0%,#191d26,#13161d)}
+  .scen-prog{height:5px;background:#0b0d11;border-radius:0 0 8px 8px;overflow:hidden}
+  .scen-prog i{display:block;height:100%;background:var(--accent);width:0%}
+  .scen-prog.cont i{background:var(--dim2)}
+  .scen-head{display:flex;align-items:center;gap:12px;margin:0 0 4px}
+  .scen-head h2{margin:0}
+  #scenToggle{font-size:12.5px;padding:5px 12px}
+  footer{margin-top:46px;color:var(--dim2);font-size:12px;border-top:1px solid var(--line);
+    padding-top:16px}
+  footer code{background:#0b0d11}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Living Whiteboard — Sim ↔ Visual Strategy Explorer</h1>
+  <p>The simulator is a discrete-event engine: packets jump between nodes at exact
+     sim-time nanoseconds. The screen is wall-clock and ~60&nbsp;fps. Six
+     <b>visual strategies</b> bridge that gap — each turns the same event stream into
+     animated packets differently. This page runs <b>one shared sim</b> through all six
+     at once so you can see the trade-offs directly.</p>
+</header>
+
+<div class="lede">
+  <b>The two knobs that define the gap.</b> Under the host's lockstep mapping
+  <code>visual_now = sim_now × 1e-9</code>, so both clocks advance together.
+  <div class="axis">
+    <div>
+      <h4>multiplier — sim time vs wall time</h4>
+      <p>Sim-seconds per wall-second. At <code>×1</code> a 8&nbsp;ms edge is on screen
+      for 8&nbsp;ms of wall — a blink. Slowing it is the <i>only</i> way SimMirror
+      becomes legible.</p>
+    </div>
+    <div>
+      <h4>k — visual latency stretch</h4>
+      <p>Event-history strategies set <code>arrive = emit + sim_latency × k</code>.
+      Big <code>k</code> stretches each hop into something the eye can follow,
+      <i>decoupling</i> apparent travel time from real latency.</p>
+    </div>
+  </div>
+</div>
+
+<!-- CONTROLS -->
+<div class="controls">
+  <div class="ctl-row">
+    <button id="playBtn" class="primary">⏸ Pause</button>
+    <button id="resetBtn">↻ Reset</button>
+    <div class="ctl">
+      <label>scenario</label>
+      <select id="scenario">
+        <option value="lb">Load balancer — G→LB→3 workers→resp (cyclic)</option>
+        <option value="pipeline">Pipeline — G→A→B→C→S (feed-forward)</option>
+        <option value="fanin">Aggregator — 3 sources→collector→sink (fan-in)</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>multiplier <span class="val" id="speedVal">1.0×</span></label>
+      <input type="range" id="speed" min="-2" max="1.7" step="0.01" value="0">
+    </div>
+    <div class="ctl">
+      <label>k (stretch) <span class="val" id="kVal">410</span></label>
+      <input type="range" id="k" min="0" max="3.3" step="0.01" value="2.61">
+    </div>
+    <div class="ctl">
+      <label>request rate <span class="val" id="rateVal">30/s</span></label>
+      <input type="range" id="rate" min="1" max="220" step="1" value="30">
+    </div>
+    <label class="chip"><input type="checkbox" id="burst"> bursty traffic</label>
+  </div>
+  <div class="ctl-row" style="margin-top:10px">
+    <span style="font-size:11px;color:var(--dim2);text-transform:uppercase;letter-spacing:.06em">edge latency</span>
+    <div class="ctl">
+      <label>unit</label>
+      <select id="latUnit"><option value="ms">ms</option><option value="ns">ns</option></select>
+    </div>
+    <div class="ctl">
+      <label>ingress hop <span class="val" id="latGRVal">8 ms</span></label>
+      <input type="range" id="latGR" min="1" max="120" step="1" value="8">
+    </div>
+    <div class="ctl">
+      <label>internal hop <span class="val" id="latRWVal">6 ms</span></label>
+      <input type="range" id="latRW" min="1" max="120" step="1" value="6">
+    </div>
+    <div class="ctl">
+      <label>service (dwell) <span class="val" id="dwellVal">25 ms</span></label>
+      <input type="range" id="dwell" min="0" max="400" step="1" value="25">
+    </div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--req)"></span>request</span>
+    <span><span class="dot" style="background:var(--resp)"></span>response</span>
+    <span><span class="ring"></span>promoted cause (causal-rate)</span>
+    <span><span class="dot" style="background:var(--bundle)"></span>bundle representative</span>
+    <span style="color:var(--dim2)">measured ingress request rate: <b id="measRate" style="color:var(--accent)">–</b></span>
+  </div>
+  <div class="insight calm" id="insight"></div>
+</div>
+
+<p style="margin:14px 2px 0;font-size:12.5px;color:var(--dim2)">
+  <b style="color:var(--dim)">Reading the metrics:</b>
+  <b style="color:var(--ink)">on screen</b> = visible this frame &nbsp;·&nbsp;
+  <b style="color:var(--ink)">created Σ</b> / <b style="color:var(--ink)">dropped Σ</b> = cumulative since reset (a lifetime odometer, not a snapshot).
+  They differ wildly because each packet animates for <code>latency × k</code> then disappears — so <i>created Σ</i> climbs into the thousands while only a handful are ever <i>on screen</i> at once.
+</p>
+<div class="grid" id="grid"></div>
+
+<!-- CARDS -->
+<div class="cards">
+  <h2>How each strategy works — and what it trades</h2>
+  <p class="sub">Verbatim behavior from <code>crates/flow-bevy/src/visual.rs</code>.
+     Open one and watch its panel above.</p>
+  <div id="cards"></div>
+</div>
+
+<!-- CAUSALITY SCENARIOS -->
+<div class="cards" id="scenarios">
+  <div class="scen-head">
+    <h2>Causality scenarios — where each strategy gets weird</h2>
+    <button id="scenToggle" class="primary">⏸ Pause</button>
+  </div>
+  <p class="sub">Self-running demos, each isolated with its own sim tuned to expose one
+     quirk. They ignore the controls up top — every knob a demo needs is on the demo itself.
+     The bar under each canvas shows loop progress (solid = looping cycle, grey sweep = continuous).</p>
+
+  <!-- Scenario 1: SimMirror low latency -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#5a6577"></span>SimMirror — low latency makes packets vanish</h3>
+      <p>SimMirror animates each packet for its <b>true latency</b> — no <code>k</code> stretch.
+        These hops are <b id="s1lat">1 ms</b>. At real time (<code>×1</code>) a packet crosses an
+        edge in 1 ms — shorter than a single 16 ms frame — so the renderer literally samples
+        <i>between</i> packets and the screen is empty on almost every frame, even though dozens
+        per second are streaming through underneath.</p>
+      <p>The sim is busy; your eye just can't catch it. Drag <b>slow-motion</b> down and the same
+        traffic re-materialises — that's the only lever SimMirror gives you for legibility.</p>
+      <div class="scen-ctl">
+        <label>slow-motion <span class="val" id="s1speedVal">×1</span></label>
+        <input type="range" id="s1speed" min="-2.3" max="0" step="0.01" value="0">
+      </div>
+      <div class="scen-metrics">
+        <div><div class="k">on screen</div><div class="v" id="s1on">0</div></div>
+        <div><div class="k">visible % of frames</div><div class="v" id="s1vis">0%</div></div>
+        <div><div class="k">packets passed Σ</div><div class="v" id="s1passed">0</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s1canvas"></canvas><div class="scen-prog cont"><i id="s1prog"></i></div></div>
+  </div>
+
+  <!-- Scenario 2: Replay lag -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#46c6ff"></span>Replay — the causal-clamp runaway</h3>
+      <p>Request → router → worker → <b>reply back to the client</b> — a cycle. Replay drops
+        nothing, but with a big <code>k</code> (<b id="s2kProse">410</b>) every hop is stretched
+        to seconds, and the causal clamp makes each hop wait for the previous one's
+        <i>stretched</i> arrival. Because the reply returns to <code>G</code>, the <b>next</b>
+        request can't visually start until the <b>previous</b> reply has visually arrived — so
+        Replay <b>serializes the entire loop</b>.</p>
+      <p>The sim fires 12 req/s and finishes each in ~53&nbsp;ms. But each visual round trip
+        takes ~11&nbsp;s, so Replay falls <b>further behind every second</b> — watch
+        <i>behind by</i> climb without bound. You end up watching ancient request #<span id="s2fromInline">—</span>
+        crawl across while the sim has raced thousands ahead: <b>you stop seeing current
+        activity at all.</b> Drop <code>k</code> below ~2 (round trip &lt; request spacing) and the
+        runaway collapses — Replay snaps back to the sim.</p>
+      <div class="scen-ctl">
+        <label>k (stretch) <span class="val" id="s2kVal">410</span></label>
+        <input type="range" id="s2k" min="0.7" max="3.3" step="0.01" value="2.61">
+      </div>
+      <div class="scen-metrics">
+        <div><div class="k">sim fired Σ</div><div class="v" id="s2fired">0</div></div>
+        <div><div class="k">screen is showing req</div><div class="v" id="s2from">—</div></div>
+        <div><div class="k">replay is behind by</div><div class="v warn" id="s2lag">—</div></div>
+        <div><div class="k">requests w/o reply yet</div><div class="v warn" id="s2pending">0</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s2canvas"></canvas><div class="scen-prog cont"><i id="s2prog"></i></div></div>
+  </div>
+
+  <p class="sub" style="margin:18px 0 10px">
+    Scenarios 3–6 run on the acyclic pipeline <code>G→A→B→C→S</code> as <b>looping bursts</b> —
+    a small burst fires, plays out, clears, repeats — slow enough to follow each packet. Visual
+    cues: <b style="color:var(--orphan)">red + halo</b> = an acausal packet (shown before its
+    cause arrived), with a dashed link to where its cause actually is &nbsp;·&nbsp;
+    <b style="color:var(--dim2)">faint hollow</b> = a <b>dropped</b> packet (you see what's
+    thrown away) &nbsp;·&nbsp; <b style="color:var(--promo)">purple ring</b> = a retroactively
+    promoted cause.
+  </p>
+
+  <!-- Scenario 3: RateSampled — effect before cause -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#7ee787"></span>RateSampled — effects before their causes</h3>
+      <p>RateSampled has <b>no causal clamp</b>. Each hop is drawn starting at its own sim-time,
+        and never waits for the hop that <i>caused</i> it to visibly arrive. Since every hop is
+        stretched by <code>k</code>, a packet <b>departs A→B, B→C, even C→S while the packet that
+        feeds it is still crawling across the first edge</b> — it spawns from a node nothing has
+        reached yet.</p>
+      <p>Watch the <b style="color:var(--orphan)">red</b> dots: each is a packet on screen
+        <i>before its own cause has arrived</i>. (The clamped strategies below hold each hop until
+        its cause lands, so the chain plays out one stage at a time — no red.)</p>
+      <div class="scen-metrics">
+        <div><div class="k">shown Σ</div><div class="v" id="s3created">0</div></div>
+        <div><div class="k">acausal spawns Σ</div><div class="v warn" id="s3orphan">0</div></div>
+        <div><div class="k">% acausal</div><div class="v warn" id="s3pct">—</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s3canvas"></canvas><div class="scen-prog"><i id="s3prog"></i></div></div>
+  </div>
+
+  <!-- Scenario 4: DropOrphans -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#ffb24d"></span>DropOrphans — no spawning-from-idle, but it drops the most</h3>
+      <p>Same throttle, but it refuses to show a packet leaving a node that has had <b>no shown
+        arrival</b> — so you never catch one spawning from a totally idle stage (the worst red
+        case above). The price is brutal: suppressing a cause cascades to its whole downstream
+        subtree, so it <b>drops the most by far</b> — watch <i>drop %</i>. The picture is tidy but
+        sparse, badly under-reporting how busy the system is. <i>(It guards the node, not the
+        individual item — it still can't promise every packet's exact cause was shown.)</i></p>
+      <div class="scen-metrics">
+        <div><div class="k">created Σ</div><div class="v" id="s4created">0</div></div>
+        <div><div class="k">dropped Σ</div><div class="v warn" id="s4dropped">0</div></div>
+        <div><div class="k">drop %</div><div class="v warn" id="s4pct">—</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s4canvas"></canvas><div class="scen-prog"><i id="s4prog"></i></div></div>
+  </div>
+
+  <!-- Scenario 5: CausalRate promotion -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#c08bff"></span>CausalRate — time-travel the cause</h3>
+      <p>Same throttle as DropOrphans, but instead of dropping a needed-but-throttled cause it
+        <b>retroactively flashes that cause back</b>. Watch (this one runs in <b>slow motion</b>):
+        packets get throttled away as <b style="color:var(--dim2)">faint ghosts</b> — but when a
+        surviving packet needs one of those dropped causes, CausalRate fires a
+        <b style="color:var(--promo)">purple ↩cause ripple</b> at that node, resurrecting the cause
+        <i>after the fact</i> so the chain stays whole.</p>
+      <p>That's the unique move: DropOrphans (above) throws the cause away forever; CausalRate
+        brings it back just-in-time. It keeps true per-item causality and drops far less — at the
+        cost of showing causes slightly out of order.</p>
+      <div class="scen-metrics">
+        <div><div class="k">created Σ</div><div class="v" id="s5created">0</div></div>
+        <div><div class="k">promoted (flashed) Σ</div><div class="v" id="s5promo" style="color:var(--promo)">0</div></div>
+        <div><div class="k">drop %</div><div class="v" id="s5pct">—</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s5canvas"></canvas><div class="scen-prog cont"><i id="s5prog"></i></div></div>
+  </div>
+
+  <!-- Scenario 6: Bundle count loss -->
+  <div class="scen">
+    <div class="scen-text">
+      <h3><span class="sw" style="background:#7ee787"></span>BundleSummarized — one dot stands for many</h3>
+      <p>Coalesces everything on an edge within a 100&nbsp;ms sim-window into a <b>single</b> packet.
+        At high rate that means a dozen events collapse to one dot — so the chain stays legible, but
+        the <b>count is lost</b>: a burst of 2 and a burst of 50 look identical. Watch
+        <i>events represented</i> race ahead of <i>shown</i>.</p>
+      <div class="scen-metrics">
+        <div><div class="k">events represented Σ</div><div class="v" id="s6events">0</div></div>
+        <div><div class="k">packets shown Σ</div><div class="v" id="s6shown">0</div></div>
+        <div><div class="k">events per shown dot</div><div class="v warn" id="s6ratio">—</div></div>
+      </div>
+    </div>
+    <div class="scen-viz"><canvas class="viz" id="s6canvas"></canvas><div class="scen-prog"><i id="s6prog"></i></div></div>
+  </div>
+</div>
+
+<footer>
+  Faithful JS port of the <code>VisualStrategy</code> implementations in
+  <code>crates/flow-bevy/src/visual.rs</code>. Constants used here match the source:
+  <code>MAX_VISUAL_RATE_PER_EDGE = 10/s</code>, <code>RATE_WINDOW = 1.0s</code>,
+  <code>BUNDLE_WINDOW = 100ms</code>, <code>K_DEFAULT = 410</code>,
+  promote cap <code>0.15s</code>. The sim is a request→router→worker→response
+  chain (one self-loop = service dwell per request); causal-clamp strategies use the
+  dwell + arrivals to keep responses behind their triggering request.
+</footer>
+</div>
+
+<script>
+"use strict";
+// ════════════════════════════════════════════════════════════════
+//  Constants — mirror visual.rs
+// ════════════════════════════════════════════════════════════════
+const K_MIN=0.1, K_MAX=100000.0;
+const RATE_WINDOW_SEC=1.0;
+const MAX_VISUAL_RATE_PER_EDGE=10.0;
+const BUNDLE_WINDOW_NS=100_000_000;
+const CAUSAL_BUF_LEN=32;
+const PROMO_CAP=0.15;
+const GC_KEEP_PAST=2.0;          // we don't scrub, so a short tail suffices
+const NEG_INF=-Infinity;
+
+// ════════════════════════════════════════════════════════════════
+//  Topology  (NodeId: 0=Gen 1=Router 2,3,4=Workers)
+// ════════════════════════════════════════════════════════════════
+const NODES=[
+  {id:0,x:0.13,y:0.50,label:"G",kind:"gen"},
+  {id:1,x:0.46,y:0.50,label:"LB",kind:"router"},
+  {id:2,x:0.83,y:0.22,label:"W0",kind:"worker"},
+  {id:3,x:0.83,y:0.50,label:"W1",kind:"worker"},
+  {id:4,x:0.83,y:0.78,label:"W2",kind:"worker"},
+];
+const NODE_BY_ID={}; NODES.forEach(n=>NODE_BY_ID[n.id]=n);
+const TOPO_EDGES=[[0,1],[1,2],[1,3],[1,4]];
+// Default edge latencies as raw slider numbers. The unit toggle decides
+// what each number means: 1 ms = 1e6 ns (default) or 1 ns. makeChain
+// multiplies the raw value by `params.unitMul` to get sim-ns.
+const DEF_LAT_GR=8;     // gen↔router latency
+const DEF_LAT_RW=6;     // router↔worker latency
+const DEF_DWELL=25;     // worker service time (self-loop)
+const UNIT_MUL={ms:1e6, ns:1};
+
+// ════════════════════════════════════════════════════════════════
+//  Shared discrete-event generator — produces PacketEmitted events
+//  Event = {packet, from, to, atNs, arrivesAtNs, tag}
+//  tag ∈ req|resp|dwell. dwell = self-loop (from==to).
+// ════════════════════════════════════════════════════════════════
+let pidCounter=0;
+// cfg = {lGR,lRW,dwell} in sim-ns. Each event is stamped with its source
+// request index + gen time so demos can measure how far a strategy lags.
+function makeChain(genTimeNs, reqIndex, cfg){
+  const {lGR,lRW,dwell}=cfg;
+  const w = 2 + (reqIndex % 3);             // round-robin worker
+  const a1 = genTimeNs + lGR;               // router has request
+  const a2 = a1 + lRW;                      // worker has request
+  const a3 = a2 + dwell;                    // service done
+  const a4 = a3 + lRW;                      // router has response
+  const E=(from,to,at,arr,tag)=>({packet:pidCounter++,from,to,atNs:at,arrivesAtNs:arr,tag,req:reqIndex,genNs:genTimeNs});
+  return [
+    E(0,1,genTimeNs,a1,"req"),
+    E(1,w,a1,a2,"req"),
+    E(w,w,a2,a3,"dwell"),     // self-loop service dwell
+    E(w,1,a3,a4,"resp"),
+    E(1,0,a4,a4+lGR,"resp"),
+  ];
+}
+
+// Linear, ACYCLIC pipeline G→A→B→C→S. No responses, no cycles — so
+// Replay's causal clamp produces a BOUNDED lag (each node has one
+// upstream) instead of the round-trip serialization a req/resp loop
+// causes. cfg.lat = per-hop latency (ns).
+const PIPE_NODES=[
+  {id:0,x:0.08,y:0.5,label:"G"},{id:1,x:0.30,y:0.5,label:"A"},
+  {id:2,x:0.52,y:0.5,label:"B"},{id:3,x:0.74,y:0.5,label:"C"},
+  {id:4,x:0.93,y:0.5,label:"S"},
+];
+const PIPE_BY_ID={}; PIPE_NODES.forEach(n=>PIPE_BY_ID[n.id]=n);
+const PIPE_TOPO={nodes:PIPE_NODES, edges:[[0,1],[1,2],[2,3],[3,4]], byId:PIPE_BY_ID};
+function makePipeChain(genTimeNs, reqIndex, cfg){
+  const l=cfg.lat;
+  const E=(from,to,at,arr,hop)=>({packet:pidCounter++,from,to,atNs:at,arrivesAtNs:arr,
+    tag:hop===3?"resp":"req",req:reqIndex,genNs:genTimeNs,hop});
+  return [
+    E(0,1,genTimeNs,        genTimeNs+l,   0),
+    E(1,2,genTimeNs+l,      genTimeNs+2*l, 1),
+    E(2,3,genTimeNs+2*l,    genTimeNs+3*l, 2),
+    E(3,4,genTimeNs+3*l,    genTimeNs+4*l, 3),
+  ];
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Helpers shared by strategies
+// ════════════════════════════════════════════════════════════════
+function isVisibleEvent(ev){            // mirrors is_visible_event()
+  if(ev.from===ev.to) return false;
+  if(ev.arrivesAtNs<=ev.atNs) return false;
+  if(ev.tag==="pull"||ev.tag==="wake") return false;
+  return true;
+}
+function visiblePacket(ev){             // mirrors parse_emit() acceptance (allows self-loop flag)
+  if(ev.arrivesAtNs<=ev.atNs) return null;
+  if(ev.tag==="pull"||ev.tag==="wake") return null;
+  return {
+    packetId:ev.packet, from:ev.from, to:ev.to, tag:ev.tag,
+    atNs:ev.atNs, arrivesAtNs:ev.arrivesAtNs,
+    simLatS:(ev.arrivesAtNs-ev.atNs)*1e-9, selfLoop:ev.from===ev.to,
+  };
+}
+function clampK(k){return Math.min(Math.max(k,K_MIN),K_MAX);}
+
+// Sorted-by-sim-time arrival index (NodeArrivals)
+class Arrivals{
+  constructor(){this.ns=[];this.real=[];}
+  push(ns,real){this.ns.push(ns);this.real.push(real);}
+  _pp(at){let i=this.ns.length;for(let j=0;j<this.ns.length;j++){if(!(this.ns[j]<=at)){i=j;break;}}return i;}
+  triggerFor(at){const i=this._pp(at);return i===0?null:this.real[i-1];}
+  triggerForFull(at){const i=this._pp(at);return i===0?null:[this.ns[i-1],this.real[i-1]];}
+  len(){return this.ns.length;}
+  gc(cut){let k=this.real.findIndex(r=>r>=cut);if(k<0)k=this.real.length;if(k>0){this.ns.splice(0,k);this.real.splice(0,k);}}
+}
+function mapArr(m,key){let a=m.get(key);if(!a){a=new Arrivals();m.set(key,a);}return a;}
+
+// ════════════════════════════════════════════════════════════════
+//  Base for event-history strategies: a packet list + frame/gc
+//  packet = {packetId,from,to,tag,emitReal,arriveReal,promoted?}
+// ════════════════════════════════════════════════════════════════
+class History{
+  constructor(k){this.k=clampK(k);this.packets=[];this.ingested=0;this.shown=0;this.peak=0;}
+  setK(k){this.k=clampK(k);}
+  reset(){this.packets=[];this.ingested=0;this.shown=0;this.peak=0;}
+  pushPkt(p){this.packets.push(p);this.shown++;}
+  gc(now){const cut=now-GC_KEEP_PAST;if(this.packets.length>2000||this.packets.length>0&&this.packets[0].arriveReal<cut){this.packets=this.packets.filter(p=>p.arriveReal>=cut);}}
+  // returns {on, list:[{p,prog}]}
+  frame(now){
+    const list=[];
+    for(const p of this.packets){
+      if(now<p.emitReal||now>=p.arriveReal) continue;
+      const denom=Math.max(p.arriveReal-p.emitReal,1e-9);
+      list.push({p,prog:(now-p.emitReal)/denom});
+    }
+    this.peak=Math.max(this.peak,list.length);
+    return list;
+  }
+}
+
+// ─── Replay (VisualTimeline) ────────────────────────────────────
+class Replay extends History{
+  constructor(k){super(k);this.nodeArr=new Map();}
+  reset(){super.reset();this.nodeArr=new Map();}
+  ingest(ev,realNow){
+    const p=visiblePacket(ev); if(!p) return;
+    const k=clampK(this.k);
+    const trig=this.nodeArr.has(p.from)?this.nodeArr.get(p.from).triggerFor(p.atNs):null;
+    const clamp=trig==null?NEG_INF:trig;
+    const emit=Math.max(realNow,clamp);
+    if(p.selfLoop){                                  // dwell: causal arrival, unscaled, not drawn
+      mapArr(this.nodeArr,p.to).push(p.arrivesAtNs,emit+p.simLatS);
+      return;
+    }
+    this.ingested++;
+    const arrive=emit+p.simLatS*k;
+    mapArr(this.nodeArr,p.to).push(p.arrivesAtNs,arrive);
+    this.pushPkt({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,emitReal:emit,arriveReal:arrive});
+  }
+  gc(now){super.gc(now);const cut=now-GC_KEEP_PAST;for(const a of this.nodeArr.values())a.gc(cut);}
+}
+
+// ─── RateSampled ────────────────────────────────────────────────
+class RateSampled extends History{
+  constructor(k){super(k);this.edges=new Map();}
+  reset(){super.reset();this.edges=new Map();}
+  _stream(key){let s=this.edges.get(key);if(!s){s={recent:[],last:NEG_INF};this.edges.set(key,s);}return s;}
+  ingest(ev,realNow){
+    if(!isVisibleEvent(ev)) return;                  // drops self-loops entirely
+    this.ingested++;
+    const p=visiblePacket(ev);
+    const s=this._stream(p.from+"-"+p.to);
+    s.recent.push(realNow);
+    const cut=realNow-RATE_WINDOW_SEC;
+    while(s.recent.length&&s.recent[0]<cut)s.recent.shift();
+    const rate=s.recent.length/RATE_WINDOW_SEC;
+    const period=rate<=MAX_VISUAL_RATE_PER_EDGE?0:1/MAX_VISUAL_RATE_PER_EDGE;
+    if(realNow<s.last+period) return;                // throttled → dropped
+    s.last=realNow;
+    const arrive=realNow+p.simLatS*clampK(this.k);
+    this.pushPkt({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,emitReal:realNow,arriveReal:arrive});
+  }
+}
+
+// ─── DropOrphans ────────────────────────────────────────────────
+class DropOrphans extends History{
+  constructor(k){super(k);this.edges=new Map();this.vis=new Map();this.any=new Map();}
+  reset(){super.reset();this.edges=new Map();this.vis=new Map();this.any=new Map();}
+  _stream(key){let s=this.edges.get(key);if(!s){s={recent:[],last:NEG_INF};this.edges.set(key,s);}return s;}
+  ingest(ev,realNow){
+    const p=visiblePacket(ev); if(!p) return;
+    if(p.selfLoop){mapArr(this.any,p.to).push(p.arrivesAtNs,realNow+p.simLatS);return;}
+    this.ingested++;
+    const tVis=this.vis.has(p.from)?this.vis.get(p.from).triggerFor(p.atNs):null;
+    const tAny=this.any.has(p.from)?this.any.get(p.from).triggerFor(p.atNs):null;
+    const orphan = tAny!=null && tVis==null;
+    if(orphan){mapArr(this.any,p.to).push(p.arrivesAtNs,realNow);return;}    // dropped: cause invisible
+    const s=this._stream(p.from+"-"+p.to);
+    s.recent.push(realNow);
+    const cut=realNow-RATE_WINDOW_SEC;
+    while(s.recent.length&&s.recent[0]<cut)s.recent.shift();
+    const rate=s.recent.length/RATE_WINDOW_SEC;
+    const period=rate<=MAX_VISUAL_RATE_PER_EDGE?0:1/MAX_VISUAL_RATE_PER_EDGE;
+    if(realNow<s.last+period){mapArr(this.any,p.to).push(p.arrivesAtNs,realNow);return;}  // throttled
+    s.last=realNow;
+    const emit=Math.max(realNow,tVis==null?NEG_INF:tVis);
+    const arrive=emit+p.simLatS*clampK(this.k);
+    this.pushPkt({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,emitReal:emit,arriveReal:arrive});
+    mapArr(this.vis,p.to).push(p.arrivesAtNs,arrive);
+    mapArr(this.any,p.to).push(p.arrivesAtNs,arrive);
+  }
+  gc(now){super.gc(now);const cut=now-GC_KEEP_PAST;for(const a of this.vis.values())a.gc(cut);for(const a of this.any.values())a.gc(cut);}
+}
+
+// ─── CausalRateSampled ──────────────────────────────────────────
+class CausalRate extends History{
+  constructor(k){super(k);this.edges=new Map();this.vis=new Map();this.thr=new Map();}
+  reset(){super.reset();this.edges=new Map();this.vis=new Map();this.thr=new Map();}
+  _stream(key){let s=this.edges.get(key);if(!s){s={recent:[],last:NEG_INF};this.edges.set(key,s);}return s;}
+  _popThr(node,limit){const b=this.thr.get(node);if(!b)return null;
+    for(let i=b.length-1;i>=0;i--){if(b[i].arrivesAtNs<=limit){return b.splice(i,1)[0];}}return null;}
+  _promote(ev,realNow){
+    const k=clampK(this.k);
+    const dur=Math.min(ev.simLatS*k,PROMO_CAP);
+    const arrive=realNow+dur;
+    this.pushPkt({packetId:ev.packetId,from:ev.from,to:ev.to,tag:ev.tag,emitReal:realNow,arriveReal:arrive,promoted:true});
+    mapArr(this.vis,ev.to).push(ev.arrivesAtNs,arrive);
+    return arrive;
+  }
+  ingest(ev,realNow){
+    const p=visiblePacket(ev); if(!p) return;
+    if(p.selfLoop){
+      // Clamp the dwell's emit to its triggering arrival before recording the
+      // causal arrival it produces, so a downstream hop doesn't emit before its
+      // cause is visible (matches Replay; fixes effect-before-cause across dwells).
+      const cl=this.vis.has(p.from)?this.vis.get(p.from).triggerFor(p.atNs):null;
+      const emit=Math.max(realNow, cl==null?NEG_INF:cl);
+      mapArr(this.vis,p.to).push(p.arrivesAtNs, emit+p.simLatS);
+      return;
+    }
+    this.ingested++;
+    const s=this._stream(p.from+"-"+p.to);
+    s.recent.push(realNow);
+    const cut=realNow-RATE_WINDOW_SEC;
+    while(s.recent.length&&s.recent[0]<cut)s.recent.shift();
+    const rate=s.recent.length/RATE_WINDOW_SEC;
+    const period=rate<=MAX_VISUAL_RATE_PER_EDGE?0:1/MAX_VISUAL_RATE_PER_EDGE;
+    const throttled=realNow<s.last+period;
+    if(throttled){
+      let b=this.thr.get(p.to);if(!b){b=[];this.thr.set(p.to,b);}
+      if(b.length>=CAUSAL_BUF_LEN)b.shift();
+      b.push({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,arrivesAtNs:p.arrivesAtNs,simLatS:p.simLatS,ingest:realNow});
+      return;
+    }
+    s.last=realNow;
+    const vt=this.vis.has(p.from)?this.vis.get(p.from).triggerForFull(p.atNs):null;
+    let buffAt=null;const bb=this.thr.get(p.from);
+    if(bb){for(let i=bb.length-1;i>=0;i--){if(bb[i].arrivesAtNs<=p.atNs){buffAt=bb[i].arrivesAtNs;break;}}}
+    let preferBuf=false;
+    if(buffAt!=null&&vt!=null)preferBuf=buffAt>vt[0];
+    else if(buffAt!=null&&vt==null)preferBuf=true;
+    let clamp;
+    if(preferBuf){const cause=this._popThr(p.from,p.atNs);clamp=cause?this._promote(cause,realNow):null;}
+    else clamp=vt?vt[1]:null;
+    const emit=Math.max(realNow,clamp==null?NEG_INF:clamp);
+    const arrive=emit+p.simLatS*clampK(this.k);
+    this.pushPkt({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,emitReal:emit,arriveReal:arrive});
+    mapArr(this.vis,p.to).push(p.arrivesAtNs,arrive);
+  }
+  gc(now){super.gc(now);const cut=now-GC_KEEP_PAST;for(const a of this.vis.values())a.gc(cut);
+    for(const b of this.thr.values()){while(b.length&&b[0].ingest<cut)b.shift();}}
+}
+
+// ─── BundleSummarized ───────────────────────────────────────────
+class Bundle extends History{
+  constructor(k){super(k);this.last=new Map();this.vis=new Map();}
+  reset(){super.reset();this.last=new Map();this.vis=new Map();}
+  ingest(ev,realNow){
+    const p=visiblePacket(ev); if(!p) return;
+    if(p.selfLoop){
+      // Clamp the dwell's emit to its triggering arrival before recording the
+      // causal arrival it produces (see CausalRate) — keeps post-dwell hops causal.
+      const cl=this.vis.has(p.from)?this.vis.get(p.from).triggerFor(p.atNs):null;
+      const emit=Math.max(realNow, cl==null?NEG_INF:cl);
+      mapArr(this.vis,p.to).push(p.arrivesAtNs, emit+p.simLatS);
+      return;
+    }
+    this.ingested++;
+    const key=p.from+"-"+p.to;
+    const last=this.last.get(key);
+    const isNew = last===undefined || (p.atNs-last)>=BUNDLE_WINDOW_NS;
+    if(!isNew) return;                                // coalesced into open bundle
+    this.last.set(key,p.atNs);
+    const trig=this.vis.has(p.from)?this.vis.get(p.from).triggerFor(p.atNs):null;
+    const emit=Math.max(realNow,trig==null?NEG_INF:trig);
+    const arrive=emit+p.simLatS*clampK(this.k);
+    this.pushPkt({packetId:p.packetId,from:p.from,to:p.to,tag:p.tag,emitReal:emit,arriveReal:arrive,bundle:true});
+    mapArr(this.vis,p.to).push(p.arrivesAtNs,arrive);
+  }
+  gc(now){super.gc(now);const cut=now-GC_KEEP_PAST;for(const a of this.vis.values())a.gc(cut);}
+}
+
+// ─── SimMirror (projects in-flight; no k, no clamp) ─────────────
+class SimMirror{
+  constructor(){this.ingested=0;this.shown=0;this.peak=0;}
+  setK(){} reset(){this.ingested=0;this.shown=0;this.peak=0;}
+  ingest(){}              // pure projection — ignores events
+  // frame derives from the global in-flight set, passed in
+  frame(simNowNs,inFlight){
+    const list=[];
+    for(const ev of inFlight){
+      if(ev.from===ev.to) continue;
+      if(ev.arrivesAtNs<=ev.atNs) continue;
+      if(simNowNs<ev.atNs||simNowNs>=ev.arrivesAtNs) continue;
+      const prog=(simNowNs-ev.atNs)/(ev.arrivesAtNs-ev.atNs);
+      list.push({p:{from:ev.from,to:ev.to,tag:ev.tag},prog});
+    }
+    this.peak=Math.max(this.peak,list.length);
+    return list;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Strategy registry / metadata
+// ════════════════════════════════════════════════════════════════
+const STRATS=[
+  {id:"sim-mirror",name:"SimMirror",cls:SimMirror,flood:false,
+   tag:"sim.in_flight, progress = sim ratio",
+   desc:"1:1 mirror of what the sim is doing right now. No k stretch, no causal clamp, no event history.",
+   sw:"#5a6577",
+   gives:"Perfectly truthful — apparent travel time <i>is</i> real latency. Trivial to rewind (no derived state).",
+   costs:"At any normal multiplier each packet is on screen for a blink; you can't read individual packets. Packet vanishes the instant it arrives — no trail.",
+   when:"Best when you've slowed the multiplier right down and want ground truth, or for replay/scrubbing where correctness beats legibility."},
+  {id:"replay",name:"Replay",cls:Replay,flood:true,
+   tag:"one visual / event, k-stretched, causally clamped",
+   desc:"Faithful: every visible event becomes a packet. Latency is stretched by k; responses are clamped to start after their triggering request has visually arrived.",
+   sw:"#46c6ff",
+   gives:"Shows everything, in causally-correct order. Responses always trail their request. The default.",
+   costs:"At high event rates the screen floods — thousands of packets, unreadable. Needs the largest rewind lookback (visibility window + chain reach).",
+   when:"The honest default at low-to-moderate rates. Switch away once the same edge carries more than the eye can track."},
+  {id:"rate-sampled",name:"RateSampled",cls:RateSampled,flood:false,
+   tag:"≤10 visual pkts/s per edge",
+   desc:"Per-edge rolling-window throttle. Above 10 visual packets/sec on an edge it shows a representative sample and drops the rest. No causal clamp.",
+   sw:"#7ee787",
+   gives:"Bursty sims become trackable — a steady, readable trickle per edge regardless of true rate.",
+   costs:"Drops individual events, so a shown response can have <b>no visible request</b> (an orphan). Causality looks broken.",
+   when:"High-throughput sims where you care about flow rate, not individual packets, and orphan responses don't bother you."},
+  {id:"drop-orphans",name:"DropOrphans",cls:DropOrphans,flood:false,
+   tag:"rate-sampled + drop responses with hidden cause",
+   desc:"RateSampled, but a response whose triggering request was throttled away is also dropped. Every visible interaction is a complete chain.",
+   sw:"#ffb24d",
+   gives:"No orphans — anything you see has its full request→response chain visible. Cleanest causal story.",
+   costs:"Drops the most of any strategy: dropping a request cascades to its whole subtree. Sparsest picture; under-reports activity.",
+   when:"Demos and teaching, where a visible-but-incomplete chain would mislead more than showing less."},
+  {id:"causal-rate",name:"CausalRate",cls:CausalRate,flood:false,
+   tag:"rate-sampled + retroactively promote the cause",
+   desc:"RateSampled, but when a shown event needs a throttled cause, that cause is retroactively flashed (a short ‘promoted’ packet) so the chain stays intact.",
+   sw:"#c08bff",
+   gives:"Throttled <i>and</i> causally complete — best of both. No lone responses, far fewer drops than DropOrphans.",
+   costs:"More machinery (a per-node buffer of throttled emits). Promoted causes appear as quick flashes, not full-duration travel — a small visual fib.",
+   when:"High rate where you still want every visible response to have a visible cause, without throwing away as much as DropOrphans."},
+  {id:"bundle",name:"BundleSummarized",cls:Bundle,flood:false,
+   tag:"coalesce 100ms bursts → 1 packet",
+   desc:"Bursts on the same edge within a 100ms sim-time window collapse into a single representative packet.",
+   sw:"#7ee787",
+   gives:"Naturally summarizes bursty traffic — one fat packet stands in for a burst. Cheap, no per-edge rate math.",
+   costs:"Loses count: a burst of 2 and a burst of 50 look identical. Coarse — silent within each window.",
+   when:"When the shape of traffic (bursts vs steady) matters more than volume, and you want minimal on-screen clutter."},
+];
+
+// ════════════════════════════════════════════════════════════════
+//  Build DOM
+// ════════════════════════════════════════════════════════════════
+const grid=document.getElementById("grid");
+const cardsEl=document.getElementById("cards");
+const panels=[];
+for(const meta of STRATS){
+  const panel=document.createElement("div");
+  panel.className="panel"+(meta.flood?" flood":"");
+  panel.innerHTML=`
+    <div class="phead">
+      <div class="t"><h3>${meta.name}</h3><span class="tag">${meta.tag}</span></div>
+      <p class="desc">${meta.desc}</p>
+    </div>
+    <canvas class="viz"></canvas>
+    <div class="bar"><i style="width:0%"></i></div>
+    <div class="metrics">
+      <div><div class="k">on screen</div><div class="v" data-m="on">0</div></div>
+      <div title="Cumulative packets this strategy has created since reset — a lifetime odometer, NOT how many are visible at once."><div class="k">created Σ</div><div class="v" data-m="shown">0</div></div>
+      <div title="Cumulative eligible events thrown away (throttled / coalesced / orphaned) since reset."><div class="k">dropped Σ</div><div class="v" data-m="drop">0</div></div>
+      <div><div class="k">peak</div><div class="v" data-m="peak">0</div></div>
+    </div>`;
+  grid.appendChild(panel);
+  const cv=panel.querySelector("canvas");
+  panels.push({meta,canvas:cv,ctx:cv.getContext("2d"),
+    el:{on:panel.querySelector('[data-m=on]'),shown:panel.querySelector('[data-m=shown]'),
+        drop:panel.querySelector('[data-m=drop]'),peak:panel.querySelector('[data-m=peak]'),
+        bar:panel.querySelector('.bar i')}});
+
+  // explanatory card
+  const d=document.createElement("details");
+  d.innerHTML=`
+    <summary><span class="sw" style="background:${meta.sw}"></span>${meta.name}
+      <span class="pill">${meta.tag}</span></summary>
+    <div class="body">
+      <p>${meta.desc}</p>
+      <div class="gives"><b class="g">▲ Gives you</b> — ${meta.gives}</div>
+      <div class="costs"><b class="c">▼ Costs you</b> — ${meta.costs}</div>
+      <div class="when"><b>Reach for it when:</b> ${meta.when}</div>
+    </div>`;
+  cardsEl.appendChild(d);
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Engine state
+// ════════════════════════════════════════════════════════════════
+let strategies=[];
+function buildStrategies(){
+  strategies=STRATS.map(m=>m.cls===SimMirror?new SimMirror():new m.cls(params.k));
+}
+const params={speed:1.0,k:410,rate:30,burst:false,
+  latGR:DEF_LAT_GR,latRW:DEF_LAT_RW,dwell:DEF_DWELL,unit:"ms",unitMul:UNIT_MUL.ms};
+let simNowNs=0, visualNow=0, running=true;
+let pending=[];            // generated chain events not yet ingested (atNs ascending-ish)
+let inFlight=[];           // events with atNs<=simNow<arrives, for SimMirror
+let nextReqTime=0, reqIndex=0, burstCounter=0;
+let rateMarks=[];          // realNow timestamps of eligible G→LB events, for measured rate
+
+function resetSim(){
+  pidCounter=0; simNowNs=0; visualNow=0;
+  pending=[]; inFlight=[]; nextReqTime=0; reqIndex=0; burstCounter=0; rateMarks=[];
+  buildStrategies();
+  for(const p of panels){p.meta._peakShown=0;}
+}
+
+function curCfg(){const m=params.unitMul;
+  return {lGR:params.latGR*m, lRW:params.latRW*m, dwell:params.dwell*m};}
+
+// generate request gen-times as sim advances
+function scheduleRequests(uptoNs){
+  const rate=params.rate; const cfg=curCfg();
+  while(nextReqTime<=uptoNs){
+    const chain=mainChain(nextReqTime,reqIndex,cfg);
+    for(const e of chain) pending.push(e);
+    reqIndex++;
+    if(params.burst){
+      const BURST=8, SPACING=4_000_000, GAP=900_000_000;
+      if((burstCounter%BURST)===BURST-1) nextReqTime+=GAP;
+      else nextReqTime+=SPACING;
+      burstCounter++;
+    }else{
+      nextReqTime += 1e9/Math.max(rate,0.5);
+    }
+    if(reqIndex>200000) break; // safety
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Main loop
+// ════════════════════════════════════════════════════════════════
+let lastWall=performance.now();
+function tick(nowMs){
+  const dtWall=Math.min((nowMs-lastWall)/1000,0.05);
+  lastWall=nowMs;
+
+  if(running){
+    const newSimNs = simNowNs + dtWall*params.speed*1e9;
+    scheduleRequests(newSimNs);
+
+    // drain events whose atNs has been reached, ascending
+    const ready=[];
+    const keep=[];
+    for(const e of pending){ (e.atNs<=newSimNs?ready:keep).push(e); }
+    pending=keep;
+    ready.sort((a,b)=>a.atNs-b.atNs);
+    for(const ev of ready){
+      const realNow=ev.atNs*1e-9;          // == visual_now at emit, lockstep, offset 0
+      if(isVisibleEvent(ev) && mainSources.has(ev.from)) rateMarks.push(realNow);
+      // SimMirror in-flight bookkeeping
+      if(ev.from!==ev.to && ev.arrivesAtNs>ev.atNs) inFlight.push(ev);
+      for(const s of strategies) s.ingest(ev,realNow);
+    }
+
+    simNowNs=newSimNs;
+    visualNow=simNowNs*1e-9;
+
+    // prune in-flight + measured-rate window
+    inFlight=inFlight.filter(e=>e.arrivesAtNs>simNowNs-0.1e9);
+    const rcut=visualNow-1.0;
+    while(rateMarks.length&&rateMarks[0]<rcut)rateMarks.shift();
+  }
+
+  // ── render every panel ───────────────────────────────────────
+  for(let i=0;i<panels.length;i++){
+    const pl=panels[i], strat=strategies[i];
+    let list, on, shown, dropped, peak;
+    if(strat instanceof SimMirror){
+      list=strat.frame(simNowNs,inFlight);
+      on=list.length; peak=strat.peak;
+      // shown/dropped don't apply (everything is shown, none dropped); show on-screen totals
+      shown="all"; dropped=0;
+    }else{
+      strat.gc(visualNow);
+      list=strat.frame(visualNow);
+      on=list.length; shown=strat.shown;
+      dropped=Math.max(0,strat.ingested-strat.shown); peak=strat.peak;
+    }
+    drawPanel(pl,list,mainTopo);
+    pl.el.on.textContent=on;
+    pl.el.shown.textContent=(typeof shown==="number")?shown.toLocaleString():shown;
+    pl.el.drop.textContent=(typeof dropped==="number")?dropped.toLocaleString():dropped;
+    pl.el.peak.textContent=peak;
+    // colour cues
+    pl.el.on.className="v"+(on>120?" warn":"");
+    pl.el.drop.className="v"+(strat instanceof SimMirror?" good":(dropped>0?" warn":" good"));
+    pl.el.bar.style.width=Math.min(100,on/2)+"%";
+  }
+
+  updateInsight();
+  if(scenRunning) for(const d of DEMOS) d.step(dtWall);
+  requestAnimationFrame(tick);
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Rendering
+// ════════════════════════════════════════════════════════════════
+function fit(cv){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth,h=cv.clientHeight;
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){
+    cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);
+  }
+  return {w,h,dpr};
+}
+function nodePos(n,w,h){return {x:24+n.x*(w-48),y:18+n.y*(h-36)};}
+function colorFor(tag){return tag==="resp"?getCSS("--resp"):getCSS("--req");}
+const _css={};
+function getCSS(v){if(!_css[v])_css[v]=getComputedStyle(document.documentElement).getPropertyValue(v).trim();return _css[v];}
+
+const LB_TOPO={nodes:NODES, edges:TOPO_EDGES, byId:NODE_BY_ID};
+
+// ── Alternate main-grid topologies (all use the same ingress/internal/dwell
+//    latency model so the latency sliders stay meaningful) ───────────────
+// Feed-forward pipeline G→A→B→C→S with a service dwell at B.
+const MPIPE_NODES=[
+  {id:0,x:0.08,y:0.5,label:"G"},{id:1,x:0.30,y:0.5,label:"A"},
+  {id:2,x:0.52,y:0.5,label:"B"},{id:3,x:0.74,y:0.5,label:"C"},{id:4,x:0.93,y:0.5,label:"S"},
+];
+const MPIPE_BY_ID={}; MPIPE_NODES.forEach(n=>MPIPE_BY_ID[n.id]=n);
+const MPIPE_TOPO={nodes:MPIPE_NODES, edges:[[0,1],[1,2],[2,3],[3,4]], byId:MPIPE_BY_ID};
+function makeMainPipe(genTimeNs, reqIndex, cfg){
+  const {lGR,lRW,dwell}=cfg;
+  const a1=genTimeNs+lGR, a2=a1+lRW, a3=a2+dwell, a4=a3+lRW;
+  const E=(from,to,at,arr,tag)=>({packet:pidCounter++,from,to,atNs:at,arrivesAtNs:arr,tag,req:reqIndex,genNs:genTimeNs});
+  return [ E(0,1,genTimeNs,a1,"req"), E(1,2,a1,a2,"req"),
+           E(2,2,a2,a3,"dwell"), E(2,3,a3,a4,"req"), E(3,4,a4,a4+lGR,"req") ];
+}
+// Fan-in: 3 sources → collector K (service dwell) → sink D.
+const FANIN_NODES=[
+  {id:0,x:0.10,y:0.20,label:"S0"},{id:1,x:0.10,y:0.50,label:"S1"},{id:2,x:0.10,y:0.80,label:"S2"},
+  {id:3,x:0.52,y:0.50,label:"K"},{id:4,x:0.90,y:0.50,label:"D"},
+];
+const FANIN_BY_ID={}; FANIN_NODES.forEach(n=>FANIN_BY_ID[n.id]=n);
+const FANIN_TOPO={nodes:FANIN_NODES, edges:[[0,3],[1,3],[2,3],[3,4]], byId:FANIN_BY_ID};
+function makeFanChain(genTimeNs, reqIndex, cfg){
+  const {lGR,lRW,dwell}=cfg; const src=reqIndex%3;
+  const a1=genTimeNs+lGR, a2=a1+dwell, a3=a2+lRW;
+  const E=(from,to,at,arr,tag)=>({packet:pidCounter++,from,to,atNs:at,arrivesAtNs:arr,tag,req:reqIndex,genNs:genTimeNs});
+  return [ E(src,3,genTimeNs,a1,"req"), E(3,3,a1,a2,"dwell"), E(3,4,a2,a3,"req") ];
+}
+const MAIN_SCENARIOS={
+  lb:       {topo:LB_TOPO,    chain:makeChain,     sources:new Set([0])},
+  pipeline: {topo:MPIPE_TOPO, chain:makeMainPipe,  sources:new Set([0])},
+  fanin:    {topo:FANIN_TOPO, chain:makeFanChain,  sources:new Set([0,1,2])},
+};
+let mainTopo=LB_TOPO, mainChain=makeChain, mainSources=new Set([0]);
+
+function drawPanel(pl,list,topo){
+  topo=topo||LB_TOPO;
+  const {ctx,canvas}=pl;
+  const {w,h,dpr}=fit(canvas);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  // edges
+  ctx.lineWidth=1.4;ctx.strokeStyle=getCSS("--line");
+  for(const [a,b] of topo.edges){
+    const pa=nodePos(topo.byId[a],w,h),pb=nodePos(topo.byId[b],w,h);
+    ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();
+  }
+  // packets
+  for(const {p,prog} of list){
+    const na=topo.byId[p.from],nb=topo.byId[p.to];
+    if(!na||!nb) continue;
+    const pa=nodePos(na,w,h),pb=nodePos(nb,w,h);
+    const x=pa.x+(pb.x-pa.x)*prog, y=pa.y+(pb.y-pa.y)*prog;
+    const col=p.orphan?getCSS("--orphan"):p.bundle?getCSS("--bundle"):colorFor(p.tag);
+    const r=p.orphan?4.2:p.bundle?4.5:3.2;
+    ctx.beginPath();ctx.arc(x,y,r,0,7);
+    ctx.fillStyle=col;ctx.globalAlpha=.92;ctx.fill();ctx.globalAlpha=1;
+    if(p.orphan){ // acausal "spawned before its cause" — red halo
+      ctx.beginPath();ctx.arc(x,y,6.4,0,7);ctx.lineWidth=1.6;
+      ctx.strokeStyle=getCSS("--orphan");ctx.globalAlpha=.6;ctx.stroke();ctx.globalAlpha=1;
+    }
+    if(p.promoted){ // promoted-cause ring
+      ctx.beginPath();ctx.arc(x,y,5.2,0,7);ctx.lineWidth=1.6;
+      ctx.strokeStyle=getCSS("--promo");ctx.stroke();
+    }
+  }
+  // nodes (on top)
+  for(const n of topo.nodes){
+    const p=nodePos(n,w,h);
+    ctx.beginPath();ctx.arc(p.x,p.y,11,0,7);
+    ctx.fillStyle=getCSS("--node");ctx.fill();
+    ctx.lineWidth=1.5;ctx.strokeStyle=getCSS("--nodeline");ctx.stroke();
+    ctx.fillStyle=getCSS("--ink");ctx.font="600 9.5px ui-monospace,monospace";
+    ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(n.label,p.x,p.y);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Insight line
+// ════════════════════════════════════════════════════════════════
+function updateInsight(){
+  const measured=rateMarks.length; // eligible G→LB events in last 1s of visual time
+  document.getElementById("measRate").textContent=measured+"/s";
+  const ins=document.getElementById("insight");
+  // Pick a regime. The prose is kept free of per-frame-varying numbers
+  // (the live count lives in the legend chip) so the regime — and thus
+  // the DOM — only changes on a slider/toggle, keeping the text both
+  // reflow-free and selectable.
+  let regime, msg, calm=true;
+  if(params.speed>=8){
+    regime="fast"; calm=false;
+    msg=`At <b>${fmtSpeed(params.speed)}</b> the sim outruns your eye — <b>SimMirror</b> shows almost nothing. Lower the multiplier or use a k-stretched strategy.`;
+  }else if(params.burst){
+    regime="burst"; calm=false;
+    msg=`Bursty traffic: <b>Bundle</b> collapses each burst to one packet, <b>Replay</b> fires the whole burst, and the rate-throttled strategies hold a steady trickle.`;
+  }else if(params.rate>MAX_VISUAL_RATE_PER_EDGE){
+    regime="flood"; calm=false;
+    msg=`Over the 10/s budget: <b>Replay</b> floods (shows every packet) while the throttled strategies stay readable. Compare orphans — RateSampled vs DropOrphans vs CausalRate.`;
+  }else{
+    regime="steady";
+    msg=`Low, steady rate (≤ 10/s budget): every strategy looks the same. <b>Raise the rate, enable bursts, or raise the multiplier</b> to force them apart.`;
+  }
+  // Only touch the DOM when the regime (or speed shown within it) changes —
+  // rewriting innerHTML every frame would wipe any text selection.
+  const key=regime+(regime==="fast"?fmtSpeed(params.speed):"");
+  if(key!==_lastInsightKey){
+    ins.innerHTML=msg; ins.className="insight"+(calm?" calm":"");
+    _lastInsightKey=key;
+  }
+}
+let _lastInsightKey="";
+function fmtSpeed(s){return (s>=1?(s<10?s.toFixed(1):s.toFixed(0)):s.toFixed(2))+"×";}
+
+// ════════════════════════════════════════════════════════════════
+//  Causality scenarios — isolated mini-sims
+// ════════════════════════════════════════════════════════════════
+// A self-contained discrete-event sim over the same topology, driving
+// one strategy. Independent of the top controls.
+class MiniSim{
+  constructor(cfg,rate,chainFn,metaCap,burst){this.cfg=cfg;this.rate=rate;
+    this.chainFn=chainFn||makeChain;this.metaCap=metaCap||8000;this.burst=burst||null;this.reset();}
+  reset(){this.simNowNs=0;this.pending=[];this.inFlight=[];this.nextReq=0;
+    this.reqIndex=0;this.meta=new Map();this.streamed=0;this.burstCount=0;}
+  // Manually inject one chain at a given sim-ns (for looping demos that
+  // drive their own schedule). Returns the req index used.
+  fire(genTimeNs){
+    const chain=this.chainFn(genTimeNs,this.reqIndex,this.cfg);
+    for(const e of chain){this.pending.push(e);this.meta.set(e.packet,{req:e.req,genNs:e.genNs,hop:e.hop});}
+    return this.reqIndex++;
+  }
+  advance(dtSimNs,ingest){
+    const newSim=this.simNowNs+dtSimNs;
+    while(this.rate>0 && this.nextReq<=newSim){
+      const chain=this.chainFn(this.nextReq,this.reqIndex,this.cfg);
+      for(const e of chain){this.pending.push(e);this.meta.set(e.packet,{req:e.req,genNs:e.genNs,hop:e.hop});}
+      this.reqIndex++;
+      if(this.burst){
+        const {n,spacing,gap}=this.burst;
+        this.nextReq += ((this.burstCount%n)===n-1) ? gap : spacing;
+        this.burstCount++;
+      }else{
+        this.nextReq+=1e9/Math.max(this.rate,0.5);
+      }
+      if(this.reqIndex>5e6) break;
+    }
+    const ready=[],keep=[];
+    for(const e of this.pending){(e.atNs<=newSim?ready:keep).push(e);}
+    this.pending=keep; ready.sort((a,b)=>a.atNs-b.atNs);
+    for(const ev of ready){
+      if(ev.from!==ev.to && ev.arrivesAtNs>ev.atNs){this.inFlight.push(ev);this.streamed++;}
+      if(ingest) ingest(ev,ev.atNs*1e-9);
+    }
+    this.simNowNs=newSim;
+    this.inFlight=this.inFlight.filter(e=>e.arrivesAtNs>newSim-0.05e9);
+    if(this.meta.size>this.metaCap){const drop=this.meta.size-this.metaCap;let i=0;
+      for(const k of this.meta.keys()){if(i++>=drop)break;this.meta.delete(k);}}
+  }
+}
+
+// ── Scenario 1: SimMirror, low latency ──────────────────────────
+const DEMOS=[];
+let scenRunning=true;
+function setM(id,v){document.getElementById(id).textContent=
+  (typeof v==="number")?v.toLocaleString():v;}
+{
+  const pl={canvas:document.getElementById("s1canvas")};
+  pl.ctx=pl.canvas.getContext("2d");
+  const sim=new MiniSim({lGR:1e6,lRW:1e6,dwell:4e6}, 50);
+  const strat=new SimMirror();
+  const speedEl=document.getElementById("s1speed"), speedVal=document.getElementById("s1speedVal"),
+        onEl=document.getElementById("s1on"), visEl=document.getElementById("s1vis"),
+        passedEl=document.getElementById("s1passed");
+  let speed=1.0, visEMA=0;
+  speedEl.addEventListener("input",()=>{speed=Math.pow(10,parseFloat(speedEl.value));
+    speedVal.textContent=fmtSpeed(speed);});
+  DEMOS.push({step(dtWall){
+    sim.advance(dtWall*speed*1e9, null);
+    const list=strat.frame(sim.simNowNs, sim.inFlight);
+    drawPanel(pl,list,LB_TOPO);
+    const on=list.length;
+    visEMA = visEMA*0.95 + (on>0?1:0)*0.05;
+    onEl.textContent=on;
+    visEl.textContent=Math.round(visEMA*100)+"%";
+    visEl.className="v"+(visEMA<0.25?" warn":"");
+    passedEl.textContent=sim.streamed.toLocaleString();
+  }});
+}
+
+// ── Scenario 2: Replay, lag behind the sim ──────────────────────
+{
+  const pl={canvas:document.getElementById("s2canvas")};
+  pl.ctx=pl.canvas.getContext("2d");
+  // CYCLIC req/response (response routed back to the generator). The causal
+  // clamp then SERIALIZES the whole loop: request N's chain can't visually
+  // start until request N-1's reply has visually arrived back at G. With a big
+  // k each round trip is many seconds, so Replay falls further behind forever.
+  const cfg={lGR:8e6,lRW:6e6,dwell:25e6};
+  const sim=new MiniSim(cfg, 12, makeChain, 1e7);   // huge meta cap: old replies stay referenced
+  let strat=new Replay(410);
+  const kEl=document.getElementById("s2k"), kVal=document.getElementById("s2kVal"),
+        kProseEl=document.getElementById("s2kProse"),
+        firedEl=document.getElementById("s2fired"), fromEl=document.getElementById("s2from"),
+        lagEl=document.getElementById("s2lag"), pendEl=document.getElementById("s2pending"),
+        fromInline=document.getElementById("s2fromInline");
+  kEl.addEventListener("input",()=>{
+    const k=Math.round(Math.pow(10,parseFloat(kEl.value)));
+    kVal.textContent=k; kProseEl.textContent=k;
+    strat=new Replay(k); sim.reset();         // fresh picture for the new stretch
+  });
+  DEMOS.push({step(dtWall){
+    const dt=Math.min(dtWall,0.05);
+    sim.advance(dt*1e9, (ev,rn)=>strat.ingest(ev,rn));
+    const visualNow=sim.simNowNs*1e-9;
+    strat.gc(visualNow);
+    const list=strat.frame(visualNow);
+    drawPanel(pl,list,LB_TOPO);
+    // Newest request with ANY packet visible. Under the runaway the chain
+    // currently crawling across is a very old request, so this stays pinned
+    // far behind sim.reqIndex while the sim races ahead.
+    let best=null;
+    for(const {p} of list){
+      const m=sim.meta.get(p.packetId);
+      if(m && (!best || m.req>best.req)) best=m;
+    }
+    firedEl.textContent=sim.reqIndex.toLocaleString();
+    if(best){
+      const lagS=visualNow - best.genNs*1e-9;
+      const f="#"+best.req.toLocaleString();
+      fromEl.textContent=f; fromInline.textContent=f;
+      lagEl.textContent=lagS<90?lagS.toFixed(1)+" s":(lagS/60).toFixed(1)+" min";
+      pendEl.textContent=Math.max(0,(sim.reqIndex-1)-best.req).toLocaleString();
+    }else{
+      fromEl.textContent="—"; fromInline.textContent="—";
+      lagEl.textContent="building…"; pendEl.textContent=sim.reqIndex.toLocaleString();
+    }
+  }});
+}
+
+// ── Scenarios 3–6: LOOPING bursts on the acyclic pipeline ──────────
+// Each demo fires a small burst, lets it play out and clear, then loops.
+// Slow + sparse so you can follow individual packets. Visual cues:
+//   • dropped events → faint hollow GHOST packets (you see what's lost)
+//   • acausal packets (effect shown before its cause arrives) → RED, with
+//     a dashed link to where the cause actually is
+//   • promoted causes (CausalRate) → purple ring flash
+const SK=410;            // demo stretch (matches K_DEFAULT)
+const PIPE_LAT=6e6;
+const POP_DUR=1.3;       // how long a promotion "pop" lingers on screen (s)
+
+// Rich renderer for the scenario canvases.
+function drawScene(pl, visible, ghosts, pops, now){
+  const topo=PIPE_TOPO, {ctx,canvas}=pl, {w,h,dpr}=fit(canvas);
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  const pos=n=>nodePos(topo.byId[n],w,h);
+  // edges
+  ctx.lineWidth=1.4; ctx.strokeStyle=getCSS("--line");
+  for(const [a,b] of topo.edges){const pa=pos(a),pb=pos(b);
+    ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();}
+  // ghosts (dropped) — faint hollow dots gliding the edge they'd have taken
+  ctx.lineWidth=1.2;
+  for(const g of ghosts){
+    if(now<g.emit||now>=g.arrive) continue;
+    const pa=pos(g.from),pb=pos(g.to),pr=(now-g.emit)/(g.arrive-g.emit);
+    const x=pa.x+(pb.x-pa.x)*pr,y=pa.y+(pb.y-pa.y)*pr;
+    ctx.beginPath();ctx.arc(x,y,3,0,7);
+    ctx.strokeStyle=getCSS("--dim2");ctx.globalAlpha=.5;ctx.stroke();ctx.globalAlpha=1;
+  }
+  // build position map for cause links
+  const pmap=new Map();
+  for(const {p,prog} of visible){
+    const pa=pos(p.from),pb=pos(p.to);
+    p._x=pa.x+(pb.x-pa.x)*prog; p._y=pa.y+(pb.y-pa.y)*prog;
+    if(p._req!=null) pmap.set(p._req+":"+p._hop,p);
+  }
+  // cause links for acausal packets
+  for(const {p} of visible){
+    if(!p.orphan||p._req==null) continue;
+    const cause=pmap.get(p._req+":"+(p._hop-1));
+    ctx.setLineDash([4,4]); ctx.lineWidth=1.4; ctx.strokeStyle=getCSS("--orphan");
+    ctx.globalAlpha=.7; ctx.beginPath(); ctx.moveTo(p._x,p._y);
+    if(cause){ ctx.lineTo(cause._x,cause._y); }      // effect → its lagging cause
+    else { const up=pos(p.from); ctx.lineTo(up.x,up.y); }  // cause not on screen
+    ctx.stroke(); ctx.globalAlpha=1; ctx.setLineDash([]);
+  }
+  // packets
+  for(const {p} of visible){
+    const col=p.orphan?getCSS("--orphan"):p.bundle?getCSS("--bundle"):colorFor(p.tag);
+    const r=p.orphan?4.4:3.4;
+    ctx.beginPath();ctx.arc(p._x,p._y,r,0,7);ctx.fillStyle=col;ctx.globalAlpha=.95;ctx.fill();ctx.globalAlpha=1;
+    if(p.orphan){ctx.beginPath();ctx.arc(p._x,p._y,7,0,7);ctx.lineWidth=1.6;
+      ctx.strokeStyle=getCSS("--orphan");ctx.globalAlpha=.55;ctx.stroke();ctx.globalAlpha=1;}
+    if(p.promoted){ctx.beginPath();ctx.arc(p._x,p._y,7,0,7);ctx.lineWidth=2;
+      ctx.strokeStyle=getCSS("--promo");ctx.stroke();}
+  }
+  // nodes
+  for(const n of topo.nodes){const pn=pos(n.id);
+    ctx.beginPath();ctx.arc(pn.x,pn.y,11,0,7);ctx.fillStyle=getCSS("--node");ctx.fill();
+    ctx.lineWidth=1.5;ctx.strokeStyle=getCSS("--nodeline");ctx.stroke();
+    ctx.fillStyle=getCSS("--ink");ctx.font="600 9.5px ui-monospace,monospace";
+    ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(n.label,pn.x,pn.y);}
+  // promotion "pops" — an expanding purple ripple where a throttled cause
+  // was retroactively flashed back into existence. The unique CausalRate move.
+  if(pops) for(const pp of pops){
+    const age=(now-pp.t0)/POP_DUR; if(age<0||age>1) continue;
+    const pn=pos(pp.to);
+    ctx.beginPath();ctx.arc(pn.x,pn.y,11+age*16,0,7);ctx.lineWidth=2.4;
+    ctx.strokeStyle=getCSS("--promo");ctx.globalAlpha=(1-age)*0.9;ctx.stroke();ctx.globalAlpha=1;
+    if(age<0.4){ ctx.fillStyle=getCSS("--promo");ctx.globalAlpha=(0.4-age)/0.4*0.9;
+      ctx.font="700 9px ui-monospace,monospace";ctx.textAlign="center";
+      ctx.fillText("↩cause",pn.x,pn.y-18);ctx.globalAlpha=1; }
+  }
+}
+
+// opts: {k, markRed, ghosts, onMetrics} plus EITHER
+//   loop:  {nReqs, spacing(ns), cycle(s)}  — fires a burst each cycle, clears, repeats
+//   cont:  {rate}                          — continuous over-budget stream (needed for
+//                                            CausalRate promotions, which require sustained
+//                                            desynchronized throttling — a burst+gap resets it)
+function loopDemo(canvasId, strat, opts){
+  const pl={canvas:document.getElementById(canvasId)}; pl.ctx=pl.canvas.getContext("2d");
+  const progEl=document.getElementById(canvasId.replace("canvas","prog"));
+  const k=opts.k||SK, continuous=opts.rate>0;
+  const sim=new MiniSim({lat:PIPE_LAT}, continuous?opts.rate:0, makePipeChain);
+  const shownArrive=new Map(); const ghosts=[]; const pops=[];
+  let acausal=0, promoted=0, nextBurst=0;
+  const cycleNs=(opts.cycle||9)*1e9;
+  function fireBurst(at){ for(let i=0;i<opts.nReqs;i++) sim.fire(at + i*opts.spacing); }
+  if(!continuous){ fireBurst(0); nextBurst=cycleNs; }
+  const slow=opts.slow||1;
+  DEMOS.push({step(dtWall){
+    const dt=Math.min(dtWall,0.05);
+    sim.advance(dt*1e9*slow,(ev,rn)=>{
+      const before=strat.packets.length;
+      strat.ingest(ev,rn);
+      if(strat.packets.length===before){      // dropped (no packet produced)
+        if(opts.ghosts && ev.from!==ev.to && ev.arrivesAtNs>ev.atNs){
+          const lat=(ev.arrivesAtNs-ev.atNs)*1e-9;
+          ghosts.push({from:ev.from,to:ev.to,emit:rn,arrive:rn+lat*k});
+        }
+      } else {
+        for(let i=before;i<strat.packets.length;i++){
+          const p=strat.packets[i], meta=sim.meta.get(p.packetId);
+          if(p.promoted){ promoted++; pops.push({from:p.from,to:p.to,t0:p.emitReal}); }
+          else if(meta && meta.hop>=1){
+            const causeArr=shownArrive.get(meta.req+":"+(meta.hop-1));
+            if(causeArr===undefined||causeArr>p.emitReal+1e-9){ acausal++; if(opts.markRed) p.orphan=true; }
+          }
+          if(meta){ p._req=meta.req; p._hop=meta.hop; shownArrive.set(meta.req+":"+meta.hop,p.arriveReal); }
+        }
+      }
+    });
+    if(!continuous && sim.simNowNs>=nextBurst){ fireBurst(nextBurst); nextBurst+=cycleNs; }
+    const visualNow=sim.simNowNs*1e-9;
+    while(ghosts.length && ghosts[0].arrive<visualNow) ghosts.shift();
+    while(pops.length && pops[0].t0 < visualNow-POP_DUR) pops.shift();
+    if(shownArrive.size>20000){let i=0,d=shownArrive.size-20000;
+      for(const k of shownArrive.keys()){if(i++>=d)break;shownArrive.delete(k);}}
+    strat.gc(visualNow);
+    drawScene(pl, strat.frame(visualNow), ghosts, pops, visualNow);
+    // loop-progress bar
+    if(continuous){ const pos=(visualNow*0.22)%1;
+      progEl.style.width="26%"; progEl.style.marginLeft=(pos*74)+"%"; }
+    else { const cs=nextBurst-cycleNs; const frac=Math.min(1,Math.max(0,(sim.simNowNs-cs)/cycleNs));
+      progEl.style.width=(frac*100)+"%"; }
+    opts.onMetrics({created:strat.shown, ingested:strat.ingested,
+      dropped:Math.max(0,strat.ingested-strat.shown), acausal, promoted});
+  }});
+}
+
+// 3 — RateSampled: 2 chains/cycle, UNDER budget (no drops). The story is
+// the missing clamp: every downstream hop is red, ahead of its cause.
+loopDemo("s3canvas", new RateSampled(180), {k:180, nReqs:4, spacing:0.55e9, cycle:5.5, markRed:true, ghosts:false,
+  onMetrics:m=>{ setM("s3created",m.created); setM("s3orphan",m.acausal);
+    setM("s3pct", m.created? Math.round(100*m.acausal/m.created)+"%":"—"); }});
+// 4 — DropOrphans: a dense burst OVER budget. Most drop (ghosts); a
+// dropped cause kills its subtree → drops the most.
+loopDemo("s4canvas", new DropOrphans(220), {k:220, nReqs:44, spacing:18e6, cycle:7, markRed:false, ghosts:true,
+  onMetrics:m=>{ setM("s4created",m.created); setM("s4dropped",m.dropped);
+    setM("s4pct", m.ingested? Math.round(100*m.dropped/m.ingested)+"%":"—"); }});
+// 5 — CausalRate: CONTINUOUS over-budget (sustained throttle is what makes
+// throttled causes get flashed back). Ghosts show drops; purple ripples show
+// the rescues — the unique move: a dropped cause comes BACK to keep the chain.
+loopDemo("s5canvas", new CausalRate(55), {k:55, rate:30, slow:0.18, markRed:false, ghosts:true,
+  onMetrics:m=>{ setM("s5created",m.created); setM("s5promo",m.promoted);
+    setM("s5pct", m.ingested? Math.round(100*m.dropped/m.ingested)+"%":"—"); }});
+// 6 — Bundle: a tight burst on each edge collapses to one dot; the rest
+// become ghosts that ride alongside — count loss made visible.
+loopDemo("s6canvas", new Bundle(220), {k:220, nReqs:24, spacing:16e6, cycle:7, markRed:false, ghosts:true,
+  onMetrics:m=>{ setM("s6events",m.ingested); setM("s6shown",m.created);
+    setM("s6ratio", m.created? (m.ingested/m.created).toFixed(1)+"×":"—"); }});
+
+const scenToggle=document.getElementById("scenToggle");
+scenToggle.addEventListener("click",()=>{ scenRunning=!scenRunning;
+  scenToggle.textContent=scenRunning?"⏸ Pause":"▶ Play";
+  scenToggle.classList.toggle("primary",scenRunning); });
+
+// ════════════════════════════════════════════════════════════════
+//  Controls wiring
+// ════════════════════════════════════════════════════════════════
+const speedEl=document.getElementById("speed"), kEl=document.getElementById("k"),
+      rateEl=document.getElementById("rate"), burstEl=document.getElementById("burst"),
+      speedVal=document.getElementById("speedVal"), kValEl=document.getElementById("kVal"),
+      rateVal=document.getElementById("rateVal"), playBtn=document.getElementById("playBtn"),
+      resetBtn=document.getElementById("resetBtn"),
+      latGREl=document.getElementById("latGR"), latRWEl=document.getElementById("latRW"),
+      dwellEl=document.getElementById("dwell"), latUnitEl=document.getElementById("latUnit"),
+      latGRVal=document.getElementById("latGRVal"), latRWVal=document.getElementById("latRWVal"),
+      dwellVal=document.getElementById("dwellVal");
+
+function applySpeed(){params.speed=Math.pow(10,parseFloat(speedEl.value));
+  speedVal.textContent=(params.speed>=1?params.speed.toFixed(params.speed<10?1:0):params.speed.toFixed(2))+"×";}
+function applyK(){params.k=Math.round(Math.pow(10,parseFloat(kEl.value)));
+  kValEl.textContent=params.k;for(const s of strategies)if(s.setK)s.setK(params.k);}
+function applyRate(){params.rate=parseInt(rateEl.value);rateVal.textContent=params.rate+"/s";}
+function applyLat(){
+  params.latGR=parseInt(latGREl.value); params.latRW=parseInt(latRWEl.value);
+  params.dwell=parseInt(dwellEl.value);
+  params.unit=latUnitEl.value; params.unitMul=UNIT_MUL[params.unit];
+  const u=" "+params.unit;
+  latGRVal.textContent=params.latGR+u;
+  latRWVal.textContent=params.latRW+u;
+  dwellVal.textContent=params.dwell+u;
+}
+
+speedEl.addEventListener("input",applySpeed);
+kEl.addEventListener("input",applyK);
+rateEl.addEventListener("input",()=>{applyRate();});
+latGREl.addEventListener("input",applyLat);
+latRWEl.addEventListener("input",applyLat);
+dwellEl.addEventListener("input",applyLat);
+latUnitEl.addEventListener("change",applyLat);
+burstEl.addEventListener("change",()=>{params.burst=burstEl.checked;
+  rateEl.disabled=params.burst;});
+const scenarioEl=document.getElementById("scenario");
+scenarioEl.addEventListener("change",()=>{
+  const s=MAIN_SCENARIOS[scenarioEl.value]||MAIN_SCENARIOS.lb;
+  mainTopo=s.topo; mainChain=s.chain; mainSources=s.sources;
+  resetSim();
+});
+playBtn.addEventListener("click",()=>{running=!running;
+  playBtn.textContent=running?"⏸ Pause":"▶ Play";playBtn.classList.toggle("primary",running);});
+resetBtn.addEventListener("click",()=>{resetSim();applyK();});
+
+applySpeed();applyK();applyRate();applyLat();
+resetSim();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
