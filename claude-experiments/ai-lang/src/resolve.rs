@@ -2977,7 +2977,14 @@ fn resolve_checked_decode(
         });
     }
     let t = resolve_type(&type_args[0], structs, enums, type_params)?;
-    let expected = decode_expected_hash(&t, span)?;
+    // A type variable (a generic `decode::<T>`, e.g. inside `at_via<T>`)
+    // has no concrete identity hash; bake the all-zero "no-check" sentinel
+    // so the runtime trusts the bytes (same model as `at`). Concrete types
+    // keep their checked identity hash.
+    let expected = match &t {
+        Type::TypeVar(_) => Hash([0u8; 32]),
+        _ => decode_expected_hash(&t, span)?,
+    };
     // Ensure the Result/Failure binding exists so the runtime can build
     // the Result and the runtime-side binding gets installed at startup.
     let binding = match at_binding.as_ref() {

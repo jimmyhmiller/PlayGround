@@ -2334,7 +2334,12 @@ pub unsafe extern "C" fn ai_wire_decode_checked(
         }
         WireValue::Heap(p) => (p, unsafe { identity_hash_of(rt, p) }),
     };
-    if identity != expected {
+    // An all-zero `expected` is the "no-check" sentinel baked by
+    // `decode::<T>` when T is a type variable (e.g. inside a generic
+    // `at_via<T>`): trust the bytes exactly as the Rust `at` driver does
+    // (both ends compiled the same source), returning the decoded value
+    // without a per-call shape check. Concrete types keep their check.
+    if expected != Hash([0u8; 32]) && identity != expected {
         return unsafe { build_decode_err(thread, binding, &binding.decode_type_mismatch) };
     }
     unsafe { build_ok(thread, binding, value_ptr) }
@@ -2509,6 +2514,196 @@ mod tests {
             vec![41, 41, 1, 0 - 404],
             "function-driven TCP KV: set/get/del/get-missing"
         );
+    }
+
+    /// Records-of-closures transport: `at` reimplemented as an ordinary
+    /// language function `at_via` that drives ANY value providing a
+    /// `roundtrip` closure — the "language-level trait" is just a struct of
+    /// closures. TCP is reimplemented as one such record (`tcp_transport`)
+    /// over the existing socket/framing layer; a second, socket-free
+    /// `local_transport` runs the shipped thunk in-process through the
+    /// identical interface, proving the carrier is fully pluggable.
+    #[test]
+    fn at_via_records_of_closures() {
+        init();
+        let port = free_port();
+        // Transport / at_via / tcp_transport / local_transport now live in
+        // the stdlib prelude — the program only supplies its handler and the
+        // thin server/client entry points.
+        let extra = r#"
+            def work(x: Int) -> Int = x * 10 + 3
+
+            def srv_listen(p: Int) -> Int =
+                match tcp_listen(p) { Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }
+            def srv_run(fd: Int) -> Int = serve_turns(fd, 1)
+
+            def cli_tcp(p: Int, x: Int) -> Int =
+                match at_via(tcp_transport(127, 0, 0, 1, p), || work(x)) {
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }
+
+            def cli_local(x: Int) -> Int =
+                match at_via(local_transport(), || work(x)) {
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }
+        "#;
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, extra);
+        install_current_runtime(&server_rt);
+        let listen = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["srv_listen"]),
+                )
+                .unwrap()
+        };
+        let fd = unsafe { listen.call(server_rt.thread_ptr(), port as i64) };
+        assert!(fd >= 0, "listen failed: {}", fd);
+
+        let extra_for_client = extra.to_owned();
+        let client = std::thread::spawn(move || -> (i64, i64) {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &extra_for_client);
+            install_current_runtime(&client_rt);
+            // `at_via` decodes the reply via `decode::<T>`, which needs the
+            // Result/DecodeError binding installed on this thread.
+            let full = format!("{}\n{}", crate::stdlib::SOURCE, extra_for_client);
+            let m = parse_module(&full).unwrap();
+            let r = resolve_module(&m).unwrap();
+            let rb = r.at_binding.as_ref().expect("at_binding");
+            let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+            install_current_at_binding(&rt_binding);
+            // Second transport first — it needs no server, just the local
+            // runtime (wire_invoke runs the thunk in-process).
+            let cli_local = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["cli_local"]),
+                    )
+                    .unwrap()
+            };
+            let local = unsafe { cli_local.call(client_rt.thread_ptr(), 5) };
+            // TCP transport — the server loop below handles exactly this call.
+            let cli_tcp = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["cli_tcp"]),
+                    )
+                    .unwrap()
+            };
+            let tcp = unsafe { cli_tcp.call(client_rt.thread_ptr(), port as i64, 4) };
+            clear_current_at_binding();
+            clear_current_runtime();
+            (local, tcp)
+        });
+
+        let _ = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["srv_run"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let (local, tcp) = client.join().unwrap();
+        clear_current_runtime();
+        // work(5) = 53 in-process; work(4) = 43 over loopback TCP — both
+        // through the same `at_via` driver, different transport records.
+        assert_eq!(local, 5 * 10 + 3, "local transport: in-process roundtrip");
+        assert_eq!(tcp, 4 * 10 + 3, "tcp transport: loopback roundtrip");
+    }
+
+    /// The Unix-domain-socket transport, through the SAME `at_via` driver
+    /// and the SAME `serve_turns` loop as TCP — only the carrier (a
+    /// `unix_transport` over a filesystem socket) differs. Proves the
+    /// framing/serve layer is fd-generic, not TCP-specific.
+    #[test]
+    fn at_via_unix_socket_transport() {
+        init();
+        let sock_path = format!(
+            "{}/ai_lang_at_{}.sock",
+            std::env::temp_dir().display(),
+            std::process::id()
+        );
+        let _ = std::fs::remove_file(&sock_path);
+        let extra = format!(
+            r#"
+            def work(x: Int) -> Int = x * 10 + 3
+            def usrv_listen() -> Int =
+                match unix_listen("{path}") {{ Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }}
+            def usrv_run(fd: Int) -> Int = serve_turns(fd, 1)
+            def ucli(x: Int) -> Int =
+                match at_via(unix_transport("{path}"), || work(x)) {{
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }}
+        "#,
+            path = sock_path
+        );
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &extra);
+        install_current_runtime(&server_rt);
+        let fd = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["usrv_listen"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr())
+        };
+        assert!(fd >= 0, "unix_listen failed: {}", fd);
+
+        let extra_for_client = extra.clone();
+        let client = std::thread::spawn(move || -> i64 {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &extra_for_client);
+            install_current_runtime(&client_rt);
+            let full = format!("{}\n{}", crate::stdlib::SOURCE, extra_for_client);
+            let m = parse_module(&full).unwrap();
+            let r = resolve_module(&m).unwrap();
+            let rb = r.at_binding.as_ref().expect("at_binding");
+            let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+            install_current_at_binding(&rt_binding);
+            let ucli = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["ucli"]),
+                    )
+                    .unwrap()
+            };
+            let r = unsafe { ucli.call(client_rt.thread_ptr(), 7) };
+            clear_current_at_binding();
+            clear_current_runtime();
+            r
+        });
+
+        let _ = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["usrv_run"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let result = client.join().unwrap();
+        clear_current_runtime();
+        let _ = std::fs::remove_file(&sock_path);
+        assert_eq!(result, 7 * 10 + 3, "unix transport: socket-file roundtrip");
     }
 
     /// The same KV store via `at()` — the client calls `kv_set_at` then

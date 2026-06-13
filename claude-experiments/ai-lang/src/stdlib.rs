@@ -3214,6 +3214,7 @@ extern "C" lib "c" {
     fn write(fd: Int, buf: Ptr, count: Int) -> Int
     fn close(fd: Int) -> Int
     fn setsockopt(fd: Int, level: Int, optname: Int, optval: Ptr, optlen: Int) -> Int
+    fn unlink(path: Ptr) -> Int
 }
 
 enum NetErr {
@@ -3450,6 +3451,149 @@ def serve(listener: Int) -> Int = {
     let _t = serve_turn(listener);
     serve(listener)
 }
+
+// ============================================================
+// Transports — `at` over a pluggable carrier (records of closures)
+// ============================================================
+//
+// A `Transport` is the language-level "trait" for reaching a node: a
+// record holding ONE closure that turns a request frame (the shipped
+// closure's wire bytes) into a reply frame (the encoded result). Any
+// carrier — TCP, a Unix socket, an in-process call, later HTTP/Lambda —
+// is just a value of this type, built by capturing its own connection
+// details. `at_via` drives any of them; nothing in it knows how the
+// bytes actually travel.
+
+struct Transport { roundtrip: fn(Bytes) -> Result<Bytes, NetErr> }
+
+// `at`, as an ordinary function over a pluggable transport. Ship the
+// thunk's bytes; decode the reply back to T. A decode failure (the reply
+// held some other type, or was truncated) folds into ConnClosed — the
+// call did not deliver a usable T.
+def at_via<T>(t: Transport, thunk: fn() -> T) -> Result<T, NetErr> = {
+    let req = wire_encode(thunk);
+    let rt = t.roundtrip;
+    match rt(req) {
+        Result::Ok(resp) => match decode::<T>(resp) {
+            Result::Ok(v) => Result::Ok(v),
+            Result::Err(_e) => Result::Err(NetErr::ConnClosed),
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// One request/response over an already-connected fd, closing it after.
+def fd_roundtrip(fd: Int, req: Bytes) -> Result<Bytes, NetErr> =
+    match send_frame(fd, req) {
+        Result::Ok(_w) => {
+            let r = recv_frame(fd);
+            let _c = conn_close(fd);
+            r
+        },
+        Result::Err(e) => { let _c = conn_close(fd); Result::Err(e) },
+    }
+
+// In-process transport: run the shipped thunk locally via wire_invoke.
+// No socket, no copy off-process — the same interface, a different carrier.
+def local_transport() -> Transport =
+    Transport { roundtrip: |req: Bytes| Result::Ok(wire_invoke(req)) }
+
+// TCP transport: connect per call, frame the request, read the reply.
+def tcp_roundtrip(a: Int, b: Int, c: Int, d: Int, port: Int, req: Bytes) -> Result<Bytes, NetErr> =
+    match tcp_connect(a, b, c, d, port) {
+        Result::Ok(fd) => fd_roundtrip(fd, req),
+        Result::Err(e) => Result::Err(e),
+    }
+
+def tcp_transport(a: Int, b: Int, c: Int, d: Int, port: Int) -> Transport =
+    Transport { roundtrip: |req: Bytes| tcp_roundtrip(a, b, c, d, port, req) }
+
+// ---- Unix-domain-socket transport ----
+//
+// Only `connect`/`listen` differ from TCP — the framing (send_frame /
+// recv_frame), the per-fd roundtrip (fd_roundtrip), and the server loop
+// (serve_turns, whose accept takes any listener fd) are all fd-generic
+// and reused verbatim. That reuse is the whole point of the abstraction.
+
+// Build a `sockaddr_un` for `path` in a fresh malloc'd buffer. macOS
+// layout: sun_len@0, sun_family@1 (AF_UNIX = 1), then the NUL-terminated
+// path; the used address length is `len(path) + 3`. (On Linux byte 0 is
+// the low byte of the 2-byte family field — this targets the dev host.)
+def net_sockaddr_un(path: String) -> Ptr = {
+    let pb = bytes_from_string(path);
+    let n = bytes_len(pb);
+    let total = n + 3;
+    let sa = malloc(total);
+    let _z = net_zero(sa, 0, total);
+    let _l = ptr_write_u8(sa, 0, total);   // sun_len
+    let _f = ptr_write_u8(sa, 1, 1);       // AF_UNIX
+    let _p = net_bytes_to_buf(pb, ptr_add(sa, 2), 0, n);
+    sa
+}
+
+def net_sockaddr_un_len(path: String) -> Int = bytes_len(bytes_from_string(path)) + 3
+
+// A NUL-terminated C string in a fresh malloc'd buffer (the C FFI takes
+// `Ptr`, not `String`). Caller frees.
+def net_cstr(s: String) -> Ptr = {
+    let b = bytes_from_string(s);
+    let n = bytes_len(b);
+    let p = malloc(n + 1);
+    let _z = ptr_write_u8(p, n, 0);
+    let _c = net_bytes_to_buf(b, p, 0, n);
+    p
+}
+
+// Connect a SOCK_STREAM AF_UNIX socket to `path`.
+def unix_connect(path: String) -> Result<Int, NetErr> = {
+    let fd = socket(1, 1, 0);              // AF_UNIX, SOCK_STREAM
+    if fd < 0 { Result::Err(NetErr::SocketFailed) } else {
+        let sa = net_sockaddr_un(path);
+        defer free(sa);
+        let r = connect(fd, sa, net_sockaddr_un_len(path));
+        if r < 0 {
+            let _c = close(fd);
+            Result::Err(NetErr::ConnectFailed)
+        } else {
+            Result::Ok(fd)
+        }
+    }
+}
+
+// Open a listening AF_UNIX socket bound to `path`, removing any stale
+// socket file first. Returns the listener fd.
+def unix_listen(path: String) -> Result<Int, NetErr> = {
+    let cp = net_cstr(path);
+    let _u = unlink(cp);
+    let _fc = free(cp);
+    let fd = socket(1, 1, 0);
+    if fd < 0 { Result::Err(NetErr::SocketFailed) } else {
+        let sa = net_sockaddr_un(path);
+        defer free(sa);
+        let r = bind(fd, sa, net_sockaddr_un_len(path));
+        if r < 0 {
+            let _c = close(fd);
+            Result::Err(NetErr::BindFailed)
+        } else {
+            let lr = listen(fd, 16);
+            if lr < 0 {
+                let _c = close(fd);
+                Result::Err(NetErr::ListenFailed)
+            } else {
+                Result::Ok(fd)
+            }
+        }
+    }
+}
+
+def unix_roundtrip(path: String, req: Bytes) -> Result<Bytes, NetErr> =
+    match unix_connect(path) {
+        Result::Ok(fd) => fd_roundtrip(fd, req),
+        Result::Err(e) => Result::Err(e),
+    }
+
+def unix_transport(path: String) -> Transport =
+    Transport { roundtrip: |req: Bytes| unix_roundtrip(path, req) }
 
 // ---- Live service slots: deploy / upgrade / rollback as a library ----
 //
