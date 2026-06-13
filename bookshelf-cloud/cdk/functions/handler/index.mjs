@@ -11,6 +11,9 @@
 //   GET  /api/items/{id}                        -> manifest JSON
 //   GET  /api/items/{id}/cover                  -> 302 to presigned S3 URL
 //   GET  /api/items/{id}/download               -> 302 to presigned S3 URL
+//   GET  /api/authors/{id}                      -> author object (+libraryItems
+//                                                  when ?include=items), built
+//                                                  by filtering the items list
 //
 // Auth: every endpoint except /login and /ping requires a valid JWT in
 // `Authorization: Bearer <jwt>` OR `?token=<jwt>` (the download URL uses
@@ -192,6 +195,53 @@ async function serveManifest(key) {
     }
 }
 
+// BookPlayer requests GET /api/authors/{id}?include=items when the user taps
+// an author in the filter view. There is no per-author manifest in S3, so we
+// build the response on the fly: read the library items list and keep the ones
+// whose media.metadata.authors contains this id. The author ids here are the
+// same `aut-<slug>` ids the filterdata response advertises (both derive from
+// each item's authors), so a match is guaranteed for any tappable author.
+async function serveAuthor(authorId, includeItems) {
+    let listing;
+    try {
+        const out = await s3.send(new GetObjectCommand({
+            Bucket: BUCKET,
+            Key: 'api/libraries/main/items',
+        }));
+        listing = JSON.parse(await out.Body.transformToString('utf8'));
+    } catch (e) {
+        if (e instanceof NoSuchKey || e?.name === 'NoSuchKey') {
+            return jsonResponse(404, { error: 'not found', id: authorId });
+        }
+        throw e;
+    }
+
+    const allItems = Array.isArray(listing?.results) ? listing.results : [];
+    let name = null;
+    const matched = [];
+    for (const it of allItems) {
+        const authors = it?.media?.metadata?.authors || [];
+        const hit = authors.find((a) => a?.id === authorId);
+        if (hit) {
+            if (!name) name = hit.name;
+            matched.push(it);
+        }
+    }
+
+    if (!name) {
+        return jsonResponse(404, { error: 'not found', id: authorId });
+    }
+
+    const author = {
+        id: authorId,
+        name,
+        libraryId: 'main',
+        numBooks: matched.length,
+    };
+    if (includeItems) author.libraryItems = matched;
+    return jsonResponse(200, author);
+}
+
 async function presign(key) {
     const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
     return getSignedUrl(s3, cmd, { expiresIn: PRESIGN_TTL_SECONDS });
@@ -274,6 +324,15 @@ async function handleAuthed(event, path) {
             : `books/${id}/audio.m4b`;
         const url = await presign(key);
         return redirect(url);
+    }
+
+    const authorMatch = path.match(/^\/api\/authors\/([^\/]+)$/);
+    if (authorMatch) {
+        const authorId = decodeURIComponent(authorMatch[1]);
+        const include = (event.queryStringParameters?.include || '')
+            .split(',')
+            .map((s) => s.trim());
+        return serveAuthor(authorId, include.includes('items'));
     }
 
     if (path.startsWith('/api/')) {
