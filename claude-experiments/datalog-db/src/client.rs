@@ -172,8 +172,23 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to a datalog-db server, performing the handshake.
+    /// Connect to a datalog-db server with no auth token.
+    ///
+    /// Use this against a server started with auth disabled. If the server
+    /// requires a token, the handshake fails with
+    /// [`protocol::ProtocolError::AuthFailed`] (surfaced as
+    /// [`ClientError::Protocol`]). Use [`Client::connect_with_token`] to
+    /// authenticate.
     pub fn connect(addr: &str) -> Result<Self> {
+        Self::connect_with_token(addr, "")
+    }
+
+    /// Connect to a datalog-db server, presenting `token` at the handshake.
+    ///
+    /// Pass the shared secret the server was configured with. An empty token
+    /// is equivalent to [`Client::connect`] and only succeeds against a
+    /// server with auth disabled.
+    pub fn connect_with_token(addr: &str, token: &str) -> Result<Self> {
         let mut stream = TcpStream::connect(addr)
             .map_err(|e| protocol::ProtocolError::Io(e))?;
         // Disable Nagle: every request is small and round-trips immediately,
@@ -181,7 +196,7 @@ impl Client {
         // stalls under request/response loads. Loopback workloads suffer
         // most because RTT is microseconds and the kernel still waits.
         let _ = stream.set_nodelay(true);
-        protocol::client_handshake(&mut stream)?;
+        protocol::client_handshake(&mut stream, token.as_bytes())?;
         Ok(Self {
             stream,
             next_request_id: AtomicU64::new(1),

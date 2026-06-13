@@ -577,7 +577,7 @@ fn test_tcp_protocol_roundtrip() {
     // Server thread
     let server_handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        protocol::server_handshake(&mut stream).unwrap();
+        protocol::server_handshake(&mut stream, None).unwrap();
 
         // Read one message
         let msg = protocol::read_message(&mut stream).unwrap();
@@ -590,7 +590,7 @@ fn test_tcp_protocol_roundtrip() {
 
     // Client
     let mut client = std::net::TcpStream::connect(addr).unwrap();
-    protocol::client_handshake(&mut client).unwrap();
+    protocol::client_handshake(&mut client, b"").unwrap();
 
     // Send a message
     let payload = serde_json::json!({"type": "status"});
@@ -617,7 +617,7 @@ fn test_full_server_define_transact_query() {
     let db_clone = db.clone();
     let server_handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        protocol::server_handshake(&mut stream).unwrap();
+        protocol::server_handshake(&mut stream, None).unwrap();
 
         // Process messages until client disconnects
         loop {
@@ -690,7 +690,7 @@ fn test_full_server_define_transact_query() {
 
     // Client side
     let mut client = std::net::TcpStream::connect(addr).unwrap();
-    protocol::client_handshake(&mut client).unwrap();
+    protocol::client_handshake(&mut client, b"").unwrap();
 
     // 1. Define User type
     let define_payload = serde_json::json!({
@@ -2736,6 +2736,67 @@ fn test_explain_wire_protocol() {
     assert!(result.display.contains("Project"), "display: {}", result.display);
     assert!(result.plan.is_object(), "plan should be JSON object");
     assert_eq!(result.plan["node"], "Project");
+}
+
+#[test]
+fn test_auth_token_required_and_enforced() {
+    use datalog_db::client::{Client, ClientError};
+    use datalog_db::protocol::ProtocolError;
+    use datalog_db::server::Server;
+
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Server started WITH a shared token.
+    let server =
+        Server::bind_with_auth("127.0.0.1:0", db, None, Some(b"s3cret".to_vec())).unwrap();
+    let addr = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Correct token: connects, and a request goes through.
+    let mut ok = Client::connect_with_token(&addr, "s3cret").unwrap();
+    assert_eq!(ok.status().unwrap().server, "datalog-db");
+
+    // Wrong token: handshake is rejected as an auth failure.
+    match Client::connect_with_token(&addr, "wrong") {
+        Err(ClientError::Protocol(ProtocolError::AuthFailed(_))) => {}
+        Err(e) => panic!("expected AuthFailed, got error {:?}", e),
+        Ok(_) => panic!("expected AuthFailed, but connect succeeded with a wrong token"),
+    }
+
+    // No token (the back-compat `connect`): also rejected.
+    match Client::connect(&addr) {
+        Err(ClientError::Protocol(ProtocolError::AuthFailed(_))) => {}
+        Err(e) => panic!("expected AuthFailed for empty token, got error {:?}", e),
+        Ok(_) => panic!("expected AuthFailed, but connect succeeded with an empty token"),
+    }
+}
+
+#[test]
+fn test_auth_disabled_accepts_any_token() {
+    use datalog_db::client::Client;
+    use datalog_db::server::Server;
+
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Server started WITHOUT auth (the explicit opt-out path).
+    let server = Server::bind("127.0.0.1:0", db).unwrap();
+    let addr = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Both an empty token and a non-empty one are accepted when auth is off.
+    assert_eq!(Client::connect(&addr).unwrap().status().unwrap().server, "datalog-db");
+    assert_eq!(
+        Client::connect_with_token(&addr, "ignored").unwrap().status().unwrap().server,
+        "datalog-db"
+    );
 }
 
 #[test]

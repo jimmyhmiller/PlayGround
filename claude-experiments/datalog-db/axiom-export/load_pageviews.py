@@ -7,13 +7,18 @@ flattened (request.path -> path) and _time is parsed into an i64 epoch-ms `ts`
 plus an i64 epoch-day `day` so per-day grouping needs no engine support.
 """
 import json
+import os
 import socket
 import struct
 import sys
 from datetime import datetime, timezone
 
 HOST, PORT = "127.0.0.1", 5557
-MAGIC, VERSION = 0xDA7A1061, 1
+# VERSION 2 added a token auth frame to the handshake. The token comes from
+# DATALOG_AUTH_TOKEN; an empty token is sent when the var is unset (only works
+# against a server started with --no-auth).
+MAGIC, VERSION = 0xDA7A1061, 2
+AUTH_TOKEN = os.environ.get("DATALOG_AUTH_TOKEN", "").encode()
 NDJSON = "events.ndjson"
 BATCH = 500
 
@@ -74,7 +79,9 @@ def to_op(ev):
 class Conn:
     def __init__(self):
         self.s = socket.create_connection((HOST, PORT))
+        # magic + version, then the auth frame: 4-byte length + token bytes.
         self.s.sendall(struct.pack(">II", MAGIC, VERSION))
+        self.s.sendall(struct.pack(">I", len(AUTH_TOKEN)) + AUTH_TOKEN)
         # server replies with a single status byte: 0x00 = OK, 0x01 = error
         ack = self._recv_exact(1)
         if ack[0] != 0x00:

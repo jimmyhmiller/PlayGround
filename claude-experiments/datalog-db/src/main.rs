@@ -27,6 +27,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = arg_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5557".to_string());
 
+    // Auth is required by default. The operator supplies a shared bearer
+    // token via `--auth-token <secret>` or the `DATALOG_AUTH_TOKEN` env var
+    // (the env var is preferred for secrets — it won't show up in `ps`).
+    // Running without auth is allowed only with an explicit `--no-auth`
+    // flag, so an unauthenticated server is always a deliberate choice and
+    // never the result of a forgotten flag.
+    let no_auth = args.iter().any(|a| a == "--no-auth");
+    let auth_token: Option<Vec<u8>> = arg_value(&args, "--auth-token")
+        .or_else(|| std::env::var("DATALOG_AUTH_TOKEN").ok())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.into_bytes());
+
+    if auth_token.is_none() && !no_auth {
+        eprintln!(
+            "error: no auth token configured.\n  \
+             Set one with --auth-token <secret> or the DATALOG_AUTH_TOKEN env var,\n  \
+             or pass --no-auth to run an unauthenticated server (open to anyone\n  \
+             who can reach {}).",
+            bind_addr
+        );
+        std::process::exit(1);
+    }
+    if auth_token.is_some() && no_auth {
+        eprintln!("error: --no-auth conflicts with a configured auth token; pass only one.");
+        std::process::exit(1);
+    }
+
     // Optional periodic-backup configuration. `--backup-dir` is the
     // opt-in; the other two have sensible defaults.
     let backup_dir = arg_value(&args, "--backup-dir").map(PathBuf::from);
@@ -75,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!("Starting server on {}", bind_addr);
-    let server = Server::bind_with(&bind_addr, db, backup_ctx)?;
+    let server = Server::bind_with_auth(&bind_addr, db, backup_ctx, auth_token)?;
     server.run()?;
 
     Ok(())

@@ -11,9 +11,9 @@ struct Client {
 }
 
 impl Client {
-    fn connect(addr: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn connect(addr: &str, token: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut stream = TcpStream::connect(addr)?;
-        protocol::client_handshake(&mut stream)?;
+        protocol::client_handshake(&mut stream, token.as_bytes())?;
         Ok(Self { stream, next_id: 1 })
     }
 
@@ -1447,6 +1447,7 @@ USAGE:
 
 GLOBAL FLAGS:
   --host HOST:PORT    Server address (default 127.0.0.1:5557)
+  --auth-token TOKEN  Shared bearer token (or set DATALOG_AUTH_TOKEN env var)
   --json              Print server responses as raw JSON (good for scripts/LLMs)
 
 ONE-SHOT COMMANDS:
@@ -1822,6 +1823,10 @@ fn main() {
 
     let mut host = "127.0.0.1:5557".to_string();
     let mut json_mode = false;
+    // Auth token presented at the handshake. Defaults to DATALOG_AUTH_TOKEN
+    // so an interactive shell can `export` it once; --auth-token overrides.
+    // Empty against an auth-enabled server is rejected by the server.
+    let mut auth_token = std::env::var("DATALOG_AUTH_TOKEN").unwrap_or_default();
     let mut remaining = Vec::new();
 
     let mut i = 1;
@@ -1833,6 +1838,15 @@ fn main() {
                     i += 2;
                 } else {
                     eprintln!("--host requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--auth-token" => {
+                if i + 1 < args.len() {
+                    auth_token = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("--auth-token requires a value");
                     std::process::exit(1);
                 }
             }
@@ -1858,7 +1872,7 @@ fn main() {
         return;
     }
 
-    let mut client = match Client::connect(&host) {
+    let mut client = match Client::connect(&host, &auth_token) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to connect to {}: {}", host, e);

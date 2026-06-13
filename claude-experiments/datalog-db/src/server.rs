@@ -25,6 +25,10 @@ pub struct Server {
     db: Arc<Database>,
     backup: Option<BackupContext>,
     listener: TcpListener,
+    /// Shared bearer token every client must present at the handshake.
+    /// `None` means auth is disabled (the operator opted out explicitly at
+    /// startup). Wrapped in `Arc` so each connection thread shares one copy.
+    auth_token: Option<Arc<Vec<u8>>>,
 }
 
 impl Server {
@@ -37,12 +41,29 @@ impl Server {
         db: Arc<Database>,
         backup: Option<BackupContext>,
     ) -> std::io::Result<Self> {
+        Self::bind_with_auth(addr, db, backup, None)
+    }
+
+    /// Bind with an optional shared auth token. When `auth_token` is `Some`,
+    /// every connection must present a matching token at the handshake or it
+    /// is dropped before any request is dispatched.
+    pub fn bind_with_auth(
+        addr: &str,
+        db: Arc<Database>,
+        backup: Option<BackupContext>,
+        auth_token: Option<Vec<u8>>,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        info!("Server listening on {}", addr);
+        if auth_token.is_some() {
+            info!("Server listening on {} (token auth enabled)", addr);
+        } else {
+            info!("Server listening on {} (auth disabled)", addr);
+        }
         Ok(Self {
             db,
             backup,
             listener,
+            auth_token: auth_token.map(Arc::new),
         })
     }
 
@@ -60,8 +81,9 @@ impl Server {
             info!("New connection from {}", addr);
             let db = self.db.clone();
             let backup = self.backup.clone();
+            let auth_token = self.auth_token.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_connection(stream, db, backup) {
+                if let Err(e) = handle_connection(stream, db, backup, auth_token) {
                     warn!("Connection error from {}: {}", addr, e);
                 }
                 info!("Connection closed: {}", addr);
@@ -75,9 +97,10 @@ fn handle_connection(
     mut stream: std::net::TcpStream,
     db: Arc<Database>,
     backup: Option<BackupContext>,
+    auth_token: Option<Arc<Vec<u8>>>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Handshake
-    protocol::server_handshake(&mut stream)?;
+    // Handshake (validates the auth token when one is configured).
+    protocol::server_handshake(&mut stream, auth_token.as_deref().map(|t| t.as_slice()))?;
 
     // Message loop
     loop {

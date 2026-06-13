@@ -18,21 +18,41 @@ cargo run --release --bin datalog-db -- \
 ```
 
 The server is a long-running process. Data lives in RocksDB under
-`--data-dir`. The wire protocol is plain TCP — no auth, no TLS — so it
-should only be bound to a loopback or trusted interface.
+`--data-dir`. The wire protocol is plain TCP with **shared-token auth** but
+no TLS, so it should still only be bound to a loopback or trusted interface.
+
+### Auth
+
+Auth is **required by default**. Start the server with a shared bearer token
+via `--auth-token <secret>` or the `DATALOG_AUTH_TOKEN` env var (the env var
+keeps the secret out of `ps`):
+
+```sh
+DATALOG_AUTH_TOKEN=s3cret cargo run --release --bin datalog-db -- \
+    --data-dir ./datalog-data --bind 127.0.0.1:5557
+```
+
+To run an unauthenticated server you must opt out explicitly with `--no-auth`
+— the server refuses to start with neither a token nor `--no-auth`, so an
+open server is always a deliberate choice.
 
 ## Connecting
 
 ```rust
 use datalog_db::client::Client;
 
+// Auth-enabled server: present the shared token.
+let mut client = Client::connect_with_token("127.0.0.1:5557", "s3cret")?;
+
+// --no-auth server: token-free connect (equivalent to an empty token).
 let mut client = Client::connect("127.0.0.1:5557")?;
 ```
 
-`Client::connect` opens a `TcpStream`, sets `TCP_NODELAY`, performs the
-8-byte magic+version handshake, and returns the live `Client`. The
-connection stays open for the lifetime of the value; drop the `Client`
-to close it.
+Both open a `TcpStream`, set `TCP_NODELAY`, perform the magic+version
+handshake (protocol version 2) followed by a token frame, and return the
+live `Client`. A bad or missing token fails the handshake with
+`ProtocolError::AuthFailed`. The connection stays open for the lifetime of
+the value; drop the `Client` to close it.
 
 ## Defining schema
 
