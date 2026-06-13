@@ -54,6 +54,13 @@ pub const MIN_ITERATIONS: u32 = 4096;
 /// users.
 pub const DEFAULT_ITERATIONS: u32 = 15_000;
 
+/// Upper bound on the iteration count a CLIENT will honor from a server-supplied
+/// server-first message. Without this, a malicious or MITM'd server could send
+/// `i=4294967295` and pin the client's CPU for hours computing PBKDF2 (the
+/// client must compute it before it can even verify the server's signature).
+/// Generous enough for any legitimate policy; refuses absurd costs.
+pub const MAX_ITERATIONS: u32 = 1_000_000;
+
 /// Salt length in bytes for new verifiers.
 const SALT_LEN: usize = 16;
 
@@ -258,8 +265,14 @@ pub fn make_nonce() -> String {
 /// Split a SCRAM message `a=...,b=...,c=...` into its `key=value` attributes.
 /// Values may themselves contain `=` (e.g. base64 padding), so we split each
 /// comma-separated field only at the *first* `=`.
+///
+/// **Duplicate attribute keys are rejected.** Otherwise an attacker could smuggle
+/// a second `c=`/`r=`/`p=` and exploit the disagreement between attribute lookup
+/// (which would otherwise take the *first*) and the AuthMessage construction in
+/// `server_final` (which splits at the *last* `,p=`). Rejecting duplicates makes
+/// the parse unambiguous so those two views can never diverge.
 fn parse_attrs(msg: &str) -> Result<Vec<(char, String)>> {
-    let mut out = Vec::new();
+    let mut out: Vec<(char, String)> = Vec::new();
     for field in msg.split(',') {
         if field.is_empty() {
             continue;
@@ -272,6 +285,9 @@ fn parse_attrs(msg: &str) -> Result<Vec<(char, String)>> {
         let val = rest
             .strip_prefix('=')
             .ok_or_else(|| ScramError::Malformed(format!("attribute '{key}' missing '='")))?;
+        if out.iter().any(|(k, _)| *k == key) {
+            return Err(ScramError::Malformed(format!("duplicate attribute '{key}'")));
+        }
         out.push((key, val.to_string()));
     }
     Ok(out)
@@ -316,19 +332,35 @@ impl ScramServer {
         }
     }
 
-    /// Begin an exchange for an *unknown* user. A deterministic mock verifier is
-    /// derived from `username` under a server-only `mock_key`, so the
-    /// server-first message is indistinguishable from a real one and an attacker
-    /// cannot probe which usernames exist. The client proof will not verify.
+    /// Begin an exchange for an *unknown* user, producing a mock verifier that
+    /// is indistinguishable from a real one to a remote attacker.
+    ///
+    /// Critically, this derives the salt and keys **directly via HMAC** under a
+    /// server-only `mock_key` — it does NOT run PBKDF2. A real user's handshake
+    /// also runs no server-side PBKDF2 (the stored verifier already holds the
+    /// derived keys), so both paths perform the same cheap HMAC work. An earlier
+    /// version ran PBKDF2 here, which made unknown-user logins measurably slower
+    /// than known-user ones — i.e. the anti-enumeration mock was itself a timing
+    /// oracle. Deriving keys without PBKDF2 closes that.
+    ///
+    /// `iterations` is reported as [`DEFAULT_ITERATIONS`] so the server-first
+    /// message looks identical to a real user's. The keys are unpredictable to
+    /// anyone without `mock_key`, so the client proof can never verify.
     pub fn mock(username: &str, mock_key: &[u8]) -> Self {
-        // Deterministic salt from HMAC(mock_key, username); stable across
-        // attempts for the same username (a real user's salt is also stable).
-        let salt = hmac(mock_key, username.as_bytes());
-        // A random password the attacker can't know → proof always fails.
-        let mut fake_pw = [0u8; 32];
-        fill_random(&mut fake_pw);
-        let verifier =
-            Verifier::create_with(&B64.encode(fake_pw), &salt[..SALT_LEN], DEFAULT_ITERATIONS);
+        // Salt: stable per username (like a real user's stored salt), domain-
+        // separated from the key derivations below.
+        let salt = hmac(mock_key, &[b"mock-salt:", username.as_bytes()].concat());
+        // StoredKey/ServerKey derived directly from mock_key+username — no
+        // PBKDF2. Distinct domain tags so the two keys differ.
+        let stored_key = hmac(mock_key, &[b"mock-stored:", username.as_bytes()].concat());
+        let server_key = hmac(mock_key, &[b"mock-server:", username.as_bytes()].concat());
+        let verifier = Verifier {
+            version: 1,
+            iterations: DEFAULT_ITERATIONS,
+            salt: B64.encode(&salt[..SALT_LEN]),
+            stored_key: B64.encode(stored_key),
+            server_key: B64.encode(server_key),
+        };
         let mut s = Self::new(verifier);
         s.is_mock = true;
         s
@@ -477,6 +509,12 @@ impl ScramClient {
         let iterations: u32 = attr(&attrs, 'i')?
             .parse()
             .map_err(|_| ScramError::Malformed("bad iteration count".into()))?;
+        // Bound the server-supplied cost on BOTH ends. Below the floor weakens
+        // our own hashing; above the ceiling lets a rogue server burn our CPU
+        // (we compute PBKDF2 here, before we can verify the server is genuine).
+        if iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS {
+            return Err(ScramError::WeakIterations(iterations));
+        }
 
         let salted = salted_password(self.password.as_bytes(), &salt, iterations);
         let keys = derive_keys(&salted);
@@ -614,6 +652,56 @@ mod tests {
         let s3 = ScramServer::mock("other", mock_key).verifier.salt;
         assert_eq!(s1, s2, "same username → same mock salt");
         assert_ne!(s1, s3, "different username → different mock salt");
+    }
+
+    #[test]
+    fn mock_runs_no_pbkdf2_and_matches_real_message_shape() {
+        // C1 regression: the mock path must NOT run PBKDF2 (it derives keys via
+        // HMAC), and its server-first must look like a real user's (same iters,
+        // base64 salt of the same length). We can't time here, but we can assert
+        // the structural equivalence that makes the timing equal.
+        let mut mock = ScramServer::mock("ghost", b"k");
+        let mut real = ScramServer::new(Verifier::create("pw"));
+        let sf_mock = mock.server_first("n,,n=ghost,r=abc").unwrap();
+        let sf_real = real.server_first("n,,n=alice,r=abc").unwrap();
+        // Both advertise DEFAULT_ITERATIONS and a 16-byte (base64) salt.
+        assert!(sf_mock.contains(&format!("i={DEFAULT_ITERATIONS}")));
+        assert!(sf_real.contains(&format!("i={DEFAULT_ITERATIONS}")));
+        let salt_len = |sf: &str| {
+            B64.decode(sf.split(',').find(|f| f.starts_with("s=")).unwrap().strip_prefix("s=").unwrap())
+                .unwrap()
+                .len()
+        };
+        assert_eq!(salt_len(&sf_mock), SALT_LEN);
+        assert_eq!(salt_len(&sf_real), SALT_LEN);
+    }
+
+    #[test]
+    fn client_rejects_out_of_range_iterations() {
+        // C2 regression: a malicious server-first with an absurd or too-low `i`
+        // must be refused before the client runs PBKDF2.
+        let mut client = ScramClient::new("alice", "pw");
+        let _cf = client.client_first();
+        let nonce = &client.client_nonce.clone();
+        // Too high.
+        let sf_high = format!("r={nonce}srv,s={},i={}", B64.encode(b"saltsaltsaltsalt"), MAX_ITERATIONS + 1);
+        assert_eq!(
+            client.client_final(&sf_high).unwrap_err(),
+            ScramError::WeakIterations(MAX_ITERATIONS + 1)
+        );
+        // Too low.
+        let sf_low = format!("r={nonce}srv,s={},i=100", B64.encode(b"saltsaltsaltsalt"));
+        assert_eq!(client.client_final(&sf_low).unwrap_err(), ScramError::WeakIterations(100));
+    }
+
+    #[test]
+    fn duplicate_attributes_rejected() {
+        // H2 regression: a message with a duplicate key must be refused so the
+        // first-match lookup can't disagree with the AuthMessage split.
+        assert!(parse_attrs("r=a,r=b").is_err());
+        assert!(parse_attrs("c=biws,r=x,p=y,p=z").is_err());
+        // A normal message still parses.
+        assert!(parse_attrs("c=biws,r=x,p=y").is_ok());
     }
 
     #[test]

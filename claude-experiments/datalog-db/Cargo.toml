@@ -33,6 +33,11 @@ getrandom = "0.2"
 # initialized when TLS is actually used, so plaintext deployments pay nothing.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+# Turn a pinned self-signed server cert into a webpki trust anchor so the
+# standard verifier (signature + expiry + hostname) applies to it — instead of
+# a raw DER-equality pin that would skip expiry/hostname checks.
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
 
 [[bin]]
 name = "datalog"

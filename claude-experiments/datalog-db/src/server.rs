@@ -1,6 +1,8 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{info, warn};
 
@@ -39,6 +41,26 @@ fn make_mock_key() -> Arc<Vec<u8>> {
     let mut k = vec![0u8; 32];
     crate::auth::scram::fill_random(&mut k);
     Arc::new(k)
+}
+
+/// Max concurrent client connections. Beyond this, new connections are dropped
+/// immediately rather than spawning unbounded threads — a coarse but effective
+/// guard against connection-storm / handshake-flood DoS. Generous for real use.
+const MAX_CONNECTIONS: usize = 1024;
+
+/// How long a client has to complete the handshake. A connection that opens but
+/// stalls mid-handshake (slow-loris) is closed rather than holding a slot and a
+/// thread indefinitely. Applied as a socket read/write timeout during the
+/// handshake, then cleared for the (long-lived) request loop.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// RAII guard that decrements the live-connection counter on drop, so a panic
+/// or early return in a connection thread still frees its slot.
+struct ConnGuard(Arc<AtomicUsize>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Per-server backup state shared with request handlers. When `None`,
@@ -135,12 +157,30 @@ impl Server {
     }
 
     pub fn run(self) -> std::io::Result<()> {
+        let live = Arc::new(AtomicUsize::new(0));
         for stream in self.listener.incoming() {
             let stream = stream?;
             let addr = stream.peer_addr()?;
+
+            // Connection cap: refuse rather than spawn unbounded threads under a
+            // connection storm. Reserve a slot up front; the guard frees it on
+            // thread exit (incl. panic / early return).
+            let current = live.fetch_add(1, Ordering::SeqCst);
+            if current >= MAX_CONNECTIONS {
+                live.fetch_sub(1, Ordering::SeqCst);
+                warn!("connection from {} refused: at capacity ({})", addr, MAX_CONNECTIONS);
+                // Drop the socket; the client sees a closed connection.
+                continue;
+            }
+            let guard = ConnGuard(live.clone());
+
             // Set socket options on the RAW socket before any TLS wrapping —
             // they call straight through and keep applying inside the tunnel.
             let _ = stream.set_nodelay(true);
+            // Bound the handshake: a client that stalls mid-handshake is closed
+            // rather than tying up a thread + slot indefinitely.
+            let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
             info!("New connection from {}", addr);
 
             // Wrap in TLS if configured. A failure to start the TLS session is
@@ -151,7 +191,7 @@ impl Server {
                     Ok(c) => c,
                     Err(e) => {
                         warn!("TLS setup failed for {}: {}", addr, e);
-                        continue;
+                        continue; // guard drops here, freeing the slot
                     }
                 },
             };
@@ -161,6 +201,8 @@ impl Server {
             let auth = self.auth.clone();
             let mock_key = self.mock_key.clone();
             std::thread::spawn(move || {
+                // Hold the slot for the connection's lifetime; freed on return.
+                let _guard = guard;
                 if let Err(e) = handle_connection(conn, db, backup, auth, mock_key) {
                     warn!("Connection error from {}: {}", addr, e);
                 }
@@ -196,10 +238,14 @@ fn handle_connection(
     };
 
     // Handshake: authenticates the client (token or SCRAM) and yields identity.
+    // It runs under the socket's handshake timeout (set in `run`).
     let AuthOutcome { user } = protocol::server_handshake(&mut stream, &server_auth)?;
     if let Some(ref u) = user {
         info!("Authenticated SCRAM user: {}", u);
     }
+    // Past the handshake: clear the deadline so the request loop can block
+    // indefinitely on the next request from an idle but valid client.
+    let _ = stream.clear_timeouts();
 
     // Message loop
     loop {
