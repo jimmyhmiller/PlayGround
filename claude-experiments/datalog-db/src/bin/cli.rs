@@ -1,19 +1,51 @@
 use std::io::{self, BufRead, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 
 use datalog_db::protocol;
+use datalog_db::transport::{self, ClientStream};
 
 // --- Client ---
 
 struct Client {
-    stream: TcpStream,
+    stream: ClientStream,
     next_id: u64,
 }
 
+/// How the CLI authenticates to the server.
+enum Auth {
+    /// Shared bearer token (possibly empty for a --no-auth server).
+    Token(String),
+    /// Per-user SCRAM with (username, password).
+    Scram(String, String),
+}
+
 impl Client {
-    fn connect(addr: &str, token: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(addr)?;
-        protocol::client_handshake(&mut stream, token.as_bytes())?;
+    /// Connect with optional TLS (`ca` = trusted CA PEM) and the chosen auth.
+    fn connect(
+        addr: &str,
+        ca: Option<&Path>,
+        auth: &Auth,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut stream = match ca {
+            None => {
+                let sock = TcpStream::connect(addr)?;
+                let _ = sock.set_nodelay(true);
+                ClientStream::Plain(sock)
+            }
+            Some(ca_pem) => {
+                let sock = TcpStream::connect(addr)?;
+                let _ = sock.set_nodelay(true);
+                let config = transport::client_config(Some(ca_pem))?;
+                transport::connect_tls(sock, config, &host_of(addr))?
+            }
+        };
+        match auth {
+            Auth::Token(token) => protocol::client_handshake(&mut stream, token.as_bytes())?,
+            Auth::Scram(user, pass) => {
+                protocol::client_handshake_scram(&mut stream, user, pass)?
+            }
+        }
         Ok(Self { stream, next_id: 1 })
     }
 
@@ -24,6 +56,53 @@ impl Client {
         let msg = protocol::read_message(&mut self.stream)?;
         Ok(msg.payload)
     }
+}
+
+/// Host part of `host:port`, for TLS certificate validation.
+fn host_of(addr: &str) -> String {
+    if let Some(rest) = addr.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    addr.rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| addr.to_string())
+}
+
+/// Read a password from the TTY without echoing it.
+///
+/// Disables terminal echo via `stty` (dependency-free, universally present on
+/// the target platforms) for the duration of the read, restoring it after. If
+/// stdin is not a TTY (piped input for automation) the `stty` calls are no-ops
+/// / fail harmlessly and we just read the line.
+fn read_password(prompt: &str) -> io::Result<String> {
+    use std::process::Command;
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+
+    // Save current settings, then disable echo. `stty -g` prints a restorable
+    // settings string. If this fails (not a TTY), we proceed with echo on.
+    let saved = Command::new("stty")
+        .arg("-g")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    if saved.is_some() {
+        let _ = Command::new("stty").arg("-echo").status();
+    }
+
+    let mut line = String::new();
+    let res = io::stdin().lock().read_line(&mut line);
+
+    if let Some(s) = saved {
+        // Restore the exact prior terminal settings.
+        let _ = Command::new("stty").arg(s).status();
+        eprintln!(); // the user's Enter wasn't echoed; move to a fresh line
+    }
+    res?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 // --- Parser ---
@@ -1448,7 +1527,16 @@ USAGE:
 GLOBAL FLAGS:
   --host HOST:PORT    Server address (default 127.0.0.1:5557)
   --auth-token TOKEN  Shared bearer token (or set DATALOG_AUTH_TOKEN env var)
+  --user NAME         Authenticate as a SCRAM user (prompts for password,
+                      or reads DATALOG_PASSWORD). Implies per-user auth.
+  --tls CA / --ca CA  Connect over TLS, trusting CA PEM (server cert / CA).
   --json              Print server responses as raw JSON (good for scripts/LLMs)
+
+USER ADMIN (offline — opens the store directly, no server):
+  --data-dir DIR user add NAME      Create a user (prompts for password twice)
+  --data-dir DIR user passwd NAME   Change a user's password
+  --data-dir DIR user del NAME      Delete a user
+  --data-dir DIR user list          List users
 
 ONE-SHOT COMMANDS:
   status                                      Server status
@@ -1818,6 +1906,123 @@ fn execute_cmd(client: &mut Client, cmd: Cmd, json_mode: bool) -> Result<(), Str
     }
 }
 
+/// Consume the value following a flag at `args[*i]`, advancing `*i` past both.
+/// Exits with an error if the value is missing.
+fn take_value(args: &[String], i: &mut usize, flag: &str) -> String {
+    if *i + 1 < args.len() {
+        let v = args[*i + 1].clone();
+        *i += 2;
+        v
+    } else {
+        eprintln!("{flag} requires a value");
+        std::process::exit(1);
+    }
+}
+
+/// Offline user administration: `datalog --data-dir DIR user <add|list|del|passwd> [name]`.
+/// Opens the RocksDB store directly (no server), so it can seed the first user
+/// before the server is exposed, and avoids sending passwords over any network.
+fn run_user_admin(remaining: &[String], data_dir: Option<&Path>) {
+    use datalog_db::auth::scram::Verifier;
+    use datalog_db::db::Database;
+    use datalog_db::storage::rocksdb_backend::RocksDbStorage;
+    use std::sync::Arc;
+
+    let data_dir = match data_dir {
+        Some(d) => d,
+        None => {
+            eprintln!("`user` is an offline admin command and requires --data-dir <path>.");
+            eprintln!("Run it on the DB host, with the server stopped or pointed elsewhere.");
+            std::process::exit(1);
+        }
+    };
+
+    let sub = remaining.get(1).map(|s| s.as_str()).unwrap_or("");
+    let open_db = || -> Database {
+        let storage = match RocksDbStorage::open(data_dir) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                eprintln!("failed to open store at {}: {e}", data_dir.display());
+                std::process::exit(1);
+            }
+        };
+        Database::open(storage).unwrap_or_else(|e| {
+            eprintln!("failed to open database: {e}");
+            std::process::exit(1);
+        })
+    };
+
+    match sub {
+        "add" | "passwd" => {
+            let name = match remaining.get(2) {
+                Some(n) => n.clone(),
+                None => {
+                    eprintln!("usage: datalog --data-dir DIR user {sub} <name>");
+                    std::process::exit(1);
+                }
+            };
+            let db = open_db();
+            if sub == "add" && db.get_scram_verifier(&name).ok().flatten().is_some() {
+                eprintln!("user '{name}' already exists (use `user passwd` to change password)");
+                std::process::exit(1);
+            }
+            let pw = read_password(&format!("New password for {name}: ")).unwrap_or_default();
+            if pw.is_empty() {
+                eprintln!("password must not be empty");
+                std::process::exit(1);
+            }
+            let confirm = read_password("Confirm password: ").unwrap_or_default();
+            if pw != confirm {
+                eprintln!("passwords do not match");
+                std::process::exit(1);
+            }
+            match db.put_scram_verifier(&name, &Verifier::create(&pw)) {
+                Ok(()) => println!("{} user '{name}'", if sub == "add" { "created" } else { "updated" }),
+                Err(e) => {
+                    eprintln!("failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "del" => {
+            let name = match remaining.get(2) {
+                Some(n) => n.clone(),
+                None => {
+                    eprintln!("usage: datalog --data-dir DIR user del <name>");
+                    std::process::exit(1);
+                }
+            };
+            match open_db().delete_user(&name) {
+                Ok(true) => println!("deleted user '{name}'"),
+                Ok(false) => {
+                    eprintln!("no such user '{name}'");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "list" => match open_db().list_users() {
+            Ok(users) if users.is_empty() => println!("(no users)"),
+            Ok(users) => {
+                for u in users {
+                    println!("{u}");
+                }
+            }
+            Err(e) => {
+                eprintln!("failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        _ => {
+            eprintln!("usage: datalog --data-dir DIR user <add|passwd|del|list> [name]");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -1827,28 +2032,33 @@ fn main() {
     // so an interactive shell can `export` it once; --auth-token overrides.
     // Empty against an auth-enabled server is rejected by the server.
     let mut auth_token = std::env::var("DATALOG_AUTH_TOKEN").unwrap_or_default();
+    // SCRAM username; when set, the CLI authenticates as that user (prompting
+    // for a password) instead of using the token.
+    let mut user: Option<String> = None;
+    // TLS CA PEM. When set (--tls <ca> or --ca <ca>), the connection is TLS.
+    let mut ca: Option<PathBuf> = None;
+    // Data dir for offline admin (`user` subcommand without a server).
+    let mut data_dir: Option<PathBuf> = None;
     let mut remaining = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--host" => {
-                if i + 1 < args.len() {
-                    host = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("--host requires a value");
-                    std::process::exit(1);
-                }
+                host = take_value(&args, &mut i, "--host");
             }
             "--auth-token" => {
-                if i + 1 < args.len() {
-                    auth_token = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("--auth-token requires a value");
-                    std::process::exit(1);
-                }
+                auth_token = take_value(&args, &mut i, "--auth-token");
+            }
+            "--user" => {
+                user = Some(take_value(&args, &mut i, "--user"));
+            }
+            // --tls <ca> and --ca <ca> are synonyms (both enable TLS with that CA).
+            "--tls" | "--ca" => {
+                ca = Some(PathBuf::from(take_value(&args, &mut i, "--ca")));
+            }
+            "--data-dir" => {
+                data_dir = Some(PathBuf::from(take_value(&args, &mut i, "--data-dir")));
             }
             "--json" => {
                 json_mode = true;
@@ -1872,7 +2082,33 @@ fn main() {
         return;
     }
 
-    let mut client = match Client::connect(&host, &auth_token) {
+    // `user` is an OFFLINE admin command: it opens the RocksDB store directly
+    // (no server, no network), so it works for seeding the first user before
+    // the server is exposed. Requires --data-dir.
+    if remaining.first().map(|s| s.as_str()) == Some("user") {
+        run_user_admin(&remaining, data_dir.as_deref());
+        return;
+    }
+
+    // Decide auth method: --user → SCRAM (prompt for password), else token.
+    let auth = match &user {
+        Some(u) => {
+            let pw = match std::env::var("DATALOG_PASSWORD") {
+                Ok(p) if !p.is_empty() => p,
+                _ => match read_password(&format!("Password for {u}: ")) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("could not read password: {e}");
+                        std::process::exit(1);
+                    }
+                },
+            };
+            Auth::Scram(u.clone(), pw)
+        }
+        None => Auth::Token(auth_token.clone()),
+    };
+
+    let mut client = match Client::connect(&host, ca.as_deref(), &auth) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to connect to {}: {}", host, e);

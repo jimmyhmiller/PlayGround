@@ -6,9 +6,40 @@ use tracing::{info, warn};
 
 use crate::backup;
 use crate::db::{self, Database};
-use crate::protocol::{self, Message};
+use crate::protocol::{self, AuthOutcome, Message, ServerAuth, UserStore};
 use crate::query::Query;
+use crate::transport::ServerStream;
 use crate::tx::TxOp;
+
+/// Adapter letting the protocol layer look up SCRAM verifiers without depending
+/// on `db`. Holds the same `Arc<Database>` the server already owns.
+struct DbUserStore(Arc<Database>);
+
+impl UserStore for DbUserStore {
+    fn lookup(&self, username: &str) -> std::result::Result<Option<crate::auth::scram::Verifier>, String> {
+        self.0.get_scram_verifier(username).map_err(|e| e.to_string())
+    }
+}
+
+/// What the server accepts at the handshake. At least one method must be
+/// enabled (enforced by `main`); both can be on at once (token for loopback
+/// consumers, SCRAM for remote users), selected per-connection by the client.
+#[derive(Clone, Default)]
+pub struct AuthConfig {
+    /// Shared bearer token. `Some` enables the `token` method.
+    pub token: Option<Vec<u8>>,
+    /// Enable per-user SCRAM (verifiers come from the `Database`).
+    pub scram: bool,
+}
+
+/// Server-only random key for deriving deterministic mock verifiers for unknown
+/// SCRAM users (enumeration resistance). Generated once at startup; never
+/// persisted — it only needs to be stable for the lifetime of the process.
+fn make_mock_key() -> Arc<Vec<u8>> {
+    let mut k = vec![0u8; 32];
+    crate::auth::scram::fill_random(&mut k);
+    Arc::new(k)
+}
 
 /// Per-server backup state shared with request handlers. When `None`,
 /// `backup_now` / `backup_list` return an error explaining that backups
@@ -25,10 +56,10 @@ pub struct Server {
     db: Arc<Database>,
     backup: Option<BackupContext>,
     listener: TcpListener,
-    /// Shared bearer token every client must present at the handshake.
-    /// `None` means auth is disabled (the operator opted out explicitly at
-    /// startup). Wrapped in `Arc` so each connection thread shares one copy.
-    auth_token: Option<Arc<Vec<u8>>>,
+    auth: AuthConfig,
+    mock_key: Arc<Vec<u8>>,
+    /// rustls config when TLS is enabled. `None` = plaintext (loopback/dev).
+    tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl Server {
@@ -41,29 +72,61 @@ impl Server {
         db: Arc<Database>,
         backup: Option<BackupContext>,
     ) -> std::io::Result<Self> {
-        Self::bind_with_auth(addr, db, backup, None)
+        Self::bind_full(addr, db, backup, AuthConfig::default(), None)
     }
 
-    /// Bind with an optional shared auth token. When `auth_token` is `Some`,
-    /// every connection must present a matching token at the handshake or it
-    /// is dropped before any request is dispatched.
+    /// Back-compat shim: bind with only a shared token (or none).
     pub fn bind_with_auth(
         addr: &str,
         db: Arc<Database>,
         backup: Option<BackupContext>,
         auth_token: Option<Vec<u8>>,
     ) -> std::io::Result<Self> {
+        Self::bind_full(
+            addr,
+            db,
+            backup,
+            AuthConfig {
+                token: auth_token,
+                scram: false,
+            },
+            None,
+        )
+    }
+
+    /// Bind with full auth + optional TLS config.
+    pub fn bind_full(
+        addr: &str,
+        db: Arc<Database>,
+        backup: Option<BackupContext>,
+        auth: AuthConfig,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        if auth_token.is_some() {
-            info!("Server listening on {} (token auth enabled)", addr);
-        } else {
-            info!("Server listening on {} (auth disabled)", addr);
+        let transport = if tls.is_some() { "TLS" } else { "plaintext" };
+        let mut methods = Vec::new();
+        if auth.token.is_some() {
+            methods.push("token");
         }
+        if auth.scram {
+            methods.push("scram");
+        }
+        let methods = if methods.is_empty() {
+            "none (open)".to_string()
+        } else {
+            methods.join("+")
+        };
+        info!(
+            "Server listening on {} ({transport}, auth: {methods})",
+            addr
+        );
         Ok(Self {
             db,
             backup,
             listener,
-            auth_token: auth_token.map(Arc::new),
+            auth,
+            mock_key: make_mock_key(),
+            tls,
         })
     }
 
@@ -75,15 +138,30 @@ impl Server {
         for stream in self.listener.incoming() {
             let stream = stream?;
             let addr = stream.peer_addr()?;
-            // Disable Nagle on the server side too — matches the client
-            // and ensures responses go out without coalescing delay.
+            // Set socket options on the RAW socket before any TLS wrapping —
+            // they call straight through and keep applying inside the tunnel.
             let _ = stream.set_nodelay(true);
             info!("New connection from {}", addr);
+
+            // Wrap in TLS if configured. A failure to start the TLS session is
+            // logged and the connection dropped (don't fall back to plaintext).
+            let conn = match &self.tls {
+                None => ServerStream::Plain(stream),
+                Some(cfg) => match ServerStream::accept_tls(stream, cfg.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("TLS setup failed for {}: {}", addr, e);
+                        continue;
+                    }
+                },
+            };
+
             let db = self.db.clone();
             let backup = self.backup.clone();
-            let auth_token = self.auth_token.clone();
+            let auth = self.auth.clone();
+            let mock_key = self.mock_key.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_connection(stream, db, backup, auth_token) {
+                if let Err(e) = handle_connection(conn, db, backup, auth, mock_key) {
                     warn!("Connection error from {}: {}", addr, e);
                 }
                 info!("Connection closed: {}", addr);
@@ -94,13 +172,34 @@ impl Server {
 }
 
 fn handle_connection(
-    mut stream: std::net::TcpStream,
+    mut stream: ServerStream,
     db: Arc<Database>,
     backup: Option<BackupContext>,
-    auth_token: Option<Arc<Vec<u8>>>,
+    auth: AuthConfig,
+    mock_key: Arc<Vec<u8>>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Handshake (validates the auth token when one is configured).
-    protocol::server_handshake(&mut stream, auth_token.as_deref().map(|t| t.as_slice()))?;
+    // Build the per-connection auth view. The user store is only consulted when
+    // SCRAM is enabled.
+    let user_store = DbUserStore(db.clone());
+    // Open mode (accept any token) only when no method is configured — i.e. the
+    // operator passed --no-auth. With a token or SCRAM enabled, this is false.
+    let allow_no_auth = auth.token.is_none() && !auth.scram;
+    let server_auth = ServerAuth {
+        expected_token: auth.token.clone(),
+        users: if auth.scram {
+            Some(&user_store as &dyn UserStore)
+        } else {
+            None
+        },
+        mock_key: &mock_key,
+        allow_no_auth,
+    };
+
+    // Handshake: authenticates the client (token or SCRAM) and yields identity.
+    let AuthOutcome { user } = protocol::server_handshake(&mut stream, &server_auth)?;
+    if let Some(ref u) = user {
+        info!("Authenticated SCRAM user: {}", u);
+    }
 
     // Message loop
     loop {
@@ -109,7 +208,7 @@ fn handle_connection(
             Err(protocol::ProtocolError::Io(e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                // Client disconnected
+                // Client disconnected (incl. a clean TLS close_notify → EOF).
                 return Ok(());
             }
             Err(e) => return Err(e.into()),

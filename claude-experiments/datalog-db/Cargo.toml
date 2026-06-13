@@ -14,6 +14,26 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# --- SCRAM-SHA-256 auth (always on) ---
+# Hand-rolled SCRAM (RFC 5802 / 7677) assembled over the audited RustCrypto
+# primitives — small, no heavyweight SCRAM framework, fully under our control and
+# unit-testable against the RFC vectors. `subtle` gives a constant-time compare
+# for the security-critical client-proof check.
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
+subtle = "2"
+getrandom = "0.2"
+
+# --- TLS transport (rustls, ring backend) ---
+# The `ring` provider avoids the aws-lc-rs C toolchain on this box. Non-optional:
+# the transport layer always offers both plaintext and TLS streams, and the
+# server/CLI binaries always want TLS available. The crypto provider is only
+# initialized when TLS is actually used, so plaintext deployments pay nothing.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+
 [[bin]]
 name = "datalog"
 path = "src/bin/cli.rs"
@@ -37,6 +57,8 @@ tempfile = "3.25.0"
 insta = "1"
 proptest = "1"
 postgres = "0.19"
+# Generate self-signed certs for the TLS integration tests (test-only).
+rcgen = "0.13"
 
 [[bench]]
 name = "comparative"

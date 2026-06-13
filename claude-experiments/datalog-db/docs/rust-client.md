@@ -18,41 +18,79 @@ cargo run --release --bin datalog-db -- \
 ```
 
 The server is a long-running process. Data lives in RocksDB under
-`--data-dir`. The wire protocol is plain TCP with **shared-token auth** but
-no TLS, so it should still only be bound to a loopback or trusted interface.
+`--data-dir`. The wire protocol (protocol version 3) supports **TLS** and two
+auth methods — a shared bearer **token** and per-user **SCRAM-SHA-256** —
+negotiated per connection.
 
 ### Auth
 
-Auth is **required by default**. Start the server with a shared bearer token
-via `--auth-token <secret>` or the `DATALOG_AUTH_TOKEN` env var (the env var
-keeps the secret out of `ps`):
+Auth is **required by default**. Enable one or both methods, or opt out
+explicitly with `--no-auth` (the server refuses to start with neither, so an
+open server is always deliberate). Token + SCRAM can both be on at once; each
+client picks its method.
 
 ```sh
-DATALOG_AUTH_TOKEN=s3cret cargo run --release --bin datalog-db -- \
-    --data-dir ./datalog-data --bind 127.0.0.1:5557
+# Shared token (good for trusted loopback consumers). Env var keeps it out of `ps`.
+DATALOG_AUTH_TOKEN=s3cret datalog-db --data-dir ./data --bind 127.0.0.1:5557
+
+# Per-user SCRAM, over TLS (the right setup for remote exposure):
+datalog-db --data-dir ./data --bind 0.0.0.0:5557 \
+    --scram --tls-cert cert.pem --tls-key key.pem
 ```
 
-To run an unauthenticated server you must opt out explicitly with `--no-auth`
-— the server refuses to start with neither a token nor `--no-auth`, so an
-open server is always a deliberate choice.
+**Users** are managed offline (no server needed — opens the store directly),
+which is also how you seed the first user before exposing the server:
+
+```sh
+datalog --data-dir ./data user add alice      # prompts for a password twice
+datalog --data-dir ./data user list
+datalog --data-dir ./data user passwd alice
+datalog --data-dir ./data user del alice
+```
+
+A verifier holds only `salt`/`iterations`/`StoredKey`/`ServerKey` — never the
+password. For containerized first-boot, `--bootstrap-user <name>` +
+`DATALOG_BOOTSTRAP_PASSWORD` creates one user when the store is empty.
+
+### TLS
+
+TLS is **wrapped-socket** (the whole stream is TLS from byte zero; no STARTTLS
+negotiation). The client trusts a CA or a pinned self-signed cert via `--ca`;
+a self-signed server cert is accepted by exact certificate pinning, and a
+proper CA chain by standard validation. Without TLS, keep the server on
+loopback — the SCRAM password is never sent over the wire either way, but the
+rest of the session is only encrypted under TLS.
 
 ## Connecting
 
 ```rust
 use datalog_db::client::Client;
 
-// Auth-enabled server: present the shared token.
+// Shared token over plaintext (loopback / trusted network):
 let mut client = Client::connect_with_token("127.0.0.1:5557", "s3cret")?;
 
-// --no-auth server: token-free connect (equivalent to an empty token).
+// Per-user SCRAM over TLS (remote): trust `ca.pem`, auth as alice.
+let ca = std::path::Path::new("ca.pem");
+let mut client = Client::connect_scram("db.example.com:5557", "alice", "pw", ca)?;
+
+// Token over TLS, or SCRAM over plaintext loopback, are also available:
+let mut client = Client::connect_tls("db.example.com:5557", "s3cret", ca)?;
+let mut client = Client::connect_scram_plain("127.0.0.1:5557", "alice", "pw")?;
+
+// --no-auth server: token-free connect.
 let mut client = Client::connect("127.0.0.1:5557")?;
 ```
 
-Both open a `TcpStream`, set `TCP_NODELAY`, perform the magic+version
-handshake (protocol version 2) followed by a token frame, and return the
-live `Client`. A bad or missing token fails the handshake with
-`ProtocolError::AuthFailed`. The connection stays open for the lifetime of
-the value; drop the `Client` to close it.
+Each performs the magic+version handshake (protocol version 3), the negotiated
+auth exchange, and (for TLS) validates the server certificate; SCRAM also
+verifies the server's signature (mutual auth) before returning. A bad token,
+wrong password, unknown user, or untrusted server all fail with
+`ProtocolError::AuthFailed`. The connection stays open for the lifetime of the
+value; drop the `Client` to close it.
+
+The `datalog` CLI mirrors this: `--auth-token`/`DATALOG_AUTH_TOKEN` for token,
+`--user NAME` (prompts for a password, or reads `DATALOG_PASSWORD`) for SCRAM,
+and `--ca <pem>` to enable TLS.
 
 ## Defining schema
 

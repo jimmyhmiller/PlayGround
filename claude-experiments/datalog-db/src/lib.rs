@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod backup;
 pub mod cache;
 pub mod client;
@@ -14,4 +15,5 @@ pub mod query;
 pub mod schema;
 pub mod server;
 pub mod storage;
+pub mod transport;
 pub mod tx;

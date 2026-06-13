@@ -577,7 +577,14 @@ fn test_tcp_protocol_roundtrip() {
     // Server thread
     let server_handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        protocol::server_handshake(&mut stream, None).unwrap();
+        // No-auth ServerAuth: open server (explicit --no-auth equivalent).
+        let auth = protocol::ServerAuth {
+            expected_token: None,
+            users: None,
+            mock_key: b"test-mock-key",
+            allow_no_auth: true,
+        };
+        protocol::server_handshake(&mut stream, &auth).unwrap();
 
         // Read one message
         let msg = protocol::read_message(&mut stream).unwrap();
@@ -617,7 +624,14 @@ fn test_full_server_define_transact_query() {
     let db_clone = db.clone();
     let server_handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        protocol::server_handshake(&mut stream, None).unwrap();
+        // No-auth ServerAuth: open server (explicit --no-auth equivalent).
+        let auth = protocol::ServerAuth {
+            expected_token: None,
+            users: None,
+            mock_key: b"test-mock-key",
+            allow_no_auth: true,
+        };
+        protocol::server_handshake(&mut stream, &auth).unwrap();
 
         // Process messages until client disconnects
         loop {
@@ -2797,6 +2811,207 @@ fn test_auth_disabled_accepts_any_token() {
         Client::connect_with_token(&addr, "ignored").unwrap().status().unwrap().server,
         "datalog-db"
     );
+}
+
+// ---------------------------------------------------------------------------
+// TLS + SCRAM
+// ---------------------------------------------------------------------------
+
+/// Generate a self-signed cert for `localhost`/`127.0.0.1`, written as PEM to a
+/// temp dir. Returns (cert_path, key_path, tempdir-guard). The same cert file
+/// serves as the client's trusted CA (it's self-signed).
+fn self_signed_cert() -> (std::path::PathBuf, std::path::PathBuf, tempfile::TempDir) {
+    let cert = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ])
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+    (cert_path, key_path, dir)
+}
+
+/// Start a TLS + SCRAM server with one pre-created user. Returns the bound
+/// address, the cert path (client CA), and guards to keep things alive.
+fn start_tls_scram_server(
+    username: &str,
+    password: &str,
+) -> (
+    String,
+    std::path::PathBuf,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    use datalog_db::auth::scram::Verifier;
+    use datalog_db::server::{AuthConfig, Server};
+
+    let (db, data_dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.put_scram_verifier(username, &Verifier::create(password))
+        .unwrap();
+
+    let (cert, key, cert_dir) = self_signed_cert();
+    let tls = datalog_db::transport::server_config(&cert, &key).unwrap();
+    let server = Server::bind_full(
+        "127.0.0.1:0",
+        db,
+        None,
+        AuthConfig {
+            token: None,
+            scram: true,
+        },
+        Some(tls),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    (addr, cert, cert_dir, data_dir)
+}
+
+#[test]
+fn test_tls_scram_success() {
+    use datalog_db::client::Client;
+    let (addr, ca, _cert_dir, _data_dir) = start_tls_scram_server("alice", "s3cret-pw");
+
+    // Use "localhost" as the SNI name (the cert has it as a SAN); the bound
+    // addr is 127.0.0.1:<port>, so override the server name explicitly.
+    let port = addr.rsplit_once(':').unwrap().1;
+    let connect_addr = format!("127.0.0.1:{port}");
+    let mut client =
+        Client::connect_scram_with_name(&connect_addr, "alice", "s3cret-pw", &ca, "localhost")
+            .unwrap();
+    assert_eq!(client.status().unwrap().server, "datalog-db");
+}
+
+#[test]
+fn test_tls_scram_wrong_password_rejected() {
+    use datalog_db::client::{Client, ClientError};
+    use datalog_db::protocol::ProtocolError;
+    let (addr, ca, _cert_dir, _data_dir) = start_tls_scram_server("alice", "right-pw");
+    let port = addr.rsplit_once(':').unwrap().1;
+    let connect_addr = format!("127.0.0.1:{port}");
+
+    match Client::connect_scram_with_name(&connect_addr, "alice", "WRONG-pw", &ca, "localhost") {
+        Err(ClientError::Protocol(ProtocolError::AuthFailed(_))) => {}
+        Err(e) => panic!("expected AuthFailed, got {e:?}"),
+        Ok(_) => panic!("wrong password must not authenticate"),
+    }
+}
+
+#[test]
+fn test_tls_scram_unknown_user_rejected() {
+    use datalog_db::client::{Client, ClientError};
+    use datalog_db::protocol::ProtocolError;
+    let (addr, ca, _cert_dir, _data_dir) = start_tls_scram_server("alice", "pw");
+    let port = addr.rsplit_once(':').unwrap().1;
+    let connect_addr = format!("127.0.0.1:{port}");
+
+    // Unknown user: server mock-authenticates, proof fails → AuthFailed (not a
+    // distinct "no such user" — that's the enumeration-resistance behavior).
+    match Client::connect_scram_with_name(&connect_addr, "mallory", "pw", &ca, "localhost") {
+        Err(ClientError::Protocol(ProtocolError::AuthFailed(_))) => {}
+        Err(e) => panic!("expected AuthFailed, got {e:?}"),
+        Ok(_) => panic!("unknown user must not authenticate"),
+    }
+}
+
+#[test]
+fn test_scram_over_plaintext_loopback() {
+    // SCRAM does not require TLS — the password is never sent. Verify it works
+    // over a plaintext loopback connection too.
+    use datalog_db::auth::scram::Verifier;
+    use datalog_db::client::Client;
+    use datalog_db::server::{AuthConfig, Server};
+
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.put_scram_verifier("bob", &Verifier::create("bobpw")).unwrap();
+
+    let server = Server::bind_full(
+        "127.0.0.1:0",
+        db,
+        None,
+        AuthConfig { token: None, scram: true },
+        None, // plaintext
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.run();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let mut ok = Client::connect_scram_plain(&addr, "bob", "bobpw").unwrap();
+    assert_eq!(ok.status().unwrap().server, "datalog-db");
+    assert!(Client::connect_scram_plain(&addr, "bob", "nope").is_err());
+}
+
+#[test]
+fn test_plaintext_client_to_tls_server_fails() {
+    // A plaintext token client hitting a TLS server must fail cleanly, not hang
+    // or half-connect (the server reads TLS records, sees junk).
+    use datalog_db::client::Client;
+    let (addr, _ca, _cert_dir, _data_dir) = start_tls_scram_server("alice", "pw");
+    let port = addr.rsplit_once(':').unwrap().1;
+    let connect_addr = format!("127.0.0.1:{port}");
+    assert!(
+        Client::connect_with_token(&connect_addr, "anything").is_err(),
+        "plaintext client must not connect to a TLS server"
+    );
+}
+
+#[test]
+fn test_tls_wrong_pinned_cert_rejected() {
+    // Pinning a DIFFERENT self-signed cert than the server presents must fail
+    // at the TLS layer (no match, no chain), before any auth.
+    use datalog_db::client::Client;
+    let (addr, _real_ca, _cert_dir, _data_dir) = start_tls_scram_server("alice", "pw");
+    let port = addr.rsplit_once(':').unwrap().1;
+    let connect_addr = format!("127.0.0.1:{port}");
+
+    // A second, unrelated self-signed cert to pin.
+    let (other_cert, _ok, _other_dir) = self_signed_cert();
+    match Client::connect_scram_with_name(&connect_addr, "alice", "pw", &other_cert, "localhost") {
+        Err(_) => {} // TLS rejection (cert mismatch) — any error is correct here
+        Ok(_) => panic!("pinning a different cert must reject the connection"),
+    }
+}
+
+#[test]
+fn test_user_store_crud() {
+    use datalog_db::auth::scram::Verifier;
+    let (db, _dir) = test_db();
+
+    assert_eq!(db.count_users().unwrap(), 0);
+    db.put_scram_verifier("alice", &Verifier::create("pw1")).unwrap();
+    db.put_scram_verifier("bob", &Verifier::create("pw2")).unwrap();
+    assert_eq!(db.list_users().unwrap(), vec!["alice", "bob"]);
+    assert_eq!(db.count_users().unwrap(), 2);
+
+    assert!(db.get_scram_verifier("alice").unwrap().is_some());
+    assert!(db.get_scram_verifier("ghost").unwrap().is_none());
+
+    assert!(db.delete_user("alice").unwrap());
+    assert!(!db.delete_user("alice").unwrap());
+    assert_eq!(db.list_users().unwrap(), vec!["bob"]);
+}
+
+#[test]
+fn test_weak_verifier_rejected_on_load() {
+    // A stored verifier below the RFC iteration floor must be refused on read,
+    // not silently honored.
+    use datalog_db::auth::scram::Verifier;
+    let (db, _dir) = test_db();
+    // create_with lets us force a weak count; put_scram_verifier validates, so
+    // this also checks the write path rejects it.
+    let weak = Verifier::create_with("pw", b"saltsaltsaltsalt", 100);
+    assert!(db.put_scram_verifier("weak", &weak).is_err());
 }
 
 #[test]

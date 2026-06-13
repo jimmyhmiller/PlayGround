@@ -40,6 +40,8 @@ pub enum DbError {
     Query(String),
     #[error("Schema error: {0}")]
     Schema(String),
+    #[error("Auth error: {0}")]
+    Auth(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -1789,6 +1791,112 @@ impl Database {
 
         Ok(*result.downcast::<Vec<crate::datom::Datom>>().expect("wrong type"))
     }
+
+    // -----------------------------------------------------------------------
+    // SCRAM user store
+    //
+    // Verifiers live in the META keyspace under the `auth/user/` sub-prefix, so
+    // they are never visible to the datom query path (the executor only touches
+    // the EAVT/AEVT/AVET/VAET/CURRENT/FTS prefixes, 0x01–0x21). A verifier holds
+    // no password — only salt/iterations/StoredKey/ServerKey — so this store is
+    // safe at rest in the same way Postgres's `pg_authid` is.
+    // -----------------------------------------------------------------------
+
+    /// Fetch a user's SCRAM verifier, or `None` if the user does not exist.
+    /// Returns an `Auth` error if a stored verifier fails its iteration-count
+    /// floor (a malformed/tampered record must not silently weaken a login).
+    pub fn get_scram_verifier(
+        &self,
+        username: &str,
+    ) -> Result<Option<crate::auth::scram::Verifier>> {
+        let key = index::meta_key(&scram_user_meta_key(username));
+        let result = self.storage.execute_read(Box::new(move |snap| {
+            let v = snap.get(&key)?;
+            Ok(Box::new(v) as Box<dyn Any + Send>)
+        }))?;
+        let raw = *result.downcast::<Option<Vec<u8>>>().expect("wrong type");
+        match raw {
+            None => Ok(None),
+            Some(bytes) => {
+                let verifier: crate::auth::scram::Verifier = serde_json::from_slice(&bytes)
+                    .map_err(|e| DbError::Auth(format!("corrupt verifier for '{username}': {e}")))?;
+                verifier
+                    .validate()
+                    .map_err(|e| DbError::Auth(e.to_string()))?;
+                Ok(Some(verifier))
+            }
+        }
+    }
+
+    /// Create or replace a user's verifier. Atomic single-key WriteBatch; does
+    /// not touch the tx/entity counters because a verifier is not a datom.
+    pub fn put_scram_verifier(
+        &self,
+        username: &str,
+        verifier: &crate::auth::scram::Verifier,
+    ) -> Result<()> {
+        verifier
+            .validate()
+            .map_err(|e| DbError::Auth(e.to_string()))?;
+        let key = index::meta_key(&scram_user_meta_key(username));
+        let value = serde_json::to_vec(verifier)
+            .map_err(|e| DbError::Auth(format!("serializing verifier: {e}")))?;
+        self.storage.execute_batch(Box::new(move |txn| {
+            txn.put(key, value)?;
+            Ok(Box::new(()) as Box<dyn Any + Send>)
+        }))?;
+        Ok(())
+    }
+
+    /// Delete a user. Returns `true` if the user existed.
+    pub fn delete_user(&self, username: &str) -> Result<bool> {
+        let key = index::meta_key(&scram_user_meta_key(username));
+        let lookup = key.clone();
+        let result = self.storage.execute_batch(Box::new(move |txn| {
+            let existed = txn.get(&lookup)?.is_some();
+            if existed {
+                txn.delete(&key)?;
+            }
+            Ok(Box::new(existed) as Box<dyn Any + Send>)
+        }))?;
+        Ok(*result.downcast::<bool>().expect("wrong type"))
+    }
+
+    /// List all usernames, sorted (scans the `auth/user/` sub-prefix).
+    pub fn list_users(&self) -> Result<Vec<String>> {
+        let prefix = index::meta_key(SCRAM_USER_PREFIX);
+        let end = index::prefix_end(&prefix);
+        // The stored key is meta_key("auth/user/<name>"); strip the meta prefix
+        // (1 byte) + the "auth/user/" literal to recover the username.
+        let strip = prefix.len();
+        let result = self.storage.execute_read(Box::new(move |snap| {
+            let entries = snap.scan(&prefix, &end)?;
+            let mut names: Vec<String> = entries
+                .iter()
+                .filter_map(|(k, _)| {
+                    k.get(strip..)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            names.sort();
+            Ok(Box::new(names) as Box<dyn Any + Send>)
+        }))?;
+        Ok(*result.downcast::<Vec<String>>().expect("wrong type"))
+    }
+
+    /// Number of users — used to detect a fresh store for first-user bootstrap.
+    pub fn count_users(&self) -> Result<usize> {
+        Ok(self.list_users()?.len())
+    }
+}
+
+/// Meta sub-prefix under which SCRAM user verifiers are stored. Combined with
+/// `index::meta_key` this yields keys like `[0x00]auth/user/alice`.
+const SCRAM_USER_PREFIX: &str = "auth/user/";
+
+fn scram_user_meta_key(username: &str) -> String {
+    format!("{SCRAM_USER_PREFIX}{username}")
 }
 
 fn encode_u64(val: u64) -> Vec<u8> {

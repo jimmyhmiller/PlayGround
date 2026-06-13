@@ -98,10 +98,12 @@
 //! [`send_raw`]:    Client::send_raw
 
 use std::net::TcpStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::protocol;
 use crate::schema::{EntityTypeDef, EnumTypeDef, FieldType};
+use crate::transport::{self, ClientStream};
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -167,40 +169,91 @@ pub struct StatusResult {
 // ---------------------------------------------------------------------------
 
 pub struct Client {
-    stream: TcpStream,
+    stream: ClientStream,
     next_request_id: AtomicU64,
 }
 
 impl Client {
-    /// Connect to a datalog-db server with no auth token.
+    /// Connect to a datalog-db server with no auth token (plaintext).
     ///
     /// Use this against a server started with auth disabled. If the server
-    /// requires a token, the handshake fails with
-    /// [`protocol::ProtocolError::AuthFailed`] (surfaced as
-    /// [`ClientError::Protocol`]). Use [`Client::connect_with_token`] to
-    /// authenticate.
+    /// requires auth, the handshake fails with
+    /// [`protocol::ProtocolError::AuthFailed`]. Use [`Client::connect_with_token`],
+    /// [`Client::connect_tls`], or [`Client::connect_scram`] to authenticate.
     pub fn connect(addr: &str) -> Result<Self> {
         Self::connect_with_token(addr, "")
     }
 
-    /// Connect to a datalog-db server, presenting `token` at the handshake.
-    ///
-    /// Pass the shared secret the server was configured with. An empty token
-    /// is equivalent to [`Client::connect`] and only succeeds against a
-    /// server with auth disabled.
+    /// Connect (plaintext) presenting a shared bearer `token` at the handshake.
     pub fn connect_with_token(addr: &str, token: &str) -> Result<Self> {
-        let mut stream = TcpStream::connect(addr)
-            .map_err(|e| protocol::ProtocolError::Io(e))?;
-        // Disable Nagle: every request is small and round-trips immediately,
-        // so coalescing into MSS-sized frames just adds 40ms delayed-ACK
-        // stalls under request/response loads. Loopback workloads suffer
-        // most because RTT is microseconds and the kernel still waits.
-        let _ = stream.set_nodelay(true);
+        let mut stream = plain_stream(addr)?;
         protocol::client_handshake(&mut stream, token.as_bytes())?;
-        Ok(Self {
+        Ok(Self::wrap(stream))
+    }
+
+    /// Connect over **TLS** presenting a shared bearer `token`.
+    ///
+    /// `ca_pem` is the CA (or self-signed server cert) to trust; `server_name`
+    /// must match the server certificate's name. Defaults the name to the host
+    /// part of `addr` via [`Client::connect_tls_with_token`].
+    pub fn connect_tls(addr: &str, token: &str, ca_pem: &Path) -> Result<Self> {
+        let server_name = host_of(addr);
+        Self::connect_tls_with_token(addr, token, ca_pem, &server_name)
+    }
+
+    /// TLS + token with an explicit `server_name` for certificate validation.
+    pub fn connect_tls_with_token(
+        addr: &str,
+        token: &str,
+        ca_pem: &Path,
+        server_name: &str,
+    ) -> Result<Self> {
+        let mut stream = tls_stream(addr, ca_pem, server_name)?;
+        protocol::client_handshake(&mut stream, token.as_bytes())?;
+        Ok(Self::wrap(stream))
+    }
+
+    /// Connect over **TLS** authenticating as `username`/`password` with
+    /// per-user SCRAM-SHA-256. The server's signature is verified (mutual auth)
+    /// before this returns `Ok`. `server_name` defaults to the host part of
+    /// `addr`; use [`Client::connect_scram_with_name`] to override.
+    pub fn connect_scram(
+        addr: &str,
+        username: &str,
+        password: &str,
+        ca_pem: &Path,
+    ) -> Result<Self> {
+        let server_name = host_of(addr);
+        Self::connect_scram_with_name(addr, username, password, ca_pem, &server_name)
+    }
+
+    /// SCRAM over TLS with an explicit `server_name`.
+    pub fn connect_scram_with_name(
+        addr: &str,
+        username: &str,
+        password: &str,
+        ca_pem: &Path,
+        server_name: &str,
+    ) -> Result<Self> {
+        let mut stream = tls_stream(addr, ca_pem, server_name)?;
+        protocol::client_handshake_scram(&mut stream, username, password)?;
+        Ok(Self::wrap(stream))
+    }
+
+    /// SCRAM over **plaintext** (e.g. SCRAM on loopback without TLS). The
+    /// password is protected by SCRAM's challenge-response — it never crosses
+    /// the wire — but without TLS the rest of the session is unencrypted.
+    pub fn connect_scram_plain(addr: &str, username: &str, password: &str) -> Result<Self> {
+        let mut stream = plain_stream(addr)?;
+        protocol::client_handshake_scram(&mut stream, username, password)?;
+        Ok(Self::wrap(stream))
+    }
+
+    fn wrap(stream: ClientStream) -> Self {
+        Self {
             stream,
             next_request_id: AtomicU64::new(1),
-        })
+        }
     }
 
     /// Define an entity type from an `EntityTypeDef`.
@@ -480,6 +533,37 @@ impl Client {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Open a plain TCP stream with Nagle disabled. Nagle hurts request/response
+/// loops (40ms delayed-ACK stalls), worst on loopback where RTT is microseconds.
+fn plain_stream(addr: &str) -> Result<ClientStream> {
+    let stream = TcpStream::connect(addr).map_err(protocol::ProtocolError::Io)?;
+    let _ = stream.set_nodelay(true);
+    Ok(ClientStream::Plain(stream))
+}
+
+/// Open a TLS stream: connect TCP, set nodelay on the raw socket (it carries
+/// through the tunnel), then wrap in rustls validating against `ca_pem`.
+fn tls_stream(addr: &str, ca_pem: &Path, server_name: &str) -> Result<ClientStream> {
+    let sock = TcpStream::connect(addr).map_err(protocol::ProtocolError::Io)?;
+    let _ = sock.set_nodelay(true);
+    let config = transport::client_config(Some(ca_pem)).map_err(protocol::ProtocolError::Io)?;
+    transport::connect_tls(sock, config, server_name).map_err(|e| protocol::ProtocolError::Io(e).into())
+}
+
+/// Extract the host part of an `addr` (`host:port`) for TLS cert validation.
+/// IPv6 literals in brackets are returned without the brackets.
+fn host_of(addr: &str) -> String {
+    if let Some(rest) = addr.strip_prefix('[') {
+        // [::1]:5557 → ::1
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    addr.rsplit_once(':')
+        .map(|(host, _)| host.to_string())
+        .unwrap_or_else(|| addr.to_string())
+}
 
 fn field_type_to_wire(ft: &FieldType) -> String {
     match ft {

@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use tracing::info;
 
+use datalog_db::auth::scram::Verifier;
 use datalog_db::backup::{spawn_backup_scheduler, BackupSchedulerConfig};
 use datalog_db::db::Database;
-use datalog_db::server::{BackupContext, Server};
+use datalog_db::server::{AuthConfig, BackupContext, Server};
 use datalog_db::storage::rocksdb_backend::RocksDbStorage;
 
 fn arg_value(args: &[String], key: &str) -> Option<String> {
@@ -27,30 +28,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = arg_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5557".to_string());
 
-    // Auth is required by default. The operator supplies a shared bearer
-    // token via `--auth-token <secret>` or the `DATALOG_AUTH_TOKEN` env var
-    // (the env var is preferred for secrets — it won't show up in `ps`).
-    // Running without auth is allowed only with an explicit `--no-auth`
-    // flag, so an unauthenticated server is always a deliberate choice and
-    // never the result of a forgotten flag.
+    // --- Authentication configuration ---
+    //
+    // At least one method must be enabled, unless `--no-auth` is given
+    // explicitly — an unauthenticated server is always a deliberate choice.
+    //   --auth-token <t> / DATALOG_AUTH_TOKEN : shared bearer token (loopback consumers)
+    //   --scram                               : per-user SCRAM-SHA-256
+    //   --no-auth                             : explicit opt-out
+    // Token + SCRAM may both be on at once; clients pick per-connection.
     let no_auth = args.iter().any(|a| a == "--no-auth");
+    let scram = args.iter().any(|a| a == "--scram");
     let auth_token: Option<Vec<u8>> = arg_value(&args, "--auth-token")
         .or_else(|| std::env::var("DATALOG_AUTH_TOKEN").ok())
         .filter(|t| !t.is_empty())
         .map(|t| t.into_bytes());
 
-    if auth_token.is_none() && !no_auth {
+    let any_auth = auth_token.is_some() || scram;
+    if !any_auth && !no_auth {
         eprintln!(
-            "error: no auth token configured.\n  \
-             Set one with --auth-token <secret> or the DATALOG_AUTH_TOKEN env var,\n  \
+            "error: no authentication configured.\n  \
+             Enable one (or both) of:\n    \
+               --auth-token <secret>  (or DATALOG_AUTH_TOKEN env)  — shared token\n    \
+               --scram                                            — per-user SCRAM\n  \
              or pass --no-auth to run an unauthenticated server (open to anyone\n  \
              who can reach {}).",
             bind_addr
         );
         std::process::exit(1);
     }
-    if auth_token.is_some() && no_auth {
-        eprintln!("error: --no-auth conflicts with a configured auth token; pass only one.");
+    if any_auth && no_auth {
+        eprintln!("error: --no-auth conflicts with --auth-token/--scram; pass only one mode.");
+        std::process::exit(1);
+    }
+
+    // --- TLS configuration ---
+    // Both-or-neither, mirroring the auth validation. Plaintext is allowed
+    // (loopback/dev); remote exposure should set both.
+    let tls_cert = arg_value(&args, "--tls-cert").map(PathBuf::from);
+    let tls_key = arg_value(&args, "--tls-key").map(PathBuf::from);
+    if tls_cert.is_some() != tls_key.is_some() {
+        eprintln!("error: --tls-cert and --tls-key must be given together.");
         std::process::exit(1);
     }
 
@@ -72,6 +89,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db = Database::open(storage)?;
     let db = Arc::new(db);
+
+    // First-user bootstrap: when SCRAM is enabled, the store has no users, and
+    // `--bootstrap-user` is given, create that user once from
+    // DATALOG_BOOTSTRAP_PASSWORD (never argv). Lets a fresh containerized deploy
+    // come up self-sufficient; for hands-on setups prefer `datalog user add`
+    // offline. Idempotent: skipped once any user exists.
+    if scram {
+        if let Some(bootstrap_user) = arg_value(&args, "--bootstrap-user") {
+            if db.count_users()? == 0 {
+                let password = std::env::var("DATALOG_BOOTSTRAP_PASSWORD").unwrap_or_default();
+                if password.is_empty() {
+                    eprintln!(
+                        "error: --bootstrap-user requires DATALOG_BOOTSTRAP_PASSWORD (non-empty)."
+                    );
+                    std::process::exit(1);
+                }
+                db.put_scram_verifier(&bootstrap_user, &Verifier::create(&password))?;
+                info!("Bootstrap SCRAM user created: {}", bootstrap_user);
+            } else {
+                info!("--bootstrap-user ignored: user store is not empty");
+            }
+        }
+    }
 
     // Spawn the backup scheduler before the server so the first scheduled
     // tick is anchored to startup. The handle is held in `_scheduler` for
@@ -101,8 +141,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => (None, None),
     };
 
+    // Build TLS config if cert/key were provided.
+    let tls = match (&tls_cert, &tls_key) {
+        (Some(cert), Some(key)) => {
+            info!("TLS enabled: cert={:?} key={:?}", cert, key);
+            Some(datalog_db::transport::server_config(cert, key)?)
+        }
+        _ => None,
+    };
+
+    let auth = AuthConfig {
+        token: auth_token,
+        scram,
+    };
+
     info!("Starting server on {}", bind_addr);
-    let server = Server::bind_with_auth(&bind_addr, db, backup_ctx, auth_token)?;
+    let server = Server::bind_full(&bind_addr, db, backup_ctx, auth, tls)?;
     server.run()?;
 
     Ok(())
