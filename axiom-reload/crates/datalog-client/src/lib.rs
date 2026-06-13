@@ -1,9 +1,10 @@
 //! A tiny, pure-Rust client for the `datalog-db` wire protocol.
 //!
 //! The protocol (verified against the live server):
-//! - **Handshake:** client sends `MAGIC` (`u32` BE) then `VERSION` (`u32` BE);
-//!   server replies with a single status byte (`0x00` = OK, else an error frame
-//!   `len(u32 BE) + utf8` follows).
+//! - **Handshake (VERSION 2):** client sends `MAGIC` (`u32` BE), `VERSION`
+//!   (`u32` BE), then an auth frame `len(u32 BE) + token bytes`; server replies
+//!   with a single status byte (`0x00` = OK, else an error frame
+//!   `len(u32 BE) + utf8` follows). The token comes from `DATALOG_AUTH_TOKEN`.
 //! - **Frames (both directions):** `request_id` (`u64` BE) + `len` (`u32` BE) +
 //!   `len` bytes of JSON. The server echoes the same `request_id` back.
 //!
@@ -23,7 +24,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 const MAGIC: u32 = 0xDA7A_1061;
-const VERSION: u32 = 1;
+// VERSION 2 added a shared-token auth frame to the handshake (4-byte length +
+// token bytes) sent right after magic/version. Always present, even when the
+// token is empty (which only authenticates against a --no-auth server).
+const VERSION: u32 = 2;
 
 /// A connected datalog-db client. One owns a single TCP connection and a
 /// monotonic request-id counter.
@@ -83,18 +87,31 @@ type Result<T> = std::result::Result<T, Error>;
 
 impl Client {
     /// Connect to `addr` (e.g. `"127.0.0.1:5557"`) and complete the handshake.
+    ///
+    /// The auth token is read from `DATALOG_AUTH_TOKEN` (empty if unset, which
+    /// only works against a `--no-auth` server). Use [`Client::connect_with_token`]
+    /// to pass it explicitly.
     pub fn connect(addr: &str) -> Result<Client> {
+        let token = std::env::var("DATALOG_AUTH_TOKEN").unwrap_or_default();
+        Self::connect_with_token(addr, &token)
+    }
+
+    /// Connect to `addr`, presenting `token` at the handshake.
+    pub fn connect_with_token(addr: &str, token: &str) -> Result<Client> {
         let stream = TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         stream.set_write_timeout(Some(Duration::from_secs(120)))?;
         let mut c = Client { stream, next_id: 0 };
-        c.handshake()?;
+        c.handshake(token.as_bytes())?;
         Ok(c)
     }
 
-    fn handshake(&mut self) -> Result<()> {
+    fn handshake(&mut self, token: &[u8]) -> Result<()> {
         self.stream.write_all(&MAGIC.to_be_bytes())?;
         self.stream.write_all(&VERSION.to_be_bytes())?;
+        // Auth frame: 4-byte big-endian length + token bytes.
+        self.stream.write_all(&(token.len() as u32).to_be_bytes())?;
+        self.stream.write_all(token)?;
         self.stream.flush()?;
         let mut status = [0u8; 1];
         self.read_exact(&mut status)?;
