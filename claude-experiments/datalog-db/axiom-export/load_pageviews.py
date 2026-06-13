@@ -14,10 +14,10 @@ import sys
 from datetime import datetime, timezone
 
 HOST, PORT = "127.0.0.1", 5557
-# VERSION 2 added a token auth frame to the handshake. The token comes from
-# DATALOG_AUTH_TOKEN; an empty token is sent when the var is unset (only works
-# against a server started with --no-auth).
-MAGIC, VERSION = 0xDA7A1061, 2
+# VERSION 3 made auth method-negotiated: after magic/version the client sends a
+# `{"method":"token"}` control frame, then the token frame. The token comes from
+# DATALOG_AUTH_TOKEN; an empty token only works against a --no-auth server.
+MAGIC, VERSION = 0xDA7A1061, 3
 AUTH_TOKEN = os.environ.get("DATALOG_AUTH_TOKEN", "").encode()
 NDJSON = "events.ndjson"
 BATCH = 500
@@ -79,8 +79,11 @@ def to_op(ev):
 class Conn:
     def __init__(self):
         self.s = socket.create_connection((HOST, PORT))
-        # magic + version, then the auth frame: 4-byte length + token bytes.
+        # magic + version, then the method control frame, then the token frame.
+        # Each frame is 4-byte big-endian length + bytes.
         self.s.sendall(struct.pack(">II", MAGIC, VERSION))
+        method = b'{"method":"token"}'
+        self.s.sendall(struct.pack(">I", len(method)) + method)
         self.s.sendall(struct.pack(">I", len(AUTH_TOKEN)) + AUTH_TOKEN)
         # server replies with a single status byte: 0x00 = OK, 0x01 = error
         ack = self._recv_exact(1)

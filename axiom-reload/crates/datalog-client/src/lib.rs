@@ -24,10 +24,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 const MAGIC: u32 = 0xDA7A_1061;
-// VERSION 2 added a shared-token auth frame to the handshake (4-byte length +
-// token bytes) sent right after magic/version. Always present, even when the
-// token is empty (which only authenticates against a --no-auth server).
-const VERSION: u32 = 2;
+// VERSION 3 made auth method-negotiated: after magic/version the client sends a
+// small JSON control frame `{"method":"token"}` (or "scram"), then the method's
+// frames. This vendored client only does the token method (the loopback prod
+// consumers — axiom-reload, analytics — don't need per-user SCRAM). Each frame
+// is `len(u32 BE) + bytes`.
+const VERSION: u32 = 3;
 
 /// A connected datalog-db client. One owns a single TCP connection and a
 /// monotonic request-id counter.
@@ -109,9 +111,10 @@ impl Client {
     fn handshake(&mut self, token: &[u8]) -> Result<()> {
         self.stream.write_all(&MAGIC.to_be_bytes())?;
         self.stream.write_all(&VERSION.to_be_bytes())?;
-        // Auth frame: 4-byte big-endian length + token bytes.
-        self.stream.write_all(&(token.len() as u32).to_be_bytes())?;
-        self.stream.write_all(token)?;
+        // Method control frame: select the shared-token method.
+        self.write_frame(br#"{"method":"token"}"#)?;
+        // Token frame: 4-byte big-endian length + token bytes.
+        self.write_frame(token)?;
         self.stream.flush()?;
         let mut status = [0u8; 1];
         self.read_exact(&mut status)?;
@@ -128,6 +131,13 @@ impl Client {
             "handshake rejected: {}",
             String::from_utf8_lossy(&msg)
         )))
+    }
+
+    /// Write one `len(u32 BE) + bytes` frame (used for the v3 handshake frames).
+    fn write_frame(&mut self, bytes: &[u8]) -> Result<()> {
+        self.stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+        self.stream.write_all(bytes)?;
+        Ok(())
     }
 
     /// Send one request object and read the response object. Verifies the echoed
