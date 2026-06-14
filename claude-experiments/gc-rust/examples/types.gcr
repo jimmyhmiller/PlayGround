@@ -1,0 +1,65 @@
+// Exercises value types, reference types, generics, enums, traits, closures,
+// match, and the ? operator — the parser/typechecker golden program.
+
+value struct Vec3 { x: f64, y: f64, z: f64 }
+
+fn dot(a: Vec3, b: Vec3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+struct Body {
+    pos: Vec3,
+    vel: Vec3,
+    mass: f64,
+}
+
+enum Option<T> { None, Some(T) }
+enum Result<T, E> { Ok(T), Err(E) }
+
+trait Show {
+    fn show(self) -> String;
+}
+
+impl Show for i64 {
+    fn show(self) -> String {
+        int_to_string(self)
+    }
+}
+
+impl<T: Show> Show for Option<T> {
+    fn show(self) -> String {
+        match self {
+            Option::None => "None",
+            Option::Some(x) => x.show(),
+        }
+    }
+}
+
+fn checked_div(a: i64, b: i64) -> Result<i64, String> {
+    if b == 0 {
+        Result::Err("divide by zero")
+    } else {
+        Result::Ok(a / b)
+    }
+}
+
+fn compute(x: i64, d: i64) -> Result<i64, String> {
+    let q = checked_div(x, d)?;
+    let r = checked_div(q + 6, 2)?;
+    Result::Ok(r + 1)
+}
+
+fn apply<T>(f: fn(T) -> T, x: T) -> T {
+    f(x)
+}
+
+fn main() -> i64 {
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    let n = dot(v, v) as i64;
+    let inc = |k: i64| k + 1;
+    let n = apply(inc, n);
+    match compute(n, 2) {
+        Result::Ok(r) => r,
+        Result::Err(_e) => -1,
+    }
+}

@@ -193,27 +193,33 @@ pub fn rough_ellipse(w: f64, h: f64, opts: &RoughOptions) -> Drawable {
     let rx_off = roughness_offset(opts);
     let ry_off = rx_off;
 
+    let sample = |angle: f64, rng: &mut crate::rough::RoughRng| {
+        Point::new(
+            cx + angle.cos() * rx + rng.offset(rx_off, opts.roughness),
+            cy + angle.sin() * ry + rng.offset(ry_off, opts.roughness),
+        )
+    };
+
+    // Sample a full revolution, then overlap the first few samples again so the
+    // Catmull-Rom curve closes smoothly across the seam (Rough.js samples past
+    // 2π for the same reason — a single duplicated point leaves a visible gap
+    // because the spline needs neighbors on both sides of the join).
+    let start = rng.range(-increment, increment);
     let mut points: Vec<Point> = Vec::new();
-    // Two overlapping loops, as Rough.js does, to close the curve cleanly.
-    let offset = increment;
-    let mut angle = rng.range(-offset, offset);
-    let end = std::f64::consts::PI * 2.0 + angle - 1e-9;
+    let mut angle = start;
+    let end = start + std::f64::consts::PI * 2.0 - 1e-9;
     while angle < end {
-        let cos = angle.cos();
-        let sin = angle.sin();
-        points.push(Point::new(
-            cx + cos * rx + rng.offset(rx_off, opts.roughness),
-            cy + sin * ry + rng.offset(ry_off, opts.roughness),
-        ));
+        points.push(sample(angle, &mut rng));
         angle += increment;
     }
-    // Close the loop back onto the first sampled angle.
-    if let Some(&first) = points.first() {
-        points.push(first);
+    // Overlap: re-sample the first three step angles to bridge the join.
+    for k in 0..3 {
+        points.push(sample(start + k as f64 * increment, &mut rng));
     }
 
     let mut out = Path::builder();
     curve_through(&points, &mut out);
+    out.close();
     out.build()
 }
 

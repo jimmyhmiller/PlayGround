@@ -1,0 +1,14 @@
+[package]
+name = "winit-draw"
+description = "Runnable demo: draw on a headless-whiteboard canvas with the mouse, rendered via the tiny-skia backend in a winit window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+whiteboard-core = { path = "../../crates/whiteboard-core" }
+whiteboard-tiny-skia = { path = "../../crates/whiteboard-tiny-skia" }
+winit = "0.30"
+softbuffer = "0.4"

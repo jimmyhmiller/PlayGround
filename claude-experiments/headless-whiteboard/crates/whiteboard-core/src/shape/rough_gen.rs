@@ -105,13 +105,16 @@ impl ShapeGenerator for RoughGenerator {
         }
 
         // Re-pattern the fill as a sketchy hachure/cross-hatch/zigzag/dots fill
-        // when the element is fillable with a non-solid style. Solid fills stay
-        // as the clean fill region (the renderer fills it flat).
+        // when the element is fillable with a non-solid style. These are stroked
+        // lines, not a region, so they go in `fill_strokes` (the tessellator
+        // strokes them with the background color). Solid fills keep the clean
+        // flood-fill region in `fill`.
         if !clean.fill.is_empty() && element.fill_style != FillStyle::Solid {
             if let Some(region) = fillable_polygon(element) {
                 let lines = fill_polygon(&region, element.fill_style, &opts);
                 if !lines.is_empty() {
-                    clean.fill = lines;
+                    clean.fill.clear();
+                    clean.fill_strokes = lines;
                 }
             }
         }

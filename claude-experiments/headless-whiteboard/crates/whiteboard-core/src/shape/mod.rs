@@ -33,8 +33,12 @@ use crate::geometry::Path;
 pub struct ShapeGeometry {
     /// Closed/open path(s) to stroke as the element's outline.
     pub outline: Vec<Path>,
-    /// Path(s) describing the fill region (empty if not filled).
+    /// Closed region(s) to flood-fill with the background color (solid fill).
     pub fill: Vec<Path>,
+    /// Open path(s) to *stroke* with the background color — the hachure /
+    /// cross-hatch / zigzag fill lines. Stroked rather than filled because each
+    /// is a line, not a region. Empty for solid fills.
+    pub fill_strokes: Vec<Path>,
 }
 
 impl ShapeGeometry {
@@ -42,6 +46,7 @@ impl ShapeGeometry {
         ShapeGeometry {
             outline: vec![path],
             fill: Vec::new(),
+            fill_strokes: Vec::new(),
         }
     }
 }

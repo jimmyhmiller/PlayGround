@@ -7,4 +7,5 @@
 //! language, frontend, type system, monomorphization, codegen) is new.
 
 pub mod gc;
+pub mod lexer;
 pub mod runtime;

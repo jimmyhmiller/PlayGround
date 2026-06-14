@@ -55,8 +55,12 @@ pub fn tessellate<G: ShapeGenerator>(
 }
 
 fn emit_element<G: ShapeGenerator>(element: &Element, generator: &G, out: &mut RenderScene) {
-    let ShapeGeometry { outline, fill } = generator.geometry(element);
-    if outline.is_empty() && fill.is_empty() {
+    let ShapeGeometry {
+        outline,
+        fill,
+        fill_strokes,
+    } = generator.geometry(element);
+    if outline.is_empty() && fill.is_empty() && fill_strokes.is_empty() {
         return;
     }
 
@@ -70,13 +74,26 @@ fn emit_element<G: ShapeGenerator>(element: &Element, generator: &G, out: &mut R
 
     let opacity = element.opacity_unit();
 
-    if !fill.is_empty() && !element.background_color.is_transparent() {
+    if !element.background_color.is_transparent() {
         let paint = Paint::solid(element.background_color).with_opacity(opacity);
+        // Solid fill regions: flood-fill.
         for path in &fill {
             out.push(DrawCommand::FillPath {
                 path: path.clone(),
                 paint: paint.clone(),
             });
+        }
+        // Hachure / cross-hatch / zigzag fill lines: stroke with the background
+        // color at a thin, fixed width (independent of the outline width).
+        if !fill_strokes.is_empty() {
+            let fill_stroke = Stroke::solid(element.stroke_width.max(1.0));
+            for path in &fill_strokes {
+                out.push(DrawCommand::StrokePath {
+                    path: path.clone(),
+                    stroke: fill_stroke.clone(),
+                    paint: paint.clone(),
+                });
+            }
         }
     }
 
