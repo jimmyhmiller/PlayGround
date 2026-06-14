@@ -1122,4 +1122,71 @@ mod tests {
             30
         );
     }
+
+    // ---- heap types + GC ---------------------------------------------------
+
+    fn run_gc(src: &str, stress: bool) -> i64 {
+        let m = parse_module(&lex(src).unwrap()).unwrap();
+        let r = resolve_module(m).unwrap();
+        let prog = lower_program(&r.globals).unwrap();
+        jit_run_i64_gc(&prog, stress).unwrap()
+    }
+
+    #[test]
+    fn struct_alloc_and_field() {
+        let src = "struct Point { x: i64, y: i64 } \
+                   fn main() -> i64 { let p = Point { x: 3, y: 4 }; p.x + p.y }";
+        assert_eq!(run_gc(src, false), 7);
+    }
+
+    #[test]
+    fn struct_survives_gc_stress() {
+        // Allocate, then more allocations (each triggers a collection under
+        // stress) — the rooted struct must survive relocation and still read 7.
+        let src = "struct Point { x: i64, y: i64 } \
+                   fn mk(a: i64, b: i64) -> Point { Point { x: a, y: b } } \
+                   fn main() -> i64 { \
+                       let p = mk(3, 4); \
+                       let _q = mk(100, 200); \
+                       let _r = mk(5, 6); \
+                       p.x + p.y \
+                   }";
+        assert_eq!(run_gc(src, true), 7);
+    }
+
+    #[test]
+    fn enum_match() {
+        let src = "enum Shape { Circle(i64), Square(i64) } \
+                   fn area(s: Shape) -> i64 { \
+                       match s { Shape::Circle(r) => r * r * 3, Shape::Square(w) => w * w } \
+                   } \
+                   fn main() -> i64 { area(Shape::Circle(2)) + area(Shape::Square(3)) }";
+        // 2*2*3 + 3*3 = 12 + 9 = 21
+        assert_eq!(run_gc(src, false), 21);
+    }
+
+    #[test]
+    fn enum_match_under_stress() {
+        let src = "enum Shape { Circle(i64), Square(i64) } \
+                   fn area(s: Shape) -> i64 { \
+                       match s { Shape::Circle(r) => r * r * 3, Shape::Square(w) => w * w } \
+                   } \
+                   fn main() -> i64 { area(Shape::Square(7)) }";
+        assert_eq!(run_gc(src, true), 49);
+    }
+
+    #[test]
+    fn nested_ref_struct_survives_gc() {
+        // Wrap holds a *reference* field (inner: Pair) plus a raw tag. Under
+        // stress, the inner Pair must be traced through Wrap's pointer slot and
+        // both must relocate correctly.
+        let src = "struct Pair { a: i64, b: i64 } \
+                   struct Wrap { inner: Pair, tag: i64 } \
+                   fn main() -> i64 { \
+                       let p = Pair { a: 5, b: 6 }; \
+                       let w = Wrap { inner: p, tag: 9 }; \
+                       w.inner.a + w.inner.b + w.tag \
+                   }";
+        assert_eq!(run_gc(src, true), 20);
+    }
 }

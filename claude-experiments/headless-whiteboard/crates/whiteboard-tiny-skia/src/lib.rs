@@ -6,22 +6,23 @@
 //! rasterizer — not a performance target. GPU backends (Vello/wgpu) consume the
 //! exact same commands.
 //!
-//! Text is drawn with bundled fonts via [`fontdue`] (see [`text`]); image
-//! drawing is the one remaining `DrawCommand` the backend does not yet
-//! rasterize (it needs decoded pixels supplied out-of-band).
+//! Text is drawn with bundled fonts via [`fontdue`] (see [`text`]). Images are
+//! drawn from pixels an app registers via [`TinySkiaBackend::register_image`]
+//! (the core never holds pixel data). Every `DrawCommand` variant is handled.
 
 mod text;
 
 pub use text::FontSet;
 
+use std::collections::HashMap;
 use tiny_skia::{
     FillRule, LineCap as SkCap, LineJoin as SkJoin, Paint as SkPaint, PathBuilder as SkPathBuilder,
-    Pixmap, Stroke as SkStroke, StrokeDash, Transform as SkTransform,
+    Pixmap, PixmapPaint, Stroke as SkStroke, StrokeDash, Transform as SkTransform,
 };
 use whiteboard_core::geometry::Path;
 use whiteboard_core::geometry::PathSegment;
 use whiteboard_core::render::{
-    Backend, Color, DrawCommand, LineCap, LineJoin, Paint, RenderScene, Stroke,
+    Backend, Color, DrawCommand, ImageId, LineCap, LineJoin, Paint, RenderScene, Stroke,
 };
 use whiteboard_core::text::{FontSpec, TextMeasurer, TextMetrics};
 
@@ -38,6 +39,9 @@ pub struct TinySkiaBackend {
     background: Color,
     /// Bundled fonts for text rasterization.
     fonts: FontSet,
+    /// Decoded image pixels keyed by the `ImageId` the core emits. The core
+    /// never holds pixel data; an app registers images here out-of-band.
+    images: HashMap<ImageId, Pixmap>,
 }
 
 /// A [`TextMeasurer`] backed by the bundled fonts. Hand this to the editor so
@@ -81,12 +85,32 @@ impl TinySkiaBackend {
             clip_stack: Vec::new(),
             background: Color::WHITE,
             fonts: FontSet::new(),
+            images: HashMap::new(),
         }
     }
 
     pub fn with_background(mut self, color: Color) -> Self {
         self.background = color;
         self
+    }
+
+    /// Register decoded image pixels for an [`ImageId`] the core will reference
+    /// via [`DrawCommand::DrawImage`]. The id is the image element's `file_id`.
+    /// Call before rendering a scene containing that image.
+    pub fn register_image(&mut self, id: impl Into<String>, pixmap: Pixmap) {
+        self.images.insert(ImageId(id.into()), pixmap);
+    }
+
+    /// Decode raw image bytes (PNG/…) and register them for `id`. Returns an
+    /// error string if decoding fails.
+    pub fn register_image_bytes(
+        &mut self,
+        id: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let pixmap = Pixmap::decode_png(bytes).map_err(|e| e.to_string())?;
+        self.register_image(id, pixmap);
+        Ok(())
     }
 
     /// Access the rendered pixels (RGBA, premultiplied as tiny-skia stores them).
@@ -127,6 +151,30 @@ impl TinySkiaBackend {
         let ts = self.current_transform();
         self.pixmap
             .fill_path(&sk_path, &sk_paint, FillRule::Winding, ts, None);
+    }
+
+    fn draw_image(&mut self, id: &ImageId, dst: &whiteboard_core::geometry::Rect, opacity: f32) {
+        let Some(src) = self.images.get(id) else {
+            // Unregistered image: nothing to draw. The core still tracks the
+            // element; the app simply hasn't supplied pixels.
+            return;
+        };
+        let (sw, sh) = (src.width() as f32, src.height() as f32);
+        if sw == 0.0 || sh == 0.0 || dst.width <= 0.0 || dst.height <= 0.0 {
+            return;
+        }
+        // Scale the source to the destination size, then translate to dst origin,
+        // then apply the current viewport/element transform.
+        let scale = SkTransform::from_scale(dst.width as f32 / sw, dst.height as f32 / sh);
+        let place = scale.post_translate(dst.x as f32, dst.y as f32);
+        let transform = self.current_transform().pre_concat(place);
+
+        let paint = PixmapPaint {
+            opacity: opacity.clamp(0.0, 1.0),
+            ..PixmapPaint::default()
+        };
+        self.pixmap
+            .draw_pixmap(0, 0, src.as_ref(), &paint, transform, None);
     }
 
     fn draw_text(&mut self, run: &whiteboard_core::text::TextRun, paint: &Paint) {
@@ -200,9 +248,7 @@ impl Backend for TinySkiaBackend {
                     paint,
                 } => self.draw_stroke(path, stroke, paint),
                 DrawCommand::DrawText { run, paint } => self.draw_text(run, paint),
-                // Image drawing needs decoded pixels supplied out-of-band; the
-                // backend has no pixel store yet, so we skip rather than fake it.
-                DrawCommand::DrawImage { .. } => {}
+                DrawCommand::DrawImage { id, dst, opacity } => self.draw_image(id, dst, *opacity),
             }
         }
     }
@@ -312,6 +358,68 @@ mod tests {
         backend.render(&RenderScene::new());
         let px = backend.pixmap().pixel(5, 5).unwrap();
         assert_eq!((px.red(), px.green(), px.blue()), (250, 250, 250));
+    }
+
+    #[test]
+    fn registered_image_draws_into_dst() {
+        use whiteboard_core::element::ImageData;
+
+        // A 2x2 solid-green source image.
+        let mut src = Pixmap::new(2, 2).unwrap();
+        src.fill(tiny_skia::Color::from_rgba8(0, 200, 0, 255));
+
+        let mut editor = Editor::new(FontMeasurer::new());
+        let img = Element::new(
+            ElementId::from("img"),
+            1,
+            10.0,
+            10.0,
+            40.0,
+            40.0,
+            ElementKind::Image(ImageData::new("img")),
+        );
+        editor.add_element(img);
+
+        let mut backend = TinySkiaBackend::new(80, 80);
+        backend.register_image("img", src);
+        backend.render(&editor.render());
+
+        // Center of the image rect should be green.
+        let px = backend.pixmap().pixel(30, 30).unwrap();
+        assert!(
+            px.green() > 120 && px.red() < 80,
+            "expected green image pixel, got rgba({},{},{},{})",
+            px.red(),
+            px.green(),
+            px.blue(),
+            px.alpha()
+        );
+        // A corner outside the image rect stays background (white).
+        let corner = backend.pixmap().pixel(70, 70).unwrap();
+        assert_eq!(
+            (corner.red(), corner.green(), corner.blue()),
+            (255, 255, 255)
+        );
+    }
+
+    #[test]
+    fn unregistered_image_is_skipped() {
+        use whiteboard_core::element::ImageData;
+        let mut editor = Editor::new(FontMeasurer::new());
+        editor.add_element(Element::new(
+            ElementId::from("img"),
+            1,
+            0.0,
+            0.0,
+            20.0,
+            20.0,
+            ElementKind::Image(ImageData::new("missing")),
+        ));
+        let mut backend = TinySkiaBackend::new(40, 40);
+        // No image registered: renders cleanly, image area stays background.
+        backend.render(&editor.render());
+        let px = backend.pixmap().pixel(10, 10).unwrap();
+        assert_eq!((px.red(), px.green(), px.blue()), (255, 255, 255));
     }
 
     #[test]

@@ -25,48 +25,104 @@ fn err<T>(msg: impl Into<String>, span: Span) -> LResult<T> {
     Err(LowerError { msg: msg.into(), span })
 }
 
+/// A function instantiation: a fully-qualified name plus concrete type
+/// arguments (empty for a non-generic function). This is the unit of
+/// monomorphization — each distinct instantiation is lowered once.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Inst {
+    fq: String,
+    args: Vec<Ty>,
+}
+
+impl Inst {
+    fn mangled(&self) -> String {
+        if self.args.is_empty() {
+            self.fq.clone()
+        } else {
+            let a: Vec<String> = self.args.iter().map(ty_mangle).collect();
+            format!("{}${}", self.fq, a.join("_"))
+        }
+    }
+}
+
+/// Drives monomorphization: assigns each needed instantiation a [`FuncId`] and
+/// keeps a worklist of instantiations still to be lowered.
+struct Mono {
+    ids: HashMap<Inst, FuncId>,
+    worklist: Vec<(FuncId, Inst)>,
+}
+
+impl Mono {
+    fn new() -> Self {
+        Mono { ids: HashMap::new(), worklist: Vec::new() }
+    }
+    /// Get (or assign) the FuncId for an instantiation, queueing it for lowering
+    /// the first time it's seen. `count` is the current number of allocated ids.
+    fn intern(&mut self, inst: Inst, count: &mut u32) -> FuncId {
+        if let Some(id) = self.ids.get(&inst) {
+            return *id;
+        }
+        let id = *count;
+        *count += 1;
+        self.ids.insert(inst.clone(), id);
+        self.worklist.push((id, inst));
+        id
+    }
+}
+
 pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgram> {
     let ctx = TyCtx::from_globals(globals);
     let mut reg = LayoutRegistry::new(&ctx);
     let mut prog = CoreProgram::default();
-    // Assign each non-generic free function a FuncId, in a stable order.
-    let mut names: Vec<&String> = ctx.fns.keys().collect();
-    names.sort();
-    let mut func_ids: HashMap<String, FuncId> = HashMap::new();
-    for n in &names {
-        let f = &ctx.fns[*n];
-        if !f.generics.params.is_empty() {
-            continue; // generic fns are instantiated by the monomorphizer
-        }
-        func_ids.insert((*n).clone(), prog.funcs.len() as FuncId);
-        prog.funcs.push(CoreFn {
-            name: (*n).clone(),
-            params: vec![],
-            ret: Repr::Unit,
-            locals: vec![],
-            body: CoreBlock { stmts: vec![], tail: None },
-        });
-    }
+    let mut mono = Mono::new();
+    let mut count: u32 = 0;
 
-    for n in &names {
-        let f = ctx.fns[*n].clone();
-        if !f.generics.params.is_empty() {
-            continue;
-        }
-        let id = func_ids[*n];
-        let lowered = lower_fn(&f, &ctx, &func_ids, &mut reg)?;
-        prog.funcs[id as usize] = lowered;
-        if f.name == "main" {
-            prog.entry = Some(id);
-        }
-    }
-
-    if prog.entry.is_none() {
+    // Seed from `main` (which must be non-generic).
+    let main_fq = ctx.fns.keys().find(|k| k.rsplit("::").next().unwrap() == "main").cloned();
+    let Some(main_fq) = main_fq else {
         return err("no `main` function found", Span::new(0, 0));
+    };
+    let entry = mono.intern(Inst { fq: main_fq, args: vec![] }, &mut count);
+    prog.entry = Some(entry);
+
+    // Lower instantiations until the worklist drains (transitively reachable).
+    while let Some((id, inst)) = mono.worklist.pop() {
+        let f = ctx.fns.get(&inst.fq).cloned()
+            .ok_or_else(|| LowerError { msg: format!("unknown function `{}`", inst.fq), span: Span::new(0, 0) })?;
+        let subst = build_fn_subst(&f, &inst.args);
+        let lowered = lower_fn(&f, &inst, &subst, &ctx, &mut reg, &mut mono, &mut count)?;
+        // Ensure prog.funcs is large enough.
+        while prog.funcs.len() <= id as usize {
+            prog.funcs.push(placeholder_fn());
+        }
+        prog.funcs[id as usize] = lowered;
     }
+
     prog.layouts = reg.layouts;
     prog.values = reg.values;
     Ok(prog)
+}
+
+fn placeholder_fn() -> CoreFn {
+    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None } }
+}
+
+fn build_fn_subst(f: &FnDef, args: &[Ty]) -> HashMap<String, Ty> {
+    f.generics.params.iter().map(|p| p.name.clone()).zip(args.iter().cloned()).collect()
+}
+
+fn ty_mangle(t: &Ty) -> String {
+    match t {
+        Ty::Prim(p) => format!("{:?}", p),
+        Ty::Named { name, args } => if args.is_empty() { name.replace("::", ".") } else {
+            format!("{}.{}", name.replace("::", "."), args.iter().map(ty_mangle).collect::<Vec<_>>().join("."))
+        },
+        Ty::Var(v) => format!("V{}", v),
+        Ty::Array(e, n) => format!("A{}x{}", ty_mangle(e), n),
+        Ty::Tuple(es) => format!("T{}", es.iter().map(ty_mangle).collect::<Vec<_>>().join("_")),
+        Ty::Fn { params, ret } => format!("F{}_{}", params.iter().map(ty_mangle).collect::<Vec<_>>().join("_"), ty_mangle(ret)),
+        Ty::Infer(n) => format!("I{}", n),
+    }
 }
 
 struct FnLowerer<'a, 'r> {

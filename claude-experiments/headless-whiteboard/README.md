@@ -84,7 +84,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 268 tests
+cargo test --workspace          # 270 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

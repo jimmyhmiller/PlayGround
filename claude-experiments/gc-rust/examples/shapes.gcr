@@ -1,0 +1,23 @@
+// Heap types: a struct, an enum with payloads, pattern matching, and a small
+// object graph — all GC-managed. `gcr run` JITs this against the real copying
+// collector.
+
+struct Point { x: i64, y: i64 }
+
+enum Shape {
+    Circle(i64),       // radius
+    Rect(Point),       // width/height packed in a Point
+}
+
+fn area(s: Shape) -> i64 {
+    match s {
+        Shape::Circle(r) => r * r * 3,   // ~pi
+        Shape::Rect(p) => p.x * p.y,
+    }
+}
+
+fn main() -> i64 {
+    let p = Point { x: 4, y: 5 };
+    let total = area(Shape::Circle(3)) + area(Shape::Rect(p));
+    total   // 3*3*3 + 4*5 = 27 + 20 = 47
+}
