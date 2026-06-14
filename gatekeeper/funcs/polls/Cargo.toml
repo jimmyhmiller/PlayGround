@@ -1,0 +1,13 @@
+[package]
+name = "polls-fn"
+version = "0.1.0"
+edition = "2021"
+description = "Gatekeeper function: Slack /poll app analytics from datalog-db (Poll + PollVote)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gatekeeper-fn = { path = "../../crates/gatekeeper-fn" }
+datalog-client = { path = "../../../axiom-reload/crates/datalog-client" }
+serde_json = "1"

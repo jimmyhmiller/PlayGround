@@ -250,7 +250,19 @@ pub fn process_transaction(
 ) -> Result<TransactionResult> {
     let mut datoms = Vec::new();
     let mut entity_ids = Vec::new();
+    // Set if any `entity: None` assert resolved to an EXISTING entity (an upsert,
+    // whether matched in committed state or earlier in this same batch). Such an
+    // assert mutates a row, so the transaction is NOT a pure-add and must not take
+    // the cache-append fast path (which assumes every assert created a new row).
+    let mut any_upsert = false;
     let mut pending_unique: HashMap<(String, String), EntityId> = HashMap::new();
+    // Within-batch upsert tracking for `unique_keys` (composite or single-field
+    // `unique(...)` keys). `resolve_composite_upsert` only sees COMMITTED state,
+    // so without this an INSERT and a later upsert for the same key IN THE SAME
+    // transaction would not see each other and would create duplicate entities.
+    // Key: (entity_type, [(field, value-as-string), ...] in key order). Value:
+    // the entity id that holds that key so far in this batch.
+    let mut pending_upsert: HashMap<(String, Vec<(String, String)>), EntityId> = HashMap::new();
     // Attribute names (e.g. "Doc/subjects") that are cardinality-many. These
     // get value-keyed current-state indexes (multiple values per entity-attr)
     // and skip the cardinality-one last-write-wins stale-cleanup. Precomputed
@@ -334,15 +346,26 @@ pub fn process_transaction(
                 }
 
                 // Composite-key upsert: an assert with no explicit `#id` whose
-                // data carries a full composite unique key resolves to the
-                // existing entity holding that key (if any), updating it in
-                // place rather than creating a duplicate.
+                // data carries a full unique key (`unique_keys`) resolves to the
+                // existing entity holding that key, updating it in place rather
+                // than creating a duplicate. We check the in-flight batch
+                // (`pending_upsert`) BEFORE committed state, so an INSERT and a
+                // later upsert for the same key in ONE transaction collapse onto
+                // the same entity (e.g. a poll's creation + its vote updates).
                 let upsert_target = if entity.is_none() {
-                    resolve_composite_upsert(txn, interner, type_def, entity_type, data)?
+                    match pending_composite_upsert(type_def, entity_type, data, &pending_upsert) {
+                        Some(eid) => Some(eid),
+                        None => {
+                            resolve_composite_upsert(txn, interner, type_def, entity_type, data)?
+                        }
+                    }
                 } else {
                     None
                 };
 
+                if upsert_target.is_some() {
+                    any_upsert = true;
+                }
                 let is_new = entity.is_none() && upsert_target.is_none();
                 let eid = match (entity, upsert_target) {
                     (Some(id), _) => *id,
@@ -362,6 +385,21 @@ pub fn process_transaction(
                 };
 
                 entity_ids.push(eid);
+
+                // Record this entity under every fully-supplied unique key so a
+                // later assert in the SAME batch upserts onto it. We do this for
+                // both new and upserted entities, and even when only the key
+                // fields (not all fields) were supplied — exactly the case of a
+                // vote update that carries `callback_id` + the changed fields.
+                for key_fields in &type_def.unique_keys {
+                    if key_fields.iter().all(|f| data.contains_key(f)) {
+                        let key: Vec<(String, String)> = key_fields
+                            .iter()
+                            .map(|f| (f.clone(), format!("{}", data[f])))
+                            .collect();
+                        pending_upsert.insert((entity_type.clone(), key), eid);
+                    }
+                }
 
                 if is_new {
                     for field_def in &type_def.fields {
@@ -435,7 +473,24 @@ pub fn process_transaction(
                         let attr = type_def.attribute_name(field_name);
                         let field_def = type_def.get_field(field_name).unwrap();
 
-                        if !is_new {
+                        // Supersede any value this SAME transaction already wrote
+                        // for (eid, attr): a later upsert in the batch replaces an
+                        // earlier one. That earlier add never committed, so we drop
+                        // it outright rather than emit a retract — leaving it would
+                        // strand two current values for a cardinality-one attr.
+                        let pending_pos = datoms.iter().position(|d| {
+                            d.entity == eid && d.attribute == attr && d.added
+                        });
+                        if let Some(pos) = pending_pos {
+                            // Unchanged value: keep the existing add, nothing to do.
+                            if datoms[pos].value == *value {
+                                continue;
+                            }
+                            // Changed: remove the superseded add before pushing new.
+                            datoms.remove(pos);
+                        } else if !is_new {
+                            // No pending value this batch — fall back to the
+                            // committed current value and retract it as history.
                             if let Some(current_val) = get_latest_value(txn, interner, eid, &attr)?
                             {
                                 if current_val == *value {
@@ -697,12 +752,13 @@ pub fn process_transaction(
     // `field/__tag` and `field.variant/sub_field` columns that the
     // simple append helper doesn't handle, so we treat any enum value
     // as a fallback-to-invalidate trigger.
-    let pure_add = ops.iter().all(|op| match op {
-        TxOp::Assert {
-            entity: None, data, ..
-        } => !data.values().any(|v| matches!(v, Value::Enum(_))),
-        _ => false,
-    });
+    let pure_add = !any_upsert
+        && ops.iter().all(|op| match op {
+            TxOp::Assert {
+                entity: None, data, ..
+            } => !data.values().any(|v| matches!(v, Value::Enum(_))),
+            _ => false,
+        });
 
     let cache_appends = if pure_add {
         let mut appends = Vec::with_capacity(ops.len());
@@ -840,6 +896,32 @@ fn check_unique_constraint(
 ///
 /// Single-field unique keys are handled here too, giving `unique` fields
 /// upsert-on-conflict semantics for the no-id assert path.
+///
+/// In-batch counterpart of [`resolve_composite_upsert`]: resolves an upsert
+/// target against entities created/updated EARLIER in the same transaction
+/// (`pending`), which committed-state resolution can't see. Returns the matching
+/// entity id, or `None` to fall through to committed-state resolution.
+fn pending_composite_upsert(
+    type_def: &crate::schema::EntityTypeDef,
+    entity_type: &str,
+    data: &HashMap<String, Value>,
+    pending: &HashMap<(String, Vec<(String, String)>), EntityId>,
+) -> Option<EntityId> {
+    for key_fields in &type_def.unique_keys {
+        if !key_fields.iter().all(|f| data.contains_key(f)) {
+            continue;
+        }
+        let key: Vec<(String, String)> = key_fields
+            .iter()
+            .map(|f| (f.clone(), format!("{}", data[f])))
+            .collect();
+        if let Some(&eid) = pending.get(&(entity_type.to_string(), key)) {
+            return Some(eid);
+        }
+    }
+    None
+}
+
 fn resolve_composite_upsert(
     txn: &dyn TxnOps,
     interner: &AttrInterner,

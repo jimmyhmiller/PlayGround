@@ -22,8 +22,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use datalog_client::Client;
 use serde_json::{json, Value};
 
-const AXIOM_URL: &str = "https://api.axiom.co/v1/datasets/_apl?format=tabular";
-const AXIOM_ORG: &str = "jimmyhmiller-hcux";
+mod poll;
+
+pub const AXIOM_URL: &str = "https://api.axiom.co/v1/datasets/_apl?format=tabular";
+pub const AXIOM_ORG: &str = "jimmyhmiller-hcux";
 const DATASET: &str = "vercel";
 const WINDOW_MS: i64 = 3_600_000; // 1 hour; busiest hour ~2.4k rows, well under cap
 const ROW_LIMIT: i64 = 50_000; // APL default cap is 1000; raise it explicitly
@@ -56,6 +58,10 @@ const FLOAT_FIELDS: &[(&str, &str)] = &[("report.durationMs", "durationMs")];
 fn main() {
     if let Err(e) = run() {
         eprintln!("axiom-reload: {e}");
+        std::process::exit(1);
+    }
+    if let Err(e) = poll::run() {
+        eprintln!("axiom-reload(poll): {e}");
         std::process::exit(1);
     }
 }
@@ -143,7 +149,7 @@ fn fetch_window(token: &str, start_ms: i64, end_ms: i64) -> Result<Vec<BTreeMap<
 }
 
 /// POST an APL query to Axiom with retries on transient errors.
-fn http_post_json(token: &str, body: &Value) -> Result<Value, String> {
+pub fn http_post_json(token: &str, body: &Value) -> Result<Value, String> {
     let mut last_err = String::new();
     for attempt in 0..6 {
         let result = ureq::post(AXIOM_URL)
@@ -185,7 +191,7 @@ fn http_post_json(token: &str, body: &Value) -> Result<Value, String> {
 
 /// Flatten Axiom's tabular (column-major) response into row maps. Empty windows
 /// come back with no `tables`/`columns`; handle that as zero rows.
-fn tabular_rows(resp: &Value) -> Vec<BTreeMap<String, Value>> {
+pub fn tabular_rows(resp: &Value) -> Vec<BTreeMap<String, Value>> {
     let Some(tables) = resp.get("tables").and_then(|t| t.as_array()) else {
         return Vec::new();
     };
@@ -261,7 +267,7 @@ fn event_to_op(ev: &BTreeMap<String, Value>) -> Option<Value> {
 
 /// Parse an Axiom `_time` (ISO-8601, e.g. `2026-06-10T14:50:05.653Z`, or already
 /// a number of ms) into epoch milliseconds.
-fn parse_axiom_time(v: &Value) -> Option<i64> {
+pub fn parse_axiom_time(v: &Value) -> Option<i64> {
     if let Some(n) = v.as_i64() {
         return Some(n);
     }
@@ -331,7 +337,7 @@ fn as_i64_loose(v: &Value) -> Option<i64> {
     v.as_str().and_then(|s| s.parse().ok())
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -340,7 +346,7 @@ fn now_ms() -> i64 {
 
 /// Format epoch-ms as the ISO-8601 string Axiom's APL `startTime`/`endTime`
 /// expect (`YYYY-MM-DDTHH:MM:SS.000Z`).
-fn iso(ms: i64) -> String {
+pub fn iso(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let millis = ms.rem_euclid(1000);
     let days = secs.div_euclid(86_400);

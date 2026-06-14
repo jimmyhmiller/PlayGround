@@ -192,6 +192,68 @@ fn composite_unique_upserts() {
 }
 
 #[test]
+fn unique_key_upserts_within_one_transaction() {
+    // Regression: an INSERT plus several updates for the SAME unique key in ONE
+    // transaction must collapse onto a single entity holding the LAST value —
+    // not create a duplicate per op. (This is the poll loader's batch: a Poll
+    // creation followed by its vote updates, all keyed on callback_id.)
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(
+        &db,
+        json!({"entity_type": "Poll", "fields": [
+            {"name": "cb", "type": "string", "required": true},
+            {"name": "votes", "type": "i64"},
+        ], "unique_keys": [["cb"]]}),
+    );
+
+    let ids = assert_ops(
+        &db,
+        vec![
+            json!({"assert": "Poll", "data": {"cb": "p1", "votes": 0}}),
+            json!({"assert": "Poll", "data": {"cb": "p1", "votes": 1}}),
+            json!({"assert": "Poll", "data": {"cb": "p1", "votes": 2}}),
+            // A second poll in the same batch is a distinct entity.
+            json!({"assert": "Poll", "data": {"cb": "p2", "votes": 5}}),
+            json!({"assert": "Poll", "data": {"cb": "p2", "votes": 6}}),
+        ],
+    );
+    // All p1 ops resolve to one id; all p2 ops to another.
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(ids[1], ids[2]);
+    assert_eq!(ids[3], ids[4]);
+    assert_ne!(ids[0], ids[3]);
+
+    // Exactly two Poll entities, each with the LATEST votes value.
+    let rows = run(
+        &db,
+        json!({"find": ["?cb", "?v"], "where": [
+            {"bind": "?e", "type": "Poll", "cb": "?cb", "votes": "?v"}
+        ], "order_by": ["?cb"]}),
+    );
+    assert_eq!(rows.len(), 2, "must be 2 entities, not one-per-op");
+    assert_eq!(rows[0][0], json!("p1"));
+    assert_eq!(rows[0][1], json!(2), "p1 should hold the last value (2)");
+    assert_eq!(rows[1][0], json!("p2"));
+    assert_eq!(rows[1][1], json!(6), "p2 should hold the last value (6)");
+
+    // A later, separate transaction still upserts onto the committed entity.
+    let ids2 = assert_ops(
+        &db,
+        vec![json!({"assert": "Poll", "data": {"cb": "p1", "votes": 9}})],
+    );
+    assert_eq!(ids2[0], ids[0], "cross-transaction upsert hits the same entity");
+    let rows = run(
+        &db,
+        json!({"find": ["?v"], "where": [
+            {"bind": "?e", "type": "Poll", "cb": "p1", "votes": "?v"}
+        ]}),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], json!(9));
+}
+
+#[test]
 fn cardinality_many_membership_and_fanout() {
     let (db, _dir) = mem_db();
     let db = &*db;
