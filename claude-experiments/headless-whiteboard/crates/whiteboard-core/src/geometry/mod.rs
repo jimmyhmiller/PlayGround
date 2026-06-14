@@ -7,11 +7,15 @@
 //! clockwise (because screen-space y grows downward), and element rotation is
 //! around the element's center.
 
+mod bounds;
+mod hit;
 mod path;
 mod point;
 mod rect;
 mod transform;
 
+pub use bounds::{element_bounds, element_line_segments};
+pub use hit::{distance_to_outline, hit_test, point_distance_to_segment};
 pub use path::{Path, PathBuilder, PathSegment};
 pub use point::{Point, Vec2};
 pub use rect::Rect;

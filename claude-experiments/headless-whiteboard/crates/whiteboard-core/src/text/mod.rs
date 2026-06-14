@@ -8,6 +8,13 @@
 //! Layout (wrapping, container fitting) is added in Phase 1 on top of these
 //! types; this module file establishes the shared vocabulary.
 
+pub mod layout;
+
+pub use layout::{
+    container_text_dimensions, layout_text, wrap_text, ContainerTextLayout, LaidOutText,
+    BOUND_TEXT_PADDING,
+};
+
 use serde::{Deserialize, Serialize};
 
 /// Horizontal alignment of text within its bounding box / container.

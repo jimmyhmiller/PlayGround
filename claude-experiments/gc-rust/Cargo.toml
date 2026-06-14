@@ -1,0 +1,16 @@
+[package]
+name = "gc-rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "gcrust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gcr"
+path = "src/main.rs"
+
+[dependencies]
+# LLVM backend (AOT + JIT) via Inkwell. Same fork/feature ai-lang uses.
+inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }

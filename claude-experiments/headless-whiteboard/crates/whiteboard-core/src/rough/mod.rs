@@ -8,8 +8,14 @@
 //! Determinism is the whole game: a given element `seed` must always produce the
 //! same sketch, so renders are stable and snapshot-testable.
 
+mod fills;
+mod generator;
 mod rng;
 
+pub use fills::{cross_hatch, dots, fill_polygon, hachure, zigzag, FillLine};
+pub use generator::{
+    rough_ellipse, rough_line, rough_linear_path, rough_polygon, rough_rectangle, Drawable,
+};
 pub use rng::RoughRng;
 
 /// Knobs controlling how rough a generated shape looks. Mirrors Rough.js's

@@ -13,6 +13,14 @@
 use crate::geometry::{Point, Transform, Vec2};
 use serde::{Deserialize, Serialize};
 
+pub mod handles;
+pub mod state;
+pub mod tools;
+
+pub use handles::{Handle, HandleLayout, HANDLE_SIZE, ROTATION_HANDLE_OFFSET};
+pub use state::{Commit, InteractionResult, InteractionState};
+pub use tools::{create_kind, is_creation_tool, CreateKind};
+
 /// The active drawing/selection tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Tool {

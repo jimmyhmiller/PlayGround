@@ -11,6 +11,13 @@ use crate::element::Element;
 use crate::scene::Scene;
 use serde::{Deserialize, Serialize};
 
+pub mod excalidraw;
+
+pub use excalidraw::{
+    load_excalidraw_doc, load_excalidraw_str, save_excalidraw_str, ExDocument, ExElement,
+    ExcalidrawError,
+};
+
 /// Errors from loading or saving documents.
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {
@@ -20,6 +27,9 @@ pub enum IoError {
     UnsupportedType(String),
     #[error("unsupported schema version: {0}")]
     UnsupportedVersion(u32),
+    /// A real `.excalidraw` element could not be mapped to/from our model.
+    #[error("excalidraw element mapping error: {0}")]
+    Excalidraw(#[source] Box<ExcalidrawError>),
 }
 
 /// The `.excalidraw` document envelope.

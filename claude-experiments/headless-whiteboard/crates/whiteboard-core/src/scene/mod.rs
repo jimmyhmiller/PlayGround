@@ -9,6 +9,13 @@ use crate::element::{Element, ElementId};
 use crate::geometry::Rect;
 use std::collections::HashMap;
 
+mod frames;
+mod groups;
+mod order;
+mod query;
+
+pub use order::{compare_order, generate_key_between, generate_n_keys_between, IndexError};
+
 /// The element store. Owns every element and defines paint order.
 #[derive(Debug, Clone, Default)]
 pub struct Scene {
@@ -77,6 +84,24 @@ impl Scene {
     /// Element ids in paint order.
     pub fn order(&self) -> &[ElementId] {
         &self.order
+    }
+
+    /// Clone the current paint-order id list. Internal helper for the ordering
+    /// submodule, which needs an owned snapshot while it mutates element indices.
+    pub(crate) fn order_vec_clone(&self) -> Vec<ElementId> {
+        self.order.clone()
+    }
+
+    /// Overwrite the paint order with a permutation of the existing ids. Internal
+    /// helper for the ordering submodule. Debug-asserts the new order is a
+    /// permutation of the old (same membership) so we never lose or invent ids.
+    pub(crate) fn set_order(&mut self, new_order: Vec<ElementId>) {
+        debug_assert_eq!(
+            new_order.len(),
+            self.order.len(),
+            "set_order must preserve element count"
+        );
+        self.order = new_order;
     }
 
     /// Bounding box of all live elements' raw boxes. Tight bounds (rotation,

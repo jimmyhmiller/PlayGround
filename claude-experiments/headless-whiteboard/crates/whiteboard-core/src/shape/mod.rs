@@ -8,12 +8,24 @@
 //!   by the element's `seed`/`roughness`.
 //!
 //! Phase 1 implements the per-element generators and the rough delegation. This
-//! file defines the [`ShapeGenerator`] trait that the tessellator (render module)
-//! calls, plus the clean rectangle generator as a worked, tested baseline so the
-//! pipeline is exercisable end to end before the rest lands.
+//! file defines the [`ShapeGeometry`]/[`ShapeGenerator`] vocabulary the
+//! tessellator (render module) calls; the per-element clean geometry lives in
+//! [`clean`], arrowheads in [`arrowhead`], and the (delegating-for-now)
+//! hand-drawn generator in [`rough_gen`].
 
-use crate::element::{Element, ElementKind};
-use crate::geometry::{Path, Point};
+mod arrowhead;
+mod clean;
+mod rough_gen;
+
+pub use arrowhead::arrowhead_paths;
+pub use clean::{
+    catmull_rom_path, clean_geometry, diamond_path, ellipse_path, rounded_rectangle_path,
+    roundness_radius,
+};
+pub use rough_gen::RoughGenerator;
+
+use crate::element::{Element, Roundness};
+use crate::geometry::Path;
 
 /// The outline + optional fill geometry for one element, in the element's own
 /// unrotated coordinate space (the tessellator applies rotation/translation).
@@ -40,39 +52,44 @@ pub trait ShapeGenerator {
 }
 
 /// Precise, non-sketchy geometry generator.
+///
+/// Supports every element type via [`clean::clean_geometry`] with sharp corners.
+/// For rounded box/diamond corners use [`RoundedCleanGenerator`] (the shared
+/// `Element` type carries no roundness field, so the radius is configured on the
+/// generator rather than read off the element).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CleanGenerator;
 
 impl ShapeGenerator for CleanGenerator {
     fn geometry(&self, element: &Element) -> ShapeGeometry {
-        match &element.kind {
-            ElementKind::Rectangle | ElementKind::Frame(_) | ElementKind::Selection => {
-                let w = element.width;
-                let h = element.height;
-                let path = Path::polygon(&[
-                    Point::new(0.0, 0.0),
-                    Point::new(w, 0.0),
-                    Point::new(w, h),
-                    Point::new(0.0, h),
-                ]);
-                let mut g = ShapeGeometry::outline_only(path.clone());
-                if element.kind.is_fillable() && !element.background_color.is_transparent() {
-                    g.fill = vec![path];
-                }
-                g
-            }
-            // Remaining element types are generated in Phase 1. Returning empty
-            // geometry here is honest (nothing to draw yet) rather than a fake
-            // placeholder shape; the tessellator simply emits no commands for it.
-            _ => ShapeGeometry::default(),
-        }
+        clean_geometry(element, None)
+    }
+}
+
+/// Clean geometry generator that rounds box/diamond corners with a configured
+/// [`Roundness`]. Kept separate from [`CleanGenerator`] so the latter stays a
+/// zero-field unit type usable as a bare value.
+#[derive(Debug, Clone, Copy)]
+pub struct RoundedCleanGenerator {
+    pub roundness: Roundness,
+}
+
+impl RoundedCleanGenerator {
+    pub fn new(roundness: Roundness) -> Self {
+        RoundedCleanGenerator { roundness }
+    }
+}
+
+impl ShapeGenerator for RoundedCleanGenerator {
+    fn geometry(&self, element: &Element) -> ShapeGeometry {
+        clean_geometry(element, Some(self.roundness))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::ElementId;
+    use crate::element::{ElementId, ElementKind, RoundnessKind};
 
     #[test]
     fn clean_rectangle_outline() {
@@ -103,5 +120,27 @@ mod tests {
             ElementKind::Rectangle,
         );
         assert!(CleanGenerator.geometry(&e).fill.is_empty());
+    }
+
+    #[test]
+    fn rounded_generator_rounds_corners() {
+        let e = Element::new(
+            ElementId::from("r"),
+            1,
+            0.0,
+            0.0,
+            80.0,
+            40.0,
+            ElementKind::Rectangle,
+        );
+        let rnd = Roundness {
+            kind: RoundnessKind::AdaptiveRadius,
+            value: Some(8.0),
+        };
+        let g = RoundedCleanGenerator::new(rnd).geometry(&e);
+        assert!(g.outline[0]
+            .segments
+            .iter()
+            .any(|s| matches!(s, crate::geometry::PathSegment::CubicTo { .. })));
     }
 }
