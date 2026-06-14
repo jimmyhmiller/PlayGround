@@ -5,18 +5,36 @@
 //! Run: `cargo run -p whiteboard-tiny-skia --example render_png -- out.png`
 
 use whiteboard_core::editor::Editor;
-use whiteboard_core::element::{Element, ElementId, ElementKind, FreedrawData, LinearData};
+use whiteboard_core::element::{
+    Element, ElementId, ElementKind, FreedrawData, LinearData, TextData,
+};
 use whiteboard_core::geometry::Point;
 use whiteboard_core::render::{Backend, Color};
-use whiteboard_core::text::MonospaceMeasurer;
-use whiteboard_tiny_skia::TinySkiaBackend;
+use whiteboard_tiny_skia::{FontMeasurer, TinySkiaBackend};
+
+fn text_el(id: &str, x: f64, y: f64, s: &str, size: f64, color: Color) -> Element {
+    let mut data = TextData::new(s);
+    data.font_size = size;
+    let mut e = Element::new(
+        ElementId::from(id),
+        7,
+        x,
+        y,
+        s.len() as f64 * size * 0.6,
+        size * 1.25,
+        ElementKind::Text(data),
+    );
+    e.stroke_color = color;
+    e
+}
 
 fn main() {
     let out = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "whiteboard.png".into());
 
-    let mut editor = Editor::new_rough(MonospaceMeasurer::default());
+    // Use the real font-backed measurer so layout matches what is rasterized.
+    let mut editor = Editor::new_rough(FontMeasurer::new());
 
     // A filled rough rectangle.
     let mut rect = Element::new(
@@ -100,6 +118,32 @@ fn main() {
     free.stroke_color = Color::rgb(33, 33, 33);
     free.stroke_width = 2.0;
     editor.add_element(free);
+
+    // Text labels — now rasterized with real glyphs.
+    editor.add_element(text_el(
+        "title",
+        60.0,
+        18.0,
+        "headless-whiteboard",
+        26.0,
+        Color::rgb(33, 33, 33),
+    ));
+    editor.add_element(text_el(
+        "label-rect",
+        95.0,
+        118.0,
+        "rectangle",
+        18.0,
+        Color::rgb(230, 81, 0),
+    ));
+    editor.add_element(text_el(
+        "label-ell",
+        365.0,
+        120.0,
+        "ellipse",
+        18.0,
+        Color::rgb(13, 71, 161),
+    ));
 
     // Render headlessly and rasterize.
     let scene = editor.render();

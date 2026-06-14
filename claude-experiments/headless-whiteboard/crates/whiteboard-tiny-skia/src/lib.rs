@@ -6,9 +6,13 @@
 //! rasterizer — not a performance target. GPU backends (Vello/wgpu) consume the
 //! exact same commands.
 //!
-//! Phase 1/3 extend this with text and image drawing (which need fonts and
-//! decoded pixels). Fill and stroke of vector paths — the bulk of a whiteboard —
-//! work today.
+//! Text is drawn with bundled fonts via [`fontdue`] (see [`text`]); image
+//! drawing is the one remaining `DrawCommand` the backend does not yet
+//! rasterize (it needs decoded pixels supplied out-of-band).
+
+mod text;
+
+pub use text::FontSet;
 
 use tiny_skia::{
     FillRule, LineCap as SkCap, LineJoin as SkJoin, Paint as SkPaint, PathBuilder as SkPathBuilder,
@@ -19,6 +23,7 @@ use whiteboard_core::geometry::PathSegment;
 use whiteboard_core::render::{
     Backend, Color, DrawCommand, LineCap, LineJoin, Paint, RenderScene, Stroke,
 };
+use whiteboard_core::text::{FontSpec, TextMeasurer, TextMetrics};
 
 /// A tiny-skia raster surface that consumes draw commands.
 pub struct TinySkiaBackend {
@@ -31,6 +36,40 @@ pub struct TinySkiaBackend {
     clip_stack: Vec<Option<tiny_skia::Rect>>,
     /// Background fill color.
     background: Color,
+    /// Bundled fonts for text rasterization.
+    fonts: FontSet,
+}
+
+/// A [`TextMeasurer`] backed by the bundled fonts. Hand this to the editor so
+/// text layout matches what this backend will actually rasterize.
+///
+/// ```no_run
+/// use whiteboard_tiny_skia::FontMeasurer;
+/// use whiteboard_core::editor::Editor;
+/// let editor = Editor::new_rough(FontMeasurer::new());
+/// ```
+pub struct FontMeasurer {
+    fonts: FontSet,
+}
+
+impl FontMeasurer {
+    pub fn new() -> Self {
+        FontMeasurer {
+            fonts: FontSet::new(),
+        }
+    }
+}
+
+impl Default for FontMeasurer {
+    fn default() -> Self {
+        FontMeasurer::new()
+    }
+}
+
+impl TextMeasurer for FontMeasurer {
+    fn measure(&self, text: &str, font: &FontSpec) -> TextMetrics {
+        self.fonts.measure(text, font)
+    }
 }
 
 impl TinySkiaBackend {
@@ -41,6 +80,7 @@ impl TinySkiaBackend {
             transform_stack: Vec::new(),
             clip_stack: Vec::new(),
             background: Color::WHITE,
+            fonts: FontSet::new(),
         }
     }
 
@@ -87,6 +127,27 @@ impl TinySkiaBackend {
         let ts = self.current_transform();
         self.pixmap
             .fill_path(&sk_path, &sk_paint, FillRule::Winding, ts, None);
+    }
+
+    fn draw_text(&mut self, run: &whiteboard_core::text::TextRun, paint: &Paint) {
+        let Paint::Solid(color) = paint;
+        let ts = self.current_transform();
+        // Map the baseline-left origin into device space.
+        let mut pt = tiny_skia::Point::from_xy(run.origin.x as f32, run.origin.y as f32);
+        ts.map_point(&mut pt);
+        // Scale the font size by the transform's uniform scale (viewport zoom).
+        let scale = ((ts.sx * ts.sx + ts.ky * ts.ky).sqrt()) as f64;
+
+        let mut dev_run = run.clone();
+        dev_run.origin = whiteboard_core::geometry::Point::new(pt.x as f64, pt.y as f64);
+        dev_run.font = FontSpec {
+            size: run.font.size * scale,
+            ..run.font.clone()
+        };
+        // fontdue rasterizes axis-aligned glyphs; rotation/skew in the transform
+        // is not applied to the glyph shapes (the common viewport case is
+        // translate + uniform scale, which is handled exactly).
+        self.fonts.draw_run(&mut self.pixmap, &dev_run, *color);
     }
 
     fn draw_stroke(&mut self, path: &Path, stroke: &Stroke, paint: &Paint) {
@@ -138,9 +199,10 @@ impl Backend for TinySkiaBackend {
                     stroke,
                     paint,
                 } => self.draw_stroke(path, stroke, paint),
-                // Text and images require fonts / decoded pixels; added in a
-                // later phase. We intentionally skip rather than fake them.
-                DrawCommand::DrawText { .. } | DrawCommand::DrawImage { .. } => {}
+                DrawCommand::DrawText { run, paint } => self.draw_text(run, paint),
+                // Image drawing needs decoded pixels supplied out-of-band; the
+                // backend has no pixel store yet, so we skip rather than fake it.
+                DrawCommand::DrawImage { .. } => {}
             }
         }
     }
@@ -250,5 +312,37 @@ mod tests {
         backend.render(&RenderScene::new());
         let px = backend.pixmap().pixel(5, 5).unwrap();
         assert_eq!((px.red(), px.green(), px.blue()), (250, 250, 250));
+    }
+
+    #[test]
+    fn text_draws_dark_pixels() {
+        use whiteboard_core::element::TextData;
+
+        // Use the font-backed measurer so layout matches rasterization.
+        let mut editor = Editor::new(FontMeasurer::new());
+        let mut data = TextData::new("Hello");
+        data.font_size = 40.0;
+        let mut e = Element::new(
+            ElementId::from("t"),
+            1,
+            5.0,
+            5.0,
+            0.0,
+            50.0,
+            ElementKind::Text(data),
+        );
+        e.stroke_color = Color::BLACK;
+        editor.add_element(e);
+
+        let mut backend = TinySkiaBackend::new(220, 70);
+        backend.render(&editor.render());
+
+        // Somewhere in the text region there must be a dark (drawn) pixel.
+        let any_dark = backend
+            .pixmap()
+            .pixels()
+            .iter()
+            .any(|p| p.red() < 100 && p.green() < 100 && p.blue() < 100 && p.alpha() > 0);
+        assert!(any_dark, "text rasterization produced no dark glyph pixels");
     }
 }

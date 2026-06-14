@@ -249,14 +249,23 @@ impl RuntimeContext {
         &self.heap
     }
 
-    /// Force a stop-the-world collection. The calling thread must be at a
-    /// safepoint or unregistered; here it is driven from test/host code with
-    /// the mutator parked, so it is safe.
+    /// Force a collection driven *by this mutator* — the model real compiled
+    /// code uses when it hits allocation exhaustion. The calling thread becomes
+    /// the GC thread (it parks every *other* registered mutator, excludes
+    /// itself, and scans every parked thread's published frame chain). The
+    /// caller MUST have published its own top frame into `parked_jit_fp` first
+    /// (so its roots are scanned), via `thread`.
     ///
     /// # Safety
-    /// No other registered mutator may be running outside a safepoint.
-    pub unsafe fn force_collect(&self) {
-        unsafe { self.heap.stw_collect::<IdentityPtrPolicy>() }
+    /// `thread` must be this context's live mutator thread, with its current
+    /// frame chain published. All live roots must already be in frame slots.
+    pub unsafe fn force_collect(&self, thread: &Thread) {
+        unsafe {
+            let dyna = &*thread.dyna_thread;
+            dyna.set_parked_jit_fp(thread.top_frame as *const u8);
+            self.heap.mutator_triggered_gc::<IdentityPtrPolicy>(dyna);
+            dyna.clear_parked_jit_fp();
+        }
     }
 }
 
@@ -324,7 +333,10 @@ unsafe fn alloc_with_published_frame(
     unsafe {
         let dyna = &*t.dyna_thread;
         dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let p = heap.alloc(info, varlen_len);
+        // `alloc_obj::<Full>` (not bare `alloc`) stamps the object header with
+        // `info.type_id` — bare `alloc` only zeroes, leaving type_id 0, which
+        // breaks the GC scanner (it'd read every object as shape 0).
+        let p = heap.alloc_obj::<Full>(info, varlen_len);
         dyna.clear_parked_jit_fp();
         p
     }

@@ -49,10 +49,10 @@ thread_local! {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn gcr_test_force_gc(_thread: *mut Thread) {
+extern "C" fn gcr_test_force_gc(thread: *mut Thread) {
     let ctx = FORCE_GC_CTX.with(|c| c.get());
     assert!(!ctx.is_null(), "force-gc context not installed");
-    unsafe { (*ctx).force_collect() };
+    unsafe { (*ctx).force_collect(&*thread) };
 }
 
 #[test]
@@ -248,8 +248,8 @@ fn jit_object_survives_collection_via_precise_roots() {
     let ee = module
         .create_jit_execution_engine(OptimizationLevel::None)
         .unwrap();
-    ee.add_global_mapping(&alloc_fixed, runtime::ai_gc_alloc_fixed as usize);
-    ee.add_global_mapping(&force_gc, gcr_test_force_gc as usize);
+    ee.add_global_mapping(&alloc_fixed, runtime::ai_gc_alloc_fixed as *const () as usize);
+    ee.add_global_mapping(&force_gc, gcr_test_force_gc as *const () as usize);
 
     FORCE_GC_CTX.with(|c| c.set(&ctx as *const RuntimeContext));
 
@@ -271,7 +271,12 @@ fn jit_object_survives_collection_via_precise_roots() {
         "relocated child is not in the live from-space (stale/un-fixed pointer)"
     );
     let tid = unsafe { ctx.heap().obj_type_id(returned_child) };
-    assert_eq!(tid, 1, "field0 does not point at a child-shaped object after GC");
+    assert_eq!(
+        tid, 1,
+        "field0 does not point at a child-shaped object after GC \
+         (returned_child={:p}, tid={}, collections={})",
+        returned_child, tid, ctx.heap().collections()
+    );
 
     // And exactly one collection ran.
     assert_eq!(ctx.heap().collections(), 1, "expected exactly one collection");

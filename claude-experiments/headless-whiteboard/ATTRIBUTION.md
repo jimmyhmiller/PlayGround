@@ -71,3 +71,18 @@ fills, double-stroke roughening) is reimplemented from Rough.js.
 > SOFTWARE.
 
 Source: <https://github.com/rough-stuff/rough>
+
+---
+
+## DejaVu Fonts
+
+The `whiteboard-tiny-skia` backend bundles the DejaVu Sans and DejaVu Sans Mono
+fonts (in `crates/whiteboard-tiny-skia/assets/`) to rasterize text deterministically
+without system font discovery.
+
+DejaVu fonts are based on the Bitstream Vera fonts and are distributed under a
+permissive license (the Bitstream Vera license plus the DejaVu changes license),
+which allows redistribution and embedding. The fonts and their full license text
+are available from the DejaVu project.
+
+Source: <https://dejavu-fonts.github.io/>

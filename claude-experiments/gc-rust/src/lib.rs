@@ -6,6 +6,14 @@
 //! integrate with LLVM-compiled code. Everything else in this crate (the
 //! language, frontend, type system, monomorphization, codegen) is new.
 
+pub mod ast;
+pub mod codegen;
+pub mod core;
 pub mod gc;
+pub mod layout;
 pub mod lexer;
+pub mod lower;
+pub mod parser;
+pub mod resolve;
 pub mod runtime;
+pub mod types;

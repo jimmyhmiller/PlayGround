@@ -258,7 +258,7 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         let opts = RenderOptions {
             viewport: self.viewport.scene_to_screen(),
         };
-        tessellate(&self.scene, &self.generator, &opts)
+        tessellate(&self.scene, &self.generator, &self.measurer, &opts)
     }
 }
 

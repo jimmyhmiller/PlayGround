@@ -63,6 +63,11 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   select, move, 8 resize handles, rotation, pan, wheel zoom, keyboard.
 - **Undo/redo**, `.excalidraw` JSON load/save (real-format + internal),
   tight rotated bounds and precise per-shape hit-testing.
+- **Real text rendering**: the core lays text out (word-wrap, alignment,
+  container fitting) against an injected `TextMeasurer` and emits `DrawText`
+  commands; the tiny-skia backend rasterizes glyphs with bundled DejaVu fonts
+  (via `fontdue`). Use `whiteboard_tiny_skia::FontMeasurer` for font-accurate
+  layout.
 
 ## Try it
 
@@ -79,7 +84,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 261 tests
+cargo test --workspace          # 268 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

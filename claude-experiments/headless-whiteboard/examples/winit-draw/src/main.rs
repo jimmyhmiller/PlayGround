@@ -23,15 +23,14 @@ use whiteboard_core::editor::Editor;
 use whiteboard_core::geometry::{Point, Vec2};
 use whiteboard_core::interaction::{InputEvent, Modifiers, PointerButton, Tool};
 use whiteboard_core::render::Backend;
-use whiteboard_core::text::MonospaceMeasurer;
-use whiteboard_tiny_skia::TinySkiaBackend;
+use whiteboard_tiny_skia::{FontMeasurer, TinySkiaBackend};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-type WhiteboardEditor = Editor<MonospaceMeasurer, whiteboard_core::shape::RoughGenerator>;
+type WhiteboardEditor = Editor<FontMeasurer, whiteboard_core::shape::RoughGenerator>;
 
 struct App {
     window: Option<Rc<Window>>,
@@ -49,7 +48,7 @@ impl App {
             window: None,
             surface: None,
             // The sketchy (rough) generator is the default Excalidraw look.
-            editor: Editor::new_rough(MonospaceMeasurer::default()),
+            editor: Editor::new_rough(FontMeasurer::new()),
             backend: TinySkiaBackend::new(1024, 768),
             mods: Modifiers::default(),
             cursor: Point::ORIGIN,
