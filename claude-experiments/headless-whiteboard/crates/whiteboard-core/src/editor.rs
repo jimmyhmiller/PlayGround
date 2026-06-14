@@ -13,6 +13,7 @@
 use crate::element::{Element, ElementId};
 use crate::geometry::Point;
 use crate::history::History;
+use crate::interaction::state::InteractionState;
 use crate::interaction::{InputEvent, Tool, Viewport};
 use crate::render::{tessellate, RenderOptions, RenderScene};
 use crate::scene::Scene;
@@ -47,7 +48,14 @@ pub struct Editor<M: TextMeasurer, G: ShapeGenerator = CleanGenerator> {
     history: History,
     viewport: Viewport,
     tool: Tool,
-    selection: HashSet<ElementId>,
+    /// The interaction state machine owns the selection set and any in-progress
+    /// pointer gesture; the editor drives it from raw events and wraps undo
+    /// bookkeeping around its commits.
+    interaction: InteractionState,
+    /// Set on the pointer-down that begins a gesture: holds the pre-gesture
+    /// scene snapshot until the matching commit (then it is pushed to history)
+    /// or the gesture is abandoned (then it is dropped).
+    pending_undo: Option<Scene>,
     measurer: M,
     generator: G,
 }
@@ -59,6 +67,15 @@ impl<M: TextMeasurer> Editor<M, CleanGenerator> {
     }
 }
 
+impl<M: TextMeasurer> Editor<M, crate::shape::RoughGenerator> {
+    /// Create an editor with the hand-drawn ("sketchy") generator — the default
+    /// Excalidraw look. Each element's `seed`/`roughness` drives the sketch, so
+    /// rendering stays deterministic.
+    pub fn new_rough(measurer: M) -> Self {
+        Editor::with_generator(measurer, crate::shape::RoughGenerator::new())
+    }
+}
+
 impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
     pub fn with_generator(measurer: M, generator: G) -> Self {
         Editor {
@@ -66,7 +83,8 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             history: History::default(),
             viewport: Viewport::default(),
             tool: Tool::default(),
-            selection: HashSet::new(),
+            interaction: InteractionState::default(),
+            pending_undo: None,
             measurer,
             generator,
         }
@@ -99,7 +117,13 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
     }
 
     pub fn selection(&self) -> &HashSet<ElementId> {
-        &self.selection
+        self.interaction.selection()
+    }
+
+    /// Mutable access to the interaction state machine (tools, gestures, handle
+    /// layout). Backends use this for handle hit-testing / overlay rendering.
+    pub fn interaction(&self) -> &InteractionState {
+        &self.interaction
     }
 
     // --- Programmatic scene API -----------------------------------------
@@ -115,11 +139,11 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
     /// Soft-delete the current selection (preserving undo). Returns whether any
     /// element was deleted.
     pub fn delete_selection(&mut self) -> bool {
-        if self.selection.is_empty() {
+        if self.selection().is_empty() {
             return false;
         }
         self.history.record(self.scene.clone());
-        let ids: Vec<_> = self.selection.iter().cloned().collect();
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
         let mut changed = false;
         for id in ids {
             if let Some(el) = self.scene.get_mut(&id) {
@@ -127,17 +151,17 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
                 changed = true;
             }
         }
-        self.selection.clear();
+        self.interaction.clear_selection();
         changed
     }
 
     /// Replace the selection set.
     pub fn select(&mut self, ids: impl IntoIterator<Item = ElementId>) {
-        self.selection = ids.into_iter().collect();
+        self.interaction.set_selection(ids);
     }
 
     pub fn clear_selection(&mut self) {
-        self.selection.clear();
+        self.interaction.clear_selection();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -170,8 +194,7 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
 
     /// Drop selected ids that no longer refer to live elements.
     fn prune_selection(&mut self) {
-        self.selection
-            .retain(|id| self.scene.get(id).map(|e| !e.is_deleted).unwrap_or(false));
+        self.interaction.prune_selection(&self.scene);
     }
 
     /// Map a screen point to scene coordinates via the viewport.
@@ -181,11 +204,51 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
 
     // --- Event handling --------------------------------------------------
 
-    /// Handle a raw input event. Phase 2 implements the full per-tool state
-    /// machine here; for now it is a no-op that reports no change, so callers
-    /// can already wire the event loop without depending on unfinished behavior.
-    pub fn handle(&mut self, _event: InputEvent) -> HandleResult {
-        HandleResult::default()
+    /// Handle a raw input event, driving the interaction state machine and
+    /// wrapping undo bookkeeping around any committed gesture.
+    ///
+    /// The contract with [`InteractionState`]: when it reports `begins_undo` we
+    /// snapshot the pre-gesture scene; when it reports a `commit` we push that
+    /// snapshot to history; if a gesture ends without a commit (e.g. a bare
+    /// click that created nothing) we discard the snapshot so no empty undo
+    /// entry is recorded.
+    pub fn handle(&mut self, event: InputEvent) -> HandleResult {
+        let is_pointer_up = matches!(event, InputEvent::PointerUp { .. });
+        // Snapshot the scene *before* the state machine touches it. A gesture
+        // that mutates the scene (create/move/resize/rotate) begins on a
+        // pointer-down; the create gesture inserts its element during that same
+        // event, so capturing here — before `handle` — yields the true
+        // pre-gesture scene to restore on undo.
+        let before = self.scene.clone();
+
+        let result = self
+            .interaction
+            .handle(&mut self.scene, &mut self.viewport, self.tool, event);
+
+        if result.begins_undo {
+            self.pending_undo = Some(before);
+        }
+
+        match &result.commit {
+            Some(_) => {
+                if let Some(before) = self.pending_undo.take() {
+                    self.history.record(before);
+                }
+            }
+            None => {
+                // A pointer-up that ends a gesture without committing (e.g. a
+                // bare click that created nothing) discards the snapshot so no
+                // empty undo entry is recorded.
+                if is_pointer_up {
+                    self.pending_undo = None;
+                }
+            }
+        }
+
+        HandleResult {
+            scene_changed: result.scene_changed,
+            view_changed: result.view_changed,
+        }
     }
 
     // --- Rendering -------------------------------------------------------
