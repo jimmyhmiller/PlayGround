@@ -1,0 +1,12 @@
+[package]
+name = "whiteboard-tiny-skia"
+description = "Reference CPU backend for whiteboard-core: consumes the draw-command list and rasterizes it with tiny-skia. Also powers snapshot tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+whiteboard-core = { path = "../whiteboard-core" }
+tiny-skia = "0.11"

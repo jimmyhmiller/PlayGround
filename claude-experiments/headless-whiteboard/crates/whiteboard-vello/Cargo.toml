@@ -1,0 +1,11 @@
+[package]
+name = "whiteboard-vello"
+description = "GPU backend scaffold for whiteboard-core: converts the draw-command list into Vello scene fragments. Feature-gated; full GPU path lands in a later phase."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+whiteboard-core = { path = "../whiteboard-core" }

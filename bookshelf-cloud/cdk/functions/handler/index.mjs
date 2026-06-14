@@ -242,6 +242,56 @@ async function serveAuthor(authorId, includeItems) {
     return jsonResponse(200, author);
 }
 
+// BookPlayer requests GET /api/libraries/main/search?q=<text>&limit=N as the
+// user types. The original design assumed search was client-side over the
+// fetched library, so this was a static {"book": []} stub — meaning every
+// query returned nothing. We build it on the fly: read the items list and
+// keep entries whose title or author contains the query (case-insensitive),
+// then return the AudiobookShelf search shape BookPlayer expects.
+async function serveSearch(query, limit) {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) {
+        return jsonResponse(200, { book: [], narrators: [], series: [], authors: [], tags: [] });
+    }
+
+    let listing;
+    try {
+        const out = await s3.send(new GetObjectCommand({
+            Bucket: BUCKET,
+            Key: 'api/libraries/main/items',
+        }));
+        listing = JSON.parse(await out.Body.transformToString('utf8'));
+    } catch (e) {
+        if (e instanceof NoSuchKey || e?.name === 'NoSuchKey') {
+            return jsonResponse(200, { book: [], narrators: [], series: [], authors: [], tags: [] });
+        }
+        throw e;
+    }
+
+    const allItems = Array.isArray(listing?.results) ? listing.results : [];
+    const book = [];
+    for (const it of allItems) {
+        const meta = it?.media?.metadata || {};
+        const title = (meta.title || '').toLowerCase();
+        const author = (meta.authorName || '').toLowerCase();
+        let matchKey = null;
+        let matchText = null;
+        if (title.includes(q)) {
+            matchKey = 'title';
+            matchText = meta.title || '';
+        } else if (author.includes(q)) {
+            matchKey = 'authorName';
+            matchText = meta.authorName || '';
+        }
+        if (matchKey) {
+            book.push({ libraryItem: it, matchKey, matchText });
+            if (book.length >= limit) break;
+        }
+    }
+
+    return jsonResponse(200, { book, narrators: [], series: [], authors: [], tags: [] });
+}
+
 async function presign(key) {
     const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
     return getSignedUrl(s3, cmd, { expiresIn: PRESIGN_TTL_SECONDS });
@@ -333,6 +383,13 @@ async function handleAuthed(event, path) {
             .split(',')
             .map((s) => s.trim());
         return serveAuthor(authorId, include.includes('items'));
+    }
+
+    const searchMatch = path.match(/^\/api\/libraries\/([^\/]+)\/search$/);
+    if (searchMatch) {
+        const qs = event.queryStringParameters || {};
+        const limit = Math.max(1, Math.min(parseInt(qs.limit, 10) || 100, 500));
+        return serveSearch(qs.q, limit);
     }
 
     if (path.startsWith('/api/')) {

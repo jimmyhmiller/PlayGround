@@ -165,6 +165,76 @@ def list_books() -> None:
         click.echo(f"  {it['id']:40s}  {meta.get('title') or '?'}")
 
 
+def _apply_meta_overrides(meta: dict, *, title, author, narrator) -> None:
+    """Patch a media.metadata block in place to match the overrides given.
+
+    Mirrors manifest._metadata_block so an edited entry is shaped exactly like
+    a freshly-published one (authorName + authors[] derived from the name)."""
+    if title is not None:
+        meta["title"] = title
+    if author is not None:
+        if author == "":
+            meta.pop("authorName", None)
+            meta.pop("authors", None)
+        else:
+            meta["authorName"] = author
+            meta["authors"] = [{"id": f"aut-{manifest.slugify(author)}", "name": author}]
+    if narrator is not None:
+        if narrator == "":
+            meta.pop("narratorName", None)
+            meta.pop("narrators", None)
+        else:
+            meta["narratorName"] = narrator
+            meta["narrators"] = [narrator]
+
+
+@main.command()
+@click.argument("book_id")
+@click.option("--title", default=None, help="New title.")
+@click.option("--author", default=None, help="New author (pass '' to clear).")
+@click.option("--narrator", default=None, help="New narrator (pass '' to clear).")
+def edit(book_id: str, title: str | None, author: str | None, narrator: str | None) -> None:
+    """Edit a published book's metadata in place (no re-upload of audio).
+
+    Patches both the item-detail JSON and the library list entry, then
+    refreshes filterdata so the authors/narrators filter views stay correct.
+    Example:
+        bookshelf-cloud edit skepticism-...-z-libsk --author "Michael Huemer"
+    """
+    if title is None and author is None and narrator is None:
+        click.echo("nothing to change — pass --title/--author/--narrator", err=True)
+        sys.exit(2)
+
+    pub = Publisher(_load_bucket())
+
+    # --- item detail ---
+    detail = pub.get_json(_item_detail_key(book_id))
+    if detail is None:
+        click.echo(f"no such book: {book_id}", err=True)
+        sys.exit(1)
+    detail_meta = detail.setdefault("media", {}).setdefault("metadata", {})
+    _apply_meta_overrides(detail_meta, title=title, author=author, narrator=narrator)
+    pub.put_json(_item_detail_key(book_id), detail)
+
+    # --- list entry ---
+    items = _load_items(pub)
+    found = False
+    for it in items:
+        if it.get("id") == book_id:
+            found = True
+            list_meta = it.setdefault("media", {}).setdefault("metadata", {})
+            _apply_meta_overrides(list_meta, title=title, author=author, narrator=narrator)
+    if not found:
+        click.echo(f"  (warning: {book_id} not in items list — detail updated only)", err=True)
+    else:
+        items.sort(key=lambda it: (it.get("media", {}).get("metadata", {}).get("title") or "").lower())
+        _write_items(pub, items)
+        _refresh_filterdata(pub, items)
+
+    m = detail_meta
+    click.echo(f"updated {book_id}: title={m.get('title')!r} author={m.get('authorName')!r} narrator={m.get('narratorName')!r}")
+
+
 @main.command()
 @click.argument("book_id")
 def remove(book_id: str) -> None:
