@@ -15,8 +15,8 @@ pub use binding::{
 };
 pub use id::{ElementId, GroupId};
 pub use kind::{
-    Arrowhead, BoundElement, BoundElementKind, ElementKind, FreedrawData, ImageData, ImageStatus,
-    LinearData, LinearKind, PointBinding, Roundness, RoundnessKind, TextData,
+    Arrowhead, BoundElement, BoundElementKind, ElementKind, FrameData, FreedrawData, ImageData,
+    ImageStatus, LinearData, LinearKind, PointBinding, Roundness, RoundnessKind, TextData,
 };
 
 use crate::geometry::{Point, Rect};

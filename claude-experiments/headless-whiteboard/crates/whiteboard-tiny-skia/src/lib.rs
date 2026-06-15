@@ -139,6 +139,31 @@ impl TinySkiaBackend {
         self.pixmap.fill(to_sk_color(self.background));
     }
 
+    /// Build a clip [`Mask`] from the intersection of the active clip-rect stack,
+    /// or `None` if nothing is clipped. Clip rects are stored already mapped to
+    /// device space (resolved at `PushClip` time), so this just intersects them.
+    fn current_clip_mask(&self) -> Option<tiny_skia::Mask> {
+        if self.clip_stack.is_empty() {
+            return None;
+        }
+        let mut acc: Option<(f32, f32, f32, f32)> = None; // (min_x, min_y, max_x, max_y)
+        for clip in self.clip_stack.iter().flatten() {
+            let r = (clip.left(), clip.top(), clip.right(), clip.bottom());
+            acc = Some(match acc {
+                None => r,
+                Some((ax, ay, bx, by)) => (ax.max(r.0), ay.max(r.1), bx.min(r.2), by.min(r.3)),
+            });
+        }
+        let (min_x, min_y, max_x, max_y) = acc?;
+        let rect = tiny_skia::Rect::from_ltrb(min_x, min_y, max_x.max(min_x), max_y.max(min_y))?;
+        let mut mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height())?;
+        let mut pb = SkPathBuilder::new();
+        pb.push_rect(rect);
+        let path = pb.finish()?;
+        mask.fill_path(&path, FillRule::Winding, true, SkTransform::identity());
+        Some(mask)
+    }
+
     fn draw_fill(&mut self, path: &Path, paint: &Paint) {
         let Some(sk_path) = build_path(path) else {
             return;
@@ -149,8 +174,9 @@ impl TinySkiaBackend {
         };
         set_paint_color(&mut sk_paint, paint);
         let ts = self.current_transform();
+        let mask = self.current_clip_mask();
         self.pixmap
-            .fill_path(&sk_path, &sk_paint, FillRule::Winding, ts, None);
+            .fill_path(&sk_path, &sk_paint, FillRule::Winding, ts, mask.as_ref());
     }
 
     fn draw_image(&mut self, id: &ImageId, dst: &whiteboard_core::geometry::Rect, opacity: f32) {
@@ -173,8 +199,9 @@ impl TinySkiaBackend {
             opacity: opacity.clamp(0.0, 1.0),
             ..PixmapPaint::default()
         };
+        let mask = self.current_clip_mask();
         self.pixmap
-            .draw_pixmap(0, 0, src.as_ref(), &paint, transform, None);
+            .draw_pixmap(0, 0, src.as_ref(), &paint, transform, mask.as_ref());
     }
 
     fn draw_text(&mut self, run: &whiteboard_core::text::TextRun, paint: &Paint) {
@@ -209,8 +236,9 @@ impl TinySkiaBackend {
         set_paint_color(&mut sk_paint, paint);
         let sk_stroke = build_stroke(stroke);
         let ts = self.current_transform();
+        let mask = self.current_clip_mask();
         self.pixmap
-            .stroke_path(&sk_path, &sk_paint, &sk_stroke, ts, None);
+            .stroke_path(&sk_path, &sk_paint, &sk_stroke, ts, mask.as_ref());
     }
 }
 
@@ -231,11 +259,34 @@ impl Backend for TinySkiaBackend {
                     self.transform_stack.pop();
                 }
                 DrawCommand::PushClip(r) => {
-                    self.clip_stack.push(tiny_skia::Rect::from_xywh(
-                        r.x as f32,
-                        r.y as f32,
-                        r.width.max(0.0) as f32,
-                        r.height.max(0.0) as f32,
+                    // Map the clip rect into device space using the transform
+                    // active *now* (when the clip is pushed), and store that.
+                    // Later element transforms must not move an already-applied
+                    // clip, so we resolve it to device pixels up front.
+                    let ts = self.current_transform();
+                    let corners = [
+                        (r.x as f32, r.y as f32),
+                        ((r.x + r.width) as f32, r.y as f32),
+                        (r.x as f32, (r.y + r.height) as f32),
+                        ((r.x + r.width) as f32, (r.y + r.height) as f32),
+                    ];
+                    let mut min_x = f32::INFINITY;
+                    let mut min_y = f32::INFINITY;
+                    let mut max_x = f32::NEG_INFINITY;
+                    let mut max_y = f32::NEG_INFINITY;
+                    for (cx, cy) in corners {
+                        let mut p = tiny_skia::Point::from_xy(cx, cy);
+                        ts.map_point(&mut p);
+                        min_x = min_x.min(p.x);
+                        min_y = min_y.min(p.y);
+                        max_x = max_x.max(p.x);
+                        max_y = max_y.max(p.y);
+                    }
+                    self.clip_stack.push(tiny_skia::Rect::from_ltrb(
+                        min_x,
+                        min_y,
+                        max_x.max(min_x),
+                        max_y.max(min_y),
                     ));
                 }
                 DrawCommand::PopClip => {
