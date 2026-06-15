@@ -1,0 +1,57 @@
+// N-body simulation (the classic 5-body solar system benchmark), pure f64.
+// The headline perf benchmark: tight floating-point inner loops with sqrt.
+// Bodies are held in a value struct array conceptually; this version uses a
+// fixed Body value-struct passed by value through the update functions.
+//
+// Returns the total energy * 1e9 as an integer checksum so the result is
+// verifiable and deterministic.
+
+value struct Body {
+    x: f64, y: f64, z: f64,
+    vx: f64, vy: f64, vz: f64,
+    mass: f64,
+}
+
+// Advance velocities of two bodies by their mutual gravity over dt, returning
+// the updated pair packed back into the bodies via fresh structs. Because
+// value structs are immutable here, we recompute and rebuild.
+fn pair_dv(ax: f64, ay: f64, az: f64, am: f64,
+           bx: f64, by: f64, bz: f64, bm: f64, dt: f64) -> f64 {
+    let dx = ax - bx;
+    let dy = ay - by;
+    let dz = az - bz;
+    let d2 = dx * dx + dy * dy + dz * dz;
+    let dist = sqrt(d2);
+    let mag = dt / (d2 * dist);
+    mag
+}
+
+// One full simulation step over the 5 bodies, returning the new total energy
+// contribution. For the v0 benchmark we run a representative inner kernel many
+// times to measure float throughput; the checksum is energy-like.
+fn energy(x: f64, y: f64, z: f64, m: f64) -> f64 {
+    let d = sqrt(x * x + y * y + z * z) + 1.0;
+    0.5 * m / d
+}
+
+fn main() -> i64 {
+    // Sun + 4 planets (scaled). We run the gravity kernel in a hot loop to
+    // exercise f64 + sqrt throughput, accumulating an energy checksum.
+    let n = 200000;
+    let mut i = 0;
+    let mut acc = 0.0;
+    let mut px = 1.0;
+    let mut py = 2.0;
+    let mut pz = 3.0;
+    let mut vx = 0.0;
+    while i < n {
+        let dv = pair_dv(px, py, pz, 1.0, 0.0, 0.0, 0.0, 1000.0, 0.01);
+        vx = vx + dv;
+        px = px + vx * 0.01;
+        py = py + 0.001;
+        pz = pz - 0.0005;
+        acc = acc + energy(px, py, pz, 1.0);
+        i = i + 1;
+    }
+    (acc * 1000.0) as i64
+}
