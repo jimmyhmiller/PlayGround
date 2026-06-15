@@ -1,29 +1,42 @@
 # coil — a low-level Lisp with first-class MLIR
 
 A redesign of the `lispier` / `mlir-lisp` experiments. The thesis: **MLIR is the
-object language, not a backend** — IR nodes are first-class values, building IR
-is evaluation, and macros are ordinary compile-time functions sharing one value
-universe. That single move dissolves the two things that sank the earlier
-attempts: a two-headed macro system and a lisp→MLIR mapping smeared across
-phases.
+object language, not a backend** — IR nodes are first-class values, the lisp→MLIR
+mapping is one clean AOT codegen walk, and macros are ordinary compile-time
+functions (staged, proc-macro style) sharing one value universe. That dissolves
+the two things that sank the earlier attempts: a two-headed macro system and a
+mapping smeared across phases.
 
 ## Read in this order
+
+**Start here:** **[LANGUAGE.md](LANGUAGE.md)** — the comprehensive, authoritative
+end-to-end design (types, memory, functions/closures, control flow & errors,
+aggregates, staged macros, dialects/passes, modules, CPU/GPU targets,
+diagnostics, toolchain, worked examples, grammar). The docs below are deep-dives;
+where they disagree with LANGUAGE.md, LANGUAGE.md wins.
 
 1. **[DESIGN.md](DESIGN.md)** — rationale. What went wrong in `lispier`
    (the two-macro-system problem; macros running blind so the mapping leaked
    into `ir_gen`, post-passes, and the parser) and the one idea that fixes both.
 2. **[SPEC.md](SPEC.md)** — the surface. Reader grammar, special forms, and the
    total desugaring of every operation to MLIR's generic form via one `op`.
-3. **[KERNEL.md](KERNEL.md)** — the frozen Rust core. The `Val` type, the
-   evaluator, the complete MLIR primitive catalog, hygiene, phasing, diagnostics.
-4. **[ELABORATION.md](ELABORATION.md)** — the hard part, resolved. Single-pass
-   elaboration (build = eval), the anti-double-emit rule, the three ways a macro
-   sees a type (`infer-results` / `value-type` / `build` + `with-scratch`),
-   ordered compile-time effects, and scope-set hygiene worked through
-   `defstruct`. This is where the remaining design risk lived.
-5. **[prelude.coil](prelude.coil)** — proof. `defn`, `print`, `defstruct`,
+3. **[KERNEL.md](KERNEL.md)** — the frozen Rust core. The `Val` type, the MLIR
+   primitive catalog, hygiene, phasing, diagnostics.
+4. **[AOT.md](AOT.md)** — the execution model: coil is an ahead-of-time compiler,
+   not an interpreter; macros are staged (compiled then called). Supersedes the
+   interpreter framing in ELABORATION.
+5. **[ELABORATION.md](ELABORATION.md)** — the anti-double-emit rule, the three
+   ways a macro sees a type (`infer-results` / `value-type` / `build` +
+   `with-scratch`), ordered compile-time effects, and scope-set hygiene worked
+   through `defstruct`. (Its single-pass "build = eval" framing is replaced by
+   AOT.md's staging; the hygiene & anti-double-emit analysis still applies.)
+6. **[prelude.coil](prelude.coil)** — proof. `defn`, `print`, `defstruct`,
    control flow, dialects, and passes written *in the language* over the kernel
    primitives. If the prelude holds, the design holds.
+
+The implementation lives in **[`../coil/`](../coil/)** (reader, `Val`, printer,
+`Backend` codegen boundary, and the core-form→MLIR `emit` mapping are built and
+tested; expander, `melior` backend, and staged macros are next).
 
 ## The claim, in one example
 
