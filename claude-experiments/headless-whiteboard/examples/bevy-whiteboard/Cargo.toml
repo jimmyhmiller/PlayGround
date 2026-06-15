@@ -1,0 +1,24 @@
+[package]
+name = "bevy-whiteboard"
+description = "Bevy proof-of-concept: a headless-whiteboard Editor driven by Bevy input and rendered with Bevy gizmos/meshes. Proves the library plugs into an ECS game engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+whiteboard-core = { path = "../../crates/whiteboard-core" }
+# Trim Bevy's default features: the PoC is a 2D drawing app and needs no audio
+# (the `bevy_audio`/alsa stack isn't available here) or other extras. We enable
+# only windowing + 2D rendering + gizmos + winit.
+bevy = { version = "0.16", default-features = false, features = [
+    "bevy_winit",
+    "bevy_window",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_gizmos",
+    "x11",
+    "webgl2",
+] }

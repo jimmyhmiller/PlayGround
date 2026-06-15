@@ -46,6 +46,7 @@ including all interaction — lives in the headless core.
 | `whiteboard-vello` | Vello GPU backend: builds a `vello::Scene` from the command list. |
 | `whiteboard-svg` | SVG export backend: the command list → a standalone SVG document. |
 | `examples/winit-draw` | Runnable window: draw with the mouse. |
+| `examples/bevy-whiteboard` | Bevy ECS proof-of-concept: Editor driven by Bevy input, rendered with gizmos/meshes. |
 
 `whiteboard-core` modules: `element` (model), `geometry` (primitives + bounds +
 hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
