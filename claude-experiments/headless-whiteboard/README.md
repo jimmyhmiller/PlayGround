@@ -64,7 +64,8 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
 - **Full interaction lifecycle**: drag-to-create (incl. frames), click-to-place
   text with live **text entry** (type/backspace/newline, box auto-sizes), select,
   move, 8 resize handles, rotation, pan, wheel zoom, eraser, laser, **z-order**
-  (front/back/raise/lower), image placement.
+  (front/back/raise/lower), image placement, line/arrow **vertex editing**
+  (drag a vertex to reshape, with visible vertex handles).
 - **Undo/redo**, `.excalidraw` JSON load/save (real-format + internal),
   tight rotated bounds and precise per-shape hit-testing.
 - **Real text rendering**: the core lays text out (word-wrap, alignment,
@@ -108,7 +109,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 566 tests
+cargo test --workspace          # 569 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

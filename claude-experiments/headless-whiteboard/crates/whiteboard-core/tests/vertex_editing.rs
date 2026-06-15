@@ -36,9 +36,11 @@ fn up(x: f64, y: f64) -> InputEvent {
 fn vertices(ed: &Editor<MonospaceMeasurer>) -> Vec<Point> {
     let e = ed.scene().iter_live().next().unwrap();
     match &e.kind {
-        ElementKind::Line(d) | ElementKind::Arrow(d) => {
-            d.points.iter().map(|p| Point::new(e.x + p.x, e.y + p.y)).collect()
-        }
+        ElementKind::Line(d) | ElementKind::Arrow(d) => d
+            .points
+            .iter()
+            .map(|p| Point::new(e.x + p.x, e.y + p.y))
+            .collect(),
         _ => vec![],
     }
 }
@@ -83,18 +85,29 @@ fn drag_middle_vertex_reshapes_the_line() {
     let after = vertices(&ed);
     assert_eq!(after.len(), 3, "still three vertices");
     // The middle vertex moved up to y≈10; endpoints unchanged.
-    assert!((after[1].y - 10.0).abs() < 1e-6, "middle vertex moved up: {:?}", after[1]);
+    assert!(
+        (after[1].y - 10.0).abs() < 1e-6,
+        "middle vertex moved up: {:?}",
+        after[1]
+    );
     assert!((after[0].y - 50.0).abs() < 1e-6, "first endpoint unchanged");
     assert!((after[2].y - 50.0).abs() < 1e-6, "last endpoint unchanged");
 
     // The element box re-normalized to span the new extent (y from 10 to 50).
     let el = ed.scene().get(&id).unwrap();
-    assert!((el.y - 10.0).abs() < 1e-6, "box top follows the raised vertex");
+    assert!(
+        (el.y - 10.0).abs() < 1e-6,
+        "box top follows the raised vertex"
+    );
     assert!((el.height - 40.0).abs() < 1e-6, "box height grew to 40");
 
     // The reshape is undoable in one step.
     assert!(ed.undo());
-    assert_eq!(vertices(&ed)[1], Point::new(100.0, 50.0), "undo restores the vertex");
+    assert_eq!(
+        vertices(&ed)[1],
+        Point::new(100.0, 50.0),
+        "undo restores the vertex"
+    );
 }
 
 #[test]

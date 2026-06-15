@@ -765,7 +765,12 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         // Vertex handles: when exactly one line/arrow is selected, draw a small
         // square at each vertex so the user sees the draggable points.
         if self.selection().len() == 1 {
-            if let Some(el) = self.selection().iter().next().and_then(|id| self.scene.get(id)) {
+            if let Some(el) = self
+                .selection()
+                .iter()
+                .next()
+                .and_then(|id| self.scene.get(id))
+            {
                 let verts = crate::interaction::linear_vertices_scene(el);
                 if !verts.is_empty() {
                     use crate::geometry::{Path, Point as P, Rect};
