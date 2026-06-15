@@ -15,12 +15,15 @@
 > layers need an adapter. The conversion itself is mechanical in the
 > React→JSLIR direction and is essentially what `jsir-jslir` is already building.
 
-This doc is grounded in the JSIR side as it actually exists in this repo
-(`crates/jsir-ir`, `crates/jsir-jslir`) and in the upstream React Compiler HIR
-(`HIR.ts`, `HIRBuilder.ts`, `BuildHIR.ts`, `EnterSSA.ts`, the reactive-scope
-passes). The React Compiler source is **not vendored here**, so its side is
-described from the upstream model that the `jsir-react-oracle` fixtures and the
-`jsir-jslir` passes are written against.
+This doc is grounded on **both sides by reading the actual source**: the JSIR
+side as it exists in this repo (`crates/jsir-ir`, `crates/jsir-jslir`), and the
+React Compiler HIR read directly from `facebook/react` at commit
+`e730b5e` (2026-06-12),
+`compiler/packages/babel-plugin-react-compiler/src/HIR/` — `HIR.ts`,
+`HIRBuilder.ts`, `BuildHIR.ts`, `EnterSSA.ts`, and the reactive-scope passes.
+Every React-side type/line-count citation below is from that checkout, not from
+memory. (The React source is not vendored into this repo; it was pulled to verify
+this comparison.)
 
 ---
 
@@ -74,6 +77,12 @@ Two encoding differences to bridge:
 - React's blocks live in a `Map`; JSLIR's in a `Vec<Block>` inside a `Region`.
   A `BlockId → &Block` index (`ssa.rs` builds exactly this) makes them equivalent.
 
+A nice convergence: `HIR.blocks` is documented (`HIR.ts:304`) as stored in
+**reverse postorder** "to facilitate forward data flow analysis" — which is
+exactly the RPO that JSLIR's `ssa.rs` computes on the fly (`analyze_cfg`). Both
+IRs agree on the traversal order their analyses want; one bakes it into storage,
+the other derives it.
+
 ---
 
 ## 2. The instruction model — *this is the crux of the mismatch*
@@ -85,8 +94,9 @@ the box.
 ```
 Instruction { id: InstructionId, lvalue: Place, value: InstructionValue, loc }
 ```
-with the hard invariant: **one lvalue, and every operand is a `Place`** — never a
-nested expression. `a = f(b + c)` becomes a *list*:
+(verified at `HIR.ts:651`) with the hard invariant: **one lvalue, and every
+operand is a `Place`** — never a nested expression. `a = f(b + c)` becomes a
+*list*:
 ```
 $0 = LoadLocal b
 $1 = LoadLocal c
@@ -95,11 +105,15 @@ $3 = LoadLocal f
 $4 = CallExpression $3 ($2)
 $5 = StoreLocal a = $4
 ```
-`InstructionValue` is a ~50-arm tagged union (`LoadLocal`, `StoreLocal`,
-`LoadGlobal`, `BinaryExpression`, `CallExpression`, `PropertyLoad`,
-`ObjectExpression`, `JsxExpression`, `Primitive`, …). This maximal flatness is
-*the* property the reactive-scope analysis depends on: every intermediate value
-is named and individually rangeable.
+`InstructionValue` is a **44-variant** closed tagged union (counted at the
+checkout: `LoadLocal`, `StoreLocal`, `LoadGlobal`, `StoreGlobal`, `LoadContext`,
+`BinaryExpression`, `CallExpression`, `MethodCall`, `NewExpression`,
+`PropertyLoad`/`PropertyStore`, `ComputedLoad`/`ComputedStore`, `Destructure`,
+`ObjectExpression`, `ArrayExpression`, `JsxExpression`, `JSXText`,
+`FunctionExpression`, `ObjectMethod`, `Primitive`, `TemplateLiteral`, `Await`,
+`StartMemoize`/`FinishMemoize`, …). This maximal flatness is *the* property the
+reactive-scope analysis depends on: every intermediate value is named and
+individually rangeable.
 
 **JSLIR instructions are AST-faithful `jsir.*` ops, reused verbatim and coarse.**
 `jsir-jslir/src/lib.rs` is explicit: block instructions "reuse the AST-faithful
@@ -136,10 +150,13 @@ the *shape* (scalar list vs nested tree).
 ## 3. SSA & value identity — *materialized vs side-table*
 
 **React:** SSA is **in the IR**. `EnterSSA` rewrites the function so each
-`Place` points at an `Identifier` with a unique `IdentifierId`; phis are real
-members of `BasicBlock.phis` (`Phi { place, operands: Map<BlockId, Place> }`).
-Value identity, variable identity, type, scope and mutable range all hang off
-`Identifier`.
+`Place` (`HIR.ts:1165`) points at an `Identifier` with a unique `IdentifierId`;
+phis are real members of `BasicBlock.phis` (`Phi { kind, place, operands:
+Map<BlockId, Place> }`, `HIR.ts:789`). Crucially, `Identifier` carries **two**
+identities (`HIR.ts:1253`): `id: IdentifierId` is the *SSA instance* (distinct per
+reassignment after `EnterSSA`), while `declarationId: DeclarationId` is the
+*original source variable* (stable across reassignments). Type, scope and mutable
+range all hang off `Identifier`.
 
 **JSLIR:** SSA is a **pure side-table analysis** (`ssa.rs::enter_ssa →
 SsaInfo`). The IR is *not* in SSA form — it stays in named-variable form, and
@@ -155,9 +172,12 @@ Two further mismatches here:
   JSIR substrate is **MLIR block-argument** form (`Block.args` + `Successor.args`
   on the branch). These are duals — `cond_br_logical` in `dialect.rs` already
   uses block args as phis — but a shared pass must pick one and adapt the other.
-- **Where identity lives.** React: `IdentifierId` (intrinsic). JSLIR: resolved
-  symbol name/scope (extrinsic, via trivia). A shared "what variable is this"
-  query needs an adapter on the JSLIR side.
+- **Where identity lives.** React: `IdentifierId` (intrinsic, SSA-instance) plus
+  `declarationId` (intrinsic, source-variable). JSLIR: resolved symbol
+  name/`def_scope_uid` (extrinsic, via trivia) maps to React's *`declarationId`*
+  level; the SSA-instance level is what `SsaInfo`'s reaching-def values stand in
+  for. So a shared "what variable is this" query needs an adapter that exposes
+  both levels on the JSLIR side.
 
 So to make JSLIR look like React HIR you must (a) materialize SSA from `SsaInfo`
 into block args/results, and (b) synthesize stable identifier ids from resolved
@@ -209,12 +229,18 @@ for now.
 
 React HIR is saturated with memoization metadata that JSIR simply does not have:
 
-- `Place.effect` — `Read` / `Mutate` / `Capture` / `Store` / `Freeze` /
-  `ConditionallyMutate`. The dataflow currency of the compiler.
+- `Place.effect: Effect` — the 8-value enum at `HIR.ts:1512` (`Read`, `Mutate`,
+  `Store`, `Capture`, `Freeze`, `ConditionallyMutate`,
+  `ConditionallyMutateIterator`, `Unknown`). The dataflow currency of the compiler.
+- A newer, richer **aliasing-effect** layer on top: `Instruction.effects:
+  Array<AliasingEffect> | null` (`HIR.ts:656`) and a function-level
+  `HIRFunction.aliasingEffects` (`HIR.ts:296`). So the effect substrate is even
+  heavier than "one effect per Place" — it's per-instruction alias graphs.
 - `Identifier.mutableRange` — an `[InstructionId, InstructionId)` range; the
-  reason instructions are globally numbered.
-- `Identifier.scope: ReactiveScope` — the memoization unit; `BasicBlock` even has
-  `kind: 'scope' | 'pruned-scope'` and a `scope`/`pruned-scope` terminal.
+  reason instructions carry a globally-monotonic `InstructionId`.
+- `Identifier.scope: ReactiveScope` — the memoization unit; `BasicBlock.kind`
+  (`HIR.ts:324`) includes the expression-block kinds `value`/`loop`/`sequence`,
+  and the terminal union has `ReactiveScopeTerminal`/`PrunedScopeTerminal`.
 - `reactive: boolean` on `Place`, mutable-range-based aliasing, etc.
 
 JSIR has **none** of this — it's a general-purpose JS IR. There is no effect, no
@@ -240,7 +266,7 @@ meant to be **added as side tables** keyed on `ValueId`/`BlockId`, exactly like
 | Instruction | scalar `{lvalue, value}` | nested `jsir.*` op | **hard** — needs full scalarization (not yet built) |
 | Value kind | `InstructionValue` (~50 enum) | `jsir.*` op name (open) | enumerable table |
 | Operand | `Place` | `ValueId` (op result) | needs SSA + identity adapter |
-| Variable id | `Identifier.id` (intrinsic) | `trivia.referenced_symbol` | synthesize ids |
+| Variable id | `Identifier.id` (SSA-instance) + `declarationId` (source var) | `trivia.referenced_symbol` (≈ declarationId) + `SsaInfo` reaching def (≈ id) | synthesize ids |
 | SSA / phi | materialized, `Phi` nodes | `SsaInfo` side table, MLIR block-args | materialize from `SsaInfo` |
 | `if`/`while`/`for` | structured terminal variants | `cond_br` + structured attrs | accessor shim, mechanical |
 | `return`/`throw`/`break` | terminal variants | `jslir.return`, `br_loop_exit`, (throw TBD) | mechanical (throw pending) |
