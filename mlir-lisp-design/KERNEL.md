@@ -141,12 +141,20 @@ them). These are the *entire* surface between the language and MLIR.
 
 ### Inference & introspection (the Problem-2 fix)
 ```
-(mlir/infer-results name attrs operands regions) -> [Type]   ; InferTypeOpInterface
+(mlir/infer-results name attrs operands regions) -> [Type]   ; InferTypeOpInterface, PURE
 (mlir/op-has-trait name trait)      -> Bool
 (mlir/op-name op) (mlir/op-attr op k) (mlir/op-operand op i) -> …
+(mlir/value-type value)             -> Type                   ; PURE
+(build form)                        -> Value                  ; ELABORATE form NOW, commit IR
+(with-scratch thunk)                -> a   ; throwaway builder scope; ops discarded on return
 ```
-Macros call `mlir/infer-results` (or just omit `:results`) to *know a result
-type at expansion time* — impossible in the old syntactic-only macro layer.
+A macro learns a result type at expansion time three ways, in order of
+preference (see ELABORATION.md §3): `mlir/infer-results` (pure, builds nothing),
+`mlir/value-type` on an already-built value (pure), or `build` (commits the op —
+then you MUST splice the returned `Value`, never the original form, per the
+anti-double-emit rule). `with-scratch` is for genuinely speculative construction
+(e.g. try-to-verify-then-choose); ops built inside it never reach the module.
+These were the linchpin gaps the prelude surfaced; they are now kernel-level.
 
 ### Module, verify, passes, codegen
 ```

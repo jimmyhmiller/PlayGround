@@ -16,7 +16,12 @@ phases.
    total desugaring of every operation to MLIR's generic form via one `op`.
 3. **[KERNEL.md](KERNEL.md)** — the frozen Rust core. The `Val` type, the
    evaluator, the complete MLIR primitive catalog, hygiene, phasing, diagnostics.
-4. **[prelude.coil](prelude.coil)** — proof. `defn`, `print`, `defstruct`,
+4. **[ELABORATION.md](ELABORATION.md)** — the hard part, resolved. Single-pass
+   elaboration (build = eval), the anti-double-emit rule, the three ways a macro
+   sees a type (`infer-results` / `value-type` / `build` + `with-scratch`),
+   ordered compile-time effects, and scope-set hygiene worked through
+   `defstruct`. This is where the remaining design risk lived.
+5. **[prelude.coil](prelude.coil)** — proof. `defn`, `print`, `defstruct`,
    control flow, dialects, and passes written *in the language* over the kernel
    primitives. If the prelude holds, the design holds.
 
@@ -32,30 +37,32 @@ Everything except the reader and a handful of kernel ops is library code.
 the result type of `arith.addi` comes from MLIR's `InferTypeOpInterface` at build
 time, not from a language-level rule.
 
-## Gaps the prelude surfaced (feed back into KERNEL.md)
+## Gaps the prelude surfaced — and how they were resolved
 
 Writing `prelude.coil` against `KERNEL.md §4` exposed primitives the kernel must
-add or bless. These are the concrete next decisions, not hand-waving:
+bless. The load-bearing ones are now resolved in **ELABORATION.md**; the rest are
+small helpers.
 
-- **Compile-time mutable state.** `intern-cstring!` needs `atom`/`swap!`/`get`/
-  `assoc` (or equivalent) usable during expansion. Decision: provide a small
-  persistent-map + `atom` in the kernel data prims, scoped per compilation unit.
-- **`build` — expand-time evaluation of an op-form to an `MlirValue`.** Used by
-  `widen-i64` to learn an operand's type before deciding what to emit. This is
-  the linchpin of "macros can see types"; it must be a first-class kernel prim
-  (`mlir/build form -> Value`) with a defined builder scope.
-- **`module-body` / `block-thunk` / insertion-scope helpers.** The prelude pokes
-  the module's top block to append globals/dialects. Needs a blessed
-  `mlir/module-body` and a thunk-based `with-block`, both in the kernel.
+- **`build` — expand-time evaluation of an op-form to a `Value`.** *Resolved
+  (ELABORATION §1–3, now a kernel prim):* elaboration is single-pass (build =
+  eval), so `build` commits an op and you splice the returned `Value`
+  (anti-double-emit rule). Pure type queries use `mlir/infer-results` /
+  `mlir/value-type`; speculation uses `with-scratch`.
+- **Compile-time mutable state.** *Resolved (ELABORATION §4):* `atom`/`swap!`/
+  `get`/`assoc` scoped to the compilation unit, with a defined top-to-bottom
+  effect order; `intern-cstring!` is idempotent by construction.
+- **Hygiene × `defstruct`'s nested `defmacro`.** *Resolved (ELABORATION §5–6):*
+  scope-set hygiene + a prelude fix — generate accessors by closing over
+  `sty`/`idx` as **values** spliced once, not via nested-quasiquote
+  double-unquote. Values can't capture, so the generated macros are hygienic.
+- **`module-body` / `block-thunk` / insertion helpers** — blessed kernel
+  insertion-scope wrappers (`mlir/module-body`, thunk-based `mlir/with-block`).
+  Small; still to be pinned down in code.
 - **Parameter introspection** (`param-type`, `param-name`, `bind-args`) and the
   `(: name type)` parameter form — a tiny reader/AST helper, kernel-level.
-- **Implicit terminators** (`with-implicit-terminator`, `*implicit-terminator*`).
-  Region terminator insertion is prelude policy but needs a dynamic var the
-  kernel threads; confirm it's expressible without a kernel special form.
-- **Hygiene × `defstruct`'s nested `defmacro`.** `defstruct` defines macros whose
-  bodies quasiquote the field index — a macro-defining-macro with two quote
-  levels. This is the stress test for the hygiene/`gensym` story in `KERNEL §5`;
-  it must round-trip cleanly or the hygiene model needs revisiting.
+- **Implicit terminators** (`with-implicit-terminator`, `*implicit-terminator*`)
+  — prelude policy threaded via a kernel dynamic var; expressible without a new
+  special form.
 
 ## Status
 
