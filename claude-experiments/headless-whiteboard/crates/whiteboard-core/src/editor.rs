@@ -10,8 +10,9 @@
 //! select / delete elements, undo/redo, pan/zoom, render) so backends and tests
 //! can exercise the whole pipeline immediately.
 
+use crate::element::GroupId;
 use crate::element::{Element, ElementId};
-use crate::geometry::Point;
+use crate::geometry::{Point, Vec2};
 use crate::history::History;
 use crate::interaction::state::InteractionState;
 use crate::interaction::{InputEvent, Tool, Viewport};
@@ -56,6 +57,11 @@ pub struct Editor<M: TextMeasurer, G: ShapeGenerator = CleanGenerator> {
     /// scene snapshot until the matching commit (then it is pushed to history)
     /// or the gesture is abandoned (then it is dropped).
     pending_undo: Option<Scene>,
+    /// Internal clipboard for copy/cut/paste/duplicate.
+    clipboard: crate::scene::Clipboard,
+    /// Monotonic counter backing deterministic id/group-id generation for
+    /// paste/duplicate (no RNG, no clock — stable across runs).
+    id_counter: u64,
     measurer: M,
     generator: G,
 }
@@ -85,6 +91,8 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             tool: Tool::default(),
             interaction: InteractionState::default(),
             pending_undo: None,
+            clipboard: crate::scene::Clipboard::new(),
+            id_counter: 0,
             measurer,
             generator,
         }
@@ -164,6 +172,124 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         self.interaction.clear_selection();
     }
 
+    // --- Clipboard / duplicate ------------------------------------------
+
+    /// Deterministic id allocator shared by the paste/duplicate/group closures
+    /// (a `Cell` so two `FnMut` generators can both pull from one counter).
+    fn next_id_cell(counter: &std::cell::Cell<u64>) -> ElementId {
+        let n = counter.get();
+        counter.set(n + 1);
+        ElementId::from(format!("gen-{n}"))
+    }
+
+    /// Copy the current selection to the internal clipboard.
+    pub fn copy(&mut self) {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        self.clipboard = crate::scene::copy(&self.scene, &ids);
+    }
+
+    /// Copy the selection, then soft-delete it (undoable).
+    pub fn cut(&mut self) -> bool {
+        self.copy();
+        self.delete_selection()
+    }
+
+    /// Paste the clipboard contents, offset by `offset`, selecting the new
+    /// elements. Returns the new element ids. Records one undo entry.
+    pub fn paste(&mut self, offset: Vec2) -> Vec<ElementId> {
+        if self.clipboard.is_empty() {
+            return Vec::new();
+        }
+        let counter = std::cell::Cell::new(self.id_counter);
+        let new_elements = {
+            let mut id_gen = || Self::next_id_cell(&counter);
+            let mut group_gen = || GroupId::from(Self::next_id_cell(&counter).as_str());
+            crate::scene::paste(&self.clipboard, &mut id_gen, &mut group_gen, offset)
+        };
+        self.id_counter = counter.get();
+        if new_elements.is_empty() {
+            return Vec::new();
+        }
+        self.history.record(self.scene.clone());
+        let ids: Vec<ElementId> = new_elements.iter().map(|e| e.id.clone()).collect();
+        for el in new_elements {
+            self.scene.insert(el);
+        }
+        self.interaction.set_selection(ids.clone());
+        ids
+    }
+
+    /// Duplicate the selection in place with a small nudge (Excalidraw uses
+    /// +10,+10), selecting the duplicates. Records one undo entry.
+    pub fn duplicate_selection(&mut self) -> Vec<ElementId> {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let counter = std::cell::Cell::new(self.id_counter);
+        let new_elements = {
+            let mut id_gen = || Self::next_id_cell(&counter);
+            let mut group_gen = || GroupId::from(Self::next_id_cell(&counter).as_str());
+            crate::scene::duplicate(
+                &self.scene,
+                &ids,
+                &mut id_gen,
+                &mut group_gen,
+                Vec2::new(10.0, 10.0),
+            )
+        };
+        self.id_counter = counter.get();
+        if new_elements.is_empty() {
+            return Vec::new();
+        }
+        self.history.record(self.scene.clone());
+        let new_ids: Vec<ElementId> = new_elements.iter().map(|e| e.id.clone()).collect();
+        for el in new_elements {
+            self.scene.insert(el);
+        }
+        self.interaction.set_selection(new_ids.clone());
+        new_ids
+    }
+
+    // --- Grouping --------------------------------------------------------
+
+    /// Group the current selection under a fresh group id. Returns whether a
+    /// group was formed (needs >= 2 elements). Records undo.
+    pub fn group_selection(&mut self) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        let counter = std::cell::Cell::new(self.id_counter);
+        let group_id = GroupId::from(Self::next_id_cell(&counter).as_str());
+        self.id_counter = counter.get();
+        let before = self.scene.clone();
+        if crate::scene::group(&mut self.scene, &ids, group_id) {
+            self.history.record(before);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Ungroup the current selection's outermost shared group. Returns whether
+    /// anything was ungrouped. Records undo.
+    pub fn ungroup_selection(&mut self) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        let before = self.scene.clone();
+        let removed = crate::scene::ungroup(&mut self.scene, &ids);
+        if removed.is_empty() {
+            false
+        } else {
+            self.history.record(before);
+            true
+        }
+    }
+
+    /// Expand a set of ids to include all members of their groups (so clicking
+    /// one group member selects the whole group). Used by callers wiring
+    /// group-aware click selection.
+    pub fn expand_to_groups(&self, ids: &[ElementId]) -> Vec<ElementId> {
+        crate::scene::group_members(&self.scene, ids)
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
@@ -237,6 +363,8 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
                 // A committed gesture may have moved/resized elements that arrows
                 // are bound to; refresh bound arrow endpoints so they follow.
                 self.refresh_bindings();
+                // Moving an element in/out of a frame updates its membership.
+                self.refresh_frame_membership();
             }
             None => {
                 // A pointer-up that ends a gesture without committing (e.g. a
@@ -282,6 +410,20 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
                 let origin = Point::new(arrow.x, arrow.y);
                 if let ElementKind::Arrow(d) | ElementKind::Line(d) = &mut arrow.kind {
                     apply_bound_endpoints(d, origin, endpoints);
+                }
+            }
+        }
+    }
+
+    /// After a gesture, reassign frame membership for elements whose containing
+    /// frame changed (dragged into or out of a frame). Only applies real
+    /// changes, so it is a cheap no-op for the common case.
+    fn refresh_frame_membership(&mut self) {
+        let ids: Vec<ElementId> = self.scene.iter_live().map(|e| e.id.clone()).collect();
+        for id in ids {
+            if let Some(new_frame) = crate::scene::assign_frame_membership(&self.scene, &id) {
+                if let Some(el) = self.scene.get_mut(&id) {
+                    el.frame_id = new_frame;
                 }
             }
         }

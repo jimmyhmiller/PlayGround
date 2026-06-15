@@ -75,6 +75,8 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   draw commands a backend draws over the scene.
 - **Arrow binding**: arrows bound to shapes follow them on move/resize — wired
   into the editor's event loop.
+- **Clipboard + grouping**: copy/cut/paste/duplicate, group/ungroup, and
+  frame membership reassignment on drag — all wired into the `Editor`.
 - **Multiple backends**: a CPU rasterizer (tiny-skia), a GPU scene builder
   (Vello), and a vector exporter (SVG) all consume the same command list.
 
@@ -93,7 +95,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 365 tests
+cargo test --workspace          # 417 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
