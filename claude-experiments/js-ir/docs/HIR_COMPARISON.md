@@ -370,3 +370,85 @@ scalar-SSA-plus-effects contract — those are genuinely different data models
 serving different masters. The pragmatic target is **one shared CFG interface +
 a thin, mechanical React↔JSLIR adapter**, which is the trajectory `jsir-jslir` is
 already on.
+
+---
+
+## 9. Could we run the *existing* React passes on JSIR with the right interface?
+
+This is the load-bearing question, and now that the Rust port is vendored we can
+answer it from the actual pass code, not by analogy.
+
+**No — not through an interface/trait.** The passes are not generic. Every one is
+a concrete function over concrete data:
+
+```rust
+// react_compiler_ssa/src/enter_ssa.rs, .../eliminate_redundant_phi.rs
+pub fn enter_ssa(func: &mut HirFunction, env: &mut Environment) { … }
+// react_compiler_inference, react_compiler_optimization, react_compiler_reactive_scopes …
+pub fn infer_reactive_scope_variables(func: &mut HirFunction, env: &mut Environment) -> … { … }
+pub fn dead_code_elimination(func: &mut HirFunction, env: &mut Environment) { … }
+```
+
+~30 pass entry points, **161 references to `HirFunction`** across the pass crates,
+and they `match` the concrete `Terminal` / `InstructionValue` / `Place` enums and
+mutate the `Environment` arenas directly. A `Cfg`-style trait abstracts only code
+*you* write (the algorithms in `cfg.rs`); it cannot retro-fit an abstraction onto
+30 functions that own a concrete type. So "make JSIR implement an interface and
+the passes just work" is **not** on the table.
+
+**Yes — through a converter.** The only way to reuse the *real* passes is to
+produce an actual `HirFunction` (+ an `Environment`), run them unmodified, and
+convert back: `JSIR → HirFunction → [real react passes] → HirFunction → JSIR`.
+Two findings make this genuinely viable rather than a rewrite:
+
+1. **The storage layout already matches.** The Rust port is SoA, not the TS
+   pointer-soup: `HirFunction.instructions: Vec<Instruction>` is a flat arena,
+   `BasicBlock.instructions: Vec<InstructionId>` indexes it, and
+   `Instruction { id, lvalue: Place, value: InstructionValue }`. That is *exactly*
+   the shape JSLIR would have after the "within-block scalarization" it already
+   plans — so the destination is friendly.
+2. **The CFG/terminal half is done.** §1/§4 + `cfg.rs` already map blocks, edges,
+   and the structured terminals both ways.
+
+### How far off, layer by layer (converter surface)
+
+| Layer | Distance | Why |
+|---|---|---|
+| CFG blocks + edges | **~0 (done)** | shared `Cfg`, proven on both backends |
+| Structured terminals | **small** | `TerminalView` mapping exists; React's extra kinds (loops-via-test-block, switch, try, for-of, scope) are mechanical additions |
+| Instruction stream | **the bulk of the work** | scalarize JSLIR's nested `jsir.*` ops → flat `Vec<Instruction>` (one lvalue `Place` per `InstructionId`); map the **44** `InstructionValue` kinds ↔ `jsir.*` op names |
+| Value identity / SSA | **moderate** | materialize `SsaInfo` into `Place`/`Identifier` + populate `Environment.identifiers` |
+| `Environment` | **moderate, tiered** | `Environment::new()` is cheap (counters + arenas); `globals`/`shapes`/type registries are only needed by the *type-dependent* passes |
+
+### The strategic consequence
+
+There are two ways to get React's memoization onto JSIR, and they are mutually
+exclusive trajectories:
+
+- **(A) Re-port** each pass against JSLIR + `SsaInfo` — what `jsir-jslir`'s
+  `passes.rs` does today. No converter, but you re-implement and then *maintain
+  parity for all ~30 passes forever* as upstream evolves.
+- **(B) Convert** once (`JSIR ⇄ HirFunction`/`Environment`) and call the **real**
+  passes unmodified — they come for free and track upstream automatically. The
+  converter cost is the table above; the biggest single chunk is instruction
+  scalarization.
+
+Before the Rust port existed, (B) was impossible (the passes were TypeScript).
+Now that `react_compiler_hir` compiles in *this* workspace, (B) is a real option:
+you can already call `react_compiler_ssa::enter_ssa(&mut func, &mut env)` from our
+crate — the only missing piece is a `func` produced from JSIR. The tiered
+`Environment` means you don't need the whole thing at once: the **structural
+passes** (`enter_ssa`, `eliminate_redundant_phi`, `dead_code_elimination`,
+`prune_unused_*`) need little more than counters + arenas, so a thin converter +
+minimal `Environment` could run them end-to-end first, and the type/shape
+registries only become necessary when you reach `infer_types` and the
+reactive-scope inference.
+
+**Bottom line on "how far off":** not far in *kind* — they share the CFG exactly
+and now share the storage *philosophy* (flat instruction arena). They differ in
+three *materializations* — scalar instructions, SSA/`Place` identity, and the
+`Environment` substrate — none of which is a fundamental impedance mismatch; all
+are "lower/convert," not "incompatible." The honest measure is: **a JSIR→HIR
+converter is a bounded, well-understood piece of work whose long pole is
+instruction scalarization — and it buys you the entire real pass pipeline instead
+of a perpetual re-port.**
