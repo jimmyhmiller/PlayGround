@@ -1,0 +1,18 @@
+; A user-defined convention that lowers to LLVM `fastcc`.
+; The register intent (rax/rdx/...) is recorded but, on the `:native` path,
+; LLVM's own fastcc placement is used. `add` becomes a `fastcc` function and is
+; invoked with `call fastcc` -- inspect with `coil --emit-ir examples/conventions.coil`.
+; `coil examples/conventions.coil`  =>  42
+
+(defcc fast2
+  :params [rax rdx]
+  :ret rax
+  :clobber [rax rdx rcx]
+  :preserve [rbx rbp]
+  :native fast)
+
+(defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64)
+  (iadd a b))
+
+(defn main [] (-> :i64)
+  (add 20 22))
