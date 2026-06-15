@@ -9,6 +9,7 @@
 //!   r / o / d   rectangle / ellipse (oval) / diamond tool
 //!   l / a       line / arrow tool
 //!   f           freedraw tool
+//!   e / k       eraser / laser-pointer tool
 //!   v / 1       select tool
 //!   space-drag  pan      |  mouse wheel  scroll   |  ctrl+wheel  zoom
 //!   u           undo     |  shift+u      redo
@@ -66,7 +67,8 @@ impl App {
         }
 
         // Render the headless scene to draw commands, then rasterize.
-        let scene = self.editor.render();
+        // Render with the selection overlay (handles, marquee, laser trail).
+        let scene = self.editor.render_with_overlay();
         self.backend.render(&scene);
 
         // Blit the tiny-skia pixmap (RGBA, premultiplied) into the softbuffer
@@ -190,6 +192,8 @@ impl App {
                     "l" => Some(Tool::Line),
                     "a" => Some(Tool::Arrow),
                     "f" => Some(Tool::Freedraw),
+                    "e" => Some(Tool::Eraser),
+                    "k" => Some(Tool::Laser),
                     "v" | "1" => Some(Tool::Select),
                     "u" => {
                         if self.mods.shift {

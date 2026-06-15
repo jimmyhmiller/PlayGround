@@ -75,6 +75,11 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   draw commands a backend draws over the scene.
 - **Arrow binding**: arrows bound to shapes follow them on move/resize — wired
   into the editor's event loop.
+- **Eraser + laser tools**: eraser-drag soft-deletes (one undo per stroke);
+  laser draws a transient pointer trail that never touches the scene.
+- **Web backend**: `whiteboard-web` lowers the command list to HTML5 Canvas 2D
+  ops (wasm-bindgen/web-sys), proving the browser target.
+- **Load real `.excalidraw` files**: `render-file <in.excalidraw> <out.png|svg>`.
 - **Clipboard + grouping**: copy/cut/paste/duplicate, group/ungroup, and
   frame membership reassignment on drag — all wired into the `Editor`.
 - **Multiple backends**: a CPU rasterizer (tiny-skia), a GPU scene builder
@@ -95,7 +100,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 417 tests
+cargo test --workspace          # 465 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

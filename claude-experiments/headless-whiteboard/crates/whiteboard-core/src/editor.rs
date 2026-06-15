@@ -465,6 +465,22 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             scene.commands.extend(overlay.commands);
             scene.bounds = scene.bounds.union(&overlay.bounds);
         }
+
+        // Laser-pointer trail: a transient screen-space polyline (never part of
+        // the scene). Drawn last so it sits on top of everything.
+        let trail = self.interaction.laser_trail();
+        if trail.len() >= 2 {
+            use crate::geometry::Path;
+            use crate::render::{Color, DrawCommand, Paint, Stroke};
+            let screen_pts: Vec<Point> = trail.iter().map(|p| to_screen.apply(*p)).collect();
+            let path = Path::polyline(&screen_pts);
+            scene.push(DrawCommand::StrokePath {
+                path,
+                stroke: Stroke::solid(4.0),
+                paint: Paint::solid(Color::rgba(255, 32, 32, 200)),
+            });
+        }
+
         scene
     }
 }
