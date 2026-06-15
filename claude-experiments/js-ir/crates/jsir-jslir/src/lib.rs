@@ -16,12 +16,15 @@
 //! **passed through unchanged** (still valid JSHIR), so the round-trip never
 //! regresses; [`Stats`] reports how many functions actually became a CFG.
 
+pub mod cfg;
 pub mod constprop;
 pub mod dce;
 pub mod dialect;
 pub mod passes;
 pub mod pipeline;
 pub mod ssa;
+#[cfg(feature = "react-hir")]
+pub mod to_react_hir;
 pub mod verify;
 mod build;
 mod expr_flatten;
