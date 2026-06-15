@@ -1,0 +1,20 @@
+[package]
+name = "coil"
+version = "0.0.1"
+edition = "2021"
+description = "A low-level Lisp with first-class MLIR"
+
+[features]
+# The MLIR backend is feature-gated so the core (reader, Val, evaluator,
+# elaboration) builds and is tested without MLIR/LLVM installed. The real
+# backend will pull in `melior` behind this feature.
+default = []
+mlir = []
+
+[[bin]]
+name = "coil"
+path = "src/main.rs"
+
+[lib]
+name = "coil"
+path = "src/lib.rs"
