@@ -1,0 +1,11 @@
+[package]
+name = "whiteboard-svg"
+description = "SVG export backend for whiteboard-core: consumes the draw-command list and emits a vector SVG document, proving the commands drive a vector format, not just raster."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+whiteboard-core = { path = "../whiteboard-core" }

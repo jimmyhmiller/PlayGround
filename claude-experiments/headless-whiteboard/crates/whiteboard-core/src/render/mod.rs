@@ -11,9 +11,12 @@
 //! The [`Tessellator`] that turns a `Scene` into commands lands in Phase 1; this
 //! module defines the vocabulary every backend and that tessellator share.
 
+mod clip;
+mod overlay;
 mod paint;
 mod tessellate;
 
+pub use overlay::{selection_overlay, OverlayStyle};
 pub use paint::{Color, FillStyle, LineCap, LineJoin, Paint, Stroke, StrokeStyle};
 pub use tessellate::{tessellate, RenderOptions};
 

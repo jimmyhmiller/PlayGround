@@ -5,9 +5,14 @@
 //! upstream so `.excalidraw` files load losslessly, but use idiomatic Rust:
 //! a base struct of common fields plus a `kind`-specific payload enum.
 
+mod binding;
 mod id;
 mod kind;
 
+pub use binding::{
+    apply_bound_endpoints, bindable_element_at, bound_point, compute_binding, is_bindable_element,
+    update_bound_arrow, BoundEndpoints,
+};
 pub use id::{ElementId, GroupId};
 pub use kind::{
     Arrowhead, BoundElement, BoundElementKind, ElementKind, FreedrawData, ImageData, ImageStatus,

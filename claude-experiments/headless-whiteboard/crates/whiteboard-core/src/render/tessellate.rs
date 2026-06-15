@@ -7,7 +7,7 @@
 //! baseline already produces correct fill+stroke commands for the element types
 //! the clean generator supports, so the headless→backend path is live.
 
-use super::{DrawCommand, ImageId, Paint, RenderScene, Stroke};
+use super::{clip, DrawCommand, ImageId, Paint, RenderScene, Stroke};
 use crate::element::{Element, ElementKind};
 use crate::geometry::{Point, Transform};
 use crate::render::Color;
@@ -47,9 +47,32 @@ pub fn tessellate<G: ShapeGenerator>(
         out.push(DrawCommand::PushTransform(opts.viewport));
     }
 
-    for element in scene.iter_live() {
+    // Plan frame clips before walking the scene. Clip edges are expressed against
+    // the same paint-ordered live element list we iterate below, so index `i`
+    // lines up. Clips live *inside* the viewport transform: the clip rect is in
+    // scene space and the backend's clip stack composes it with the active
+    // transform, matching how every other command is placed.
+    let live: Vec<&Element> = scene.iter_live().collect();
+    let edges = clip::plan_clips(scene, &live);
+
+    for (i, element) in live.iter().enumerate() {
+        let edge = edges[i];
+        // Close the previous frame's clip run before drawing an element that
+        // starts a new run (or leaves all runs).
+        if edge.close_before_open {
+            out.push(DrawCommand::PopClip);
+        }
+        // Open this frame's clip before drawing its first contiguous child.
+        if let Some(rect) = edge.open {
+            out.push(DrawCommand::PushClip(rect));
+        }
         emit_element(element, generator, measurer, &mut out);
         out.bounds = out.bounds.union(&element.raw_box());
+    }
+    // A trailing run of framed children leaves one clip open; close it so
+    // push/pop stay balanced.
+    if clip::trailing_clip_open(scene, &live) {
+        out.push(DrawCommand::PopClip);
     }
 
     if !viewport_is_identity {
@@ -333,6 +356,232 @@ mod tests {
             .filter(|c| matches!(c, DrawCommand::DrawText { .. }))
             .count();
         assert_eq!(text_runs, 2, "two lines => two DrawText commands");
+    }
+
+    fn frame_kind() -> ElementKind {
+        serde_json::from_value(serde_json::json!({ "type": "frame", "name": null }))
+            .expect("frame kind deserializes")
+    }
+
+    fn frame(id: &str, x: f64, y: f64, w: f64, h: f64) -> Element {
+        Element::new(ElementId::from(id), 1, x, y, w, h, frame_kind())
+    }
+
+    fn framed_rect(id: &str, frame_id: &str) -> Element {
+        let mut e = filled_rect();
+        e.id = ElementId::from(id);
+        e.frame_id = Some(ElementId::from(frame_id));
+        e
+    }
+
+    /// Indices of every PushClip/PopClip in the command stream, as a kind list.
+    fn clip_kinds(rs: &RenderScene) -> Vec<&'static str> {
+        rs.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::PushClip(_) => Some("push"),
+                DrawCommand::PopClip => Some("pop"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Assert push/pop clips are balanced and never pop below zero depth.
+    fn assert_clips_balanced(rs: &RenderScene) {
+        let mut depth = 0i32;
+        for c in &rs.commands {
+            match c {
+                DrawCommand::PushClip(_) => depth += 1,
+                DrawCommand::PopClip => depth -= 1,
+                _ => {}
+            }
+            assert!(depth >= 0, "PopClip without matching PushClip");
+        }
+        assert_eq!(depth, 0, "unbalanced clips: ended at depth {depth}");
+    }
+
+    #[test]
+    fn frame_children_are_clipped() {
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 100.0, 100.0));
+        scene.insert(framed_rect("c1", "f"));
+        scene.insert(framed_rect("c2", "f"));
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        // Exactly one push and one pop wrapping the two children.
+        assert_eq!(clip_kinds(&rs), ["push", "pop"]);
+        assert_clips_balanced(&rs);
+
+        // The push carries the frame's clip rect.
+        let push = rs
+            .commands
+            .iter()
+            .find(|c| matches!(c, DrawCommand::PushClip(_)))
+            .unwrap();
+        assert!(matches!(
+            push,
+            DrawCommand::PushClip(r) if *r == crate::geometry::Rect::new(0.0, 0.0, 100.0, 100.0)
+        ));
+
+        // The PushClip comes before any child paint command, and the PopClip
+        // comes after the last one (no draw command sits outside the clip pair
+        // for the framed children).
+        let push_idx = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::PushClip(_)))
+            .unwrap();
+        let pop_idx = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::PopClip))
+            .unwrap();
+        let first_fill = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::FillPath { .. }))
+            .unwrap();
+        // The frame outline itself draws unclipped, so a stroke for the frame
+        // exists before the push; the children's fills come after it.
+        assert!(push_idx < first_fill, "clip opens before children draw");
+        assert!(pop_idx > push_idx, "pop after push");
+    }
+
+    #[test]
+    fn frame_outline_draws_unclipped() {
+        // The frame element's own stroke must be emitted outside any clip.
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 100.0, 100.0));
+        scene.insert(framed_rect("c1", "f"));
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        let push_idx = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::PushClip(_)))
+            .unwrap();
+        // The first stroke (the frame outline) precedes the clip push.
+        let first_stroke = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::StrokePath { .. }))
+            .unwrap();
+        assert!(
+            first_stroke < push_idx,
+            "frame outline draws before the children's clip is pushed"
+        );
+        assert_clips_balanced(&rs);
+    }
+
+    #[test]
+    fn frame_with_no_children_emits_no_clip() {
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 100.0, 100.0));
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        assert!(clip_kinds(&rs).is_empty(), "no children => no clip");
+        assert_clips_balanced(&rs);
+    }
+
+    #[test]
+    fn unframed_elements_are_not_clipped() {
+        let mut scene = Scene::new();
+        scene.insert(filled_rect());
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        assert!(clip_kinds(&rs).is_empty());
+        assert_clips_balanced(&rs);
+    }
+
+    #[test]
+    fn two_frames_each_get_their_own_clip() {
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 50.0, 50.0));
+        scene.insert(framed_rect("c1", "f"));
+        scene.insert(frame("g", 100.0, 0.0, 50.0, 50.0));
+        scene.insert(framed_rect("c2", "g"));
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        // Two balanced push/pop pairs, one per frame run.
+        assert_eq!(clip_kinds(&rs), ["push", "pop", "push", "pop"]);
+        assert_clips_balanced(&rs);
+    }
+
+    #[test]
+    fn trailing_framed_child_clip_is_closed() {
+        // The framed child is the very last element in paint order; the trailing
+        // clip must still be popped.
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 100.0, 100.0));
+        scene.insert(framed_rect("c1", "f"));
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &RenderOptions::default(),
+        );
+        assert_eq!(clip_kinds(&rs), ["push", "pop"]);
+        assert_clips_balanced(&rs);
+        // The PopClip is inside the (identity) viewport — with identity viewport
+        // there is no PopTransform, so PopClip is last.
+        assert!(matches!(rs.commands.last(), Some(DrawCommand::PopClip)));
+    }
+
+    #[test]
+    fn clips_nested_inside_viewport_transform() {
+        let mut scene = Scene::new();
+        scene.insert(frame("f", 0.0, 0.0, 100.0, 100.0));
+        scene.insert(framed_rect("c1", "f"));
+        let opts = RenderOptions {
+            viewport: Transform::translate(5.0, 5.0),
+        };
+        let rs = tessellate(
+            &scene,
+            &CleanGenerator,
+            &MonospaceMeasurer::default(),
+            &opts,
+        );
+        // Outermost is the viewport push/pop; clips live inside it.
+        assert!(matches!(
+            rs.commands.first(),
+            Some(DrawCommand::PushTransform(_))
+        ));
+        assert!(matches!(
+            rs.commands.last(),
+            Some(DrawCommand::PopTransform)
+        ));
+        let push_clip = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::PushClip(_)))
+            .unwrap();
+        let pop_clip = rs
+            .commands
+            .iter()
+            .position(|c| matches!(c, DrawCommand::PopClip))
+            .unwrap();
+        assert!(push_clip > 0 && pop_clip < rs.commands.len() - 1);
+        assert_clips_balanced(&rs);
     }
 
     #[test]

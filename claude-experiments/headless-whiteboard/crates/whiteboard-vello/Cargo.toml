@@ -9,3 +9,8 @@ repository.workspace = true
 
 [dependencies]
 whiteboard-core = { path = "../whiteboard-core" }
+# Scene assembly only: `default-features = false` drops the wgpu / vello_shaders
+# GPU stack, leaving the retained-mode `vello::Scene` builder (plus its peniko /
+# kurbo re-exports) which is pure CPU-side and testable headlessly. The wgpu
+# surface wiring lives behind vello's `default` feature for the eventual GPU phase.
+vello = { version = "0.9", default-features = false }
