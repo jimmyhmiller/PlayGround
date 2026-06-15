@@ -5,8 +5,10 @@
 //! reader and growing toward the single-pass elaborator.
 
 pub mod backend;
+pub mod emit;
 pub mod printer;
 pub mod reader;
+pub mod recording;
 pub mod value;
 
 pub use printer::print;
