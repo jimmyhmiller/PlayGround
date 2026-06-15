@@ -16,6 +16,7 @@
 //! **passed through unchanged** (still valid JSHIR), so the round-trip never
 //! regresses; [`Stats`] reports how many functions actually became a CFG.
 
+pub mod cfg;
 pub mod constprop;
 pub mod dce;
 pub mod dialect;

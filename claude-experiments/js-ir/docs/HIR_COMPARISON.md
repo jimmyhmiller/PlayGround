@@ -326,10 +326,17 @@ not a *loss*, so it's not on the critical path.
 
 ## 8. Recommendation
 
-1. **Build the shared `Cfg`/`TerminalView` trait now.** It's low-risk, both sides
-   already expose what it needs (`successors`, `ssa.rs`'s pred map, `dialect.rs`'s
-   structured accessors), and it immediately lets CFG-level passes be written once.
-   This is the largest "works on both" surface available today.
+1. **Build the shared `Cfg`/`TerminalView` trait now.** ✅ *Done as a first
+   increment* — see `crates/jsir-jslir/src/cfg.rs`. It defines the backend-neutral
+   `Cfg` trait + `TerminalView` (Return / Goto{Break,Continue} / If / While / For /
+   Ternary / Logical / Branch), a `JslirCfg` backend over a lowered `Region`, and
+   generic `analysis::{predecessors, reverse_postorder, reachable,
+   immediate_dominators}` written *only* against the trait. `tests/cfg.rs` runs
+   those algorithms on real lowered bodies through the neutral interface (never
+   touching a `jslir.*` name), which is exactly the code a React-HIR `impl Cfg`
+   would reuse unchanged. Low-risk, both sides already expose what it needs
+   (`successors`, `ssa.rs`'s pred map, `dialect.rs`'s structured accessors). This
+   is the largest "works on both" surface available today.
 2. **Land within-block scalarization in JSLIR** (the refinement its own header
    promises). This is the gate to instruction-level shared code and to a faithful
    JSLIR→React-HIR adapter. Until then, accept that instruction-walking passes are
