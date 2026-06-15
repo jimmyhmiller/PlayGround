@@ -10,11 +10,22 @@
 //! reachability, structured-control-flow reconstruction — is written **once**
 //! against [`Cfg`]/[`TerminalView`] and runs on either backend.
 //!
-//! Only the JSLIR backend ([`JslirCfg`]) is implemented here, since the React HIR
-//! is not in this repo; a React-side `impl Cfg for HIRFunction` would map each
-//! `Terminal` variant onto the same [`TerminalView`] (`IfTerminal` → `If`,
-//! `WhileTerminal` → `While`, `GotoTerminal{kind:Break}` → `Goto{Break}`, …).
-//! The generic algorithms below would then run unchanged on both.
+//! Two backends are implemented:
+//! - [`JslirCfg`] over a lowered JSLIR [`Region`] (always available).
+//! - [`react::ReactHir`] over the **real** React Compiler HIR (the vendored Rust
+//!   port, `vendor/react-compiler-rust`), behind the `react-hir` feature. This is
+//!   not a mock — it wraps `react_compiler_hir::HIR` and reads its actual
+//!   `Terminal`s and `each_terminal_successor` edge semantics.
+//!
+//! The generic algorithms in [`analysis`] depend on nothing but the [`Cfg`] trait
+//! and run **unchanged on both** — `tests/cross_backend.rs` runs the identical
+//! dominator/RPO/reachability code on a real React HIR diamond and a JSLIR one.
+//!
+//! Because the two IRs name SSA values differently (React `Place`/`IdentifierId`
+//! vs JSLIR `ValueId`), [`Cfg`] is generic over an associated [`Cfg::Value`] type
+//! and [`TerminalView`] is parameterized by it. Block identity is a `u32` on both
+//! sides, so [`jsir_ir::BlockId`] is used as the shared lingua franca (React ids
+//! convert by their `.0`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,33 +50,47 @@ pub enum GotoKind {
 /// algorithms ignore the structure and use [`Cfg::successors`], while
 /// structured passes match on these.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TerminalView {
+pub enum TerminalView<V> {
     /// `return v?;` — no successors.
-    Return { value: Option<ValueId> },
-    /// Unconditional jump (`jslir.br` / React `GotoTerminal`).
+    Return { value: Option<V> },
+    /// Unconditional jump (`jslir.br` / React `Terminal::Goto`).
     Goto { target: BlockId, kind: GotoKind },
-    /// A structured `if` diamond. `merge` is the join block both arms reconverge
-    /// at (React's `fallthrough`; JSLIR's `merge` attr).
-    If { cond: ValueId, then_blk: BlockId, else_blk: BlockId, merge: Option<BlockId> },
-    /// A `while` loop header. `body` branches back to this header; `exit` is the
-    /// loop-merge block.
-    While { cond: ValueId, body: BlockId, exit: BlockId },
-    /// A `for` loop header, carrying the surrounding structure (`preheader` runs
-    /// the init, `latch` runs the update before the back-edge).
+    /// A structured `if` diamond, carrying a real condition value (JSLIR's
+    /// `cond_br` operand / React's `Terminal::If.test` Place). `merge` is the
+    /// join block both arms reconverge at — React's `fallthrough`, JSLIR's
+    /// `merge` attr. Successors are `[then_blk, else_blk]` on both backends.
+    If { cond: V, then_blk: BlockId, else_blk: BlockId, merge: Option<BlockId> },
+    /// A `while` loop header (JSLIR `cond_br_loop`). `body` branches back to this
+    /// header; `exit` is the loop-merge block. *JSLIR-shaped*: React encodes
+    /// `while` as a `Terminal::While` pointing at a separate `test` block, which
+    /// surfaces as [`TerminalView::Other`] — see the module note on the loop
+    /// encoding difference.
+    While { cond: V, body: BlockId, exit: BlockId },
+    /// A `for` loop header (JSLIR `cond_br_for`), carrying the surrounding
+    /// structure (`preheader` runs the init, `latch` runs the update before the
+    /// back-edge). JSLIR-shaped (see `While`).
     For {
-        cond: ValueId,
+        cond: V,
         body: BlockId,
         exit: BlockId,
         preheader: Option<BlockId>,
         latch: Option<BlockId>,
     },
     /// A flattened ternary `test ? cons : alt`, both arms feeding `merge` (a phi).
-    Ternary { cond: ValueId, cons: BlockId, alt: BlockId, merge: Option<BlockId> },
+    Ternary { cond: V, cons: BlockId, alt: BlockId, merge: Option<BlockId> },
     /// A flattened logical `left && rhs` / `left || rhs`.
-    Logical { left: ValueId, operator: String, rhs: BlockId, merge: Option<BlockId> },
-    /// A two-way branch with no recognized source structure (defensive; a raw
-    /// `cond_br` carrying none of the structured markers).
-    Branch { cond: ValueId, then_blk: BlockId, else_blk: BlockId },
+    Logical { left: V, operator: String, rhs: BlockId, merge: Option<BlockId> },
+    /// A two-way branch carrying a condition but no recognized source structure
+    /// (JSLIR raw `cond_br`; React `Terminal::Branch`).
+    Branch { cond: V, then_blk: BlockId, else_blk: BlockId },
+    /// A structured terminal outside the shared core — loops as React encodes
+    /// them, `switch`, `try`/`throw`, `for-of`/`for-in`, `scope`, etc. The two
+    /// IRs encode these differently (see `docs/HIR_COMPARISON.md` §4–5), so they
+    /// are surfaced generically by their backend `name` plus raw `successors`;
+    /// the [`analysis`] algorithms still handle them correctly because they only
+    /// consult [`Cfg::successors`]. This is the honest boundary of the shared
+    /// *structured* vocabulary.
+    Other { name: &'static str, successors: Vec<BlockId> },
     /// No terminator op present — an open/un-terminated block (malformed CFG).
     Open,
 }
@@ -74,6 +99,9 @@ pub enum TerminalView {
 /// exposes its blocks, entry, raw successor edges, and a structured view of each
 /// terminator. Everything in [`analysis`] is written against just this.
 pub trait Cfg {
+    /// How this backend names an SSA value / operand: `jsir_ir::ValueId` for
+    /// JSLIR, `react_compiler_hir::IdentifierId` for the React HIR.
+    type Value;
     /// The entry block (`HIR.entry` / the region's first block).
     fn entry(&self) -> BlockId;
     /// All block ids, in no particular order.
@@ -82,7 +110,7 @@ pub trait Cfg {
     /// every generic graph algorithm; independent of the structured view.
     fn successors(&self, b: BlockId) -> Vec<BlockId>;
     /// The structured interpretation of `b`'s terminator.
-    fn terminal(&self, b: BlockId) -> TerminalView;
+    fn terminal(&self, b: BlockId) -> TerminalView<Self::Value>;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +138,8 @@ impl<'a> JslirCfg<'a> {
 }
 
 impl<'a> Cfg for JslirCfg<'a> {
+    type Value = ValueId;
+
     fn entry(&self) -> BlockId {
         self.region.blocks.first().map(|b| b.id).unwrap_or_default()
     }
@@ -125,7 +155,7 @@ impl<'a> Cfg for JslirCfg<'a> {
         }
     }
 
-    fn terminal(&self, b: BlockId) -> TerminalView {
+    fn terminal(&self, b: BlockId) -> TerminalView<ValueId> {
         let Some(op) = self.terminator(b) else { return TerminalView::Open };
         let succ = |i: usize| op.successors.get(i).map(|s| s.block);
 
@@ -193,6 +223,13 @@ impl<'a> Cfg for JslirCfg<'a> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// React HIR backend (the real vendored Rust port), behind the `react-hir` feature.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "react-hir")]
+pub mod react;
 
 // ---------------------------------------------------------------------------
 // Generic algorithms — written ONCE against `Cfg`, run on any backend.
