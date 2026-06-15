@@ -19,7 +19,13 @@ use crate::interaction::Tool;
 pub fn is_creation_tool(tool: Tool) -> bool {
     matches!(
         tool,
-        Tool::Rectangle | Tool::Ellipse | Tool::Diamond | Tool::Line | Tool::Arrow | Tool::Freedraw
+        Tool::Rectangle
+            | Tool::Ellipse
+            | Tool::Diamond
+            | Tool::Line
+            | Tool::Arrow
+            | Tool::Freedraw
+            | Tool::Frame
     )
 }
 
@@ -38,7 +44,8 @@ pub enum CreateKind {
 /// Classify a creation tool. Returns `None` for non-creation tools.
 pub fn create_kind(tool: Tool) -> Option<CreateKind> {
     match tool {
-        Tool::Rectangle | Tool::Ellipse | Tool::Diamond => Some(CreateKind::Box),
+        // Frames are created by dragging a box, like the generic shapes.
+        Tool::Rectangle | Tool::Ellipse | Tool::Diamond | Tool::Frame => Some(CreateKind::Box),
         Tool::Line | Tool::Arrow => Some(CreateKind::Linear),
         Tool::Freedraw => Some(CreateKind::Freedraw),
         _ => None,
@@ -58,6 +65,7 @@ pub fn begin_element(tool: Tool, id: ElementId, seed: u32, start: Point) -> Opti
         Tool::Line => ElementKind::Line(LinearData::line(vec![Point::ORIGIN, Point::ORIGIN])),
         Tool::Arrow => ElementKind::Arrow(LinearData::arrow(vec![Point::ORIGIN, Point::ORIGIN])),
         Tool::Freedraw => ElementKind::Freedraw(FreedrawData::new(vec![Point::ORIGIN])),
+        Tool::Frame => ElementKind::Frame(crate::element::FrameData { name: None }),
         _ => return None,
     };
     Some(Element::new(id, seed, start.x, start.y, 0.0, 0.0, kind))

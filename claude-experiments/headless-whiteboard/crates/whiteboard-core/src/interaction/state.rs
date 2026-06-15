@@ -385,6 +385,13 @@ impl InteractionState {
 
         let scene_pt = vp.screen_to_scene(screen);
 
+        // Text tool: click to place a text element (not a drag-to-create). The
+        // element starts with empty text; an app layers text entry on top by
+        // editing the element's `TextData.text` and re-rendering.
+        if tool == Tool::Text {
+            return self.place_text(scene, scene_pt);
+        }
+
         // Creation tools: start a new element.
         if let Some(kind) = tools::create_kind(tool) {
             return self.begin_create(scene, tool, kind, scene_pt);
@@ -437,6 +444,35 @@ impl InteractionState {
             view_changed: true,
             commit: None,
             // An erase stroke is undoable as a unit; ask the editor to snapshot.
+            begins_undo: true,
+        }
+    }
+
+    /// Click-to-place a text element at `at`. Unlike the drag-creation tools,
+    /// text is committed immediately (a click, not a drag); an application drives
+    /// the actual text entry by mutating the element's `TextData.text`.
+    fn place_text(&mut self, scene: &mut Scene, at: Point) -> InteractionResult {
+        use crate::element::{Element, ElementKind, TextData};
+        let id = self.alloc_id();
+        let seed = self.alloc_seed();
+        let data = TextData::new("");
+        let font_size = data.font_size;
+        let el = Element::new(
+            id.clone(),
+            seed,
+            at.x,
+            at.y,
+            0.0,
+            font_size * 1.25,
+            ElementKind::Text(data),
+        );
+        scene.insert(el);
+        self.selection = std::iter::once(id.clone()).collect();
+        InteractionResult {
+            scene_changed: true,
+            view_changed: true,
+            // Placed immediately — one undo entry for the whole placement.
+            commit: Some(Commit::Created(id)),
             begins_undo: true,
         }
     }
