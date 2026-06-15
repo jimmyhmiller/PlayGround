@@ -15,15 +15,18 @@
 > layers need an adapter. The conversion itself is mechanical in the
 > React→JSLIR direction and is essentially what `jsir-jslir` is already building.
 
-This doc is grounded on **both sides by reading the actual source**: the JSIR
-side as it exists in this repo (`crates/jsir-ir`, `crates/jsir-jslir`), and the
-React Compiler HIR read directly from `facebook/react` at commit
-`e730b5e` (2026-06-12),
-`compiler/packages/babel-plugin-react-compiler/src/HIR/` — `HIR.ts`,
-`HIRBuilder.ts`, `BuildHIR.ts`, `EnterSSA.ts`, and the reactive-scope passes.
-Every React-side type/line-count citation below is from that checkout, not from
-memory. (The React source is not vendored into this repo; it was pulled to verify
-this comparison.)
+This doc is grounded on **both sides by reading (and compiling) the actual
+source**: the JSIR side as it exists in this repo (`crates/jsir-ir`,
+`crates/jsir-jslir`), and the React Compiler HIR — both the TypeScript original
+(`facebook/react` @ `e730b5e`,
+`compiler/packages/babel-plugin-react-compiler/src/HIR/`: `HIR.ts`,
+`HIRBuilder.ts`, `BuildHIR.ts`, `EnterSSA.ts`) **and its Rust port**, which is now
+**vendored into this repo** at `vendor/react-compiler-rust` (`facebook/react`
+branch `pr-36173` @ `0dc7f2e`). The Rust `react_compiler_hir` crate compiles here
+and is wired up as a *real second `Cfg` backend* (see §8) — so the
+"works on both" claim below is not hypothetical; it's exercised by
+`crates/jsir-jslir/tests/cross_backend.rs`. Every React-side type citation is from
+that source, not from memory.
 
 ---
 
@@ -326,17 +329,28 @@ not a *loss*, so it's not on the critical path.
 
 ## 8. Recommendation
 
-1. **Build the shared `Cfg`/`TerminalView` trait now.** ✅ *Done as a first
-   increment* — see `crates/jsir-jslir/src/cfg.rs`. It defines the backend-neutral
-   `Cfg` trait + `TerminalView` (Return / Goto{Break,Continue} / If / While / For /
-   Ternary / Logical / Branch), a `JslirCfg` backend over a lowered `Region`, and
-   generic `analysis::{predecessors, reverse_postorder, reachable,
-   immediate_dominators}` written *only* against the trait. `tests/cfg.rs` runs
-   those algorithms on real lowered bodies through the neutral interface (never
-   touching a `jslir.*` name), which is exactly the code a React-HIR `impl Cfg`
-   would reuse unchanged. Low-risk, both sides already expose what it needs
-   (`successors`, `ssa.rs`'s pred map, `dialect.rs`'s structured accessors). This
-   is the largest "works on both" surface available today.
+1. **Build the shared `Cfg`/`TerminalView` trait.** ✅ *Done, with both backends
+   real.* `crates/jsir-jslir/src/cfg.rs` defines the backend-neutral `Cfg` trait
+   (generic over an associated `Value` type, since React names values by
+   `IdentifierId` and JSLIR by `ValueId`) + `TerminalView` (Return / Goto /
+   If / While / For / Ternary / Logical / Branch / **Other** / Open), plus generic
+   `analysis::{predecessors, reverse_postorder, reachable, immediate_dominators}`
+   (Cooper–Harvey–Kennedy) written *only* against the trait.
+   - `JslirCfg` backs it over a lowered `Region` (`tests/cfg.rs`).
+   - `cfg/react.rs` (`--features react-hir`) backs it over the **real vendored
+     `react_compiler_hir::HIR`**, reading its actual `Terminal`s and
+     `each_terminal_successor` semantics.
+   - `tests/cross_backend.rs` runs the *identical* dominator/RPO/reachability code
+     on a real React-HIR diamond and a JSLIR one — the "write once, run on both"
+     claim, compiled and green.
+
+   The honest boundary: React's structured-terminal vocabulary is *richer* than
+   JSLIR's current dialect (loops encoded via a separate `test` block, plus
+   `switch`/`try`/`for-of`/`scope`/…), so those map to `TerminalView::Other`
+   rather than being forced into a JSLIR-shaped variant. The generic algorithms
+   are unaffected — they consult only `successors()`, which is exact on both. The
+   shared *structured* core that lines up precisely today is
+   Return / Goto / If / Branch.
 2. **Land within-block scalarization in JSLIR** (the refinement its own header
    promises). This is the gate to instruction-level shared code and to a faithful
    JSLIR→React-HIR adapter. Until then, accept that instruction-walking passes are

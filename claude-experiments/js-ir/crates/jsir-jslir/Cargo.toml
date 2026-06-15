@@ -13,6 +13,17 @@ rust-version.workspace = true
 
 [dependencies]
 jsir-ir = { path = "../jsir-ir" }
+# Optional: the real React Compiler HIR (Rust port, vendored under
+# vendor/react-compiler-rust). Enables a genuine second `Cfg` backend so the
+# shared CFG algorithms are proven to run on both IRs. Off by default because the
+# upstream crate is edition 2024 and not needed for the JSLIR pipeline itself.
+react_compiler_hir = { path = "../../vendor/react-compiler-rust/crates/react_compiler_hir", optional = true }
+
+[features]
+react-hir = ["dep:react_compiler_hir"]
 
 [dev-dependencies]
 jsir-swc = { path = "../jsir-swc" }
+# For the cross-backend test (building a React HIR by hand); same version the
+# vendored react_compiler_hir uses, so the IndexMap types unify.
+indexmap = "2"
