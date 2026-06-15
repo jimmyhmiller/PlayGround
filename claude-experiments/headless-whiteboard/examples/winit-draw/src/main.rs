@@ -8,9 +8,11 @@
 //! Controls:
 //!   r / o / d   rectangle / ellipse (oval) / diamond tool
 //!   l / a       line / arrow tool
-//!   f           freedraw tool
+//!   f / t / m   freedraw / text / frame tool
 //!   e / k       eraser / laser-pointer tool
 //!   v / 1       select tool
+//!   [ / ]       lower / raise selection   (shift: send-to-back / bring-to-front)
+//!   (with the text tool, click to place text, then just type; Esc finishes)
 //!   space-drag  pan      |  mouse wheel  scroll   |  ctrl+wheel  zoom
 //!   u           undo     |  shift+u      redo
 //!   Delete      delete selection
@@ -177,6 +179,29 @@ impl ApplicationHandler for App {
 
 impl App {
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key: WKey) {
+        use whiteboard_core::interaction::Key as WbKey;
+
+        // While editing a text element, route keystrokes into it instead of
+        // treating letters as tool shortcuts.
+        if self.editor.is_editing_text() {
+            let wb_key = match &key {
+                WKey::Named(NamedKey::Escape) => Some(WbKey::Escape),
+                WKey::Named(NamedKey::Enter) => Some(WbKey::Enter),
+                WKey::Named(NamedKey::Backspace) => Some(WbKey::Backspace),
+                WKey::Named(NamedKey::Space) => Some(WbKey::Char(' ')),
+                WKey::Character(c) => c.chars().next().map(WbKey::Char),
+                _ => None,
+            };
+            if let Some(k) = wb_key {
+                self.forward(InputEvent::KeyDown {
+                    key: k,
+                    mods: self.mods,
+                });
+                self.request_redraw();
+            }
+            return;
+        }
+
         match key {
             WKey::Named(NamedKey::Escape) => event_loop.exit(),
             WKey::Named(NamedKey::Delete) | WKey::Named(NamedKey::Backspace) => {
@@ -192,6 +217,8 @@ impl App {
                     "l" => Some(Tool::Line),
                     "a" => Some(Tool::Arrow),
                     "f" => Some(Tool::Freedraw),
+                    "t" => Some(Tool::Text),
+                    "m" => Some(Tool::Frame),
                     "e" => Some(Tool::Eraser),
                     "k" => Some(Tool::Laser),
                     "v" | "1" => Some(Tool::Select),
@@ -200,6 +227,25 @@ impl App {
                             self.editor.redo();
                         } else {
                             self.editor.undo();
+                        }
+                        self.request_redraw();
+                        None
+                    }
+                    // Z-order: [ send back / lower, ] bring front / raise.
+                    "[" => {
+                        if self.mods.shift {
+                            self.editor.send_to_back();
+                        } else {
+                            self.editor.lower();
+                        }
+                        self.request_redraw();
+                        None
+                    }
+                    "]" => {
+                        if self.mods.shift {
+                            self.editor.bring_to_front();
+                        } else {
+                            self.editor.raise();
                         }
                         self.request_redraw();
                         None

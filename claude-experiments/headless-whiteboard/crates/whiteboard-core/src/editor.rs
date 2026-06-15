@@ -57,6 +57,10 @@ pub struct Editor<M: TextMeasurer, G: ShapeGenerator = CleanGenerator> {
     /// scene snapshot until the matching commit (then it is pushed to history)
     /// or the gesture is abandoned (then it is dropped).
     pending_undo: Option<Scene>,
+    /// The text element currently being edited (typed into), if any. Set when a
+    /// text element is placed or a text element is double-clicked; cleared on
+    /// commit/escape. While set, `KeyDown` chars are routed into its text.
+    editing_text: Option<ElementId>,
     /// Internal clipboard for copy/cut/paste/duplicate.
     clipboard: crate::scene::Clipboard,
     /// Monotonic counter backing deterministic id/group-id generation for
@@ -91,6 +95,7 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             tool: Tool::default(),
             interaction: InteractionState::default(),
             pending_undo: None,
+            editing_text: None,
             clipboard: crate::scene::Clipboard::new(),
             id_counter: 0,
             measurer,
@@ -144,6 +149,30 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         id
     }
 
+    /// Place an image element at `(x, y)` with the given size, referencing
+    /// `file_id` (the key a backend uses to resolve the decoded pixels — e.g.
+    /// `TinySkiaBackend::register_image`). Records an undo point. Returns its id.
+    ///
+    /// This is the image-placement entry point: an app decodes the file, hands
+    /// the pixels to its backend under `file_id`, and calls this to put the image
+    /// on the board.
+    pub fn add_image(
+        &mut self,
+        file_id: impl Into<String>,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> ElementId {
+        use crate::element::{ElementKind, ImageData};
+        let file_id = file_id.into();
+        let id = ElementId::from(format!("img-{file_id}"));
+        let mut data = ImageData::new(file_id);
+        data.status = crate::element::ImageStatus::Saved;
+        let el = Element::new(id.clone(), 1, x, y, width, height, ElementKind::Image(data));
+        self.add_element(el)
+    }
+
     /// Soft-delete the current selection (preserving undo). Returns whether any
     /// element was deleted.
     pub fn delete_selection(&mut self) -> bool {
@@ -170,6 +199,138 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
 
     pub fn clear_selection(&mut self) {
         self.interaction.clear_selection();
+    }
+
+    // --- Text editing ----------------------------------------------------
+
+    /// The text element currently being edited, if any.
+    pub fn editing_text(&self) -> Option<&ElementId> {
+        self.editing_text.as_ref()
+    }
+
+    /// Whether a text element is currently being typed into.
+    pub fn is_editing_text(&self) -> bool {
+        self.editing_text.is_some()
+    }
+
+    /// Begin editing the given text element (route keystrokes into it). Records
+    /// an undo point so the whole edit session is one undoable change. Returns
+    /// false if the id is not a live text element.
+    pub fn begin_text_edit(&mut self, id: ElementId) -> bool {
+        let is_text = self
+            .scene
+            .get(&id)
+            .map(|e| !e.is_deleted && matches!(e.kind, crate::element::ElementKind::Text(_)))
+            .unwrap_or(false);
+        if !is_text {
+            return false;
+        }
+        // Snapshot once so the whole typing session collapses into one undo step.
+        self.history.record(self.scene.clone());
+        self.interaction.set_selection([id.clone()]);
+        self.editing_text = Some(id);
+        true
+    }
+
+    /// Insert a character into the element being edited, resizing its box to fit.
+    /// No-op when not editing.
+    pub fn type_char(&mut self, c: char) -> bool {
+        let Some(id) = self.editing_text.clone() else {
+            return false;
+        };
+        self.mutate_text(&id, |t| t.push(c));
+        true
+    }
+
+    /// Delete the last character of the element being edited.
+    pub fn backspace(&mut self) -> bool {
+        let Some(id) = self.editing_text.clone() else {
+            return false;
+        };
+        self.mutate_text(&id, |t| {
+            t.pop();
+        });
+        true
+    }
+
+    /// Insert a newline into the element being edited.
+    pub fn newline(&mut self) -> bool {
+        let Some(id) = self.editing_text.clone() else {
+            return false;
+        };
+        self.mutate_text(&id, |t| t.push('\n'));
+        true
+    }
+
+    /// Finish the current text edit. If the edited text is empty, the element is
+    /// removed (Excalidraw discards empty text). Does NOT record undo (the
+    /// session's snapshot was taken at [`Editor::begin_text_edit`]).
+    pub fn commit_text(&mut self) {
+        if let Some(id) = self.editing_text.take() {
+            let empty = self
+                .scene
+                .get(&id)
+                .and_then(|e| match &e.kind {
+                    crate::element::ElementKind::Text(t) => Some(t.text.is_empty()),
+                    _ => None,
+                })
+                .unwrap_or(true);
+            if empty {
+                self.scene.remove(&id);
+                self.interaction.prune_selection(&self.scene);
+            }
+        }
+    }
+
+    /// Dispatch a key while editing text. Returns whether the scene changed.
+    fn handle_text_key(&mut self, key: &crate::interaction::Key) -> bool {
+        use crate::interaction::Key;
+        match key {
+            Key::Char(c) => self.type_char(*c),
+            Key::Backspace => self.backspace(),
+            Key::Enter => self.newline(),
+            Key::Escape => {
+                self.commit_text();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply `f` to the editing element's text string, then re-fit its box to the
+    /// measured text so the element bounds track the content.
+    fn mutate_text(&mut self, id: &ElementId, f: impl FnOnce(&mut String)) {
+        use crate::element::ElementKind;
+        use crate::text::FontSpec;
+
+        let mut measured: Option<(f64, f64)> = None;
+        if let Some(el) = self.scene.get_mut(id) {
+            if let ElementKind::Text(data) = &mut el.kind {
+                f(&mut data.text);
+                data.original_text = Some(data.text.clone());
+                // Measure each line; box = widest line × total line height.
+                let font = FontSpec {
+                    family: data.font_family.clone(),
+                    size: data.font_size,
+                    line_height: data.line_height,
+                };
+                let lines: Vec<&str> = if data.text.is_empty() {
+                    vec![""]
+                } else {
+                    data.text.split('\n').collect()
+                };
+                let width = lines
+                    .iter()
+                    .map(|l| self.measurer.measure(l, &font).width)
+                    .fold(0.0_f64, f64::max);
+                let height = lines.len() as f64 * font.line_spacing();
+                measured = Some((width, height));
+            }
+        }
+        if let (Some(el), Some((w, h))) = (self.scene.get_mut(id), measured) {
+            el.width = w;
+            el.height = h;
+        }
     }
 
     // --- Clipboard / duplicate ------------------------------------------
@@ -293,6 +454,58 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         }
     }
 
+    // --- Z-order ---------------------------------------------------------
+
+    /// Bring the current selection to the front (top of the paint order).
+    pub fn bring_to_front(&mut self) -> bool {
+        self.reorder(|scene, ids| scene.bring_to_front(ids))
+    }
+
+    /// Send the current selection to the back (bottom of the paint order).
+    pub fn send_to_back(&mut self) -> bool {
+        self.reorder(|scene, ids| scene.send_to_back(ids))
+    }
+
+    /// Raise the current selection one step up the paint order.
+    pub fn raise(&mut self) -> bool {
+        self.reorder(|scene, ids| scene.raise(ids))
+    }
+
+    /// Lower the current selection one step down the paint order.
+    pub fn lower(&mut self) -> bool {
+        self.reorder(|scene, ids| scene.lower(ids))
+    }
+
+    /// Shared z-order helper: snapshot, apply the reorder to the selection, and
+    /// record undo. Returns whether the order changed.
+    fn reorder(
+        &mut self,
+        f: impl FnOnce(&mut Scene, &[ElementId]) -> Result<(), crate::scene::IndexError>,
+    ) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let before = self.scene.clone();
+        let order_before = self.scene.order().to_vec();
+        // The z-order operations work on fractional indices; ensure every element
+        // has one first (elements added programmatically start with `index: None`).
+        if self.scene.assign_initial_indices().is_err() {
+            self.scene = before;
+            return false;
+        }
+        if f(&mut self.scene, &ids).is_err() {
+            // Restore on error so a failed reorder is a clean no-op.
+            self.scene = before;
+            return false;
+        }
+        if self.scene.order() == order_before.as_slice() {
+            return false; // no change ⇒ no undo entry
+        }
+        self.history.record(before);
+        true
+    }
+
     // --- Grouping --------------------------------------------------------
 
     /// Group the current selection under a fresh group id. Returns whether a
@@ -381,6 +594,35 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
     /// click that created nothing) we discard the snapshot so no empty undo
     /// entry is recorded.
     pub fn handle(&mut self, event: InputEvent) -> HandleResult {
+        // While editing text, route keystrokes into the text element instead of
+        // the interaction state machine. A pointer-down ends the edit (click
+        // elsewhere to finish), then falls through to normal handling.
+        if self.is_editing_text() {
+            match &event {
+                InputEvent::KeyDown { key, .. } => {
+                    let changed = self.handle_text_key(key);
+                    return HandleResult {
+                        scene_changed: changed,
+                        view_changed: changed,
+                    };
+                }
+                InputEvent::KeyUp { .. } => {
+                    return HandleResult::default();
+                }
+                InputEvent::PointerDown { .. } => {
+                    // A click ends the edit. Consume this event so it doesn't
+                    // immediately place/select something at the click point
+                    // (Excalidraw: first click just blurs the text editor).
+                    self.commit_text();
+                    return HandleResult {
+                        scene_changed: true,
+                        view_changed: true,
+                    };
+                }
+                _ => {}
+            }
+        }
+
         let is_pointer_up = matches!(event, InputEvent::PointerUp { .. });
         // Snapshot the scene *before* the state machine touches it. A gesture
         // that mutates the scene (create/move/resize/rotate) begins on a
@@ -398,7 +640,7 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         }
 
         match &result.commit {
-            Some(_) => {
+            Some(commit) => {
                 if let Some(before) = self.pending_undo.take() {
                     self.history.record(before);
                 }
@@ -407,6 +649,18 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
                 self.refresh_bindings();
                 // Moving an element in/out of a frame updates its membership.
                 self.refresh_frame_membership();
+                // A newly placed text element enters edit mode automatically so
+                // the next keystrokes type into it. (We already recorded undo
+                // above, so begin_text_edit must not double-record — set the
+                // editing id directly.)
+                if let crate::interaction::Commit::Created(id) = commit {
+                    if matches!(
+                        self.scene.get(id).map(|e| &e.kind),
+                        Some(crate::element::ElementKind::Text(_))
+                    ) {
+                        self.editing_text = Some(id.clone());
+                    }
+                }
             }
             None => {
                 // A pointer-up that ends a gesture without committing (e.g. a
