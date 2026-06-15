@@ -9,17 +9,21 @@ use crate::element::{Element, ElementId};
 use crate::geometry::Rect;
 use std::collections::HashMap;
 
+mod align;
 mod clipboard;
 mod frames;
 mod grouping;
 mod groups;
 mod membership;
+mod mutate;
 mod order;
 mod query;
 
+pub use align::{align, distribute, Align, Distribute};
 pub use clipboard::{copy, duplicate, paste, Clipboard};
 pub use grouping::{group, group_members, ungroup};
 pub use membership::{assign_frame_membership, frame_containing};
+pub use mutate::{apply_style, StyleChange};
 pub use order::{compare_order, generate_key_between, generate_n_keys_between, IndexError};
 
 /// The element store. Owns every element and defines paint order.

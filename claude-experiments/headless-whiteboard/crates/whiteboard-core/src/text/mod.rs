@@ -8,8 +8,13 @@
 //! Layout (wrapping, container fitting) is added in Phase 1 on top of these
 //! types; this module file establishes the shared vocabulary.
 
+pub mod autogrow;
 pub mod layout;
 
+pub use autogrow::{
+    bound_text_box_size, bound_text_element, container_inner_rect, fit_container_to_text,
+    position_bound_text,
+};
 pub use layout::{
     container_text_dimensions, layout_text, wrap_text, ContainerTextLayout, LaidOutText,
     BOUND_TEXT_PADDING,

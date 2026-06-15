@@ -15,6 +15,7 @@
 
 mod arrowhead;
 mod clean;
+mod elbow;
 mod rough_gen;
 
 pub use arrowhead::arrowhead_paths;
@@ -22,6 +23,7 @@ pub use clean::{
     catmull_rom_path, clean_geometry, diamond_path, ellipse_path, rounded_rectangle_path,
     roundness_radius,
 };
+pub use elbow::{elbow_geometry, elbow_route};
 pub use rough_gen::RoughGenerator;
 
 use crate::element::{Element, Roundness};

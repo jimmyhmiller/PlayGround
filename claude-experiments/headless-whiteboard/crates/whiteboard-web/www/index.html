@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!--
+  headless-whiteboard — browser demo.
+
+  Loads the wasm module built by `wasm-pack build --target web` (its output
+  lands in ../pkg, see README.md) and paints a sample RenderScene onto the
+  <canvas>. All drawing decisions are made in Rust by `scene_to_ops`; this page
+  is pure glue — it only initializes the module and forwards the call.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>headless-whiteboard — web backend demo</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Nunito, Helvetica, system-ui, sans-serif;
+        background: #f5f5f5;
+        color: #1f1f1f;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+        padding: 2rem 1rem;
+      }
+      h1 {
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+        color: #555;
+        font-size: 0.9rem;
+        text-align: center;
+        max-width: 40rem;
+      }
+      #board {
+        background: #ffffff;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+      }
+      #status {
+        font-size: 0.85rem;
+        color: #777;
+        min-height: 1.2em;
+      }
+      #status.error {
+        color: #c62828;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>headless-whiteboard</h1>
+    <p>
+      The same backend-agnostic <code>RenderScene</code> the tiny-skia and SVG
+      backends consume, painted here onto an HTML5 canvas by the wasm web
+      backend. The scene is built by Rust (<code>sample_scene_json()</code>) and
+      lowered to canvas ops by <code>scene_to_ops</code>.
+    </p>
+    <canvas id="board" width="540" height="320"></canvas>
+    <div id="status">loading wasm module…</div>
+
+    <!-- The glue is an ES module so it can `import` the wasm-pack output. -->
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

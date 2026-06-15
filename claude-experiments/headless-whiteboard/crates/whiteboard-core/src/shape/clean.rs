@@ -248,7 +248,14 @@ fn finish_closed(element: &Element, path: Path) -> ShapeGeometry {
 }
 
 /// Polyline (or polygon) through a linear element's points, plus arrowheads.
+///
+/// Dispatches on `data.elbowed`: an elbowed linear element is routed
+/// orthogonally by [`super::elbow::elbow_geometry`]; otherwise it is the
+/// existing straight polyline through the raw points.
 fn linear_geometry(element: &Element, data: &LinearData) -> ShapeGeometry {
+    if data.elbowed {
+        return super::elbow::elbow_geometry(element, data);
+    }
     let pts = &data.points;
     let mut g = ShapeGeometry::default();
     if pts.len() < 2 {

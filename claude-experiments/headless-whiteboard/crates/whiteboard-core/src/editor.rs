@@ -251,6 +251,48 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         new_ids
     }
 
+    // --- Property mutation / alignment ----------------------------------
+
+    /// Apply a style change (color, fill, stroke width/style, roughness, opacity)
+    /// to the current selection. Records one undo entry if anything changed.
+    pub fn set_style(&mut self, change: &crate::scene::StyleChange) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let before = self.scene.clone();
+        if crate::scene::apply_style(&mut self.scene, &ids, change) {
+            self.history.record(before);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Align the current selection (>=2 elements). Records one undo entry.
+    pub fn align(&mut self, how: crate::scene::Align) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        let before = self.scene.clone();
+        if crate::scene::align(&mut self.scene, &ids, how) {
+            self.history.record(before);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Distribute the current selection evenly (>=3 elements). Records one undo.
+    pub fn distribute(&mut self, how: crate::scene::Distribute) -> bool {
+        let ids: Vec<_> = self.selection().iter().cloned().collect();
+        let before = self.scene.clone();
+        if crate::scene::distribute(&mut self.scene, &ids, how) {
+            self.history.record(before);
+            true
+        } else {
+            false
+        }
+    }
+
     // --- Grouping --------------------------------------------------------
 
     /// Group the current selection under a fresh group id. Returns whether a

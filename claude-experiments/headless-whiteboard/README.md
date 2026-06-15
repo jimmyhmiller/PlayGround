@@ -75,6 +75,9 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   draw commands a backend draws over the scene.
 - **Arrow binding**: arrows bound to shapes follow them on move/resize — wired
   into the editor's event loop.
+- **Elbow arrows, align/distribute, style edits**: orthogonal arrow routing
+  (`LinearData.elbowed`); `Editor::align`/`distribute`/`set_style` over the
+  selection (undoable); bound-text container auto-grow.
 - **Eraser + laser tools**: eraser-drag soft-deletes (one undo per stroke);
   laser draws a transient pointer trail that never touches the scene.
 - **Web backend**: `whiteboard-web` lowers the command list to HTML5 Canvas 2D
@@ -100,7 +103,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 465 tests
+cargo test --workspace          # 521 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

@@ -55,6 +55,97 @@ mod backend;
 pub use backend::{render_scene_json, WebBackend};
 
 // ---------------------------------------------------------------------------
+// Sample scene (host-testable; also wasm-exported for the browser demo)
+// ---------------------------------------------------------------------------
+
+/// Build a small demonstration scene with the headless [`Editor`] and return its
+/// rendered [`RenderScene`] serialized as JSON — exactly the shape
+/// [`render_scene_json`] (and `WebBackend::render`) consume.
+///
+/// This is the single source of truth for the browser demo in `www/`: the page
+/// calls `render_scene_json(canvas, sample_scene_json())`, so the very same
+/// tessellation path the host tests exercise is what paints in the browser.
+///
+/// It is pure (no `web-sys`, no RNG, no clock): it constructs a fixed set of
+/// elements — a filled rectangle, an ellipse, an arrow, and a text label — using
+/// the clean generator and a [`MonospaceMeasurer`], renders them, and serializes
+/// with `serde_json`. The result always round-trips back to a non-empty
+/// [`RenderScene`] (asserted in the host tests).
+///
+/// On `wasm32` this is exported to JS as `sample_scene_json()`.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn sample_scene_json() -> String {
+    use whiteboard_core::editor::Editor;
+    use whiteboard_core::element::{Element, ElementId, ElementKind, LinearData, TextData};
+    use whiteboard_core::geometry::Point;
+    use whiteboard_core::text::MonospaceMeasurer;
+
+    // Clean generator => crisp vectors; deterministic (fixed seeds, no clock).
+    let mut editor = Editor::new(MonospaceMeasurer::default());
+
+    let mut rect = Element::new(
+        ElementId::from("rect"),
+        11,
+        40.0,
+        40.0,
+        200.0,
+        120.0,
+        ElementKind::Rectangle,
+    );
+    rect.background_color = Color::rgb(255, 224, 178);
+    rect.stroke_color = Color::rgb(230, 81, 0);
+    rect.stroke_width = 2.0;
+    rect.roughness = 0.0;
+    editor.add_element(rect);
+
+    let mut ell = Element::new(
+        ElementId::from("ell"),
+        29,
+        300.0,
+        50.0,
+        180.0,
+        110.0,
+        ElementKind::Ellipse,
+    );
+    ell.stroke_color = Color::rgb(13, 71, 161);
+    ell.stroke_width = 2.0;
+    ell.roughness = 0.0;
+    editor.add_element(ell);
+
+    let arrow = LinearData::arrow(vec![Point::new(0.0, 0.0), Point::new(160.0, 40.0)]);
+    let mut arr = Element::new(
+        ElementId::from("arr"),
+        41,
+        60.0,
+        220.0,
+        160.0,
+        40.0,
+        ElementKind::Arrow(arrow),
+    );
+    arr.stroke_color = Color::rgb(74, 20, 140);
+    arr.stroke_width = 2.5;
+    arr.roughness = 0.0;
+    editor.add_element(arr);
+
+    let mut text = TextData::new("headless whiteboard");
+    text.font_size = 24.0;
+    let mut t = Element::new(
+        ElementId::from("txt"),
+        53,
+        300.0,
+        210.0,
+        0.0,
+        30.0,
+        ElementKind::Text(text),
+    );
+    t.stroke_color = Color::rgb(33, 33, 33);
+    editor.add_element(t);
+
+    let scene = editor.render();
+    serde_json::to_string(&scene).expect("RenderScene serializes to JSON")
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers (host-testable)
 // ---------------------------------------------------------------------------
 
@@ -703,6 +794,45 @@ mod tests {
         let ops = scene_to_ops(&scene);
         assert!(matches!(ops[0], CanvasOp::FillPath { .. }));
         assert!(matches!(ops[1], CanvasOp::StrokePath { .. }));
+    }
+
+    // --- sample_scene_json ----------------------------------------------
+
+    #[test]
+    fn sample_scene_json_round_trips_to_non_empty_scene() {
+        let json = sample_scene_json();
+        assert!(!json.is_empty(), "sample JSON must not be empty");
+        let scene: RenderScene =
+            serde_json::from_str(&json).expect("sample JSON deserializes to a RenderScene");
+        assert!(
+            !scene.commands.is_empty(),
+            "sample scene must contain draw commands"
+        );
+    }
+
+    #[test]
+    fn sample_scene_json_lowers_to_canvas_ops() {
+        // The whole point of the demo: the sample scene must drive real ops.
+        let json = sample_scene_json();
+        let scene: RenderScene = serde_json::from_str(&json).expect("deserialize");
+        let ops = scene_to_ops(&scene);
+        assert!(!ops.is_empty(), "sample scene must produce canvas ops");
+        // A filled rectangle + an ellipse + an arrow means we expect at least
+        // one fill and several strokes; assert both kinds appear.
+        assert!(
+            ops.iter().any(|o| matches!(o, CanvasOp::FillPath { .. })),
+            "expected at least one FillPath from the filled rectangle"
+        );
+        assert!(
+            ops.iter().any(|o| matches!(o, CanvasOp::StrokePath { .. })),
+            "expected at least one StrokePath from the outlined shapes"
+        );
+    }
+
+    #[test]
+    fn sample_scene_json_is_deterministic() {
+        // No RNG, no clock: two builds must be byte-identical.
+        assert_eq!(sample_scene_json(), sample_scene_json());
     }
 
     #[test]
