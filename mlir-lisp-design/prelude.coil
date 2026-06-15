@@ -1,0 +1,249 @@
+;;; coil prelude — the standard library, written in coil itself.
+;;;
+;;; This file exists to discharge the central claim of DESIGN.md: that the
+;;; painful "builtins" of lispier (defn, print, defstruct, control flow, type
+;;; inference) are *library code* over a tiny kernel (KERNEL.md §4), not
+;;; compiler features. If it type-checks against those primitives, the design
+;;; carries its weight. Pseudo-runnable; a few prims are stubbed for brevity.
+
+;; ---------------------------------------------------------------------------
+;; 1. Types as ordinary values (KERNEL §4 type prims)
+;; ---------------------------------------------------------------------------
+
+(def i1  (mlir/integer-type 1  true))
+(def i8  (mlir/integer-type 8  true))
+(def i16 (mlir/integer-type 16 true))
+(def i32 (mlir/integer-type 32 true))
+(def i64 (mlir/integer-type 64 true))
+(def index (mlir/index-type))
+(def f32 (mlir/float-type :f32))
+(def f64 (mlir/float-type :f64))
+(def bf16 (mlir/float-type :bf16))
+
+(defn integer-type [w] (mlir/integer-type w true))
+(defn fn-type    [ins outs] (mlir/function-type ins outs))
+(defn vector-type [shape elt] (mlir/shaped-type :vector shape elt))
+(defn memref-type [shape elt] (mlir/shaped-type :memref shape elt))
+(defn tensor-type [shape elt] (mlir/shaped-type :tensor shape elt))
+
+;; ---------------------------------------------------------------------------
+;; 2. Operator-position sugar  (SPEC §4)
+;;    The expander calls (expand-op-call form) when a list head is a dotted
+;;    symbol. We split {attrs}, operands, (region …), and ^successors, then
+;;    emit the single kernel `op`. This is the ENTIRE lisp->generic mapping.
+;; ---------------------------------------------------------------------------
+
+(defn region-form? [x] (and (list? x) (= (head x) 'region)))
+(defn succ-form?   [x] (block-ref? x))
+(defn attr-map?    [x] (map? x))
+
+(defmacro op-call [name & args]
+  (let [attrs   (if (and (first args) (attr-map? (first args))) (first args) {})
+        rest    (if (= attrs {}) args (drop 1 args))
+        regions (filter region-form? rest)
+        succs   (filter succ-form?   rest)
+        opnds   (filter (fn [x] (not (or (region-form? x) (succ-form? x)))) rest)]
+    `(op ~(str name)
+         :attrs      ~attrs
+         :operands   [~@opnds]
+         :regions    [~@regions]
+         :successors [~@succs])))   ; :results omitted ⇒ kernel infers
+
+;; ---------------------------------------------------------------------------
+;; 3. Typed literals and attribute shorthands  (SPEC §5)
+;; ---------------------------------------------------------------------------
+
+;; (: v t): a constant in operand position, an IntegerAttr in attr position.
+;; The expander tags position; here we provide both entry points.
+(defmacro const [v t]
+  `(arith.constant {:value (mlir/int-attr ~v ~t) :results [~t]}))
+
+(defmacro int-attr [v t] `(mlir/int-attr ~v ~t))
+
+;; (# name): a bare named attribute, e.g. comparison predicates.
+(defmacro named-attr [n] `(mlir/string-attr ~(str n)))
+
+;; ---------------------------------------------------------------------------
+;; 4. Regions / blocks with implicit terminators  (SPEC §6)
+;; ---------------------------------------------------------------------------
+
+;; (region body…) — single entry block, no params, implicit terminator chosen
+;; by the enclosing op via *implicit-terminator* (set by scf/func macros).
+(defmacro region [& body]
+  `(mlir/region [(block-thunk [] (do ~@body))]))
+
+;; A block binds typed params to MlirValues, then runs body in that scope.
+(defmacro block [name params & body]
+  (let [ptypes (map param-type params)
+        pnames (map param-name params)]
+    `(let [b (mlir/block [~@ptypes])]
+       (mlir/with-block b
+         (fn []
+           (let* [~@(bind-args pnames 'b)]   ; bind each param to block-arg
+             ~@body)))
+       b)))
+
+;; ---------------------------------------------------------------------------
+;; 5. Functions  (SPEC §7) — replaces lispier's hard-coded defn.rs
+;; ---------------------------------------------------------------------------
+
+(defmacro defn-mlir [name params -> ret & body]
+  (let [ptypes (map param-type params)]
+    `(op "func.func"
+         :attrs {:sym_name (str '~name)
+                 :function_type (fn-type [~@ptypes] [~ret])
+                 :llvm.emit_c_interface true}
+         :regions
+         [(mlir/region
+            [(block ~(gensym "entry") ~params
+               (with-implicit-terminator func.return ~@body))])])))
+
+(defmacro extern [name ftype & opts]
+  `(op "func.func"
+       :attrs {:sym_name (str '~name)
+               :function_type ~ftype
+               :sym_visibility "private"
+               ~@(if (member :vararg opts) `(:llvm.varargs true) `())}))
+
+;; ---------------------------------------------------------------------------
+;; 6. Control flow  (all macros, none in the kernel)
+;; ---------------------------------------------------------------------------
+
+(defmacro when [c & body] `(if ~c (do ~@body) (do)))
+(defmacro unless [c & body] `(if (not ~c) (do ~@body)))
+
+(defmacro cond [& clauses]
+  (if (empty? clauses)
+    `(do)
+    `(if ~(first clauses) ~(second clauses)
+         (cond ~@(drop 2 clauses)))))
+
+(defmacro and [& xs]
+  (cond (empty? xs)        true
+        (empty? (rest xs)) (first xs)
+        :else              `(if ~(first xs) (and ~@(rest xs)) false)))
+
+(defmacro or [& xs]
+  (cond (empty? xs)        false
+        (empty? (rest xs)) (first xs)
+        :else `(let [t# ~(first xs)] (if t# t# (or ~@(rest xs))))))
+
+;; threading: (-> x (f a) (g b)) ⇒ (g (f x a) b)
+(defmacro -> [x & forms]
+  (reduce (fn [acc form]
+            (if (list? form)
+              `(~(head form) ~acc ~@(tail form))
+              `(~form ~acc)))
+          x forms))
+
+;; ---------------------------------------------------------------------------
+;; 7. Arithmetic sugar that emits arith ops with inference
+;;    `i+` infers its result type from operands via the kernel (no per-op hack).
+;; ---------------------------------------------------------------------------
+
+(defmacro i+ [a b] `(arith.addi ~a ~b))
+(defmacro i- [a b] `(arith.subi ~a ~b))
+(defmacro i* [a b] `(arith.muli ~a ~b))
+(defmacro i< [a b] `(arith.cmpi {:predicate (named-attr slt)} ~a ~b))
+
+;; A type-directed widen: needs the operand's TYPE at expansion time — the thing
+;; lispier macros could never do. Here it's trivial (KERNEL §4 mlir/value-type).
+(defmacro widen-i64 [x]
+  (let [v  (build x)                 ; build operand, obtain MlirValue
+        ty (mlir/value-type v)]
+    (if (mlir/type= ty i64) v `(arith.extsi ~v :results [i64]))))
+
+;; ---------------------------------------------------------------------------
+;; 8. print — replaces lispier's whole StringCollector post-pass.
+;;    intern-cstring! mutates *module* NOW, using the first-class module API.
+;; ---------------------------------------------------------------------------
+
+(def *interned* (atom {}))
+
+(defn intern-cstring! [s]
+  (or (get @*interned* s)
+      (let [g     (gensym "cstr")
+            bytes (str s "\0")
+            ty    (mlir/parse-type (str "!llvm.array<" (count bytes) " x i8>"))]
+        ;; append a private global to the module's top block
+        (mlir/with-block (module-body *module*)
+          (fn []
+            (op "llvm.mlir.global"
+                :attrs {:sym_name (name g)
+                        :linkage (mlir/parse-attr "#llvm.linkage<internal>")
+                        :global_type ty :constant true}
+                :regions
+                [(mlir/region
+                   [(block-thunk []
+                      (op "llvm.return"
+                          :operands [(op "llvm.mlir.constant"
+                                         :attrs {:value (mlir/string-attr bytes)
+                                                 :results [ty]})]))])])))
+        (swap! *interned* assoc s g)
+        g)))
+
+(defmacro print [fmt & args]
+  (let [g (intern-cstring! fmt)]
+    `(llvm.call {:callee @printf
+                 :var_callee_type !llvm.func<i32 (ptr, ...)>
+                 :results [i32]}
+        (llvm.mlir.addressof {:global_name ~(symbol-ref g) :results [!llvm.ptr]})
+        ~@args)))
+
+;; ---------------------------------------------------------------------------
+;; 9. structs — GEP offsets come from the data layout, not hard-coded * 8.
+;; ---------------------------------------------------------------------------
+
+(defmacro defstruct [Name & fields]
+  (let [ftypes (map second fields)
+        sty    (mlir/parse-type
+                 (str "!llvm.struct<(" (join ", " (map type->str ftypes)) ")>"))]
+    `(do
+       (def ~(sym (str Name "-type")) ~sty)
+       ;; one getter + setter macro per field, indices known at expand time
+       ~@(map-indexed
+           (fn [i [fname ftype]]
+             `(do
+                (defmacro ~(sym (str Name "/" fname)) [ptr]
+                  `(llvm.load (llvm.getelementptr {:elem_type ~~sty
+                                                   :indices [0 ~~i]} ~ptr)
+                              :results [~~ftype]))
+                (defmacro ~(sym (str Name "/" fname "!")) [ptr v]
+                  `(llvm.store ~v (llvm.getelementptr {:elem_type ~~sty
+                                                       :indices [0 ~~i]} ~ptr)))))
+           fields))))
+
+;; ---------------------------------------------------------------------------
+;; 10. Dialects, passes, codegen as values
+;; ---------------------------------------------------------------------------
+
+(defmacro require-dialect [& names]
+  `(eval-when :compile ~@(map (fn [n] `(mlir/load-dialect ~(str n))) names)))
+
+(defmacro passes [& specs]
+  `(mlir/pipeline ~@(map (fn [s] `(quote ~s)) specs)))
+
+(defmacro emit [target pipeline-result]
+  (cond (= target :jit)    `(mlir/jit *module*)
+        (= target :object) `(mlir/emit-object *module* "out.o")
+        (= target :llvm)   `(mlir/emit-llvm *module*)))
+
+;; ---------------------------------------------------------------------------
+;; 11. defdialect / defpattern — finishes mlir-lisp's unfinished Phase 3 by
+;;     actually emitting irdl/pdl ops and registering them at compile time.
+;; ---------------------------------------------------------------------------
+
+(defmacro defdialect [name & ops]
+  `(eval-when :compile
+     (let [m (mlir/module)]
+       (mlir/with-block (module-body m)
+         (fn []
+           (op "irdl.dialect" :attrs {:sym_name ~(str name)}
+               :regions [(mlir/region [(block-thunk [] ~@(map expand-defop ops))])])))
+       (mlir/register-irdl m))))
+
+(defmacro defpattern [name & {:keys [match rewrite benefit]}]
+  `(eval-when :compile
+     (mlir/register-pdl *module*
+       (build-pdl-pattern ~(str name) (or ~benefit 1)
+                          (quote ~match) (quote ~rewrite)))))
