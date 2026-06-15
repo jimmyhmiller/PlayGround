@@ -14,18 +14,25 @@ coroutines, and FFI trampolines become library code written in macros.
 
 ## Status
 
-**M0 + M1 implemented** — an s-expression front end that JIT-compiles through
-LLVM, with calling conventions as first-class data that actually drive codegen.
+**M0 + M1 + M2 implemented** — an s-expression front end that JIT-compiles
+through LLVM, with calling conventions as first-class data that actually drive
+codegen, **including conventions LLVM's CC enum cannot express.**
 
 - M0: reader → core AST → LLVM codegen → JIT. `i64`, `let`, arithmetic,
   comparisons, `if`, direct + recursive calls.
 - M1: `defcc` conventions attached to functions; the `:native` lowering sets the
   real LLVM calling convention on the function **and every call site**; the
-  checker rejects mismatched arity, unbound vars, and conventions with no
-  lowering yet (the `:shim` path is M2).
+  checker rejects mismatched arity, unbound vars, and (for shims) missing return
+  registers or too few argument registers.
+- M2: `:shim` lowering for exotic register layouts. A shim function becomes a
+  `ccc` `__impl` body plus a **`naked` trampoline** that marshals the
+  convention's registers into the SysV registers; call sites use
+  register-constrained inline asm so each argument is genuinely pinned to its
+  register. Verified through JIT, including recursion through the exotic ABI.
 
-Not yet: allocation/region types (M3), adapters/trampolines + `:shim` lowering
-(M2), macros, multiple types. See the roadmap in the design doc.
+Not yet: the `adapt` macro (general convention-to-convention trampolines — needs
+the macro layer), allocation/region types (M3), closures derived from
+(convention × allocation) (M4), macros, multiple types. See the design doc.
 
 ## What it looks like
 
@@ -51,10 +58,11 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                  # 6 end-to-end tests
+cargo test                                  # 8 end-to-end tests
 cargo run -- examples/fib.coil              # => 55
-cargo run -- examples/conventions.coil      # => 42
-cargo run -- --emit-ir examples/conventions.coil   # show the LLVM IR
+cargo run -- examples/conventions.coil      # => 42  (native fastcc)
+cargo run -- examples/shim.coil             # => 42  (exotic rax/rdx convention)
+cargo run -- --emit-ir examples/shim.coil   # show the trampoline + inline asm
 ```
 
 [inkwell]: https://github.com/TheDan64/inkwell

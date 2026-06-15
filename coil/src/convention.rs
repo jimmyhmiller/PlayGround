@@ -72,4 +72,8 @@ impl Convention {
             Lowering::Shim => None,
         }
     }
+
+    pub fn is_shim(&self) -> bool {
+        matches!(self.lowering, Lowering::Shim)
+    }
 }

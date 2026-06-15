@@ -446,13 +446,20 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
 
 ## 12. Roadmap (suggested)
 
-- **M0 — Reader + core.** s-expr reader, AST, compile-time evaluator,
-  `defn`/`let`/arith lowering to LLVM via `inkwell`. No conventions yet (`ccc`
-  only). Hello-world that JITs.
-- **M1 — Convention types.** `defcc`, function types carry `FnType`,
-  `:native` lowering for SysV. Type errors on signature mismatch.
-- **M2 — Adapters.** `adapt` macro + `:shim` lowering (naked + inline asm).
-  Trampoline between two conventions, checked. *This is the thesis demo.*
+- **M0 — Reader + core. ✅ done.** s-expr reader, AST, `defn`/`let`/arith/
+  `if`/calls lowering to LLVM via `inkwell`, JIT runner. (`fib.coil` → 55.)
+- **M1 — Convention types. ✅ done.** `defcc`; each function's convention sets
+  the real LLVM calling convention on the function and every call site
+  (`:native c|fast|cold`). Checker rejects arity/unbound/ill-formed conventions.
+- **M2 — Shim lowering. ✅ done.** `:lower shim` for register layouts LLVM's CC
+  enum can't express: a `ccc` `__impl` body + a `naked` trampoline marshalling
+  the convention's registers ↔ SysV, and register-constrained inline-asm call
+  sites. Verified through JIT, including recursion through the exotic ABI
+  (`shim.coil` → 42; `fact 5` → 120). *Core thesis demonstrated.*
+  - **Remaining for M2:** the `adapt` macro (general convention-to-convention
+    trampolines, §4.5) and a safe parallel-move schedule in the trampoline (the
+    current marshaller assumes non-colliding source/dest registers). Both wait
+    on the macro layer / a small register-move solver.
 - **M3 — Allocation types.** `Ptr<T,R>`, `'frame`/`'static`/`malloc`, escape
   check, `alloc`/`free`, `defer`.
 - **M4 — Derived closures.** `defclosure` over (C × R); two representations from

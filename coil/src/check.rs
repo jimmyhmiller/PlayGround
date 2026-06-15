@@ -20,17 +20,29 @@ pub fn check(program: &Program) -> Result<(), String> {
         .collect();
 
     for f in &program.funcs {
-        // convention must exist and be lowerable
+        // convention must exist; if it's a shim, it must carry enough register
+        // placement to realize the function's signature.
         let conv = program
             .conventions
             .get(&f.cc)
             .ok_or_else(|| format!("function '{}': unknown convention '{}'", f.name, f.cc))?;
-        if conv.native_id().is_none() {
-            return Err(format!(
-                "function '{}': convention '{}' has no native lowering \
-                 (shim/trampoline path is M2, not implemented yet)",
-                f.name, f.cc
-            ));
+        if conv.is_shim() {
+            if conv.ret.is_none() {
+                return Err(format!(
+                    "function '{}': shim convention '{}' needs a :ret register",
+                    f.name, f.cc
+                ));
+            }
+            if conv.params.len() < f.params.len() {
+                return Err(format!(
+                    "function '{}': convention '{}' provides {} param registers but the \
+                     function has {} parameters",
+                    f.name,
+                    f.cc,
+                    conv.params.len(),
+                    f.params.len()
+                ));
+            }
         }
 
         let mut scope: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
