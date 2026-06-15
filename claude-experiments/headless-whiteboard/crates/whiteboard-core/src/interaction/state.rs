@@ -25,7 +25,7 @@ use crate::interaction::handles::{Handle, HandleLayout};
 use crate::interaction::tools::{self, CreateKind};
 use crate::interaction::{InputEvent, Key, Modifiers, PointerButton, Tool, Viewport};
 use crate::rough::RoughRng;
-use crate::scene::Scene;
+use crate::scene::{snap_moving, Scene, SnapGuide};
 use std::collections::HashSet;
 
 /// Below this scene-space drag distance a pointer-down/up is treated as a click,
@@ -37,6 +37,11 @@ const CLICK_SLOP: f64 = 2.0;
 /// small radius around the endpoint; a few px keeps accidental binds rare while
 /// still catching a deliberate drop onto a shape edge.
 const BIND_TOLERANCE: f64 = 5.0;
+
+/// Scene-space distance (px at zoom 1.0) within which a moving/creating
+/// selection's edges/center snap onto a non-moving element's edges/center,
+/// drawing Excalidraw's alignment guides. Ctrl/Cmd disables snapping.
+const SNAP_THRESHOLD: f64 = 5.0;
 
 /// How a single `handle` call changed the world. The editor turns this into a
 /// [`crate::editor::HandleResult`] and decides undo bookkeeping.
@@ -164,6 +169,11 @@ pub struct InteractionState {
     /// tool is actively dragging; cleared on pointer-up or tool switch. The
     /// editor renders this overlay — it is never written into the scene.
     laser: Vec<Point>,
+    /// Active alignment guide lines (scene coords) produced by the most recent
+    /// move/create snap. Empty unless this event snapped; cleared when a gesture
+    /// ends or no snap occurred. The editor maps these to screen space and draws
+    /// them as thin guide-colored strokes.
+    snap_guides: Vec<SnapGuide>,
 }
 
 impl Default for InteractionState {
@@ -185,7 +195,15 @@ impl InteractionState {
             id_prefix: id_prefix.into(),
             seed_rng: RoughRng::new(seed_base),
             laser: Vec::new(),
+            snap_guides: Vec::new(),
         }
+    }
+
+    /// The active alignment guide lines in **scene** coordinates. Empty unless
+    /// the most recent move/create event snapped the selection to a nearby
+    /// element. The editor maps these to screen space for the overlay.
+    pub fn snap_guides(&self) -> &[SnapGuide] {
+        &self.snap_guides
     }
 
     /// The current laser-pointer trail in **scene** coordinates, oldest point
@@ -308,8 +326,10 @@ impl InteractionState {
         }
         if down && key == Key::Escape && self.gesture.is_some() {
             // Cancelling an in-progress gesture is left to the editor (it owns
-            // the pre-gesture snapshot); here we just drop the gesture.
+            // the pre-gesture snapshot); here we just drop the gesture and any
+            // active alignment guides.
             self.gesture = None;
+            self.snap_guides.clear();
             return InteractionResult::view();
         }
         InteractionResult::none()
@@ -624,12 +644,18 @@ impl InteractionState {
                 let d = Vec2::new(scene_pt.x - start.x, scene_pt.y - start.y);
                 let moved = d.length() >= CLICK_SLOP;
                 if moved {
+                    // First lay the selection down at the raw drag offset.
                     for (id, origin) in &origins {
                         if let Some(el) = scene.get_mut(id) {
                             el.x = origin.x + d.x;
                             el.y = origin.y + d.y;
                         }
                     }
+                    // Then nudge it onto nearby element edges/centers, drawing
+                    // alignment guides — unless Ctrl/Cmd disables snapping.
+                    self.apply_move_snap(scene, &origins, mods);
+                } else {
+                    self.snap_guides.clear();
                 }
                 (
                     Some(Gesture::Moving {
@@ -778,6 +804,8 @@ impl InteractionState {
         let Some(gesture) = self.gesture.take() else {
             return InteractionResult::none();
         };
+        // A gesture ending clears any active alignment guides.
+        self.snap_guides.clear();
         match gesture {
             Gesture::Creating {
                 id, moved, kind, ..
@@ -899,6 +927,49 @@ impl InteractionState {
     fn alloc_seed(&mut self) -> u32 {
         // Pull a deterministic 31-bit seed from the reused Rough RNG.
         (self.seed_rng.next_f64() * (i32::MAX as f64)) as u32
+    }
+
+    /// Snap the just-moved selection onto nearby non-moving elements' edges and
+    /// centers, applying the small correction in place and recording the guide
+    /// lines. Holding Ctrl/Cmd disables snapping (Excalidraw's toggle); in that
+    /// case the guides are cleared and positions are left untouched.
+    ///
+    /// `origins` names the moving elements (by id); the proposed selection
+    /// bounds are read back from their current scene positions.
+    fn apply_move_snap(
+        &mut self,
+        scene: &mut Scene,
+        origins: &[(ElementId, Point)],
+        mods: Modifiers,
+    ) {
+        if mods.command() {
+            self.snap_guides.clear();
+            return;
+        }
+        let moving_ids: Vec<ElementId> = origins.iter().map(|(id, _)| id.clone()).collect();
+        // Proposed bounds = union of the moving elements' current rotated bounds.
+        let mut proposed = Rect::EMPTY;
+        let mut any = false;
+        for id in &moving_ids {
+            if let Some(el) = scene.get(id) {
+                proposed = proposed.union(&rotated_bounds(el));
+                any = true;
+            }
+        }
+        if !any {
+            self.snap_guides.clear();
+            return;
+        }
+        let result = snap_moving(scene, &moving_ids, proposed, SNAP_THRESHOLD);
+        if result.offset != Vec2::ZERO {
+            for id in &moving_ids {
+                if let Some(el) = scene.get_mut(id) {
+                    el.x += result.offset.x;
+                    el.y += result.offset.y;
+                }
+            }
+        }
+        self.snap_guides = result.guides;
     }
 }
 
@@ -1353,6 +1424,90 @@ mod tests {
         assert_eq!(sc.get(&ElementId::from("a")).unwrap().y, 50.0);
         assert_eq!(sc.get(&ElementId::from("b")).unwrap().y, 50.0);
         assert_eq!(sc.get(&ElementId::from("b")).unwrap().x, 100.0);
+    }
+
+    // --- Snapping -------------------------------------------------------
+
+    fn mv_ctrl(x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerMove {
+            pos: Point::new(x, y),
+            mods: Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn moving_snaps_left_edge_and_produces_vertical_guide() {
+        let (mut st, mut sc, mut vp) = fresh();
+        // Stationary rect with left edge at x=100.
+        add_rect(&mut sc, "a", 100.0, 0.0, 50.0, 50.0);
+        // Moving rect starts with left edge at x=0; drag right by 103 so its
+        // left edge lands 3px past 100 (within the 5px threshold).
+        add_rect(&mut sc, "m", 0.0, 200.0, 50.0, 50.0);
+        st.set_selection([ElementId::from("m")]);
+        drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Select,
+            [down(25.0, 225.0), mv(128.0, 225.0), up(128.0, 225.0)],
+        );
+        // Raw drag would put left edge at 103; snapping pulls it to exactly 100.
+        let el = sc.get(&ElementId::from("m")).unwrap();
+        assert!((el.x - 100.0).abs() < 1e-9, "x={}", el.x);
+        // A vertical guide at x=100 is exposed during the move. (Pointer-up
+        // clears guides, so we check on the intermediate move below.)
+    }
+
+    #[test]
+    fn move_snap_exposes_guide_during_drag() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 100.0, 0.0, 50.0, 50.0);
+        add_rect(&mut sc, "m", 0.0, 200.0, 50.0, 50.0);
+        st.set_selection([ElementId::from("m")]);
+        st.handle(&mut sc, &mut vp, Tool::Select, down(25.0, 225.0));
+        st.handle(&mut sc, &mut vp, Tool::Select, mv(128.0, 225.0));
+        // Mid-drag a vertical guide at x=100 is active.
+        let guides = st.snap_guides();
+        assert_eq!(guides.len(), 1, "expected one guide, got {guides:?}");
+        assert!((guides[0].a.x - 100.0).abs() < 1e-9);
+        assert!((guides[0].b.x - 100.0).abs() < 1e-9);
+        // It is vertical.
+        assert!((guides[0].a.x - guides[0].b.x).abs() < 1e-9);
+        assert!((guides[0].a.y - guides[0].b.y).abs() > 1.0);
+        // Pointer-up clears the guides.
+        st.handle(&mut sc, &mut vp, Tool::Select, up(128.0, 225.0));
+        assert!(st.snap_guides().is_empty());
+    }
+
+    #[test]
+    fn holding_ctrl_disables_snap() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 100.0, 0.0, 50.0, 50.0);
+        add_rect(&mut sc, "m", 0.0, 200.0, 50.0, 50.0);
+        st.set_selection([ElementId::from("m")]);
+        st.handle(&mut sc, &mut vp, Tool::Select, down(25.0, 225.0));
+        st.handle(&mut sc, &mut vp, Tool::Select, mv_ctrl(128.0, 225.0));
+        // No snap: left edge stays at the raw 103, no guides.
+        let el = sc.get(&ElementId::from("m")).unwrap();
+        assert!((el.x - 103.0).abs() < 1e-9, "x={}", el.x);
+        assert!(st.snap_guides().is_empty());
+    }
+
+    #[test]
+    fn no_snap_when_far_apart() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 100.0, 0.0, 50.0, 50.0);
+        add_rect(&mut sc, "m", 0.0, 400.0, 50.0, 50.0);
+        st.set_selection([ElementId::from("m")]);
+        st.handle(&mut sc, &mut vp, Tool::Select, down(25.0, 425.0));
+        // Drag so the left edge lands at 60 — nowhere near 100 (>5px).
+        st.handle(&mut sc, &mut vp, Tool::Select, mv(85.0, 425.0));
+        let el = sc.get(&ElementId::from("m")).unwrap();
+        assert!((el.x - 60.0).abs() < 1e-9, "x={}", el.x);
+        assert!(st.snap_guides().is_empty());
     }
 
     // --- Resize ---------------------------------------------------------

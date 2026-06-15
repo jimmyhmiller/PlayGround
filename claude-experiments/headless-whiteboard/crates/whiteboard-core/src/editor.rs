@@ -508,6 +508,24 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             scene.bounds = scene.bounds.union(&overlay.bounds);
         }
 
+        // Snapping alignment guides: thin pink segments (Excalidraw style) shown
+        // while a move snaps to another element. In scene space → map to screen.
+        let guides = self.interaction.snap_guides();
+        if !guides.is_empty() {
+            use crate::geometry::Path;
+            use crate::render::{Color, DrawCommand, Paint, Stroke};
+            let pink = Color::rgb(255, 0, 200);
+            for g in guides {
+                let a = to_screen.apply(g.a);
+                let b = to_screen.apply(g.b);
+                scene.push(DrawCommand::StrokePath {
+                    path: Path::polyline(&[a, b]),
+                    stroke: Stroke::solid(1.0),
+                    paint: Paint::solid(pink),
+                });
+            }
+        }
+
         // Laser-pointer trail: a transient screen-space polyline (never part of
         // the scene). Drawn last so it sits on top of everything.
         let trail = self.interaction.laser_trail();

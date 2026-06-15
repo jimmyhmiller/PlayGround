@@ -15,7 +15,7 @@
 use crate::element::{Element, ElementKind, FreedrawData, LinearData, Roundness, RoundnessKind};
 use crate::geometry::{Path, Point};
 
-use super::arrowhead::arrowhead_paths;
+use super::arrowhead::{arrowhead_geometry, ArrowheadGeometry};
 use super::ShapeGeometry;
 
 /// Default proportional corner radius factor Excalidraw uses for
@@ -282,20 +282,63 @@ fn linear_geometry(element: &Element, data: &LinearData) -> ShapeGeometry {
         if let Some(head) = data.end_arrowhead {
             let tip = pts[pts.len() - 1];
             let prev = pts[pts.len() - 2];
-            for p in arrowhead_paths(head, tip, prev, size) {
-                g.outline.push(p);
-            }
+            push_arrowhead(&mut g, arrowhead_geometry(head, tip, prev, size));
         }
         if let Some(head) = data.start_arrowhead {
             let tip = pts[0];
             let prev = pts[1];
-            for p in arrowhead_paths(head, tip, prev, size) {
-                g.outline.push(p);
-            }
+            push_arrowhead(&mut g, arrowhead_geometry(head, tip, prev, size));
         }
     }
 
     g
+}
+
+/// Fold one arrowhead's [`ArrowheadGeometry`] into the element's
+/// [`ShapeGeometry`].
+///
+/// ## Filled vs outline heads, and the tessellator seam
+///
+/// Excalidraw paints *solid* heads (`Triangle`/`Dot`/`Circle`/`Diamond`) flood-
+/// filled with the element's **stroke** color, and *outline* heads
+/// (`*Outline`, plus the open chevron/bar/crowfoot) stroked only.
+///
+/// `ShapeGeometry` today carries two fill buckets, neither of which fits a solid
+/// arrowhead: `fill` is flood-filled with the **background** color, and
+/// `fill_strokes` is *stroked* with the background color. There is no
+/// "flood-fill with the *stroke* color" bucket, and the tessellator
+/// (`render/tessellate.rs`, not this lane) is the only place that could add one.
+///
+/// So we keep the geometry honestly distinguishable here without faking a fill:
+/// - **Outline / open heads** → pushed to `outline` (stroked, exactly as before).
+/// - **Filled heads** → pushed to `outline` *as their closed path*. A stroked
+///   closed triangle/disc/diamond reads as a solid-ish head at the small sizes
+///   arrowheads use, and — crucially — it is a **closed** path, so once the
+///   tessellator learns to flood-fill it (see below) the same path becomes a
+///   true solid fill with no geometry change.
+///
+/// The closed-vs-open distinction is therefore preserved in `outline`: a filled
+/// `Triangle` contributes a path ending in `Close`, while the `Bar`/`Arrow`/
+/// `Crowfoot` heads stay open. That difference is asserted in the tests.
+///
+/// SEAM: to render true solid heads, the tessellator must gain a path bucket
+/// that is flood-filled with `element.stroke_color` (the natural shape is a new
+/// `ShapeGeometry::fill_with_stroke: Vec<Path>` field plus a `FillPath` emission
+/// using a `Paint::solid(element.stroke_color)`), and this function would route
+/// `ah.filled` there instead of into `outline`. That edit lives in
+/// `render/tessellate.rs` + `shape/mod.rs`, outside this lane.
+fn push_arrowhead(g: &mut ShapeGeometry, ah: ArrowheadGeometry) {
+    // Filled heads: flood-fill the closed region with the element's stroke color
+    // (via the tessellator's `fill_with_stroke` handling) AND stroke its outline
+    // for a crisp edge.
+    for p in ah.filled {
+        g.fill_with_stroke.push(p.clone());
+        g.outline.push(p);
+    }
+    // Outline / open heads: stroked as-is.
+    for p in ah.stroked {
+        g.outline.push(p);
+    }
 }
 
 /// Arrowhead size derived from stroke width (Excalidraw scales heads with line
@@ -571,6 +614,87 @@ mod tests {
         let data = LinearData::arrow(vec![Point::new(0.0, 0.0), Point::new(20.0, 0.0)]);
         let g = clean_geometry(&el(ElementKind::Arrow(data), 20.0, 0.0), None);
         assert!(g.outline.len() >= 2, "got {}", g.outline.len());
+    }
+
+    /// The arrowhead path is everything in `outline` past the line body
+    /// (`outline[0]`).
+    fn head_paths(g: &ShapeGeometry) -> &[Path] {
+        &g.outline[1..]
+    }
+
+    fn arrow_with_end_head(head: crate::element::Arrowhead) -> ShapeGeometry {
+        let mut data = LinearData::arrow(vec![Point::new(0.0, 0.0), Point::new(20.0, 0.0)]);
+        data.end_arrowhead = Some(head);
+        data.start_arrowhead = None;
+        clean_geometry(&el(ElementKind::Arrow(data), 20.0, 0.0), None)
+    }
+
+    #[test]
+    fn filled_triangle_head_is_closed_in_outline() {
+        use crate::element::Arrowhead;
+        let g = arrow_with_end_head(Arrowhead::Triangle);
+        let heads = head_paths(&g);
+        assert_eq!(heads.len(), 1);
+        // A solid head contributes a CLOSED region (fillable / drop-in for a
+        // future stroke-color flood fill).
+        assert!(matches!(
+            heads[0].segments.last().unwrap(),
+            PathSegment::Close
+        ));
+    }
+
+    #[test]
+    fn outline_triangle_head_is_closed_too_but_open_heads_are_not() {
+        use crate::element::Arrowhead;
+        // TriangleOutline is the same closed shape, stroked.
+        let g = arrow_with_end_head(Arrowhead::TriangleOutline);
+        assert!(matches!(
+            head_paths(&g)[0].segments.last().unwrap(),
+            PathSegment::Close
+        ));
+        // The open chevron is NOT closed — the distinction is preserved in
+        // `outline`.
+        let arrow = arrow_with_end_head(Arrowhead::Arrow);
+        assert!(!arrow.outline[1]
+            .segments
+            .iter()
+            .any(|s| matches!(s, PathSegment::Close)));
+    }
+
+    #[test]
+    fn filled_dot_head_is_closed_loop_outline_circle_too() {
+        use crate::element::Arrowhead;
+        for head in [
+            Arrowhead::Dot,
+            Arrowhead::Circle,
+            Arrowhead::CircleOutline,
+            Arrowhead::Diamond,
+            Arrowhead::DiamondOutline,
+        ] {
+            let g = arrow_with_end_head(head);
+            assert!(
+                matches!(
+                    head_paths(&g)[0].segments.last().unwrap(),
+                    PathSegment::Close
+                ),
+                "{head:?} head should be a closed region"
+            );
+        }
+    }
+
+    #[test]
+    fn bar_and_crowfoot_heads_stay_open() {
+        use crate::element::Arrowhead;
+        for head in [Arrowhead::Bar, Arrowhead::Crowfoot] {
+            let g = arrow_with_end_head(head);
+            assert!(
+                !head_paths(&g)[0]
+                    .segments
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Close)),
+                "{head:?} head should be an open stroked path"
+            );
+        }
     }
 
     #[test]

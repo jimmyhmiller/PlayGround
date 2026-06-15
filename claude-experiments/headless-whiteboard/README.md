@@ -76,6 +76,8 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   draw commands a backend draws over the scene.
 - **Arrow binding**: arrows bound to shapes follow them on move/resize — wired
   into the editor's event loop.
+- **Arrowhead variants** (filled vs outline triangle/dot/diamond) + **object
+  snapping** with Excalidraw-style alignment guide lines.
 - **Elbow arrows, align/distribute, style edits**: orthogonal arrow routing
   (`LinearData.elbowed`); `Editor::align`/`distribute`/`set_style` over the
   selection (undoable); bound-text container auto-grow.
@@ -104,7 +106,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 521 tests
+cargo test --workspace          # 554 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

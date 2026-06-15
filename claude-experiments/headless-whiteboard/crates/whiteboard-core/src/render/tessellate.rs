@@ -107,8 +107,13 @@ fn emit_element<G: ShapeGenerator>(
         outline,
         fill,
         fill_strokes,
+        fill_with_stroke,
     } = generator.geometry(element);
-    if outline.is_empty() && fill.is_empty() && fill_strokes.is_empty() {
+    if outline.is_empty()
+        && fill.is_empty()
+        && fill_strokes.is_empty()
+        && fill_with_stroke.is_empty()
+    {
         return;
     }
 
@@ -142,6 +147,21 @@ fn emit_element<G: ShapeGenerator>(
                     paint: paint.clone(),
                 });
             }
+        }
+    }
+
+    // Solid arrowheads (filled triangle / dot / diamond) are flood-filled with
+    // the *stroke* color, independent of the element's background.
+    if !fill_with_stroke.is_empty()
+        && !element.stroke_color.is_transparent()
+        && element.stroke_color != Color::TRANSPARENT
+    {
+        let paint = Paint::solid(element.stroke_color).with_opacity(opacity);
+        for path in &fill_with_stroke {
+            out.push(DrawCommand::FillPath {
+                path: path.clone(),
+                paint: paint.clone(),
+            });
         }
     }
 

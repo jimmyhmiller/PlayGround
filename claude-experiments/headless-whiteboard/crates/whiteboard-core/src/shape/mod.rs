@@ -18,7 +18,7 @@ mod clean;
 mod elbow;
 mod rough_gen;
 
-pub use arrowhead::arrowhead_paths;
+pub use arrowhead::{arrowhead_geometry, arrowhead_paths, ArrowheadGeometry};
 pub use clean::{
     catmull_rom_path, clean_geometry, diamond_path, ellipse_path, rounded_rectangle_path,
     roundness_radius,
@@ -41,6 +41,10 @@ pub struct ShapeGeometry {
     /// cross-hatch / zigzag fill lines. Stroked rather than filled because each
     /// is a line, not a region. Empty for solid fills.
     pub fill_strokes: Vec<Path>,
+    /// Closed region(s) to flood-fill with the element's **stroke** color (not
+    /// the background). Used for solid arrowheads (filled triangle / dot /
+    /// diamond), which are colored by the line's stroke.
+    pub fill_with_stroke: Vec<Path>,
 }
 
 impl ShapeGeometry {
@@ -49,6 +53,7 @@ impl ShapeGeometry {
             outline: vec![path],
             fill: Vec::new(),
             fill_strokes: Vec::new(),
+            fill_with_stroke: Vec::new(),
         }
     }
 }
