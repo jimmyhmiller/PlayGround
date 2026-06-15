@@ -14,3 +14,11 @@ whiteboard-core = { path = "../whiteboard-core" }
 # kurbo re-exports) which is pure CPU-side and testable headlessly. The wgpu
 # surface wiring lives behind vello's `default` feature for the eventual GPU phase.
 vello = { version = "0.9", default-features = false }
+
+[features]
+default = []
+# Enable vello's GPU stack (wgpu, shaders, `vello::util`, `vello::Renderer`,
+# `vello::wgpu`). Pulled in by binaries that render a `vello::Scene` to a real
+# surface (e.g. the `vello-window` example). Does NOT change anything this crate
+# compiles in `src/` — the scene-assembly API is identical with or without it.
+gpu = ["vello/default"]

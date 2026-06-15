@@ -7,6 +7,7 @@
 
 mod binding;
 mod id;
+mod interactive_binding;
 mod kind;
 
 pub use binding::{
@@ -14,6 +15,7 @@ pub use binding::{
     update_bound_arrow, BoundEndpoints,
 };
 pub use id::{ElementId, GroupId};
+pub use interactive_binding::{clear_endpoint_binding, try_bind_endpoint, ArrowEnd};
 pub use kind::{
     Arrowhead, BoundElement, BoundElementKind, ElementKind, FrameData, FreedrawData, ImageData,
     ImageStatus, LinearData, LinearKind, PointBinding, Roundness, RoundnessKind, TextData,

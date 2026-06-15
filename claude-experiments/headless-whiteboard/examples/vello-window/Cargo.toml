@@ -1,0 +1,24 @@
+[package]
+name = "vello-window"
+description = "Runnable GPU demo: renders a headless-whiteboard scene through the Vello backend onto a real wgpu surface in a winit 0.30 window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+whiteboard-core = { path = "../../crates/whiteboard-core" }
+# `gpu` turns on vello's default features, which pulls in the wgpu device/surface
+# stack plus `vello::Renderer`, `vello::util`, and the `vello::wgpu` re-export we
+# build the surface with. We deliberately depend on `vello` only transitively (via
+# whiteboard-vello's re-exports) so the wgpu version is pinned to exactly the one
+# vello 0.9 was built against — no risk of a duplicate/incompatible wgpu.
+whiteboard-vello = { path = "../../crates/whiteboard-vello", features = ["gpu"] }
+# vello itself, with the full GPU stack (default features). This is the same
+# vello 0.9 whiteboard-vello uses; cargo unifies them to one build, so the
+# `vello::Scene` produced by `build_vello_scene` is exactly the type this crate's
+# `Renderer` consumes. We use vello's `wgpu`/`util`/`Renderer` re-exports here so
+# the wgpu version is whatever vello 0.9 pins (29.x) — no separate wgpu dep.
+vello = { version = "0.9", default-features = true }
+winit = "0.30"
