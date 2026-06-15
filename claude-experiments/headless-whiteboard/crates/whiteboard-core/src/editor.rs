@@ -234,6 +234,9 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
                 if let Some(before) = self.pending_undo.take() {
                     self.history.record(before);
                 }
+                // A committed gesture may have moved/resized elements that arrows
+                // are bound to; refresh bound arrow endpoints so they follow.
+                self.refresh_bindings();
             }
             None => {
                 // A pointer-up that ends a gesture without committing (e.g. a
@@ -251,6 +254,39 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
         }
     }
 
+    /// Recompute the endpoints of every bound arrow from its targets' current
+    /// positions, so arrows stay attached when shapes move/resize. Cheap sweep:
+    /// only arrows that actually carry a binding are recomputed.
+    fn refresh_bindings(&mut self) {
+        use crate::element::{apply_bound_endpoints, update_bound_arrow, ElementKind};
+
+        // Collect arrow ids that have at least one binding.
+        let bound_arrows: Vec<ElementId> = self
+            .scene
+            .iter_live()
+            .filter(|e| match &e.kind {
+                ElementKind::Arrow(d) | ElementKind::Line(d) => {
+                    d.start_binding.is_some() || d.end_binding.is_some()
+                }
+                _ => false,
+            })
+            .map(|e| e.id.clone())
+            .collect();
+
+        for id in bound_arrows {
+            // Recompute against the (immutable) scene, then apply to the arrow.
+            let Some(endpoints) = update_bound_arrow(&self.scene, &id) else {
+                continue;
+            };
+            if let Some(arrow) = self.scene.get_mut(&id) {
+                let origin = Point::new(arrow.x, arrow.y);
+                if let ElementKind::Arrow(d) | ElementKind::Line(d) = &mut arrow.kind {
+                    apply_bound_endpoints(d, origin, endpoints);
+                }
+            }
+        }
+    }
+
     // --- Rendering -------------------------------------------------------
 
     /// Produce the draw-command list for the current frame.
@@ -259,6 +295,35 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             viewport: self.viewport.scene_to_screen(),
         };
         tessellate(&self.scene, &self.generator, &self.measurer, &opts)
+    }
+
+    /// Render the scene plus the selection overlay (bounding box, resize/rotation
+    /// handles, and the active marquee) on top, using the default overlay style.
+    ///
+    /// The overlay commands are in **screen** space and are appended after the
+    /// viewport-transformed scene, so a backend draws them as on-screen UI.
+    pub fn render_with_overlay(&self) -> RenderScene {
+        self.render_with_overlay_style(&crate::render::OverlayStyle::default())
+    }
+
+    /// Like [`Editor::render_with_overlay`] but with a caller-supplied style.
+    pub fn render_with_overlay_style(&self, style: &crate::render::OverlayStyle) -> RenderScene {
+        let mut scene = self.render();
+
+        let layout = self.interaction.handle_layout(&self.scene, &self.viewport);
+        // Map the scene-space marquee into screen space for the overlay.
+        let to_screen = self.viewport.scene_to_screen();
+        let marquee = self
+            .interaction
+            .active_marquee()
+            .map(|r| to_screen.apply_rect_bounds(&r));
+
+        if layout.is_some() || marquee.is_some() {
+            let overlay = crate::render::selection_overlay(layout.as_ref(), marquee, style);
+            scene.commands.extend(overlay.commands);
+            scene.bounds = scene.bounds.union(&overlay.bounds);
+        }
+        scene
     }
 }
 

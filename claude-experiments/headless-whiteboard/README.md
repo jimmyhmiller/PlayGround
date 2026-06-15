@@ -43,7 +43,8 @@ including all interaction — lives in the headless core.
 |-------|------|
 | `whiteboard-core` | **The library.** Headless, zero GPU/windowing deps. |
 | `whiteboard-tiny-skia` | Reference CPU backend; rasterizes the command list to pixels/PNG. Powers snapshot tests. |
-| `whiteboard-vello` | GPU backend scaffold (command → GPU-op conversion). |
+| `whiteboard-vello` | Vello GPU backend: builds a `vello::Scene` from the command list. |
+| `whiteboard-svg` | SVG export backend: the command list → a standalone SVG document. |
 | `examples/winit-draw` | Runnable window: draw with the mouse. |
 
 `whiteboard-core` modules: `element` (model), `geometry` (primitives + bounds +
@@ -68,6 +69,14 @@ hit-test), `scene` (store, z-order, groups, frames), `rough` (rough.js port),
   commands; the tiny-skia backend rasterizes glyphs with bundled DejaVu fonts
   (via `fontdue`). Use `whiteboard_tiny_skia::FontMeasurer` for font-accurate
   layout.
+- **Frame clipping**: frames clip their children in the tessellator.
+- **Selection overlay**: `Editor::render_with_overlay()` appends the selection
+  bounding box, 8 resize handles, rotation handle, and the active marquee as
+  draw commands a backend draws over the scene.
+- **Arrow binding**: arrows bound to shapes follow them on move/resize — wired
+  into the editor's event loop.
+- **Multiple backends**: a CPU rasterizer (tiny-skia), a GPU scene builder
+  (Vello), and a vector exporter (SVG) all consume the same command list.
 
 ## Try it
 
@@ -84,7 +93,7 @@ cargo run -p winit-draw
 ## Develop
 
 ```sh
-cargo test --workspace          # 270 tests
+cargo test --workspace          # 365 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

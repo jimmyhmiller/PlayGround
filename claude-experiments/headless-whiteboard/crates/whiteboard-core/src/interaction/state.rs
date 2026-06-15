@@ -103,6 +103,9 @@ enum Gesture {
     /// Box-select marquee from an empty-space drag.
     Marquee {
         start: Point,
+        /// Current pointer position (scene coords); with `start` defines the
+        /// marquee rect. Updated on each pointer-move so the overlay can draw it.
+        current: Point,
         /// Selection present before the marquee (for additive shift-drag).
         base: HashSet<ElementId>,
         additive: bool,
@@ -179,6 +182,18 @@ impl InteractionState {
     /// Whether a gesture is currently in progress.
     pub fn is_interacting(&self) -> bool {
         self.gesture.is_some()
+    }
+
+    /// The active marquee rectangle in **scene** coordinates, if a box-select
+    /// drag is in progress. Returns `None` otherwise. The editor maps this to
+    /// screen space for the selection overlay.
+    pub fn active_marquee(&self) -> Option<Rect> {
+        match &self.gesture {
+            Some(Gesture::Marquee { start, current, .. }) => {
+                Some(Rect::from_corners(*start, *current))
+            }
+            _ => None,
+        }
     }
 
     /// Drop selected ids that no longer point at live elements.
@@ -471,6 +486,7 @@ impl InteractionState {
         }
         self.gesture = Some(Gesture::Marquee {
             start,
+            current: start,
             base,
             additive,
         });
@@ -563,6 +579,7 @@ impl InteractionState {
             }
             Gesture::Marquee {
                 start,
+                current: _,
                 base,
                 additive,
             } => {
@@ -577,6 +594,7 @@ impl InteractionState {
                 (
                     Some(Gesture::Marquee {
                         start,
+                        current: scene_pt,
                         base,
                         additive,
                     }),
