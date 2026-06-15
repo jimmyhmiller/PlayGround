@@ -17,7 +17,9 @@
 //! (correct for unrotated boxes). TODO: switch to `geometry::hit::hit_test` once
 //! that module lands (built in parallel) for precise per-shape and rotated hits.
 
-use crate::element::{Element, ElementId};
+use crate::element::{
+    try_bind_endpoint, ArrowEnd, BoundElement, BoundElementKind, Element, ElementId, ElementKind,
+};
 use crate::geometry::{point_rotate_rads, Point, Rect, Vec2};
 use crate::interaction::handles::{Handle, HandleLayout};
 use crate::interaction::tools::{self, CreateKind};
@@ -29,6 +31,12 @@ use std::collections::HashSet;
 /// Below this scene-space drag distance a pointer-down/up is treated as a click,
 /// not a drag (prevents accidental 1px marquees / moves).
 const CLICK_SLOP: f64 = 2.0;
+
+/// Scene-space tolerance (in px at zoom 1.0) for snapping an arrow/line endpoint
+/// onto a bindable shape when a create/drag gesture commits. Excalidraw uses a
+/// small radius around the endpoint; a few px keeps accidental binds rare while
+/// still catching a deliberate drop onto a shape edge.
+const BIND_TOLERANCE: f64 = 5.0;
 
 /// How a single `handle` call changed the world. The editor turns this into a
 /// [`crate::editor::HandleResult`] and decides undo bookkeeping.
@@ -79,6 +87,10 @@ pub enum Commit {
     Resized(Vec<ElementId>),
     /// The selection was rotated.
     Rotated(Vec<ElementId>),
+    /// One or more elements were soft-deleted by an eraser stroke. The whole
+    /// stroke is a single undo entry; the editor restores every listed element
+    /// (clearing `is_deleted`) on undo.
+    Erased(Vec<ElementId>),
 }
 
 /// The gesture currently in progress between a pointer-down and pointer-up.
@@ -128,6 +140,12 @@ enum Gesture {
     },
     /// Panning the viewport (space-drag / middle-button / Pan tool).
     Panning { last_screen: Point },
+    /// Erasing: dragging the eraser soft-deletes any element touched. Accumulates
+    /// the set of ids erased this stroke so the whole stroke is one undo entry.
+    Erasing { erased: Vec<ElementId> },
+    /// Lasering: a transient pointer trail that never mutates the scene. The live
+    /// trail is mirrored into [`InteractionState::laser_trail`] for the renderer.
+    Lasering,
 }
 
 /// Owns selection + the in-progress gesture and drives all interaction.
@@ -142,6 +160,10 @@ pub struct InteractionState {
     id_prefix: String,
     /// RNG for per-element seeds (kept off any global/OS source).
     seed_rng: RoughRng,
+    /// Live laser-pointer trail (scene coords). Non-empty only while the Laser
+    /// tool is actively dragging; cleared on pointer-up or tool switch. The
+    /// editor renders this overlay — it is never written into the scene.
+    laser: Vec<Point>,
 }
 
 impl Default for InteractionState {
@@ -162,7 +184,16 @@ impl InteractionState {
             next_id: 0,
             id_prefix: id_prefix.into(),
             seed_rng: RoughRng::new(seed_base),
+            laser: Vec::new(),
         }
+    }
+
+    /// The current laser-pointer trail in **scene** coordinates, oldest point
+    /// first. Empty unless the [`Tool::Laser`] is actively dragging. The editor
+    /// maps these to screen space to draw the fading trail; the scene is never
+    /// touched. Cleared on pointer-up and whenever a non-laser gesture begins.
+    pub fn laser_trail(&self) -> &[Point] {
+        &self.laser
     }
 
     // --- Accessors -------------------------------------------------------
@@ -318,6 +349,12 @@ impl InteractionState {
         button: PointerButton,
         mods: Modifiers,
     ) -> InteractionResult {
+        // A new press with any non-laser tool clears a stale laser trail (e.g.
+        // the user switched tools without lifting between strokes).
+        if tool != Tool::Laser && !self.laser.is_empty() {
+            self.laser.clear();
+        }
+
         // Pan takes precedence: middle button, Pan tool, or space held.
         if button == PointerButton::Middle || tool == Tool::Pan || self.space_down {
             self.gesture = Some(Gesture::Panning {
@@ -349,9 +386,39 @@ impl InteractionState {
             return self.begin_marquee(scene_pt, mods);
         }
 
-        // Non-interactive tools (Text/Image/Frame/Eraser/Laser) are out of scope
-        // for this module; report no change rather than faking behavior.
+        // Eraser: begin an erase stroke, soft-deleting the element under the
+        // initial press (if any) as the first of the stroke.
+        if tool == Tool::Eraser {
+            return self.begin_erase(scene, scene_pt);
+        }
+
+        // Laser: begin a transient pointer trail. Never mutates the scene.
+        if tool == Tool::Laser {
+            self.laser.clear();
+            self.laser.push(scene_pt);
+            self.gesture = Some(Gesture::Lasering);
+            return InteractionResult::view();
+        }
+
+        // Remaining non-interactive tools (Text/Image/Frame) are out of scope for
+        // this module; report no change rather than faking behavior.
         InteractionResult::none()
+    }
+
+    /// Begin an eraser stroke, soft-deleting the topmost element under `scene_pt`
+    /// (if any). The gesture accumulates every element erased until pointer-up,
+    /// which emits a single [`Commit::Erased`] for the whole stroke.
+    fn begin_erase(&mut self, scene: &mut Scene, scene_pt: Point) -> InteractionResult {
+        let mut erased = Vec::new();
+        let scene_changed = erase_at(scene, scene_pt, &mut erased);
+        self.gesture = Some(Gesture::Erasing { erased });
+        InteractionResult {
+            scene_changed,
+            view_changed: true,
+            commit: None,
+            // An erase stroke is undoable as a unit; ask the editor to snapshot.
+            begins_undo: true,
+        }
     }
 
     fn begin_create(
@@ -679,6 +746,22 @@ impl InteractionState {
                     InteractionResult::view(),
                 )
             }
+            Gesture::Erasing { mut erased } => {
+                let scene_changed = erase_at(scene, scene_pt, &mut erased);
+                (
+                    Some(Gesture::Erasing { erased }),
+                    InteractionResult {
+                        scene_changed,
+                        view_changed: scene_changed,
+                        ..InteractionResult::none()
+                    },
+                )
+            }
+            Gesture::Lasering => {
+                // Only the trail changes; the scene is untouched.
+                self.laser.push(scene_pt);
+                (Some(Gesture::Lasering), InteractionResult::view())
+            }
         }
     }
 
@@ -704,6 +787,12 @@ impl InteractionState {
                 // where a tap is a legitimate dot.
                 let keep = moved || kind == CreateKind::Freedraw;
                 if keep {
+                    // A freshly-drawn arrow/line whose endpoints land on a
+                    // bindable shape gets bound to it (and the shape gains the
+                    // reverse `bound_elements` link).
+                    if kind == CreateKind::Linear {
+                        bind_linear_endpoints(scene, &id, BIND_TOLERANCE);
+                    }
                     InteractionResult {
                         scene_changed: true,
                         view_changed: true,
@@ -772,6 +861,30 @@ impl InteractionState {
                 }
             }
             Gesture::Panning { .. } => InteractionResult::view(),
+            Gesture::Erasing { erased } => {
+                if erased.is_empty() {
+                    // Nothing was touched: drop the would-be undo snapshot.
+                    InteractionResult {
+                        scene_changed: true,
+                        view_changed: true,
+                        commit: None,
+                        ..InteractionResult::none()
+                    }
+                } else {
+                    InteractionResult {
+                        scene_changed: true,
+                        view_changed: true,
+                        commit: Some(Commit::Erased(erased)),
+                        ..InteractionResult::none()
+                    }
+                }
+            }
+            Gesture::Lasering => {
+                // The trail is transient; clearing it ends the overlay. No scene
+                // change, no undo entry.
+                self.laser.clear();
+                InteractionResult::view()
+            }
         }
     }
 
@@ -807,6 +920,101 @@ fn topmost_at(scene: &Scene, scene_pt: Point) -> Option<ElementId> {
         }
     }
     None
+}
+
+/// Soft-delete the topmost live element under `scene_pt`, recording its id in
+/// `erased` (deduped). Returns whether anything was newly erased this call.
+///
+/// Used by the eraser stroke on press and on every drag move so a single drag
+/// sweeps through everything it touches. Already-erased elements are skipped by
+/// `topmost_at` (it ignores `is_deleted`), so the same element is never recorded
+/// twice within one stroke.
+fn erase_at(scene: &mut Scene, scene_pt: Point, erased: &mut Vec<ElementId>) -> bool {
+    let Some(id) = topmost_at(scene, scene_pt) else {
+        return false;
+    };
+    if let Some(el) = scene.get_mut(&id) {
+        el.is_deleted = true;
+        if !erased.contains(&id) {
+            erased.push(id);
+        }
+        return true;
+    }
+    false
+}
+
+/// Bind a freshly-committed arrow/line's endpoints to any bindable shape under
+/// them, writing the binding into the arrow's [`crate::element::LinearData`] and
+/// pushing the reverse [`BoundElement`] link onto each target's `bound_elements`.
+///
+/// Mirrors what Excalidraw's `maybeBindLinearElement` does on pointer-up: it
+/// considers both ends independently. The endpoint scene position is the
+/// element's stored point (relative to its origin) plus its origin, matching how
+/// the create gesture lays out the path.
+fn bind_linear_endpoints(scene: &mut Scene, arrow_id: &ElementId, tolerance: f64) {
+    let Some((start_pt, end_pt)) = linear_endpoints_scene(scene, arrow_id) else {
+        return;
+    };
+    bind_one_endpoint(scene, arrow_id, ArrowEnd::Start, start_pt, tolerance);
+    bind_one_endpoint(scene, arrow_id, ArrowEnd::End, end_pt, tolerance);
+}
+
+/// The scene-space positions of a linear element's first and last points, or
+/// `None` if `arrow_id` is not a live linear element with at least two points.
+fn linear_endpoints_scene(scene: &Scene, arrow_id: &ElementId) -> Option<(Point, Point)> {
+    let el = scene.get(arrow_id)?;
+    let pts = match &el.kind {
+        ElementKind::Arrow(d) | ElementKind::Line(d) => &d.points,
+        _ => return None,
+    };
+    let first = pts.first()?;
+    let last = pts.last()?;
+    Some((
+        Point::new(el.x + first.x, el.y + first.y),
+        Point::new(el.x + last.x, el.y + last.y),
+    ))
+}
+
+/// Try to bind a single endpoint; on success write the binding into the arrow
+/// and push the reverse link onto the target (deduped).
+fn bind_one_endpoint(
+    scene: &mut Scene,
+    arrow_id: &ElementId,
+    which: ArrowEnd,
+    scene_pt: Point,
+    tolerance: f64,
+) {
+    let Some(binding) = try_bind_endpoint(scene, arrow_id, which, scene_pt, tolerance) else {
+        return;
+    };
+    let target_id = binding.element_id.clone();
+
+    // Write the binding into the arrow's LinearData.
+    if let Some(arrow) = scene.get_mut(arrow_id) {
+        match &mut arrow.kind {
+            ElementKind::Arrow(d) | ElementKind::Line(d) => match which {
+                ArrowEnd::Start => d.start_binding = Some(binding),
+                ArrowEnd::End => d.end_binding = Some(binding),
+            },
+            _ => return,
+        }
+    } else {
+        return;
+    }
+
+    // Push the reverse `bound_elements` link onto the target (dedup by id).
+    if let Some(target) = scene.get_mut(&target_id) {
+        let already = target
+            .bound_elements
+            .iter()
+            .any(|b| b.id == *arrow_id && b.kind == BoundElementKind::Arrow);
+        if !already {
+            target.bound_elements.push(BoundElement {
+                id: arrow_id.clone(),
+                kind: BoundElementKind::Arrow,
+            });
+        }
+    }
 }
 
 /// Hit-test a single element. Rotated elements: inverse-rotate the point about
@@ -1346,5 +1554,196 @@ mod tests {
         );
         let ids: Vec<_> = sc.order().iter().map(|i| i.as_str().to_string()).collect();
         assert_eq!(ids, ["el-0", "el-1"]);
+    }
+
+    // --- Binding on endpoint-drag ---------------------------------------
+
+    #[test]
+    fn drawing_arrow_onto_rect_binds_end() {
+        let (mut st, mut sc, mut vp) = fresh();
+        // Bindable rect at (100,0)-(200,50). Draw an arrow from far left to a
+        // point inside the rect so the end snaps onto it.
+        add_rect(&mut sc, "r", 100.0, 0.0, 100.0, 50.0);
+        let results = drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Arrow,
+            [down(0.0, 25.0), mv(140.0, 25.0), up(140.0, 25.0)],
+        );
+        // It committed as a Created arrow.
+        let arrow_id = match &results[2].commit {
+            Some(Commit::Created(id)) => id.clone(),
+            other => panic!("expected Created commit, got {other:?}"),
+        };
+
+        // The arrow's end_binding points at the rect; start has no binding.
+        let arrow = sc.get(&arrow_id).unwrap();
+        let ElementKind::Arrow(d) = &arrow.kind else {
+            panic!("expected arrow");
+        };
+        assert!(d.start_binding.is_none(), "start should be unbound");
+        let eb = d.end_binding.as_ref().expect("end should be bound");
+        assert_eq!(eb.element_id, ElementId::from("r"));
+
+        // The rect gained a reverse bound_elements link to the arrow.
+        let rect = sc.get(&ElementId::from("r")).unwrap();
+        assert_eq!(rect.bound_elements.len(), 1);
+        assert_eq!(rect.bound_elements[0].id, arrow_id);
+        assert_eq!(rect.bound_elements[0].kind, BoundElementKind::Arrow);
+    }
+
+    #[test]
+    fn drawing_arrow_in_open_space_binds_nothing() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "r", 100.0, 0.0, 100.0, 50.0);
+        // Arrow nowhere near the rect.
+        drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Arrow,
+            [down(0.0, 300.0), mv(50.0, 300.0), up(50.0, 300.0)],
+        );
+        let arrow = sc
+            .iter_live()
+            .find(|e| matches!(e.kind, ElementKind::Arrow(_)))
+            .unwrap();
+        let ElementKind::Arrow(d) = &arrow.kind else {
+            unreachable!()
+        };
+        assert!(d.start_binding.is_none());
+        assert!(d.end_binding.is_none());
+        assert!(sc
+            .get(&ElementId::from("r"))
+            .unwrap()
+            .bound_elements
+            .is_empty());
+    }
+
+    // --- Eraser ---------------------------------------------------------
+
+    #[test]
+    fn eraser_drag_soft_deletes_touched_elements() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 0.0, 0.0, 40.0, 40.0);
+        add_rect(&mut sc, "b", 100.0, 0.0, 40.0, 40.0);
+        // Drag the eraser across both rects.
+        let results = drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Eraser,
+            [
+                down(20.0, 20.0), // over a
+                mv(120.0, 20.0),  // over b
+                up(120.0, 20.0),
+            ],
+        );
+        // Down begins an undoable stroke.
+        assert!(results[0].begins_undo);
+        // Both are soft-deleted.
+        assert!(sc.get(&ElementId::from("a")).unwrap().is_deleted);
+        assert!(sc.get(&ElementId::from("b")).unwrap().is_deleted);
+        assert_eq!(sc.iter_live().count(), 0);
+        // Pointer-up emits a single Erased commit listing both, in stroke order.
+        match &results[2].commit {
+            Some(Commit::Erased(ids)) => {
+                assert_eq!(ids.len(), 2);
+                assert!(ids.contains(&ElementId::from("a")));
+                assert!(ids.contains(&ElementId::from("b")));
+            }
+            other => panic!("expected Erased commit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eraser_over_empty_space_commits_nothing() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 0.0, 0.0, 40.0, 40.0);
+        let results = drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Eraser,
+            [down(500.0, 500.0), mv(520.0, 520.0), up(520.0, 520.0)],
+        );
+        assert!(!sc.get(&ElementId::from("a")).unwrap().is_deleted);
+        assert!(results[2].commit.is_none());
+    }
+
+    #[test]
+    fn eraser_single_undo_restores_whole_stroke() {
+        // Mirrors the editor's undo contract: the Erased commit names every id, so
+        // restoring the pre-stroke scene revives them all at once. Here we assert
+        // the commit shape the editor relies on (one entry, both ids).
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 0.0, 0.0, 40.0, 40.0);
+        add_rect(&mut sc, "b", 100.0, 0.0, 40.0, 40.0);
+        let snapshot = sc.clone();
+        let results = drive(
+            &mut st,
+            &mut sc,
+            &mut vp,
+            Tool::Eraser,
+            [down(20.0, 20.0), mv(120.0, 20.0), up(120.0, 20.0)],
+        );
+        // Exactly one commit across the whole stroke.
+        let commits: Vec<_> = results.iter().filter(|r| r.commit.is_some()).collect();
+        assert_eq!(commits.len(), 1);
+        // Restoring the snapshot (the editor's undo) brings both back live.
+        sc = snapshot;
+        assert!(!sc.get(&ElementId::from("a")).unwrap().is_deleted);
+        assert!(!sc.get(&ElementId::from("b")).unwrap().is_deleted);
+        assert_eq!(sc.iter_live().count(), 2);
+    }
+
+    // --- Laser ----------------------------------------------------------
+
+    #[test]
+    fn laser_drag_accumulates_trail_and_leaves_scene_unchanged() {
+        let (mut st, mut sc, mut vp) = fresh();
+        add_rect(&mut sc, "a", 0.0, 0.0, 40.0, 40.0);
+        let before = sc.clone();
+        assert!(st.laser_trail().is_empty());
+        st.handle(&mut sc, &mut vp, Tool::Laser, down(10.0, 10.0));
+        st.handle(&mut sc, &mut vp, Tool::Laser, mv(20.0, 30.0));
+        st.handle(&mut sc, &mut vp, Tool::Laser, mv(40.0, 60.0));
+        // Trail has all three points in scene coords, oldest first.
+        assert_eq!(
+            st.laser_trail(),
+            &[
+                Point::new(10.0, 10.0),
+                Point::new(20.0, 30.0),
+                Point::new(40.0, 60.0),
+            ]
+        );
+        // The scene is untouched: no new elements, none deleted.
+        assert_eq!(sc.iter_live().count(), before.iter_live().count());
+        assert!(!sc.get(&ElementId::from("a")).unwrap().is_deleted);
+    }
+
+    #[test]
+    fn laser_pointer_up_clears_trail_without_commit() {
+        let (mut st, mut sc, mut vp) = fresh();
+        st.handle(&mut sc, &mut vp, Tool::Laser, down(10.0, 10.0));
+        st.handle(&mut sc, &mut vp, Tool::Laser, mv(20.0, 30.0));
+        assert!(!st.laser_trail().is_empty());
+        let r = st.handle(&mut sc, &mut vp, Tool::Laser, up(20.0, 30.0));
+        assert!(st.laser_trail().is_empty());
+        assert!(r.commit.is_none());
+        assert!(!st.is_interacting());
+    }
+
+    #[test]
+    fn switching_tool_clears_stale_laser_trail() {
+        let (mut st, mut sc, mut vp) = fresh();
+        // Start a laser stroke but never lift; the next press uses another tool.
+        st.handle(&mut sc, &mut vp, Tool::Laser, down(10.0, 10.0));
+        st.handle(&mut sc, &mut vp, Tool::Laser, mv(20.0, 30.0));
+        assert!(!st.laser_trail().is_empty());
+        // A press with the Rectangle tool clears the stale trail.
+        st.handle(&mut sc, &mut vp, Tool::Rectangle, down(100.0, 100.0));
+        assert!(st.laser_trail().is_empty());
     }
 }

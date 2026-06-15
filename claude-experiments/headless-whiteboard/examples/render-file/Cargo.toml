@@ -1,0 +1,13 @@
+[package]
+name = "render-file"
+description = "CLI that loads a real .excalidraw file and renders it to PNG (tiny-skia) or SVG (whiteboard-svg), auto-fitting the canvas to the scene bounds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+whiteboard-core = { path = "../../crates/whiteboard-core" }
+whiteboard-tiny-skia = { path = "../../crates/whiteboard-tiny-skia" }
+whiteboard-svg = { path = "../../crates/whiteboard-svg" }
