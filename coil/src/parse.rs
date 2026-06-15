@@ -156,7 +156,14 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
 fn parse_type(s: &Sexp) -> Result<Type, String> {
     match s {
         Sexp::Keyword(k) if k == "i64" => Ok(Type::I64),
-        other => Err(format!("unsupported type: {other:?} (only :i64 in M1)")),
+        // (ptr REGION)  e.g. (ptr heap), (ptr frame), (ptr static)
+        Sexp::List(items) if head_sym(items).ok().as_deref() == Some("ptr") => {
+            let r = sym(items.get(1).ok_or("ptr type: missing region")?, "region")?;
+            let region = Region::parse(&r)
+                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap)"))?;
+            Ok(Type::Ptr(region))
+        }
+        other => Err(format!("unsupported type: {other:?} (:i64 or (ptr REGION))")),
     }
 }
 
@@ -242,6 +249,31 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 .map(parse_expr)
                 .collect::<Result<_, _>>()?;
             Ok(Expr::Call { func: f, args: cargs })
+        }
+        "alloc" => {
+            let r = sym(args.first().ok_or("alloc: missing region")?, "region")?;
+            let region = Region::parse(&r)
+                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap)"))?;
+            Ok(Expr::Alloc { region })
+        }
+        "load" => {
+            if args.len() != 1 {
+                return Err("load: expects (load ptr)".to_string());
+            }
+            Ok(Expr::Load(Box::new(parse_expr(&args[0])?)))
+        }
+        "store!" => {
+            let (p, v) = two(args, "store!")?;
+            Ok(Expr::Store {
+                ptr: Box::new(parse_expr(p)?),
+                val: Box::new(parse_expr(v)?),
+            })
+        }
+        "free" => {
+            if args.len() != 1 {
+                return Err("free: expects (free ptr)".to_string());
+            }
+            Ok(Expr::Free(Box::new(parse_expr(&args[0])?)))
         }
         // direct application: (fib n) == (call fib n)
         other => {

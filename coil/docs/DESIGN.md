@@ -460,8 +460,15 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
     trampolines, §4.5) and a safe parallel-move schedule in the trampoline (the
     current marshaller assumes non-colliding source/dest registers). Both wait
     on the macro layer / a small register-move solver.
-- **M3 — Allocation types.** `Ptr<T,R>`, `'frame`/`'static`/`malloc`, escape
-  check, `alloc`/`free`, `defer`.
+- **M3 — Allocation types. ✅ done.** A pointer's region is part of its type:
+  `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
+  `malloc`/`free`. `alloc`/`load`/`store!`/`free`, with a real bidirectional
+  type checker (the language is no longer i64-only). Region soundness checked:
+  `frame` pointers can't cross a function boundary; `free` only accepts `heap`.
+  (`allocation.coil` → 42.)
+  - **Remaining for M3:** richer pointee types (pointers to pointers/structs),
+    user-defined allocators as values (§5.1), arena regions with bulk teardown,
+    and `defer`/RAII (a macro, once the macro layer exists).
 - **M4 — Derived closures.** `defclosure` over (C × R); two representations from
   one mechanism. *Second thesis demo.*
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`extern`, a small "normal"

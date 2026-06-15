@@ -38,6 +38,75 @@ fn custom_convention_runs_and_emits_fastcc() {
 }
 
 #[test]
+fn heap_alloc_store_load_free() {
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc heap)]
+            (store! p 42)
+            (let [v (load p)]
+              (free p)
+              v)))
+    "#;
+    assert_eq!(run_source(src).unwrap(), 42);
+}
+
+#[test]
+fn static_and_frame_regions() {
+    let static_src = r#"
+        (defn main [] (-> :i64)
+          (let [g (alloc static)] (store! g 99) (load g)))
+    "#;
+    assert_eq!(run_source(static_src).unwrap(), 99);
+
+    let frame_src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc frame)] (store! p 7) (iadd (load p) 35)))
+    "#;
+    assert_eq!(run_source(frame_src).unwrap(), 42);
+}
+
+#[test]
+fn heap_pointer_crosses_function_boundary() {
+    // A (ptr heap) is allowed in signatures: make allocates and returns it, main
+    // consumes and frees it.
+    let src = r#"
+        (defn make [(v :i64)] (-> (ptr heap))
+          (let [p (alloc heap)] (store! p v) p))
+        (defn main [] (-> :i64)
+          (let [p (make 42)]
+            (let [v (load p)] (free p) v)))
+    "#;
+    assert_eq!(run_source(src).unwrap(), 42);
+}
+
+#[test]
+fn rejects_escaping_frame_pointer() {
+    let src = r#"
+        (defn bad [] (-> (ptr frame)) (alloc frame))
+        (defn main [] (-> :i64) 0)
+    "#;
+    let err = run_source(src).unwrap_err();
+    assert!(err.contains("frame pointer"), "got: {err}");
+}
+
+#[test]
+fn rejects_freeing_non_heap() {
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [g (alloc static)] (free g)))
+    "#;
+    let err = run_source(src).unwrap_err();
+    assert!(err.contains("cannot free"), "got: {err}");
+}
+
+#[test]
+fn rejects_loading_non_pointer() {
+    let src = "(defn main [] (-> :i64) (load 5))";
+    let err = run_source(src).unwrap_err();
+    assert!(err.contains("load expects a pointer"), "got: {err}");
+}
+
+#[test]
 fn rejects_arity_mismatch() {
     let src = r#"
         (defn add [(a :i64) (b :i64)] (-> :i64) (iadd a b))

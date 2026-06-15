@@ -14,9 +14,10 @@ coroutines, and FFI trampolines become library code written in macros.
 
 ## Status
 
-**M0 + M1 + M2 implemented** — an s-expression front end that JIT-compiles
-through LLVM, with calling conventions as first-class data that actually drive
-codegen, **including conventions LLVM's CC enum cannot express.**
+**M0–M3 implemented** — an s-expression front end that JIT-compiles through
+LLVM, where **both** calling convention and allocation are part of the type
+system: conventions LLVM's CC enum cannot express, and pointers whose region is
+part of their type.
 
 - M0: reader → core AST → LLVM codegen → JIT. `i64`, `let`, arithmetic,
   comparisons, `if`, direct + recursive calls.
@@ -29,10 +30,14 @@ codegen, **including conventions LLVM's CC enum cannot express.**
   convention's registers into the SysV registers; call sites use
   register-constrained inline asm so each argument is genuinely pinned to its
   register. Verified through JIT, including recursion through the exotic ABI.
+- M3: allocation as types. A pointer's **region** is part of its type:
+  `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
+  `malloc`/`free`. The checker enforces region soundness — `frame` pointers may
+  not cross a function boundary, and `free` only accepts a `heap` pointer.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines — needs
-the macro layer), allocation/region types (M3), closures derived from
-(convention × allocation) (M4), macros, multiple types. See the design doc.
+the macro layer), closures derived from (convention × allocation) (M4), macros,
+richer pointee types. See the design doc.
 
 ## What it looks like
 
@@ -58,10 +63,11 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                  # 8 end-to-end tests
+cargo test                                  # 14 end-to-end tests
 cargo run -- examples/fib.coil              # => 55
 cargo run -- examples/conventions.coil      # => 42  (native fastcc)
 cargo run -- examples/shim.coil             # => 42  (exotic rax/rdx convention)
+cargo run -- examples/allocation.coil       # => 42  (frame/static/heap regions)
 cargo run -- --emit-ir examples/shim.coil   # show the trampoline + inline asm
 ```
 
