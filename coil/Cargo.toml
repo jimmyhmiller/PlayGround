@@ -1,0 +1,12 @@
+[package]
+name = "coil"
+version = "0.0.0"
+edition = "2021"
+description = "Low-level Lisp where calling convention and allocation are types. M0/M1 skeleton."
+
+[dependencies]
+inkwell = { version = "0.5", features = ["llvm18-0"] }
+
+[[bin]]
+name = "coil"
+path = "src/main.rs"

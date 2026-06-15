@@ -1,0 +1,11 @@
+; Recursive fibonacci on the default `c` convention.
+; `coil examples/fib.coil`  =>  55
+
+(defn fib :cc c [(n :i64)] (-> :i64)
+  (if (icmp-le n 1)
+      n
+      (iadd (fib (isub n 1))
+            (fib (isub n 2)))))
+
+(defn main [] (-> :i64)
+  (fib 10))
