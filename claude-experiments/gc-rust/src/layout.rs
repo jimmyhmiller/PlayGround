@@ -64,7 +64,11 @@ impl<'a> LayoutRegistry<'a> {
     fn named_repr(&mut self, name: &str, args: &[Ty]) -> R<Repr> {
         // Builtin generic containers.
         match name {
-            "Vec" | "Array" => {
+            "Array" => {
+                let er = self.repr(&args[0])?;
+                return Ok(Repr::Ref(self.array_for(&er)));
+            }
+            "Vec" => {
                 let er = self.repr(&args[0])?;
                 return Ok(Repr::Ref(self.vec_layout(&er)));
             }
@@ -153,6 +157,7 @@ impl<'a> LayoutRegistry<'a> {
             // offset 0 and let codegen compute payload locations per variant.
             field_map: vec![FieldLoc::Raw { offset: 0, repr: ScalarRepr::U32 }],
             name: key,
+            elem_stride: 0,
         };
         self.layouts[id as usize] = layout;
         Ok(id)
@@ -186,6 +191,7 @@ impl<'a> LayoutRegistry<'a> {
             varlen: VarLen::None,
             field_map: vec![FieldLoc::Raw { offset: 0, repr: ScalarRepr::U32 }],
             name: key,
+            elem_stride: 0,
         };
         self.layouts[id as usize] = layout;
         Ok(id)
@@ -248,7 +254,7 @@ impl<'a> LayoutRegistry<'a> {
     fn string_layout(&mut self) -> LayoutId {
         self.intern_ref("String", Layout {
             ptr_fields: 0, raw_bytes: 0, varlen: VarLen::Bytes,
-            field_map: vec![], name: "String".into(),
+            field_map: vec![], name: "String".into(), elem_stride: 0,
         })
     }
     fn vec_layout(&mut self, elem: &Repr) -> LayoutId {
@@ -266,22 +272,83 @@ impl<'a> LayoutRegistry<'a> {
                 FieldLoc::Raw { offset: 8, repr: ScalarRepr::U64 },
             ],
             name: if traced { format!("{key}#traced") } else { key.clone() },
+            elem_stride: 0,
         })
     }
+    /// A varlen array layout for the given element repr. Pointer elements use a
+    /// traced `Values` tail; scalar elements use an untraced `Bytes` tail whose
+    /// element stride is the scalar's byte size (encoded via raw_bytes=stride).
+    pub fn array_for(&mut self, elem: &Repr) -> LayoutId {
+        let traced = matches!(elem, Repr::Ref(_));
+        let stride = match elem {
+            Repr::Ref(_) => 8u16,
+            Repr::Scalar(s) => (s.bits().max(8) / 8) as u16,
+            Repr::Value(vid) => self.values[*vid as usize].size as u16,
+            Repr::Unit => 8,
+        };
+        let key = format!("Array<{}>", repr_key(elem));
+        if let Some(id) = self.ref_ids.get(&key) {
+            return *id;
+        }
+        let id = self.layouts.len() as LayoutId;
+        self.layouts.push(Layout {
+            ptr_fields: 0,
+            raw_bytes: 0,
+            // Reference elements → traced 8-byte `Values` tail (count = n).
+            // Scalar elements → untraced `Bytes` tail; codegen addresses by the
+            // element stride, count word = n * stride bytes.
+            varlen: if traced { VarLen::Values } else { VarLen::Bytes },
+            field_map: vec![],
+            name: key.clone(),
+            elem_stride: stride,
+        });
+        self.ref_ids.insert(key, id);
+        id
+    }
+
     fn array_layout(&mut self, elem: &Repr, n: u64) -> LayoutId {
         let key = format!("[{};{}]", repr_key(elem), n);
         let traced = matches!(elem, Repr::Ref(_));
+        let stride = match elem { Repr::Ref(_) => 8u16, Repr::Scalar(s) => (s.bits().max(8) / 8) as u16, Repr::Value(vid) => self.values[*vid as usize].size as u16, Repr::Unit => 8 };
         self.intern_ref(&key, Layout {
             ptr_fields: 0,
             raw_bytes: 0,
             varlen: if traced { VarLen::Values } else { VarLen::Bytes },
             field_map: vec![],
             name: key.clone(),
+            elem_stride: stride,
         })
     }
     fn closure_placeholder(&mut self) -> LayoutId {
         // Filled per-closure during closure lowering; a generic env placeholder.
         self.intern_ref("<closure-env>", placeholder_layout("<closure-env>"))
+    }
+
+    /// Build a closure-environment layout: pointer captures first (traced),
+    /// then a raw section holding [code_ptr: u64][scalar captures...]. The
+    /// returned layout's `field_map` is empty (codegen addresses by section
+    /// offset using `capture_kinds`). `key` makes distinct closures distinct.
+    pub fn closure_env(&mut self, key: &str, captures: &[Repr]) -> LayoutId {
+        let mut ptr_fields = 0u16;
+        let mut raw_bytes = 8u16; // code pointer
+        for c in captures {
+            match c {
+                Repr::Ref(_) => ptr_fields += 1,
+                Repr::Scalar(s) => raw_bytes += (s.bits().max(8) / 8) as u16,
+                Repr::Value(vid) => raw_bytes += self.values[*vid as usize].size as u16,
+                Repr::Unit => {}
+            }
+        }
+        let id = self.layouts.len() as LayoutId;
+        self.layouts.push(Layout {
+            ptr_fields,
+            raw_bytes: align_up(raw_bytes as u32, 8) as u16,
+            varlen: VarLen::None,
+            field_map: vec![],
+            name: key.to_string(),
+            elem_stride: 0,
+        });
+        id
     }
 
     fn intern_ref(&mut self, key: &str, layout: Layout) -> LayoutId {
@@ -349,6 +416,7 @@ impl<'a> LayoutRegistry<'a> {
             varlen: VarLen::None,
             field_map,
             name: name.to_string(),
+            elem_stride: 0,
         })
     }
 }
@@ -356,7 +424,7 @@ impl<'a> LayoutRegistry<'a> {
 // ---- free helpers ----------------------------------------------------------
 
 fn placeholder_layout(name: &str) -> Layout {
-    Layout { ptr_fields: 0, raw_bytes: 0, varlen: VarLen::None, field_map: vec![], name: name.to_string() }
+    Layout { ptr_fields: 0, raw_bytes: 0, varlen: VarLen::None, field_map: vec![], name: name.to_string(), elem_stride: 0 }
 }
 
 fn struct_field_tys(s: &crate::ast::StructDef, args: &[Ty]) -> R<Vec<Ty>> {

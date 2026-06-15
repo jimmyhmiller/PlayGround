@@ -119,6 +119,20 @@ impl TyCtx {
         }
     }
 
+    /// Does the concrete type `ty` implement the trait named `trait_name`?
+    /// Checks for an `impl <trait_name> for <ty's base>` block (generic or not).
+    pub fn type_implements_trait(&self, ty: &Ty, trait_name: &str) -> bool {
+        let base = match ty {
+            Ty::Named { name, .. } => name.rsplit("::").next().unwrap().to_string(),
+            Ty::Prim(p) => prim_name(*p).to_string(),
+            _ => return false,
+        };
+        self.impls.iter().any(|imp| {
+            imp.trait_ref.as_ref().map(|tr| tr.path.last()) == Some(trait_name)
+                && type_base_name(&imp.self_ty) == base
+        })
+    }
+
     /// Resolve a fully-qualified or unqualified type/enum/struct name to its
     /// canonical fq-name.
     pub fn canon(&self, name: &str) -> Option<String> {
@@ -133,6 +147,16 @@ impl TyCtx {
             }
         }
         None
+    }
+}
+
+/// The canonical source name of a primitive type (`i64`, `f64`, …).
+pub fn prim_name(p: Prim) -> &'static str {
+    match p {
+        Prim::I8 => "i8", Prim::I16 => "i16", Prim::I32 => "i32", Prim::I64 => "i64",
+        Prim::U8 => "u8", Prim::U16 => "u16", Prim::U32 => "u32", Prim::U64 => "u64",
+        Prim::F32 => "f32", Prim::F64 => "f64",
+        Prim::Bool => "bool", Prim::Char => "char", Prim::Str => "String", Prim::Unit => "()",
     }
 }
 

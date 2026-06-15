@@ -1,0 +1,28 @@
+// Uses the auto-imported prelude — no `Option`/`Result` declaration needed,
+// and the numeric helpers (max_i64, pow_i64, gcd_i64) come for free.
+
+fn safe_div(a: i64, b: i64) -> Result<i64, i64> {
+    if b == 0 { Result::Err(0 - 1) } else { Result::Ok(a / b) }
+}
+
+fn first_even(n: i64) -> Option<i64> {
+    let mut i = 0;
+    while i < n {
+        if i % 2 == 0 {
+            return Option::Some(i);
+        }
+        i = i + 1;
+    }
+    Option::None
+}
+
+fn main() -> i64 {
+    let q = result_unwrap_or(safe_div(84, 2), 0);      // 42
+    let e = opt_unwrap_or(first_even(5), 0 - 1);        // 0
+    let m = max_i64(q, 10);                              // 42
+    let p = pow_i64(2, 5);                               // 32
+    let g = gcd_i64(48, 36);                             // 12
+    let none_default = opt_unwrap_or(Option::None, 7);   // 7 (T inferred from 7)
+    q + e + (m - 42) + (p - 32) + (g - 12) + (none_default - 7)
+    // = 42 + 0 + 0 + 0 + 0 + 0 = 42
+}

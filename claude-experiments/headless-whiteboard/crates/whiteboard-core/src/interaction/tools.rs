@@ -208,6 +208,38 @@ fn sync_linear_box(el: &mut Element, origin: Point) {
     el.height = max_y - min_y;
 }
 
+/// The vertices of a linear element (line/arrow) in **scene** coordinates, in
+/// point order. Empty for non-linear elements.
+pub fn linear_vertices_scene(el: &Element) -> Vec<Point> {
+    let pts = match &el.kind {
+        ElementKind::Line(l) | ElementKind::Arrow(l) => &l.points,
+        _ => return Vec::new(),
+    };
+    pts.iter()
+        .map(|p| Point::new(el.x + p.x, el.y + p.y))
+        .collect()
+}
+
+/// Move vertex `index` of a linear element to `new_scene` (scene coords), then
+/// re-base the element box so `raw_box()` stays correct. No-op if `el` is not
+/// linear or `index` is out of range.
+pub fn move_linear_vertex(el: &mut Element, index: usize, new_scene: Point) {
+    // The origin the box is rebased around is the element's current origin.
+    let origin = Point::new(el.x, el.y);
+    {
+        let pts = match &mut el.kind {
+            ElementKind::Line(l) | ElementKind::Arrow(l) => &mut l.points,
+            _ => return,
+        };
+        if index >= pts.len() {
+            return;
+        }
+        // New point is element-local relative to the current origin.
+        pts[index] = Point::new(new_scene.x - origin.x, new_scene.y - origin.y);
+    }
+    sync_linear_box(el, origin);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

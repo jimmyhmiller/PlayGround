@@ -38,6 +38,10 @@ const CLICK_SLOP: f64 = 2.0;
 /// still catching a deliberate drop onto a shape edge.
 const BIND_TOLERANCE: f64 = 5.0;
 
+/// Screen-space pixel radius for grabbing a linear element's vertex (zoom
+/// independent — the test is done in screen coordinates).
+const VERTEX_HIT_RADIUS: f64 = 10.0;
+
 /// Scene-space distance (px at zoom 1.0) within which a moving/creating
 /// selection's edges/center snap onto a non-moving element's edges/center,
 /// drawing Excalidraw's alignment guides. Ctrl/Cmd disables snapping.
@@ -151,6 +155,13 @@ enum Gesture {
     /// Lasering: a transient pointer trail that never mutates the scene. The live
     /// trail is mirrored into [`InteractionState::laser_trail`] for the renderer.
     Lasering,
+    /// Dragging a single vertex of a selected linear element (line/arrow) to
+    /// reshape it. `index` is the vertex position in the element's point list.
+    DraggingVertex {
+        id: ElementId,
+        index: usize,
+        moved: bool,
+    },
 }
 
 /// Owns selection + the in-progress gesture and drives all interaction.
@@ -397,8 +408,14 @@ impl InteractionState {
             return self.begin_create(scene, tool, kind, scene_pt);
         }
 
-        // Select tool: first test selection handles, then element hit.
+        // Select tool: vertex edit, then handles, then element hit.
         if tool == Tool::Select {
+            // Vertex editing: when exactly one linear element is selected, its
+            // vertices are draggable. Tested before resize handles so an endpoint
+            // sitting on the bbox corner edits the line rather than resizing it.
+            if let Some(result) = self.try_begin_vertex_drag(scene, vp, screen) {
+                return result;
+            }
             // Resize / rotate handles (only when something is selected).
             if let Some(layout) = self.handle_layout(scene, vp) {
                 if let Some(h) = layout.hit(screen) {
@@ -502,6 +519,50 @@ impl InteractionState {
             commit: None,
             begins_undo: true,
         }
+    }
+
+    /// If the cursor is over a vertex of the single selected linear element,
+    /// begin dragging that vertex. Returns `None` when there's no single linear
+    /// selection or no vertex under the cursor.
+    fn try_begin_vertex_drag(
+        &mut self,
+        scene: &Scene,
+        vp: &Viewport,
+        screen: Point,
+    ) -> Option<InteractionResult> {
+        // Exactly one element selected, and it is a line or arrow.
+        if self.selection.len() != 1 {
+            return None;
+        }
+        let id = self.selection.iter().next()?.clone();
+        let el = scene.get(&id)?;
+        if !matches!(el.kind, ElementKind::Line(_) | ElementKind::Arrow(_)) {
+            return None;
+        }
+
+        // Vertices in screen space; pick the nearest within a pixel radius.
+        let to_screen = vp.scene_to_screen();
+        let mut best: Option<(usize, f64)> = None;
+        for (i, v) in tools::linear_vertices_scene(el).into_iter().enumerate() {
+            let sv = to_screen.apply(v);
+            let d = sv.distance(screen);
+            if d <= VERTEX_HIT_RADIUS && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((i, d));
+            }
+        }
+        let (index, _) = best?;
+
+        self.gesture = Some(Gesture::DraggingVertex {
+            id,
+            index,
+            moved: false,
+        });
+        Some(InteractionResult {
+            scene_changed: false,
+            view_changed: true,
+            commit: None,
+            begins_undo: true,
+        })
     }
 
     fn begin_handle(
@@ -824,6 +885,26 @@ impl InteractionState {
                 self.laser.push(scene_pt);
                 (Some(Gesture::Lasering), InteractionResult::view())
             }
+            Gesture::DraggingVertex { id, index, .. } => {
+                // Optionally axis-snap the dragged vertex relative to its
+                // neighbour when shift is held (consistent with line drawing).
+                let target = scene_pt;
+                if let Some(el) = scene.get_mut(&id) {
+                    tools::move_linear_vertex(el, index, target);
+                }
+                (
+                    Some(Gesture::DraggingVertex {
+                        id,
+                        index,
+                        moved: true,
+                    }),
+                    InteractionResult {
+                        scene_changed: true,
+                        view_changed: true,
+                        ..InteractionResult::none()
+                    },
+                )
+            }
         }
     }
 
@@ -948,6 +1029,24 @@ impl InteractionState {
                 // change, no undo entry.
                 self.laser.clear();
                 InteractionResult::view()
+            }
+            Gesture::DraggingVertex { id, moved, .. } => {
+                if moved {
+                    InteractionResult {
+                        scene_changed: true,
+                        view_changed: true,
+                        commit: Some(Commit::Moved(vec![id])),
+                        ..InteractionResult::none()
+                    }
+                } else {
+                    // Grabbed a vertex but didn't drag: no change, drop snapshot.
+                    InteractionResult {
+                        scene_changed: true,
+                        view_changed: true,
+                        commit: None,
+                        ..InteractionResult::none()
+                    }
+                }
             }
         }
     }

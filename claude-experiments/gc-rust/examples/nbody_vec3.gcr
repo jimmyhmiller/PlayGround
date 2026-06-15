@@ -1,0 +1,43 @@
+// N-body kernel using a `value struct Vec3` passed BY VALUE — the canonical
+// monomorphized-value-type benchmark. Vec3 is a flat LLVM aggregate (3 x f64),
+// never heap-allocated, passed in registers. This is the perf thesis in one
+// program: zero-cost value abstraction with a GC available but unused on the
+// hot path.
+
+value struct Vec3 { x: f64, y: f64, z: f64 }
+
+fn add(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+fn scale(a: Vec3, s: f64) -> Vec3 {
+    Vec3 { x: a.x * s, y: a.y * s, z: a.z * s }
+}
+
+fn dot(a: Vec3, b: Vec3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn sub(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+fn main() -> i64 {
+    let center = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let mut pos = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    let mut vel = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+
+    let n = 5000000;
+    let mut i = 0;
+    let mut acc = 0.0;
+    while i < n {
+        let d = sub(pos, center);
+        let d2 = dot(d, d) + 1.0;
+        let inv = 0.01 / (d2 * sqrt(d2));
+        vel = add(vel, scale(d, 0.0 - inv));
+        pos = add(pos, scale(vel, 0.01));
+        acc = acc + sqrt(dot(pos, pos) + 1.0);
+        i = i + 1;
+    }
+    (acc * 100.0) as i64
+}

@@ -1,65 +1,72 @@
-// Exercises value types, reference types, generics, enums, traits, closures,
-// match, and the ? operator — the parser/typechecker golden program.
-
-value struct Vec3 { x: f64, y: f64, z: f64 }
-
-fn dot(a: Vec3, b: Vec3) -> f64 {
-    a.x * b.x + a.y * b.y + a.z * b.z
-}
-
-struct Body {
-    pos: Vec3,
-    vel: Vec3,
-    mass: f64,
-}
+// A tour of gc-rust features that run today: structs, enums with payloads,
+// generics, methods + traits, Option/Result + `?`, closures, and arrays — all
+// GC-managed and monomorphized.
 
 enum Option<T> { None, Some(T) }
 enum Result<T, E> { Ok(T), Err(E) }
 
-trait Show {
-    fn show(self) -> String;
-}
+struct Point { x: i64, y: i64 }
 
-impl Show for i64 {
-    fn show(self) -> String {
-        int_to_string(self)
+impl Point {
+    fn manhattan(self) -> i64 {
+        let ax = if self.x < 0 { 0 - self.x } else { self.x };
+        let ay = if self.y < 0 { 0 - self.y } else { self.y };
+        ax + ay
     }
 }
 
-impl<T: Show> Show for Option<T> {
-    fn show(self) -> String {
-        match self {
-            Option::None => "None",
-            Option::Some(x) => x.show(),
-        }
-    }
+trait Area {
+    fn area(self) -> i64;
 }
 
-fn checked_div(a: i64, b: i64) -> Result<i64, String> {
-    if b == 0 {
-        Result::Err("divide by zero")
-    } else {
-        Result::Ok(a / b)
-    }
+struct Rect { w: i64, h: i64 }
+
+impl Area for Rect {
+    fn area(self) -> i64 { self.w * self.h }
 }
 
-fn compute(x: i64, d: i64) -> Result<i64, String> {
+// Generic identity, monomorphized per use.
+fn id<T>(x: T) -> T { x }
+
+// Error handling with `?`.
+fn checked_div(a: i64, b: i64) -> Result<i64, i64> {
+    if b == 0 { Result::Err(0 - 1) } else { Result::Ok(a / b) }
+}
+
+fn compute(x: i64, d: i64) -> Result<i64, i64> {
     let q = checked_div(x, d)?;
     let r = checked_div(q + 6, 2)?;
     Result::Ok(r + 1)
 }
 
-fn apply<T>(f: fn(T) -> T, x: T) -> T {
-    f(x)
+fn unwrap_or(r: Result<i64, i64>, default: i64) -> i64 {
+    match r {
+        Result::Ok(v) => v,
+        Result::Err(_e) => default,
+    }
 }
 
 fn main() -> i64 {
-    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
-    let n = dot(v, v) as i64;
-    let inc = |k: i64| k + 1;
-    let n = apply(inc, n);
-    match compute(n, 2) {
-        Result::Ok(r) => r,
-        Result::Err(_e) => -1,
-    }
+    let p = Point { x: 0 - 3, y: 4 };
+    let r = Rect { w: 6, h: 7 };
+
+    // closure capturing a local
+    let bonus = 5;
+    let add_bonus = |n: i64| n + bonus;
+
+    // array
+    let a: Array<i64> = array_new(3);
+    array_set(a, 0, 10);
+    array_set(a, 1, 20);
+    array_set(a, 2, 12);
+
+    let total =
+        p.manhattan()                      // 7
+        + r.area()                         // 42
+        + id(1)                            // 1
+        + unwrap_or(compute(20, 2), 0)     // 9
+        + unwrap_or(compute(1, 0), 100)    // 100 (Err -> default)
+        + add_bonus(0)                     // 5
+        + array_get(a, 0) + array_get(a, 1) + array_get(a, 2); // 42
+    total   // 7+42+1+9+100+5+42 = 206
 }

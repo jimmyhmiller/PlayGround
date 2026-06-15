@@ -1,0 +1,12 @@
+[package]
+name = "gcrust-rt"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "gcrust_rt"
+path = "src/lib.rs"
+# `rlib` for use by the main `gcrust` crate; `staticlib` so AOT-compiled
+# standalone executables can statically link the GC runtime (the `ai_gc_*` /
+# `ai_print_*` / `gcr_runtime_main` symbols) with no LLVM dependency.
+crate-type = ["rlib", "staticlib"]

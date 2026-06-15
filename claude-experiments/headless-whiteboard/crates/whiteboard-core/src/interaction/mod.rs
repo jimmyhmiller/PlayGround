@@ -19,7 +19,7 @@ pub mod tools;
 
 pub use handles::{Handle, HandleLayout, HANDLE_SIZE, ROTATION_HANDLE_OFFSET};
 pub use state::{Commit, InteractionResult, InteractionState};
-pub use tools::{create_kind, is_creation_tool, CreateKind};
+pub use tools::{create_kind, is_creation_tool, linear_vertices_scene, CreateKind};
 
 /// The active drawing/selection tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

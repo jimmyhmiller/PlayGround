@@ -1,0 +1,117 @@
+// The gc-rust prelude — auto-imported into every program. Written in gc-rust
+// itself. Any item a user program re-declares (by name) shadows the prelude
+// version, so existing programs that declare their own Option/Result keep
+// working.
+
+// ---- Core sum types -------------------------------------------------------
+
+enum Option<T> { None, Some(T) }
+
+enum Result<T, E> { Ok(T), Err(E) }
+
+// Option combinators.
+fn opt_unwrap_or<T>(o: Option<T>, default: T) -> T {
+    match o {
+        Option::Some(x) => x,
+        Option::None => default,
+    }
+}
+
+fn opt_is_some<T>(o: Option<T>) -> bool {
+    match o {
+        Option::Some(_x) => true,
+        Option::None => false,
+    }
+}
+
+// Result combinators.
+fn result_unwrap_or<T, E>(r: Result<T, E>, default: T) -> T {
+    match r {
+        Result::Ok(x) => x,
+        Result::Err(_e) => default,
+    }
+}
+
+fn result_is_ok<T, E>(r: Result<T, E>) -> bool {
+    match r {
+        Result::Ok(_x) => true,
+        Result::Err(_e) => false,
+    }
+}
+
+// ---- Numeric helpers ------------------------------------------------------
+
+fn min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_i64(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn abs_i64(a: i64) -> i64 { if a < 0 { 0 - a } else { a } }
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn pow_i64(base: i64, exp: i64) -> i64 {
+    let mut result = 1;
+    let mut i = 0;
+    while i < exp {
+        result = result * base;
+        i = i + 1;
+    }
+    result
+}
+
+fn gcd_i64(a: i64, b: i64) -> i64 {
+    let mut x = abs_i64(a);
+    let mut y = abs_i64(b);
+    while y != 0 {
+        let t = y;
+        y = x % y;
+        x = t;
+    }
+    x
+}
+
+// ---- Vec<T> — a growable, GC-managed vector --------------------------------
+// A reference struct over an `Array<T>` backing store. `push` reallocates and
+// copies when full. Functions take/return the Vec by value (it's a small
+// 3-word reference object); the backing array is shared/replaced as needed.
+//
+// Usage needs a type annotation on construction so `T` is known:
+//     let mut v: Vec<i64> = vec_new();
+//     v = vec_push(v, 10);
+//     vec_get(v, 0)
+
+struct Vec<T> { data: Array<T>, len: i64, cap: i64 }
+
+fn vec_new<T>() -> Vec<T> {
+    Vec { data: array_new(4), len: 0, cap: 4 }
+}
+
+fn vec_with_capacity<T>(cap: i64) -> Vec<T> {
+    let c = max_i64(cap, 1);
+    Vec { data: array_new(c), len: 0, cap: c }
+}
+
+fn vec_len<T>(v: Vec<T>) -> i64 { v.len }
+
+fn vec_get<T>(v: Vec<T>, i: i64) -> T { array_get(v.data, i) }
+
+fn vec_set<T>(v: Vec<T>, i: i64, x: T) -> Vec<T> {
+    let _u = array_set(v.data, i, x);
+    v
+}
+
+fn vec_push<T>(v: Vec<T>, x: T) -> Vec<T> {
+    if v.len < v.cap {
+        let _u = array_set(v.data, v.len, x);
+        Vec { data: v.data, len: v.len + 1, cap: v.cap }
+    } else {
+        let new_cap = v.cap * 2;
+        let nd: Array<T> = array_new(new_cap);
+        let mut i = 0;
+        while i < v.len {
+            let _u = array_set(nd, i, array_get(v.data, i));
+            i = i + 1;
+        }
+        let _u2 = array_set(nd, v.len, x);
+        Vec { data: nd, len: v.len + 1, cap: new_cap }
+    }
+}

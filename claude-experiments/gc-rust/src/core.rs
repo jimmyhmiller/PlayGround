@@ -71,6 +71,9 @@ pub struct Layout {
     pub field_map: Vec<FieldLoc>,
     /// Human name for FrameOrigin / debugging / mangling.
     pub name: String,
+    /// For array layouts: the element stride in bytes (codegen-only; does not
+    /// affect the GC `TypeInfo`). 0 for non-array layouts.
+    pub elem_stride: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +85,8 @@ pub enum FieldLoc {
     Ptr { idx: u16 },
     /// A raw scalar at byte `offset` within the raw section.
     Raw { offset: u16, repr: ScalarRepr },
+    /// A field of an inline value aggregate, by its index in the LLVM struct.
+    ValueField { index: u32 },
 }
 
 // ============================================================================
@@ -127,6 +132,21 @@ pub struct CoreFn {
     /// Total local slots (params first, then `let`/temp locals).
     pub locals: Vec<Repr>,
     pub body: CoreBlock,
+    /// If this is a lifted closure function, it takes an extra *leading* `env`
+    /// pointer parameter (before `params`), and its first `closure_captures.len()`
+    /// locals are initialized by loading the corresponding field from `env`.
+    /// Empty for ordinary functions.
+    pub closure_captures: Vec<ClosureCapture>,
+}
+
+/// How to initialize one capture local from the closure env object.
+#[derive(Clone, Copy, Debug)]
+pub struct ClosureCapture {
+    /// The local slot (in `CoreFn.locals`) this capture initializes.
+    pub local: LocalId,
+    /// Absolute byte offset of this capture within the env object (past the
+    /// `Full` header), where codegen loads it from.
+    pub offset: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +187,19 @@ pub enum CoreExprKind {
     Un(UnOp, Box<CoreExpr>),
     /// A float intrinsic call (`sqrt`, `abs`, `floor`, …) on a single operand.
     FloatIntrinsic(FloatIntrinsic, Box<CoreExpr>),
+    /// A runtime print of a scalar (`print_int`/`print_float`). Yields i64 0.
+    Print(Box<CoreExpr>),
+
+    /// Allocate a fresh varlen array of `len` elements of the given layout
+    /// (a reference object whose varlen tail holds the elements). Elements are
+    /// zero-initialized.
+    ArrayNew { layout: LayoutId, len: Box<CoreExpr>, elem: Repr },
+    /// Number of elements in an array (its varlen count). Yields i64.
+    ArrayLen(Box<CoreExpr>),
+    /// Read element `index` from an array. Repr is the element repr.
+    ArrayGet { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
+    /// Write `value` to element `index` of an array. Yields i64 0.
+    ArraySet { array: Box<CoreExpr>, index: Box<CoreExpr>, value: Box<CoreExpr>, elem: Repr },
     /// Numeric conversion: trunc / sext / zext / fp<->int / fp resize.
     Cast { value: Box<CoreExpr>, from: Repr, to: Repr },
 
@@ -183,9 +216,17 @@ pub enum CoreExprKind {
     MakeValue { value: ValueId, fields: Vec<CoreExpr> },
     /// Build a reference enum variant on the heap.
     MakeVariant { layout: LayoutId, tag: u32, fields: Vec<CoreExpr> },
+    /// Build an inline value-enum variant: `{ i32 tag, payload }`. v0 supports
+    /// payload-less variants (C-style enums); the payload bytes are zeroed.
+    MakeValueVariant { value: ValueId, tag: u32, fields: Vec<CoreExpr> },
+    /// Match on an inline value enum (tag is field 0 of the aggregate).
+    ValueMatch { scrutinee: Box<CoreExpr>, arms: Vec<CoreArm> },
 
     /// Field access by resolved location.
     Field { base: Box<CoreExpr>, loc: FieldLoc },
+    /// Store `value` into a reference object's field. Yields i64 0. (Only
+    /// reference-struct fields; value structs are immutable SSA aggregates.)
+    SetField { base: Box<CoreExpr>, loc: FieldLoc, value: Box<CoreExpr> },
 
     Match { scrutinee: Box<CoreExpr>, arms: Vec<CoreArm> },
     If(Box<CoreExpr>, Box<CoreBlock>, Box<CoreBlock>),

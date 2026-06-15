@@ -7,14 +7,42 @@ the machinery that exists only to serve borrow-checking. No lifetimes, no
 borrows, no `Box`. A precise copying GC owns memory; generics monomorphize so
 value types stay flat and fast.
 
-> Status: **real and running.** The full pipeline — lex → parse → resolve →
-> typecheck → **monomorphize** → core IR → LLVM → JIT — executes today for:
-> scalars + arithmetic (signed/unsigned), `if`/`while`/`loop`/`match`, recursion,
-> **heap structs + enums with a real copying GC** (`examples/shapes.gcr`), and
-> **monomorphized generics** (`fn dup<T>` becomes separate native functions per
-> concrete type — no boxing). The GC relocates live objects under stress with
-> precise roots, all from compiler-generated frame code. Traits, closures,
-> `Vec`/`String`/stdlib, and the benchmark suite are next. See `PLAN.md`.
+> Status: **real, running, and fast — and it builds standalone native
+> executables.** `gcr build app.gcr -o app` emits a native object via LLVM and
+> links it with the GC runtime (a 24 MB LLVM-free static lib) into a standalone
+> binary. `gcr run` JITs. The pipeline — lex → parse → resolve → typecheck →
+> **monomorphize** → core IR → LLVM (O2) → JIT/AOT — handles: scalars
+> (signed/unsigned), floats + `sqrt`, `if`/`while`/`loop`/`for`/`match`,
+> recursion, **heap structs + enums + a real copying GC**, **monomorphized
+> generics** (no boxing), **value types fully flat** (`value struct`/`value
+> enum` + tuples, passed in registers), **methods + trait dispatch with checked
+> bounds**, `Option`/`Result` + **`?`**, **closures**, **arrays + a growable
+> `Vec`**, and **exhaustiveness-checked `match`**. The GC relocates live objects
+> under stress with precise roots, and the GC-stress suite stays green under
+> aggressive LLVM optimization (the optimizer respects the root invariants).
+> See `docs/tour.md` for a guided tour.
+>
+> **The headline benchmarks** (bit-identical checksums vs Rust; gc-rust time
+> *includes* compile+JIT):
+>
+> | benchmark | Rust `-O` | **gc-rust** (O2 JIT) | |
+> |---|---|---|---|
+> | nbody, 50M f64+sqrt iters | 0.76s | **0.54s** | faster |
+> | nbody w/ `value struct Vec3` **by value**, 5M iters | 0.245s | **0.085s** | **~2.9× faster** |
+> | binary_trees (40× depth-16, 5.2M heap allocs) | 0.077s | 0.115s | 1.5× (GC vs malloc) |
+>
+> The `value struct Vec3` version is the thesis in one line: a value type passed
+> by value through `add`/`scale`/`dot` compiles to a flat 3×f64 aggregate in
+> registers — zero-cost abstraction, no boxing, no heap on the hot path, with a
+> precise GC available but untouched. ai-lang's equivalent was 9.5× *slower*
+> than Rust because it boxed generics; gc-rust monomorphizes + flattens value
+> types, so it matches or beats Rust.
+>
+> Also working: **closures** (captures + indirect call), **arrays**
+> (`array_new`/`get`/`set`/`len`, GC-traced for reference elements), a
+> **growable `Vec`** written in gc-rust itself (`examples/vec.gcr` — reallocates
+> and copies on grow, GC-managed), and `print_int`/`print_float`. String ops and
+> tuples are next. See `PLAN.md`.
 
 ## Try it
 

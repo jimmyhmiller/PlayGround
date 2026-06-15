@@ -276,6 +276,86 @@ impl Drop for RuntimeContext {
 }
 
 // =============================================================================
+// AOT entry point
+// =============================================================================
+
+/// One heap-shape descriptor as emitted into an AOT object file by codegen.
+///
+/// This is the *source* data for a `gc::TypeInfo` (the same fields
+/// `codegen::layouts_to_type_infos` derives a `TypeInfo` from), serialized as a
+/// fixed `#[repr(C)]` record so an AOT-compiled binary can hand its per-program
+/// layout table to the runtime at startup. We deliberately do NOT serialize a
+/// `gc::TypeInfo` directly: that type is not `#[repr(C)]`, so its in-memory
+/// field order is unspecified. Instead the runtime rebuilds each `TypeInfo`
+/// here with the exact same logic the JIT path uses, guaranteeing the GC
+/// scanner sees identical shapes regardless of compilation mode.
+///
+/// `varlen`: 0 = None, 1 = Values, 2 = Bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AotLayout {
+    pub ptr_fields: u16,
+    pub raw_bytes: u16,
+    pub varlen: u8,
+    pub _pad: [u8; 3],
+}
+
+/// AOT program entry, called from the native `main` emitted into the object
+/// file. Builds a [`RuntimeContext`] over the program's layout table (passed as
+/// a `[AotLayout; ti_count]` blob in the binary), then invokes the compiled
+/// program entry (`gcrust_entry`) with a live `Thread*` and returns its `i64`.
+///
+/// The `RuntimeContext` setup is identical to the JIT driver's: the GC frame
+/// walker is installed, the safepoint poll flag is wired to `Thread::state`, and
+/// the alloc window is pointed at the heap. This MUST match the JIT path or the
+/// GC ABI breaks.
+///
+/// # Safety
+/// `layouts` must point at `ti_count` valid `AotLayout` records, and `entry`
+/// must be the compiled program entry with signature `extern "C" fn(*mut
+/// Thread) -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gcr_runtime_main(
+    layouts: *const AotLayout,
+    ti_count: usize,
+    entry: extern "C" fn(*mut Thread) -> i64,
+) -> i64 {
+    use crate::gc::{Full, ObjHeader, TypeInfo};
+    let slice = if ti_count == 0 {
+        &[][..]
+    } else {
+        assert!(!layouts.is_null(), "gcr_runtime_main: null layout table");
+        unsafe { std::slice::from_raw_parts(layouts, ti_count) }
+    };
+    // Rebuild the type table exactly as `codegen::layouts_to_type_infos` does:
+    // pointer fields first (traced), then raw bytes, then any varlen tail.
+    let type_table: Vec<TypeInfo> = slice
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut ti = TypeInfo::for_header(Full::SIZE)
+                .with_type_id(i as u16)
+                .with_fields(l.ptr_fields)
+                .with_raw_bytes(l.raw_bytes);
+            ti = match l.varlen {
+                0 => ti,
+                1 => ti.with_varlen_values(l.ptr_fields),
+                2 => ti.with_varlen_bytes(l.ptr_fields),
+                other => panic!("gcr_runtime_main: invalid varlen kind {}", other),
+            };
+            ti
+        })
+        .collect();
+
+    // Match the JIT non-stress semi-space size so allocation-heavy programs
+    // (binary_trees) have headroom; the copying collector reclaims in between.
+    let space = 256 << 20;
+    let mut rt = RuntimeContext::new(space, type_table);
+    let thread = rt.thread_ptr();
+    entry(thread)
+}
+
+// =============================================================================
 // Runtime extern functions called by compiled code
 // =============================================================================
 
@@ -336,10 +416,44 @@ unsafe fn alloc_with_published_frame(
         // `alloc_obj::<Full>` (not bare `alloc`) stamps the object header with
         // `info.type_id` — bare `alloc` only zeroes, leaving type_id 0, which
         // breaks the GC scanner (it'd read every object as shape 0).
-        let p = heap.alloc_obj::<Full>(info, varlen_len);
+        let mut p = heap.alloc_obj::<Full>(info, varlen_len);
+        if p.is_null() {
+            // From-space is exhausted: collect (our roots are published), then
+            // retry. If it's STILL null, the live set genuinely exceeds a
+            // semi-space — abort loudly rather than hand compiled code a null it
+            // would dereference and segfault on.
+            heap.mutator_triggered_gc::<IdentityPtrPolicy>(dyna);
+            p = heap.alloc_obj::<Full>(info, varlen_len);
+            if p.is_null() {
+                dyna.clear_parked_jit_fp();
+                eprintln!(
+                    "gc-rust: out of memory — live set exceeds the {} MB semi-space \
+                     (object type_id {}, {} varlen elems)",
+                    heap.space_size() / (1 << 20),
+                    info.type_id,
+                    varlen_len,
+                );
+                std::process::abort();
+            }
+        }
         dyna.clear_parked_jit_fp();
         p
     }
+}
+
+/// Print a signed 64-bit integer followed by a newline. A minimal IO primitive
+/// so compiled programs can emit output. Returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ai_print_int(_thread: *mut Thread, v: i64) -> i64 {
+    println!("{}", v);
+    0
+}
+
+/// Print a 64-bit float followed by a newline. Returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ai_print_float(_thread: *mut Thread, v: f64) -> i64 {
+    println!("{}", v);
+    0
 }
 
 /// Safepoint poll slow path. Compiled code inlines a load of `thread.state` at

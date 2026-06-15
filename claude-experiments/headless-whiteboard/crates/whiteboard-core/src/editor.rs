@@ -762,6 +762,39 @@ impl<M: TextMeasurer, G: ShapeGenerator> Editor<M, G> {
             scene.bounds = scene.bounds.union(&overlay.bounds);
         }
 
+        // Vertex handles: when exactly one line/arrow is selected, draw a small
+        // square at each vertex so the user sees the draggable points.
+        if self.selection().len() == 1 {
+            if let Some(el) = self.selection().iter().next().and_then(|id| self.scene.get(id)) {
+                let verts = crate::interaction::linear_vertices_scene(el);
+                if !verts.is_empty() {
+                    use crate::geometry::{Path, Point as P, Rect};
+                    use crate::render::{Color, DrawCommand, Paint, Stroke};
+                    let accent = Color::rgb(0x42, 0x63, 0xeb);
+                    let half = 4.0;
+                    for v in verts {
+                        let c = to_screen.apply(v);
+                        let r = Rect::new(c.x - half, c.y - half, half * 2.0, half * 2.0);
+                        let sq = Path::polygon(&[
+                            P::new(r.min_x(), r.min_y()),
+                            P::new(r.max_x(), r.min_y()),
+                            P::new(r.max_x(), r.max_y()),
+                            P::new(r.min_x(), r.max_y()),
+                        ]);
+                        scene.push(DrawCommand::FillPath {
+                            path: sq.clone(),
+                            paint: Paint::solid(Color::WHITE),
+                        });
+                        scene.push(DrawCommand::StrokePath {
+                            path: sq,
+                            stroke: Stroke::solid(1.0),
+                            paint: Paint::solid(accent),
+                        });
+                    }
+                }
+            }
+        }
+
         // Snapping alignment guides: thin pink segments (Excalidraw style) shown
         // while a move snaps to another element. In scene space → map to screen.
         let guides = self.interaction.snap_guides();

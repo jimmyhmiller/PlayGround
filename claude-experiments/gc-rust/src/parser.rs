@@ -544,6 +544,22 @@ impl Parser {
                 stmts.push(Stmt::Item(self.item()?));
                 continue;
             }
+            // A statement that STARTS with a block-like keyword (`if`/`while`/
+            // `loop`/`match`/`for`/`{`) is parsed as a self-contained statement
+            // — a following `(`/`[`/`.`/`-` begins a NEW statement, it does not
+            // postfix onto the block (Rust's statement-vs-expression rule). This
+            // is what makes `while c {} (x)` two statements, not a call.
+            if self.is_block_stmt_start() {
+                let e = self.block_like_stmt()?;
+                // It may still be the block's tail value if `}` follows.
+                if self.at(&TokKind::RBrace) {
+                    tail = Some(e);
+                    break;
+                }
+                self.eat(&TokKind::Semi); // optional trailing `;`
+                stmts.push(Stmt::Expr(e));
+                continue;
+            }
             let e = self.expr()?;
             if self.eat(&TokKind::Semi) {
                 stmts.push(Stmt::Expr(e));
@@ -559,6 +575,28 @@ impl Parser {
         }
         self.expect(&TokKind::RBrace)?;
         Ok(Block { stmts, tail, span: start.to(self.prev_span()) })
+    }
+
+    fn is_block_stmt_start(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokKind::Keyword(Kw::If | Kw::While | Kw::Loop | Kw::Match | Kw::For) | TokKind::LBrace
+        )
+    }
+
+    /// Parse a single block-like expression in statement position WITHOUT
+    /// postfix continuation (no trailing call/index/field/cast). Used so a
+    /// `(`/`[` after the block starts a new statement.
+    fn block_like_stmt(&mut self) -> PResult<Expr> {
+        match self.peek() {
+            TokKind::Keyword(Kw::If) => self.if_expr(),
+            TokKind::Keyword(Kw::While) => self.while_expr(),
+            TokKind::Keyword(Kw::Loop) => self.loop_expr(),
+            TokKind::Keyword(Kw::Match) => self.match_expr(),
+            TokKind::Keyword(Kw::For) => self.for_expr(),
+            TokKind::LBrace => self.block_expr(),
+            _ => unreachable!("block_like_stmt called on non-block-like start"),
+        }
     }
 
     fn is_item_start(&self) -> bool {
@@ -1115,7 +1153,7 @@ mod tests {
     #[test]
     fn parses_types_example() {
         let m = parse(include_str!("../examples/types.gcr"));
-        // value struct, struct, 2 enums, trait, 2 impls, 3 fns, main
+        // The tour has 2 enums (Option, Result), a trait, 2 impls, structs + fns.
         let kinds: Vec<&str> = m.items.iter().map(|i| match &i.kind {
             ItemKind::Fn(_) => "fn",
             ItemKind::Struct(_) => "struct",
@@ -1127,11 +1165,6 @@ mod tests {
         assert!(kinds.contains(&"trait"));
         assert_eq!(kinds.iter().filter(|k| **k == "impl").count(), 2);
         assert_eq!(kinds.iter().filter(|k| **k == "enum").count(), 2);
-        // First item is the value struct Vec3.
-        match &m.items[0].kind {
-            ItemKind::Struct(s) => { assert!(s.is_value); assert_eq!(s.name, "Vec3"); }
-            _ => panic!("expected value struct first"),
-        }
     }
 
     #[test]

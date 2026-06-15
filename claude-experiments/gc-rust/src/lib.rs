@@ -8,12 +8,16 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod compile;
 pub mod core;
-pub mod gc;
+pub mod diag;
+// `gc` and `runtime` live in the LLVM-free `gcrust-rt` crate so AOT binaries
+// can statically link them without LLVM. Re-export under their original paths.
+pub use gcrust_rt::gc;
 pub mod layout;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod resolve;
-pub mod runtime;
+pub use gcrust_rt::runtime;
 pub mod types;
