@@ -23,6 +23,8 @@ pub mod dialect;
 pub mod passes;
 pub mod pipeline;
 pub mod ssa;
+#[cfg(feature = "react-hir")]
+pub mod to_react_hir;
 pub mod verify;
 mod build;
 mod expr_flatten;

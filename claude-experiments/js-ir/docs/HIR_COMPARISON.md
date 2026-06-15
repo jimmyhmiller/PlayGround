@@ -431,7 +431,21 @@ exclusive trajectories:
 - **(B) Convert** once (`JSIR ⇄ HirFunction`/`Environment`) and call the **real**
   passes unmodified — they come for free and track upstream automatically. The
   converter cost is the table above; the biggest single chunk is instruction
-  scalarization.
+  scalarization. ✅ *A first cut of this direction now exists*:
+  `crates/jsir-jslir/src/to_react_hir.rs` (`--features react-hir`) converts a
+  JSLIR body into a real `react_compiler_hir::HirFunction` — flat scalar
+  `Instruction`s (literals, identifier loads, binary/unary, calls, store/assign),
+  real `Terminal::If`/`Goto`/`Return`, allocated `IdentifierId`s via the
+  `Environment` arena, and populated predecessors. `tests/to_react_hir.rs` proves
+  it on straight-line and `if`-diamond functions; unsupported constructs (loops,
+  member/computed access, objects, …) return a descriptive `Err` rather than a
+  wrong HIR. **A key discovery while building it:** JSLIR is *already* a flat
+  per-block SSA-value op stream (each `jsir.*` op yields a result `ValueId`;
+  operands are earlier results), so the feared "scalarization" is largely
+  pre-done by jsir's lowering — the converter is mostly a per-op mapping. The
+  remaining work to run the actual passes is breadth (more op kinds) plus
+  vendoring a pass crate (e.g. `react_compiler_ssa`) to call `enter_ssa` on the
+  result.
 
 Before the Rust port existed, (B) was impossible (the passes were TypeScript).
 Now that `react_compiler_hir` compiles in *this* workspace, (B) is a real option:
