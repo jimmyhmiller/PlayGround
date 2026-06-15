@@ -1,9 +1,10 @@
 //! coil CLI.
 //!
-//! Until the elaborator lands, the useful subcommands are reader-facing:
+//! Front-end subcommands (no MLIR required):
 //!
-//!   coil read  <file>   read each top-level form and pretty-print it
-//!   coil check <file>   read and report form count / first error
+//!   coil read   <file>   read each top-level form and pretty-print it
+//!   coil expand <file>   read + expand surface sugar, print the core forms
+//!   coil check  <file>   read + expand and report the core form count
 //!
 //! With no subcommand, `coil <file>` behaves like `read`.
 
@@ -28,26 +29,40 @@ fn main() -> ExitCode {
         }
     };
 
-    match coil::read_all(&src) {
-        Ok(forms) => match cmd {
-            "read" => {
-                for form in &forms {
-                    println!("{}", coil::print(form));
+    let forms = match coil::read_all(&src) {
+        Ok(forms) => forms,
+        Err(e) => {
+            eprintln!("coil: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match cmd {
+        "read" => {
+            for form in &forms {
+                println!("{}", coil::print(form));
+            }
+            ExitCode::SUCCESS
+        }
+        "expand" | "check" => match coil::expand_all(&forms) {
+            Ok(core) => {
+                if cmd == "expand" {
+                    for form in &core {
+                        println!("{}", coil::print(form));
+                    }
+                } else {
+                    println!("ok: {} core form(s)", core.len());
                 }
                 ExitCode::SUCCESS
             }
-            "check" => {
-                println!("ok: {} top-level form(s)", forms.len());
-                ExitCode::SUCCESS
-            }
-            other => {
-                eprintln!("coil: unknown command `{other}`");
-                ExitCode::from(2)
+            Err(e) => {
+                eprintln!("coil: {e}");
+                ExitCode::FAILURE
             }
         },
-        Err(e) => {
-            eprintln!("coil: {e}");
-            ExitCode::FAILURE
+        other => {
+            eprintln!("coil: unknown command `{other}`");
+            ExitCode::from(2)
         }
     }
 }

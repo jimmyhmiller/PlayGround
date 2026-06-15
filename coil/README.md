@@ -27,10 +27,10 @@ cargo feature.
 | Printer / round-trip | ✅ |
 | `Backend` trait + `NullBackend` | ✅ (KERNEL §4 codegen surface) |
 | `RecordingBackend` (test harness) | ✅ |
-| **`emit`: core forms → MLIR builder calls** | ✅ op-calls, `let`, `do`, `region`, `block`, types, attrs, SSA threading |
-| Expander: surface sugar (`defn`, `(: …)`, control flow) | ⏳ next |
-| `MeliorBackend` (`--features mlir`) | ⏳ |
-| Staged macros (proc-macro model) | ⏳ |
+| **`emit`: core forms → MLIR builder calls** | ✅ op-calls, `let`, `do`, `region`, `block`, types, attrs, `(: v t)`, SSA threading |
+| **`expand`: bootstrap surface sugar → core forms** | ✅ `defn`, `if`→`scf.if`, `when`, `cond`, `->`; implicit returns |
+| `MeliorBackend` (`--features mlir`) | ⏳ (needs an MLIR toolchain) |
+| Staged user macros (proc-macro model) | ⏳ |
 
 ## Build & test
 
@@ -48,26 +48,34 @@ src/
   printer.rs   Val → text   (structural round-trip)
   backend.rs   the MLIR boundary: Backend trait + NullBackend (KERNEL §4)
   recording.rs RecordingBackend — logs builder calls; tests emit without MLIR
+  expand.rs    surface sugar → core forms (bootstrap expander; AOT.md phase 0)
   emit.rs      core forms → Backend calls — the lisp→MLIR mapping (AOT codegen)
   lib.rs / main.rs
 tests/
   reader.rs   reader + round-trip tests
+  expand.rs   sugar→core tests + read→expand→emit integration
   emit.rs     mapping tests against RecordingBackend
 examples/
   add.coil
+```
+
+```sh
+coil expand examples/add.coil   # show surface → core-form lowering
 ```
 
 ## Roadmap (next increments)
 
 The AOT spine is built bottom-up (AOT.md §"build order"):
 
-1. **`emit`** — core forms → MLIR builder calls. ✅ done (this increment).
-2. **MeliorBackend** (`--features mlir`): implement `Backend` against real MLIR;
+1. **`emit`** — core forms → MLIR builder calls. ✅ done.
+2. **`expand`** — bootstrap surface sugar → core forms. ✅ done.
+3. **MeliorBackend** (`--features mlir`): implement `Backend` against real MLIR;
    compile a hand-written core-form program to an object file end to end.
-3. **Expander**: a fixed, structural expander for the surface sugar (`defn`,
-   op-call normalization, `(: v t)`, control flow) — `Val → Val`, no user
-   computation yet.
+   *(Blocked here: this environment has LLVM but no MLIR dev libs/headers.)*
 4. **Staged macros**: compile-and-call user `defmacro`s (proc-macro model);
    scope-set hygiene (ELABORATION §5).
 5. **Passes + driver**: pass-pipeline values, verify with source-span
    diagnostics, lower to LLVM, emit object/executable.
+
+Stages 1–2 are a working, MLIR-free front end: `read → expand → emit` turns
+surface coil into a recorded sequence of MLIR builder calls, all under test.

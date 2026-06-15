@@ -6,11 +6,13 @@
 
 pub mod backend;
 pub mod emit;
+pub mod expand;
 pub mod printer;
 pub mod reader;
 pub mod recording;
 pub mod value;
 
+pub use expand::{expand_all, ExpandError};
 pub use printer::print;
 pub use reader::{read_all, read_one, ReadError};
 pub use value::Val;

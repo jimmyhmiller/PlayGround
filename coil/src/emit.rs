@@ -114,6 +114,11 @@ impl<'b, B: Backend> Emitter<'b, B> {
         match head {
             "let" => self.emit_let(&items[1..]),
             "do" => self.emit_do(&items[1..]),
+            // (: v t) in value position → a typed constant. The reader/expander
+            // leave it; the emitter realizes it as arith.constant (no magic —
+            // it lowers to a visible op). `(: name type)` in *parameter* position
+            // is handled separately by parse_params.
+            ":" => self.emit_typed_const(items),
             "op" => self.emit_explicit_op(&items[1..]).map(first_result),
             "region" | "block" => {
                 err(format!("`{head}` is only valid inside an op's :regions"))
@@ -122,6 +127,22 @@ impl<'b, B: Backend> Emitter<'b, B> {
             name if name.contains('.') => self.emit_op_call(name, &items[1..]).map(first_result),
             other => err(format!("unknown core form `{other}`")),
         }
+    }
+
+    /// `(: v t)` → `arith.constant` producing a value of type `t`.
+    fn emit_typed_const(&mut self, items: &[Val]) -> Result<Option<Handle>, EmitError> {
+        if items.len() != 3 {
+            return err("(: value type) takes exactly a value and a type");
+        }
+        let ty = self.resolve_type(&items[2])?;
+        let attr = NamedAttr {
+            name: "value".to_string(),
+            value: printer::print(&items[1]),
+        };
+        let results = self
+            .b
+            .build_op("arith.constant", &[], ResultTypes::Explicit(vec![ty]), &[attr], &[], &[])?;
+        Ok(results.into_iter().next())
     }
 
     fn emit_do(&mut self, body: &[Val]) -> Result<Option<Handle>, EmitError> {
