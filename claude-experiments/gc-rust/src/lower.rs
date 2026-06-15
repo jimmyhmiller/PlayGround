@@ -110,6 +110,16 @@ fn placeholder_fn() -> CoreFn {
     CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None } }
 }
 
+fn float_intrinsic(name: &str) -> Option<FloatIntrinsic> {
+    Some(match name {
+        "sqrt" => FloatIntrinsic::Sqrt,
+        "abs" => FloatIntrinsic::Abs,
+        "floor" => FloatIntrinsic::Floor,
+        "ceil" => FloatIntrinsic::Ceil,
+        _ => return None,
+    })
+}
+
 /// The method-index key for a primitive receiver: `i64`, `f64`, etc. — the
 /// literal name used in `impl Show for i64`.
 fn prim_impl_key(ty: &Ty) -> String {
@@ -939,6 +949,20 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             return err("only direct function calls supported in v0 slice", span);
         };
         let name = path.last();
+        // Float intrinsics — only when the name isn't shadowed by a user fn.
+        if let Some(intr) = float_intrinsic(name) {
+            if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
+                if args.len() != 1 {
+                    return err(format!("`{}` takes 1 argument", name), span);
+                }
+                let (ca, at) = self.expr(&args[0], None)?;
+                if !matches!(at, Ty::Prim(Prim::F32 | Prim::F64)) {
+                    return err(format!("`{}` requires a float argument", name), span);
+                }
+                let repr = ca.repr.clone();
+                return Ok((CoreExpr::new(CoreExprKind::FloatIntrinsic(intr, Box::new(ca)), repr), at));
+            }
+        }
         // An enum variant constructor (`Option::Some(x)`, `Ok(v)`) is a call
         // syntactically; route it to variant construction.
         let key = path.segments.join("::");

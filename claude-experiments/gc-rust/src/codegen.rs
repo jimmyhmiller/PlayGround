@@ -321,6 +321,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
             CoreExprKind::Bin(op, l, r) => self.gen_bin(fcx, *op, l, r),
             CoreExprKind::Un(op, inner) => self.gen_un(fcx, *op, inner),
+            CoreExprKind::FloatIntrinsic(intr, inner) => self.gen_float_intrinsic(fcx, *intr, inner),
             CoreExprKind::Cast { value, from, to } => self.gen_cast(fcx, value, from, to),
             CoreExprKind::Call(fid, args) => self.gen_call(fcx, *fid, args),
             CoreExprKind::If(cond, then_b, else_b) => self.gen_if(fcx, cond, then_b, else_b, &e.repr),
@@ -722,6 +723,32 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
         };
         Ok(Some(res))
+    }
+
+    fn gen_float_intrinsic(
+        &mut self,
+        fcx: &mut FnCtx<'ctx>,
+        intr: crate::core::FloatIntrinsic,
+        inner: &CoreExpr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        use crate::core::FloatIntrinsic::*;
+        let v = self.gen_expr(fcx, inner)?.unwrap().into_float_value();
+        let bits = match &inner.repr { Repr::Scalar(s) => s.bits(), _ => 64 };
+        let suffix = if bits == 32 { "f32" } else { "f64" };
+        let fty = if bits == 32 { self.ctx.f32_type() } else { self.ctx.f64_type() };
+        let intr_name = match intr {
+            Sqrt => "llvm.sqrt",
+            Abs => "llvm.fabs",
+            Floor => "llvm.floor",
+            Ceil => "llvm.ceil",
+        };
+        let full = format!("{}.{}", intr_name, suffix);
+        let f = self.module.get_function(&full).unwrap_or_else(|| {
+            let fnty = fty.fn_type(&[fty.into()], false);
+            self.module.add_function(&full, fnty, None)
+        });
+        let r = call_result(self.builder.build_call(f, &[v.into()], "fi").unwrap());
+        Ok(Some(r))
     }
 
     fn gen_cast(
@@ -1160,6 +1187,23 @@ mod tests {
     #[test]
     fn float_f32() {
         assert_eq!(run("fn main() -> i64 { let x = 2.5f32 * 2.0f32; x as i64 }"), 5);
+    }
+
+    #[test]
+    fn float_sqrt() {
+        // sqrt(144.0) = 12
+        assert_eq!(run("fn main() -> i64 { let x = sqrt(144.0); x as i64 }"), 12);
+    }
+
+    #[test]
+    fn float_sqrt_in_expr() {
+        // sqrt(3*3 + 4*4) = sqrt(25) = 5
+        let src = "fn main() -> i64 { \
+                     let a = 3.0; let b = 4.0; \
+                     let d = sqrt(a * a + b * b); \
+                     d as i64 \
+                   }";
+        assert_eq!(run(src), 5);
     }
 
     // ---- heap types + GC ---------------------------------------------------
