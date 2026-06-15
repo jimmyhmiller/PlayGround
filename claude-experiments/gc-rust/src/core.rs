@@ -165,6 +165,8 @@ pub enum CoreExprKind {
 
     Bin(BinOp, Box<CoreExpr>, Box<CoreExpr>),
     Un(UnOp, Box<CoreExpr>),
+    /// A float intrinsic call (`sqrt`, `abs`, `floor`, …) on a single operand.
+    FloatIntrinsic(FloatIntrinsic, Box<CoreExpr>),
     /// Numeric conversion: trunc / sext / zext / fp<->int / fp resize.
     Cast { value: Box<CoreExpr>, from: Repr, to: Repr },
 
@@ -204,6 +206,9 @@ pub struct CoreArm {
     pub binds: Vec<LocalId>,
     pub body: CoreExpr,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatIntrinsic { Sqrt, Abs, Floor, Ceil }
 
 impl CoreExpr {
     pub fn new(kind: CoreExprKind, repr: Repr) -> Self {
