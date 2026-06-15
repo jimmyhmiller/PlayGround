@@ -1123,6 +1123,45 @@ mod tests {
         );
     }
 
+    // ---- floats ------------------------------------------------------------
+
+    fn run_f64(src: &str) -> i64 {
+        // Wrap: a program returning i64 that does float work internally.
+        run(src)
+    }
+
+    #[test]
+    fn float_arithmetic() {
+        // (1.5 * 4.0 + 1.0) as i64 = 7
+        assert_eq!(run_f64("fn main() -> i64 { let x = 1.5 * 4.0 + 1.0; x as i64 }"), 7);
+    }
+
+    #[test]
+    fn float_compare_and_branch() {
+        let src = "fn main() -> i64 { \
+                     let a = 3.14; \
+                     if a > 3.0 { 1 } else { 0 } \
+                   }";
+        assert_eq!(run_f64(src), 1);
+    }
+
+    #[test]
+    fn float_loop_accumulate() {
+        // Sum 1.0..=10.0 as f64, return as i64 = 55.
+        let src = "fn main() -> i64 { \
+                     let mut i = 0; \
+                     let mut acc = 0.0; \
+                     while i < 10 { acc = acc + (i as f64) + 1.0; i = i + 1; } \
+                     acc as i64 \
+                   }";
+        assert_eq!(run_f64(src), 55);
+    }
+
+    #[test]
+    fn float_f32() {
+        assert_eq!(run("fn main() -> i64 { let x = 2.5f32 * 2.0f32; x as i64 }"), 5);
+    }
+
     // ---- heap types + GC ---------------------------------------------------
 
     fn run_gc(src: &str, stress: bool) -> i64 {
@@ -1173,6 +1212,186 @@ mod tests {
                    } \
                    fn main() -> i64 { area(Shape::Square(7)) }";
         assert_eq!(run_gc(src, true), 49);
+    }
+
+    // ---- monomorphized generics -------------------------------------------
+
+    #[test]
+    fn generic_identity() {
+        let src = "fn id<T>(x: T) -> T { x } \
+                   fn main() -> i64 { id(41) + 1 }";
+        assert_eq!(run("fn id<T>(x: T) -> T { x } fn main() -> i64 { id(41) + 1 }"), 42);
+        let _ = src;
+    }
+
+    #[test]
+    fn generic_used_at_two_types() {
+        // `first<T>` instantiated at i64 and at u32 → two specialized funcs.
+        let src = "fn dup<T>(x: T) -> T { x } \
+                   fn main() -> i64 { \
+                       let a = dup(10); \
+                       let b = dup(5u32); \
+                       a + (b as i64) \
+                   }";
+        assert_eq!(run(src), 15);
+    }
+
+    #[test]
+    fn generic_arithmetic_specializes() {
+        // A generic that does work; signedness must follow the instantiation.
+        let src = "fn twice<T>(x: T) -> T { x } \
+                   fn main() -> i64 { \
+                       let x = twice(7); \
+                       let y = twice(200u32) / twice(3u32); \
+                       x + (y as i64) \
+                   }";
+        // 7 + (200/3 unsigned = 66) = 73
+        assert_eq!(run(src), 73);
+    }
+
+    // ---- methods + traits -------------------------------------------------
+
+    #[test]
+    fn inherent_method() {
+        let src = "struct Point { x: i64, y: i64 } \
+                   impl Point { \
+                       fn sum(self) -> i64 { self.x + self.y } \
+                   } \
+                   fn main() -> i64 { let p = Point { x: 3, y: 4 }; p.sum() }";
+        assert_eq!(run_gc(src, false), 7);
+    }
+
+    #[test]
+    fn method_with_args() {
+        let src = "struct Counter { n: i64 } \
+                   impl Counter { \
+                       fn add(self, k: i64) -> i64 { self.n + k } \
+                   } \
+                   fn main() -> i64 { let c = Counter { n: 10 }; c.add(32) }";
+        assert_eq!(run_gc(src, false), 42);
+    }
+
+    #[test]
+    fn trait_method_static_dispatch() {
+        let src = "trait Area { fn area(self) -> i64; } \
+                   struct Square { side: i64 } \
+                   impl Area for Square { fn area(self) -> i64 { self.side * self.side } } \
+                   fn main() -> i64 { let s = Square { side: 6 }; s.area() }";
+        assert_eq!(run_gc(src, false), 36);
+    }
+
+    #[test]
+    fn method_under_gc_stress() {
+        let src = "struct Vec2 { x: i64, y: i64 } \
+                   impl Vec2 { fn dot(self, o: Vec2) -> i64 { self.x * o.x + self.y * o.y } } \
+                   fn main() -> i64 { \
+                       let a = Vec2 { x: 2, y: 3 }; \
+                       let b = Vec2 { x: 4, y: 5 }; \
+                       a.dot(b) \
+                   }";
+        // 2*4 + 3*5 = 23
+        assert_eq!(run_gc(src, true), 23);
+    }
+
+    // ---- generic heap types (Option/Result) -------------------------------
+
+    const PRELUDE: &str = "enum Option<T> { None, Some(T) } \
+                           enum Result<T, E> { Ok(T), Err(E) } ";
+
+    #[test]
+    fn generic_option_construct_and_match() {
+        let src = format!(
+            "{PRELUDE} \
+             fn unwrap_or(o: Option<i64>, d: i64) -> i64 {{ \
+                 match o {{ Option::Some(x) => x, Option::None => d }} \
+             }} \
+             fn main() -> i64 {{ unwrap_or(Option::Some(42), 0) + unwrap_or(Option::None, 7) }}"
+        );
+        assert_eq!(run_gc(&src, false), 49);
+    }
+
+    #[test]
+    fn generic_result_and_match() {
+        let src = format!(
+            "{PRELUDE} \
+             fn safe_div(a: i64, b: i64) -> Result<i64, i64> {{ \
+                 if b == 0 {{ Result::Err(0 - 1) }} else {{ Result::Ok(a / b) }} \
+             }} \
+             fn get(r: Result<i64, i64>) -> i64 {{ \
+                 match r {{ Result::Ok(v) => v, Result::Err(e) => e }} \
+             }} \
+             fn main() -> i64 {{ get(safe_div(20, 4)) + get(safe_div(1, 0)) }}"
+        );
+        // 5 + (-1) = 4
+        assert_eq!(run_gc(&src, false), 4);
+    }
+
+    #[test]
+    fn generic_option_under_gc_stress() {
+        let src = format!(
+            "{PRELUDE} \
+             fn unwrap_or(o: Option<i64>, d: i64) -> i64 {{ \
+                 match o {{ Option::Some(x) => x, Option::None => d }} \
+             }} \
+             fn main() -> i64 {{ \
+                 let a = Option::Some(100); \
+                 let _b = Option::Some(200); \
+                 let _c = Option::Some(300); \
+                 unwrap_or(a, 0) \
+             }}"
+        );
+        assert_eq!(run_gc(&src, true), 100);
+    }
+
+    #[test]
+    fn try_operator() {
+        let src = format!(
+            "{PRELUDE} \
+             fn checked(a: i64, b: i64) -> Result<i64, i64> {{ \
+                 if b == 0 {{ Result::Err(0 - 99) }} else {{ Result::Ok(a / b) }} \
+             }} \
+             fn compute(x: i64, d: i64) -> Result<i64, i64> {{ \
+                 let q = checked(x, d)?; \
+                 let r = checked(q + 6, 2)?; \
+                 Result::Ok(r + 1) \
+             }} \
+             fn get(r: Result<i64, i64>) -> i64 {{ \
+                 match r {{ Result::Ok(v) => v, Result::Err(e) => e }} \
+             }} \
+             fn main() -> i64 {{ get(compute(20, 2)) + get(compute(1, 0)) }}"
+        );
+        // compute(20,2): q=10, r=(10+6)/2=8, Ok(9) -> 9
+        // compute(1,0): checked(1,0)=Err(-99) -> ? returns Err(-99) -> get= -99
+        // 9 + (-99) = -90
+        assert_eq!(run_gc(&src, false), -90);
+    }
+
+    #[test]
+    fn try_operator_under_stress() {
+        let src = format!(
+            "{PRELUDE} \
+             fn checked(a: i64, b: i64) -> Result<i64, i64> {{ \
+                 if b == 0 {{ Result::Err(0 - 1) }} else {{ Result::Ok(a / b) }} \
+             }} \
+             fn chain(x: i64) -> Result<i64, i64> {{ \
+                 let a = checked(x, 2)?; \
+                 let b = checked(a, 1)?; \
+                 Result::Ok(b) \
+             }} \
+             fn get(r: Result<i64, i64>) -> i64 {{ match r {{ Result::Ok(v) => v, Result::Err(e) => e }} }} \
+             fn main() -> i64 {{ get(chain(40)) }}"
+        );
+        assert_eq!(run_gc(&src, true), 20);
+    }
+
+    #[test]
+    fn generic_struct_pair() {
+        let src = "struct Pair<A, B> { first: A, second: B } \
+                   fn main() -> i64 { \
+                       let p = Pair { first: 10, second: 32 }; \
+                       p.first + p.second \
+                   }";
+        assert_eq!(run_gc(src, true), 42);
     }
 
     #[test]

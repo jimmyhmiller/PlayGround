@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// A semantic type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// A primitive scalar / unit / never.
     Prim(Prim),
@@ -32,7 +32,7 @@ pub enum Ty {
     Infer(u32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Prim {
     I8, I16, I32, I64, U8, U16, U32, U64, F32, F64,
     Bool, Char, Str, Unit,
@@ -64,6 +64,19 @@ pub struct TyCtx {
     pub impls: Vec<Rc<ImplBlock>>,
     /// Variant name → (enum fq-name, index, payload types as written).
     pub variants: HashMap<String, (String, u32)>,
+    /// Method index: (receiver base type name, method name) → the impl method.
+    /// Used to resolve `recv.method(..)` to a concrete function. Inherent and
+    /// trait impls are both indexed here (trait method resolution is by name).
+    pub methods: HashMap<(String, String), MethodEntry>,
+}
+
+#[derive(Clone)]
+pub struct MethodEntry {
+    /// The impl's `Self` type as written (e.g. `Option<T>`), for binding `Self`.
+    pub self_ty: Type,
+    /// The impl block's own generic parameter names (`impl<T> ... for Foo<T>`).
+    pub impl_generics: Vec<String>,
+    pub method: Rc<FnDef>,
 }
 
 impl TyCtx {
@@ -78,6 +91,23 @@ impl TyCtx {
                     .or_insert((name.clone(), i as u32));
             }
         }
+        // Build the method index from every impl block.
+        let mut methods = HashMap::new();
+        for imp in &g.impls {
+            let base = type_base_name(&imp.self_ty);
+            let impl_generics: Vec<String> =
+                imp.generics.params.iter().map(|p| p.name.clone()).collect();
+            for m in &imp.items {
+                methods.insert(
+                    (base.clone(), m.name.clone()),
+                    MethodEntry {
+                        self_ty: imp.self_ty.clone(),
+                        impl_generics: impl_generics.clone(),
+                        method: Rc::new(m.clone()),
+                    },
+                );
+            }
+        }
         TyCtx {
             structs: g.structs.iter().map(|(k, v)| (k.clone(), Rc::new(v.clone()))).collect(),
             enums: g.enums.iter().map(|(k, v)| (k.clone(), Rc::new(v.clone()))).collect(),
@@ -85,6 +115,7 @@ impl TyCtx {
             traits: g.traits.iter().map(|(k, v)| (k.clone(), Rc::new(v.clone()))).collect(),
             impls: g.impls.iter().map(|i| Rc::new(i.clone())).collect(),
             variants,
+            methods,
         }
     }
 
@@ -102,6 +133,18 @@ impl TyCtx {
             }
         }
         None
+    }
+}
+
+/// The base (head) type name of a surface type: `Vec<i64>` → `"Vec"`,
+/// `i64` → `"i64"`. Used to key the method index by receiver type.
+pub fn type_base_name(t: &Type) -> String {
+    match &t.kind {
+        TypeKind::Path(p, _) => p.last().to_string(),
+        TypeKind::SelfType => "Self".to_string(),
+        TypeKind::Tuple(_) => "(tuple)".to_string(),
+        TypeKind::Array(..) => "(array)".to_string(),
+        TypeKind::Fn(..) => "(fn)".to_string(),
     }
 }
 

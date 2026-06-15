@@ -7,12 +7,14 @@ the machinery that exists only to serve borrow-checking. No lifetimes, no
 borrows, no `Box`. A precise copying GC owns memory; generics monomorphize so
 value types stay flat and fast.
 
-> Status: **early, but real and running.** The full pipeline — lex → parse →
-> resolve → typecheck → monomorphic core IR → LLVM → JIT — executes today for
-> the scalar subset (see `examples/fib.gcr`). The precise copying GC and its
-> codegen↔runtime ABI are proven end-to-end (`tests/gc_abi_smoke.rs`). Heap
-> types, generics monomorphization, traits, closures, and the stdlib are in
-> progress. See `PLAN.md`.
+> Status: **real and running.** The full pipeline — lex → parse → resolve →
+> typecheck → **monomorphize** → core IR → LLVM → JIT — executes today for:
+> scalars + arithmetic (signed/unsigned), `if`/`while`/`loop`/`match`, recursion,
+> **heap structs + enums with a real copying GC** (`examples/shapes.gcr`), and
+> **monomorphized generics** (`fn dup<T>` becomes separate native functions per
+> concrete type — no boxing). The GC relocates live objects under stress with
+> precise roots, all from compiler-generated frame code. Traits, closures,
+> `Vec`/`String`/stdlib, and the benchmark suite are next. See `PLAN.md`.
 
 ## Try it
 

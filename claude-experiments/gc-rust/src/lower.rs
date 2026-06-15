@@ -13,6 +13,7 @@ use crate::layout::LayoutRegistry;
 use crate::lexer::Span;
 use crate::types::{Prim, Ty, TyCtx, lower_type, suffix_prim};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct LowerError {
@@ -25,48 +26,50 @@ fn err<T>(msg: impl Into<String>, span: Span) -> LResult<T> {
     Err(LowerError { msg: msg.into(), span })
 }
 
-/// A function instantiation: a fully-qualified name plus concrete type
-/// arguments (empty for a non-generic function). This is the unit of
-/// monomorphization — each distinct instantiation is lowered once.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct Inst {
-    fq: String,
-    args: Vec<Ty>,
+/// A resolved function instantiation queued for lowering: the source `FnDef`,
+/// the type-parameter substitution to apply, and the mangled name. Works for
+/// free functions AND impl methods (methods aren't in `ctx.fns`, so we carry
+/// the `FnDef` directly).
+#[derive(Clone)]
+struct Job {
+    f: Rc<FnDef>,
+    subst: HashMap<String, Ty>,
+    mangled: String,
+    /// For an impl method, the receiver's `self` type (already ground). `None`
+    /// for a free function.
+    self_ty: Option<Ty>,
 }
 
-impl Inst {
-    fn mangled(&self) -> String {
-        if self.args.is_empty() {
-            self.fq.clone()
-        } else {
-            let a: Vec<String> = self.args.iter().map(ty_mangle).collect();
-            format!("{}${}", self.fq, a.join("_"))
-        }
-    }
-}
-
-/// Drives monomorphization: assigns each needed instantiation a [`FuncId`] and
-/// keeps a worklist of instantiations still to be lowered.
+/// Drives monomorphization: assigns each needed instantiation (keyed by its
+/// mangled name) a [`FuncId`] and keeps a worklist of jobs to lower.
 struct Mono {
-    ids: HashMap<Inst, FuncId>,
-    worklist: Vec<(FuncId, Inst)>,
+    ids: HashMap<String, FuncId>,
+    worklist: Vec<(FuncId, Job)>,
 }
 
 impl Mono {
     fn new() -> Self {
         Mono { ids: HashMap::new(), worklist: Vec::new() }
     }
-    /// Get (or assign) the FuncId for an instantiation, queueing it for lowering
-    /// the first time it's seen. `count` is the current number of allocated ids.
-    fn intern(&mut self, inst: Inst, count: &mut u32) -> FuncId {
-        if let Some(id) = self.ids.get(&inst) {
+    /// Get (or assign) the FuncId for a job (keyed by mangled name), queueing it
+    /// for lowering the first time it's seen.
+    fn intern(&mut self, job: Job, count: &mut u32) -> FuncId {
+        if let Some(id) = self.ids.get(&job.mangled) {
             return *id;
         }
         let id = *count;
         *count += 1;
-        self.ids.insert(inst.clone(), id);
-        self.worklist.push((id, inst));
+        self.ids.insert(job.mangled.clone(), id);
+        self.worklist.push((id, job));
         id
+    }
+}
+
+fn mangle(fq: &str, args: &[Ty]) -> String {
+    if args.is_empty() {
+        fq.to_string()
+    } else {
+        format!("{}${}", fq, args.iter().map(ty_mangle).collect::<Vec<_>>().join("_"))
     }
 }
 
@@ -82,16 +85,16 @@ pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgr
     let Some(main_fq) = main_fq else {
         return err("no `main` function found", Span::new(0, 0));
     };
-    let entry = mono.intern(Inst { fq: main_fq, args: vec![] }, &mut count);
+    let main_f = ctx.fns[&main_fq].clone();
+    let entry = mono.intern(
+        Job { f: main_f, subst: HashMap::new(), mangled: main_fq, self_ty: None },
+        &mut count,
+    );
     prog.entry = Some(entry);
 
     // Lower instantiations until the worklist drains (transitively reachable).
-    while let Some((id, inst)) = mono.worklist.pop() {
-        let f = ctx.fns.get(&inst.fq).cloned()
-            .ok_or_else(|| LowerError { msg: format!("unknown function `{}`", inst.fq), span: Span::new(0, 0) })?;
-        let subst = build_fn_subst(&f, &inst.args);
-        let lowered = lower_fn(&f, &inst, &subst, &ctx, &mut reg, &mut mono, &mut count)?;
-        // Ensure prog.funcs is large enough.
+    while let Some((id, job)) = mono.worklist.pop() {
+        let lowered = lower_fn(&job, &ctx, &mut reg, &mut mono, &mut count)?;
         while prog.funcs.len() <= id as usize {
             prog.funcs.push(placeholder_fn());
         }
@@ -107,8 +110,18 @@ fn placeholder_fn() -> CoreFn {
     CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None } }
 }
 
-fn build_fn_subst(f: &FnDef, args: &[Ty]) -> HashMap<String, Ty> {
-    f.generics.params.iter().map(|p| p.name.clone()).zip(args.iter().cloned()).collect()
+/// The method-index key for a primitive receiver: `i64`, `f64`, etc. — the
+/// literal name used in `impl Show for i64`.
+fn prim_impl_key(ty: &Ty) -> String {
+    match ty {
+        Ty::Prim(p) => match p {
+            Prim::I8 => "i8", Prim::I16 => "i16", Prim::I32 => "i32", Prim::I64 => "i64",
+            Prim::U8 => "u8", Prim::U16 => "u16", Prim::U32 => "u32", Prim::U64 => "u64",
+            Prim::F32 => "f32", Prim::F64 => "f64",
+            Prim::Bool => "bool", Prim::Char => "char", Prim::Str => "String", Prim::Unit => "()",
+        }.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn ty_mangle(t: &Ty) -> String {
@@ -125,10 +138,14 @@ fn ty_mangle(t: &Ty) -> String {
     }
 }
 
-struct FnLowerer<'a, 'r> {
+struct FnLowerer<'a, 'r, 'm> {
     ctx: &'a TyCtx,
-    func_ids: &'a HashMap<String, FuncId>,
     reg: &'r mut LayoutRegistry<'a>,
+    mono: &'m mut Mono,
+    count: &'m mut u32,
+    /// Type-parameter substitution for the current instantiation (empty if the
+    /// enclosing function is non-generic).
+    subst: HashMap<String, Ty>,
     /// Lexical scope: name → (LocalId, Ty).
     scope: Vec<HashMap<String, (LocalId, Ty)>>,
     /// All locals' reprs, indexed by LocalId.
@@ -139,20 +156,24 @@ struct FnLowerer<'a, 'r> {
 }
 
 fn lower_fn<'a>(
-    f: &FnDef,
+    job: &Job,
     ctx: &'a TyCtx,
-    func_ids: &'a HashMap<String, FuncId>,
     reg: &mut LayoutRegistry<'a>,
+    mono: &mut Mono,
+    count: &mut u32,
 ) -> LResult<CoreFn> {
-    let generics: Vec<String> = vec![];
+    let f = &job.f;
+    let subst = &job.subst;
     let ret_ty = match &f.ret {
-        Some(t) => lower_type(t, &generics, ctx).map_err(conv)?,
+        Some(t) => ground_type(t, subst, ctx)?,
         None => Ty::unit(),
     };
     let mut lo = FnLowerer {
         ctx,
-        func_ids,
         reg,
+        mono,
+        count,
+        subst: subst.clone(),
         scope: vec![HashMap::new()],
         locals: vec![],
         local_tys: vec![],
@@ -160,26 +181,60 @@ fn lower_fn<'a>(
     };
 
     let mut params = Vec::new();
+    // A method's implicit `self` parameter comes first.
+    if f.has_self {
+        let self_ty = job.self_ty.clone()
+            .ok_or_else(|| LowerError { msg: "method without a self type".into(), span: f.span })?;
+        let repr = lo.repr_of(&self_ty, f.span)?;
+        let id = lo.fresh_local(repr.clone(), self_ty.clone());
+        lo.bind("self", id, self_ty);
+        params.push(repr);
+    }
     for p in &f.params {
-        let ty = lower_type(&p.ty, &generics, lo.ctx).map_err(conv)?;
+        let ty = ground_type(&p.ty, &lo.subst.clone(), lo.ctx)?;
         let repr = lo.repr_of(&ty, p.span)?;
         let id = lo.fresh_local(repr.clone(), ty.clone());
         lo.bind(&p.name, id, ty);
         params.push(repr);
     }
 
-    let (body, body_ty) = lo.block(&f.body)?;
+    let (body, body_ty) = lo.block_expected(&f.body, Some(&ret_ty))?;
     check_assignable(&body_ty, &ret_ty, f.body.span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: f.name.clone(), params, ret, locals: lo.locals, body })
+    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body })
+}
+
+/// Lower a surface type to a ground `Ty`, applying the instantiation subst.
+fn ground_type(t: &Type, subst: &HashMap<String, Ty>, ctx: &TyCtx) -> LResult<Ty> {
+    let gparams: Vec<String> = subst.keys().cloned().collect();
+    let raw = lower_type(t, &gparams, ctx).map_err(conv)?;
+    Ok(apply_subst(&raw, subst))
+}
+
+/// Substitute type variables in a `Ty` using `subst`.
+fn apply_subst(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Named { name, args } => Ty::Named {
+            name: name.clone(),
+            args: args.iter().map(|a| apply_subst(a, subst)).collect(),
+        },
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| apply_subst(e, subst)).collect()),
+        Ty::Array(e, n) => Ty::Array(Box::new(apply_subst(e, subst)), *n),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params.iter().map(|p| apply_subst(p, subst)).collect(),
+            ret: Box::new(apply_subst(ret, subst)),
+        },
+        Ty::Prim(_) | Ty::Infer(_) => ty.clone(),
+    }
 }
 
 fn conv(e: crate::types::TypeError) -> LowerError {
     LowerError { msg: e.msg, span: e.span }
 }
 
-impl<'a, 'r> FnLowerer<'a, 'r> {
+impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
     /// Repr of a type, via the shared layout registry.
     fn repr_of(&mut self, ty: &Ty, span: Span) -> LResult<Repr> {
         self.reg.repr(ty).map_err(|e| LowerError { msg: e.0, span })
@@ -206,6 +261,10 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
     fn pop_scope(&mut self) { self.scope.pop(); }
 
     fn block(&mut self, b: &Block) -> LResult<(CoreBlock, Ty)> {
+        self.block_expected(b, None)
+    }
+
+    fn block_expected(&mut self, b: &Block, expected: Option<&Ty>) -> LResult<(CoreBlock, Ty)> {
         self.push_scope();
         let mut stmts = Vec::new();
         for s in &b.stmts {
@@ -240,7 +299,7 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         }
         let (tail, ty) = match &b.tail {
             Some(e) => {
-                let (ce, t) = self.expr(e, None)?;
+                let (ce, t) = self.expr(e, expected)?;
                 (Some(ce), t)
             }
             None => (None, Ty::unit()),
@@ -279,7 +338,7 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
                     Ok((CoreExpr::new(CoreExprKind::Local(id), repr), ty))
                 } else if self.ctx.variants.contains_key(name) {
                     // An unqualified unit variant brought into scope (`None`).
-                    self.variant_ctor(path, &[], e.span)
+                    self.variant_ctor(path, &[], expected, e.span)
                 } else {
                     err(format!("unknown variable `{}`", name), e.span)
                 }
@@ -293,15 +352,29 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
 
             ExprKind::Binary(op, l, r) => self.binary(*op, l, r, e.span),
 
-            ExprKind::Call(callee, args) => self.call(callee, args, e.span),
+            ExprKind::Call(callee, args) => {
+                // A variant constructor call (`Result::Err(x)`) needs `expected`
+                // to infer type params the payload doesn't pin; intercept it
+                // here where `expected` is in scope.
+                if let ExprKind::Path(path) = &*callee.kind {
+                    let key = path.segments.join("::");
+                    if self.ctx.variants.contains_key(&key) || self.ctx.variants.contains_key(path.last()) {
+                        return self.variant_ctor(path, args, expected, e.span);
+                    }
+                }
+                self.call(callee, args, e.span)
+            }
 
             ExprKind::If { cond, then_branch, else_branch } => {
                 let (cc, ct) = self.expr(cond, Some(&Ty::bool()))?;
                 check_assignable(&ct, &Ty::bool(), cond.span)?;
-                let (tb, tt) = self.block(then_branch)?;
+                let (tb, tt) = self.block_expected(then_branch, expected)?;
+                // The else branch is checked against the then branch's type (or
+                // the outer expectation if the then branch was itself inferred).
+                let else_exp = expected.or(Some(&tt));
                 let (eb, et) = match else_branch {
                     Some(e) => {
-                        let (ce, t) = self.expr(e, None)?;
+                        let (ce, t) = self.expr(e, else_exp)?;
                         (block_of(ce), t)
                     }
                     None => (CoreBlock { stmts: vec![], tail: None }, Ty::unit()),
@@ -315,7 +388,7 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
             }
 
             ExprKind::Block(b) => {
-                let (cb, t) = self.block(b)?;
+                let (cb, t) = self.block_expected(b, expected)?;
                 let repr = self.repr_of(&t, e.span)?;
                 Ok((CoreExpr::new(CoreExprKind::Block(Box::new(cb)), repr), t))
             }
@@ -414,10 +487,16 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
             ExprKind::Path(path) if !path.is_single() => {
                 // A qualified path that's a unit enum variant: `Color::Red`,
                 // `Option::None`.
-                self.variant_ctor(path, &[], e.span)
+                self.variant_ctor(path, &[], expected, e.span)
             }
 
             ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, e.span),
+
+            ExprKind::Try(inner) => self.try_op(inner, e.span),
+
+            ExprKind::MethodCall { recv, method, args, span } => {
+                self.method_call(recv, method, args, *span)
+            }
 
             other => err(format!("expression not supported in v0 slice: {:?}", disc(other)), e.span),
         }
@@ -433,24 +512,37 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         let StructBody::Named(def_fields) = &s.body else {
             return err("struct literal on a non-record struct", span);
         };
-        if !s.generics.params.is_empty() {
-            return err("generic struct literals need the monomorphizer (pending)", span);
-        }
-        // Evaluate fields in declaration order.
+        let gparams: Vec<String> = s.generics.params.iter().map(|p| p.name.clone()).collect();
+        // Evaluate fields in declaration order, inferring the struct's type args
+        // from the field values.
+        let mut targ: HashMap<String, Ty> = HashMap::new();
         let mut cfields = Vec::with_capacity(def_fields.len());
+        let mut field_checks = Vec::new();
         for df in def_fields {
             let init = fields.iter().find(|f| f.name == df.name)
                 .ok_or_else(|| LowerError { msg: format!("missing field `{}`", df.name), span })?;
-            let fty = lower_type(&df.ty, &[], self.ctx).map_err(conv)?;
+            let declared = lower_type(&df.ty, &gparams, self.ctx).map_err(conv)?;
             let val_expr = match &init.value {
                 Some(v) => v.clone(),
                 None => Expr { kind: Box::new(ExprKind::Path(Path::single(df.name.clone(), span))), span },
             };
-            let (cv, vt) = self.expr(&val_expr, Some(&fty))?;
-            check_assignable(&vt, &fty, span)?;
+            let (cv, vt) = self.expr(&val_expr, hint(&declared))?;
+            unify_infer(&declared, &vt, &mut targ);
+            field_checks.push((declared, vt));
             cfields.push(cv);
         }
-        let ty = Ty::Named { name: canon.clone(), args: vec![] };
+        let mut struct_args = Vec::new();
+        for gp in &gparams {
+            match targ.get(gp) {
+                Some(t) => struct_args.push(t.clone()),
+                None => return err(format!("cannot infer `{}` for struct `{}`", gp, name), span),
+            }
+        }
+        let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(struct_args.iter().cloned()).collect();
+        for (declared, actual) in &field_checks {
+            check_assignable(actual, &apply_subst(declared, &subst), span)?;
+        }
+        let ty = Ty::Named { name: canon.clone(), args: struct_args };
         let repr = self.repr_of(&ty, span)?;
         let kind = match repr {
             Repr::Ref(lid) => CoreExprKind::New { layout: lid, fields: cfields },
@@ -461,34 +553,57 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
     }
 
     /// Construct an enum variant. `path` is `Enum::Variant`; `args` are payload
-    /// values (empty for a unit variant).
-    fn variant_ctor(&mut self, path: &Path, args: &[Expr], span: Span) -> LResult<(CoreExpr, Ty)> {
+    /// values (empty for a unit variant). `expected` provides the enum's type
+    /// args when they can't be inferred from the payload (e.g. `None`).
+    fn variant_ctor(&mut self, path: &Path, args: &[Expr], expected: Option<&Ty>, span: Span) -> LResult<(CoreExpr, Ty)> {
         let key = path.segments.join("::");
         let last = path.last();
         let (enum_name, tag) = self.ctx.variants.get(&key)
             .or_else(|| self.ctx.variants.get(last))
             .cloned()
             .ok_or_else(|| LowerError { msg: format!("unknown variant `{}`", key), span })?;
-        let e = self.ctx.enums.get(&enum_name).cloned().unwrap();
-        if !e.generics.params.is_empty() {
-            return err("generic enum construction needs the monomorphizer (pending)", span);
+        // Builtin Option/Result: enum_name is "Option"/"Result"; handle by name.
+        let gparams: Vec<String> = self.ctx.enums.get(&enum_name)
+            .map(|e| e.generics.params.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_else(|| builtin_enum_params(&enum_name));
+
+        // Declared payload types (may mention the enum's generic params).
+        let decl_payload = self.variant_decl_payload(&enum_name, tag, &gparams)?;
+        if args.len() != decl_payload.len() {
+            return err(format!("variant `{}` expects {} args, got {}", last, decl_payload.len(), args.len()), span);
         }
-        let variant = &e.variants[tag as usize];
-        let payload_tys: Vec<Ty> = match &variant.payload {
-            VariantPayload::None => vec![],
-            VariantPayload::Tuple(tys) => tys.iter().map(|t| lower_type(t, &[], self.ctx)).collect::<Result<_, _>>().map_err(conv)?,
-            VariantPayload::Named(fs) => fs.iter().map(|f| lower_type(&f.ty, &[], self.ctx)).collect::<Result<_, _>>().map_err(conv)?,
-        };
-        if args.len() != payload_tys.len() {
-            return err(format!("variant `{}` expects {} args, got {}", last, payload_tys.len(), args.len()), span);
+
+        // Infer the enum's type args from (a) the expected type, (b) the payload.
+        let mut targ: HashMap<String, Ty> = HashMap::new();
+        if let Some(Ty::Named { name, args: eargs }) = expected {
+            if name == &enum_name || name.rsplit("::").next() == enum_name.rsplit("::").next() {
+                for (gp, a) in gparams.iter().zip(eargs) {
+                    targ.insert(gp.clone(), a.clone());
+                }
+            }
         }
         let mut cargs = Vec::new();
-        for (a, t) in args.iter().zip(&payload_tys) {
-            let (ca, at) = self.expr(a, Some(t))?;
-            check_assignable(&at, t, a.span)?;
+        let mut actuals = Vec::new();
+        for (a, decl) in args.iter().zip(&decl_payload) {
+            let (ca, at) = self.expr(a, hint(decl))?;
+            unify_infer(decl, &at, &mut targ);
+            actuals.push((decl.clone(), at));
             cargs.push(ca);
         }
-        let ty = Ty::Named { name: enum_name.clone(), args: vec![] };
+        // Resolve the enum's full type args.
+        let mut enum_args = Vec::new();
+        for gp in &gparams {
+            match targ.get(gp) {
+                Some(t) => enum_args.push(t.clone()),
+                None => return err(format!("cannot infer `{}` for enum `{}`", gp, enum_name), span),
+            }
+        }
+        let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(enum_args.iter().cloned()).collect();
+        for (decl, actual) in &actuals {
+            check_assignable(actual, &apply_subst(decl, &subst), span)?;
+        }
+
+        let ty = Ty::Named { name: enum_name.clone(), args: enum_args };
         let repr = self.repr_of(&ty, span)?;
         let Repr::Ref(lid) = repr else {
             return err("value enums not yet supported in construction (pending)", span);
@@ -496,12 +611,33 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr), ty))
     }
 
+    /// The declared payload types of `enum::variant[tag]`, with the enum's
+    /// generic params left as `Ty::Var`. Handles builtin Option/Result.
+    fn variant_decl_payload(&self, enum_name: &str, tag: u32, gparams: &[String]) -> LResult<Vec<Ty>> {
+        if let Some(e) = self.ctx.enums.get(enum_name) {
+            let variant = &e.variants[tag as usize];
+            return match &variant.payload {
+                VariantPayload::None => Ok(vec![]),
+                VariantPayload::Tuple(tys) => tys.iter().map(|t| lower_type(t, gparams, self.ctx)).collect::<Result<_, _>>().map_err(conv),
+                VariantPayload::Named(fs) => fs.iter().map(|f| lower_type(&f.ty, gparams, self.ctx)).collect::<Result<_, _>>().map_err(conv),
+            };
+        }
+        // Builtin Option/Result.
+        Ok(match (enum_name, tag) {
+            ("Option", 0) => vec![],                       // None
+            ("Option", 1) => vec![Ty::Var("T".into())],    // Some(T)
+            ("Result", 0) => vec![Ty::Var("T".into())],    // Ok(T)
+            ("Result", 1) => vec![Ty::Var("E".into())],    // Err(E)
+            _ => return Err(LowerError { msg: format!("unknown variant of `{}`", enum_name), span: Span::new(0, 0) }),
+        })
+    }
+
     fn field_access(&mut self, base: &Expr, field: &FieldAccess, span: Span) -> LResult<(CoreExpr, Ty)> {
         let (cbase, bty) = self.expr(base, None)?;
         let FieldAccess::Named(fname) = field else {
             return err("tuple field access not yet supported in v0", span);
         };
-        let Ty::Named { name, .. } = &bty else {
+        let Ty::Named { name, args: struct_args } = &bty else {
             return err("field access on a non-struct", span);
         };
         let s = self.ctx.structs.get(name).cloned()
@@ -511,7 +647,10 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         };
         let idx = def_fields.iter().position(|f| &f.name == fname)
             .ok_or_else(|| LowerError { msg: format!("no field `{}` on `{}`", fname, name), span })?;
-        let fty = lower_type(&def_fields[idx].ty, &[], self.ctx).map_err(conv)?;
+        let gparams: Vec<String> = s.generics.params.iter().map(|p| p.name.clone()).collect();
+        let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(struct_args.iter().cloned()).collect();
+        let raw_fty = lower_type(&def_fields[idx].ty, &gparams, self.ctx).map_err(conv)?;
+        let fty = apply_subst(&raw_fty, &subst);
         // The FieldLoc is in the base layout's field_map.
         let loc = match &cbase.repr {
             Repr::Ref(lid) => self.reg.layouts[*lid as usize].field_map[idx],
@@ -524,11 +663,13 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> LResult<(CoreExpr, Ty)> {
         let (cscrut, sty) = self.expr(scrutinee, None)?;
-        let Ty::Named { name: enum_name, .. } = &sty else {
+        let Ty::Named { name: enum_name, args: enum_args } = &sty else {
             return err("match on a non-enum is not yet supported in v0", span);
         };
-        // Resolve enum (user or builtin Option/Result).
-        let variants: Vec<(u32, Vec<Ty>)> = self.enum_variants(enum_name)?;
+        let enum_name = enum_name.clone();
+        let enum_args = enum_args.clone();
+        // Variant payload types, with the enum's concrete type args substituted.
+        let variants: Vec<(u32, Vec<Ty>)> = self.enum_variants(&enum_name, &enum_args)?;
         let mut carms = Vec::new();
         let mut result_ty: Option<Ty> = None;
         for arm in arms {
@@ -542,7 +683,7 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
                 }
                 PatternKind::Variant { path, payload } => {
                     let vlast = path.last();
-                    let (tag, ptys) = self.variant_in(enum_name, vlast, &variants, arm.pattern.span)?;
+                    let (tag, ptys) = self.variant_in(&enum_name, vlast, &variants, arm.pattern.span)?;
                     if payload.len() != ptys.len() {
                         return err(format!("variant `{}` binds {} fields, pattern has {}", vlast, ptys.len(), payload.len()), arm.pattern.span);
                     }
@@ -578,18 +719,164 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         Ok((CoreExpr::new(CoreExprKind::Match { scrutinee: Box::new(cscrut), arms: carms }, repr), rty))
     }
 
-    /// All (tag, payload-types) of an enum (user or builtin).
-    fn enum_variants(&mut self, enum_name: &str) -> LResult<Vec<(u32, Vec<Ty>)>> {
-        if let Some(e) = self.ctx.enums.get(enum_name).cloned() {
-            if !e.generics.params.is_empty() {
-                return err("generic match needs the monomorphizer (pending)", Span::new(0, 0));
+    /// Resolve and lower `recv.method(args)` to a concrete monomorphic call,
+    /// with `recv` passed as the leading `self` argument.
+    fn method_call(&mut self, recv: &Expr, method: &str, args: &[Expr], span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (crecv, recv_ty) = self.expr(recv, None)?;
+        let base = match &recv_ty {
+            Ty::Named { name, .. } => name.rsplit("::").next().unwrap().to_string(),
+            Ty::Prim(p) => format!("{:?}", p).to_lowercase(),
+            _ => return err("method call on an unsupported receiver type", span),
+        };
+        // Look up the method (try the exact base, then the canonical struct/enum
+        // name's last segment).
+        let entry = self.ctx.methods.get(&(base.clone(), method.to_string())).cloned()
+            .or_else(|| {
+                // primitives: i64 etc are keyed by their literal name in impls.
+                self.ctx.methods.get(&(prim_impl_key(&recv_ty), method.to_string())).cloned()
+            })
+            .ok_or_else(|| LowerError { msg: format!("no method `{}` on `{}`", method, base), span })?;
+
+        // Infer the impl's generic params + Self by unifying the impl's written
+        // self type against the receiver's concrete type.
+        let impl_self = lower_type(&entry.self_ty, &entry.impl_generics, self.ctx).map_err(conv)?;
+        let mut isubst: HashMap<String, Ty> = HashMap::new();
+        unify_infer(&impl_self, &recv_ty, &mut isubst);
+        // `Self` resolves to the concrete receiver type.
+        isubst.insert("Self".to_string(), recv_ty.clone());
+
+        let m = entry.method.clone();
+        // Method-level generics inferred from args.
+        let mgparams: Vec<String> = m.generics.params.iter().map(|p| p.name.clone()).collect();
+        if args.len() != m.params.len() {
+            return err(format!("method `{}` expects {} args, got {}", method, m.params.len(), args.len()), span);
+        }
+        let mut cargs = vec![crecv];
+        let mut checks = Vec::new();
+        for (a, p) in args.iter().zip(&m.params) {
+            // declared param type may mention impl generics, Self, or method generics.
+            let mut scope_params = entry.impl_generics.clone();
+            scope_params.extend(mgparams.clone());
+            scope_params.push("Self".to_string());
+            let declared = lower_type(&p.ty, &scope_params, self.ctx).map_err(conv)?;
+            let pre = apply_subst(&declared, &isubst);
+            let (ca, at) = self.expr(a, hint(&pre))?;
+            unify_infer(&pre, &at, &mut isubst);
+            checks.push((declared.clone(), at));
+            cargs.push(ca);
+        }
+        // Re-apply now that all type vars are known.
+        for (declared, actual) in &checks {
+            check_assignable(actual, &apply_subst(declared, &isubst), span)?;
+        }
+
+        // Build the full substitution (impl generics + method generics + Self).
+        let subst = isubst.clone();
+        // Mangle: <Self-type>::method$<args>.
+        let self_mangle = ty_mangle(&recv_ty);
+        let extra: Vec<Ty> = mgparams.iter().filter_map(|g| subst.get(g).cloned()).collect();
+        let mangled = mangle(&format!("{}.{}", self_mangle, method), &extra);
+
+        let ret_ty = match &m.ret {
+            Some(t) => {
+                let mut scope_params = entry.impl_generics.clone();
+                scope_params.extend(mgparams.clone());
+                scope_params.push("Self".to_string());
+                let raw = lower_type(t, &scope_params, self.ctx).map_err(conv)?;
+                apply_subst(&raw, &subst)
             }
+            None => Ty::unit(),
+        };
+
+        let job = Job { f: m, subst, mangled, self_ty: Some(recv_ty) };
+        let fid = self.mono.intern(job, self.count);
+        let repr = self.repr_of(&ret_ty, span)?;
+        Ok((CoreExpr::new(CoreExprKind::Call(fid, cargs), repr), ret_ty))
+    }
+
+    /// The `?` operator. `inner` evaluates to a `Result<T,E>` or `Option<T>`;
+    /// `Ok(v)`/`Some(v)` yields `v`, `Err(e)`/`None` early-returns the value
+    /// re-wrapped in the enclosing function's return type.
+    fn try_op(&mut self, inner: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (cinner, ity) = self.expr(inner, None)?;
+        let Ty::Named { name, args } = &ity else {
+            return err("`?` operand must be a Result or Option", span);
+        };
+        let enum_name = name.clone();
+        let kind = enum_name.rsplit("::").next().unwrap();
+        let (ok_tag, err_tag) = match kind {
+            "Result" | "Option" => (0u32, 1u32),
+            _ => return err("`?` operand must be a Result or Option", span),
+        };
+        // Determine ok-payload type from the scrutinee's args.
+        let variants = self.enum_variants(&enum_name, args)?;
+        let ok_payload = variants.iter().find(|(t, _)| *t == ok_tag).map(|(_, p)| p.clone()).unwrap_or_default();
+        let ok_ty = ok_payload.first().cloned().unwrap_or_else(Ty::unit);
+        let ok_repr = self.repr_of(&ok_ty, span)?;
+
+        // The enclosing fn's return type must be the same enum (so we can build
+        // the Err/None to early-return). Re-wrap the err payload as the fn ret.
+        let ret_ty = self.ret_ty.clone();
+        let Ty::Named { name: rname, args: rargs } = &ret_ty else {
+            return err("`?` requires the function to return a Result/Option", span);
+        };
+        if rname.rsplit("::").next() != Some(kind) {
+            return err("`?` return-type mismatch with the function", span);
+        }
+        let ret_repr = self.repr_of(&ret_ty, span)?;
+        let Repr::Ref(ret_lid) = ret_repr else {
+            return err("`?` on a value-enum return is not supported", span);
+        };
+
+        // Ok arm: bind payload to a local; body = that local.
+        let ok_local = self.fresh_local(ok_repr.clone(), ok_ty.clone());
+        let ok_body = CoreExpr::new(CoreExprKind::Local(ok_local), ok_repr.clone());
+
+        // Err arm: bind the err payload, rebuild Err(e)/None for the fn ret, return.
+        let err_payload = variants.iter().find(|(t, _)| *t == err_tag).map(|(_, p)| p.clone()).unwrap_or_default();
+        let (err_binds, err_fields) = if err_payload.is_empty() {
+            (vec![], vec![]) // None
+        } else {
+            let ety = err_payload[0].clone();
+            let erepr = self.repr_of(&ety, span)?;
+            let elocal = self.fresh_local(erepr.clone(), ety);
+            (vec![elocal], vec![CoreExpr::new(CoreExprKind::Local(elocal), erepr)])
+        };
+        // Build the return value: MakeVariant of the fn's return enum, err_tag.
+        let _ = rargs;
+        let rebuilt = CoreExpr::new(
+            CoreExprKind::MakeVariant { layout: ret_lid, tag: err_tag, fields: err_fields },
+            Repr::Ref(ret_lid),
+        );
+        let err_body = CoreExpr::new(CoreExprKind::Return(Some(Box::new(rebuilt))), Repr::Unit);
+
+        let arms = vec![
+            CoreArm { tag: ok_tag, binds: vec![ok_local], body: ok_body },
+            CoreArm { tag: err_tag, binds: err_binds, body: err_body },
+        ];
+        let m = CoreExpr::new(
+            CoreExprKind::Match { scrutinee: Box::new(cinner), arms },
+            ok_repr,
+        );
+        Ok((m, ok_ty))
+    }
+
+    /// All (tag, payload-types) of an enum, with the enum's concrete type args
+    /// substituted in (so a `match` on `Option<i64>` sees `Some(i64)`).
+    fn enum_variants(&mut self, enum_name: &str, enum_args: &[Ty]) -> LResult<Vec<(u32, Vec<Ty>)>> {
+        if let Some(e) = self.ctx.enums.get(enum_name).cloned() {
+            let gparams: Vec<String> = e.generics.params.iter().map(|p| p.name.clone()).collect();
+            let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(enum_args.iter().cloned()).collect();
             let mut out = Vec::new();
             for (i, v) in e.variants.iter().enumerate() {
                 let tys: Vec<Ty> = match &v.payload {
                     VariantPayload::None => vec![],
-                    VariantPayload::Tuple(t) => t.iter().map(|t| lower_type(t, &[], self.ctx)).collect::<Result<_, _>>().map_err(conv)?,
-                    VariantPayload::Named(f) => f.iter().map(|f| lower_type(&f.ty, &[], self.ctx)).collect::<Result<_, _>>().map_err(conv)?,
+                    VariantPayload::Tuple(t) => t.iter().map(|t| {
+                        lower_type(t, &gparams, self.ctx).map(|ty| apply_subst(&ty, &subst))
+                    }).collect::<Result<_, _>>().map_err(conv)?,
+                    VariantPayload::Named(f) => f.iter().map(|f| {
+                        lower_type(&f.ty, &gparams, self.ctx).map(|ty| apply_subst(&ty, &subst))
+                    }).collect::<Result<_, _>>().map_err(conv)?,
                 };
                 out.push((i as u32, tys));
             }
@@ -656,31 +943,59 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
         // syntactically; route it to variant construction.
         let key = path.segments.join("::");
         if self.ctx.variants.contains_key(&key) || self.ctx.variants.contains_key(name) {
-            return self.variant_ctor(path, args, span);
+            return self.variant_ctor(path, args, None, span);
         }
         let fq = self.ctx.fns.keys().find(|k| k.rsplit("::").next().unwrap() == name).cloned();
         let Some(fq) = fq else {
             return err(format!("unknown function `{}`", name), span);
         };
         let f = self.ctx.fns[&fq].clone();
-        if !f.generics.params.is_empty() {
-            return err("generic function calls not yet supported (monomorphizer pending)", span);
-        }
-        let Some(&fid) = self.func_ids.get(&fq) else {
-            return err(format!("function `{}` has no id", fq), span);
-        };
         if args.len() != f.params.len() {
             return err(format!("`{}` expects {} args, got {}", name, f.params.len(), args.len()), span);
         }
+
+        // Lower the argument expressions, learning each one's concrete type.
+        // For a generic callee we infer the type-parameter assignment by
+        // unifying declared param types (which mention `T`) against the actual
+        // argument types.
+        let gparams: Vec<String> = f.generics.params.iter().map(|p| p.name.clone()).collect();
+        let mut targ: HashMap<String, Ty> = HashMap::new();
         let mut cargs = Vec::new();
+        let mut arg_tys = Vec::new();
         for (a, p) in args.iter().zip(&f.params) {
-            let pty = lower_type(&p.ty, &[], self.ctx).map_err(conv)?;
-            let (ca, at) = self.expr(a, Some(&pty))?;
-            check_assignable(&at, &pty, a.span)?;
+            // The expected type may still contain `T`; lower with the callee's
+            // generic params in scope (no subst yet — we're inferring it).
+            let declared = lower_type(&p.ty, &gparams, self.ctx).map_err(conv)?;
+            let (ca, at) = self.expr(a, hint(&declared))?;
+            unify_infer(&declared, &at, &mut targ);
+            arg_tys.push((declared, at.clone()));
             cargs.push(ca);
         }
+
+        // Resolve the instantiation's concrete type args (in declared order).
+        let mut inst_args = Vec::new();
+        for gp in &gparams {
+            match targ.get(gp) {
+                Some(t) => inst_args.push(t.clone()),
+                None => return err(format!("cannot infer type parameter `{}` for `{}`", gp, name), span),
+            }
+        }
+
+        // Check each argument against its substituted declared type.
+        let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(inst_args.iter().cloned()).collect();
+        for (declared, actual) in &arg_tys {
+            check_assignable(actual, &apply_subst(declared, &subst), span)?;
+        }
+
+        let mangled = mangle(&fq, &inst_args);
+        let job = Job { f: f.clone(), subst: subst.clone(), mangled, self_ty: None };
+        let fid = self.mono.intern(job, self.count);
+
         let ret_ty = match &f.ret {
-            Some(t) => lower_type(t, &[], self.ctx).map_err(conv)?,
+            Some(t) => {
+                let raw = lower_type(t, &gparams, self.ctx).map_err(conv)?;
+                apply_subst(&raw, &subst)
+            }
             None => Ty::unit(),
         };
         let repr = self.repr_of(&ret_ty, span)?;
@@ -688,10 +1003,56 @@ impl<'a, 'r> FnLowerer<'a, 'r> {
     }
 }
 
+/// A `Some(ty)` hint only when the declared type is already concrete (no free
+/// type variables) — otherwise literal defaulting shouldn't be guided by `T`.
+fn hint(declared: &Ty) -> Option<&Ty> {
+    if has_var(declared) { None } else { Some(declared) }
+}
+
+fn has_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Named { args, .. } | Ty::Tuple(args) => args.iter().any(has_var),
+        Ty::Array(e, _) => has_var(e),
+        Ty::Fn { params, ret } => params.iter().any(has_var) || has_var(ret),
+        Ty::Prim(_) | Ty::Infer(_) => false,
+    }
+}
+
+/// Unify a declared type (which may contain `Ty::Var`) against a concrete
+/// actual type, recording type-variable assignments into `out`.
+fn unify_infer(declared: &Ty, actual: &Ty, out: &mut HashMap<String, Ty>) {
+    match (declared, actual) {
+        (Ty::Var(v), _) => { out.entry(v.clone()).or_insert_with(|| actual.clone()); }
+        (Ty::Named { args: da, .. }, Ty::Named { args: aa, .. }) => {
+            for (d, a) in da.iter().zip(aa) { unify_infer(d, a, out); }
+        }
+        (Ty::Tuple(de), Ty::Tuple(ae)) => {
+            for (d, a) in de.iter().zip(ae) { unify_infer(d, a, out); }
+        }
+        (Ty::Array(de, _), Ty::Array(ae, _)) => unify_infer(de, ae, out),
+        (Ty::Fn { params: dp, ret: dr }, Ty::Fn { params: ap, ret: ar }) => {
+            for (d, a) in dp.iter().zip(ap) { unify_infer(d, a, out); }
+            unify_infer(dr, ar, out);
+        }
+        _ => {}
+    }
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 fn block_of(e: CoreExpr) -> CoreBlock {
     CoreBlock { stmts: vec![], tail: Some(e) }
+}
+
+/// Generic parameter names of the built-in `Option`/`Result` enums (used only
+/// when they aren't user-declared; example programs declare their own).
+fn builtin_enum_params(name: &str) -> Vec<String> {
+    match name {
+        "Option" => vec!["T".into()],
+        "Result" => vec!["T".into(), "E".into()],
+        _ => vec![],
+    }
 }
 
 fn negate(e: CoreExpr) -> CoreExpr {

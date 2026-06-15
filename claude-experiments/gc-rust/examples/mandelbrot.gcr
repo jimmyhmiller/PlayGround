@@ -1,0 +1,46 @@
+// Mandelbrot escape-count sum over a grid — pure f64 arithmetic in a hot
+// recursive/iterative inner loop. One of the headline benchmarks. Returns a
+// checksum (sum of escape iteration counts) so the result is verifiable.
+
+fn iter_count(cr: f64, ci: f64, max: i64) -> i64 {
+    let mut zr = 0.0;
+    let mut zi = 0.0;
+    let mut i = 0;
+    let mut done = 0;
+    while i < max {
+        let zr2 = zr * zr;
+        let zi2 = zi * zi;
+        if done == 0 {
+            if zr2 + zi2 > 4.0 {
+                done = i;
+            } else {
+                let new_zr = zr2 - zi2 + cr;
+                let new_zi = 2.0 * zr * zi + ci;
+                zr = new_zr;
+                zi = new_zi;
+            }
+        }
+        i = i + 1;
+    }
+    if done == 0 { max } else { done }
+}
+
+fn main() -> i64 {
+    let width = 80;
+    let height = 50;
+    let max_iter = 100;
+    let mut py = 0;
+    let mut checksum = 0;
+    while py < height {
+        let mut px = 0;
+        while px < width {
+            // map pixel to complex plane: cr in [-2.5, 1.0], ci in [-1.25, 1.25]
+            let cr = -2.5 + (px as f64) * 3.5 / 80.0;
+            let ci = -1.25 + (py as f64) * 2.5 / 50.0;
+            checksum = checksum + iter_count(cr, ci, max_iter);
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    checksum
+}
