@@ -1,0 +1,46 @@
+// Strings are a built-in, GC-managed, varlen heap type (UTF-8 bytes). The
+// primitives `print_str`, `str_len`, `str_eq`, and `str_concat` are runtime
+// intrinsics; the prelude adds friendly wrappers (`println`, `string_concat`,
+// `str_is_empty`, `str_concat3`). Concatenation allocates a fresh String and is
+// fully GC-safe — the collector relocates live strings under stress.
+
+fn shout(s: String) -> String {
+    str_concat(s, "!")
+}
+
+fn main() -> i64 {
+    let name = "world";
+    let greeting = str_concat3("Hello, ", name, "");
+    println(shout(greeting));            // "Hello, world!"
+
+    // Equality is byte-wise.
+    let yes = if string_eq(name, "world") { 1 } else { 0 };
+
+    // Build a longer string in a loop; each concat allocates, the running
+    // accumulator stays rooted and survives every collection.
+    let mut acc = "";
+    let mut i = 0;
+    while i < 5 {
+        acc = str_concat(acc, "ab");
+        i = i + 1;
+    }
+    println(acc);                        // "ababababab"
+
+    // Formatting: numbers become strings with `to_string`, then concat.
+    println(str_concat("answer = ", to_string(42)));   // "answer = 42"
+    println(str_concat("pi ~ ", to_string(3.14)));     // "pi ~ 3.14"
+
+    // Stdlib algorithms (written in gc-rust over the primitives): trim,
+    // prefix/suffix tests, substring, byte search.
+    let padded = "  trimmed  ";
+    let clean = str_trim(padded);
+    println(clean);                      // "trimmed"
+    let pre = if str_starts_with(clean, "trim") { 1 } else { 0 };
+    let mid = str_substring(clean, 0, 4);
+    println(mid);                        // "trim"
+
+    // Return a checksum: greeting len + acc len + equality + prefix flag +
+    // trimmed len + mid len.
+    str_len(greeting) + str_len(acc) + yes + pre + str_len(clean) + str_len(mid)
+    // 12 + 10 + 1 + 1 + 7 + 4 = 35
+}

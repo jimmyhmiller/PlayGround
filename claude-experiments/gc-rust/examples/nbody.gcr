@@ -6,7 +6,9 @@
 // Returns the total energy * 1e9 as an integer checksum so the result is
 // verifiable and deterministic.
 
-value struct Body {
+#[value]
+
+struct Body {
     x: f64, y: f64, z: f64,
     vx: f64, vy: f64, vz: f64,
     mass: f64,

@@ -1,0 +1,32 @@
+// FFI Phase B: pass a value struct ACROSS the boundary by pointer, and let the
+// C function write through it. `gettimeofday(struct timeval*, struct timezone*)`
+// fills our `TimeVal` in place. On Linux x86-64 `struct timeval` is two 8-byte
+// fields, matching this value struct's `{ i64, i64 }` layout exactly.
+//
+// The `mut tv` parameter means "pass a pointer C may write through" — the struct
+// lives on the native stack (never on the GC heap), so its address is stable for
+// the call and needs no pinning. See docs/ffi.md.
+
+#[value]
+
+struct TimeVal { tv_sec: i64, tv_usec: i64 }
+
+// We pass null (0) for the timezone pointer, typed as i64 — scalars cross by
+// value. (A real pointer-typed FFI argument is a later phase; null-as-int works
+// because the C side ignores a NULL timezone.)
+extern "C" fn gettimeofday(mut tv: TimeVal, tz: i64) -> i32;
+
+fn main() -> i64 {
+    let mut tv = TimeVal { tv_sec: 0, tv_usec: 0 };
+    let rc = gettimeofday(tv, 0);
+    if rc != 0 {
+        return 0 - 1;
+    }
+    // The current Unix time in seconds is well past 1_700_000_000 (Nov 2023),
+    // so this proves C actually wrote our struct. Return 1 on success.
+    if tv.tv_sec > 1700000000 {
+        1
+    } else {
+        0
+    }
+}

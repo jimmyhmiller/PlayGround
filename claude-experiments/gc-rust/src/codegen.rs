@@ -16,7 +16,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
-use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+use inkwell::{AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ pub fn codegen<'ctx>(
 ) -> Result<Compiled<'ctx>, CodegenError> {
     let module = ctx.create_module("gcr");
     let builder = ctx.create_builder();
-    let mut cg = Codegen { ctx, module, builder, prog, funcs: HashMap::new() };
+    let mut cg = Codegen { ctx, module, builder, prog, funcs: HashMap::new(), trampolines: HashMap::new() };
     cg.declare_runtime_externs();
 
     // Declare every function first (so calls can reference forward decls).
@@ -50,6 +50,9 @@ pub fn codegen<'ctx>(
     let entry = prog.entry.ok_or_else(|| CodegenError("no entry".into()))?;
     let entry_name = prog.funcs[entry as usize].name.clone();
 
+    if std::env::var("GCR_DUMP_IR").is_ok() {
+        eprintln!("{}", cg.module.print_to_string().to_string());
+    }
     cg.module
         .verify()
         .map_err(|e| CodegenError(format!("LLVM module verify failed: {}", e.to_string())))?;
@@ -62,6 +65,9 @@ struct Codegen<'ctx, 'p> {
     builder: Builder<'ctx>,
     prog: &'p CoreProgram,
     funcs: HashMap<FuncId, FunctionValue<'ctx>>,
+    /// Cache of synthesized FFI callback trampolines, keyed by the gc-rust
+    /// FuncId they wrap (one trampoline per referenced function).
+    trampolines: HashMap<FuncId, FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'p> Codegen<'ctx, 'p> {
@@ -107,11 +113,41 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             ScalarRepr::F32 => self.ctx.f32_type().as_basic_type_enum(),
             ScalarRepr::F64 => self.ctx.f64_type().as_basic_type_enum(),
             ScalarRepr::Bool => self.ctx.bool_type().as_basic_type_enum(),
+            ScalarRepr::Ptr => self.ctx.ptr_type(AddressSpace::default()).as_basic_type_enum(),
         }
     }
 
     fn declare_fn(&self, _id: FuncId, f: &CoreFn) -> FunctionValue<'ctx> {
         let ptr = self.ctx.ptr_type(AddressSpace::default());
+        // Foreign `extern "C"` function: a plain C declaration with exactly its
+        // written signature — NO leading Thread*, no env pointer, name unmangled
+        // (the C symbol). External linkage so the JIT/host or AOT linker resolves
+        // it. See `docs/ffi.md`.
+        if f.is_extern {
+            let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
+            for p in &f.params {
+                match p {
+                    // A `#[repr(C)]` value struct crosses by POINTER: the caller
+                    // spills it to a stack alloca and passes its address (C reads
+                    // / writes through the pointer). See `docs/ffi.md`.
+                    Repr::Value(_) => params.push(ptr.into()),
+                    _ => {
+                        if let Some(t) = self.llvm_ty(p) {
+                            params.push(t.into());
+                        }
+                    }
+                }
+            }
+            let fn_ty = match self.llvm_ty(&f.ret) {
+                Some(rt) => rt.fn_type(&params, false),
+                None => self.ctx.void_type().fn_type(&params, false),
+            };
+            return self.module.add_function(
+                &f.name,
+                fn_ty,
+                Some(inkwell::module::Linkage::External),
+            );
+        }
         // First param is the Thread*. A lifted closure fn takes the env pointer
         // as its second param (before the value params).
         let mut params: Vec<BasicMetadataTypeEnum> = vec![ptr.into()];
@@ -134,7 +170,72 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         f.name.starts_with("__closure_")
     }
 
+    /// Get (or synthesize) a C-ABI trampoline for gc-rust function `fid`, used as
+    /// an FFI callback. The trampoline has the callback's C signature (the wrapped
+    /// function's value params, no leading `Thread*`), recovers the ambient
+    /// thread, re-enters managed state, calls the real function, restores native
+    /// state, and returns. See `docs/ffi.md`.
+    fn callback_trampoline(&mut self, fid: FuncId) -> FunctionValue<'ctx> {
+        if let Some(tr) = self.trampolines.get(&fid) {
+            return *tr;
+        }
+        let target = self.funcs[&fid];
+        let f = &self.prog.funcs[fid as usize];
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+
+        // C signature: the value params (skip Unit), no Thread*.
+        let mut c_params: Vec<BasicMetadataTypeEnum> = Vec::new();
+        for p in &f.params {
+            if let Some(t) = self.llvm_ty(p) {
+                c_params.push(t.into());
+            }
+        }
+        let fn_ty = match self.llvm_ty(&f.ret) {
+            Some(rt) => rt.fn_type(&c_params, false),
+            None => self.ctx.void_type().fn_type(&c_params, false),
+        };
+        let name = format!("__cb_{}", f.name);
+        let tramp = self.module.add_function(&name, fn_ty, Some(inkwell::module::Linkage::Internal));
+        self.trampolines.insert(fid, tramp);
+
+        // Build the body. (Save/restore the builder position — we may be mid-call.)
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(tramp, "entry");
+        self.builder.position_at_end(entry);
+
+        // thread = ai_current_thread()
+        let cur = self.module.get_function("ai_current_thread").unwrap();
+        let thread = call_result(self.builder.build_call(cur, &[], "thr").unwrap()).into_pointer_value();
+        // ai_ffi_reenter(thread) — we're back in managed code.
+        let reenter = self.module.get_function("ai_ffi_reenter").unwrap();
+        self.builder.build_call(reenter, &[thread.into()], "").unwrap();
+
+        // Call the real gc-rust function: (thread, c_params...).
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![thread.into()];
+        for (i, _) in c_params.iter().enumerate() {
+            call_args.push(tramp.get_nth_param(i as u32).unwrap().into());
+        }
+        let cs = self.builder.build_call(target, &call_args, "cbret").unwrap();
+
+        // ai_ffi_exit(thread) — return to foreign code, re-publish frame.
+        let exit = self.module.get_function("ai_ffi_exit").unwrap();
+        self.builder.build_call(exit, &[thread.into()], "").unwrap();
+
+        match cs.try_as_basic_value() {
+            inkwell::values::ValueKind::Basic(v) => { self.builder.build_return(Some(&v)).unwrap(); }
+            inkwell::values::ValueKind::Instruction(_) => { self.builder.build_return(None).unwrap(); }
+        }
+
+        if let Some(bb) = saved { self.builder.position_at_end(bb); }
+        tramp
+    }
+
     fn define_fn(&mut self, id: FuncId, f: &CoreFn) -> Result<(), CodegenError> {
+        // Foreign `extern "C"` functions have no body — they're resolved at
+        // link/JIT time, not defined here.
+        if f.is_extern {
+            return Ok(());
+        }
         let func = self.funcs[&id];
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
@@ -259,6 +360,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             loops: Vec::new(),
             loop_headers: Vec::new(),
             unlink,
+            pending_copy_outs: Vec::new(),
         };
         let val = self.gen_block(&mut fcx, &f.body)?;
 
@@ -266,6 +368,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             self.emit_unlink(&fcx);
             match val {
                 Some(v) => { self.builder.build_return(Some(&v)).unwrap(); }
+                // No tail value. If the function returns non-unit, the body must
+                // have diverged (a `loop`/`return` tail, e.g. `swap`'s retry
+                // loop) and this fall-through is unreachable — emitting `ret void`
+                // against a non-void signature is invalid. Emit `unreachable`.
+                None if self.llvm_ty(&f.ret).is_some() => { self.builder.build_unreachable().unwrap(); }
                 None => { self.builder.build_return(None).unwrap(); }
             }
         }
@@ -355,6 +462,13 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 Ok(Some(self.ctx.i32_type().const_int(*c as u64, false).into()))
             }
             CoreExprKind::ConstStr(s) => self.gen_const_str(fcx, s, &e.repr),
+            CoreExprKind::ConstZero(repr) => {
+                // Zero/null of the repr: scalars → 0, refs → null pointer.
+                match self.llvm_ty(repr) {
+                    Some(ty) => Ok(Some(ty.const_zero())),
+                    None => Ok(None),
+                }
+            }
             CoreExprKind::Unit => Ok(None),
             CoreExprKind::Local(id) => {
                 let slot = fcx.slots[*id as usize];
@@ -394,8 +508,250 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), arg.into()], "print").unwrap());
                 Ok(Some(r))
             }
+            CoreExprKind::PrintStr(s) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_print_str").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "prints").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrLen(s) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_str_len").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "strlen").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrEq(a, b) => {
+                let av = self.gen_expr(fcx, a)?.unwrap().into_pointer_value();
+                let bv = self.gen_expr(fcx, b)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_str_eq").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), av.into(), bv.into()], "streq").unwrap());
+                // ai_str_eq returns i64 (0/1); narrow to i1 for the bool repr.
+                let iv = r.into_int_value();
+                let b1 = self.builder.build_int_truncate(iv, self.ctx.bool_type(), "streqb").unwrap();
+                Ok(Some(b1.into()))
+            }
+            CoreExprKind::StrConcat { layout, a, b } => {
+                // `a`/`b` are live GC roots that the allocating call may move, so
+                // they must already be spilled to frame slots by the root
+                // discipline (same as any other runtime call that allocates).
+                let av = self.gen_expr(fcx, a)?.unwrap().into_pointer_value();
+                let bv = self.gen_expr(fcx, b)?.unwrap().into_pointer_value();
+                let i32t = self.ctx.i32_type();
+                let f = self.module.get_function("ai_str_concat").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), av.into(), bv.into()],
+                    "strcat",
+                ).unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrGet(s, i) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let iv = self.gen_expr(fcx, i)?.unwrap().into_int_value();
+                let f = self.module.get_function("ai_str_get").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into(), iv.into()], "strget").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrSubstring { layout, s, start, end } => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let st = self.gen_expr(fcx, start)?.unwrap().into_int_value();
+                let en = self.gen_expr(fcx, end)?.unwrap().into_int_value();
+                let i32t = self.ctx.i32_type();
+                let f = self.module.get_function("ai_str_substring").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), sv.into(), st.into(), en.into()],
+                    "strsub",
+                ).unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrToFloat(s) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_str_to_float").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "strtof").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrHash(s) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_str_hash").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "strhash").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::AsCBytes { src, elem, is_string, copy_out } => {
+                // Copy a String/scalar-Array's heap bytes into a dynamically-sized
+                // STACK buffer and yield its pointer. The stack never moves, so
+                // the pointer is stable for the enclosing extern call with no
+                // pinning. A `copy_out` (mut array) buffer is written back into
+                // the heap object after the call (queued for `gen_call` to drain).
+                // See `docs/ffi.md`.
+                let sv = self.gen_expr(fcx, src)?.unwrap().into_pointer_value();
+                let i8t = self.ctx.i8_type();
+                let i64t = self.ctx.i64_type();
+                let stride = (elem.bits().max(8) / 8) as u64;
+
+                if *is_string {
+                    // byte_len = ai_str_len(s); buffer = byte_len + 1 (NUL).
+                    let lenf = self.module.get_function("ai_str_len").unwrap();
+                    let len = call_result(
+                        self.builder.build_call(lenf, &[fcx.thread.into(), sv.into()], "ascb.len").unwrap()
+                    ).into_int_value();
+                    let cap = self.builder.build_int_add(len, i64t.const_int(1, false), "ascb.cap").unwrap();
+                    let buf = self.builder.build_array_alloca(i8t, cap, "ascb.buf").unwrap();
+                    let cpf = self.module.get_function("ai_str_copy_to_buf").unwrap();
+                    self.builder.build_call(cpf, &[fcx.thread.into(), sv.into(), buf.into()], "").unwrap();
+                    return Ok(Some(buf.into()));
+                }
+
+                // Scalar array: byte_len from the varlen count word at HEADER.
+                let lid = match &src.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("as_c_bytes on non-array".into())) };
+                let is_values = matches!(self.prog.layouts[lid as usize].varlen, crate::core::VarLen::Values);
+                let count_addr = self.obj_addr(sv, Self::HEADER);
+                let count = self.builder.build_load(i64t, count_addr, "ascb.cnt").unwrap().into_int_value();
+                let byte_len = if is_values {
+                    self.builder.build_int_mul(count, i64t.const_int(stride, false), "ascb.bytes").unwrap()
+                } else {
+                    count // Bytes array: count word already holds the byte length.
+                };
+                let buf = self.builder.build_array_alloca(i8t, byte_len, "ascb.buf").unwrap();
+                let cin = self.module.get_function("ai_buf_copy_in").unwrap();
+                self.builder.build_call(cin, &[fcx.thread.into(), sv.into(), buf.into(), byte_len.into()], "").unwrap();
+                if *copy_out {
+                    // Queue a write-back; gen_call replays it after the extern call.
+                    fcx.pending_copy_outs.push((sv, buf, byte_len));
+                }
+                Ok(Some(buf.into()))
+            }
+            CoreExprKind::StrFromNum { layout, is_float, v } => {
+                let vv = self.gen_expr(fcx, v)?.unwrap();
+                let i32t = self.ctx.i32_type();
+                let fname = if *is_float { "ai_str_from_float" } else { "ai_str_from_int" };
+                let f = self.module.get_function(fname).unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), vv.into()],
+                    "strfromnum",
+                ).unwrap());
+                Ok(Some(r))
+            }
             CoreExprKind::Cast { value, from, to } => self.gen_cast(fcx, value, from, to),
             CoreExprKind::Call(fid, args) => self.gen_call(fcx, *fid, args),
+            CoreExprKind::PtrReadI64(p) => {
+                let pv = self.gen_expr(fcx, p)?.unwrap().into_pointer_value();
+                let v = self.builder.build_load(self.ctx.i64_type(), pv, "ptrd").unwrap();
+                Ok(Some(v))
+            }
+            CoreExprKind::CallbackPtr(fid) => {
+                // The address of the synthesized C-ABI trampoline for `fid`.
+                let tramp = self.callback_trampoline(*fid);
+                Ok(Some(tramp.as_global_value().as_pointer_value().into()))
+            }
+            CoreExprKind::ThreadSpawn(closure) => {
+                // Evaluate the closure env, read its code pointer (first word of
+                // the raw section, like gen_call_closure), and hand both to the
+                // runtime. ai_thread_spawn registers a child mutator + runs it.
+                let env = self.gen_expr(fcx, closure)?.unwrap().into_pointer_value();
+                // Recover the code pointer at runtime from the env's header
+                // type_id — the static repr here may be the placeholder closure
+                // layout (ptr_fields=0) which gives the WRONG offset for a closure
+                // that captured GC pointers. See `ai_closure_code_ptr`.
+                let codef = self.module.get_function("ai_closure_code_ptr").unwrap();
+                let code = call_result(self.builder.build_call(
+                    codef, &[fcx.thread.into(), env.into()], "code",
+                ).unwrap()).into_pointer_value();
+                let f = self.module.get_function("ai_thread_spawn").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f, &[fcx.thread.into(), env.into(), code.into()], "spawn",
+                ).unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::ThreadJoin(handle) => {
+                let h = self.gen_expr(fcx, handle)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_thread_join").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), h.into()], "join").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::AtomLoad { atom, elem } => {
+                // Atomic load of the atom's value field (first pointer slot).
+                let a = self.gen_expr(fcx, atom)?.unwrap().into_pointer_value();
+                let slot = self.obj_addr(a, Self::HEADER);
+                let lty = self.llvm_ty(elem).ok_or_else(|| CodegenError("atom of unit".into()))?;
+                let load = self.builder.build_load(lty, slot, "atom.load").unwrap();
+                let inst = load.as_instruction_value().unwrap();
+                // Atomics require natural alignment (8 for our pointer/i64-wide
+                // value fields); the default field alignment (4) is UB for an
+                // atomic load and faults at runtime.
+                inst.set_alignment(8).ok();
+                inst.set_atomic_ordering(AtomicOrdering::SequentiallyConsistent).ok();
+                Ok(Some(load))
+            }
+            CoreExprKind::AtomCas { atom, old, new } => {
+                // Atomic compare-and-swap the value field; barrier on success.
+                let a = self.gen_expr(fcx, atom)?.unwrap().into_pointer_value();
+                let oldv = self.gen_expr(fcx, old)?.unwrap();
+                let newv = self.gen_expr(fcx, new)?.unwrap();
+                let slot = self.obj_addr(a, Self::HEADER);
+                let cas = self.builder.build_cmpxchg(
+                    slot, oldv, newv,
+                    AtomicOrdering::SequentiallyConsistent,
+                    AtomicOrdering::SequentiallyConsistent,
+                ).unwrap();
+                // cmpxchg requires natural alignment of the value field.
+                cas.as_instruction_value().unwrap().set_alignment(8).ok();
+                // cmpxchg yields { value, i1 success }; element 1 is the success bool.
+                let ok = self.builder.build_extract_value(cas, 1, "cas.ok").unwrap().into_int_value();
+                // Generational write barrier: a successful install may create an
+                // old(atom)→young(new) edge. (No-ops cheaply if non-generational.)
+                self.emit_write_barrier(fcx, a, newv);
+                Ok(Some(ok.into()))
+            }
+            CoreExprKind::ChanSend { buf, ctrl, value } => {
+                let b = self.gen_expr(fcx, buf)?.unwrap().into_pointer_value();
+                let c = self.gen_expr(fcx, ctrl)?.unwrap().into_pointer_value();
+                let v = self.gen_expr(fcx, value)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_chan_send").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f, &[fcx.thread.into(), b.into(), c.into(), v.into()], "chsend").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::ChanRecv { buf, ctrl, elem: _ } => {
+                let b = self.gen_expr(fcx, buf)?.unwrap().into_pointer_value();
+                let c = self.gen_expr(fcx, ctrl)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_chan_recv").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f, &[fcx.thread.into(), b.into(), c.into()], "chrecv").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::RuntimeCall { func, args, ret } => {
+                let f = self.module.get_function(func)
+                    .ok_or_else(|| CodegenError(format!("unknown runtime extern `{}`", func)))?;
+                let mut cargs: Vec<inkwell::values::BasicMetadataValueEnum> = vec![fcx.thread.into()];
+                for a in args {
+                    if let Some(v) = self.gen_expr(fcx, a)? {
+                        cargs.push(v.into());
+                    }
+                }
+                let cs = self.builder.build_call(f, &cargs, "rtcall").unwrap();
+                match (cs.try_as_basic_value(), self.llvm_ty(ret)) {
+                    (inkwell::values::ValueKind::Basic(v), _) => Ok(Some(v)),
+                    (inkwell::values::ValueKind::Instruction(_), _) => Ok(None),
+                }
+            }
+            CoreExprKind::ThreadSleep(ms) => {
+                let m = self.gen_expr(fcx, ms)?.unwrap().into_int_value();
+                let f = self.module.get_function("ai_thread_sleep").unwrap();
+                self.builder.build_call(f, &[fcx.thread.into(), m.into()], "").unwrap();
+                Ok(Some(self.ctx.i64_type().const_zero().into()))
+            }
+            CoreExprKind::ThreadYield => {
+                let f = self.module.get_function("ai_thread_yield").unwrap();
+                self.builder.build_call(f, &[fcx.thread.into()], "").unwrap();
+                Ok(Some(self.ctx.i64_type().const_zero().into()))
+            }
+            CoreExprKind::ThreadCurrentId => {
+                let f = self.module.get_function("ai_thread_current_id").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into()], "tid").unwrap());
+                Ok(Some(r))
+            }
             CoreExprKind::If(cond, then_b, else_b) => self.gen_if(fcx, cond, then_b, else_b, &e.repr),
             CoreExprKind::Block(b) => self.gen_block(fcx, b),
             CoreExprKind::Loop(body) => self.gen_loop(fcx, body),
@@ -463,9 +819,31 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 };
                 let addr = self.obj_addr(obj, off);
                 self.builder.build_store(addr, v).unwrap();
+                // Generational write barrier on pointer-field stores.
+                if matches!(loc, FieldLoc::Ptr { .. }) {
+                    self.emit_write_barrier(fcx, obj, v);
+                }
                 Ok(Some(self.ctx.i64_type().const_zero().into()))
             }
             CoreExprKind::Match { scrutinee, arms } => self.gen_match(fcx, scrutinee, arms, &e.repr),
+            CoreExprKind::EnumTag(scrut) => {
+                let obj = self.gen_expr(fcx, scrut)?.unwrap().into_pointer_value();
+                let lid = match &scrut.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("EnumTag on non-ref enum".into())) };
+                let ptr_fields = self.prog.layouts[lid as usize].ptr_fields as u64;
+                let i32t = self.ctx.i32_type();
+                let tag_off = Self::HEADER + ptr_fields * 8;
+                let addr = self.obj_addr(obj, tag_off);
+                let tag = self.builder.build_load(i32t, addr, "etag").unwrap();
+                Ok(Some(tag))
+            }
+            CoreExprKind::EnumPayload { scrutinee, field, repr, payload_reprs } => {
+                let obj = self.gen_expr(fcx, scrutinee)?.unwrap().into_pointer_value();
+                let lid = match &scrutinee.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("EnumPayload on non-ref enum".into())) };
+                let ptr_fields = self.prog.layouts[lid as usize].ptr_fields as u64;
+                let tag_off = Self::HEADER + ptr_fields * 8;
+                let val = self.load_enum_payload(obj, tag_off, *field as usize, repr, payload_reprs);
+                Ok(Some(val))
+            }
             CoreExprKind::ArrayNew { layout, len, elem } => self.gen_array_new(fcx, *layout, len, elem),
             CoreExprKind::ArrayLen(arr) => self.gen_array_len(fcx, arr),
             CoreExprKind::ArrayGet { array, index, elem } => self.gen_array_get(fcx, array, index, elem),
@@ -492,9 +870,43 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
+        // void ai_gc_write_barrier(ptr thread, ptr obj, ptr new_val)
+        self.module.add_function(
+            "ai_gc_write_barrier",
+            self.ctx.void_type().fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
         // void ai_gc_pollcheck_slow(ptr thread)
         self.module.add_function(
             "ai_gc_pollcheck_slow",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // void ai_ffi_enter(ptr thread) / void ai_ffi_leave(ptr thread)
+        // The managed↔native transition wrapped around every extern "C" call.
+        self.module.add_function(
+            "ai_ffi_enter",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        self.module.add_function(
+            "ai_ffi_leave",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // Callback support: ptr ai_current_thread(void); reenter/exit transitions.
+        self.module.add_function(
+            "ai_current_thread",
+            ptr.fn_type(&[], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        self.module.add_function(
+            "ai_ffi_reenter",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        self.module.add_function(
+            "ai_ffi_exit",
             self.ctx.void_type().fn_type(&[ptr.into()], false),
             Some(inkwell::module::Linkage::External),
         );
@@ -508,6 +920,162 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         self.module.add_function(
             "ai_print_float",
             i64t.fn_type(&[ptr.into(), self.ctx.f64_type().into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // String primitives (see crates/gcrust-rt/src/runtime.rs).
+        // i64 ai_print_str(ptr thread, ptr s)
+        self.module.add_function(
+            "ai_print_str",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_str_len(ptr thread, ptr s)
+        self.module.add_function(
+            "ai_str_len",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_str_eq(ptr thread, ptr a, ptr b)
+        self.module.add_function(
+            "ai_str_eq",
+            i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_str_concat(ptr thread, i32 type_id, ptr a, ptr b)
+        self.module.add_function(
+            "ai_str_concat",
+            ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_str_get(ptr thread, ptr s, i64 i)
+        self.module.add_function(
+            "ai_str_get",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_str_substring(ptr thread, i32 type_id, ptr s, i64 start, i64 end)
+        self.module.add_function(
+            "ai_str_substring",
+            ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into(), i64t.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_str_from_int(ptr thread, i32 type_id, i64 v)
+        self.module.add_function(
+            "ai_str_from_int",
+            ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_str_from_float(ptr thread, i32 type_id, f64 v)
+        self.module.add_function(
+            "ai_str_from_float",
+            ptr.fn_type(&[ptr.into(), i32t.into(), self.ctx.f64_type().into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // f64 ai_str_to_float(ptr thread, ptr s)
+        self.module.add_function(
+            "ai_str_to_float",
+            self.ctx.f64_type().fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_str_hash(ptr thread, ptr s)
+        self.module.add_function(
+            "ai_str_hash",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_str_copy_to_buf(ptr thread, ptr s, ptr dst)
+        self.module.add_function(
+            "ai_str_copy_to_buf",
+            i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // void ai_buf_copy_in(ptr thread, ptr obj, ptr dst, i64 byte_len)
+        self.module.add_function(
+            "ai_buf_copy_in",
+            self.ctx.void_type().fn_type(&[ptr.into(), ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // void ai_buf_copy_out(ptr thread, ptr obj, ptr src, i64 byte_len)
+        self.module.add_function(
+            "ai_buf_copy_out",
+            self.ctx.void_type().fn_type(&[ptr.into(), ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // Threads. ptr ai_thread_spawn(ptr parent, ptr env, ptr code)
+        self.module.add_function(
+            "ai_thread_spawn",
+            ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_thread_join(ptr thread, ptr handle)
+        self.module.add_function(
+            "ai_thread_join",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // void ai_thread_sleep(ptr thread, i64 ms) / void ai_thread_yield(ptr thread)
+        self.module.add_function(
+            "ai_thread_sleep",
+            self.ctx.void_type().fn_type(&[ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        self.module.add_function(
+            "ai_thread_yield",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_thread_current_id(ptr thread)
+        self.module.add_function(
+            "ai_thread_current_id",
+            i64t.fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_closure_code_ptr(ptr thread, ptr env) — recover a closure's code
+        // pointer from its env header type_id (correct for any capture count).
+        self.module.add_function(
+            "ai_closure_code_ptr",
+            ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // Channels.
+        self.module.add_function("ai_chan_new",
+            ptr.fn_type(&[ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External));
+        self.module.add_function("ai_chan_send",
+            i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false), Some(inkwell::module::Linkage::External));
+        self.module.add_function("ai_chan_recv",
+            ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false), Some(inkwell::module::Linkage::External));
+        self.module.add_function("ai_chan_sender_clone",
+            self.ctx.void_type().fn_type(&[ptr.into(), ptr.into()], false), Some(inkwell::module::Linkage::External));
+        self.module.add_function("ai_chan_sender_drop",
+            self.ctx.void_type().fn_type(&[ptr.into(), ptr.into()], false), Some(inkwell::module::Linkage::External));
+        // AtomicI64. ptr ai_atomic_i64_new(ptr thread, i64 v)
+        self.module.add_function(
+            "ai_atomic_i64_new",
+            ptr.fn_type(&[ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_atomic_i64_load(ptr thread, ptr a)
+        self.module.add_function(
+            "ai_atomic_i64_load",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_atomic_i64_store(ptr thread, ptr a, i64 v)
+        self.module.add_function(
+            "ai_atomic_i64_store",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_atomic_i64_fetch_add(ptr thread, ptr a, i64 delta)
+        self.module.add_function(
+            "ai_atomic_i64_fetch_add",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_atomic_i64_compare_and_set(ptr thread, ptr a, i64 expected, i64 new)
+        self.module.add_function(
+            "ai_atomic_i64_compare_and_set",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into(), i64t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
     }
@@ -674,6 +1242,21 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         self.builder.build_int_to_ptr(addr, ptr, "o.fp").unwrap()
     }
 
+    /// Emit a generational write barrier: `ai_gc_write_barrier(thread, obj, new)`
+    /// after storing pointer `new` into a field/element of heap object `obj`.
+    /// Called unconditionally on every pointer store; the runtime fast-paths the
+    /// non-generational / non-old→young cases. Keeps the minor GC's old→young
+    /// root set correct — a missed barrier would be a use-after-free.
+    fn emit_write_barrier(&self, fcx: &FnCtx<'ctx>, obj: PointerValue<'ctx>, new_val: BasicValueEnum<'ctx>) {
+        if !new_val.is_pointer_value() {
+            return; // only pointer stores can create an old→young edge
+        }
+        let f = self.module.get_function("ai_gc_write_barrier").unwrap();
+        self.builder
+            .build_call(f, &[fcx.thread.into(), obj.into(), new_val.into()], "")
+            .unwrap();
+    }
+
     /// The byte stride of an array element repr, and whether it's a traced
     /// (pointer/Values) array.
     fn elem_stride(elem: &Repr) -> (u64, bool) {
@@ -808,6 +1391,9 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let (stride, _) = Self::elem_stride(elem);
         let addr = self.array_elem_addr(obj, idx, stride);
         self.builder.build_store(addr, val).unwrap();
+        // Generational write barrier: a long-lived (tenured) array may receive a
+        // young pointer element. `emit_write_barrier` no-ops for scalar elements.
+        self.emit_write_barrier(fcx, obj, val);
         Ok(Some(self.ctx.i64_type().const_zero().into()))
     }
 
@@ -859,7 +1445,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     raw_off += sz;
                     if let Some(v) = v { self.builder.build_store(a, *v).unwrap(); }
                 }
-                _ => {}
+                // Inline value-aggregate capture: store its bytes in the raw
+                // section at an 8-aligned offset (mirrors lower_lifted).
+                Repr::Value(vid) => {
+                    let sz = self.prog.values[*vid as usize].size as u64;
+                    raw_off = align_up64(raw_off, 8);
+                    let a = self.obj_addr(obj, raw_base + raw_off);
+                    raw_off += sz;
+                    if let Some(v) = v { self.builder.build_store(a, *v).unwrap(); }
+                }
+                Repr::Unit => {}
             }
         }
         Ok(Some(obj.into()))
@@ -876,11 +1471,14 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let ptr = self.ctx.ptr_type(AddressSpace::default());
         let env = self.gen_expr(fcx, callee)?.unwrap().into_pointer_value();
-        let env_lid = match &callee.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("call on non-closure".into())) };
-        let lay = &self.prog.layouts[env_lid as usize];
-        let raw_base = Self::HEADER + (lay.ptr_fields as u64) * 8;
-        let code_addr = self.obj_addr(env, raw_base);
-        let code_ptr = self.builder.build_load(ptr, code_addr, "code").unwrap().into_pointer_value();
+        // Recover the code pointer at runtime from the env header's type_id. The
+        // static `callee.repr` is often the placeholder closure layout
+        // (ptr_fields=0) — wrong for a closure that captured GC pointers — so we
+        // must NOT compute the offset from it. See `ai_closure_code_ptr`.
+        let codef = self.module.get_function("ai_closure_code_ptr").unwrap();
+        let code_ptr = call_result(self.builder.build_call(
+            codef, &[fcx.thread.into(), env.into()], "code",
+        ).unwrap()).into_pointer_value();
 
         // Build the call signature: (thread, env, args...) -> ret.
         let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
@@ -1102,6 +1700,56 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         }
     }
 
+    /// Load payload field `field` from a reference enum object, replicating the
+    /// physical slot layout the tag-switch binding path uses: pointer payloads
+    /// occupy the leading pointer slots (`HEADER + k*8`), raw payloads are packed
+    /// (aligned) after the tag word at `tag_off + 8`. `payload_reprs` is the full
+    /// ordered payload list so we can find `field`'s slot.
+    fn load_enum_payload(
+        &self,
+        obj: PointerValue<'ctx>,
+        tag_off: u64,
+        field: usize,
+        repr: &Repr,
+        payload_reprs: &[Repr],
+    ) -> BasicValueEnum<'ctx> {
+        let mut ptr_slot = 0u64;
+        let mut raw_cursor = tag_off + 8;
+        for (i, r) in payload_reprs.iter().enumerate() {
+            match r {
+                Repr::Ref(_) => {
+                    let off = Self::HEADER + ptr_slot * 8;
+                    ptr_slot += 1;
+                    if i == field {
+                        let addr = self.obj_addr(obj, off);
+                        return self.builder.build_load(self.ctx.ptr_type(AddressSpace::default()), addr, "pl").unwrap();
+                    }
+                }
+                Repr::Scalar(s) => {
+                    let sz = (s.bits().max(8) / 8) as u64;
+                    raw_cursor = align_up64(raw_cursor, sz);
+                    let off = raw_cursor;
+                    raw_cursor += sz;
+                    if i == field {
+                        let addr = self.obj_addr(obj, off);
+                        return self.builder.build_load(self.scalar_ty(*s), addr, "pl").unwrap();
+                    }
+                }
+                _ => {
+                    // Value payloads aren't bound through this path in v0.
+                    if i == field {
+                        // Fallback: load as a pointer (won't happen for scalar/ref).
+                        let addr = self.obj_addr(obj, Self::HEADER + ptr_slot * 8);
+                        return self.builder.build_load(self.ctx.ptr_type(AddressSpace::default()), addr, "pl").unwrap();
+                    }
+                }
+            }
+        }
+        // Unreachable if `field` is valid.
+        let _ = repr;
+        self.ctx.i64_type().const_zero().into()
+    }
+
     fn gen_bin(
         &mut self,
         fcx: &mut FnCtx<'ctx>,
@@ -1142,6 +1790,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let li = lv.into_int_value();
         let ri = rv.into_int_value();
         let signed = scalar.is_signed();
+        // Integer overflow WRAPS (two's complement), like Java/Go/OCaml — see
+        // docs/overflow.md. The plain `build_int_*` builders emit LLVM `add`/
+        // `sub`/`mul` with NO `nsw`/`nuw` flags, which is defined wrapping. Do
+        // NOT switch to the `*_nsw`/`*_nuw` variants: those make overflow UB and
+        // would silently break this language guarantee.
         let v: BasicValueEnum = match op {
             BinOp::Add => b.build_int_add(li, ri, "add").unwrap().into(),
             BinOp::Sub => b.build_int_sub(li, ri, "sub").unwrap().into(),
@@ -1320,14 +1973,94 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         args: &[CoreExpr],
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let callee = self.funcs[&fid];
+        // Foreign `extern "C"` callees take no leading Thread* — they're plain C.
+        let is_extern = self.prog.funcs[fid as usize].is_extern;
         let mut cargs: Vec<inkwell::values::BasicMetadataValueEnum> =
-            vec![fcx.thread.into()];
-        for a in args {
+            if is_extern { vec![] } else { vec![fcx.thread.into()] };
+        let param_reprs = self.prog.funcs[fid as usize].params.clone();
+        // Any FFI copy-out buffers queued while evaluating THIS call's arguments
+        // are drained after the call; snapshot the queue depth to isolate them.
+        let copy_out_base = fcx.pending_copy_outs.len();
+
+        // GC-SAFETY: a `Ref` argument backed by a `Local` must be loaded from its
+        // root slot AFTER every sibling argument that might allocate — otherwise a
+        // collection triggered while evaluating a later argument (e.g. the closure
+        // in `atom.swap(|x| ..)`) relocates the object, leaving the
+        // already-materialized pointer dangling. So we DEFER such loads to a
+        // second pass, right before the call. Their slots are always current (the
+        // collector updates them), so reloading is always safe.
+        // `cargs` is built positionally; `deferred` holds (cargs-index, local-id).
+        let mut deferred: Vec<(usize, u32)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            // For an extern callee, a value-struct argument crosses by POINTER.
+            // The struct lives on the native stack — never a GC heap object — so
+            // its address is stable for the call and needs no pinning.
+            //   * If the argument is a value-struct LOCAL, pass the address of
+            //     the local's own alloca, so writes by C (the `mut ts` out-param
+            //     case) land back in the caller's variable.
+            //   * Otherwise spill the temporary to a fresh alloca and pass that.
+            // See `docs/ffi.md`.
+            if is_extern && matches!(param_reprs.get(i), Some(Repr::Value(_))) {
+                if let CoreExprKind::Local(id) = a.kind.as_ref() {
+                    if let Some(slot) = fcx.slots[*id as usize] {
+                        cargs.push(slot.into());
+                        continue;
+                    }
+                }
+                if let Some(v) = self.gen_expr(fcx, a)? {
+                    let slot = self.builder.build_alloca(v.get_type(), "ffi.arg").unwrap();
+                    self.builder.build_store(slot, v).unwrap();
+                    cargs.push(slot.into());
+                }
+                continue;
+            }
+            // Defer a `Ref` argument that is a plain `Local` (reload from its slot
+            // after all args are evaluated — see GC-SAFETY note above).
+            if let CoreExprKind::Local(id) = a.kind.as_ref() {
+                if matches!(a.repr, Repr::Ref(_)) && fcx.slots[*id as usize].is_some() {
+                    deferred.push((cargs.len(), *id));
+                    cargs.push(self.ctx.ptr_type(AddressSpace::default()).const_null().into());
+                    continue;
+                }
+            }
             if let Some(v) = self.gen_expr(fcx, a)? {
                 cargs.push(v.into());
             }
         }
+        // Second pass: reload deferred `Ref`-`Local` args from their (now-current,
+        // post-any-allocation) root slots.
+        for (ci, id) in deferred {
+            let slot = fcx.slots[id as usize].unwrap();
+            let lty = self.llvm_ty(&fcx.local_reprs[id as usize]).unwrap();
+            let v = self.builder.build_load(lty, slot, "arg.reload").unwrap();
+            cargs[ci] = v.into();
+        }
+        // Wrap a foreign call in the managed↔native transition: publish our
+        // frame chain so a concurrent GC can find this thread's roots while we
+        // are in native code, then clear it on return. Safe by default — the
+        // call's correctness does not depend on the C function not allocating.
+        if is_extern {
+            let enter = self.module.get_function("ai_ffi_enter").unwrap();
+            self.builder.build_call(enter, &[fcx.thread.into()], "").unwrap();
+        }
         let cs = self.builder.build_call(callee, &cargs, "call").unwrap();
+        if is_extern {
+            let leave = self.module.get_function("ai_ffi_leave").unwrap();
+            self.builder.build_call(leave, &[fcx.thread.into()], "").unwrap();
+        }
+        // Copy-out: write each `mut` array's stack buffer back into its heap
+        // object now that C has filled it (e.g. read(fd, buf, n)).
+        if fcx.pending_copy_outs.len() > copy_out_base {
+            let cout = self.module.get_function("ai_buf_copy_out").unwrap();
+            let pending: Vec<_> = fcx.pending_copy_outs.drain(copy_out_base..).collect();
+            for (obj, buf, byte_len) in pending {
+                self.builder.build_call(
+                    cout,
+                    &[fcx.thread.into(), obj.into(), buf.into(), byte_len.into()],
+                    "",
+                ).unwrap();
+            }
+        }
         Ok(match cs.try_as_basic_value() {
             inkwell::values::ValueKind::Basic(v) => Some(v),
             inkwell::values::ValueKind::Instruction(_) => None,
@@ -1448,6 +2181,10 @@ struct FnCtx<'ctx> {
     /// `(frame ptr, frame type, &thread.top_frame)` for the GC frame epilogue.
     /// `None` when this function allocated no GC frame (no Ref locals).
     unlink: Option<(PointerValue<'ctx>, inkwell::types::StructType<'ctx>, PointerValue<'ctx>)>,
+    /// FFI copy-out buffers awaiting write-back: `(heap object, stack buffer,
+    /// byte length)`. Filled by an `AsCBytes { copy_out: true }` argument and
+    /// drained by `gen_call` AFTER the extern call returns. See `docs/ffi.md`.
+    pending_copy_outs: Vec<(PointerValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>)>,
 }
 
 fn align_up64(n: u64, a: u64) -> u64 {
@@ -1575,8 +2312,43 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
         ("ai_gc_alloc_fixed", runtime::ai_gc_alloc_fixed as *const () as usize),
         ("ai_gc_alloc_varlen", runtime::ai_gc_alloc_varlen as *const () as usize),
         ("ai_gc_pollcheck_slow", runtime::ai_gc_pollcheck_slow as *const () as usize),
+        ("ai_ffi_enter", runtime::ai_ffi_enter as *const () as usize),
+        ("ai_ffi_leave", runtime::ai_ffi_leave as *const () as usize),
+        ("ai_current_thread", runtime::ai_current_thread as *const () as usize),
+        ("ai_ffi_reenter", runtime::ai_ffi_reenter as *const () as usize),
+        ("ai_ffi_exit", runtime::ai_ffi_exit as *const () as usize),
         ("ai_print_int", runtime::ai_print_int as *const () as usize),
         ("ai_print_float", runtime::ai_print_float as *const () as usize),
+        ("ai_print_str", runtime::ai_print_str as *const () as usize),
+        ("ai_str_len", runtime::ai_str_len as *const () as usize),
+        ("ai_str_eq", runtime::ai_str_eq as *const () as usize),
+        ("ai_str_concat", runtime::ai_str_concat as *const () as usize),
+        ("ai_str_get", runtime::ai_str_get as *const () as usize),
+        ("ai_str_substring", runtime::ai_str_substring as *const () as usize),
+        ("ai_str_from_int", runtime::ai_str_from_int as *const () as usize),
+        ("ai_str_from_float", runtime::ai_str_from_float as *const () as usize),
+        ("ai_str_to_float", runtime::ai_str_to_float as *const () as usize),
+        ("ai_str_hash", runtime::ai_str_hash as *const () as usize),
+        ("ai_str_copy_to_buf", runtime::ai_str_copy_to_buf as *const () as usize),
+        ("ai_buf_copy_in", runtime::ai_buf_copy_in as *const () as usize),
+        ("ai_buf_copy_out", runtime::ai_buf_copy_out as *const () as usize),
+        ("ai_thread_spawn", runtime::ai_thread_spawn as *const () as usize),
+        ("ai_thread_join", runtime::ai_thread_join as *const () as usize),
+        ("ai_thread_sleep", runtime::ai_thread_sleep as *const () as usize),
+        ("ai_thread_yield", runtime::ai_thread_yield as *const () as usize),
+        ("ai_thread_current_id", runtime::ai_thread_current_id as *const () as usize),
+        ("ai_closure_code_ptr", runtime::ai_closure_code_ptr as *const () as usize),
+        ("ai_chan_new", runtime::ai_chan_new as *const () as usize),
+        ("ai_chan_send", runtime::ai_chan_send as *const () as usize),
+        ("ai_chan_recv", runtime::ai_chan_recv as *const () as usize),
+        ("ai_chan_sender_clone", runtime::ai_chan_sender_clone as *const () as usize),
+        ("ai_chan_sender_drop", runtime::ai_chan_sender_drop as *const () as usize),
+        ("ai_atomic_i64_new", runtime::ai_atomic_i64_new as *const () as usize),
+        ("ai_atomic_i64_load", runtime::ai_atomic_i64_load as *const () as usize),
+        ("ai_atomic_i64_store", runtime::ai_atomic_i64_store as *const () as usize),
+        ("ai_atomic_i64_fetch_add", runtime::ai_atomic_i64_fetch_add as *const () as usize),
+        ("ai_atomic_i64_compare_and_set", runtime::ai_atomic_i64_compare_and_set as *const () as usize),
+        ("ai_gc_write_barrier", runtime::ai_gc_write_barrier as *const () as usize),
     ] {
         if let Some(f) = compiled.module.get_function(name) {
             ee.add_global_mapping(&f, addr);
@@ -1584,14 +2356,21 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
     }
 
     let tis = layouts_to_type_infos(prog);
-    // A generous semi-space (per space). Large enough for allocation-heavy
-    // programs like binary_trees whose live set is several MB; the copying
-    // collector reclaims between iterations. Stress mode collects every alloc.
-    let space = if stress { 8 << 20 } else { 256 << 20 };
-    let mut rt = RuntimeContext::new(space, tis);
-    if stress {
+    // Normal runs use the GENERATIONAL heap: a small nursery (collected cheaply
+    // and often by minor GCs) over a large tenured generation.
+    //
+    // `--gc-stress` instead uses the single-generation SEMI-SPACE heap with
+    // collect-on-every-alloc. That mode's invariant checks (e.g. "every root
+    // points to from-space after a flip") are semi-space-specific and don't hold
+    // for a nursery, so stress validates relocation correctness on the
+    // semi-space collector, the collector it was designed to torture-test.
+    let mut rt = if stress {
+        let mut rt = RuntimeContext::new(8 << 20, tis);
         rt.heap().set_gc_every_alloc(true);
-    }
+        rt
+    } else {
+        RuntimeContext::new_generational(16 << 20, 256 << 20, tis)
+    };
 
     let addr = ee
         .get_function_address(&compiled.entry_name)
@@ -1599,7 +2378,19 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
     type EntryFn = unsafe extern "C" fn(*mut runtime::Thread) -> i64;
     let f: EntryFn = unsafe { std::mem::transmute(addr) };
     let thread = rt.thread_ptr();
-    Ok(unsafe { f(thread) })
+    // Publish the current thread so FFI callback trampolines can recover it.
+    runtime::set_current_thread(thread);
+    let result = unsafe { f(thread) };
+    // Opt-in GC stats (set GCR_GC_STATS=1) — useful to confirm the generational
+    // split is working: minor collections should dominate on young-heavy loads.
+    if std::env::var("GCR_GC_STATS").is_ok() {
+        eprintln!(
+            "gc-rust: {} minor + {} major collections",
+            rt.heap().minor_collections(),
+            rt.heap().collections(),
+        );
+    }
+    Ok(result)
 }
 
 /// JIT-compile and run a 0-arg `-> i64` entry. Uses the GC runtime so heap
@@ -1804,11 +2595,14 @@ pub fn build_executable(
     Ok(())
 }
 
-/// Locate the gc-rust runtime staticlib (`libgcrust_rt.a`).
+/// Locate the gc-rust runtime staticlib for AOT linking.
 ///
-/// Cargo builds it as a `staticlib` crate-type artifact under the target dir.
-/// We search the standard cargo profiles relative to the manifest dir captured
-/// at build time, honoring `$GCRUST_RUNTIME_LIB` as an explicit override.
+/// The path is baked in at build time by `build.rs` via the `GCRUST_RT_STATICLIB`
+/// env var: the build script copies the `gcrust-rt` staticlib (built in the SAME
+/// cargo profile as this `gcr`) into `OUT_DIR/libgcrust_rt_aot.a` and records its
+/// path. This guarantees a profile-matched runtime (a debug `gcr` links the debug
+/// runtime, a release `gcr` the release one) with no path-sniffing or runtime
+/// `cargo` calls. `$GCRUST_RUNTIME_LIB` still overrides it for special cases.
 fn locate_runtime_staticlib() -> Result<std::path::PathBuf, CodegenError> {
     use std::path::PathBuf;
     if let Ok(p) = std::env::var("GCRUST_RUNTIME_LIB") {
@@ -1821,50 +2615,15 @@ fn locate_runtime_staticlib() -> Result<std::path::PathBuf, CodegenError> {
             p.display()
         )));
     }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // The current exe lives in target/<profile>/ (or target/<profile>/deps/ for
-    // tests); the staticlib is alongside in the same profile dir.
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        // .../target/<profile>/gcr  -> dir = .../target/<profile>
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("libgcrust_rt.a"));
-            // tests run from .../deps/; the lib is one level up.
-            if let Some(parent) = dir.parent() {
-                candidates.push(parent.join("libgcrust_rt.a"));
-            }
-        }
-    }
-    for profile in ["release", "debug"] {
-        candidates.push(manifest.join("target").join(profile).join("libgcrust_rt.a"));
-    }
-    for c in &candidates {
-        if c.exists() {
-            return Ok(c.clone());
-        }
-    }
-    // Not found — try to build it on demand so `gcr build` "just works" even
-    // after a plain `cargo build` (which only produces the rlib, not the
-    // staticlib). Best-effort: if cargo isn't available we fall through to the
-    // clear error below.
-    let _ = std::process::Command::new("cargo")
-        .args(["build", "-p", "gcrust-rt"])
-        .current_dir(&manifest)
-        .status();
-    for c in &candidates {
-        if c.exists() {
-            return Ok(c.clone());
-        }
+    // Baked in by build.rs — always matches this binary's build profile.
+    let baked = PathBuf::from(env!("GCRUST_RT_STATICLIB"));
+    if baked.exists() {
+        return Ok(baked);
     }
     Err(CodegenError(format!(
-        "could not find the gc-rust runtime staticlib (libgcrust_rt.a), and \
-         building it via `cargo build -p gcrust-rt` did not produce it. \
-         Set $GCRUST_RUNTIME_LIB to its path. Searched: {}",
-        candidates
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        "gc-rust runtime staticlib not found at {} (set by build.rs). \
+         Rebuild gcr (`cargo build [--release]`), or set $GCRUST_RUNTIME_LIB.",
+        baked.display()
     )))
 }
 
@@ -2104,6 +2863,69 @@ mod tests {
         assert_eq!(run_gc(src, true), 49);
     }
 
+    // ---- match completion (scalars, literals, guards) ---------------------
+
+    #[test]
+    fn match_on_integer_literals() {
+        let src = "fn classify(n: i64) -> i64 { \
+                     match n { 0 => 100, 1 => 200, 2 => 300, _ => 999 } \
+                   } \
+                   fn main() -> i64 { \
+                     classify(0) + classify(1) + classify(2) + classify(9) \
+                   }";
+        // 100 + 200 + 300 + 999 = 1599
+        assert_eq!(run_gc(src, false), 1599);
+    }
+
+    #[test]
+    fn match_with_guards() {
+        let src = "fn sign(n: i64) -> i64 { \
+                     match n { x if x < 0 => 0 - 1, 0 => 0, _ => 1 } \
+                   } \
+                   fn main() -> i64 { \
+                     (sign(0 - 5) + 10) * 100 + (sign(0) + 10) * 10 + (sign(42) + 10) \
+                   }";
+        // sign: -1, 0, 1 -> (9)*100 + (10)*10 + (11) = 900+100+11 = 1011
+        assert_eq!(run_gc(src, false), 1011);
+    }
+
+    #[test]
+    fn match_on_string_literals() {
+        let src = "fn code(s: String) -> i64 { \
+                     match s { \"red\" => 1, \"green\" => 2, \"blue\" => 3, _ => 0 } \
+                   } \
+                   fn main() -> i64 { code(\"green\") * 100 + code(\"blue\") * 10 + code(\"x\") }";
+        // 2*100 + 3*10 + 0 = 230
+        assert_eq!(run_gc(src, false), 230);
+    }
+
+    #[test]
+    fn match_enum_with_guard() {
+        let src = "enum Opt { None, Some(i64) } \
+                   fn describe(o: Opt) -> i64 { \
+                     match o { \
+                       Opt::Some(x) if x > 10 => 1000 + x, \
+                       Opt::Some(x) => x, \
+                       Opt::None => 0 - 1, \
+                     } \
+                   } \
+                   fn main() -> i64 { describe(Opt::Some(42)) + describe(Opt::Some(5)) + describe(Opt::None) }";
+        // 1042 + 5 + (-1) = 1046
+        assert_eq!(run_gc(src, true), 1046);
+    }
+
+    #[test]
+    fn deferred_init_let() {
+        let src = "fn main() -> i64 { \
+                     let mut x: i64; \
+                     if true { x = 7; } else { x = 0; } \
+                     let mut y: i64; \
+                     y = x * 6; \
+                     y \
+                   }";
+        assert_eq!(run_gc(src, false), 42);
+    }
+
     // ---- monomorphized generics -------------------------------------------
 
     #[test]
@@ -2182,7 +3004,7 @@ mod tests {
     #[test]
     fn index_get_set() {
         let src = "fn main() -> i64 { \
-                     let a: Array<i64> = array_new(4); \
+                     let mut a: Array<i64> = array_new(4); \
                      a[0] = 10; a[1] = 20; a[3] = 12; \
                      a[0] + a[1] + a[3] \
                    }";
@@ -2192,7 +3014,7 @@ mod tests {
     #[test]
     fn index_in_for_loop() {
         let src = "fn main() -> i64 { \
-                     let a: Array<i64> = array_new(50); \
+                     let mut a: Array<i64> = array_new(50); \
                      for i in 0..50 { a[i] = i * 2; } \
                      let mut sum = 0; \
                      for j in 0..50 { sum = sum + a[j]; } \
@@ -2217,7 +3039,7 @@ mod tests {
     #[test]
     fn compound_index_assign() {
         let src = "fn main() -> i64 { \
-                     let a: Array<i64> = array_new(2); \
+                     let mut a: Array<i64> = array_new(2); \
                      a[0] = 10; a[0] += 5; a[0] *= 2; \
                      a[0] \
                    }";
@@ -2228,7 +3050,7 @@ mod tests {
 
     #[test]
     fn value_enum_with_payloads() {
-        let src = "value enum Shape { Circle(i64), Rect(i64, i64), Empty } \
+        let src = "#[value] enum Shape { Circle(i64), Rect(i64, i64), Empty } \
                    fn area(s: Shape) -> i64 { \
                        match s { \
                            Shape::Circle(r) => r * r * 3, \
@@ -2245,7 +3067,7 @@ mod tests {
 
     #[test]
     fn value_option_with_payload() {
-        let src = "value enum Opt { None, Some(i64) } \
+        let src = "#[value] enum Opt { None, Some(i64) } \
                    fn unwrap(o: Opt, d: i64) -> i64 { match o { Opt::Some(x) => x, Opt::None => d } } \
                    fn main() -> i64 { unwrap(Opt::Some(42), 0) + unwrap(Opt::None, 8) }";
         assert_eq!(run_gc(src, false), 50);
@@ -2271,7 +3093,7 @@ mod tests {
 
     #[test]
     fn value_enum_construct_and_match() {
-        let src = "value enum Color { Red, Green, Blue } \
+        let src = "#[value] enum Color { Red, Green, Blue } \
                    fn code(c: Color) -> i64 { \
                        match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 } \
                    } \
@@ -2284,7 +3106,7 @@ mod tests {
     #[test]
     fn value_enum_no_heap_under_stress() {
         // C-style value enums are inline (no heap), so they survive GC stress.
-        let src = "value enum Dir { N, S, E, W } \
+        let src = "#[value] enum Dir { N, S, E, W } \
                    fn dx(d: Dir) -> i64 { match d { Dir::E => 1, Dir::W => 0 - 1, Dir::N => 0, Dir::S => 0 } } \
                    fn main() -> i64 { dx(Dir::E) + dx(Dir::W) + dx(Dir::E) }";
         assert_eq!(run_gc(src, true), 1);
@@ -2292,7 +3114,7 @@ mod tests {
 
     #[test]
     fn value_struct_field_access() {
-        let src = "value struct Vec3 { x: i64, y: i64, z: i64 } \
+        let src = "#[value] struct Vec3 { x: i64, y: i64, z: i64 } \
                    fn main() -> i64 { \
                        let v = Vec3 { x: 3, y: 4, z: 5 }; \
                        v.x + v.y + v.z \
@@ -2302,7 +3124,7 @@ mod tests {
 
     #[test]
     fn value_struct_passed_by_value() {
-        let src = "value struct Vec3 { x: f64, y: f64, z: f64 } \
+        let src = "#[value] struct Vec3 { x: f64, y: f64, z: f64 } \
                    fn dot(a: Vec3, b: Vec3) -> f64 { a.x * b.x + a.y * b.y + a.z * b.z } \
                    fn main() -> i64 { \
                        let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 }; \
@@ -2314,7 +3136,7 @@ mod tests {
 
     #[test]
     fn value_struct_in_let_chain() {
-        let src = "value struct P { a: i64, b: i64 } \
+        let src = "#[value] struct P { a: i64, b: i64 } \
                    fn mk(x: i64) -> P { P { a: x, b: x * 2 } } \
                    fn main() -> i64 { \
                        let p = mk(10); \
@@ -2329,7 +3151,7 @@ mod tests {
     fn value_struct_no_heap_alloc_under_stress() {
         // Value structs are inline — even under GC-every-alloc stress, building
         // and reading them triggers no heap allocation for the struct itself.
-        let src = "value struct Pt { x: i64, y: i64 } \
+        let src = "#[value] struct Pt { x: i64, y: i64 } \
                    fn sum(p: Pt) -> i64 { p.x + p.y } \
                    fn main() -> i64 { \
                        let a = Pt { x: 40, y: 2 }; \
@@ -2343,7 +3165,7 @@ mod tests {
     #[test]
     fn array_int_set_get() {
         let src = "fn main() -> i64 { \
-                     let a: Array<i64> = array_new(5); \
+                     let mut a: Array<i64> = array_new(5); \
                      array_set(a, 0, 10); \
                      array_set(a, 1, 20); \
                      array_set(a, 4, 12); \
@@ -2361,7 +3183,7 @@ mod tests {
     #[test]
     fn array_sum_loop() {
         let src = "fn main() -> i64 { \
-                     let a: Array<i64> = array_new(100); \
+                     let mut a: Array<i64> = array_new(100); \
                      let mut i = 0; \
                      while i < 100 { array_set(a, i, i); i = i + 1; } \
                      let mut sum = 0; \
@@ -2376,7 +3198,7 @@ mod tests {
     #[test]
     fn array_float() {
         let src = "fn main() -> i64 { \
-                     let a: Array<f64> = array_new(3); \
+                     let mut a: Array<f64> = array_new(3); \
                      array_set(a, 0, 1.5); \
                      array_set(a, 1, 2.5); \
                      array_set(a, 2, 4.0); \
@@ -2391,12 +3213,92 @@ mod tests {
         // rooted and its scalar contents must survive (untraced Bytes tail).
         let src = "fn mk() -> Array<i64> { array_new(10) } \
                    fn main() -> i64 { \
-                       let a: Array<i64> = array_new(3); \
+                       let mut a: Array<i64> = array_new(3); \
                        array_set(a, 0, 100); array_set(a, 1, 20); array_set(a, 2, 3); \
                        let _x = mk(); let _y = mk(); \
                        array_get(a, 0) + array_get(a, 1) + array_get(a, 2) \
                    }";
         assert_eq!(run_gc(src, true), 123);
+    }
+
+    // ---- strings ----------------------------------------------------------
+
+    #[test]
+    fn str_len_and_eq() {
+        let src = "fn main() -> i64 { \
+                     let s = \"hello\"; \
+                     let n = str_len(s); \
+                     let e = if str_eq(s, \"hello\") { 1 } else { 0 }; \
+                     let d = if str_eq(s, \"nope\") { 1 } else { 0 }; \
+                     n * 100 + e * 10 + d \
+                   }";
+        // len 5, eq 1, neq 0 -> 510
+        assert_eq!(run_gc(src, false), 510);
+    }
+
+    #[test]
+    fn str_concat_basic() {
+        let src = "fn main() -> i64 { \
+                     let t = str_concat(\"foo\", \"barbaz\"); \
+                     str_len(t) \
+                   }";
+        assert_eq!(run_gc(src, false), 9);
+    }
+
+    #[test]
+    fn str_concat_survives_gc_stress() {
+        // Repeatedly concatenate under stress (a collection per allocation); the
+        // accumulated String is a rooted local and must survive every relocation.
+        let src = "fn main() -> i64 { \
+                     let mut acc = \"\"; \
+                     let mut i = 0; \
+                     while i < 50 { acc = str_concat(acc, \"ab\"); i = i + 1; } \
+                     str_len(acc) \
+                   }";
+        assert_eq!(run_gc(src, true), 100);
+    }
+
+    #[test]
+    fn str_get_and_substring() {
+        let src = "fn main() -> i64 { \
+                     let s = \"hello world\"; \
+                     let c = str_get(s, 0); \
+                     let sub = str_substring(s, 6, 11); \
+                     c * 1000 + str_len(sub) \
+                   }";
+        // 'h' = 104, substring \"world\" len 5 -> 104005
+        assert_eq!(run_gc(src, false), 104005);
+    }
+
+    #[test]
+    fn to_string_int_and_concat() {
+        let src = "fn main() -> i64 { \
+                     let s = str_concat(\"n=\", to_string(42)); \
+                     str_len(s) \
+                   }";
+        // \"n=42\" -> length 4
+        assert_eq!(run_gc(src, false), 4);
+    }
+
+    #[test]
+    fn str_to_float_intrinsic() {
+        // \"2.5\" parses to 2.5; *4 = 10.0 -> 10 as i64.
+        let src = "fn main() -> i64 { (str_to_float(\"2.5\") * 4.0) as i64 }";
+        assert_eq!(run_gc(src, false), 10);
+    }
+
+    #[test]
+    fn substring_survives_gc_stress() {
+        // Take a substring then allocate heavily; the substring is a fresh rooted
+        // String and must survive collection with its bytes intact.
+        let src = "fn main() -> i64 { \
+                     let sub = str_substring(\"abcdefgh\", 2, 6); \
+                     let mut i = 0; \
+                     while i < 30 { let mut j: Array<i64> = array_new(40); array_set(j, 0, i); i = i + 1; } \
+                     str_len(sub) * 100 + str_get(sub, 0) \
+                   }";
+        // sub = \"cdef\", len 4, first byte 'c' = 99 -> 499
+        assert_eq!(run_gc(src, true), 499);
     }
 
     #[test]

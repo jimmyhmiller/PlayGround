@@ -1,5 +1,11 @@
 # gc-rust — a fast, monomorphized, GC'd systems language
 
+> **Historical document.** This was the *initial* build plan (bring-up of the
+> compiler + GC). It has been fully executed and then some; the language is now
+> a working, usable system. For the production roadmap that followed (and is also
+> complete), see `PLAN_PROD.md`; for the current state, see the README and
+> `docs/`.
+
 ## What this is (and is NOT)
 
 **gc-rust is a brand-new language.** It is *not* ai-lang and shares none of

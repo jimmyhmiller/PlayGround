@@ -47,6 +47,12 @@ pub enum SymKind {
 pub struct Symbol {
     pub kind: SymKind,
     pub span: Span,
+    /// Was the item declared `pub`? Items at the crate root are always
+    /// accessible; for items inside a `mod`, this gates cross-module access.
+    pub vis: bool,
+    /// The module path the item lives in (`""` for the crate root,
+    /// `"geometry::shapes"` for a nested module). Used for visibility checks.
+    pub module: String,
 }
 
 #[derive(Default)]
@@ -64,6 +70,10 @@ pub struct GlobalTable {
     pub fns: HashMap<String, FnDef>,
     pub consts: HashMap<String, ConstDef>,
     pub aliases: HashMap<String, TypeAlias>,
+    /// `use` declarations, applied after the whole table is collected.
+    pub pending_uses: Vec<crate::ast::UsePath>,
+    /// `use` aliases: a short name → the fully-qualified path it refers to.
+    pub use_aliases: HashMap<String, String>,
 }
 
 impl GlobalTable {
@@ -79,6 +89,14 @@ impl GlobalTable {
         if let Some(s) = self.by_path.get(&joined) {
             return Some(s);
         }
+        // A `use` alias for the unqualified name maps to a full path.
+        if path.is_single() {
+            if let Some(full) = self.use_aliases.get(path.last()) {
+                if let Some(s) = self.by_path.get(full) {
+                    return Some(s);
+                }
+            }
+        }
         // Try last-segment if unambiguous.
         if let Some(paths) = self.by_last.get(path.last()) {
             if paths.len() == 1 {
@@ -87,13 +105,181 @@ impl GlobalTable {
         }
         None
     }
+
+    /// Apply collected `use` declarations, populating `use_aliases`. A
+    /// `use a::b::c;` maps `c` → `a::b::c`; a `use a::b::*;` maps every item
+    /// directly in module `a::b` by its last segment.
+    fn apply_uses(&mut self) {
+        let uses = std::mem::take(&mut self.pending_uses);
+        for u in &uses {
+            if u.segments.last().map(|s| s.as_str()) == Some("*") {
+                // Glob: prefix is everything before the `*`.
+                let prefix = u.segments[..u.segments.len() - 1].join("::");
+                let pref_colon = format!("{}::", prefix);
+                let members: Vec<(String, String)> = self
+                    .by_path
+                    .keys()
+                    .filter(|p| p.starts_with(&pref_colon))
+                    .filter_map(|p| {
+                        let rest = &p[pref_colon.len()..];
+                        // Only items DIRECTLY in the module (no further `::`).
+                        if rest.contains("::") { None } else { Some((rest.to_string(), p.clone())) }
+                    })
+                    .collect();
+                for (short, full) in members {
+                    self.use_aliases.entry(short).or_insert(full);
+                }
+            } else {
+                let full = u.segments.join("::");
+                if let Some(last) = u.segments.last() {
+                    self.use_aliases.entry(last.clone()).or_insert(full);
+                }
+            }
+        }
+    }
 }
 
 pub fn resolve_module(module: Module) -> Result<Resolved, ResolveError> {
     let mut globals = GlobalTable::default();
     collect_items(&module.items, &mut Vec::new(), &mut globals)?;
+    globals.apply_uses();
     validate_types(&globals)?;
+    validate_visibility(&module.items, &mut Vec::new(), &globals)?;
     Ok(Resolved { module, globals })
+}
+
+/// Can code in module `from_mod` reference the symbol at fully-qualified path
+/// `target`? Allowed when the target is `pub`, or lives in `from_mod` itself or
+/// an ancestor module of `from_mod` (a child can see its parents' privates, and
+/// every module can see the crate root). This mirrors Rust's rule closely
+/// enough for v1.
+fn visible_from(g: &GlobalTable, target: &str, from_mod: &str) -> bool {
+    let Some(sym) = g.by_path.get(target) else { return true }; // unknown → let later passes report
+    if sym.vis {
+        return true;
+    }
+    let item_mod = &sym.module;
+    // Same module, or item_mod is an ancestor of (a prefix of) from_mod.
+    item_mod.is_empty()
+        || from_mod == item_mod
+        || from_mod.starts_with(&format!("{}::", item_mod))
+}
+
+/// Walk items, tracking the enclosing module, and reject explicitly
+/// module-qualified references (`a::b::c`, ≥2 segments) to a private item that
+/// isn't visible from the referencing module.
+fn validate_visibility(
+    items: &[Item],
+    prefix: &mut Vec<String>,
+    g: &GlobalTable,
+) -> Result<(), ResolveError> {
+    let cur_mod = prefix.join("::");
+    for item in items {
+        match &item.kind {
+            ItemKind::Fn(f) => {
+                let mut paths = Vec::new();
+                collect_paths_block(&f.body, &mut paths);
+                check_paths_vis(&paths, &cur_mod, g)?;
+            }
+            ItemKind::Mod(m) => {
+                prefix.push(m.name.clone());
+                validate_visibility(&m.items, prefix, g)?;
+                prefix.pop();
+            }
+            ItemKind::Impl(b) => {
+                for m in &b.items {
+                    let mut paths = Vec::new();
+                    collect_paths_block(&m.body, &mut paths);
+                    check_paths_vis(&paths, &cur_mod, g)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Reject any qualified (≥2 segment) reference targeting a private item not
+/// visible from `cur_mod`.
+fn check_paths_vis(paths: &[(Vec<String>, Span)], cur_mod: &str, g: &GlobalTable) -> Result<(), ResolveError> {
+    for (segs, span) in paths {
+        if segs.len() < 2 {
+            continue;
+        }
+        let joined = segs.join("::");
+        if g.by_path.contains_key(&joined) && !visible_from(g, &joined, cur_mod) {
+            return Err(ResolveError {
+                msg: format!("`{}` is private and not accessible from here (mark it `pub`)", joined),
+                span: *span,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_paths_block(b: &Block, out: &mut Vec<(Vec<String>, Span)>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { init: Some(e), .. } => collect_paths_expr(e, out),
+            Stmt::Let { .. } => {}
+            Stmt::Expr(e) => collect_paths_expr(e, out),
+            Stmt::Item(_) => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        collect_paths_expr(t, out);
+    }
+}
+
+fn collect_paths_expr(e: &Expr, out: &mut Vec<(Vec<String>, Span)>) {
+    use ExprKind::*;
+    match &*e.kind {
+        Path(p) => out.push((p.segments.clone(), e.span)),
+        StructLit { path, fields, .. } => {
+            out.push((path.segments.clone(), e.span));
+            for f in fields { if let Some(v) = &f.value { collect_paths_expr(v, out); } }
+        }
+        Call(callee, args) => {
+            collect_paths_expr(callee, out);
+            for a in args { collect_paths_expr(a, out); }
+        }
+        MethodCall { recv, args, .. } => {
+            collect_paths_expr(recv, out);
+            for a in args { collect_paths_expr(a, out); }
+        }
+        Field { base, .. } => collect_paths_expr(base, out),
+        Index { base, index } => { collect_paths_expr(base, out); collect_paths_expr(index, out); }
+        Unary(_, x) => collect_paths_expr(x, out),
+        Binary(_, l, r) => { collect_paths_expr(l, out); collect_paths_expr(r, out); }
+        Assign { target, value, .. } => { collect_paths_expr(target, out); collect_paths_expr(value, out); }
+        Cast(x, _) => collect_paths_expr(x, out),
+        Tuple(xs) => for x in xs { collect_paths_expr(x, out); },
+        Array(crate::ast::ArrayLit::Elems(xs)) => for x in xs { collect_paths_expr(x, out); },
+        Array(crate::ast::ArrayLit::Repeat(v, n)) => { collect_paths_expr(v, out); collect_paths_expr(n, out); }
+        Block(b) => collect_paths_block(b, out),
+        If { cond, then_branch, else_branch } => {
+            collect_paths_expr(cond, out);
+            collect_paths_block(then_branch, out);
+            if let Some(e) = else_branch { collect_paths_expr(e, out); }
+        }
+        Match { scrutinee, arms } => {
+            collect_paths_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_paths_expr(g, out); }
+                collect_paths_expr(&arm.body, out);
+            }
+        }
+        While { cond, body } => { collect_paths_expr(cond, out); collect_paths_block(body, out); }
+        Loop { body } => collect_paths_block(body, out),
+        For { iter, body, .. } => { collect_paths_expr(iter, out); collect_paths_block(body, out); }
+        Closure { body, .. } => collect_paths_expr(body, out),
+        Return(Some(x)) | Break(Some(x)) | Try(x) => collect_paths_expr(x, out),
+        Range { lo, hi, .. } => {
+            if let Some(x) = lo { collect_paths_expr(x, out); }
+            if let Some(x) = hi { collect_paths_expr(x, out); }
+        }
+        _ => {}
+    }
 }
 
 fn collect_items(
@@ -101,23 +287,25 @@ fn collect_items(
     prefix: &mut Vec<String>,
     g: &mut GlobalTable,
 ) -> Result<(), ResolveError> {
+    let module = prefix.join("::");
     for item in items {
         match &item.kind {
             ItemKind::Fn(f) => {
                 let path = qualify(prefix, &f.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::Fn, span: f.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::Fn, span: f.span, vis: f.vis, module: module.clone() });
                 g.fns.insert(path, f.clone());
             }
             ItemKind::Struct(s) => {
                 let path = qualify(prefix, &s.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::Struct, span: s.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::Struct, span: s.span, vis: s.vis, module: module.clone() });
                 g.structs.insert(path, s.clone());
             }
             ItemKind::Enum(e) => {
                 let path = qualify(prefix, &e.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::Enum, span: e.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::Enum, span: e.span, vis: e.vis, module: module.clone() });
                 g.enums.insert(path.clone(), e.clone());
-                // Register variants as `Enum::Variant`.
+                // Register variants as `Enum::Variant`. A variant is as visible
+                // as its enum.
                 for (i, v) in e.variants.iter().enumerate() {
                     let vpath = format!("{}::{}", path, v.name);
                     let has_payload = !matches!(v.payload, VariantPayload::None);
@@ -130,13 +318,15 @@ fn collect_items(
                                 has_payload,
                             },
                             span: v.span,
+                            vis: e.vis,
+                            module: module.clone(),
                         },
                     );
                 }
             }
             ItemKind::Trait(t) => {
                 let path = qualify(prefix, &t.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::Trait, span: t.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::Trait, span: t.span, vis: t.vis, module: module.clone() });
                 g.traits.insert(path, t.clone());
             }
             ItemKind::Impl(b) => {
@@ -144,12 +334,12 @@ fn collect_items(
             }
             ItemKind::Const(c) => {
                 let path = qualify(prefix, &c.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::Const, span: c.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::Const, span: c.span, vis: c.vis, module: module.clone() });
                 g.consts.insert(path, c.clone());
             }
             ItemKind::TypeAlias(a) => {
                 let path = qualify(prefix, &a.name);
-                g.insert(path.clone(), Symbol { kind: SymKind::TypeAlias, span: a.span });
+                g.insert(path.clone(), Symbol { kind: SymKind::TypeAlias, span: a.span, vis: a.vis, module: module.clone() });
                 g.aliases.insert(path, a.clone());
             }
             ItemKind::Mod(m) => {
@@ -157,8 +347,14 @@ fn collect_items(
                 collect_items(&m.items, prefix, g)?;
                 prefix.pop();
             }
-            ItemKind::Use(_) => { /* v0: `use` is a no-op alias hint; lookups try
-                                     both qualified and last-segment already. */ }
+            ItemKind::Use(u) => {
+                // `use a::b::c;` brings `c` into scope as an alias for the full
+                // path `a::b::c`. `use a::b::*;` is a glob: every item directly
+                // in module `a::b` becomes accessible by its last segment.
+                // We record aliases now and apply them after the full table is
+                // built (so forward references to not-yet-collected items work).
+                g.pending_uses.push(u.clone());
+            }
         }
     }
     Ok(())
@@ -250,7 +446,7 @@ fn check_type(
             for t in tys { check_type(t, generics, is_known)?; }
         }
         TypeKind::Array(elem, _) => check_type(elem, generics, is_known)?,
-        TypeKind::Fn(params, ret) => {
+        TypeKind::Fn(params, ret) | TypeKind::ExternFn(params, ret) => {
             for p in params { check_type(p, generics, is_known)?; }
             if let Some(r) = ret { check_type(r, generics, is_known)?; }
         }
@@ -265,7 +461,7 @@ pub fn is_builtin_type(name: &str) -> bool {
         "i8" | "i16" | "i32" | "i64"
             | "u8" | "u16" | "u32" | "u64"
             | "f32" | "f64"
-            | "bool" | "char" | "String" | "Bytes"
+            | "bool" | "char" | "String" | "Bytes" | "RawPtr"
             // generic builtins resolved structurally later
             | "Vec" | "Array" | "Option" | "Result"
     )

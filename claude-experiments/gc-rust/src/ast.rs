@@ -43,8 +43,15 @@ pub struct FnDef {
     /// `self` receiver, if this is a method (`self` param). gc-rust passes self
     /// by value (GC reference under the hood) — there is no `&self`/`&mut self`.
     pub has_self: bool,
+    /// Was the receiver declared `mut self`? Mutating the receiver (or assigning
+    /// through it) is only allowed when this is true. See `docs/mutability.md`.
+    pub self_is_mut: bool,
     pub ret: Option<Type>,
     pub body: Block,
+    /// `true` for an `extern "C" fn name(...) -> ret;` declaration: a foreign C
+    /// function with no body. Its `body` is empty and must not be lowered; the
+    /// `name` is the unmangled C symbol. See `docs/ffi.md`.
+    pub is_extern: bool,
     pub span: Span,
 }
 
@@ -131,6 +138,7 @@ pub struct FnSig {
     pub generics: Generics,
     pub params: Vec<Param>,
     pub has_self: bool,
+    pub self_is_mut: bool,
     pub ret: Option<Type>,
     pub span: Span,
 }
@@ -168,6 +176,10 @@ pub struct ModDef {
     pub vis: bool,
     pub name: String,
     pub items: Vec<Item>,
+    /// `true` for an inline `mod foo { ... }`; `false` for `mod foo;`, whose
+    /// items are loaded from a sibling file (`foo.gcr` or `foo/mod.gcr`) by the
+    /// compile pipeline before resolution.
+    pub inline: bool,
     pub span: Span,
 }
 
@@ -229,6 +241,10 @@ pub enum TypeKind {
     Array(Box<Type>, Box<Expr>),
     /// `fn(A, B) -> R`.
     Fn(Vec<Type>, Option<Box<Type>>),
+    /// `extern fn(A, B) -> R` — a C function-pointer (callback) type. Distinct
+    /// from `Fn` (a gc-rust closure): passing a named gc-rust function where this
+    /// is expected synthesizes a C-ABI trampoline. See `docs/ffi.md`.
+    ExternFn(Vec<Type>, Option<Box<Type>>),
     /// The `Self` type inside a trait/impl.
     SelfType,
 }

@@ -1,0 +1,32 @@
+// FFI Phase D: a C function calls BACK into gc-rust. We pass `cmp` (a gc-rust
+// function) to libc `qsort` as a C callback. The compiler synthesizes a C-ABI
+// trampoline that recovers the current thread, re-enters managed state, calls
+// `cmp`, and restores native state — so the callback can run safely even though
+// C invoked it with no `Thread*`. See docs/ffi.md.
+
+// qsort sorts `n` elements of `size` bytes at `base`, ordering by `compar`.
+// `mut base` → the sorted stack buffer is copied back into the caller's array.
+extern "C" fn qsort(mut base: RawPtr, n: i64, size: i64, compar: extern fn(RawPtr, RawPtr) -> i32);
+
+// Comparator: ascending i64 order. `a`/`b` are pointers into the array C is
+// sorting; ptr_read_i64 reads through them.
+fn cmp(a: RawPtr, b: RawPtr) -> i32 {
+    let x = ptr_read_i64(a);
+    let y = ptr_read_i64(b);
+    if x < y { (0 - 1) as i32 } else if x > y { 1i32 } else { 0i32 }
+}
+
+fn main() -> i64 {
+    // An unsorted i64 array; qsort it in place via the copy-out buffer.
+    let mut arr: Array<i64> = array_new(5);
+    array_set(arr, 0, 30);
+    array_set(arr, 1, 10);
+    array_set(arr, 2, 50);
+    array_set(arr, 3, 20);
+    array_set(arr, 4, 40);
+
+    qsort(as_c_bytes(arr), 5, 8, cmp);
+
+    // After sorting: [10,20,30,40,50]. Return arr[0]*100 + arr[4] = 1050.
+    array_get(arr, 0) * 100 + array_get(arr, 4)
+}

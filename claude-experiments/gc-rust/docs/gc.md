@@ -1,22 +1,25 @@
 # The garbage collector and the codegen↔GC contract
 
-gc-rust does not have its own collector. It reuses ai-lang's `gc/` module
-verbatim (`src/gc/`), a self-contained, precise, semi-space **copying**
-collector. This document describes what it is and the exact ABI compiled code
-must honor so collections are correct. Phase 0's `tests/gc_abi_smoke.rs` proves
-this contract end-to-end with hand-built LLVM IR.
+gc-rust does not have its own collector. It reuses ai-lang's GC module verbatim
+(`crates/gcrust-rt/src/gc/`), a self-contained, precise, relocating collector.
+This document describes what it is and the exact ABI compiled code must honor so
+collections are correct. `tests/gc_abi_smoke.rs` proves this contract end-to-end
+with hand-built LLVM IR; `tests/generational.rs` verifies the generational path.
 
 ## The collector in one paragraph
 
-Two equal half-spaces. Allocation bumps a cursor in *from-space*. When it fills,
-a collection copies every live object to *to-space* (Cheney scan), leaving a
+gc-rust runs the **generational** mode by default (see "Generational mode" at
+the end). At its core is a semi-space **copying** collector — two equal
+half-spaces; allocation bumps a cursor in *from-space*; when it fills, a
+collection copies every live object to *to-space* (Cheney scan), leaving a
 forwarding pointer in each moved object's header word, then swaps the spaces.
 Because objects **move**, every live pointer must be found and updated — which
 is why roots are precise and why compiled code must spill pointers across
 allocations. Cycles are collected for free (a copying collector doesn't care
-about cycles). The collector is also generational- and concurrent-capable
-(card table + SATB barriers are present in `gc/`), but v0 runs the simple STW
-semi-space path.
+about cycles). The generational layer puts a bump-allocated nursery in front of
+this, collected cheaply and often by minor GCs, with a card-table write barrier.
+(A concurrent-marking path with SATB barriers also exists in the runtime but is
+not turned on.)
 
 ## Object layout
 
@@ -34,7 +37,7 @@ if present) and skips the raw bytes. Codegen's `Layout` → `TypeInfo` lowering
 must put every GC reference in the pointer-field region and every scalar in the
 raw region. (See `docs/core-ir.md`.)
 
-## The ABI (`src/runtime.rs`)
+## The ABI (`crates/gcrust-rt/src/runtime.rs`)
 
 Compiled code is passed a `*mut Thread` as its first argument:
 
@@ -92,3 +95,27 @@ spill → allocate → build graph → **collect mid-function** → reload → e
 sequence above, and asserts that after the collection the relocated object's
 field still points at the relocated child of the correct shape. Green ⇒ the
 contract codegen will generate is sound.
+
+## Generational mode (active)
+
+gc-rust now runs a **generational** collector by default (JIT and AOT):
+
+- **Nursery (young gen)**: 16 MB. New allocations land here. When it fills, a
+  cheap **minor GC** scavenges only the nursery, promoting survivors to tenured.
+- **Tenured (old gen)**: 256 MB per space. A **major GC** (the semi-space
+  copying collector) reclaims it when it fills.
+- **Write barrier**: `ai_gc_write_barrier` runs after every pointer store into a
+  heap object/array. If a tenured object gains a nursery pointer, the covering
+  card is marked dirty so the minor GC finds the old→young edge without scanning
+  all of tenured. Object *construction* needs no barrier (a fresh object is
+  always young). The barrier no-ops for non-pointer stores and on the
+  non-generational heap.
+
+Most objects die young, so minor GCs do the bulk of the work and major GCs are
+rare — e.g. `binary_trees` runs 12 minor + 0 major collections. Set
+`GCR_GC_STATS=1` to print the counts.
+
+`--gc-stress` deliberately uses the **single-generation semi-space** collector
+with collect-on-every-allocation: its relocation invariants are semi-space
+specific, so it torture-tests that collector while normal runs get the
+generational speedup. Both produce identical results on every example.

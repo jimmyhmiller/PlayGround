@@ -1,0 +1,33 @@
+// OS-thread concurrency. `Thread::spawn(f)` runs the closure `f` on a new thread
+// that shares this program's GC heap; the generational collector stops the world
+// across ALL threads when it collects. `t.join()` blocks for the result. Lambdas
+// and named functions are interchangeable. See docs/threads.md.
+
+// Build a Vec of 0..n and sum it — allocates heavily, so the GC runs while
+// multiple threads are live (exercising stop-the-world coordination).
+fn build_and_sum(n: i64) -> i64 {
+    let v: Vec<i64> = vec_new();
+    let mut acc = v;
+    let mut i = 0;
+    while i < n {
+        acc = vec_push(acc, i);
+        i = i + 1;
+    }
+    let mut s = 0;
+    let mut j = 0;
+    while j < vec_len(acc) {
+        s = s + vec_get(acc, j);
+        j = j + 1;
+    }
+    s
+}
+
+fn main() -> i64 {
+    // Two worker threads + the main thread, all allocating concurrently.
+    let t1 = Thread::spawn(|| build_and_sum(5000));
+    let t2 = Thread::spawn(|| build_and_sum(5000));
+    let local = build_and_sum(5000);
+
+    // Each sum is 0+1+...+4999 = 12497500; total = 3 * 12497500 = 37492500.
+    local + t1.join() + t2.join()
+}

@@ -8,13 +8,13 @@ fn ivec_get(v: IntVec, i: i64) -> i64 {
     array_get(v.data, i)
 }
 
-fn ivec_push(v: IntVec, x: i64) -> IntVec {
+fn ivec_push(mut v: IntVec, x: i64) -> IntVec {
     if v.len < v.cap {
         let _u = array_set(v.data, v.len, x);
         IntVec { data: v.data, len: v.len + 1, cap: v.cap }
     } else {
         let new_cap = v.cap * 2;
-        let new_data: Array<i64> = array_new(new_cap);
+        let mut new_data: Array<i64> = array_new(new_cap);
         let mut i = 0;
         while i < v.len {
             let _u = array_set(new_data, i, array_get(v.data, i));

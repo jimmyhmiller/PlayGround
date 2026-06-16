@@ -41,11 +41,32 @@ fn line_text(src: &str, offset: usize) -> (usize, &str) {
     (line_no, &src[line_start..line_end])
 }
 
+/// The embedded standard-library source. Prelude items are lexed from this text
+/// separately from the user program, so a span originating in the prelude indexes
+/// into here, not the user file. `render` falls back to it when a span lands
+/// outside the user source.
+const PRELUDE_SRC: &str = include_str!("prelude.gcr");
+
 /// Render a diagnostic for `span` in `src` (named `file`) with `msg`. The span's
 /// `start..end` is underlined with carets (clamped to a single line).
 pub fn render(file: &str, src: &str, span: Span, msg: &str) -> String {
+    // A span may point outside `src` — most commonly into the injected prelude,
+    // whose text is lexed separately. Re-render against the prelude source so the
+    // user still sees the offending stdlib line with carets.
+    if (span.start as usize) >= src.len() {
+        if (span.start as usize) < PRELUDE_SRC.len() {
+            let inner = render_in("<std>", PRELUDE_SRC, span, msg);
+            return format!("{}\n note: this error is in the standard library (prelude)", inner);
+        }
+        return format!("error: {msg}\n note: no source location available");
+    }
+    render_in(file, src, span, msg)
+}
+
+/// Render a diagnostic for `span` known to index into `src`.
+fn render_in(file: &str, src: &str, span: Span, msg: &str) -> String {
     let start = span.start as usize;
-    let end = (span.end as usize).max(start + 1);
+    let end = (span.end as usize).max(start + 1).min(src.len());
     let (line, col) = line_col(src, start);
     let (line_no, text) = line_text(src, start);
     debug_assert_eq!(line, line_no);
@@ -99,5 +120,25 @@ mod tests {
         let out = render("x.gcr", src, Span::new(off, off + 3), "unknown");
         assert!(out.contains("x.gcr:2:"));
         assert!(out.contains("let x = bad;"));
+    }
+
+    #[test]
+    fn prelude_span_falls_back_to_stdlib_source() {
+        // A span past the user source but within the prelude renders against the
+        // prelude with a stdlib note (no panic, real context).
+        let user = "fn main() -> i64 { 0 }";
+        // Pick an offset inside the (larger) prelude text.
+        let off = user.len() + 20;
+        assert!(off < PRELUDE_SRC.len());
+        let out = render("app.gcr", user, Span::new(off, off + 3), "some stdlib error");
+        assert!(out.contains("standard library"), "{out}");
+    }
+
+    #[test]
+    fn span_fully_out_of_range_is_graceful() {
+        let user = "fn main() -> i64 { 0 }";
+        let huge = PRELUDE_SRC.len() + user.len() + 1000;
+        let out = render("app.gcr", user, Span::new(huge, huge + 1), "weird");
+        assert!(out.contains("no source location"), "{out}");
     }
 }

@@ -4,7 +4,9 @@
 // program: zero-cost value abstraction with a GC available but unused on the
 // hot path.
 
-value struct Vec3 { x: f64, y: f64, z: f64 }
+#[value]
+
+struct Vec3 { x: f64, y: f64, z: f64 }
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
     Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }

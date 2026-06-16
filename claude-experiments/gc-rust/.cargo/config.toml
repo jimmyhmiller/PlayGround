@@ -1,0 +1,9 @@
+# Convenience aliases for gc-rust.
+#
+# `cargo build` builds the `gcr` compiler + the gcrust-rt rlib (enough for JIT:
+# `gcr run`). It does NOT build the gcrust-rt *staticlib*, which AOT linking
+# (`gcr build`) needs — cargo only builds a dependency's staticlib crate-type
+# when explicitly asked. These aliases build both, profile-matched, in one shot.
+[alias]
+gcr-build = ["build", "-p", "gc-rust", "-p", "gcrust-rt"]
+gcr-release = ["build", "--release", "-p", "gc-rust", "-p", "gcrust-rt"]

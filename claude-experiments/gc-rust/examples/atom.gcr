@@ -1,0 +1,27 @@
+// Clojure-style Atom: a shared cell holding an immutable value. You never mutate
+// in place — you atomically SWAP which value the atom points at. `swap` applies a
+// pure function and retries (lock-free CAS) if another thread changed it first.
+// Three threads concurrently increment a shared atom 5000 times each; the final
+// value is exact (no lost updates), proving the retry loop is correct under
+// contention. See docs/threads.md.
+
+fn bump(a: Atom<i64>, iters: i64) -> i64 {
+    let mut i = 0;
+    while i < iters {
+        let _n = a.swap(|x| x + 1);
+        i = i + 1;
+    }
+    0
+}
+
+fn main() -> i64 {
+    let a: Atom<i64> = Atom::new(0);
+    let t1 = Thread::spawn(|| bump(a, 5000));
+    let t2 = Thread::spawn(|| bump(a, 5000));
+    let t3 = Thread::spawn(|| bump(a, 5000));
+    let _l = bump(a, 5000);
+    let _x = t1.join();
+    let _y = t2.join();
+    let _z = t3.join();
+    a.deref()   // exactly 4 * 5000 = 20000
+}

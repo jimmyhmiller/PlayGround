@@ -54,8 +54,8 @@ fn main() -> i64 {
     let bonus = 5;
     let add_bonus = |n: i64| n + bonus;
 
-    // array
-    let a: Array<i64> = array_new(3);
+    // array (mutable: we write into its elements)
+    let mut a: Array<i64> = array_new(3);
     array_set(a, 0, 10);
     array_set(a, 1, 20);
     array_set(a, 2, 12);

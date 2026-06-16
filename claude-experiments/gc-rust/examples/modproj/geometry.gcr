@@ -1,0 +1,17 @@
+// A library module: only `pub` items are visible to importers.
+pub struct Point { x: i64, y: i64 }
+
+pub fn dist_sq(a: Point, b: Point) -> i64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
+}
+
+// Private helper — not accessible outside this module.
+fn negate(n: i64) -> i64 { 0 - n }
+
+pub fn manhattan(a: Point, b: Point) -> i64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    abs_i64(dx) + abs_i64(dy)
+}
