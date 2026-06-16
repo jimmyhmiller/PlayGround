@@ -8,6 +8,7 @@ pub mod ast;
 pub mod check;
 pub mod codegen;
 pub mod convention;
+pub mod macros;
 pub mod parse;
 pub mod reader;
 
@@ -15,10 +16,26 @@ use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target};
 use inkwell::OptimizationLevel;
 
+/// Read + macro-expand a source string into the macro-free top-level forms.
+fn read_and_expand(src: &str) -> Result<Vec<reader::Sexp>, String> {
+    let forms = reader::read_all(src)?;
+    macros::expand_program(&forms)
+}
+
+/// Macro-expand and pretty-print the resulting forms (for `--expand`).
+pub fn expand_to_string(src: &str) -> Result<String, String> {
+    let forms = read_and_expand(src)?;
+    Ok(forms
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 /// Parse + check + emit textual LLVM IR (no JIT). Useful in tests and for
 /// inspecting how conventions lower.
 pub fn emit_ir(src: &str) -> Result<String, String> {
-    let forms = reader::read_all(src)?;
+    let forms = read_and_expand(src)?;
     let program = parse::parse_program(&forms)?;
     check::check(&program)?;
     let ctx = Context::create();
@@ -29,7 +46,7 @@ pub fn emit_ir(src: &str) -> Result<String, String> {
 /// Parse + check + JIT-compile, then run `main` (which must take no args and
 /// return i64) and return its result.
 pub fn run_source(src: &str) -> Result<i64, String> {
-    let forms = reader::read_all(src)?;
+    let forms = read_and_expand(src)?;
     let program = parse::parse_program(&forms)?;
     check::check(&program)?;
 

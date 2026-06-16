@@ -11,6 +11,9 @@ pub enum Sexp {
     Sym(String),
     /// Keyword `:foo` stored without the leading colon.
     Keyword(String),
+    /// String literal `"..."` — used by macros (name munging); the core
+    /// language has no string type.
+    Str(String),
     List(Vec<Sexp>),
     Vector(Vec<Sexp>),
 }
@@ -29,6 +32,10 @@ pub fn read_all(src: &str) -> Result<Vec<Sexp>, String> {
 enum Tok {
     Open(char),  // ( or [
     Close(char), // ) or ]
+    /// A reader-macro prefix: `'`→quote, `` ` ``→quasiquote, `~`→unquote,
+    /// `~@`→unquote-splicing. The next form is wrapped in `(<sym> form)`.
+    Prefix(&'static str),
+    Str(String),
     Atom(String),
 }
 
@@ -57,10 +64,49 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 toks.push(Tok::Close(c));
                 chars.next();
             }
+            '\'' => {
+                toks.push(Tok::Prefix("quote"));
+                chars.next();
+            }
+            '`' => {
+                toks.push(Tok::Prefix("quasiquote"));
+                chars.next();
+            }
+            '~' => {
+                chars.next();
+                if chars.peek() == Some(&'@') {
+                    chars.next();
+                    toks.push(Tok::Prefix("unquote-splicing"));
+                } else {
+                    toks.push(Tok::Prefix("unquote"));
+                }
+            }
+            '"' => {
+                chars.next();
+                let mut s = String::new();
+                loop {
+                    match chars.next() {
+                        None => return Err("unterminated string literal".to_string()),
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some('n') => s.push('\n'),
+                            Some('t') => s.push('\t'),
+                            Some('"') => s.push('"'),
+                            Some('\\') => s.push('\\'),
+                            Some(c) => s.push(c),
+                            None => return Err("unterminated string escape".to_string()),
+                        },
+                        Some(c) => s.push(c),
+                    }
+                }
+                toks.push(Tok::Str(s));
+            }
             _ => {
                 let mut s = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ';') {
+                    if c.is_whitespace()
+                        || matches!(c, '(' | ')' | '[' | ']' | ';' | '\'' | '`' | '~' | '"')
+                    {
                         break;
                     }
                     s.push(c);
@@ -109,10 +155,44 @@ impl Parser {
                     Sexp::Vector(items)
                 })
             }
+            Tok::Prefix(sym) => {
+                let inner = self.parse()?;
+                Ok(Sexp::List(vec![Sexp::Sym(sym.to_string()), inner]))
+            }
+            Tok::Str(s) => Ok(Sexp::Str(s)),
             Tok::Close(c) => Err(format!("unexpected '{c}'")),
             Tok::Atom(s) => Ok(atom(&s)),
         }
     }
+}
+
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Sexp::Int(n) => write!(f, "{n}"),
+            Sexp::Sym(s) => write!(f, "{s}"),
+            Sexp::Keyword(k) => write!(f, ":{k}"),
+            Sexp::Str(s) => write!(f, "{s:?}"),
+            Sexp::List(items) => write_seq(f, items, '(', ')'),
+            Sexp::Vector(items) => write_seq(f, items, '[', ']'),
+        }
+    }
+}
+
+fn write_seq(
+    f: &mut std::fmt::Formatter<'_>,
+    items: &[Sexp],
+    open: char,
+    close: char,
+) -> std::fmt::Result {
+    write!(f, "{open}")?;
+    for (i, it) in items.iter().enumerate() {
+        if i > 0 {
+            write!(f, " ")?;
+        }
+        write!(f, "{it}")?;
+    }
+    write!(f, "{close}")
 }
 
 fn atom(s: &str) -> Sexp {

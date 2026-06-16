@@ -14,10 +14,11 @@ coroutines, and FFI trampolines become library code written in macros.
 
 ## Status
 
-**M0–M3 implemented** — an s-expression front end that JIT-compiles through
-LLVM, where **both** calling convention and allocation are part of the type
-system: conventions LLVM's CC enum cannot express, and pointers whose region is
-part of their type.
+**M0–M3 + a user-defined macro system** — an s-expression front end that
+JIT-compiles through LLVM, where **both** calling convention and allocation are
+part of the type system (conventions LLVM's CC enum cannot express, and pointers
+whose region is part of their type), and the higher-level surface is grown with
+**real Lisp macros** — a compile-time interpreter, not template substitution.
 
 - M0: reader → core AST → LLVM codegen → JIT. `i64`, `let`, arithmetic,
   comparisons, `if`, direct + recursive calls.
@@ -34,10 +35,15 @@ part of their type.
   `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
   `malloc`/`free`. The checker enforces region soundness — `frame` pointers may
   not cross a function boundary, and `free` only accepts a `heap` pointer.
+- Macros: `defmacro` / `def` run in a compile-time Lisp (quasiquote `` ` ``,
+  unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
+  helper functions). Macros can compute, recurse, and emit whole top-level
+  definitions, and they compose with conventions and regions. Inspect any
+  expansion with `coil --expand`.
 
-Not yet: the `adapt` macro (general convention-to-convention trampolines — needs
-the macro layer), closures derived from (convention × allocation) (M4), macros,
-richer pointee types. See the design doc.
+Not yet: the `adapt` macro (general convention-to-convention trampolines),
+closures derived from (convention × allocation) (M4), richer pointee types, a
+macro standard library. See the design doc.
 
 ## What it looks like
 
@@ -63,11 +69,13 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                  # 14 end-to-end tests
+cargo test                                  # 21 end-to-end tests
 cargo run -- examples/fib.coil              # => 55
 cargo run -- examples/conventions.coil      # => 42  (native fastcc)
 cargo run -- examples/shim.coil             # => 42  (exotic rax/rdx convention)
 cargo run -- examples/allocation.coil       # => 42  (frame/static/heap regions)
+cargo run -- examples/macros.coil           # => 41  (user-defined macros)
+cargo run -- --expand examples/macros.coil  # show macro expansion
 cargo run -- --emit-ir examples/shim.coil   # show the trampoline + inline asm
 ```
 

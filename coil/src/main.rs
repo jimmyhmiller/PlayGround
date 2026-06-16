@@ -7,11 +7,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let (emit_ir, path) = match args.as_slice() {
-        [_, flag, path] if flag == "--emit-ir" => (true, path.clone()),
-        [_, path] => (false, path.clone()),
+    let (mode, path) = match args.as_slice() {
+        [_, flag, path] if flag == "--emit-ir" => (Mode::EmitIr, path.clone()),
+        [_, flag, path] if flag == "--expand" => (Mode::Expand, path.clone()),
+        [_, path] => (Mode::Run, path.clone()),
         _ => {
-            eprintln!("usage: coil [--emit-ir] <file.coil>");
+            eprintln!("usage: coil [--emit-ir | --expand] <file.coil>");
             return ExitCode::from(2);
         }
     };
@@ -24,27 +25,25 @@ fn main() -> ExitCode {
         }
     };
 
-    if emit_ir {
-        match coil::emit_ir(&src) {
-            Ok(ir) => {
-                print!("{ir}");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
+    let result = match mode {
+        Mode::EmitIr => coil::emit_ir(&src),
+        Mode::Expand => coil::expand_to_string(&src),
+        Mode::Run => coil::run_source(&src).map(|r| r.to_string()),
+    };
+    match result {
+        Ok(out) => {
+            println!("{out}");
+            ExitCode::SUCCESS
         }
-    } else {
-        match coil::run_source(&src) {
-            Ok(result) => {
-                println!("{result}");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
         }
     }
+}
+
+enum Mode {
+    Run,
+    EmitIr,
+    Expand,
 }

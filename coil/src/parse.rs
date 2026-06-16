@@ -172,6 +172,7 @@ fn parse_expr(s: &Sexp) -> Result<Expr, String> {
         Sexp::Int(n) => Ok(Expr::Int(*n)),
         Sexp::Sym(name) => Ok(Expr::Var(name.clone())),
         Sexp::Keyword(k) => Err(format!("unexpected keyword :{k} in expression")),
+        Sexp::Str(_) => Err("string literals are not valid in core code".to_string()),
         Sexp::Vector(_) => Err("unexpected vector in expression".to_string()),
         Sexp::List(items) => parse_list_expr(items),
     }

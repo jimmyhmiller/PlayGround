@@ -469,10 +469,19 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   - **Remaining for M3:** richer pointee types (pointers to pointers/structs),
     user-defined allocators as values (§5.1), arena regions with bulk teardown,
     and `defer`/RAII (a macro, once the macro layer exists).
+- **Macros — ✅ done (engine).** `defmacro`/`def` evaluated by a compile-time
+  Lisp interpreter (quasiquote/unquote/splicing, `gensym`, list & symbol
+  builtins, lambdas, recursion, helper functions). Macros compute and can emit
+  whole top-level definitions (a top-level `(do ...)` is spliced). They compose
+  with conventions and regions. Pipeline: `read → expand → parse → check →
+  codegen`; inspect with `--expand`. (`macros.coil` → 41.) *The "Lisp-like
+  macros" half of the pitch.* Remaining: hygiene is `gensym`-based (not
+  automatic), and there is no module/`import` system yet.
 - **M4 — Derived closures.** `defclosure` over (C × R); two representations from
-  one mechanism. *Second thesis demo.*
-- **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`extern`, a small "normal"
-  surface grown entirely in macros.
+  one mechanism, written *in* macros. *Second thesis demo.* (Needs richer
+  pointee types — env structs — built first.)
+- **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`extern`/`adapt`/`defer`, a
+  small "normal" surface grown entirely in macros on top of the typed core.
 
 ---
 
