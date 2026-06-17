@@ -26,6 +26,7 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `Dependent.agda` | the **dependent** quantitative calculus: a universe, dependent `Π`/`Σ` with multiplicities, λ, app, pair, definitional conversion, and the **0-fragment** (type formation does not track usage). The `dep-id` derivation `λA.λx.x : Π(A:⁰⋆).Π(x:¹A).A` machine-checks the linear+dependent+erasure unification; `dep-sigma` a dependent `Σ`. | ✅ checks |
 | `DepSubst.agda` | the **substitution algebra** for the dependent syntax (`ren`/`sub` compose; capstone `sub-comm`). Foundation for confluence and the dependent substitution lemma. | ✅ checks |
 | `Confluence.agda` | **confluence** via Takahashi: parallel reduction closed under ren/sub, the complete development, the triangle lemma, and the **diamond property**. The new ingredient for dependent canonical forms. | ✅ checks |
+| `MemSafety.agda` | the **memory-safety kernel**: the heap machine (alloc/read/write/resize/free/mkclaim/staleread incl. strong update), a store-typing **invariant**, and machine-checked **preservation** (invariant is inductive) + **safe access** (invariant ⟹ reads are in-bounds of live memory), giving safety for programs of **any length**. The Agda port of the Rosette E1 result — unbounded, **no SMT in the trusted base**. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -72,8 +73,14 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
           the Module-5b proof on `Tm`, using `DepSubst`);
     - [ ] dependent preservation + progress (using `Π`-injectivity to invert the
           conversion rule).
-- [ ] The memory primitives (`alloc/read/write/free`) typed in the quantitative
-      kernel, with the resource-safety theorem — the full λ-Tally.
+- [~] The memory primitives in a **proven kernel**:
+    - [x] operational memory safety (`MemSafety.agda`) — the store-typing
+          invariant is inductive and implies safe access, unbounded, no SMT (the
+          Agda port of Rosette E1; preservation + safe-access for the heap
+          machine, strong update included);
+    - [ ] wire it to the term-level linear type checker (`well-typed ⟹ Inv`, the
+          resource-soundness link Rosette E4 showed bounded);
+    - [ ] fold the primitives into the **dependent** kernel — the full λ-Tally.
 - [ ] **Consistency / normalization** (genuinely beyond Rosette's reach), and a
       universe hierarchy replacing `⋆ : ⋆`.
 
