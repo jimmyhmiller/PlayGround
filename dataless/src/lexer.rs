@@ -1,33 +1,18 @@
-//! Hand-written lexer.
+//! Lexer shared by program (.dl) and declaration (.decl) files. Keywords are
+//! recognized contextually in the parsers, so the token set stays small.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
     Int(i64),
-    Str(String),
+    Text(String),
     Ident(String),
-    // keywords
-    Let,
-    If,
-    Else,
-    While,
-    For,
-    In,
-    True,
-    False,
-    Not,
-    And,
-    Or,
-    Nil,
-    Break,
-    Continue,
-    // punctuation / operators
     LParen,
     RParen,
     LBrace,
     RBrace,
-    LBracket,
-    RBracket,
     Comma,
+    Semi,
+    Colon,
     Assign,
     Eq,
     Ne,
@@ -54,6 +39,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     let mut i = 0;
     let mut line = 1;
     let mut out = Vec::new();
+    let push = |out: &mut Vec<Token>, t: Tok, line: usize| out.push(Token { tok: t, line });
 
     while i < chars.len() {
         let c = chars[i];
@@ -69,85 +55,85 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
             }
             '(' => {
-                out.push(t(Tok::LParen, line));
+                push(&mut out, Tok::LParen, line);
                 i += 1;
             }
             ')' => {
-                out.push(t(Tok::RParen, line));
+                push(&mut out, Tok::RParen, line);
                 i += 1;
             }
             '{' => {
-                out.push(t(Tok::LBrace, line));
+                push(&mut out, Tok::LBrace, line);
                 i += 1;
             }
             '}' => {
-                out.push(t(Tok::RBrace, line));
-                i += 1;
-            }
-            '[' => {
-                out.push(t(Tok::LBracket, line));
-                i += 1;
-            }
-            ']' => {
-                out.push(t(Tok::RBracket, line));
+                push(&mut out, Tok::RBrace, line);
                 i += 1;
             }
             ',' => {
-                out.push(t(Tok::Comma, line));
+                push(&mut out, Tok::Comma, line);
+                i += 1;
+            }
+            ';' => {
+                push(&mut out, Tok::Semi, line);
+                i += 1;
+            }
+            ':' => {
+                push(&mut out, Tok::Colon, line);
                 i += 1;
             }
             '+' => {
-                out.push(t(Tok::Plus, line));
+                push(&mut out, Tok::Plus, line);
                 i += 1;
             }
             '-' => {
-                out.push(t(Tok::Minus, line));
+                push(&mut out, Tok::Minus, line);
                 i += 1;
             }
             '*' => {
-                out.push(t(Tok::Star, line));
+                push(&mut out, Tok::Star, line);
                 i += 1;
             }
             '/' => {
-                out.push(t(Tok::Slash, line));
+                push(&mut out, Tok::Slash, line);
                 i += 1;
             }
             '%' => {
-                out.push(t(Tok::Percent, line));
+                push(&mut out, Tok::Percent, line);
                 i += 1;
             }
             '=' => {
-                if peek(&chars, i + 1) == Some('=') {
-                    out.push(t(Tok::Eq, line));
+                if next_is(&chars, i, '=') {
+                    push(&mut out, Tok::Eq, line);
                     i += 2;
                 } else {
-                    out.push(t(Tok::Assign, line));
+                    push(&mut out, Tok::Assign, line);
                     i += 1;
                 }
             }
             '!' => {
-                if peek(&chars, i + 1) == Some('=') {
-                    out.push(t(Tok::Ne, line));
+                if next_is(&chars, i, '=') {
+                    push(&mut out, Tok::Ne, line);
                     i += 2;
                 } else {
                     return Err(format!("line {}: unexpected '!'", line));
                 }
             }
             '<' => {
-                if peek(&chars, i + 1) == Some('=') {
-                    out.push(t(Tok::Le, line));
+                if next_is(&chars, i, '=') {
+                    push(&mut out, Tok::Le, line);
                     i += 2;
                 } else {
-                    out.push(t(Tok::Lt, line));
+                    push(&mut out, Tok::Lt, line);
                     i += 1;
                 }
             }
             '>' => {
-                if peek(&chars, i + 1) == Some('=') {
-                    out.push(t(Tok::Ge, line));
+                if next_is(&chars, i, '=') {
+                    push(&mut out, Tok::Ge, line);
                     i += 2;
                 } else {
-                    out.push(t(Tok::Gt, line));
+                    push(&mut out, Tok::Gt, line);
                     i += 1;
                 }
             }
@@ -157,8 +143,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 while i < chars.len() && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < chars.len() {
                         i += 1;
-                        let e = chars[i];
-                        s.push(match e {
+                        s.push(match chars[i] {
                             'n' => '\n',
                             't' => '\t',
                             '\\' => '\\',
@@ -176,8 +161,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 if i >= chars.len() {
                     return Err(format!("line {}: unterminated string", line));
                 }
-                i += 1; // closing quote
-                out.push(t(Tok::Str(s), line));
+                i += 1;
+                push(&mut out, Tok::Text(s), line);
             }
             c if c.is_ascii_digit() => {
                 let start = i;
@@ -188,7 +173,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 let n = num
                     .parse::<i64>()
                     .map_err(|_| format!("line {}: bad integer '{}'", line, num))?;
-                out.push(t(Tok::Int(n), line));
+                push(&mut out, Tok::Int(n), line);
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
@@ -196,36 +181,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                let tok = match word.as_str() {
-                    "let" => Tok::Let,
-                    "if" => Tok::If,
-                    "else" => Tok::Else,
-                    "while" => Tok::While,
-                    "for" => Tok::For,
-                    "in" => Tok::In,
-                    "true" => Tok::True,
-                    "false" => Tok::False,
-                    "not" => Tok::Not,
-                    "and" => Tok::And,
-                    "or" => Tok::Or,
-                    "nil" => Tok::Nil,
-                    "break" => Tok::Break,
-                    "continue" => Tok::Continue,
-                    _ => Tok::Ident(word),
-                };
-                out.push(t(tok, line));
+                push(&mut out, Tok::Ident(word), line);
             }
             other => return Err(format!("line {}: unexpected character '{}'", line, other)),
         }
     }
-    out.push(t(Tok::Eof, line));
+    push(&mut out, Tok::Eof, line);
     Ok(out)
 }
 
-fn t(tok: Tok, line: usize) -> Token {
-    Token { tok, line }
-}
-
-fn peek(chars: &[char], i: usize) -> Option<char> {
-    chars.get(i).copied()
+fn next_is(chars: &[char], i: usize, c: char) -> bool {
+    chars.get(i + 1).copied() == Some(c)
 }

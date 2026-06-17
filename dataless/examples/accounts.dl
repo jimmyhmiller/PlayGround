@@ -1,0 +1,44 @@
+# accounts.dl  —  exercises the paper's higher-level facilities:
+# insertion, search expressions, generators, and STATE statements.
+
+repeat 4 with i {
+  let a = insert accounts
+  name(a) = "acct-" + i
+  balance(a) = i * 100
+}
+
+# Search expression: does any account satisfy a content condition?
+if there exists x in accounts such that (balance(x) >= 300) {
+  print("at least one account has >= 300")
+}
+
+# Generator: a lazy cursor that yields, on demand, the next member matching a
+# condition. Two pulls, each advancing independently of any loop.
+generate wealthy over accounts such that (balance(it) >= 200)
+let first = next wealthy
+print("first wealthy:", name(first), "=", balance(first))
+let second = next wealthy
+print("next wealthy: ", name(second), "=", balance(second))
+
+# STATE statement: fire whenever a watched account goes negative. The monitor
+# is driven by the update routine, not by any explicit check in the logic.
+let watched = member(accounts, 2)
+whenever (balance(watched) < 0) {
+  print("ALERT: watched account overdrawn at", balance(watched))
+}
+
+balance(watched) = 50
+balance(watched) = -10     # false -> true : fires
+balance(watched) = -25     # stays true   : silent
+balance(watched) = 5       # true -> false: silent
+balance(watched) = -1      # false -> true : fires again
+
+# Structural change: insert a member after another, then delete one.
+let mid = member(accounts, 2)
+let extra = insert after mid in accounts
+name(extra) = "inserted"
+balance(extra) = 999
+print("count after insert:", size(accounts))
+delete member(accounts, 1)
+print("count after delete:", size(accounts))
+print("first account now:", name(member(accounts, 1)))

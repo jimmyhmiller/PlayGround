@@ -1,0 +1,13 @@
+[package]
+name = "dataless"
+version = "0.1.0"
+edition = "2021"
+description = "A modern realization of R. M. Balzer's Dataless Programming (RAND RM-5290, 1967): one program, separate swappable data-representation declarations."
+
+[[bin]]
+name = "dataless"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

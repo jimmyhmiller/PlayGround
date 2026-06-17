@@ -1,0 +1,32 @@
+# shapes.dl  —  representation-independent program.
+#
+# Nothing in here says how `shapes` is stored. The declarations file decides
+# whether it is an ARRAY, a LIST, or a DOUBLE_LIST. Running this same program
+# against any of those declarations produces identical output; only the cost
+# (positional steps) changes.
+
+repeat 30 with i {
+  let s = insert shapes
+  side(s) = i
+  area(s) = i * i
+}
+
+# Positional sweep: read every k-th shape by position and sum its area.
+# `member(shapes, k)` is O(1) for an ARRAY but O(k) for a LIST — same answer.
+let total = 0
+let k = 1
+while k <= size(shapes) {
+  let s = member(shapes, k)
+  total = total + area(s)
+  k = k + 1
+}
+
+print("shape count:", size(shapes))
+print("total area:", total)
+
+# A search clause + implied qualification: inside the loop, the bare names
+# `side` and `area` mean the field of the *current* member.
+print("big shapes (area > 400):")
+for each shapes such that (area(it) > 400) {
+  print("  side", side, "area", area)
+}

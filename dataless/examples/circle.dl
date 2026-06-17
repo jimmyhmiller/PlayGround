@@ -1,0 +1,21 @@
+# circle.dl  —  the program references `area(c)` as a single canonical form.
+# It cannot tell whether `area` is STORED data or a COMPUTED function; that is
+# decided entirely in the declarations. Writes to `area` persist if it is a
+# stored field and are ignored if it is computed — so this one program works,
+# unchanged, either way.
+
+repeat 5 with i {
+  let c = insert circles
+  radius(c) = i
+  area(c) = 314 * i * i / 100
+}
+
+let total = 0
+for each circles {
+  total = total + area(it)
+}
+print("total area x100:", total)
+
+for each circles {
+  print("radius", radius(it), "area", area(it))
+}

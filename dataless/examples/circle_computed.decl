@@ -1,0 +1,6 @@
+# `area` is a COMPUTED function of radius. The program is identical; the write
+# to `area(c)` is simply ignored, and every read runs this function instead.
+collection circles as ARRAY {
+  radius : int
+}
+computed area(c) = 314 * radius(c) * radius(c) / 100
