@@ -15,8 +15,10 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 
 | File | Contents | Status |
 |------|----------|--------|
-| `Rig.agda`     | the multiplicity rig `R = {0,1,ω}`: `+`, `*`, the usage order `⊑`, and **proven** semiring + order laws; `⊑1→≡1` / `⊑0→≡0` formalize "1 = used exactly once", "0 = erased". | ✅ checks |
-| `Context.agda` | usage contexts as a **left module over the rig**: `+ᶜ`, `π ·ᶜ`, `𝟘`, with the module laws (identity, commutativity, associativity, distributivity) proven by lifting the rig laws pointwise — exactly the algebra every context-splitting step in the metatheory uses. | ✅ checks |
+| `Rig.agda`      | the multiplicity rig `R = {0,1,ω}`: `+`, `*`, the usage order `⊑`, and **proven** semiring + order laws; `⊑1→≡1` / `⊑0→≡0` formalize "1 = used exactly once", "0 = erased". | ✅ checks |
+| `Context.agda`  | usage contexts as a **left module over the rig**: `+ᶜ`, `π ·ᶜ`, `𝟘`, with the module laws (identity, commutativity, associativity, distributivity) proven by lifting the rig laws pointwise — exactly the algebra every context-splitting step in the metatheory uses. | ✅ checks |
+| `Syntax.agda`   | a de Bruijn calculus with the **quantitative typing judgment** `Φ ⊢[ Γ ] t ⦂ A`: the var rule uses `only`, application uses `Γ +ᶜ (π ·ᶜ Δ)`, the lambda checks the bound variable's usage against its budget with `⊑`. Worked derivations: a **linear identity** and a **K combinator with an erased (0#) argument** — linearity and erasure in one system, type-checked. | ✅ checks |
+| `Semantics.agda`| call-by-value **operational semantics**: de Bruijn renaming/substitution, values, `_⟶_` (β + ξ rules) and its closure `_⟶*_`, with worked single- and multi-step reductions. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -26,11 +28,11 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
 
 - [x] **M1 Rig** — the semiring of multiplicities, laws, and usage order.
 - [x] **M2 Context** — contexts as a module over the rig.
-- [ ] **M3 Syntax + typing** — an intrinsically (quantitatively) typed linear
-      λ-calculus: terms indexed by type and usage context, so linearity holds
-      *by construction*. Uses `+ᶜ`/`·ᶜ` from M2 in the App/binder rules.
-- [ ] **M4 Operational semantics** — small-step (or an environment evaluator) +
-      a resource heap, mirroring the Rosette model.
+- [x] **M3 Syntax + typing** — a de Bruijn calculus with the quantitative typing
+      judgment `Φ ⊢[ Γ ] t ⦂ A`, using `+ᶜ`/`·ᶜ`/`⊑` in the rules; linear and
+      erased example derivations check.
+- [x] **M4 Operational semantics** — call-by-value `_⟶_` with de Bruijn
+      substitution; example reductions check.
 - [ ] **M5 Resource soundness / type safety** — the *unbounded* proof of what
       `resource-soundness-rosette.rkt` checked to depth 4: well-typed ⟹ no
       use-after-free / double-free / leak. Plus erasure soundness (M-erasure),
