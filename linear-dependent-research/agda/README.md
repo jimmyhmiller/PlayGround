@@ -27,6 +27,8 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `DepSubst.agda` | the **substitution algebra** for the dependent syntax (`ren`/`sub` compose; capstone `sub-comm`). Foundation for confluence and the dependent substitution lemma. | ✅ checks |
 | `Confluence.agda` | **confluence** via Takahashi: parallel reduction closed under ren/sub, the complete development, the triangle lemma, and the **diamond property**. The new ingredient for dependent canonical forms. | ✅ checks |
 | `MemSafety.agda` | the **memory-safety kernel**: the heap machine (alloc/read/write/resize/free/mkclaim/staleread incl. strong update), a store-typing **invariant**, and machine-checked **preservation** (invariant is inductive) + **safe access** (invariant ⟹ reads are in-bounds of live memory), giving safety for programs of **any length**. The Agda port of the Rosette E1 result — unbounded, **no SMT in the trusted base**. | ✅ checks |
+| `Combined.agda` | the **combined** linear+memory calculus in one system: terms `var \| tt \| new \| use \| lt \| sq`, types `Un \| Cp` (a linear capability), the quantitative typing judgment, and a structural big-step heap evaluator whose `ok?` flag flips on a double-free / use-after-free. The "both in one system" artifact. | ✅ checks |
+| `CombinedSound.agda` | **SOUNDNESS: well-typed ⟹ memory-safe.** For the canonical memory idiom (`var \| tt \| use \| nu \| sq`), a machine-checked proof that a **closed, well-typed program runs with NO error** (`rok ≡ true`: no double-free / use-after-free) **and leaves NO leak** (final heap has no live cell). A separation/frame argument keyed on the rig: the usage context tracks which live cells each subterm *owns*, and linearity (`1# + 1# = ω ⋢ 1#`) forces owned sets disjoint across a `sq` split. The unbounded, machine-checked counterpart of the Rosette E4 resource-soundness result — **no SMT, no postulates**. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -78,8 +80,14 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
           invariant is inductive and implies safe access, unbounded, no SMT (the
           Agda port of Rosette E1; preservation + safe-access for the heap
           machine, strong update included);
-    - [ ] wire it to the term-level linear type checker (`well-typed ⟹ Inv`, the
-          resource-soundness link Rosette E4 showed bounded);
+    - [x] wire it to the term-level linear type checker (`well-typed ⟹ memory
+          safe`): `CombinedSound.agda` proves a closed well-typed program of the
+          combined calculus runs without error (no double-free / use-after-free)
+          and leaks nothing — the resource-soundness link Rosette E4 showed
+          bounded, now an **unbounded, machine-checked, postulate-free** theorem.
+          (Proven for the `nu`/`use`/`sq` memory idiom; extending to the fully
+          general `lt` needs the usage-relative injectivity invariant, sketched
+          in the module — the only remaining gap is the cap-*moving* `lt`.)
     - [ ] fold the primitives into the **dependent** kernel — the full λ-Tally.
 - [ ] **Consistency / normalization** (genuinely beyond Rosette's reach), and a
       universe hierarchy replacing `⋆ : ⋆`.
