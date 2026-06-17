@@ -1,21 +1,24 @@
 # Prototype: executable, semi-formal models
 
-Two small, runnable models that make the formalisms in `../docs` concrete enough
-to argue with. They are deliberately split along the same fault line as the
-theory: the *static* multiplicity discipline vs. the *operational* memory story.
+Three small, runnable models that make the formalisms in `../docs` concrete
+enough to argue with. Stages A and B are deliberately split along the theory's
+fault line — the *static* multiplicity discipline vs. the *operational* memory
+story — and Stage C joins them.
 
 | File | Tool | Models | Corresponds to |
 |------|------|--------|----------------|
-| `qtt_checker.py`   | Python 3 | the QTT **type checker** (multiplicities, dependent Pi/Sigma, NbE conversion, erasure) | `docs/01-qtt-core.md` |
-| `memory-model.rkt` | PLT Redex (Racket) | the **operational** memory semantics (heap + new/read/write/free) and a linear type system that rejects use-after-free / double-free / leaks | `docs/02-memory-views.md` |
+| `qtt_checker.py`         | Python 3 | the QTT **type checker** (multiplicities, dependent Pi/Sigma, NbE conversion, erasure) | `docs/01-qtt-core.md` |
+| `memory-model.rkt`       | PLT Redex (Racket) | the **operational** memory semantics (heap + new/read/write/free) and a linear type system that rejects use-after-free / double-free / leaks | `docs/02-memory-views.md` |
+| `lambda_tally_memory.py` | Python 3 | the **unification**: memory primitives as QTT functions, so multiplicities alone give memory safety + strong update | `docs/04` Phases 2 & 4 |
 
-Why two tools? The thing you most need to *understand* (how linear and dependent
-typing cohabit, and how erasure works) is a **type-checking** phenomenon — best
-felt by running check/infer and watching the usage ledger. The thing you most
-need to *stress-test* (that the C-level memory ops can't go wrong) is an
-**operational** phenomenon — best caught by an executable reduction relation and
-property testing. See `../docs/04-roadmap.md` for how these feed the eventual
-mechanized proofs, and the "Open: unification" note below.
+Why split A and B across two tools? The thing you most need to *understand*
+(how linear and dependent typing cohabit, and how erasure works) is a
+**type-checking** phenomenon — best felt by running check/infer and watching the
+usage ledger. The thing you most need to *stress-test* (that the C-level memory
+ops can't go wrong) is an **operational** phenomenon — best caught by an
+executable reduction relation and property testing. Stage C then shows the two
+disciplines are really one. See `../docs/04-roadmap.md` for how these feed the
+eventual mechanized proofs.
 
 ## Stage A — `qtt_checker.py`
 
@@ -82,13 +85,48 @@ those follow from **linearity alone**. The richer **location-indexed** capabilit
 wrong-pointer safety — is the documented next step (`docs/02` §3, `docs/04`
 Phase 2).
 
-## Open: unifying the two
+## Stage C — `lambda_tally_memory.py`
 
-Stage A has the dependent multiplicity kernel but no heap; Stage B has the heap
-and linear capabilities but no dependency. The research goal (`docs/04` Phase 2 &
-4) is the single system: the Stage-B views become `0`/`1`-annotated entries in a
-Stage-A QTT context, and `alloc/read/write/free` become kernel primitives typed
-in λ-Tally. These two files are the scaffolding you grow toward that merge.
+```
+python3 lambda_tally_memory.py
+```
+
+The unification. Stage A had the dependent multiplicity kernel but no heap;
+Stage B had the heap and linear capabilities but no dependency. Stage C imports
+Stage A's checker **unchanged** and adds the memory layer purely by *postulating
+constants* — no new typing rules:
+
+```
+Loc  : Type                   -- locations: erased        (used at multiplicity 0)
+Ptr  : Loc -> Type            -- pointers : unrestricted   (multiplicity w)
+View : Type -> Loc -> Type    -- A @ l   : the LINEAR view (multiplicity 1)
+
+alloc : (A:^0 Type)(i:^1 A) -> Sigma(l:^0 Loc). Sigma(p:^w Ptr l). View A l
+read  : (l:^0 Loc)(A:^0 Type)(p:^w Ptr l)(v:^1 View A l) -> Sigma(_:^w A). View A l
+write : (l:^0 Loc)(A:^0 Type)(B:^0 Type)(p:^w Ptr l)(v:^1 View A l)(n:^1 B)
+                                                        -> Sigma(_:^w Unit). View B l
+free  : (l:^0 Loc)(A:^0 Type)(p:^w Ptr l)(v:^1 View A l) -> Unit
+```
+
+The whole point: **the pointer/view split of L3/ATS is just two multiplicities
+in a dependent tensor.** `p` is bound at `w` (copy it freely); the view `v` at
+`1` (linear). Stage A's existing usage accounting then delivers, with no extra
+machinery:
+
+- `alloc … free`, and `alloc … read … free` — accepted;
+- **strong update** — `write` returns `View B l` from `View A l`: the type stored
+  at `l` changes (`Unit → Byte`) and `free`s at the new type. Sound *because* the
+  view is linear, so no stale `View A l` can survive;
+- **leak** (never free) — rejected: the linear view is dropped;
+- **double-free** and **use-after-free** — rejected: the linear view is used
+  twice.
+
+This is the *static* half of the unified safety story; the *operational* half
+(that the discipline keeps the heap consistent at runtime) is `memory-model.rkt`.
+A simplification: `read` hands back its payload at `w` rather than tracking
+copyability, and locations are abstract variables (location equality is
+syntactic, no solver). Both are noted in the file and are the next things to
+sharpen on the way to the mechanized development (`docs/04`).
 
 ## Reproducing
 

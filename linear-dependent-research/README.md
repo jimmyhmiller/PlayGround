@@ -63,7 +63,7 @@ Prior art that gets *part* of the way:
 | `docs/04-roadmap.md`       | What to formalize next, open problems, proof obligations, a possible mechanization path. |
 | `notes/bibliography.md`    | Annotated references (papers, systems). Citation details to be verified before relying on them. |
 | `notes/glossary.md`        | Terminology, kept consistent across docs. |
-| `prototype/`               | **Runnable** semi-formal models: `qtt_checker.py` (the QTT type checker, Stage A) and `memory-model.rkt` (PLT Redex memory semantics + linear safety, Stage B). See `prototype/README.md`. |
+| `prototype/`               | **Runnable** semi-formal models: `qtt_checker.py` (QTT type checker, Stage A), `memory-model.rkt` (PLT Redex memory semantics + linear safety, Stage B), and `lambda_tally_memory.py` (the unification — memory primitives as QTT functions, Stage C). See `prototype/README.md`. |
 
 ## Status
 
