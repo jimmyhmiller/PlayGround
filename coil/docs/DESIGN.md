@@ -493,10 +493,17 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
 - **`extern` + C interop — ✅ done.** `(extern name :cc c [types] (-> ret))`
   declares a foreign function's convention + signature; calls are type-checked
   and the symbol is resolved at link time. Pointer regions are erased at the
-  boundary (the foreign side doesn't track them). Programs can do real I/O
-  (`putchar`/`write`); `extern.coil` prints `12345`. Remaining: variadics (e.g.
-  `printf`), and `:shim`-convention externs (calling hand-written asm through a
+  boundary (the foreign side doesn't track them). Programs do real I/O
+  (`putchar`/`write`/`puts`); `extern.coil` prints `12345`. Remaining: variadics
+  (`printf`), and `:shim`-convention externs (calling hand-written asm through a
   custom register ABI — the call-site marshalling already exists from M2).
+- **C types — ✅ done.** Integer widths `i8/i16/i32/i64`; typed pointers
+  `(ptr REGION TYPE)` with a foreign `c` region (so `(ptr c (ptr c i8))` is
+  `char**`); pointer indexing `(index p i)` (GEP); width `(cast :iN e)`
+  (sext/trunc). `main` may take `(argc :i32) (argv (ptr c (ptr c i8)))`.
+  Codegen threads each value's Coil type so loads/indexing use the right width
+  and pointee. `args.coil` reads and echoes its command line. Remaining: structs
+  and arrays, unsigned types, and `alloc` of types other than i64.
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
 

@@ -1,7 +1,7 @@
 //! `extern` + C interop: foreign declarations are type-checked and linked.
 
 mod common;
-use common::build_and_capture;
+use common::{build_and_capture, build_and_capture_args};
 
 #[test]
 fn putchar_prints_to_stdout() {
@@ -57,6 +57,45 @@ fn extern_erases_pointer_region() {
     let (code, out) = build_and_capture(src);
     assert_eq!(code, 0);
     assert_eq!(out, "Hi\n");
+}
+
+#[test]
+fn reads_argc_and_argv() {
+    // main(argc: i32, argv: char**); print each arg with puts.
+    let src = include_str!("../examples/args.coil");
+    let (code, out) = build_and_capture_args(src, &["one", "two", "three"]);
+    assert_eq!(code, 0);
+    // argv[0] is the program path (varies); the rest are our args.
+    assert!(out.ends_with("one\ntwo\nthree\n"), "got: {out:?}");
+    assert_eq!(out.lines().count(), 4); // argv[0] + 3 args
+}
+
+#[test]
+fn integer_widths_and_casts() {
+    // Load an i32 through a typed pointer, widen to i64, use it.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc heap)]
+            (store! p 42)
+            (let [v (load p)] (free p) v)))
+    "#;
+    assert_eq!(build_and_capture(src).0, 42);
+
+    // A truncate/extend round-trip: 300 -> i8 (300 & 0xff = 44) -> i64.
+    let src2 = r#"
+        (defn main [] (-> :i64)
+          (cast :i64 (cast :i8 300)))
+    "#;
+    assert_eq!(build_and_capture(src2).0, 44);
+}
+
+#[test]
+fn rejects_mixed_width_arithmetic() {
+    let src = r#"
+        (defn main [] (-> :i64)
+          (iadd (cast :i32 1) 2))
+    "#;
+    assert!(coil::check_source(src).unwrap_err().contains("mixed widths"));
 }
 
 #[test]

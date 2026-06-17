@@ -49,7 +49,11 @@ whose region is part of their type), and the higher-level surface is grown with
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
   function's convention + signature; calls are type-checked and the symbol is
   resolved at link time (libc, etc.). Pointer regions are erased at the extern
-  boundary. So programs can actually do I/O — e.g. `putchar`/`write`.
+  boundary. So programs can do I/O — e.g. `putchar`/`write`/`puts`.
+- C types: integer widths `i8/i16/i32/i64`, typed pointers `(ptr REGION TYPE)`
+  with a foreign `c` region (so `(ptr c (ptr c i8))` is `char**`), pointer
+  indexing `(index p i)`, and width `(cast :iN e)`. `main` may take
+  `(argc :i32) (argv (ptr c (ptr c i8)))`, so programs read their command line.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
 closures derived from (convention × allocation) (M4), richer pointee types, a
@@ -79,12 +83,13 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 33 tests (build + run native exes)
+cargo test                                     # 36 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- build examples/shim.coil -o /tmp/shim && /tmp/shim; echo $?   # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
 cargo run -- run   examples/extern.coil                                    # prints 12345
+cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
 # Inspect the pipeline
 cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file

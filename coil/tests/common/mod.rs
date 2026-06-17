@@ -29,9 +29,14 @@ pub fn build_and_run(src: &str) -> i32 {
 
 /// Like `build_and_run`, but also captures stdout (for testing C interop).
 pub fn build_and_capture(src: &str) -> (i32, String) {
+    build_and_capture_args(src, &[])
+}
+
+/// Build, run with command-line `args`, capture (exit code, stdout).
+pub fn build_and_capture_args(src: &str, args: &[&str]) -> (i32, String) {
     let exe = unique_path("exe");
     coil::build_executable(src, &exe).expect("build_executable");
-    let out = Command::new(&exe).output().expect("run executable");
+    let out = Command::new(&exe).args(args).output().expect("run executable");
     let _ = std::fs::remove_file(&exe);
     (
         out.status.code().expect("exit code"),

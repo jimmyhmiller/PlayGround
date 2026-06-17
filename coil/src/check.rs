@@ -105,7 +105,7 @@ pub fn check(program: &Program) -> Result<(), String> {
         // body must type-check and produce the declared return type
         let mut env: HashMap<String, Type> =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
-        let mut last = Type::I64;
+        let mut last = Type::Int(64);
         for e in &f.body {
             last = synth(e, &mut env, &sigs, &f.name)?;
         }
@@ -128,23 +128,29 @@ fn synth(
     fname: &str,
 ) -> Result<Type, String> {
     match e {
-        Expr::Int(_) => Ok(Type::I64),
+        Expr::Int(_) => Ok(Type::Int(64)),
         Expr::Var(name) => env
             .get(name)
             .cloned()
             .ok_or_else(|| format!("in '{fname}': unbound variable '{name}'")),
         Expr::Bin { lhs, rhs, .. } => {
-            expect(synth(lhs, env, sigs, fname)?, &Type::I64, fname, "arithmetic operand")?;
-            expect(synth(rhs, env, sigs, fname)?, &Type::I64, fname, "arithmetic operand")?;
-            Ok(Type::I64)
+            let lw = int_width(synth(lhs, env, sigs, fname)?, fname, "arithmetic operand")?;
+            let rw = int_width(synth(rhs, env, sigs, fname)?, fname, "arithmetic operand")?;
+            if lw != rw {
+                return Err(format!("in '{fname}': arithmetic on mixed widths i{lw} and i{rw}"));
+            }
+            Ok(Type::Int(lw))
         }
         Expr::Cmp { lhs, rhs, .. } => {
-            expect(synth(lhs, env, sigs, fname)?, &Type::I64, fname, "comparison operand")?;
-            expect(synth(rhs, env, sigs, fname)?, &Type::I64, fname, "comparison operand")?;
-            Ok(Type::I64)
+            let lw = int_width(synth(lhs, env, sigs, fname)?, fname, "comparison operand")?;
+            let rw = int_width(synth(rhs, env, sigs, fname)?, fname, "comparison operand")?;
+            if lw != rw {
+                return Err(format!("in '{fname}': comparison on mixed widths i{lw} and i{rw}"));
+            }
+            Ok(Type::Int(64))
         }
         Expr::If { cond, then, els } => {
-            expect(synth(cond, env, sigs, fname)?, &Type::I64, fname, "if condition")?;
+            int_width(synth(cond, env, sigs, fname)?, fname, "if condition")?;
             let t = synth(then, env, sigs, fname)?;
             let e = synth(els, env, sigs, fname)?;
             if t != e {
@@ -157,7 +163,7 @@ fn synth(
             Ok(t)
         }
         Expr::Do(es) => {
-            let mut last = Type::I64;
+            let mut last = Type::Int(64);
             for e in es {
                 last = synth(e, env, sigs, fname)?;
             }
@@ -169,7 +175,7 @@ fn synth(
                 let t = synth(val, env, sigs, fname)?;
                 env.insert(name.clone(), t);
             }
-            let mut last = Type::I64;
+            let mut last = Type::Int(64);
             for e in body {
                 last = synth(e, env, sigs, fname)?;
             }
@@ -200,30 +206,53 @@ fn synth(
             }
             Ok(sig.ret.clone())
         }
-        Expr::Alloc { region } => Ok(Type::Ptr(*region)),
+        Expr::Alloc { region } => Ok(Type::Ptr(*region, Box::new(Type::Int(64)))),
         Expr::Load(p) => match synth(p, env, sigs, fname)? {
-            Type::Ptr(_) => Ok(Type::I64),
+            Type::Ptr(_, pointee) => Ok(*pointee),
             other => Err(format!(
                 "in '{fname}': load expects a pointer, got {}",
                 ty_str(&other)
             )),
         },
-        Expr::Store { ptr, val } => {
-            match synth(ptr, env, sigs, fname)? {
-                Type::Ptr(_) => {}
-                other => {
+        Expr::Store { ptr, val } => match synth(ptr, env, sigs, fname)? {
+            Type::Ptr(_, pointee) => {
+                let vt = synth(val, env, sigs, fname)?;
+                if vt != *pointee {
                     return Err(format!(
-                        "in '{fname}': store! expects a pointer, got {}",
-                        ty_str(&other)
-                    ))
+                        "in '{fname}': store! of {} through a pointer to {}",
+                        ty_str(&vt),
+                        ty_str(&pointee)
+                    ));
                 }
+                Ok(*pointee)
             }
-            expect(synth(val, env, sigs, fname)?, &Type::I64, fname, "store! value")?;
-            Ok(Type::I64)
+            other => Err(format!(
+                "in '{fname}': store! expects a pointer, got {}",
+                ty_str(&other)
+            )),
+        },
+        Expr::Index { ptr, idx } => {
+            let pt = synth(ptr, env, sigs, fname)?;
+            let it = synth(idx, env, sigs, fname)?;
+            if it != Type::Int(64) {
+                return Err(format!("in '{fname}': index must be i64, got {}", ty_str(&it)));
+            }
+            match pt {
+                Type::Ptr(r, pointee) => Ok(Type::Ptr(r, pointee)),
+                other => Err(format!(
+                    "in '{fname}': index expects a pointer, got {}",
+                    ty_str(&other)
+                )),
+            }
+        }
+        Expr::Cast { ty, expr } => {
+            int_width(ty.clone(), fname, "cast target")?;
+            int_width(synth(expr, env, sigs, fname)?, fname, "cast operand")?;
+            Ok(ty.clone())
         }
         Expr::Free(p) => match synth(p, env, sigs, fname)? {
-            Type::Ptr(Region::Heap) => Ok(Type::I64),
-            Type::Ptr(r) => Err(format!(
+            Type::Ptr(Region::Heap, _) => Ok(Type::Int(64)),
+            Type::Ptr(r, _) => Err(format!(
                 "in '{fname}': cannot free a {} pointer (only heap pointers are freed)",
                 r.name()
             )),
@@ -235,8 +264,18 @@ fn synth(
     }
 }
 
+fn int_width(t: Type, fname: &str, what: &str) -> Result<u32, String> {
+    match t {
+        Type::Int(w) => Ok(w),
+        other => Err(format!(
+            "in '{fname}': {what} must be an integer, got {}",
+            ty_str(&other)
+        )),
+    }
+}
+
 fn is_frame_ptr(t: &Type) -> bool {
-    matches!(t, Type::Ptr(Region::Frame))
+    matches!(t, Type::Ptr(Region::Frame, _))
 }
 
 /// Argument-type compatibility. Normally exact; at an `extern` boundary the
@@ -244,26 +283,14 @@ fn is_frame_ptr(t: &Type) -> bool {
 fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
     match (got, want) {
         _ if got == want => true,
-        (Type::Ptr(_), Type::Ptr(_)) if is_extern => true,
+        (Type::Ptr(..), Type::Ptr(..)) if is_extern => true,
         _ => false,
-    }
-}
-
-fn expect(got: Type, want: &Type, fname: &str, what: &str) -> Result<(), String> {
-    if &got == want {
-        Ok(())
-    } else {
-        Err(format!(
-            "in '{fname}': {what} has type {} but expected {}",
-            ty_str(&got),
-            ty_str(want)
-        ))
     }
 }
 
 fn ty_str(t: &Type) -> String {
     match t {
-        Type::I64 => "i64".to_string(),
-        Type::Ptr(r) => format!("(ptr {})", r.name()),
+        Type::Int(w) => format!("i{w}"),
+        Type::Ptr(r, pointee) => format!("(ptr {} {})", r.name(), ty_str(pointee)),
     }
 }

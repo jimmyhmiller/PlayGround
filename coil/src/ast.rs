@@ -5,16 +5,23 @@ use std::collections::HashMap;
 
 use crate::convention::Convention;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    I64,
-    /// A pointer whose *region* (where the pointee lives) is part of the type.
-    /// Pointees are i64 in M3; the interesting axis is the region.
-    Ptr(Region),
+    /// Integer of the given bit width (8, 16, 32, 64).
+    Int(u32),
+    /// A pointer whose *region* (where the pointee lives) and *pointee type*
+    /// are both part of the type. `Ptr(C, i8)` is a C `char*`.
+    Ptr(Region, Box<Type>),
 }
 
-/// Where allocated memory lives. Part of a pointer's type, so `Ptr(Heap)` and
-/// `Ptr(Static)` are distinct types and (e.g.) `free` only accepts `Ptr(Heap)`.
+impl Type {
+    pub fn i64() -> Type {
+        Type::Int(64)
+    }
+}
+
+/// Where allocated memory lives. Part of a pointer's type, so `Ptr(Heap, _)`
+/// and `Ptr(Static, _)` are distinct types and `free` only accepts `Ptr(Heap)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     /// Current stack frame (`alloca`). May not cross a function boundary.
@@ -23,6 +30,9 @@ pub enum Region {
     Static,
     /// libc heap (`malloc`/`free`). Must be freed.
     Heap,
+    /// A raw/foreign pointer (from C, the OS, hand-written asm). Not owned by
+    /// Coil's allocators: no `free`, no escape rules — just a machine pointer.
+    C,
 }
 
 impl Region {
@@ -31,6 +41,7 @@ impl Region {
             "frame" => Some(Region::Frame),
             "static" => Some(Region::Static),
             "heap" => Some(Region::Heap),
+            "c" => Some(Region::C),
             _ => None,
         }
     }
@@ -40,6 +51,7 @@ impl Region {
             Region::Frame => "frame",
             Region::Static => "static",
             Region::Heap => "heap",
+            Region::C => "c",
         }
     }
 }
@@ -91,16 +103,26 @@ pub enum Expr {
         func: String,
         args: Vec<Expr>,
     },
-    /// Allocate one i64 slot in `region`, yielding `Ptr(region)`.
+    /// Allocate one i64 slot in `region`, yielding `Ptr(region, i64)`.
     Alloc {
         region: Region,
     },
-    /// Read the i64 a pointer points at.
+    /// Read the value a pointer points at (type = the pointee type).
     Load(Box<Expr>),
-    /// Write an i64 through a pointer; evaluates to the stored value.
+    /// Write a value through a pointer; evaluates to the stored value.
     Store {
         ptr: Box<Expr>,
         val: Box<Expr>,
+    },
+    /// Pointer + index (in elements): `Ptr(R,T)` and an i64 → `Ptr(R,T)`.
+    Index {
+        ptr: Box<Expr>,
+        idx: Box<Expr>,
+    },
+    /// Integer width conversion (sign-extend / truncate).
+    Cast {
+        ty: Type,
+        expr: Box<Expr>,
     },
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),

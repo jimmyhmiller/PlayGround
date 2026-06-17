@@ -201,15 +201,31 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
 
 fn parse_type(s: &Sexp) -> Result<Type, String> {
     match s {
-        Sexp::Keyword(k) if k == "i64" => Ok(Type::I64),
-        // (ptr REGION)  e.g. (ptr heap), (ptr frame), (ptr static)
+        // Int type names accepted as `:i32` (keyword) or `i32` (bare symbol, so
+        // nested pointee types like `(ptr c i8)` read naturally).
+        Sexp::Keyword(k) | Sexp::Sym(k) => int_type(k),
+        // (ptr REGION) -> pointee defaults to i64; (ptr REGION TYPE) for others.
         Sexp::List(items) if head_sym(items).ok().as_deref() == Some("ptr") => {
             let r = sym(items.get(1).ok_or("ptr type: missing region")?, "region")?;
             let region = Region::parse(&r)
-                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap)"))?;
-            Ok(Type::Ptr(region))
+                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap|c)"))?;
+            let pointee = match items.get(2) {
+                Some(t) => parse_type(t)?,
+                None => Type::Int(64),
+            };
+            Ok(Type::Ptr(region, Box::new(pointee)))
         }
-        other => Err(format!("unsupported type: {other:?} (:i64 or (ptr REGION))")),
+        other => Err(format!("unsupported type: {other:?} (:iN or (ptr REGION [TYPE]))")),
+    }
+}
+
+fn int_type(name: &str) -> Result<Type, String> {
+    match name {
+        "i8" => Ok(Type::Int(8)),
+        "i16" => Ok(Type::Int(16)),
+        "i32" => Ok(Type::Int(32)),
+        "i64" => Ok(Type::Int(64)),
+        other => Err(format!("unknown type '{other}' (i8|i16|i32|i64)")),
     }
 }
 
@@ -322,6 +338,22 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 return Err("free: expects (free ptr)".to_string());
             }
             Ok(Expr::Free(Box::new(parse_expr(&args[0])?)))
+        }
+        "index" => {
+            let (p, i) = two(args, "index")?;
+            Ok(Expr::Index {
+                ptr: Box::new(parse_expr(p)?),
+                idx: Box::new(parse_expr(i)?),
+            })
+        }
+        "cast" => {
+            if args.len() != 2 {
+                return Err("cast: expects (cast :type expr)".to_string());
+            }
+            Ok(Expr::Cast {
+                ty: parse_type(&args[0])?,
+                expr: Box::new(parse_expr(&args[1])?),
+            })
         }
         // direct application: (fib n) == (call fib n)
         other => {
