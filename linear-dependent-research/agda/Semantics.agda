@@ -41,13 +41,15 @@ subst σ ⟨⟩        = ⟨⟩
 subst σ (lam t)   = lam (subst (exts σ) t)
 subst σ (app f a) = app (subst σ f) (subst σ a)
 
+-- the substitution that replaces de Bruijn 0 by s (named so the metatheory can
+-- refer to it)
+sub-head : ∀ {n} → Term n → Fin (suc n) → Term n
+sub-head s zero    = s
+sub-head s (suc x) = var x
+
 -- single-variable substitution: t [ s ]  replaces de Bruijn 0 by s
 _[_] : ∀ {n} → Term (suc n) → Term n → Term n
-_[_] {n} t s = subst σ t
-  where
-    σ : Fin (suc n) → Term n
-    σ zero    = s
-    σ (suc x) = var x
+t [ s ] = subst (sub-head s) t
 
 ------------------------------------------------------------------------
 -- Values and call-by-value reduction

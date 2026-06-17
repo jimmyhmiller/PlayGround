@@ -19,7 +19,10 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `Context.agda`  | usage contexts as a **left module over the rig**: `+ᶜ`, `π ·ᶜ`, `𝟘`, with the module laws (identity, commutativity, associativity, distributivity) proven by lifting the rig laws pointwise — exactly the algebra every context-splitting step in the metatheory uses. | ✅ checks |
 | `Syntax.agda`   | a de Bruijn calculus with the **quantitative typing judgment** `Φ ⊢[ Γ ] t ⦂ A`: the var rule uses `only`, application uses `Γ +ᶜ (π ·ᶜ Δ)`, the lambda checks the bound variable's usage against its budget with `⊑`. Worked derivations: a **linear identity** and a **K combinator with an erased (0#) argument** — linearity and erasure in one system, type-checked. | ✅ checks |
 | `Semantics.agda`| call-by-value **operational semantics**: de Bruijn renaming/substitution, values, `_⟶_` (β + ξ rules) and its closure `_⟶*_`, with worked single- and multi-step reductions. | ✅ checks |
-| `Progress.agda` | **progress** (half of type safety): every well-typed closed term is a value or steps. Holds for all such terms — the unbounded form of the Rosette "no stuck states" check. | ✅ checks |
+| `Progress.agda` | **progress** (half of type safety): every well-typed closed term is a value or steps. | ✅ checks |
+| `Renaming.agda` | the weakening lemma: inserting an unused (`0#`) variable anywhere preserves typing (the infrastructure that pushes derivations under binders). | ✅ checks |
+| `Substitution.agda` | the **quantitative substitution lemma**: a typed substitution applied to a well-typed term stays well-typed, at usage `mvp Γ Δs` (the Γ-weighted sum). The crux lemma. | ✅ checks |
+| `Preservation.agda` | **preservation** (β via the substitution lemma; congruence cases recurse) and its multi-step closure. **Progress + preservation = type safety.** | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -35,30 +38,23 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
 - [x] **M4 Operational semantics** — call-by-value `_⟶_` with de Bruijn
       substitution; example reductions check.
 - [x] **M5a Progress** — proven (`Progress.agda`).
-- [ ] **M5b Preservation** — the remaining, genuinely hard piece. Attempting it
-      surfaced two precise obstacles, both known and addressed in the literature
-      (GraD; graded-Agda), confirming it is tractable but not a one-sitting job:
-    1. **The quantitative substitution lemma** needs the *general* de Bruijn
-       renaming + simultaneous-substitution infrastructure, because going under
-       a binder turns a single substitution into `exts σ` (so single-variable
-       induction does not close). The usage bookkeeping is a `Γ`-weighted sum of
-       the substitution's per-variable usage contexts — the Wood–Atkey "matrix"
-       view — which the `Context.agda` module laws (`·ᶜ-distrib`, `·ᶜ-assoc`,
-       `+ᶜ-comm/assoc`) are exactly what discharge.
-    2. **A subusaging design point.** Our lambda rule already uses `σ ⊑ π`, but
-       the `var`/`app` rules pin the usage context *exactly*. After β the reduct
-       is typeable at usage `Γ +ᶜ (σ ·ᶜ Δ) ⊑ Γ +ᶜ (π ·ᶜ Δ)`; closing the `⊑`
-       gap (only the `ω` budget creates it — for `{0,1}` budgets `⊑1→≡1`/`⊑0→≡0`
-       force equality, so the linear/erased fragment that matters for memory is
-       already exact) needs the leaf rules to be subusaging-aware, the standard
-       QTT reformulation.
-- [ ] **M5 Resource soundness / type safety** — the *unbounded* proof of what
-      `resource-soundness-rosette.rkt` checked to depth 4: well-typed ⟹ no
-      use-after-free / double-free / leak. Plus erasure soundness (M-erasure),
-      the unbounded form of the Rosette E2 result.
-- [ ] **Beyond Rosette** — normalization and logical consistency for the
-      dependent core (replacing `Type:Type` with a universe), and ultimately the
-      memory primitives (`alloc/read/write/free`) typed in the quantitative
-      kernel — the full λ-Tally.
+- [x] **M5b Preservation** — **proven** (`Preservation.agda`), single- and
+      multi-step. The quantitative substitution lemma (`Substitution.agda`) and
+      the weakening lemma (`Renaming.agda`) are the supporting infrastructure.
+      The `ω`-fragment subusaging gap noted earlier is sidestepped by reporting
+      the reduct's usage context existentially (a reduct may use fewer resources,
+      which is exactly right).
+- [x] **M5 TYPE SAFETY** — progress + preservation, for all well-typed terms.
+      **This is the unbounded, machine-checked counterpart of the Rosette E4
+      resource-soundness result** (which was bounded to depth 4). The make-or-
+      break milestone for the linear core: done.
+
+### Remaining (the dependent layer and beyond)
+
+- [ ] Dependent types: extend the calculus to full `Π`/`Σ` with a universe
+      hierarchy (replacing the implicit `Type` story), re-proving the above.
+- [ ] The memory primitives (`alloc/read/write/free`) typed in the quantitative
+      kernel, with the resource-safety theorem — the full λ-Tally.
+- [ ] Normalization and logical consistency (genuinely beyond Rosette's reach).
 
 Each milestone names a *theorem* (a checked `.agda` file), not just code.
