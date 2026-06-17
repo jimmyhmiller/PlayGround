@@ -28,6 +28,8 @@ data _≡_ {A : Set} (x : A) : A → Set where
 
 infix 4 _≡_
 
+{-# BUILTIN EQUALITY _≡_ #-}   -- enables `rewrite` in later modules
+
 sym : ∀ {A : Set} {x y : A} → x ≡ y → y ≡ x
 sym refl = refl
 
