@@ -50,6 +50,7 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Rem,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,9 +122,21 @@ pub struct Func {
     pub body: Vec<Expr>,
 }
 
+/// A foreign function declaration: a name, a calling convention, and a typed
+/// signature, with no body. Calls are checked against it; it lowers to an
+/// external LLVM declaration the linker resolves (libc, hand-written asm, ...).
+#[derive(Debug, Clone)]
+pub struct Extern {
+    pub name: String,
+    pub cc: String,
+    pub params: Vec<Type>,
+    pub ret: Type,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub conventions: HashMap<String, Convention>,
+    pub externs: Vec<Extern>,
     pub funcs: Vec<Func>,
 }
 

@@ -490,8 +490,15 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
 - **M4 — Derived closures.** `defclosure` over (C × R); two representations from
   one mechanism, written *in* macros. *Second thesis demo.* (Needs richer
   pointee types — env structs — built first.)
-- **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`extern`/`adapt`/`defer`, a
-  small "normal" surface grown entirely in macros on top of the typed core.
+- **`extern` + C interop — ✅ done.** `(extern name :cc c [types] (-> ret))`
+  declares a foreign function's convention + signature; calls are type-checked
+  and the symbol is resolved at link time. Pointer regions are erased at the
+  boundary (the foreign side doesn't track them). Programs can do real I/O
+  (`putchar`/`write`); `extern.coil` prints `12345`. Remaining: variadics (e.g.
+  `printf`), and `:shim`-convention externs (calling hand-written asm through a
+  custom register ABI — the call-site marshalling already exists from M2).
+- **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
+  "normal" surface grown entirely in macros on top of the typed core.
 
 ---
 

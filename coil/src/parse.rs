@@ -10,6 +10,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     let mut conventions = HashMap::new();
     conventions.insert("c".to_string(), Convention::default_c());
     let mut funcs = Vec::new();
+    let mut externs = Vec::new();
 
     for form in forms {
         let items = as_list(form, "top-level form must be a list")?;
@@ -28,11 +29,56 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
                 }
                 funcs.push(f);
             }
+            "extern" => externs.push(parse_extern(&items[1..])?),
             other => return Err(format!("unknown top-level form '{other}'")),
         }
     }
 
-    Ok(Program { conventions, funcs })
+    Ok(Program {
+        conventions,
+        externs,
+        funcs,
+    })
+}
+
+fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
+    let mut i = 0;
+    let name = sym(rest.get(i).ok_or("extern: missing name")?, "extern name")?;
+    i += 1;
+
+    let mut cc = "c".to_string();
+    if let Some(Sexp::Keyword(k)) = rest.get(i) {
+        if k == "cc" {
+            cc = sym(
+                rest.get(i + 1).ok_or("extern: ':cc' missing convention")?,
+                "cc name",
+            )?;
+            i += 2;
+        }
+    }
+
+    let params_v = match rest.get(i) {
+        Some(Sexp::Vector(v)) => v,
+        _ => return Err(format!("extern '{name}': expected a vector of parameter types")),
+    };
+    i += 1;
+    let params = params_v.iter().map(parse_type).collect::<Result<_, _>>()?;
+
+    let ret_l = as_list(
+        rest.get(i).ok_or("extern: missing (-> :type)")?,
+        "expected (-> :type)",
+    )?;
+    if head_sym(ret_l)? != "->" {
+        return Err(format!("extern '{name}': expected (-> :type)"));
+    }
+    let ret = parse_type(ret_l.get(1).ok_or("(-> ) missing type")?)?;
+
+    Ok(Extern {
+        name,
+        cc,
+        params,
+        ret,
+    })
 }
 
 fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
@@ -202,6 +248,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         "isub" => bin(BinOp::Sub),
         "imul" => bin(BinOp::Mul),
         "idiv" => bin(BinOp::Div),
+        "irem" => bin(BinOp::Rem),
         "icmp-lt" => cmp(CmpOp::Lt),
         "icmp-le" => cmp(CmpOp::Le),
         "icmp-gt" => cmp(CmpOp::Gt),

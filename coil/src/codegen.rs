@@ -17,7 +17,7 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FunctionType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
 use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate};
 
@@ -52,7 +52,22 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         globals: Cell::new(0),
     };
 
-    // 1. declare everything first (so mutual recursion resolves).
+    // 1a. declare externs (foreign symbols the linker will resolve).
+    for e in &program.externs {
+        let conv = program
+            .conventions
+            .get(&e.cc)
+            .ok_or_else(|| format!("codegen: unknown convention '{}'", e.cc))?;
+        let cc_id = conv
+            .native_id()
+            .ok_or_else(|| format!("codegen: extern '{}' needs a native convention", e.name))?;
+        let fn_ty = cg.fn_type_types(&e.params, &e.ret);
+        let fv = cg.module.add_function(&e.name, fn_ty, None);
+        fv.set_call_conventions(cc_id);
+        cg.funcs.insert(e.name.clone(), fv);
+    }
+
+    // 1b. declare all functions (so mutual recursion resolves).
     for f in &program.funcs {
         let conv = program
             .conventions
@@ -118,9 +133,13 @@ impl<'ctx> Cg<'ctx> {
         }
     }
 
-    fn fn_type(&self, params: &[Param], ret: &Type) -> inkwell::types::FunctionType<'ctx> {
-        let p: Vec<BasicMetadataTypeEnum> =
-            params.iter().map(|x| self.basic_ty(&x.ty).into()).collect();
+    fn fn_type(&self, params: &[Param], ret: &Type) -> FunctionType<'ctx> {
+        let types: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
+        self.fn_type_types(&types, ret)
+    }
+
+    fn fn_type_types(&self, params: &[Type], ret: &Type) -> FunctionType<'ctx> {
+        let p: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| self.basic_ty(t).into()).collect();
         match ret {
             Type::I64 => self.ctx.i64_type().fn_type(&p, false),
             Type::Ptr(_) => self.ctx.ptr_type(AddressSpace::default()).fn_type(&p, false),
@@ -246,6 +265,7 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
                     BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
                     BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
+                    BinOp::Rem => self.builder.build_int_signed_rem(l, r, "rem"),
                 };
                 Ok(v.map_err(le)?.into())
             }

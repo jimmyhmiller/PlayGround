@@ -26,3 +26,15 @@ pub fn build_and_run(src: &str) -> i32 {
     let _ = std::fs::remove_file(&exe);
     code
 }
+
+/// Like `build_and_run`, but also captures stdout (for testing C interop).
+pub fn build_and_capture(src: &str) -> (i32, String) {
+    let exe = unique_path("exe");
+    coil::build_executable(src, &exe).expect("build_executable");
+    let out = Command::new(&exe).output().expect("run executable");
+    let _ = std::fs::remove_file(&exe);
+    (
+        out.status.code().expect("exit code"),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}

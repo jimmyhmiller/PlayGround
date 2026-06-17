@@ -45,7 +45,11 @@ whose region is part of their type), and the higher-level surface is grown with
   unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
   helper functions). Macros can compute, recurse, and emit whole top-level
   definitions, and they compose with conventions and regions. Inspect any
-  expansion with `coil --expand`.
+  expansion with `coil expand`.
+- C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
+  function's convention + signature; calls are type-checked and the symbol is
+  resolved at link time (libc, etc.). Pointer regions are erased at the extern
+  boundary. So programs can actually do I/O — e.g. `putchar`/`write`.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
 closures derived from (convention × allocation) (M4), richer pointee types, a
@@ -75,11 +79,12 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 28 tests (build + run native exes)
+cargo test                                     # 33 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- build examples/shim.coil -o /tmp/shim && /tmp/shim; echo $?   # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
+cargo run -- run   examples/extern.coil                                    # prints 12345
 
 # Inspect the pipeline
 cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file

@@ -18,22 +18,46 @@ use crate::ast::*;
 struct Sig {
     params: Vec<Type>,
     ret: Type,
+    /// Calls to externs erase pointer regions at the boundary (see `arg_ok`).
+    is_extern: bool,
 }
 
 pub fn check(program: &Program) -> Result<(), String> {
-    let sigs: HashMap<&str, Sig> = program
-        .funcs
-        .iter()
-        .map(|f| {
-            (
-                f.name.as_str(),
-                Sig {
-                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
-                    ret: f.ret.clone(),
-                },
-            )
-        })
-        .collect();
+    let mut sigs: HashMap<&str, Sig> = HashMap::new();
+    for f in &program.funcs {
+        sigs.insert(
+            f.name.as_str(),
+            Sig {
+                params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                ret: f.ret.clone(),
+                is_extern: false,
+            },
+        );
+    }
+    for e in &program.externs {
+        if sigs.contains_key(e.name.as_str()) {
+            return Err(format!("'{}' is declared more than once", e.name));
+        }
+        // an extern's convention must exist and be lowerable today (native).
+        let conv = program
+            .conventions
+            .get(&e.cc)
+            .ok_or_else(|| format!("extern '{}': unknown convention '{}'", e.name, e.cc))?;
+        if conv.is_shim() {
+            return Err(format!(
+                "extern '{}': shim conventions for externs are not supported yet",
+                e.name
+            ));
+        }
+        sigs.insert(
+            e.name.as_str(),
+            Sig {
+                params: e.params.clone(),
+                ret: e.ret.clone(),
+                is_extern: true,
+            },
+        );
+    }
 
     for f in &program.funcs {
         // convention well-formedness
@@ -165,7 +189,14 @@ fn synth(
             }
             for (i, a) in args.iter().enumerate() {
                 let at = synth(a, env, sigs, fname)?;
-                expect(at, &sig.params[i], fname, &format!("argument {} to '{func}'", i + 1))?;
+                if !arg_ok(&at, &sig.params[i], sig.is_extern) {
+                    return Err(format!(
+                        "in '{fname}': argument {} to '{func}' has type {} but expected {}",
+                        i + 1,
+                        ty_str(&at),
+                        ty_str(&sig.params[i])
+                    ));
+                }
             }
             Ok(sig.ret.clone())
         }
@@ -206,6 +237,16 @@ fn synth(
 
 fn is_frame_ptr(t: &Type) -> bool {
     matches!(t, Type::Ptr(Region::Frame))
+}
+
+/// Argument-type compatibility. Normally exact; at an `extern` boundary the
+/// foreign side doesn't track regions, so any pointer matches any pointer.
+fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
+    match (got, want) {
+        _ if got == want => true,
+        (Type::Ptr(_), Type::Ptr(_)) if is_extern => true,
+        _ => false,
+    }
 }
 
 fn expect(got: Type, want: &Type, fname: &str, what: &str) -> Result<(), String> {
