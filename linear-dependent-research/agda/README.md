@@ -19,6 +19,7 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `Context.agda`  | usage contexts as a **left module over the rig**: `+ᶜ`, `π ·ᶜ`, `𝟘`, with the module laws (identity, commutativity, associativity, distributivity) proven by lifting the rig laws pointwise — exactly the algebra every context-splitting step in the metatheory uses. | ✅ checks |
 | `Syntax.agda`   | a de Bruijn calculus with the **quantitative typing judgment** `Φ ⊢[ Γ ] t ⦂ A`: the var rule uses `only`, application uses `Γ +ᶜ (π ·ᶜ Δ)`, the lambda checks the bound variable's usage against its budget with `⊑`. Worked derivations: a **linear identity** and a **K combinator with an erased (0#) argument** — linearity and erasure in one system, type-checked. | ✅ checks |
 | `Semantics.agda`| call-by-value **operational semantics**: de Bruijn renaming/substitution, values, `_⟶_` (β + ξ rules) and its closure `_⟶*_`, with worked single- and multi-step reductions. | ✅ checks |
+| `Progress.agda` | **progress** (half of type safety): every well-typed closed term is a value or steps. Holds for all such terms — the unbounded form of the Rosette "no stuck states" check. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -33,6 +34,24 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
       erased example derivations check.
 - [x] **M4 Operational semantics** — call-by-value `_⟶_` with de Bruijn
       substitution; example reductions check.
+- [x] **M5a Progress** — proven (`Progress.agda`).
+- [ ] **M5b Preservation** — the remaining, genuinely hard piece. Attempting it
+      surfaced two precise obstacles, both known and addressed in the literature
+      (GraD; graded-Agda), confirming it is tractable but not a one-sitting job:
+    1. **The quantitative substitution lemma** needs the *general* de Bruijn
+       renaming + simultaneous-substitution infrastructure, because going under
+       a binder turns a single substitution into `exts σ` (so single-variable
+       induction does not close). The usage bookkeeping is a `Γ`-weighted sum of
+       the substitution's per-variable usage contexts — the Wood–Atkey "matrix"
+       view — which the `Context.agda` module laws (`·ᶜ-distrib`, `·ᶜ-assoc`,
+       `+ᶜ-comm/assoc`) are exactly what discharge.
+    2. **A subusaging design point.** Our lambda rule already uses `σ ⊑ π`, but
+       the `var`/`app` rules pin the usage context *exactly*. After β the reduct
+       is typeable at usage `Γ +ᶜ (σ ·ᶜ Δ) ⊑ Γ +ᶜ (π ·ᶜ Δ)`; closing the `⊑`
+       gap (only the `ω` budget creates it — for `{0,1}` budgets `⊑1→≡1`/`⊑0→≡0`
+       force equality, so the linear/erased fragment that matters for memory is
+       already exact) needs the leaf rules to be subusaging-aware, the standard
+       QTT reformulation.
 - [ ] **M5 Resource soundness / type safety** — the *unbounded* proof of what
       `resource-soundness-rosette.rkt` checked to depth 4: well-typed ⟹ no
       use-after-free / double-free / leak. Plus erasure soundness (M-erasure),
