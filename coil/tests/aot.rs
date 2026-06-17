@@ -1,50 +1,46 @@
 //! Ahead-of-time compilation: source → object → linked native executable.
-//! These run the produced binary and check its process exit code (low 8 bits of
-//! the i64 `main` returns), so they prove the *real* output path, not the JIT.
+//! No JIT is involved anywhere in this path.
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static N: AtomicU32 = AtomicU32::new(0);
-
-fn unique_exe(tag: &str) -> PathBuf {
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("coil_aot_{}_{}_{}", tag, std::process::id(), n))
-}
-
-fn build_and_run(src: &str, tag: &str) -> i32 {
-    let exe = unique_exe(tag);
-    coil::build_executable(src, &exe).expect("build_executable");
-    let status = Command::new(&exe).status().expect("run executable");
-    let _ = std::fs::remove_file(&exe);
-    status.code().expect("exit code")
-}
+mod common;
+use common::{build_and_run, unique_path};
 
 #[test]
 fn aot_arithmetic() {
-    let src = "(defn main [] (-> :i64) (iadd 40 2))";
-    assert_eq!(build_and_run(src, "arith"), 42);
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (iadd 40 2))"), 42);
 }
 
 #[test]
 fn aot_shim_trampoline_natively_linked() {
-    // The hard case: a calling convention LLVM can't express, compiled to a
-    // native object and resolved by the real assembler + linker.
-    let src = include_str!("../examples/shim.coil");
-    assert_eq!(build_and_run(src, "shim"), 42);
+    // A calling convention LLVM can't express, compiled to a native object and
+    // resolved by the real assembler + linker.
+    assert_eq!(build_and_run(include_str!("../examples/shim.coil")), 42);
 }
 
 #[test]
 fn aot_heap_allocation_links_libc() {
-    // malloc/free are resolved at link time against libc.
-    let src = include_str!("../examples/allocation.coil");
-    assert_eq!(build_and_run(src, "alloc"), 42);
+    // malloc/free resolved at link time against libc.
+    assert_eq!(build_and_run(include_str!("../examples/allocation.coil")), 42);
+}
+
+#[test]
+fn aot_expands_all_macros_then_compiles() {
+    // The whole point: macros expand at compile time (a tree-walking interpreter,
+    // no JIT), then the result AOT-compiles to a native binary.
+    let src = r#"
+        (defmacro when [c & body] `(if ~c (do ~@body) 0))
+        (defmacro inc [x] `(iadd ~x 1))
+        (def pow-form (lambda [x n] (if (= n 0) 1 `(imul ~x ~(pow-form x (- n 1))))))
+        (defmacro pow [x n] (pow-form x n))
+        (defn main [] (-> :i64)
+          (when (icmp-eq 1 1)
+            (iadd (pow 2 5) (inc 9))))  ; 32 + 10 = 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
 }
 
 #[test]
 fn aot_object_file_is_emitted() {
-    let obj = unique_exe("obj").with_extension("o");
+    let obj = unique_path("obj").with_extension("o");
     coil::compile_to_object("(defn main [] (-> :i64) 0)", &obj).expect("compile_to_object");
     let meta = std::fs::metadata(&obj).expect("object exists");
     assert!(meta.len() > 0, "object file should be non-empty");

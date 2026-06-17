@@ -99,24 +99,11 @@ pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// JIT-evaluate `main` (no args, returns i64) and return the full i64 result.
-/// This is the `eval`/REPL convenience path — AOT (`build_executable`) is the
-/// real output. `eval` exists because a process exit code is only 8 bits, so it
-/// can report results like 1024 that an executable's exit status cannot.
-pub fn run_source(src: &str) -> Result<i64, String> {
-    Target::initialize_native(&InitializationConfig::default())?;
-    let ctx = Context::create();
-    let module = build_module(&ctx, src)?;
-    if module.get_function("main").is_none() {
-        return Err("no `main` function to run".to_string());
-    }
-    let ee = module
-        .create_jit_execution_engine(OptimizationLevel::None)
-        .map_err(|e| e.to_string())?;
-    unsafe {
-        let f = ee
-            .get_function::<unsafe extern "C" fn() -> i64>("main")
-            .map_err(|e| e.to_string())?;
-        Ok(f.call())
-    }
+/// Front end only: read → expand → parse → check. No codegen, no LLVM
+/// execution — just diagnostics. (Coil has no `eval`/JIT: the only way to run a
+/// program is to AOT-compile it.)
+pub fn check_source(src: &str) -> Result<(), String> {
+    let forms = read_and_expand(src)?;
+    let program = parse::parse_program(&forms)?;
+    check::check(&program)
 }

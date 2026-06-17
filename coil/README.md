@@ -10,10 +10,11 @@ Core bet: a *closure* is not a primitive — it's
 type system talk about conventions and allocations, and closures, vtables,
 coroutines, and FFI trampolines become library code written in macros.
 
-Coil is **ahead-of-time**: it emits a native object file and links an
+Coil is **ahead-of-time, no JIT**: it emits a native object file and links an
 executable with the system `cc` — no runtime dependency on LLVM, and the exotic
 `:shim` conventions become ordinary relocations the assembler/linker resolves.
-(A JIT `eval` exists too, but only as a REPL-style convenience — see below.)
+Macros run during compilation in a tree-walking interpreter (no JIT, no LLVM);
+`coil build` fully expands every macro before emitting any code.
 
 - Full design: [`docs/DESIGN.md`](docs/DESIGN.md)
 
@@ -74,7 +75,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 27 tests (incl. AOT: build + run native exes)
+cargo test                                     # 28 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- build examples/shim.coil -o /tmp/shim && /tmp/shim; echo $?   # => 42
@@ -84,11 +85,10 @@ cargo run -- run   examples/allocation.coil; echo $?                       # => 
 cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file
 cargo run -- emit-ir  examples/shim.coil                  # LLVM IR (trampoline + inline asm)
 cargo run -- expand   examples/macros.coil                # program after macro expansion
-cargo run -- eval     examples/macros.coil                # => 41 (JIT; full i64, not just exit code)
 ```
 
-`build`/`run`/`emit-obj` are the AOT path. `eval` JIT-evaluates `main` and
-prints the full i64 — useful because a process exit code is only 8 bits, so
-`run` on a program returning e.g. 1024 would report `0`.
+There is no `eval`/JIT: the only way to run a program is to AOT-compile it.
+`main` (i64, no args) is the process entry; its return value is the exit code
+(low 8 bits).
 
 [inkwell]: https://github.com/TheDan64/inkwell

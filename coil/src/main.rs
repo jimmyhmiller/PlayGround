@@ -1,11 +1,10 @@
-//! CLI — AOT-first.
+//! CLI — AOT only (no JIT, no `eval`).
 //!
 //!   coil build <file> [-o out]   compile + link a native executable (default: ./<stem>)
 //!   coil run   <file>            build to a temp executable and run it (exit code = result)
 //!   coil emit-obj <file> [-o o]  emit a native object file (default: ./<stem>.o)
 //!   coil emit-ir  <file>         print the generated LLVM IR
 //!   coil expand   <file>         print the program after macro expansion
-//!   coil eval     <file>         JIT-evaluate main and print the full i64 result
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -38,7 +37,6 @@ fn main() -> ExitCode {
         }
         "emit-ir" => report(coil::emit_ir(&src)),
         "expand" => report(coil::expand_to_string(&src)),
-        "eval" => report(coil::run_source(&src).map(|r| r.to_string())),
         "run" => run_aot(&src),
         _ => usage(),
     }
@@ -95,6 +93,6 @@ fn default_out(file: &str, ext: &str) -> PathBuf {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: coil <build|run|emit-obj|emit-ir|expand|eval> <file.coil> [-o out]");
+    eprintln!("usage: coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out]");
     ExitCode::from(2)
 }

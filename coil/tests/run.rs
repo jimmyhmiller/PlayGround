@@ -1,7 +1,8 @@
-//! End-to-end: source -> JIT -> result, plus the diagnostics that make
-//! "convention is part of the type" real even at M1.
+//! Core language, end to end via AOT (build native exe, check exit code).
+//! Rejections are checked with the front-end-only `check_source`.
 
-use coil::{emit_ir, run_source};
+mod common;
+use common::build_and_run;
 
 #[test]
 fn arithmetic_and_let() {
@@ -9,7 +10,7 @@ fn arithmetic_and_let() {
         (defn main [] (-> :i64)
           (let [x 20 y 22] (iadd x y)))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }
 
 #[test]
@@ -19,7 +20,7 @@ fn recursion_and_if() {
           (if (icmp-le n 1) n (iadd (fib (isub n 1)) (fib (isub n 2)))))
         (defn main [] (-> :i64) (fib 10))
     "#;
-    assert_eq!(run_source(src).unwrap(), 55);
+    assert_eq!(build_and_run(src), 55);
 }
 
 #[test]
@@ -30,11 +31,36 @@ fn custom_convention_runs_and_emits_fastcc() {
         (defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64) (iadd a b))
         (defn main [] (-> :i64) (add 20 22))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
-
-    // The convention is not cosmetic: it shows up in the IR.
-    let ir = emit_ir(src).unwrap();
+    assert_eq!(build_and_run(src), 42);
+    let ir = coil::emit_ir(src).unwrap();
     assert!(ir.contains("fastcc"), "expected fastcc in IR:\n{ir}");
+}
+
+#[test]
+fn shim_convention_with_exotic_registers() {
+    let src = r#"
+        (defcc reg2 :params [rax rdx] :ret rax
+          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+        (defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64) (isub a b))
+        (defn main [] (-> :i64)
+          (let [x (iadd 40 10)] (sub2 x 8)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+    let ir = coil::emit_ir(src).unwrap();
+    assert!(ir.contains("naked"), "expected a naked trampoline:\n{ir}");
+    assert!(ir.contains("__impl"), "expected a ccc impl:\n{ir}");
+}
+
+#[test]
+fn shim_convention_recurses() {
+    let src = r#"
+        (defcc reg2 :params [rax rdx] :ret rax
+          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+        (defn fact :cc reg2 [(n :i64) (acc :i64)] (-> :i64)
+          (if (icmp-le n 1) acc (fact (isub n 1) (imul n acc))))
+        (defn main [] (-> :i64) (fact 5 1))
+    "#;
+    assert_eq!(build_and_run(src), 120);
 }
 
 #[test]
@@ -43,11 +69,9 @@ fn heap_alloc_store_load_free() {
         (defn main [] (-> :i64)
           (let [p (alloc heap)]
             (store! p 42)
-            (let [v (load p)]
-              (free p)
-              v)))
+            (let [v (load p)] (free p) v)))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }
 
 #[test]
@@ -56,19 +80,17 @@ fn static_and_frame_regions() {
         (defn main [] (-> :i64)
           (let [g (alloc static)] (store! g 99) (load g)))
     "#;
-    assert_eq!(run_source(static_src).unwrap(), 99);
+    assert_eq!(build_and_run(static_src), 99);
 
     let frame_src = r#"
         (defn main [] (-> :i64)
           (let [p (alloc frame)] (store! p 7) (iadd (load p) 35)))
     "#;
-    assert_eq!(run_source(frame_src).unwrap(), 42);
+    assert_eq!(build_and_run(frame_src), 42);
 }
 
 #[test]
 fn heap_pointer_crosses_function_boundary() {
-    // A (ptr heap) is allowed in signatures: make allocates and returns it, main
-    // consumes and frees it.
     let src = r#"
         (defn make [(v :i64)] (-> (ptr heap))
           (let [p (alloc heap)] (store! p v) p))
@@ -76,8 +98,10 @@ fn heap_pointer_crosses_function_boundary() {
           (let [p (make 42)]
             (let [v (load p)] (free p) v)))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }
+
+// ---- rejections (front-end only) ---------------------------------------
 
 #[test]
 fn rejects_escaping_frame_pointer() {
@@ -85,8 +109,7 @@ fn rejects_escaping_frame_pointer() {
         (defn bad [] (-> (ptr frame)) (alloc frame))
         (defn main [] (-> :i64) 0)
     "#;
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains("frame pointer"), "got: {err}");
+    assert!(coil::check_source(src).unwrap_err().contains("frame pointer"));
 }
 
 #[test]
@@ -95,15 +118,15 @@ fn rejects_freeing_non_heap() {
         (defn main [] (-> :i64)
           (let [g (alloc static)] (free g)))
     "#;
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains("cannot free"), "got: {err}");
+    assert!(coil::check_source(src).unwrap_err().contains("cannot free"));
 }
 
 #[test]
 fn rejects_loading_non_pointer() {
     let src = "(defn main [] (-> :i64) (load 5))";
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains("load expects a pointer"), "got: {err}");
+    assert!(coil::check_source(src)
+        .unwrap_err()
+        .contains("load expects a pointer"));
 }
 
 #[test]
@@ -112,46 +135,7 @@ fn rejects_arity_mismatch() {
         (defn add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
         (defn main [] (-> :i64) (add 1))
     "#;
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains("expects 2 args"), "got: {err}");
-}
-
-#[test]
-fn shim_convention_with_exotic_registers() {
-    // A convention LLVM's CC enum cannot express: integer args pinned to rax/rdx
-    // (not the SysV rdi/rsi). `isub` is order-sensitive, so a register mix-up in
-    // the trampoline or call site would yield -42, not 42. Computing one arg
-    // forces real register placement rather than a folded constant.
-    let src = r#"
-        (defcc reg2 :params [rax rdx] :ret rax
-          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
-        (defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64) (isub a b))
-        (defn main [] (-> :i64)
-          (let [x (iadd 40 10)] (sub2 x 8)))
-    "#;
-    assert_eq!(run_source(src).unwrap(), 42);
-
-    // The shim genuinely lowers to a naked trampoline (not a normal call).
-    let ir = emit_ir(src).unwrap();
-    assert!(ir.contains("naked"), "expected a naked trampoline in IR:\n{ir}");
-    assert!(
-        ir.contains("__impl"),
-        "expected a ccc impl function in IR:\n{ir}"
-    );
-}
-
-#[test]
-fn shim_convention_recurses() {
-    // The shim path must survive recursion: factorial calls itself through the
-    // exotic-register convention each time.
-    let src = r#"
-        (defcc reg2 :params [rax rdx] :ret rax
-          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
-        (defn fact :cc reg2 [(n :i64) (acc :i64)] (-> :i64)
-          (if (icmp-le n 1) acc (fact (isub n 1) (imul n acc))))
-        (defn main [] (-> :i64) (fact 5 1))
-    "#;
-    assert_eq!(run_source(src).unwrap(), 120);
+    assert!(coil::check_source(src).unwrap_err().contains("expects 2 args"));
 }
 
 #[test]
@@ -161,13 +145,13 @@ fn rejects_shim_without_ret() {
         (defn add :cc bad [(a :i64) (b :i64)] (-> :i64) (iadd a b))
         (defn main [] (-> :i64) (add 1 2))
     "#;
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains(":ret"), "got: {err}");
+    assert!(coil::check_source(src).unwrap_err().contains(":ret"));
 }
 
 #[test]
 fn rejects_unbound_variable() {
     let src = "(defn main [] (-> :i64) (iadd x 1))";
-    let err = run_source(src).unwrap_err();
-    assert!(err.contains("unbound variable"), "got: {err}");
+    assert!(coil::check_source(src)
+        .unwrap_err()
+        .contains("unbound variable"));
 }

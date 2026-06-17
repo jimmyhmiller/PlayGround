@@ -1,6 +1,9 @@
-//! User-defined macros: a real compile-time Lisp, exercised end to end.
+//! User-defined macros: a compile-time Lisp (tree-walking interpreter, no JIT).
+//! Programs are run via AOT so we also prove macros fully expand before codegen.
 
-use coil::{expand_to_string, run_source};
+mod common;
+use common::build_and_run;
+use coil::expand_to_string;
 
 #[test]
 fn quasiquote_and_splicing() {
@@ -9,7 +12,7 @@ fn quasiquote_and_splicing() {
         (defn main [] (-> :i64)
           (when (icmp-eq 1 1) 10 20 42))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }
 
 #[test]
@@ -27,19 +30,19 @@ fn recursive_macro_cond() {
           (iadd (iadd (pick 0) (imul (pick 5) 10)) (imul (pick 0) 100)))
     "#;
     // pick(0)=2, pick(5)=3, pick(0)=2  ->  2 + 30 + 200 = 232
-    assert_eq!(run_source(src).unwrap(), 232);
+    assert_eq!(build_and_run(src), 232);
 }
 
 #[test]
 fn compile_time_computation_unrolls() {
-    // A helper function recurses at compile time to build nested imuls.
+    // A helper recurses at compile time to build nested imuls.
     let src = r#"
         (def pow-form (lambda [x n]
           (if (= n 0) 1 `(imul ~x ~(pow-form x (- n 1))))))
         (defmacro pow [x n] (pow-form x n))
-        (defn main [] (-> :i64) (pow 2 10))
+        (defn main [] (-> :i64) (pow 2 7))
     "#;
-    assert_eq!(run_source(src).unwrap(), 1024);
+    assert_eq!(build_and_run(src), 128); // 2^7
 
     let expanded = expand_to_string(src).unwrap();
     assert!(
@@ -50,15 +53,12 @@ fn compile_time_computation_unrolls() {
 
 #[test]
 fn gensym_avoids_capture_and_double_eval() {
-    // `double` must evaluate its argument once even though it uses it twice.
-    // If it expanded to (iadd x x) with a side-effecting x, you'd see it twice;
-    // here we prove single-eval by binding through a gensym.
     let src = r#"
         (defmacro double [x]
           (let [t (gensym "t")] `(let [~t ~x] (iadd ~t ~t))))
         (defn main [] (-> :i64) (double (iadd 20 1)))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 
     let expanded = expand_to_string(src).unwrap();
     assert!(expanded.contains("t__"), "expected a gensym name:\n{expanded}");
@@ -75,13 +75,11 @@ fn macro_emits_toplevel_definition() {
         (defconst answer 42)
         (defn main [] (-> :i64) (answer))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }
 
 #[test]
 fn macro_can_target_conventions_and_regions() {
-    // Macros compose with the rest of the language: this one stamps out a
-    // function on a custom convention, and the body uses a heap allocation.
     let src = r#"
         (defcc fast2 :params [rax rdx] :ret rax
           :clobber [rax rdx rcx] :preserve [rbx rbp] :native fast)
@@ -93,14 +91,12 @@ fn macro_can_target_conventions_and_regions() {
             (store! p (add 20 22))
             (let [v (load p)] (free p) v)))
     "#;
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
     assert!(expand_to_string(src).unwrap().contains(":cc fast2"));
 }
 
 #[test]
 fn macroless_programs_still_work() {
-    // The expander is on the path for every program; one with no macros must be
-    // unaffected.
     let src = "(defn main [] (-> :i64) (iadd 40 2))";
-    assert_eq!(run_source(src).unwrap(), 42);
+    assert_eq!(build_and_run(src), 42);
 }

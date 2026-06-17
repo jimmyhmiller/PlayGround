@@ -78,12 +78,17 @@ core, plus a macro system powerful enough that "high-level" features are
 ```
 
 - **Backend:** raw LLVM through `inkwell`. Host/implementation language: Rust.
-- **AOT, not JIT.** Coil emits a native object via LLVM's `TargetMachine` and
+- **AOT, no JIT.** Coil emits a native object via LLVM's `TargetMachine` and
   links with the system `cc`. This is the right model for a language about
   total ABI/memory control: no runtime LLVM dependency, real linker, C/asm
   interop at link time, and `:shim` trampolines become ordinary relocations the
-  assembler/linker resolves. A JIT path (`eval`) is kept only as a REPL-style
-  convenience and as the eventual substrate for executing compile-time code.
+  assembler/linker resolves. There is no `eval`/JIT — the only way to run a
+  program is to compile it.
+- **Comptime is a tree-walking interpreter, not a JIT.** Macro expansion runs
+  the compile-time Lisp (see Macros, below) with no dependency on LLVM, and
+  `coil build` expands every macro to a fixpoint *before* any code is emitted.
+  So the compile-time and run-time phases are cleanly separated and the JIT
+  never enters the picture.
 - **Reader:** s-expressions. Homoiconic so macros are ordinary tree transforms.
 - **Compile-time evaluation:** macros run in a compile-time interpreter that can
   inspect types, target data layout, and convention descriptions (Terra/Zig-style
