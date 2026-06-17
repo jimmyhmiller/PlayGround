@@ -24,6 +24,8 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `Substitution.agda` | the **quantitative substitution lemma**: a typed substitution applied to a well-typed term stays well-typed, at usage `mvp Γ Δs` (the Γ-weighted sum). The crux lemma. | ✅ checks |
 | `Preservation.agda` | **preservation** (β via the substitution lemma; congruence cases recurse) and its multi-step closure. **Progress + preservation = type safety.** | ✅ checks |
 | `Dependent.agda` | the **dependent** quantitative calculus: a universe, dependent `Π`/`Σ` with multiplicities, λ, app, pair, definitional conversion, and the **0-fragment** (type formation does not track usage). The `dep-id` derivation `λA.λx.x : Π(A:⁰⋆).Π(x:¹A).A` machine-checks the linear+dependent+erasure unification; `dep-sigma` a dependent `Σ`. | ✅ checks |
+| `DepSubst.agda` | the **substitution algebra** for the dependent syntax (`ren`/`sub` compose; capstone `sub-comm`). Foundation for confluence and the dependent substitution lemma. | ✅ checks |
+| `Confluence.agda` | **confluence** via Takahashi: parallel reduction closed under ren/sub, the complete development, the triangle lemma, and the **diamond property**. The new ingredient for dependent canonical forms. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -58,12 +60,18 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
 
 ### Remaining (the dependent metatheory and beyond)
 
-- [ ] **Dependent type safety** (progress + preservation for `Dependent.agda`).
-      Harder than the linear core: the substitution lemma must act on *types*
-      too, and progress with the conversion rule needs **confluence** of `_≅_`
-      (canonical forms up to conversion). The substitution-lemma infrastructure
-      from Modules 5b ports over; confluence (Church–Rosser via parallel
-      reduction) is the new ingredient. Multi-session, graded-Agda-scale.
+- [~] **Dependent type safety** (progress + preservation for `Dependent.agda`).
+      In progress, bottom-up:
+    - [x] substitution algebra (`DepSubst.agda`);
+    - [x] confluence's **diamond property** (`Confluence.agda`) — the hard new
+          ingredient;
+    - [ ] Church–Rosser (strip lemma from the diamond) and the convertibility
+          characterisation (`Π`-injectivity, `⋆ ≇ Π` — standard boilerplate on
+          the diamond);
+    - [ ] the dependent substitution lemma (substitution into types; structurally
+          the Module-5b proof on `Tm`, using `DepSubst`);
+    - [ ] dependent preservation + progress (using `Π`-injectivity to invert the
+          conversion rule).
 - [ ] The memory primitives (`alloc/read/write/free`) typed in the quantitative
       kernel, with the resource-safety theorem — the full λ-Tally.
 - [ ] **Consistency / normalization** (genuinely beyond Rosette's reach), and a
