@@ -1,0 +1,19 @@
+# Word-frequency count.
+#
+# `counts` is used with put/get/has and is later traversed in SORTED order,
+# so the analyzer infers an ORDERED MAP (BTreeMap). No type was ever declared.
+
+let text = ["the", "cat", "sat", "on", "the", "mat", "the", "cat", "ran"]
+
+let counts = collection()
+for w in text {
+  if has(counts, w) {
+    put(counts, w, get(counts, w) + 1)
+  } else {
+    put(counts, w, 1)
+  }
+}
+
+for w in sorted(counts) {
+  print(w, get(counts, w))
+}

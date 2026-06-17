@@ -1,0 +1,23 @@
+# Membership-heavy workload used by `autostruct bench`.
+#
+# `evens` is only ever probed for membership, so it is inferred to be a
+# HASH SET (O(1) lookup). The naive backend stores the same elements in a
+# linear list (O(n) lookup). Same answer, very different running time.
+
+let n = 8000
+
+let evens = collection()
+for i in range(n) {
+  add(evens, i * 2)
+}
+
+let hits = 0
+for q in range(n * 2) {
+  if has(evens, q) {
+    hits = hits + 1
+  }
+}
+
+print("n:", n)
+print("members:", size(evens))
+print("hits:", hits)
