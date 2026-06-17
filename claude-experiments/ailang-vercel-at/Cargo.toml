@@ -1,0 +1,16 @@
+[package]
+name = "ailang-vercel-at"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+vercel_runtime = "2"
+http-body-util = "0.1"
+
+[[bin]]
+name = "at"
+path = "api/at.rs"
+
+[profile.release]
+opt-level = 3

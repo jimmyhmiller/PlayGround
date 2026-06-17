@@ -1,0 +1,30 @@
+# Auto Scaling Group demo.
+#
+#   Source ──packet──▶  ASG  ──req──▶  Worker_n   (×N, spawned, fan-out)
+#                        │  ◀── resp ──┘
+#                        └──packet──▶ Out
+#
+# The Generator pushes work faster than one worker can drain, so the ASG
+# spawns more workers (real `WorkerComposite` instances, cloned from its
+# `worker_class`) up to `max_workers`, then sheds them when the load
+# drops. The workers fan out around the ASG at the top level with live
+# dispatch edges. Select the ASG to tune its scaling, pause it, or nudge
+# the fleet by hand; select the Generator to drive the load.
+
+node Generator : Generator { period_ns: 25000000, color: 0 }
+
+node ASG : AutoScalingGroup {
+    worker_class: "WorkerComposite"
+    min_workers:  1
+    max_workers:  6
+    scale_up:     12
+    scale_down:   4
+    tick_ns:      150000000
+}
+
+node Sink : Sink { color: 0 }
+
+edges {
+    Generator.output -> ASG  : 1ms
+    ASG -> Sink.input        : 1ms
+}

@@ -1,0 +1,18 @@
+[package]
+name = "ailang-vercel-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+vercel_runtime = "2"
+serde_json = "1"
+libloading = "0.8"
+
+# One handler binary, served at /api/probe
+[[bin]]
+name = "probe"
+path = "api/probe.rs"
+
+[profile.release]
+opt-level = 3
