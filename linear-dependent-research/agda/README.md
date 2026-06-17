@@ -23,6 +23,7 @@ checked boundedly (resource soundness, erasure), then go beyond Rosette's ceilin
 | `Renaming.agda` | the weakening lemma: inserting an unused (`0#`) variable anywhere preserves typing (the infrastructure that pushes derivations under binders). | ✅ checks |
 | `Substitution.agda` | the **quantitative substitution lemma**: a typed substitution applied to a well-typed term stays well-typed, at usage `mvp Γ Δs` (the Γ-weighted sum). The crux lemma. | ✅ checks |
 | `Preservation.agda` | **preservation** (β via the substitution lemma; congruence cases recurse) and its multi-step closure. **Progress + preservation = type safety.** | ✅ checks |
+| `Dependent.agda` | the **dependent** quantitative calculus: a universe, dependent `Π`/`Σ` with multiplicities, λ, app, pair, definitional conversion, and the **0-fragment** (type formation does not track usage). The `dep-id` derivation `λA.λx.x : Π(A:⁰⋆).Π(x:¹A).A` machine-checks the linear+dependent+erasure unification; `dep-sigma` a dependent `Σ`. | ✅ checks |
 
 Self-contained: `Rig.agda` uses a tiny inline prelude; `Context.agda` only
 imports `Rig`. No standard library needed — `agda Rig.agda && agda Context.agda`
@@ -49,12 +50,23 @@ from this directory checks everything. (Tested on Agda 2.6.3.)
       resource-soundness result** (which was bounded to depth 4). The make-or-
       break milestone for the linear core: done.
 
-### Remaining (the dependent layer and beyond)
+- [x] **M6 Dependent calculus** — `Dependent.agda`: universe, dependent `Π`/`Σ`
+      with multiplicities, λ/app/pair, definitional conversion, and the QTT
+      0-fragment, **type-checked and inhabited** (`dep-id`, `dep-sigma`). The
+      linear+dependent+erasure unification is now machine-checked in a genuinely
+      dependent type theory, not just the simply-typed core.
 
-- [ ] Dependent types: extend the calculus to full `Π`/`Σ` with a universe
-      hierarchy (replacing the implicit `Type` story), re-proving the above.
+### Remaining (the dependent metatheory and beyond)
+
+- [ ] **Dependent type safety** (progress + preservation for `Dependent.agda`).
+      Harder than the linear core: the substitution lemma must act on *types*
+      too, and progress with the conversion rule needs **confluence** of `_≅_`
+      (canonical forms up to conversion). The substitution-lemma infrastructure
+      from Modules 5b ports over; confluence (Church–Rosser via parallel
+      reduction) is the new ingredient. Multi-session, graded-Agda-scale.
 - [ ] The memory primitives (`alloc/read/write/free`) typed in the quantitative
       kernel, with the resource-safety theorem — the full λ-Tally.
-- [ ] Normalization and logical consistency (genuinely beyond Rosette's reach).
+- [ ] **Consistency / normalization** (genuinely beyond Rosette's reach), and a
+      universe hierarchy replacing `⋆ : ⋆`.
 
 Each milestone names a *theorem* (a checked `.agda` file), not just code.
