@@ -74,11 +74,16 @@ core, plus a macro system powerful enough that "high-level" features are
   lowering      (per-convention strategy; §7)
         │
         ▼
-  LLVM IR  (via inkwell / llvm-sys)  ──►  object / JIT
+  LLVM IR  (via inkwell)  ──►  native object file  ──►  cc/ld  ──►  executable
 ```
 
-- **Backend:** raw LLVM through `inkwell` (safe-ish Rust bindings) or `llvm-sys`
-  (thin FFI). Host/implementation language: Rust.
+- **Backend:** raw LLVM through `inkwell`. Host/implementation language: Rust.
+- **AOT, not JIT.** Coil emits a native object via LLVM's `TargetMachine` and
+  links with the system `cc`. This is the right model for a language about
+  total ABI/memory control: no runtime LLVM dependency, real linker, C/asm
+  interop at link time, and `:shim` trampolines become ordinary relocations the
+  assembler/linker resolves. A JIT path (`eval`) is kept only as a REPL-style
+  convenience and as the eventual substrate for executing compile-time code.
 - **Reader:** s-expressions. Homoiconic so macros are ordinary tree transforms.
 - **Compile-time evaluation:** macros run in a compile-time interpreter that can
   inspect types, target data layout, and convention descriptions (Terra/Zig-style
