@@ -82,23 +82,28 @@ def kv_del_at(node: Node, k: String) -> Result<Int, Failure> =
 // A unified client error so a caller gets one Result, not nested ones.
 enum KvErr { Net(NetErr), Decode(DecodeError) }
 
-// Connect, ship the encoded thunk in one length-prefixed frame, read the reply
-// frame back. Fresh connection per call (the stdlib `serve_turn` closes after
-// each request). Network faults surface as KvErr::Net.
-def kv_call_tcp(node: Node, payload: Bytes) -> Result<Bytes, KvErr> =
-    match tcp_connect(node.a, node.b, node.c, node.d, node.port) {
-        Result::Ok(conn) => match send_frame(conn, payload) {
-            Result::Ok(_w) => match recv_frame(conn) {
-                Result::Ok(resp) => {
-                    let _c = conn_close(conn);
-                    Result::Ok(resp)
-                },
-                Result::Err(e) => Result::Err(KvErr::Net(e)),
-            },
-            Result::Err(e) => Result::Err(KvErr::Net(e)),
-        },
-        Result::Err(e) => Result::Err(KvErr::Net(e)),
+// Ship the encoded thunk in one length-prefixed frame, read the reply frame
+// back — driving the node's own transport `Channel` (connect, write, read)
+// rather than reaching into address fields. This is the hand-rolled framing
+// path (no KIND byte; pairs with the stdlib `serve_turn`), now expressed over
+// the unified `Node`. Network faults surface as KvErr::Net.
+def kv_call_tcp(node: Node, payload: Bytes) -> Result<Bytes, KvErr> = {
+    let dial = node.connect;
+    let ch = dial();
+    let w = ch.write_frame;
+    let r = ch.read_frame;
+    let sent = w(payload);
+    if sent < 0 {
+        Result::Err(KvErr::Net(NetErr::WriteFailed))
+    } else {
+        let resp = r();
+        if bytes_len(resp) == 0 {
+            Result::Err(KvErr::Net(NetErr::ConnClosed))
+        } else {
+            Result::Ok(resp)
+        }
     }
+}
 
 def kv_set_tcp(node: Node, k: String, v: Val) -> Result<Val, KvErr> =
     match kv_call_tcp(node, wire_encode(|| do_set(k, v))) {

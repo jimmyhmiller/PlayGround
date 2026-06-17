@@ -98,6 +98,30 @@ impl Parser {
         }
     }
 
+    /// True if the current token is the identifier `name`. Used to peek
+    /// for soft-keyword forms (e.g. `sibling(...)`) without reserving a
+    /// real token.
+    fn peek_ident_is(&self, name: &str) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if s == name)
+    }
+
+    /// Parse `sibling("Name")` and return the local sibling name. Assumes
+    /// the current token is the `sibling` identifier.
+    fn parse_sibling_ref(&mut self) -> Result<String, String> {
+        let kw = self.ident()?;
+        debug_assert_eq!(kw, "sibling");
+        self.expect(Tok::LParen)?;
+        let name = match self.bump() {
+            Tok::Str(s) => s,
+            other => return Err(format!(
+                "{}: sibling(...) expects a string-literal name, got {:?}",
+                self.here(), other
+            )),
+        };
+        self.expect(Tok::RParen)?;
+        Ok(name)
+    }
+
     /// Parse a name in any name-bearing position (node decls, edge
     /// endpoints, emit targets, port `inner` mappings). Accepts plain
     /// `Tok::Ident` and `Tok::IdentTpl(...)` (`Cell_{x}_{y}` shape) and
@@ -235,9 +259,14 @@ impl Parser {
 
     /// Parse `on_spawn { … }` — per-instance bootstrap wiring.
     ///
-    /// Two statement shapes:
-    ///   `self -> self : LATENCY_EXPR`    — create a self-edge
+    /// Statement shapes:
+    ///   `self -> self : LATENCY_EXPR`        — create a self-edge
+    ///   `sibling("Name") -> self : LAT`      — inbound edge from a sibling
+    ///   `self -> sibling("Name") : LAT`      — outbound edge to a sibling
     ///   `inject TAG` or `inject TAG(PAYLOAD)` — seed inbox packet
+    ///
+    /// `sibling("Name")` resolves at spawn time against the spawner's
+    /// enclosing-compound prefix (see [`EdgeEnd::Sibling`]).
     ///
     /// Trailing `;` / `,` is optional between statements.
     fn parse_on_spawn(&mut self) -> Result<Vec<OnSpawnStmt>, String> {
@@ -249,20 +278,35 @@ impl Parser {
                 Tok::Self_ => {
                     self.bump();
                     self.expect(Tok::Arrow)?;
-                    // Only self -> self supported. Cross-instance wiring
-                    // belongs at the top-level `edges` block or on the
-                    // canvas file format.
-                    if !matches!(self.peek(), Tok::Self_) {
+                    // `self -> self` (self-loop) or `self -> sibling("X")`
+                    // (outbound edge to a named sibling).
+                    if matches!(self.peek(), Tok::Self_) {
+                        self.bump();
+                        self.expect(Tok::Colon)?;
+                        let latency = self.parse_expr()?;
+                        let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
+                        out.push(OnSpawnStmt::SelfEdge { latency });
+                    } else if self.peek_ident_is("sibling") {
+                        let sibling = self.parse_sibling_ref()?;
+                        self.expect(Tok::Colon)?;
+                        let latency = self.parse_expr()?;
+                        let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
+                        out.push(OnSpawnStmt::SiblingEdge { sibling, inbound: false, latency });
+                    } else {
                         return Err(format!(
-                            "{}: on_spawn edges must be `self -> self`",
+                            "{}: on_spawn edge must be `self -> self` or `self -> sibling(\"…\")`",
                             self.here()
                         ));
                     }
-                    self.bump();
+                }
+                Tok::Ident(ref id) if id == "sibling" => {
+                    let sibling = self.parse_sibling_ref()?;
+                    self.expect(Tok::Arrow)?;
+                    self.expect(Tok::Self_)?;
                     self.expect(Tok::Colon)?;
                     let latency = self.parse_expr()?;
                     let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
-                    out.push(OnSpawnStmt::SelfEdge { latency });
+                    out.push(OnSpawnStmt::SiblingEdge { sibling, inbound: true, latency });
                 }
                 Tok::Inject => {
                     self.bump();
@@ -280,7 +324,8 @@ impl Parser {
                     out.push(OnSpawnStmt::Inject { tag, payload });
                 }
                 other => return Err(format!(
-                    "{}: expected `self -> self : …` or `inject …`, got {:?}",
+                    "{}: expected `self -> self : …`, `sibling(\"…\") -> self : …`, \
+                     `self -> sibling(\"…\") : …`, or `inject …`, got {:?}",
                     self.here(), other
                 )),
             }
@@ -469,11 +514,19 @@ impl Parser {
             }
             Tok::Spawn => {
                 self.bump();
-                let template = self.ident()?;
+                // `spawn "WorkerComposite" -> w` (literal class) or
+                // `spawn template -> w` (slot read → runtime class name).
+                let template = self.parse_expr()?;
                 self.expect(Tok::Arrow)?;
                 let into = self.ident()?;
                 let _ = self.eat(&Tok::Semi);
                 Ok(Stmt::Spawn { template, into })
+            }
+            Tok::Despawn => {
+                self.bump();
+                let node = self.parse_expr()?;
+                let _ = self.eat(&Tok::Semi);
+                Ok(Stmt::Despawn { node })
             }
             Tok::Ident(_) => {
                 // `name := expr ;`
@@ -993,7 +1046,7 @@ impl Parser {
                         | "len" | "mean" | "count_where"
                         | "out_neighbors" | "slot_of"
                         | "length" | "index" | "filter" | "map" | "reduce" | "argmin"
-                        | "head" | "tail"
+                        | "head" | "tail" | "append" | "contains"
                         | "edge_last_sent"
                         // `tagged(kind, value)` — build a packet with a
                         // dynamic kind (slot- or param-controlled). The

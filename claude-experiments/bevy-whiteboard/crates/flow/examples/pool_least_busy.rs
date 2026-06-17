@@ -113,7 +113,7 @@ fn main() {
     let spawn_rule = Rule::new("spawn_and_enroll")
         .when(When::input(Pattern::variant("kick", Pattern::wild())))
         .do_(Effect::Spawn {
-            template: "Worker".into(),
+            template: Expr::str("Worker"),
             into_var: Some("w".into()),
         })
         .do_(Effect::SamplesPush {

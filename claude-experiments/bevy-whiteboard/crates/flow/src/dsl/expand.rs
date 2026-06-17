@@ -642,6 +642,15 @@ fn expand_on_spawn(s: &OnSpawnStmt, env: &Env, name_prefix: &str) -> Result<OnSp
             tag: tag.clone(),
             payload: payload.as_ref().map(|p| rewrite_expr_names(p, env, name_prefix)).transpose()?,
         },
+        // The sibling name is a local (unqualified) reference resolved at
+        // spawn time against the *spawner's* compound prefix, so it must
+        // NOT be prefixed here — leave it verbatim. Only the latency
+        // expression participates in compile-time name rewriting.
+        OnSpawnStmt::SiblingEdge { sibling, inbound, latency } => OnSpawnStmt::SiblingEdge {
+            sibling: sibling.clone(),
+            inbound: *inbound,
+            latency: rewrite_expr_names(latency, env, name_prefix)?,
+        },
     })
 }
 
@@ -707,7 +716,11 @@ fn expand_stmt(s: &Stmt, env: &Env, name_prefix: &str) -> Result<Stmt, String> {
             name: name.clone(),
             value: rewrite_expr_names(value, env, name_prefix)?,
         },
-        Stmt::Spawn { template, into } => Stmt::Spawn { template: template.clone(), into: into.clone() },
+        Stmt::Spawn { template, into } => Stmt::Spawn {
+            template: rewrite_expr_names(template, env, name_prefix)?,
+            into: into.clone(),
+        },
+        Stmt::Despawn { node } => Stmt::Despawn { node: rewrite_expr_names(node, env, name_prefix)? },
         Stmt::Error { kind, detail } => Stmt::Error {
             kind: kind.clone(),
             detail: rewrite_expr_names(detail, env, name_prefix)?,

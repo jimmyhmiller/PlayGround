@@ -10,6 +10,7 @@ pub mod edges;
 pub mod errors;
 pub mod examples;
 pub mod examples_menu;
+pub mod fleet_layout;
 pub mod bitmap_label;
 pub mod gadgets;
 pub mod glyph_atlas;
@@ -136,6 +137,7 @@ impl Plugin for FlowBevyPlugins {
                 compound::CompoundPlugin,
                 examples_menu::ExamplesMenuPlugin,
                 primitive_viz::PrimitiveVizPlugin,
+                fleet_layout::FleetLayoutPlugin,
             ));
     }
 }

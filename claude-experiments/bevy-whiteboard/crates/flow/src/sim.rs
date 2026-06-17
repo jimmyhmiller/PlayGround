@@ -874,11 +874,14 @@ impl Sim {
                 node.outbound.retain(|eid| !removed_edges.contains(eid));
             }
         }
+        // Rewrite every dangling reference to the despawned node to `Nil`,
+        // including refs nested inside `List`/`Record` values (e.g. an
+        // autoscaler's `members: List<NodeRef>`). A bare top-level ref
+        // becomes `Nil`; a ref inside a list becomes a `Nil` element the
+        // owner filters out on its next pass.
         for node in self.nodes.values_mut() {
             for (_, v) in node.slots.iter_mut() {
-                if matches!(v, Value::NodeRef(r) if *r == nid) {
-                    *v = Value::Nil;
-                }
+                scrub_noderef(v, nid);
             }
         }
         self.log.push(Event::NodeDespawned { node: nid, at_ns: self.now_ns });
@@ -917,6 +920,33 @@ impl Sim {
 
     pub fn node_by_name(&self, name: &str) -> Option<NodeId> {
         self.nodes.values().find(|n| n.name == name).map(|n| n.id)
+    }
+
+    /// The next NodeId the sim would allocate — a monotonic high-water
+    /// mark. Lets external observers (e.g. the Bevy topology detector)
+    /// distinguish "spawned then despawned the same count" from a no-op.
+    pub fn next_node_id_hint(&self) -> u64 {
+        self.next_node_id
+    }
+
+    /// Resolve a sibling of `spawner` by its local (unqualified) name.
+    ///
+    /// Compound inner nodes are named `<instance>::<Local>` (e.g.
+    /// `ASG::Scaler`, `ASG::LB`). Given the spawner's qualified name we
+    /// split off the part after the last `::` to recover the compound
+    /// prefix (`ASG`), then look up `<prefix>::<local>`. When the spawner
+    /// has no `::` prefix (a top-level node), we fall back to a bare
+    /// `node_by_name(local)` lookup. Returns `None` if nothing matches —
+    /// callers turn that into a hard error rather than a silent drop.
+    pub fn resolve_sibling(&self, spawner: NodeId, local: &str) -> Option<NodeId> {
+        let spawner_name = self.nodes.get(&spawner).map(|n| n.name.clone())?;
+        match spawner_name.rfind("::") {
+            Some(idx) => {
+                let prefix = &spawner_name[..idx];
+                self.node_by_name(&format!("{prefix}::{local}"))
+            }
+            None => self.node_by_name(local),
+        }
     }
 
     pub(crate) fn next_packet_id(&mut self) -> PacketId {
@@ -1058,5 +1088,27 @@ fn format_probe_value(v: &Value) -> String {
         Value::Str(s) => s.clone(),
         Value::Nil => "—".into(),
         other => format!("{:?}", other),
+    }
+}
+
+/// Replace every reference to `dead` inside `v` with `Nil`, recursing
+/// through `List` and `Record` values. Used by `despawn_node` so a
+/// despawned node leaves no dangling handle — whether the handle was a
+/// bare slot or an element of a collection (e.g. an autoscaler's
+/// `members` list).
+fn scrub_noderef(v: &mut Value, dead: NodeId) {
+    match v {
+        Value::NodeRef(r) if *r == dead => *v = Value::Nil,
+        Value::List(items) => {
+            for item in items.iter_mut() {
+                scrub_noderef(item, dead);
+            }
+        }
+        Value::Record(fields) => {
+            for (_, fv) in fields.iter_mut() {
+                scrub_noderef(fv, dead);
+            }
+        }
+        _ => {}
     }
 }

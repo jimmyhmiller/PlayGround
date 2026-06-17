@@ -476,7 +476,16 @@ pub fn seed_from_path(
         let membership = crate::compound::compute_membership(sim);
         let mut nodes: Vec<(flow::NodeId, String, Option<String>, Option<usize>, bool)> = Vec::new();
         for (nid, node) in sim.nodes.iter() {
-            let class_name = sim.class_name(*nid).map(|s| s.to_owned());
+            // `class_name()` follows the leaf TemplateId and is `None` for
+            // a compound shim (Generator, Worker, …). Fall back to the
+            // shim's compound class so gadgets loaded from a whiteboard
+            // render as their real Kind (and get their kind-specific
+            // inspector controls) instead of the generic Worker box. This
+            // mirrors what `sync_canvas_population` already does.
+            let class_name = sim
+                .class_name(*nid)
+                .map(|s| s.to_owned())
+                .or_else(|| sim.compound_class_of.get(nid).cloned());
             let color_slot = match node.slots.get("color") {
                 Some(Value::Int(n)) => Some(*n as usize),
                 _ => None,
@@ -687,7 +696,13 @@ pub(crate) fn spawn_one_canvas_node_at(
         return;
     }
 
-    let kind = class_name.map(class_to_kind).unwrap_or(Kind::Worker);
+    // Prefer the gadget mapping (handles both the short alias `Generator`
+    // and the canonical `GeneratorComposite`); fall back to the plain
+    // class→kind table for primitives / custom classes.
+    let kind = class_name
+        .and_then(gadget_kind_for_class)
+        .or_else(|| class_name.map(class_to_kind))
+        .unwrap_or(Kind::Worker);
     // Merge: visual.json's explicit class entry wins, but if absent we
     // fall back to the hardcoded `stock_class_visual` table so every
     // stock primitive renders with its proper glyph + inner label.
@@ -1157,6 +1172,7 @@ pub fn class_to_kind(class: &str) -> Kind {
         "Router" => Kind::Router,
         "Queue" => Kind::Queue,
         "Sink" => Kind::Sink,
+        "AutoScalingGroup" => Kind::AutoScalingGroup,
         _ => Kind::Worker,
     }
 }
@@ -1176,6 +1192,9 @@ pub fn gadget_kind_for_class(class: &str) -> Option<Kind> {
         "RouterComposite"       | "Router"         => Some(Kind::Router),
         "QueueComposite"        | "Queue"          => Some(Kind::Queue),
         "SinkComposite"         | "Sink"           => Some(Kind::Sink),
+        // The autoscaler is a leaf class (no `*Composite`), but treat it
+        // as a first-class gadget kind so it renders with its own body.
+        "AutoScalingGroup"                          => Some(Kind::AutoScalingGroup),
         _ => None,
     }
 }
@@ -1290,14 +1309,21 @@ mod tests {
     use std::io::Write;
 
     fn mktemp() -> PathBuf {
+        // A monotonic counter guarantees a unique dir even when two tests
+        // call this in the same nanosecond (parallel test runs) — without
+        // it they collide on one dir and one's `remove_dir_all` yanks it
+        // from under the other, a flaky load failure.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "canvas_test_{}_{}",
+            "canvas_test_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            n,
         ));
         fs::create_dir_all(&p).unwrap();
         p

@@ -39,6 +39,9 @@ struct Tuning {
     camera_smoothing
     run_multiplier
     sneak_multiplier
+    stamina_max
+    stamina_sprint_drain
+    stamina_regen
 }
 
 fn default_tuning() {
@@ -55,7 +58,10 @@ fn default_tuning() {
         ambient: 0.08,
         camera_smoothing: 8.0,
         run_multiplier: 1.75,
-        sneak_multiplier: 0.4
+        sneak_multiplier: 0.4,
+        stamina_max: 100.0,
+        stamina_sprint_drain: 40.0,
+        stamina_regen: 25.0
     }
 }
 
@@ -70,6 +76,7 @@ struct Player {
     half          // half-extents (Vec2)
     aim           // Vec2 unit vector
     speed_mult    // 1.0 normal, run_multiplier, sneak_multiplier
+    stamina       // current stamina (0..stamina_max)
     hp            // hit points — attacks subtract, respawn on 0
     iframes       // invulnerability timer (seconds) after being hit
 }
@@ -132,11 +139,11 @@ fn read_desired_dir() {
     v/normalize_or_zero(v/make(dx, dy))
 }
 
-fn read_speed_mult(tuning) {
+fn read_speed_mult(tuning, stamina) {
     let sneak = r/is_key_down(r/KEY_LEFT_CONTROL) || r/is_key_down(r/KEY_RIGHT_CONTROL)
     let run = r/is_key_down(r/KEY_LEFT_SHIFT) || r/is_key_down(r/KEY_RIGHT_SHIFT)
     if sneak { tuning.sneak_multiplier }
-    else if run { tuning.run_multiplier }
+    else if run && stamina > 0.0 { tuning.run_multiplier }
     else { 1.0 }
 }
 
@@ -201,12 +208,19 @@ fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
     let new_vel = approach_velocity(player.vel, target, rate, dt)
     let move_delta = v/scale(new_vel, dt)
     let res = resolve_collision(player.pos, player.half, move_delta, walls, new_vel)
+    let stamina_delta = if speed_mult > 1.0 {
+        0.0 - tuning.stamina_sprint_drain * dt
+    } else {
+        tuning.stamina_regen * dt
+    }
+    let new_stamina = clamp(player.stamina + stamina_delta, 0.0, tuning.stamina_max)
     Player {
         ...player,
         pos: res.pos,
         prev: player.pos,
         vel: res.vel,
         speed_mult: speed_mult,
+        stamina: new_stamina,
         iframes: if player.iframes > 0.0 { player.iframes - dt } else { 0.0 }
     }
 }
@@ -216,7 +230,7 @@ fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
 // ============================================================
 
 fn update_camera(camera, player_pos, smoothing, dt) {
-    // alpha = 1 - exp(-k*dt) — exponential approach
+    // alpha = 1 - exp(-k*dt) u014 exponential approach
     if smoothing <= 0.0 {
         player_pos
     } else {

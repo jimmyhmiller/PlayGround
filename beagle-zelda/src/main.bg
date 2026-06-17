@@ -477,6 +477,7 @@ fn default_player() {
         half: v/make(14.0, 14.0),
         aim: v/UNIT_X,
         speed_mult: 1.0,
+        stamina: 100.0,
         hp: 3.0,
         iframes: 0.0
     }
@@ -596,7 +597,7 @@ fn collect_gold(player, gold_items) {
 
 fn playing_tick(world) {
     let dt = g/current_dt()
-    // Freeze simulation entirely during a transition — player can't move or
+    // Freeze simulation entirely during a transition u014 player can't move or
     // take hits mid-fade. Camera also stops, matching the visual teleport.
     let is_transitioning = match world.transition {
         Transition.None => false,
@@ -605,9 +606,15 @@ fn playing_tick(world) {
     if is_transitioning {
         advance_transition(world, dt)
     } else {
-        let tuning = world.tuning
+        // If the world's tuning is a stale instance from before a live struct
+        // change, upgrade it to a fresh default so new fields aren't null.
+        let tuning = if world.tuning.stamina_max == null {
+            g/default_tuning()
+        } else {
+            world.tuning
+        }
         let desired = g/read_desired_dir()
-        let speed_mult = g/read_speed_mult(tuning)
+        let speed_mult = g/read_speed_mult(tuning, world.player.stamina)
         let player_a = g/advance_player(world.player, tuning, world.walls, desired, speed_mult, dt)
         let camera = g/update_camera(world.camera, player_a.pos, tuning.camera_smoothing, dt)
         let player_b = g/update_aim(player_a, camera)
@@ -636,6 +643,7 @@ fn playing_tick(world) {
             gold_items: pickup.remaining,
             gold_collected: world.gold_collected + pickup.collected,
             camera: camera,
+            tuning: tuning,
             transition: next_transition
         }
     }
@@ -656,6 +664,9 @@ struct UiBuffers {
     camera_smoothing
     run_mult
     sneak_mult
+    stamina_max
+    stamina_drain
+    stamina_regen
 }
 
 fn alloc_ui_buffers(t) {
@@ -669,7 +680,10 @@ fn alloc_ui_buffers(t) {
         ambient:              ffi/cell(ffi/Type.F32, t.ambient),
         camera_smoothing:     ffi/cell(ffi/Type.F32, t.camera_smoothing),
         run_mult:             ffi/cell(ffi/Type.F32, t.run_multiplier),
-        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier)
+        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier),
+        stamina_max:          ffi/cell(ffi/Type.F32, t.stamina_max),
+        stamina_drain:        ffi/cell(ffi/Type.F32, t.stamina_sprint_drain),
+        stamina_regen:        ffi/cell(ffi/Type.F32, t.stamina_regen)
     }
 }
 
@@ -684,7 +698,10 @@ fn read_tuning_from_ui(bufs) {
         ambient:              ffi/cell-get(bufs.ambient),
         camera_smoothing:     ffi/cell-get(bufs.camera_smoothing),
         run_multiplier:       ffi/cell-get(bufs.run_mult),
-        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult)
+        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult),
+        stamina_max:          ffi/cell-get(bufs.stamina_max),
+        stamina_sprint_drain: ffi/cell-get(bufs.stamina_drain),
+        stamina_regen:        ffi/cell-get(bufs.stamina_regen)
     }
 }
 

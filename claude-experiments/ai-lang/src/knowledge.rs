@@ -561,6 +561,94 @@ pub fn non_cacheable_hashes(
     set
 }
 
+/// The transitive [`EffectSet`](crate::effects::EffectSet) of every
+/// def/lambda in `defs` + `extra_lambdas`, keyed by hash.
+///
+/// This is the security gate's effect oracle: a node uses it to decide
+/// whether shipped code stays within its effect policy BEFORE installing or
+/// running it. It is a SOUND over-approximation — it unions, syntactically:
+///   * `STATE` for any node-`state` access,
+///   * the concrete effect of every builtin/extern referenced
+///     ([`builtin_effect_sig`](crate::effects::builtin_effect_sig), whose
+///     default for anything unrecognized is `ALL`),
+///   * the (transitive) effect of every `TopRef`'d def/lambda,
+/// walking through lambda bodies and call arguments (`walk_children` is
+/// exhaustive, so no effect-bearing sub-expression is skipped). Because
+/// every effect originates at a `BuiltinRef`/`StateRef` leaf or a `TopRef`
+/// edge, and the walk closes over all of them, the result never
+/// under-reports — it can only over-approximate (e.g. a dead branch),
+/// which is the safe direction for a gate.
+///
+/// `seed` supplies effects for hashes NOT among `defs`/`extra_lambdas` —
+/// e.g. a node precomputes its resident stdlib's effects once and passes
+/// them here so a shipped thunk's `TopRef` into the stdlib resolves to the
+/// stdlib def's real effect (an empty seed would silently under-report it).
+pub fn transitive_effects(
+    defs: &[crate::resolve::ResolvedDef],
+    extra_lambdas: &[(Hash, Expr)],
+    seed: &std::collections::HashMap<Hash, crate::effects::EffectSet>,
+) -> std::collections::HashMap<Hash, crate::effects::EffectSet> {
+    use crate::effects::EffectSet;
+    let mut entries: Vec<(Hash, Expr)> = Vec::new();
+    for rd in defs {
+        match &rd.def {
+            Def::Fn { body, .. } => {
+                entries.push((rd.hash, body.clone()));
+                collect_lambda_entries(body, &mut entries);
+            }
+            Def::State { init, .. } => {
+                entries.push((rd.hash, init.clone()));
+                collect_lambda_entries(init, &mut entries);
+            }
+            Def::Struct { .. } | Def::Enum { .. } => {}
+        }
+    }
+    for (h, e) in extra_lambdas {
+        entries.push((*h, e.clone()));
+        if let Expr::Lambda { body, .. } = e {
+            collect_lambda_entries(body, &mut entries);
+        }
+    }
+    let mut eff: std::collections::HashMap<Hash, EffectSet> = seed.clone();
+    loop {
+        let mut changed = false;
+        for (h, body) in &entries {
+            let cur = eff.get(h).copied().unwrap_or(EffectSet::EMPTY);
+            let next = cur | expr_effects(body, &eff);
+            if next != cur {
+                eff.insert(*h, next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    eff
+}
+
+/// Leaf accumulator for [`transitive_effects`]: the effect of evaluating `e`,
+/// unioning every leaf and the (current estimate of the) transitive effect of
+/// each `TopRef`. Monotone in `eff`, so the outer fixpoint converges.
+fn expr_effects(
+    e: &Expr,
+    eff: &std::collections::HashMap<Hash, crate::effects::EffectSet>,
+) -> crate::effects::EffectSet {
+    use crate::effects::EffectSet;
+    match e {
+        Expr::StateRef(_) | Expr::StateSelfRef(_) => EffectSet::STATE,
+        Expr::TopRef(h) => eff.get(h).copied().unwrap_or(EffectSet::EMPTY),
+        Expr::BuiltinRef(name) => crate::effects::builtin_effect_sig(name).concrete,
+        _ => {
+            let mut acc = EffectSet::EMPTY;
+            walk_children(e, &mut |c| {
+                acc = acc | expr_effects(c, eff);
+            });
+            acc
+        }
+    }
+}
+
 /// Leaf predicate for [`non_cacheable_hashes`].
 fn expr_is_non_cacheable(e: &Expr, set: &HashSet<Hash>) -> bool {
     use crate::effects::EffectSet;

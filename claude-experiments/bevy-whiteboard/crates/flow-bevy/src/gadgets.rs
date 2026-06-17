@@ -54,6 +54,10 @@ pub enum Kind {
     Router,
     Queue,
     Sink,
+    /// A load-balanced, self-scaling worker fleet. Spawns and destroys
+    /// `ScalableWorker` members at runtime based on fleet load. Drill in
+    /// to see the load balancer fanning out to the live workers.
+    AutoScalingGroup,
 }
 
 impl Kind {
@@ -66,6 +70,7 @@ impl Kind {
             Kind::Router => "Router",
             Kind::Queue => "Queue",
             Kind::Sink => "Sink",
+            Kind::AutoScalingGroup => "ASG",
         }
     }
 
@@ -78,6 +83,7 @@ impl Kind {
             Kind::Router => 'r',
             Kind::Queue => 'q',
             Kind::Sink => 's',
+            Kind::AutoScalingGroup => 'a',
         }
     }
 
@@ -97,6 +103,7 @@ impl Kind {
             Kind::Router => "⊕",
             Kind::Queue => "▦",
             Kind::Sink => "▽",
+            Kind::AutoScalingGroup => "⊞",
         }
     }
 
@@ -111,6 +118,7 @@ impl Kind {
             Kind::Router => 'R',
             Kind::Queue => 'Q',
             Kind::Sink => 'S',
+            Kind::AutoScalingGroup => 'A',
         }
     }
 
@@ -121,7 +129,8 @@ impl Kind {
     pub fn forward_output_port(self) -> Option<&'static str> {
         match self {
             Kind::Generator | Kind::Client | Kind::BackoffClient
-            | Kind::Router | Kind::Queue | Kind::Worker => Some("output"),
+            | Kind::Router | Kind::Queue | Kind::Worker
+            | Kind::AutoScalingGroup => Some("output"),
             Kind::Sink => None,
         }
     }
@@ -132,7 +141,7 @@ impl Kind {
     /// replies, not fresh requests).
     pub fn forward_input_port(self) -> Option<&'static str> {
         match self {
-            Kind::Worker => Some("request"),
+            Kind::Worker | Kind::AutoScalingGroup => Some("request"),
             Kind::Router | Kind::Queue | Kind::Sink => Some("input"),
             Kind::Generator | Kind::Client | Kind::BackoffClient => None,
         }
@@ -145,7 +154,8 @@ impl Kind {
     pub fn reverse_output_port(self) -> Option<&'static str> {
         match self {
             Kind::Worker | Kind::Router | Kind::Queue => Some("response"),
-            Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => None,
+            Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink
+            | Kind::AutoScalingGroup => None,
         }
     }
 
@@ -156,7 +166,7 @@ impl Kind {
         match self {
             Kind::Client | Kind::BackoffClient | Kind::Router
             | Kind::Queue | Kind::Worker => Some("reply"),
-            Kind::Generator | Kind::Sink => None,
+            Kind::Generator | Kind::Sink | Kind::AutoScalingGroup => None,
         }
     }
 
@@ -165,6 +175,8 @@ impl Kind {
             Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => Vec2::new(60.0, 60.0),
             Kind::Worker | Kind::Router => Vec2::new(70.0, 50.0),
             Kind::Queue => Vec2::new(90.0, 40.0),
+            // Larger box — it visually contains a fleet.
+            Kind::AutoScalingGroup => Vec2::new(110.0, 70.0),
         }
     }
 }
@@ -240,6 +252,9 @@ fn gadget_class_name(kind: Kind) -> &'static str {
         Kind::Router        => "RouterComposite",
         Kind::Queue         => "QueueComposite",
         Kind::Sink          => "SinkComposite",
+        // A leaf controller class (not a `*Composite`): it spawns the
+        // real composites at runtime rather than containing them.
+        Kind::AutoScalingGroup => "AutoScalingGroup",
     }
 }
 
@@ -357,6 +372,11 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/composite/saga.flow"),            "\n",
     include_str!("gadgets/composite/tpc.flow"),             "\n",
     include_str!("gadgets/composite/life.flow"),            "\n",
+    // Autoscaling: a single top-level leaf that load-balances across and
+    // grows/shrinks a fleet of workers it clones from its `template`
+    // slot (default `WorkerComposite`). Pluggable — it treats whatever
+    // it spawns as a black-box request/response gadget.
+    include_str!("gadgets/composite/auto_scaling_group.flow"), "\n",
 );
 
 // ============================================================================

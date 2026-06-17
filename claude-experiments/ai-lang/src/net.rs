@@ -102,6 +102,14 @@ pub const KIND_AUTH: u8 = 10;
 /// crash arrives as a VALUE (`Err(Crashed(node))`), exactly like every
 /// other failure in the language.
 pub const KIND_ERR: u8 = 11;
+/// A self-contained call: the closure AND the transitive code it needs,
+/// in one frame, so a code-less node can run it with no back-and-forth
+/// (the `NeedCode` handshake can't cross a one-shot transport like HTTP).
+/// Body: `[KIND_BUNDLE][u32 BE code_len][code bytes (a KIND_CODE frame)]
+/// [call bytes (a KIND_CALL frame)]`. The node installs the code
+/// (idempotent — content-addressed, a no-op on a warm node that already
+/// has it) then runs the call.
+pub const KIND_BUNDLE: u8 = 12;
 
 /// `KIND_ERR` code: the thunk (or its decode/invoke/encode) failed on
 /// the node — most importantly a thunk PANIC, which propagates out of
@@ -117,6 +125,12 @@ pub const ERR_CANCELLED: u8 = 3;
 /// `KIND_ERR` code: the node gave up on the call after its own
 /// deadline (reserved; maps to `Failure::TimedOut` when declared).
 pub const ERR_TIMED_OUT: u8 = 4;
+/// `KIND_ERR` code: the node REFUSED to run the shipped code because its
+/// inferred effects exceed the node's effect policy — a safety gate, not a
+/// runtime failure. The code was never installed or executed. The message
+/// names the offending effects. Maps to `Failure::Cancelled` ("refused
+/// before running"); the message carries the policy detail.
+pub const ERR_FORBIDDEN: u8 = 5;
 
 /// Build a `KIND_ERR` frame body.
 pub fn encode_err_frame(code: u8, msg: &str) -> Vec<u8> {
@@ -489,6 +503,7 @@ impl core::fmt::Display for NetError {
                     ERR_CODE_MISSING => "code missing",
                     ERR_CANCELLED => "cancelled",
                     ERR_TIMED_OUT => "timed out",
+                    ERR_FORBIDDEN => "forbidden by effect policy",
                     _ => "unknown failure",
                 };
                 write!(f, "node reported {}: {}", kind, msg)
@@ -584,6 +599,15 @@ pub trait Channel: Send {
     /// [`NetError::TimedOut`]. Default: no-op (in-process channels and
     /// tests don't time out).
     fn set_io_deadline(&mut self, _d: Option<std::time::Duration>) {}
+    /// Does `read_frame` park this OS thread in a blocking kernel syscall?
+    /// If so, the `at` driver wraps the read in a `BlockedRegion` so a
+    /// concurrent STW collection scans this thread in place. A transport
+    /// whose `read_frame` instead runs JIT'd language code (see
+    /// [`LangChannel`]) returns `false`: that code manages its own
+    /// safepoints and allocates, so it must NOT run inside a blocked region.
+    fn read_is_blocking_syscall(&self) -> bool {
+        true
+    }
 }
 
 impl Channel for TcpStream {
@@ -945,6 +969,154 @@ unsafe fn handle_call_payload<'ctx>(
         }
     }
     Err(NetError::CodeFetchDepthExceeded)
+}
+
+/// Serve one self-contained `KIND_BUNDLE` frame: gate the shipped code
+/// against the node's effect `policy`, then (if allowed) install it into the
+/// running `IncrementalJit` (idempotent — content-addressed, so a hash
+/// already present is a no-op), decode and invoke the bundled closure, and
+/// reply. This is the generic dynamic-code node: it starts with only the
+/// stdlib and learns each shipped program on demand.
+///
+/// ## The effect gate (`policy` + `stdlib_effects`)
+/// Before installing OR running anything, the node infers the shipped code's
+/// effect set ([`knowledge::transitive_effects`](crate::knowledge::transitive_effects),
+/// a sound over-approximation) and refuses any bundle whose effects exceed
+/// `policy` (the node's allowed [`EffectSet`]). Refused code is never
+/// compiled or executed — the node replies `KIND_ERR`/`ERR_FORBIDDEN`
+/// (surfacing as `Failure::Cancelled` on the client) and keeps serving.
+/// `stdlib_effects` seeds the inference with the node's resident stdlib
+/// effects so a shipped thunk's `TopRef` into the stdlib resolves to the
+/// stdlib def's real effect rather than being under-reported as pure.
+///
+/// # Safety
+/// Same contract as [`serve_with_install`].
+pub unsafe fn serve_bundle_one<'ctx>(
+    rt: &mut Runtime,
+    jit: &mut IncrementalJit<'ctx>,
+    channel: &mut dyn Channel,
+    policy: crate::effects::EffectSet,
+    stdlib_effects: &std::collections::HashMap<Hash, crate::effects::EffectSet>,
+) -> Result<(), NetError> {
+    park_home_on_foreign_serve(rt);
+    let body = {
+        let _blocked = BlockedRegion::enter(rt);
+        channel.read_frame()
+    }?;
+    if body.is_empty() {
+        return Err(NetError::ProtocolViolation("empty frame body"));
+    }
+    if body[0] != KIND_BUNDLE {
+        return Err(NetError::BadKind(body[0]));
+    }
+    if body.len() < 5 {
+        return Err(NetError::ProtocolViolation("truncated bundle header"));
+    }
+    let code_len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+    let code_end = 5usize.saturating_add(code_len);
+    if body.len() < code_end + 1 {
+        return Err(NetError::ProtocolViolation("truncated bundle"));
+    }
+    let code_bytes = &body[5..code_end];
+    let call_section = &body[code_end..]; // [KIND_CALL][closure]
+    if call_section[0] != KIND_CALL {
+        return Err(NetError::BadKind(call_section[0]));
+    }
+
+    let items = decode_code(code_bytes)?;
+
+    // ── Effect gate (before install/run) ──────────────────────────────
+    // Decode the shipped items WITHOUT installing them, infer their effect
+    // set, and refuse the whole bundle if it exceeds the node's policy.
+    if let Some(excess) = bundle_excess_effects(&items, policy, stdlib_effects)? {
+        let msg = format!(
+            "node effect policy [{}] forbids effect(s) [{}] in shipped code",
+            join_tokens(policy.tokens()),
+            join_tokens(excess.tokens()),
+        );
+        channel.write_frame(&encode_err_frame(ERR_FORBIDDEN, &msg))?;
+        return Ok(());
+    }
+
+    // Allowed: install the shipped code (no-op for hashes already present).
+    jit.install(rt, items)
+        .map_err(|e| NetError::InstallFailed(format!("{}", e)))?;
+
+    // Run the call; code is now resident so no NeedCode is needed. A
+    // reportable failure becomes a KIND_ERR reply (errors are values).
+    match unsafe { serve_call_payload(rt, &call_section[1..]) } {
+        Ok(reply) => {
+            channel.write_frame(&reply)?;
+            Ok(())
+        }
+        Err(e) => match err_reply_code(&e) {
+            Some(code) => {
+                channel.write_frame(&encode_err_frame(code, &format!("{}", e)))?;
+                Ok(())
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Join effect tokens for a human-readable policy message (`pure` when none).
+fn join_tokens(toks: Vec<&'static str>) -> String {
+    if toks.is_empty() {
+        "pure".to_string()
+    } else {
+        toks.join(",")
+    }
+}
+
+/// Decode the shipped `items` (defs + lambdas) without installing them and
+/// return `Some(excess)` if their inferred effects exceed `policy`, else
+/// `None` (allowed). `excess` is exactly the forbidden bits, for reporting.
+/// `stdlib_effects` seeds `TopRef`s into the node's resident stdlib.
+fn bundle_excess_effects(
+    items: &[(ItemKind, Hash, Vec<u8>)],
+    policy: crate::effects::EffectSet,
+    stdlib_effects: &std::collections::HashMap<Hash, crate::effects::EffectSet>,
+) -> Result<Option<crate::effects::EffectSet>, NetError> {
+    use crate::effects::EffectSet;
+    let mut defs: Vec<crate::resolve::ResolvedDef> = Vec::new();
+    let mut lambdas: Vec<(Hash, crate::ast::Expr)> = Vec::new();
+    for (kind, hash, bytes) in items {
+        match kind {
+            ItemKind::Def => {
+                let def = crate::codec::decode_def(bytes).map_err(|e| {
+                    NetError::ProtocolViolation_owned(format!("gate decode_def: {}", e))
+                })?;
+                defs.push(crate::resolve::ResolvedDef {
+                    name: format!("shipped_{}", &hash.to_hex()[..8]),
+                    hash: *hash,
+                    def,
+                });
+            }
+            ItemKind::Lambda => {
+                let e = crate::codec::decode_expr(bytes).map_err(|err| {
+                    NetError::ProtocolViolation_owned(format!("gate decode_expr: {}", err))
+                })?;
+                lambdas.push((*hash, e));
+            }
+            // Externs are classified at their call sites (a `BuiltinRef`
+            // into `ext/…`, which `builtin_effect_sig` maps to IO or FFI);
+            // their mere declaration carries no effect.
+            ItemKind::Extern => {}
+        }
+    }
+
+    let effects = crate::knowledge::transitive_effects(&defs, &lambdas, stdlib_effects);
+    // The node installs (and may run state-init for) every shipped item, so
+    // gate on the union of ALL shipped hashes — not just the entry thunk.
+    let mut total = EffectSet::EMPTY;
+    for d in &defs {
+        total = total | effects.get(&d.hash).copied().unwrap_or(EffectSet::EMPTY);
+    }
+    for (h, _) in &lambdas {
+        total = total | effects.get(h).copied().unwrap_or(EffectSet::EMPTY);
+    }
+    let excess = total.without(policy);
+    Ok(if excess.is_empty() { None } else { Some(excess) })
 }
 
 /// Spawn a server thread that handles one connection then exits. Used
@@ -1310,85 +1482,6 @@ pub fn clear_at_conn_cache() {
     AT_CONN_CACHE.with(|c| c.borrow_mut().clear());
 }
 
-/// `at_remote` variant that reuses (or opens) a cached TCP stream for
-/// the given address, amortising the TCP handshake across many `at()`
-/// calls. Works with EITHER a persistent server ([`serve_persistent_in_thread`],
-/// where the cache is a pure win) OR a one-shot server (the stdlib `serve`
-/// loop, which closes the connection after each reply): if a *reused* cached
-/// connection turns out to be dead — the common case against a one-shot
-/// server — we evict it and retry ONCE on a guaranteed-fresh connection.
-/// Without that retry, the second call to a one-shot node would fail (and a
-/// counting server would then deadlock waiting for a connection the client
-/// never opens).
-///
-/// # Safety
-/// Same as [`at_remote`].
-pub unsafe fn at_remote_cached(
-    runtime: &Runtime,
-    knowledge_base: &KnowledgeBase,
-    addr: &str,
-    closure_ptr: *const u8,
-) -> Result<*const u8, NetError> {
-    // Did we already have an open connection to this addr? If so, the first
-    // attempt reuses it and a failure is most likely a stale (server-closed)
-    // socket worth retrying; if not, the first attempt is already fresh and a
-    // failure is a genuine error (no retry).
-    let reused = AT_CONN_CACHE.with(|c| c.borrow().contains_key(addr));
-
-    // First attempt: reuse the cached connection, or open one if absent.
-    let attempt = |runtime: &Runtime, kb: &KnowledgeBase| -> Result<*const u8, NetError> {
-        AT_CONN_CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            let stream = match cache.entry(addr.to_owned()) {
-                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    let s = connect_with_at_timeout(addr)?;
-                    // Disable Nagle to keep per-cell latency low; the
-                    // protocol is request/response and we never batch.
-                    s.set_nodelay(true).ok();
-                    v.insert(s)
-                }
-            };
-            unsafe { at_remote_on_channel(runtime, kb, stream, closure_ptr) }
-        })
-    };
-
-    let first = attempt(runtime, knowledge_base);
-    let first_err = match first {
-        Ok(v) => return Ok(v),
-        Err(e) => e,
-    };
-    // A `Remote` failure is a COMPLETE reply on a healthy connection: the
-    // call reached the node and failed there. Keep the connection cached
-    // and do NOT retry — re-sending might re-execute a stateful thunk.
-    if matches!(first_err, NetError::Remote { .. }) {
-        return Err(first_err);
-    }
-    // Evict the (now-suspect) connection.
-    AT_CONN_CACHE.with(|c| {
-        c.borrow_mut().remove(addr);
-    });
-    // Retry once ONLY when the failed attempt reused a cached socket AND
-    // the failure is a transport error consistent with a stale (server-
-    // closed) connection. A fresh-socket failure would just repeat; a
-    // timeout is not retried here (the request may be mid-execution on
-    // the node — re-sending could double-execute a stateful thunk).
-    let stale_transport = matches!(
-        first_err,
-        NetError::Io(_) | NetError::ConnectionClosed
-    );
-    if !reused || !stale_transport {
-        return Err(first_err);
-    }
-    let second = attempt(runtime, knowledge_base);
-    if second.is_err() {
-        AT_CONN_CACHE.with(|c| {
-            c.borrow_mut().remove(addr);
-        });
-    }
-    second
-}
-
 /// Same as [`at_remote`] but uses an already-connected stream. Lets
 /// callers cache TCP connections across many `at()` calls — the
 /// connection stays open between the response and the next request,
@@ -1462,11 +1555,32 @@ pub unsafe fn at_remote_on_channel(
         // is still rooted by our JIT caller's frame (so a concurrent GC
         // can relocate it safely); we hold no un-rooted heap pointer here.
         arm(channel, "waiting for reply")?;
-        let reply = {
+        let read_res = if channel.read_is_blocking_syscall() {
+            // Syscall-blocking transport (TCP/Unix stream): park as BLOCKED
+            // so a concurrent STW collection scans this thread in place.
             let _blocked = BlockedRegion::enter(runtime);
             channel.read_frame()
-        }
-        .map_err(|e| map_timeout(e, "waiting for reply"))?;
+        } else {
+            // The read runs JIT'd language code (a transport's read_frame
+            // closure); it allocates and polls its own safepoints, so it
+            // must NOT run inside a blocked region.
+            channel.read_frame()
+        };
+        let reply = match read_res {
+            Ok(r) => r,
+            Err(e) => {
+                // If the whole-call deadline has already expired, a read
+                // failure IS a timeout — including a language transport's
+                // socket read-timeout, which surfaces as a closed read
+                // rather than an io `WouldBlock`. Distinguishing "slow" from
+                // "dead" this way keeps `Failure::TimedOut` precise across
+                // every transport, not just the built-in TCP stream.
+                if matches!(deadline, Some(t) if Instant::now() >= t) {
+                    return Err(NetError::TimedOut("waiting for reply".to_owned()));
+                }
+                return Err(map_timeout(e, "waiting for reply"));
+            }
+        };
         if reply.is_empty() {
             return Err(NetError::ProtocolViolation("empty reply body"));
         }
@@ -1549,6 +1663,93 @@ pub unsafe fn at_remote_on_channel(
         }
     }
     Err(NetError::CodeFetchDepthExceeded)
+}
+
+/// One-shot `at` exchange that ships the closure AND its transitive code in
+/// a single self-contained `KIND_BUNDLE` frame — for request/response
+/// transports (HTTP) where the reactive `NeedCode` handshake can't run. The
+/// node installs the code (idempotent on a warm node) then runs the call.
+///
+/// # Safety
+/// `closure_ptr` must be a live closure in `runtime`'s heap.
+pub unsafe fn at_remote_bundled(
+    runtime: &Runtime,
+    knowledge_base: &KnowledgeBase,
+    channel: &mut dyn Channel,
+    closure_ptr: *const u8,
+) -> Result<*const u8, NetError> {
+    // The closure's code hash (its lifted lambda), via the header type_id.
+    let type_id_off = <crate::gc::Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET;
+    let type_id = unsafe { *(closure_ptr.add(type_id_off) as *const u16) };
+    let code_hash = runtime
+        .shape_by_type_id
+        .get(type_id as usize)
+        .copied()
+        .flatten()
+        .ok_or(NetError::UnknownCode(Hash([0u8; 32])))?;
+
+    // Gather the transitive defs/lambdas the closure references, plus the
+    // C/host extern requirements, into one KIND_CODE blob.
+    let deps = knowledge_base
+        .collect_transitive_deps(&[code_hash])
+        .map_err(|e| match e {
+            crate::knowledge::KbError::MissingHash(h) => NetError::MissingFromKnowledgeBase(h),
+            other => NetError::InstallFailed(format!("{}", other)),
+        })?;
+    let mut items: Vec<(ItemKind, Hash, Vec<u8>)> = Vec::with_capacity(deps.len());
+    for h in &deps {
+        if let Some((kind, bytes)) = knowledge_base.lookup(h) {
+            items.push((*kind, *h, bytes.clone()));
+        }
+    }
+    for (name, sig) in knowledge_base.extern_requirements(&deps) {
+        let ext_hash = Hash::of_bytes(name.as_bytes());
+        let bytes = crate::codec::encode_extern(
+            &name,
+            &sig.params,
+            &sig.ret,
+            sig.library.as_deref(),
+            sig.variadic,
+        );
+        items.push((ItemKind::Extern, ext_hash, bytes));
+    }
+    let code_bytes = encode_code(&items); // [KIND_CODE][items...]
+
+    // Build the call section, then the bundle.
+    let mut call_bytes = vec![KIND_CALL];
+    unsafe { encode_value(runtime, WireValue::Heap(closure_ptr), &mut call_bytes)? };
+
+    let mut body = Vec::with_capacity(8 + code_bytes.len() + call_bytes.len());
+    body.push(KIND_BUNDLE);
+    body.extend_from_slice(&(code_bytes.len() as u32).to_be_bytes());
+    body.extend_from_slice(&code_bytes);
+    body.extend_from_slice(&call_bytes);
+
+    channel.write_frame(&body)?;
+    let reply = {
+        let _blocked = BlockedRegion::enter(runtime);
+        channel.read_frame()
+    }?;
+    if reply.is_empty() {
+        return Err(NetError::ProtocolViolation("empty reply to bundle"));
+    }
+    match reply[0] {
+        KIND_RESULT => {
+            let (value, _) = unsafe { decode_value(runtime, &reply[1..])? };
+            match value {
+                WireValue::Heap(p) => Ok(p),
+                WireValue::Int(_) => Err(NetError::ProtocolViolation(
+                    "Result payload must be a heap value",
+                )),
+            }
+        }
+        KIND_ERR => {
+            let code = reply.get(1).copied().unwrap_or(ERR_CRASHED);
+            let msg = String::from_utf8_lossy(reply.get(2..).unwrap_or(&[])).into_owned();
+            Err(NetError::Remote { code, msg })
+        }
+        other => Err(NetError::BadKind(other)),
+    }
 }
 
 // =============================================================================
@@ -1747,11 +1948,6 @@ fn current_knowledge_base() -> Option<&'static KnowledgeBase> {
 // `at` runtime function (language-level call from JIT'd code)
 // =============================================================================
 
-/// Read a 64-bit field at `offset` from the start of an ai-lang struct
-/// object. Assumes the field is an `Int` (raw bytes after the header).
-unsafe fn read_int_field(obj_ptr: *const u8, offset: usize) -> i64 {
-    unsafe { *(obj_ptr.add(offset) as *const i64) }
-}
 
 /// The runtime implementation of the language-level `at(node, thunk)`
 /// primitive. JIT'd code calls this through inkwell's
@@ -1807,20 +2003,11 @@ unsafe fn at_call_and_build(
     node_ptr: *const u8,
     closure_ptr: *const u8,
 ) -> *const u8 {
-    let header_size = <Full as crate::gc::ObjHeader>::SIZE;
-    let (a, b, c, d, port) = unsafe {
-        (
-            read_int_field(node_ptr, header_size),
-            read_int_field(node_ptr, header_size + 8),
-            read_int_field(node_ptr, header_size + 16),
-            read_int_field(node_ptr, header_size + 24),
-            read_int_field(node_ptr, header_size + 32),
-        )
-    };
-
-    let addr = format!("{}.{}.{}.{}:{}", a, b, c, d, port);
+    // A node is a transport — a `Node { connect }` (a record of closures).
+    // `at` drives EVERY carrier (TCP, Unix, ...) through the one protocol
+    // over the transport's Channel; there is no built-in-TCP special case.
     if std::env::var_os("AI_LANG_AT_TRACE").is_some() {
-        eprintln!("[at-trace] node={node_ptr:p} addr={addr}");
+        eprintln!("[at-trace] node={node_ptr:p} (transport)");
     }
 
     // Root `node_ptr` and `closure_ptr` across the exchange: decoding
@@ -1853,7 +2040,10 @@ unsafe fn at_call_and_build(
     let mut attempt: u64 = 0;
     let result = loop {
         let closure_now = scope.get(closure_slot) as *const u8;
-        match unsafe { at_remote_cached(rt, kb, &addr, closure_now) } {
+        let node_now = scope.get(node_slot) as *const u8;
+        let attempt_res =
+            unsafe { at_via_transport(rt, kb, &scope, thread, node_now, closure_now) };
+        match attempt_res {
             Ok(n) => break Ok(n),
             Err(e) => {
                 let transient = matches!(
@@ -1977,7 +2167,10 @@ fn failure_variant_for<'b>(
         // The node reported the failure explicitly — honor its code.
         NetError::Remote { code, .. } => match *code {
             ERR_CODE_MISSING => &binding.code_missing,
-            ERR_CANCELLED => &binding.cancelled,
+            // The node refused the call before running it — policy denial
+            // (ERR_FORBIDDEN) and explicit cancel both surface as Cancelled;
+            // the message distinguishes them.
+            ERR_CANCELLED | ERR_FORBIDDEN => &binding.cancelled,
             ERR_TIMED_OUT => binding
                 .timed_out
                 .as_ref()
@@ -2111,6 +2304,192 @@ unsafe fn invoke_zero_arg_closure(
     // node-side runtime faults (decode failure, missing code).
     let ret_ptr = unsafe { lambda(thread, closure_ptr) };
     Ok(ret_ptr as *const u8)
+}
+
+/// Invoke a language closure from Rust under the uniform closure ABI
+/// `extern "C" fn(*mut Thread, closure, args...) -> *mut u8`: thread,
+/// then the closure pointer, then each argument as a heap pointer. The
+/// code pointer is resolved by the closure's `type_id` (pointer captures
+/// shift `code_hash`'s offset, so a fixed offset won't do). Supports 0 or
+/// 1 argument — all a transport channel needs.
+unsafe fn invoke_lang_closure(
+    rt: &Runtime,
+    thread: *mut Thread,
+    closure_ptr: *const u8,
+    arg: Option<*const u8>,
+) -> Result<*const u8, NetError> {
+    let type_id_off = <crate::gc::Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET;
+    let type_id = unsafe { *(closure_ptr.add(type_id_off) as *const u16) };
+    let code_hash = rt
+        .shape_by_type_id
+        .get(type_id as usize)
+        .copied()
+        .flatten()
+        .ok_or(NetError::UnknownCode(Hash([0u8; 32])))?;
+    let fn_ptr = rt
+        .code_table
+        .lookup(&code_hash)
+        .ok_or(NetError::UnknownCode(code_hash))?;
+    let ret = match arg {
+        None => {
+            let f: unsafe extern "C" fn(*mut Thread, *const u8) -> *mut u8 =
+                unsafe { core::mem::transmute(fn_ptr) };
+            unsafe { f(thread, closure_ptr) }
+        }
+        Some(a) => {
+            let f: unsafe extern "C" fn(*mut Thread, *const u8, *const u8) -> *mut u8 =
+                unsafe { core::mem::transmute(fn_ptr) };
+            unsafe { f(thread, closure_ptr, a) }
+        }
+    };
+    Ok(ret as *const u8)
+}
+
+/// A [`Channel`] whose frame I/O is provided by language closures pulled
+/// from a transport node: `read_frame: fn() -> Bytes` and
+/// `write_frame: fn(Bytes) -> Int`. This is the bridge that lets the one
+/// `at` driver run its protocol over ANY transport defined in ai-lang
+/// (TCP, Unix, ... — see the `Transport`/`Channel` prelude types); the
+/// driver only ever sees `&mut dyn Channel`.
+///
+/// The two closures are kept GC-rooted in the caller's scratch scope; we
+/// re-read the (possibly relocated) pointer from its slot before each
+/// invocation, since invoking a closure allocates and can collect.
+struct LangChannel<'a> {
+    rt: &'a Runtime,
+    thread: *mut Thread,
+    scope: &'a crate::gc::ScratchScope<'a>,
+    read_slot: usize,
+    write_slot: usize,
+    deadline_slot: usize,
+}
+
+// `Channel` requires `Send` (some transports move to a serve thread), but a
+// `LangChannel` is only ever driven synchronously on the thread that built
+// it — it never crosses a thread boundary. Same pattern as `RuntimeHandle`.
+unsafe impl Send for LangChannel<'_> {}
+
+impl Channel for LangChannel<'_> {
+    fn read_frame(&mut self) -> Result<Vec<u8>, NetError> {
+        let closure = self.scope.get(self.read_slot) as *const u8;
+        let bytes_ptr = unsafe { invoke_lang_closure(self.rt, self.thread, closure, None)? };
+        if bytes_ptr.is_null() {
+            return Err(NetError::ConnectionClosed);
+        }
+        let bytes = unsafe { crate::ffi::heap_str_bytes(bytes_ptr) };
+        // A transport signals a failed/closed read as an empty frame (the
+        // protocol's smallest real frame is one kind byte, so 0 is never a
+        // legitimate body).
+        if bytes.is_empty() {
+            return Err(NetError::ConnectionClosed);
+        }
+        Ok(bytes.to_vec())
+    }
+
+    fn write_frame(&mut self, body: &[u8]) -> Result<(), NetError> {
+        // Build the Bytes arg FIRST (it allocates and may relocate the
+        // rooted closures), THEN read the live write-closure pointer.
+        let arg = unsafe {
+            crate::runtime::ai_str_new(self.thread, body.as_ptr(), body.len() as i64)
+        } as *const u8;
+        let closure = self.scope.get(self.write_slot) as *const u8;
+        let ret = unsafe { invoke_lang_closure(self.rt, self.thread, closure, Some(arg))? };
+        // write_frame returns a (boxed) Int: bytes written, negative on error.
+        let n = unsafe { crate::runtime::ai_gc_unbox_int(ret) };
+        if n < 0 {
+            return Err(NetError::ConnectionClosed);
+        }
+        Ok(())
+    }
+
+    fn set_io_deadline(&mut self, d: Option<std::time::Duration>) {
+        // Forward the remaining-time bound to the transport's own
+        // `set_deadline` closure (ms; 0 = clear). A socket transport maps
+        // it to SO_RCVTIMEO so the driver's whole-call deadline actually
+        // interrupts a silent peer; transports that can't honor it return 0.
+        let ms: i64 = d
+            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0)
+            .max(0);
+        let arg = unsafe { crate::runtime::ai_gc_box_int(self.thread, ms) } as *const u8;
+        let closure = self.scope.get(self.deadline_slot) as *const u8;
+        let _ = unsafe { invoke_lang_closure(self.rt, self.thread, closure, Some(arg)) };
+    }
+
+    fn read_is_blocking_syscall(&self) -> bool {
+        false
+    }
+}
+
+/// The transport-node path of `at`: the node is a `Transport { connect:
+/// fn() -> Channel }` whose `connect` closure hands back a `Channel {
+/// read_frame, write_frame }`. Pull those closures, root them in `scope`,
+/// and run the SAME `at_remote_on_channel` driver the TCP path uses — so
+/// every driver feature (the NeedCode handshake, the whole-call deadline,
+/// the errors-as-values failure model) works uniformly over any
+/// language-defined carrier.
+///
+/// # Safety
+/// `node_ptr`/`closure_ptr` must be live heap objects; `node_ptr` must be
+/// a `Transport` (one pointer field: the connect closure). `scope` must be
+/// the caller's live scratch scope (it roots `node_ptr`/`closure_ptr`).
+unsafe fn at_via_transport(
+    rt: &Runtime,
+    kb: &KnowledgeBase,
+    scope: &crate::gc::ScratchScope,
+    thread: *mut Thread,
+    node_ptr: *const u8,
+    closure_ptr: *const u8,
+) -> Result<*const u8, NetError> {
+    let hdr = <Full as crate::gc::ObjHeader>::SIZE;
+    // Node { connect, bundle } — `connect` is the sole pointer field (@hdr),
+    // `bundle` the lone Int (in the raw-bytes region after pointer fields,
+    // @hdr+8). bundle=1 ships a self-contained `KIND_BUNDLE` (code + call);
+    // bundle=0 uses the streaming NeedCode handshake.
+    let connect = unsafe { *(node_ptr.add(hdr) as *const *const u8) };
+    let bundle = unsafe { *(node_ptr.add(hdr + 8) as *const i64) } != 0;
+    let channel = unsafe { invoke_lang_closure(rt, thread, connect, None)? };
+    // Channel { read_frame, write_frame, set_deadline, close } — four
+    // pointer fields. No allocation between reading them and rooting them,
+    // so the un-rooted `channel` local cannot be relocated out from under
+    // us here.
+    let read_c = unsafe { *(channel.add(hdr) as *const *const u8) };
+    let write_c = unsafe { *(channel.add(hdr + 8) as *const *const u8) };
+    let deadline_c = unsafe { *(channel.add(hdr + 16) as *const *const u8) };
+    let close_c = unsafe { *(channel.add(hdr + 24) as *const *const u8) };
+    let read_slot = scope.push(read_c);
+    let write_slot = scope.push(write_c);
+    let deadline_slot = scope.push(deadline_c);
+    let close_slot = scope.push(close_c);
+    let mut lc = LangChannel {
+        rt,
+        thread,
+        scope,
+        read_slot,
+        write_slot,
+        deadline_slot,
+    };
+    let result = if bundle {
+        unsafe { at_remote_bundled(rt, kb, &mut lc, closure_ptr) }
+    } else {
+        unsafe { at_remote_on_channel(rt, kb, &mut lc, closure_ptr) }
+    };
+    // Connect-per-call: we never reuse this connection, so close it now —
+    // otherwise a persistent server stays blocked reading our dead socket
+    // and never accepts the next call. `close` runs JIT'd code that
+    // allocates, so root any Ok result across it before re-reading.
+    let close = scope.get(close_slot) as *const u8;
+    match result {
+        Ok(p) => {
+            let p_slot = scope.push(p);
+            let _ = unsafe { invoke_lang_closure(rt, thread, close, None) };
+            Ok(scope.get(p_slot) as *const u8)
+        }
+        Err(e) => {
+            let _ = unsafe { invoke_lang_closure(rt, thread, close, None) };
+            Err(e)
+        }
+    }
 }
 
 // =============================================================================
@@ -2516,121 +2895,89 @@ mod tests {
         );
     }
 
-    /// Records-of-closures transport: `at` reimplemented as an ordinary
-    /// language function `at_via` that drives ANY value providing a
-    /// `roundtrip` closure — the "language-level trait" is just a struct of
-    /// closures. TCP is reimplemented as one such record (`tcp_transport`)
-    /// over the existing socket/framing layer; a second, socket-free
-    /// `local_transport` runs the shipped thunk in-process through the
-    /// identical interface, proving the carrier is fully pluggable.
+    /// `at` over a language-defined transport: the client builds a
+    /// `tcp_transport(...)` — a `Transport { connect }` value whose
+    /// `connect`/`read_frame`/`write_frame` are ordinary ai-lang closures —
+    /// and calls the ONE built-in `at(node, thunk)`. The single Rust driver
+    /// runs its full wire protocol over that language transport through the
+    /// `LangChannel` bridge, talking to the real Rust serve loop. No 5-int
+    /// `Node`, no TCP special-case in the driver — the carrier is just a
+    /// value defined in the language.
     #[test]
-    fn at_via_records_of_closures() {
+    fn at_over_language_transport() {
         init();
-        let port = free_port();
-        // Transport / at_via / tcp_transport / local_transport now live in
-        // the stdlib prelude — the program only supplies its handler and the
-        // thin server/client entry points.
         let extra = r#"
             def work(x: Int) -> Int = x * 10 + 3
-
-            def srv_listen(p: Int) -> Int =
-                match tcp_listen(p) { Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }
-            def srv_run(fd: Int) -> Int = serve_turns(fd, 1)
-
-            def cli_tcp(p: Int, x: Int) -> Int =
-                match at_via(tcp_transport(127, 0, 0, 1, p), || work(x)) {
-                    Result::Ok(n) => n,
-                    Result::Err(_e) => 0 - 1,
-                }
-
-            def cli_local(x: Int) -> Int =
-                match at_via(local_transport(), || work(x)) {
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
+            def run(t: Node, x: Int) -> Int =
+                match at(t, || work(x)) {
                     Result::Ok(n) => n,
                     Result::Err(_e) => 0 - 1,
                 }
         "#;
 
         let server_ctx = Context::create();
-        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, extra);
-        install_current_runtime(&server_rt);
-        let listen = unsafe {
-            server_jit
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
+        let _ = server_jit;
+        let listener = bind("127.0.0.1:0").unwrap();
+        let server_port = listener.local_addr().unwrap().port() as i64;
+        let server_handle =
+            unsafe { serve_one_in_thread(Arc::new(RuntimeHandle(server_rt)), listener) };
+
+        let client_ctx = Context::create();
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
+        install_current_runtime(&client_rt);
+        let kb = KnowledgeBase::new();
+        install_current_knowledge_base(&kb);
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let rb = r.at_binding.as_ref().expect("at_binding");
+        let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+        install_current_at_binding(&rt_binding);
+
+        let mk = unsafe {
+            client_jit
                 .engine
-                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
-                    &crate::codegen::def_symbol(&names["srv_listen"]),
+                .get_function::<unsafe extern "C" fn(
+                    *mut Thread,
+                    i64,
+                    i64,
+                    i64,
+                    i64,
+                    i64,
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
+                .unwrap()
+        };
+        let node = unsafe { mk.call(client_rt.thread_ptr(), 127, 0, 0, 1, server_port) };
+        let run = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["run"]),
                 )
                 .unwrap()
         };
-        let fd = unsafe { listen.call(server_rt.thread_ptr(), port as i64) };
-        assert!(fd >= 0, "listen failed: {}", fd);
+        let result = unsafe { run.call(client_rt.thread_ptr(), node, 4) };
+        assert_eq!(result, 4 * 10 + 3, "at over language tcp_transport should yield 43");
 
-        let extra_for_client = extra.to_owned();
-        let client = std::thread::spawn(move || -> (i64, i64) {
-            let client_ctx = Context::create();
-            let (client_rt, client_jit, names) =
-                make_stdlib_runtime(&client_ctx, &extra_for_client);
-            install_current_runtime(&client_rt);
-            // `at_via` decodes the reply via `decode::<T>`, which needs the
-            // Result/DecodeError binding installed on this thread.
-            let full = format!("{}\n{}", crate::stdlib::SOURCE, extra_for_client);
-            let m = parse_module(&full).unwrap();
-            let r = resolve_module(&m).unwrap();
-            let rb = r.at_binding.as_ref().expect("at_binding");
-            let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
-            install_current_at_binding(&rt_binding);
-            // Second transport first — it needs no server, just the local
-            // runtime (wire_invoke runs the thunk in-process).
-            let cli_local = unsafe {
-                client_jit
-                    .engine
-                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
-                        &crate::codegen::def_symbol(&names["cli_local"]),
-                    )
-                    .unwrap()
-            };
-            let local = unsafe { cli_local.call(client_rt.thread_ptr(), 5) };
-            // TCP transport — the server loop below handles exactly this call.
-            let cli_tcp = unsafe {
-                client_jit
-                    .engine
-                    .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> i64>(
-                        &crate::codegen::def_symbol(&names["cli_tcp"]),
-                    )
-                    .unwrap()
-            };
-            let tcp = unsafe { cli_tcp.call(client_rt.thread_ptr(), port as i64, 4) };
-            clear_current_at_binding();
-            clear_current_runtime();
-            (local, tcp)
-        });
-
-        let _ = unsafe {
-            server_jit
-                .engine
-                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
-                    &crate::codegen::def_symbol(&names["srv_run"]),
-                )
-                .unwrap()
-                .call(server_rt.thread_ptr(), fd)
-        };
-
-        let (local, tcp) = client.join().unwrap();
+        server_handle.join().unwrap().expect("server ok");
         clear_current_runtime();
-        // work(5) = 53 in-process; work(4) = 43 over loopback TCP — both
-        // through the same `at_via` driver, different transport records.
-        assert_eq!(local, 5 * 10 + 3, "local transport: in-process roundtrip");
-        assert_eq!(tcp, 4 * 10 + 3, "tcp transport: loopback roundtrip");
+        clear_current_knowledge_base();
+        clear_current_at_binding();
     }
 
-    /// The Unix-domain-socket transport, through the SAME `at_via` driver
-    /// and the SAME `serve_turns` loop as TCP — only the carrier (a
-    /// `unix_transport` over a filesystem socket) differs. Proves the
-    /// framing/serve layer is fd-generic, not TCP-specific.
+    /// The SAME built-in `at`, over a Unix-domain-socket transport, served
+    /// by an all-ai-lang node (`serve_at` speaks the driver's KIND
+    /// protocol over any listener fd). TCP and Unix differ only in the
+    /// transport value passed to `at` and the listener the node binds —
+    /// the driver, the wire protocol, and the serve loop are identical.
     #[test]
-    fn at_via_unix_socket_transport() {
+    fn at_over_unix_transport() {
         init();
         let sock_path = format!(
-            "{}/ai_lang_at_{}.sock",
+            "{}/ai_lang_at_unix_{}.sock",
             std::env::temp_dir().display(),
             std::process::id()
         );
@@ -2640,9 +2987,10 @@ mod tests {
             def work(x: Int) -> Int = x * 10 + 3
             def usrv_listen() -> Int =
                 match unix_listen("{path}") {{ Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }}
-            def usrv_run(fd: Int) -> Int = serve_turns(fd, 1)
-            def ucli(x: Int) -> Int =
-                match at_via(unix_transport("{path}"), || work(x)) {{
+            def usrv_run(fd: Int) -> Int = serve_at_turns(fd, 1)
+            def ucli() -> Node = unix_node("{path}")
+            def run(t: Node, x: Int) -> Int =
+                match at(t, || work(x)) {{
                     Result::Ok(n) => n,
                     Result::Err(_e) => 0 - 1,
                 }}
@@ -2670,22 +3018,34 @@ mod tests {
             let (client_rt, client_jit, names) =
                 make_stdlib_runtime(&client_ctx, &extra_for_client);
             install_current_runtime(&client_rt);
+            let kb = KnowledgeBase::new();
+            install_current_knowledge_base(&kb);
             let full = format!("{}\n{}", crate::stdlib::SOURCE, extra_for_client);
             let m = parse_module(&full).unwrap();
             let r = resolve_module(&m).unwrap();
             let rb = r.at_binding.as_ref().expect("at_binding");
             let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
             install_current_at_binding(&rt_binding);
-            let ucli = unsafe {
+            let mk = unsafe {
                 client_jit
                     .engine
-                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> *mut u8>(
                         &crate::codegen::def_symbol(&names["ucli"]),
                     )
                     .unwrap()
             };
-            let r = unsafe { ucli.call(client_rt.thread_ptr(), 7) };
+            let node = unsafe { mk.call(client_rt.thread_ptr()) };
+            let run = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["run"]),
+                    )
+                    .unwrap()
+            };
+            let r = unsafe { run.call(client_rt.thread_ptr(), node, 7) };
             clear_current_at_binding();
+            clear_current_knowledge_base();
             clear_current_runtime();
             r
         });
@@ -2703,7 +3063,224 @@ mod tests {
         let result = client.join().unwrap();
         clear_current_runtime();
         let _ = std::fs::remove_file(&sock_path);
-        assert_eq!(result, 7 * 10 + 3, "unix transport: socket-file roundtrip");
+        assert_eq!(result, 7 * 10 + 3, "at over unix transport should yield 73");
+    }
+
+    /// Live end-to-end: `at(http_node(VERCEL_URL), || work(x))` against a
+    /// deployed Vercel ai-lang function. Set `AI_LANG_VERCEL_URL` to the
+    /// function endpoint (deployment protection disabled). `#[ignore]` —
+    /// needs network + a live deploy; run with
+    /// `AI_LANG_VERCEL_URL=… cargo test at_over_vercel_live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn at_over_vercel_live() {
+        init();
+        let url = std::env::var("AI_LANG_VERCEL_URL")
+            .expect("set AI_LANG_VERCEL_URL to the deployed function endpoint");
+        let extra = format!(
+            "def work(x: Int) -> Int = x * 10 + 3
+             def call_remote(node: Node, x: Int) -> Result<Int, Failure> =
+                at(node, || work(x))
+             def mk() -> Node = http_node(\"{}\")
+             def run(node: Node, x: Int) -> Int =
+                match call_remote(node, x) {{
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }}",
+            url
+        );
+        let ctx = Context::create();
+        let (rt, jit, names) = make_stdlib_runtime(&ctx, &extra);
+        install_current_runtime(&rt);
+        let kb = KnowledgeBase::new();
+        install_current_knowledge_base(&kb);
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let rb = r.at_binding.as_ref().expect("at_binding");
+        let rt_binding = build_at_runtime_binding(&rt, rb).expect("rt binding");
+        install_current_at_binding(&rt_binding);
+        let mk = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> *mut u8>(
+                    &crate::codegen::def_symbol(&names["mk"]),
+                )
+                .unwrap()
+        };
+        let node = unsafe { mk.call(rt.thread_ptr()) };
+        let run = unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["run"]),
+                )
+                .unwrap()
+        };
+        let result = unsafe { run.call(rt.thread_ptr(), node, 4) };
+        eprintln!("[at-over-vercel] result = {} (expect 43)", result);
+        clear_current_runtime();
+        clear_current_knowledge_base();
+        clear_current_at_binding();
+        assert_eq!(result, 43, "at over Vercel http_node should yield work(4)=43");
+    }
+
+    /// A server-side `Channel` that replays one request frame and captures
+    /// the one reply frame — lets `serve_one` process a frame delivered out
+    /// of band (here: an HTTP request body). This is the shape a FaaS
+    /// handler (Vercel) uses: body in → `serve_one` → body out.
+    struct OneShotServerChannel {
+        request: Option<Vec<u8>>,
+        response: Option<Vec<u8>>,
+    }
+    impl Channel for OneShotServerChannel {
+        fn read_frame(&mut self) -> Result<Vec<u8>, NetError> {
+            self.request.take().ok_or(NetError::ConnectionClosed)
+        }
+        fn write_frame(&mut self, body: &[u8]) -> Result<(), NetError> {
+            self.response = Some(body.to_vec());
+            Ok(())
+        }
+    }
+
+    /// `at` over the HTTP transport (`http_node`), end to end against a
+    /// local HTTP server. `http_node` is BUNDLE mode: a one-shot request
+    /// can't do the reactive NeedCode handshake, so the client ships a
+    /// self-contained `KIND_BUNDLE` (code + call). The server is a GENERIC
+    /// node — an initially-empty `IncrementalJit` that knows nothing of
+    /// `work` — which installs the shipped code on demand and runs it.
+    /// Exactly the Vercel function shape (proven live), minus the deploy.
+    ///
+    /// Threading mirrors `tcp_code_fetch_install_and_run`: the
+    /// `IncrementalJit` isn't `Send`, so the server runs INLINE on the
+    /// test thread and the client (which does the blocking libcurl POST)
+    /// runs in a spawned thread.
+    #[test]
+    fn at_over_http_transport() {
+        use std::io::{Read, Write};
+        init();
+
+        let listener = bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port() as i64;
+
+        let extra = "
+            def work(x: Int) -> Int = x * 10 + 3
+            def http_url(port: Int) -> String =
+                string_concat(string_concat(\"http://127.0.0.1:\", int_to_string(port)), \"/\")
+            def mk(port: Int) -> Node = http_node(http_url(port))
+            def run(node: Node, x: Int) -> Int =
+                match at(node, || work(x)) {
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }
+        ";
+
+        // SERVER (inline): a generic, initially-empty node. It installs the
+        // bundle the client ships, then runs the call — no baked `work`.
+        let server_ctx = Context::create();
+        let empty_r = resolve_module(&parse_module("").unwrap()).unwrap();
+        let empty_cm = crate::codegen::CompiledModule::build(&server_ctx, &empty_r).unwrap();
+        let mut server_rt = Runtime::new_with_metadata(
+            empty_cm.closure_type_infos.clone(),
+            empty_cm.shape_registry.clone(),
+            empty_cm.shape_meta.clone(),
+            empty_cm.shape_by_type_id.clone(),
+        );
+        let mut server_jit =
+            crate::codegen::IncrementalJit::new(empty_cm, &server_rt).unwrap();
+
+        // CLIENT (spawned thread): full program; builds the http_node and
+        // drives `at` through the JIT. Its KnowledgeBase must be POPULATED
+        // (not empty) so `at_remote_bundled` can gather `work`'s code to ship.
+        let client = std::thread::spawn(move || -> i64 {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
+            install_current_runtime(&client_rt);
+            let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+            let m = parse_module(&full).unwrap();
+            let r = resolve_module(&m).unwrap();
+            let kb = KnowledgeBase::build(&r);
+            install_current_knowledge_base(&kb);
+            let rb = r.at_binding.as_ref().expect("at_binding");
+            let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+            install_current_at_binding(&rt_binding);
+
+            let mk = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> *mut u8>(
+                        &crate::codegen::def_symbol(&names["mk"]),
+                    )
+                    .unwrap()
+            };
+            let node = unsafe { mk.call(client_rt.thread_ptr(), port) };
+            let run = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["run"]),
+                    )
+                    .unwrap()
+            };
+            let result = unsafe { run.call(client_rt.thread_ptr(), node, 4) };
+            clear_current_runtime();
+            clear_current_knowledge_base();
+            clear_current_at_binding();
+            result
+        });
+
+        // Accept the client's HTTP POST, feed its body to serve_bundle_one.
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut data: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n]);
+                if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                    let clen = headers
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= pos + 4 + clen {
+                        let frame = data[pos + 4..pos + 4 + clen].to_vec();
+                        let mut ch = OneShotServerChannel {
+                            request: Some(frame),
+                            response: None,
+                        };
+                        // `work` is pure arithmetic; serve with an
+                        // all-permitting policy (gate exercised separately).
+                        unsafe {
+                            serve_bundle_one(
+                                &mut server_rt,
+                                &mut server_jit,
+                                &mut ch,
+                                crate::effects::EffectSet::ALL,
+                                &std::collections::HashMap::new(),
+                            )
+                            .unwrap()
+                        };
+                        let reply = ch.response.unwrap_or_default();
+                        let mut resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            reply.len()
+                        )
+                        .into_bytes();
+                        resp.extend_from_slice(&reply);
+                        let _ = sock.write_all(&resp);
+                        let _ = sock.flush();
+                        break;
+                    }
+                }
+            }
+        }
+
+        let result = client.join().unwrap();
+        assert_eq!(result, 4 * 10 + 3, "at over http transport (bundle) should yield 43");
     }
 
     /// The same KV store via `at()` — the client calls `kv_set_at` then
@@ -3989,6 +4566,116 @@ mod tests {
         );
     }
 
+    /// The EFFECT GATE: a node refuses to install OR run shipped code whose
+    /// inferred effects exceed its policy. We ship `|| work(6)` over a bundle
+    /// (`at_remote_bundled`) to a generic empty node and vary (work's effect,
+    /// node policy):
+    ///   * pure work + pure policy        → allowed, runs, returns 43
+    ///   * FFI work (calls libc `abs`) + pure policy → FORBIDDEN (ERR_FORBIDDEN)
+    ///   * FFI work + FFI-allowing policy  → allowed, runs, returns 13
+    /// The forbidden case proves the node never installs the code: the gate
+    /// runs on the decoded items before `jit.install`.
+    #[test]
+    fn bundle_effect_gate_blocks_disallowed_effects() {
+        init();
+
+        // One bundle exchange: ship `make_thunk(6)` from `src` to a fresh
+        // empty node under `policy`. Returns Ok(unboxed result) or Err(code).
+        fn exchange(src: &str, policy: crate::effects::EffectSet) -> Result<i64, u8> {
+            let server_ctx = Context::create();
+            let empty_r = resolve_module(&parse_module("").unwrap()).unwrap();
+            let empty_cm =
+                crate::codegen::CompiledModule::build(&server_ctx, &empty_r).unwrap();
+            let mut server_rt = Runtime::new_with_metadata(
+                empty_cm.closure_type_infos.clone(),
+                empty_cm.shape_registry.clone(),
+                empty_cm.shape_meta.clone(),
+                empty_cm.shape_by_type_id.clone(),
+            );
+            let mut server_jit =
+                crate::codegen::IncrementalJit::new(empty_cm, &server_rt).unwrap();
+            let shapes_before = server_rt.shape_by_type_id.len();
+
+            let (client_chan, mut server_chan) = InProcessChannel::pair();
+            let src = src.to_string();
+            let client_handle = std::thread::spawn(move || -> Result<i64, u8> {
+                let client_ctx = Context::create();
+                let client_r = resolve_module(&parse_module(&src).unwrap()).unwrap();
+                let names: HashMap<String, Hash> = client_r
+                    .defs
+                    .iter()
+                    .map(|d| (d.name.clone(), d.hash))
+                    .collect();
+                let client_cm =
+                    crate::codegen::CompiledModule::build(&client_ctx, &client_r).unwrap();
+                let client_rt = Runtime::new_with_metadata(
+                    client_cm.closure_type_infos.clone(),
+                    client_cm.shape_registry.clone(),
+                    client_cm.shape_meta.clone(),
+                    client_cm.shape_by_type_id.clone(),
+                );
+                let client_jit = Jit::new(client_cm, &client_rt).unwrap();
+                let kb = KnowledgeBase::build(&client_r);
+                let make_thunk = unsafe {
+                    client_jit
+                        .engine
+                        .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> *mut u8>(
+                            &crate::codegen::def_symbol(&names["make_thunk"]),
+                        )
+                        .unwrap()
+                };
+                let closure = unsafe { make_thunk.call(client_rt.thread_ptr(), 6) };
+                let mut ch = client_chan;
+                match unsafe {
+                    at_remote_bundled(&client_rt, &kb, &mut ch, closure as *const u8)
+                } {
+                    Ok(p) => Ok(unsafe { crate::runtime::ai_gc_unbox_int(p) }),
+                    Err(NetError::Remote { code, .. }) => Err(code),
+                    Err(e) => panic!("unexpected transport error: {:?}", e),
+                }
+            });
+
+            unsafe {
+                serve_bundle_one(
+                    &mut server_rt,
+                    &mut server_jit,
+                    &mut server_chan,
+                    policy,
+                    &HashMap::new(),
+                )
+                .unwrap()
+            };
+            let out = client_handle.join().unwrap();
+            // A forbidden bundle must NOT have installed anything.
+            if out == Err(ERR_FORBIDDEN) {
+                assert_eq!(
+                    server_rt.shape_by_type_id.len(),
+                    shapes_before,
+                    "forbidden code must not be installed"
+                );
+            }
+            out
+        }
+
+        use crate::effects::EffectSet;
+        let pure_src = "
+            def work(x: Int) -> Int = x * x + 7
+            def make_thunk(x: Int) -> fn() -> Int = || work(x)
+        ";
+        let ffi_src = "
+            extern \"C\" lib \"c\" { fn abs(n: Int) -> Int }
+            def work(x: Int) -> Int = abs(0 - x) + 7
+            def make_thunk(x: Int) -> fn() -> Int = || work(x)
+        ";
+
+        // Pure code under a pure (empty) policy: allowed.
+        assert_eq!(exchange(pure_src, EffectSet::EMPTY), Ok(6 * 6 + 7));
+        // FFI code under a pure policy: refused before install/run.
+        assert_eq!(exchange(ffi_src, EffectSet::EMPTY), Err(ERR_FORBIDDEN));
+        // FFI code under an FFI-allowing policy: allowed.
+        assert_eq!(exchange(ffi_src, EffectSet::FFI), Ok(6 + 7));
+    }
+
     /// Shipping code that calls a C extern: the extern requirement must
     /// travel with the code so the (initially empty) server can resolve
     /// the real symbol and run it. `work` calls libc `abs` through the C
@@ -4075,20 +4762,13 @@ mod tests {
     #[test]
     fn at_returns_ok_with_generic_result() {
         init();
-        let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
+        // `Node`/`Failure`/`Result`/`tcp_node` now come from the prelude;
+        // the program supplies its handler and a thin node constructor.
+        let extra = "
             def work(x: Int) -> Int = x * 10 + 3
 
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def run(node: Node, x: Int) -> Int =
                 match at(node, || work(x)) {
@@ -4098,7 +4778,7 @@ mod tests {
         ";
 
         let server_ctx = Context::create();
-        let (server_rt, server_jit, _) = make_compiled_runtime(&server_ctx, src);
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
         let _ = server_jit;
         let listener = bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
@@ -4108,11 +4788,12 @@ mod tests {
         };
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let rb = r.at_binding.as_ref().expect("at_binding");
         let rt_binding =
@@ -4129,7 +4810,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe {
@@ -4158,18 +4839,9 @@ mod tests {
     #[test]
     fn at_returns_err_on_unreachable() {
         init();
-        let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+        let extra = "
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def run(node: Node) -> Int =
                 match at(node, || 42) {
@@ -4179,11 +4851,12 @@ mod tests {
         ";
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let resolver_binding = r.at_binding.as_ref().expect("at_binding");
         let rt_binding =
@@ -4208,7 +4881,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe {
@@ -4243,19 +4916,9 @@ mod tests {
     fn at_times_out_on_silent_node() {
         init();
         let _config = AT_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-                TimedOut(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+        let extra = "
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def run(node: Node) -> Int =
                 match at(node, || 42) {
@@ -4271,11 +4934,12 @@ mod tests {
         ";
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let rb = r.at_binding.as_ref().expect("at_binding");
         assert!(
@@ -4309,7 +4973,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe { make_node.call(client_rt.thread_ptr(), 127, 0, 0, 1, port) };
@@ -4352,20 +5016,11 @@ mod tests {
     fn at_retries_pure_thunk_after_dropped_connection() {
         init();
         let _config = AT_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
+        let extra = "
             def work(x: Int) -> Int = x * 7
 
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def run(node: Node, x: Int) -> Int =
                 match at(node, || work(x)) {
@@ -4375,7 +5030,7 @@ mod tests {
         ";
 
         let server_ctx = Context::create();
-        let (server_rt, server_jit, _) = make_compiled_runtime(&server_ctx, src);
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
         let _ = server_jit;
         let server_rt = Arc::new(RuntimeHandle(server_rt));
         let listener = bind("127.0.0.1:0").unwrap();
@@ -4394,11 +5049,12 @@ mod tests {
         };
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let rb = r.at_binding.as_ref().expect("at_binding");
         let rt_binding =
@@ -4422,7 +5078,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe { make_node.call(client_rt.thread_ptr(), 127, 0, 0, 1, port) };
@@ -4453,19 +5109,10 @@ mod tests {
     fn at_async_join_returns_result_values() {
         init();
         let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
-
             def work(x: Int) -> Int = x * 10 + 3
 
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def run(node: Node, x: Int) -> Int = {
                 let h1 = at_async(node, || work(x));
@@ -4490,13 +5137,14 @@ mod tests {
                         Failure::Crashed(_) => 0 - 2,
                         Failure::CodeMissing(_) => 0 - 4,
                         Failure::Cancelled(_) => 0 - 5,
+                        Failure::TimedOut(_) => 0 - 6,
                     },
                 }
             }
         ";
 
         let server_ctx = Context::create();
-        let (server_rt, server_jit, _) = make_compiled_runtime(&server_ctx, src);
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, src);
         let _ = server_jit;
         let listener = bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port() as i64;
@@ -4505,11 +5153,12 @@ mod tests {
         };
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, src);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, src);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let rb = r.at_binding.as_ref().expect("at_binding");
         let rt_binding =
@@ -4526,7 +5175,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe { make_node.call(client_rt.thread_ptr(), 127, 0, 0, 1, port) };
@@ -5077,7 +5726,7 @@ mod tests {
         let listener = bind("127.0.0.1:0").unwrap();
         let server_port = listener.local_addr().unwrap().port() as i64;
         let _server_handle = unsafe {
-            serve_persistent_in_thread(Arc::new(RuntimeHandle(server_rt)), listener)
+            serve_n_in_thread(Arc::new(RuntimeHandle(server_rt)), listener, 4)
         };
 
         let client_ctx = Context::create();
@@ -5282,18 +5931,10 @@ mod tests {
     fn at_returns_struct() {
         init();
         let src = "
-            struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
             struct Pair { a: Int, b: Int }
-            enum Failure {
-                Unreachable(Node),
-                Crashed(Node),
-                CodeMissing(Node),
-                Cancelled(Node),
-            }
-            enum Result<T, E> { Ok(T), Err(E) }
 
-            def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-                Node { a: a, b: b, c: c, d: d, port: port }
+            def mk(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+                tcp_node(a, b, c, d, port)
 
             def make_pair(x: Int, y: Int) -> Pair = Pair { a: x, b: y }
 
@@ -5305,7 +5946,7 @@ mod tests {
         ";
 
         let server_ctx = Context::create();
-        let (server_rt, server_jit, _) = make_compiled_runtime(&server_ctx, src);
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, src);
         let _ = server_jit;
         let listener = bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
@@ -5315,11 +5956,12 @@ mod tests {
         };
 
         let client_ctx = Context::create();
-        let (client_rt, client_jit, names) = make_compiled_runtime(&client_ctx, src);
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, src);
         install_current_runtime(&client_rt);
         let kb = KnowledgeBase::new();
         install_current_knowledge_base(&kb);
-        let m = parse_module(src).unwrap();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, src);
+        let m = parse_module(&full).unwrap();
         let r = resolve_module(&m).unwrap();
         let rb = r.at_binding.as_ref().expect("at_binding");
         let rt_binding =
@@ -5336,7 +5978,7 @@ mod tests {
                     i64,
                     i64,
                     i64,
-                ) -> *mut u8>(&crate::codegen::def_symbol(&names["make_node"]))
+                ) -> *mut u8>(&crate::codegen::def_symbol(&names["mk"]))
                 .unwrap()
         };
         let node = unsafe {

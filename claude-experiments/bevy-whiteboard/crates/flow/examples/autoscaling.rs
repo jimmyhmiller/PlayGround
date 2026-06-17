@@ -80,7 +80,7 @@ fn main() {
             })
             .guard(Expr::lt(Expr::var("r"), Expr::slot("min_replicas")))
             .do_(Effect::Spawn {
-                template: "Worker".into(),
+                template: Expr::str("Worker"),
                 into_var: Some("new_w".into()),
             })
             .do_(Effect::SamplesPush {

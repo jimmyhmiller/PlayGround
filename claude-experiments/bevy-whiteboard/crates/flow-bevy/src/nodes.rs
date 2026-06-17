@@ -113,6 +113,8 @@ pub fn body_shape(kind: Kind) -> BodyShape {
         Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => BodyShape::Circle(34.0),
         Kind::Worker | Kind::Router => BodyShape::Rect(Vec2::new(80.0, 56.0)),
         Kind::Queue => BodyShape::Rect(Vec2::new(100.0, 46.0)),
+        // A wide rounded box that reads as a "group" container.
+        Kind::AutoScalingGroup => BodyShape::Rect(Vec2::new(120.0, 80.0)),
     }
 }
 
@@ -803,6 +805,11 @@ fn format_node_state(kind: Kind, node_id: NodeId, snapshot: &RenderSnapshot) -> 
             format!("{} absorbed", slot_int("count"))
         }
         Kind::Router => String::new(),
+        Kind::AutoScalingGroup => {
+            // `count` lives on the inner Scaler; `resolve_slot` walks into
+            // the compound to find it.
+            format!("{} workers", slot_int("count"))
+        }
     }
 }
 

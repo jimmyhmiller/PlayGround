@@ -729,6 +729,52 @@ def http_header_match(line: String, want: String) -> Result<String, IndexError> 
 def http_find_byte(b: Bytes, i: Int, len: Int, target: Int) -> Result<Int, IndexError> =
     if i >= len { Result::Ok(len) } else { if bytes_get(b, i)? == target { Result::Ok(i) } else { http_find_byte(b, i + 1, len, target) } }
 
+// ---- Binary HTTP POST (the transport carrier for `at` over HTTP) ----
+//
+// `http_request_full` takes a String body (NUL-terminated via `cstr`),
+// which truncates binary wire frames at the first 0 byte. This sends the
+// request body as RAW bytes (CURLOPT_POSTFIELDSIZE = exact length, no NUL
+// dependence) and returns the response body as RAW bytes (memstream buffer
+// sliced to its real length, not strlen). Exactly what a wire frame
+// (`[KIND_CALL] ++ encoded-closure` out, `[KIND_RESULT] ++ encoded` back)
+// needs to survive an HTTPS round-trip.
+def http_post_bytes(url: String, body: Bytes) -> Result<Bytes, String> = {
+    let n = bytes_len(body);
+    let reqbuf = malloc(n);
+    defer free(reqbuf);
+    let _c = net_bytes_to_buf(body, reqbuf, 0, n);
+    let outp = malloc(8);
+    defer free(outp);
+    let sizep = malloc(8);
+    defer free(sizep);
+    let fp = open_memstream(outp, sizep);
+    let h = curl_easy_init();
+    defer curl_easy_cleanup(h);
+    let urlc = ix(cstr(url))?;
+    defer free(urlc);
+    let s_url = curl_easy_setopt(h, curlopt_url(), urlc);
+    let s_wd = curl_easy_setopt(h, curlopt_writedata(), fp);
+    // POSTFIELDS does NOT copy — reqbuf must outlive perform (it does:
+    // `defer free` runs at function exit, after perform below).
+    let s_pf = curl_easy_setopt(h, curlopt_postfields(), reqbuf);
+    let s_pfs = curl_easy_setopt(h, curlopt_postfieldsize(), n);
+    let rc = curl_easy_perform(h);
+    let flushed = fflush(fp);
+    let closed = fclose(fp);
+    let bufptr = ptr_read_ptr(outp, 0);
+    defer free(bufptr);
+    let outlen = ptr_read_i64(sizep, 0);
+    if rc == 0 {
+        let rb = bytes_new(outlen);
+        match net_buf_to_bytes(bufptr, rb, 0, outlen) {
+            Result::Ok(filled) => Result::Ok(filled),
+            Result::Err(_e) => Result::Err("http_post_bytes: response copy failed"),
+        }
+    } else {
+        Result::Err(string_concat("curl error ", int_to_string(rc)))
+    }
+}
+
 // ---- Concurrent requests (libcurl multi interface) ----
 //
 // Fire N HTTP requests AT ONCE from a single thread and collect all N
@@ -2425,13 +2471,30 @@ def parse_int_or(s: String, default: Int) -> Int =
 // constructing a Node directly. Future transports (Unix socket,
 // QUIC) will get their own constructors; the field layout will
 // gain a tag once we need to distinguish them at runtime.
-struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
+// A `Node` is a transport: a record of closures describing how to reach
+// the endpoint. `connect` establishes (or wakes) it and hands back a
+// `Channel` — `write_frame`/`read_frame` move one frame body each way, and
+// `set_deadline` bounds a blocking read (ms; 0 = no bound). Any carrier —
+// TCP, a Unix socket, later HTTP/Lambda — is just a `Node` value built in
+// the language; the built-in `at` drives all of them through one protocol.
+struct Channel {
+    read_frame: fn() -> Bytes,
+    write_frame: fn(Bytes) -> Int,
+    set_deadline: fn(Int) -> Int,
+    close: fn() -> Int,
+}
+// `bundle = 1` makes `at` ship the closure AND its transitive code in one
+// self-contained frame (for one-shot transports like HTTP, where the
+// reactive NeedCode handshake can't run, and for a generic code-less node).
+// `bundle = 0` uses the streaming handshake (persistent TCP/Unix nodes).
+struct Node { connect: fn() -> Channel, bundle: Int }
 
 enum Failure {
     Unreachable(Node),
     Crashed(Node),
     CodeMissing(Node),
     Cancelled(Node),
+    TimedOut(Node),
 }
 
 enum Result<T, E> { Ok(T), Err(E) }
@@ -2467,9 +2530,6 @@ def ix<T>(r: Result<T, IndexError>) -> Result<T, String> =
 // `TypeMismatch` = the bytes held a value of a different type than `T`;
 // `Malformed` = the bytes were truncated or otherwise un-decodable.
 enum DecodeError { TypeMismatch, Malformed }
-
-def tcp_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-    Node { a: a, b: b, c: c, d: d, port: port }
 
 // ---- Remote pointers (opt-in, explicit) ----
 //
@@ -3263,6 +3323,22 @@ def net_set_reuseaddr(fd: Int) -> Int = {
     r
 }
 
+// Bound blocking reads on `fd` to `ms` milliseconds via SO_RCVTIMEO, so a
+// silent peer surfaces as a (timed-out) read error instead of hanging. ms
+// <= 0 clears the timeout (block forever). macOS: SOL_SOCKET = 0xffff,
+// SO_RCVTIMEO = 0x1006; optval is a `struct timeval { i64 sec; i32 usec }`
+// (16 bytes incl. padding). The driver calls this through a Channel's
+// `set_deadline` before each read.
+def net_set_rcvtimeo(fd: Int, ms: Int) -> Int = {
+    let tv = malloc(16);
+    let _z = net_zero(tv, 0, 16);
+    let _s = ptr_write_i64(tv, 0, ms / 1000);             // tv_sec
+    let _u = ptr_write_i64(tv, 8, (ms % 1000) * 1000);    // tv_usec (low 4 bytes)
+    let r = setsockopt(fd, 65535, 4102, tv, 16);          // SOL_SOCKET, SO_RCVTIMEO
+    let _free = free(tv);
+    r
+}
+
 // Open a listening socket bound to 0.0.0.0:port. Returns the listener fd.
 def tcp_listen(port: Int) -> Result<Int, NetErr> = {
     let fd = socket(2, 1, 0);   // AF_INET, SOCK_STREAM, default proto
@@ -3456,57 +3532,58 @@ def serve(listener: Int) -> Int = {
 // Transports — `at` over a pluggable carrier (records of closures)
 // ============================================================
 //
-// A `Transport` is the language-level "trait" for reaching a node: a
-// record holding ONE closure that turns a request frame (the shipped
-// closure's wire bytes) into a reply frame (the encoded result). Any
-// carrier — TCP, a Unix socket, an in-process call, later HTTP/Lambda —
-// is just a value of this type, built by capturing its own connection
-// details. `at_via` drives any of them; nothing in it knows how the
-// bytes actually travel.
+// `Node`/`Channel` are defined up top (next to `Failure`). A `Node` holds a
+// `connect` closure; a `Channel` holds `read_frame`/`write_frame`/
+// `set_deadline`. Any carrier — TCP, a Unix socket, later HTTP/Lambda — is
+// just a `Node` value built by capturing its own connection details. The
+// built-in `at(node, thunk)` drives all of them through the one wire
+// protocol; nothing in the driver knows how the bytes actually travel.
 
-struct Transport { roundtrip: fn(Bytes) -> Result<Bytes, NetErr> }
+// Frame a request body / read the next reply body over a connected fd.
+// A failure surfaces as the sentinel the driver-side Channel expects:
+// a negative write count, or an empty read frame.
+def chan_send(fd: Int, body: Bytes) -> Int =
+    match send_frame(fd, body) { Result::Ok(n) => n, Result::Err(_e) => 0 - 1 }
+def chan_recv(fd: Int) -> Bytes =
+    match recv_frame(fd) { Result::Ok(b) => b, Result::Err(_e) => bytes_new(0) }
 
-// `at`, as an ordinary function over a pluggable transport. Ship the
-// thunk's bytes; decode the reply back to T. A decode failure (the reply
-// held some other type, or was truncated) folds into ConnClosed — the
-// call did not deliver a usable T.
-def at_via<T>(t: Transport, thunk: fn() -> T) -> Result<T, NetErr> = {
-    let req = wire_encode(thunk);
-    let rt = t.roundtrip;
-    match rt(req) {
-        Result::Ok(resp) => match decode::<T>(resp) {
-            Result::Ok(v) => Result::Ok(v),
-            Result::Err(_e) => Result::Err(NetErr::ConnClosed),
-        },
-        Result::Err(e) => Result::Err(e),
-    }
-}
-
-// One request/response over an already-connected fd, closing it after.
-def fd_roundtrip(fd: Int, req: Bytes) -> Result<Bytes, NetErr> =
-    match send_frame(fd, req) {
-        Result::Ok(_w) => {
-            let r = recv_frame(fd);
-            let _c = conn_close(fd);
-            r
-        },
-        Result::Err(e) => { let _c = conn_close(fd); Result::Err(e) },
+// A Channel over a connected socket fd. The fd is just an fd — this same
+// Channel serves TCP and Unix sockets alike (the framing is fd-generic).
+// `set_deadline` bounds blocking reads via SO_RCVTIMEO so the driver's
+// whole-call deadline can actually interrupt a silent peer.
+def fd_channel(fd: Int) -> Channel =
+    Channel {
+        read_frame: || chan_recv(fd),
+        write_frame: |b: Bytes| chan_send(fd, b),
+        set_deadline: |ms: Int| net_set_rcvtimeo(fd, ms),
+        close: || conn_close(fd),
     }
 
-// In-process transport: run the shipped thunk locally via wire_invoke.
-// No socket, no copy off-process — the same interface, a different carrier.
-def local_transport() -> Transport =
-    Transport { roundtrip: |req: Bytes| Result::Ok(wire_invoke(req)) }
-
-// TCP transport: connect per call, frame the request, read the reply.
-def tcp_roundtrip(a: Int, b: Int, c: Int, d: Int, port: Int, req: Bytes) -> Result<Bytes, NetErr> =
-    match tcp_connect(a, b, c, d, port) {
-        Result::Ok(fd) => fd_roundtrip(fd, req),
-        Result::Err(e) => Result::Err(e),
+// A Channel whose every op fails — returned when `connect` fails, so the
+// driver observes a write/read error and yields `Failure::Unreachable`.
+def dead_channel() -> Channel =
+    Channel {
+        read_frame: || bytes_new(0),
+        write_frame: |_b: Bytes| 0 - 1,
+        set_deadline: |_ms: Int| 0,
+        close: || 0,
     }
 
-def tcp_transport(a: Int, b: Int, c: Int, d: Int, port: Int) -> Transport =
-    Transport { roundtrip: |req: Bytes| tcp_roundtrip(a, b, c, d, port, req) }
+// TCP transport: connect per call; the Channel reuses that one fd across
+// the whole exchange (so the code-fetch handshake's extra frames work).
+def tcp_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+    Node { connect: || match tcp_connect(a, b, c, d, port) {
+        Result::Ok(fd) => fd_channel(fd),
+        Result::Err(_e) => dead_channel(),
+    }, bundle: 0 }
+
+// TCP node that ships code in a self-contained bundle (for a generic
+// code-less `at-serve` node, e.g. testing the bundle path over loopback).
+def tcp_bundle_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+    Node { connect: || match tcp_connect(a, b, c, d, port) {
+        Result::Ok(fd) => fd_channel(fd),
+        Result::Err(_e) => dead_channel(),
+    }, bundle: 1 }
 
 // ---- Unix-domain-socket transport ----
 //
@@ -3586,14 +3663,91 @@ def unix_listen(path: String) -> Result<Int, NetErr> = {
     }
 }
 
-def unix_roundtrip(path: String, req: Bytes) -> Result<Bytes, NetErr> =
-    match unix_connect(path) {
-        Result::Ok(fd) => fd_roundtrip(fd, req),
-        Result::Err(e) => Result::Err(e),
+// Unix-domain-socket transport — identical to TCP except for `connect`.
+// The Channel (fd_channel) and everything downstream is reused verbatim.
+def unix_node(path: String) -> Node =
+    Node { connect: || match unix_connect(path) {
+        Result::Ok(fd) => fd_channel(fd),
+        Result::Err(_e) => dead_channel(),
+    }, bundle: 0 }
+
+// ---- HTTP transport: `at` over an HTTPS POST (e.g. a Vercel function) ----
+//
+// `at(http_node(url), thunk)` POSTs the call frame to `url` and reads the
+// reply frame from the response body. HTTP is one request/response, so the
+// Channel buffers the (single) call frame on `write_frame` and fires the
+// POST on the matching `read_frame` — exactly the no-handshake at-call (the
+// receiver must already have the thunk's code, same assumption as
+// `serve_at`). A failed POST yields an empty frame → `Failure::Unreachable`.
+// `atom_swap` takes a `fn(T)->T`; an updater that ignores the old value and
+// stores `b` is built here (a lambda in a top-level fn body — allowed; a
+// lambda nested directly inside another lambda is not).
+def replace_with(b: Bytes) -> fn(Bytes) -> Bytes = |_old: Bytes| b
+
+def http_post_or_empty(url: String, req: Bytes) -> Bytes =
+    match http_post_bytes(url, req) {
+        Result::Ok(resp) => resp,
+        Result::Err(_e) => bytes_new(0),
     }
 
-def unix_transport(path: String) -> Transport =
-    Transport { roundtrip: |req: Bytes| unix_roundtrip(path, req) }
+def http_channel(url: String) -> Channel = {
+    let pending = atom_new(bytes_new(0));
+    Channel {
+        write_frame: |b: Bytes| { let _o = swap(pending, replace_with(b)); bytes_len(b) },
+        read_frame: || http_post_or_empty(url, deref(pending)),
+        set_deadline: |_ms: Int| 0,
+        close: || 0,
+    }
+}
+
+def http_node(url: String) -> Node = Node { connect: || http_channel(url), bundle: 1 }
+
+// ---- Serving the `at` driver protocol over any listener ----
+//
+// The built-in `at` ships a frame body `[KIND_CALL] ++ encoded-closure`
+// and expects `[KIND_RESULT] ++ encoded-result` (KIND_CALL = 0,
+// KIND_RESULT = 1). `serve_at` runs exactly that over ANY connected
+// listener fd — TCP or Unix alike, since `tcp_accept` is fd-generic — so a
+// node hosting `at` calls is itself just ai-lang, uniform across
+// transports. (The legacy no-KIND `serve_turns` is kept for the
+// hand-rolled framing demos.)
+
+def byte1(v: Int) -> Bytes = {
+    let b = bytes_new(1);
+    match bytes_set(b, 0, v) { Result::Ok(_x) => b, Result::Err(_e) => b }
+}
+
+// The transport-independent core of an `at` node: turn one request frame
+// (`[KIND_CALL] ++ encoded-closure`) into its reply frame
+// (`[KIND_RESULT] ++ encoded-result`). Every node front-end calls this on
+// the bytes it receives — the TCP/Unix `serve_at` loops below, and an
+// HTTP/FaaS handler (e.g. a Vercel function) that hands it the request body.
+def at_handle_frame(req: Bytes) -> Bytes = {
+    let body = bytes_slice(req, 1, bytes_len(req) - 1);   // strip KIND_CALL
+    let result = wire_invoke(body);
+    bytes_concat(byte1(1), result)                        // [KIND_RESULT] ++ result
+}
+
+def serve_at_turn(listener: Int) -> Int =
+    match tcp_accept(listener) {
+        Result::Ok(conn) => match recv_frame(conn) {
+            Result::Ok(req) => {
+                let _s = send_frame(conn, at_handle_frame(req));
+                let _c = conn_close(conn);
+                0
+            },
+            Result::Err(_e) => 0 - 1,
+        },
+        Result::Err(_e) => 0 - 2,
+    }
+
+def serve_at_turns(listener: Int, n: Int) -> Int =
+    if n <= 0 { 0 } else { let _t = serve_at_turn(listener); serve_at_turns(listener, n - 1) }
+
+def serve_at(listener: Int) -> Int = {
+    let _t = serve_at_turn(listener);
+    serve_at(listener)
+}
 
 // ---- Live service slots: deploy / upgrade / rollback as a library ----
 //
@@ -5902,6 +6056,109 @@ mod tests {
         assert!(req.starts_with("POST /submit"), "request line was: {:?}", req.lines().next());
         assert!(req.contains("X-Test: ai-lang"), "custom header missing in: {}", req);
         assert!(req.contains("payload-123"), "request body missing in: {}", req);
+    }
+
+    /// The Vercel-transport feasibility check: a BINARY request body — one
+    /// containing NUL bytes, like a wire frame — must survive an HTTP POST
+    /// round-trip through libcurl (`http_post_bytes`), unlike the String
+    /// path which truncates at the first 0. A mock server echoes the raw
+    /// bytes; the client rebuilds an int from all 5 (incl. the two NULs),
+    /// so any truncation changes the answer.
+    #[test]
+    fn http_post_bytes_round_trips_binary() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        init();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut data: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                        let clen = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= pos + 4 + clen {
+                            // Echo the raw body bytes (binary-safe).
+                            let body = data[pos + 4..pos + 4 + clen].to_vec();
+                            let mut resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            resp.extend_from_slice(&body);
+                            let _ = sock.write_all(&resp);
+                            let _ = sock.flush();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = Context::create();
+        let (rt, jit, names) = build_with_stdlib(
+            &ctx,
+            "def mkbody() -> Result<Bytes, IndexError> = {
+                let b = bytes_new(5);
+                let _0 = bytes_set(b, 0, 7)?;
+                let _1 = bytes_set(b, 1, 0)?;
+                let _2 = bytes_set(b, 2, 255)?;
+                let _3 = bytes_set(b, 3, 0)?;
+                let _4 = bytes_set(b, 4, 42)?;
+                Result::Ok(b)
+             }
+             def check_echo(resp: Bytes) -> Result<Int, IndexError> = {
+                let b0 = bytes_get(resp, 0)?;
+                let b1 = bytes_get(resp, 1)?;
+                let b2 = bytes_get(resp, 2)?;
+                let b3 = bytes_get(resp, 3)?;
+                let b4 = bytes_get(resp, 4)?;
+                Result::Ok(b0 * 100000 + b1 * 10000 + b2 * 1000 + b3 * 100 + b4)
+             }
+             def test_post(port: Int) -> Int = {
+                let url = string_concat(
+                    string_concat(\"http://127.0.0.1:\", int_to_string(port)), \"/\");
+                match mkbody() {
+                    Result::Ok(body) => match http_post_bytes(url, body) {
+                        Result::Ok(resp) =>
+                            if bytes_len(resp) == 5 {
+                                match check_echo(resp) {
+                                    Result::Ok(v) => v,
+                                    Result::Err(_e) => 0 - 2
+                                }
+                            } else { 0 - bytes_len(resp) - 1000 },
+                        Result::Err(_e) => 0 - 1
+                    },
+                    Result::Err(_e) => 0 - 3
+                }
+             }",
+        );
+        let result = unsafe {
+            let f = jit.get_fn1(&names["test_post"]).unwrap();
+            f.call(rt.thread_ptr(), port as i64)
+        };
+        let _ = server.join();
+        // 7*100000 + 0 + 255*1000 + 0 + 42 = 955042. A NUL-truncated body
+        // would echo length 1 → 0 - 1 - 1000 = -1001.
+        assert_eq!(
+            result, 955042,
+            "binary body (with NUL bytes) must round-trip intact, got {}",
+            result
+        );
     }
 
     // ---- JSON FFI bridge (Tier 2) ----

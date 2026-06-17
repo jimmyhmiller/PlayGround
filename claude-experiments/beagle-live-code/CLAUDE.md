@@ -8,6 +8,14 @@ Instead of the traditional "read file, edit file, run tests" loop, this agent in
 
 Built directly on DeepSeek's OpenAI-compatible ChatCompletions API (via the `openai` npm package) with a hand-rolled tool-calling agent loop.
 
+## Layout (three files, one shared core)
+
+- **`beagle_repl_core.ts`** — the shared toolkit core: nREPL TCP transport (`connect`/`replSend`/`replRequest`/`formatReplResponse`/`probeReplConnection`), connectivity helpers (`waitForPort`/`isPortOpen`), and ALL the `beagle.reflect` introspection — both the `introspect*` plumbing and the high-level `reflect*` ops (`reflectSource`, `reflectPersist`, `reflectNamespaceInfo`, …) that own the `reflect/...` code strings. This is the single source of truth so the protocol/reflection logic can't drift. Per-interface wording (hint lines) and the connect-failure annotation are injected via `configureRepl()`.
+- **`beagle_agent.ts`** — the DeepSeek agent: imports core, keeps the agent-only bits (attached `beag` child lifecycle, crash tracking, logging, eval history, the MCP-style tool table, and the agent loop). Tool handlers are thin wrappers over `reflect*`/transport.
+- **`beagle_repl_cli.ts`** — the **`beagle` CLI toolkit** (see `BEAGLE_CLI.md`): same core, exposed as subcommands so any shell-capable agent can drive a live program. Differs from the agent only in lifecycle — it auto-starts the server **detached** (survives across invocations), tracks the daemon in `/tmp/beagle-repl-cli.json`, and finds an existing server by probing the port. Run via `npm run cli -- <cmd>` or the `beagle` bin.
+
+When changing the REPL protocol or reflection surface, edit **core** — both callers inherit it.
+
 ## Running
 
 ```bash

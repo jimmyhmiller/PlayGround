@@ -21,7 +21,7 @@ pub enum Tok {
     // Keywords
     Params, Node, Compound, In, Out, Port, Edges, Scenario, Template,
     Slots, Rule, On, OnSpawn, When, Do, Probes,
-    Push, Pop, Drop, Emit, EmitEach, Record, Spawn, Error,
+    Push, Pop, Drop, Emit, EmitEach, Record, Spawn, Despawn, Error,
     To, As, At, Inject, SetParam, SetSlot, Kill,
     For,
     True, False, Nil, Self_,
@@ -245,6 +245,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 "record" => Some(Tok::Record),
                 "error" => Some(Tok::Error),
                 "spawn" => Some(Tok::Spawn),
+                "despawn" => Some(Tok::Despawn),
                 "to" => Some(Tok::To),
                 "as" => Some(Tok::As),
                 "at" => Some(Tok::At),

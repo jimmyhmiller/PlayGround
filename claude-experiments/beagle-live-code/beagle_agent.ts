@@ -1,10 +1,18 @@
-import * as net from "net";
 import * as readline from "readline";
 import * as child_process from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import OpenAI from "openai";
 import { z } from "zod";
+import {
+  REPL_HOST, REPL_PORT,
+  configureRepl, connectRepl, disconnectRepl, replSend, replRequest,
+  formatReplResponse, isErrorResponse, extractErrorText, waitForPort, probeReplConnection,
+  extractNamespaceFromText,
+  reflectAllNamespaces, reflectNamespaceInfo, reflectSource, reflectNamespaceSource,
+  reflectLocation, reflectApropos, reflectInfo, reflectPersist,
+  formatNamespaceInfo,
+} from "./beagle_repl_core";
 
 // ---------------------------------------------------------------------------
 // DeepSeek (OpenAI-compatible) configuration
@@ -96,8 +104,6 @@ process.on("unhandledRejection", (reason) => {
 // Beagle REPL server management
 // ---------------------------------------------------------------------------
 
-const REPL_HOST = "127.0.0.1";
-const REPL_PORT = 7888;
 const DEFAULT_REPL_SERVER = path.join(
   process.env.HOME ?? "",
   "Documents/Code/beagle/resources/examples/repl_server.bg"
@@ -174,218 +180,6 @@ function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_proc
   return proc;
 }
 
-function waitForPort(host: string, port: number, timeoutMs = 15_000): Promise<void> {
-  const start = Date.now();
-  return new Promise((resolve, reject) => {
-    function tryConnect() {
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error(`Timed out waiting for ${host}:${port}`));
-        return;
-      }
-      const sock = new net.Socket();
-      sock.once("connect", () => {
-        sock.destroy();
-        resolve();
-      });
-      sock.once("error", () => {
-        sock.destroy();
-        setTimeout(tryConnect, 200);
-      });
-      sock.connect(port, host);
-    }
-    tryConnect();
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Beagle REPL persistent connection
-// ---------------------------------------------------------------------------
-
-let reqCounter = 0;
-
-interface ReplResponse {
-  value?: string;
-  out?: string;
-  err?: string;
-  ex?: string;
-  status?: string[];
-  id?: string;
-  "suspend-depth"?: number;
-  [key: string]: unknown;
-}
-
-interface PendingEval {
-  messages: ReplResponse[];
-  resolve: (messages: ReplResponse[]) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-let replSocket: net.Socket | undefined;
-let replConnected = false;
-let replBuffer = "";
-const pendingEvals = new Map<string, PendingEval>();
-
-function disconnectRepl() {
-  if (replSocket) {
-    replSocket.destroy();
-    replSocket = undefined;
-    replConnected = false;
-    replBuffer = "";
-    // Reject all pending evals
-    for (const [id, pending] of pendingEvals) {
-      clearTimeout(pending.timer);
-      pending.resolve([...pending.messages, { err: "Connection closed", status: ["error"] }]);
-    }
-    pendingEvals.clear();
-  }
-}
-
-function connectRepl(): Promise<void> {
-  if (replConnected && replSocket) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    disconnectRepl();
-    const sock = new net.Socket();
-    replSocket = sock;
-    replBuffer = "";
-
-    sock.connect(REPL_PORT, REPL_HOST, () => {
-      replConnected = true;
-      resolve();
-    });
-
-    sock.on("data", (chunk) => {
-      replBuffer += chunk.toString();
-      const lines = replBuffer.split("\n");
-      replBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const parsed: ReplResponse = JSON.parse(line);
-          handleReplMessage(parsed);
-        } catch {
-          // skip unparseable lines
-        }
-      }
-    });
-
-    sock.on("end", () => {
-      replConnected = false;
-      replSocket = undefined;
-      for (const [id, pending] of pendingEvals) {
-        clearTimeout(pending.timer);
-        pending.resolve(pending.messages);
-      }
-      pendingEvals.clear();
-    });
-
-    sock.on("error", (err) => {
-      replConnected = false;
-      replSocket = undefined;
-      for (const [id, pending] of pendingEvals) {
-        clearTimeout(pending.timer);
-        pending.resolve([...pending.messages, { err: err.message, status: ["error"] }]);
-      }
-      pendingEvals.clear();
-      reject(err);
-    });
-  });
-}
-
-function handleReplMessage(msg: ReplResponse) {
-  const id = msg.id as string | undefined;
-  if (!id) return;
-  const pending = pendingEvals.get(id);
-  if (!pending) return;
-
-  pending.messages.push(msg);
-  if (msg.status?.includes("done") || msg.status?.includes("error")) {
-    clearTimeout(pending.timer);
-    pendingEvals.delete(id);
-    pending.resolve(pending.messages);
-  }
-}
-
-// Low-level request: resolves with the raw nREPL message stream. Callers that
-// want a human-readable string use replRequest(); callers that want structured
-// data (introspectJson) read the messages directly.
-async function replSend(op: string, extra: Record<string, string> = {}): Promise<ReplResponse[]> {
-  if (!replConnected) {
-    try {
-      await connectRepl();
-    } catch (err: any) {
-      let msg = `Connection failed: ${err.message}`;
-      if (lastCrash) {
-        msg += `\n\n${formatCrashInfo(lastCrash)}`;
-      }
-      return [{ err: msg, status: ["error"] }];
-    }
-  }
-
-  const id = String(++reqCounter);
-  const msg = JSON.stringify({ op, id, ...extra }) + "\n";
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      const pending = pendingEvals.get(id);
-      pendingEvals.delete(id);
-      resolve([...(pending?.messages ?? []), { err: "Timed out after 30s", status: ["error"] }]);
-    }, 30_000);
-
-    pendingEvals.set(id, { messages: [], resolve, timer });
-    replSocket!.write(msg);
-  });
-}
-
-async function replRequest(op: string, extra: Record<string, string> = {}): Promise<string> {
-  return formatReplResponse(await replSend(op, extra));
-}
-
-function formatReplResponse(messages: ReplResponse[]): string {
-  // Combine the nREPL-style streaming messages into a single readable result
-  const parts: string[] = [];
-  let value: string | undefined;
-  let resumable = false;
-  let suspendDepth: number | undefined;
-
-  for (const msg of messages) {
-    if (msg.out) parts.push(msg.out);
-    if (msg.err) parts.push(`[stderr] ${msg.err}`);
-    if (msg.ex) parts.push(`[error] ${msg.ex}`);
-    if (msg.value !== undefined) value = msg.value;
-    if (msg.status?.includes("resumable")) resumable = true;
-    if (msg["suspend-depth"] !== undefined) suspendDepth = msg["suspend-depth"];
-    // Main-thread status fields
-    if ((msg as any)["main-thread"] === "suspended") {
-      parts.push(`[main-thread SUSPENDED] ${(msg as any).error ?? "unknown error"}`);
-      parts.push(`\nUse beagle_eval to fix the broken function, then beagle_main_resume to continue.`);
-    } else if ((msg as any)["main-thread"] === "running") {
-      parts.push(`[main-thread running]`);
-    }
-  }
-
-  const output = parts.join("");
-  let result: string;
-  if (output && value !== undefined) {
-    result = `${output}\n=> ${value}`;
-  } else if (value !== undefined) {
-    result = `=> ${value}`;
-  } else if (output) {
-    result = output;
-  } else {
-    // Fallback: return the raw messages as JSON
-    result = JSON.stringify(messages, null, 2);
-  }
-
-  if (resumable) {
-    result += `\n\n⚠️ RESUMABLE EXCEPTION (suspend-depth: ${suspendDepth ?? "unknown"})`;
-    result += `\nThe evaluation is suspended — the program is waiting for you to provide a value.`;
-    result += `\nUse beagle_resume to supply a replacement value, or beagle_abort to abandon.`;
-  }
-
-  return result;
-}
-
 // ---------------------------------------------------------------------------
 // Session → namespace tracking
 // ---------------------------------------------------------------------------
@@ -394,38 +188,8 @@ function formatReplResponse(messages: ReplResponse[]): string {
 
 const sessionNamespaces = new Map<string, string>();
 
-function extractNamespaceFromText(text: string): string | undefined {
-  const match = text.match(/^\s*namespace\s+(\S+)/m);
-  return match ? match[1] : undefined;
-}
-
 function trackSessionNamespace(session: string, ns: string | undefined) {
   if (ns) sessionNamespaces.set(session, ns);
-}
-
-// ---------------------------------------------------------------------------
-// Beagle string literal escape (for embedding arbitrary text in a Beagle call)
-// ---------------------------------------------------------------------------
-
-function beagleStringEscape(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
-}
-
-function isErrorResponse(result: string): boolean {
-  return result.includes("[error]") || result.includes("[stderr]");
-}
-
-function extractErrorText(result: string): string | null {
-  const errMatch = result.match(/\[error\]\s*(.+)/);
-  if (errMatch) return errMatch[1].trim();
-  const stderrMatch = result.match(/\[stderr\]\s*(.+)/);
-  if (stderrMatch) return stderrMatch[1].trim();
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -501,52 +265,46 @@ function formatCrashInfo(crash: ProcessCrashInfo): string {
   return parts.join("\n");
 }
 
+// Tailor the shared REPL core to the agent: keep the default agent-tool wording
+// for suspension hints, and append this server's last crash info to any
+// connection-failed message (the core has no notion of our beag child).
+configureRepl({
+  hints: {
+    mainSuspended:
+      `\n\nThe main thread (game loop / GUI) threw and is PAUSED at the throw site — the process is alive.` +
+      `\nThis is recoverable. Before doing anything, understand the cause: read the error's kind, message,` +
+      ` and location above. A "TypeError ... mix integers and floats" whose real cause is a null operand` +
+      ` usually means you read a field that does not exist on a value that is still live in the program` +
+      ` (a STALE struct instance — see below).` +
+      `\n\nThe live data, not your code, is often what's wrong. Changing a struct's shape does NOT migrate` +
+      ` instances already alive in the running program: their new fields read as null (or their declared` +
+      ` default). So a freshly-constructed value will look fine while the one inside the live world crashes.` +
+      `\n\nTo recover, pick the right tool for the cause:` +
+      `\n  • Fix the DATA: if state lives in an atom (e.g. a world atom), swap! a migrated value into it,` +
+      ` then beagle_main_resume.` +
+      `\n  • Resume PAST one bad call: beagle_main_resume("<expr>") evaluates <expr> and uses it as the` +
+      ` return value of the throwing expression, so the paused frame continues. Supply the value the failed` +
+      ` op should have produced (e.g. a float). Note this only steps past THIS one throw; if the underlying` +
+      ` data is still wrong the next frame re-throws — fix the data instead.` +
+      `\n  • If the FUNCTION is genuinely buggy: beagle_persist the corrected fn, then beagle_main_resume.` +
+      ` But remember the paused frame runs the OLD code — your new fn only takes effect on the NEXT call,` +
+      ` so for an in-frame crash you usually also need to resume with a value or fix the data.` +
+      `\n  • Give up on this frame: beagle_main_abort.` +
+      `\n\nFIRST inspect the ACTUAL live operands (e.g. eval the real world.player.stamina), never a value you` +
+      ` just constructed. If you can't see the cause, say so and ask — do not thrash by editing functions blindly.`,
+    resumable:
+      `\nThe evaluation is suspended at the throw site — the program waits for a value.` +
+      `\nbeagle_resume("<expr>") evaluates <expr> and makes it the return value of the throwing expression,` +
+      ` so execution continues past the failure. Supply what the failed op should have produced.` +
+      `\nWhile suspended you can beagle_eval to inspect the exact state at the failure point first.` +
+      `\nbeagle_abort abandons the suspended evaluation.`,
+  },
+  onConnectError: () => (lastCrash ? formatCrashInfo(lastCrash) : undefined),
+});
+
 // ---------------------------------------------------------------------------
 // MCP Tools
 // ---------------------------------------------------------------------------
-
-// Actively probe the REPL by trying to connect (if needed) and round-trip a
-// describe op. Returns "connected" if the round-trip succeeds, otherwise an
-// error string explaining why. This is what beagle_status uses, because the
-// cached `replConnected` flag lags reality: after beagle_run, the initial
-// connect can fail silently (server still booting, early connection kicked),
-// leaving replConnected=false even though the next eval would reconnect fine.
-// Returns null on success, or a string describing why the probe failed.
-async function probeReplConnection(): Promise<string | null> {
-  if (!replConnected) {
-    try {
-      await connectRepl();
-    } catch (err: any) {
-      return `connect failed: ${err.message ?? err}`;
-    }
-  }
-
-  const id = String(++reqCounter);
-  const msg = JSON.stringify({ op: "describe", id }) + "\n";
-
-  return new Promise<string | null>((resolve) => {
-    const timer = setTimeout(() => {
-      pendingEvals.delete(id);
-      resolve("describe round-trip timed out after 2s");
-    }, 2_000);
-
-    pendingEvals.set(id, {
-      messages: [],
-      resolve: () => {
-        clearTimeout(timer);
-        resolve(null);
-      },
-      timer,
-    });
-    try {
-      replSocket!.write(msg);
-    } catch (err: any) {
-      clearTimeout(timer);
-      pendingEvals.delete(id);
-      resolve(`write failed: ${err.message ?? err}`);
-    }
-  });
-}
 
 const beagleStatus = tool(
   "beagle_status",
@@ -820,74 +578,11 @@ const beagleLoad = tool(
 );
 
 // ---------------------------------------------------------------------------
-// Introspection tools — structured wrappers around beagle.reflect
+// Introspection tools — thin wrappers around the reflect* ops in
+// beagle_repl_core (which own the beagle.reflect code strings).
 // ---------------------------------------------------------------------------
 
-const INTROSPECT_SESSION = "introspect";
-
-// Every reflection / persist eval runs through the helpers below. They prefix
-// `use beagle.reflect as reflect` so the alias is (re)established in whatever
-// namespace happens to be current at compile time. REPL sessions share ONE
-// global current-namespace, so a `beagle_load` — or any `namespace X` eval in
-// any session — can otherwise strand the alias and make the very next reflect
-// call fail with "Namespace alias not found: reflect". The import and the call
-// that uses it are compiled together, so the alias is always in scope.
-const REFLECT_PRELUDE = "use beagle.reflect as reflect\n";
-
-// A failed reflection/persist eval (e.g. a drift error) throws, and the session
-// machinery turns an uncaught throw into a *resumable suspension*. Left alone,
-// each retry stacks another suspension and the introspect session's
-// suspend-depth climbs without bound (the runaway "suspend-depth: 14" seen in
-// the wild). Abort the suspension so the session returns to a clean state for
-// the next call — a reflection failure is "fix and retry", never "resume".
-async function abortIfSuspended(messages: ReplResponse[]): Promise<void> {
-  if (messages.some((m) => m.status?.includes("resumable"))) {
-    await replSend("abort", { session: INTROSPECT_SESSION });
-  }
-}
-
-// Run reflection code in the introspect session with the reflect prelude, then
-// clear any suspension it left behind. Returns the raw message stream.
-async function introspectSend(code: string): Promise<ReplResponse[]> {
-  const messages = await replSend("eval", {
-    code: REFLECT_PRELUDE + code,
-    session: INTROSPECT_SESSION,
-  });
-  await abortIfSuspended(messages);
-  return messages;
-}
-
-async function introspectEval(code: string): Promise<string> {
-  return formatReplResponse(await introspectSend(code));
-}
-
-// Thrown by introspectJson when the reflection eval raises a (resumable)
-// exception or otherwise returns no value. The suspension is already aborted by
-// introspectSend — we just surface the error text.
-class IntrospectError extends Error {}
-
-// Evaluate `code` in the introspect session wrapped in json-encode and return
-// the parsed result. Reflection functions already return structured maps and
-// vectors, so this hands the data to TypeScript intact rather than formatting
-// it inside Beagle.
-async function introspectJson<T = unknown>(code: string): Promise<T> {
-  const messages = await introspectSend(`json-encode(${code})`);
-
-  // Surface Beagle-side errors (unknown namespace, undefined reference, ...).
-  const exMsg = messages.find((m) => m.ex !== undefined)?.ex;
-  if (exMsg !== undefined) throw new IntrospectError(String(exMsg));
-  const errMsg = messages.find((m) => m.err !== undefined)?.err;
-  if (errMsg !== undefined) throw new IntrospectError(String(errMsg));
-
-  const valueMsg = [...messages].reverse().find((m) => m.value !== undefined);
-  if (valueMsg?.value === undefined) {
-    throw new IntrospectError("Reflection eval returned no value");
-  }
-  return JSON.parse(valueMsg.value as string) as T;
-}
-
-// Wrap a tool body that uses introspectJson, turning IntrospectErrors into a
-// clean text response instead of crashing the agent loop.
+// Wrap a reflect* result (or a caught error) as a tool response.
 function introspectResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
@@ -898,7 +593,7 @@ const beagleListNamespaces = tool(
   {},
   async () => {
     try {
-      const namespaces = await introspectJson<string[]>("reflect/all-namespaces()");
+      const namespaces = await reflectAllNamespaces();
       namespaces.sort();
       return introspectResult(namespaces.join("\n"));
     } catch (err: any) {
@@ -907,55 +602,6 @@ const beagleListNamespaces = tool(
   }
 );
 
-// Shapes returned by beagle.reflect, JSON-encoded. Note the function flag key
-// is `variadic?` (with the question mark) — the runtime interns it that way.
-interface ReflectFn { name: string; doc?: string | null; args?: string[] | null; "variadic?"?: boolean }
-interface ReflectStruct { name: string; doc?: string | null; fields?: string[] | null }
-interface ReflectEnum { name: string; doc?: string | null; variants?: string[] | null }
-interface ReflectNsInfo {
-  name?: string;
-  functions?: ReflectFn[] | null;
-  structs?: ReflectStruct[] | null;
-  enums?: ReflectEnum[] | null;
-}
-
-function formatNamespaceInfo(ns: string, info: ReflectNsInfo): string {
-  const lines: string[] = [`Namespace: ${ns}`];
-
-  const fns = info.functions ?? [];
-  if (fns.length > 0) {
-    lines.push(`\nFunctions (${fns.length}):`);
-    for (const f of [...fns].sort((a, b) => a.name.localeCompare(b.name))) {
-      const params = (f.args ?? []).join(", ");
-      const variadic = f["variadic?"] ? "..." : "";
-      let sig = `  ${f.name}(${params}${variadic})`;
-      if (f.doc) sig += ` — ${f.doc}`;
-      lines.push(sig);
-    }
-  }
-
-  const structs = info.structs ?? [];
-  if (structs.length > 0) {
-    lines.push(`\nStructs (${structs.length}):`);
-    for (const s of [...structs].sort((a, b) => a.name.localeCompare(b.name))) {
-      const fields = s.fields && s.fields.length > 0 ? ` { ${s.fields.join(", ")} }` : "";
-      lines.push(`  ${s.name}${fields}`);
-    }
-  }
-
-  const enums = info.enums ?? [];
-  if (enums.length > 0) {
-    lines.push(`\nEnums (${enums.length}):`);
-    for (const e of [...enums].sort((a, b) => a.name.localeCompare(b.name))) {
-      const variants = e.variants && e.variants.length > 0 ? ` { ${e.variants.join(" | ")} }` : "";
-      lines.push(`  ${e.name}${variants}`);
-    }
-  }
-
-  if (lines.length === 1) lines.push("(no functions, structs, or enums)");
-  return lines.join("\n");
-}
-
 const beagleNamespaceInfo = tool(
   "beagle_namespace_info",
   "Get detailed info about a namespace: its functions (with args and docs), structs, and enums. " +
@@ -963,9 +609,7 @@ const beagleNamespaceInfo = tool(
   { namespace: z.string().describe("Namespace name, e.g. \"beagle.core\"") },
   async (args) => {
     try {
-      const info = await introspectJson<ReflectNsInfo>(
-        `reflect/namespace-info("${beagleStringEscape(args.namespace)}")`,
-      );
+      const info = await reflectNamespaceInfo(args.namespace);
       return introspectResult(formatNamespaceInfo(args.namespace, info));
     } catch (err: any) {
       return introspectResult(`Error inspecting namespace "${args.namespace}": ${err.message}`);
@@ -979,9 +623,7 @@ const beagleSearch = tool(
   { query: z.string().describe("Search term to match against function names and docstrings") },
   async (args) => {
     try {
-      const matches = await introspectJson<string[]>(
-        `reflect/apropos("${beagleStringEscape(args.query)}")`,
-      );
+      const matches = await reflectApropos(args.query);
       matches.sort();
       return introspectResult(
         matches.length > 0 ? matches.join("\n") : `No matches for "${args.query}"`,
@@ -992,16 +634,6 @@ const beagleSearch = tool(
   }
 );
 
-interface ReflectInfo {
-  name?: string;
-  kind?: string;
-  doc?: string | null;
-  args?: string[] | null;
-  "variadic?"?: boolean;
-  fields?: string[] | null;
-  variants?: string[] | null;
-}
-
 const beagleDoc = tool(
   "beagle_doc",
   "Get the documentation, arguments, and type info for a specific function or value. " +
@@ -1011,7 +643,7 @@ const beagleDoc = tool(
     try {
       // `name` is a Beagle reference (resolved in the introspect session), not
       // a string literal — reflect/info takes the value directly.
-      const info = await introspectJson<ReflectInfo>(`reflect/info(${args.name})`);
+      const info = await reflectInfo(args.name);
       const lines: string[] = [`Name: ${info.name ?? args.name}`];
       if (info.kind) lines.push(`Kind: ${info.kind}`);
       if (info.doc) lines.push(`Doc: ${info.doc}`);
@@ -1041,9 +673,7 @@ const beagleSource = tool(
       // resolve_by_name (which handles "ns/name" forms), so it works without
       // the target's namespace being imported as an alias in the introspect
       // session — more robust than evaluating it as a bare reference.
-      const source = await introspectJson<string | null>(
-        `reflect/source("${beagleStringEscape(args.name)}")`,
-      );
+      const source = await reflectSource(args.name);
       return introspectResult(
         source ?? `No stored source for "${args.name}" (REPL/eval def, builtin, or FFI).`,
       );
@@ -1061,9 +691,7 @@ const beagleNamespaceSource = tool(
   { namespace: z.string().describe("Namespace name, e.g. 'my.module'") },
   async (args) => {
     try {
-      const source = await introspectJson<string | null>(
-        `reflect/namespace-source("${beagleStringEscape(args.namespace)}")`,
-      );
+      const source = await reflectNamespaceSource(args.namespace);
       return introspectResult(
         source ?? `No stored source for namespace "${args.namespace}".`,
       );
@@ -1084,9 +712,7 @@ const beagleLocation = tool(
     try {
       // String literal → resolved via resolve_by_name (handles "ns/name"),
       // so no alias for the target namespace is required. See beagle_source.
-      const loc = await introspectJson<Record<string, unknown> | null>(
-        `reflect/location("${beagleStringEscape(args.name)}")`,
-      );
+      const loc = await reflectLocation(args.name);
       return introspectResult(
         loc ? JSON.stringify(loc, null, 2) : `No location for "${args.name}" (REPL/builtin/FFI).`,
       );
@@ -1143,8 +769,7 @@ const beaglePersist = tool(
     }
     trackSessionNamespace(session, ns);
 
-    const code = `reflect/persist("${beagleStringEscape(ns)}", "${beagleStringEscape(args.text)}")`;
-    const result = await introspectEval(code);
+    const result = await reflectPersist(ns, args.text);
 
     const persisted = parsePersistedList(result);
     const err = isErrorResponse(result) ? extractErrorText(result) : null;
@@ -1383,22 +1008,61 @@ beagle_resume("compute_fallback(default_input)")
 - This is powerful for interactive debugging: when something goes wrong, you can \
   inspect the exact state at the failure point and provide a fix value without \
   restarting the computation.
+- **resume supplies a VALUE, not a fix.** \`beagle_resume("<expr>")\` evaluates \
+  \`<expr>\` and substitutes its result *as the return value of the throwing \
+  expression*, then continues. So you supply what the failed operation should have \
+  produced (e.g. a float for a failed multiply). It does NOT re-run the expression \
+  with corrected code.
+
+## The live-coding mental model (read before recovering from ANY crash)
+
+You are editing a **running program that holds live data**. The single most common \
+mistake is treating a crash as "a function is broken" when really **the live data is \
+the wrong shape**. Internalize this:
+
+- **Changing a struct's fields does NOT migrate instances already alive in the \
+  program.** If you add a field to \`Player\`, every \`Player\` already sitting in the \
+  running world keeps its old shape. Reading the new field off a stale instance yields \
+  **null** (or the field's declared default if it has one) — it does not error at the \
+  read.
+- That null then blows up *somewhere else*, often as a misleading \
+  \`TypeError: ... mix integers and floats\` (a null operand in arithmetic), pointing \
+  far from the real cause. **A null operand in arithmetic almost always means a \
+  stale-instance field read.**
+- A value you construct fresh in beagle_eval will have the new shape and look fine. \
+  **That proves nothing.** Always inspect the *actual live value* that crashed (e.g. \
+  \`world.player.stamina\`), never a stand-in you just built.
 
 ## Main-thread crash recovery
 
 When running a GUI program (e.g. raylib game) with beagle_run, the main thread runs \
-the game loop while the REPL server runs on a background thread. If you redefine a \
-function with a bug and the game loop calls it, the **main thread crashes** — but \
-instead of killing the process, it suspends and waits for REPL recovery.
+the game loop while the REPL server runs on a background thread. If a function the \
+loop calls throws, the **main thread suspends at the throw site** instead of killing \
+the process, and waits for REPL recovery.
 
-### Workflow
+### Workflow — diagnose the CAUSE, then pick the matching fix
 
-1. You redefine a function via beagle_persist — it has a bug.
-2. The game loop calls the broken function and throws an error.
-3. The main thread suspends. Use **beagle_main_status** to see the error.
-4. Fix the function with **beagle_persist** (same def, corrected body).
-5. Use **beagle_main_resume** to continue the game loop from where it crashed.
-6. Or use **beagle_main_abort** if you want to give up and restart with beagle_run.
+1. **Read the error** (beagle_main_status): kind, message, location. Form a hypothesis \
+   about the *cause* before touching anything.
+2. **Inspect the real live operands** with beagle_eval — the actual values that \
+   crashed, not freshly-built ones. If a field reads null on a live instance, this is a \
+   **stale-data** problem, not a code problem.
+3. **Fix the right thing:**
+   - **Stale data with state in an atom** (e.g. a world atom): \`swap!\` a migrated \
+     value into the atom, then **beagle_main_resume**. This is the clean fix for a \
+     struct-shape change.
+   - **Step past one bad call:** **beagle_main_resume("<value>")** supplies the result \
+     the failed op should have produced and continues the paused frame. Good for a \
+     one-off; but if the underlying data is still wrong the next frame re-throws — \
+     prefer fixing the data.
+   - **Genuinely buggy function:** beagle_persist the corrected def, then \
+     beagle_main_resume. Caveat: **the paused frame is still running the OLD code** — \
+     your new def only applies to the *next* call. For an in-frame crash you typically \
+     also resume-with-a-value (or fix the data) so the current frame can complete.
+   - **Give up on this frame:** **beagle_main_abort** (then beagle_run to restart).
+4. **If you can't see the cause, STOP and say so.** Do not edit functions blindly \
+   hoping one sticks — that thrashing is the exact failure mode to avoid. Report what \
+   you observe and ask.
 
 **Important**: The REPL server stays alive during a main-thread crash. You can still \
 eval code, persist fixes, and inspect state. The main thread is just paused waiting \

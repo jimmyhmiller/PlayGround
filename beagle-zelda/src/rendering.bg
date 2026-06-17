@@ -297,7 +297,7 @@ fn draw_shadow_geometry(world) {
             j = j + 1
         }
 
-        let sorted = sort-by(hits, fn(h) { h.angle })
+        let sorted = sort-by(fn(h) { h.angle }, hits)
 
         // Emit quads between each adjacent pair of hits.
         let n = length(sorted)
@@ -543,9 +543,9 @@ fn ysort_drawables(world) {
     let p = world.player
     items = push(items, Drawable.Player { ground_y: p.pos.y - p.half.y })
 
-    // Descending by ground_y — things farther south draw after things north of
-    // them. Stable Timsort from the stdlib; O(n log n) on n≈500 walls+entities.
-    sort-with(items, fn(a, b) { drawable_ground_y(a) > drawable_ground_y(b) })
+    // Descending by ground_y u014 things farther south draw after things north of
+    // them. Stable Timsort from the stdlib; O(n log n) on nu248500 walls+entities.
+    sort-with(fn(a, b) { drawable_ground_y(a) > drawable_ground_y(b) }, items)
 }
 
 fn draw_scene_ysorted(world) {
