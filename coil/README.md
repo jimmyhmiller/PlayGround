@@ -54,6 +54,10 @@ whose region is part of their type), and the higher-level surface is grown with
   with a foreign `c` region (so `(ptr c (ptr c i8))` is `char**`), pointer
   indexing `(index p i)`, and width `(cast :iN e)`. `main` may take
   `(argc :i32) (argv (ptr c (ptr c i8)))`, so programs read their command line.
+- Structs & arrays: `(defstruct Name [(field :type) ...])` and `(array T N)`.
+  A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
+  then `load`/`store!`. Structs nest by value (or self-reference by pointer);
+  allocate any type with `(alloc REGION TYPE)`.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
 closures derived from (convention × allocation) (M4), richer pointee types, a
@@ -83,10 +87,10 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 36 tests (build + run native exes)
+cargo test                                     # 44 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
-cargo run -- build examples/shim.coil -o /tmp/shim && /tmp/shim; echo $?   # => 42
+cargo run -- run   examples/structs.coil; echo $?                          # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
 cargo run -- run   examples/extern.coil                                    # prints 12345
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv

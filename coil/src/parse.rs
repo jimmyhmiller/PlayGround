@@ -11,6 +11,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     conventions.insert("c".to_string(), Convention::default_c());
     let mut funcs = Vec::new();
     let mut externs = Vec::new();
+    let mut structs = Vec::new();
 
     for form in forms {
         let items = as_list(form, "top-level form must be a list")?;
@@ -22,6 +23,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
                     return Err(format!("convention '{}' defined twice", c.name));
                 }
             }
+            "defstruct" => structs.push(parse_defstruct(&items[1..])?),
             "defn" => {
                 let f = parse_defn(&items[1..])?;
                 if funcs.iter().any(|g: &Func| g.name == f.name) {
@@ -36,9 +38,26 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
 
     Ok(Program {
         conventions,
+        structs,
         externs,
         funcs,
     })
+}
+
+fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
+    let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
+    let fields_v = match rest.get(1) {
+        Some(Sexp::Vector(v)) => v,
+        _ => return Err(format!("defstruct '{name}': expected a field vector")),
+    };
+    let mut fields = Vec::new();
+    for f in fields_v {
+        let fl = as_list(f, "field must be (name :type)")?;
+        let fname = sym(&fl[0], "field name")?;
+        let fty = parse_type(fl.get(1).ok_or("field missing type")?)?;
+        fields.push((fname, fty));
+    }
+    Ok(StructDef { name, fields })
 }
 
 fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
@@ -201,21 +220,39 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
 
 fn parse_type(s: &Sexp) -> Result<Type, String> {
     match s {
-        // Int type names accepted as `:i32` (keyword) or `i32` (bare symbol, so
-        // nested pointee types like `(ptr c i8)` read naturally).
-        Sexp::Keyword(k) | Sexp::Sym(k) => int_type(k),
-        // (ptr REGION) -> pointee defaults to i64; (ptr REGION TYPE) for others.
-        Sexp::List(items) if head_sym(items).ok().as_deref() == Some("ptr") => {
-            let r = sym(items.get(1).ok_or("ptr type: missing region")?, "region")?;
-            let region = Region::parse(&r)
-                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap|c)"))?;
-            let pointee = match items.get(2) {
-                Some(t) => parse_type(t)?,
-                None => Type::Int(64),
-            };
-            Ok(Type::Ptr(region, Box::new(pointee)))
-        }
-        other => Err(format!("unsupported type: {other:?} (:iN or (ptr REGION [TYPE]))")),
+        // `:i32` (keyword) must be an int. A bare symbol is an int name, or
+        // otherwise a struct name (so `(ptr c i8)` and `Point` both read well).
+        Sexp::Keyword(k) => int_type(k),
+        Sexp::Sym(k) => Ok(int_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
+        Sexp::List(items) => match head_sym(items)?.as_str() {
+            // (ptr REGION) -> pointee defaults to i64; (ptr REGION TYPE) otherwise.
+            "ptr" => {
+                let r = sym(items.get(1).ok_or("ptr type: missing region")?, "region")?;
+                let region = Region::parse(&r)
+                    .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap|c)"))?;
+                let pointee = match items.get(2) {
+                    Some(t) => parse_type(t)?,
+                    None => Type::Int(64),
+                };
+                Ok(Type::Ptr(region, Box::new(pointee)))
+            }
+            // (array TYPE N)
+            "array" => {
+                let elem = parse_type(items.get(1).ok_or("array type: missing element type")?)?;
+                let n = match items.get(2) {
+                    Some(Sexp::Int(n)) if *n > 0 => *n as u32,
+                    _ => return Err("array type: expected a positive length".to_string()),
+                };
+                Ok(Type::Array(Box::new(elem), n))
+            }
+            // (struct Name) — explicit form; bare `Name` also works.
+            "struct" => {
+                let n = sym(items.get(1).ok_or("struct type: missing name")?, "struct name")?;
+                Ok(Type::Struct(n))
+            }
+            other => Err(format!("unsupported type form '{other}'")),
+        },
+        other => Err(format!("unsupported type: {other:?}")),
     }
 }
 
@@ -225,7 +262,7 @@ fn int_type(name: &str) -> Result<Type, String> {
         "i16" => Ok(Type::Int(16)),
         "i32" => Ok(Type::Int(32)),
         "i64" => Ok(Type::Int(64)),
-        other => Err(format!("unknown type '{other}' (i8|i16|i32|i64)")),
+        other => Err(format!("unknown int type '{other}'")),
     }
 }
 
@@ -318,7 +355,19 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             let r = sym(args.first().ok_or("alloc: missing region")?, "region")?;
             let region = Region::parse(&r)
                 .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap)"))?;
-            Ok(Expr::Alloc { region })
+            let ty = match args.get(1) {
+                Some(t) => parse_type(t)?,
+                None => Type::Int(64),
+            };
+            Ok(Expr::Alloc { region, ty })
+        }
+        "field" => {
+            let p = parse_expr(args.first().ok_or("field: missing pointer")?)?;
+            let name = sym(args.get(1).ok_or("field: missing field name")?, "field name")?;
+            Ok(Expr::Field {
+                ptr: Box::new(p),
+                field: name,
+            })
         }
         "load" => {
             if args.len() != 1 {

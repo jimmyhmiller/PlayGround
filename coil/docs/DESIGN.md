@@ -502,8 +502,13 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   `char**`); pointer indexing `(index p i)` (GEP); width `(cast :iN e)`
   (sext/trunc). `main` may take `(argc :i32) (argv (ptr c (ptr c i8)))`.
   Codegen threads each value's Coil type so loads/indexing use the right width
-  and pointee. `args.coil` reads and echoes its command line. Remaining: structs
-  and arrays, unsigned types, and `alloc` of types other than i64.
+  and pointee. `args.coil` reads and echoes its command line.
+- **Structs & arrays — ✅ done.** `(defstruct Name [(field :type) ...])` and
+  `(array T N)`; `(alloc REGION TYPE)` allocates any type; `(field p name)` and
+  array `(index p i)` produce element pointers (struct/array GEP); structs nest
+  by value (built in definition order) or self-reference by pointer.
+  `structs.coil` → 42. Remaining: unsigned types, struct/array literals, and
+  passing aggregates by value across `:shim`/`extern` boundaries (ABI work).
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
 

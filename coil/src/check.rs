@@ -1,17 +1,11 @@
-//! M3 type + convention + region checks.
+//! Type + convention + region checks (bidirectional, synthesis-only).
 //!
-//! The language now has two types (`i64` and `Ptr(region)`), so this is a real
-//! (if small) bidirectional type checker. On top of typing it enforces:
-//!
-//! * **Convention well-formedness** — a shim convention must name a return
-//!   register and enough argument registers for the function (M1/M2).
-//! * **Region soundness (descriptive-but-checked)** — `frame` pointers may not
-//!   cross a function boundary (no `frame` in any parameter or return type), and
-//!   since pointees are `i64` there is no other way for one to escape. `free`
-//!   only accepts a `heap` pointer. This is the design's deliberate middle path:
-//!   not a full borrow checker, but enough to stop the obvious escapes.
+//! Beyond typing it enforces convention well-formedness (M1/M2) and region
+//! soundness (M3): `frame` pointers may not cross a function boundary, and
+//! `free` only accepts a `heap` pointer. Structs/arrays (this milestone) add
+//! `field`/`index` typing and validation that every named type exists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
@@ -22,11 +16,36 @@ struct Sig {
     is_extern: bool,
 }
 
+/// Everything `synth` needs besides the local variable environment.
+struct Cx {
+    sigs: HashMap<String, Sig>,
+    structs: HashMap<String, Vec<(String, Type)>>,
+}
+
 pub fn check(program: &Program) -> Result<(), String> {
-    let mut sigs: HashMap<&str, Sig> = HashMap::new();
+    // struct table
+    let mut structs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
+    for sd in &program.structs {
+        if structs.insert(sd.name.clone(), sd.fields.clone()).is_some() {
+            return Err(format!("struct '{}' defined twice", sd.name));
+        }
+    }
+    for sd in &program.structs {
+        let mut seen = HashSet::new();
+        for (fname, fty) in &sd.fields {
+            if !seen.insert(fname) {
+                return Err(format!("struct '{}': duplicate field '{fname}'", sd.name));
+            }
+            validate_type(fty, &structs)
+                .map_err(|e| format!("struct '{}' field '{fname}': {e}", sd.name))?;
+        }
+    }
+
+    // signatures (functions + externs)
+    let mut sigs: HashMap<String, Sig> = HashMap::new();
     for f in &program.funcs {
         sigs.insert(
-            f.name.as_str(),
+            f.name.clone(),
             Sig {
                 params: f.params.iter().map(|p| p.ty.clone()).collect(),
                 ret: f.ret.clone(),
@@ -35,10 +54,9 @@ pub fn check(program: &Program) -> Result<(), String> {
         );
     }
     for e in &program.externs {
-        if sigs.contains_key(e.name.as_str()) {
+        if sigs.contains_key(&e.name) {
             return Err(format!("'{}' is declared more than once", e.name));
         }
-        // an extern's convention must exist and be lowerable today (native).
         let conv = program
             .conventions
             .get(&e.cc)
@@ -50,7 +68,7 @@ pub fn check(program: &Program) -> Result<(), String> {
             ));
         }
         sigs.insert(
-            e.name.as_str(),
+            e.name.clone(),
             Sig {
                 params: e.params.clone(),
                 ret: e.ret.clone(),
@@ -58,6 +76,8 @@ pub fn check(program: &Program) -> Result<(), String> {
             },
         );
     }
+
+    let cx = Cx { sigs, structs };
 
     for f in &program.funcs {
         // convention well-formedness
@@ -84,30 +104,32 @@ pub fn check(program: &Program) -> Result<(), String> {
             }
         }
 
-        // region soundness: frame pointers can't cross function boundaries
+        // signature types: valid, and no frame pointers across the boundary
         for p in &f.params {
+            validate_type(&p.ty, &cx.structs)
+                .map_err(|e| format!("function '{}' param '{}': {e}", f.name, p.name))?;
             if is_frame_ptr(&p.ty) {
                 return Err(format!(
-                    "function '{}': parameter '{}' is a frame pointer; frame pointers \
-                     cannot cross function boundaries",
+                    "function '{}': parameter '{}' is a frame pointer; frame pointers cannot \
+                     cross function boundaries",
                     f.name, p.name
                 ));
             }
         }
+        validate_type(&f.ret, &cx.structs)
+            .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
         if is_frame_ptr(&f.ret) {
             return Err(format!(
-                "function '{}': returns a frame pointer; frame pointers cannot escape \
-                 their frame",
+                "function '{}': returns a frame pointer; frame pointers cannot escape their frame",
                 f.name
             ));
         }
 
-        // body must type-check and produce the declared return type
         let mut env: HashMap<String, Type> =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
         let mut last = Type::Int(64);
         for e in &f.body {
-            last = synth(e, &mut env, &sigs, &f.name)?;
+            last = synth(e, &mut env, &cx, &f.name)?;
         }
         if last != f.ret {
             return Err(format!(
@@ -121,10 +143,31 @@ pub fn check(program: &Program) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Result<(), String> {
+    match t {
+        Type::Int(w) => {
+            if matches!(w, 8 | 16 | 32 | 64) {
+                Ok(())
+            } else {
+                Err(format!("unsupported integer width i{w}"))
+            }
+        }
+        Type::Ptr(_, p) => validate_type(p, structs),
+        Type::Array(e, _) => validate_type(e, structs),
+        Type::Struct(name) => {
+            if structs.contains_key(name) {
+                Ok(())
+            } else {
+                Err(format!("unknown struct '{name}'"))
+            }
+        }
+    }
+}
+
 fn synth(
     e: &Expr,
     env: &mut HashMap<String, Type>,
-    sigs: &HashMap<&str, Sig>,
+    cx: &Cx,
     fname: &str,
 ) -> Result<Type, String> {
     match e {
@@ -134,25 +177,25 @@ fn synth(
             .cloned()
             .ok_or_else(|| format!("in '{fname}': unbound variable '{name}'")),
         Expr::Bin { lhs, rhs, .. } => {
-            let lw = int_width(synth(lhs, env, sigs, fname)?, fname, "arithmetic operand")?;
-            let rw = int_width(synth(rhs, env, sigs, fname)?, fname, "arithmetic operand")?;
+            let lw = int_width(synth(lhs, env, cx, fname)?, fname, "arithmetic operand")?;
+            let rw = int_width(synth(rhs, env, cx, fname)?, fname, "arithmetic operand")?;
             if lw != rw {
                 return Err(format!("in '{fname}': arithmetic on mixed widths i{lw} and i{rw}"));
             }
             Ok(Type::Int(lw))
         }
         Expr::Cmp { lhs, rhs, .. } => {
-            let lw = int_width(synth(lhs, env, sigs, fname)?, fname, "comparison operand")?;
-            let rw = int_width(synth(rhs, env, sigs, fname)?, fname, "comparison operand")?;
+            let lw = int_width(synth(lhs, env, cx, fname)?, fname, "comparison operand")?;
+            let rw = int_width(synth(rhs, env, cx, fname)?, fname, "comparison operand")?;
             if lw != rw {
                 return Err(format!("in '{fname}': comparison on mixed widths i{lw} and i{rw}"));
             }
             Ok(Type::Int(64))
         }
         Expr::If { cond, then, els } => {
-            int_width(synth(cond, env, sigs, fname)?, fname, "if condition")?;
-            let t = synth(then, env, sigs, fname)?;
-            let e = synth(els, env, sigs, fname)?;
+            int_width(synth(cond, env, cx, fname)?, fname, "if condition")?;
+            let t = synth(then, env, cx, fname)?;
+            let e = synth(els, env, cx, fname)?;
             if t != e {
                 return Err(format!(
                     "in '{fname}': if branches have different types ({} vs {})",
@@ -165,26 +208,27 @@ fn synth(
         Expr::Do(es) => {
             let mut last = Type::Int(64);
             for e in es {
-                last = synth(e, env, sigs, fname)?;
+                last = synth(e, env, cx, fname)?;
             }
             Ok(last)
         }
         Expr::Let { binds, body } => {
             let saved = env.clone();
             for (name, val) in binds {
-                let t = synth(val, env, sigs, fname)?;
+                let t = synth(val, env, cx, fname)?;
                 env.insert(name.clone(), t);
             }
             let mut last = Type::Int(64);
             for e in body {
-                last = synth(e, env, sigs, fname)?;
+                last = synth(e, env, cx, fname)?;
             }
             *env = saved; // bindings are lexical
             Ok(last)
         }
         Expr::Call { func, args } => {
-            let sig = sigs
-                .get(func.as_str())
+            let sig = cx
+                .sigs
+                .get(func)
                 .ok_or_else(|| format!("in '{fname}': call to undefined function '{func}'"))?;
             if sig.params.len() != args.len() {
                 return Err(format!(
@@ -194,7 +238,7 @@ fn synth(
                 ));
             }
             for (i, a) in args.iter().enumerate() {
-                let at = synth(a, env, sigs, fname)?;
+                let at = synth(a, env, cx, fname)?;
                 if !arg_ok(&at, &sig.params[i], sig.is_extern) {
                     return Err(format!(
                         "in '{fname}': argument {} to '{func}' has type {} but expected {}",
@@ -206,17 +250,47 @@ fn synth(
             }
             Ok(sig.ret.clone())
         }
-        Expr::Alloc { region } => Ok(Type::Ptr(*region, Box::new(Type::Int(64)))),
-        Expr::Load(p) => match synth(p, env, sigs, fname)? {
+        Expr::Alloc { region, ty } => {
+            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
+            if *region == Region::C {
+                return Err(format!("in '{fname}': cannot allocate in the c (foreign) region"));
+            }
+            Ok(Type::Ptr(*region, Box::new(ty.clone())))
+        }
+        Expr::Field { ptr, field } => match synth(ptr, env, cx, fname)? {
+            Type::Ptr(r, pointee) => match *pointee {
+                Type::Struct(s) => {
+                    let fields = cx
+                        .structs
+                        .get(&s)
+                        .ok_or_else(|| format!("in '{fname}': unknown struct '{s}'"))?;
+                    let fty = fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| format!("in '{fname}': struct '{s}' has no field '{field}'"))?;
+                    Ok(Type::Ptr(r, Box::new(fty)))
+                }
+                other => Err(format!(
+                    "in '{fname}': field access needs a pointer to a struct, got (ptr _ {})",
+                    ty_str(&other)
+                )),
+            },
+            other => Err(format!(
+                "in '{fname}': field access needs a pointer, got {}",
+                ty_str(&other)
+            )),
+        },
+        Expr::Load(p) => match synth(p, env, cx, fname)? {
             Type::Ptr(_, pointee) => Ok(*pointee),
             other => Err(format!(
                 "in '{fname}': load expects a pointer, got {}",
                 ty_str(&other)
             )),
         },
-        Expr::Store { ptr, val } => match synth(ptr, env, sigs, fname)? {
+        Expr::Store { ptr, val } => match synth(ptr, env, cx, fname)? {
             Type::Ptr(_, pointee) => {
-                let vt = synth(val, env, sigs, fname)?;
+                let vt = synth(val, env, cx, fname)?;
                 if vt != *pointee {
                     return Err(format!(
                         "in '{fname}': store! of {} through a pointer to {}",
@@ -232,13 +306,18 @@ fn synth(
             )),
         },
         Expr::Index { ptr, idx } => {
-            let pt = synth(ptr, env, sigs, fname)?;
-            let it = synth(idx, env, sigs, fname)?;
+            let pt = synth(ptr, env, cx, fname)?;
+            let it = synth(idx, env, cx, fname)?;
             if it != Type::Int(64) {
                 return Err(format!("in '{fname}': index must be i64, got {}", ty_str(&it)));
             }
             match pt {
-                Type::Ptr(r, pointee) => Ok(Type::Ptr(r, pointee)),
+                // pointer to an array: element access, `Ptr(R, elem)`.
+                Type::Ptr(r, pointee) => match *pointee {
+                    Type::Array(elem, _) => Ok(Type::Ptr(r, elem)),
+                    // pointer to a scalar/struct: pointer arithmetic, type unchanged.
+                    p => Ok(Type::Ptr(r, Box::new(p))),
+                },
                 other => Err(format!(
                     "in '{fname}': index expects a pointer, got {}",
                     ty_str(&other)
@@ -247,10 +326,10 @@ fn synth(
         }
         Expr::Cast { ty, expr } => {
             int_width(ty.clone(), fname, "cast target")?;
-            int_width(synth(expr, env, sigs, fname)?, fname, "cast operand")?;
+            int_width(synth(expr, env, cx, fname)?, fname, "cast operand")?;
             Ok(ty.clone())
         }
-        Expr::Free(p) => match synth(p, env, sigs, fname)? {
+        Expr::Free(p) => match synth(p, env, cx, fname)? {
             Type::Ptr(Region::Heap, _) => Ok(Type::Int(64)),
             Type::Ptr(r, _) => Err(format!(
                 "in '{fname}': cannot free a {} pointer (only heap pointers are freed)",
@@ -292,5 +371,7 @@ fn ty_str(t: &Type) -> String {
     match t {
         Type::Int(w) => format!("i{w}"),
         Type::Ptr(r, pointee) => format!("(ptr {} {})", r.name(), ty_str(pointee)),
+        Type::Struct(name) => name.clone(),
+        Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
     }
 }

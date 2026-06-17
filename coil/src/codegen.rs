@@ -15,7 +15,7 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FunctionType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
 use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate};
 
@@ -34,12 +34,18 @@ struct ShimInfo<'ctx> {
     clobber: Vec<String>,
 }
 
+struct StructInfo<'ctx> {
+    fields: Vec<(String, Type)>,
+    ty: StructType<'ctx>,
+}
+
 struct Cg<'ctx> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     funcs: HashMap<String, FunctionValue<'ctx>>,
     shims: HashMap<String, ShimInfo<'ctx>>,
+    structs: HashMap<String, StructInfo<'ctx>>,
     /// Coil return type of every callable (function/extern), for typing calls.
     rets: HashMap<String, Type>,
     globals: Cell<u32>,
@@ -52,9 +58,24 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         builder: ctx.create_builder(),
         funcs: HashMap::new(),
         shims: HashMap::new(),
+        structs: HashMap::new(),
         rets: HashMap::new(),
         globals: Cell::new(0),
     };
+
+    // 0. build struct types, in definition order (by-value fields must refer to
+    //    earlier structs; self/forward references via pointers are fine).
+    for sd in &program.structs {
+        let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
+        let ty = ctx.struct_type(&field_types, false);
+        cg.structs.insert(
+            sd.name.clone(),
+            StructInfo {
+                fields: sd.fields.clone(),
+                ty,
+            },
+        );
+    }
 
     // 1a. declare externs (foreign symbols resolved at link time).
     for e in &program.externs {
@@ -136,6 +157,8 @@ impl<'ctx> Cg<'ctx> {
         match t {
             Type::Int(w) => self.ctx.custom_width_int_type(*w).into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
+            Type::Struct(name) => self.structs[name].ty.into(),
+            Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
         }
     }
 
@@ -146,10 +169,7 @@ impl<'ctx> Cg<'ctx> {
 
     fn fn_type_types(&self, params: &[Type], ret: &Type) -> FunctionType<'ctx> {
         let p: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| self.basic_ty(t).into()).collect();
-        match ret {
-            Type::Int(w) => self.ctx.custom_width_int_type(*w).fn_type(&p, false),
-            Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).fn_type(&p, false),
-        }
+        self.basic_ty(ret).fn_type(&p, false)
     }
 
     fn emit_func(&self, f: &Func, function: FunctionValue<'ctx>) -> Result<(), String> {
@@ -341,7 +361,32 @@ impl<'ctx> Cg<'ctx> {
                     .ok_or_else(|| "codegen: call returned void".to_string())?;
                 Ok((v, ret_ty))
             }
-            Expr::Alloc { region } => self.emit_alloc(*region),
+            Expr::Alloc { region, ty } => self.emit_alloc(*region, ty),
+            Expr::Field { ptr, field } => {
+                let (pv, pt) = self.emit_expr(ptr, scope)?;
+                let (region, sname) = match pt {
+                    Type::Ptr(r, pointee) => match *pointee {
+                        Type::Struct(s) => (r, s),
+                        other => return Err(format!("codegen: field on (ptr _ {other:?})")),
+                    },
+                    other => return Err(format!("codegen: field on non-pointer {other:?}")),
+                };
+                let info = self
+                    .structs
+                    .get(&sname)
+                    .ok_or_else(|| format!("codegen: unknown struct '{sname}'"))?;
+                let idx = info
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n == field)
+                    .ok_or_else(|| format!("codegen: struct '{sname}' has no field '{field}'"))?;
+                let fty = info.fields[idx].1.clone();
+                let gep = self
+                    .builder
+                    .build_struct_gep(info.ty, pv.into_pointer_value(), idx as u32, "field")
+                    .map_err(le)?;
+                Ok((gep.into(), Type::Ptr(region, Box::new(fty))))
+            }
             Expr::Load(p) => {
                 let (pv, pt) = self.emit_expr(p, scope)?;
                 let pointee = match pt {
@@ -369,17 +414,29 @@ impl<'ctx> Cg<'ctx> {
                     Type::Ptr(r, pointee) => (r, *pointee),
                     other => return Err(format!("codegen: index of non-pointer {other:?}")),
                 };
-                let gep = unsafe {
-                    self.builder
-                        .build_gep(
-                            self.basic_ty(&pointee),
-                            pv.into_pointer_value(),
-                            &[iv.into_int_value()],
-                            "idx",
-                        )
-                        .map_err(le)?
-                };
-                Ok((gep.into(), Type::Ptr(region, Box::new(pointee))))
+                let ptr_val = pv.into_pointer_value();
+                let i = iv.into_int_value();
+                match &pointee {
+                    // pointer to an array: GEP [0, i] yields a pointer to elem i.
+                    Type::Array(elem, _) => {
+                        let zero = self.ctx.i64_type().const_zero();
+                        let gep = unsafe {
+                            self.builder
+                                .build_gep(self.basic_ty(&pointee), ptr_val, &[zero, i], "idx")
+                                .map_err(le)?
+                        };
+                        Ok((gep.into(), Type::Ptr(region, elem.clone())))
+                    }
+                    // pointer to a scalar/struct: GEP [i] is pointer arithmetic.
+                    _ => {
+                        let gep = unsafe {
+                            self.builder
+                                .build_gep(self.basic_ty(&pointee), ptr_val, &[i], "idx")
+                                .map_err(le)?
+                        };
+                        Ok((gep.into(), Type::Ptr(region, Box::new(pointee))))
+                    }
+                }
             }
             Expr::Cast { ty, expr } => {
                 let (v, _) = self.emit_expr(expr, scope)?;
@@ -407,21 +464,21 @@ impl<'ctx> Cg<'ctx> {
         }
     }
 
-    fn emit_alloc(&self, region: Region) -> Result<Tv<'ctx>, String> {
-        let i64t = self.ctx.i64_type();
+    fn emit_alloc(&self, region: Region, ty: &Type) -> Result<Tv<'ctx>, String> {
+        let bt = self.basic_ty(ty);
         let ptr = match region {
-            Region::Frame => self.builder.build_alloca(i64t, "frame.slot").map_err(le)?,
-            Region::Heap => self.builder.build_malloc(i64t, "heap.box").map_err(le)?,
+            Region::Frame => self.builder.build_alloca(bt, "frame.slot").map_err(le)?,
+            Region::Heap => self.builder.build_malloc(bt, "heap.box").map_err(le)?,
             Region::Static => {
                 let n = self.globals.get();
                 self.globals.set(n + 1);
-                let g = self.module.add_global(i64t, None, &format!("g.{n}"));
-                g.set_initializer(&i64t.const_zero());
+                let g = self.module.add_global(bt, None, &format!("g.{n}"));
+                g.set_initializer(&bt.const_zero());
                 g.as_pointer_value()
             }
             Region::C => return Err("codegen: cannot allocate in the C region".to_string()),
         };
-        Ok((ptr.into(), Type::Ptr(region, Box::new(Type::Int(64)))))
+        Ok((ptr.into(), Type::Ptr(region, Box::new(ty.clone()))))
     }
 
     fn emit_if(

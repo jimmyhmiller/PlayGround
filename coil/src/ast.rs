@@ -9,9 +9,13 @@ use crate::convention::Convention;
 pub enum Type {
     /// Integer of the given bit width (8, 16, 32, 64).
     Int(u32),
-    /// A pointer whose *region* (where the pointee lives) and *pointee type*
-    /// are both part of the type. `Ptr(C, i8)` is a C `char*`.
+    /// A pointer whose *region* and *pointee type* are both part of the type.
+    /// `Ptr(C, i8)` is a C `char*`.
     Ptr(Region, Box<Type>),
+    /// A named struct (defined by `defstruct`).
+    Struct(String),
+    /// A fixed-size array of `len` elements.
+    Array(Box<Type>, u32),
 }
 
 impl Type {
@@ -103,9 +107,16 @@ pub enum Expr {
         func: String,
         args: Vec<Expr>,
     },
-    /// Allocate one i64 slot in `region`, yielding `Ptr(region, i64)`.
+    /// Allocate one value of `ty` in `region`, yielding `Ptr(region, ty)`.
     Alloc {
         region: Region,
+        ty: Type,
+    },
+    /// Pointer to a struct field: `Ptr(R, Struct S)` and a field name →
+    /// `Ptr(R, fieldtype)`.
+    Field {
+        ptr: Box<Expr>,
+        field: String,
     },
     /// Read the value a pointer points at (type = the pointee type).
     Load(Box<Expr>),
@@ -155,9 +166,17 @@ pub struct Extern {
     pub ret: Type,
 }
 
+/// A named struct definition: ordered (field-name, field-type) pairs.
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub conventions: HashMap<String, Convention>,
+    pub structs: Vec<StructDef>,
     pub externs: Vec<Extern>,
     pub funcs: Vec<Func>,
 }
