@@ -48,6 +48,10 @@ struct Cg<'ctx> {
     structs: HashMap<String, StructInfo<'ctx>>,
     /// Coil return type of every callable (function/extern), for typing calls.
     rets: HashMap<String, Type>,
+    /// Full signature of every callable, for `fnptr-of` (cc, params, ret).
+    callables: HashMap<String, (String, Vec<Type>, Type)>,
+    /// Native LLVM calling-convention id for each convention name.
+    conv_ids: HashMap<String, u32>,
     globals: Cell<u32>,
 }
 
@@ -60,8 +64,16 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         shims: HashMap::new(),
         structs: HashMap::new(),
         rets: HashMap::new(),
+        callables: HashMap::new(),
+        conv_ids: HashMap::new(),
         globals: Cell::new(0),
     };
+
+    for (name, conv) in &program.conventions {
+        if let Some(id) = conv.native_id() {
+            cg.conv_ids.insert(name.clone(), id);
+        }
+    }
 
     // 0. build struct types, in definition order (by-value fields must refer to
     //    earlier structs; self/forward references via pointers are fine).
@@ -91,6 +103,8 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         fv.set_call_conventions(cc_id);
         cg.funcs.insert(e.name.clone(), fv);
         cg.rets.insert(e.name.clone(), e.ret.clone());
+        cg.callables
+            .insert(e.name.clone(), (e.cc.clone(), e.params.clone(), e.ret.clone()));
     }
 
     // 1b. declare all functions (so mutual recursion resolves).
@@ -101,6 +115,14 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             .ok_or_else(|| format!("codegen: unknown convention '{}'", f.cc))?;
         let fn_ty = cg.fn_type(&f.params, &f.ret);
         cg.rets.insert(f.name.clone(), f.ret.clone());
+        cg.callables.insert(
+            f.name.clone(),
+            (
+                f.cc.clone(),
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                f.ret.clone(),
+            ),
+        );
 
         match &conv.lowering {
             Lowering::Native(cc) => {
@@ -159,6 +181,7 @@ impl<'ctx> Cg<'ctx> {
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Struct(name) => self.structs[name].ty.into(),
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
+            Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
         }
     }
 
@@ -440,26 +463,67 @@ impl<'ctx> Cg<'ctx> {
             }
             Expr::Cast { ty, expr } => {
                 let (v, _) = self.emit_expr(expr, scope)?;
-                let iv = v.into_int_value();
-                let from = iv.get_type().get_bit_width();
-                let to = match ty {
-                    Type::Int(w) => *w,
-                    other => return Err(format!("codegen: cast to non-integer {other:?}")),
-                };
-                let target = self.ctx.custom_width_int_type(to);
-                let out = if to > from {
-                    self.builder.build_int_s_extend(iv, target, "sext").map_err(le)?
-                } else if to < from {
-                    self.builder.build_int_truncate(iv, target, "trunc").map_err(le)?
-                } else {
-                    iv
-                };
-                Ok((out.into(), ty.clone()))
+                match ty {
+                    Type::Int(to) => {
+                        let iv = v.into_int_value();
+                        let from = iv.get_type().get_bit_width();
+                        let target = self.ctx.custom_width_int_type(*to);
+                        let out = if *to > from {
+                            self.builder.build_int_s_extend(iv, target, "sext").map_err(le)?
+                        } else if *to < from {
+                            self.builder.build_int_truncate(iv, target, "trunc").map_err(le)?
+                        } else {
+                            iv
+                        };
+                        Ok((out.into(), ty.clone()))
+                    }
+                    // opaque pointers: a reinterpret leaves the value untouched.
+                    Type::Ptr(..) => Ok((v, ty.clone())),
+                    other => Err(format!("codegen: cannot cast to {other:?}")),
+                }
             }
             Expr::Free(p) => {
                 let (pv, _) = self.emit_expr(p, scope)?;
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;
                 Ok((i64t.const_zero().into(), Type::Int(64)))
+            }
+            Expr::FnPtrOf(name) => {
+                let fv = *self
+                    .funcs
+                    .get(name)
+                    .ok_or_else(|| format!("codegen: fnptr-of unknown '{name}'"))?;
+                let (cc, params, ret) = self
+                    .callables
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("codegen: no signature for '{name}'"))?;
+                let ptr = fv.as_global_value().as_pointer_value();
+                Ok((ptr.into(), Type::Fn(cc, params, Box::new(ret))))
+            }
+            Expr::CallPtr { fp, args } => {
+                let (fpv, fpt) = self.emit_expr(fp, scope)?;
+                let (cc, params, ret) = match fpt {
+                    Type::Fn(cc, params, ret) => (cc, params, *ret),
+                    other => return Err(format!("codegen: call-ptr on non-fnptr {other:?}")),
+                };
+                let fn_ty = self.fn_type_types(&params, &ret);
+                let argtv: Vec<Tv<'ctx>> = args
+                    .iter()
+                    .map(|a| self.emit_expr(a, scope))
+                    .collect::<Result<_, _>>()?;
+                let meta: Vec<_> = argtv.iter().map(|(v, _)| (*v).into()).collect();
+                let cs = self
+                    .builder
+                    .build_indirect_call(fn_ty, fpv.into_pointer_value(), &meta, "callptr")
+                    .map_err(le)?;
+                if let Some(id) = self.conv_ids.get(&cc) {
+                    cs.set_call_convention(*id);
+                }
+                let v = cs
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| "codegen: call-ptr returned void".to_string())?;
+                Ok((v, ret))
             }
         }
     }

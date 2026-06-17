@@ -250,6 +250,17 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
                 let n = sym(items.get(1).ok_or("struct type: missing name")?, "struct name")?;
                 Ok(Type::Struct(n))
             }
+            // (fnptr CC [param-types] ret-type)
+            "fnptr" => {
+                let cc = sym(items.get(1).ok_or("fnptr type: missing convention")?, "fnptr cc")?;
+                let params_v = match items.get(2) {
+                    Some(Sexp::Vector(v)) => v,
+                    _ => return Err("fnptr type: expected a vector of parameter types".to_string()),
+                };
+                let params = params_v.iter().map(parse_type).collect::<Result<_, _>>()?;
+                let ret = parse_type(items.get(3).ok_or("fnptr type: missing return type")?)?;
+                Ok(Type::Fn(cc, params, Box::new(ret)))
+            }
             other => Err(format!("unsupported type form '{other}'")),
         },
         other => Err(format!("unsupported type: {other:?}")),
@@ -367,6 +378,20 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             Ok(Expr::Field {
                 ptr: Box::new(p),
                 field: name,
+            })
+        }
+        "fnptr-of" => {
+            if args.len() != 1 {
+                return Err("fnptr-of: expects (fnptr-of name)".to_string());
+            }
+            Ok(Expr::FnPtrOf(sym(&args[0], "function name")?))
+        }
+        "call-ptr" => {
+            let fp = parse_expr(args.first().ok_or("call-ptr: missing function pointer")?)?;
+            let cargs = args[1..].iter().map(parse_expr).collect::<Result<_, _>>()?;
+            Ok(Expr::CallPtr {
+                fp: Box::new(fp),
+                args: cargs,
             })
         }
         "load" => {

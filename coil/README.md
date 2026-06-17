@@ -58,6 +58,12 @@ whose region is part of their type), and the higher-level surface is grown with
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
   allocate any type with `(alloc REGION TYPE)`.
+- Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
+  for a function's address, and indirect `(call-ptr fp args...)` (honoring the
+  convention). Closures are **not** a language primitive — a closure is a struct
+  of `{ code pointer, environment pointer }`, and the env's *region* is its
+  memory-management story. `closure.coil` shows heterogeneous heap closures
+  (different captures, one type, one generic `apply`) allocated and freed by hand.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
 closures derived from (convention × allocation) (M4), richer pointee types, a
@@ -87,9 +93,10 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 44 tests (build + run native exes)
+cargo test                                     # 51 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
+cargo run -- run   examples/closure.coil; echo $?                          # => 42
 cargo run -- run   examples/structs.coil; echo $?                          # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
 cargo run -- run   examples/extern.coil                                    # prints 12345

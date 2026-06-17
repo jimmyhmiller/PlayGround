@@ -487,9 +487,20 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   codegen`; inspect with `--expand`. (`macros.coil` → 41.) *The "Lisp-like
   macros" half of the pitch.* Remaining: hygiene is `gensym`-based (not
   automatic), and there is no module/`import` system yet.
-- **M4 — Derived closures.** `defclosure` over (C × R); two representations from
-  one mechanism, written *in* macros. *Second thesis demo.* (Needs richer
-  pointee types — env structs — built first.)
+- **Function pointers — ✅ done.** `(fnptr CC [types] ret)` type, `(fnptr-of
+  name)` for a function's address, indirect `(call-ptr fp args...)` honoring the
+  convention (native conventions only — shim fnptrs are future). `cast` also
+  reinterprets between pointer types (opaque-pointer no-op), enabling type-erased
+  `void*` environments. Array-of-fnptr gives a vtable/dispatch table.
+- **M4 — Closures (manual memory) — ✅ done.** A closure is **not** a primitive:
+  it's a struct `{ code: fnptr-with-a-convention, env: ptr-with-a-region }`. The
+  env region is the lifetime/ownership story — `heap` closures escape and are
+  freed by hand; `frame` closures are non-escaping (the escape rule enforces it).
+  `closure.coil` shows two heterogeneous heap closures behind one `Closure` type
+  and one generic `apply`, allocated and freed manually → 42. Remaining: a
+  `defclosure` macro to remove the boilerplate; the `nest`-register convention so
+  the env is threaded out-of-band; downward `frame` closures (needs the borrow
+  relaxation below).
 - **`extern` + C interop — ✅ done.** `(extern name :cc c [types] (-> ret))`
   declares a foreign function's convention + signature; calls are type-checked
   and the symbol is resolved at link time. Pointer regions are erased at the

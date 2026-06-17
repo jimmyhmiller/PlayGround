@@ -14,6 +14,10 @@ struct Sig {
     ret: Type,
     /// Calls to externs erase pointer regions at the boundary (see `arg_ok`).
     is_extern: bool,
+    /// The calling convention's name, and whether a function pointer can be
+    /// taken to it (only native conventions, for now).
+    cc: String,
+    fnptr_ok: bool,
 }
 
 /// Everything `synth` needs besides the local variable environment.
@@ -44,12 +48,15 @@ pub fn check(program: &Program) -> Result<(), String> {
     // signatures (functions + externs)
     let mut sigs: HashMap<String, Sig> = HashMap::new();
     for f in &program.funcs {
+        let native = program.conventions.get(&f.cc).is_some_and(|c| !c.is_shim());
         sigs.insert(
             f.name.clone(),
             Sig {
                 params: f.params.iter().map(|p| p.ty.clone()).collect(),
                 ret: f.ret.clone(),
                 is_extern: false,
+                cc: f.cc.clone(),
+                fnptr_ok: native,
             },
         );
     }
@@ -73,6 +80,8 @@ pub fn check(program: &Program) -> Result<(), String> {
                 params: e.params.clone(),
                 ret: e.ret.clone(),
                 is_extern: true,
+                cc: e.cc.clone(),
+                fnptr_ok: true,
             },
         );
     }
@@ -160,6 +169,12 @@ fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Re
             } else {
                 Err(format!("unknown struct '{name}'"))
             }
+        }
+        Type::Fn(_, params, ret) => {
+            for p in params {
+                validate_type(p, structs)?;
+            }
+            validate_type(ret, structs)
         }
     }
 }
@@ -325,9 +340,17 @@ fn synth(
             }
         }
         Expr::Cast { ty, expr } => {
-            int_width(ty.clone(), fname, "cast target")?;
-            int_width(synth(expr, env, cx, fname)?, fname, "cast operand")?;
-            Ok(ty.clone())
+            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
+            let et = synth(expr, env, cx, fname)?;
+            match (ty, &et) {
+                // integer width conversion, or a pointer reinterpret.
+                (Type::Int(_), Type::Int(_)) | (Type::Ptr(..), Type::Ptr(..)) => Ok(ty.clone()),
+                _ => Err(format!(
+                    "in '{fname}': cast only converts int<->int or ptr<->ptr (got {} to {})",
+                    ty_str(&et),
+                    ty_str(ty)
+                )),
+            }
         }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
             Type::Ptr(Region::Heap, _) => Ok(Type::Int(64)),
@@ -337,6 +360,50 @@ fn synth(
             )),
             other => Err(format!(
                 "in '{fname}': free expects a pointer, got {}",
+                ty_str(&other)
+            )),
+        },
+        Expr::FnPtrOf(name) => {
+            let sig = cx
+                .sigs
+                .get(name)
+                .ok_or_else(|| format!("in '{fname}': fnptr-of unknown function '{name}'"))?;
+            if !sig.fnptr_ok {
+                return Err(format!(
+                    "in '{fname}': cannot take a function pointer to '{name}' \
+                     (shim-convention functions are not supported yet)"
+                ));
+            }
+            Ok(Type::Fn(
+                sig.cc.clone(),
+                sig.params.clone(),
+                Box::new(sig.ret.clone()),
+            ))
+        }
+        Expr::CallPtr { fp, args } => match synth(fp, env, cx, fname)? {
+            Type::Fn(_, params, ret) => {
+                if params.len() != args.len() {
+                    return Err(format!(
+                        "in '{fname}': function pointer expects {} args, got {}",
+                        params.len(),
+                        args.len()
+                    ));
+                }
+                for (i, a) in args.iter().enumerate() {
+                    let at = synth(a, env, cx, fname)?;
+                    if !arg_ok(&at, &params[i], false) {
+                        return Err(format!(
+                            "in '{fname}': call-ptr argument {} has type {} but expected {}",
+                            i + 1,
+                            ty_str(&at),
+                            ty_str(&params[i])
+                        ));
+                    }
+                }
+                Ok(*ret)
+            }
+            other => Err(format!(
+                "in '{fname}': call-ptr expects a function pointer, got {}",
                 ty_str(&other)
             )),
         },
@@ -373,5 +440,9 @@ fn ty_str(t: &Type) -> String {
         Type::Ptr(r, pointee) => format!("(ptr {} {})", r.name(), ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
+        Type::Fn(cc, params, ret) => {
+            let ps: Vec<String> = params.iter().map(ty_str).collect();
+            format!("(fnptr {cc} [{}] {})", ps.join(" "), ty_str(ret))
+        }
     }
 }

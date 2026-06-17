@@ -16,6 +16,9 @@ pub enum Type {
     Struct(String),
     /// A fixed-size array of `len` elements.
     Array(Box<Type>, u32),
+    /// A function pointer: calling convention, parameter types, return type.
+    /// Represented as a raw machine pointer; the convention is needed to call it.
+    Fn(String, Vec<Type>, Box<Type>),
 }
 
 impl Type {
@@ -137,6 +140,13 @@ pub enum Expr {
     },
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
+    /// The address of a named function/extern, as a function pointer value.
+    FnPtrOf(String),
+    /// Indirect call through a function pointer value.
+    CallPtr {
+        fp: Box<Expr>,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
