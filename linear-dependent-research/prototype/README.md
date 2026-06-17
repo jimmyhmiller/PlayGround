@@ -10,6 +10,7 @@ story — and Stage C joins them.
 | `qtt_checker.py`         | Python 3 | the QTT **type checker** (multiplicities, dependent Pi/Sigma, NbE conversion, erasure) | `docs/01-qtt-core.md` |
 | `memory-model.rkt`       | PLT Redex (Racket) | the **operational** memory semantics (heap + new/read/write/free) and a linear type system that rejects use-after-free / double-free / leaks | `docs/02-memory-views.md` |
 | `lambda_tally_memory.py` | Python 3 | the **unification**: memory primitives as QTT functions, so multiplicities alone give memory safety + strong update | `docs/04` Phases 2 & 4 |
+| `memory-safety-rosette.rkt` | Rosette (Racket + Z3) | **bounded-exhaustive verification** of the memory-safety crux: an erased reference surviving a linear strong update | `docs/05` |
 
 Why split A and B across two tools? The thing you most need to *understand*
 (how linear and dependent typing cohabit, and how erasure works) is a
@@ -128,7 +129,41 @@ copyability, and locations are abstract variables (location equality is
 syntactic, no solver). Both are noted in the file and are the next things to
 sharpen on the way to the mechanized development (`docs/04`).
 
+## Stage D — `memory-safety-rosette.rkt`
+
+```
+racket memory-safety-rosette.rkt
+```
+
+Bounded-**exhaustive** verification (Rosette + Z3) of the one soundness question
+Stage C only *asserts*: when a linear mutable view lives inside a dependent type
+theory, **can an erased (multiplicity-0) reference to a location survive a linear
+strong update and cause an unsound access?** This is the crux cell that no
+existing system fills (`docs/05`), so it is the first thing worth machine-checking.
+
+The model has the four primitives plus `mkproof` (form an erased proof of a
+location's type) and `proofread` (the adversarial access), under two disciplines:
+
+- **SOUND** — a read requires a live linear view (mirrors the Stage-C primitive
+  types). Z3 verifies **safe for every program up to length 16** (~10²²
+  sequences), including the strong-update-under-erased-reference programs.
+- **BROKEN** — an erased proof alone authorises a read. Z3 finds a **counterexample
+  at length 4**: `alloc l:A; mkproof l; free l; proofread l` reads reclaimed memory
+  through the stale proof.
+
+The contrast is the result: under the sound rule, `free` spends the linear view,
+so the later read's guard fails — the multiplicity-`1` requirement on views is
+exactly what removes the hazard. This both shows the danger is real/detectable
+*and* validates the design choice in the Stage-C prelude.
+
+Honest scope: bounded (refutes, doesn't prove for all sizes); trusted base is
+Z3 + Rosette + the model faithfully reflecting the rules; locations/types are
+finite tags, not full dependent types. It is a bug-finder and design validator,
+not a foundational proof — rung (b+) on the `docs/05` assurance ladder.
+
 ## Reproducing
 
 - Python ≥ 3.8 (tested on 3.11). No dependencies.
-- Racket ≥ 8 with `redex-lib` (tested on 8.10). No GUI required.
+- Racket ≥ 8 with `redex-lib` for `memory-model.rkt`; **Rosette 4** + a `z3`
+  binary on `PATH` for `memory-safety-rosette.rkt` (tested on Racket 8.10, Z3
+  4.8). No GUI required.
