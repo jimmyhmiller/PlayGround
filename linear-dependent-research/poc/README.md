@@ -42,15 +42,40 @@ You'll see three things:
   so a field read always yields a bare `Addr`. That's why the checker rejects
   `a.next.next = …` (you hold no `Perm` for `a.next`).
 
+## Run it (v1 — the intrusive doubly-linked list)
+
+```
+python3 tally_dll.py
+```
+
+The operation safe Rust cannot express: **O(1) removal of a node by handle**, no
+GC, no `Rc`/`RefCell`, no `unsafe` — fully checked. You'll see:
+
+1. **Accepted** list programs (build, traverse by cursor, O(1) `remove` of the
+   middle, drain, drop) — checker silent, each runs **leak-free**.
+2. **Rejected** — double-remove, use-after-remove, **cross-list remove**, and
+   leaks (drop a non-empty list / forget to drop) — each with a precise error.
+3. **Differential** — bypass the checker, run the rejected programs, and the
+   monitor fires on the exact heap bug (use-after-free / leak).
+4. **Fuzz** — 20 000 random list op-sequences: every accepted program runs with
+   the monitor silent and no leak (0 violations).
+
+The mechanism: a `List` is a **linear** handle to a ghost **region** (the bundle
+of one `Perm` per node + the link order); it can't be dropped implicitly, so no
+leaks. A `Cursor` is a **copyable** address + an **erased** membership proof —
+holding one does *not* borrow the list, which is exactly why `remove(cursor)`
+can be O(1). The checker is a **symbolic executor** over the region: for a closed
+program it tracks the exact live-node set and order, so every
+membership/liveness/disjointness obligation is decided by lookup.
+
 ## Status / roadmap
 
-- **v0 (this file) — the L3 core, running.** Owned cells, the Addr/Perm split,
-  linear checking + heap monitor + differential demo + fuzz. ✅
-- **v1 — the intrusive doubly-linked list.** Add `focus`/`give`/`take` over a
-  symbolic ghost *region*, cursors (a copyable `Addr` + an erased membership
-  proof), and **O(1) `remove`** — the operation safe Rust cannot express. For
-  closed programs the symbolic region decides all membership/disjointness
-  obligations, so no inductive theorem proving is needed.
+- **v0 (`tally_poc.py`) — the L3 core, running.** Owned cells, the Addr/Perm
+  split, linear checking + heap monitor + differential demo + fuzz. ✅
+- **v1 (`tally_dll.py`) — the intrusive doubly-linked list.** Linear list owning
+  a symbolic region, cursors (copyable address + erased membership proof), and
+  **O(1) `remove`**. Checks and runs leak-free; double-remove / use-after-remove
+  / cross-list remove / leaks rejected; differential + fuzz. ✅
 - **v2 — ergonomics.** Rust-flavoured surface syntax (functions, `impl`,
   borrows), inferred ghost arguments, better error messages.
 
