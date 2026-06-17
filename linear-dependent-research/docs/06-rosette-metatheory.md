@@ -103,9 +103,16 @@ models both).
       but drops “used exactly once” is shown to accept a leaking program
       (`seq (use new) (let _=new in unit)`). So linearity is precisely what turns
       a type checker into a memory-safety guarantee.
-- [ ] **E5** **inter-location dependency**: a type at `l1` that mentions `l2`'s
-      index — the case most likely to expose a real soundness problem. (Also:
-      first-class functions in E3, and unifying the two Rosette models.)
+- [x] **E5** **inter-location dependency** (`interloc-dependency-rosette.rkt`):
+      a dependent capability whose read-bound on one location is the *value
+      stored at another* location. The lambda-Tally fix — forming the dependency
+      **freezes** both cells (consumes their linear views) so neither can be
+      mutated while it is live — is verified as an **inductive invariant
+      (unbounded length)** under SOUND; BROKEN (no freeze) breaks it and a
+      bounded search exhibits a concrete unsafe trace (`alloc; alloc; mkdep;
+      free arr; depread`). The hardest case — “types depend on values; strong
+      update changes values”, now across two cells — holds. (Remaining: first-
+      class functions in E3, larger bounds, unifying the Rosette models.)
 - [ ] **Handoff** the unbounded/inductive-over-terms results (normalization,
       consistency, decidable conversion, full dependent Π/Σ metatheory) to Agda
       (`docs/05`), cribbing GraD and graded-Agda.
