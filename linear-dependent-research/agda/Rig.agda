@@ -43,6 +43,17 @@ cong₂ : ∀ {A B C : Set} (f : A → B → C) {x x′ : A} {y y′ : B}
       → x ≡ x′ → y ≡ y′ → f x y ≡ f x′ y′
 cong₂ f refl refl = refl
 
+-- equational reasoning
+infix  1 begin_
+infixr 2 _≡⟨_⟩_
+infix  3 _∎
+begin_ : ∀ {A : Set} {x y : A} → x ≡ y → x ≡ y
+begin p = p
+_≡⟨_⟩_ : ∀ {A : Set} (x : A) {y z} → x ≡ y → y ≡ z → x ≡ z
+x ≡⟨ p ⟩ q = trans p q
+_∎ : ∀ {A : Set} (x : A) → x ≡ x
+x ∎ = refl
+
 data ⊥ : Set where
 
 ¬_ : Set → Set
