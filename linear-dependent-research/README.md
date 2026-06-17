@@ -62,6 +62,7 @@ Prior art that gets *part* of the way:
 | `docs/03-programmable-checker.md` | Stratified statics + Shen-style rules-as-data; constraint domains; decidability and the termination/fuel story. |
 | `docs/04-roadmap.md`       | What to formalize next, open problems, proof obligations, a possible mechanization path. |
 | `docs/05-soundness.md`     | How we get *evidence* for soundness: the distinct correctness claims, the assurance ladder, the prior-art landscape, and the first bounded-verification result. |
+| `docs/06-rosette-metatheory.md` | The Rosette metatheory effort: the inductive-invariant technique (unbounded operational safety for the model), what Rosette can vs cannot reach, results so far, and the staged plan (E0–E5) toward the Agda handoff. |
 | `notes/bibliography.md`    | Annotated references (papers, systems). Citation details to be verified before relying on them. |
 | `notes/glossary.md`        | Terminology, kept consistent across docs. |
 | `prototype/`               | **Runnable** semi-formal models: `qtt_checker.py` (QTT type checker, Stage A), `memory-model.rkt` (PLT Redex memory semantics + linear safety, Stage B), `lambda_tally_memory.py` (the unification — memory primitives as QTT functions, Stage C), and `memory-safety-rosette.rkt` (bounded-exhaustive verification of the safety crux, Stage D). See `prototype/README.md`. |

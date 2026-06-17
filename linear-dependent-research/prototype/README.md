@@ -163,6 +163,15 @@ views is exactly what removes the hazard (and defends against the erased-referen
 *and* aliasing forms at once). This shows the danger is real/detectable *and*
 validates the design choice in the Stage-C prelude.
 
+**Beyond bounded length — the metatheorem.** The file also exhibits an *inductive
+store-typing invariant* `Inv` and has Z3 prove that every single operation
+preserves it (and accesses safely) from an *arbitrary* `Inv`-state. Since the
+initial state satisfies `Inv`, safety then holds for programs of **any length**
+and arrays of **any size** — not just up to a bound — under the SOUND discipline.
+BROKEN breaks `Inv`. This is a genuine proof of the operational memory-safety
+theorem *for the model*; see `docs/06` for the technique, results, and the staged
+plan to extend it (resource ledger, functions, connecting the static checker).
+
 Honest scope: bounded (refutes, doesn't prove for all sizes); trusted base is
 Z3 + Rosette + the model faithfully reflecting the rules; finite locations/lengths
 with bounds-checks standing in for full dependent proofs. It is a bug-finder and

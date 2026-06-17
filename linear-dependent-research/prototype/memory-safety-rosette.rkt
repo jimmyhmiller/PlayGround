@@ -154,11 +154,75 @@
          (define kind (if (or (= o ALLOC) (= o RESIZE)) "len" "idx"))
          (printf "        ~a) ~a  loc=~a ~a=~a\n" i (vector-ref op-name o) l kind a)))]))
 
+;; ===========================================================================
+;; THE METATHEOREM: an INDUCTIVE store-typing invariant.
+;;
+;; The bounded checks above say "safe for every program up to length k". This is
+;; stronger: we exhibit an invariant Inv(state) and prove in Z3 that
+;;   (P) every single operation, from ANY state satisfying Inv, (a) performs no
+;;       unsafe access and (b) leaves a state still satisfying Inv.
+;; The initial state satisfies Inv, so by induction Inv -- hence safety -- holds
+;; at every reachable state, for programs of ANY length and arrays of ANY size.
+;; The trace length is now UNBOUNDED; only the number of locations stays finite
+;; (and locations are independent, so the argument is uniform in that too).
+;;
+;; Inv: holding a live linear view of a location implies the location is alive
+;; and the view's claimed length equals the actual length (store-typing
+;; consistency). That is exactly what makes a SOUND read in-bounds.
+;; ===========================================================================
+(define (==> a b) (|| (! a) b))
+(define (all lst) (foldl (lambda (x acc) (&& x acc)) #t lst))
+
+(define (inv s)
+  (all (for/list ([loc (in-range L)])
+         (==> (nth (st-vview s) loc)
+              (&& (nth (st-alive s) loc)
+                  (= (nth (st-vlen s) loc) (nth (st-len s) loc)))))))
+
+(define (sym-bool) (define-symbolic* b boolean?) b)
+(define (sym-nat)  (define-symbolic* n integer?) n)
+(define (arb-state)                       ; a completely arbitrary machine state
+  (st (list (sym-bool) (sym-bool)) (list (sym-nat) (sym-nat))
+      (list (sym-bool) (sym-bool)) (list (sym-nat) (sym-nat))
+      (list (sym-bool) (sym-bool)) (list (sym-nat) (sym-nat))))
+(define (nats-nonneg s)                   ; lengths are naturals (otherwise UNBOUNDED)
+  (all (for/list ([n (append (st-len s) (st-vlen s) (st-slen s))]) (>= n 0))))
+
+(define (verify-inductive mode)
+  (define s (arb-state))
+  (define-symbolic* op integer?) (define-symbolic* loc integer?) (define-symbolic* arg integer?)
+  (define sol
+    (verify
+     (begin
+       (assume (nats-nonneg s))
+       (assume (inv s))                                  ; arbitrary Inv-state
+       (assume (&& (>= op 0) (< op NOPS) (>= loc 0) (< loc L) (>= arg 0)))
+       (assert (inv (step s op loc arg mode))))))        ; safety (in step) + preservation
+  (cond
+    [(unsat? sol)
+     (printf "  ~a : INDUCTIVE INVARIANT HOLDS -> safe for programs of ANY length\n" (label mode))]
+    [else
+     (printf "  ~a : BREAKS -- counterexample (one step from a well-typed state):\n" (label mode))
+     (printf "        pre : alive=~a len=~a vview=~a vlen=~a scap=~a slen=~a\n"
+             (evaluate (st-alive s) sol) (evaluate (st-len s) sol) (evaluate (st-vview s) sol)
+             (evaluate (st-vlen s) sol) (evaluate (st-scap s) sol) (evaluate (st-slen s) sol))
+     (define o (evaluate op sol))
+     (printf "        op  : ~a loc=~a arg=~a\n"
+             (if (and (integer? o) (<= 0 o) (< o NOPS)) (vector-ref op-name o) o)
+             (evaluate loc sol) (evaluate arg sol))]))
+
 ;; ---- main ----------------------------------------------------------------
 (printf "lambda-Tally bounded memory-safety check (Rosette/Z3)\n")
 (printf "~a locations; length-indexed arrays (lengths/indices 0..~a).\n" L MAXLEN)
 (printf "Probing: stale dependent-index claim across a linear strong update (resize)/free.\n\n")
 
+(printf "=== METATHEOREM: inductive store-typing invariant (UNBOUNDED length) ===\n")
+(printf "  base case: initial state satisfies Inv? ~a\n" (inv (init)))
+(verify-inductive SOUND)
+(verify-inductive BROKEN)
+(printf "\n")
+
+(printf "=== Bounded-exhaustive reachability (complementary, finite length) ===\n")
 (printf "SOUND discipline (mirrors the Stage-C primitive types):\n")
 (for ([k '(4 8 12 16)]) (run-experiment SOUND k))
 

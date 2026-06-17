@@ -109,6 +109,14 @@ validator, not a foundational certificate. The model is still abstract: a finite
 set of locations and lengths, with bounds-checks standing in for full dependent
 proofs — not the real conversion checker.
 
+**Update:** the model now goes beyond bounded length. An *inductive store-typing
+invariant* is machine-checked to be preserved by every operation from any
+well-formed state, so memory safety holds for programs of **any length** under
+the sound discipline — a proof of the operational safety theorem *for the model*.
+See `docs/06` for the Rosette metatheory plan, the inductive technique, the
+reachable-vs-proof-assistant split, and the staged path (resource ledger,
+functions, connecting the static checker, inter-location dependency).
+
 ## Plan (extends roadmap Phase 1–3)
 
 1. **Write the declarative system on paper** (M1.1) — nothing can be "correct"
