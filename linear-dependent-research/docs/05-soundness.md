@@ -69,36 +69,45 @@ bridge is where soundness either lands or breaks — and the first thing to prob
 ## First concrete evidence: bounded memory-safety (Stage D)
 
 `prototype/memory-safety-rosette.rkt` attacks exactly that crux with SMT-backed
-bounded-exhaustive checking (rung b+). It models the four primitives plus an
-*erased* (multiplicity-0) proof that references a location's type — the dependent
-reference — and runs two disciplines:
+bounded-exhaustive checking (rung b+). The model is genuinely **dependent**:
+locations hold *length-indexed arrays*, a view carries the length, and an element
+access requires a static bounds check (`i < n`) — our stand-in for a dependent
+proof. `resize` is a **strong update that changes the dependent index** `n`, so
+the failure mode is a real **out-of-bounds access** (or use-after-free), not mere
+tag confusion. A key economy: an *erased* (multiplicity-0) dependent proof
+"`l : Array n`" and a *duplicated* linear view (aliasing) are the **same** hazard
+here — "a length claim that outlives the mutation" — so one secondary-capability
+slot models both. Two disciplines:
 
-- **SOUND**: a runtime access (read) requires a live **linear view** (mirrors the
-  Stage-C primitive types, where `read/write/free` take `View A l` at
-  multiplicity `1`).
-- **BROKEN**: an erased proof alone may authorise a read ("what if we got the
-  multiplicity wrong").
+- **SOUND**: a read requires a live **linear view** (mirrors the Stage-C primitive
+  types, where `read/write/free` take `View A l` at multiplicity `1`). A stale
+  claim cannot authorise a read.
+- **BROKEN**: a stale claim alone may authorise a read ("what if we mis-graded the
+  view, or let an erased proof be used at runtime").
 
 Result (Z3, in seconds):
 
-- **SOUND — verified safe for *every* program up to length 16** (~10²² operation
-  sequences), *including* the `alloc; mkproof; write; proofread` strong-update-
-  under-erased-reference programs. Bounded evidence that linearity removes the
-  hazard.
-- **BROKEN — counterexample at length 4**: `alloc l:A; mkproof l (erased "l : A");
-  free l; proofread l` reads reclaimed memory through the stale erased proof. The
-  hazard is real and the tool finds it automatically.
+- **SOUND — verified safe for *every* program up to length 16** (≈10²²·k operation
+  sequences over the symbolic alphabet), *including* the `alloc; mkclaim; resize;
+  staleread` strong-update-under-a-dependent-reference programs. Bounded evidence
+  that linearity removes the hazard.
+- **BROKEN — counterexamples at length 4**: `alloc l len=1; mkclaim l; free l;
+  staleread l` (use-after-free), and with `free` disabled, `alloc l len=1;
+  mkclaim l (claims len 1); resize l len=0; staleread l idx=0` — a genuine
+  **out-of-bounds** read: the stale length claim outlived the `resize`.
 
-The contrast is the content: under the sound rule, `free` spends the linear view,
-so the later read's guard fails — the erased proof cannot authorise it. **The
-multiplicity-`1` requirement on views is exactly what is load-bearing.** This
-validates the design choice baked into the Stage-C prelude.
+The contrast is the content: under the sound rule, `resize`/`free` consume the
+linear view, so the later read's guard fails — the stale claim cannot authorise
+it. **The multiplicity-`1` requirement on views is exactly what is load-bearing**,
+and it defends against the erased-reference *and* the aliasing form of the hazard
+at once. This validates the design choice baked into the Stage-C prelude.
 
 Scope/trust (honest): this is *bounded* (no induction → refutes, doesn't prove
 for all sizes), and its trusted base is Z3 + Rosette's symbolic VM + the model
 faithfully reflecting the real rules. It is a strong bug-finder and design
-validator, not a foundational certificate. The model is also abstract: locations
-are a finite set and types are tags, not full dependent types.
+validator, not a foundational certificate. The model is still abstract: a finite
+set of locations and lengths, with bounds-checks standing in for full dependent
+proofs — not the real conversion checker.
 
 ## Plan (extends roadmap Phase 1–3)
 

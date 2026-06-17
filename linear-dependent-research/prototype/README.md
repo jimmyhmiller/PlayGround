@@ -137,29 +137,36 @@ racket memory-safety-rosette.rkt
 
 Bounded-**exhaustive** verification (Rosette + Z3) of the one soundness question
 Stage C only *asserts*: when a linear mutable view lives inside a dependent type
-theory, **can an erased (multiplicity-0) reference to a location survive a linear
-strong update and cause an unsound access?** This is the crux cell that no
-existing system fills (`docs/05`), so it is the first thing worth machine-checking.
+theory, **can a stale claim about a location's index survive a linear strong
+update and cause an unsound access?** This is the crux cell no existing system
+fills (`docs/05`), so it is the first thing worth machine-checking.
 
-The model has the four primitives plus `mkproof` (form an erased proof of a
-location's type) and `proofread` (the adversarial access), under two disciplines:
+The model is genuinely **dependent**: locations hold length-indexed arrays, a view
+carries the length, and an element access requires a static bounds check
+(`idx < len`) — a stand-in for a dependent `i < n` proof. `resize` is a **strong
+update that changes the dependent index**. One `mkclaim`/`staleread` pair models a
+*secondary capability* — either an erased (multiplicity-0) dependent proof or a
+duplicated view (aliasing); both are the same "stale length claim" hazard. Two
+disciplines:
 
 - **SOUND** — a read requires a live linear view (mirrors the Stage-C primitive
-  types). Z3 verifies **safe for every program up to length 16** (~10²²
-  sequences), including the strong-update-under-erased-reference programs.
-- **BROKEN** — an erased proof alone authorises a read. Z3 finds a **counterexample
-  at length 4**: `alloc l:A; mkproof l; free l; proofread l` reads reclaimed memory
-  through the stale proof.
+  types). Z3 verifies **safe for every program up to length 16**, including the
+  `alloc; mkclaim; resize; staleread` strong-update-under-a-dependent-reference
+  programs.
+- **BROKEN** — a stale claim alone authorises a read. Z3 finds **out-of-bounds /
+  use-after-free counterexamples at length 4**, e.g. `alloc l len=1; mkclaim l;
+  resize l len=0; staleread l idx=0` — index 0 into a now-length-0 array.
 
-The contrast is the result: under the sound rule, `free` spends the linear view,
-so the later read's guard fails — the multiplicity-`1` requirement on views is
-exactly what removes the hazard. This both shows the danger is real/detectable
-*and* validates the design choice in the Stage-C prelude.
+The contrast is the result: under the sound rule, `resize`/`free` consume the
+linear view, so the later read's guard fails — the multiplicity-`1` requirement on
+views is exactly what removes the hazard (and defends against the erased-reference
+*and* aliasing forms at once). This shows the danger is real/detectable *and*
+validates the design choice in the Stage-C prelude.
 
 Honest scope: bounded (refutes, doesn't prove for all sizes); trusted base is
-Z3 + Rosette + the model faithfully reflecting the rules; locations/types are
-finite tags, not full dependent types. It is a bug-finder and design validator,
-not a foundational proof — rung (b+) on the `docs/05` assurance ladder.
+Z3 + Rosette + the model faithfully reflecting the rules; finite locations/lengths
+with bounds-checks standing in for full dependent proofs. It is a bug-finder and
+design validator, not a foundational proof — rung (b+) on the `docs/05` ladder.
 
 ## Reproducing
 
