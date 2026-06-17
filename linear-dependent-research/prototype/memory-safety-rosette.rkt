@@ -64,19 +64,28 @@
 (define (init)
   (st (list #f #f) (list 0 0) (list #f #f) (list 0 0) (list #f #f) (list 0 0)))
 
-;; An element access through some capability:
-;;   `have?`  : is the capability present (and, for a view, the loc live)?
-;;   `claimed`: the length the capability asserts -> used for the STATIC bounds
-;;              check (arg < claimed), our stand-in for a dependent `i < n` proof.
-;; SAFETY OBLIGATION: the access is actually in-bounds of live memory
-;;   (alive AND arg < the REAL current length). If the capability's claim is
-;;   honest (claimed = len), this always holds; a stale claim breaks it.
-(define (access s loc arg have? claimed)
-  (when (&& have? (< arg claimed))
-    (assert (&& (nth (st-alive s) loc) (< arg (nth (st-len s) loc)))))
-  s)
+;; The capability an op reads through, as (have? . claimed-length):
+;;   have?   : is the capability present (and, for a view, the loc live)?
+;;   claimed : the length it asserts -> the STATIC bounds check (arg < claimed),
+;;             our stand-in for a dependent `i < n` proof.
+(define (cap-of s op loc mode)
+  (cond
+    [(or (= op READ) (= op WRITE))
+     (cons (&& (nth (st-vview s) loc) (nth (st-alive s) loc)) (nth (st-vlen s) loc))]
+    [(= op STALEREAD)
+     (if (= mode SOUND)
+         (cons (&& (nth (st-vview s) loc) (nth (st-alive s) loc)) (nth (st-vlen s) loc))
+         (cons (nth (st-scap s) loc) (nth (st-slen s) loc)))]   ; BROKEN: stale claim alone
+    [else (cons #f 0)]))                                         ; non-accessing op
 
-;; ---- one interpreter step ------------------------------------------------
+;; SAFETY: whenever an access fires (have? && arg<claimed), it must actually be
+;; in-bounds of live memory (alive && arg < the REAL current length).
+(define (safe-step? s op loc arg mode)
+  (define c (cap-of s op loc mode))
+  (==> (&& (car c) (< arg (cdr c)))
+       (&& (nth (st-alive s) loc) (< arg (nth (st-len s) loc)))))
+
+;; ---- one interpreter step (PURE: state transition only) ------------------
 (define (step s op loc arg mode)
   (define alive (st-alive s)) (define len  (st-len s))
   (define vview (st-vview s)) (define vlen (st-vlen s))
@@ -89,12 +98,8 @@
              (setn vview loc #t) (setn vlen loc arg)
              (setn scap loc #f)  (setn slen loc 0))
          s)]
-    ;; read / write element `arg`: need a live view; bounds-check against vlen.
-    [(= op READ)  (access s loc arg (&& (nth vview loc) (nth alive loc)) (nth vlen loc))]
-    [(= op WRITE) (access s loc arg (&& (nth vview loc) (nth alive loc)) (nth vlen loc))]
-    ;; resize = STRONG UPDATE of the index: consume the view, reissue at the new
-    ;; length `arg`. Heap length AND the view's claim move together; any
-    ;; secondary claim is intentionally left STALE.
+    ;; resize = STRONG UPDATE of the index: heap length AND the view's claim move
+    ;; together; any secondary claim is intentionally left STALE.
     [(= op RESIZE)
      (if (&& (nth vview loc) (nth alive loc))
          (st alive (setn len loc arg) vview (setn vlen loc arg) scap slen)
@@ -111,19 +116,13 @@
      (if (&& (nth vview loc) (nth alive loc))
          (st alive len vview vlen (setn scap loc #t) (setn slen loc (nth vlen loc)))
          s)]
-    ;; staleread: read element `arg` via the SECONDARY claim.
-    [(= op STALEREAD)
-     (if (= mode SOUND)
-         ;; SOUND: a read still needs the live linear view; the claim adds nothing.
-         (access s loc arg (&& (nth vview loc) (nth alive loc)) (nth vlen loc))
-         ;; BROKEN: the stale claim alone authorises the read (no view, no
-         ;; liveness), bounds-checking against its possibly-stale length `slen`.
-         (access s loc arg (nth scap loc) (nth slen loc)))]
+    ;; read / write / staleread do not change the state (only `safe-step?` cares).
     [else s]))
 
-;; ---- run a whole symbolic program ---------------------------------------
+;; ---- run a whole symbolic program (asserting safety at each step) --------
 (define (run ops locs args mode)
   (for/fold ([s (init)]) ([o ops] [l locs] [a args])
+    (assert (safe-step? s o l a mode))
     (step s o l a mode)))
 
 ;; ---- one experiment: verify a discipline for programs of length k --------
@@ -197,7 +196,8 @@
        (assume (nats-nonneg s))
        (assume (inv s))                                  ; arbitrary Inv-state
        (assume (&& (>= op 0) (< op NOPS) (>= loc 0) (< loc L) (>= arg 0)))
-       (assert (inv (step s op loc arg mode))))))        ; safety (in step) + preservation
+       (assert (&& (safe-step? s op loc arg mode)         ; safety of this access
+                   (inv (step s op loc arg mode)))))))    ; + preservation of Inv
   (cond
     [(unsat? sol)
      (printf "  ~a : INDUCTIVE INVARIANT HOLDS -> safe for programs of ANY length\n" (label mode))]
@@ -211,15 +211,61 @@
              (if (and (integer? o) (<= 0 o) (< o NOPS)) (vector-ref op-name o) o)
              (evaluate loc sol) (evaluate arg sol))]))
 
+;; ===========================================================================
+;; E2 -- ERASURE SOUNDNESS, as a non-interference theorem.
+;;
+;; The secondary claim `scap`/`slen` models the multiplicity-0 (erased) fragment.
+;; Erasure soundness = the erased part is computationally IRRELEVANT: it cannot
+;; influence runtime behaviour. We prove it relationally: take two states that
+;; agree on every RUNTIME-relevant field (alive,len,vview,vlen) but may differ
+;; arbitrarily on the erased scap/slen; run the SAME operation on both; then they
+;; still agree on the relevant fields AND one is safe iff the other is. So the
+;; erased data can be deleted without changing what the program does or whether
+;; it is safe -- the formal justification for erasing the 0-fragment at runtime.
+;;
+;; Under SOUND this holds (no runtime op consults scap). Under BROKEN it FAILS
+;; (staleread reads scap), i.e. allowing an erased value to drive a read makes
+;; erasure unsound -- exactly the property the multiplicity discipline must keep.
+;; ===========================================================================
+(define (<=> a b) (&& (==> a b) (==> b a)))
+(define (agree-relevant s1 s2)
+  (all (append
+        (for/list ([l (in-range L)]) (<=> (nth (st-alive s1) l) (nth (st-alive s2) l)))
+        (for/list ([l (in-range L)]) (= (nth (st-len  s1) l) (nth (st-len  s2) l)))
+        (for/list ([l (in-range L)]) (<=> (nth (st-vview s1) l) (nth (st-vview s2) l)))
+        (for/list ([l (in-range L)]) (= (nth (st-vlen s1) l) (nth (st-vlen s2) l))))))
+
+(define (verify-erasure mode)
+  (define s1 (arb-state)) (define s2 (arb-state))
+  (define-symbolic* op integer?) (define-symbolic* loc integer?) (define-symbolic* arg integer?)
+  (define sol
+    (verify
+     (begin
+       (assume (nats-nonneg s1)) (assume (nats-nonneg s2))
+       (assume (agree-relevant s1 s2))         ; identical except the erased fields
+       (assume (&& (>= op 0) (< op NOPS) (>= loc 0) (< loc L) (>= arg 0)))
+       (assert (&& (agree-relevant (step s1 op loc arg mode) (step s2 op loc arg mode))
+                   (<=> (safe-step? s1 op loc arg mode)
+                        (safe-step? s2 op loc arg mode)))))))
+  (printf "  ~a : ~a\n" (label mode)
+          (if (unsat? sol)
+              "ERASURE SOUND -> the multiplicity-0 fragment is computationally irrelevant"
+              "erasure FAILS -> erased data influences runtime behaviour")))
+
 ;; ---- main ----------------------------------------------------------------
 (printf "lambda-Tally bounded memory-safety check (Rosette/Z3)\n")
 (printf "~a locations; length-indexed arrays (lengths/indices 0..~a).\n" L MAXLEN)
 (printf "Probing: stale dependent-index claim across a linear strong update (resize)/free.\n\n")
 
-(printf "=== METATHEOREM: inductive store-typing invariant (UNBOUNDED length) ===\n")
+(printf "=== METATHEOREM 1: inductive store-typing invariant (UNBOUNDED length) ===\n")
 (printf "  base case: initial state satisfies Inv? ~a\n" (inv (init)))
 (verify-inductive SOUND)
 (verify-inductive BROKEN)
+(printf "\n")
+
+(printf "=== METATHEOREM 2 (E2): erasure soundness / non-interference ===\n")
+(verify-erasure SOUND)
+(verify-erasure BROKEN)
 (printf "\n")
 
 (printf "=== Bounded-exhaustive reachability (complementary, finite length) ===\n")

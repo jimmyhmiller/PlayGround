@@ -83,23 +83,40 @@ models both).
 
 - [x] **E0** abstract memory model, bounded-exhaustive safety.
 - [x] **E1** inductive store-typing invariant → unbounded operational safety.
-- [ ] **E2** add a multiplicity **usage ledger**; verify *resource soundness* as an
-      invariant — every linear view consumed exactly once (no leak/double-use),
-      every multiplicity-`0` entity never drives a runtime access (erasure).
-- [ ] **E3** add function values + application via an **environment machine** (no
-      substitution); re-verify safety + resources for the higher-order fragment.
-- [ ] **E4** **connect static to dynamic**: encode the Stage-C leftover-context
-      checker over bounded symbolic terms and verify *accepts(e) ⟹ run(e) ⊨ Inv*
-      — i.e. the type checker’s multiplicities actually deliver the operational
-      guarantee. (Bounded in term size; the symbolic-term encoding lives here.)
+- [x] **E2** **erasure soundness** as a non-interference theorem
+      (`memory-safety-rosette.rkt`): two states agreeing on the runtime-relevant
+      fields but differing arbitrarily on the erased (multiplicity-`0`) fields
+      stay in agreement and have identical safety after any operation. So the
+      `0`-fragment is *computationally irrelevant* — the formal licence to erase
+      it. SOUND: holds. BROKEN (a read may consult the erased claim): fails.
+- [x] **E3 (core)** **environment machine** with binding
+      (`resource-soundness-rosette.rkt`): a real term language with `let`
+      evaluated by an environment evaluator (no substitution — the technical
+      point of E3) plus a resource heap. *First-class `λ`/application with
+      closures and function types is the remaining extension*; the
+      substitution-free binding core that E3 was about is done.
+- [x] **E4** **static ⟹ dynamic** (`resource-soundness-rosette.rkt`): a real
+      leftover-context **multiplicity type checker** plus the evaluator, with Z3
+      proving the resource-soundness theorem — *accepts(e) ⟹ run(e) leaks
+      nothing and never double-frees / uses-after-free* — for **every well-typed
+      closed program up to depth 4**. A BROKEN checker that keeps the type checks
+      but drops “used exactly once” is shown to accept a leaking program
+      (`seq (use new) (let _=new in unit)`). So linearity is precisely what turns
+      a type checker into a memory-safety guarantee.
 - [ ] **E5** **inter-location dependency**: a type at `l1` that mentions `l2`'s
-      index — the case most likely to expose a real soundness problem.
+      index — the case most likely to expose a real soundness problem. (Also:
+      first-class functions in E3, and unifying the two Rosette models.)
 - [ ] **Handoff** the unbounded/inductive-over-terms results (normalization,
       consistency, decidable conversion, full dependent Π/Σ metatheory) to Agda
       (`docs/05`), cribbing GraD and graded-Agda.
 
-When E2–E5 are green, "the idea works" will mean: the operational metatheory is
-machine-checked (unbounded where an invariant exists, bounded-exhaustive where it
-does not), the static checker is verified to deliver it on all small programs, and
-the only remaining obligations are the pure-type-theory properties earmarked for
-the proof assistant.
+### Where this leaves "does the idea work?"
+
+The operational metatheory is now machine-checked: memory safety is **unbounded**
+(inductive invariant, E1), erasure is sound (E2), and the **static multiplicity
+checker is proved to deliver memory safety** on every well-typed program up to a
+depth bound (E4) — with the linearity rule shown to be load-bearing. That is
+strong, concrete evidence that the core idea is sound. What remains is breadth
+(first-class functions, inter-location dependency, larger bounds) and the
+pure-type-theory properties (normalization, consistency, decidable conversion)
+that are fundamentally proof-assistant work — the Agda handoff in `docs/05`.

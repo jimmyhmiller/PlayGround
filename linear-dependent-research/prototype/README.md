@@ -10,7 +10,8 @@ story — and Stage C joins them.
 | `qtt_checker.py`         | Python 3 | the QTT **type checker** (multiplicities, dependent Pi/Sigma, NbE conversion, erasure) | `docs/01-qtt-core.md` |
 | `memory-model.rkt`       | PLT Redex (Racket) | the **operational** memory semantics (heap + new/read/write/free) and a linear type system that rejects use-after-free / double-free / leaks | `docs/02-memory-views.md` |
 | `lambda_tally_memory.py` | Python 3 | the **unification**: memory primitives as QTT functions, so multiplicities alone give memory safety + strong update | `docs/04` Phases 2 & 4 |
-| `memory-safety-rosette.rkt` | Rosette (Racket + Z3) | **bounded-exhaustive verification** of the memory-safety crux: an erased reference surviving a linear strong update | `docs/05` |
+| `memory-safety-rosette.rkt` | Rosette (Racket + Z3) | the operational metatheory: **unbounded** memory safety via an inductive store-typing invariant, plus **erasure soundness** | `docs/05`, `docs/06` |
+| `resource-soundness-rosette.rkt` | Rosette (Racket + Z3) | the static⟹dynamic link: a multiplicity **type checker** + evaluator, proving *accepts(e) ⟹ no leak / no use-after-free* | `docs/06` (E3/E4) |
 
 Why split A and B across two tools? The thing you most need to *understand*
 (how linear and dependent typing cohabit, and how erasure works) is a
@@ -170,7 +171,36 @@ initial state satisfies `Inv`, safety then holds for programs of **any length**
 and arrays of **any size** — not just up to a bound — under the SOUND discipline.
 BROKEN breaks `Inv`. This is a genuine proof of the operational memory-safety
 theorem *for the model*; see `docs/06` for the technique, results, and the staged
-plan to extend it (resource ledger, functions, connecting the static checker).
+plan (E0–E5).
+
+**Erasure soundness (E2).** The same file proves erasure is sound as a
+*non-interference* theorem: two states that agree on the runtime-relevant fields
+but differ arbitrarily on the erased (multiplicity-`0`) fields stay in agreement
+and have identical safety after any operation — so the `0`-fragment can be deleted
+without changing behaviour. SOUND holds; BROKEN (a read may consult the erased
+claim) fails.
+
+## Stage D (cont.) — `resource-soundness-rosette.rkt`
+
+```
+racket resource-soundness-rosette.rkt
+```
+
+Closes the loop from the operational discipline to the **type system** (E3/E4 in
+`docs/06`). It has a real term language (`unit | new | use | var | seq | let`,
+types `U`/`R`), a **leftover-context multiplicity type checker**, and an
+**environment evaluator** (binding without substitution) with a resource heap.
+Z3 proves the **resource-soundness theorem**:
+
+> if the checker accepts a closed program, then evaluating it never
+> double-frees / uses-after-free and **leaks nothing** —
+
+for **every well-typed program up to depth 4**. A BROKEN checker that keeps the
+type checks but drops “used exactly once” is shown to accept a leaking program
+(`seq (use new) (let _=new in unit)`). So **linearity is exactly what turns a type
+checker into a memory-safety guarantee** — the clearest statement yet that the
+core idea works. (Remaining: first-class `λ`/application with closures; larger
+depths.)
 
 Honest scope: bounded (refutes, doesn't prove for all sizes); trusted base is
 Z3 + Rosette + the model faithfully reflecting the rules; finite locations/lengths
