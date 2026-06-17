@@ -1,0 +1,46 @@
+// A tour of the gc-rust standard library (all written in gc-rust itself, in the
+// prelude): Vec with combinators, a String-keyed HashMap, the Eq/Ord traits,
+// and generic sort/contains/max that work for user types too.
+
+struct Score { name: String, points: i64 }
+
+// Make Score orderable by points so the generic vec_sort/vec_max work on it.
+impl Ord for Score {
+    fn cmp(self, other: Score) -> i64 {
+        if self.points < other.points { 0 - 1 }
+        else { if self.points > other.points { 1 } else { 0 } }
+    }
+}
+
+fn main() -> i64 {
+    // Vec + iterator combinators.
+    let nums = vec_range(1, 11);                       // [1..10]
+    let squares = vec_map(nums, |x: i64| x * x);       // [1,4,9,...,100]
+    let big = vec_filter(squares, |x: i64| x > 25);    // [36,49,64,81,100]
+    let sum_big = vec_fold(big, 0, |a: i64, x: i64| a + x);  // 330
+    println(str_concat("sum of squares > 25: ", to_string(sum_big)));
+
+    // HashMap: word -> length.
+    let mut lengths: MapStr<i64> = mapstr_new();
+    let words = str_split_byte("the quick brown fox", 32);   // split on space
+    let mut i = 0;
+    while i < vec_len(words) {
+        let w = vec_get(words, i);
+        lengths = mapstr_insert(lengths, w, str_len(w));
+        i = i + 1;
+    }
+    println(str_concat("len(quick) = ", to_string(opt_unwrap_or(mapstr_get(lengths, "quick"), 0))));
+
+    // Generic Ord-based sort on a user struct.
+    let mut board: Vec<Score> = vec_new();
+    board = vec_push(board, Score { name: "alice", points: 30 });
+    board = vec_push(board, Score { name: "bob", points: 50 });
+    board = vec_push(board, Score { name: "carol", points: 40 });
+    let top = opt_unwrap_or(vec_max(board), Score { name: "none", points: 0 });
+    println(str_concat3("top scorer: ", top.name, str_concat(" with ", to_string(top.points))));
+
+    let ranked = vec_sort(board);                      // ascending by points
+    // Checksum: sum_big + map length + lowest & highest points.
+    sum_big + mapstr_len(lengths) + vec_get(ranked, 0).points + top.points
+    // 330 + 4 + 30 + 50 = 414
+}

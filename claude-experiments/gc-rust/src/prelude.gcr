@@ -9,6 +9,25 @@ enum Option<T> { None, Some(T) }
 
 enum Result<T, E> { Ok(T), Err(E) }
 
+// ---- Core comparison traits ------------------------------------------------
+// `Eq` and `Ord` let generic collection code compare elements. Implemented for
+// the built-in scalar/string types; users can implement them for their own
+// types to use the generic `vec_contains`/`vec_sort`/etc.
+
+trait Eq { fn eq(self, other: Self) -> bool; }
+
+// `cmp` returns -1 (self < other), 0 (equal), or 1 (self > other).
+trait Ord { fn cmp(self, other: Self) -> i64; }
+
+impl Eq for i64 { fn eq(self, other: i64) -> bool { self == other } }
+impl Ord for i64 {
+    fn cmp(self, other: i64) -> i64 {
+        if self < other { 0 - 1 } else { if self > other { 1 } else { 0 } }
+    }
+}
+
+impl Eq for String { fn eq(self, other: String) -> bool { str_eq(self, other) } }
+
 // Option combinators.
 fn opt_unwrap_or<T>(o: Option<T>, default: T) -> T {
     match o {
@@ -69,6 +88,51 @@ fn gcd_i64(a: i64, b: i64) -> i64 {
     x
 }
 
+// Overflow-checked arithmetic (opt-in). Plain `+`/`*` wrap on overflow (see
+// docs/overflow.md); these return `Option::None` when the wrapping result
+// disagrees with the true mathematical result, so callers who care can detect it
+// without taxing every operation.
+
+// `a + b` overflows iff a and b share a sign but the sum has the opposite sign.
+fn checked_add_i64(a: i64, b: i64) -> Option<i64> {
+    let s = a + b;                          // wrapping
+    if (a < 0) == (b < 0) && (s < 0) != (a < 0) {
+        Option::None
+    } else {
+        Option::Some(s)
+    }
+}
+
+// `a - b` overflows iff a and b differ in sign and the result's sign differs
+// from a's.
+fn checked_sub_i64(a: i64, b: i64) -> Option<i64> {
+    let d = a - b;                          // wrapping
+    if (a < 0) != (b < 0) && (d < 0) != (a < 0) {
+        Option::None
+    } else {
+        Option::Some(d)
+    }
+}
+
+// `a * b` overflows iff dividing the wrapping product back doesn't recover `a`.
+fn checked_mul_i64(a: i64, b: i64) -> Option<i64> {
+    if a == 0 || b == 0 {
+        Option::Some(0)
+    } else {
+        let p = a * b;                      // wrapping
+        if p / b == a {
+            Option::Some(p)
+        } else {
+            Option::None
+        }
+    }
+}
+
+// Explicit wrapping forms (identical to `+`/`-`/`*`, provided for symmetry).
+fn wrapping_add_i64(a: i64, b: i64) -> i64 { a + b }
+fn wrapping_sub_i64(a: i64, b: i64) -> i64 { a - b }
+fn wrapping_mul_i64(a: i64, b: i64) -> i64 { a * b }
+
 // ---- Vec<T> — a growable, GC-managed vector --------------------------------
 // A reference struct over an `Array<T>` backing store. `push` reallocates and
 // copies when full. Functions take/return the Vec by value (it's a small
@@ -94,18 +158,21 @@ fn vec_len<T>(v: Vec<T>) -> i64 { v.len }
 
 fn vec_get<T>(v: Vec<T>, i: i64) -> T { array_get(v.data, i) }
 
-fn vec_set<T>(v: Vec<T>, i: i64, x: T) -> Vec<T> {
+// `vec_set`/`vec_push` mutate the backing array, so they take `mut v`: under
+// gc-rust's immutable-by-default rule, mutating `v.data` requires `v` to be
+// mutable (see docs/mutability.md). Callers therefore need `let mut v`.
+fn vec_set<T>(mut v: Vec<T>, i: i64, x: T) -> Vec<T> {
     let _u = array_set(v.data, i, x);
     v
 }
 
-fn vec_push<T>(v: Vec<T>, x: T) -> Vec<T> {
+fn vec_push<T>(mut v: Vec<T>, x: T) -> Vec<T> {
     if v.len < v.cap {
         let _u = array_set(v.data, v.len, x);
         Vec { data: v.data, len: v.len + 1, cap: v.cap }
     } else {
         let new_cap = v.cap * 2;
-        let nd: Array<T> = array_new(new_cap);
+        let mut nd: Array<T> = array_new(new_cap);
         let mut i = 0;
         while i < v.len {
             let _u = array_set(nd, i, array_get(v.data, i));
@@ -115,3 +182,717 @@ fn vec_push<T>(v: Vec<T>, x: T) -> Vec<T> {
         Vec { data: nd, len: v.len + 1, cap: new_cap }
     }
 }
+
+// ---- Vec completion --------------------------------------------------------
+// Combinators that don't need element equality/ordering are fully generic.
+// Element-comparing ops (contains/index_of/sort) are provided as concrete i64
+// versions here; trait-bounded generic versions come with the Ord/Eq traits.
+
+fn vec_is_empty<T>(v: Vec<T>) -> bool { v.len == 0 }
+
+// Drop the last element (no-op if empty), returning the shrunk Vec. Pair with
+// `vec_last` to read the value first. (We keep value and container separate
+// rather than returning a tuple of generics, which the inference engine can't
+// yet resolve in the empty branch.)
+fn vec_pop<T>(mut v: Vec<T>) -> Vec<T> {
+    if v.len == 0 {
+        v
+    } else {
+        Vec { data: v.data, len: v.len - 1, cap: v.cap }
+    }
+}
+
+// Truncate to at most `n` elements.
+fn vec_truncate<T>(mut v: Vec<T>, n: i64) -> Vec<T> {
+    if n >= v.len {
+        v
+    } else {
+        Vec { data: v.data, len: max_i64(n, 0), cap: v.cap }
+    }
+}
+
+// The last element, or None if empty.
+fn vec_last<T>(v: Vec<T>) -> Option<T> {
+    if v.len == 0 { Option::None } else { Option::Some(array_get(v.data, v.len - 1)) }
+}
+
+// A shallow copy (own backing array), so the original is untouched by later
+// in-place ops on the copy.
+fn vec_copy<T>(v: Vec<T>) -> Vec<T> {
+    let mut nd: Array<T> = array_new(max_i64(v.cap, 1));
+    let mut i = 0;
+    while i < v.len {
+        let _u = array_set(nd, i, array_get(v.data, i));
+        i = i + 1;
+    }
+    Vec { data: nd, len: v.len, cap: max_i64(v.cap, 1) }
+}
+
+// Reverse the elements, returning a fresh Vec.
+fn vec_reverse<T>(v: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = vec_with_capacity(max_i64(v.len, 1));
+    let mut i = v.len;
+    while i > 0 {
+        out = vec_push(out, array_get(v.data, i - 1));
+        i = i - 1;
+    }
+    out
+}
+
+// ---- Vec<i64> concrete element-comparing ops -------------------------------
+
+fn vec_index_of_i64(v: Vec<i64>, x: i64) -> i64 {
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i < v.len {
+        if found < 0 {
+            if array_get(v.data, i) == x {
+                found = i;
+            }
+        }
+        i = i + 1;
+    }
+    found
+}
+
+fn vec_contains_i64(v: Vec<i64>, x: i64) -> bool {
+    vec_index_of_i64(v, x) >= 0
+}
+
+fn vec_sum_i64(v: Vec<i64>) -> i64 {
+    let mut i = 0;
+    let mut acc = 0;
+    while i < v.len {
+        acc = acc + array_get(v.data, i);
+        i = i + 1;
+    }
+    acc
+}
+
+// In-place insertion sort of a Vec<i64> (ascending). Stable, returns the sorted
+// Vec. Fine for the small/medium vectors a v1 stdlib targets.
+fn vec_sort_i64(mut v: Vec<i64>) -> Vec<i64> {
+    let mut i = 1;
+    while i < v.len {
+        let key = array_get(v.data, i);
+        let mut j = i - 1;
+        // Shift larger elements right. `j` can go to -1, so guard before reading.
+        let mut placed = false;
+        while j >= 0 && placed == false {
+            let cur = array_get(v.data, j);
+            if cur > key {
+                let _u = array_set(v.data, j + 1, cur);
+                j = j - 1;
+            } else {
+                placed = true;
+            }
+        }
+        let _u2 = array_set(v.data, j + 1, key);
+        i = i + 1;
+    }
+    v
+}
+
+// ---- String helpers --------------------------------------------------------
+// `String` is a built-in varlen heap type. The primitives `print_str`,
+// `str_len`, `str_eq`, and `str_concat` are runtime intrinsics; these wrappers
+// give friendlier names and a few conveniences, all in gc-rust itself.
+
+fn println(s: String) -> i64 { print_str(s) }
+
+fn string_len(s: String) -> i64 { str_len(s) }
+
+fn string_eq(a: String, b: String) -> bool { str_eq(a, b) }
+
+fn string_concat(a: String, b: String) -> String { str_concat(a, b) }
+
+fn str_is_empty(s: String) -> bool { str_len(s) == 0 }
+
+// Concatenate three strings: `str_concat3(a, b, c)`.
+fn str_concat3(a: String, b: String, c: String) -> String {
+    str_concat(str_concat(a, b), c)
+}
+
+// ---- String algorithms (written in gc-rust over the primitives) -----------
+// Built on `str_len`, `str_get` (byte at index, -1 if out of range),
+// `str_substring`, and `to_string`.
+
+// Is byte `c` ASCII whitespace (space, tab, newline, carriage return)?
+fn is_space_byte(c: i64) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// Index of the first occurrence of single-byte `needle` (its first byte) at or
+// after `from`, or -1 if absent.
+fn str_index_of_byte(s: String, byte: i64, from: i64) -> i64 {
+    let n = str_len(s);
+    let mut i = max_i64(from, 0);
+    let mut found = 0 - 1;
+    while i < n {
+        if found < 0 {
+            if str_get(s, i) == byte {
+                found = i;
+            }
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// Does `s` start with `prefix`?
+fn str_starts_with(s: String, prefix: String) -> bool {
+    let pn = str_len(prefix);
+    if pn > str_len(s) {
+        false
+    } else {
+        let mut i = 0;
+        let mut ok = true;
+        while i < pn {
+            if str_get(s, i) != str_get(prefix, i) {
+                ok = false;
+            }
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Does `s` end with `suffix`?
+fn str_ends_with(s: String, suffix: String) -> bool {
+    let sn = str_len(s);
+    let qn = str_len(suffix);
+    if qn > sn {
+        false
+    } else {
+        let mut i = 0;
+        let mut ok = true;
+        while i < qn {
+            if str_get(s, sn - qn + i) != str_get(suffix, i) {
+                ok = false;
+            }
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Strip leading and trailing ASCII whitespace, returning a fresh substring.
+fn str_trim(s: String) -> String {
+    let n = str_len(s);
+    let mut lo = 0;
+    while lo < n && is_space_byte(str_get(s, lo)) {
+        lo = lo + 1;
+    }
+    let mut hi = n;
+    while hi > lo && is_space_byte(str_get(s, hi - 1)) {
+        hi = hi - 1;
+    }
+    str_substring(s, lo, hi)
+}
+
+// Does `s` contain the single byte `byte`?
+fn str_contains_byte(s: String, byte: i64) -> bool {
+    str_index_of_byte(s, byte, 0) >= 0
+}
+
+// Split `s` on every occurrence of the single byte `sep`, returning the pieces
+// (the separator is removed; adjacent separators yield empty pieces). A string
+// with no separators yields a one-element Vec holding the whole string.
+fn str_split_byte(s: String, sep: i64) -> Vec<String> {
+    let mut out: Vec<String> = vec_new();
+    let n = str_len(s);
+    let mut start = 0;
+    let mut i = 0;
+    while i < n {
+        if str_get(s, i) == sep {
+            out = vec_push(out, str_substring(s, start, i));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    // The final piece (from the last separator to the end).
+    out = vec_push(out, str_substring(s, start, n));
+    out
+}
+
+// Parse a base-10 signed integer. Returns `Option::Some(n)` on success, or
+// `Option::None` if the string is empty or contains a non-digit (after an
+// optional leading `-`). ASCII digits are bytes 48..=57; '-' is 45.
+fn parse_int(s: String) -> Option<i64> {
+    let n = str_len(s);
+    if n == 0 {
+        Option::None
+    } else {
+        let mut neg = false;
+        let mut i = 0;
+        if str_get(s, 0) == 45 {
+            neg = true;
+            i = 1;
+        }
+        // A lone "-" is not a number.
+        if i >= n {
+            Option::None
+        } else {
+            let mut acc = 0;
+            let mut ok = true;
+            while i < n {
+                let c = str_get(s, i);
+                if c < 48 || c > 57 {
+                    ok = false;
+                }
+                acc = acc * 10 + (c - 48);
+                i = i + 1;
+            }
+            if ok {
+                if neg { Option::Some(0 - acc) } else { Option::Some(acc) }
+            } else {
+                Option::None
+            }
+        }
+    }
+}
+
+// Parse a float (runtime-backed; returns 0.0 on a malformed string). For a
+// checked variant, gate on a separate validity check.
+fn parse_float(s: String) -> f64 {
+    str_to_float(s)
+}
+
+// Replace every occurrence of the single byte `from` with the string `to`,
+// returning a fresh string. (Splitting on the byte and re-joining with `to`.)
+fn str_replace_byte(s: String, from: i64, to: String) -> String {
+    let n = str_len(s);
+    let mut out = "";
+    let mut start = 0;
+    let mut i = 0;
+    while i < n {
+        if str_get(s, i) == from {
+            out = str_concat(out, str_substring(s, start, i));
+            out = str_concat(out, to);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    str_concat(out, str_substring(s, start, n))
+}
+
+// Join the strings in `parts` with `sep` between them.
+fn str_join(parts: Vec<String>, sep: String) -> String {
+    let n = vec_len(parts);
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        if i > 0 {
+            out = str_concat(out, sep);
+        }
+        out = str_concat(out, vec_get(parts, i));
+        i = i + 1;
+    }
+    out
+}
+
+// ---- MapStr<V> — a String-keyed hash map ----------------------------------
+// Open addressing with linear probing over three parallel backing arrays:
+// `keys` (the String keys), `vals` (the values), and `used` (0 = empty slot,
+// 1 = occupied). Grows (rehashes into a 2x table) past a 0.7 load factor. No
+// deletion in v1. Keys are hashed with the `str_hash` runtime primitive.
+//
+//   let mut m: MapStr<i64> = mapstr_new();
+//   m = mapstr_insert(m, "a", 1);
+//   opt_unwrap_or(mapstr_get(m, "a"), 0)   // 1
+
+struct MapStr<V> { keys: Array<String>, vals: Array<V>, used: Array<i64>, len: i64, cap: i64 }
+
+fn mapstr_new<V>() -> MapStr<V> {
+    let cap = 8;
+    MapStr { keys: array_new(cap), vals: array_new(cap), used: array_new(cap), len: 0, cap: cap }
+}
+
+fn mapstr_len<V>(m: MapStr<V>) -> i64 { m.len }
+
+// Find the slot index for `key`: either where it already lives, or the first
+// empty slot on its probe sequence. Returns the index; caller checks `used`.
+fn mapstr_slot<V>(m: MapStr<V>, key: String) -> i64 {
+    let mask = m.cap - 1;
+    let mut i = str_hash(key) & mask;
+    let mut result = 0 - 1;
+    let mut steps = 0;
+    while steps < m.cap && result < 0 {
+        if array_get(m.used, i) == 0 {
+            result = i;
+        } else {
+            if str_eq(array_get(m.keys, i), key) {
+                result = i;
+            } else {
+                i = (i + 1) & mask;
+            }
+        }
+        steps = steps + 1;
+    }
+    result
+}
+
+// Insert into a map known to have a free slot (used internally by insert/grow).
+fn mapstr_put_raw<V>(mut m: MapStr<V>, key: String, val: V) -> MapStr<V> {
+    let slot = mapstr_slot(m, key);
+    let was_used = array_get(m.used, slot);
+    let _u1 = array_set(m.keys, slot, key);
+    let _u2 = array_set(m.vals, slot, val);
+    let _u3 = array_set(m.used, slot, 1);
+    if was_used == 0 {
+        MapStr { keys: m.keys, vals: m.vals, used: m.used, len: m.len + 1, cap: m.cap }
+    } else {
+        m
+    }
+}
+
+// Double the table and re-insert every occupied entry.
+fn mapstr_grow<V>(m: MapStr<V>) -> MapStr<V> {
+    let new_cap = m.cap * 2;
+    let mut bigger: MapStr<V> = MapStr {
+        keys: array_new(new_cap), vals: array_new(new_cap), used: array_new(new_cap),
+        len: 0, cap: new_cap,
+    };
+    let mut i = 0;
+    while i < m.cap {
+        if array_get(m.used, i) == 1 {
+            bigger = mapstr_put_raw(bigger, array_get(m.keys, i), array_get(m.vals, i));
+        }
+        i = i + 1;
+    }
+    bigger
+}
+
+fn mapstr_insert<V>(mut m: MapStr<V>, key: String, val: V) -> MapStr<V> {
+    // Grow first if we're past the 0.7 load factor (len*10 >= cap*7).
+    if (m.len + 1) * 10 >= m.cap * 7 {
+        m = mapstr_grow(m);
+    }
+    mapstr_put_raw(m, key, val)
+}
+
+fn mapstr_contains<V>(m: MapStr<V>, key: String) -> bool {
+    let slot = mapstr_slot(m, key);
+    if slot < 0 { false } else { array_get(m.used, slot) == 1 }
+}
+
+fn mapstr_get<V>(m: MapStr<V>, key: String) -> Option<V> {
+    let slot = mapstr_slot(m, key);
+    if slot < 0 {
+        Option::None
+    } else {
+        if array_get(m.used, slot) == 1 {
+            Option::Some(array_get(m.vals, slot))
+        } else {
+            Option::None
+        }
+    }
+}
+
+// ---- Functional iterator combinators over Vec -----------------------------
+// gc-rust has value semantics (no references), so iteration is expressed as
+// eager combinators over Vec<T> taking closures, rather than a stateful
+// `Iterator` with `next()`. Each returns a fresh Vec or a reduced value.
+
+// Apply `f` to every element, collecting the results into a new Vec<U>.
+fn vec_map<T, U>(v: Vec<T>, f: fn(T) -> U) -> Vec<U> {
+    let mut out: Vec<U> = vec_with_capacity(max_i64(vec_len(v), 1));
+    let mut i = 0;
+    while i < vec_len(v) {
+        out = vec_push(out, f(vec_get(v, i)));
+        i = i + 1;
+    }
+    out
+}
+
+// Keep only elements for which `pred` returns true.
+fn vec_filter<T>(v: Vec<T>, pred: fn(T) -> bool) -> Vec<T> {
+    let mut out: Vec<T> = vec_new();
+    let mut i = 0;
+    while i < vec_len(v) {
+        let x = vec_get(v, i);
+        if pred(x) {
+            out = vec_push(out, x);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Left fold: `acc = f(acc, elem)` for each element, starting from `init`.
+fn vec_fold<T, A>(v: Vec<T>, init: A, f: fn(A, T) -> A) -> A {
+    let mut acc = init;
+    let mut i = 0;
+    while i < vec_len(v) {
+        acc = f(acc, vec_get(v, i));
+        i = i + 1;
+    }
+    acc
+}
+
+// Does any element satisfy `pred`?
+fn vec_any<T>(v: Vec<T>, pred: fn(T) -> bool) -> bool {
+    let mut i = 0;
+    let mut found = false;
+    while i < vec_len(v) {
+        if pred(vec_get(v, i)) {
+            found = true;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// Do all elements satisfy `pred`?
+fn vec_all<T>(v: Vec<T>, pred: fn(T) -> bool) -> bool {
+    let mut i = 0;
+    let mut ok = true;
+    while i < vec_len(v) {
+        if pred(vec_get(v, i)) == false {
+            ok = false;
+        }
+        i = i + 1;
+    }
+    ok
+}
+
+// Count elements satisfying `pred`.
+fn vec_count<T>(v: Vec<T>, pred: fn(T) -> bool) -> i64 {
+    let mut i = 0;
+    let mut n = 0;
+    while i < vec_len(v) {
+        if pred(vec_get(v, i)) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    n
+}
+
+// Apply `f` to each element for its side effect (returns 0).
+fn vec_for_each<T>(v: Vec<T>, f: fn(T) -> i64) -> i64 {
+    let mut i = 0;
+    while i < vec_len(v) {
+        let _u = f(vec_get(v, i));
+        i = i + 1;
+    }
+    0
+}
+
+// Build a Vec<i64> of `[start, start+1, ..., end-1]`.
+fn vec_range(start: i64, end: i64) -> Vec<i64> {
+    let mut out: Vec<i64> = vec_with_capacity(max_i64(end - start, 1));
+    let mut i = start;
+    while i < end {
+        out = vec_push(out, i);
+        i = i + 1;
+    }
+    out
+}
+
+// ---- Generic trait-bounded collection ops ---------------------------------
+// These work for any element type implementing `Eq` / `Ord` (the prelude
+// implements both for i64 and Eq for String; users can add their own).
+
+// Does `v` contain an element equal (by `Eq`) to `x`?
+fn vec_contains<T: Eq>(v: Vec<T>, x: T) -> bool {
+    let mut i = 0;
+    let mut found = false;
+    while i < vec_len(v) {
+        if vec_get(v, i).eq(x) {
+            found = true;
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// Index of the first element equal to `x`, or -1.
+fn vec_index_of<T: Eq>(v: Vec<T>, x: T) -> i64 {
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i < vec_len(v) {
+        if found < 0 {
+            if vec_get(v, i).eq(x) {
+                found = i;
+            }
+        }
+        i = i + 1;
+    }
+    found
+}
+
+// In-place insertion sort using the `Ord` trait (ascending). Returns the sorted
+// Vec. Works for any `T: Ord`.
+fn vec_sort<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+    let mut i = 1;
+    while i < v.len {
+        let key = array_get(v.data, i);
+        let mut j = i - 1;
+        let mut placed = false;
+        while j >= 0 && placed == false {
+            let cur = array_get(v.data, j);
+            if cur.cmp(key) > 0 {
+                let _u = array_set(v.data, j + 1, cur);
+                j = j - 1;
+            } else {
+                placed = true;
+            }
+        }
+        let _u2 = array_set(v.data, j + 1, key);
+        i = i + 1;
+    }
+    v
+}
+
+// The maximum element by `Ord`, or None if empty.
+fn vec_max<T: Ord>(v: Vec<T>) -> Option<T> {
+    if vec_len(v) == 0 {
+        Option::None
+    } else {
+        let mut best = vec_get(v, 0);
+        let mut i = 1;
+        while i < vec_len(v) {
+            let x = vec_get(v, i);
+            if x.cmp(best) > 0 {
+                best = x;
+            }
+            i = i + 1;
+        }
+        Option::Some(best)
+    }
+}
+
+// ---- Thread<T> — OS-thread concurrency (see docs/threads.md) ---------------
+// `Thread::spawn(f)` runs the no-arg closure `f` on a new OS thread sharing this
+// heap; the GC stops the world across all threads when it collects. `t.join()`
+// blocks and returns `f`'s result — of ANY type `T` (scalar or heap value).
+//
+// The result travels via the handle's `result` field (the Future model, à la
+// Java's `FutureTask.outcome`): the child stores `f()` into a plain heap cell on
+// finish, and because the parent holds the (GC-rooted) handle, the result is
+// traced + relocated for free until joined. Cross-thread safe publication comes
+// from `thread_join` (a real OS thread join = a happens-before edge), NOT from
+// any atomic on the cell — exactly like Java. Lambdas and named fns interchangeable.
+struct ThreadResult<T> { v: Option<T> }
+
+// Sharing the cell between child (one write, before finishing) and parent (one
+// read, after join) is safe because `thread_join` orders them — assert Sync
+// (the auto-deriver can't see the join provides the ordering).
+impl Sync for ThreadResult {}
+
+struct Thread<T> { handle: RawPtr, result: ThreadResult<T> }
+
+impl Thread {
+    fn spawn<T>(f: fn() -> T) -> Thread<T> {
+        let cell: ThreadResult<T> = ThreadResult { v: Option::None };
+        // The child computes `f()` and stores it into the shared cell (a plain
+        // field write), then returns 0 (the runtime's i64 channel is unused).
+        let handle = thread_spawn(|| {
+            let mut c = cell;
+            c.v = Option::Some(f());
+            0
+        });
+        Thread { handle: handle, result: cell }
+    }
+    fn sleep(ms: i64) { let _u = thread_sleep(ms); }
+    fn yield_now() { let _u = thread_yield(); }
+    fn current_id() -> i64 { thread_current_id() }
+}
+
+impl<T> Thread<T> {
+    fn join(self) -> T {
+        let _h = thread_join(self.handle);   // wait for the OS thread (happens-before)
+        // The child has stored its result before finishing, so this reads `Some`.
+        // The `None` arm is unreachable; the loop satisfies the return type.
+        let mut r = self.result;
+        loop {
+            match r.v {
+                Option::Some(v) => { return v; }
+                Option::None => {}
+            }
+        }
+    }
+}
+
+// ---- AtomicI64 — a lock-free shared integer (see docs/threads.md) ----------
+// The cell lives off the GC heap (stable address), so concurrent CAS/fetch_add
+// are safe. Shareable across threads.
+#[value]
+struct AtomicI64 { cell: RawPtr }
+
+impl AtomicI64 {
+    fn new(v: i64) -> AtomicI64 { AtomicI64 { cell: atomic_i64_new(v) } }
+}
+impl AtomicI64 {
+    fn load(self) -> i64 { atomic_i64_load(self.cell) }
+    fn store(self, v: i64) -> i64 { atomic_i64_store(self.cell, v) }
+    fn fetch_add(self, delta: i64) -> i64 { atomic_i64_fetch_add(self.cell, delta) }
+    fn compare_and_set(self, expected: i64, new: i64) -> bool { atomic_i64_cas(self.cell, expected, new) == 1 }
+}
+
+// ---- Atom<T> — a Clojure-style atom (see docs/threads.md) ------------------
+// Holds a single immutable value. You never mutate in place: you atomically SWAP
+// which immutable value the atom points at. `swap` applies a pure function and
+// retries on contention (lock-free CAS loop). Shareable across threads; reads
+// always see a consistent immutable snapshot.
+struct Atom<T> { value: T }
+
+impl<T> Atom<T> {
+    fn new(v: T) -> Atom<T> { Atom { value: v } }
+}
+
+impl<T> Atom<T> {
+    // @atom — the current value (atomic load).
+    fn deref(self) -> T { atom_load(self) }
+
+    // compare-and-set! — install `new` iff the current value is `old`.
+    fn compare_and_set(self, old: T, new: T) -> bool { atom_cas(self, old, new) }
+
+    // swap! — apply the pure function `f` to the current value and install the
+    // result, retrying the whole function if another thread swapped in between.
+    fn swap(self, f: fn(T) -> T) -> T {
+        loop {
+            let old = atom_load(self);
+            let new = f(old);
+            if atom_cas(self, old, new) {
+                return new;
+            }
+        }
+    }
+
+    // reset! — set a new value unconditionally (retry the CAS until it sticks).
+    fn reset(self, v: T) -> T {
+        loop {
+            let old = atom_load(self);
+            if atom_cas(self, old, v) {
+                return v;
+            }
+        }
+    }
+}
+
+// ---- Channel<T> — a bounded, blocking message channel (see docs/threads.md) -
+// The element buffer is an on-heap Array<T> (GC traces queued values); a runtime
+// control block (RawPtr) holds the mutex/condvars/indices. send blocks while
+// full, recv blocks while empty (parking, not spinning). Shareable across
+// threads (built from a synchronized control block).
+struct Channel<T> { buf: Array<T>, ctrl: RawPtr }
+
+impl<T> Channel<T> {
+    fn new(cap: i64) -> Channel<T> {
+        let b: Array<T> = array_new(cap);
+        Channel { buf: b, ctrl: chan_new(cap) }
+    }
+}
+
+impl<T> Channel<T> {
+    fn send(self, v: T) -> i64 { chan_send(self.buf, self.ctrl, v) }
+    fn recv(self) -> T { chan_recv(self.buf, self.ctrl) }
+    fn close(self) -> i64 { chan_sender_drop(self.ctrl); 0 }
+}
+
+// A Channel synchronizes access internally (its control block holds the lock),
+// so it is safe to SHARE across threads — assert Sync explicitly (the auto-
+// deriver can't prove the runtime control block makes the mutable buffer safe).
+impl Sync for Channel {}

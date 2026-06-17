@@ -56,6 +56,8 @@ impl<'a> LayoutRegistry<'a> {
                 // closure repr is the env layout (code ptr lives in the layout).
                 Ok(Repr::Ref(self.closure_placeholder()))
             }
+            // A C callback is a raw function pointer.
+            Ty::ExternFn { .. } => Ok(Repr::Scalar(ScalarRepr::Ptr)),
             Ty::Var(v) => Err(LayoutError(format!("non-ground type variable `{}` reached layout", v))),
             Ty::Infer(_) => Err(LayoutError("inference hole reached layout".into())),
         }
@@ -335,7 +337,12 @@ impl<'a> LayoutRegistry<'a> {
             match c {
                 Repr::Ref(_) => ptr_fields += 1,
                 Repr::Scalar(s) => raw_bytes += (s.bits().max(8) / 8) as u16,
-                Repr::Value(vid) => raw_bytes += self.values[*vid as usize].size as u16,
+                // Value aggregates are stored 8-aligned in the raw section (see
+                // lower_lifted / gen_make_closure), so reserve aligned space.
+                Repr::Value(vid) => {
+                    raw_bytes = align_up(raw_bytes as u32, 8) as u16;
+                    raw_bytes += self.values[*vid as usize].size as u16;
+                }
                 Repr::Unit => {}
             }
         }
@@ -490,6 +497,14 @@ fn surface_to_ground(t: &crate::ast::Type, subst: &HashMap<String, Ty>) -> R<Ty>
             };
             Ok(Ty::Fn { params: ps, ret: Box::new(r) })
         }
+        TypeKind::ExternFn(params, ret) => {
+            let ps = params.iter().map(|p| surface_to_ground(p, subst)).collect::<R<_>>()?;
+            let r = match ret {
+                Some(r) => surface_to_ground(r, subst)?,
+                None => Ty::Prim(Prim::Unit),
+            };
+            Ok(Ty::ExternFn { params: ps, ret: Box::new(r) })
+        }
         TypeKind::SelfType => subst.get("Self").cloned().ok_or_else(|| LayoutError("Self outside impl".into())),
     }
 }
@@ -500,6 +515,7 @@ fn prim_of(name: &str) -> Option<Prim> {
         "u8" => Prim::U8, "u16" => Prim::U16, "u32" => Prim::U32, "u64" => Prim::U64,
         "f32" => Prim::F32, "f64" => Prim::F64,
         "bool" => Prim::Bool, "char" => Prim::Char, "String" => Prim::Str,
+        "RawPtr" => Prim::RawPtr,
         _ => return None,
     })
 }
@@ -512,6 +528,7 @@ fn scalar_of(p: Prim) -> Option<ScalarRepr> {
         Prim::U32 => ScalarRepr::U32, Prim::U64 => ScalarRepr::U64,
         Prim::F32 => ScalarRepr::F32, Prim::F64 => ScalarRepr::F64,
         Prim::Bool => ScalarRepr::Bool, Prim::Char => ScalarRepr::Char,
+        Prim::RawPtr => ScalarRepr::Ptr,
         Prim::Str | Prim::Unit => return None,
     })
 }
@@ -546,6 +563,7 @@ fn ty_key(t: &Ty) -> String {
         Ty::Array(e, n) => format!("[{};{}]", ty_key(e), n),
         Ty::Tuple(es) => format!("({})", es.iter().map(ty_key).collect::<Vec<_>>().join(",")),
         Ty::Fn { params, ret } => format!("fn({})->{}", params.iter().map(ty_key).collect::<Vec<_>>().join(","), ty_key(ret)),
+        Ty::ExternFn { params, ret } => format!("extern fn({})->{}", params.iter().map(ty_key).collect::<Vec<_>>().join(","), ty_key(ret)),
         Ty::Infer(n) => format!("?{}", n),
     }
 }
@@ -574,7 +592,7 @@ mod tests {
 
     #[test]
     fn value_struct_is_inline() {
-        let c = ctx("value struct Vec3 { x: f64, y: f64, z: f64 }");
+        let c = ctx("#[value] struct Vec3 { x: f64, y: f64, z: f64 }");
         let mut reg = LayoutRegistry::new(&c);
         let r = reg.repr(&Ty::Named { name: "Vec3".into(), args: vec![] }).unwrap();
         let Repr::Value(id) = r else { panic!("Vec3 should be a value type") };

@@ -26,6 +26,40 @@ fn err<T>(msg: impl Into<String>, span: Span) -> LResult<T> {
     Err(LowerError { msg: msg.into(), span })
 }
 
+/// Levenshtein edit distance between two short identifiers (for "did you mean?"
+/// suggestions). Bounded use only — fine for identifier-length strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Pick the closest candidate name to `name` (within a small edit distance), for
+/// a "did you mean `x`?" hint. Returns `None` if nothing is close enough.
+fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    // Allow up to ~1/3 of the name's length in edits (min 1, max 3).
+    let budget = (name.len() / 3).clamp(1, 3);
+    let mut best: Option<(usize, String)> = None;
+    for c in candidates {
+        if c == "_" || c.is_empty() { continue; }
+        let d = edit_distance(name, c);
+        if d <= budget && best.as_ref().map_or(true, |(bd, _)| d < *bd) {
+            best = Some((d, c.to_string()));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// A resolved function instantiation queued for lowering: the source `FnDef`,
 /// the type-parameter substitution to apply, and the mangled name. Works for
 /// free functions AND impl methods (methods aren't in `ctx.fns`, so we carry
@@ -121,6 +155,41 @@ pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgr
     Ok(prog)
 }
 
+/// Type-check every non-generic top-level function (and method) independently,
+/// collecting ALL errors rather than stopping at the first. This is the
+/// multi-error pass: unlike `lower_program` (which is demand-driven from `main`
+/// and halts on the first `?`), this checks each function in isolation, so one
+/// broken function doesn't hide errors in the others.
+///
+/// Generic functions are skipped here — they can only be checked once
+/// instantiated with concrete type args, which the demand-driven `lower_program`
+/// does. So this catches the common case (broken concrete functions) up front;
+/// `lower_program` still reports any error reachable only through a generic
+/// instantiation.
+pub fn check_program(globals: &crate::resolve::GlobalTable) -> Result<(), Vec<LowerError>> {
+    let ctx = TyCtx::from_globals(globals);
+    let mut errors = Vec::new();
+
+    // Free functions: check each non-generic one in a throwaway lowering context.
+    let mut names: Vec<&String> = ctx.fns.keys().collect();
+    names.sort(); // deterministic error order
+    for fq in names {
+        let f = &ctx.fns[fq];
+        if !f.generics.params.is_empty() {
+            continue; // generic — needs instantiation; left to lower_program
+        }
+        let mut reg = LayoutRegistry::new(&ctx);
+        let mut mono = Mono::new();
+        let mut count = 0u32;
+        let job = Job { f: f.clone(), subst: HashMap::new(), mangled: (*fq).clone(), self_ty: None };
+        if let Err(e) = lower_fn(&job, &ctx, &mut reg, &mut mono, &mut count) {
+            errors.push(e);
+        }
+    }
+
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
 fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
     while prog.funcs.len() <= id as usize {
         prog.funcs.push(placeholder_fn());
@@ -129,7 +198,7 @@ fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
 }
 
 fn placeholder_fn() -> CoreFn {
-    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![] }
+    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false }
 }
 
 /// Collect free variable names referenced in `e`: single-segment path uses that
@@ -245,6 +314,7 @@ fn ty_display(ty: &Ty) -> String {
         Ty::Array(e, n) => format!("[{}; {}]", ty_display(e), n),
         Ty::Tuple(es) => format!("({})", es.iter().map(ty_display).collect::<Vec<_>>().join(", ")),
         Ty::Fn { params, ret } => format!("fn({}) -> {}", params.iter().map(ty_display).collect::<Vec<_>>().join(", "), ty_display(ret)),
+        Ty::ExternFn { params, ret } => format!("extern fn({}) -> {}", params.iter().map(ty_display).collect::<Vec<_>>().join(", "), ty_display(ret)),
         Ty::Infer(_) => "_".to_string(),
     }
 }
@@ -275,6 +345,7 @@ fn prim_impl_key(ty: &Ty) -> String {
             Prim::U8 => "u8", Prim::U16 => "u16", Prim::U32 => "u32", Prim::U64 => "u64",
             Prim::F32 => "f32", Prim::F64 => "f64",
             Prim::Bool => "bool", Prim::Char => "char", Prim::Str => "String", Prim::Unit => "()",
+            Prim::RawPtr => "RawPtr",
         }.to_string(),
         _ => String::new(),
     }
@@ -290,7 +361,29 @@ fn ty_mangle(t: &Ty) -> String {
         Ty::Array(e, n) => format!("A{}x{}", ty_mangle(e), n),
         Ty::Tuple(es) => format!("T{}", es.iter().map(ty_mangle).collect::<Vec<_>>().join("_")),
         Ty::Fn { params, ret } => format!("F{}_{}", params.iter().map(ty_mangle).collect::<Vec<_>>().join("_"), ty_mangle(ret)),
+        Ty::ExternFn { params, ret } => format!("XF{}_{}", params.iter().map(ty_mangle).collect::<Vec<_>>().join("_"), ty_mangle(ret)),
         Ty::Infer(n) => format!("I{}", n),
+    }
+}
+
+/// Is `repr` allowed to cross the FFI boundary? Scalars are blittable; a value
+/// struct is blittable iff it is a plain struct (not a value enum) whose fields
+/// are all transitively blittable. Managed heap (`Ref`) types and `Unit` are
+/// not. See `docs/ffi.md`.
+/// Expected argument kind for a runtime-call intrinsic (atomics etc.).
+#[derive(Clone, Copy)]
+enum ArgKind { Int, Ptr }
+
+fn repr_is_blittable(repr: &Repr, values: &[ValueLayout]) -> bool {
+    match repr {
+        Repr::Scalar(_) => true,
+        Repr::Value(vid) => {
+            let v = &values[*vid as usize];
+            // Value enums carry a tag union whose layout we don't yet expose as
+            // a C-stable type; only plain value structs cross.
+            v.variants.is_none() && v.fields.iter().all(|f| repr_is_blittable(f, values))
+        }
+        Repr::Ref(_) | Repr::Unit => false,
     }
 }
 
@@ -302,8 +395,9 @@ struct FnLowerer<'a, 'r, 'm> {
     /// Type-parameter substitution for the current instantiation (empty if the
     /// enclosing function is non-generic).
     subst: HashMap<String, Ty>,
-    /// Lexical scope: name → (LocalId, Ty).
-    scope: Vec<HashMap<String, (LocalId, Ty)>>,
+    /// Lexical scope: name → (LocalId, Ty, is_mut). `is_mut` drives the
+    /// immutable-by-default mutability discipline (see `docs/mutability.md`).
+    scope: Vec<HashMap<String, (LocalId, Ty, bool)>>,
     /// All locals' reprs, indexed by LocalId.
     locals: Vec<Repr>,
     /// Parallel: each local's semantic Ty (for checking).
@@ -324,6 +418,62 @@ fn lower_fn<'a>(
         Some(t) => ground_type(t, subst, ctx)?,
         None => Ty::unit(),
     };
+
+    // Foreign `extern "C"` declaration: no body to lower. Enforce the Phase-A
+    // blittable-only rule (scalars only cross the boundary — never a managed
+    // GC pointer), then emit a body-less `CoreFn` named after the bare C symbol.
+    // See `docs/ffi.md`.
+    if f.is_extern {
+        let mut reg_lo = FnLowerer {
+            ctx, reg, mono, count,
+            subst: subst.clone(),
+            scope: vec![HashMap::new()],
+            locals: vec![],
+            local_tys: vec![],
+            ret_ty: ret_ty.clone(),
+        };
+        let mut params = Vec::new();
+        for p in &f.params {
+            let ty = ground_type(&p.ty, subst, ctx)?;
+            let repr = reg_lo.repr_of(&ty, p.span)?;
+            // Scalars cross by value; `#[repr(C)]` value structs of transitively
+            // blittable fields cross by pointer (caller passes a stack alloca).
+            // A managed heap (`Ref`) type never crosses. See `docs/ffi.md`.
+            if !repr_is_blittable(&repr, &reg_lo.reg.values) {
+                return err(
+                    format!(
+                        "extern function `{}` parameter `{}` has type `{}`, but only scalar \
+                         types and value structs of scalar fields may cross the FFI boundary \
+                         (a managed/heap type cannot — see docs/ffi.md)",
+                        f.name, p.name, ty_display(&ty),
+                    ),
+                    p.span,
+                );
+            }
+            params.push(repr);
+        }
+        let ret = reg_lo.repr_of(&ret_ty, f.span)?;
+        if !matches!(ret, Repr::Scalar(_) | Repr::Unit) {
+            return err(
+                format!(
+                    "extern function `{}` returns `{}`, but only scalar types (or no return) \
+                     may cross the FFI boundary (see docs/ffi.md)",
+                    f.name, ty_display(&ret_ty),
+                ),
+                f.span,
+            );
+        }
+        return Ok(CoreFn {
+            name: f.name.clone(),
+            params,
+            ret,
+            locals: vec![],
+            body: CoreBlock { stmts: vec![], tail: None },
+            closure_captures: vec![],
+            is_extern: true,
+        });
+    }
+
     let mut lo = FnLowerer {
         ctx,
         reg,
@@ -343,14 +493,14 @@ fn lower_fn<'a>(
             .ok_or_else(|| LowerError { msg: "method without a self type".into(), span: f.span })?;
         let repr = lo.repr_of(&self_ty, f.span)?;
         let id = lo.fresh_local(repr.clone(), self_ty.clone());
-        lo.bind("self", id, self_ty);
+        lo.bind_mut("self", id, self_ty, f.self_is_mut);
         params.push(repr);
     }
     for p in &f.params {
         let ty = ground_type(&p.ty, &lo.subst.clone(), lo.ctx)?;
         let repr = lo.repr_of(&ty, p.span)?;
         let id = lo.fresh_local(repr.clone(), ty.clone());
-        lo.bind(&p.name, id, ty);
+        lo.bind_mut(&p.name, id, ty, p.is_mut);
         params.push(repr);
     }
 
@@ -361,7 +511,7 @@ fn lower_fn<'a>(
     check_assignable(&body_ty, &ret_ty, body_err_span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![] })
+    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![], is_extern: false })
 }
 
 /// Lower a surface type to a ground `Ty`, applying the instantiation subst.
@@ -385,6 +535,10 @@ fn apply_subst(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
             params: params.iter().map(|p| apply_subst(p, subst)).collect(),
             ret: Box::new(apply_subst(ret, subst)),
         },
+        Ty::ExternFn { params, ret } => Ty::ExternFn {
+            params: params.iter().map(|p| apply_subst(p, subst)).collect(),
+            ret: Box::new(apply_subst(ret, subst)),
+        },
         Ty::Prim(_) | Ty::Infer(_) => ty.clone(),
     }
 }
@@ -405,16 +559,71 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         self.local_tys.push(ty);
         id
     }
+    /// Bind an immutable local (the default). Use `bind_mut` for `let mut`,
+    /// `mut` params, and `mut self`.
     fn bind(&mut self, name: &str, id: LocalId, ty: Ty) {
-        self.scope.last_mut().unwrap().insert(name.to_string(), (id, ty));
+        self.bind_mut(name, id, ty, false);
+    }
+    fn bind_mut(&mut self, name: &str, id: LocalId, ty: Ty, is_mut: bool) {
+        self.scope.last_mut().unwrap().insert(name.to_string(), (id, ty, is_mut));
     }
     fn lookup(&self, name: &str) -> Option<(LocalId, Ty)> {
         for s in self.scope.iter().rev() {
-            if let Some((id, ty)) = s.get(name) {
+            if let Some((id, ty, _)) = s.get(name) {
                 return Some((*id, ty.clone()));
             }
         }
         None
+    }
+    /// Is the binding `name` mutable in the current scope? `None` if unbound.
+    fn lookup_mut(&self, name: &str) -> Option<bool> {
+        for s in self.scope.iter().rev() {
+            if let Some((_, _, is_mut)) = s.get(name) {
+                return Some(*is_mut);
+            }
+        }
+        None
+    }
+
+    /// The root binding name of an assignment target's access path:
+    /// `a` for `a`, `a.b`, `a.b.c`, `a[i]`, `a.b[i].c`. Used to enforce
+    /// transitive (deep) immutability: mutating any place requires the root of
+    /// its path to be a `mut` binding. Returns `None` if the path isn't rooted
+    /// in a simple variable (e.g. a function-call result).
+    fn path_root_name(e: &Expr) -> Option<String> {
+        match &*e.kind {
+            ExprKind::Path(p) if p.is_single() => Some(p.last().to_string()),
+            ExprKind::Field { base, .. } => Self::path_root_name(base),
+            ExprKind::Index { base, .. } => Self::path_root_name(base),
+            _ => None,
+        }
+    }
+
+    /// Enforce the immutable-by-default rule for an assignment to `target`:
+    /// the root binding of the access path must be declared `mut`. `what`
+    /// describes the place for the error message ("variable", "field of",
+    /// "element of").
+    fn check_mutable_root(&self, target: &Expr, what: &str, span: Span) -> LResult<()> {
+        match Self::path_root_name(target) {
+            Some(root) => match self.lookup_mut(&root) {
+                Some(true) => Ok(()),
+                Some(false) => {
+                    let fix = if root == "self" {
+                        "declare the receiver `mut self`".to_string()
+                    } else {
+                        format!("declare it `let mut {}`, or take it as `mut {}`", root, root)
+                    };
+                    err(format!("cannot assign to {} immutable binding `{}` ({})", what, root, fix), span)
+                }
+                None => err(format!("unknown variable `{}`", root), span),
+            },
+            // No simple root (e.g. assigning into a temporary) — reject; there's
+            // nothing to make `mut`.
+            None => err(
+                format!("cannot assign to {} a temporary value (it is not rooted in a `mut` binding)", what),
+                span,
+            ),
+        }
     }
     fn push_scope(&mut self) { self.scope.push(HashMap::new()); }
     fn pop_scope(&mut self) { self.scope.pop(); }
@@ -429,31 +638,52 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         for s in &b.stmts {
             match s {
                 Stmt::Let { pattern, ty, init, span } => {
-                    let (init_expr, init_ty) = match init {
+                    let (name, is_mut) = match &pattern.kind {
+                        PatternKind::Binding { name, is_mut } => (name.clone(), *is_mut),
+                        PatternKind::Wildcard => ("_".to_string(), false),
+                        _ => return err("only simple `let x =` patterns supported in v0", *span),
+                    };
+                    match init {
                         Some(e) => {
                             let expected = match ty {
                                 Some(t) => Some(ground_type(t, &self.subst.clone(), self.ctx)?),
                                 None => None,
                             };
-                            let (ce, at) = self.expr(e, expected.as_ref())?;
-                            // A `let x: T = e` whose `e` doesn't match `T` is an
-                            // error pointing at `e` (not at later uses of `x`).
-                            if let Some(exp) = &expected {
-                                check_assignable(&at, exp, e.span)?;
-                            }
-                            (ce, at)
+                            let (init_expr, init_ty) = {
+                                let (ce, at) = self.expr(e, expected.as_ref())?;
+                                // A `let x: T = e` whose `e` doesn't match `T` is
+                                // an error pointing at `e`.
+                                if let Some(exp) = &expected {
+                                    check_assignable(&at, exp, e.span)?;
+                                }
+                                (ce, at)
+                            };
+                            let repr = init_expr.repr.clone();
+                            let id = self.fresh_local(repr, init_ty.clone());
+                            self.bind_mut(&name, id, init_ty, is_mut);
+                            stmts.push(CoreStmt::Let(id, init_expr));
                         }
-                        None => return err("let without initializer is not supported in v0", *span),
-                    };
-                    let name = match &pattern.kind {
-                        PatternKind::Binding { name, .. } => name.clone(),
-                        PatternKind::Wildcard => "_".to_string(),
-                        _ => return err("only simple `let x =` patterns supported in v0", *span),
-                    };
-                    let repr = init_expr.repr.clone();
-                    let id = self.fresh_local(repr, init_ty.clone());
-                    self.bind(&name, id, init_ty);
-                    stmts.push(CoreStmt::Let(id, init_expr));
+                        // Deferred initialization: `let mut x: T;`. Requires a type
+                        // annotation (nothing to infer from) and `mut` (the binding
+                        // will be assigned later — see docs/mutability.md). The slot
+                        // is zero-initialized; a later `x = ...` fills it.
+                        None => {
+                            let Some(t) = ty else {
+                                return err("`let` without an initializer needs a type annotation (`let mut x: T;`)", *span);
+                            };
+                            if !is_mut {
+                                return err("a deferred-initialization `let` must be `mut` (it is assigned later): write `let mut`", *span);
+                            }
+                            let dty = ground_type(t, &self.subst.clone(), self.ctx)?;
+                            let repr = self.repr_of(&dty, *span)?;
+                            let id = self.fresh_local(repr.clone(), dty.clone());
+                            self.bind_mut(&name, id, dty.clone(), is_mut);
+                            // Zero-initialize so the slot is well-defined before the
+                            // first assignment (and GC-safe for ref slots → null).
+                            let zero = self.zero_value(&repr);
+                            stmts.push(CoreStmt::Let(id, zero));
+                        }
+                    }
                 }
                 Stmt::Expr(e) => {
                     let (ce, _) = self.expr(e, None)?;
@@ -510,7 +740,15 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                     // An unqualified unit variant brought into scope (`None`).
                     self.variant_ctor(path, &[], expected, e.span)
                 } else {
-                    err(format!("unknown variable `{}`", name), e.span)
+                    // Suggest a similarly-spelled in-scope local or known fn.
+                    let in_scope: Vec<String> = self.scope.iter()
+                        .flat_map(|s| s.keys().cloned())
+                        .chain(self.ctx.fns.keys().map(|k| k.rsplit("::").next().unwrap().to_string()))
+                        .collect();
+                    let hint = closest(name, in_scope.iter().map(|s| s.as_str()))
+                        .map(|s| format!(" (did you mean `{}`?)", s))
+                        .unwrap_or_default();
+                    err(format!("unknown variable `{}`{}", name, hint), e.span)
                 }
             }
 
@@ -572,8 +810,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                     }
                     None => None,
                 };
-                // `return` has type "never"; represent as unit for the slice.
-                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit), Ty::unit()))
+                // `return` diverges — type never (assignable to any context).
+                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit), never_ty()))
             }
 
             ExprKind::While { cond, body } => {
@@ -601,7 +839,11 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
             ExprKind::Loop { body } => {
                 let (cb, _) = self.block(body)?;
-                Ok((CoreExpr::new(CoreExprKind::Loop(Box::new(cb)), Repr::Unit), Ty::unit()))
+                // A `loop` diverges from the value's standpoint: it runs forever
+                // or exits via `return`/`break`. Type it as never so it can stand
+                // as a function body of any return type (e.g. the `swap` retry
+                // loop). Never is assignable to anything, including unit.
+                Ok((CoreExpr::new(CoreExprKind::Loop(Box::new(cb)), Repr::Unit), never_ty()))
             }
 
             ExprKind::For { pat, iter, body } => {
@@ -665,6 +907,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 // `a[i] = v` desugars to `array_set(a, i, v)` (compound forms
                 // expand to `a[i] = a[i] op v`).
                 if let ExprKind::Index { base, index } = &*target.kind {
+                    // (`array_set_op` enforces the mutable-root rule for both this
+                    // desugar and direct `array_set(..)` calls.)
                     let val_expr = match op {
                         None => value.clone(),
                         Some(binop) => Expr {
@@ -688,6 +932,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 let Some((id, ty)) = self.lookup(p.last()) else {
                     return err(format!("unknown variable `{}`", p.last()), e.span);
                 };
+                // Immutable-by-default: reassigning a non-`mut` binding is an error.
+                if self.lookup_mut(p.last()) != Some(true) {
+                    return err(
+                        format!("cannot reassign immutable binding `{}` (declare it `let mut {}`)", p.last(), p.last()),
+                        e.span,
+                    );
+                }
                 let (cv, vt) = self.expr(value, Some(&ty))?;
                 check_assignable(&vt, &ty, e.span)?;
                 let final_val = match op {
@@ -938,9 +1189,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
     /// Lower `base.field = value` to a `SetField` (reference structs only).
     fn assign_field(&mut self, base: &Expr, field: &FieldAccess, op: &Option<BinOp>, value: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        // Transitive immutability: `base.field = v` requires the root of `base`'s
+        // access path to be a `mut` binding (see docs/mutability.md).
+        self.check_mutable_root(base, "field of", span)?;
         let (cbase, bty) = self.expr(base, None)?;
         let FieldAccess::Named(fname) = field else {
-            return err("tuple field assignment not supported in v0", span);
+            // `t.0 = v`. Tuples are value aggregates (immutable, like value
+            // structs): rebuild the tuple instead of assigning an element.
+            return err("tuples are immutable value types; rebuild the tuple instead of assigning `.N` (e.g. `t = (new0, t.1)`)", span);
         };
         let Ty::Named { name, args: struct_args } = &bty else {
             return err("field assignment on a non-struct", span);
@@ -978,6 +1234,27 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> LResult<(CoreExpr, Ty)> {
         let (cscrut, sty) = self.expr(scrutinee, None)?;
+
+        // Dispatch: the fast tag-switch path handles a pure enum match with only
+        // variant/wildcard arms and no guards. Anything else — a scalar/string
+        // scrutinee, literal patterns, or guards — lowers to a sequential
+        // if-else decision chain over the existing core primitives.
+        let is_enum = matches!(&sty, Ty::Named { name, .. } if self.ctx.enums.contains_key(name));
+        let any_guard = arms.iter().any(|a| a.guard.is_some());
+        // The switch path handles only variant arms with simple (binding/wildcard)
+        // payloads and an optional trailing wildcard. A bare binding arm (named
+        // catch-all), literal, tuple, or struct pattern routes to the chain.
+        let switchable = arms.iter().all(|a| match &a.pattern.kind {
+            PatternKind::Wildcard => true,
+            PatternKind::Variant { payload, .. } => payload.iter().all(|p| matches!(
+                &p.kind, PatternKind::Binding { .. } | PatternKind::Wildcard
+            )),
+            _ => false,
+        });
+        if !is_enum || any_guard || !switchable {
+            return self.match_chain(cscrut, sty, arms, span);
+        }
+
         let Ty::Named { name: enum_name, args: enum_args } = &sty else {
             return err("match on a non-enum is not yet supported in v0", span);
         };
@@ -1063,6 +1340,269 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         Ok((CoreExpr::new(node, repr), rty))
     }
 
+    /// Lower a match as a sequential if-else decision chain. Handles scalar /
+    /// string scrutinees, literal patterns, bare-binding catch-alls, and guards
+    /// — anything the fast enum tag-switch can't. Built entirely from existing
+    /// core primitives (`Let`, `If`, `Bin(Eq)`, `StrEq`), so no codegen changes.
+    fn match_chain(&mut self, cscrut: CoreExpr, sty: Ty, arms: &[MatchArm], span: Span) -> LResult<(CoreExpr, Ty)> {
+        // Bind the scrutinee to a fresh local so we evaluate it once and can test
+        // it repeatedly.
+        let srepr = cscrut.repr.clone();
+        let sid = self.fresh_local(srepr.clone(), sty.clone());
+        let scrut_local = |this: &Self| CoreExpr::new(CoreExprKind::Local(sid), this.locals[sid as usize].clone());
+
+        // Enum info, if the scrutinee is an enum (for variant patterns in a
+        // guarded match).
+        let enum_info: Option<(String, Vec<Ty>, Vec<(u32, Vec<Ty>)>)> = match &sty {
+            Ty::Named { name, args } if self.ctx.enums.contains_key(name) => {
+                let vs = self.enum_variants(name, args)?;
+                Some((name.clone(), args.clone(), vs))
+            }
+            _ => None,
+        };
+
+        let mut result_ty: Option<Ty> = None;
+        // Build the chain bottom-up: start with the "no arm matched" tail.
+        // For an exhaustive match the final arm is a catch-all; otherwise we
+        // require coverage via a wildcard/binding (checked below).
+        let mut saw_irrefutable = false;
+        // Variant tags covered by an UNGUARDED variant arm (for enum
+        // exhaustiveness when there's no wildcard).
+        let mut covered_tags: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        struct Built { cond: Option<CoreExpr>, binds: Vec<(LocalId, CoreExpr)>, body: CoreExpr }
+        let mut built: Vec<Built> = Vec::new();
+
+        for arm in arms {
+            self.push_scope();
+            // Track an unguarded variant arm's tag for exhaustiveness.
+            if arm.guard.is_none() {
+                if let (PatternKind::Variant { path, .. }, Some((en, _, vs))) = (&arm.pattern.kind, &enum_info) {
+                    if let Ok((tag, _)) = self.variant_in(en, path.last(), vs, arm.pattern.span) {
+                        covered_tags.insert(tag);
+                    }
+                }
+            }
+            // Compute the match condition and the bindings this pattern introduces.
+            let (cond, mut binds, irrefutable) =
+                self.pattern_test(&arm.pattern, &scrut_local(self), &sty, &enum_info, arm.pattern.span)?;
+            // A guard ANDs onto the condition (after bindings are in scope).
+            let mut full_cond = cond;
+            if let Some(g) = &arm.guard {
+                // Bind names before lowering the guard so it can reference them.
+                // The binds reference the scrutinee local; emit them as lets
+                // inside the arm — but the guard needs them too, so we lower the
+                // guard with a temporary view of the scope.
+                for (id, init) in &binds {
+                    // already bound in scope by pattern_test; nothing to do here.
+                    let _ = (id, init);
+                }
+                let (cg, gt) = self.expr(g, Some(&Ty::bool()))?;
+                check_assignable(&gt, &Ty::bool(), g.span)?;
+                full_cond = Some(match full_cond {
+                    Some(c) => CoreExpr::new(CoreExprKind::Bin(BinOp::And, Box::new(c), Box::new(cg)), Repr::Scalar(ScalarRepr::Bool)),
+                    None => cg,
+                });
+            }
+            if full_cond.is_none() {
+                saw_irrefutable = true;
+            }
+            // An unguarded irrefutable pattern (wildcard/binding) makes coverage.
+            let covers = irrefutable && arm.guard.is_none();
+            let (body, bty) = self.expr(&arm.body, result_ty.as_ref())?;
+            match &result_ty {
+                Some(rt) => check_assignable(&bty, rt, arm.span)?,
+                None => result_ty = Some(bty),
+            }
+            // Move bindings out for emission.
+            let arm_binds = std::mem::take(&mut binds);
+            built.push(Built { cond: full_cond, binds: arm_binds, body });
+            self.pop_scope();
+            if covers { saw_irrefutable = true; }
+        }
+
+        // Exhaustive if there's an irrefutable (wildcard/binding) arm, OR the
+        // scrutinee is an enum and every variant tag is covered by an unguarded
+        // variant arm.
+        let enum_exhaustive = match &enum_info {
+            Some((_, _, variants)) => variants.iter().all(|(t, _)| covered_tags.contains(t)),
+            None => false,
+        };
+        if !saw_irrefutable && !enum_exhaustive {
+            return err(
+                "non-exhaustive match: add a `_` wildcard or binding arm to cover all cases",
+                span,
+            );
+        }
+        // The chain's innermost else is reached only if NO arm matched. When the
+        // match is exhaustive purely via enum-variant coverage (no wildcard), the
+        // LAST arm is guaranteed to match if reached, so we drop its condition —
+        // it becomes the unconditional base of the chain. (Its pattern bindings
+        // still apply.) This avoids a dangling empty `else` that would produce a
+        // malformed PHI in codegen.
+        if !saw_irrefutable && enum_exhaustive {
+            if let Some(last) = built.last_mut() {
+                last.cond = None;
+            }
+        }
+
+        let rty = result_ty.unwrap_or_else(Ty::unit);
+        let repr = self.repr_of(&rty, span)?;
+
+        // Fold the arms into nested ifs, from the last arm up. Each arm with
+        // bindings is wrapped as `{ let binds...; if cond { body } else { rest } }`
+        // so the pattern bindings are in scope for BOTH the condition (guard) and
+        // the body. The innermost "else" is unreachable (the exhaustiveness check
+        // guarantees a prior irrefutable arm covers it).
+        let unit_repr = repr.clone();
+        let mut chain: Option<CoreExpr> = None;
+        for b in built.into_iter().rev() {
+            let bind_stmts: Vec<CoreStmt> = b.binds.into_iter().map(|(id, init)| CoreStmt::Let(id, init)).collect();
+            let arm_expr = match b.cond {
+                None => {
+                    // Irrefutable arm: just `{ let binds...; body }`.
+                    CoreExpr::new(
+                        CoreExprKind::Block(Box::new(CoreBlock { stmts: bind_stmts, tail: Some(b.body) })),
+                        unit_repr.clone(),
+                    )
+                }
+                Some(cond) => {
+                    let then_block = CoreBlock { stmts: vec![], tail: Some(b.body) };
+                    let else_block = match chain.take() {
+                        Some(e) => CoreBlock { stmts: vec![], tail: Some(e) },
+                        None => CoreBlock { stmts: vec![], tail: None },
+                    };
+                    let iff = CoreExpr::new(
+                        CoreExprKind::If(Box::new(cond), Box::new(then_block), Box::new(else_block)),
+                        unit_repr.clone(),
+                    );
+                    // Wrap the `if` in a block that first emits the pattern binds,
+                    // so the guard (inside `cond`) can reference them.
+                    if bind_stmts.is_empty() {
+                        iff
+                    } else {
+                        CoreExpr::new(
+                            CoreExprKind::Block(Box::new(CoreBlock { stmts: bind_stmts, tail: Some(iff) })),
+                            unit_repr.clone(),
+                        )
+                    }
+                }
+            };
+            chain = Some(arm_expr);
+        }
+
+        // Emit `{ let scrut = <cscrut>; <chain> }`.
+        let chain = chain.unwrap();
+        let block = CoreBlock {
+            stmts: vec![CoreStmt::Let(sid, cscrut)],
+            tail: Some(chain),
+        };
+        Ok((CoreExpr::new(CoreExprKind::Block(Box::new(block)), repr), rty))
+    }
+
+    /// Compute the boolean test for a pattern against `scrut` (already a core
+    /// expr referencing the scrutinee local), plus any bindings it introduces
+    /// (each binding is bound into the current scope AND returned as a
+    /// (LocalId, init-expr) so the caller can emit the `let`). Returns
+    /// `(cond, binds, irrefutable)` where `cond == None` means "always matches".
+    fn pattern_test(
+        &mut self,
+        pat: &Pattern,
+        scrut: &CoreExpr,
+        sty: &Ty,
+        enum_info: &Option<(String, Vec<Ty>, Vec<(u32, Vec<Ty>)>)>,
+        span: Span,
+    ) -> LResult<(Option<CoreExpr>, Vec<(LocalId, CoreExpr)>, bool)> {
+        match &pat.kind {
+            PatternKind::Wildcard => Ok((None, vec![], true)),
+            PatternKind::Binding { name, is_mut } => {
+                // Bind the whole scrutinee to `name`.
+                let id = self.fresh_local(scrut.repr.clone(), sty.clone());
+                self.bind_mut(name, id, sty.clone(), *is_mut);
+                Ok((None, vec![(id, scrut.clone())], true))
+            }
+            PatternKind::Literal(lit) => {
+                let cond = self.literal_eq(scrut, lit, sty, span)?;
+                Ok((Some(cond), vec![], false))
+            }
+            PatternKind::Variant { path, payload } => {
+                let Some((enum_name, _eargs, variants)) = enum_info else {
+                    return err("variant pattern in a match on a non-enum", span);
+                };
+                let vlast = path.last();
+                let (tag, ptys) = self.variant_in(enum_name, vlast, variants, span)?;
+                if payload.len() != ptys.len() {
+                    return err(format!("variant `{}` binds {} fields, pattern has {}", vlast, ptys.len(), payload.len()), span);
+                }
+                // tag check: load the enum tag and compare. For a reference enum
+                // the tag lives in the object; we expose it via a dedicated core
+                // read. Reuse the existing Match machinery is overkill here, so
+                // compare against an `EnumTag` read.
+                let tag_read = CoreExpr::new(CoreExprKind::EnumTag(Box::new(scrut.clone())), Repr::Scalar(ScalarRepr::I32));
+                let tag_const = CoreExpr::new(CoreExprKind::ConstInt(tag as u64, ScalarRepr::I32), Repr::Scalar(ScalarRepr::I32));
+                let cond = CoreExpr::new(CoreExprKind::Bin(BinOp::Eq, Box::new(tag_read), Box::new(tag_const)), Repr::Scalar(ScalarRepr::Bool));
+                // Bind payload fields (only simple bindings supported in the chain
+                // for now; nested patterns within a guarded/literal match are a
+                // later step).
+                // Reprs of all payload fields (the physical slot of each field
+                // depends on the full list — ptr and raw payloads are separate).
+                let payload_reprs: Vec<Repr> = ptys.iter().map(|t| self.repr_of(t, span)).collect::<LResult<_>>()?;
+                let mut binds = Vec::new();
+                for (i, (p, pty)) in payload.iter().zip(&ptys).enumerate() {
+                    let prepr = payload_reprs[i].clone();
+                    let field = CoreExpr::new(
+                        CoreExprKind::EnumPayload {
+                            scrutinee: Box::new(scrut.clone()),
+                            field: i as u32,
+                            repr: prepr.clone(),
+                            payload_reprs: payload_reprs.clone(),
+                        },
+                        prepr.clone(),
+                    );
+                    match &p.kind {
+                        PatternKind::Wildcard => {}
+                        PatternKind::Binding { name, is_mut } => {
+                            let id = self.fresh_local(prepr, pty.clone());
+                            self.bind_mut(name, id, pty.clone(), *is_mut);
+                            binds.push((id, field));
+                        }
+                        _ => return err("nested patterns inside a guarded/scalar match are not yet supported", p.span),
+                    }
+                }
+                Ok((Some(cond), binds, false))
+            }
+            PatternKind::Tuple(_) => err("tuple patterns are not yet supported in v0", span),
+            PatternKind::Struct { .. } => err("struct patterns are not yet supported in v0", span),
+        }
+    }
+
+    /// Build a boolean equality test `scrut == <literal>` for a literal pattern.
+    fn literal_eq(&mut self, scrut: &CoreExpr, lit: &LitPattern, sty: &Ty, span: Span) -> LResult<CoreExpr> {
+        let bool_repr = Repr::Scalar(ScalarRepr::Bool);
+        match lit {
+            LitPattern::Int(n) => {
+                let sr = match &scrut.repr { Repr::Scalar(s) if !s.is_float() => *s, _ => return err("integer literal pattern against a non-integer scrutinee", span) };
+                let k = CoreExpr::new(CoreExprKind::ConstInt(*n, sr), Repr::Scalar(sr));
+                Ok(CoreExpr::new(CoreExprKind::Bin(BinOp::Eq, Box::new(scrut.clone()), Box::new(k)), bool_repr))
+            }
+            LitPattern::Bool(b) => {
+                if !matches!(sty, Ty::Prim(Prim::Bool)) { return err("bool literal pattern against a non-bool scrutinee", span); }
+                let k = CoreExpr::new(CoreExprKind::ConstBool(*b), bool_repr.clone());
+                Ok(CoreExpr::new(CoreExprKind::Bin(BinOp::Eq, Box::new(scrut.clone()), Box::new(k)), bool_repr))
+            }
+            LitPattern::Char(c) => {
+                if !matches!(sty, Ty::Prim(Prim::Char)) { return err("char literal pattern against a non-char scrutinee", span); }
+                let k = CoreExpr::new(CoreExprKind::ConstChar(*c), Repr::Scalar(ScalarRepr::Char));
+                Ok(CoreExpr::new(CoreExprKind::Bin(BinOp::Eq, Box::new(scrut.clone()), Box::new(k)), bool_repr))
+            }
+            LitPattern::Str(s) => {
+                if !matches!(sty, Ty::Prim(Prim::Str)) { return err("string literal pattern against a non-string scrutinee", span); }
+                let lid = match self.repr_of(&Ty::Prim(Prim::Str), span)? { Repr::Ref(l) => l, _ => return err("internal: String repr", span) };
+                let k = CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid));
+                Ok(CoreExpr::new(CoreExprKind::StrEq(Box::new(scrut.clone()), Box::new(k)), bool_repr))
+            }
+        }
+    }
+
     /// `array_new(len)` — allocate a varlen array. Element type from `expected`.
     fn array_new(&mut self, len: &Expr, expected: Option<&Ty>, span: Span) -> LResult<(CoreExpr, Ty)> {
         let elem_ty = match expected {
@@ -1092,6 +1632,9 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
     }
 
     fn array_set_op(&mut self, arr: &Expr, idx: &Expr, val: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        // Mutating an array element (whether via `a[i] = v` or `array_set(a, ..)`)
+        // requires the array's access-path root to be a `mut` binding.
+        self.check_mutable_root(arr, "element of", span)?;
         let (ca, aty) = self.expr(arr, None)?;
         let elem_ty = array_elem_ty(&aty).ok_or_else(|| LowerError { msg: "array_set on a non-array".into(), span })?;
         let elem = self.repr_of(&elem_ty, span)?;
@@ -1102,10 +1645,154 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         Ok((CoreExpr::new(CoreExprKind::ArraySet { array: Box::new(ca), index: Box::new(ci), value: Box::new(cv), elem }, Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
     }
 
+    /// Lower the built-in `String` intrinsics. Each argument must be a `String`.
+    fn str_intrinsic(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<(CoreExpr, Ty)> {
+        let str_ty = Ty::Prim(Prim::Str);
+        // Lower an argument and require it to be a String.
+        let mut str_arg = |this: &mut Self, e: &Expr| -> LResult<CoreExpr> {
+            let (ce, t) = this.expr(e, Some(&str_ty))?;
+            check_assignable(&t, &str_ty, e.span)?;
+            Ok(ce)
+        };
+        match name {
+            "print_str" => {
+                if args.len() != 1 { return err("`print_str` takes 1 argument", span); }
+                let a = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::PrintStr(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "str_len" => {
+                if args.len() != 1 { return err("`str_len` takes 1 argument", span); }
+                let a = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::StrLen(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "str_eq" => {
+                if args.len() != 2 { return err("`str_eq` takes 2 arguments", span); }
+                let a = str_arg(self, &args[0])?;
+                let b = str_arg(self, &args[1])?;
+                Ok((CoreExpr::new(CoreExprKind::StrEq(Box::new(a), Box::new(b)), Repr::Scalar(ScalarRepr::Bool)), Ty::bool()))
+            }
+            "str_concat" => {
+                if args.len() != 2 { return err("`str_concat` takes 2 arguments", span); }
+                let a = str_arg(self, &args[0])?;
+                let b = str_arg(self, &args[1])?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::StrConcat { layout, a: Box::new(a), b: Box::new(b) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
+            }
+            "str_get" => {
+                if args.len() != 2 { return err("`str_get` takes 2 arguments", span); }
+                let s = str_arg(self, &args[0])?;
+                let (i, it) = self.expr(&args[1], Some(&Ty::i64()))?;
+                check_assignable(&it, &Ty::i64(), args[1].span)?;
+                Ok((CoreExpr::new(CoreExprKind::StrGet(Box::new(s), Box::new(i)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "str_to_float" => {
+                if args.len() != 1 { return err("`str_to_float` takes 1 argument", span); }
+                let s = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::StrToFloat(Box::new(s)), Repr::Scalar(ScalarRepr::F64)), Ty::Prim(Prim::F64)))
+            }
+            "str_hash" => {
+                if args.len() != 1 { return err("`str_hash` takes 1 argument", span); }
+                let s = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::StrHash(Box::new(s)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "str_substring" => {
+                if args.len() != 3 { return err("`str_substring` takes 3 arguments", span); }
+                let s = str_arg(self, &args[0])?;
+                let (st, stt) = self.expr(&args[1], Some(&Ty::i64()))?;
+                check_assignable(&stt, &Ty::i64(), args[1].span)?;
+                let (en, ent) = self.expr(&args[2], Some(&Ty::i64()))?;
+                check_assignable(&ent, &Ty::i64(), args[2].span)?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::StrSubstring { layout, s: Box::new(s), start: Box::new(st), end: Box::new(en) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
+            }
+            "to_string" => {
+                if args.len() != 1 { return err("`to_string` takes 1 argument", span); }
+                let (v, vt) = self.expr(&args[0], None)?;
+                let is_float = match &vt {
+                    Ty::Prim(Prim::F32 | Prim::F64) => true,
+                    Ty::Prim(p) if matches!(p, Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64
+                        | Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::Bool | Prim::Char) => false,
+                    _ => return err("`to_string` requires an integer or float argument", args[0].span),
+                };
+                // Widen the numeric value so the runtime sees i64 / f64.
+                let v = self.widen_to_string_arg(v, &vt, is_float);
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::StrFromNum { layout, is_float, v: Box::new(v) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
+            }
+            _ => err(format!("unknown string intrinsic `{}`", name), span),
+        }
+    }
+
+    /// A zero/null value of the given repr, for deferred-init `let` slots.
+    fn zero_value(&self, repr: &Repr) -> CoreExpr {
+        match repr {
+            Repr::Scalar(s) if s.is_float() => CoreExpr::new(CoreExprKind::ConstFloat(0.0, *s), repr.clone()),
+            Repr::Scalar(s) => CoreExpr::new(CoreExprKind::ConstInt(0, *s), repr.clone()),
+            Repr::Unit => CoreExpr::new(CoreExprKind::Unit, Repr::Unit),
+            _ => CoreExpr::new(CoreExprKind::ConstZero(repr.clone()), repr.clone()),
+        }
+    }
+
+    /// The layout id of the built-in `String` reference type.
+    fn string_layout_id(&mut self, span: Span) -> LResult<LayoutId> {
+        match self.repr_of(&Ty::Prim(Prim::Str), span)? {
+            Repr::Ref(l) => Ok(l),
+            _ => err("internal: String is not a reference type", span),
+        }
+    }
+
+    /// Widen a numeric `to_string` argument to the i64/f64 the runtime expects.
+    /// Codegen's `StrFromNum` passes the value straight through, so we coerce
+    /// here via a `Cast` core node when the source repr is narrower.
+    fn widen_to_string_arg(&self, v: CoreExpr, ty: &Ty, is_float: bool) -> CoreExpr {
+        let target = if is_float { Ty::Prim(Prim::F64) } else { Ty::i64() };
+        if ty == &target {
+            return v;
+        }
+        let from = v.repr.clone();
+        let to = if is_float { Repr::Scalar(ScalarRepr::F64) } else { Repr::Scalar(ScalarRepr::I64) };
+        CoreExpr::new(CoreExprKind::Cast { value: Box::new(v), from, to: to.clone() }, to)
+    }
+
     /// Lower a closure `|params| body`. Free variables that refer to enclosing
     /// locals are captured into a heap env object; the body is lifted into a
     /// top-level function `(env, params...) -> ret`. The closure value is the
     /// env reference, with the code pointer stored in its raw section.
+    /// Send/Sync check for `Thread::spawn`: every value the closure `arg`
+    /// captures must be `Sync` (it is shared with the parent thread). Non-closure
+    /// args are left to the normal type check. See `docs/threads.md`.
+    fn check_spawn_captures_sync(&self, arg: &Expr) -> LResult<()> {
+        let ExprKind::Closure { params, body, .. } = &*arg.kind else { return Ok(()) };
+        let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        let mut free = Vec::new();
+        collect_free_vars(body, &param_names, &mut Vec::new(), &mut free);
+        for name in &free {
+            if let Some((_, ty)) = self.lookup(name) {
+                if !self.ctx.is_sync(&ty) {
+                    return err(
+                        format!(
+                            "cannot capture `{}: {}` in a spawned thread — it is not `Sync` \
+                             (a shared mutable reference would race). Wrap it in `Atom<{}>` (or \
+                             build it from `Atom`/`AtomicI64` fields), or capture an immutable value.",
+                            name, ty_display(&ty), ty_display(&ty),
+                        ),
+                        arg.span,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn closure(
         &mut self,
         params: &[ClosureParam],
@@ -1257,7 +1944,17 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                     raw_off += sz;
                     o
                 }
-                _ => raw_base + raw_off,
+                // An inline value-aggregate capture lives in the raw section like
+                // a scalar; advance `raw_off` by its size so a following capture
+                // doesn't alias it. (Must mirror MakeClosure codegen.)
+                Repr::Value(vid) => {
+                    let sz = self.reg.values[*vid as usize].size as u64;
+                    raw_off = raw_off.div_ceil(8) * 8; // 8-align value aggregates
+                    let o = raw_base + raw_off;
+                    raw_off += sz;
+                    o
+                }
+                Repr::Unit => raw_base + raw_off,
             };
             closure_captures.push(ClosureCapture { local: *cap_local, offset });
         }
@@ -1268,6 +1965,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             locals,
             body: CoreBlock { stmts: body_block.stmts, tail: body_block.tail },
             closure_captures,
+            is_extern: false,
         }, ret_ty))
     }
 
@@ -1300,6 +1998,12 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             })
             .ok_or_else(|| LowerError { msg: format!("no method `{}` on `{}`", method, base), span })?;
 
+        // Transitive immutability: calling a `mut self` method requires the
+        // receiver to be rooted in a `mut` binding (see docs/mutability.md).
+        if entry.method.self_is_mut {
+            self.check_mutable_root(recv, "the receiver of a `mut self` method through", span)?;
+        }
+
         // Infer the impl's generic params + Self by unifying the impl's written
         // self type against the receiver's concrete type.
         let impl_self = lower_type(&entry.self_ty, &entry.impl_generics, self.ctx).map_err(conv)?;
@@ -1325,12 +2029,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             let pre = apply_subst(&declared, &isubst);
             let (ca, at) = self.expr(a, hint(&pre))?;
             unify_infer(&pre, &at, &mut isubst);
-            checks.push((declared.clone(), at));
+            checks.push((declared.clone(), at, a.span));
             cargs.push(ca);
         }
-        // Re-apply now that all type vars are known.
-        for (declared, actual) in &checks {
-            check_assignable(actual, &apply_subst(declared, &isubst), span)?;
+        // Re-apply now that all type vars are known, pointing each error at the
+        // argument that caused it.
+        for (declared, actual, arg_span) in &checks {
+            check_assignable(actual, &apply_subst(declared, &isubst), *arg_span)?;
         }
 
         // Build the full substitution (impl generics + method generics + Self).
@@ -1352,6 +2057,88 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         };
 
         let job = Job { f: m, subst, mangled, self_ty: Some(recv_ty) };
+        let fid = self.mono.intern(job, self.count);
+        let repr = self.repr_of(&ret_ty, span)?;
+        Ok((CoreExpr::new(CoreExprKind::Call(fid, cargs), repr), ret_ty))
+    }
+
+    /// Lower an associated (self-less) function call `Type::func(args)`. Like a
+    /// method call but with no receiver: impl-level and method-level generics
+    /// (and `Self`) are inferred from the expected return type and the arguments.
+    fn assoc_call(
+        &mut self,
+        base: &str,
+        entry: &crate::types::MethodEntry,
+        args: &[Expr],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> LResult<(CoreExpr, Ty)> {
+        let m = entry.method.clone();
+        if args.len() != m.params.len() {
+            return err(
+                format!("`{}::{}` expects {} args, got {}", base, m.name, m.params.len(), args.len()),
+                span,
+            );
+        }
+        // SEND/SYNC: `Thread::spawn(closure)` shares the closure's captures with
+        // the parent thread, so each must be `Sync`. We check at THIS call site
+        // (the closure literal is the argument here; by the time the prelude
+        // wrapper forwards it to the `thread_spawn` intrinsic it's just a param).
+        // See `docs/threads.md`.
+        if base == "Thread" && m.name == "spawn" && !args.is_empty() {
+            self.check_spawn_captures_sync(&args[0])?;
+        }
+        let mgparams: Vec<String> = m.generics.params.iter().map(|p| p.name.clone()).collect();
+        // All generic names in scope for the signature: impl generics + method
+        // generics + Self.
+        let mut scope_params = entry.impl_generics.clone();
+        scope_params.extend(mgparams.clone());
+        scope_params.push("Self".to_string());
+
+        // `Self` is the impl's self type with its impl-generics left as vars.
+        let impl_self = lower_type(&entry.self_ty, &entry.impl_generics, self.ctx).map_err(conv)?;
+        let mut subst: HashMap<String, Ty> = HashMap::new();
+        subst.insert("Self".to_string(), impl_self.clone());
+
+        // Seed inference from the expected return type, if concrete.
+        if let Some(exp) = expected {
+            if let Some(ret) = &m.ret {
+                let ret_decl = lower_type(ret, &scope_params, self.ctx).map_err(conv)?;
+                unify_infer(&ret_decl, exp, &mut subst);
+            }
+        }
+
+        // Lower args, inferring impl/method generics from their concrete types.
+        let mut cargs = Vec::new();
+        let mut checks = Vec::new();
+        for (a, p) in args.iter().zip(&m.params) {
+            let declared = lower_type(&p.ty, &scope_params, self.ctx).map_err(conv)?;
+            let pre = apply_subst(&declared, &subst);
+            let (ca, at) = self.expr(a, hint(&pre))?;
+            unify_infer(&pre, &at, &mut subst);
+            checks.push((declared, at, a.span));
+            cargs.push(ca);
+        }
+        for (declared, actual, arg_span) in &checks {
+            check_assignable(actual, &apply_subst(declared, &subst), *arg_span)?;
+        }
+
+        let ret_ty = match &m.ret {
+            Some(t) => {
+                let raw = lower_type(t, &scope_params, self.ctx).map_err(conv)?;
+                apply_subst(&raw, &subst)
+            }
+            None => Ty::unit(),
+        };
+
+        // Mangle: <Self-type>::func$<impl-and-method-generic-args>.
+        let self_concrete = apply_subst(&impl_self, &subst);
+        let extra: Vec<Ty> = entry.impl_generics.iter().chain(mgparams.iter())
+            .filter_map(|g| subst.get(g).cloned())
+            .collect();
+        let mangled = mangle(&format!("{}.{}", ty_mangle(&self_concrete), m.name), &extra);
+
+        let job = Job { f: m, subst, mangled, self_ty: None };
         let fid = self.mono.intern(job, self.count);
         let repr = self.repr_of(&ret_ty, span)?;
         Ok((CoreExpr::new(CoreExprKind::Call(fid, cargs), repr), ret_ty))
@@ -1500,6 +2287,121 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
     /// arguments — currently: a bare enum-variant constructor (`None`, `Ok(x)`,
     /// `Some(x)`), whose enum type args may not be pinnable from itself. Such
     /// args are lowered in phase 2 after concrete args pin the type vars.
+    /// If `a` is an `as_c_bytes(x)` call, lower it to an `AsCBytes` node (a
+    /// `RawPtr` to a stack copy of `x`'s contents). `x` may be a `String` or a
+    /// scalar `Array<T>`. Returns `Ok(None)` if `a` is not `as_c_bytes`. Errors
+    /// if the declared parameter is not `RawPtr` or if `x` is not a String/scalar
+    /// array. When the extern parameter is `mut`, the copy is also written BACK
+    /// into the array after the call (copy-out, e.g. `read(fd, buf, n)`). Only
+    /// called for direct extern-call arguments — see the caller and `docs/ffi.md`.
+    fn try_as_c_bytes_arg(&mut self, a: &Expr, declared: &Ty, param_is_mut: bool) -> LResult<Option<(CoreExpr, Ty)>> {
+        let ExprKind::Call(callee, cargs) = &*a.kind else { return Ok(None) };
+        let ExprKind::Path(p) = &*callee.kind else { return Ok(None) };
+        if p.last() != "as_c_bytes" { return Ok(None); }
+        // Don't shadow a user function of the same name.
+        if self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "as_c_bytes") {
+            return Ok(None);
+        }
+        if cargs.len() != 1 {
+            return err("`as_c_bytes` takes 1 argument (a String or scalar Array)", a.span);
+        }
+        if !matches!(declared, Ty::Prim(Prim::RawPtr)) {
+            return err(
+                "`as_c_bytes` produces a `RawPtr`; the extern parameter here is not `RawPtr`",
+                a.span,
+            );
+        }
+        let (cs, sty) = self.expr(&cargs[0], None)?;
+        // String: bytes (+ NUL); element stride 1.
+        if matches!(sty, Ty::Prim(Prim::Str)) {
+            return Ok(Some((
+                CoreExpr::new(
+                    CoreExprKind::AsCBytes {
+                        src: Box::new(cs), elem: ScalarRepr::U8, is_string: true, copy_out: false,
+                    },
+                    Repr::Scalar(ScalarRepr::Ptr),
+                ),
+                Ty::Prim(Prim::RawPtr),
+            )));
+        }
+        // Scalar Array<T>: contiguous T elements, stride = sizeof(T).
+        if let Some(elem_ty) = array_elem_ty(&sty) {
+            let elem_repr = self.repr_of(&elem_ty, cargs[0].span)?;
+            let Repr::Scalar(elem) = elem_repr else {
+                return err(
+                    format!("`as_c_bytes` requires a String or an array of scalars, found `Array<{}>`",
+                        ty_display(&elem_ty)),
+                    cargs[0].span,
+                );
+            };
+            return Ok(Some((
+                CoreExpr::new(
+                    CoreExprKind::AsCBytes {
+                        src: Box::new(cs), elem, is_string: false, copy_out: param_is_mut,
+                    },
+                    Repr::Scalar(ScalarRepr::Ptr),
+                ),
+                Ty::Prim(Prim::RawPtr),
+            )));
+        }
+        err(
+            format!("`as_c_bytes` requires a `String` or a scalar `Array`, found `{}`", ty_display(&sty)),
+            cargs[0].span,
+        )
+    }
+
+    /// If `declared` is an `extern fn(..)` callback type and `a` names a (non-
+    /// generic) gc-rust function, resolve it and emit a `CallbackPtr` (a `RawPtr`
+    /// to a synthesized C trampoline). Returns `Ok(None)` if `declared` is not a
+    /// callback type. Errors if `a` is not a plain function name, the function is
+    /// generic/unknown, or its signature doesn't match. See `docs/ffi.md`.
+    fn try_callback_arg(&mut self, a: &Expr, declared: &Ty) -> LResult<Option<(CoreExpr, Ty)>> {
+        let Ty::ExternFn { params: cb_params, ret: cb_ret } = declared else { return Ok(None) };
+        // The argument must be a bare path naming a function.
+        let ExprKind::Path(path) = &*a.kind else {
+            return err("a callback argument must be a named function", a.span);
+        };
+        let name = path.last();
+        let fq = self.ctx.use_aliases.get(name)
+            .filter(|fq| self.ctx.fns.contains_key(*fq))
+            .cloned()
+            .or_else(|| self.ctx.fns.keys().find(|k| k.rsplit("::").next().unwrap() == name).cloned());
+        let Some(fq) = fq else {
+            return err(format!("unknown function `{}` for callback", name), a.span);
+        };
+        let f = self.ctx.fns[&fq].clone();
+        if !f.generics.params.is_empty() {
+            return err(format!("callback function `{}` cannot be generic", name), a.span);
+        }
+        // Check the function's signature matches the expected callback type.
+        let gparams: Vec<String> = Vec::new();
+        let f_params: Vec<Ty> = f.params.iter()
+            .map(|p| lower_type(&p.ty, &gparams, self.ctx).map_err(conv))
+            .collect::<Result<_, _>>()?;
+        let f_ret = match &f.ret {
+            Some(t) => lower_type(t, &gparams, self.ctx).map_err(conv)?,
+            None => Ty::unit(),
+        };
+        if f_params.len() != cb_params.len() {
+            return err(
+                format!("callback `{}` takes {} argument(s), but the expected type takes {}",
+                    name, f_params.len(), cb_params.len()),
+                a.span,
+            );
+        }
+        for (fp, cp) in f_params.iter().zip(cb_params.iter()) {
+            check_assignable(fp, cp, a.span)?;
+        }
+        check_assignable(&f_ret, cb_ret, a.span)?;
+        let mangled = mangle(&fq, &[]);
+        let job = Job { f, subst: HashMap::new(), mangled, self_ty: None };
+        let fid = self.mono.intern(job, self.count);
+        Ok(Some((
+            CoreExpr::new(CoreExprKind::CallbackPtr(fid), Repr::Scalar(ScalarRepr::Ptr)),
+            declared.clone(),
+        )))
+    }
+
     fn is_inference_dependent_arg(&self, a: &Expr) -> bool {
         let path = match &*a.kind {
             ExprKind::Path(p) => p,
@@ -1537,6 +2439,17 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 ));
             }
         }
+        // Associated (self-less) function call: `Type::func(args)`. The path's
+        // second-to-last segment names the type; look up an impl item of that
+        // name with NO `self`. (Methods with `self` go through `method_call`.)
+        if path.segments.len() >= 2 {
+            let base = path.segments[path.segments.len() - 2].clone();
+            if let Some(entry) = self.ctx.methods.get(&(base.clone(), name.to_string())).cloned() {
+                if !entry.method.has_self {
+                    return self.assoc_call(&base, &entry, args, expected, span);
+                }
+            }
+        }
         // Array intrinsics — built-in varlen arrays. The element type comes
         // from `expected` (for new) or the array's own type (get/set/len).
         if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
@@ -1547,6 +2460,244 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 "array_set" if args.len() == 3 => return self.array_set_op(&args[0], &args[1], &args[2], span),
                 _ => {}
             }
+        }
+        // String intrinsics — built-in `String` ops backed by runtime externs.
+        // Skipped if shadowed by a user-defined function of the same name.
+        if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
+            match name {
+                "print_str" | "str_len" | "str_eq" | "str_concat"
+                | "str_get" | "str_substring" | "to_string" | "str_to_float" | "str_hash" => {
+                    return self.str_intrinsic(name, args, span);
+                }
+                _ => {}
+            }
+        }
+        // `as_c_bytes` is only valid as a DIRECT argument to an extern call (it's
+        // intercepted there). Reaching it through the general expression path
+        // means it was used somewhere else — reject it, because the stack copy it
+        // produces is only valid for the duration of that one call.
+        if name == "as_c_bytes"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "as_c_bytes")
+        {
+            return err(
+                "`as_c_bytes(s)` may only appear as a direct argument to an `extern \"C\"` call \
+                 (its pointer is valid only for that call — see docs/ffi.md)",
+                span,
+            );
+        }
+        // Atom<T> intrinsics. `atom_load(a) -> T` (atomic), `atom_cas(a, old,
+        // new) -> bool` (atomic CAS + write barrier). The atom is an ordinary
+        // heap object `{ value: T }`; swap!'s retry loop is in the prelude over
+        // these (so old/new/atom are frame roots → GC-safe). See docs/threads.md.
+        if (name == "atom_load" || name == "atom_cas")
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name)
+        {
+            // First arg is the atom; recover its element type T from `Atom<T>`.
+            let (catom, atom_ty) = self.expr(&args[0], None)?;
+            let elem_ty = match &atom_ty {
+                Ty::Named { name: n, args: ta } if n.rsplit("::").next() == Some("Atom") && !ta.is_empty() => ta[0].clone(),
+                _ => return err(format!("`{}` requires an `Atom<T>`, found `{}`", name, ty_display(&atom_ty)), args[0].span),
+            };
+            let elem = self.repr_of(&elem_ty, args[0].span)?;
+            if name == "atom_load" {
+                if args.len() != 1 { return err("`atom_load` takes 1 argument", span); }
+                return Ok((
+                    CoreExpr::new(CoreExprKind::AtomLoad { atom: Box::new(catom), elem: elem.clone() }, elem),
+                    elem_ty,
+                ));
+            }
+            // atom_cas(a, old, new) -> bool
+            if args.len() != 3 { return err("`atom_cas` takes 3 arguments (atom, old, new)", span); }
+            let (cold, oldt) = self.expr(&args[1], Some(&elem_ty))?;
+            check_assignable(&oldt, &elem_ty, args[1].span)?;
+            let (cnew, newt) = self.expr(&args[2], Some(&elem_ty))?;
+            check_assignable(&newt, &elem_ty, args[2].span)?;
+            return Ok((
+                CoreExpr::new(
+                    CoreExprKind::AtomCas { atom: Box::new(catom), old: Box::new(cold), new: Box::new(cnew) },
+                    Repr::Scalar(ScalarRepr::Bool),
+                ),
+                Ty::bool(),
+            ));
+        }
+        // Channel intrinsics. `chan_new(cap) -> RawPtr` (control block);
+        // `chan_send(buf, ctrl, v) -> i64`; `chan_recv(buf, ctrl) -> T`. `buf` is
+        // the on-heap element Array<T>; the GC traces queued values via it.
+        if name == "chan_new"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "chan_new")
+        {
+            if args.len() != 1 { return err("`chan_new` takes 1 argument (capacity)", span); }
+            let (ccap, _) = self.expr(&args[0], Some(&Ty::i64()))?;
+            return Ok((
+                CoreExpr::new(CoreExprKind::RuntimeCall { func: "ai_chan_new", args: vec![ccap], ret: Repr::Scalar(ScalarRepr::Ptr) }, Repr::Scalar(ScalarRepr::Ptr)),
+                Ty::Prim(Prim::RawPtr),
+            ));
+        }
+        if name == "chan_send"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "chan_send")
+        {
+            if args.len() != 3 { return err("`chan_send` takes 3 arguments (buf, ctrl, value)", span); }
+            let (cbuf, _) = self.expr(&args[0], None)?;
+            let (cctrl, _) = self.expr(&args[1], None)?;
+            let (cval, _) = self.expr(&args[2], None)?;
+            return Ok((
+                CoreExpr::new(CoreExprKind::ChanSend { buf: Box::new(cbuf), ctrl: Box::new(cctrl), value: Box::new(cval) }, Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
+        }
+        if name == "chan_recv"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "chan_recv")
+        {
+            if args.len() != 2 { return err("`chan_recv` takes 2 arguments (buf, ctrl)", span); }
+            let (cbuf, bty) = self.expr(&args[0], None)?;
+            let (cctrl, _) = self.expr(&args[1], None)?;
+            let elem_ty = array_elem_ty(&bty)
+                .ok_or_else(|| LowerError { msg: format!("`chan_recv` buffer must be an Array, found `{}`", ty_display(&bty)), span: args[0].span })?;
+            let elem = self.repr_of(&elem_ty, span)?;
+            return Ok((
+                CoreExpr::new(CoreExprKind::ChanRecv { buf: Box::new(cbuf), ctrl: Box::new(cctrl), elem: elem.clone() }, elem),
+                elem_ty,
+            ));
+        }
+        if (name == "chan_sender_clone" || name == "chan_sender_drop")
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name)
+        {
+            if args.len() != 1 { return err(format!("`{}` takes 1 argument (ctrl)", name), span); }
+            let (cctrl, _) = self.expr(&args[0], None)?;
+            let func = if name == "chan_sender_clone" { "ai_chan_sender_clone" } else { "ai_chan_sender_drop" };
+            return Ok((
+                CoreExpr::new(CoreExprKind::RuntimeCall { func, args: vec![cctrl], ret: Repr::Unit }, Repr::Unit),
+                Ty::unit(),
+            ));
+        }
+        // AtomicI64 intrinsics → runtime externs. The handle is a RawPtr.
+        // `atomic_i64_new(v)->RawPtr`, `..._load(a)->i64`, `..._store(a,v)->i64`,
+        // `..._fetch_add(a,d)->i64`, `..._cas(a,expected,new)->i64` (1/0).
+        {
+            let atomic_intr: Option<(&'static str, &[ArgKind], Repr, Ty)> = match name {
+                "atomic_i64_new" => Some(("ai_atomic_i64_new", &[ArgKind::Int], Repr::Scalar(ScalarRepr::Ptr), Ty::Prim(Prim::RawPtr))),
+                "atomic_i64_load" => Some(("ai_atomic_i64_load", &[ArgKind::Ptr], Repr::Scalar(ScalarRepr::I64), Ty::i64())),
+                "atomic_i64_store" => Some(("ai_atomic_i64_store", &[ArgKind::Ptr, ArgKind::Int], Repr::Scalar(ScalarRepr::I64), Ty::i64())),
+                "atomic_i64_fetch_add" => Some(("ai_atomic_i64_fetch_add", &[ArgKind::Ptr, ArgKind::Int], Repr::Scalar(ScalarRepr::I64), Ty::i64())),
+                "atomic_i64_cas" => Some(("ai_atomic_i64_cas_marker", &[ArgKind::Ptr, ArgKind::Int, ArgKind::Int], Repr::Scalar(ScalarRepr::I64), Ty::i64())),
+                _ => None,
+            };
+            if let Some((func, kinds, ret, ret_ty)) = atomic_intr {
+                if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
+                    let func = if func == "ai_atomic_i64_cas_marker" { "ai_atomic_i64_compare_and_set" } else { func };
+                    if args.len() != kinds.len() {
+                        return err(format!("`{}` takes {} argument(s)", name, kinds.len()), span);
+                    }
+                    let mut cargs = Vec::new();
+                    for (a, k) in args.iter().zip(kinds) {
+                        let (ca, at) = self.expr(a, None)?;
+                        match k {
+                            ArgKind::Int if !matches!(at, Ty::Prim(Prim::I64)) =>
+                                return err(format!("`{}` argument must be i64, found `{}`", name, ty_display(&at)), a.span),
+                            ArgKind::Ptr if !matches!(at, Ty::Prim(Prim::RawPtr)) =>
+                                return err(format!("`{}` argument must be a RawPtr handle, found `{}`", name, ty_display(&at)), a.span),
+                            _ => {}
+                        }
+                        cargs.push(ca);
+                    }
+                    return Ok((CoreExpr::new(CoreExprKind::RuntimeCall { func, args: cargs, ret: ret.clone() }, ret), ret_ty));
+                }
+            }
+        }
+        // `thread_spawn(closure)` → spawn an OS thread; returns a RawPtr handle.
+        // The closure must be a no-arg `fn() -> i64` (M2 restricts results to i64).
+        if name == "thread_spawn"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "thread_spawn")
+        {
+            if args.len() != 1 {
+                return err("`thread_spawn` takes 1 argument (a `fn() -> i64` closure)", span);
+            }
+            // SEND/SYNC: a spawned closure shares its captures with the parent
+            // thread, so every captured value must be `Sync` (safe to share). A
+            // captured mutable reference type is NOT Sync → reject it, pointing at
+            // a concrete fix (use Atom/AtomicI64 or build from Sync parts). See
+            // `docs/threads.md`. (Deeply-immutable values are Sync automatically,
+            // so the common case is unaffected.)
+            self.check_spawn_captures_sync(&args[0])?;
+            let (cf, ft) = self.expr(&args[0], None)?;
+            match &ft {
+                Ty::Fn { params, ret } if params.is_empty() && matches!(**ret, Ty::Prim(Prim::I64)) => {}
+                _ => return err(
+                    format!("`thread_spawn` requires a `fn() -> i64` closure, found `{}`", ty_display(&ft)),
+                    args[0].span,
+                ),
+            }
+            return Ok((
+                CoreExpr::new(CoreExprKind::ThreadSpawn(Box::new(cf)), Repr::Scalar(ScalarRepr::Ptr)),
+                Ty::Prim(Prim::RawPtr),
+            ));
+        }
+        // `thread_join(handle)` → block; returns the thread's i64 result.
+        if name == "thread_join"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "thread_join")
+        {
+            if args.len() != 1 {
+                return err("`thread_join` takes 1 argument (a thread handle)", span);
+            }
+            let (ch, ht) = self.expr(&args[0], None)?;
+            if !matches!(ht, Ty::Prim(Prim::RawPtr)) {
+                return err(
+                    format!("`thread_join` requires a thread handle (RawPtr), found `{}`", ty_display(&ht)),
+                    args[0].span,
+                );
+            }
+            return Ok((
+                CoreExpr::new(CoreExprKind::ThreadJoin(Box::new(ch)), Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
+        }
+        // `thread_sleep(ms)` / `thread_yield()` / `thread_current_id()`.
+        if name == "thread_sleep"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "thread_sleep")
+        {
+            if args.len() != 1 { return err("`thread_sleep` takes 1 argument (millis)", span); }
+            let (cm, _) = self.expr(&args[0], Some(&Ty::i64()))?;
+            return Ok((
+                CoreExpr::new(CoreExprKind::ThreadSleep(Box::new(cm)), Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
+        }
+        if name == "thread_yield"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "thread_yield")
+        {
+            if !args.is_empty() { return err("`thread_yield` takes no arguments", span); }
+            return Ok((
+                CoreExpr::new(CoreExprKind::ThreadYield, Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
+        }
+        if name == "thread_current_id"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "thread_current_id")
+        {
+            if !args.is_empty() { return err("`thread_current_id` takes no arguments", span); }
+            return Ok((
+                CoreExpr::new(CoreExprKind::ThreadCurrentId, Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
+        }
+        // `ptr_read_i64(p)` → load an i64 through a RawPtr (for FFI callbacks).
+        if name == "ptr_read_i64"
+            && !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == "ptr_read_i64")
+        {
+            if args.len() != 1 {
+                return err("`ptr_read_i64` takes 1 argument (a RawPtr)", span);
+            }
+            let (cp, pt) = self.expr(&args[0], None)?;
+            if !matches!(pt, Ty::Prim(Prim::RawPtr)) {
+                return err(
+                    format!("`ptr_read_i64` requires a `RawPtr`, found `{}`", ty_display(&pt)),
+                    args[0].span,
+                );
+            }
+            return Ok((
+                CoreExpr::new(CoreExprKind::PtrReadI64(Box::new(cp)), Repr::Scalar(ScalarRepr::I64)),
+                Ty::i64(),
+            ));
         }
         // print_int / print_float intrinsics → runtime extern, return i64.
         if (name == "print_int" || name == "print_float")
@@ -1581,9 +2732,19 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         if self.ctx.variants.contains_key(&key) || self.ctx.variants.contains_key(name) {
             return self.variant_ctor(path, args, None, span);
         }
-        let fq = self.ctx.fns.keys().find(|k| k.rsplit("::").next().unwrap() == name).cloned();
+        // Resolution order: a `use` alias for this name wins (it disambiguates
+        // same-named items across modules); otherwise fall back to the unique
+        // last-segment match.
+        let fq = self.ctx.use_aliases.get(name)
+            .filter(|fq| self.ctx.fns.contains_key(*fq))
+            .cloned()
+            .or_else(|| self.ctx.fns.keys().find(|k| k.rsplit("::").next().unwrap() == name).cloned());
         let Some(fq) = fq else {
-            return err(format!("unknown function `{}`", name), span);
+            let names: Vec<&str> = self.ctx.fns.keys().map(|k| k.rsplit("::").next().unwrap()).collect();
+            let hint = closest(name, names.into_iter())
+                .map(|s| format!(" (did you mean `{}`?)", s))
+                .unwrap_or_default();
+            return err(format!("unknown function `{}`{}", name, hint), span);
         };
         let f = self.ctx.fns[&fq].clone();
         if args.len() != f.params.len() {
@@ -1623,6 +2784,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         // can supply, so it's deferred to phase 2.)
         for (i, (a, declared)) in args.iter().zip(&declared_tys).enumerate() {
             if self.is_inference_dependent_arg(a) { continue; }
+            // FFI `as_c_bytes(s)` is legal ONLY as a direct argument to an extern
+            // call whose corresponding parameter is `RawPtr`. Intercept it here;
+            // any other use falls through to `self.expr`, which rejects it.
+            if f.is_extern {
+                let param_is_mut = f.params.get(i).map(|p| p.is_mut).unwrap_or(false);
+                if let Some((ca, at)) = self.try_as_c_bytes_arg(a, declared, param_is_mut)? {
+                    unify_infer(declared, &at, &mut targ);
+                    lowered[i] = Some((ca, at));
+                    continue;
+                }
+                if let Some((ca, at)) = self.try_callback_arg(a, declared)? {
+                    lowered[i] = Some((ca, at));
+                    continue;
+                }
+            }
             let (ca, at) = self.expr(a, hint(declared))?;
             unify_infer(declared, &at, &mut targ);
             lowered[i] = Some((ca, at));
@@ -1638,9 +2814,11 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         }
         let mut cargs = Vec::new();
         let mut arg_tys = Vec::new();
-        for slot in lowered {
+        for (i, slot) in lowered.into_iter().enumerate() {
             let (ca, at) = slot.expect("every argument lowered");
-            arg_tys.push((/* declared placeholder set below */ at.clone(), at));
+            // Carry each argument's own span so a type error underlines that
+            // argument, not the whole call.
+            arg_tys.push((/* declared placeholder */ at.clone(), at, args[i].span));
             cargs.push(ca);
         }
         // Re-pair arg_tys with their declared types for the assignability check.
@@ -1674,10 +2852,11 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             }
         }
 
-        // Check each argument against its substituted declared type.
+        // Check each argument against its substituted declared type, pointing the
+        // error at the argument's own span.
         let subst: HashMap<String, Ty> = gparams.iter().cloned().zip(inst_args.iter().cloned()).collect();
-        for (declared, actual) in &arg_tys {
-            check_assignable(actual, &apply_subst(declared, &subst), span)?;
+        for (declared, actual, arg_span) in &arg_tys {
+            check_assignable(actual, &apply_subst(declared, &subst), *arg_span)?;
         }
 
         let mangled = mangle(&fq, &inst_args);
@@ -1707,7 +2886,7 @@ fn has_var(t: &Ty) -> bool {
         Ty::Var(_) => true,
         Ty::Named { args, .. } | Ty::Tuple(args) => args.iter().any(has_var),
         Ty::Array(e, _) => has_var(e),
-        Ty::Fn { params, ret } => params.iter().any(has_var) || has_var(ret),
+        Ty::Fn { params, ret } | Ty::ExternFn { params, ret } => params.iter().any(has_var) || has_var(ret),
         Ty::Prim(_) | Ty::Infer(_) => false,
     }
 }
@@ -1761,6 +2940,7 @@ fn scalar_of(p: Prim) -> Option<ScalarRepr> {
         Prim::U32 => ScalarRepr::U32, Prim::U64 => ScalarRepr::U64,
         Prim::F32 => ScalarRepr::F32, Prim::F64 => ScalarRepr::F64,
         Prim::Bool => ScalarRepr::Bool, Prim::Char => ScalarRepr::Char,
+        Prim::RawPtr => ScalarRepr::Ptr,
         Prim::Str | Prim::Unit => return None,
     })
 }
@@ -1772,8 +2952,16 @@ fn is_numeric(ty: &Ty) -> bool {
     matches!(ty, Ty::Prim(p) if is_int_prim(*p) || matches!(p, Prim::F32 | Prim::F64))
 }
 
+/// The "never" type, produced by diverging expressions (`return`, and a `loop`
+/// with no value-carrying `break`). It is assignable to ANY expected type — a
+/// `loop {}` whose only exits are `return` can stand as a function body of any
+/// return type. Encoded as a reserved `Ty::Infer` sentinel to avoid a new `Ty`
+/// variant rippling through every match. See `check_assignable` / `is_never`.
+fn never_ty() -> Ty { Ty::Infer(u32::MAX) }
+fn is_never(t: &Ty) -> bool { matches!(t, Ty::Infer(n) if *n == u32::MAX) }
+
 fn check_assignable(actual: &Ty, expected: &Ty, span: Span) -> LResult<()> {
-    if actual == expected || actual.is_unit() && expected.is_unit() {
+    if is_never(actual) || actual == expected || actual.is_unit() && expected.is_unit() {
         Ok(())
     } else {
         err(format!("type mismatch: expected `{}`, found `{}`", ty_display(expected), ty_display(actual)), span)
@@ -1836,5 +3024,224 @@ mod tests {
         let prog = lower("fn main() -> u32 { let x = 5u32; x + 1 }").unwrap();
         let main = &prog.funcs[0];
         assert_eq!(main.ret, Repr::Scalar(ScalarRepr::U32));
+    }
+
+    // ---- Mutability discipline (docs/mutability.md) ----------------------
+    // Immutable by default for ALL values; `mut` is required at every binder.
+
+    fn err_msg(src: &str) -> String {
+        lower(src).err().expect("expected a lowering error").msg
+    }
+
+    #[test]
+    fn associated_fn_resolves() {
+        // `Type::func` with no `self` resolves to the impl's associated function.
+        assert!(lower(
+            "struct Foo { x: i64 } \
+             impl Foo { fn make(n: i64) -> Foo { Foo { x: n } } fn get(self) -> i64 { self.x } } \
+             fn main() -> i64 { let f = Foo::make(42); f.get() }",
+        ).is_ok());
+    }
+
+    #[test]
+    fn generic_associated_fn_infers_from_arg() {
+        // `Box::wrap(99)` infers `T = i64` from the argument.
+        assert!(lower(
+            "struct Box<T> { val: T } \
+             impl<T> Box<T> { fn wrap(x: T) -> Box<T> { Box { val: x } } fn get(self) -> T { self.val } } \
+             fn main() -> i64 { let b = Box::wrap(99); b.get() }",
+        ).is_ok());
+    }
+
+    #[test]
+    fn reassign_immutable_let_rejected() {
+        let m = err_msg("fn main() -> i64 { let x = 5; x = 6; x }");
+        assert!(m.contains("immutable"), "{m}");
+    }
+
+    #[test]
+    fn reassign_let_mut_ok() {
+        assert!(lower("fn main() -> i64 { let mut x = 5; x = 6; x }").is_ok());
+    }
+
+    #[test]
+    fn field_assign_through_immutable_rejected() {
+        let m = err_msg(
+            "struct P { x: i64 } fn main() -> i64 { let p = P { x: 1 }; p.x = 9; p.x }",
+        );
+        assert!(m.contains("immutable"), "{m}");
+    }
+
+    #[test]
+    fn field_assign_through_mut_ok() {
+        assert!(lower(
+            "struct P { x: i64 } fn main() -> i64 { let mut p = P { x: 1 }; p.x = 9; p.x }",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn mut_self_method_on_immutable_receiver_rejected() {
+        let m = err_msg(
+            "struct C { n: i64 } \
+             impl C { fn bump(mut self) -> i64 { self.n = self.n + 1; self.n } } \
+             fn main() -> i64 { let c = C { n: 0 }; c.bump() }",
+        );
+        assert!(m.contains("immutable"), "{m}");
+    }
+
+    #[test]
+    fn mut_self_method_on_mut_receiver_ok() {
+        assert!(lower(
+            "struct C { n: i64 } \
+             impl C { fn bump(mut self) -> i64 { self.n = self.n + 1; self.n } } \
+             fn main() -> i64 { let mut c = C { n: 0 }; c.bump() }",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn plain_self_cannot_mutate_fields() {
+        let m = err_msg(
+            "struct C { n: i64 } \
+             impl C { fn bad(self) -> i64 { self.n = self.n + 1; self.n } } \
+             fn main() -> i64 { let mut c = C { n: 0 }; c.bad() }",
+        );
+        assert!(m.contains("mut self"), "{m}");
+    }
+
+    #[test]
+    fn assign_through_immutable_param_rejected() {
+        let m = err_msg(
+            "struct P { x: i64 } fn set(p: P) -> i64 { p.x = 5; p.x } \
+             fn main() -> i64 { let q = P { x: 1 }; set(q) }",
+        );
+        assert!(m.contains("immutable"), "{m}");
+    }
+
+    #[test]
+    fn assign_through_mut_param_ok() {
+        assert!(lower(
+            "struct P { x: i64 } fn set(mut p: P) -> i64 { p.x = 5; p.x } \
+             fn main() -> i64 { let q = P { x: 1 }; set(q) }",
+        )
+        .is_ok());
+    }
+
+    // ---- Phase 2: match completion, deferred let, tuple immutability ------
+
+    #[test]
+    fn scalar_match_without_wildcard_rejected() {
+        let m = err_msg("fn f(n: i64) -> i64 { match n { 0 => 1, 1 => 2 } } fn main() -> i64 { f(0) }");
+        assert!(m.contains("non-exhaustive"), "{m}");
+    }
+
+    #[test]
+    fn enum_missing_variant_rejected() {
+        let m = err_msg("enum E { A, B, C } fn f(e: E) -> i64 { match e { E::A => 1, E::B => 2 } } fn main() -> i64 { f(E::A) }");
+        assert!(m.contains("non-exhaustive"), "{m}");
+    }
+
+    #[test]
+    fn guarded_variant_does_not_cover() {
+        // `E::B if ...` is guarded, so it doesn't make B covered: still non-exhaustive.
+        let m = err_msg("enum E { A, B } fn f(e: E) -> i64 { match e { E::A => 1, E::B if true => 2 } } fn main() -> i64 { f(E::A) }");
+        assert!(m.contains("non-exhaustive"), "{m}");
+    }
+
+    #[test]
+    fn immutable_deferred_let_rejected() {
+        let m = err_msg("fn main() -> i64 { let x: i64; x = 1; x }");
+        assert!(m.contains("mut"), "{m}");
+    }
+
+    #[test]
+    fn deferred_let_needs_type_annotation() {
+        let m = err_msg("fn main() -> i64 { let mut x; x = 1; x }");
+        assert!(m.contains("type annotation"), "{m}");
+    }
+
+    #[test]
+    fn tuple_field_assignment_rejected() {
+        let m = err_msg("fn main() -> i64 { let mut t = (3, 4); t.0 = 9; t.0 }");
+        assert!(m.contains("immutable") || m.contains("rebuild"), "{m}");
+    }
+
+    // ---- Phase 5: diagnostics quality ------------------------------------
+
+    #[test]
+    fn unknown_variable_suggests_close_name() {
+        let m = err_msg("fn main() -> i64 { let count = 5; cont + 1 }");
+        assert!(m.contains("did you mean `count`?"), "{m}");
+    }
+
+    #[test]
+    fn unknown_function_suggests_close_name() {
+        let m = err_msg("fn compute() -> i64 { 5 } fn main() -> i64 { comput() }");
+        assert!(m.contains("did you mean `compute`?"), "{m}");
+    }
+
+    #[test]
+    fn no_suggestion_when_nothing_close() {
+        // A wildly different name shouldn't get a bogus suggestion.
+        let m = err_msg("fn main() -> i64 { let count = 5; zzzzzzzz + 1 }");
+        assert!(!m.contains("did you mean"), "{m}");
+    }
+
+    #[test]
+    fn arg_type_error_points_at_argument() {
+        // The error span should be the argument `true`, not the whole call. We
+        // can't see the span text here, but lower returns the span; verify the
+        // message is the arg type mismatch (the span fix is covered in tests/).
+        let e = lower("fn f(x: i64) -> i64 { x } fn main() -> i64 { f(true) }").err().unwrap();
+        assert!(e.msg.contains("expected `i64`, found `bool`"), "{}", e.msg);
+        // The span must be inside the `true` token region, not span 0.
+        assert!(e.span.start > 0);
+    }
+
+    #[test]
+    fn edit_distance_works() {
+        assert_eq!(edit_distance("count", "cont"), 1);
+        assert_eq!(edit_distance("vec_push", "vec_pushh"), 1);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "xyz"), 3);
+    }
+
+    // ---- multiple-error reporting (check_program) ------------------------
+
+    fn check_errs(src: &str) -> Vec<LowerError> {
+        let m = parse_module(&lex(src).unwrap()).unwrap();
+        let r = resolve_module(m).unwrap();
+        check_program(&r.globals).err().unwrap_or_default()
+    }
+
+    #[test]
+    fn check_program_collects_all_errors() {
+        // Three independently-broken functions — all three should be reported,
+        // not just the first.
+        let src = "fn a() -> i64 { true } \
+                   fn b() -> i64 { nope + 1 } \
+                   fn c() -> i64 { let x = 5; x = 6; x } \
+                   fn main() -> i64 { 0 }";
+        let errs = check_errs(src);
+        assert_eq!(errs.len(), 3, "expected 3 errors, got: {:?}", errs.iter().map(|e| &e.msg).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn check_program_ok_when_clean() {
+        let src = "fn a() -> i64 { 1 } fn b() -> i64 { a() + 1 } fn main() -> i64 { b() }";
+        assert!(check_errs(src).is_empty());
+    }
+
+    #[test]
+    fn check_program_skips_generics_but_catches_concrete() {
+        // A generic fn is skipped by the eager pass (needs instantiation), but a
+        // broken concrete fn is still caught.
+        let src = "fn id<T>(x: T) -> T { x } \
+                   fn broken() -> i64 { true } \
+                   fn main() -> i64 { id(0) }";
+        let errs = check_errs(src);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].msg.contains("found `bool`"));
     }
 }

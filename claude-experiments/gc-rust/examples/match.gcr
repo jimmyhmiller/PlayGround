@@ -1,0 +1,56 @@
+// `match` now handles far more than enum variants: integer/string/bool/char
+// literals, a catch-all binding, guards (`if cond`), and guards combined with
+// enum-variant patterns. Non-enum and guarded matches lower to a sequential
+// if-else decision chain; pure enum matches still use a fast tag-switch.
+// Exhaustiveness is checked in both cases.
+
+enum Token { Num(i64), Plus, Minus, End }
+
+// Guards + variant patterns together.
+fn eval_step(acc: i64, t: Token) -> i64 {
+    match t {
+        Token::Num(n) if n < 0 => acc,        // ignore negatives
+        Token::Num(n) => acc + n,
+        Token::Plus => acc + 1,
+        Token::Minus => acc - 1,
+        Token::End => acc,
+    }
+}
+
+// Match on a string literal.
+fn precedence(op: String) -> i64 {
+    match op {
+        "*" => 2,
+        "/" => 2,
+        "+" => 1,
+        "-" => 1,
+        _ => 0,
+    }
+}
+
+// Match on an integer with literals, a guard, and a catch-all.
+fn fizz(n: i64) -> i64 {
+    match n {
+        0 => 0,
+        x if x % 15 == 0 => 15,
+        x if x % 3 == 0 => 3,
+        x if x % 5 == 0 => 5,
+        _ => n,
+    }
+}
+
+fn main() -> i64 {
+    let mut acc = 0;
+    acc = eval_step(acc, Token::Num(10));    // 10
+    acc = eval_step(acc, Token::Plus);       // 11
+    acc = eval_step(acc, Token::Num(0 - 7)); // ignored -> 11
+    acc = eval_step(acc, Token::Num(4));     // 15
+    acc = eval_step(acc, Token::Minus);      // 14
+    acc = eval_step(acc, Token::End);        // 14
+
+    let p = precedence("*") + precedence("+") + precedence("?"); // 2 + 1 + 0 = 3
+
+    let f = fizz(30) + fizz(9) + fizz(10) + fizz(7); // 15 + 3 + 5 + 7 = 30
+
+    acc + p + f   // 14 + 3 + 30 = 47
+}

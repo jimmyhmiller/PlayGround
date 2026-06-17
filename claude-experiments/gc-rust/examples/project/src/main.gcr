@@ -1,0 +1,9 @@
+// The entry point of the `calculator` project (see ../gcr.toml).
+mod ops;
+
+fn main() -> i64 {
+    // Use the sibling `ops` module's functions.
+    let sum = ops::add(40, 2);
+    let prod = ops::mul(6, 7);
+    sum + prod   // 42 + 42 = 84
+}

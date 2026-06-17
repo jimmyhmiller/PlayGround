@@ -665,30 +665,23 @@ impl AtomicRootSet {
         index
     }
 
-    /// Read a root's current value. **Lock-free.**
+    /// Read a root's current value.
     ///
-    /// Two instructions on the hot path: load ptr, indexed atomic load.
-    #[inline]
+    /// Takes the backing lock: a concurrent `add` from another thread (e.g. two
+    /// threads spawning at once during the env handoff in `ai_thread_spawn`) may
+    /// reallocate and FREE the backing buffer, so a lock-free `ptr` load + deref
+    /// would be a use-after-free. The lock makes the buffer stable for the read.
+    /// (`get`/`set` are off the hot path — only `scan_roots`, which runs under
+    /// stop-the-world with no concurrent `add`, is lock-free.)
     pub fn get(&self, index: usize) -> u64 {
-        let ptr = self.ptr.load(Ordering::Relaxed);
-        debug_assert!(!ptr.is_null(), "AtomicRootSet::get on empty set");
-        debug_assert!(
-            index < self.len.load(Ordering::Relaxed),
-            "AtomicRootSet::get index {index} out of bounds"
-        );
-        unsafe { (*ptr.add(index)).load(Ordering::Relaxed) }
+        let vec = self.backing.lock().unwrap();
+        vec[index].load(Ordering::Relaxed)
     }
 
-    /// Update a root's value. **Lock-free.**
-    #[inline]
+    /// Update a root's value. Takes the backing lock — see `get`.
     pub fn set(&self, index: usize, bits: u64) {
-        let ptr = self.ptr.load(Ordering::Relaxed);
-        debug_assert!(!ptr.is_null(), "AtomicRootSet::set on empty set");
-        debug_assert!(
-            index < self.len.load(Ordering::Relaxed),
-            "AtomicRootSet::set index {index} out of bounds"
-        );
-        unsafe { (*ptr.add(index)).store(bits, Ordering::Relaxed) }
+        let vec = self.backing.lock().unwrap();
+        vec[index].store(bits, Ordering::Relaxed);
     }
 
     pub fn len(&self) -> usize {

@@ -1,11 +1,13 @@
-# gc-rust language reference (v0, frozen surface for Phase 1)
+# gc-rust language reference
 
 gc-rust is Rust-flavored, OCaml-weight, GC'd. It looks like Rust minus the
 machinery that exists *only* to serve borrow-checking. There is **no** `&`,
-`&mut`, lifetimes, `Box`, `Rc`, `move`, `unsafe` (v0). The GC owns memory.
+`&mut`, lifetimes, `Box`, `Rc`, `move`, or `unsafe`. The GC owns memory.
 
-This document freezes the v0 surface so the lexer, parser, resolver, and type
-checker can be built in parallel against a stable grammar.
+This document is the grammar/surface reference. It is implemented; for the
+runnable feature tour see `tour.md`, and for the cross-cutting rules see
+`mutability.md` (immutable-by-default), `modules.md` (`mod`/`use`/`pub`), and
+`overflow.md` (wrapping arithmetic).
 
 ## 1. Lexical
 

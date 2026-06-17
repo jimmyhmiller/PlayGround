@@ -1,12 +1,13 @@
 # A tour of gc-rust
 
 gc-rust is a Rust-flavored, garbage-collected, monomorphized systems language.
-It compiles through LLVM to native code (JIT today, AOT via `gcr build`). It
-keeps the parts of Rust that make code clear and fast, and drops the parts that
-exist only to manage memory by hand — there are no lifetimes, no borrows, no
-`&`/`&mut`, no `Box`. A precise copying garbage collector owns memory. Generics
-monomorphize, so abstraction is free: a `value struct` passed by value compiles
-to the same registers a hand-written one would.
+It compiles through LLVM to native code (JIT via `gcr run`, AOT via `gcr
+build`). It keeps the parts of Rust that make code clear and fast, and drops the
+parts that exist only to manage memory by hand — there are no lifetimes, no
+borrows, no `&`/`&mut`, no `Box`. A precise **generational** garbage collector
+owns memory (a nursery collected by cheap minor GCs over a copying tenured
+generation). Generics monomorphize, so abstraction is free: a `value struct`
+passed by value compiles to the same registers a hand-written one would.
 
 This tour shows the language by example. Every snippet here runs.
 

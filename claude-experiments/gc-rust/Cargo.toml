@@ -15,7 +15,8 @@ path = "src/main.rs"
 # LLVM backend (AOT + JIT) via Inkwell. Same fork/feature ai-lang uses.
 inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
 # The GC runtime + collector, split into its own LLVM-free crate so AOT binaries
-# can statically link just the runtime (libgcrust_rt.a).
+# can statically link just the runtime (libgcrust_rt.a). Used as an rlib by the
+# JIT; `build.rs` also produces + locates the profile-matched staticlib for AOT.
 gcrust-rt = { path = "crates/gcrust-rt" }
 
 [workspace]

@@ -1,0 +1,50 @@
+// Mutability is opt-in everywhere: immutable by default for ALL values, with
+// `mut` required at each binder. The rule is transitive — mutating a field or
+// element requires the access path's ROOT binding to be `mut`. See
+// docs/mutability.md. Every mutation below is legal precisely because the thing
+// it reaches through was declared `mut`. (Drop a `mut` and `gcr check` rejects
+// the program.)
+
+struct Counter { n: i64 }
+
+impl Counter {
+    // A method that mutates the receiver must declare `mut self`.
+    fn bump(mut self) -> Counter {
+        self.n = self.n + 1;
+        self
+    }
+}
+
+// A function may only mutate through a parameter declared `mut`.
+fn fill(mut a: Array<i64>, n: i64) -> Array<i64> {
+    let mut i = 0;
+    while i < n {
+        array_set(a, i, i * i);
+        i = i + 1;
+    }
+    a
+}
+
+fn main() -> i64 {
+    // `mut` binding: we reassign it.
+    let mut total = 0;
+
+    // `mut` struct binding: bump() needs a mutable receiver.
+    let mut c = Counter { n: 0 };
+    c = c.bump();
+    c = c.bump();
+    c = c.bump();          // c.n == 3
+
+    // `mut` array binding: we write its elements (transitively through `mut a`
+    // inside fill, and the binding here is mutable too).
+    let mut squares: Array<i64> = array_new(5);
+    squares = fill(squares, 5);   // [0,1,4,9,16]
+
+    let mut i = 0;
+    while i < 5 {
+        total = total + array_get(squares, i);
+        i = i + 1;
+    }                       // total == 30
+
+    total + c.n             // 30 + 3 == 33
+}

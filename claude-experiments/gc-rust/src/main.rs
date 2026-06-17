@@ -9,8 +9,7 @@
 use std::process::ExitCode;
 
 use gcrust::ast::ItemKind;
-use gcrust::codegen::{build_executable, jit_run_i64};
-use gcrust::compile::parse_with_prelude;
+use gcrust::codegen::{build_executable, jit_run_i64, jit_run_i64_gc};
 use gcrust::lexer::lex;
 use gcrust::lower::lower_program;
 use gcrust::parser::parse_module;
@@ -23,7 +22,30 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cmd = &args[1];
-    let path = &args[2];
+    let arg_path = &args[2];
+
+    // Resolve the entry file. If the argument is a directory (or a `gcr.toml`),
+    // read the manifest and use its `entry`; otherwise it's a source file path.
+    let path: String = {
+        let p = std::path::Path::new(arg_path);
+        if p.is_dir() || p.file_name().map(|n| n == "gcr.toml").unwrap_or(false) {
+            let dir = if p.is_dir() { p } else { p.parent().unwrap_or(std::path::Path::new(".")) };
+            match gcrust::manifest::Manifest::load(dir) {
+                Ok(m) => {
+                    println!("gcr: building `{}` v{}", m.name, m.version);
+                    m.entry_path().to_string_lossy().into_owned()
+                }
+                Err(e) => {
+                    eprintln!("gcr: {}", e.0);
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            arg_path.clone()
+        }
+    };
+    let path = &path;
+
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -51,7 +73,8 @@ fn main() -> ExitCode {
             }
         }
     } else {
-        match parse_with_prelude(&src) {
+        // Load the file (plus any `mod foo;` sibling files) and inject the prelude.
+        match gcrust::compile::parse_file_with_prelude(std::path::Path::new(path)) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
@@ -78,16 +101,35 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        "check" => match resolve_module(module) {
-            Ok(r) => {
-                println!("ok: {} top-level symbols", r.globals.by_path.len());
-                ExitCode::SUCCESS
+        "check" => {
+            // `check` runs the full front end: resolve + typecheck + monomorphize.
+            // It first runs the multi-error check pass (every non-generic function
+            // checked independently), so it can report ALL broken functions at
+            // once, then the demand-driven lower pass to catch anything reachable
+            // only through a generic instantiation.
+            let resolved = match resolve_module(module) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
+                    return ExitCode::FAILURE;
+                }
+            };
+            let nsyms = resolved.globals.by_path.len();
+            if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
+                report_errors(path, &src, &errs);
+                return ExitCode::FAILURE;
             }
-            Err(e) => {
-                eprintln!("gcr: resolve error at {:?}: {}", e.span, e.msg);
-                ExitCode::FAILURE
+            match lower_program(&resolved.globals) {
+                Ok(_) => {
+                    println!("ok: {} top-level symbols, type-checks", nsyms);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         "run" => {
             let resolved = match resolve_module(module) {
                 Ok(r) => r,
@@ -96,6 +138,10 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
+                report_errors(path, &src, &errs);
+                return ExitCode::FAILURE;
+            }
             let prog = match lower_program(&resolved.globals) {
                 Ok(p) => p,
                 Err(e) => {
@@ -103,7 +149,11 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match jit_run_i64(&prog) {
+            // `--gc-stress` forces a collection at every allocation — the
+            // strongest test that the precise relocating GC keeps roots correct.
+            let stress = args.iter().any(|a| a == "--gc-stress");
+            let result = if stress { jit_run_i64_gc(&prog, true) } else { jit_run_i64(&prog) };
+            match result {
                 Ok(v) => {
                     println!("{}", v);
                     ExitCode::SUCCESS
@@ -138,6 +188,10 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
+                report_errors(path, &src, &errs);
+                return ExitCode::FAILURE;
+            }
             let prog = match lower_program(&resolved.globals) {
                 Ok(p) => p,
                 Err(e) => {
@@ -161,6 +215,16 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Render every collected error (the multi-error check pass), each with its own
+/// caret, separated by blank lines, then a summary count.
+fn report_errors(path: &str, src: &str, errs: &[gcrust::lower::LowerError]) {
+    for e in errs {
+        eprintln!("{}\n", gcrust::diag::render(path, src, e.span, &e.msg));
+    }
+    let n = errs.len();
+    eprintln!("gcr: {} error{} found", n, if n == 1 { "" } else { "s" });
 }
 
 /// Parse an optional `-o <path>` (or `--output <path>`) flag from the argument

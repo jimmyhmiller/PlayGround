@@ -26,6 +26,9 @@ pub enum ScalarRepr {
     U8, U16, U32, U64,
     F32, F64,
     Bool, Char,
+    /// An opaque pointer-sized non-GC value (FFI `RawPtr`). Lowers to LLVM
+    /// `ptr`. Never participates in arithmetic — only crosses the FFI boundary.
+    Ptr,
 }
 
 impl ScalarRepr {
@@ -35,7 +38,7 @@ impl ScalarRepr {
             ScalarRepr::I8 | ScalarRepr::U8 => 8,
             ScalarRepr::I16 | ScalarRepr::U16 => 16,
             ScalarRepr::I32 | ScalarRepr::U32 | ScalarRepr::F32 | ScalarRepr::Char => 32,
-            ScalarRepr::I64 | ScalarRepr::U64 | ScalarRepr::F64 => 64,
+            ScalarRepr::I64 | ScalarRepr::U64 | ScalarRepr::F64 | ScalarRepr::Ptr => 64,
             ScalarRepr::Bool => 1,
         }
     }
@@ -47,7 +50,7 @@ impl ScalarRepr {
         matches!(self, ScalarRepr::I8 | ScalarRepr::I16 | ScalarRepr::I32 | ScalarRepr::I64)
     }
     pub fn is_int(self) -> bool {
-        !self.is_float() && !matches!(self, ScalarRepr::Bool)
+        !self.is_float() && !matches!(self, ScalarRepr::Bool | ScalarRepr::Ptr)
     }
 }
 
@@ -137,6 +140,11 @@ pub struct CoreFn {
     /// locals are initialized by loading the corresponding field from `env`.
     /// Empty for ordinary functions.
     pub closure_captures: Vec<ClosureCapture>,
+    /// `true` for a foreign `extern "C"` function. Such a function has no body
+    /// (`body` is empty and must not be defined), takes no leading `Thread*`,
+    /// and `name` is the unmangled C symbol resolved at link/JIT time. Calls to
+    /// it omit the `Thread*` argument. See `docs/ffi.md`.
+    pub is_extern: bool,
 }
 
 /// How to initialize one capture local from the closure env object.
@@ -177,6 +185,9 @@ pub enum CoreExprKind {
     ConstFloat(f64, ScalarRepr),
     ConstBool(bool),
     ConstChar(char),
+    /// The zero/null value of a repr (scalar 0, ref null). Used to define a
+    /// deferred-initialization `let mut x: T;` slot before its first assignment.
+    ConstZero(Repr),
     /// A string literal → a `Ref` to a `String` heap object.
     ConstStr(String),
     Unit,
@@ -189,6 +200,44 @@ pub enum CoreExprKind {
     FloatIntrinsic(FloatIntrinsic, Box<CoreExpr>),
     /// A runtime print of a scalar (`print_int`/`print_float`). Yields i64 0.
     Print(Box<CoreExpr>),
+
+    /// String primitives. Operands are `Ref`s to `String` heap objects.
+    /// `print_str(s)` → i64 0.
+    PrintStr(Box<CoreExpr>),
+    /// `str_len(s)` → i64 byte length.
+    StrLen(Box<CoreExpr>),
+    /// `str_eq(a, b)` → bool.
+    StrEq(Box<CoreExpr>, Box<CoreExpr>),
+    /// `str_concat(a, b)` → a fresh `String`. `layout` is the String layout id
+    /// (passed to the allocating runtime call).
+    StrConcat { layout: LayoutId, a: Box<CoreExpr>, b: Box<CoreExpr> },
+    /// `str_get(s, i)` → i64 byte (or -1 out of range).
+    StrGet(Box<CoreExpr>, Box<CoreExpr>),
+    /// `str_substring(s, start, end)` → a fresh `String`.
+    StrSubstring { layout: LayoutId, s: Box<CoreExpr>, start: Box<CoreExpr>, end: Box<CoreExpr> },
+    /// `to_string(v)` → a fresh `String` (int or float rendering). `is_float`
+    /// selects the runtime entry point.
+    StrFromNum { layout: LayoutId, is_float: bool, v: Box<CoreExpr> },
+    /// `str_to_float(s)` → f64 (0.0 on malformed input).
+    StrToFloat(Box<CoreExpr>),
+    /// `str_hash(s)` → i64 non-negative hash.
+    StrHash(Box<CoreExpr>),
+    /// FFI `as_c_bytes(x)` → a `RawPtr` (`Scalar(Ptr)`) to a stack-resident copy
+    /// of a `String`'s or scalar `Array`'s contents. Codegen copies the heap
+    /// bytes into a fresh stack alloca for the duration of the enclosing extern
+    /// call (the only place this node may appear). Because the copy lives on the
+    /// non-moving native stack, the pointer is stable across the call with no
+    /// pinning. See `docs/ffi.md`.
+    ///
+    /// * `src` is the `Ref` to the String/Array object.
+    /// * `elem` is the element scalar (`U8` for a `String`'s bytes) — its byte
+    ///   size is the stride; total bytes = `array_len * stride`.
+    /// * `is_string` adds a trailing NUL (C-string convention) and sizes the
+    ///   buffer from the String's byte count.
+    /// * `copy_out` (a `mut` array argument) means: after the enclosing extern
+    ///   call returns, copy the stack buffer back into the heap object, so writes
+    ///   the C function made are visible to the caller (e.g. `read(fd, buf, n)`).
+    AsCBytes { src: Box<CoreExpr>, elem: ScalarRepr, is_string: bool, copy_out: bool },
 
     /// Allocate a fresh varlen array of `len` elements of the given layout
     /// (a reference object whose varlen tail holds the elements). Elements are
@@ -205,6 +254,54 @@ pub enum CoreExprKind {
 
     /// Direct call to a known monomorphic function.
     Call(FuncId, Vec<CoreExpr>),
+    /// `thread_spawn(closure)` → spawn an OS thread running the no-arg closure
+    /// `closure` (a `Ref` to a closure env). Yields a thread handle as a `RawPtr`
+    /// (opaque, non-GC — it wraps a runtime-owned join handle). Codegen extracts
+    /// the env + code pointer and calls `ai_thread_spawn`. See `docs/threads.md`.
+    ThreadSpawn(Box<CoreExpr>),
+    /// `thread_join(handle)` → block until the thread finishes; yields its i64
+    /// result. Consumes the `RawPtr` handle.
+    ThreadJoin(Box<CoreExpr>),
+    /// Clojure-style atom (single mutable cell holding an immutable value).
+    /// `AtomLoad` atomically loads the atom's value field (a GC pointer slot).
+    /// The atom is an ordinary heap object `{ value: T }`; the field is at
+    /// `HEADER + 0`. See `docs/threads.md`.
+    AtomLoad { atom: Box<CoreExpr>, elem: Repr },
+    /// `AtomCas` atomically compare-and-swaps the atom's value field: if it
+    /// currently equals `old`, install `new` (with write barrier) and yield
+    /// true, else yield false. The retry loop of `swap!` is written in-language
+    /// over this (so old/new/atom are ordinary frame roots — GC-safe for free).
+    AtomCas { atom: Box<CoreExpr>, old: Box<CoreExpr>, new: Box<CoreExpr> },
+    /// Channel `send`: store `value` (a GC pointer) into the channel's on-heap
+    /// `buf` at the control block `ctrl`'s tail slot, blocking while full. The
+    /// queued value is traced by the GC via `buf`. Yields i64 0.
+    ChanSend { buf: Box<CoreExpr>, ctrl: Box<CoreExpr>, value: Box<CoreExpr> },
+    /// Channel `recv`: pop the head element of `buf` (blocking while empty);
+    /// yields the element as `elem` (a GC pointer, or null when closed+drained —
+    /// the prelude wraps the result as `Option<T>`).
+    ChanRecv { buf: Box<CoreExpr>, ctrl: Box<CoreExpr>, elem: Repr },
+    /// A direct call to a named runtime extern with already-lowered scalar/ptr
+    /// args, threading the `Thread*` as the leading argument. Used for the
+    /// shared-memory primitives (atomics) and similar runtime intrinsics that
+    /// don't warrant a bespoke node. `ret` is the result repr.
+    RuntimeCall { func: &'static str, args: Vec<CoreExpr>, ret: Repr },
+    /// `thread_sleep(ms)` → sleep this thread; yields i64 0.
+    ThreadSleep(Box<CoreExpr>),
+    /// `thread_yield()` → yield this thread's timeslice; yields i64 0.
+    ThreadYield,
+    /// `thread_current_id()` → a stable per-thread id (i64).
+    ThreadCurrentId,
+    /// FFI `ptr_read_i64(p)` → the i64 at `RawPtr` `p` (a plain load). Lets a
+    /// callback read through the C pointers it is handed (e.g. a `qsort`
+    /// comparator). See `docs/ffi.md`.
+    PtrReadI64(Box<CoreExpr>),
+    /// FFI callback: a `RawPtr` (`Scalar(Ptr)`) to a C-ABI trampoline that
+    /// invokes gc-rust function `FuncId`. Codegen synthesizes one trampoline per
+    /// referenced function (re-entering managed state, calling the function with
+    /// the ambient `Thread*`, restoring native state) and yields its address.
+    /// Used when a named gc-rust function is passed where an `extern fn(..)` C
+    /// callback is expected. See `docs/ffi.md`.
+    CallbackPtr(FuncId),
     /// Indirect call through a closure value.
     CallClosure { callee: Box<CoreExpr>, args: Vec<CoreExpr> },
     /// Build a closure: env layout + code fn + captures.
@@ -229,6 +326,15 @@ pub enum CoreExprKind {
     SetField { base: Box<CoreExpr>, loc: FieldLoc, value: Box<CoreExpr> },
 
     Match { scrutinee: Box<CoreExpr>, arms: Vec<CoreArm> },
+    /// Read the discriminant tag (i32) of a reference enum object. Used by the
+    /// if-chain match lowering (guards / literals) where there's no tag-switch.
+    EnumTag(Box<CoreExpr>),
+    /// Read payload field `field` of a reference enum object, as `repr`. The
+    /// caller knows the variant matches (a preceding `EnumTag` test guards it).
+    /// `payload_reprs` is the full ordered payload-field repr list (needed to
+    /// compute the physical slot of `field`, since ptr and raw payloads are laid
+    /// out in separate regions just like the tag-switch binding path).
+    EnumPayload { scrutinee: Box<CoreExpr>, field: u32, repr: Repr, payload_reprs: Vec<Repr> },
     If(Box<CoreExpr>, Box<CoreBlock>, Box<CoreBlock>),
     Block(Box<CoreBlock>),
 

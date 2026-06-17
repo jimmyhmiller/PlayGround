@@ -1,0 +1,28 @@
+// FFI Phase C follow-up: pass ARRAY contents to C, including copy-OUT (C fills a
+// buffer in place). `as_c_bytes(arr)` copies the array's bytes to a stack buffer
+// for the call; when the extern parameter is `mut`, the buffer is copied BACK
+// into the array afterward — the read(2)/memset pattern. See docs/ffi.md.
+
+// memset(buf, c, n): fills n bytes of buf with byte c, returns buf. The `mut`
+// marks buf as copy-out: writes C makes are visible to the caller after the call.
+extern "C" fn memset(mut buf: RawPtr, c: i32, n: i64) -> RawPtr;
+
+// memcmp(a, b, n): 0 if the first n bytes are equal. Read-only arrays.
+extern "C" fn memcmp(a: RawPtr, b: RawPtr, n: i64) -> i32;
+
+fn main() -> i64 {
+    // Copy-out: ask C to fill 5 bytes with 0x07.
+    let mut buf: Array<u8> = array_new(5);
+    memset(as_c_bytes(buf), 7, 5);
+    // The write-back means buf now holds [7,7,7,7,7].
+    let sum = (array_get(buf, 0) as i64) + (array_get(buf, 4) as i64); // 7 + 7 = 14
+
+    // Read-only: compare two equal byte arrays -> memcmp returns 0.
+    let mut a: Array<u8> = array_new(3);
+    array_set(a, 0, 1); array_set(a, 1, 2); array_set(a, 2, 3);
+    let mut b: Array<u8> = array_new(3);
+    array_set(b, 0, 1); array_set(b, 1, 2); array_set(b, 2, 3);
+    let eq = memcmp(as_c_bytes(a), as_c_bytes(b), 3); // 0 when equal
+
+    sum + (eq as i64) // 14 + 0 = 14
+}

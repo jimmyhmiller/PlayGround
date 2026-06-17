@@ -50,7 +50,7 @@ pub enum TokKind {
     // punctuation / operators
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Semi, Colon, ColonColon, Arrow, FatArrow, Dot, DotDot, DotDotEq,
-    Question, At,
+    Question, At, Hash,
     Plus, Minus, Star, Slash, Percent,
     Eq, EqEq, Ne, Lt, Le, Gt, Ge,
     AndAnd, OrOr, Not,
@@ -63,7 +63,7 @@ pub enum TokKind {
 pub enum Kw {
     Fn, Let, Mut, Struct, Enum, Impl, Trait, For, In, If, Else, Match,
     While, Loop, Return, Break, Continue, True, False, As, Where, Pub, Mod,
-    Use, Type, Const, Static, SelfValue, SelfType, Value,
+    Use, Type, Const, Static, SelfValue, SelfType, Extern,
 }
 
 impl Kw {
@@ -79,7 +79,8 @@ impl Kw {
             "where" => Kw::Where, "pub" => Kw::Pub, "mod" => Kw::Mod,
             "use" => Kw::Use, "type" => Kw::Type, "const" => Kw::Const,
             "static" => Kw::Static, "self" => Kw::SelfValue,
-            "Self" => Kw::SelfType, "value" => Kw::Value,
+            "Self" => Kw::SelfType,
+            "extern" => Kw::Extern,
             _ => return None,
         })
     }
@@ -363,7 +364,7 @@ impl<'a> Lexer<'a> {
             b'{' => TokKind::LBrace, b'}' => TokKind::RBrace,
             b'[' => TokKind::LBracket, b']' => TokKind::RBracket,
             b',' => TokKind::Comma, b';' => TokKind::Semi,
-            b'@' => TokKind::At,
+            b'@' => TokKind::At, b'#' => TokKind::Hash,
             b':' => if self.peek() == b':' { two(self, TokKind::ColonColon) } else { TokKind::Colon },
             b'-' => match self.peek() {
                 b'>' => two(self, TokKind::Arrow),
@@ -433,7 +434,9 @@ mod tests {
         assert_eq!(k[1], TokKind::Ident("foo".into()));
         assert_eq!(k[2], TokKind::Keyword(Kw::Let));
         assert_eq!(k[3], TokKind::Keyword(Kw::Mut));
-        assert_eq!(k[4], TokKind::Keyword(Kw::Value));
+        // `value` is no longer a keyword — it's an ordinary identifier now that
+        // the value-type representation is selected via the `#[value]` attribute.
+        assert_eq!(k[4], TokKind::Ident("value".into()));
         assert_eq!(k[5], TokKind::Keyword(Kw::Struct));
     }
 

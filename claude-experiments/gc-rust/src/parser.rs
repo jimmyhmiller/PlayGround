@@ -14,7 +14,7 @@ pub struct ParseError {
 }
 
 pub fn parse_module(tokens: &[Token]) -> Result<Module, ParseError> {
-    let mut p = Parser { toks: tokens.to_vec(), pos: 0, no_struct: 0 };
+    let mut p = Parser { toks: tokens.to_vec(), pos: 0, no_struct: 0, depth: 0 };
     let mut items = Vec::new();
     while !p.at(&TokKind::Eof) {
         items.push(p.item()?);
@@ -32,7 +32,17 @@ struct Parser {
     /// forbidden (if/while/match/for scrutinee), so `if x {` reads `x` as the
     /// condition, not `x { … }` as a struct literal.
     no_struct: u32,
+    /// Current expression-recursion depth, bounded by `MAX_EXPR_DEPTH` so deeply
+    /// nested input (e.g. `((((((…))))))`) yields a clean error instead of a
+    /// stack overflow. Every recursive-descent compiler needs this.
+    depth: u32,
 }
+
+/// Maximum expression/block nesting depth before the parser bails with an error.
+/// Real programs nest a few dozen deep at most; 128 is well above that yet low
+/// enough that the recursive-descent frames stay within a small (2 MB) thread
+/// stack, so deeply nested input errors cleanly instead of overflowing.
+const MAX_EXPR_DEPTH: u32 = 128;
 
 type PResult<T> = Result<T, ParseError>;
 
@@ -102,18 +112,15 @@ impl Parser {
     // ---- items -------------------------------------------------------------
     fn item(&mut self) -> PResult<Item> {
         let start = self.span();
+        let attrs = self.attributes()?;
+        // `#[value]` selects the inline value-type representation on a struct/enum.
+        let is_value = attrs.iter().any(|a| a == "value");
         let vis = self.eat_kw(Kw::Pub);
         let kind = match self.peek() {
+            TokKind::Keyword(Kw::Extern) => ItemKind::Fn(self.extern_fn(vis)?),
             TokKind::Keyword(Kw::Fn) => ItemKind::Fn(self.fn_def(vis)?),
-            TokKind::Keyword(Kw::Value) | TokKind::Keyword(Kw::Struct)
-                if self.is_struct_ahead() =>
-            {
-                ItemKind::Struct(self.struct_def(vis)?)
-            }
-            TokKind::Keyword(Kw::Value) | TokKind::Keyword(Kw::Enum) => {
-                ItemKind::Enum(self.enum_def(vis)?)
-            }
-            TokKind::Keyword(Kw::Struct) => ItemKind::Struct(self.struct_def(vis)?),
+            TokKind::Keyword(Kw::Struct) => ItemKind::Struct(self.struct_def(vis, is_value)?),
+            TokKind::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_def(vis, is_value)?),
             TokKind::Keyword(Kw::Trait) => ItemKind::Trait(self.trait_def(vis)?),
             TokKind::Keyword(Kw::Impl) => ItemKind::Impl(self.impl_block()?),
             TokKind::Keyword(Kw::Type) => ItemKind::TypeAlias(self.type_alias(vis)?),
@@ -127,13 +134,31 @@ impl Parser {
         Ok(Item { kind, span: start.to(self.prev_span()) })
     }
 
-    /// Disambiguate `value struct` / `struct` from `value enum` / `enum`.
-    fn is_struct_ahead(&self) -> bool {
-        match self.peek() {
-            TokKind::Keyword(Kw::Struct) => true,
-            TokKind::Keyword(Kw::Value) => matches!(self.peek_at(1), TokKind::Keyword(Kw::Struct)),
-            _ => false,
+    /// Parse zero or more leading attributes `#[ name ]`. Returns the attribute
+    /// names (e.g. `["value"]`, `["repr"]`). Currently only `#[value]` is acted
+    /// on; unknown attributes are accepted and ignored (forward-compatible).
+    fn attributes(&mut self) -> PResult<Vec<String>> {
+        let mut attrs = Vec::new();
+        while self.at(&TokKind::Hash) {
+            self.bump(); // `#`
+            self.expect(&TokKind::LBracket)?;
+            attrs.push(self.ident()?);
+            // Tolerate (and skip) attribute arguments like `repr(C)` for the
+            // future, by consuming a balanced paren group if present.
+            if self.eat(&TokKind::LParen) {
+                let mut depth = 1;
+                while depth > 0 && !self.at(&TokKind::Eof) {
+                    match self.peek() {
+                        TokKind::LParen => depth += 1,
+                        TokKind::RParen => depth -= 1,
+                        _ => {}
+                    }
+                    self.bump();
+                }
+            }
+            self.expect(&TokKind::RBracket)?;
         }
+        Ok(attrs)
     }
 
     fn fn_def(&mut self, vis: bool) -> PResult<FnDef> {
@@ -141,18 +166,61 @@ impl Parser {
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(&TokKind::LParen)?;
-        let (params, has_self) = self.params()?;
+        let (params, has_self, self_is_mut) = self.params()?;
         self.expect(&TokKind::RParen)?;
         let ret = if self.eat(&TokKind::Arrow) { Some(self.ty()?) } else { None };
         let generics = self.maybe_where(generics)?;
         let body = self.block()?;
-        Ok(FnDef { vis, name, generics, params, has_self, ret, body, span: start.to(self.prev_span()) })
+        Ok(FnDef { vis, name, generics, params, has_self, self_is_mut, ret, body, is_extern: false, span: start.to(self.prev_span()) })
     }
 
-    fn params(&mut self) -> PResult<(Vec<Param>, bool)> {
+    /// Parse an `extern "C" fn name(params) -> ret;` foreign declaration. The
+    /// ABI string must be `"C"`. There is no body — the trailing `;` is required.
+    /// See `docs/ffi.md`.
+    fn extern_fn(&mut self, vis: bool) -> PResult<FnDef> {
+        let start = self.expect_kw(Kw::Extern)?;
+        let abi = match self.peek() {
+            TokKind::Str(s) => { let s = s.clone(); self.bump(); s }
+            other => return Err(self.error(format!("expected ABI string after `extern`, found {:?}", other))),
+        };
+        if abi != "C" {
+            return Err(self.error(format!("unsupported extern ABI {:?} (only \"C\" is supported)", abi)));
+        }
+        self.expect_kw(Kw::Fn)?;
+        let name = self.ident()?;
+        let generics = self.generics()?;
+        if !generics.params.is_empty() {
+            return Err(self.error("extern functions cannot be generic"));
+        }
+        self.expect(&TokKind::LParen)?;
+        let (params, has_self, self_is_mut) = self.params()?;
+        self.expect(&TokKind::RParen)?;
+        if has_self {
+            return Err(self.error("extern functions cannot take `self`"));
+        }
+        let ret = if self.eat(&TokKind::Arrow) { Some(self.ty()?) } else { None };
+        self.expect(&TokKind::Semi)?;
+        let body = Block { stmts: Vec::new(), tail: None, span: start.to(self.prev_span()) };
+        Ok(FnDef {
+            vis, name, generics, params, has_self, self_is_mut, ret, body,
+            is_extern: true, span: start.to(self.prev_span()),
+        })
+    }
+
+    fn params(&mut self) -> PResult<(Vec<Param>, bool, bool)> {
         let mut params = Vec::new();
         let mut has_self = false;
-        if self.at_kw(Kw::SelfValue) {
+        let mut self_is_mut = false;
+        // A receiver may be written `self` or `mut self`.
+        if self.at_kw(Kw::Mut) && matches!(self.peek_at(1), TokKind::Keyword(Kw::SelfValue)) {
+            self.bump(); // `mut`
+            self.bump(); // `self`
+            has_self = true;
+            self_is_mut = true;
+            if !self.at(&TokKind::RParen) {
+                self.expect(&TokKind::Comma)?;
+            }
+        } else if self.at_kw(Kw::SelfValue) {
             self.bump();
             has_self = true;
             if !self.at(&TokKind::RParen) {
@@ -170,12 +238,11 @@ impl Parser {
                 break;
             }
         }
-        Ok((params, has_self))
+        Ok((params, has_self, self_is_mut))
     }
 
-    fn struct_def(&mut self, vis: bool) -> PResult<StructDef> {
+    fn struct_def(&mut self, vis: bool, is_value: bool) -> PResult<StructDef> {
         let start = self.span();
-        let is_value = self.eat_kw(Kw::Value);
         self.expect_kw(Kw::Struct)?;
         let name = self.ident()?;
         let generics = self.generics()?;
@@ -219,9 +286,8 @@ impl Parser {
         Ok(FieldDef { vis, name, ty, span: start.to(self.prev_span()) })
     }
 
-    fn enum_def(&mut self, vis: bool) -> PResult<EnumDef> {
+    fn enum_def(&mut self, vis: bool, is_value: bool) -> PResult<EnumDef> {
         let start = self.span();
-        let is_value = self.eat_kw(Kw::Value);
         self.expect_kw(Kw::Enum)?;
         let name = self.ident()?;
         let generics = self.generics()?;
@@ -291,18 +357,19 @@ impl Parser {
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(&TokKind::LParen)?;
-        let (params, has_self) = self.params()?;
+        let (params, has_self, self_is_mut) = self.params()?;
         self.expect(&TokKind::RParen)?;
         let ret = if self.eat(&TokKind::Arrow) { Some(self.ty()?) } else { None };
         let generics = self.maybe_where(generics)?;
         if self.eat(&TokKind::Semi) {
             Ok(TraitItem::Required(FnSig {
-                name, generics, params, has_self, ret, span: start.to(self.prev_span()),
+                name, generics, params, has_self, self_is_mut, ret, span: start.to(self.prev_span()),
             }))
         } else {
             let body = self.block()?;
             Ok(TraitItem::Provided(FnDef {
-                vis: false, name, generics, params, has_self, ret, body,
+                vis: false, name, generics, params, has_self, self_is_mut, ret, body,
+                is_extern: false,
                 span: start.to(self.prev_span()),
             }))
         }
@@ -358,19 +425,29 @@ impl Parser {
     fn mod_def(&mut self, vis: bool) -> PResult<ModDef> {
         let start = self.expect_kw(Kw::Mod)?;
         let name = self.ident()?;
+        // `mod foo;` — a file module, loaded from disk by the pipeline. Or
+        // `mod foo { ... }` — an inline module.
+        if self.eat(&TokKind::Semi) {
+            return Ok(ModDef { vis, name, items: vec![], inline: false, span: start.to(self.prev_span()) });
+        }
         self.expect(&TokKind::LBrace)?;
         let mut items = Vec::new();
         while !self.at(&TokKind::RBrace) {
             items.push(self.item()?);
         }
         self.expect(&TokKind::RBrace)?;
-        Ok(ModDef { vis, name, items, span: start.to(self.prev_span()) })
+        Ok(ModDef { vis, name, items, inline: true, span: start.to(self.prev_span()) })
     }
 
     fn use_decl(&mut self) -> PResult<UsePath> {
         let start = self.expect_kw(Kw::Use)?;
         let mut segments = vec![self.ident()?];
         while self.eat(&TokKind::ColonColon) {
+            // A trailing `::*` is a glob import; record it as a `*` segment.
+            if self.eat(&TokKind::Star) {
+                segments.push("*".to_string());
+                break;
+            }
             segments.push(self.ident()?);
         }
         self.expect(&TokKind::Semi)?;
@@ -465,6 +542,20 @@ impl Parser {
                 let ret = if self.eat(&TokKind::Arrow) { Some(Box::new(self.ty()?)) } else { None };
                 TypeKind::Fn(params, ret)
             }
+            // `extern fn(A, B) -> R` — a C callback (function-pointer) type.
+            TokKind::Keyword(Kw::Extern) => {
+                self.bump();
+                self.expect_kw(Kw::Fn)?;
+                self.expect(&TokKind::LParen)?;
+                let mut params = Vec::new();
+                while !self.at(&TokKind::RParen) {
+                    params.push(self.ty()?);
+                    if !self.eat(&TokKind::Comma) { break; }
+                }
+                self.expect(&TokKind::RParen)?;
+                let ret = if self.eat(&TokKind::Arrow) { Some(Box::new(self.ty()?)) } else { None };
+                TypeKind::ExternFn(params, ret)
+            }
             TokKind::Keyword(Kw::SelfType) => {
                 self.bump();
                 TypeKind::SelfType
@@ -532,6 +623,22 @@ impl Parser {
 
     // ---- statements + blocks ----------------------------------------------
     fn block(&mut self) -> PResult<Block> {
+        // Blocks recurse (a `{ { ... } }` block-expression chain), so bound them
+        // with the same depth budget as expressions to prevent stack overflow.
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError {
+                msg: format!("block nested too deeply (limit {})", MAX_EXPR_DEPTH),
+                span: self.span(),
+            });
+        }
+        let r = self.block_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn block_inner(&mut self) -> PResult<Block> {
         let start = self.expect(&TokKind::LBrace)?;
         let mut stmts = Vec::new();
         let mut tail = None;
@@ -604,7 +711,7 @@ impl Parser {
             self.peek(),
             TokKind::Keyword(
                 Kw::Fn | Kw::Struct | Kw::Enum | Kw::Trait | Kw::Impl
-                    | Kw::Type | Kw::Const | Kw::Static | Kw::Mod | Kw::Use | Kw::Value
+                    | Kw::Type | Kw::Const | Kw::Static | Kw::Mod | Kw::Use
             )
         )
     }
@@ -624,6 +731,22 @@ impl Parser {
     }
 
     fn expr_bp(&mut self, min_bp: u8) -> PResult<Expr> {
+        // Bound recursion depth: deeply nested input must error cleanly, never
+        // overflow the stack.
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError {
+                msg: format!("expression nested too deeply (limit {})", MAX_EXPR_DEPTH),
+                span: self.span(),
+            });
+        }
+        let r = self.expr_bp_inner(min_bp);
+        self.depth -= 1;
+        r
+    }
+
+    fn expr_bp_inner(&mut self, min_bp: u8) -> PResult<Expr> {
         let start = self.span();
         let mut lhs = self.unary()?;
 

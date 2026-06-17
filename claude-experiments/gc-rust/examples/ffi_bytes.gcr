@@ -1,0 +1,17 @@
+// FFI Phase C: pass a String's bytes to C. `as_c_bytes(s)` copies s's UTF-8
+// (plus a NUL terminator) into a stack buffer that lives only for the call, and
+// passes a `RawPtr` to it. The bytes never leave the non-moving native stack, so
+// no pinning is needed even though the String itself lives on the moving GC
+// heap. `as_c_bytes` is legal ONLY as a direct extern-call argument.
+// See docs/ffi.md.
+
+extern "C" fn strlen(s: RawPtr) -> i64;
+extern "C" fn atoi(s: RawPtr) -> i32;
+
+fn main() -> i64 {
+    // strlen("hello, ffi") = 10
+    let n = strlen(as_c_bytes("hello, ffi"));
+    // atoi("32") = 32
+    let v = atoi(as_c_bytes("32"));
+    n + (v as i64)   // 10 + 32 = 42
+}

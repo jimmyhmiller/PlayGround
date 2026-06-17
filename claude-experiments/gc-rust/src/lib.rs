@@ -17,6 +17,7 @@ pub use gcrust_rt::gc;
 pub mod layout;
 pub mod lexer;
 pub mod lower;
+pub mod manifest;
 pub mod parser;
 pub mod resolve;
 pub use gcrust_rt::runtime;

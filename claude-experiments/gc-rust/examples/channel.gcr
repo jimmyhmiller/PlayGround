@@ -1,0 +1,33 @@
+// Channels: bounded, blocking message passing between threads. The element
+// buffer is on the GC heap, so the Vec values sent here are traced + relocated
+// normally; a runtime control block provides the lock + parking. send blocks
+// while full, recv blocks while empty (no busy-spin). See docs/threads.md.
+
+fn produce(ch: Channel<Vec<i64>>, base: i64, n: i64) -> i64 {
+    let mut i = 0;
+    while i < n {
+        let v: Vec<i64> = vec_new();
+        let _s = ch.send(vec_push(v, base + i));
+        i = i + 1;
+    }
+    0
+}
+
+fn main() -> i64 {
+    // A small (capacity 4) channel forces real backpressure: producers block on
+    // send when it fills, the consumer drains it.
+    let ch: Channel<Vec<i64>> = Channel::new(4);
+    let t1 = Thread::spawn(|| produce(ch, 0, 100));
+    let t2 = Thread::spawn(|| produce(ch, 1000, 100));
+
+    let mut total = 0;
+    let mut got = 0;
+    while got < 200 {
+        let item = ch.recv();
+        total = total + vec_get(item, 0);
+        got = got + 1;
+    }
+    let _a = t1.join();
+    let _b = t2.join();
+    total   // sum(0..99) + sum(1000..1099) = 4950 + 104950 = 109900
+}

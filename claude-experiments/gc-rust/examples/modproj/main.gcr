@@ -1,0 +1,10 @@
+// A multi-file gc-rust program: `mod geometry;` loads geometry.gcr.
+mod geometry;
+use geometry::Point;
+
+fn main() -> i64 {
+    let a = Point { x: 0, y: 0 };
+    let b = Point { x: 3, y: 4 };
+    // dist_sq = 25, manhattan = 7 -> 32
+    geometry::dist_sq(a, b) + geometry::manhattan(a, b)
+}
