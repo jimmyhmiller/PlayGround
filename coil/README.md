@@ -69,7 +69,12 @@ template substitution.
 - C types: **arbitrary-width integers** `iN`/`uN` for any `N` (Zig-style: `u2`,
   `i7`, `u23`, `i64`) with real signed/unsigned semantics (sext vs zext, sdiv vs
   udiv, signed vs unsigned compares; mixing widths or signedness is a type
-  error). Typed pointers `(ptr TYPE)` (so
+  error). Integer **literals infer their width** from context (bidirectional
+  elaboration): a bare `42` adopts the `iN`/`uN` it meets — the other operand of
+  an op, the other `if`/`match` branch, a `store!`/return/call/field target — so
+  `(store! p 42)` into a `(ptr u8)` and `(iadd x 1)` with `x : u8` need no
+  `(cast :u8 …)`; a literal that doesn't fit its inferred type is a compile
+  error. Typed pointers `(ptr TYPE)` (so
   `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, width
   `(cast :iN e)` (and ptr reinterpret), and `(sizeof TYPE)`. `main` may take
   `(argc :i32) (argv (ptr (ptr i8)))`, so programs read their command line.
@@ -98,9 +103,10 @@ template substitution.
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-type-argument inference (generics/sums need explicit type args today), per-field
-endianness, an IO `Writer` capability, a per-arch shim backend. See the design
-docs.
+*generic* type-argument inference (generics/sums still need explicit type args
+today — integer-*literal* inference is done, but inferring a function's type
+parameters from its value arguments is not), per-field endianness, an IO
+`Writer` capability, a per-arch shim backend. See the design docs.
 
 ## What it looks like
 
@@ -126,7 +132,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 95 tests (build + run native exes)
+cargo test                                     # 101 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
@@ -134,6 +140,7 @@ cargo run -- run   examples/closure-lib.coil; echo $?                      # => 
 cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
 cargo run -- run   examples/closure.coil; echo $?                          # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
+cargo run -- run   examples/inference.coil; echo $?                        # => 42 (literal inference)
 cargo run -- run   examples/extern.coil                                    # prints 12345
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 

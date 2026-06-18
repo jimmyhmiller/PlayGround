@@ -57,7 +57,7 @@ fn host_target() -> macros::TargetInfo {
 fn build_module<'ctx>(ctx: &'ctx Context, src: &str) -> Result<Module<'ctx>, String> {
     let forms = read_and_expand(src)?;
     let program = mono::monomorphize(parse::parse_program(&forms)?)?;
-    check::check(&program)?;
+    let program = check::check(&program)?;
     codegen::compile(ctx, &program)
 }
 
@@ -131,5 +131,6 @@ pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
 pub fn check_source(src: &str) -> Result<(), String> {
     let forms = read_and_expand(src)?;
     let program = mono::monomorphize(parse::parse_program(&forms)?)?;
-    check::check(&program)
+    check::check(&program)?;
+    Ok(())
 }

@@ -406,6 +406,18 @@ direction and avoiding global HM inference:
 - Allocator identity is nominal (`malloc` ≠ `my_pool`).
 - Calls check convention match + clobber/live-set disjointness (§4.4).
 
+**Implemented as an elaborator.** The checker doesn't just accept/reject — it
+returns an elaborated `Program` with integer-literal coercions inserted. A bare
+literal starts flexible (default `i64`) and adopts the concrete `iN`/`uN` it
+meets in *check* position: the other operand of an arithmetic/comparison op, the
+other branch of an `if`/`match`, or a boundary that pushes an expected type
+inward — `store!`/return/call argument/`construct` field/bitfield `set!`. Where a
+literal needs a non-default type the checker wraps it in an explicit
+`(cast :iN …)`, so codegen never sees an under-typed literal and stays unchanged.
+A literal that doesn't fit its inferred width (`(store! p 300)` into a `(ptr u8)`)
+is a compile error, not a silent truncation. Two *concrete* types that disagree
+(neither is a literal) are still a hard mismatch (mixed widths/signedness).
+
 ---
 
 ## 10. Worked example (end to end, aspirational)

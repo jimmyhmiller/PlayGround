@@ -53,6 +53,73 @@ fn rejects_mixed_signedness() {
 
 #[test]
 fn rejects_mixed_width() {
-    let src = "(defn main [] (-> :i64) (iadd (cast :i32 1) 2))";
+    // Two *concrete* widths: a literal would just adopt the other's type, so
+    // this uses casts on both sides to force a genuine mismatch.
+    let src = "(defn main [] (-> :i64) (iadd (cast :i32 1) (cast :i64 2)))";
     assert!(coil::check_source(src).unwrap_err().contains("mixed widths"));
+}
+
+// --- bidirectional literal inference ----------------------------------------
+
+#[test]
+fn literal_adopts_operand_width() {
+    // `x : u8`; the bare `1` is inferred as u8 (no cast needed). Result 41 fits.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [x (cast :u8 41)]
+            (cast :i64 (iadd x 1))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_stored_into_typed_pointer() {
+    // (store! p 42) into a (ptr u8) — the literal adopts u8, no (cast :u8 ...).
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc-stack :u8)]
+            (store! p 42)
+            (cast :i64 (load p))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_from_return_type() {
+    // The function returns u8; the body literal is coerced to u8 at the boundary.
+    let src = r#"
+        (defn answer [] (-> :u8) 42)
+        (defn main [] (-> :i64) (cast :i64 (answer)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_through_if_branches() {
+    // One branch is `(cast :u8 ...)`, the other a bare literal that adopts u8.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (cast :i64 (if 1 (cast :u8 42) 0)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_as_call_argument() {
+    let src = r#"
+        (defn take :cc c [(x :u8)] (-> :i64) (cast :i64 x))
+        (defn main [] (-> :i64) (take 42))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn out_of_range_literal_is_rejected() {
+    // 300 doesn't fit in u8 — even with inference, that's a compile error.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc-stack :u8)] (store! p 300) (cast :i64 (load p))))
+    "#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("does not fit in u8"), "got: {err}");
 }

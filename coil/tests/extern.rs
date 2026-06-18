@@ -93,7 +93,7 @@ fn integer_widths_and_casts() {
 fn rejects_mixed_width_arithmetic() {
     let src = r#"
         (defn main [] (-> :i64)
-          (iadd (cast :i32 1) 2))
+          (iadd (cast :i32 1) (cast :i64 2)))
     "#;
     assert!(coil::check_source(src).unwrap_err().contains("mixed widths"));
 }
