@@ -35,7 +35,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
             }
             out.push(Tok::Ident(src[s..i].to_string()));
-        } else if "{}();,.=+:<>".contains(c) {
+        } else if "{}();,.=+:<>-".contains(c) {
             out.push(Tok::Punc(c));
             i += 1;
         } else {

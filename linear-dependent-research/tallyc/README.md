@@ -12,6 +12,27 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
                             codegen (inkwell, behind `--features llvm`)
 ```
 
+## Status (v0.3 — functions + multiplicities)
+
+- **Quantitative type system.** A multiplicity rig `{0,1,ω}` (`mult.rs`, the one
+  from `../agda/Rig.agda`) and a **usage-context checker**: every binding has a
+  multiplicity *budget*; the checker counts actual *usage* and requires
+  `usage ⊑ budget`. Borrows (field reads, `addr`, write bases) cost 0; only
+  moves/consumes spend budget.
+- **Functions thread linear capabilities across call boundaries.** At a call,
+  an argument's usage is *scaled* by the parameter's budget (the rig `·`). So:
+  a function can take ownership (`fn consume(c: Own<C>)` must free or return it
+  — leaking it is a type error), return ownership (`fn make() -> Own<C>`), and
+  passing the same `Own` to two parameters, or to a `ω` parameter, is rejected.
+- **Parameter multiplicities.** `fn f(1 n: Int)` (use exactly once), `0 n: Int`
+  (erased), default `ω` for copyable / `1` for `Own`. Demonstrated end to end:
+  `make(42)`/`consume(a)` type-checks **and JIT-compiles to native code → 42**.
+- Examples: `examples/functions.tal` (accept), `examples/bad_leak_fn.tal`
+  (reject: a linear capability leaks inside a function).
+
+Next: the region/cursor discipline for the intrusive doubly-linked list with
+O(1) remove, built on functions; then richer types / dependent indices.
+
 ## Status (v0.2 — type-directed)
 
 - **Type system:** `struct` declarations and the L3 split *as types* —

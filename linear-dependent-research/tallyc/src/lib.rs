@@ -8,6 +8,7 @@
 pub mod ast;
 pub mod check;
 pub mod lexer;
+pub mod mult;
 pub mod parser;
 
 #[cfg(feature = "llvm")]

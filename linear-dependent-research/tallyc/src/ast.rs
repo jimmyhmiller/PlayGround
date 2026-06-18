@@ -46,6 +46,8 @@ pub struct StructDecl {
     pub fields: Vec<(String, Ty)>,
 }
 
+use crate::mult::Mult;
+
 #[derive(Clone, Debug)]
 pub enum Expr {
     Int(i64),
@@ -58,6 +60,8 @@ pub enum Expr {
     AddrOf(String),
     /// `e.f` — read field `f` (the base must be `Own<S>`; yields the field type).
     Field(Box<Expr>, String),
+    /// `f(a1, ..., an)` — call a top-level function.
+    Call(String, Vec<Expr>),
 }
 
 #[derive(Clone, Debug)]
@@ -71,8 +75,27 @@ pub enum Stmt {
     Expr(Expr),
 }
 
+/// A function parameter: an optional multiplicity budget, a name, and a type.
+/// If `mult` is `None`, the budget defaults from the type (`Own` → 1, else ω).
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub mult: Option<Mult>,
+    pub name: String,
+    pub ty: Ty,
+}
+
+#[derive(Clone, Debug)]
+pub struct Func {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Ty,
+    pub body: Vec<Stmt>,
+    /// the trailing return expression (absent ⇒ returns `Unit`).
+    pub tail: Option<Expr>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Program {
     pub structs: Vec<StructDecl>,
-    pub body: Vec<Stmt>,
+    pub funcs: Vec<Func>,
 }

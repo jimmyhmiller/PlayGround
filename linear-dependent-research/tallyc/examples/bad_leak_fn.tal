@@ -1,0 +1,13 @@
+struct C { val: Int }
+
+// takes ownership but neither frees nor returns it: the linear `c` leaks
+fn drop_it(c: Own<C>) -> Int {
+  0
+}
+
+fn main() -> Int {
+  let a = make(1);
+  drop_it(a)
+}
+
+fn make(n: Int) -> Own<C> { alloc C { val: n } }
