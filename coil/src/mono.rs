@@ -192,7 +192,7 @@ impl<'a> Mono<'a> {
     /// (mangled) struct names, queueing any newly-needed instantiations.
     fn resolve_ty(&mut self, t: &Type, map: &Subst) -> Result<Type, String> {
         Ok(match t {
-            Type::Int(w) => Type::Int(*w),
+            Type::Int(b, s) => Type::Int(*b, *s),
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
             Type::Fn(cc, ps, r) => Type::Fn(
@@ -418,7 +418,7 @@ fn mangle(name: &str, args: &[Type]) -> String {
 
 fn type_key(t: &Type) -> String {
     match t {
-        Type::Int(w) => format!("i{w}"),
+        Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Ptr(p) => format!("ptr_{}", type_key(p)),
         Type::Struct(s) => s.clone(),
         Type::Array(e, n) => format!("arr{n}_{}", type_key(e)),

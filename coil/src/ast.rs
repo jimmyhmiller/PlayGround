@@ -7,8 +7,9 @@ use crate::convention::Convention;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    /// Integer of the given bit width (8, 16, 32, 64).
-    Int(u32),
+    /// Integer of an arbitrary bit width, signed or unsigned (Zig-style: `u2`,
+    /// `i7`, `u23`, ...). LLVM has native `iN`; signedness drives the operations.
+    Int(u32, bool), // (bits, signed)
     /// A pointer to a value of the pointee type. Pointers are region-less (a
     /// pointer is a pointer, à la Zig/C); where the memory came from is the
     /// `alloc` operation's concern, not the type's.
@@ -26,7 +27,11 @@ pub enum Type {
 
 impl Type {
     pub fn i64() -> Type {
-        Type::Int(64)
+        Type::Int(64, true)
+    }
+    /// True for any integer type.
+    pub fn is_int(&self) -> bool {
+        matches!(self, Type::Int(..))
     }
 }
 

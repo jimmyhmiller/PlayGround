@@ -66,7 +66,10 @@ template substitution.
   resolved at link time (libc, etc.). At the extern boundary any pointer matches
   a pointer parameter (`void*`-style). So programs can do I/O — e.g.
   `putchar`/`write`/`puts`.
-- C types: integer widths `i8/i16/i32/i64`, typed pointers `(ptr TYPE)` (so
+- C types: **arbitrary-width integers** `iN`/`uN` for any `N` (Zig-style: `u2`,
+  `i7`, `u23`, `i64`) with real signed/unsigned semantics (sext vs zext, sdiv vs
+  udiv, signed vs unsigned compares; mixing widths or signedness is a type
+  error). Typed pointers `(ptr TYPE)` (so
   `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, width
   `(cast :iN e)` (and ptr reinterpret), and `(sizeof TYPE)`. `main` may take
   `(argc :i32) (argv (ptr (ptr i8)))`, so programs read their command line.

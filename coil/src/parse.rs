@@ -288,7 +288,7 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
             "ptr" => {
                 let pointee = match items.get(1) {
                     Some(t) => parse_type(t)?,
-                    None => Type::Int(64),
+                    None => Type::Int(64, true),
                 };
                 Ok(Type::Ptr(Box::new(pointee)))
             }
@@ -330,19 +330,28 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
 fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, String> {
     let ty = match args.first() {
         Some(t) => parse_type(t)?,
-        None => Type::Int(64),
+        None => Type::Int(64, true),
     };
     Ok(Expr::Alloc { storage, ty })
 }
 
+/// Parse a Zig-style integer type name: `i<N>` (signed) or `u<N>` (unsigned),
+/// for any width N in 1..=65535 (e.g. `i64`, `u2`, `i7`, `u23`).
 fn int_type(name: &str) -> Result<Type, String> {
-    match name {
-        "i8" => Ok(Type::Int(8)),
-        "i16" => Ok(Type::Int(16)),
-        "i32" => Ok(Type::Int(32)),
-        "i64" => Ok(Type::Int(64)),
-        other => Err(format!("unknown int type '{other}'")),
+    let signed = match name.as_bytes().first() {
+        Some(b'i') => true,
+        Some(b'u') => false,
+        _ => return Err(format!("not an int type '{name}'")),
+    };
+    let digits = &name[1..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("not an int type '{name}'"));
     }
+    let bits: u32 = digits.parse().map_err(|_| format!("int width too large in '{name}'"))?;
+    if bits == 0 || bits > 65535 {
+        return Err(format!("int width out of range in '{name}' (1..=65535)"));
+    }
+    Ok(Type::Int(bits, signed))
 }
 
 fn parse_expr(s: &Sexp) -> Result<Expr, String> {

@@ -149,7 +149,7 @@ pub fn check(program: &Program) -> Result<(), String> {
 
         let mut env: HashMap<String, Type> =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
-        let mut last = Type::Int(64);
+        let mut last = Type::Int(64, true);
         for e in &f.body {
             last = synth(e, &mut env, &cx, &f.name)?;
         }
@@ -167,13 +167,7 @@ pub fn check(program: &Program) -> Result<(), String> {
 
 fn validate_type(t: &Type, known: &HashSet<String>) -> Result<(), String> {
     match t {
-        Type::Int(w) => {
-            if matches!(w, 8 | 16 | 32 | 64) {
-                Ok(())
-            } else {
-                Err(format!("unsupported integer width i{w}"))
-            }
-        }
+        Type::Int(..) => Ok(()),
         Type::Ptr(p) => validate_type(p, known),
         Type::Array(e, _) => validate_type(e, known),
         Type::Struct(name) => {
@@ -200,29 +194,28 @@ fn synth(
     fname: &str,
 ) -> Result<Type, String> {
     match e {
-        Expr::Int(_) => Ok(Type::Int(64)),
+        Expr::Int(_) => Ok(Type::Int(64, true)),
         Expr::Var(name) => env
             .get(name)
             .cloned()
             .ok_or_else(|| format!("in '{fname}': unbound variable '{name}'")),
         Expr::Bin { lhs, rhs, .. } => {
-            let lw = int_width(synth(lhs, env, cx, fname)?, fname, "arithmetic operand")?;
-            let rw = int_width(synth(rhs, env, cx, fname)?, fname, "arithmetic operand")?;
-            if lw != rw {
-                return Err(format!("in '{fname}': arithmetic on mixed widths i{lw} and i{rw}"));
-            }
-            Ok(Type::Int(lw))
+            let lt = synth(lhs, env, cx, fname)?;
+            let rt = synth(rhs, env, cx, fname)?;
+            same_int(&lt, &rt, fname, "arithmetic")?;
+            Ok(lt)
         }
         Expr::Cmp { lhs, rhs, .. } => {
-            let lw = int_width(synth(lhs, env, cx, fname)?, fname, "comparison operand")?;
-            let rw = int_width(synth(rhs, env, cx, fname)?, fname, "comparison operand")?;
-            if lw != rw {
-                return Err(format!("in '{fname}': comparison on mixed widths i{lw} and i{rw}"));
-            }
-            Ok(Type::Int(64))
+            let lt = synth(lhs, env, cx, fname)?;
+            let rt = synth(rhs, env, cx, fname)?;
+            same_int(&lt, &rt, fname, "comparison")?;
+            Ok(Type::Int(64, true))
         }
         Expr::If { cond, then, els } => {
-            int_width(synth(cond, env, cx, fname)?, fname, "if condition")?;
+            let ct = synth(cond, env, cx, fname)?;
+            if !ct.is_int() {
+                return Err(format!("in '{fname}': if condition must be an integer, got {}", ty_str(&ct)));
+            }
             let t = synth(then, env, cx, fname)?;
             let e = synth(els, env, cx, fname)?;
             if t != e {
@@ -235,7 +228,7 @@ fn synth(
             Ok(t)
         }
         Expr::Do(es) => {
-            let mut last = Type::Int(64);
+            let mut last = Type::Int(64, true);
             for e in es {
                 last = synth(e, env, cx, fname)?;
             }
@@ -247,7 +240,7 @@ fn synth(
                 let t = synth(val, env, cx, fname)?;
                 env.insert(name.clone(), t);
             }
-            let mut last = Type::Int(64);
+            let mut last = Type::Int(64, true);
             for e in body {
                 last = synth(e, env, cx, fname)?;
             }
@@ -334,7 +327,7 @@ fn synth(
         Expr::Index { ptr, idx } => {
             let pt = synth(ptr, env, cx, fname)?;
             let it = synth(idx, env, cx, fname)?;
-            if it != Type::Int(64) {
+            if it != Type::Int(64, true) {
                 return Err(format!("in '{fname}': index must be i64, got {}", ty_str(&it)));
             }
             match pt {
@@ -354,7 +347,7 @@ fn synth(
             let et = synth(expr, env, cx, fname)?;
             match (ty, &et) {
                 // integer width conversion, or a pointer reinterpret.
-                (Type::Int(_), Type::Int(_)) | (Type::Ptr(..), Type::Ptr(..)) => Ok(ty.clone()),
+                (Type::Int(..), Type::Int(..)) | (Type::Ptr(..), Type::Ptr(..)) => Ok(ty.clone()),
                 _ => Err(format!(
                     "in '{fname}': cast only converts int<->int or ptr<->ptr (got {} to {})",
                     ty_str(&et),
@@ -364,12 +357,12 @@ fn synth(
         }
         Expr::SizeOf(ty) => {
             validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
-            Ok(Type::Int(64))
+            Ok(Type::Int(64, true))
         }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
             // any pointer can be freed (it calls libc free). Freeing stack/static
             // memory is your problem — like C.
-            Type::Ptr(_) => Ok(Type::Int(64)),
+            Type::Ptr(_) => Ok(Type::Int(64, true)),
             other => Err(format!(
                 "in '{fname}': free expects a pointer, got {}",
                 ty_str(&other)
@@ -506,12 +499,22 @@ fn synth(
     }
 }
 
-fn int_width(t: Type, fname: &str, what: &str) -> Result<u32, String> {
-    match t {
-        Type::Int(w) => Ok(w),
-        other => Err(format!(
-            "in '{fname}': {what} must be an integer, got {}",
-            ty_str(&other)
+/// Both operands must be the *same* integer type (same width and signedness).
+fn same_int(lt: &Type, rt: &Type, fname: &str, what: &str) -> Result<(), String> {
+    match (lt, rt) {
+        (Type::Int(lb, ls), Type::Int(rb, rs)) => {
+            if lb != rb {
+                Err(format!("in '{fname}': {what} on mixed widths ({lb} and {rb} bits)"))
+            } else if ls != rs {
+                Err(format!("in '{fname}': {what} on mixed signedness ({} and {})", ty_str(lt), ty_str(rt)))
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(format!(
+            "in '{fname}': {what} requires integers, got {} and {}",
+            ty_str(lt),
+            ty_str(rt)
         )),
     }
 }
@@ -529,7 +532,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 
 fn ty_str(t: &Type) -> String {
     match t {
-        Type::Int(w) => format!("i{w}"),
+        Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Ptr(pointee) => format!("(ptr {})", ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),

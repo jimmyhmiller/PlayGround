@@ -227,7 +227,7 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
 impl<'ctx> Cg<'ctx> {
     fn basic_ty(&self, t: &Type) -> BasicTypeEnum<'ctx> {
         match t {
-            Type::Int(w) => self.ctx.custom_width_int_type(*w).into(),
+            Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Struct(name) => self
                 .structs
@@ -263,7 +263,7 @@ impl<'ctx> Cg<'ctx> {
             scope.insert(p.name.clone(), (v, p.ty.clone()));
         }
 
-        let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64));
+        let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
         for e in &f.body {
             last = self.emit_expr(e, &scope)?;
         }
@@ -354,7 +354,7 @@ impl<'ctx> Cg<'ctx> {
     fn emit_expr(&self, e: &Expr, scope: &HashMap<String, Tv<'ctx>>) -> Result<Tv<'ctx>, String> {
         let i64t = self.ctx.i64_type();
         match e {
-            Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64))),
+            Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
             Expr::Var(name) => scope
                 .get(name)
                 .cloned()
@@ -364,23 +364,31 @@ impl<'ctx> Cg<'ctx> {
                 let (rv, _) = self.emit_expr(rhs, scope)?;
                 let l = lv.into_int_value();
                 let r = rv.into_int_value();
+                let signed = matches!(lt, Type::Int(_, true));
                 let v = match op {
                     BinOp::Add => self.builder.build_int_add(l, r, "add"),
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
                     BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
-                    BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
-                    BinOp::Rem => self.builder.build_int_signed_rem(l, r, "rem"),
+                    BinOp::Div if signed => self.builder.build_int_signed_div(l, r, "div"),
+                    BinOp::Div => self.builder.build_int_unsigned_div(l, r, "div"),
+                    BinOp::Rem if signed => self.builder.build_int_signed_rem(l, r, "rem"),
+                    BinOp::Rem => self.builder.build_int_unsigned_rem(l, r, "rem"),
                 };
                 Ok((v.map_err(le)?.into(), lt))
             }
             Expr::Cmp { op, lhs, rhs } => {
-                let (lv, _) = self.emit_expr(lhs, scope)?;
+                let (lv, lt) = self.emit_expr(lhs, scope)?;
                 let (rv, _) = self.emit_expr(rhs, scope)?;
+                let signed = matches!(lt, Type::Int(_, true));
                 let pred = match op {
-                    CmpOp::Lt => IntPredicate::SLT,
-                    CmpOp::Le => IntPredicate::SLE,
-                    CmpOp::Gt => IntPredicate::SGT,
-                    CmpOp::Ge => IntPredicate::SGE,
+                    CmpOp::Lt if signed => IntPredicate::SLT,
+                    CmpOp::Lt => IntPredicate::ULT,
+                    CmpOp::Le if signed => IntPredicate::SLE,
+                    CmpOp::Le => IntPredicate::ULE,
+                    CmpOp::Gt if signed => IntPredicate::SGT,
+                    CmpOp::Gt => IntPredicate::UGT,
+                    CmpOp::Ge if signed => IntPredicate::SGE,
+                    CmpOp::Ge => IntPredicate::UGE,
                     CmpOp::Eq => IntPredicate::EQ,
                     CmpOp::Ne => IntPredicate::NE,
                 };
@@ -390,11 +398,11 @@ impl<'ctx> Cg<'ctx> {
                     .map_err(le)?;
                 Ok((
                     self.builder.build_int_z_extend(b, i64t, "cmp64").map_err(le)?.into(),
-                    Type::Int(64),
+                    Type::Int(64, true),
                 ))
             }
             Expr::Do(es) => {
-                let mut last: Tv = (i64t.const_zero().into(), Type::Int(64));
+                let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
                 for e in es {
                     last = self.emit_expr(e, scope)?;
                 }
@@ -406,7 +414,7 @@ impl<'ctx> Cg<'ctx> {
                     let v = self.emit_expr(val, &child)?;
                     child.insert(name.clone(), v);
                 }
-                let mut last: Tv = (i64t.const_zero().into(), Type::Int(64));
+                let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
                 for e in body {
                     last = self.emit_expr(e, &child)?;
                 }
@@ -519,14 +527,20 @@ impl<'ctx> Cg<'ctx> {
                 }
             }
             Expr::Cast { ty, expr } => {
-                let (v, _) = self.emit_expr(expr, scope)?;
+                let (v, vt) = self.emit_expr(expr, scope)?;
                 match ty {
-                    Type::Int(to) => {
+                    Type::Int(to, _) => {
                         let iv = v.into_int_value();
                         let from = iv.get_type().get_bit_width();
+                        let src_signed = matches!(vt, Type::Int(_, true));
                         let target = self.ctx.custom_width_int_type(*to);
                         let out = if *to > from {
-                            self.builder.build_int_s_extend(iv, target, "sext").map_err(le)?
+                            // widen: sign-extend a signed source, zero-extend unsigned.
+                            if src_signed {
+                                self.builder.build_int_s_extend(iv, target, "sext").map_err(le)?
+                            } else {
+                                self.builder.build_int_z_extend(iv, target, "zext").map_err(le)?
+                            }
                         } else if *to < from {
                             self.builder.build_int_truncate(iv, target, "trunc").map_err(le)?
                         } else {
@@ -544,12 +558,12 @@ impl<'ctx> Cg<'ctx> {
                     .basic_ty(ty)
                     .size_of()
                     .ok_or_else(|| format!("codegen: type {ty:?} has no known size"))?;
-                Ok((sz.into(), Type::Int(64)))
+                Ok((sz.into(), Type::Int(64, true)))
             }
             Expr::Free(p) => {
                 let (pv, _) = self.emit_expr(p, scope)?;
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;
-                Ok((i64t.const_zero().into(), Type::Int(64)))
+                Ok((i64t.const_zero().into(), Type::Int(64, true)))
             }
             Expr::Construct { sum, variant, args } => self.emit_construct(sum, variant, args, scope),
             Expr::Match { scrut, arms } => self.emit_match(scrut, arms, scope),
@@ -679,7 +693,7 @@ impl<'ctx> Cg<'ctx> {
         self.builder.build_unreachable().map_err(le)?;
 
         let mut incoming: Vec<(BasicValueEnum<'ctx>, BasicBlock)> = Vec::new();
-        let mut result_ty = Type::Int(64);
+        let mut result_ty = Type::Int(64, true);
         for (k, arm) in arms.iter().enumerate() {
             self.builder.position_at_end(arm_blocks[k]);
             let vidx = info.variants.iter().position(|(n, _)| n == &arm.variant).unwrap();
@@ -801,7 +815,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
-        Type::Int(w) => (*w as u64) / 8,
+        Type::Int(bits, _) => (*bits as u64).div_ceil(8),
         Type::Ptr(_) | Type::Fn(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
         Type::Struct(name) => {
