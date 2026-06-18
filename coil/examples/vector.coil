@@ -1,0 +1,91 @@
+; A generic growable vector (dynamic array), end to end:
+;   * generic over its element type T (monomorphized; type args inferred)
+;   * storage comes from an Allocator value, threaded in (no ambient heap)
+;   * a bounds-checked accessor returns (Option T) — no type annotations
+;   * output goes to a Writer value (stdout here, but swappable)
+; Both capabilities are ordinary values; the compiler knows about neither.
+;   coil run examples/vector.coil   =>  prints the vector, exits 42
+(include "lib/alloc.coil")
+(include "lib/io.coil")
+
+(defstruct Vec [T] [(data (ptr T)) (len :i64) (cap :i64)])
+
+; empty vector: null buffer, grown lazily on first push.
+(defn vec-init [T] [(v (ptr (Vec T)))] (-> :i64)
+  (do (store! (field v data) (cast (ptr T) 0))   ; int->ptr null
+      (store! (field v len) 0)
+      (store! (field v cap) 0)))
+
+; grow to (at least) double; realloc through the allocator (None = OOM).
+(defn vec-grow [T] [(v (ptr (Vec T))) (a (ptr Allocator))] (-> :i64)
+  (let [oldcap (load (field v cap))
+        newcap (if (icmp-eq oldcap 0) 4 (imul oldcap 2))]
+    (match (raw-resize a
+                       (cast (ptr i8) (load (field v data)))
+                       (imul oldcap (sizeof T))
+                       (imul newcap (sizeof T))
+                       (alignof T))
+      (None []  0)                                ; allocation failed: keep old
+      (Some [p] (do (store! (field v data) (cast (ptr T) p))
+                    (store! (field v cap) newcap))))))
+
+; append one element, growing if the buffer is full. (T inferred from v.)
+(defn vec-push [T] [(v (ptr (Vec T))) (a (ptr Allocator)) (x T)] (-> :i64)
+  (do
+    (if (icmp-ge (load (field v len)) (load (field v cap)))
+        (vec-grow v a)
+        0)
+    (store! (index (load (field v data)) (load (field v len))) x)
+    (store! (field v len) (iadd (load (field v len)) 1))))
+
+; unchecked element read.
+(defn vec-at [T] [(v (ptr (Vec T))) (i :i64)] (-> T)
+  (load (index (load (field v data)) i)))
+
+; bounds-checked read: (Some x) in range, (None) past the end. Note neither
+; constructor carries a type argument -- the (-> (Option T)) return type is
+; pushed in, and checking mode fills T (and None's, which no field mentions).
+(defn vec-get [T] [(v (ptr (Vec T))) (i :i64)] (-> (Option T))
+  (if (icmp-lt i (load (field v len)))
+      (Some (vec-at v i))
+      (None)))
+
+(defn vec-free [T] [(v (ptr (Vec T))) (a (ptr Allocator))] (-> :i64)
+  (raw-free a (cast (ptr i8) (load (field v data)))
+            (imul (load (field v cap)) (sizeof T)) (alignof T)))
+
+; print the elements space-separated, by recursion over the indices.
+(defn print-elems [(w (ptr Writer)) (v (ptr (Vec i64))) (i :i64)] (-> :i64)
+  (if (icmp-ge i (load (field v len)))
+      0
+      (do (print-int w (vec-at v i))
+          (print-str w " ")
+          (print-elems w v (iadd i 1)))))
+
+; print v[i] as either its value or "-" when out of range.
+(defn show-at [(w (ptr Writer)) (v (ptr (Vec i64))) (i :i64)] (-> :i64)
+  (do (print-str w "v[")
+      (print-int w i)
+      (print-str w "] = ")
+      (match (vec-get v i)
+        (None []  (print-str w "out of range"))
+        (Some [x] (print-int w x)))
+      (print-str w "\n")
+      0))                                   ; IO result discarded; return i64
+
+(defn main [] (-> :i64)
+  (let [gpa (malloc-allocator)             ; pick the allocation strategy here
+        v   (alloc-stack (Vec i64))        ; vector header on the stack
+        w   (stdout)]                      ; pick the output sink here
+    (vec-init v)
+    (vec-push v gpa 10)
+    (vec-push v gpa 20)
+    (vec-push v gpa 12)                     ; forces at least one regrow (cap 4)
+    (print-str w "vec = [ ")
+    (print-elems w v 0)
+    (print-str w "]\n")
+    (show-at w v 1)                         ; in range  -> 20
+    (show-at w v 9)                         ; past end  -> out of range
+    (let [total (iadd (vec-at v 0) (iadd (vec-at v 1) (vec-at v 2)))]
+      (vec-free v gpa)
+      total)))                              ; 10 + 20 + 12 = 42
