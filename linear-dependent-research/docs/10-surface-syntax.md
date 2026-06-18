@@ -356,18 +356,22 @@ this is the Rust-flavored skin over them.
 
 ## 10. Implementation roadmap
 
-- **Phase 1 — the front end (cheap; mostly a reskin).** Lexer + parser for the
-  Rust+ML grammar above; elaborate the type language, `enum`/`struct` →
-  `Signature`, signature + `fn` → defs. `match` compiles to `Elim` for the
-  direct cases: one level of constructor patterns, motive from the return type,
-  and structural self-recursion on the matched argument's fields → the IH. No
-  implicit *inference* yet (write implicits explicitly, or fall back to the v0.9
-  `elim` form where needed).
-- **Phase 2 — full dependent pattern matching.** Nested/deep patterns, full
-  coverage with absurd-case elimination, unification-based **index refinement**
-  (the GADT learning), and **implicit argument inference** (extend the baby
-  unifier already in `tallyc/src/check.rs`). This is the hard, high-value piece;
-  it is orthogonal to the syntax and unchanged by dropping `<>`.
+- **Phase 1 — the front end ✅** (`tallyc/src/rust_surface.rs`). Lexer + parser
+  for the Rust+ML grammar; elaborate the type language, `enum`/`struct` →
+  `Signature`, signature + `fn` → defs. `match` compiles to `Elim`: one level of
+  constructor patterns, motive inferred from the return type (incl. the
+  dependent case), coverage checked, and structural self-recursion rewritten to
+  the IH. Run with `tally lang`.
+- **Phase 2 — implicit arguments + index refinement ◑** (mostly done). Brace
+  binders `{..}` are erased + inferred; datatype parameters are inferred at
+  constructor use sites. Implicit *constructor*/*datatype* arguments are solved
+  by matching the head's result type against the expected type (first-order
+  unification with holes), which also gives the GADT index refinement for free
+  (`Cons(h, t)` / `FS(FZ)` carry no indices). The kernel re-checks, so the
+  solver is untrusted. *Remaining:* implicit *function*-call arguments (solving
+  a callee's implicits from its explicit arguments' types — recursive calls
+  already work as the IH), nested/deep patterns with absurd-case elimination,
+  and an occurs/scope check in the unifier.
 - **Phase 3 — the merge.** Fold the low-level memory layer (`Own`/`Ptr`/
   regions/cursors, today in `check.rs`) into this one front end, with
   capabilities **indexed by propositions** so proofs constrain memory operations

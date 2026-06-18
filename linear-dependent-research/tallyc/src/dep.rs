@@ -1090,5 +1090,57 @@ pub fn normalize_closed(t: &Term) -> Term {
     normalize_closed_in(Signature::default(), t)
 }
 
+// ---------------------------------------------------------------------------
+// elaboration support (used by the surface elaborator for implicit solving)
+// ---------------------------------------------------------------------------
+
+/// Evaluate `t` under `env` against `sig` (NbE).
+pub(crate) fn eval_rc(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
+    eval(sig, env, t)
+}
+
+/// Quote a value back to a β-normal term at de Bruijn level `lvl`.
+pub(crate) fn quote_at(lvl: usize, v: &Value) -> Term {
+    quote(lvl, v)
+}
+
+/// The semantic free variable at level `lvl`.
+pub(crate) fn nvar(lvl: usize) -> Value {
+    Value::VNeu(Neutral::NVar(lvl))
+}
+
+/// The return type of constructor `ctor`'s eliminator method, in the context of
+/// the eliminator (`base`), extended by the method's binders (the constructor's
+/// arguments followed by one induction hypothesis per recursive argument).
+/// `sparam_tms` are the family's parameters, `motive_tm` the (quoted) motive —
+/// both valid at level `base`. Used to find the expected type of a `match` arm.
+pub(crate) fn elim_method_return(
+    sig: &Signature,
+    data: &str,
+    sparam_tms: &[Term],
+    motive_tm: &Term,
+    ctor_name: &str,
+) -> Result<Term, String> {
+    let decl = sig.data(data).ok_or_else(|| format!("unknown datatype `{data}`"))?;
+    let ctor = decl
+        .ctors
+        .iter()
+        .find(|c| c.name == ctor_name)
+        .ok_or_else(|| format!("unknown constructor `{ctor_name}`"))?;
+    let nrec = ctor
+        .args
+        .iter()
+        .filter(|(_, a)| matches!(a, Term::Data(dn, _) if dn == data))
+        .count();
+    let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm);
+    for _ in 0..(ctor.args.len() + nrec) {
+        match t {
+            Term::Pi(_, _, b) => t = *b,
+            _ => return Err("internal: malformed method type".into()),
+        }
+    }
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests;

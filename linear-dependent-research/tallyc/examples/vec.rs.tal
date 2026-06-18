@@ -1,11 +1,10 @@
-// The v1.0 surface: ML-style type signatures, Rust-style terms.
+// The v1.0 surface with IMPLICIT arguments (Phase 2).
 //   tally lang examples/vec.rs.tal
 //
-// Peano naturals, addition, and length-indexed vectors — defined with `enum`,
-// `fn`, and `match`. Recursion is via ordinary recursive calls; the elaborator
-// compiles each `match` to the kernel's dependent eliminator (so it is total by
-// construction) and turns the structural recursive call into the induction
-// hypothesis. Phase 1: every argument is explicit (`0` = erased).
+// The element type `a` and the length indices `k`/`m`/`n` are written nowhere
+// at the use sites — they are inferred. `match` still compiles to the kernel's
+// dependent eliminator (total by construction), with the recursive call turned
+// into the induction hypothesis.
 
 enum Nat {
     Zero : Nat,
@@ -22,22 +21,20 @@ fn add(m, n) {
 
 enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
-    Cons : (0 k : Nat) -> a -> Vec a k -> Vec a (Succ k),
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }
 
-// the result length `add m n` is tracked in the type
-append : (0 a : Type) -> (0 m : Nat) -> (0 n : Nat) -> Vec a m -> Vec a n -> Vec a (add m n)
-fn append(a, m, n, xs, ys) {
+// `a`, `m`, `n` are implicit (erased + inferred); the length `add m n` is in the type.
+append : {0 a : Type} -> {0 m : Nat} -> {0 n : Nat} -> Vec a m -> Vec a n -> Vec a (add m n)
+fn append(xs, ys) {
     match xs {
-        Nil           => ys,
-        Cons(k, h, t) => Cons(a, add(k, n), h, append(a, k, n, t, ys)),
+        Nil        => ys,
+        Cons(h, t) => Cons(h, append(t, ys)),   // no a, no k — inferred
     }
 }
 
-// append [1] [2] : Vec Nat 2  ↝  [1,2]
+// a vector literal: `a` and the per-cons lengths are inferred from the type
 main : Vec Nat (Succ (Succ Zero))
 fn main() {
-    append(Nat, Succ(Zero), Succ(Zero),
-           Cons(Nat, Zero, Succ(Zero), Nil(Nat)),
-           Cons(Nat, Zero, Succ(Succ(Zero)), Nil(Nat)))
+    Cons(Succ(Zero), Cons(Zero, Nil))
 }
