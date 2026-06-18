@@ -44,7 +44,9 @@ whose region is part of their type), and the higher-level surface is grown with
 - Macros: `defmacro` / `def` run in a compile-time Lisp (quasiquote `` ` ``,
   unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
   helper functions). Macros can compute, recurse, and emit whole top-level
-  definitions, and they compose with conventions and regions. Inspect any
+  definitions, and they compose with conventions and regions. The target is a
+  compile-time value (`target-arch`, `target-os`, `target-pointer-width`), so a
+  macro can branch per architecture — e.g. select a `defcc`. Inspect any
   expansion with `coil expand`.
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
   function's convention + signature; calls are type-checked and the symbol is
@@ -64,6 +66,8 @@ whose region is part of their type), and the higher-level surface is grown with
   of `{ code pointer, environment pointer }`, and the env's *region* is its
   memory-management story. `closure.coil` shows heterogeneous heap closures
   (different captures, one type, one generic `apply`) allocated and freed by hand.
+  `defclosure.coil` is a userland macro that generates the whole closure
+  (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
 closures derived from (convention × allocation) (M4), richer pointee types, a
@@ -93,11 +97,12 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 51 tests (build + run native exes)
+cargo test                                     # 55 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
+cargo run -- run   examples/defclosure.coil; echo $?                       # => 42
+cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
 cargo run -- run   examples/closure.coil; echo $?                          # => 42
-cargo run -- run   examples/structs.coil; echo $?                          # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
 cargo run -- run   examples/extern.coil                                    # prints 12345
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv

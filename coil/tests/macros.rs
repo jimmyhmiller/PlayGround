@@ -100,3 +100,28 @@ fn macroless_programs_still_work() {
     let src = "(defn main [] (-> :i64) (iadd 40 2))";
     assert_eq!(build_and_run(src), 42);
 }
+
+// ---- target as a compile-time value (host is x86_64/64-bit) -------------
+
+#[test]
+fn macro_reads_target_pointer_width() {
+    let src = "(defmacro pw [] target-pointer-width) (defn main [] (-> :i64) (pw))";
+    assert_eq!(build_and_run(src), 64);
+}
+
+#[test]
+fn macro_branches_on_target_arch() {
+    let src = r#"
+        (defmacro tag [] (if (= target-arch "x86_64") `42 `7))
+        (defn main [] (-> :i64) (tag))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+    assert!(!expand_to_string(src).unwrap().contains("(tag)"));
+}
+
+#[test]
+fn macro_selects_convention_per_arch() {
+    let src = include_str!("../examples/per-arch.coil");
+    assert_eq!(build_and_run(src), 42);
+    assert!(expand_to_string(src).unwrap().contains("[rax rdx]"));
+}

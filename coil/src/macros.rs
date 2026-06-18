@@ -76,9 +76,18 @@ fn env_define(env: &Env, name: &str, val: Value) {
 
 // ---- public entry point -------------------------------------------------
 
+/// Compile-time view of the target, exposed to macros so conventions/layouts
+/// can branch per architecture.
+pub struct TargetInfo {
+    pub arch: String,
+    pub os: String,
+    pub triple: String,
+    pub pointer_width: i64,
+}
+
 /// Expand all macros in a program, returning the macro-free top-level forms.
-pub fn expand_program(forms: &[Sexp]) -> Result<Vec<Sexp>, String> {
-    let genv = global_env();
+pub fn expand_program(forms: &[Sexp], target: &TargetInfo) -> Result<Vec<Sexp>, String> {
+    let genv = global_env(target);
     let mut macros: HashMap<String, Value> = HashMap::new();
     let mut out: Vec<Sexp> = Vec::new();
 
@@ -387,7 +396,7 @@ fn quasi_seq(items: &[Value], env: &Env, depth: u32) -> Result<Vec<Value>, Strin
 
 static GENSYM: AtomicU64 = AtomicU64::new(0);
 
-fn global_env() -> Env {
+fn global_env(target: &TargetInfo) -> Env {
     let env = Rc::new(RefCell::new(Scope {
         vars: HashMap::new(),
         parent: None,
@@ -401,6 +410,11 @@ fn global_env() -> Env {
     }
     env_define(&env, "true", Value::Bool(true));
     env_define(&env, "false", Value::Bool(false));
+    // target as compile-time values, so macros can branch per architecture.
+    env_define(&env, "target-arch", Value::Str(target.arch.clone()));
+    env_define(&env, "target-os", Value::Str(target.os.clone()));
+    env_define(&env, "target-triple", Value::Str(target.triple.clone()));
+    env_define(&env, "target-pointer-width", Value::Int(target.pointer_width));
     env
 }
 

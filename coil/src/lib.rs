@@ -24,7 +24,32 @@ use std::process::Command;
 /// Read + macro-expand a source string into the macro-free top-level forms.
 fn read_and_expand(src: &str) -> Result<Vec<reader::Sexp>, String> {
     let forms = reader::read_all(src)?;
-    macros::expand_program(&forms)
+    macros::expand_program(&forms, &host_target())
+}
+
+/// The compile-time target description handed to the macro evaluator. Derived
+/// from the host triple (Coil currently AOT-targets the host).
+fn host_target() -> macros::TargetInfo {
+    let triple = TargetMachine::get_default_triple()
+        .as_str()
+        .to_string_lossy()
+        .into_owned();
+    let mut parts = triple.split('-');
+    let arch = parts.next().unwrap_or("unknown").to_string();
+    let _vendor = parts.next();
+    let os = parts.next().unwrap_or("unknown").to_string();
+    let pointer_width = match arch.as_str() {
+        "i386" | "i686" | "arm" | "armv7" | "thumbv7" | "wasm32" | "riscv32" | "mips" | "mipsel" => {
+            32
+        }
+        _ => 64,
+    };
+    macros::TargetInfo {
+        arch,
+        os,
+        triple,
+        pointer_width,
+    }
 }
 
 /// The shared front end: read → expand → parse → check → LLVM module.

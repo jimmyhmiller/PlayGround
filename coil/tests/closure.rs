@@ -82,6 +82,13 @@ fn rejects_fnptr_to_shim_convention() {
 }
 
 #[test]
+fn defclosure_macro_generates_working_closures() {
+    // `defclosure` is userland macro code: one form per closure generates the
+    // env struct, code, closure struct, and new/call/free.
+    assert_eq!(build_and_run(include_str!("../examples/defclosure.coil")), 42);
+}
+
+#[test]
 fn rejects_callptr_wrong_arg_type() {
     let src = r#"
         (defn add [(a :i64) (b :i64)] (-> :i64) (iadd a b))

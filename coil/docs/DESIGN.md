@@ -483,10 +483,14 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   Lisp interpreter (quasiquote/unquote/splicing, `gensym`, list & symbol
   builtins, lambdas, recursion, helper functions). Macros compute and can emit
   whole top-level definitions (a top-level `(do ...)` is spliced). They compose
-  with conventions and regions. Pipeline: `read → expand → parse → check →
-  codegen`; inspect with `--expand`. (`macros.coil` → 41.) *The "Lisp-like
-  macros" half of the pitch.* Remaining: hygiene is `gensym`-based (not
-  automatic), and there is no module/`import` system yet.
+  with conventions and regions. The target is exposed as compile-time values
+  (`target-arch`, `target-os`, `target-triple`, `target-pointer-width`), so
+  macros can branch per architecture (e.g. `per-arch.coil` selects a `defcc` by
+  arch). Pipeline: `read → expand → parse → check → codegen`; inspect with
+  `--expand`. (`macros.coil` → 41.) *The "Lisp-like macros" half of the pitch.*
+  Remaining: hygiene is `gensym`-based (not automatic), no module/`import`
+  system, and per-arch *shim* lowering is still x86-64-only (only the selection
+  is portable, not the trampoline asm).
 - **Function pointers — ✅ done.** `(fnptr CC [types] ret)` type, `(fnptr-of
   name)` for a function's address, indirect `(call-ptr fp args...)` honoring the
   convention (native conventions only — shim fnptrs are future). `cast` also
@@ -497,10 +501,11 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   env region is the lifetime/ownership story — `heap` closures escape and are
   freed by hand; `frame` closures are non-escaping (the escape rule enforces it).
   `closure.coil` shows two heterogeneous heap closures behind one `Closure` type
-  and one generic `apply`, allocated and freed manually → 42. Remaining: a
-  `defclosure` macro to remove the boilerplate; the `nest`-register convention so
-  the env is threaded out-of-band; downward `frame` closures (needs the borrow
-  relaxation below).
+  and one generic `apply`, allocated and freed manually → 42. A `defclosure`
+  macro (`defclosure.coil`, *userland* macro code) generates the env struct +
+  code + closure struct + new/call/free from one line — closures as a library,
+  not a language feature. Remaining: the `nest`-register convention so the env is
+  threaded out-of-band; downward `frame` closures (needs the borrow relaxation).
 - **`extern` + C interop — ✅ done.** `(extern name :cc c [types] (-> ret))`
   declares a foreign function's convention + signature; calls are type-checked
   and the symbol is resolved at link time. Pointer regions are erased at the
