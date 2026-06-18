@@ -79,6 +79,12 @@ fn unify(
         (Ty::Vec(pi), Ty::Vec(ai)) => unify_idx(pi, ai, s, implicit),
         (Ty::Own(x), Ty::Own(y)) if x == y => Ok(()),
         (Ty::Ptr(x), Ty::Ptr(y)) if x == y => Ok(()),
+        (Ty::Lst(x), Ty::Lst(y)) if x == y => Ok(()),
+        (Ty::Cursor(x), Ty::Cursor(y)) if x == y => Ok(()),
+        (Ty::Pair(p1, p2), Ty::Pair(a1, a2)) => {
+            unify(p1, a1, s, implicit)?;
+            unify(p2, a2, s, implicit)
+        }
         (Ty::Int, Ty::Int) | (Ty::Unit, Ty::Unit) | (Ty::Nat, Ty::Nat) => Ok(()),
         _ => Err(format!("type mismatch: expected {p}, found {a}")),
     }
@@ -98,6 +104,7 @@ struct Checker {
     fns: HashMap<String, Sig>,
     env: HashMap<String, Slot>,
     errs: Vec<String>,
+    tag: u32, // fresh type-level list-identity tags
 }
 
 fn budget_of(mult: Option<Mult>, ty: &Ty, errs: &mut Vec<String>, what: &str) -> Mult {
@@ -125,6 +132,12 @@ fn budget_of(mult: Option<Mult>, ty: &Ty, errs: &mut Vec<String>, what: &str) ->
 impl Checker {
     fn err(&mut self, m: impl Into<String>) {
         self.errs.push(m.into());
+    }
+
+    fn fresh_tag(&mut self) -> String {
+        let t = format!("$L{}", self.tag);
+        self.tag += 1;
+        t
     }
 
     fn field_ty(&mut self, sname: &str, f: &str) -> Ty {
@@ -346,6 +359,80 @@ impl Checker {
                 }
                 Some(Ty::Unit)
             }
+
+            // ---- linear-cursor list (the Vale `LinearKey` model) -------------
+            // a cursor is LINEAR, so `lremove` consumes it: no double-remove, no
+            // use-after-remove; the list tag stops cursors crossing lists.
+            "lnew" => {
+                if !args.is_empty() {
+                    self.err("lnew expects no arguments");
+                }
+                Some(Ty::Lst(self.fresh_tag()))
+            }
+            "linsert" => {
+                if args.len() != 2 {
+                    self.err("linsert(l, x) expects 2 arguments");
+                    return Some(Ty::Unit);
+                }
+                let lt = self.check_expr(&args[0], None, pi); // consume the list
+                self.check_expr(&args[1], Some(&Ty::Int), pi);
+                match lt {
+                    Ty::Lst(tag) => Some(Ty::Pair(
+                        Box::new(Ty::Cursor(tag.clone())),
+                        Box::new(Ty::Lst(tag)),
+                    )),
+                    other => {
+                        self.err(format!("linsert: expected a list, found {other}"));
+                        Some(Ty::Unit)
+                    }
+                }
+            }
+            "lremove" => {
+                if args.len() != 2 {
+                    self.err("lremove(l, c) expects 2 arguments");
+                    return Some(Ty::Unit);
+                }
+                let lt = self.check_expr(&args[0], None, pi); // consume the list
+                let ct = self.check_expr(&args[1], None, pi); // consume the cursor
+                let ltag = match lt {
+                    Ty::Lst(t) => Some(t),
+                    other => {
+                        self.err(format!("lremove: first argument is not a list ({other})"));
+                        None
+                    }
+                };
+                let ctag = match ct {
+                    Ty::Cursor(t) => Some(t),
+                    other => {
+                        self.err(format!("lremove: second argument is not a cursor ({other})"));
+                        None
+                    }
+                };
+                if let (Some(l), Some(c)) = (&ltag, &ctag) {
+                    if l != c {
+                        self.err(format!(
+                            "lremove: cursor belongs to a different list (cursor {c}, list {l})"
+                        ));
+                    }
+                }
+                let rtag = match ltag {
+                    Some(t) => t,
+                    None => self.fresh_tag(),
+                };
+                Some(Ty::Pair(Box::new(Ty::Int), Box::new(Ty::Lst(rtag))))
+            }
+            "lfree" => {
+                if args.len() != 1 {
+                    self.err("lfree(l) expects 1 argument");
+                    return Some(Ty::Unit);
+                }
+                let lt = self.check_expr(&args[0], None, pi); // consume the list
+                match lt {
+                    Ty::Lst(_) => {}
+                    other => self.err(format!("lfree: expected a list, found {other}")),
+                }
+                Some(Ty::Unit)
+            }
             _ => None,
         }
     }
@@ -419,6 +506,28 @@ impl Checker {
                         usage: Mult::Zero,
                     },
                 );
+            }
+            Stmt::LetPair(x, y, rhs) => {
+                let t = self.check_expr(rhs, None, Mult::One);
+                let (t1, t2) = match t {
+                    Ty::Pair(a, b) => (*a, *b),
+                    other => {
+                        self.err(format!("let ({x}, {y}): expected a pair, found {other}"));
+                        (Ty::Unit, Ty::Unit)
+                    }
+                };
+                for (name, ty) in [(x, t1), (y, t2)] {
+                    let budget = if ty.is_linear() { Mult::One } else { Mult::Omega };
+                    self.env.insert(
+                        name.clone(),
+                        Slot {
+                            ty,
+                            budget,
+                            alive: true,
+                            usage: Mult::Zero,
+                        },
+                    );
+                }
             }
             Stmt::Write(base, fld, rhs) => match self.check_base(base) {
                 Ty::Own(s) => {
@@ -574,6 +683,7 @@ pub fn check(prog: &Program) -> Vec<String> {
         fns,
         env: HashMap::new(),
         errs,
+        tag: 0,
     };
     for f in &prog.funcs {
         c.check_fn(f);
@@ -694,5 +804,60 @@ mod tests {
         reject("fn bad(0 n: Nat, v: Vec<n>) -> Vec<n> { vtail(v) } fn main() -> Int { 0 }");
         // an erased index used at runtime
         reject("fn bad(0 n: Nat) -> Int { n } fn main() -> Int { 0 }");
+    }
+
+    #[test]
+    fn linear_cursors() {
+        // O(1) remove-by-handle: insert three, remove the MIDDLE by its cursor,
+        // then account for the rest. The cursor is linear, so this is sound.
+        accept(
+            "fn main() -> Int {
+               let l0 = lnew();
+               let (c1, l1) = linsert(l0, 10);
+               let (c2, l2) = linsert(l1, 20);
+               let (c3, l3) = linsert(l2, 30);
+               let (x, l4) = lremove(l3, c2);
+               let (y, l5) = lremove(l4, c1);
+               let (z, l6) = lremove(l5, c3);
+               lfree(l6);
+               x
+             }",
+        );
+
+        // double-remove: c is consumed by the first remove
+        reject(
+            "fn main() -> Int {
+               let l0 = lnew();
+               let (c, l1) = linsert(l0, 1);
+               let (x, l2) = lremove(l1, c);
+               let (y, l3) = lremove(l2, c);
+               lfree(l3);
+               x
+             }",
+        );
+        // forget to remove a cursor -> the linear cursor leaks
+        reject(
+            "fn main() -> Int {
+               let l0 = lnew();
+               let (c, l1) = linsert(l0, 1);
+               lfree(l1);
+               0
+             }",
+        );
+        // cross-list: a cursor from list `a` used to remove from list `b`
+        reject(
+            "fn main() -> Int {
+               let a0 = lnew();
+               let b0 = lnew();
+               let (ca, a1) = linsert(a0, 1);
+               let (cb, b1) = linsert(b0, 2);
+               let (x, b2) = lremove(b1, ca);
+               let (y, a2) = lremove(a1, cb);
+               lfree(a2); lfree(b2);
+               x
+             }",
+        );
+        // leak the list itself
+        reject("fn main() -> Int { let l = lnew(); 0 }");
     }
 }

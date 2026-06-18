@@ -10,7 +10,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 use inkwell::types::{IntType, PointerType};
-use inkwell::values::{BasicValueEnum, FunctionValue, IntValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use std::collections::HashMap;
 
@@ -55,9 +55,11 @@ pub fn compile_and_run(prog: &Program) -> i64 {
             collect_fields_expr(t, &mut slot);
         }
     }
-    // reserve two slots for length-indexed Vec cons cells (head / tail)
-    add("$vhd", &mut slot);
-    add("$vtl", &mut slot);
+    // reserve slots used by the runtime cells of the built-in data structures:
+    //   Vec cons cell: $vhd/$vtl ; pair: $fst/$snd ; DLL node: $nnext/$nprev/$nelem
+    for f in ["$vhd", "$vtl", "$fst", "$snd", "$nnext", "$nprev", "$nelem"] {
+        add(f, &mut slot);
+    }
 
     let ctx = Context::create();
     let module = ctx.create_module("tally");
@@ -100,6 +102,50 @@ pub fn compile_and_run(prog: &Program) -> i64 {
 }
 
 impl<'c> Cg<'c> {
+    fn nslots(&self) -> u64 {
+        self.slot.len().max(1) as u64
+    }
+    fn gep(&self, b: &Builder<'c>, p: PointerValue<'c>, idx: u32, name: &str) -> PointerValue<'c> {
+        unsafe {
+            b.build_gep(self.i64t, p, &[self.i64t.const_int(idx as u64, false)], name)
+                .unwrap()
+        }
+    }
+    fn store(&self, b: &Builder<'c>, p: PointerValue<'c>, idx: u32, v: IntValue<'c>) {
+        b.build_store(self.gep(b, p, idx, "s"), v).unwrap();
+    }
+    fn load(&self, b: &Builder<'c>, p: PointerValue<'c>, idx: u32, name: &str) -> IntValue<'c> {
+        b.build_load(self.i64t, self.gep(b, p, idx, name), name)
+            .unwrap()
+            .into_int_value()
+    }
+    fn malloc_cell(&self, b: &Builder<'c>, name: &str) -> PointerValue<'c> {
+        let sz = self.i64t.const_int(self.nslots() * 8, false);
+        b.build_call(self.malloc, &[sz.into()], name)
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value()
+    }
+    fn toptr(&self, b: &Builder<'c>, v: IntValue<'c>, name: &str) -> PointerValue<'c> {
+        b.build_int_to_ptr(v, self.ptr, name).unwrap()
+    }
+    fn toint(&self, b: &Builder<'c>, p: PointerValue<'c>, name: &str) -> IntValue<'c> {
+        b.build_ptr_to_int(p, self.i64t, name).unwrap()
+    }
+    fn freep(&self, b: &Builder<'c>, v: IntValue<'c>) {
+        let p = self.toptr(b, v, "fp");
+        b.build_call(self.free, &[p.into()], "").unwrap();
+    }
+    /// build a 2-slot pair cell {fst, snd} and return it as an i64
+    fn mk_pair(&self, b: &Builder<'c>, fst: IntValue<'c>, snd: IntValue<'c>) -> IntValue<'c> {
+        let p = self.malloc_cell(b, "pair");
+        self.store(b, p, self.slot["$fst"], fst);
+        self.store(b, p, self.slot["$snd"], snd);
+        self.toint(b, p, "pairint")
+    }
+
     fn lower_fn(&self, builder: &Builder<'c>, f: &Func) {
         let fv = self.fns[&f.name];
         let entry = self.ctx.append_basic_block(fv, "entry");
@@ -134,6 +180,16 @@ impl<'c> Cg<'c> {
                     let v = env[name].into_int_value();
                     let p = builder.build_int_to_ptr(v, self.ptr, "freep").unwrap();
                     builder.build_call(self.free, &[p.into()], "").unwrap();
+                }
+                Stmt::LetPair(x, y, rhs) => {
+                    let pv = self.eval(builder, &env, rhs);
+                    let p = self.toptr(builder, pv, "pp");
+                    let xv = self.load(builder, p, self.slot["$fst"], "fst");
+                    let yv = self.load(builder, p, self.slot["$snd"], "snd");
+                    self.freep(builder, pv);
+                    env.insert(x.clone(), xv.into());
+                    env.insert(y.clone(), yv.into());
+                    last = xv;
                 }
                 Stmt::Expr(e) => {
                     last = self.eval(builder, &env, e);
@@ -235,6 +291,56 @@ impl<'c> Cg<'c> {
                         let _ = self.eval(builder, env, &args[0]); // empty == null, nothing to free
                         return self.i64t.const_zero();
                     }
+                    // linear-cursor list = a CIRCULAR doubly-linked list with a
+                    // sentinel node (so insert/remove are branch-free). The list
+                    // value IS the sentinel; a cursor IS a real node pointer.
+                    "lnew" => {
+                        let nn = self.slot["$nnext"];
+                        let np = self.slot["$nprev"];
+                        let s = self.malloc_cell(builder, "sentinel");
+                        let si = self.toint(builder, s, "si");
+                        self.store(builder, s, nn, si); // s.next = s
+                        self.store(builder, s, np, si); // s.prev = s
+                        return si;
+                    }
+                    "linsert" => {
+                        let (nn, np, ne) =
+                            (self.slot["$nnext"], self.slot["$nprev"], self.slot["$nelem"]);
+                        let li = self.eval(builder, env, &args[0]); // sentinel
+                        let x = self.eval(builder, env, &args[1]);
+                        let s = self.toptr(builder, li, "s");
+                        let node = self.malloc_cell(builder, "node");
+                        let ni = self.toint(builder, node, "ni");
+                        let prev = self.load(builder, s, np, "sp"); // old tail
+                        let prevp = self.toptr(builder, prev, "pp");
+                        self.store(builder, node, ne, x);
+                        self.store(builder, node, np, prev); // node.prev = old tail
+                        self.store(builder, node, nn, li); // node.next = sentinel
+                        self.store(builder, prevp, nn, ni); // old_tail.next = node
+                        self.store(builder, s, np, ni); // sentinel.prev = node
+                        return self.mk_pair(builder, ni, li); // (cursor, list)
+                    }
+                    "lremove" => {
+                        let (nn, np, ne) =
+                            (self.slot["$nnext"], self.slot["$nprev"], self.slot["$nelem"]);
+                        let li = self.eval(builder, env, &args[0]); // sentinel
+                        let ci = self.eval(builder, env, &args[1]); // node = cursor
+                        let node = self.toptr(builder, ci, "c");
+                        let prev = self.load(builder, node, np, "np");
+                        let next = self.load(builder, node, nn, "nx");
+                        let prevp = self.toptr(builder, prev, "pp");
+                        let nextp = self.toptr(builder, next, "xp");
+                        self.store(builder, prevp, nn, next); // prev.next = next
+                        self.store(builder, nextp, np, prev); // next.prev = prev
+                        let elem = self.load(builder, node, ne, "elem");
+                        self.freep(builder, ci); // O(1) free of the node
+                        return self.mk_pair(builder, elem, li); // (value, list)
+                    }
+                    "lfree" => {
+                        let li = self.eval(builder, env, &args[0]);
+                        self.freep(builder, li); // free the sentinel
+                        return self.i64t.const_zero();
+                    }
                     _ => {}
                 }
                 let fv = self.fns[fname];
@@ -253,7 +359,7 @@ impl<'c> Cg<'c> {
 
 fn collect_fields_stmt(s: &Stmt, slot: &mut HashMap<String, u32>) {
     match s {
-        Stmt::Let(_, _, e) | Stmt::Expr(e) => collect_fields_expr(e, slot),
+        Stmt::Let(_, _, e) | Stmt::Expr(e) | Stmt::LetPair(_, _, e) => collect_fields_expr(e, slot),
         Stmt::Write(b, f, r) => {
             add(f, slot);
             collect_fields_expr(b, slot);
@@ -348,5 +454,27 @@ mod tests {
         .unwrap();
         assert!(crate::check::check(&prog).is_empty(), "{:?}", crate::check::check(&prog));
         assert_eq!(compile_and_run(&prog), 20);
+    }
+
+    #[test]
+    fn linear_cursor_dll_runs() {
+        // a real intrusive doubly-linked list: insert 3, O(1)-remove the MIDDLE
+        // by its cursor, then the rest. Lowers to branch-free pointer surgery.
+        let prog = parse(
+            "fn main() -> Int {
+               let l0 = lnew();
+               let (c1, l1) = linsert(l0, 10);
+               let (c2, l2) = linsert(l1, 20);
+               let (c3, l3) = linsert(l2, 30);
+               let (x, l4) = lremove(l3, c2);
+               let (y, l5) = lremove(l4, c1);
+               let (z, l6) = lremove(l5, c3);
+               lfree(l6);
+               x
+             }",
+        )
+        .unwrap();
+        assert!(crate::check::check(&prog).is_empty(), "{:?}", crate::check::check(&prog));
+        assert_eq!(compile_and_run(&prog), 20); // removed-middle value
     }
 }

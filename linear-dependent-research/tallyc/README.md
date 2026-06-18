@@ -30,28 +30,28 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
-### Next: the region / cursor discipline (the intrusive DLL with O(1) remove)
+## Status (v0.5 — linear cursors: the intrusive DLL with O(1) remove)
 
-This is the headline application and a genuinely larger milestone. Doing it
-*soundly* (the project's whole point) forces a design choice, because a
-**copyable** cursor that doesn't borrow the list AND O(1) `remove` requires
-tracking per-node liveness — which a simple type system can't do without one of:
+The headline application, **sound and native**. A `Cursor<'L>` is a LINEAR token
+(the Vale `LinearKey` model) tagged with a type-level list identity `'L`. Pairs
+(`Pair<A,B>`, `let (x, y) = e;`) thread results.
 
-- **linear cursors** (Vale's `LinearKey` style): a cursor is linear, so
-  `remove` consumes it and a stale cursor cannot be used — sound and type-level,
-  but the cursor cannot be freely copied (needs pairs/tuples to thread results);
-- **lexically-scoped regions** (Tofte–Talpin): aliased `Ptr<'r,S>` are copyable,
-  deref is gated by holding the region `'r`, and the whole region is freed at
-  scope exit — sound, zero-cost, but no individual free / no cursor invalidation;
-- **a symbolic region checker** (what `../poc/tally_dll.py` does): tracks the
-  exact live-node set for *closed* programs, giving the full copyable-cursor +
-  O(1) `remove` story, sound for bounded programs but not a compositional type;
-- **region polymorphism + generational references** (Vale's runtime model): a
-  small runtime check, general but not zero-cost.
+- `lnew : Lst<'L>` (fresh tag); `linsert : Lst<'L> → Int → Pair<Cursor<'L>, Lst<'L>>`;
+  `lremove : Lst<'L> → Cursor<'L> → Pair<Int, Lst<'L>>`; `lfree : Lst<'L> → Unit`.
+- **O(1) remove by handle** — the operation safe Rust cannot express — and it is
+  sound: the cursor is linear, so `lremove` consumes it ⇒ **double-remove and
+  use-after-remove are type errors**; the tag stops **cross-list** removal; an
+  un-removed cursor (= a node) **leaks** ⇒ nothing is forgotten.
+- Native: lowers to a real **circular sentinel doubly-linked list**, so
+  insert/remove are branch-free pointer surgery. `cargo test --features llvm`:
+  10 tests incl. `linear_cursor_dll_runs` (insert 3, remove the middle → 20).
+  Example: `examples/dll.tal`. (Background: `../docs/08-prior-art-vale.md`.)
 
-These are real, different points on the design space (see `../docs/08-prior-art-vale.md`).
-The cleanest fit for this linear system is **linear cursors**; the most faithful
-to the POC is the **symbolic region checker**.
+The trade-off (vs a *copyable* cursor) is that a linear cursor can't be freely
+duplicated. A copyable-cursor + O(1)-remove needs per-node liveness tracking —
+a symbolic region checker (what `../poc/tally_dll.py` does, sound for closed
+programs) or region polymorphism + generational references (Vale's runtime
+model). Those remain available as a separate "bounded-verification" mode.
 
 ## Status (v0.3 — functions + multiplicities)
 

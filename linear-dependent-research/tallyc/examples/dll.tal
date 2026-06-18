@@ -1,0 +1,21 @@
+// An intrusive doubly-linked list with O(1) remove BY HANDLE -- the operation
+// safe Rust cannot express. A `Cursor` is a LINEAR token (the Vale LinearKey
+// model): `lremove` consumes it, so double-remove and use-after-remove are type
+// errors; the list tag stops a cursor from one list removing from another; and
+// the cursor (= a node) is leaked unless it is removed, so nothing is forgotten.
+
+fn main() -> Int {
+  let l0 = lnew();
+  let (c1, l1) = linsert(l0, 10);
+  let (c2, l2) = linsert(l1, 20);
+  let (c3, l3) = linsert(l2, 30);
+
+  // remove the MIDDLE element in O(1), by its cursor -- no traversal:
+  let (x, l4) = lremove(l3, c2);
+
+  // the remaining cursors must be accounted for (linear), then the list freed:
+  let (y, l5) = lremove(l4, c1);
+  let (z, l6) = lremove(l5, c3);
+  lfree(l6);
+  x                 // = 20
+}

@@ -166,6 +166,26 @@ impl Parser {
                 self.eat_punc('>')?;
                 Ok(Ty::Vec(i))
             }
+            "Lst" => {
+                self.eat_punc('<')?;
+                let t = self.eat_ident()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Lst(t))
+            }
+            "Cursor" => {
+                self.eat_punc('<')?;
+                let t = self.eat_ident()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Cursor(t))
+            }
+            "Pair" => {
+                self.eat_punc('<')?;
+                let a = self.ty()?;
+                self.eat_punc(',')?;
+                let b = self.ty()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Pair(Box::new(a), Box::new(b)))
+            }
             other => Err(format!("unknown type `{other}`")),
         }
     }
@@ -197,6 +217,19 @@ impl Parser {
         while !self.is_punc('}') {
             if self.is_kw("let") {
                 self.bump();
+                // `let (x, y) = e;`  destructure a pair
+                if self.is_punc('(') {
+                    self.bump();
+                    let x = self.eat_ident()?;
+                    self.eat_punc(',')?;
+                    let y = self.eat_ident()?;
+                    self.eat_punc(')')?;
+                    self.eat_punc('=')?;
+                    let rhs = self.expr()?;
+                    self.eat_punc(';')?;
+                    stmts.push(Stmt::LetPair(x, y, rhs));
+                    continue;
+                }
                 let name = self.eat_ident()?;
                 let ann = if self.is_punc(':') {
                     self.bump();

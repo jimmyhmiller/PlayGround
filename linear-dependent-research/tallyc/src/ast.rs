@@ -66,11 +66,22 @@ pub enum Ty {
     Ptr(String),
     /// a LINEAR length-indexed vector (stack); the index is erased at runtime
     Vec(Idx),
+    /// a LINEAR list, tagged with a type-level identity (so cursors can't cross)
+    Lst(String),
+    /// a LINEAR cursor — a token proving an element is in the list `tag`. Being
+    /// linear, `remove` consumes it (no double-remove / use-after-remove).
+    Cursor(String),
+    /// a pair (linear if either component is)
+    Pair(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
     pub fn is_linear(&self) -> bool {
-        matches!(self, Ty::Own(_) | Ty::Vec(_))
+        match self {
+            Ty::Own(_) | Ty::Vec(_) | Ty::Lst(_) | Ty::Cursor(_) => true,
+            Ty::Pair(a, b) => a.is_linear() || b.is_linear(),
+            _ => false,
+        }
     }
     pub fn is_copyable(&self) -> bool {
         !self.is_linear()
@@ -86,6 +97,9 @@ impl fmt::Display for Ty {
             Ty::Own(s) => write!(f, "Own<{s}>"),
             Ty::Ptr(s) => write!(f, "Ptr<{s}>"),
             Ty::Vec(i) => write!(f, "Vec<{i}>"),
+            Ty::Lst(t) => write!(f, "Lst<{t}>"),
+            Ty::Cursor(t) => write!(f, "Cursor<{t}>"),
+            Ty::Pair(a, b) => write!(f, "Pair<{a}, {b}>"),
         }
     }
 }
@@ -118,6 +132,8 @@ pub enum Expr {
 pub enum Stmt {
     /// `let name (: Ty)? = rhs;`
     Let(String, Option<Ty>, Expr),
+    /// `let (x, y) = rhs;`  (destructure a pair)
+    LetPair(String, String, Expr),
     /// `base.fld = rhs;`  (base must be `Own<S>`)
     Write(Expr, String, Expr),
     /// `free name;`  (consume the `Own`)
