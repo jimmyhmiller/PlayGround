@@ -298,11 +298,10 @@ Design decisions (chosen, not defaulted):
 
 - **Failure is a sum type, never a sentinel.** `alloc` returns `(Option (ptr
   i8))` (`None` = OOM); `write`/`read` return `(Result :i64 IoError)`. This leans
-  on generics + `match`; *consuming* a result needs no annotations. *Producing*
-  a variant whose type parameters aren't pinned by its fields (`(None)`, or
-  `(Ok v)` whose error type appears in no field) needs explicit type arguments,
-  which the IO library hides behind the `io-ok`/`io-err` macros. (Checking-mode
-  constructor inference would remove even that — a future item.)
+  on generics + `match`; both *consuming* and *producing* are annotation-free —
+  bidirectional checking pushes the expected type into a bare `(None)`/`(Ok v)`/
+  `(Err e)` (even the `Result` error type that `Ok` mentions in no field), so the
+  libraries carry no explicit type arguments and no constructor macros (see §9).
 - **Alignment-aware, Zig-faithful vtable.** `alloc(len,align)`,
   `resize(ptr,old,new,align)`, `free(ptr,len,align)` — enough for bump/pool
   allocators to align and reclaim precisely.
@@ -484,16 +483,28 @@ structural unification: each declared parameter type (which may mention the
 callee's type parameters) is matched against the synthesized argument type, so a
 parameter `(ptr (Pair T T))` against an argument of type `(ptr (Pair i64 i64))`
 binds `T = i64`; the same recovers a sum's parameters from a variant's fields
-(`(Some 42)` ⟹ `Option<i64>`). Every type parameter must be pinned by some
-argument — a phantom parameter or a fieldless variant (`(None …)`) still needs
-explicit args, and two arguments that force a parameter to two different types
-are a "conflicting types" error. The inferred (or explicit) arguments are written
+(`(Some 42)` ⟹ `Option<i64>`). The inferred (or explicit) arguments are written
 back onto the call as elaboration, so the monomorphizer that follows is a **pure
 specializer**: it never infers, it just stamps out one concrete copy per distinct
 type-argument tuple. Inferred arguments may themselves mention an *outer*
 function's type parameters (a generic body calling another generic) — the
 specializer substitutes those when it instantiates the outer function, so a
 single inference rule composes across nesting without a global solver.
+
+**Checking mode finishes the job.** Synthesis-from-arguments can't recover a
+parameter that no argument mentions — a fieldless `(None)`, or `Result`'s error
+type `E` which appears in no field of `(Ok v)`. So the elaborator threads an
+*expected type* (the second half of bidirectional checking) into every check
+position — a function's return, a `store!`/branch/call-argument/field target,
+and recursively through `if`/`match`/`do`/`let` tails — and a constructor in
+such a position takes its sum's type arguments straight from that expected type
+(then checks each field argument against the substituted field type, which
+recurses, so `(Some (None))` against `(Option (Option i64))` works). The result:
+`(None)`, `(Ok v)`, `(Err e)` need no annotations wherever context supplies a
+type, which is why the allocator and IO libraries carry none. Inference still has
+a hard floor — a bare `(None)` in a plain `let` with no expected type, or two
+arguments that force one parameter to two types, are errors ("cannot infer" /
+"conflicting types"), not silent guesses.
 
 This is the resolution of the old phase-ordering circularity (inference needs
 typing; specialization needed inference; specialization used to run first):

@@ -209,8 +209,10 @@ pub fn check(program: &Program) -> Result<Program, String> {
         let mut body: Vec<Expr> = Vec::with_capacity(f.body.len());
         let n = f.body.len();
         for (i, e) in f.body.iter().enumerate() {
-            let (ee, et) = synth(e, &mut env, &cx, &tps, &f.name)?;
             if i + 1 == n {
+                // tail position: check against the declared return type, so a
+                // literal or constructor in the body's tail adopts it.
+                let (ee, et) = synth(e, Some(&f.ret), &mut env, &cx, &tps, &f.name)?;
                 let et_str = ty_str(&et);
                 let ee = coerce(ee, et, &f.ret, false, &f.name, "body").map_err(|_| {
                     format!(
@@ -222,6 +224,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 })?;
                 body.push(ee);
             } else {
+                let (ee, _) = synth(e, None, &mut env, &cx, &tps, &f.name)?;
                 body.push(ee);
             }
         }
@@ -248,7 +251,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
     let mut asserts: Vec<StaticAssert> = Vec::with_capacity(program.asserts.len());
     for a in &program.asserts {
         let mut env: HashMap<String, Type> = HashMap::new();
-        let (cond, t) = synth(&a.cond, &mut env, &cx, &empty_tps, "static-assert")?;
+        let (cond, t) = synth(&a.cond, None, &mut env, &cx, &empty_tps, "static-assert")?;
         if !t.is_int() {
             return Err(format!(
                 "static-assert: condition must be an integer, got {}",
@@ -335,6 +338,7 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
 /// parameters in scope (opaque types) for the function being checked.
 fn synth(
     e: &Expr,
+    expected: Option<&Type>,
     env: &mut HashMap<String, Type>,
     cx: &Cx,
     tps: &HashSet<String>,
@@ -351,8 +355,8 @@ fn synth(
             Ok((Expr::Var(name.clone()), t))
         }
         Expr::Bin { op, lhs, rhs } => {
-            let (le, lt) = synth(lhs, env, cx, tps, fname)?;
-            let (re, rt) = synth(rhs, env, cx, tps, fname)?;
+            let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
+            let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;
             let (mut sides, t) =
                 unify_branches(vec![(le, lt), (re, rt)], fname, "arithmetic")?;
             if !numeric(&t, tps) {
@@ -373,8 +377,8 @@ fn synth(
             ))
         }
         Expr::Cmp { op, lhs, rhs } => {
-            let (le, lt) = synth(lhs, env, cx, tps, fname)?;
-            let (re, rt) = synth(rhs, env, cx, tps, fname)?;
+            let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
+            let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;
             let (mut sides, t) =
                 unify_branches(vec![(le, lt), (re, rt)], fname, "comparison")?;
             if !numeric(&t, tps) {
@@ -395,35 +399,68 @@ fn synth(
             ))
         }
         Expr::If { cond, then, els } => {
-            let (ce, ct) = synth(cond, env, cx, tps, fname)?;
+            let (ce, ct) = synth(cond, None, env, cx, tps, fname)?;
             if !ct.is_int() {
                 return Err(format!(
                     "in '{fname}': if condition must be an integer, got {}",
                     ty_str(&ct)
                 ));
             }
-            let (te, tt) = synth(then, env, cx, tps, fname)?;
-            let (ee, et) = synth(els, env, cx, tps, fname)?;
-            let (mut branches, t) =
-                unify_branches(vec![(te, tt), (ee, et)], fname, "if branches")?;
-            let els = branches.pop().unwrap();
-            let then = branches.pop().unwrap();
-            Ok((
-                Expr::If {
-                    cond: Box::new(ce),
-                    then: Box::new(then),
-                    els: Box::new(els),
-                },
-                t,
-            ))
+            match expected {
+                // checking mode: push the expected type into both branches, so a
+                // literal or constructor in either arm adopts it.
+                Some(exp) => {
+                    let then_e = check_to(then, exp, env, cx, tps, fname, "if branch")?;
+                    let els_e = check_to(els, exp, env, cx, tps, fname, "if branch")?;
+                    Ok((
+                        Expr::If {
+                            cond: Box::new(ce),
+                            then: Box::new(then_e),
+                            els: Box::new(els_e),
+                        },
+                        exp.clone(),
+                    ))
+                }
+                // synthesis mode: synthesize both branches and reconcile them.
+                None => {
+                    let (te, tt) = synth(then, None, env, cx, tps, fname)?;
+                    let (ee, et) = synth(els, None, env, cx, tps, fname)?;
+                    let (mut branches, t) =
+                        unify_branches(vec![(te, tt), (ee, et)], fname, "if branches")?;
+                    let els = branches.pop().unwrap();
+                    let then = branches.pop().unwrap();
+                    Ok((
+                        Expr::If {
+                            cond: Box::new(ce),
+                            then: Box::new(then),
+                            els: Box::new(els),
+                        },
+                        t,
+                    ))
+                }
+            }
         }
         Expr::Do(es) => {
             let mut out = Vec::with_capacity(es.len());
             let mut last = Type::Int(64, true);
-            for e in es {
-                let (ee, et) = synth(e, env, cx, tps, fname)?;
-                last = et;
-                out.push(ee);
+            let n = es.len();
+            for (i, e) in es.iter().enumerate() {
+                if i + 1 == n {
+                    match expected {
+                        Some(exp) => {
+                            out.push(check_to(e, exp, env, cx, tps, fname, "do result")?);
+                            last = exp.clone();
+                        }
+                        None => {
+                            let (ee, et) = synth(e, None, env, cx, tps, fname)?;
+                            last = et;
+                            out.push(ee);
+                        }
+                    }
+                } else {
+                    let (ee, _) = synth(e, None, env, cx, tps, fname)?;
+                    out.push(ee);
+                }
             }
             Ok((Expr::Do(out), last))
         }
@@ -431,16 +468,30 @@ fn synth(
             let saved = env.clone();
             let mut new_binds = Vec::with_capacity(binds.len());
             for (name, val) in binds {
-                let (ve, vt) = synth(val, env, cx, tps, fname)?;
+                let (ve, vt) = synth(val, None, env, cx, tps, fname)?;
                 env.insert(name.clone(), vt);
                 new_binds.push((name.clone(), ve));
             }
             let mut out = Vec::with_capacity(body.len());
             let mut last = Type::Int(64, true);
-            for e in body {
-                let (ee, et) = synth(e, env, cx, tps, fname)?;
-                last = et;
-                out.push(ee);
+            let n = body.len();
+            for (i, e) in body.iter().enumerate() {
+                if i + 1 == n {
+                    match expected {
+                        Some(exp) => {
+                            out.push(check_to(e, exp, env, cx, tps, fname, "let body")?);
+                            last = exp.clone();
+                        }
+                        None => {
+                            let (ee, et) = synth(e, None, env, cx, tps, fname)?;
+                            last = et;
+                            out.push(ee);
+                        }
+                    }
+                } else {
+                    let (ee, _) = synth(e, None, env, cx, tps, fname)?;
+                    out.push(ee);
+                }
             }
             *env = saved; // bindings are lexical
             Ok((
@@ -459,7 +510,7 @@ fn synth(
             // Variant construction (the parser emits it as a call to the variant
             // name) routes here so we can type and infer its sum's type args.
             if cx.variant_to_sum.contains_key(func) {
-                return synth_construct(func, type_args, args, env, cx, tps, fname);
+                return synth_construct(func, type_args, args, expected, env, cx, tps, fname);
             }
             let sig = cx
                 .sigs
@@ -472,25 +523,56 @@ fn synth(
                     args.len()
                 ));
             }
-            // synthesize the arguments
-            let mut arglist: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
-            for a in args {
-                arglist.push(synth(a, env, cx, tps, fname)?);
+            if sig.type_params.is_empty() {
+                // non-generic: each parameter type is known up front, so check the
+                // argument against it (a literal/constructor argument adopts it).
+                if !type_args.is_empty() {
+                    return Err(format!(
+                        "in '{fname}': '{func}' is not generic but got type arguments"
+                    ));
+                }
+                let mut new_args = Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    let want = sig.params[i].clone();
+                    let (ae, at) = synth(a, Some(&want), env, cx, tps, fname)?;
+                    let ae = coerce(
+                        ae,
+                        at,
+                        &want,
+                        sig.is_extern,
+                        fname,
+                        &format!("argument {} to '{func}'", i + 1),
+                    )?;
+                    new_args.push(ae);
+                }
+                return Ok((
+                    Expr::Call {
+                        func: func.clone(),
+                        type_args: vec![],
+                        args: new_args,
+                    },
+                    sig.ret.clone(),
+                ));
             }
 
-            // resolve the type-parameter substitution (explicit or inferred)
+            // generic: synthesize the arguments, then infer the type parameters
+            // from them — and from the expected return type, if there is one.
+            let mut arglist: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
+            for a in args {
+                arglist.push(synth(a, None, env, cx, tps, fname)?);
+            }
             let subst = solve_type_args(
                 &sig.type_params,
                 &sig.params,
                 type_args,
                 &arglist,
+                &sig.ret,
+                expected,
                 cx,
                 tps,
                 fname,
                 func,
             )?;
-
-            // coerce each argument to its (substituted) parameter type
             let mut new_args = Vec::with_capacity(args.len());
             for (i, (ae, at)) in arglist.into_iter().enumerate() {
                 let want = subst_apply(&sig.params[i], &subst);
@@ -504,7 +586,6 @@ fn synth(
                 )?;
                 new_args.push(ae);
             }
-
             let out_type_args: Vec<Type> = sig
                 .type_params
                 .iter()
@@ -542,7 +623,7 @@ fn synth(
         }
         Expr::BitSet { ptr, field, val } => {
             let (pe, fty) = bit_field_type(ptr, field, env, cx, tps, fname)?;
-            let (ve, vt) = synth(val, env, cx, tps, fname)?;
+            let (ve, vt) = synth(val, Some(&fty), env, cx, tps, fname)?;
             let ve = coerce(
                 ve,
                 vt,
@@ -561,7 +642,7 @@ fn synth(
             ))
         }
         Expr::Field { ptr, field } => {
-            let (pe, pt) = synth(ptr, env, cx, tps, fname)?;
+            let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             let pointee = match pt {
                 Type::Ptr(p) => *p,
                 other => {
@@ -598,7 +679,7 @@ fn synth(
             ))
         }
         Expr::Load(p) => {
-            let (pe, pt) = synth(p, env, cx, tps, fname)?;
+            let (pe, pt) = synth(p, None, env, cx, tps, fname)?;
             match pt {
                 Type::Ptr(pointee) => Ok((Expr::Load(Box::new(pe)), *pointee)),
                 other => Err(format!(
@@ -608,10 +689,10 @@ fn synth(
             }
         }
         Expr::Store { ptr, val } => {
-            let (pe, pt) = synth(ptr, env, cx, tps, fname)?;
+            let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             match pt {
                 Type::Ptr(pointee) => {
-                    let (ve, vt) = synth(val, env, cx, tps, fname)?;
+                    let (ve, vt) = synth(val, Some(&pointee), env, cx, tps, fname)?;
                     let ve = coerce(ve, vt, &pointee, false, fname, "store! value")?;
                     Ok((
                         Expr::Store {
@@ -628,8 +709,8 @@ fn synth(
             }
         }
         Expr::Index { ptr, idx } => {
-            let (pe, pt) = synth(ptr, env, cx, tps, fname)?;
-            let (ie, it) = synth(idx, env, cx, tps, fname)?;
+            let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
+            let (ie, it) = synth(idx, None, env, cx, tps, fname)?;
             let ie = coerce(ie, it, &Type::Int(64, true), false, fname, "index")
                 .map_err(|_| format!("in '{fname}': index must be i64"))?;
             match pt {
@@ -654,7 +735,7 @@ fn synth(
         }
         Expr::Cast { ty, expr } => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
-            let (ee, et) = synth(expr, env, cx, tps, fname)?;
+            let (ee, et) = synth(expr, None, env, cx, tps, fname)?;
             match (ty, &et) {
                 // int<->int width change, ptr<->ptr reinterpret, or int<->ptr
                 // (address arithmetic, null, MMIO, tagged pointers).
@@ -696,7 +777,7 @@ fn synth(
             Ok((Expr::OffsetOf(ty.clone(), field.clone()), Type::Int(64, true)))
         }
         Expr::Free(p) => {
-            let (pe, pt) = synth(p, env, cx, tps, fname)?;
+            let (pe, pt) = synth(p, None, env, cx, tps, fname)?;
             match pt {
                 Type::Ptr(_) => Ok((Expr::Free(Box::new(pe)), Type::Int(64, true))),
                 other => Err(format!(
@@ -707,17 +788,22 @@ fn synth(
         }
         Expr::Construct { sum, variant, args } => {
             // The parser never emits Construct (it uses Call); kept for safety.
-            synth_construct(variant, &[], args, env, cx, tps, fname).map(|(e, _)| {
-                (e, Type::Struct(sum.clone()))
-            })
+            synth_construct(variant, &[], args, None, env, cx, tps, fname)
+                .map(|(e, _)| (e, Type::Struct(sum.clone())))
         }
         Expr::Match { scrut, arms } => {
-            let (se, st) = synth(scrut, env, cx, tps, fname)?;
+            let (se, st) = synth(scrut, None, env, cx, tps, fname)?;
             let (sumname, variants) = sum_variants(&st, cx).ok_or_else(|| {
                 format!("in '{fname}': match expects a sum value, got {}", ty_str(&st))
             })?;
+            if arms.is_empty() {
+                return Err(format!("in '{fname}': empty match"));
+            }
             let mut covered: HashSet<&str> = HashSet::new();
-            let mut bodies: Vec<(Expr, Type)> = Vec::with_capacity(arms.len());
+            // In checking mode each arm body is checked against `expected`; in
+            // synthesis mode they are synthesized and reconciled afterwards.
+            let mut checked_arms: Vec<Arm> = Vec::with_capacity(arms.len());
+            let mut syn_bodies: Vec<(Expr, Type)> = Vec::with_capacity(arms.len());
             let mut meta: Vec<(String, Vec<String>)> = Vec::with_capacity(arms.len());
             for arm in arms {
                 let v = variants.iter().find(|v| v.name == arm.variant).ok_or_else(|| {
@@ -738,10 +824,22 @@ fn synth(
                 for (b, (_, fty)) in arm.binds.iter().zip(&v.fields) {
                     env.insert(b.clone(), fty.clone());
                 }
-                let (be, bt) = synth(&arm.body, env, cx, tps, fname)?;
+                match expected {
+                    Some(exp) => {
+                        let be = check_to(&arm.body, exp, env, cx, tps, fname, "match arm")?;
+                        checked_arms.push(Arm {
+                            variant: arm.variant.clone(),
+                            binds: arm.binds.clone(),
+                            body: be,
+                        });
+                    }
+                    None => {
+                        let (be, bt) = synth(&arm.body, None, env, cx, tps, fname)?;
+                        syn_bodies.push((be, bt));
+                        meta.push((arm.variant.clone(), arm.binds.clone()));
+                    }
+                }
                 *env = saved;
-                bodies.push((be, bt));
-                meta.push((arm.variant.clone(), arm.binds.clone()));
             }
             if covered.len() != variants.len() {
                 return Err(format!(
@@ -750,26 +848,30 @@ fn synth(
                     variants.len()
                 ));
             }
-            if bodies.is_empty() {
-                return Err(format!("in '{fname}': empty match"));
+            match expected {
+                Some(exp) => Ok((
+                    Expr::Match {
+                        scrut: Box::new(se),
+                        arms: checked_arms,
+                    },
+                    exp.clone(),
+                )),
+                None => {
+                    let (coerced, t) = unify_branches(syn_bodies, fname, "match arms")?;
+                    let new_arms = meta
+                        .into_iter()
+                        .zip(coerced)
+                        .map(|((variant, binds), body)| Arm { variant, binds, body })
+                        .collect();
+                    Ok((
+                        Expr::Match {
+                            scrut: Box::new(se),
+                            arms: new_arms,
+                        },
+                        t,
+                    ))
+                }
             }
-            let (coerced, t) = unify_branches(bodies, fname, "match arms")?;
-            let new_arms = meta
-                .into_iter()
-                .zip(coerced)
-                .map(|((variant, binds), body)| Arm {
-                    variant,
-                    binds,
-                    body,
-                })
-                .collect();
-            Ok((
-                Expr::Match {
-                    scrut: Box::new(se),
-                    arms: new_arms,
-                },
-                t,
-            ))
         }
         Expr::FnPtrOf(name) => {
             let sig = cx
@@ -793,7 +895,7 @@ fn synth(
             ))
         }
         Expr::CallPtr { fp, args } => {
-            let (fe, ft) = synth(fp, env, cx, tps, fname)?;
+            let (fe, ft) = synth(fp, None, env, cx, tps, fname)?;
             match ft {
                 Type::Fn(_, params, ret) => {
                     if params.len() != args.len() {
@@ -805,7 +907,7 @@ fn synth(
                     }
                     let mut new_args = Vec::with_capacity(args.len());
                     for (i, a) in args.iter().enumerate() {
-                        let (ae, at) = synth(a, env, cx, tps, fname)?;
+                        let (ae, at) = synth(a, Some(&params[i]), env, cx, tps, fname)?;
                         let ae = coerce(
                             ae,
                             at,
@@ -834,12 +936,17 @@ fn synth(
 }
 
 /// Type and elaborate a variant construction `(Variant [targs?] args…)`. The
-/// sum's type arguments are read (explicit) or inferred from the field types,
-/// written back onto the call so monomorphization can specialize it.
+/// sum's type arguments come from (in priority) explicit `[targs]`, the expected
+/// type pushed in from context (checking mode), or inference from the field
+/// argument types; they're written back onto the call so monomorphization can
+/// specialize it. When the type arguments are known *before* the arguments
+/// (explicit or from context), each argument is itself checked in checking mode,
+/// so nested constructors and literals get their expected type too.
 fn synth_construct(
     variant: &str,
     type_args: &[Type],
     args: &[Expr],
+    expected: Option<&Type>,
     env: &mut HashMap<String, Type>,
     cx: &Cx,
     tps: &HashSet<String>,
@@ -859,39 +966,65 @@ fn synth_construct(
             args.len()
         ));
     }
-
-    let mut arglist: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
-    for a in args {
-        arglist.push(synth(a, env, cx, tps, fname)?);
-    }
-
+    let tparams = &si.type_params;
+    let tpset: HashSet<String> = tparams.iter().cloned().collect();
     let field_types: Vec<Type> = v.fields.iter().map(|(_, t)| t.clone()).collect();
-    let subst = solve_type_args(
-        &si.type_params,
-        &field_types,
-        type_args,
-        &arglist,
-        cx,
-        tps,
-        fname,
-        variant,
-    )?;
 
-    let mut new_args = Vec::with_capacity(args.len());
-    for (i, (ae, at)) in arglist.into_iter().enumerate() {
-        let want = subst_apply(&field_types[i], &subst);
-        let ae = coerce(
-            ae,
-            at,
-            &want,
-            false,
-            fname,
-            &format!("'{variant}' field {}", i + 1),
-        )?;
-        new_args.push(ae);
+    // Phase 1: seed the substitution *without* the argument types — from explicit
+    // type arguments, else from the expected type when it pins this sum.
+    let mut subst: HashMap<String, Type> = HashMap::new();
+    if !type_args.is_empty() {
+        if type_args.len() != tparams.len() {
+            return Err(format!(
+                "in '{fname}': '{variant}' expects {} type arguments, got {}",
+                tparams.len(),
+                type_args.len()
+            ));
+        }
+        for ta in type_args {
+            validate_type(ta, cx, tps).map_err(|e| format!("in '{fname}': type argument: {e}"))?;
+        }
+        subst = tparams.iter().cloned().zip(type_args.iter().cloned()).collect();
+    } else if let Some(targs) =
+        expected.and_then(|exp| expected_sum_targs(exp, &sumname, tparams.len()))
+    {
+        subst = tparams.iter().cloned().zip(targs).collect();
     }
 
-    if si.type_params.is_empty() {
+    let new_args = if tparams.iter().all(|p| subst.contains_key(p)) {
+        // Fully determined: check each argument against its field type.
+        let mut out = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let want = subst_apply(&field_types[i], &subst);
+            out.push(check_to(a, &want, env, cx, tps, fname, &format!("'{variant}' field {}", i + 1))?);
+        }
+        out
+    } else {
+        // Infer the remaining parameters from the argument types.
+        let mut arglist: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
+        for a in args {
+            arglist.push(synth(a, None, env, cx, tps, fname)?);
+        }
+        for (decl, (_, at)) in field_types.iter().zip(&arglist) {
+            unify(decl, at, &tpset, &mut subst, fname)?;
+        }
+        for p in tparams {
+            if !subst.contains_key(p) {
+                return Err(format!(
+                    "in '{fname}': cannot infer type argument '{p}' for '{variant}'; \
+                     provide it explicitly: ({variant} [<types>] ...)"
+                ));
+            }
+        }
+        let mut out = Vec::with_capacity(args.len());
+        for (i, (ae, at)) in arglist.into_iter().enumerate() {
+            let want = subst_apply(&field_types[i], &subst);
+            out.push(coerce(ae, at, &want, false, fname, &format!("'{variant}' field {}", i + 1))?);
+        }
+        out
+    };
+
+    if tparams.is_empty() {
         // concrete sum: leave type_args empty, result is the plain sum type.
         Ok((
             Expr::Call {
@@ -902,8 +1035,7 @@ fn synth_construct(
             Type::Struct(sumname),
         ))
     } else {
-        let out_targs: Vec<Type> =
-            si.type_params.iter().map(|p| subst[p].clone()).collect();
+        let out_targs: Vec<Type> = tparams.iter().map(|p| subst[p].clone()).collect();
         Ok((
             Expr::Call {
                 func: variant.to_string(),
@@ -915,27 +1047,50 @@ fn synth_construct(
     }
 }
 
-/// Resolve the substitution for a generic call/construction. With explicit
-/// `type_args` it validates arity and uses them directly; otherwise it infers
-/// each type parameter by unifying the declared parameter/field types against
-/// the actual argument types.
+/// If `expected` pins the named sum (`(S a b …)`, or a bare concrete `S`), return
+/// its type arguments — used to seed a constructor's substitution from context.
+fn expected_sum_targs(expected: &Type, sumname: &str, arity: usize) -> Option<Vec<Type>> {
+    match expected {
+        Type::App(n, targs) if n == sumname && targs.len() == arity => Some(targs.clone()),
+        Type::Struct(n) if n == sumname && arity == 0 => Some(vec![]),
+        _ => None,
+    }
+}
+
+/// Synthesize `e` against an expected type (checking mode), then coerce the
+/// result to it. The single boundary primitive: a literal/constructor in `e`
+/// adopts `want`, and anything else is coerced (or reported as a mismatch).
+fn check_to(
+    e: &Expr,
+    want: &Type,
+    env: &mut HashMap<String, Type>,
+    cx: &Cx,
+    tps: &HashSet<String>,
+    fname: &str,
+    what: &str,
+) -> Result<Expr, String> {
+    let (ee, et) = synth(e, Some(want), env, cx, tps, fname)?;
+    coerce(ee, et, want, false, fname, what)
+}
+
+/// Resolve a generic *function call's* type-parameter substitution. With explicit
+/// `type_args` it uses them; otherwise it infers each parameter by unifying the
+/// declared parameter types against the actual argument types, seeded by the
+/// expected return type (so a parameter that appears only in the return can be
+/// recovered from context).
 #[allow(clippy::too_many_arguments)]
 fn solve_type_args(
     type_params: &[String],
     declared: &[Type],
     type_args: &[Type],
     arglist: &[(Expr, Type)],
+    ret_tmpl: &Type,
+    expected: Option<&Type>,
     cx: &Cx,
     tps: &HashSet<String>,
     fname: &str,
     what: &str,
 ) -> Result<HashMap<String, Type>, String> {
-    if type_params.is_empty() {
-        if !type_args.is_empty() {
-            return Err(format!("in '{fname}': '{what}' is not generic but got type arguments"));
-        }
-        return Ok(HashMap::new());
-    }
     if !type_args.is_empty() {
         if type_args.len() != type_params.len() {
             return Err(format!(
@@ -949,9 +1104,11 @@ fn solve_type_args(
         }
         return Ok(type_params.iter().cloned().zip(type_args.iter().cloned()).collect());
     }
-    // infer
     let tpset: HashSet<String> = type_params.iter().cloned().collect();
     let mut subst: HashMap<String, Type> = HashMap::new();
+    if let Some(exp) = expected {
+        unify(ret_tmpl, exp, &tpset, &mut subst, fname)?; // seed from context
+    }
     for (decl, (_, at)) in declared.iter().zip(arglist) {
         unify(decl, at, &tpset, &mut subst, fname)?;
     }
@@ -1108,7 +1265,7 @@ fn bit_field_type(
     tps: &HashSet<String>,
     fname: &str,
 ) -> Result<(Expr, Type), String> {
-    let (pe, pt) = synth(ptr, env, cx, tps, fname)?;
+    let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
     let pointee = match pt {
         Type::Ptr(p) => *p,
         other => {

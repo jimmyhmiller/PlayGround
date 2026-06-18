@@ -35,12 +35,12 @@
 ; `destroy` infers T from its pointer argument.
 (defn create [T] [(a (ptr Allocator))] (-> (Option (ptr T)))
   (match (raw-alloc a (sizeof T) (alignof T))
-    (None []  (None [(ptr T)]))
+    (None []  (None))
     (Some [p] (Some (cast (ptr T) p)))))
 
 (defn alloc-slice [T] [(a (ptr Allocator)) (n :i64)] (-> (Option (ptr T)))
   (match (raw-alloc a (imul n (sizeof T)) (alignof T))
-    (None []  (None [(ptr T)]))
+    (None []  (None))
     (Some [p] (Some (cast (ptr T) p)))))
 
 (defn destroy [T] [(a (ptr Allocator)) (p (ptr T))] (-> :i64)
@@ -56,11 +56,11 @@
 ; covers every scalar and pointer; over-aligned requests aren't honored here.
 (defn ma-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
   (let [p (malloc size)]
-    (if (icmp-eq (cast :i64 p) 0) (None [(ptr i8)]) (Some p))))
+    (if (icmp-eq (cast :i64 p) 0) (None) (Some p))))
 (defn ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
     (-> (Option (ptr i8)))
   (let [q (realloc p new)]
-    (if (icmp-eq (cast :i64 q) 0) (None [(ptr i8)]) (Some q))))
+    (if (icmp-eq (cast :i64 q) 0) (None) (Some q))))
 (defn ma-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) (free p))
 (defn malloc-allocator [] (-> (ptr Allocator))
   (let [a (alloc-static Allocator)]
@@ -80,12 +80,12 @@
   (let [ar (cast (ptr Arena) ctx)
         o  (align-up (load (field ar off)) align)]
     (if (icmp-gt (iadd o size) (load (field ar cap)))
-        (None [(ptr i8)])                                  ; arena exhausted
+        (None)                                  ; arena exhausted
         (do (store! (field ar off) (iadd o size))
             (Some (index (load (field ar base)) o))))))     ; base + o
 (defn ar-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
     (-> (Option (ptr i8)))
-  (None [(ptr i8)]))                                         ; no in-place resize
+  (None))                                         ; no in-place resize
 (defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0) ; bulk-freed
 (defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
   (let [ar (alloc-static Arena)

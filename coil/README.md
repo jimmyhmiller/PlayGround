@@ -110,13 +110,17 @@ template substitution.
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
   structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`. Generic **sum
   types** too: `(defsum Option [T] (None) (Some [(val T)]))` with
-  `(match o (None [] ...) (Some [v] ...))`. **Type arguments are inferred** from
-  the value arguments — `(id 42)`, `(pair-sum p)`, `(Some 42)` need no `[i64]`;
-  the checker unifies the declared parameter types against the actual argument
-  types (even nested, e.g. `(ptr (Pair T T))`) and fills the arguments in before
-  monomorphization. Explicit `[i64 …]` is still accepted and is required only
-  when nothing pins a parameter down (a phantom type param, or a fieldless
-  variant like `(None [i64])`).
+  `(match o (None [] ...) (Some [v] ...))`. **Type arguments are inferred**
+  (bidirectional checking): from the value arguments — `(id 42)`, `(pair-sum p)`,
+  `(Some 42)` — by unifying declared parameter types against actual ones (even
+  nested, e.g. `(ptr (Pair T T))`); *and* from the expected type pushed in from
+  context — a bare `(None)`, or `(Ok v)`/`(Err e)` whose `Result` error type
+  appears in no field, adopt their type from the function's return type, a
+  `store!`/branch/argument target, or an enclosing constructor's field. Explicit
+  `[i64 …]` is still accepted, and is needed only when nothing pins a parameter
+  down (e.g. a bare `(None)` in a plain `let` with no expected type). The
+  inferred arguments are filled in before monomorphization, which stays a pure
+  specializer.
 - Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
   for a function's address, and indirect `(call-ptr fp args...)` (honoring the
   convention). Closures are **not** a language primitive — a closure is a struct
@@ -126,9 +130,7 @@ template substitution.
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-per-field endianness, a per-arch shim backend, and checking-mode constructor
-inference (so `(Ok v)` / `(None)` could drop their explicit type args). See the
-design docs.
+per-field endianness, and a per-arch shim backend. See the design docs.
 
 ## What it looks like
 
@@ -154,7 +156,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 110 tests (build + run native exes)
+cargo test                                     # 115 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)

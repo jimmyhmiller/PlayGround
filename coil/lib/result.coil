@@ -5,10 +5,12 @@
 ;
 ; These are ordinary generic sum types; the compiler has no built-in notion of
 ; them. `match` recovers the concrete instance from the scrutinee, so *consuming*
-; an Option/Result needs no type annotations. *Constructing* a variant whose type
-; parameters aren't all pinned by its fields (a bare `(None)`, or `(Ok v)` for a
-; Result whose error type `E` appears in no field) needs explicit type arguments
-; — e.g. `(None [(ptr i8)])`, `(Ok [:i64 IoError] n)`.
+; an Option/Result needs no annotations — and neither does *constructing* one:
+; bidirectional checking pushes the expected type into a bare `(None)`/`(Ok v)`/
+; `(Err e)` (from the function's return type, a store/branch/argument target, or
+; an enclosing constructor's field), filling even the `Result` error type that
+; `Ok` mentions in no field. Explicit `[T …]` is only needed where no expected
+; type is available (e.g. a bare `(None)` in a plain `let`).
 
 (defsum Option [T]
   (None)

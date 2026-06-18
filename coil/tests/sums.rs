@@ -81,3 +81,73 @@ fn rejects_wrong_bind_count() {
     "#;
     assert!(coil::check_source(src).unwrap_err().contains("binds"));
 }
+
+// --- checking-mode (bidirectional) constructor inference --------------------
+
+#[test]
+fn none_and_some_infer_from_return_type() {
+    // No [i64] on the constructors: the expected return type pins Option's T.
+    let src = r#"
+        (defsum Option [T] (None) (Some [(val T)]))
+        (defn pick [(b :i64)] (-> (Option i64))
+          (if b (Some 42) (None)))
+        (defn main [] (-> :i64)
+          (match (pick 1) (None [] 0) (Some [v] v)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn result_error_type_inferred_from_context() {
+    // Result's `E` appears in no field of `Ok`, so it can't be inferred from
+    // arguments — only from the expected type. Checking mode supplies it.
+    let src = r#"
+        (defsum Result [T E] (Ok [(val T)]) (Err [(err E)]))
+        (defsum Fail (Bad))
+        (defn go [(n :i64)] (-> (Result i64 Fail))
+          (if (icmp-lt n 0) (Err (Bad)) (Ok n)))
+        (defn main [] (-> :i64)
+          (match (go 42) (Ok [v] v) (Err [e] 0)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn constructor_infers_as_call_argument() {
+    // A bare constructor passed to a function adopts the parameter's type.
+    let src = r#"
+        (defsum Option [T] (None) (Some [(val T)]))
+        (defn unwrap [(o (Option i64))] (-> :i64)
+          (match o (None [] 0) (Some [v] v)))
+        (defn main [] (-> :i64)
+          (iadd (unwrap (Some 42)) (unwrap (None))))   ; 42 + 0
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn nested_constructor_infers_through_field() {
+    // (Some (None)) with expected (Option (Option i64)): the outer pins the
+    // inner's type parameter through the field, in checking mode.
+    let src = r#"
+        (defsum Option [T] (None) (Some [(val T)]))
+        (defn nested [] (-> (Option (Option i64)))
+          (Some (None)))
+        (defn main [] (-> :i64)
+          (match (nested)
+            (None [] 1)
+            (Some [inner] (match inner (None [] 42) (Some [v] v)))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn bare_constructor_without_context_still_needs_type_args() {
+    // With no expected type (a plain let binding), an un-inferable constructor
+    // is still a compile error — checking mode doesn't paper over real ambiguity.
+    let src = r#"
+        (defsum Option [T] (None) (Some [(val T)]))
+        (defn main [] (-> :i64) (let [x (None)] 0))
+    "#;
+    assert!(coil::check_source(src).unwrap_err().contains("cannot infer"));
+}
