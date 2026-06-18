@@ -46,8 +46,13 @@ whose region is part of their type), and the higher-level surface is grown with
   helper functions). Macros can compute, recurse, and emit whole top-level
   definitions, and they compose with conventions and regions. The target is a
   compile-time value (`target-arch`, `target-os`, `target-pointer-width`), so a
-  macro can branch per architecture — e.g. select a `defcc`. Inspect any
-  expansion with `coil expand`.
+  macro can branch per architecture — e.g. select a `defcc`. **Automatic
+  hygiene**: a template symbol ending in `#` (e.g. `tmp#`) auto-gensyms, so
+  macro temporaries can't capture caller bindings. Inspect with `coil expand`.
+- Modules: `(include "path")` splices another file's macros and definitions in
+  (resolved from the working directory, with an include guard). `lib/closure.coil`
+  is the `defclosure` macro shipped as a prelude — `(include "lib/closure.coil")`
+  then `(defclosure NAME [captures] [params] RET body...)`.
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
   function's convention + signature; calls are type-checked and the symbol is
   resolved at link time (libc, etc.). Pointer regions are erased at the extern
@@ -97,9 +102,10 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 55 tests (build + run native exes)
+cargo test                                     # 59 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
+cargo run -- run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
 cargo run -- run   examples/defclosure.coil; echo $?                       # => 42
 cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
 cargo run -- run   examples/closure.coil; echo $?                          # => 42

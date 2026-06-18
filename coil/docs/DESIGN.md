@@ -488,9 +488,15 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   macros can branch per architecture (e.g. `per-arch.coil` selects a `defcc` by
   arch). Pipeline: `read → expand → parse → check → codegen`; inspect with
   `--expand`. (`macros.coil` → 41.) *The "Lisp-like macros" half of the pitch.*
-  Remaining: hygiene is `gensym`-based (not automatic), no module/`import`
-  system, and per-arch *shim* lowering is still x86-64-only (only the selection
-  is portable, not the trampoline asm).
+  **Automatic hygiene**: inside a quasiquote a symbol ending in `#` auto-gensyms
+  consistently, so introduced temporaries can't capture caller bindings
+  (`add-to` → 105, not 200). **Modules**: `(include "path")` splices another
+  file's macros/definitions with an include guard; `lib/closure.coil` ships
+  `defclosure` as a prelude. Remaining: hygiene is auto-gensym (not full
+  referential `syntax-rules` hygiene — it doesn't unify a name across two
+  separate quasiquotes); includes resolve from the working dir, not the
+  including file; per-arch *shim* lowering is still x86-64-only (only the
+  convention *selection* is portable, not the trampoline asm).
 - **Function pointers — ✅ done.** `(fnptr CC [types] ret)` type, `(fnptr-of
   name)` for a function's address, indirect `(call-ptr fp args...)` honoring the
   convention (native conventions only — shim fnptrs are future). `cast` also

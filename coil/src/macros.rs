@@ -12,12 +12,17 @@
 //! Surface:
 //! * `(defmacro name [params... & rest] body...)` — define a macro.
 //! * `(def name expr)` — define a compile-time helper value/function.
+//! * `(include "path")` — splice another file's macros/definitions in.
 //! * `` `form ``, `~x`, `~@xs`, `'x` — quasiquote / unquote / splicing / quote.
+//! * Inside a quasiquote, a symbol ending in `#` (e.g. `tmp#`) auto-gensyms to a
+//!   fresh name, consistently within that one quasiquote — automatic hygiene for
+//!   macro-introduced temporaries.
 //! * A top-level `(do ...)` produced by expansion is spliced into several
 //!   top-level forms, so one macro call can emit multiple definitions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -86,25 +91,73 @@ pub struct TargetInfo {
 }
 
 /// Expand all macros in a program, returning the macro-free top-level forms.
+/// `(include "path")` forms pull in another file's macros and definitions;
+/// paths resolve relative to the current working directory, with an include
+/// guard so a file is processed at most once.
 pub fn expand_program(forms: &[Sexp], target: &TargetInfo) -> Result<Vec<Sexp>, String> {
     let genv = global_env(target);
     let mut macros: HashMap<String, Value> = HashMap::new();
     let mut out: Vec<Sexp> = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    process_forms(forms, &genv, &mut macros, &mut out, &base, &mut visited)?;
+    Ok(out)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn process_forms(
+    forms: &[Sexp],
+    genv: &Env,
+    macros: &mut HashMap<String, Value>,
+    out: &mut Vec<Sexp>,
+    base_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
     for form in forms {
         match list_head(form) {
             Some("defmacro") => {
-                let (name, clo) = make_macro(form, &genv)?;
+                let (name, clo) = make_macro(form, genv)?;
                 macros.insert(name, clo);
             }
-            Some("def") => eval_toplevel_def(form, &genv)?,
+            Some("def") => eval_toplevel_def(form, genv)?,
+            Some("include") => process_include(form, genv, macros, out, base_dir, visited)?,
             _ => {
-                let expanded = expand_form(form, &macros, &genv)?;
-                splice_toplevel(expanded, &mut out);
+                let expanded = expand_form(form, macros, genv)?;
+                splice_toplevel(expanded, out);
             }
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+fn process_include(
+    form: &Sexp,
+    genv: &Env,
+    macros: &mut HashMap<String, Value>,
+    out: &mut Vec<Sexp>,
+    base_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    let items = as_list(form)?;
+    let path = match items.get(1) {
+        Some(Sexp::Str(p)) => p,
+        _ => return Err("include: expected a string path, e.g. (include \"lib/x.coil\")".into()),
+    };
+    let full = base_dir.join(path);
+    let canon = full
+        .canonicalize()
+        .map_err(|e| format!("include '{}': {e}", full.display()))?;
+    if !visited.insert(canon.clone()) {
+        return Ok(()); // already included
+    }
+    let text = std::fs::read_to_string(&canon)
+        .map_err(|e| format!("include '{}': {e}", canon.display()))?;
+    let inc_forms = crate::reader::read_all(&text)?;
+    let inc_dir = canon
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| base_dir.to_path_buf());
+    process_forms(&inc_forms, genv, macros, out, &inc_dir, visited)
 }
 
 /// A top-level `(do a b c)` is spliced into separate top-level forms.
@@ -199,7 +252,12 @@ fn eval(form: &Value, env: &Env) -> Result<Value, String> {
             if let Value::Sym(head) = &items[0] {
                 match head.as_str() {
                     "quote" => return Ok(items[1].clone()),
-                    "quasiquote" => return quasi(&items[1], env, 1),
+                    "quasiquote" => {
+                        // Fresh auto-gensym scope per quasiquote: `tmp#` -> a
+                        // consistent fresh symbol within this template.
+                        let mut gs = HashMap::new();
+                        return quasi(&items[1], env, 1, &mut gs);
+                    }
                     "if" => {
                         let c = eval(&items[1], env)?;
                         return if truthy(&c) {
@@ -338,8 +396,22 @@ fn apply(f: Value, args: Vec<Value>) -> Result<Value, String> {
 
 // ---- quasiquote ---------------------------------------------------------
 
-fn quasi(form: &Value, env: &Env, depth: u32) -> Result<Value, String> {
+fn quasi(
+    form: &Value,
+    env: &Env,
+    depth: u32,
+    gs: &mut HashMap<String, String>,
+) -> Result<Value, String> {
     match form {
+        // automatic hygiene: a template symbol ending in `#` becomes a fresh
+        // gensym, the same one for every occurrence within this quasiquote.
+        Value::Sym(s) if s.len() > 1 && s.ends_with('#') => {
+            let g = gs
+                .entry(s.clone())
+                .or_insert_with(|| auto_gensym(s))
+                .clone();
+            Ok(Value::Sym(g))
+        }
         Value::List(items) => {
             // (unquote x) / (quasiquote x) as the whole form
             if items.len() == 2 {
@@ -349,26 +421,37 @@ fn quasi(form: &Value, env: &Env, depth: u32) -> Result<Value, String> {
                     } else {
                         Ok(Value::List(vec![
                             Value::Sym("unquote".into()),
-                            quasi(&items[1], env, depth - 1)?,
+                            quasi(&items[1], env, depth - 1, gs)?,
                         ]))
                     };
                 }
                 if sym_is(&items[0], "quasiquote") {
                     return Ok(Value::List(vec![
                         Value::Sym("quasiquote".into()),
-                        quasi(&items[1], env, depth + 1)?,
+                        quasi(&items[1], env, depth + 1, gs)?,
                     ]));
                 }
             }
-            Ok(Value::List(quasi_seq(items, env, depth)?))
+            Ok(Value::List(quasi_seq(items, env, depth, gs)?))
         }
-        Value::Vector(items) => Ok(Value::Vector(quasi_seq(items, env, depth)?)),
+        Value::Vector(items) => Ok(Value::Vector(quasi_seq(items, env, depth, gs)?)),
         other => Ok(other.clone()),
     }
 }
 
+fn auto_gensym(s: &str) -> String {
+    let stem = &s[..s.len() - 1]; // drop the trailing '#'
+    let n = GENSYM.fetch_add(1, Ordering::Relaxed);
+    format!("{stem}__hy{n}")
+}
+
 /// Walk a sequence, handling `~@` splicing at the current depth.
-fn quasi_seq(items: &[Value], env: &Env, depth: u32) -> Result<Vec<Value>, String> {
+fn quasi_seq(
+    items: &[Value],
+    env: &Env,
+    depth: u32,
+    gs: &mut HashMap<String, String>,
+) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for it in items {
         if let Value::List(inner) = it {
@@ -381,13 +464,13 @@ fn quasi_seq(items: &[Value], env: &Env, depth: u32) -> Result<Vec<Value>, Strin
                 } else {
                     out.push(Value::List(vec![
                         Value::Sym("unquote-splicing".into()),
-                        quasi(&inner[1], env, depth - 1)?,
+                        quasi(&inner[1], env, depth - 1, gs)?,
                     ]));
                 }
                 continue;
             }
         }
-        out.push(quasi(it, env, depth)?);
+        out.push(quasi(it, env, depth, gs)?);
     }
     Ok(out)
 }

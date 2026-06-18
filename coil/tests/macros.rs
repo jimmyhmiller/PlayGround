@@ -125,3 +125,50 @@ fn macro_selects_convention_per_arch() {
     assert_eq!(build_and_run(src), 42);
     assert!(expand_to_string(src).unwrap().contains("[rax rdx]"));
 }
+
+// ---- automatic hygiene (auto-gensym) ------------------------------------
+
+#[test]
+fn auto_gensym_avoids_capture() {
+    // The macro introduces `v#`; the caller also uses `v`. Hygiene keeps them
+    // apart: 100 + 5 = 105 (not 200, which a captured temp would give).
+    let src = r#"
+        (defmacro add-to [e] `(let [v# 100] (iadd v# ~e)))
+        (defn main [] (-> :i64) (let [v 5] (add-to v)))
+    "#;
+    assert_eq!(build_and_run(src), 105);
+    let expanded = expand_to_string(src).unwrap();
+    assert!(expanded.contains("v__hy"), "expected a gensym'd temp:\n{expanded}");
+}
+
+#[test]
+fn auto_gensym_is_consistent_within_one_template() {
+    // Both occurrences of `t#` must become the SAME fresh symbol.
+    let src = r#"
+        (defmacro twice [e] `(let [t# ~e] (iadd t# t#)))
+        (defn main [] (-> :i64) (twice (iadd 20 1)))
+    "#;
+    assert_eq!(build_and_run(src), 42); // (20+1)*2, argument evaluated once
+}
+
+// ---- module system: (include ...) ---------------------------------------
+
+#[test]
+fn include_pulls_in_a_prelude() {
+    // `lib/closure.coil` defines the `defclosure` macro; resolved relative to
+    // the crate root (cargo test's working directory).
+    let src = include_str!("../examples/closure-lib.coil");
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn include_guard_allows_double_include() {
+    let src = r#"
+        (include "lib/closure.coil")
+        (include "lib/closure.coil")
+        (defclosure adder [(n :i64)] [(x :i64)] :i64 (iadd n x))
+        (defn main [] (-> :i64)
+          (let [a (adder-new 40)] (let [r (adder-call a 2)] (adder-free a) r)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}

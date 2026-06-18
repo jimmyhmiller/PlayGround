@@ -1,0 +1,40 @@
+; Closure library — written entirely in Coil macros. `(include "lib/closure.coil")`
+; then `(defclosure NAME [captures] [params] RET body...)` to get a heap closure
+; with NAME-new / NAME-call / NAME-free. Nothing in the compiler knows about it.
+
+(def param-types (lambda [ps] (map (lambda [p] (first (rest p))) ps)))
+(def param-names (lambda [ps] (map (lambda [p] (first p)) ps)))
+(def cap-loads (lambda [caps]
+  (if (empty? caps) (list)
+      (concat (list (first (first caps))
+                    `(load (field __self ~(first (first caps)))))
+              (cap-loads (rest caps))))))
+(def cap-stores (lambda [caps]
+  (if (empty? caps) (list)
+      (cons `(store! (field __e ~(first (first caps))) ~(first (first caps)))
+            (cap-stores (rest caps))))))
+
+(defmacro defclosure [name caps params ret & body]
+  (let [env-name  (symbol name "-env")
+        code-name (symbol name "-code")
+        new-name  (symbol name "-new")
+        call-name (symbol name "-call")
+        free-name (symbol name "-free")]
+    `(do
+       (defstruct ~env-name [~@caps])
+       (defn ~code-name [(__self (ptr heap ~env-name)) ~@params] (-> ~ret)
+         (let [~@(cap-loads caps)] ~@body))
+       (defstruct ~name
+         [(code (fnptr c [(ptr heap ~env-name) ~@(param-types params)] ~ret))
+          (env (ptr heap ~env-name))])
+       (defn ~new-name [~@caps] (-> (ptr heap ~name))
+         (let [__e (alloc heap ~env-name)
+               __c (alloc heap ~name)]
+           ~@(cap-stores caps)
+           (store! (field __c code) (fnptr-of ~code-name))
+           (store! (field __c env) __e)
+           __c))
+       (defn ~call-name [(__c (ptr heap ~name)) ~@params] (-> ~ret)
+         (call-ptr (load (field __c code)) (load (field __c env)) ~@(param-names params)))
+       (defn ~free-name [(__c (ptr heap ~name))] (-> :i64)
+         (do (free (load (field __c env))) (free __c))))))
