@@ -64,7 +64,7 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             StructDef {
                 name: sd.name.clone(),
                 type_params: vec![],
-                layout: sd.layout,
+                layout: sd.layout.clone(),
                 fields,
             },
         );
@@ -136,7 +136,7 @@ impl<'a> Mono<'a> {
                     StructDef {
                         name: mangled,
                         type_params: vec![],
-                        layout: gs.layout,
+                        layout: gs.layout.clone(),
                         fields,
                     },
                 );

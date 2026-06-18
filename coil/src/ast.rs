@@ -185,7 +185,7 @@ pub struct Extern {
 }
 
 /// How a struct is laid out in memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layout {
     /// Target C ABI: natural alignment + padding (the default; for FFI).
     C,
@@ -193,6 +193,19 @@ pub enum Layout {
     Packed,
     /// C layout but with the whole struct force-aligned to N bytes.
     Aligned(u32),
+    /// Total control: each field placed at an explicit byte offset (parallel to
+    /// the field list). Realized as a byte blob; overlapping offsets = a union.
+    Explicit(ExplicitLayout),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitLayout {
+    /// Byte offset of each field, parallel to `StructDef.fields`.
+    pub offsets: Vec<u64>,
+    /// Fixed total size in bytes (the struct is padded to this); None = computed.
+    pub size: Option<u64>,
+    /// Whole-struct alignment (0 = natural/1).
+    pub align: u32,
 }
 
 /// A named struct definition: ordered (field-name, field-type) pairs.

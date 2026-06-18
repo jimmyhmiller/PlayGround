@@ -195,7 +195,7 @@ exist.
 
 1. ✅ DONE: `:packed` + `(align N)` strategies + `static-assert`/`offsetof`/`alignof`
    (small; immediately useful for FFI and asserting C layouts).
-2. `:explicit` with `:at` offsets + unions (the byte-blob realization).
+2. ✅ DONE: `:explicit` with `:at` offsets + unions (the byte-blob realization).
 3. Bitfields (`:bits`, backing int, get/set accessors).
 4. `:endian` fields (bswap on access).
 5. `deflayout` reusable policies (mostly sugar once 1–4 exist).

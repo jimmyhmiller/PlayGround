@@ -79,7 +79,7 @@ template substitution.
   allocate any type with `(alloc-stack/static/heap TYPE)`.
 - Layout control (the dual of calling conventions): `(defstruct Name :layout
   c | packed | (align N) ...)`, with compile-time `(sizeof T)`, `(alignof T)`,
-  `(offsetof Struct field)` and `(static-assert COND "msg")` to pin a layout
+  `(offsetof Struct field)`, `(static-assert COND "msg")`, plus `:layout explicit` with per-field `:at` offsets and unions, to pin a layout
   down — a wrong size/offset is a compile error. (Design sketch for explicit
   per-field offsets, bitfields, endianness: [`docs/LAYOUT.md`](docs/LAYOUT.md).)
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic

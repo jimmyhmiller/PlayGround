@@ -122,7 +122,7 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             StructInfo {
                 fields: sd.fields.clone(),
                 ty,
-                layout: sd.layout,
+                layout: sd.layout.clone(),
             },
         );
     }
@@ -149,9 +149,25 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
     // 0c. struct bodies (may reference sums, which are now complete).
     for sd in &program.structs {
         let ty = cg.structs[&sd.name].ty;
-        let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
-        let packed = matches!(sd.layout, Layout::Packed);
-        ty.set_body(&field_types, packed);
+        match &sd.layout {
+            // explicit layout -> a flat byte blob; field access is byte-offset GEP.
+            Layout::Explicit(e) => {
+                let computed = sd
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, fty))| e.offsets[i] + cg.target_data.get_abi_size(&cg.basic_ty(fty)))
+                    .max()
+                    .unwrap_or(0);
+                let size = e.size.map_or(computed, |s| s.max(computed));
+                ty.set_body(&[ctx.i8_type().array_type(size as u32).into()], true);
+            }
+            other => {
+                let field_types: Vec<BasicTypeEnum> =
+                    sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
+                ty.set_body(&field_types, matches!(other, Layout::Packed));
+            }
+        }
     }
     // 0d. per-variant field structs (used to read/write payloads).
     for sd in &program.sums {
@@ -503,10 +519,21 @@ impl<'ctx> Cg<'ctx> {
                     .position(|(n, _)| n == field)
                     .ok_or_else(|| format!("codegen: struct '{sname}' has no field '{field}'"))?;
                 let fty = info.fields[idx].1.clone();
-                let gep = self
-                    .builder
-                    .build_struct_gep(info.ty, pv.into_pointer_value(), idx as u32, "field")
-                    .map_err(le)?;
+                let gep = match &info.layout {
+                    // explicit layout: a byte blob -> GEP to the declared offset.
+                    Layout::Explicit(e) => {
+                        let off = self.ctx.i64_type().const_int(e.offsets[idx], false);
+                        unsafe {
+                            self.builder
+                                .build_gep(self.ctx.i8_type(), pv.into_pointer_value(), &[off], "field")
+                                .map_err(le)?
+                        }
+                    }
+                    _ => self
+                        .builder
+                        .build_struct_gep(info.ty, pv.into_pointer_value(), idx as u32, "field")
+                        .map_err(le)?,
+                };
                 Ok((gep.into(), Type::Ptr(Box::new(fty))))
             }
             Expr::Load(p) => {
@@ -764,10 +791,12 @@ impl<'ctx> Cg<'ctx> {
 
     fn emit_alloc(&self, storage: Storage, ty: &Type) -> Result<Tv<'ctx>, String> {
         let bt = self.basic_ty(ty);
-        // a struct with `:layout (align N)` forces its allocation alignment.
+        // a struct with `:layout (align N)` (or explicit `:align`) forces its
+        // allocation alignment.
         let force_align = match ty {
-            Type::Struct(name) => match self.structs.get(name).map(|s| s.layout) {
-                Some(Layout::Aligned(n)) => Some(n),
+            Type::Struct(name) => match self.structs.get(name).map(|s| &s.layout) {
+                Some(Layout::Aligned(n)) => Some(*n),
+                Some(Layout::Explicit(e)) if e.align > 0 => Some(e.align),
                 _ => None,
             },
             _ => None,
@@ -807,9 +836,13 @@ impl<'ctx> Cg<'ctx> {
                     .iter()
                     .position(|(n, _)| n == field)
                     .ok_or_else(|| format!("codegen: struct '{name}' has no field '{field}'"))?;
-                self.target_data
-                    .offset_of_element(&info.ty, idx as u32)
-                    .ok_or_else(|| "codegen: could not compute field offset".to_string())
+                match &info.layout {
+                    Layout::Explicit(e) => Ok(e.offsets[idx]),
+                    _ => self
+                        .target_data
+                        .offset_of_element(&info.ty, idx as u32)
+                        .ok_or_else(|| "codegen: could not compute field offset".to_string()),
+                }
             }
             other => Err(format!("codegen: offsetof needs a struct, got {other:?}")),
         }

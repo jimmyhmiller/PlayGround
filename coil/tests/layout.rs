@@ -65,6 +65,47 @@ fn static_assert_failure_is_a_compile_error() {
 }
 
 #[test]
+fn explicit_offsets_with_padding() {
+    let src = r#"
+        (defstruct Reg :layout explicit :size 16
+          [(status :u32 :at 0)
+           (data   :i64 :at 8)])          ; bytes 4-7 are explicit padding
+        (static-assert (icmp-eq (sizeof Reg) 16) "Reg is 16")
+        (static-assert (icmp-eq (offsetof Reg data) 8) "data at 8")
+        (defn main [] (-> :i64)
+          (let [r (alloc-stack Reg)]
+            (store! (field r data) 40)
+            (store! (field r status) (cast :u32 2))
+            (iadd (load (field r data)) (cast :i64 (load (field r status))))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn explicit_union_overlap() {
+    // two fields at the same :at overlap — write a u32, read the low byte back.
+    let src = r#"
+        (defstruct U :layout explicit :size 4
+          [(word  :u32         :at 0)
+           (bytes (array u8 4) :at 0)])
+        (defn main [] (-> :i64)
+          (let [u (alloc-stack U)]
+            (store! (field u word) (cast :u32 42))
+            (cast :i64 (load (index (field u bytes) 0)))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn explicit_requires_at_on_every_field() {
+    let src = r#"
+        (defstruct Bad :layout explicit [(a :i64 :at 0) (b :i64)])
+        (defn main [] (-> :i64) 0)
+    "#;
+    assert!(coil::check_source(src).unwrap_err().contains(":at"));
+}
+
+#[test]
 fn offsetof_on_generic_struct() {
     let src = r#"
         (defstruct Pair [A B] [(fst A) (snd B)])

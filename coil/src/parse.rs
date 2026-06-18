@@ -94,25 +94,76 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
 fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
     let mut i = 1;
-    // optional `:layout c | packed | (align N)`
-    let mut layout = Layout::C;
-    if matches!(rest.get(i), Some(Sexp::Keyword(k)) if k == "layout") {
-        layout = parse_layout(rest.get(i + 1).ok_or("defstruct: :layout missing value")?)?;
+    // struct-level options: :layout c|packed|explicit|(align N), :size N, :align N.
+    let mut packed = false;
+    let mut explicit = false;
+    let mut aligned: Option<u32> = None;
+    let mut exp_size: Option<u64> = None;
+    let mut exp_align: u32 = 0;
+    while let Some(Sexp::Keyword(k)) = rest.get(i) {
+        let val = rest.get(i + 1).ok_or_else(|| format!("defstruct: ':{k}' missing value"))?;
+        match k.as_str() {
+            "layout" => match val {
+                Sexp::Sym(s) if s == "c" => {}
+                Sexp::Sym(s) if s == "packed" => packed = true,
+                Sexp::Sym(s) if s == "explicit" => explicit = true,
+                Sexp::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
+                    aligned = Some(pow2(items.get(1))?);
+                }
+                _ => return Err("layout must be c, packed, explicit, or (align N)".to_string()),
+            },
+            "size" => exp_size = Some(int_val(val, "size")? as u64),
+            "align" => exp_align = pow2(Some(val))?,
+            _ => break,
+        }
         i += 2;
     }
-    // optional generic params: a vector immediately followed by the field vector.
+
     let type_params = parse_type_params(rest, &mut i)?;
     let fields_v = match rest.get(i) {
         Some(Sexp::Vector(v)) => v,
         _ => return Err(format!("defstruct '{name}': expected a field vector")),
     };
     let mut fields = Vec::new();
+    let mut at_offsets: Vec<Option<u64>> = Vec::new();
     for f in fields_v {
-        let fl = as_list(f, "field must be (name :type)")?;
+        let fl = as_list(f, "field must be (name :type [:at N])")?;
         let fname = sym(&fl[0], "field name")?;
         let fty = parse_type(fl.get(1).ok_or("field missing type")?)?;
+        // optional `:at N`
+        let mut at = None;
+        let mut j = 2;
+        while j < fl.len() {
+            match &fl[j] {
+                Sexp::Keyword(k) if k == "at" => {
+                    at = Some(int_val(fl.get(j + 1).ok_or(":at missing value")?, "at")? as u64);
+                    j += 2;
+                }
+                other => return Err(format!("unknown field option {other:?}")),
+            }
+        }
         fields.push((fname, fty));
+        at_offsets.push(at);
     }
+
+    let layout = if let Some(n) = aligned {
+        Layout::Aligned(n)
+    } else if explicit || at_offsets.iter().any(Option::is_some) {
+        let offsets = at_offsets
+            .iter()
+            .map(|o| o.ok_or_else(|| format!("defstruct '{name}': explicit layout needs :at on every field")))
+            .collect::<Result<Vec<_>, _>>()?;
+        Layout::Explicit(ExplicitLayout {
+            offsets,
+            size: exp_size,
+            align: exp_align,
+        })
+    } else if packed {
+        Layout::Packed
+    } else {
+        Layout::C
+    };
+
     Ok(StructDef {
         name,
         type_params,
@@ -121,19 +172,17 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     })
 }
 
-fn parse_layout(s: &Sexp) -> Result<Layout, String> {
+fn int_val(s: &Sexp, what: &str) -> Result<i64, String> {
     match s {
-        Sexp::Sym(k) if k == "c" => Ok(Layout::C),
-        Sexp::Sym(k) if k == "packed" => Ok(Layout::Packed),
-        Sexp::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
-            match items.get(1) {
-                Some(Sexp::Int(n)) if *n > 0 && (*n as u64).is_power_of_two() => {
-                    Ok(Layout::Aligned(*n as u32))
-                }
-                _ => Err("(align N): N must be a positive power of two".to_string()),
-            }
-        }
-        _ => Err("layout must be c, packed, or (align N)".to_string()),
+        Sexp::Int(n) => Ok(*n),
+        other => Err(format!("{what}: expected an integer, got {other:?}")),
+    }
+}
+
+fn pow2(s: Option<&Sexp>) -> Result<u32, String> {
+    match s {
+        Some(Sexp::Int(n)) if *n > 0 && (*n as u64).is_power_of_two() => Ok(*n as u32),
+        _ => Err("alignment must be a positive power of two".to_string()),
     }
 }
 
