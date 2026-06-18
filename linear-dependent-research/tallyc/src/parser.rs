@@ -1,6 +1,6 @@
 //! Recursive-descent parser for the v0.3 surface language (functions added).
 
-use crate::ast::{Expr, Func, Param, Program, Stmt, StructDecl, Ty};
+use crate::ast::{Expr, Func, Idx, Param, Program, Stmt, StructDecl, Ty};
 use crate::lexer::{lex, Tok};
 use crate::mult::Mult;
 
@@ -147,6 +147,7 @@ impl Parser {
         match name.as_str() {
             "Int" => Ok(Ty::Int),
             "Unit" => Ok(Ty::Unit),
+            "Nat" => Ok(Ty::Nat),
             "Own" => {
                 self.eat_punc('<')?;
                 let s = self.eat_ident()?;
@@ -159,7 +160,32 @@ impl Parser {
                 self.eat_punc('>')?;
                 Ok(Ty::Ptr(s))
             }
+            "Vec" => {
+                self.eat_punc('<')?;
+                let i = self.idx()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Vec(i))
+            }
             other => Err(format!("unknown type `{other}`")),
+        }
+    }
+
+    /// a length index: `k` | `n` | `n + k`
+    fn idx(&mut self) -> Result<Idx, String> {
+        match self.bump() {
+            Tok::Int(k) => Ok(Idx::Lit(k as u32)),
+            Tok::Ident(n) => {
+                if self.is_punc('+') {
+                    self.bump();
+                    match self.bump() {
+                        Tok::Int(k) => Ok(Idx::Var(n, k as u32)),
+                        t => Err(format!("expected a literal after `+` in index, got {t:?}")),
+                    }
+                } else {
+                    Ok(Idx::Var(n, 0))
+                }
+            }
+            t => Err(format!("expected an index, got {t:?}")),
         }
     }
 

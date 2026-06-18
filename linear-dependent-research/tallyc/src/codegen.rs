@@ -38,6 +38,7 @@ struct Cg<'c> {
     i64t: IntType<'c>,
     ptr: PointerType<'c>,
     malloc: FunctionValue<'c>,
+    free: FunctionValue<'c>,
     slot: HashMap<String, u32>,
     fns: HashMap<String, FunctionValue<'c>>,
 }
@@ -54,6 +55,9 @@ pub fn compile_and_run(prog: &Program) -> i64 {
             collect_fields_expr(t, &mut slot);
         }
     }
+    // reserve two slots for length-indexed Vec cons cells (head / tail)
+    add("$vhd", &mut slot);
+    add("$vtl", &mut slot);
 
     let ctx = Context::create();
     let module = ctx.create_module("tally");
@@ -77,12 +81,13 @@ pub fn compile_and_run(prog: &Program) -> i64 {
         i64t,
         ptr,
         malloc,
+        free,
         slot,
         fns,
     };
 
     for f in &prog.funcs {
-        cg.lower_fn(&builder, free, f);
+        cg.lower_fn(&builder, f);
     }
 
     let ee = module
@@ -95,7 +100,7 @@ pub fn compile_and_run(prog: &Program) -> i64 {
 }
 
 impl<'c> Cg<'c> {
-    fn lower_fn(&self, builder: &Builder<'c>, free: FunctionValue<'c>, f: &Func) {
+    fn lower_fn(&self, builder: &Builder<'c>, f: &Func) {
         let fv = self.fns[&f.name];
         let entry = self.ctx.append_basic_block(fv, "entry");
         builder.position_at_end(entry);
@@ -128,7 +133,7 @@ impl<'c> Cg<'c> {
                 Stmt::Free(name) => {
                     let v = env[name].into_int_value();
                     let p = builder.build_int_to_ptr(v, self.ptr, "freep").unwrap();
-                    builder.build_call(free, &[p.into()], "").unwrap();
+                    builder.build_call(self.free, &[p.into()], "").unwrap();
                 }
                 Stmt::Expr(e) => {
                     last = self.eval(builder, &env, e);
@@ -182,6 +187,56 @@ impl<'c> Cg<'c> {
                 builder.build_load(self.i64t, gep, "rd").unwrap().into_int_value()
             }
             Expr::Call(fname, args) => {
+                // length-indexed Vec built-ins lower to a linked stack of cons
+                // cells; the length is erased (never materialised at runtime).
+                let hd = self.slot["$vhd"];
+                let tl = self.slot["$vtl"];
+                let gep = |builder: &Builder<'c>, p, idx: u32, name| unsafe {
+                    builder
+                        .build_gep(self.i64t, p, &[self.i64t.const_int(idx as u64, false)], name)
+                        .unwrap()
+                };
+                match fname.as_str() {
+                    "vnew" => return self.i64t.const_zero(), // empty == null
+                    "vpush" => {
+                        let v = self.eval(builder, env, &args[0]);
+                        let x = self.eval(builder, env, &args[1]);
+                        let sz = self.i64t.const_int(nslots * 8, false);
+                        let raw = builder
+                            .build_call(self.malloc, &[sz.into()], "cons")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_pointer_value();
+                        builder.build_store(gep(builder, raw, hd, "hd"), x).unwrap();
+                        builder.build_store(gep(builder, raw, tl, "tl"), v).unwrap();
+                        return builder.build_ptr_to_int(raw, self.i64t, "consint").unwrap();
+                    }
+                    "vhead" => {
+                        let v = self.eval(builder, env, &args[0]);
+                        let p = builder.build_int_to_ptr(v, self.ptr, "vh").unwrap();
+                        return builder
+                            .build_load(self.i64t, gep(builder, p, hd, "hd"), "head")
+                            .unwrap()
+                            .into_int_value();
+                    }
+                    "vtail" => {
+                        let v = self.eval(builder, env, &args[0]);
+                        let p = builder.build_int_to_ptr(v, self.ptr, "vt").unwrap();
+                        let t = builder
+                            .build_load(self.i64t, gep(builder, p, tl, "tl"), "tail")
+                            .unwrap()
+                            .into_int_value();
+                        builder.build_call(self.free, &[p.into()], "").unwrap();
+                        return t;
+                    }
+                    "vfree" => {
+                        let _ = self.eval(builder, env, &args[0]); // empty == null, nothing to free
+                        return self.i64t.const_zero();
+                    }
+                    _ => {}
+                }
                 let fv = self.fns[fname];
                 let args: Vec<_> = args.iter().map(|a| self.eval(builder, env, a).into()).collect();
                 builder
@@ -273,5 +328,25 @@ mod tests {
         .unwrap();
         assert!(crate::check::check(&prog).is_empty(), "{:?}", crate::check::check(&prog));
         assert_eq!(compile_and_run(&prog), 99);
+    }
+
+    #[test]
+    fn dependent_vec_runs() {
+        // length-indexed vector lowered to a linked stack; length is erased.
+        let prog = parse(
+            "fn main() -> Int {
+               let v0 = vnew();
+               let v1 = vpush(v0, 10);
+               let v2 = vpush(v1, 20);
+               let top = vhead(v2);
+               let v1b = vtail(v2);
+               let v0b = vtail(v1b);
+               vfree(v0b);
+               top
+             }",
+        )
+        .unwrap();
+        assert!(crate::check::check(&prog).is_empty(), "{:?}", crate::check::check(&prog));
+        assert_eq!(compile_and_run(&prog), 20);
     }
 }

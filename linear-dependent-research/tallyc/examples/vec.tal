@@ -1,0 +1,19 @@
+// A length-indexed linear vector. The length lives in the TYPE (Vec<n>) and is
+// ERASED at runtime; pop-from-empty and free-of-nonempty are TYPE errors.
+
+// a dependent function over an erased length index (the 0-fragment):
+// n is implicit, solved by unifying Vec<n> against the argument.
+fn push_zero(0 n: Nat, v: Vec<n>) -> Vec<n+1> {
+  vpush(v, 0)
+}
+
+fn main() -> Int {
+  let v0 = vnew();           // Vec<0>
+  let v1 = vpush(v0, 10);    // Vec<1>
+  let v2 = push_zero(v1);    // Vec<2>   (n solved to 1)
+  let top = vhead(v2);       // 0   (the last pushed)
+  let v1b = vtail(v2);       // Vec<1>
+  let v0b = vtail(v1b);      // Vec<0>
+  vfree(v0b);                // requires Vec<0>
+  top
+}

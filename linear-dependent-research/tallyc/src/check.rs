@@ -15,9 +15,74 @@
 //! This is the algorithmic reflection of QTT (`../../agda/Syntax.agda`): borrows
 //! (field reads, `addr`, write bases) cost 0; only moves/consumes spend budget.
 
-use crate::ast::{Expr, Func, Param, Program, Stmt, StructDecl, Ty};
+use crate::ast::{Expr, Func, Idx, Param, Program, Stmt, StructDecl, Ty};
 use crate::mult::Mult;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+// ---- index substitution & unification (for erased/implicit index params) ----
+
+fn subst_idx(i: &Idx, s: &HashMap<String, Idx>) -> Idx {
+    match i {
+        Idx::Lit(k) => Idx::Lit(*k),
+        Idx::Var(n, k) => match s.get(n) {
+            Some(Idx::Lit(m)) => Idx::Lit(m + k),
+            Some(Idx::Var(p, j)) => Idx::Var(p.clone(), j + k),
+            None => Idx::Var(n.clone(), *k),
+        },
+    }
+}
+
+fn subst_ty(t: &Ty, s: &HashMap<String, Idx>) -> Ty {
+    match t {
+        Ty::Vec(i) => Ty::Vec(subst_idx(i, s)),
+        other => other.clone(),
+    }
+}
+
+/// Unify a parameter index against an argument index, solving implicit vars.
+fn unify_idx(
+    p: &Idx,
+    a: &Idx,
+    s: &mut HashMap<String, Idx>,
+    implicit: &HashSet<String>,
+) -> Result<(), String> {
+    let pr = subst_idx(p, s);
+    if let Idx::Var(n, k) = &pr {
+        if implicit.contains(n) {
+            return match a {
+                Idx::Lit(m) if m >= k => {
+                    s.insert(n.clone(), Idx::Lit(m - k));
+                    Ok(())
+                }
+                Idx::Var(q, j) if j >= k => {
+                    s.insert(n.clone(), Idx::Var(q.clone(), j - k));
+                    Ok(())
+                }
+                _ => Err(format!("length mismatch: cannot solve {p} = {a}")),
+            };
+        }
+    }
+    if &pr == a {
+        Ok(())
+    } else {
+        Err(format!("length mismatch: expected {pr}, found {a}"))
+    }
+}
+
+fn unify(
+    p: &Ty,
+    a: &Ty,
+    s: &mut HashMap<String, Idx>,
+    implicit: &HashSet<String>,
+) -> Result<(), String> {
+    match (p, a) {
+        (Ty::Vec(pi), Ty::Vec(ai)) => unify_idx(pi, ai, s, implicit),
+        (Ty::Own(x), Ty::Own(y)) if x == y => Ok(()),
+        (Ty::Ptr(x), Ty::Ptr(y)) if x == y => Ok(()),
+        (Ty::Int, Ty::Int) | (Ty::Unit, Ty::Unit) | (Ty::Nat, Ty::Nat) => Ok(()),
+        _ => Err(format!("type mismatch: expected {p}, found {a}")),
+    }
+}
 
 struct Slot {
     ty: Ty,
@@ -26,7 +91,7 @@ struct Slot {
     usage: Mult,  // accumulated consuming uses, checked against budget at scope end
 }
 
-type Sig = (Vec<(Mult, Ty)>, Ty); // (param budgets+types, return type)
+type Sig = (Vec<(Mult, String, Ty)>, Ty); // (param budget+name+type, return type)
 
 struct Checker {
     structs: HashMap<String, StructDecl>,
@@ -202,7 +267,93 @@ impl Checker {
         Ty::Own(name.to_string())
     }
 
+    /// The dependent, length-indexed `Vec<n>` built-ins. The length arithmetic
+    /// (`n`, `n+1`, `0`) is the type-level dependency; `vhead`/`vtail` require a
+    /// statically non-empty vector, so pop-from-empty is a *type* error.
+    fn check_builtin(&mut self, fname: &str, args: &[Expr], pi: Mult) -> Option<Ty> {
+        let as_vec = |c: &mut Self, t: Ty, op: &str| -> Option<Idx> {
+            match t {
+                Ty::Vec(i) => Some(i),
+                other => {
+                    c.err(format!("{op}: expected a Vec, found {other}"));
+                    None
+                }
+            }
+        };
+        match fname {
+            "vnew" => {
+                if !args.is_empty() {
+                    self.err("vnew expects no arguments");
+                }
+                Some(Ty::Vec(Idx::Lit(0)))
+            }
+            "vpush" => {
+                if args.len() != 2 {
+                    self.err("vpush(v, x) expects 2 arguments");
+                    return Some(Ty::Vec(Idx::Lit(0)));
+                }
+                let vt = self.check_expr(&args[0], None, pi); // consume the vector
+                self.check_expr(&args[1], Some(&Ty::Int), pi); // the element
+                match as_vec(self, vt, "vpush") {
+                    Some(i) => Some(Ty::Vec(i.succ())),
+                    None => Some(Ty::Vec(Idx::Lit(0))),
+                }
+            }
+            "vhead" => {
+                if args.len() != 1 {
+                    self.err("vhead(v) expects 1 argument");
+                    return Some(Ty::Int);
+                }
+                let vt = self.check_base(&args[0]); // borrow (read), do not consume
+                if let Some(i) = as_vec(self, vt, "vhead") {
+                    if !i.nonempty() {
+                        self.err(format!(
+                            "vhead: the vector may be empty (its length is {i}); need a Vec<n+1>"
+                        ));
+                    }
+                }
+                Some(Ty::Int)
+            }
+            "vtail" => {
+                if args.len() != 1 {
+                    self.err("vtail(v) expects 1 argument");
+                    return Some(Ty::Vec(Idx::Lit(0)));
+                }
+                let vt = self.check_expr(&args[0], None, pi); // consume
+                match as_vec(self, vt, "vtail") {
+                    Some(i) if i.nonempty() => Some(Ty::Vec(i.pred())),
+                    Some(i) => {
+                        self.err(format!(
+                            "vtail: the vector may be empty (its length is {i}); need a Vec<n+1>"
+                        ));
+                        Some(Ty::Vec(i))
+                    }
+                    None => Some(Ty::Vec(Idx::Lit(0))),
+                }
+            }
+            "vfree" => {
+                if args.len() != 1 {
+                    self.err("vfree(v) expects 1 argument");
+                    return Some(Ty::Unit);
+                }
+                let vt = self.check_expr(&args[0], None, pi); // consume
+                if let Some(i) = as_vec(self, vt, "vfree") {
+                    if !i.is_zero() {
+                        self.err(format!(
+                            "vfree requires an empty Vec<0>, but this vector has length {i}"
+                        ));
+                    }
+                }
+                Some(Ty::Unit)
+            }
+            _ => None,
+        }
+    }
+
     fn check_call(&mut self, fname: &str, args: &[Expr], pi: Mult) -> Ty {
+        if let Some(t) = self.check_builtin(fname, args, pi) {
+            return t;
+        }
         let sig = match self.fns.get(fname).cloned() {
             Some(s) => s,
             None => {
@@ -211,18 +362,31 @@ impl Checker {
             }
         };
         let (params, ret) = sig;
-        if args.len() != params.len() {
+        // multiplicity-0 parameters are IMPLICIT (erased): not passed at the
+        // call site, but solved by unifying the explicit argument types.
+        let implicit: HashSet<String> = params
+            .iter()
+            .filter(|(m, _, _)| *m == Mult::Zero)
+            .map(|(_, n, _)| n.clone())
+            .collect();
+        let explicit: Vec<&(Mult, String, Ty)> =
+            params.iter().filter(|(m, _, _)| *m != Mult::Zero).collect();
+        if args.len() != explicit.len() {
             self.err(format!(
-                "`{fname}` expects {} argument(s), got {}",
-                params.len(),
+                "`{fname}` expects {} explicit argument(s), got {}",
+                explicit.len(),
                 args.len()
             ));
         }
-        for (arg, (budget, pty)) in args.iter().zip(params.iter()) {
+        let mut subst: HashMap<String, Idx> = HashMap::new();
+        for (arg, (budget, _name, pty)) in args.iter().zip(explicit.iter()) {
             // the argument is consumed at  pi · (parameter budget)
-            self.check_expr(arg, Some(pty), pi.mul(*budget));
+            let at = self.check_expr(arg, None, pi.mul(*budget));
+            if let Err(m) = unify(pty, &at, &mut subst, &implicit) {
+                self.err(format!("`{fname}`: argument {m}"));
+            }
         }
-        ret
+        subst_ty(&ret, &subst)
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -395,7 +559,7 @@ pub fn check(prog: &Program) -> Vec<String> {
         let params = f
             .params
             .iter()
-            .map(|p| (budget_of(p.mult, &p.ty, &mut errs, "param"), p.ty.clone()))
+            .map(|p| (budget_of(p.mult, &p.ty, &mut errs, "param"), p.name.clone(), p.ty.clone()))
             .collect();
         if fns.insert(f.name.clone(), (params, f.ret.clone())).is_some() {
             errs.push(format!("duplicate function `{}`", f.name));
@@ -480,5 +644,55 @@ mod tests {
         // still catches the basics
         reject(&format!("{C} fn main() -> Int {{ let a = alloc C {{ val: 1 }}; free a; free a; 0 }}"));
         reject(&format!("{C} fn main() -> Int {{ let a = alloc C {{ val: 1 }}; 0 }}")); // leak
+    }
+
+    #[test]
+    fn dependent() {
+        // length-indexed vector: the type tracks the length, which is erased.
+        accept(
+            "fn main() -> Int {
+               let v0 = vnew();
+               let v1 = vpush(v0, 10);
+               let v2 = vpush(v1, 20);
+               let top = vhead(v2);
+               let v1b = vtail(v2);
+               let v0b = vtail(v1b);
+               vfree(v0b);
+               top
+             }",
+        );
+        // a dependent function over an ERASED length index (the 0-fragment):
+        // n is implicit, solved by unifying Vec<n> with the argument.
+        accept(
+            "fn push0(0 n: Nat, v: Vec<n>) -> Vec<n+1> { vpush(v, 0) }
+             fn main() -> Int {
+               let a = vnew();
+               let b = push0(a);
+               let c = vtail(b);
+               vfree(c);
+               0
+             }",
+        );
+        accept(
+            "fn pop2(0 n: Nat, v: Vec<n+2>) -> Vec<n> { vtail(vtail(v)) }
+             fn main() -> Int {
+               let a = vpush(vpush(vnew(), 1), 2);
+               let b = pop2(a);
+               vfree(b);
+               0
+             }",
+        );
+
+        // pop-from-empty is a TYPE error
+        reject("fn main() -> Int { let v = vnew(); let w = vtail(v); vfree(w); 0 }");
+        reject("fn main() -> Int { let v = vnew(); let x = vhead(v); vfree(v); x }");
+        // free a non-empty vector
+        reject("fn main() -> Int { let v = vpush(vnew(), 1); vfree(v); 0 }");
+        // leak a vector
+        reject("fn main() -> Int { let v = vnew(); 0 }");
+        // cannot prove a Vec<n> (abstract, possibly empty) is non-empty
+        reject("fn bad(0 n: Nat, v: Vec<n>) -> Vec<n> { vtail(v) } fn main() -> Int { 0 }");
+        // an erased index used at runtime
+        reject("fn bad(0 n: Nat) -> Int { n } fn main() -> Int { 0 }");
     }
 }
