@@ -30,6 +30,10 @@ pub enum Term {
     Pi(Mult, Box<Term>, Box<Term>),               // Π[π](_:A). B
     Lam(Box<Term>),
     App(Box<Term>, Box<Term>),
+    Sigma(Mult, Box<Term>, Box<Term>),            // Σ[π](_:A). B   (dependent pair type)
+    Pair(Box<Term>, Box<Term>),
+    Fst(Box<Term>),
+    Snd(Box<Term>),
     Nat,
     NatLit(u64),
     Add(Box<Term>, Box<Term>),
@@ -43,6 +47,8 @@ pub enum Value {
     VType,
     VPi(Mult, Box<Value>, Closure),
     VLam(Closure),
+    VSigma(Mult, Box<Value>, Closure),
+    VPair(Box<Value>, Box<Value>),
     VNat,
     VNatLit(u64),
     VEq(Box<Value>, Box<Value>, Box<Value>),
@@ -55,6 +61,8 @@ pub enum Neutral {
     NVar(usize), // de Bruijn LEVEL
     NApp(Box<Neutral>, Box<Value>),
     NAdd(Box<Value>, Box<Value>),
+    NFst(Box<Neutral>),
+    NSnd(Box<Neutral>),
 }
 
 #[derive(Clone)]
@@ -86,6 +94,14 @@ fn eval(env: &[Value], t: &Term) -> Value {
         ),
         Term::Lam(b) => Value::VLam(Closure { env: env.to_vec(), body: (**b).clone() }),
         Term::App(f, a) => vapp(eval(env, f), eval(env, a)),
+        Term::Sigma(pi, a, b) => Value::VSigma(
+            *pi,
+            Box::new(eval(env, a)),
+            Closure { env: env.to_vec(), body: (**b).clone() },
+        ),
+        Term::Pair(a, b) => Value::VPair(Box::new(eval(env, a)), Box::new(eval(env, b))),
+        Term::Fst(p) => vfst(eval(env, p)),
+        Term::Snd(p) => vsnd(eval(env, p)),
         Term::Nat => Value::VNat,
         Term::NatLit(n) => Value::VNatLit(*n),
         Term::Add(a, b) => match (eval(env, a), eval(env, b)) {
@@ -110,6 +126,22 @@ fn vapp(f: Value, a: Value) -> Value {
     }
 }
 
+fn vfst(p: Value) -> Value {
+    match p {
+        Value::VPair(a, _) => *a,
+        Value::VNeu(n) => Value::VNeu(Neutral::NFst(Box::new(n))),
+        _ => unreachable!("fst of a non-pair"),
+    }
+}
+
+fn vsnd(p: Value) -> Value {
+    match p {
+        Value::VPair(_, b) => *b,
+        Value::VNeu(n) => Value::VNeu(Neutral::NSnd(Box::new(n))),
+        _ => unreachable!("snd of a non-pair"),
+    }
+}
+
 fn quote(lvl: usize, v: &Value) -> Term {
     match v {
         Value::VType => Term::Type,
@@ -121,6 +153,12 @@ fn quote(lvl: usize, v: &Value) -> Term {
         Value::VLam(clo) => {
             Term::Lam(Box::new(quote(lvl + 1, &clo.apply(Value::VNeu(Neutral::NVar(lvl))))))
         }
+        Value::VSigma(pi, a, clo) => Term::Sigma(
+            *pi,
+            Box::new(quote(lvl, a)),
+            Box::new(quote(lvl + 1, &clo.apply(Value::VNeu(Neutral::NVar(lvl))))),
+        ),
+        Value::VPair(a, b) => Term::Pair(Box::new(quote(lvl, a)), Box::new(quote(lvl, b))),
         Value::VNat => Term::Nat,
         Value::VNatLit(n) => Term::NatLit(*n),
         Value::VEq(a, x, y) => Term::Eq(
@@ -138,6 +176,8 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
         Neutral::NVar(k) => Term::Var(lvl - 1 - k),
         Neutral::NApp(f, a) => Term::App(Box::new(quote_neu(lvl, f)), Box::new(quote(lvl, a))),
         Neutral::NAdd(a, b) => Term::Add(Box::new(quote(lvl, a)), Box::new(quote(lvl, b))),
+        Neutral::NFst(p) => Term::Fst(Box::new(quote_neu(lvl, p))),
+        Neutral::NSnd(p) => Term::Snd(Box::new(quote_neu(lvl, p))),
     }
 }
 
@@ -213,6 +253,12 @@ fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
             }
             Ok(ub)
         }
+        (Term::Pair(a, b), Value::VSigma(pi, dom, cod)) => {
+            let ua = check(ctx, a, dom)?;
+            let va = eval(&ctx.env(), a);
+            let ub = check(ctx, b, &cod.apply(va))?; // B[a] — the dependency
+            Ok(uadd(&uscale(*pi, &ua), &ub)) // first component used at multiplicity π
+        }
         (Term::Refl(a), Value::VEq(aty, x, y)) => {
             check(ctx, a, aty)?; // a proof lives in the 0-fragment; discard usage
             let va = eval(&ctx.env(), a);
@@ -258,12 +304,24 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let ub = check(ctx, b, &Value::VNat)?;
             Ok((Value::VNat, uadd(&ua, &ub)))
         }
-        Term::Pi(_, a, b) => {
+        Term::Pi(_, a, b) | Term::Sigma(_, a, b) => {
             check_type(ctx, a)?;
             let va = eval(&ctx.env(), a);
             check_type(&ctx.extend(va), b)?;
             Ok((Value::VType, uzero(n)))
         }
+        Term::Fst(p) => match infer(ctx, p)? {
+            (Value::VSigma(_, dom, _), up) => Ok((*dom, up)),
+            (other, _) => Err(format!("fst of a non-pair (type {:?})", quote(n, &other))),
+        },
+        Term::Snd(p) => match infer(ctx, p)? {
+            (Value::VSigma(_, _, cod), up) => {
+                let v1 = vfst(eval(&ctx.env(), p)); // snd's type depends on fst
+                Ok((cod.apply(v1), up))
+            }
+            (other, _) => Err(format!("snd of a non-pair (type {:?})", quote(n, &other))),
+        },
+        Term::Pair(_, _) => Err("cannot infer a bare pair; annotate it `(e : T)`".to_string()),
         Term::Eq(a, x, y) => {
             check_type(ctx, a)?;
             let va = eval(&ctx.env(), a);
@@ -350,6 +408,23 @@ mod tests {
         // Π[ω](x:Nat). Nat  -- now using x twice is fine
         let unr = Pi(Omega, b(Nat), b(Nat));
         assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &unr).is_ok());
+    }
+
+    #[test]
+    fn dependent_pairs() {
+        // Σ[ω](b:Nat). Eq Nat b 4   -- "a Nat together with a proof it equals 4"
+        let ty = Sigma(Omega, b(Nat), b(Eq(b(Nat), b(Var(0)), b(NatLit(4)))));
+        // (2+2, refl) inhabits it: the second component's type is Eq Nat (2+2) 4
+        let good = Pair(b(Add(b(NatLit(2)), b(NatLit(2)))), b(Refl(b(NatLit(4)))));
+        assert!(check_closed(&good, &ty).is_ok(), "{:?}", check_closed(&good, &ty));
+
+        // (5, refl) does NOT: its proof obligation Eq Nat 5 4 is false
+        let bad = Pair(b(NatLit(5)), b(Refl(b(NatLit(5)))));
+        assert!(check_closed(&bad, &ty).is_err());
+
+        // projection: fst (2+2, _) reduces to 4 : Nat
+        let proj = Fst(b(Ann(b(good), b(ty))));
+        assert_eq!(infer_closed(&proj), Ok(Nat));
     }
 
     #[test]
