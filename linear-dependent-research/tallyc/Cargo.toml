@@ -1,0 +1,22 @@
+[package]
+name = "tally"
+version = "0.0.1"
+edition = "2021"
+description = "lambda-Tally: a dependent + linear (quantitative) language for memory-safe low-level code"
+
+[lib]
+name = "tally"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tally"
+path = "src/main.rs"
+
+[features]
+default = []
+# the LLVM backend; needs a system LLVM 18 (llvm-config-18). Build with:
+#   cargo build --features llvm
+llvm = ["inkwell"]
+
+[dependencies]
+inkwell = { version = "0.5", features = ["llvm18-0"], optional = true }
