@@ -30,6 +30,37 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v0.6 — the dependent core: proofs as terms, via NbE)
+
+The Route-B foundation (`src/dep.rs`): a **dependent type checker with
+normalization by evaluation** — one syntax for terms *and* types, a universe,
+`Π`, `λ`, application, a base `Nat`/`+`, and an **identity type** `Eq A a b` with
+`refl`. Definitional equality is decided by NbE (eval to values with closures,
+quote to a β-normal term, compare). The upshot: **a proof is a term, checked by
+computation** —
+
+```
+refl : Eq Nat (2 + 2) 4        -- type-checks: 2+2 and 4 share a normal form
+refl : Eq Nat ((λx.x) 7) 7     -- β-reduction happens inside the proposition
+refl : Eq Nat (2 + 2) 5        -- REJECTED: the equation does not hold
+```
+
+The polymorphic identity `λA.λx.x : Π(A:Type).Π(x:A).A` checks at its dependent
+type and applies. This is a port of the engine in `../prototype/qtt_checker.py`
+and the kernel every dependent proof assistant is built on. `cargo test`: 8
+tests incl. `proofs_by_computation`.
+
+Currently standalone (its own `Term` syntax, separate from the simply-typed
+surface). The remaining Route-B steps, in order: **(1)** fuse the multiplicity
+layer (resourced bidirectional checking — `qtt_checker.py` shows how; we already
+have the rig and usage context); **(2)** **inductive families** + a recursor
+(so `Nat`/`Vec`/`lseg` and real propositions are user-defined, not built-in);
+**(3)** a surface parser for the dependent syntax; **(4)** merge with the
+low-level layer so `Own`/`Vec<n>` are definitions in the dependent calculus and
+proofs constrain the memory operations; **(5)** a universe hierarchy for logical
+consistency (`Type : Type` today is fine for a language, not for a logic — see
+`../docs/07-implementation-guide.md` §7).
+
 ## Status (v0.5 — linear cursors: the intrusive DLL with O(1) remove)
 
 The headline application, **sound and native**. A `Cursor<'L>` is a LINEAR token
