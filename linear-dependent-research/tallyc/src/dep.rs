@@ -36,6 +36,11 @@ pub enum Term {
     Snd(Box<Term>),
     Nat,
     NatLit(u64),
+    Zero,                                         // the constructor 0
+    Suc(Box<Term>),                               // the constructor suc
+    /// the dependent eliminator (induction):  natElim P z s n : P n
+    ///   P : Nat → Type,  z : P 0,  s : Π(k:Nat). P k → P (suc k)
+    NatElim(Box<Term>, Box<Term>, Box<Term>, Box<Term>),
     Add(Box<Term>, Box<Term>),
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
@@ -51,6 +56,7 @@ pub enum Value {
     VPair(Box<Value>, Box<Value>),
     VNat,
     VNatLit(u64),
+    VSuc(Box<Value>),                             // suc of a *neutral* Nat (open term)
     VEq(Box<Value>, Box<Value>, Box<Value>),
     VRefl(Box<Value>),
     VNeu(Neutral),
@@ -63,6 +69,8 @@ pub enum Neutral {
     NAdd(Box<Value>, Box<Value>),
     NFst(Box<Neutral>),
     NSnd(Box<Neutral>),
+    /// natElim stuck on a neutral scrutinee: P, z, s, and the stuck Nat.
+    NNatElim(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
 }
 
 #[derive(Clone)]
@@ -104,6 +112,11 @@ fn eval(env: &[Value], t: &Term) -> Value {
         Term::Snd(p) => vsnd(eval(env, p)),
         Term::Nat => Value::VNat,
         Term::NatLit(n) => Value::VNatLit(*n),
+        Term::Zero => Value::VNatLit(0),
+        Term::Suc(t) => vsuc(eval(env, t)),
+        Term::NatElim(p, z, s, scrut) => {
+            vnatelim(eval(env, p), eval(env, z), eval(env, s), eval(env, scrut))
+        }
         Term::Add(a, b) => match (eval(env, a), eval(env, b)) {
             (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
             (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
@@ -123,6 +136,39 @@ fn vapp(f: Value, a: Value) -> Value {
         Value::VLam(clo) => clo.apply(a),
         Value::VNeu(n) => Value::VNeu(Neutral::NApp(Box::new(n), Box::new(a))),
         _ => unreachable!("vapp on a non-function (ill-typed term reached eval)"),
+    }
+}
+
+fn vsuc(n: Value) -> Value {
+    match n {
+        Value::VNatLit(k) => Value::VNatLit(k + 1),
+        other => Value::VSuc(Box::new(other)), // suc of a stuck Nat
+    }
+}
+
+/// The ι-rule for `natElim P z s n`:
+///   natElim P z s 0       = z
+///   natElim P z s (suc k) = s k (natElim P z s k)
+/// stuck when `n` is neutral.
+fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
+    match scrut {
+        Value::VNatLit(0) => z,
+        Value::VNatLit(k) => {
+            let pred = Value::VNatLit(k - 1);
+            let rec = vnatelim(p.clone(), z, s.clone(), pred.clone());
+            vapp(vapp(s, pred), rec)
+        }
+        Value::VSuc(pred) => {
+            let rec = vnatelim(p.clone(), z, s.clone(), (*pred).clone());
+            vapp(vapp(s, *pred), rec)
+        }
+        Value::VNeu(nu) => Value::VNeu(Neutral::NNatElim(
+            Box::new(p),
+            Box::new(z),
+            Box::new(s),
+            Box::new(nu),
+        )),
+        _ => unreachable!("natElim on a non-Nat (ill-typed term reached eval)"),
     }
 }
 
@@ -161,6 +207,7 @@ fn quote(lvl: usize, v: &Value) -> Term {
         Value::VPair(a, b) => Term::Pair(Box::new(quote(lvl, a)), Box::new(quote(lvl, b))),
         Value::VNat => Term::Nat,
         Value::VNatLit(n) => Term::NatLit(*n),
+        Value::VSuc(k) => Term::Suc(Box::new(quote(lvl, k))),
         Value::VEq(a, x, y) => Term::Eq(
             Box::new(quote(lvl, a)),
             Box::new(quote(lvl, x)),
@@ -178,11 +225,61 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
         Neutral::NAdd(a, b) => Term::Add(Box::new(quote(lvl, a)), Box::new(quote(lvl, b))),
         Neutral::NFst(p) => Term::Fst(Box::new(quote_neu(lvl, p))),
         Neutral::NSnd(p) => Term::Snd(Box::new(quote_neu(lvl, p))),
+        Neutral::NNatElim(p, z, s, scrut) => Term::NatElim(
+            Box::new(quote(lvl, p)),
+            Box::new(quote(lvl, z)),
+            Box::new(quote(lvl, s)),
+            Box::new(quote_neu(lvl, scrut)),
+        ),
     }
 }
 
 fn conv(lvl: usize, a: &Value, b: &Value) -> bool {
     quote(lvl, a) == quote(lvl, b)
+}
+
+/// de Bruijn shift: add `d` to every free `Var(i)` with `i >= cutoff`. Used to
+/// lift a quoted term under newly-introduced binders when building the expected
+/// type of `natElim`'s step argument.
+fn shift(d: usize, cutoff: usize, t: &Term) -> Term {
+    match t {
+        Term::Var(i) => Term::Var(if *i >= cutoff { *i + d } else { *i }),
+        Term::Type | Term::Nat | Term::NatLit(_) | Term::Zero => t.clone(),
+        Term::Pi(pi, a, b) => Term::Pi(
+            *pi,
+            Box::new(shift(d, cutoff, a)),
+            Box::new(shift(d, cutoff + 1, b)),
+        ),
+        Term::Sigma(pi, a, b) => Term::Sigma(
+            *pi,
+            Box::new(shift(d, cutoff, a)),
+            Box::new(shift(d, cutoff + 1, b)),
+        ),
+        Term::Lam(b) => Term::Lam(Box::new(shift(d, cutoff + 1, b))),
+        Term::App(f, a) => Term::App(Box::new(shift(d, cutoff, f)), Box::new(shift(d, cutoff, a))),
+        Term::Pair(a, b) => {
+            Term::Pair(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, b)))
+        }
+        Term::Fst(p) => Term::Fst(Box::new(shift(d, cutoff, p))),
+        Term::Snd(p) => Term::Snd(Box::new(shift(d, cutoff, p))),
+        Term::Suc(k) => Term::Suc(Box::new(shift(d, cutoff, k))),
+        Term::NatElim(p, z, s, scrut) => Term::NatElim(
+            Box::new(shift(d, cutoff, p)),
+            Box::new(shift(d, cutoff, z)),
+            Box::new(shift(d, cutoff, s)),
+            Box::new(shift(d, cutoff, scrut)),
+        ),
+        Term::Add(a, b) => Term::Add(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, b))),
+        Term::Eq(a, x, y) => Term::Eq(
+            Box::new(shift(d, cutoff, a)),
+            Box::new(shift(d, cutoff, x)),
+            Box::new(shift(d, cutoff, y)),
+        ),
+        Term::Refl(a) => Term::Refl(Box::new(shift(d, cutoff, a))),
+        Term::Ann(e, ty) => {
+            Term::Ann(Box::new(shift(d, cutoff, e)), Box::new(shift(d, cutoff, ty)))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +395,57 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             Ok((ctx.types[lvl].clone(), uunit(n, lvl)))
         }
         Term::Type | Term::Nat => Ok((Value::VType, uzero(n))),
-        Term::NatLit(_) => Ok((Value::VNat, uzero(n))),
+        Term::NatLit(_) | Term::Zero => Ok((Value::VNat, uzero(n))),
+        Term::Suc(k) => {
+            let u = check(ctx, k, &Value::VNat)?;
+            Ok((Value::VNat, u))
+        }
+        Term::NatElim(p, z, s, scrut) => {
+            // P : Nat → Type  (a type-former; its usage is in the 0-fragment)
+            let motive_ty = Value::VPi(
+                Mult::Omega,
+                Box::new(Value::VNat),
+                Closure { env: vec![], body: Term::Type },
+            );
+            check(ctx, p, &motive_ty)?;
+            let vp = eval(&ctx.env(), p);
+
+            // z : P 0
+            let pzero = vapp(vp.clone(), Value::VNatLit(0));
+            let uz = check(ctx, z, &pzero)?;
+
+            // s : Π[ω](k:Nat). Π[ω](_:P k). P (suc k)
+            let p_tm = quote(n, &vp);
+            let sty_term = Term::Pi(
+                Mult::Omega,
+                Box::new(Term::Nat),
+                Box::new(Term::Pi(
+                    Mult::Omega,
+                    // P k          (k is Var(0) under the outer binder)
+                    Box::new(Term::App(Box::new(shift(1, 0, &p_tm)), Box::new(Term::Var(0)))),
+                    // P (suc k)    (k is Var(1) under both binders)
+                    Box::new(Term::App(
+                        Box::new(shift(2, 0, &p_tm)),
+                        Box::new(Term::Suc(Box::new(Term::Var(1)))),
+                    )),
+                )),
+            );
+            let vsty = eval(&ctx.env(), &sty_term);
+            let us = check(ctx, s, &vsty)?;
+
+            // n : Nat
+            let uscr = check(ctx, scrut, &Value::VNat)?;
+
+            // result type: P n
+            let result = vapp(vp, eval(&ctx.env(), scrut));
+            // z is used 0/1×, s is used n×, the scrutinee is inspected — all
+            // bounded above by ω, so scale conservatively (sound; see docs/09).
+            let u = uadd(
+                &uscale(Mult::Omega, &uz),
+                &uadd(&uscale(Mult::Omega, &us), &uscale(Mult::Omega, &uscr)),
+            );
+            Ok((result, u))
+        }
         Term::Add(a, b) => {
             let ua = check(ctx, a, &Value::VNat)?;
             let ub = check(ctx, b, &Value::VNat)?;
@@ -371,6 +518,13 @@ pub fn infer_closed(t: &Term) -> Result<Term, String> {
     Ok(quote(0, &infer(&Ctx::new(), t)?.0))
 }
 
+/// Fully normalize a closed term (NbE: eval then quote). This is the partial
+/// evaluator — see docs/09 §2: type-level computation, applied known functions,
+/// and ι-reductions of `natElim` are all carried out here.
+pub fn normalize_closed(t: &Term) -> Term {
+    quote(0, &eval(&[], t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::Term::*;
@@ -425,6 +579,65 @@ mod tests {
         // projection: fst (2+2, _) reduces to 4 : Nat
         let proj = Fst(b(Ann(b(good), b(ty))));
         assert_eq!(infer_closed(&proj), Ok(Nat));
+    }
+
+    // `add` defined by the dependent eliminator (induction on the first arg):
+    //   add = λm. λn. natElim (λ_.Nat) n (λk. λrec. suc rec) m
+    // recursing structurally on m, so it is TOTAL BY CONSTRUCTION (docs/09 §1.3).
+    fn add_def() -> Term {
+        Lam(b(Lam(b(NatElim(
+            b(Lam(b(Nat))),            // motive P = λ_. Nat
+            b(Var(0)),                 // base:  add 0 n = n
+            b(Lam(b(Lam(b(Suc(b(Var(0)))))))), // step: λk. λrec. suc rec
+            b(Var(1)),                 // scrutinee = m
+        )))))
+    }
+    fn add_ty() -> Term {
+        Pi(Omega, b(Nat), b(Pi(Omega, b(Nat), b(Nat))))
+    }
+
+    #[test]
+    fn natelim_is_a_total_recursor() {
+        // add type-checks at Π[ω](m:Nat). Π[ω](n:Nat). Nat
+        assert!(
+            check_closed(&add_def(), &add_ty()).is_ok(),
+            "{:?}",
+            check_closed(&add_def(), &add_ty())
+        );
+        // and it COMPUTES: add 2 3  ↝  5   (ι-reduction of natElim by NbE)
+        let add = Ann(b(add_def()), b(add_ty()));
+        let app = App(b(App(b(add), b(NatLit(2)))), b(NatLit(3)));
+        assert_eq!(normalize_closed(&app), NatLit(5));
+    }
+
+    #[test]
+    fn proof_by_user_defined_computation() {
+        // refl : Eq Nat (add 2 3) 5   — a proof discharged by the eliminator's
+        // own computation, not a built-in `+`. This is the Idris-like payoff.
+        let add = Ann(b(add_def()), b(add_ty()));
+        let app = App(b(App(b(add), b(NatLit(2)))), b(NatLit(3)));
+        let prop = Eq(b(Nat), b(app.clone()), b(NatLit(5)));
+        assert!(check_closed(&Refl(b(app)), &prop).is_ok());
+
+        // the false equation add 2 3 = 6 is rejected
+        let add2 = Ann(b(add_def()), b(add_ty()));
+        let app2 = App(b(App(b(add2), b(NatLit(2)))), b(NatLit(3)));
+        let bad = Eq(b(Nat), b(app2.clone()), b(NatLit(6)));
+        assert!(check_closed(&Refl(b(app2)), &bad).is_err());
+    }
+
+    #[test]
+    fn natelim_is_type_checked() {
+        // an ill-typed eliminator is rejected: motive P = λ_. Eq Nat 0 0, so the
+        // base case z must be a PROOF (Eq Nat 0 0), but we hand it a Nat.
+        let motive = Lam(b(Eq(b(Nat), b(NatLit(0)), b(NatLit(0)))));
+        let bad = NatElim(
+            b(motive),
+            b(NatLit(3)),                       // wrong: should be `refl`
+            b(Lam(b(Lam(b(Var(0)))))),
+            b(NatLit(2)),
+        );
+        assert!(infer_closed(&bad).is_err());
     }
 
     #[test]

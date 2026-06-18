@@ -56,17 +56,41 @@ refl : Eq Nat (2 + 2) 5        -- REJECTED
 
 This is the dependent + linear + erasure unification — the same as
 `agda/Dependent.agda`'s `dep-id`, and a port of `../prototype/qtt_checker.py`.
-`cargo test`: 8 tests (incl. `polymorphic_linear_identity`,
-`linearity_is_enforced_under_dependency`).
 
-Standalone for now (its own `Term` syntax). Remaining Route-B steps: **(1)**
-**inductive families** + a recursor (so `Nat`/`Vec`/`lseg` and real propositions
-are user-defined, not built-in — this is what enables proofs by induction);
-**(2)** a surface parser for the dependent syntax; **(3)** merge with the
-low-level layer so `Own`/`Vec<n>` are definitions in the calculus and
-capabilities are **indexed by propositions** (so proofs constrain the memory
-operations); **(4)** a universe hierarchy for logical consistency (`Type : Type`
-today is fine for a language, not for a logic — `../docs/07-implementation-guide.md` §7).
+**The dependent eliminator (induction), totality by construction.** `Nat` now
+has its constructors `zero`/`suc` and the **dependent eliminator** `natElim`:
+
+```
+natElim P z s n : P n
+  P : Nat → Type     z : P 0     s : Π(k:Nat). P k → P (suc k)
+```
+
+`natElim` is the *only* recursion, so every function written with it is **total
+by construction** (docs/09 §1.3) — there is no `fix`, no way to write a
+non-terminating or non-covering term. `add` is then a *definition*, not a
+built-in: `add = λm.λn. natElim (λ_.Nat) n (λk.λr. suc r) m`. It **computes** by
+the eliminator's ι-rules under NbE (`add 2 3 ↝ 5`), and proofs are discharged by
+that user-defined computation:
+
+```
+refl : Eq Nat (add 2 3) 5        -- checks, via natElim's own reduction
+```
+
+`cargo test`: 12 tests (incl. `polymorphic_linear_identity`,
+`linearity_is_enforced_under_dependency`, `natelim_is_a_total_recursor`,
+`proof_by_user_defined_computation`).
+
+Standalone for now (its own `Term` syntax). `Nat`+`natElim` is the template;
+remaining Route-B steps: **(1)** **general inductive families** — generalise
+the hardcoded `natElim` to *any* strictly-positive family with an eliminator
+*typed from its constructors*, so `Vec n`/`Fin n`/`lseg` become user
+declarations (this is the gate to everything Idris-like, and what makes the
+totality story general); **(2)** a surface parser for the dependent syntax;
+**(3)** merge with the low-level layer so `Own`/`Vec<n>` are definitions in the
+calculus and capabilities are **indexed by propositions** (so proofs constrain
+the memory operations); **(4)** a universe hierarchy for logical consistency
+(`Type : Type` today is fine for a language, not for a logic —
+`../docs/07-implementation-guide.md` §7).
 
 ## Status (v0.5 — linear cursors: the intrusive DLL with O(1) remove)
 
