@@ -1,0 +1,43 @@
+// The v1.0 surface: ML-style type signatures, Rust-style terms.
+//   tally lang examples/vec.rs.tal
+//
+// Peano naturals, addition, and length-indexed vectors — defined with `enum`,
+// `fn`, and `match`. Recursion is via ordinary recursive calls; the elaborator
+// compiles each `match` to the kernel's dependent eliminator (so it is total by
+// construction) and turns the structural recursive call into the induction
+// hypothesis. Phase 1: every argument is explicit (`0` = erased).
+
+enum Nat {
+    Zero : Nat,
+    Succ : Nat -> Nat,
+}
+
+add : Nat -> Nat -> Nat
+fn add(m, n) {
+    match m {
+        Zero    => n,
+        Succ(k) => Succ(add(k, n)),
+    }
+}
+
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : (0 k : Nat) -> a -> Vec a k -> Vec a (Succ k),
+}
+
+// the result length `add m n` is tracked in the type
+append : (0 a : Type) -> (0 m : Nat) -> (0 n : Nat) -> Vec a m -> Vec a n -> Vec a (add m n)
+fn append(a, m, n, xs, ys) {
+    match xs {
+        Nil           => ys,
+        Cons(k, h, t) => Cons(a, add(k, n), h, append(a, k, n, t, ys)),
+    }
+}
+
+// append [1] [2] : Vec Nat 2  ↝  [1,2]
+main : Vec Nat (Succ (Succ Zero))
+fn main() {
+    append(Nat, Succ(Zero), Succ(Zero),
+           Cons(Nat, Zero, Succ(Zero), Nil(Nat)),
+           Cons(Nat, Zero, Succ(Succ(Zero)), Nil(Nat)))
+}

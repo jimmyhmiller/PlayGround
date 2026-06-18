@@ -66,9 +66,42 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("lang") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: tally lang <file>");
+                return ExitCode::FAILURE;
+            };
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match tally::rust_surface::check_program(&src) {
+                Ok(prog) => {
+                    println!(
+                        "ok: {path} elaborates and type-checks ({} datatype(s), {} def(s))",
+                        prog.sig.datas.len(),
+                        prog.defs.len()
+                    );
+                    if let Some(nf) = prog.normalize("main") {
+                        println!("main = {}", tally::rust_surface::pretty(&nf));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(diags) => {
+                    eprintln!("{path}: rejected ({} error(s)):", diags.len());
+                    for d in &diags {
+                        eprintln!("  - {d}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!(
-                "lambda-Tally compiler\nusage:\n  tally check <file>   (low-level linear checker)\n  tally dep <file>     (dependent+linear surface language)"
+                "lambda-Tally compiler\nusage:\n  tally check <file>   (low-level linear checker)\n  tally dep <file>     (dependent surface, ML syntax)\n  tally lang <file>    (v1.0 surface: ML types, Rust terms)"
             );
             ExitCode::FAILURE
         }

@@ -30,6 +30,66 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v1.0 — Rust-flavored surface: `fn`/`enum`/`match`, ML type signatures)
+
+`src/rust_surface.rs` implements **Phase 1** of `../docs/10-surface-syntax.md`:
+the language whose *types/signatures are ML-flavored* (juxtaposition `Vec a n`,
+arrow types, no angle brackets) and whose *terms are Rust-flavored* (`fn`,
+`enum`, `struct`, `match`). Run it with `tally lang <file>`:
+
+```rust
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+add : Nat -> Nat -> Nat
+fn add(m, n) {
+    match m {
+        Zero    => n,
+        Succ(k) => Succ(add(k, n)),   // recursive call ↦ the induction hypothesis
+    }
+}
+
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : (0 k : Nat) -> a -> Vec a k -> Vec a (Succ k),
+}
+
+append : (0 a : Type) -> (0 m : Nat) -> (0 n : Nat) -> Vec a m -> Vec a n -> Vec a (add m n)
+fn append(a, m, n, xs, ys) {
+    match xs {
+        Nil           => ys,
+        Cons(k, h, t) => Cons(a, add(k, n), h, append(a, k, n, t, ys)),
+    }
+}
+```
+
+```
+$ tally lang examples/vec.rs.tal
+ok: examples/vec.rs.tal elaborates and type-checks (2 datatype(s), 3 def(s))
+main = Cons Nat (Succ Zero) (Succ Zero) (Cons Nat Zero (Succ (Succ Zero)) (Nil Nat))
+```
+
+The headline: **`match` compiles to the kernel's dependent eliminator.** The
+elaborator infers the motive from the `fn`'s declared return type (including the
+dependent case — `append`'s `Vec a (add m n)` becomes `λ m. λ _. Vec a (add m
+n)`), checks coverage, and rewrites each *structural recursive call* into the
+eliminator's induction hypothesis. So you write Rust-looking `fn`/`match` with
+ordinary recursion and get a **total-by-construction** eliminator term that the
+kernel re-checks — elaboration is untrusted.
+
+Phase 1 scope (per docs/10): every argument is explicit (`0` = erased; `{..}`
+implicits and index unification are Phase 2); `match` is one level of
+constructor patterns on a parameter, and recursion must be structural on the
+matched argument (non-structural recursion is rejected — try `tally lang` on a
+bad recursion). `enum` (incl. GADT-style indexed families), `struct` (records),
+`Eq`/`refl` proofs, and strict positivity all work. Examples:
+`examples/vec.rs.tal`. `cargo test`: 8 `rust_surface` tests (Nat/add, indexed
+Vec/append, Fin/fin_to_nat, a struct, a proof, and the coverage/recursion/parse
+rejections).
+
+Next (Phase 2): implicit `{..}` arguments + unification-based index refinement
+(so constructors and recursive calls drop their erased indices), then the merge
+with the low-level memory layer (`docs/10` §10).
+
 ## Status (v0.9 — a SURFACE language: parser + elaborator)
 
 You no longer write the kernel's de Bruijn `Term`s by hand. `src/surface.rs` is a
