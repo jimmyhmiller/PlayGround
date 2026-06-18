@@ -270,6 +270,60 @@ safety/ergonomics ceiling open to library design rather than baking one policy i
 (Ptr T A)`. Region pointers (`'arena`, `'frame`) reject individual `free` — they
 are released by region teardown. A `defer`/scope macro can emit the teardown.
 
+### 5.5 Realized interface (what was actually built)
+
+The region-in-the-pointer model above (§5.1–5.4) was simplified away: pointers
+are **region-less** (`(ptr T)`), and control over allocation is expressed the
+**Zig way — an allocator is a value**, not a type annotation. This keeps the
+"allocation is explicit and visible in the type" goal (a function that allocates
+*takes* an `Allocator`, so its signature shows it) without a region/lifetime
+checker, matching the project's *descriptive, not memory-safe* stance.
+
+Both capabilities are **pure library code** (`lib/alloc.coil`, `lib/io.coil`) —
+the compiler has no notion of either. Each is a vtable struct of function
+pointers plus an opaque `ctx`, threaded explicitly:
+
+```lisp
+(defstruct Allocator
+  [(alloc  (fnptr c [(ptr i8) :i64 :i64] (Option (ptr i8))))            ; (ctx,len,align)
+   (resize (fnptr c [(ptr i8) (ptr i8) :i64 :i64 :i64] (Option (ptr i8))))
+   (free   (fnptr c [(ptr i8) (ptr i8) :i64 :i64] :i64))
+   (ctx    (ptr i8))])
+(defstruct Writer
+  [(write-fn (fnptr c [(ptr i8) (ptr i8) :i64] (Result :i64 IoError)))  ; (ctx,bytes,len)
+   (ctx      (ptr i8))])
+```
+
+Design decisions (chosen, not defaulted):
+
+- **Failure is a sum type, never a sentinel.** `alloc` returns `(Option (ptr
+  i8))` (`None` = OOM); `write`/`read` return `(Result :i64 IoError)`. This leans
+  on generics + `match`; *consuming* a result needs no annotations. *Producing*
+  a variant whose type parameters aren't pinned by its fields (`(None)`, or
+  `(Ok v)` whose error type appears in no field) needs explicit type arguments,
+  which the IO library hides behind the `io-ok`/`io-err` macros. (Checking-mode
+  constructor inference would remove even that — a future item.)
+- **Alignment-aware, Zig-faithful vtable.** `alloc(len,align)`,
+  `resize(ptr,old,new,align)`, `free(ptr,len,align)` — enough for bump/pool
+  allocators to align and reclaim precisely.
+- **Typed generic layer over the byte vtable** (using monomorphization +
+  inference): `(create [T] a)`, `(alloc-slice [T] a n)`, `(destroy a p)` (with
+  `T` inferred from the pointer), each sizing/aligning itself via
+  `sizeof`/`alignof`.
+- **Capabilities compose.** The same `Writer` formats to a file descriptor, a
+  `null` sink, or a fixed buffer whose storage came from an `Allocator` — two
+  capabilities-as-values stacking, which is the whole thesis in miniature.
+
+Two small compiler primitives were added to make this expressible, both
+general-purpose rather than IO/alloc-specific:
+
+- **int↔ptr cast** (`inttoptr`/`ptrtoint`) — null (`(cast (ptr i8) 0)`), null
+  tests (`(icmp-eq (cast :i64 p) 0)`), packing an fd into a vtable `ctx`, MMIO,
+  tagged pointers. The `cast` op now spans int↔int, ptr↔ptr, and int↔ptr.
+- **String literals** — `"…"` lowers to a private NUL-terminated `[N x i8]`
+  global and has type `(ptr i8)` (C-string compatible), so `(print-str w "hi")`
+  and any libc string call just work.
+
 ---
 
 ## 6. The payoff: closures (and friends) are *derived*

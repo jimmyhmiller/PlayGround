@@ -70,6 +70,9 @@ pub enum CmpOp {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
+    /// A string literal. Lowers to a private, NUL-terminated `[N x i8]` global;
+    /// its value is a `(ptr i8)` to the first byte (C-string compatible).
+    Str(String),
     Var(String),
     Let {
         binds: Vec<(String, Expr)>,

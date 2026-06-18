@@ -1,0 +1,26 @@
+; IO as a capability value, Zig-style: a `Writer` is passed in, so a function's
+; type shows that it does output -- and you choose the sink at the call site.
+; This also composes the two interfaces: an Allocator hands out a buffer, a
+; fixed-buffer Writer formats into it, then we flush that buffer to stdout.
+;   coil run examples/io.coil   prints: answer=42   => 0
+(include "lib/alloc.coil")
+(include "lib/io.coil")
+
+; Polymorphic over the sink: works with stdout, a buffer, or a null writer.
+(defn greet [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (do (print-str w "answer=")
+      (print-int w n)
+      (write-byte w (cast :u8 10))))
+
+(defn main [] (-> :i64)
+  (let [a   (malloc-allocator)
+        buf (unwrap-ptr (alloc-slice [i8] a 64))   ; allocator provides storage
+        fb  (alloc-static FixBuf)]
+    (store! (field fb data) buf)
+    (store! (field fb cap) 64)
+    (greet (fixed-buffer-writer fb) 42)            ; format into the buffer
+    (match (write-all (stdout)                     ; flush the captured bytes
+                      (load (field fb data))
+                      (load (field fb len)))
+      (Ok  [n] 0)
+      (Err [e] 1))))

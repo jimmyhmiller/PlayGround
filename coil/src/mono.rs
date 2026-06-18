@@ -281,6 +281,7 @@ impl<'a> Mono<'a> {
         let go = |m: &mut Self, e: &Expr| m.resolve_expr(e, map);
         Ok(match e {
             Expr::Int(n) => Expr::Int(*n),
+            Expr::Str(s) => Expr::Str(s.clone()),
             Expr::Var(s) => Expr::Var(s.clone()),
             Expr::Bin { op, lhs, rhs } => Expr::Bin {
                 op: *op,

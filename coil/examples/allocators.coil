@@ -1,14 +1,17 @@
 ; Allocation as an effect/capability, Zig-style: `boxed-add` takes an Allocator,
 ; so its type shows it allocates -- and you choose the strategy at the call site.
+; Allocation can fail, and failure is a sum type (Option), not a null sentinel.
 ;   coil run examples/allocators.coil; echo $?   => 42
 (include "lib/alloc.coil")
 
 (defn boxed-add [(a (ptr Allocator)) (x :i64) (y :i64)] (-> :i64)
-  (let [p (cast (ptr i64) (alloc-bytes a 8))]   ; ask the allocator for 8 bytes
-    (store! p (iadd x y))
-    (let [v (load p)]
-      (free-bytes a (cast (ptr i8) p))
-      v)))
+  (match (create [i64] a)            ; ask for one i64 (sized/aligned by sizeof/alignof)
+    (None []  0)                     ; out of memory
+    (Some [p]                        ; p : (ptr i64)
+      (do (store! p (iadd x y))
+          (let [v (load p)]
+            (destroy a p)            ; T inferred from p
+            v)))))
 
 (defn main [] (-> :i64)
   (let [gpa   (malloc-allocator)      ; general-purpose (libc)

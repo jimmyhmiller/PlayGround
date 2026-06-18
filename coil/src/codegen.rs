@@ -415,6 +415,17 @@ impl<'ctx> Cg<'ctx> {
         let i64t = self.ctx.i64_type();
         match e {
             Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
+            Expr::Str(s) => {
+                // Private, NUL-terminated [N x i8] global; value is a (ptr i8).
+                let bytes = self.ctx.const_string(s.as_bytes(), true);
+                let n = self.globals.get();
+                self.globals.set(n + 1);
+                let g = self.module.add_global(bytes.get_type(), None, &format!("str.{n}"));
+                g.set_initializer(&bytes);
+                g.set_constant(true);
+                g.set_linkage(inkwell::module::Linkage::Private);
+                Ok((g.as_pointer_value().into(), Type::Ptr(Box::new(Type::Int(8, true)))))
+            }
             Expr::Var(name) => scope
                 .get(name)
                 .cloned()
@@ -653,6 +664,15 @@ impl<'ctx> Cg<'ctx> {
             Expr::Cast { ty, expr } => {
                 let (v, vt) = self.emit_expr(expr, scope)?;
                 match ty {
+                    // pointer -> integer (address of): ptrtoint.
+                    Type::Int(to, _) if matches!(vt, Type::Ptr(..)) => {
+                        let target = self.ctx.custom_width_int_type(*to);
+                        let out = self
+                            .builder
+                            .build_ptr_to_int(v.into_pointer_value(), target, "ptrtoint")
+                            .map_err(le)?;
+                        Ok((out.into(), ty.clone()))
+                    }
                     Type::Int(to, _) => {
                         let iv = v.into_int_value();
                         let from = iv.get_type().get_bit_width();
@@ -672,7 +692,16 @@ impl<'ctx> Cg<'ctx> {
                         };
                         Ok((out.into(), ty.clone()))
                     }
-                    // opaque pointers: a reinterpret leaves the value untouched.
+                    // integer -> pointer: inttoptr.
+                    Type::Ptr(..) if matches!(vt, Type::Int(..)) => {
+                        let pt = self.ctx.ptr_type(AddressSpace::default());
+                        let out = self
+                            .builder
+                            .build_int_to_ptr(v.into_int_value(), pt, "inttoptr")
+                            .map_err(le)?;
+                        Ok((out.into(), ty.clone()))
+                    }
+                    // opaque pointers: a ptr->ptr reinterpret leaves it untouched.
                     Type::Ptr(..) => Ok((v, ty.clone())),
                     other => Err(format!("codegen: cannot cast to {other:?}")),
                 }

@@ -342,6 +342,7 @@ fn synth(
 ) -> Result<(Expr, Type), String> {
     match e {
         Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
+        Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
         Expr::Var(name) => {
             let t = env
                 .get(name)
@@ -655,7 +656,12 @@ fn synth(
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
             let (ee, et) = synth(expr, env, cx, tps, fname)?;
             match (ty, &et) {
-                (Type::Int(..), Type::Int(..)) | (Type::Ptr(..), Type::Ptr(..)) => Ok((
+                // int<->int width change, ptr<->ptr reinterpret, or int<->ptr
+                // (address arithmetic, null, MMIO, tagged pointers).
+                (Type::Int(..), Type::Int(..))
+                | (Type::Ptr(..), Type::Ptr(..))
+                | (Type::Int(..), Type::Ptr(..))
+                | (Type::Ptr(..), Type::Int(..)) => Ok((
                     Expr::Cast {
                         ty: ty.clone(),
                         expr: Box::new(ee),
@@ -663,7 +669,7 @@ fn synth(
                     ty.clone(),
                 )),
                 _ => Err(format!(
-                    "in '{fname}': cast only converts int<->int or ptr<->ptr (got {} to {})",
+                    "in '{fname}': cast only converts among int and ptr (got {} to {})",
                     ty_str(&et),
                     ty_str(ty)
                 )),

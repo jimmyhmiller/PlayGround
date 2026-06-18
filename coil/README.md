@@ -45,10 +45,22 @@ template substitution.
   lifetimes — control over allocation comes from allocators (below).
 - Allocators (Zig-style): an allocator is an explicit **value** — a vtable
   struct of function pointers — threaded through, so a function that allocates
-  *takes* an `Allocator` and its type shows it. `lib/alloc.coil` ships a
-  `malloc`-backed and an `arena` (bump) allocator; the same code runs under
-  either by swapping the value. The compiler has no allocator concept; it's a
-  library (structs + fnptrs + `extern`).
+  *takes* an `Allocator` and its type shows it. The interface is alignment-aware
+  (`alloc(len,align)` / `resize(ptr,old,new,align)` / `free(ptr,len,align)`) and
+  signals failure with a **sum type** (`(Option (ptr i8))`, `None` = OOM), never
+  a null sentinel. `lib/alloc.coil` ships a `malloc`-backed and an `arena` (bump)
+  allocator plus a typed generic layer — `(create [T] a)`, `(destroy a p)` (`T`
+  inferred), `(alloc-slice [T] a n)` — that sizes/aligns itself with
+  `sizeof`/`alignof`. The same code runs under either allocator by swapping the
+  value; the compiler has no allocator concept (structs + fnptrs + `extern`).
+- IO (Zig-style): a `Writer`/`Reader` is likewise an explicit capability value
+  `{ fn-ptr, ctx }` threaded in, so doing IO shows up in a function's type — no
+  ambient stdout. `lib/io.coil` ships `write-all`/`write-byte`/`print-int`/
+  `print-str` over a `Writer`, with `stdout`/`stderr`, a `null` sink, and a
+  fixed-buffer (in-memory) sink; `Reader` mirrors it (`stdin`, `read-some`).
+  Errors are a sum type (`(Result :i64 IoError)`). It composes with allocation —
+  the same `Writer` interface formats into an allocator-provided buffer or a file
+  descriptor (see `examples/io.coil`).
 - Macros: `defmacro` / `def` run in a compile-time Lisp (quasiquote `` ` ``,
   unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
   helper functions). Macros can compute, recurse, and emit whole top-level
@@ -75,9 +87,14 @@ template substitution.
   `(store! p 42)` into a `(ptr u8)` and `(iadd x 1)` with `x : u8` need no
   `(cast :u8 …)`; a literal that doesn't fit its inferred type is a compile
   error. Typed pointers `(ptr TYPE)` (so
-  `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, width
-  `(cast :iN e)` (and ptr reinterpret), and `(sizeof TYPE)`. `main` may take
-  `(argc :i32) (argv (ptr (ptr i8)))`, so programs read their command line.
+  `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, and `(sizeof
+  TYPE)`. `cast` converts among ints and pointers in every direction: int↔int
+  width change, ptr↔ptr reinterpret, and **int↔ptr** (`(cast (ptr i8) 0)` is
+  null, `(cast :i64 p)` is an address — for null tests, MMIO, tagged pointers,
+  packing an fd into a vtable `ctx`). **String literals** `"…"` lower to a
+  private NUL-terminated `[N x i8]` and have type `(ptr i8)` (C-string
+  compatible). `main` may take `(argc :i32) (argv (ptr (ptr i8)))`, so programs
+  read their command line.
 - Structs & arrays: `(defstruct Name [(field :type) ...])` and `(array T N)`.
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
@@ -109,8 +126,9 @@ template substitution.
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-per-field endianness, an IO `Writer` capability, a per-arch shim backend. See
-the design docs.
+per-field endianness, a per-arch shim backend, and checking-mode constructor
+inference (so `(Ok v)` / `(None)` could drop their explicit type args). See the
+design docs.
 
 ## What it looks like
 
@@ -136,7 +154,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 104 tests (build + run native exes)
+cargo test                                     # 110 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
@@ -146,6 +164,7 @@ cargo run -- run   examples/closure.coil; echo $?                          # => 
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42
 cargo run -- run   examples/inference.coil; echo $?                        # => 42 (literal inference)
 cargo run -- run   examples/extern.coil                                    # prints 12345
+cargo run -- run   examples/io.coil                                        # prints answer=42 (Writer capability)
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
 # Inspect the pipeline

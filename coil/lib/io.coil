@@ -1,0 +1,122 @@
+; Zig-style IO: a capability is a VALUE (a vtable struct) threaded explicitly,
+; exactly like the allocator. A `Writer` is `{ write-fn, ctx }`; a function that
+; does output *takes* a Writer, so IO shows up in its type. There is no ambient
+; stdout -- you pass `(stdout)` (or a buffer, or a null sink) in.
+;
+;   write-fn (ctx, bytes, len) -> (Result n IoError)   ; n = bytes written
+;   read-fn  (ctx, buf,   len) -> (Result n IoError)   ; n = bytes read, 0 = EOF
+;
+; Errors are a sum type (Result), never a -1 sentinel. The generic Result's two
+; parameters can't both be inferred when constructing `Ok`/`Err` (the error type
+; appears in no field of `Ok`), so the library uses the `io-ok`/`io-err` macros
+; to supply the type arguments once; callers just `match` and stay annotation-free.
+
+(include "result.coil")
+
+(extern write  :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
+(extern read   :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t read(fd, buf, n)
+(extern strlen :cc c [(ptr i8)] (-> :i64))             ; size_t strlen(const char*)
+(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+
+(defsum IoError
+  (Eof)
+  (Errno [(code :i64)]))
+
+(defmacro io-ok  [n] `(Ok  [:i64 IoError] ~n))
+(defmacro io-err [e] `(Err [:i64 IoError] ~e))
+
+; ============================ Writer ========================================
+(defstruct Writer
+  [(write-fn (fnptr c [(ptr i8) (ptr i8) :i64] (Result :i64 IoError)))
+   (ctx      (ptr i8))])
+
+; One underlying write; may be short (writes fewer than `len` bytes).
+(defn write-some [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (call-ptr (load (field w write-fn)) (load (field w ctx)) buf len))
+
+; Write the whole buffer, looping over short writes; returns the total or errors.
+(defn write-all [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (if (icmp-le len 0)
+      (io-ok 0)
+      (match (write-some w buf len)
+        (Err [e] (io-err e))
+        (Ok [n]
+          (if (icmp-le n 0)
+              (io-err (Errno 0))                          ; made no progress
+              (match (write-all w (index buf n) (isub len n))
+                (Err [e] (io-err e))
+                (Ok [m] (io-ok (iadd n m)))))))))
+
+(defn write-byte [(w (ptr Writer)) (b :u8)] (-> (Result :i64 IoError))
+  (let [p (alloc-stack :u8)]
+    (store! p b)
+    (write-all w (cast (ptr i8) p) 1)))
+
+; Write a NUL-terminated C string (e.g. a string literal).
+(defn print-str [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
+  (write-all w s (strlen s)))
+
+; Write a non-negative integer in decimal, most-significant digit first.
+(defn print-int [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (do
+    (if (icmp-ge n 10) (print-int w (idiv n 10)) (io-ok 0))
+    (write-byte w (cast :u8 (iadd (irem n 10) 48)))))
+
+; ---- backends ----
+; fd-backed: the ctx pointer *is* the file descriptor (int<->ptr cast).
+(defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (let [n (write (cast :i64 ctx) buf len)]
+    (if (icmp-lt n 0) (io-err (Errno n)) (io-ok n))))
+(defn fd-writer [(fd :i64)] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]
+    (store! (field w write-fn) (fnptr-of fd-write))
+    (store! (field w ctx) (cast (ptr i8) fd))
+    w))
+(defn stdout [] (-> (ptr Writer)) (fd-writer 1))
+(defn stderr [] (-> (ptr Writer)) (fd-writer 2))
+
+; null sink: discards everything, always succeeds.
+(defn null-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (io-ok len))
+(defn null-writer [] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]
+    (store! (field w write-fn) (fnptr-of null-write))
+    (store! (field w ctx) (cast (ptr i8) 0))
+    w))
+
+; fixed-buffer sink: writes into a caller-provided byte buffer, tracking how
+; much is used (Zig's fixedBufferStream). Errors with Errno 0 when full.
+(defstruct FixBuf [(data (ptr i8)) (len :i64) (cap :i64)])
+(defn fb-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (let [fb   (cast (ptr FixBuf) ctx)
+        cur  (load (field fb len))
+        room (isub (load (field fb cap)) cur)
+        n    (if (icmp-lt len room) len room)]
+    (memcpy (index (load (field fb data)) cur) buf n)
+    (store! (field fb len) (iadd cur n))
+    (if (icmp-lt n len) (io-err (Errno 0)) (io-ok n))))
+; Initialize a Writer over an existing FixBuf (data/cap already set, len 0).
+(defn fixed-buffer-writer [(fb (ptr FixBuf))] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]
+    (store! (field fb len) 0)
+    (store! (field w write-fn) (fnptr-of fb-write))
+    (store! (field w ctx) (cast (ptr i8) fb))
+    w))
+
+; ============================ Reader ========================================
+(defstruct Reader
+  [(read-fn (fnptr c [(ptr i8) (ptr i8) :i64] (Result :i64 IoError)))
+   (ctx     (ptr i8))])
+
+(defn read-some [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (call-ptr (load (field r read-fn)) (load (field r ctx)) buf len))
+
+(defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (let [n (read (cast :i64 ctx) buf len)]
+    (if (icmp-lt n 0) (io-err (Errno n)) (io-ok n))))
+(defn fd-reader [(fd :i64)] (-> (ptr Reader))
+  (let [r (alloc-static Reader)]
+    (store! (field r read-fn) (fnptr-of fd-read))
+    (store! (field r ctx) (cast (ptr i8) fd))
+    r))
+(defn stdin [] (-> (ptr Reader)) (fd-reader 0))
