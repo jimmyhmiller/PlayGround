@@ -71,7 +71,7 @@ fn struct_returned_through_a_heap_pointer() {
 #[test]
 fn rejects_unknown_struct() {
     let src = "(defn main [] (-> :i64) (let [p (alloc-heap Nope)] 0))";
-    assert!(coil::check_source(src).unwrap_err().contains("unknown struct 'Nope'"));
+    assert!(coil::check_source(src).unwrap_err().contains("unknown type 'Nope'"));
 }
 
 #[test]

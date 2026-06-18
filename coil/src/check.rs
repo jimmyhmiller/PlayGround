@@ -24,24 +24,44 @@ struct Sig {
 struct Cx {
     sigs: HashMap<String, Sig>,
     structs: HashMap<String, Vec<(String, Type)>>,
+    sums: HashMap<String, Vec<SumVariant>>,
+    /// Names of all known nominal types (structs + sums).
+    known: HashSet<String>,
 }
 
 pub fn check(program: &Program) -> Result<(), String> {
-    // struct table
+    // type tables
     let mut structs: HashMap<String, Vec<(String, Type)>> = HashMap::new();
     for sd in &program.structs {
         if structs.insert(sd.name.clone(), sd.fields.clone()).is_some() {
             return Err(format!("struct '{}' defined twice", sd.name));
         }
     }
+    let mut sums: HashMap<String, Vec<SumVariant>> = HashMap::new();
+    for sd in &program.sums {
+        if sums.insert(sd.name.clone(), sd.variants.clone()).is_some() {
+            return Err(format!("sum '{}' defined twice", sd.name));
+        }
+    }
+    let known: HashSet<String> = structs.keys().chain(sums.keys()).cloned().collect();
+
     for sd in &program.structs {
         let mut seen = HashSet::new();
         for (fname, fty) in &sd.fields {
             if !seen.insert(fname) {
                 return Err(format!("struct '{}': duplicate field '{fname}'", sd.name));
             }
-            validate_type(fty, &structs)
+            validate_type(fty, &known)
                 .map_err(|e| format!("struct '{}' field '{fname}': {e}", sd.name))?;
+        }
+    }
+    for sd in &program.sums {
+        for v in &sd.variants {
+            for (fname, fty) in &v.fields {
+                validate_type(fty, &known).map_err(|e| {
+                    format!("sum '{}' variant '{}' field '{fname}': {e}", sd.name, v.name)
+                })?;
+            }
         }
     }
 
@@ -86,7 +106,12 @@ pub fn check(program: &Program) -> Result<(), String> {
         );
     }
 
-    let cx = Cx { sigs, structs };
+    let cx = Cx {
+        sigs,
+        structs,
+        sums,
+        known,
+    };
 
     for f in &program.funcs {
         // convention well-formedness
@@ -116,10 +141,10 @@ pub fn check(program: &Program) -> Result<(), String> {
         // signature types must be well-formed (pointers are region-less, so
         // there's no escape rule — a stack pointer can cross a boundary).
         for p in &f.params {
-            validate_type(&p.ty, &cx.structs)
+            validate_type(&p.ty, &cx.known)
                 .map_err(|e| format!("function '{}' param '{}': {e}", f.name, p.name))?;
         }
-        validate_type(&f.ret, &cx.structs)
+        validate_type(&f.ret, &cx.known)
             .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
 
         let mut env: HashMap<String, Type> =
@@ -140,7 +165,7 @@ pub fn check(program: &Program) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Result<(), String> {
+fn validate_type(t: &Type, known: &HashSet<String>) -> Result<(), String> {
     match t {
         Type::Int(w) => {
             if matches!(w, 8 | 16 | 32 | 64) {
@@ -149,20 +174,20 @@ fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Re
                 Err(format!("unsupported integer width i{w}"))
             }
         }
-        Type::Ptr(p) => validate_type(p, structs),
-        Type::Array(e, _) => validate_type(e, structs),
+        Type::Ptr(p) => validate_type(p, known),
+        Type::Array(e, _) => validate_type(e, known),
         Type::Struct(name) => {
-            if structs.contains_key(name) {
+            if known.contains(name) {
                 Ok(())
             } else {
-                Err(format!("unknown struct '{name}'"))
+                Err(format!("unknown type '{name}'"))
             }
         }
         Type::Fn(_, params, ret) => {
             for p in params {
-                validate_type(p, structs)?;
+                validate_type(p, known)?;
             }
-            validate_type(ret, structs)
+            validate_type(ret, known)
         }
         Type::App(name, _) => Err(format!("internal: unresolved generic type '{name}'")),
     }
@@ -255,7 +280,7 @@ fn synth(
             Ok(sig.ret.clone())
         }
         Expr::Alloc { ty, .. } => {
-            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
+            validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
             Ok(Type::Ptr(Box::new(ty.clone())))
         }
         Expr::Field { ptr, field } => match synth(ptr, env, cx, fname)? {
@@ -325,7 +350,7 @@ fn synth(
             }
         }
         Expr::Cast { ty, expr } => {
-            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
+            validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
             let et = synth(expr, env, cx, fname)?;
             match (ty, &et) {
                 // integer width conversion, or a pointer reinterpret.
@@ -338,7 +363,7 @@ fn synth(
             }
         }
         Expr::SizeOf(ty) => {
-            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
+            validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
             Ok(Type::Int(64))
         }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
@@ -350,6 +375,90 @@ fn synth(
                 ty_str(&other)
             )),
         },
+        Expr::Construct { sum, variant, args } => {
+            let variants = cx
+                .sums
+                .get(sum)
+                .ok_or_else(|| format!("in '{fname}': unknown sum type '{sum}'"))?;
+            let v = variants
+                .iter()
+                .find(|v| &v.name == variant)
+                .ok_or_else(|| format!("in '{fname}': sum '{sum}' has no variant '{variant}'"))?;
+            if v.fields.len() != args.len() {
+                return Err(format!(
+                    "in '{fname}': variant '{variant}' takes {} field(s), got {}",
+                    v.fields.len(),
+                    args.len()
+                ));
+            }
+            for (i, a) in args.iter().enumerate() {
+                let at = synth(a, env, cx, fname)?;
+                if at != v.fields[i].1 {
+                    return Err(format!(
+                        "in '{fname}': '{variant}' field {} has type {} but expected {}",
+                        i + 1,
+                        ty_str(&at),
+                        ty_str(&v.fields[i].1)
+                    ));
+                }
+            }
+            Ok(Type::Struct(sum.clone()))
+        }
+        Expr::Match { scrut, arms } => {
+            let sumname = match synth(scrut, env, cx, fname)? {
+                Type::Struct(s) if cx.sums.contains_key(&s) => s,
+                other => {
+                    return Err(format!(
+                        "in '{fname}': match expects a sum value, got {}",
+                        ty_str(&other)
+                    ))
+                }
+            };
+            let variants = &cx.sums[&sumname];
+            let mut covered: HashSet<&str> = HashSet::new();
+            let mut result: Option<Type> = None;
+            for arm in arms {
+                let v = variants.iter().find(|v| v.name == arm.variant).ok_or_else(|| {
+                    format!("in '{fname}': sum '{sumname}' has no variant '{}'", arm.variant)
+                })?;
+                if !covered.insert(arm.variant.as_str()) {
+                    return Err(format!("in '{fname}': duplicate match arm for '{}'", arm.variant));
+                }
+                if arm.binds.len() != v.fields.len() {
+                    return Err(format!(
+                        "in '{fname}': arm '{}' binds {} name(s) but the variant has {} field(s)",
+                        arm.variant,
+                        arm.binds.len(),
+                        v.fields.len()
+                    ));
+                }
+                let saved = env.clone();
+                for (b, (_, fty)) in arm.binds.iter().zip(&v.fields) {
+                    env.insert(b.clone(), fty.clone());
+                }
+                let bt = synth(&arm.body, env, cx, fname)?;
+                *env = saved;
+                match &result {
+                    None => result = Some(bt),
+                    Some(r) if *r != bt => {
+                        return Err(format!(
+                            "in '{fname}': match arms have different types ({} vs {})",
+                            ty_str(r),
+                            ty_str(&bt)
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            if covered.len() != variants.len() {
+                return Err(format!(
+                    "in '{fname}': non-exhaustive match on '{sumname}' ({} of {} variants)",
+                    covered.len(),
+                    variants.len()
+                ));
+            }
+            result.ok_or_else(|| format!("in '{fname}': empty match"))
+        }
         Expr::FnPtrOf(name) => {
             let sig = cx
                 .sigs

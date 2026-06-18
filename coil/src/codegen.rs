@@ -12,6 +12,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -39,6 +40,15 @@ struct StructInfo<'ctx> {
     ty: StructType<'ctx>,
 }
 
+/// A sum type's runtime shape: `{ i32 tag, [words x i64] payload }`, plus a
+/// per-variant struct type used to read/write the variant's fields out of the
+/// payload.
+struct SumInfo<'ctx> {
+    variants: Vec<(String, Vec<(String, Type)>)>,
+    ty: StructType<'ctx>,
+    variant_structs: Vec<StructType<'ctx>>,
+}
+
 struct Cg<'ctx> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
@@ -46,6 +56,7 @@ struct Cg<'ctx> {
     funcs: HashMap<String, FunctionValue<'ctx>>,
     shims: HashMap<String, ShimInfo<'ctx>>,
     structs: HashMap<String, StructInfo<'ctx>>,
+    sums: HashMap<String, SumInfo<'ctx>>,
     /// Coil return type of every callable (function/extern), for typing calls.
     rets: HashMap<String, Type>,
     /// Full signature of every callable, for `fnptr-of` (cc, params, ret).
@@ -63,6 +74,7 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         funcs: HashMap::new(),
         shims: HashMap::new(),
         structs: HashMap::new(),
+        sums: HashMap::new(),
         rets: HashMap::new(),
         callables: HashMap::new(),
         conv_ids: HashMap::new(),
@@ -75,9 +87,9 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         }
     }
 
-    // 0. build struct types in two phases (opaque names first, then bodies) so
-    //    definition order doesn't matter — monomorphization emits structs in an
-    //    arbitrary order.
+    // 0. build aggregate types. Two-phase (opaque names first, then bodies) so
+    //    definition order doesn't matter (monomorphization emits in any order).
+    // 0a. opaque struct names.
     for sd in &program.structs {
         let ty = ctx.opaque_struct_type(&sd.name);
         cg.structs.insert(
@@ -88,10 +100,43 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             },
         );
     }
+    // 0b. sum types `{ i32 tag, [words x i64] payload }` (size from a conservative
+    //     layout of the Coil types — no LLVM layout needed, just an upper bound).
+    let struct_map: HashMap<&str, &StructDef> =
+        program.structs.iter().map(|s| (s.name.as_str(), s)).collect();
+    let sum_map: HashMap<&str, &SumDef> =
+        program.sums.iter().map(|s| (s.name.as_str(), s)).collect();
+    for sd in &program.sums {
+        let words = sum_words(sd, &struct_map, &sum_map);
+        let payload = ctx.i64_type().array_type(words);
+        let ty = ctx.opaque_struct_type(&sd.name);
+        ty.set_body(&[ctx.i32_type().into(), payload.into()], false);
+        cg.sums.insert(
+            sd.name.clone(),
+            SumInfo {
+                variants: sd.variants.iter().map(|v| (v.name.clone(), v.fields.clone())).collect(),
+                ty,
+                variant_structs: vec![], // filled in 0d
+            },
+        );
+    }
+    // 0c. struct bodies (may reference sums, which are now complete).
     for sd in &program.structs {
         let ty = cg.structs[&sd.name].ty;
         let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
         ty.set_body(&field_types, false);
+    }
+    // 0d. per-variant field structs (used to read/write payloads).
+    for sd in &program.sums {
+        let vss: Vec<StructType> = sd
+            .variants
+            .iter()
+            .map(|v| {
+                let fs: Vec<BasicTypeEnum> = v.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
+                ctx.struct_type(&fs, false)
+            })
+            .collect();
+        cg.sums.get_mut(&sd.name).unwrap().variant_structs = vss;
     }
 
     // 1a. declare externs (foreign symbols resolved at link time).
@@ -184,7 +229,13 @@ impl<'ctx> Cg<'ctx> {
         match t {
             Type::Int(w) => self.ctx.custom_width_int_type(*w).into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
-            Type::Struct(name) => self.structs[name].ty.into(),
+            Type::Struct(name) => self
+                .structs
+                .get(name)
+                .map(|s| s.ty)
+                .or_else(|| self.sums.get(name).map(|s| s.ty))
+                .unwrap_or_else(|| panic!("unknown nominal type '{name}'"))
+                .into(),
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
@@ -500,6 +551,8 @@ impl<'ctx> Cg<'ctx> {
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;
                 Ok((i64t.const_zero().into(), Type::Int(64)))
             }
+            Expr::Construct { sum, variant, args } => self.emit_construct(sum, variant, args, scope),
+            Expr::Match { scrut, arms } => self.emit_match(scrut, arms, scope),
             Expr::FnPtrOf(name) => {
                 let fv = *self
                     .funcs
@@ -539,6 +592,121 @@ impl<'ctx> Cg<'ctx> {
                 Ok((v, ret))
             }
         }
+    }
+
+    fn emit_construct(
+        &self,
+        sum: &str,
+        variant: &str,
+        args: &[Expr],
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<Tv<'ctx>, String> {
+        let info = self.sums.get(sum).ok_or_else(|| format!("codegen: unknown sum '{sum}'"))?;
+        let vidx = info
+            .variants
+            .iter()
+            .position(|(n, _)| n == variant)
+            .ok_or_else(|| format!("codegen: sum '{sum}' has no variant '{variant}'"))?;
+        let sum_ty = info.ty;
+        let var_struct = info.variant_structs[vidx];
+
+        let tmp = self.builder.build_alloca(sum_ty, "sum.tmp").map_err(le)?;
+        let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
+        self.builder
+            .build_store(tagptr, self.ctx.i32_type().const_int(vidx as u64, false))
+            .map_err(le)?;
+        let payload = self.builder.build_struct_gep(sum_ty, tmp, 1, "payload").map_err(le)?;
+        for (i, a) in args.iter().enumerate() {
+            let (v, _) = self.emit_expr(a, scope)?;
+            let fptr = self
+                .builder
+                .build_struct_gep(var_struct, payload, i as u32, "vf")
+                .map_err(le)?;
+            self.builder.build_store(fptr, v).map_err(le)?;
+        }
+        let val = self.builder.build_load(sum_ty, tmp, "sum").map_err(le)?;
+        Ok((val, Type::Struct(sum.to_string())))
+    }
+
+    fn emit_match(
+        &self,
+        scrut: &Expr,
+        arms: &[Arm],
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<Tv<'ctx>, String> {
+        let (sumval, st) = self.emit_expr(scrut, scope)?;
+        let sumname = match st {
+            Type::Struct(s) => s,
+            other => return Err(format!("codegen: match on non-sum {other:?}")),
+        };
+        let info = self
+            .sums
+            .get(&sumname)
+            .ok_or_else(|| format!("codegen: match on non-sum '{sumname}'"))?;
+        let sum_ty = info.ty;
+
+        // spill the scrutinee so we can GEP into it
+        let tmp = self.builder.build_alloca(sum_ty, "match.tmp").map_err(le)?;
+        self.builder.build_store(tmp, sumval).map_err(le)?;
+        let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
+        let tag = self
+            .builder
+            .build_load(self.ctx.i32_type(), tagptr, "tag")
+            .map_err(le)?
+            .into_int_value();
+        let payload = self.builder.build_struct_gep(sum_ty, tmp, 1, "payload").map_err(le)?;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or("codegen: no current function")?;
+        let arm_blocks: Vec<BasicBlock> =
+            arms.iter().map(|_| self.ctx.append_basic_block(function, "arm")).collect();
+        let default = self.ctx.append_basic_block(function, "match.default");
+        let merge = self.ctx.append_basic_block(function, "match.end");
+
+        let cases: Vec<(inkwell::values::IntValue, BasicBlock)> = arms
+            .iter()
+            .enumerate()
+            .map(|(k, arm)| {
+                let vidx = info.variants.iter().position(|(n, _)| n == &arm.variant).unwrap();
+                (self.ctx.i32_type().const_int(vidx as u64, false), arm_blocks[k])
+            })
+            .collect();
+        self.builder.build_switch(tag, default, &cases).map_err(le)?;
+        self.builder.position_at_end(default);
+        self.builder.build_unreachable().map_err(le)?;
+
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, BasicBlock)> = Vec::new();
+        let mut result_ty = Type::Int(64);
+        for (k, arm) in arms.iter().enumerate() {
+            self.builder.position_at_end(arm_blocks[k]);
+            let vidx = info.variants.iter().position(|(n, _)| n == &arm.variant).unwrap();
+            let var_struct = info.variant_structs[vidx];
+            let mut child = scope.clone();
+            for (i, b) in arm.binds.iter().enumerate() {
+                let fptr = self
+                    .builder
+                    .build_struct_gep(var_struct, payload, i as u32, "vf")
+                    .map_err(le)?;
+                let fty = info.variants[vidx].1[i].1.clone();
+                let fval = self.builder.build_load(self.basic_ty(&fty), fptr, b).map_err(le)?;
+                child.insert(b.clone(), (fval, fty));
+            }
+            let (bval, bty) = self.emit_expr(&arm.body, &child)?;
+            let end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge).map_err(le)?;
+            incoming.push((bval, end));
+            result_ty = bty;
+        }
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(self.basic_ty(&result_ty), "match.val").map_err(le)?;
+        let inc: Vec<(&dyn BasicValue, BasicBlock)> =
+            incoming.iter().map(|(v, b)| (v as &dyn BasicValue, *b)).collect();
+        phi.add_incoming(&inc);
+        Ok((phi.as_basic_value(), result_ty))
     }
 
     fn emit_alloc(&self, storage: Storage, ty: &Type) -> Result<Tv<'ctx>, String> {
@@ -607,4 +775,44 @@ impl<'ctx> Cg<'ctx> {
 
 fn le<E: std::fmt::Display>(e: E) -> String {
     format!("llvm: {e}")
+}
+
+fn align8(x: u64) -> u64 {
+    x.div_ceil(8) * 8
+}
+
+/// Number of i64 words the payload union needs: the largest variant's size
+/// (conservative — every field rounded up to 8 bytes; an upper bound is fine
+/// since we read/write through the real per-variant struct type).
+fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u32 {
+    let max_bytes = sd
+        .variants
+        .iter()
+        .map(|v| {
+            v.fields
+                .iter()
+                .map(|(_, t)| align8(type_bytes(t, structs, sums)))
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    (max_bytes / 8) as u32
+}
+
+fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
+    match t {
+        Type::Int(w) => (*w as u64) / 8,
+        Type::Ptr(_) | Type::Fn(..) => 8,
+        Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
+        Type::Struct(name) => {
+            if let Some(s) = structs.get(name.as_str()) {
+                s.fields.iter().map(|(_, t)| align8(type_bytes(t, structs, sums))).sum()
+            } else if let Some(sm) = sums.get(name.as_str()) {
+                8 + (sum_words(sm, structs, sums) as u64) * 8
+            } else {
+                8
+            }
+        }
+        Type::App(..) => 8,
+    }
 }

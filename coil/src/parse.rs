@@ -12,6 +12,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     let mut funcs = Vec::new();
     let mut externs = Vec::new();
     let mut structs = Vec::new();
+    let mut sums = Vec::new();
 
     for form in forms {
         let items = as_list(form, "top-level form must be a list")?;
@@ -24,6 +25,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
                 }
             }
             "defstruct" => structs.push(parse_defstruct(&items[1..])?),
+            "defsum" => sums.push(parse_defsum(&items[1..])?),
             "defn" => {
                 let f = parse_defn(&items[1..])?;
                 if funcs.iter().any(|g: &Func| g.name == f.name) {
@@ -39,8 +41,42 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     Ok(Program {
         conventions,
         structs,
+        sums,
         externs,
         funcs,
+    })
+}
+
+fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
+    let name = sym(rest.first().ok_or("defsum: missing name")?, "sum name")?;
+    let mut i = 1;
+    let mut type_params = vec![];
+    if let Some(Sexp::Vector(tp)) = rest.get(i) {
+        type_params = tp.iter().map(|s| sym(s, "type parameter")).collect::<Result<_, _>>()?;
+        i += 1;
+    }
+    let mut variants = Vec::new();
+    for v in &rest[i..] {
+        let vl = as_list(v, "variant must be (Name [fields])")?;
+        let vname = sym(vl.first().ok_or("variant: missing name")?, "variant name")?;
+        let fields = match vl.get(1) {
+            Some(Sexp::Vector(fv)) => {
+                let mut fs = Vec::new();
+                for f in fv {
+                    let fl = as_list(f, "field must be (name :type)")?;
+                    fs.push((sym(&fl[0], "field name")?, parse_type(fl.get(1).ok_or("field type")?)?));
+                }
+                fs
+            }
+            None => vec![],
+            _ => return Err(format!("variant '{vname}': fields must be a vector")),
+        };
+        variants.push(SumVariant { name: vname, fields });
+    }
+    Ok(SumDef {
+        name,
+        type_params,
+        variants,
     })
 }
 
@@ -456,6 +492,26 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             Ok(Expr::Cast {
                 ty: parse_type(&args[0])?,
                 expr: Box::new(parse_expr(&args[1])?),
+            })
+        }
+        "match" => {
+            let scrut = parse_expr(args.first().ok_or("match: missing scrutinee")?)?;
+            let mut arms = Vec::new();
+            for a in &args[1..] {
+                let al = as_list(a, "match arm must be (Variant [binds] body)")?;
+                let variant = sym(al.first().ok_or("arm: missing variant")?, "variant")?;
+                let binds = match al.get(1) {
+                    Some(Sexp::Vector(bv)) => {
+                        bv.iter().map(|s| sym(s, "bind")).collect::<Result<_, _>>()?
+                    }
+                    _ => return Err(format!("arm '{variant}': expected a bind vector")),
+                };
+                let body = parse_expr(al.get(2).ok_or("arm: missing body")?)?;
+                arms.push(Arm { variant, binds, body });
+            }
+            Ok(Expr::Match {
+                scrut: Box::new(scrut),
+                arms,
             })
         }
         "sizeof" => {

@@ -125,6 +125,18 @@ pub enum Expr {
     SizeOf(Type),
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
+    /// Construct a sum-type variant. Produced by monomorphization from a call to
+    /// a variant name; `sum` is the concrete (post-mono) sum type name.
+    Construct {
+        sum: String,
+        variant: String,
+        args: Vec<Expr>,
+    },
+    /// Pattern match on a sum value: one arm per variant, binding its fields.
+    Match {
+        scrut: Box<Expr>,
+        arms: Vec<Arm>,
+    },
     /// The address of a named function/extern, as a function pointer value.
     FnPtrOf(String),
     /// Indirect call through a function pointer value.
@@ -172,10 +184,33 @@ pub struct StructDef {
     pub fields: Vec<(String, Type)>,
 }
 
+/// A match arm: a variant, names bound to its fields, and a body.
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub variant: String,
+    pub binds: Vec<String>,
+    pub body: Expr,
+}
+
+/// A sum type (tagged union): an ordered list of variants, each with fields.
+#[derive(Debug, Clone)]
+pub struct SumDef {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub variants: Vec<SumVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SumVariant {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub conventions: HashMap<String, Convention>,
     pub structs: Vec<StructDef>,
+    pub sums: Vec<SumDef>,
     pub externs: Vec<Extern>,
     pub funcs: Vec<Func>,
 }

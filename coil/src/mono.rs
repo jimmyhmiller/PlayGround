@@ -12,6 +12,14 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 
 pub fn monomorphize(program: Program) -> Result<Program, String> {
+    let mut variant_to_sum = HashMap::new();
+    for s in &program.sums {
+        for v in &s.variants {
+            if variant_to_sum.insert(v.name.clone(), s.name.clone()).is_some() {
+                return Err(format!("variant '{}' is declared in two sum types", v.name));
+            }
+        }
+    }
     let mut m = Mono {
         gfuncs: program
             .funcs
@@ -25,11 +33,21 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             .filter(|s| !s.type_params.is_empty())
             .map(|s| (s.name.clone(), s))
             .collect(),
+        gsums: program
+            .sums
+            .iter()
+            .filter(|s| !s.type_params.is_empty())
+            .map(|s| (s.name.clone(), s))
+            .collect(),
+        variant_to_sum,
         out_structs: HashMap::new(),
+        out_sums: HashMap::new(),
         out_funcs: HashMap::new(),
         pending_structs: Vec::new(),
+        pending_sums: Vec::new(),
         pending_funcs: Vec::new(),
         queued_structs: HashSet::new(),
+        queued_sums: HashSet::new(),
         queued_funcs: HashSet::new(),
     };
     let empty = HashMap::new();
@@ -50,6 +68,10 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             },
         );
     }
+    for sd in program.sums.iter().filter(|s| s.type_params.is_empty()) {
+        let sum = m.resolve_sum(sd, &empty, sd.name.clone())?;
+        m.out_sums.insert(sd.name.clone(), sum);
+    }
     for f in program.funcs.iter().filter(|f| f.type_params.is_empty()) {
         let nf = m.resolve_func(f, &empty, f.name.clone())?;
         m.out_funcs.insert(f.name.clone(), nf);
@@ -61,6 +83,7 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         conventions: program.conventions,
         externs: program.externs,
         structs: m.out_structs.into_values().collect(),
+        sums: m.out_sums.into_values().collect(),
         funcs: m.out_funcs.into_values().collect(),
     })
 }
@@ -70,11 +93,16 @@ type Subst = HashMap<String, Type>;
 struct Mono<'a> {
     gfuncs: HashMap<String, &'a Func>,
     gstructs: HashMap<String, &'a StructDef>,
+    gsums: HashMap<String, &'a SumDef>,
+    variant_to_sum: HashMap<String, String>,
     out_structs: HashMap<String, StructDef>,
+    out_sums: HashMap<String, SumDef>,
     out_funcs: HashMap<String, Func>,
     pending_structs: Vec<(String, Vec<Type>)>,
+    pending_sums: Vec<(String, Vec<Type>)>,
     pending_funcs: Vec<(String, Vec<Type>)>,
     queued_structs: HashSet<String>,
+    queued_sums: HashSet<String>,
     queued_funcs: HashSet<String>,
 }
 
@@ -100,6 +128,14 @@ impl<'a> Mono<'a> {
                 );
                 continue;
             }
+            if let Some((name, args)) = self.pending_sums.pop() {
+                let gs: &'a SumDef = self.gsums[&name];
+                let map = subst_map(&gs.type_params, &args);
+                let mangled = mangle(&name, &args);
+                let sum = self.resolve_sum(gs, &map, mangled.clone())?;
+                self.out_sums.insert(mangled, sum);
+                continue;
+            }
             if let Some((name, args)) = self.pending_funcs.pop() {
                 let gf: &'a Func = self.gfuncs[&name];
                 let map = subst_map(&gf.type_params, &args);
@@ -112,9 +148,37 @@ impl<'a> Mono<'a> {
         }
     }
 
+    fn resolve_sum(&mut self, s: &SumDef, map: &Subst, name: String) -> Result<SumDef, String> {
+        let variants = s
+            .variants
+            .iter()
+            .map(|v| {
+                Ok(SumVariant {
+                    name: v.name.clone(),
+                    fields: v
+                        .fields
+                        .iter()
+                        .map(|(n, t)| Ok((n.clone(), self.resolve_ty(t, map)?)))
+                        .collect::<Result<_, String>>()?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(SumDef {
+            name,
+            type_params: vec![],
+            variants,
+        })
+    }
+
     fn queue_struct(&mut self, name: String, args: Vec<Type>) {
         if self.queued_structs.insert(mangle(&name, &args)) {
             self.pending_structs.push((name, args));
+        }
+    }
+
+    fn queue_sum(&mut self, name: String, args: Vec<Type>) {
+        if self.queued_sums.insert(mangle(&name, &args)) {
+            self.pending_sums.push((name, args));
         }
     }
 
@@ -145,19 +209,26 @@ impl<'a> Mono<'a> {
                     .iter()
                     .map(|a| self.resolve_ty(a, map))
                     .collect::<Result<Vec<_>, _>>()?;
-                let gs = self
-                    .gstructs
-                    .get(name)
-                    .ok_or_else(|| format!("unknown generic type '{name}'"))?;
-                if gs.type_params.len() != rargs.len() {
-                    return Err(format!(
-                        "generic type '{name}' expects {} type arguments, got {}",
-                        gs.type_params.len(),
-                        rargs.len()
-                    ));
-                }
+                let arity = |n: usize| -> Result<(), String> {
+                    if n != rargs.len() {
+                        Err(format!(
+                            "generic type '{name}' expects {n} type arguments, got {}",
+                            rargs.len()
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                };
                 let mangled = mangle(name, &rargs);
-                self.queue_struct(name.clone(), rargs);
+                if let Some(gs) = self.gstructs.get(name).copied() {
+                    arity(gs.type_params.len())?;
+                    self.queue_struct(name.clone(), rargs);
+                } else if let Some(gs) = self.gsums.get(name).copied() {
+                    arity(gs.type_params.len())?;
+                    self.queue_sum(name.clone(), rargs);
+                } else {
+                    return Err(format!("unknown generic type '{name}'"));
+                }
                 Type::Struct(mangled)
             }
         })
@@ -220,7 +291,37 @@ impl<'a> Mono<'a> {
             },
             Expr::Call { func, type_args, args } => {
                 let args = args.iter().map(|a| go(self, a)).collect::<Result<Vec<_>, _>>()?;
-                if let Some(gf) = self.gfuncs.get(func).copied() {
+                if let Some(sum_name) = self.variant_to_sum.get(func).cloned() {
+                    // variant construction
+                    let concrete_sum = if let Some(gs) = self.gsums.get(&sum_name).copied() {
+                        if type_args.is_empty() {
+                            return Err(format!(
+                                "variant '{func}' of generic sum '{sum_name}' needs type arguments: ({func} [<types>] ...)"
+                            ));
+                        }
+                        let rtargs = type_args
+                            .iter()
+                            .map(|t| self.resolve_ty(t, map))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if rtargs.len() != gs.type_params.len() {
+                            return Err(format!(
+                                "sum '{sum_name}' expects {} type arguments, got {}",
+                                gs.type_params.len(),
+                                rtargs.len()
+                            ));
+                        }
+                        let mangled = mangle(&sum_name, &rtargs);
+                        self.queue_sum(sum_name.clone(), rtargs);
+                        mangled
+                    } else {
+                        sum_name.clone()
+                    };
+                    Expr::Construct {
+                        sum: concrete_sum,
+                        variant: func.clone(),
+                        args,
+                    }
+                } else if let Some(gf) = self.gfuncs.get(func).copied() {
                     if type_args.is_empty() {
                         return Err(format!(
                             "generic function '{func}' needs explicit type arguments: ({func} [<types>] ...)"
@@ -267,6 +368,24 @@ impl<'a> Mono<'a> {
             },
             Expr::SizeOf(ty) => Expr::SizeOf(self.resolve_ty(ty, map)?),
             Expr::Free(p) => Expr::Free(Box::new(go(self, p)?)),
+            Expr::Construct { sum, variant, args } => Expr::Construct {
+                sum: sum.clone(),
+                variant: variant.clone(),
+                args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
+            },
+            Expr::Match { scrut, arms } => Expr::Match {
+                scrut: Box::new(go(self, scrut)?),
+                arms: arms
+                    .iter()
+                    .map(|a| {
+                        Ok(Arm {
+                            variant: a.variant.clone(),
+                            binds: a.binds.clone(),
+                            body: go(self, &a.body)?,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?,
+            },
             Expr::FnPtrOf(name) => {
                 if self.gfuncs.contains_key(name) {
                     return Err(format!(
