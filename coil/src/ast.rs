@@ -133,11 +133,13 @@ pub enum Expr {
         ptr: Box<Expr>,
         idx: Box<Expr>,
     },
-    /// Integer width conversion (sign-extend / truncate).
+    /// Integer width conversion (sign-extend / truncate), or pointer reinterpret.
     Cast {
         ty: Type,
         expr: Box<Expr>,
     },
+    /// Size in bytes of a type's layout, as an i64 constant.
+    SizeOf(Type),
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
     /// The address of a named function/extern, as a function pointer value.

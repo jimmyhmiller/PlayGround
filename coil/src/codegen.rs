@@ -482,6 +482,13 @@ impl<'ctx> Cg<'ctx> {
                     other => Err(format!("codegen: cannot cast to {other:?}")),
                 }
             }
+            Expr::SizeOf(ty) => {
+                let sz = self
+                    .basic_ty(ty)
+                    .size_of()
+                    .ok_or_else(|| format!("codegen: type {ty:?} has no known size"))?;
+                Ok((sz.into(), Type::Int(64)))
+            }
             Expr::Free(p) => {
                 let (pv, _) = self.emit_expr(p, scope)?;
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;

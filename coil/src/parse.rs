@@ -429,6 +429,12 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 expr: Box::new(parse_expr(&args[1])?),
             })
         }
+        "sizeof" => {
+            if args.len() != 1 {
+                return Err("sizeof: expects (sizeof TYPE)".to_string());
+            }
+            Ok(Expr::SizeOf(parse_type(&args[0])?))
+        }
         // direct application: (fib n) == (call fib n)
         other => {
             let cargs = args.iter().map(parse_expr).collect::<Result<_, _>>()?;

@@ -352,6 +352,10 @@ fn synth(
                 )),
             }
         }
+        Expr::SizeOf(ty) => {
+            validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
+            Ok(Type::Int(64))
+        }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
             // heap or raw/foreign pointers can be freed (e.g. an allocator's
             // libc-backed memory). frame/static aren't freed (they'd crash).

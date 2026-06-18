@@ -28,6 +28,34 @@ fn arena_bumps_and_reuses_one_block() {
 }
 
 #[test]
+fn sizeof_computes_layout_sizes() {
+    // sizeof reflects real LLVM layout: i32=4, a 3xi64 struct=24, [14 x i8]=14.
+    let src = r#"
+        (defstruct V3 [(x :i64) (y :i64) (z :i64)])
+        (defn main [] (-> :i64)
+          (iadd (sizeof V3) (iadd (sizeof :i32) (sizeof (array i8 14)))))
+    "#;
+    assert_eq!(build_and_run(src), 42); // 24 + 4 + 14
+}
+
+#[test]
+fn alloc_one_sizes_with_sizeof() {
+    // The `alloc-one` macro allocates exactly sizeof(T) bytes via the allocator.
+    let src = r#"
+        (include "lib/alloc.coil")
+        (defstruct Pair [(a :i64) (b :i64)])
+        (defn main [] (-> :i64)
+          (let [al (malloc-allocator)
+                p  (alloc-one al Pair)]
+            (store! (field p a) 19) (store! (field p b) 23)
+            (let [s (iadd (load (field p a)) (load (field p b)))]
+              (free-bytes al (cast (ptr c i8) p))
+              s)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
 fn allocator_is_visible_in_the_signature() {
     // A function with no allocator parameter simply has no way to allocate
     // dynamically — the capability must be threaded in. (Here: it type-checks

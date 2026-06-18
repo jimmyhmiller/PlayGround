@@ -44,3 +44,7 @@
     (store! (field a free)  (fnptr-of ar-free))
     (store! (field a ctx)   (cast (ptr c i8) ar))
     a))
+
+; ---- convenience: allocate one value of a type (sized with sizeof) ----
+(defmacro alloc-one [a T]
+  `(cast (ptr c ~T) (alloc-bytes ~a (sizeof ~T))))
