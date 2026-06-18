@@ -68,6 +68,37 @@ can be O(1). The checker is a **symbolic executor** over the region: for a close
 program it tracks the exact live-node set and order, so every
 membership/liveness/disjointness obligation is decided by lookup.
 
+## Separation logic (`seplogic.py`) — "flavor 3", the most expressive option
+
+```
+python3 seplogic.py
+```
+
+A small, sound symbolic-execution verifier in the Smallfoot/VeriFast style — the
+*program-logic* end of the spectrum (strictly more expressive than the linear /
+region type systems, at the cost of discharging proof obligations). It
+demonstrates the defining ingredients of separation logic:
+
+- a symbolic **heap = a separating conjunction** of chunks: `p |-> {f: v}` (one
+  owned cell) and `pred(args)` (an inductive predicate instance);
+- the **frame rule**: an operation touches only its footprint, the rest is
+  carried through untouched — e.g. `dispose`'s recursive call consumes
+  `lseg(z, null)` while the head cell `x |-> {next: z}` is *framed* across it;
+- **inductive predicates** with `fold` / `unfold`
+  (`lseg(x,y) := (x=y & emp) \/ (x≠y & x|->{next:z} * lseg(z,y))`);
+- functions verified against `requires` / `ensures` **contracts**;
+- memory safety falls out: read/write/free need the points-to chunk, so
+  use-after-free / double-free are "no permission" errors and a leftover chunk
+  is a leak (the postcondition isn't established).
+
+It verifies `dispose` (recursively free a whole list) and `push` (prepend, using
+`fold` to re-establish the invariant) — **for lists of any length, modularly**,
+which the bounded symbolic checker (`tally_dll.py`) and the decidable type
+systems cannot do. And it rejects the buggy variants: forgetting to `free`
+(leak), double-free (no permission), and forgetting to `fold` (postcondition not
+established). Background and the expressiveness/automation trade-off:
+`../docs/08-prior-art-vale.md` and the discussion in the research notes.
+
 ## Status / roadmap
 
 - **v0 (`tally_poc.py`) — the L3 core, running.** Owned cells, the Addr/Perm
