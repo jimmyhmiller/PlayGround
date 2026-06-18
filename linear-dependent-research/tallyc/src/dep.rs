@@ -20,6 +20,15 @@
 //!
 //! `Type : Type` for now (fine for a language; for a logic, a universe hierarchy
 //! is needed — ../../docs/07-implementation-guide.md §7).
+//!
+//! Inductive families with DEPENDENT ELIMINATORS (the gate to Idris-like data):
+//! `Nat` (zero/suc + `natElim`) and the length-indexed `Vec A n` (nil/cons +
+//! `vecElim`). The eliminator is the only recursion, so functions written with
+//! it are TOTAL BY CONSTRUCTION (docs/09 §1.3). `add`/`append` are then
+//! *definitions*; `append`'s result index `add m n` type-checks because the
+//! eliminator makes `+` reduce definitionally. (These two families are
+//! hand-written; generalising to user-declared strictly-positive families is
+//! the next step — see the README.)
 
 use crate::mult::Mult;
 
@@ -42,6 +51,22 @@ pub enum Term {
     ///   P : Nat → Type,  z : P 0,  s : Π(k:Nat). P k → P (suc k)
     NatElim(Box<Term>, Box<Term>, Box<Term>, Box<Term>),
     Add(Box<Term>, Box<Term>),
+    // ---- Vec: a LENGTH-INDEXED inductive family (the headline dependent data) ----
+    VecTy(Box<Term>, Box<Term>),                  // Vec A n           : Type
+    Nil(Box<Term>),                               // nil A             : Vec A 0
+    Cons(Box<Term>, Box<Term>, Box<Term>, Box<Term>), // cons A n h t  : Vec A (suc n)
+    /// the dependent eliminator:  vecElim A P pnil pcons n xs : P n xs
+    ///   P     : Π(k:Nat). Vec A k → Type
+    ///   pnil  : P 0 (nil A)
+    ///   pcons : Π(k:Nat). Π(h:A). Π(t:Vec A k). P k t → P (suc k) (cons A k h t)
+    VecElim(
+        Box<Term>,
+        Box<Term>,
+        Box<Term>,
+        Box<Term>,
+        Box<Term>,
+        Box<Term>,
+    ),
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
     Ann(Box<Term>, Box<Term>),
@@ -57,6 +82,9 @@ pub enum Value {
     VNat,
     VNatLit(u64),
     VSuc(Box<Value>),                             // suc of a *neutral* Nat (open term)
+    VVecTy(Box<Value>, Box<Value>),               // Vec A n
+    VNil(Box<Value>),                             // nil A
+    VCons(Box<Value>, Box<Value>, Box<Value>, Box<Value>), // cons A n h t
     VEq(Box<Value>, Box<Value>, Box<Value>),
     VRefl(Box<Value>),
     VNeu(Neutral),
@@ -71,6 +99,15 @@ pub enum Neutral {
     NSnd(Box<Neutral>),
     /// natElim stuck on a neutral scrutinee: P, z, s, and the stuck Nat.
     NNatElim(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
+    /// vecElim stuck on a neutral scrutinee: A, P, pnil, pcons, n, and the stuck Vec.
+    NVecElim(
+        Box<Value>,
+        Box<Value>,
+        Box<Value>,
+        Box<Value>,
+        Box<Value>,
+        Box<Neutral>,
+    ),
 }
 
 #[derive(Clone)]
@@ -117,6 +154,22 @@ fn eval(env: &[Value], t: &Term) -> Value {
         Term::NatElim(p, z, s, scrut) => {
             vnatelim(eval(env, p), eval(env, z), eval(env, s), eval(env, scrut))
         }
+        Term::VecTy(a, n) => Value::VVecTy(Box::new(eval(env, a)), Box::new(eval(env, n))),
+        Term::Nil(a) => Value::VNil(Box::new(eval(env, a))),
+        Term::Cons(a, n, h, t) => Value::VCons(
+            Box::new(eval(env, a)),
+            Box::new(eval(env, n)),
+            Box::new(eval(env, h)),
+            Box::new(eval(env, t)),
+        ),
+        Term::VecElim(a, p, pn, pc, n, xs) => vvecelim(
+            eval(env, a),
+            eval(env, p),
+            eval(env, pn),
+            eval(env, pc),
+            eval(env, n),
+            eval(env, xs),
+        ),
         Term::Add(a, b) => match (eval(env, a), eval(env, b)) {
             (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
             (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
@@ -172,6 +225,29 @@ fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
     }
 }
 
+/// The ι-rule for `vecElim A P pnil pcons n xs`:
+///   vecElim _ _ pnil _     0       (nil _)        = pnil
+///   vecElim A P pnil pcons (suc m) (cons _ m h t) = pcons m h t (vecElim A P pnil pcons m t)
+/// stuck when `xs` is neutral.
+fn vvecelim(va: Value, vp: Value, vpn: Value, vpc: Value, vn: Value, vxs: Value) -> Value {
+    match vxs {
+        Value::VNil(_) => vpn,
+        Value::VCons(_, m, h, t) => {
+            let rec = vvecelim(va, vp, vpn.clone(), vpc.clone(), (*m).clone(), (*t).clone());
+            vapp(vapp(vapp(vapp(vpc, *m), *h), *t), rec)
+        }
+        Value::VNeu(nu) => Value::VNeu(Neutral::NVecElim(
+            Box::new(va),
+            Box::new(vp),
+            Box::new(vpn),
+            Box::new(vpc),
+            Box::new(vn),
+            Box::new(nu),
+        )),
+        _ => unreachable!("vecElim on a non-Vec (ill-typed term reached eval)"),
+    }
+}
+
 fn vfst(p: Value) -> Value {
     match p {
         Value::VPair(a, _) => *a,
@@ -208,6 +284,14 @@ fn quote(lvl: usize, v: &Value) -> Term {
         Value::VNat => Term::Nat,
         Value::VNatLit(n) => Term::NatLit(*n),
         Value::VSuc(k) => Term::Suc(Box::new(quote(lvl, k))),
+        Value::VVecTy(a, n) => Term::VecTy(Box::new(quote(lvl, a)), Box::new(quote(lvl, n))),
+        Value::VNil(a) => Term::Nil(Box::new(quote(lvl, a))),
+        Value::VCons(a, n, h, t) => Term::Cons(
+            Box::new(quote(lvl, a)),
+            Box::new(quote(lvl, n)),
+            Box::new(quote(lvl, h)),
+            Box::new(quote(lvl, t)),
+        ),
         Value::VEq(a, x, y) => Term::Eq(
             Box::new(quote(lvl, a)),
             Box::new(quote(lvl, x)),
@@ -229,6 +313,14 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
             Box::new(quote(lvl, p)),
             Box::new(quote(lvl, z)),
             Box::new(quote(lvl, s)),
+            Box::new(quote_neu(lvl, scrut)),
+        ),
+        Neutral::NVecElim(a, p, pn, pc, n, scrut) => Term::VecElim(
+            Box::new(quote(lvl, a)),
+            Box::new(quote(lvl, p)),
+            Box::new(quote(lvl, pn)),
+            Box::new(quote(lvl, pc)),
+            Box::new(quote(lvl, n)),
             Box::new(quote_neu(lvl, scrut)),
         ),
     }
@@ -268,6 +360,24 @@ fn shift(d: usize, cutoff: usize, t: &Term) -> Term {
             Box::new(shift(d, cutoff, z)),
             Box::new(shift(d, cutoff, s)),
             Box::new(shift(d, cutoff, scrut)),
+        ),
+        Term::VecTy(a, n) => {
+            Term::VecTy(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, n)))
+        }
+        Term::Nil(a) => Term::Nil(Box::new(shift(d, cutoff, a))),
+        Term::Cons(a, n, h, t) => Term::Cons(
+            Box::new(shift(d, cutoff, a)),
+            Box::new(shift(d, cutoff, n)),
+            Box::new(shift(d, cutoff, h)),
+            Box::new(shift(d, cutoff, t)),
+        ),
+        Term::VecElim(a, p, pn, pc, n, xs) => Term::VecElim(
+            Box::new(shift(d, cutoff, a)),
+            Box::new(shift(d, cutoff, p)),
+            Box::new(shift(d, cutoff, pn)),
+            Box::new(shift(d, cutoff, pc)),
+            Box::new(shift(d, cutoff, n)),
+            Box::new(shift(d, cutoff, xs)),
         ),
         Term::Add(a, b) => Term::Add(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, b))),
         Term::Eq(a, x, y) => Term::Eq(
@@ -443,6 +553,124 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let u = uadd(
                 &uscale(Mult::Omega, &uz),
                 &uadd(&uscale(Mult::Omega, &us), &uscale(Mult::Omega, &uscr)),
+            );
+            Ok((result, u))
+        }
+        Term::VecTy(a, len) => {
+            check_type(ctx, a)?; // A : Type
+            check(ctx, len, &Value::VNat)?; // n : Nat   (the index, 0-fragment)
+            Ok((Value::VType, uzero(n)))
+        }
+        Term::Nil(a) => {
+            check_type(ctx, a)?; // A : Type (the element type is a parameter)
+            let va = eval(&ctx.env(), a);
+            // nil A : Vec A 0
+            Ok((
+                Value::VVecTy(Box::new(va), Box::new(Value::VNatLit(0))),
+                uzero(n),
+            ))
+        }
+        Term::Cons(a, len, h, t) => {
+            check_type(ctx, a)?;
+            check(ctx, len, &Value::VNat)?; // the index is erased
+            let va = eval(&ctx.env(), a);
+            let vlen = eval(&ctx.env(), len);
+            let uh = check(ctx, h, &va)?; // head : A
+            let ut = check(ctx, t, &Value::VVecTy(Box::new(va.clone()), Box::new(vlen.clone())))?;
+            // cons A n h t : Vec A (suc n)
+            Ok((
+                Value::VVecTy(Box::new(va), Box::new(vsuc(vlen))),
+                uadd(&uh, &ut),
+            ))
+        }
+        Term::VecElim(a, p, pn, pc, len, xs) => {
+            check_type(ctx, a)?; // A : Type (a parameter, 0-fragment)
+            let va = eval(&ctx.env(), a);
+            let a_tm = quote(n, &va);
+
+            // P : Π[ω](k:Nat). Π[ω](_:Vec A k). Type
+            let motive_ty_tm = Term::Pi(
+                Mult::Omega,
+                Box::new(Term::Nat),
+                Box::new(Term::Pi(
+                    Mult::Omega,
+                    Box::new(Term::VecTy(Box::new(shift(1, 0, &a_tm)), Box::new(Term::Var(0)))),
+                    Box::new(Term::Type),
+                )),
+            );
+            let motive_ty = eval(&ctx.env(), &motive_ty_tm);
+            check(ctx, p, &motive_ty)?; // motive: 0-fragment, usage discarded
+            let vp = eval(&ctx.env(), p);
+            let p_tm = quote(n, &vp);
+
+            // pnil : P 0 (nil A)
+            let pnil_ty = vapp(
+                vapp(vp.clone(), Value::VNatLit(0)),
+                Value::VNil(Box::new(va.clone())),
+            );
+            let upn = check(ctx, pn, &pnil_ty)?;
+
+            // pcons : Π[ω](k:Nat). Π[ω](h:A). Π[ω](t:Vec A k). Π[ω](_:P k t).
+            //         P (suc k) (cons A k h t)
+            // binders, outside→in: k, h, t, ih   (so k=Var(3), h=Var(2), t=Var(1), ih=Var(0)
+            // at the deepest point).
+            let pcons_ty_tm = Term::Pi(
+                Mult::Omega,
+                Box::new(Term::Nat), // k
+                Box::new(Term::Pi(
+                    Mult::Omega,
+                    Box::new(shift(1, 0, &a_tm)), // h : A
+                    Box::new(Term::Pi(
+                        Mult::Omega,
+                        // t : Vec A k        (k = Var(1) under {k,h})
+                        Box::new(Term::VecTy(
+                            Box::new(shift(2, 0, &a_tm)),
+                            Box::new(Term::Var(1)),
+                        )),
+                        Box::new(Term::Pi(
+                            Mult::Omega,
+                            // ih : P k t      (k = Var(2), t = Var(0) under {k,h,t})
+                            Box::new(Term::App(
+                                Box::new(Term::App(
+                                    Box::new(shift(3, 0, &p_tm)),
+                                    Box::new(Term::Var(2)),
+                                )),
+                                Box::new(Term::Var(0)),
+                            )),
+                            // result: P (suc k) (cons A k h t)
+                            // under {k,h,t,ih}: k=Var(3), h=Var(2), t=Var(1)
+                            Box::new(Term::App(
+                                Box::new(Term::App(
+                                    Box::new(shift(4, 0, &p_tm)),
+                                    Box::new(Term::Suc(Box::new(Term::Var(3)))),
+                                )),
+                                Box::new(Term::Cons(
+                                    Box::new(shift(4, 0, &a_tm)),
+                                    Box::new(Term::Var(3)),
+                                    Box::new(Term::Var(2)),
+                                    Box::new(Term::Var(1)),
+                                )),
+                            )),
+                        )),
+                    )),
+                )),
+            );
+            let pcons_ty = eval(&ctx.env(), &pcons_ty_tm);
+            let upc = check(ctx, pc, &pcons_ty)?;
+
+            // n : Nat (the length index — erased, 0-fragment)
+            check(ctx, len, &Value::VNat)?;
+            let vlen = eval(&ctx.env(), len);
+
+            // xs : Vec A n
+            let uxs = check(ctx, xs, &Value::VVecTy(Box::new(va), Box::new(vlen.clone())))?;
+            let vxs = eval(&ctx.env(), xs);
+
+            // result type: P n xs
+            let result = vapp(vapp(vp, vlen), vxs);
+            let u = uadd(
+                &uscale(Mult::Omega, &upn),
+                &uadd(&uscale(Mult::Omega, &upc), &uscale(Mult::Omega, &uxs)),
             );
             Ok((result, u))
         }
@@ -638,6 +866,85 @@ mod tests {
             b(NatLit(2)),
         );
         assert!(infer_closed(&bad).is_err());
+    }
+
+    // `add m n` INLINED as an eliminator (recursing on m), so 0+n≡n and
+    // (suc k)+n≡suc(k+n) hold DEFINITIONALLY — which is what lets `append`
+    // below type-check against the index `add m n`.
+    fn add_tm(m: Term, n: Term) -> Term {
+        NatElim(b(Lam(b(Nat))), b(n), b(Lam(b(Lam(b(Suc(b(Var(0)))))))), b(m))
+    }
+
+    // a concrete vector  cons … : Vec Nat len
+    fn cons(n: u64, h: u64, t: Term) -> Term {
+        Cons(b(Nat), b(NatLit(n)), b(NatLit(h)), b(t))
+    }
+
+    #[test]
+    fn vectors_are_length_indexed() {
+        // [10,20,30] : Vec Nat 3
+        let v3 = cons(2, 10, cons(1, 20, cons(0, 30, Nil(b(Nat)))));
+        assert!(check_closed(&v3, &VecTy(b(Nat), b(NatLit(3)))).is_ok());
+        // the SAME term is rejected at Vec Nat 2 — the length is in the type
+        assert!(check_closed(&v3, &VecTy(b(Nat), b(NatLit(2)))).is_err());
+        // a cons whose tail length disagrees with the index is rejected
+        let bad = Cons(b(Nat), b(NatLit(5)), b(NatLit(0)), b(Nil(b(Nat)))); // claims tail len 5, is 0
+        assert!(check_closed(&bad, &VecTy(b(Nat), b(NatLit(6)))).is_err());
+    }
+
+    #[test]
+    fn append_tracks_length_in_the_type_and_computes() {
+        // append : Π[0](A:Type). Π[0](m:Nat). Π[0](n:Nat).
+        //          Π[ω](xs:Vec A m). Π[ω](ys:Vec A n). Vec A (add m n)
+        let result = VecTy(b(Var(4)), b(add_tm(Var(3), Var(2)))); // Vec A (add m n)
+        let p5 = Pi(Omega, b(VecTy(b(Var(3)), b(Var(1)))), b(result)); // ys : Vec A n
+        let p4 = Pi(Omega, b(VecTy(b(Var(2)), b(Var(1)))), b(p5)); // xs : Vec A m
+        let p3 = Pi(Zero, b(Nat), b(p4)); // n
+        let p2 = Pi(Zero, b(Nat), b(p3)); // m
+        let append_ty = Pi(Zero, b(Type), b(p2)); // A
+        // append = λA.λm.λn.λxs.λys. vecElim A P ys pcons m xs
+        //   P     = λk.λ_. Vec A (add k n)
+        //   pcons = λk.λh.λt.λrec. cons A (add k n) h rec
+        let motive = Lam(b(Lam(b(VecTy(b(Var(6)), b(add_tm(Var(1), Var(4))))))));
+        let pcons = Lam(b(Lam(b(Lam(b(Lam(b(Cons(
+            b(Var(8)),
+            b(add_tm(Var(3), Var(6))),
+            b(Var(2)),
+            b(Var(0)),
+        )))))))));
+        let append = Lam(b(Lam(b(Lam(b(Lam(b(Lam(b(VecElim(
+            b(Var(4)),   // A
+            b(motive),
+            b(Var(0)),   // pnil = ys
+            b(pcons),
+            b(Var(3)),   // length = m
+            b(Var(1)),   // scrutinee = xs
+        )))))))))));
+
+        assert!(
+            check_closed(&append, &append_ty).is_ok(),
+            "{:?}",
+            check_closed(&append, &append_ty)
+        );
+
+        // append Nat 2 1 [10,20] [30]  ↝  [10,20,30]  : Vec Nat 3
+        let xs = cons(1, 10, cons(0, 20, Nil(b(Nat))));
+        let ys = cons(0, 30, Nil(b(Nat)));
+        let app = App(
+            b(App(
+                b(App(
+                    b(App(b(App(b(Ann(b(append), b(append_ty))), b(Nat))), b(NatLit(2)))),
+                    b(NatLit(1)),
+                )),
+                b(xs),
+            )),
+            b(ys),
+        );
+        // the type carries the summed length: Vec Nat (add 2 1) = Vec Nat 3
+        assert_eq!(infer_closed(&app), Ok(VecTy(b(Nat), b(NatLit(3)))));
+        // and it actually concatenates, by the eliminator's ι-rules
+        let expected = cons(2, 10, cons(1, 20, cons(0, 30, Nil(b(Nat)))));
+        assert_eq!(normalize_closed(&app), expected);
     }
 
     #[test]

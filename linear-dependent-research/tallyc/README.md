@@ -76,16 +76,42 @@ that user-defined computation:
 refl : Eq Nat (add 2 3) 5        -- checks, via natElim's own reduction
 ```
 
-`cargo test`: 12 tests (incl. `polymorphic_linear_identity`,
-`linearity_is_enforced_under_dependency`, `natelim_is_a_total_recursor`,
-`proof_by_user_defined_computation`).
+**Length-indexed vectors (a dependent family), like Idris.** `Vec A n` is in
+the core with `nil`/`cons` and the **dependent eliminator** `vecElim`:
 
-Standalone for now (its own `Term` syntax). `Nat`+`natElim` is the template;
-remaining Route-B steps: **(1)** **general inductive families** — generalise
-the hardcoded `natElim` to *any* strictly-positive family with an eliminator
-*typed from its constructors*, so `Vec n`/`Fin n`/`lseg` become user
-declarations (this is the gate to everything Idris-like, and what makes the
-totality story general); **(2)** a surface parser for the dependent syntax;
+```
+vecElim A P pnil pcons n xs : P n xs
+  P     : Π(k:Nat). Vec A k → Type
+  pnil  : P 0 (nil A)
+  pcons : Π(k:Nat). Π(h:A). Π(t:Vec A k). P k t → P (suc k) (cons A k h t)
+```
+
+`append : Π[0](A). Π[0](m). Π[0](n). Vec A m → Vec A n → Vec A (add m n)` is
+*defined* by `vecElim` and **the length is tracked in the type**:
+
+```
+append Nat 2 1 [10,20] [30]  :  Vec Nat 3       -- the index add 2 1 ↝ 3
+                             ↝  [10,20,30]       -- and it computes
+```
+
+This only type-checks because `add` (itself defined by `natElim`) makes
+`0 + n ≡ n` and `(suc k) + n ≡ suc (k + n)` hold **definitionally** — the
+dependent + total story paying off. (`A`, `m`, `n` are `Π[0]` = erased indices;
+the vectors are `Π[ω]`.)
+
+`cargo test`: 14 tests (incl. `polymorphic_linear_identity`,
+`linearity_is_enforced_under_dependency`, `natelim_is_a_total_recursor`,
+`proof_by_user_defined_computation`, `vectors_are_length_indexed`,
+`append_tracks_length_in_the_type_and_computes`).
+
+Standalone for now (its own `Term` syntax). `Nat`/`Vec` + their eliminators are
+the hand-written template; remaining Route-B steps: **(1)** **general inductive
+families** — generalise the hardcoded `natElim`/`vecElim` to *any*
+strictly-positive family with an eliminator *typed from its constructors* (a
+signature threaded through NbE), so `Fin n`/`lseg`/`List` and `Nat`/`Vec`
+themselves become user declarations rather than built-ins (this completes the
+gate to everything Idris-like, and makes the totality story general); **(2)** a
+surface parser for the dependent syntax;
 **(3)** merge with the low-level layer so `Own`/`Vec<n>` are definitions in the
 calculus and capabilities are **indexed by propositions** (so proofs constrain
 the memory operations); **(4)** a universe hierarchy for logical consistency
