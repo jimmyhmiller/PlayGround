@@ -9,6 +9,7 @@ pub mod check;
 pub mod codegen;
 pub mod convention;
 pub mod macros;
+pub mod mono;
 pub mod parse;
 pub mod reader;
 
@@ -52,10 +53,10 @@ fn host_target() -> macros::TargetInfo {
     }
 }
 
-/// The shared front end: read → expand → parse → check → LLVM module.
+/// The shared front end: read → expand → parse → monomorphize → check → module.
 fn build_module<'ctx>(ctx: &'ctx Context, src: &str) -> Result<Module<'ctx>, String> {
     let forms = read_and_expand(src)?;
-    let program = parse::parse_program(&forms)?;
+    let program = mono::monomorphize(parse::parse_program(&forms)?)?;
     check::check(&program)?;
     codegen::compile(ctx, &program)
 }
@@ -129,6 +130,6 @@ pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
 /// program is to AOT-compile it.)
 pub fn check_source(src: &str) -> Result<(), String> {
     let forms = read_and_expand(src)?;
-    let program = parse::parse_program(&forms)?;
+    let program = mono::monomorphize(parse::parse_program(&forms)?)?;
     check::check(&program)
 }

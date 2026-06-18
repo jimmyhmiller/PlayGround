@@ -75,11 +75,11 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         }
     }
 
-    // 0. build struct types, in definition order (by-value fields must refer to
-    //    earlier structs; self/forward references via pointers are fine).
+    // 0. build struct types in two phases (opaque names first, then bodies) so
+    //    definition order doesn't matter — monomorphization emits structs in an
+    //    arbitrary order.
     for sd in &program.structs {
-        let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
-        let ty = ctx.struct_type(&field_types, false);
+        let ty = ctx.opaque_struct_type(&sd.name);
         cg.structs.insert(
             sd.name.clone(),
             StructInfo {
@@ -87,6 +87,11 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
                 ty,
             },
         );
+    }
+    for sd in &program.structs {
+        let ty = cg.structs[&sd.name].ty;
+        let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
+        ty.set_body(&field_types, false);
     }
 
     // 1a. declare externs (foreign symbols resolved at link time).
@@ -182,6 +187,7 @@ impl<'ctx> Cg<'ctx> {
             Type::Struct(name) => self.structs[name].ty.into(),
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
+            Type::App(..) => unreachable!("generic type survived monomorphization"),
         }
     }
 
@@ -356,7 +362,7 @@ impl<'ctx> Cg<'ctx> {
                 Ok(last)
             }
             Expr::If { cond, then, els } => self.emit_if(cond, then, els, scope),
-            Expr::Call { func, args } => {
+            Expr::Call { func, args, .. } => {
                 let argtv: Vec<Tv<'ctx>> = args
                     .iter()
                     .map(|a| self.emit_expr(a, scope))

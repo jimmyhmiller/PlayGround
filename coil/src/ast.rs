@@ -19,6 +19,9 @@ pub enum Type {
     Array(Box<Type>, u32),
     /// A function pointer: calling convention, parameter types, return type.
     Fn(String, Vec<Type>, Box<Type>),
+    /// A generic type application, e.g. `(Pair i64 i64)` -> `App("Pair", [i64,i64])`.
+    /// Removed by monomorphization before the checker runs.
+    App(String, Vec<Type>),
 }
 
 impl Type {
@@ -85,6 +88,9 @@ pub enum Expr {
     Do(Vec<Expr>),
     Call {
         func: String,
+        /// Explicit type arguments for a generic call: `(id [i64] 5)`. Empty for
+        /// ordinary calls.
+        type_args: Vec<Type>,
         args: Vec<Expr>,
     },
     /// Allocate one value of `ty` using `storage`, yielding `(ptr ty)`.
@@ -137,6 +143,8 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
+    /// Generic type parameters (empty for an ordinary function).
+    pub type_params: Vec<String>,
     /// Name of the calling convention this function uses.
     pub cc: String,
     pub params: Vec<Param>,
@@ -159,6 +167,8 @@ pub struct Extern {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    /// Generic type parameters (empty for an ordinary struct).
+    pub type_params: Vec<String>,
     pub fields: Vec<(String, Type)>,
 }
 

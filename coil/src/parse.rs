@@ -46,7 +46,10 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
 
 fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
-    let fields_v = match rest.get(1) {
+    // optional generic params: a vector immediately followed by the field vector.
+    let mut i = 1;
+    let type_params = parse_type_params(rest, &mut i)?;
+    let fields_v = match rest.get(i) {
         Some(Sexp::Vector(v)) => v,
         _ => return Err(format!("defstruct '{name}': expected a field vector")),
     };
@@ -57,7 +60,23 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
         let fty = parse_type(fl.get(1).ok_or("field missing type")?)?;
         fields.push((fname, fty));
     }
-    Ok(StructDef { name, fields })
+    Ok(StructDef {
+        name,
+        type_params,
+        fields,
+    })
+}
+
+/// If `rest[i]` is a vector immediately followed by another vector, the first is
+/// a generic type-parameter list (bare symbols); consume it and advance `i`.
+fn parse_type_params(rest: &[Sexp], i: &mut usize) -> Result<Vec<String>, String> {
+    if let (Some(Sexp::Vector(tp)), Some(Sexp::Vector(_))) = (rest.get(*i), rest.get(*i + 1)) {
+        let params = tp.iter().map(|s| sym(s, "type parameter")).collect::<Result<_, _>>()?;
+        *i += 1;
+        Ok(params)
+    } else {
+        Ok(vec![])
+    }
 }
 
 fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
@@ -175,6 +194,9 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
         }
     }
 
+    // optional generic params: a vector immediately followed by the param vector.
+    let type_params = parse_type_params(rest, &mut i)?;
+
     // params vector
     let params_v = match rest.get(i) {
         Some(Sexp::Vector(v)) => v,
@@ -211,6 +233,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
 
     Ok(Func {
         name,
+        type_params,
         cc,
         params,
         ret,
@@ -258,7 +281,11 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
                 let ret = parse_type(items.get(3).ok_or("fnptr type: missing return type")?)?;
                 Ok(Type::Fn(cc, params, Box::new(ret)))
             }
-            other => Err(format!("unsupported type form '{other}'")),
+            // (Name TARG...) -> a generic type application, e.g. (Pair i64 i64).
+            other => {
+                let args = items[1..].iter().map(parse_type).collect::<Result<_, _>>()?;
+                Ok(Type::App(other.to_string(), args))
+            }
         },
         other => Err(format!("unsupported type: {other:?}")),
     }
@@ -365,7 +392,11 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 .iter()
                 .map(parse_expr)
                 .collect::<Result<_, _>>()?;
-            Ok(Expr::Call { func: f, args: cargs })
+            Ok(Expr::Call {
+                func: f,
+                type_args: vec![],
+                args: cargs,
+            })
         }
         "alloc-stack" => alloc_form(args, Storage::Stack),
         "alloc-static" => alloc_form(args, Storage::Static),
@@ -433,11 +464,19 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             }
             Ok(Expr::SizeOf(parse_type(&args[0])?))
         }
-        // direct application: (fib n) == (call fib n)
+        // direct application: (fib n) == (call fib n). A leading vector is an
+        // explicit type-argument list for a generic call: (id [i64] 5).
         other => {
-            let cargs = args.iter().map(parse_expr).collect::<Result<_, _>>()?;
+            let (type_args, value_args): (Vec<Type>, &[Sexp]) = match args.first() {
+                Some(Sexp::Vector(tv)) => {
+                    (tv.iter().map(parse_type).collect::<Result<_, _>>()?, &args[1..])
+                }
+                _ => (vec![], args),
+            };
+            let cargs = value_args.iter().map(parse_expr).collect::<Result<_, _>>()?;
             Ok(Expr::Call {
                 func: other.to_string(),
+                type_args,
                 args: cargs,
             })
         }

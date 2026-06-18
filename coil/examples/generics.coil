@@ -1,0 +1,17 @@
+; Generics via monomorphization. Type arguments are explicit: `[i64]` on a call,
+; `(Pair i64 i64)` in a type. The compiler stamps out a concrete copy per
+; instantiation (id__i64, Pair__i64__i64, ...) — see `coil emit-ir`.
+;   coil run examples/generics.coil; echo $?   => 42
+
+(defn id [T] [(x T)] (-> T) x)            ; generic function
+
+(defstruct Pair [A B] [(fst A) (snd B)])  ; generic struct
+
+(defn pair-sum [T] [(p (ptr (Pair T T)))] (-> T)   ; generic over a generic struct
+  (iadd (load (field p fst)) (load (field p snd))))
+
+(defn main [] (-> :i64)
+  (let [p (alloc-stack (Pair i64 i64))]
+    (store! (field p fst) (id [i64] 40))
+    (store! (field p snd) 2)
+    (pair-sum [i64] p)))

@@ -164,6 +164,7 @@ fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Re
             }
             validate_type(ret, structs)
         }
+        Type::App(name, _) => Err(format!("internal: unresolved generic type '{name}'")),
     }
 }
 
@@ -228,7 +229,7 @@ fn synth(
             *env = saved; // bindings are lexical
             Ok(last)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             let sig = cx
                 .sigs
                 .get(func)
@@ -426,6 +427,10 @@ fn ty_str(t: &Type) -> String {
         Type::Fn(cc, params, ret) => {
             let ps: Vec<String> = params.iter().map(ty_str).collect();
             format!("(fnptr {cc} [{}] {})", ps.join(" "), ty_str(ret))
+        }
+        Type::App(name, args) => {
+            let a: Vec<String> = args.iter().map(ty_str).collect();
+            format!("({name} {})", a.join(" "))
         }
     }
 }
