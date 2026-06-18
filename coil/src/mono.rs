@@ -367,6 +367,15 @@ impl<'a> Mono<'a> {
                 ptr: Box::new(go(self, ptr)?),
                 field: field.clone(),
             },
+            Expr::BitGet { ptr, field } => Expr::BitGet {
+                ptr: Box::new(go(self, ptr)?),
+                field: field.clone(),
+            },
+            Expr::BitSet { ptr, field, val } => Expr::BitSet {
+                ptr: Box::new(go(self, ptr)?),
+                field: field.clone(),
+                val: Box::new(go(self, val)?),
+            },
             Expr::Load(p) => Expr::Load(Box::new(go(self, p)?)),
             Expr::Store { ptr, val } => Expr::Store {
                 ptr: Box::new(go(self, ptr)?),

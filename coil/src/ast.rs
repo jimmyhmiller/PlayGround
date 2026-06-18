@@ -132,6 +132,17 @@ pub enum Expr {
     AlignOf(Type),
     /// Byte offset of a field within a struct, as an i64 constant.
     OffsetOf(Type, String),
+    /// Read a bitfield by value (yields the field's `uN` type).
+    BitGet {
+        ptr: Box<Expr>,
+        field: String,
+    },
+    /// Write a bitfield (read-modify-write the backing integer).
+    BitSet {
+        ptr: Box<Expr>,
+        field: String,
+        val: Box<Expr>,
+    },
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
     /// Construct a sum-type variant. Produced by monomorphization from a call to
@@ -196,6 +207,17 @@ pub enum Layout {
     /// Total control: each field placed at an explicit byte offset (parallel to
     /// the field list). Realized as a byte blob; overlapping offsets = a union.
     Explicit(ExplicitLayout),
+    /// Bitfields: every field is a sub-byte run of bits packed (LSB-first) into a
+    /// single backing integer. Fields are accessed by value via `get`/`set!`.
+    Bits(BitsLayout),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitsLayout {
+    /// Backing integer width in bits.
+    pub backing: u32,
+    /// Starting bit offset of each field, parallel to `StructDef.fields`.
+    pub offsets: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

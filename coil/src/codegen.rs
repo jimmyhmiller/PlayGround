@@ -162,6 +162,10 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
                 let size = e.size.map_or(computed, |s| s.max(computed));
                 ty.set_body(&[ctx.i8_type().array_type(size as u32).into()], true);
             }
+            // bit structs are an integer; give the placeholder type a body anyway.
+            Layout::Bits(b) => {
+                ty.set_body(&[ctx.custom_width_int_type(b.backing).into()], false);
+            }
             other => {
                 let field_types: Vec<BasicTypeEnum> =
                     sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
@@ -279,13 +283,19 @@ impl<'ctx> Cg<'ctx> {
         match t {
             Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
-            Type::Struct(name) => self
-                .structs
-                .get(name)
-                .map(|s| s.ty)
-                .or_else(|| self.sums.get(name).map(|s| s.ty))
-                .unwrap_or_else(|| panic!("unknown nominal type '{name}'"))
-                .into(),
+            Type::Struct(name) => {
+                if let Some(s) = self.structs.get(name) {
+                    // a :layout bits struct is represented by its backing integer.
+                    if let Layout::Bits(b) = &s.layout {
+                        return self.ctx.custom_width_int_type(b.backing).into();
+                    }
+                    s.ty.into()
+                } else if let Some(s) = self.sums.get(name) {
+                    s.ty.into()
+                } else {
+                    panic!("unknown nominal type '{name}'")
+                }
+            }
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
@@ -535,6 +545,59 @@ impl<'ctx> Cg<'ctx> {
                         .map_err(le)?,
                 };
                 Ok((gep.into(), Type::Ptr(Box::new(fty))))
+            }
+            Expr::BitGet { ptr, field } => {
+                let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
+                let backing_ty = self.ctx.custom_width_int_type(backing);
+                let loaded = self
+                    .builder
+                    .build_load(backing_ty, pv, "bits")
+                    .map_err(le)?
+                    .into_int_value();
+                let shifted = if off > 0 {
+                    self.builder
+                        .build_right_shift(loaded, backing_ty.const_int(off as u64, false), false, "shr")
+                        .map_err(le)?
+                } else {
+                    loaded
+                };
+                let field_ty = self.ctx.custom_width_int_type(width);
+                let res = if width < backing {
+                    self.builder.build_int_truncate(shifted, field_ty, "bget").map_err(le)?
+                } else {
+                    shifted
+                };
+                Ok((res.into(), Type::Int(width, false)))
+            }
+            Expr::BitSet { ptr, field, val } => {
+                let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
+                let (vv, _) = self.emit_expr(val, scope)?;
+                let backing_ty = self.ctx.custom_width_int_type(backing);
+                let loaded = self
+                    .builder
+                    .build_load(backing_ty, pv, "bits")
+                    .map_err(le)?
+                    .into_int_value();
+                // clear the field's bits, then OR in the (shifted) new value.
+                let field_mask = (((1u128 << width) - 1) << off) as u64;
+                let clear = backing_ty.const_int(!field_mask, false);
+                let cleared = self.builder.build_and(loaded, clear, "clear").map_err(le)?;
+                let v = vv.into_int_value();
+                let vext = if width < backing {
+                    self.builder.build_int_z_extend(v, backing_ty, "vext").map_err(le)?
+                } else {
+                    v
+                };
+                let vshift = if off > 0 {
+                    self.builder
+                        .build_left_shift(vext, backing_ty.const_int(off as u64, false), "vshl")
+                        .map_err(le)?
+                } else {
+                    vext
+                };
+                let newval = self.builder.build_or(cleared, vshift, "set").map_err(le)?;
+                self.builder.build_store(pv, newval).map_err(le)?;
+                Ok((vv, Type::Int(width, false)))
             }
             Expr::Load(p) => {
                 let (pv, pt) = self.emit_expr(p, scope)?;
@@ -822,6 +885,42 @@ impl<'ctx> Cg<'ctx> {
             }
         };
         Ok((ptr.into(), Type::Ptr(Box::new(ty.clone()))))
+    }
+
+    /// Resolve a bitfield access to (struct pointer, bit offset, field width,
+    /// backing width).
+    fn bit_access(
+        &self,
+        ptr: &Expr,
+        field: &str,
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<(inkwell::values::PointerValue<'ctx>, u32, u32, u32), String> {
+        let (pv, pt) = self.emit_expr(ptr, scope)?;
+        let sname = match pt {
+            Type::Ptr(p) => match *p {
+                Type::Struct(s) => s,
+                other => return Err(format!("codegen: bit access on (ptr {other:?})")),
+            },
+            other => return Err(format!("codegen: bit access on {other:?}")),
+        };
+        let info = self
+            .structs
+            .get(&sname)
+            .ok_or_else(|| format!("codegen: unknown struct '{sname}'"))?;
+        let b = match &info.layout {
+            Layout::Bits(b) => b,
+            _ => return Err(format!("codegen: '{sname}' is not a bit struct")),
+        };
+        let idx = info
+            .fields
+            .iter()
+            .position(|(n, _)| n == field)
+            .ok_or_else(|| format!("codegen: bit struct '{sname}' has no field '{field}'"))?;
+        let width = match info.fields[idx].1 {
+            Type::Int(w, _) => w,
+            _ => return Err("codegen: bitfield is not an integer".to_string()),
+        };
+        Ok((pv.into_pointer_value(), b.offsets[idx], width, b.backing))
     }
 
     fn offset_of(&self, ty: &Type, field: &str) -> Result<u64, String> {

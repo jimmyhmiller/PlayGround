@@ -27,6 +27,8 @@ struct Cx {
     sums: HashMap<String, Vec<SumVariant>>,
     /// Names of all known nominal types (structs + sums).
     known: HashSet<String>,
+    /// Structs whose layout is `:layout bits` (accessed via get/set!, not field).
+    bit_structs: HashSet<String>,
 }
 
 pub fn check(program: &Program) -> Result<(), String> {
@@ -44,6 +46,12 @@ pub fn check(program: &Program) -> Result<(), String> {
         }
     }
     let known: HashSet<String> = structs.keys().chain(sums.keys()).cloned().collect();
+    let bit_structs: HashSet<String> = program
+        .structs
+        .iter()
+        .filter(|s| matches!(s.layout, Layout::Bits(_)))
+        .map(|s| s.name.clone())
+        .collect();
 
     for sd in &program.structs {
         let mut seen = HashSet::new();
@@ -111,6 +119,7 @@ pub fn check(program: &Program) -> Result<(), String> {
         structs,
         sums,
         known,
+        bit_structs,
     };
 
     for f in &program.funcs {
@@ -289,8 +298,24 @@ fn synth(
             validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
             Ok(Type::Ptr(Box::new(ty.clone())))
         }
+        Expr::BitGet { ptr, field } => bit_field_type(ptr, field, env, cx, fname),
+        Expr::BitSet { ptr, field, val } => {
+            let fty = bit_field_type(ptr, field, env, cx, fname)?;
+            let vt = synth(val, env, cx, fname)?;
+            if vt != fty {
+                return Err(format!(
+                    "in '{fname}': set! of {} into bitfield '{field}' of type {}",
+                    ty_str(&vt),
+                    ty_str(&fty)
+                ));
+            }
+            Ok(fty)
+        }
         Expr::Field { ptr, field } => match synth(ptr, env, cx, fname)? {
             Type::Ptr(pointee) => match *pointee {
+                Type::Struct(s) if cx.bit_structs.contains(&s) => Err(format!(
+                    "in '{fname}': '{s}' is a :layout bits struct; use (get p {field}) / (set! p {field} v)"
+                )),
                 Type::Struct(s) => {
                     let fields = cx
                         .structs
@@ -531,6 +556,35 @@ fn synth(
                 ty_str(&other)
             )),
         },
+    }
+}
+
+/// Resolve a bitfield access: `ptr` must be a pointer to a `:layout bits`
+/// struct; returns the field's `uN` value type.
+fn bit_field_type(
+    ptr: &Expr,
+    field: &str,
+    env: &mut HashMap<String, Type>,
+    cx: &Cx,
+    fname: &str,
+) -> Result<Type, String> {
+    match synth(ptr, env, cx, fname)? {
+        Type::Ptr(pointee) => match *pointee {
+            Type::Struct(s) if cx.bit_structs.contains(&s) => cx
+                .structs
+                .get(&s)
+                .and_then(|fs| fs.iter().find(|(n, _)| n == field))
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| format!("in '{fname}': bit struct '{s}' has no field '{field}'")),
+            other => Err(format!(
+                "in '{fname}': get/set! needs a pointer to a :layout bits struct, got (ptr {})",
+                ty_str(&other)
+            )),
+        },
+        other => Err(format!(
+            "in '{fname}': get/set! needs a pointer, got {}",
+            ty_str(&other)
+        )),
     }
 }
 

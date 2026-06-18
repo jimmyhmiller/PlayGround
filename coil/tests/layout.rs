@@ -106,6 +106,49 @@ fn explicit_requires_at_on_every_field() {
 }
 
 #[test]
+fn bitfields_pack_and_mask() {
+    // four fields packed into an i32; setting one must not corrupt the others,
+    // and each field reads back as its uN value.
+    let src = r#"
+        (defstruct Reg :layout bits :backing :i32
+          [(enable :bits 1) (mode :bits 3) (channel :bits 4) (rest :bits 24)])
+        (static-assert (icmp-eq (sizeof Reg) 4) "Reg is 4 bytes")
+        (defn main [] (-> :i64)
+          (let [r (alloc-stack Reg)]
+            (set! r channel (cast :u4 10))
+            (set! r mode    (cast :u3 2))
+            (set! r enable  (cast :u1 1))
+            (iadd (imul (cast :i64 (get r channel)) 4)
+                  (iadd (cast :i64 (get r mode)) (cast :i64 (get r enable))))))
+    "#;
+    assert_eq!(build_and_run(src), 43); // 40 + 2 + 1
+}
+
+#[test]
+fn bitfield_default_backing() {
+    // 12 bits with no :backing -> i16.
+    let src = r#"
+        (defstruct Flags :layout bits [(a :bits 4) (b :bits 8)])
+        (static-assert (icmp-eq (sizeof Flags) 2) "12 bits -> 2 bytes")
+        (defn main [] (-> :i64)
+          (let [f (alloc-stack Flags)]
+            (set! f b (cast :u8 200))
+            (set! f a (cast :u4 2))
+            (cast :i64 (get f b))))   ; 200 (a doesn't disturb b)
+    "#;
+    assert_eq!(build_and_run(src), 200);
+}
+
+#[test]
+fn rejects_field_on_bit_struct() {
+    let src = r#"
+        (defstruct R :layout bits [(a :bits 4)])
+        (defn main [] (-> :i64) (let [r (alloc-stack R)] (load (field r a))))
+    "#;
+    assert!(coil::check_source(src).unwrap_err().contains(":layout bits"));
+}
+
+#[test]
 fn offsetof_on_generic_struct() {
     let src = r#"
         (defstruct Pair [A B] [(fst A) (snd B)])

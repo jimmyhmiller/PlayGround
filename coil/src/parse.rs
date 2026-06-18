@@ -97,9 +97,11 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     // struct-level options: :layout c|packed|explicit|(align N), :size N, :align N.
     let mut packed = false;
     let mut explicit = false;
+    let mut bits = false;
     let mut aligned: Option<u32> = None;
     let mut exp_size: Option<u64> = None;
     let mut exp_align: u32 = 0;
+    let mut backing: Option<u32> = None;
     while let Some(Sexp::Keyword(k)) = rest.get(i) {
         let val = rest.get(i + 1).ok_or_else(|| format!("defstruct: ':{k}' missing value"))?;
         match k.as_str() {
@@ -107,13 +109,18 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
                 Sexp::Sym(s) if s == "c" => {}
                 Sexp::Sym(s) if s == "packed" => packed = true,
                 Sexp::Sym(s) if s == "explicit" => explicit = true,
+                Sexp::Sym(s) if s == "bits" => bits = true,
                 Sexp::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
                     aligned = Some(pow2(items.get(1))?);
                 }
-                _ => return Err("layout must be c, packed, explicit, or (align N)".to_string()),
+                _ => return Err("layout must be c, packed, explicit, bits, or (align N)".to_string()),
             },
             "size" => exp_size = Some(int_val(val, "size")? as u64),
             "align" => exp_align = pow2(Some(val))?,
+            "backing" => match parse_type(val)? {
+                Type::Int(b, _) => backing = Some(b),
+                _ => return Err(":backing must be an integer type".to_string()),
+            },
             _ => break,
         }
         i += 2;
@@ -124,6 +131,39 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
         Some(Sexp::Vector(v)) => v,
         _ => return Err(format!("defstruct '{name}': expected a field vector")),
     };
+
+    if bits {
+        let mut fields = Vec::new();
+        let mut offsets = Vec::new();
+        let mut acc: u32 = 0;
+        for f in fields_v {
+            let fl = as_list(f, "bitfield must be (name :bits N)")?;
+            let fname = sym(&fl[0], "field name")?;
+            let width = match (fl.get(1), fl.get(2)) {
+                (Some(Sexp::Keyword(k)), Some(Sexp::Int(n))) if k == "bits" && *n > 0 => *n as u32,
+                _ => return Err(format!("field '{fname}' must be (name :bits N)")),
+            };
+            fields.push((fname, Type::Int(width, false))); // a bitfield's value type is uN
+            offsets.push(acc);
+            acc += width;
+        }
+        let backing = match backing {
+            Some(b) if b >= acc => b,
+            Some(b) => return Err(format!("defstruct '{name}': :backing i{b} too small for {acc} bits")),
+            None if acc <= 8 => 8,
+            None if acc <= 16 => 16,
+            None if acc <= 32 => 32,
+            None if acc <= 64 => 64,
+            None => return Err(format!("defstruct '{name}': {acc} bits needs an explicit :backing")),
+        };
+        return Ok(StructDef {
+            name,
+            type_params,
+            layout: Layout::Bits(BitsLayout { backing, offsets }),
+            fields,
+        });
+    }
+
     let mut fields = Vec::new();
     let mut at_offsets: Vec<Option<u64>> = Vec::new();
     for f in fields_v {
@@ -535,6 +575,24 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             Ok(Expr::Field {
                 ptr: Box::new(p),
                 field: name,
+            })
+        }
+        "get" => {
+            let p = parse_expr(args.first().ok_or("get: missing pointer")?)?;
+            let name = sym(args.get(1).ok_or("get: missing field name")?, "field name")?;
+            Ok(Expr::BitGet {
+                ptr: Box::new(p),
+                field: name,
+            })
+        }
+        "set!" => {
+            let p = parse_expr(args.first().ok_or("set!: missing pointer")?)?;
+            let name = sym(args.get(1).ok_or("set!: missing field name")?, "field name")?;
+            let v = parse_expr(args.get(2).ok_or("set!: missing value")?)?;
+            Ok(Expr::BitSet {
+                ptr: Box::new(p),
+                field: name,
+                val: Box::new(v),
             })
         }
         "fnptr-of" => {

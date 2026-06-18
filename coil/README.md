@@ -80,9 +80,11 @@ template substitution.
 - Layout control (the dual of calling conventions): `(defstruct Name :layout
   c | packed | (align N) | explicit ...)`. `explicit` places each field at a
   per-field `:at` offset (gaps = padding, overlap = a union), realized as a byte
-  blob. Compile-time `(sizeof T)`, `(alignof T)`, `(offsetof Struct field)` and
+  blob. `:layout bits` packs sub-byte fields (`(f :bits N)`) into a backing
+  integer, accessed by value as `uN` via `(get p f)` / `(set! p f v)`.
+  Compile-time `(sizeof T)`, `(alignof T)`, `(offsetof Struct field)` and
   `(static-assert COND "msg")` pin a layout down — a wrong size/offset is a
-  compile error. (Bitfields & endianness sketched in [`docs/LAYOUT.md`](docs/LAYOUT.md).)
+  compile error. (Per-field endianness sketched in [`docs/LAYOUT.md`](docs/LAYOUT.md).)
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
   structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`, explicit type
   args `(id [i64] x)`. Generic **sum types** too: `(defsum Option [T] (None)
@@ -96,9 +98,9 @@ template substitution.
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-type-argument inference (generics/sums need explicit type args today), layout
-bitfields & endianness, an IO `Writer` capability, a per-arch shim backend. See
-the design docs.
+type-argument inference (generics/sums need explicit type args today), per-field
+endianness, an IO `Writer` capability, a per-arch shim backend. See the design
+docs.
 
 ## What it looks like
 
@@ -124,7 +126,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 92 tests (build + run native exes)
+cargo test                                     # 95 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
