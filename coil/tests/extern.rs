@@ -29,9 +29,9 @@ fn write_with_a_pointer_argument() {
     // write(2). Proves a pointer crossing the extern boundary works.
     // 'H'=72, 'i'=105, '\n'=10  ->  72 + 105*256 + 10*65536 = 682312
     let src = r#"
-        (extern write :cc c [:i64 (ptr static) :i64] (-> :i64))
+        (extern write :cc c [:i64 (ptr i64) :i64] (-> :i64))
         (defn main [] (-> :i64)
-          (let [buf (alloc static)]
+          (let [buf (alloc-static i64)]
             (store! buf 682312)
             (write 1 buf 3)
             0))
@@ -43,12 +43,12 @@ fn write_with_a_pointer_argument() {
 
 #[test]
 fn extern_erases_pointer_region() {
-    // write's buf is declared (ptr static), but a heap pointer is accepted at
+    // write's buf is declared (ptr i64), but a heap pointer is accepted at
     // the extern boundary (the foreign side doesn't track regions).
     let src = r#"
-        (extern write :cc c [:i64 (ptr static) :i64] (-> :i64))
+        (extern write :cc c [:i64 (ptr i64) :i64] (-> :i64))
         (defn main [] (-> :i64)
-          (let [buf (alloc heap)]
+          (let [buf (alloc-heap i64)]
             (store! buf 682312)
             (write 1 buf 3)
             (free buf)
@@ -75,7 +75,7 @@ fn integer_widths_and_casts() {
     // Load an i32 through a typed pointer, widen to i64, use it.
     let src = r#"
         (defn main [] (-> :i64)
-          (let [p (alloc heap)]
+          (let [p (alloc-heap i64)]
             (store! p 42)
             (let [v (load p)] (free p) v)))
     "#;
@@ -104,7 +104,7 @@ fn rejects_wrong_argument_type_to_extern() {
     let src = r#"
         (extern putchar :cc c [:i64] (-> :i64))
         (defn main [] (-> :i64)
-          (let [p (alloc heap)] (putchar p)))
+          (let [p (alloc-heap i64)] (putchar p)))
     "#;
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("argument 1 to 'putchar'"), "got: {err}");

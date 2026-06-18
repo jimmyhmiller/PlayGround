@@ -20,11 +20,12 @@ Macros run during compilation in a tree-walking interpreter (no JIT, no LLVM);
 
 ## Status
 
-**M0–M3 + a user-defined macro system** — an s-expression front end that
-JIT-compiles through LLVM, where **both** calling convention and allocation are
-part of the type system (conventions LLVM's CC enum cannot express, and pointers
-whose region is part of their type), and the higher-level surface is grown with
-**real Lisp macros** — a compile-time interpreter, not template substitution.
+**M0–M4 + a user-defined macro system** — an s-expression front end that
+AOT-compiles to native objects through LLVM. Calling conventions are part of the
+type system (including ones LLVM's CC enum cannot express); allocation is about
+explicit control (Zig-style allocators), not safety; and the higher-level
+surface is grown with **real Lisp macros** — a compile-time interpreter, not
+template substitution.
 
 - M0: reader → core AST → LLVM codegen → JIT. `i64`, `let`, arithmetic,
   comparisons, `if`, direct + recursive calls.
@@ -37,12 +38,11 @@ whose region is part of their type), and the higher-level surface is grown with
   convention's registers into the SysV registers; call sites use
   register-constrained inline asm so each argument is genuinely pinned to its
   register. Verified through JIT, including recursion through the exotic ABI.
-- M3: allocation as types. A pointer's **region** is part of its type:
-  `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
-  `malloc`. `frame` pointers may not cross a function boundary (a correctness
-  rule — a dangling `alloca` would crash), and `frame`/`static` can't be freed.
-  Regions are about **control over allocation**, not memory safety (no
-  borrows/linear types) — see allocators below.
+- M3: allocation. Pointers are **region-less** — `(ptr T)` is just a pointer
+  (à la Zig/C). *Where* memory comes from is an **operation**, not part of the
+  type: `(alloc-stack T)` → `alloca`, `(alloc-static T)` → a global,
+  `(alloc-heap T)` → `malloc`; all yield `(ptr T)`. No ownership, borrows, or
+  lifetimes — control over allocation comes from allocators (below).
 - Allocators (Zig-style): an allocator is an explicit **value** — a vtable
   struct of function pointers — threaded through, so a function that allocates
   *takes* an `Allocator` and its type shows it. `lib/alloc.coil` ships a
@@ -52,7 +52,7 @@ whose region is part of their type), and the higher-level surface is grown with
 - Macros: `defmacro` / `def` run in a compile-time Lisp (quasiquote `` ` ``,
   unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
   helper functions). Macros can compute, recurse, and emit whole top-level
-  definitions, and they compose with conventions and regions. The target is a
+  definitions, and they compose with conventions and allocators. The target is a
   compile-time value (`target-arch`, `target-os`, `target-pointer-width`), so a
   macro can branch per architecture — e.g. select a `defcc`. **Automatic
   hygiene**: a template symbol ending in `#` (e.g. `tmp#`) auto-gensyms, so
@@ -63,28 +63,28 @@ whose region is part of their type), and the higher-level surface is grown with
   then `(defclosure NAME [captures] [params] RET body...)`.
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
   function's convention + signature; calls are type-checked and the symbol is
-  resolved at link time (libc, etc.). Pointer regions are erased at the extern
-  boundary. So programs can do I/O — e.g. `putchar`/`write`/`puts`.
-- C types: integer widths `i8/i16/i32/i64`, typed pointers `(ptr REGION TYPE)`
-  with a foreign `c` region (so `(ptr c (ptr c i8))` is `char**`), pointer
-  indexing `(index p i)`, and width `(cast :iN e)`. `main` may take
-  `(argc :i32) (argv (ptr c (ptr c i8)))`, so programs read their command line.
+  resolved at link time (libc, etc.). At the extern boundary any pointer matches
+  a pointer parameter (`void*`-style). So programs can do I/O — e.g.
+  `putchar`/`write`/`puts`.
+- C types: integer widths `i8/i16/i32/i64`, typed pointers `(ptr TYPE)` (so
+  `(ptr (ptr i8))` is `char**`), pointer indexing `(index p i)`, width
+  `(cast :iN e)` (and ptr reinterpret), and `(sizeof TYPE)`. `main` may take
+  `(argc :i32) (argv (ptr (ptr i8)))`, so programs read their command line.
 - Structs & arrays: `(defstruct Name [(field :type) ...])` and `(array T N)`.
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
-  allocate any type with `(alloc REGION TYPE)`.
+  allocate any type with `(alloc-stack/static/heap TYPE)`.
 - Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
   for a function's address, and indirect `(call-ptr fp args...)` (honoring the
   convention). Closures are **not** a language primitive — a closure is a struct
-  of `{ code pointer, environment pointer }`, and the env's *region* is its
-  memory-management story. `closure.coil` shows heterogeneous heap closures
-  (different captures, one type, one generic `apply`) allocated and freed by hand.
-  `defclosure.coil` is a userland macro that generates the whole closure
+  of `{ code pointer, environment pointer }`. `closure.coil` shows heterogeneous
+  heap closures (different captures, one type, one generic `apply`); `defclosure`
+  (`lib/closure.coil`) is a userland macro that generates the whole closure
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-closures derived from (convention × allocation) (M4), richer pointee types, a
-macro standard library. See the design doc.
+generics and sum types (the two big type-system gaps), an IO `Writer` capability,
+a per-arch shim backend. See the design doc.
 
 ## What it looks like
 
@@ -110,7 +110,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 62 tests (build + run native exes)
+cargo test                                     # 63 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)

@@ -32,7 +32,7 @@ fn dispatch_table() {
         (defn inc [(x :i64)] (-> :i64) (iadd x 1))
         (defn dec [(x :i64)] (-> :i64) (isub x 1))
         (defn main [] (-> :i64)
-          (let [t (alloc frame (array (fnptr c [:i64] :i64) 2))]
+          (let [t (alloc-stack (array (fnptr c [:i64] :i64) 2))]
             (store! (index t 0) (fnptr-of inc))
             (store! (index t 1) (fnptr-of dec))
             (iadd (call-ptr (load (index t 0)) 41)     ; inc 41 = 42
@@ -53,11 +53,11 @@ fn closure_escapes_and_is_called_later() {
     // make-counter returns a closure (upward funarg); main calls it after.
     let src = r#"
         (defstruct Env [(base :i64)])
-        (defn code [(e (ptr heap Env)) (x :i64)] (-> :i64)
+        (defn code [(e (ptr Env)) (x :i64)] (-> :i64)
           (iadd (load (field e base)) x))
-        (defstruct Fn1 [(code (fnptr c [(ptr heap Env) :i64] :i64)) (env (ptr heap Env))])
-        (defn make [(b :i64)] (-> (ptr heap Fn1))
-          (let [e (alloc heap Env) c (alloc heap Fn1)]
+        (defstruct Fn1 [(code (fnptr c [(ptr Env) :i64] :i64)) (env (ptr Env))])
+        (defn make [(b :i64)] (-> (ptr Fn1))
+          (let [e (alloc-heap Env) c (alloc-heap Fn1)]
             (store! (field e base) b)
             (store! (field c code) (fnptr-of code))
             (store! (field c env) e)
@@ -93,7 +93,7 @@ fn rejects_callptr_wrong_arg_type() {
     let src = r#"
         (defn add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
         (defn main [] (-> :i64)
-          (let [p (alloc heap)] (call-ptr (fnptr-of add) p 2)))
+          (let [p (alloc-heap i64)] (call-ptr (fnptr-of add) p 2)))
     "#;
     assert!(coil::check_source(src).unwrap_err().contains("call-ptr argument 1"));
 }

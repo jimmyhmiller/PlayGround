@@ -113,26 +113,14 @@ pub fn check(program: &Program) -> Result<(), String> {
             }
         }
 
-        // signature types: valid, and no frame pointers across the boundary
+        // signature types must be well-formed (pointers are region-less, so
+        // there's no escape rule — a stack pointer can cross a boundary).
         for p in &f.params {
             validate_type(&p.ty, &cx.structs)
                 .map_err(|e| format!("function '{}' param '{}': {e}", f.name, p.name))?;
-            if is_frame_ptr(&p.ty) {
-                return Err(format!(
-                    "function '{}': parameter '{}' is a frame pointer; frame pointers cannot \
-                     cross function boundaries",
-                    f.name, p.name
-                ));
-            }
         }
         validate_type(&f.ret, &cx.structs)
             .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
-        if is_frame_ptr(&f.ret) {
-            return Err(format!(
-                "function '{}': returns a frame pointer; frame pointers cannot escape their frame",
-                f.name
-            ));
-        }
 
         let mut env: HashMap<String, Type> =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
@@ -161,7 +149,7 @@ fn validate_type(t: &Type, structs: &HashMap<String, Vec<(String, Type)>>) -> Re
                 Err(format!("unsupported integer width i{w}"))
             }
         }
-        Type::Ptr(_, p) => validate_type(p, structs),
+        Type::Ptr(p) => validate_type(p, structs),
         Type::Array(e, _) => validate_type(e, structs),
         Type::Struct(name) => {
             if structs.contains_key(name) {
@@ -265,15 +253,12 @@ fn synth(
             }
             Ok(sig.ret.clone())
         }
-        Expr::Alloc { region, ty } => {
+        Expr::Alloc { ty, .. } => {
             validate_type(ty, &cx.structs).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
-            if *region == Region::C {
-                return Err(format!("in '{fname}': cannot allocate in the c (foreign) region"));
-            }
-            Ok(Type::Ptr(*region, Box::new(ty.clone())))
+            Ok(Type::Ptr(Box::new(ty.clone())))
         }
         Expr::Field { ptr, field } => match synth(ptr, env, cx, fname)? {
-            Type::Ptr(r, pointee) => match *pointee {
+            Type::Ptr(pointee) => match *pointee {
                 Type::Struct(s) => {
                     let fields = cx
                         .structs
@@ -284,10 +269,10 @@ fn synth(
                         .find(|(n, _)| n == field)
                         .map(|(_, t)| t.clone())
                         .ok_or_else(|| format!("in '{fname}': struct '{s}' has no field '{field}'"))?;
-                    Ok(Type::Ptr(r, Box::new(fty)))
+                    Ok(Type::Ptr(Box::new(fty)))
                 }
                 other => Err(format!(
-                    "in '{fname}': field access needs a pointer to a struct, got (ptr _ {})",
+                    "in '{fname}': field access needs a pointer to a struct, got (ptr {})",
                     ty_str(&other)
                 )),
             },
@@ -297,14 +282,14 @@ fn synth(
             )),
         },
         Expr::Load(p) => match synth(p, env, cx, fname)? {
-            Type::Ptr(_, pointee) => Ok(*pointee),
+            Type::Ptr(pointee) => Ok(*pointee),
             other => Err(format!(
                 "in '{fname}': load expects a pointer, got {}",
                 ty_str(&other)
             )),
         },
         Expr::Store { ptr, val } => match synth(ptr, env, cx, fname)? {
-            Type::Ptr(_, pointee) => {
+            Type::Ptr(pointee) => {
                 let vt = synth(val, env, cx, fname)?;
                 if vt != *pointee {
                     return Err(format!(
@@ -327,11 +312,10 @@ fn synth(
                 return Err(format!("in '{fname}': index must be i64, got {}", ty_str(&it)));
             }
             match pt {
-                // pointer to an array: element access, `Ptr(R, elem)`.
-                Type::Ptr(r, pointee) => match *pointee {
-                    Type::Array(elem, _) => Ok(Type::Ptr(r, elem)),
-                    // pointer to a scalar/struct: pointer arithmetic, type unchanged.
-                    p => Ok(Type::Ptr(r, Box::new(p))),
+                // pointer to an array: element access; otherwise pointer arithmetic.
+                Type::Ptr(pointee) => match *pointee {
+                    Type::Array(elem, _) => Ok(Type::Ptr(elem)),
+                    p => Ok(Type::Ptr(Box::new(p))),
                 },
                 other => Err(format!(
                     "in '{fname}': index expects a pointer, got {}",
@@ -357,13 +341,9 @@ fn synth(
             Ok(Type::Int(64))
         }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
-            // heap or raw/foreign pointers can be freed (e.g. an allocator's
-            // libc-backed memory). frame/static aren't freed (they'd crash).
-            Type::Ptr(Region::Heap, _) | Type::Ptr(Region::C, _) => Ok(Type::Int(64)),
-            Type::Ptr(r, _) => Err(format!(
-                "in '{fname}': cannot free a {} pointer (frame/static memory is not freed)",
-                r.name()
-            )),
+            // any pointer can be freed (it calls libc free). Freeing stack/static
+            // memory is your problem — like C.
+            Type::Ptr(_) => Ok(Type::Int(64)),
             other => Err(format!(
                 "in '{fname}': free expects a pointer, got {}",
                 ty_str(&other)
@@ -426,16 +406,13 @@ fn int_width(t: Type, fname: &str, what: &str) -> Result<u32, String> {
     }
 }
 
-fn is_frame_ptr(t: &Type) -> bool {
-    matches!(t, Type::Ptr(Region::Frame, _))
-}
-
 /// Argument-type compatibility. Normally exact; at an `extern` boundary the
-/// foreign side doesn't track regions, so any pointer matches any pointer.
+/// foreign side doesn't care about pointee types, so any pointer matches any
+/// pointer (like passing to `void*`).
 fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
     match (got, want) {
         _ if got == want => true,
-        (Type::Ptr(..), Type::Ptr(..)) if is_extern => true,
+        (Type::Ptr(_), Type::Ptr(_)) if is_extern => true,
         _ => false,
     }
 }
@@ -443,7 +420,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 fn ty_str(t: &Type) -> String {
     match t {
         Type::Int(w) => format!("i{w}"),
-        Type::Ptr(r, pointee) => format!("(ptr {} {})", r.name(), ty_str(pointee)),
+        Type::Ptr(pointee) => format!("(ptr {})", ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
         Type::Fn(cc, params, ret) => {

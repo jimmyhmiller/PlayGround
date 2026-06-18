@@ -9,15 +9,15 @@ use crate::convention::Convention;
 pub enum Type {
     /// Integer of the given bit width (8, 16, 32, 64).
     Int(u32),
-    /// A pointer whose *region* and *pointee type* are both part of the type.
-    /// `Ptr(C, i8)` is a C `char*`.
-    Ptr(Region, Box<Type>),
+    /// A pointer to a value of the pointee type. Pointers are region-less (a
+    /// pointer is a pointer, à la Zig/C); where the memory came from is the
+    /// `alloc` operation's concern, not the type's.
+    Ptr(Box<Type>),
     /// A named struct (defined by `defstruct`).
     Struct(String),
     /// A fixed-size array of `len` elements.
     Array(Box<Type>, u32),
     /// A function pointer: calling convention, parameter types, return type.
-    /// Represented as a raw machine pointer; the convention is needed to call it.
     Fn(String, Vec<Type>, Box<Type>),
 }
 
@@ -27,40 +27,17 @@ impl Type {
     }
 }
 
-/// Where allocated memory lives. Part of a pointer's type, so `Ptr(Heap, _)`
-/// and `Ptr(Static, _)` are distinct types and `free` only accepts `Ptr(Heap)`.
+/// How an `alloc` operation obtains memory. This is *not* part of the pointer
+/// type — every `alloc` yields a plain `(ptr T)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Region {
-    /// Current stack frame (`alloca`). May not cross a function boundary.
-    Frame,
-    /// Module-static storage (a global). Lives forever.
+pub enum Storage {
+    /// Current stack frame (`alloca`).
+    Stack,
+    /// A module global.
     Static,
-    /// libc heap (`malloc`/`free`). Must be freed.
+    /// libc `malloc` (the inline convenience; the controllable path is an
+    /// allocator value — see `lib/alloc.coil`).
     Heap,
-    /// A raw/foreign pointer (from C, the OS, hand-written asm). Not owned by
-    /// Coil's allocators: no `free`, no escape rules — just a machine pointer.
-    C,
-}
-
-impl Region {
-    pub fn parse(s: &str) -> Option<Region> {
-        match s {
-            "frame" => Some(Region::Frame),
-            "static" => Some(Region::Static),
-            "heap" => Some(Region::Heap),
-            "c" => Some(Region::C),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Region::Frame => "frame",
-            Region::Static => "static",
-            Region::Heap => "heap",
-            Region::C => "c",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,9 +87,9 @@ pub enum Expr {
         func: String,
         args: Vec<Expr>,
     },
-    /// Allocate one value of `ty` in `region`, yielding `Ptr(region, ty)`.
+    /// Allocate one value of `ty` using `storage`, yielding `(ptr ty)`.
     Alloc {
-        region: Region,
+        storage: Storage,
         ty: Type,
     },
     /// Pointer to a struct field: `Ptr(R, Struct S)` and a field name →

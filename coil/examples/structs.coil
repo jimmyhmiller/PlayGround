@@ -5,8 +5,8 @@
 (defstruct Point [(x :i64) (y :i64)])
 
 (defn main [] (-> :i64)
-  (let [p (alloc frame Point)            ; pointer to a stack Point
-        a (alloc frame (array i64 3))]   ; pointer to a stack [3 x i64]
+  (let [p (alloc-stack Point)            ; pointer to a stack Point
+        a (alloc-stack (array i64 3))]   ; pointer to a stack [3 x i64]
     (store! (field p x) 30)
     (store! (field p y) 4)
     (store! (index a 0) 1)

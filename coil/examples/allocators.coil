@@ -3,11 +3,11 @@
 ;   coil run examples/allocators.coil; echo $?   => 42
 (include "lib/alloc.coil")
 
-(defn boxed-add [(a (ptr c Allocator)) (x :i64) (y :i64)] (-> :i64)
-  (let [p (cast (ptr c i64) (alloc-bytes a 8))]   ; ask the allocator for 8 bytes
+(defn boxed-add [(a (ptr Allocator)) (x :i64) (y :i64)] (-> :i64)
+  (let [p (cast (ptr i64) (alloc-bytes a 8))]   ; ask the allocator for 8 bytes
     (store! p (iadd x y))
     (let [v (load p)]
-      (free-bytes a (cast (ptr c i8) p))
+      (free-bytes a (cast (ptr i8) p))
       v)))
 
 (defn main [] (-> :i64)

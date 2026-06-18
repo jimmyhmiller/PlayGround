@@ -18,9 +18,9 @@ fn arena_bumps_and_reuses_one_block() {
         (include "lib/alloc.coil")
         (defn main [] (-> :i64)
           (let [a (arena-allocator 1024)]
-            (let [p (cast (ptr c i64) (alloc-bytes a 8))
-                  q (cast (ptr c i64) (alloc-bytes a 8))
-                  r (cast (ptr c i64) (alloc-bytes a 8))]
+            (let [p (cast (ptr i64) (alloc-bytes a 8))
+                  q (cast (ptr i64) (alloc-bytes a 8))
+                  r (cast (ptr i64) (alloc-bytes a 8))]
               (store! p 10) (store! q 14) (store! r 18)
               (iadd (load p) (iadd (load q) (load r))))))
     "#;
@@ -49,7 +49,7 @@ fn alloc_one_sizes_with_sizeof() {
                 p  (alloc-one al Pair)]
             (store! (field p a) 19) (store! (field p b) 23)
             (let [s (iadd (load (field p a)) (load (field p b)))]
-              (free-bytes al (cast (ptr c i8) p))
+              (free-bytes al (cast (ptr i8) p))
               s)))
     "#;
     assert_eq!(build_and_run(src), 42);
@@ -62,10 +62,10 @@ fn allocator_is_visible_in_the_signature() {
     // only because the allocator is a parameter.)
     let src = r#"
         (include "lib/alloc.coil")
-        (defn one [(a (ptr c Allocator))] (-> :i64)
-          (let [p (cast (ptr c i64) (alloc-bytes a 8))]
+        (defn one [(a (ptr Allocator))] (-> :i64)
+          (let [p (cast (ptr i64) (alloc-bytes a 8))]
             (store! p 42)
-            (let [v (load p)] (free-bytes a (cast (ptr c i8) p)) v)))
+            (let [v (load p)] (free-bytes a (cast (ptr i8) p)) v)))
         (defn main [] (-> :i64) (one (malloc-allocator)))
     "#;
     assert_eq!(build_and_run(src), 42);

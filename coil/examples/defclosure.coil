@@ -24,21 +24,21 @@
         free-name (symbol name "-free")]
     `(do
        (defstruct ~env-name [~@caps])
-       (defn ~code-name [(__self (ptr heap ~env-name)) ~@params] (-> ~ret)
+       (defn ~code-name [(__self (ptr ~env-name)) ~@params] (-> ~ret)
          (let [~@(cap-loads caps)] ~@body))
        (defstruct ~name
-         [(code (fnptr c [(ptr heap ~env-name) ~@(param-types params)] ~ret))
-          (env (ptr heap ~env-name))])
-       (defn ~new-name [~@caps] (-> (ptr heap ~name))
-         (let [__e (alloc heap ~env-name)
-               __c (alloc heap ~name)]
+         [(code (fnptr c [(ptr ~env-name) ~@(param-types params)] ~ret))
+          (env (ptr ~env-name))])
+       (defn ~new-name [~@caps] (-> (ptr ~name))
+         (let [__e (alloc-heap ~env-name)
+               __c (alloc-heap ~name)]
            ~@(cap-stores caps)
            (store! (field __c code) (fnptr-of ~code-name))
            (store! (field __c env) __e)
            __c))
-       (defn ~call-name [(__c (ptr heap ~name)) ~@params] (-> ~ret)
+       (defn ~call-name [(__c (ptr ~name)) ~@params] (-> ~ret)
          (call-ptr (load (field __c code)) (load (field __c env)) ~@(param-names params)))
-       (defn ~free-name [(__c (ptr heap ~name))] (-> :i64)
+       (defn ~free-name [(__c (ptr ~name))] (-> :i64)
          (do (free (load (field __c env))) (free __c))))))
 
 ; ---- usage: two closures from two one-liners ----

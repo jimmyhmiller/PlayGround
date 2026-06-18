@@ -384,13 +384,13 @@ impl<'ctx> Cg<'ctx> {
                     .ok_or_else(|| "codegen: call returned void".to_string())?;
                 Ok((v, ret_ty))
             }
-            Expr::Alloc { region, ty } => self.emit_alloc(*region, ty),
+            Expr::Alloc { storage, ty } => self.emit_alloc(*storage, ty),
             Expr::Field { ptr, field } => {
                 let (pv, pt) = self.emit_expr(ptr, scope)?;
-                let (region, sname) = match pt {
-                    Type::Ptr(r, pointee) => match *pointee {
-                        Type::Struct(s) => (r, s),
-                        other => return Err(format!("codegen: field on (ptr _ {other:?})")),
+                let sname = match pt {
+                    Type::Ptr(pointee) => match *pointee {
+                        Type::Struct(s) => s,
+                        other => return Err(format!("codegen: field on (ptr {other:?})")),
                     },
                     other => return Err(format!("codegen: field on non-pointer {other:?}")),
                 };
@@ -408,12 +408,12 @@ impl<'ctx> Cg<'ctx> {
                     .builder
                     .build_struct_gep(info.ty, pv.into_pointer_value(), idx as u32, "field")
                     .map_err(le)?;
-                Ok((gep.into(), Type::Ptr(region, Box::new(fty))))
+                Ok((gep.into(), Type::Ptr(Box::new(fty))))
             }
             Expr::Load(p) => {
                 let (pv, pt) = self.emit_expr(p, scope)?;
                 let pointee = match pt {
-                    Type::Ptr(_, pointee) => *pointee,
+                    Type::Ptr(pointee) => *pointee,
                     other => return Err(format!("codegen: load of non-pointer {other:?}")),
                 };
                 let v = self
@@ -433,8 +433,8 @@ impl<'ctx> Cg<'ctx> {
             Expr::Index { ptr, idx } => {
                 let (pv, pt) = self.emit_expr(ptr, scope)?;
                 let (iv, _) = self.emit_expr(idx, scope)?;
-                let (region, pointee) = match pt {
-                    Type::Ptr(r, pointee) => (r, *pointee),
+                let pointee = match pt {
+                    Type::Ptr(pointee) => *pointee,
                     other => return Err(format!("codegen: index of non-pointer {other:?}")),
                 };
                 let ptr_val = pv.into_pointer_value();
@@ -448,7 +448,7 @@ impl<'ctx> Cg<'ctx> {
                                 .build_gep(self.basic_ty(&pointee), ptr_val, &[zero, i], "idx")
                                 .map_err(le)?
                         };
-                        Ok((gep.into(), Type::Ptr(region, elem.clone())))
+                        Ok((gep.into(), Type::Ptr(elem.clone())))
                     }
                     // pointer to a scalar/struct: GEP [i] is pointer arithmetic.
                     _ => {
@@ -457,7 +457,7 @@ impl<'ctx> Cg<'ctx> {
                                 .build_gep(self.basic_ty(&pointee), ptr_val, &[i], "idx")
                                 .map_err(le)?
                         };
-                        Ok((gep.into(), Type::Ptr(region, Box::new(pointee))))
+                        Ok((gep.into(), Type::Ptr(Box::new(pointee))))
                     }
                 }
             }
@@ -535,21 +535,20 @@ impl<'ctx> Cg<'ctx> {
         }
     }
 
-    fn emit_alloc(&self, region: Region, ty: &Type) -> Result<Tv<'ctx>, String> {
+    fn emit_alloc(&self, storage: Storage, ty: &Type) -> Result<Tv<'ctx>, String> {
         let bt = self.basic_ty(ty);
-        let ptr = match region {
-            Region::Frame => self.builder.build_alloca(bt, "frame.slot").map_err(le)?,
-            Region::Heap => self.builder.build_malloc(bt, "heap.box").map_err(le)?,
-            Region::Static => {
+        let ptr = match storage {
+            Storage::Stack => self.builder.build_alloca(bt, "stack.slot").map_err(le)?,
+            Storage::Heap => self.builder.build_malloc(bt, "heap.box").map_err(le)?,
+            Storage::Static => {
                 let n = self.globals.get();
                 self.globals.set(n + 1);
                 let g = self.module.add_global(bt, None, &format!("g.{n}"));
                 g.set_initializer(&bt.const_zero());
                 g.as_pointer_value()
             }
-            Region::C => return Err("codegen: cannot allocate in the C region".to_string()),
         };
-        Ok((ptr.into(), Type::Ptr(region, Box::new(ty.clone()))))
+        Ok((ptr.into(), Type::Ptr(Box::new(ty.clone()))))
     }
 
     fn emit_if(

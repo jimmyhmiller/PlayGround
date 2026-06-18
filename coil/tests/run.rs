@@ -67,7 +67,7 @@ fn shim_convention_recurses() {
 fn heap_alloc_store_load_free() {
     let src = r#"
         (defn main [] (-> :i64)
-          (let [p (alloc heap)]
+          (let [p (alloc-heap i64)]
             (store! p 42)
             (let [v (load p)] (free p) v)))
     "#;
@@ -78,13 +78,13 @@ fn heap_alloc_store_load_free() {
 fn static_and_frame_regions() {
     let static_src = r#"
         (defn main [] (-> :i64)
-          (let [g (alloc static)] (store! g 99) (load g)))
+          (let [g (alloc-static i64)] (store! g 99) (load g)))
     "#;
     assert_eq!(build_and_run(static_src), 99);
 
     let frame_src = r#"
         (defn main [] (-> :i64)
-          (let [p (alloc frame)] (store! p 7) (iadd (load p) 35)))
+          (let [p (alloc-stack i64)] (store! p 7) (iadd (load p) 35)))
     "#;
     assert_eq!(build_and_run(frame_src), 42);
 }
@@ -92,8 +92,8 @@ fn static_and_frame_regions() {
 #[test]
 fn heap_pointer_crosses_function_boundary() {
     let src = r#"
-        (defn make [(v :i64)] (-> (ptr heap))
-          (let [p (alloc heap)] (store! p v) p))
+        (defn make [(v :i64)] (-> (ptr i64))
+          (let [p (alloc-heap i64)] (store! p v) p))
         (defn main [] (-> :i64)
           (let [p (make 42)]
             (let [v (load p)] (free p) v)))
@@ -101,25 +101,22 @@ fn heap_pointer_crosses_function_boundary() {
     assert_eq!(build_and_run(src), 42);
 }
 
-// ---- rejections (front-end only) ---------------------------------------
-
 #[test]
-fn rejects_escaping_frame_pointer() {
+fn stack_pointer_crosses_function_boundary() {
+    // Pointers are region-less now, so a stack pointer can be passed *down* into
+    // a helper (this used to be rejected by the escape rule).
     let src = r#"
-        (defn bad [] (-> (ptr frame)) (alloc frame))
-        (defn main [] (-> :i64) 0)
-    "#;
-    assert!(coil::check_source(src).unwrap_err().contains("frame pointer"));
-}
-
-#[test]
-fn rejects_freeing_non_heap() {
-    let src = r#"
+        (defn add-into [(p (ptr i64)) (x :i64)] (-> :i64)
+          (store! p (iadd (load p) x)) (load p))
         (defn main [] (-> :i64)
-          (let [g (alloc static)] (free g)))
+          (let [slot (alloc-stack i64)]
+            (store! slot 40)
+            (add-into slot 2)))
     "#;
-    assert!(coil::check_source(src).unwrap_err().contains("cannot free"));
+    assert_eq!(build_and_run(src), 42);
 }
+
+// ---- rejections (front-end only) ---------------------------------------
 
 #[test]
 fn rejects_loading_non_pointer() {

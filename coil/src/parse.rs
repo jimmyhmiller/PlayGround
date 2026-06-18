@@ -225,16 +225,13 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
         Sexp::Keyword(k) => int_type(k),
         Sexp::Sym(k) => Ok(int_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
         Sexp::List(items) => match head_sym(items)?.as_str() {
-            // (ptr REGION) -> pointee defaults to i64; (ptr REGION TYPE) otherwise.
+            // (ptr TYPE) -> pointer to TYPE; (ptr) defaults the pointee to i64.
             "ptr" => {
-                let r = sym(items.get(1).ok_or("ptr type: missing region")?, "region")?;
-                let region = Region::parse(&r)
-                    .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap|c)"))?;
-                let pointee = match items.get(2) {
+                let pointee = match items.get(1) {
                     Some(t) => parse_type(t)?,
                     None => Type::Int(64),
                 };
-                Ok(Type::Ptr(region, Box::new(pointee)))
+                Ok(Type::Ptr(Box::new(pointee)))
             }
             // (array TYPE N)
             "array" => {
@@ -265,6 +262,14 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
         },
         other => Err(format!("unsupported type: {other:?}")),
     }
+}
+
+fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, String> {
+    let ty = match args.first() {
+        Some(t) => parse_type(t)?,
+        None => Type::Int(64),
+    };
+    Ok(Expr::Alloc { storage, ty })
 }
 
 fn int_type(name: &str) -> Result<Type, String> {
@@ -362,16 +367,9 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 .collect::<Result<_, _>>()?;
             Ok(Expr::Call { func: f, args: cargs })
         }
-        "alloc" => {
-            let r = sym(args.first().ok_or("alloc: missing region")?, "region")?;
-            let region = Region::parse(&r)
-                .ok_or_else(|| format!("unknown region '{r}' (frame|static|heap)"))?;
-            let ty = match args.get(1) {
-                Some(t) => parse_type(t)?,
-                None => Type::Int(64),
-            };
-            Ok(Expr::Alloc { region, ty })
-        }
+        "alloc-stack" => alloc_form(args, Storage::Stack),
+        "alloc-static" => alloc_form(args, Storage::Static),
+        "alloc-heap" => alloc_form(args, Storage::Heap),
         "field" => {
             let p = parse_expr(args.first().ok_or("field: missing pointer")?)?;
             let name = sym(args.get(1).ok_or("field: missing field name")?, "field name")?;

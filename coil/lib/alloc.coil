@@ -3,48 +3,48 @@
 ; Allocator, so allocation is visible in its type. Built entirely in Coil; the
 ; compiler has no allocator concept.
 
-(extern malloc :cc c [:i64] (-> (ptr c i8)))    ; void* malloc(size_t)
+(extern malloc :cc c [:i64] (-> (ptr i8)))    ; void* malloc(size_t)
 
 (defstruct Allocator
-  [(alloc (fnptr c [(ptr c i8) :i64] (ptr c i8)))   ; (ctx, size) -> bytes
-   (free  (fnptr c [(ptr c i8) (ptr c i8)] :i64))   ; (ctx, ptr)  -> _
-   (ctx   (ptr c i8))])
+  [(alloc (fnptr c [(ptr i8) :i64] (ptr i8)))   ; (ctx, size) -> bytes
+   (free  (fnptr c [(ptr i8) (ptr i8)] :i64))   ; (ctx, ptr)  -> _
+   (ctx   (ptr i8))])
 
-(defn alloc-bytes [(a (ptr c Allocator)) (size :i64)] (-> (ptr c i8))
+(defn alloc-bytes [(a (ptr Allocator)) (size :i64)] (-> (ptr i8))
   (call-ptr (load (field a alloc)) (load (field a ctx)) size))
-(defn free-bytes [(a (ptr c Allocator)) (p (ptr c i8))] (-> :i64)
+(defn free-bytes [(a (ptr Allocator)) (p (ptr i8))] (-> :i64)
   (call-ptr (load (field a free)) (load (field a ctx)) p))
 
 ; ---- a malloc-backed general-purpose allocator ----
-(defn ma-alloc [(ctx (ptr c i8)) (size :i64)] (-> (ptr c i8)) (malloc size))
-(defn ma-free  [(ctx (ptr c i8)) (p (ptr c i8))] (-> :i64) (free p))
-(defn malloc-allocator [] (-> (ptr c Allocator))
-  (let [a (cast (ptr c Allocator) (alloc static Allocator))]
+(defn ma-alloc [(ctx (ptr i8)) (size :i64)] (-> (ptr i8)) (malloc size))
+(defn ma-free  [(ctx (ptr i8)) (p (ptr i8))] (-> :i64) (free p))
+(defn malloc-allocator [] (-> (ptr Allocator))
+  (let [a (cast (ptr Allocator) (alloc-static Allocator))]
     (store! (field a alloc) (fnptr-of ma-alloc))
     (store! (field a free)  (fnptr-of ma-free))
-    (store! (field a ctx)   (cast (ptr c i8) a))
+    (store! (field a ctx)   (cast (ptr i8) a))
     a))
 
 ; ---- an arena (bump) allocator: alloc bumps a pointer, per-alloc free is a
 ;      no-op, everything is reclaimed at once by freeing the backing block ----
-(defstruct Arena [(base (ptr c i8)) (off :i64) (cap :i64)])
-(defn ar-alloc [(ctx (ptr c i8)) (size :i64)] (-> (ptr c i8))
-  (let [ar (cast (ptr c Arena) ctx)]
+(defstruct Arena [(base (ptr i8)) (off :i64) (cap :i64)])
+(defn ar-alloc [(ctx (ptr i8)) (size :i64)] (-> (ptr i8))
+  (let [ar (cast (ptr Arena) ctx)]
     (let [o (load (field ar off))]
       (store! (field ar off) (iadd o size))
       (index (load (field ar base)) o))))          ; base + o
-(defn ar-free [(ctx (ptr c i8)) (p (ptr c i8))] (-> :i64) 0)   ; bulk-freed, not here
-(defn arena-allocator [(cap :i64)] (-> (ptr c Allocator))
-  (let [ar (cast (ptr c Arena) (alloc static Arena))
-        a  (cast (ptr c Allocator) (alloc static Allocator))]
+(defn ar-free [(ctx (ptr i8)) (p (ptr i8))] (-> :i64) 0)   ; bulk-freed, not here
+(defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
+  (let [ar (cast (ptr Arena) (alloc-static Arena))
+        a  (cast (ptr Allocator) (alloc-static Allocator))]
     (store! (field ar base) (malloc cap))
     (store! (field ar off) 0)
     (store! (field ar cap) cap)
     (store! (field a alloc) (fnptr-of ar-alloc))
     (store! (field a free)  (fnptr-of ar-free))
-    (store! (field a ctx)   (cast (ptr c i8) ar))
+    (store! (field a ctx)   (cast (ptr i8) ar))
     a))
 
 ; ---- convenience: allocate one value of a type (sized with sizeof) ----
 (defmacro alloc-one [a T]
-  `(cast (ptr c ~T) (alloc-bytes ~a (sizeof ~T))))
+  `(cast (ptr ~T) (alloc-bytes ~a (sizeof ~T))))

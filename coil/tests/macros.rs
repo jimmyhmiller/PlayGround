@@ -87,7 +87,7 @@ fn macro_can_target_conventions_and_regions() {
           `(defn ~name :cc fast2 ~params ~ret ~@body))
         (defn-fast add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
         (defn main [] (-> :i64)
-          (let [p (alloc heap)]
+          (let [p (alloc-heap i64)]
             (store! p (add 20 22))
             (let [v (load p)] (free p) v)))
     "#;

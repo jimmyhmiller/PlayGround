@@ -470,13 +470,15 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
     trampolines, §4.5) and a safe parallel-move schedule in the trampoline (the
     current marshaller assumes non-colliding source/dest registers). Both wait
     on the macro layer / a small register-move solver.
-- **M3 — Allocation as control (not safety). ✅ done.** A pointer's region is
-  part of its type: `(ptr frame)` → `alloca`, `(ptr static)` → a global,
-  `(ptr heap)` → `malloc`. The point is **effects/control over allocation**, à
-  la Zig — *not* memory safety. We deliberately do **not** pursue borrows,
-  linear/affine types, or lifetimes. The one region rule kept is a correctness
-  one (a `frame` pointer can't cross a function boundary — a dangling `alloca`
-  would crash); `frame`/`static` can't be freed for the same reason.
+- **M3 — Allocation as control (not safety). ✅ done.** Pointers are
+  **region-less** (`(ptr T)`, à la Zig/C) — a pointer is a pointer, and we
+  deliberately do **not** pursue borrows, linear/affine types, or lifetimes.
+  *Where* memory comes from is an **operation**, not part of the type:
+  `(alloc-stack T)` → `alloca`, `(alloc-static T)` → a global, `(alloc-heap T)`
+  → `malloc`; all yield `(ptr T)`. (Regions were originally a memory-safety
+  proxy; once safety was dropped in favour of Zig-style control, the region tag
+  was deleted — pointers simplified, and stack pointers can now be passed down
+  freely.)
   - **Allocators as values (Zig-style). ✅ done in userland.** An allocator is a
     vtable struct of function pointers, threaded explicitly: a function that
     allocates *takes* an `Allocator`, so allocation is visible in its type and
