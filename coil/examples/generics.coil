@@ -1,6 +1,9 @@
-; Generics via monomorphization. Type arguments are explicit: `[i64]` on a call,
-; `(Pair i64 i64)` in a type. The compiler stamps out a concrete copy per
+; Generics via monomorphization. The compiler stamps out a concrete copy per
 ; instantiation (id__i64, Pair__i64__i64, ...) — see `coil emit-ir`.
+; Type arguments are *inferred* from the value arguments: `(id 40)` and
+; `(pair-sum p)` need no `[i64]` — the checker unifies the declared parameter
+; types (even nested, `(ptr (Pair T T))`) against the actual argument types.
+; Explicit `[i64]` is still accepted when you want to be explicit.
 ;   coil run examples/generics.coil; echo $?   => 42
 
 (defn id [T] [(x T)] (-> T) x)            ; generic function
@@ -12,6 +15,6 @@
 
 (defn main [] (-> :i64)
   (let [p (alloc-stack (Pair i64 i64))]
-    (store! (field p fst) (id [i64] 40))
+    (store! (field p fst) (id 40))    ; T inferred = i64 (from the literal)
     (store! (field p snd) 2)
-    (pair-sum [i64] p)))
+    (pair-sum p)))                     ; T inferred = i64 (from p : (ptr (Pair i64 i64)))

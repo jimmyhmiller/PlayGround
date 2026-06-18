@@ -1,11 +1,13 @@
-//! Monomorphization.
+//! Monomorphization — a **pure specializer**.
 //!
-//! Generics are erased before type-checking by stamping out a concrete copy of
-//! each generic function/struct per set of concrete type arguments — the
-//! AOT-friendly approach (Rust/C++/Zig style), so the checker and codegen stay
-//! monomorphic. Type arguments are explicit: `(id [i64] x)`, `(Pair i64 i64)`.
+//! Generics are erased by stamping out a concrete copy of each generic
+//! function/struct/sum per set of concrete type arguments — the AOT-friendly
+//! approach (Rust/C++/Zig style), so codegen stays monomorphic. This pass does
+//! no inference: by the time it runs, the type checker has already typed every
+//! body and written explicit type arguments onto every generic call/construction
+//! (`(id [i64] x)`, `(Pair i64 i64)`). It just substitutes and deduplicates.
 //!
-//! Pipeline position: `read → expand → parse → ►monomorphize◄ → check → codegen`.
+//! Pipeline position: `read → expand → parse → check → ►monomorphize◄ → codegen`.
 
 use std::collections::{HashMap, HashSet};
 

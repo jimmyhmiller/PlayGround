@@ -53,11 +53,15 @@ fn host_target() -> macros::TargetInfo {
     }
 }
 
-/// The shared front end: read → expand → parse → monomorphize → check → module.
+/// The shared front end: read → expand → parse → check (elaborate + infer) →
+/// monomorphize → module. The checker runs *before* monomorphization now: it
+/// types polymorphic code and infers/fills the generic type arguments, so the
+/// monomorphizer is a pure specializer over fully-explicit type args.
 fn build_module<'ctx>(ctx: &'ctx Context, src: &str) -> Result<Module<'ctx>, String> {
     let forms = read_and_expand(src)?;
-    let program = mono::monomorphize(parse::parse_program(&forms)?)?;
+    let program = parse::parse_program(&forms)?;
     let program = check::check(&program)?;
+    let program = mono::monomorphize(program)?;
     codegen::compile(ctx, &program)
 }
 
@@ -130,7 +134,10 @@ pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
 /// program is to AOT-compile it.)
 pub fn check_source(src: &str) -> Result<(), String> {
     let forms = read_and_expand(src)?;
-    let program = mono::monomorphize(parse::parse_program(&forms)?)?;
-    check::check(&program)?;
+    let program = parse::parse_program(&forms)?;
+    let program = check::check(&program)?;
+    // Run monomorphization too, so specialization-time errors (if any) surface
+    // in a check-only pass as well.
+    mono::monomorphize(program)?;
     Ok(())
 }

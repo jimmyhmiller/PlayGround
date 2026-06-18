@@ -91,9 +91,15 @@ template substitution.
   `(static-assert COND "msg")` pin a layout down — a wrong size/offset is a
   compile error. (Per-field endianness sketched in [`docs/LAYOUT.md`](docs/LAYOUT.md).)
 - Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
-  structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`, explicit type
-  args `(id [i64] x)`. Generic **sum types** too: `(defsum Option [T] (None)
-  (Some [(val T)]))` with `(match o (None [] ...) (Some [v] ...))`.
+  structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`. Generic **sum
+  types** too: `(defsum Option [T] (None) (Some [(val T)]))` with
+  `(match o (None [] ...) (Some [v] ...))`. **Type arguments are inferred** from
+  the value arguments — `(id 42)`, `(pair-sum p)`, `(Some 42)` need no `[i64]`;
+  the checker unifies the declared parameter types against the actual argument
+  types (even nested, e.g. `(ptr (Pair T T))`) and fills the arguments in before
+  monomorphization. Explicit `[i64 …]` is still accepted and is required only
+  when nothing pins a parameter down (a phantom type param, or a fieldless
+  variant like `(None [i64])`).
 - Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
   for a function's address, and indirect `(call-ptr fp args...)` (honoring the
   convention). Closures are **not** a language primitive — a closure is a struct
@@ -103,10 +109,8 @@ template substitution.
   (env struct + code + new/call/free) from one line — closures as a library.
 
 Not yet: the `adapt` macro (general convention-to-convention trampolines),
-*generic* type-argument inference (generics/sums still need explicit type args
-today — integer-*literal* inference is done, but inferring a function's type
-parameters from its value arguments is not), per-field endianness, an IO
-`Writer` capability, a per-arch shim backend. See the design docs.
+per-field endianness, an IO `Writer` capability, a per-arch shim backend. See
+the design docs.
 
 ## What it looks like
 
@@ -132,7 +136,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 101 tests (build + run native exes)
+cargo test                                     # 104 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)

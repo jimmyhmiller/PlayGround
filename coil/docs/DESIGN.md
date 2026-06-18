@@ -68,7 +68,10 @@ core, plus a macro system powerful enough that "high-level" features are
   AST  ──►  macro expander (compile-time eval)  ──►  expanded AST
         │
         ▼
-  type checker  (bidirectional; ABI + region aware)   ──►  typed core
+  type checker  (bidirectional; elaborates literals; infers generic
+        │        type args; ABI-aware)              ──►  typed core
+        ▼
+  monomorphizer (pure specializer over explicit type args)
         │
         ▼
   lowering      (per-convention strategy; §7)
@@ -417,6 +420,30 @@ literal needs a non-default type the checker wraps it in an explicit
 A literal that doesn't fit its inferred width (`(store! p 300)` into a `(ptr u8)`)
 is a compile error, not a silent truncation. Two *concrete* types that disagree
 (neither is a literal) are still a hard mismatch (mixed widths/signedness).
+
+**The checker drives monomorphization.** It runs *before* the monomorphizer and
+is generic-aware: it type-checks polymorphic bodies with the type parameters as
+opaque types, resolves generic struct/sum applications (`(Pair i64 i64)` =
+`App("Pair", [i64,i64])`) by substitution, and at every generic call site either
+reads the explicit `[T …]` arguments or **infers** them. Inference is one-level
+structural unification: each declared parameter type (which may mention the
+callee's type parameters) is matched against the synthesized argument type, so a
+parameter `(ptr (Pair T T))` against an argument of type `(ptr (Pair i64 i64))`
+binds `T = i64`; the same recovers a sum's parameters from a variant's fields
+(`(Some 42)` ⟹ `Option<i64>`). Every type parameter must be pinned by some
+argument — a phantom parameter or a fieldless variant (`(None …)`) still needs
+explicit args, and two arguments that force a parameter to two different types
+are a "conflicting types" error. The inferred (or explicit) arguments are written
+back onto the call as elaboration, so the monomorphizer that follows is a **pure
+specializer**: it never infers, it just stamps out one concrete copy per distinct
+type-argument tuple. Inferred arguments may themselves mention an *outer*
+function's type parameters (a generic body calling another generic) — the
+specializer substitutes those when it instantiates the outer function, so a
+single inference rule composes across nesting without a global solver.
+
+This is the resolution of the old phase-ordering circularity (inference needs
+typing; specialization needed inference; specialization used to run first):
+typing now happens first and feeds specialization, instead of the reverse.
 
 ---
 
