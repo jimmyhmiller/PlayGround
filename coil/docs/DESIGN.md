@@ -470,15 +470,21 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
     trampolines, §4.5) and a safe parallel-move schedule in the trampoline (the
     current marshaller assumes non-colliding source/dest registers). Both wait
     on the macro layer / a small register-move solver.
-- **M3 — Allocation types. ✅ done.** A pointer's region is part of its type:
-  `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
-  `malloc`/`free`. `alloc`/`load`/`store!`/`free`, with a real bidirectional
-  type checker (the language is no longer i64-only). Region soundness checked:
-  `frame` pointers can't cross a function boundary; `free` only accepts `heap`.
-  (`allocation.coil` → 42.)
-  - **Remaining for M3:** richer pointee types (pointers to pointers/structs),
-    user-defined allocators as values (§5.1), arena regions with bulk teardown,
-    and `defer`/RAII (a macro, once the macro layer exists).
+- **M3 — Allocation as control (not safety). ✅ done.** A pointer's region is
+  part of its type: `(ptr frame)` → `alloca`, `(ptr static)` → a global,
+  `(ptr heap)` → `malloc`. The point is **effects/control over allocation**, à
+  la Zig — *not* memory safety. We deliberately do **not** pursue borrows,
+  linear/affine types, or lifetimes. The one region rule kept is a correctness
+  one (a `frame` pointer can't cross a function boundary — a dangling `alloca`
+  would crash); `frame`/`static` can't be freed for the same reason.
+  - **Allocators as values (Zig-style). ✅ done in userland.** An allocator is a
+    vtable struct of function pointers, threaded explicitly: a function that
+    allocates *takes* an `Allocator`, so allocation is visible in its type and
+    the strategy is the caller's choice. `lib/alloc.coil` ships a `malloc`-backed
+    and an `arena` (bump) allocator; `allocators.coil` runs the same code under
+    both → 42. No compiler support — structs + fnptrs + `extern`.
+  - **Next:** an IO capability (a `Writer` vtable) the same way — no ambient
+    stdout, thread it explicitly; and a `defer`/scope macro for cleanup.
 - **Macros — ✅ done (engine).** `defmacro`/`def` evaluated by a compile-time
   Lisp interpreter (quasiquote/unquote/splicing, `gensym`, list & symbol
   builtins, lambdas, recursion, helper functions). Macros compute and can emit

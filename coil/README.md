@@ -39,8 +39,16 @@ whose region is part of their type), and the higher-level surface is grown with
   register. Verified through JIT, including recursion through the exotic ABI.
 - M3: allocation as types. A pointer's **region** is part of its type:
   `(ptr frame)` → `alloca`, `(ptr static)` → a global, `(ptr heap)` →
-  `malloc`/`free`. The checker enforces region soundness — `frame` pointers may
-  not cross a function boundary, and `free` only accepts a `heap` pointer.
+  `malloc`. `frame` pointers may not cross a function boundary (a correctness
+  rule — a dangling `alloca` would crash), and `frame`/`static` can't be freed.
+  Regions are about **control over allocation**, not memory safety (no
+  borrows/linear types) — see allocators below.
+- Allocators (Zig-style): an allocator is an explicit **value** — a vtable
+  struct of function pointers — threaded through, so a function that allocates
+  *takes* an `Allocator` and its type shows it. `lib/alloc.coil` ships a
+  `malloc`-backed and an `arena` (bump) allocator; the same code runs under
+  either by swapping the value. The compiler has no allocator concept; it's a
+  library (structs + fnptrs + `extern`).
 - Macros: `defmacro` / `def` run in a compile-time Lisp (quasiquote `` ` ``,
   unquote `~`, splicing `~@`, `gensym`, list/symbol builtins, recursion,
   helper functions). Macros can compute, recurse, and emit whole top-level
@@ -102,11 +110,11 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 59 tests (build + run native exes)
+cargo test                                     # 62 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
+cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
 cargo run -- run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
-cargo run -- run   examples/defclosure.coil; echo $?                       # => 42
 cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
 cargo run -- run   examples/closure.coil; echo $?                          # => 42
 cargo run -- run   examples/allocation.coil; echo $?                       # => 42

@@ -353,9 +353,11 @@ fn synth(
             }
         }
         Expr::Free(p) => match synth(p, env, cx, fname)? {
-            Type::Ptr(Region::Heap, _) => Ok(Type::Int(64)),
+            // heap or raw/foreign pointers can be freed (e.g. an allocator's
+            // libc-backed memory). frame/static aren't freed (they'd crash).
+            Type::Ptr(Region::Heap, _) | Type::Ptr(Region::C, _) => Ok(Type::Int(64)),
             Type::Ptr(r, _) => Err(format!(
-                "in '{fname}': cannot free a {} pointer (only heap pointers are freed)",
+                "in '{fname}': cannot free a {} pointer (frame/static memory is not freed)",
                 r.name()
             )),
             other => Err(format!(
