@@ -77,6 +77,15 @@ template substitution.
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
   allocate any type with `(alloc-stack/static/heap TYPE)`.
+- Layout control (the dual of calling conventions): `(defstruct Name :layout
+  c | packed | (align N) ...)`, with compile-time `(sizeof T)`, `(alignof T)`,
+  `(offsetof Struct field)` and `(static-assert COND "msg")` to pin a layout
+  down — a wrong size/offset is a compile error. (Design sketch for explicit
+  per-field offsets, bitfields, endianness: [`docs/LAYOUT.md`](docs/LAYOUT.md).)
+- Generics (monomorphization): `(defn id [T] [(x T)] (-> T) x)`, generic
+  structs `(defstruct Pair [A B] ...)` used as `(Pair i64 i64)`, explicit type
+  args `(id [i64] x)`. Generic **sum types** too: `(defsum Option [T] (None)
+  (Some [(val T)]))` with `(match o (None [] ...) (Some [v] ...))`.
 - Function pointers & closures: `(fnptr CC [types] ret)` type, `(fnptr-of name)`
   for a function's address, and indirect `(call-ptr fp args...)` (honoring the
   convention). Closures are **not** a language primitive — a closure is a struct

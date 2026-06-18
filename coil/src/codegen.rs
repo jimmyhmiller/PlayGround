@@ -16,9 +16,12 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::targets::{
+    CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
-use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate};
+use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate, OptimizationLevel};
 
 use crate::ast::*;
 use crate::convention::Lowering;
@@ -38,6 +41,7 @@ struct ShimInfo<'ctx> {
 struct StructInfo<'ctx> {
     fields: Vec<(String, Type)>,
     ty: StructType<'ctx>,
+    layout: Layout,
 }
 
 /// A sum type's runtime shape: `{ i32 tag, [words x i64] payload }`, plus a
@@ -63,13 +67,33 @@ struct Cg<'ctx> {
     callables: HashMap<String, (String, Vec<Type>, Type)>,
     /// Native LLVM calling-convention id for each convention name.
     conv_ids: HashMap<String, u32>,
+    /// Target layout, for sizeof/alignof/offsetof and static asserts.
+    target_data: TargetData,
     globals: Cell<u32>,
 }
 
 pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ctx>, String> {
+    Target::initialize_native(&InitializationConfig::default())?;
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    let tm = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or("codegen: could not create target machine")?;
+    let target_data = tm.get_target_data();
+    let module = ctx.create_module("coil");
+    module.set_triple(&triple);
+    module.set_data_layout(&target_data.get_data_layout());
+
     let mut cg = Cg {
         ctx,
-        module: ctx.create_module("coil"),
+        module,
         builder: ctx.create_builder(),
         funcs: HashMap::new(),
         shims: HashMap::new(),
@@ -78,6 +102,7 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         rets: HashMap::new(),
         callables: HashMap::new(),
         conv_ids: HashMap::new(),
+        target_data,
         globals: Cell::new(0),
     };
 
@@ -97,6 +122,7 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             StructInfo {
                 fields: sd.fields.clone(),
                 ty,
+                layout: sd.layout,
             },
         );
     }
@@ -124,7 +150,8 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
     for sd in &program.structs {
         let ty = cg.structs[&sd.name].ty;
         let field_types: Vec<BasicTypeEnum> = sd.fields.iter().map(|(_, t)| cg.basic_ty(t)).collect();
-        ty.set_body(&field_types, false);
+        let packed = matches!(sd.layout, Layout::Packed);
+        ty.set_body(&field_types, packed);
     }
     // 0d. per-variant field structs (used to read/write payloads).
     for sd in &program.sums {
@@ -137,6 +164,13 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             })
             .collect();
         cg.sums.get_mut(&sd.name).unwrap().variant_structs = vss;
+    }
+
+    // 0e. static asserts — evaluate now that every layout is known.
+    for a in &program.asserts {
+        if cg.const_eval(&a.cond)? == 0 {
+            return Err(format!("static assertion failed: {}", a.msg));
+        }
     }
 
     // 1a. declare externs (foreign symbols resolved at link time).
@@ -554,11 +588,16 @@ impl<'ctx> Cg<'ctx> {
                 }
             }
             Expr::SizeOf(ty) => {
-                let sz = self
-                    .basic_ty(ty)
-                    .size_of()
-                    .ok_or_else(|| format!("codegen: type {ty:?} has no known size"))?;
-                Ok((sz.into(), Type::Int(64, true)))
+                let n = self.target_data.get_abi_size(&self.basic_ty(ty));
+                Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
+            }
+            Expr::AlignOf(ty) => {
+                let n = self.target_data.get_abi_alignment(&self.basic_ty(ty)) as u64;
+                Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
+            }
+            Expr::OffsetOf(ty, field) => {
+                let n = self.offset_of(ty, field)?;
+                Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
             }
             Expr::Free(p) => {
                 let (pv, _) = self.emit_expr(p, scope)?;
@@ -725,18 +764,95 @@ impl<'ctx> Cg<'ctx> {
 
     fn emit_alloc(&self, storage: Storage, ty: &Type) -> Result<Tv<'ctx>, String> {
         let bt = self.basic_ty(ty);
+        // a struct with `:layout (align N)` forces its allocation alignment.
+        let force_align = match ty {
+            Type::Struct(name) => match self.structs.get(name).map(|s| s.layout) {
+                Some(Layout::Aligned(n)) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        };
         let ptr = match storage {
-            Storage::Stack => self.builder.build_alloca(bt, "stack.slot").map_err(le)?,
+            Storage::Stack => {
+                let p = self.builder.build_alloca(bt, "stack.slot").map_err(le)?;
+                if let (Some(a), Some(instr)) = (force_align, p.as_instruction()) {
+                    let _ = instr.set_alignment(a);
+                }
+                p
+            }
             Storage::Heap => self.builder.build_malloc(bt, "heap.box").map_err(le)?,
             Storage::Static => {
                 let n = self.globals.get();
                 self.globals.set(n + 1);
                 let g = self.module.add_global(bt, None, &format!("g.{n}"));
                 g.set_initializer(&bt.const_zero());
+                if let Some(a) = force_align {
+                    g.set_alignment(a);
+                }
                 g.as_pointer_value()
             }
         };
         Ok((ptr.into(), Type::Ptr(Box::new(ty.clone()))))
+    }
+
+    fn offset_of(&self, ty: &Type, field: &str) -> Result<u64, String> {
+        match ty {
+            Type::Struct(name) => {
+                let info = self
+                    .structs
+                    .get(name)
+                    .ok_or_else(|| format!("codegen: offsetof on non-struct '{name}'"))?;
+                let idx = info
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n == field)
+                    .ok_or_else(|| format!("codegen: struct '{name}' has no field '{field}'"))?;
+                self.target_data
+                    .offset_of_element(&info.ty, idx as u32)
+                    .ok_or_else(|| "codegen: could not compute field offset".to_string())
+            }
+            other => Err(format!("codegen: offsetof needs a struct, got {other:?}")),
+        }
+    }
+
+    /// Evaluate a compile-time constant expression (for `static-assert`).
+    fn const_eval(&self, e: &Expr) -> Result<i64, String> {
+        match e {
+            Expr::Int(n) => Ok(*n),
+            Expr::SizeOf(t) => Ok(self.target_data.get_abi_size(&self.basic_ty(t)) as i64),
+            Expr::AlignOf(t) => Ok(self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64),
+            Expr::OffsetOf(t, f) => Ok(self.offset_of(t, f)? as i64),
+            Expr::Cast { expr, .. } => self.const_eval(expr),
+            Expr::Bin { op, lhs, rhs } => {
+                let l = self.const_eval(lhs)?;
+                let r = self.const_eval(rhs)?;
+                Ok(match op {
+                    BinOp::Add => l.wrapping_add(r),
+                    BinOp::Sub => l.wrapping_sub(r),
+                    BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::Div if r != 0 => l / r,
+                    BinOp::Rem if r != 0 => l % r,
+                    _ => return Err("static-assert: divide/mod by zero".to_string()),
+                })
+            }
+            Expr::Cmp { op, lhs, rhs } => {
+                let l = self.const_eval(lhs)?;
+                let r = self.const_eval(rhs)?;
+                Ok(i64::from(match op {
+                    CmpOp::Eq => l == r,
+                    CmpOp::Ne => l != r,
+                    CmpOp::Lt => l < r,
+                    CmpOp::Le => l <= r,
+                    CmpOp::Gt => l > r,
+                    CmpOp::Ge => l >= r,
+                }))
+            }
+            _ => Err(
+                "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic \
+                 and comparisons are allowed"
+                    .to_string(),
+            ),
+        }
     }
 
     fn emit_if(

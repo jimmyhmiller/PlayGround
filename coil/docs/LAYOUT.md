@@ -193,7 +193,7 @@ exist.
 
 ## Suggested phasing
 
-1. `:packed` + `(align N)` strategies + `static-assert`/`offsetof`/`alignof`
+1. ✅ DONE: `:packed` + `(align N)` strategies + `static-assert`/`offsetof`/`alignof`
    (small; immediately useful for FFI and asserting C layouts).
 2. `:explicit` with `:at` offsets + unions (the byte-blob realization).
 3. Bitfields (`:bits`, backing int, get/set accessors).

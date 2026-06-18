@@ -162,6 +162,19 @@ pub fn check(program: &Program) -> Result<(), String> {
             ));
         }
     }
+
+    // static-assert conditions must type-check to an integer (the codegen pass
+    // evaluates them; here we just ensure they're well-formed).
+    for a in &program.asserts {
+        let mut env: HashMap<String, Type> = HashMap::new();
+        let t = synth(&a.cond, &mut env, &cx, "static-assert")?;
+        if !t.is_int() {
+            return Err(format!(
+                "static-assert: condition must be an integer, got {}",
+                ty_str(&t)
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -359,6 +372,28 @@ fn synth(
             validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
             Ok(Type::Int(64, true))
         }
+        Expr::AlignOf(ty) => {
+            validate_type(ty, &cx.known).map_err(|e| format!("in '{fname}': alignof: {e}"))?;
+            Ok(Type::Int(64, true))
+        }
+        Expr::OffsetOf(ty, field) => match ty {
+            Type::Struct(name) => {
+                let fields = cx
+                    .structs
+                    .get(name)
+                    .ok_or_else(|| format!("in '{fname}': offsetof: '{name}' is not a struct"))?;
+                if !fields.iter().any(|(n, _)| n == field) {
+                    return Err(format!(
+                        "in '{fname}': offsetof: struct '{name}' has no field '{field}'"
+                    ));
+                }
+                Ok(Type::Int(64, true))
+            }
+            other => Err(format!(
+                "in '{fname}': offsetof needs a struct type, got {}",
+                ty_str(other)
+            )),
+        },
         Expr::Free(p) => match synth(p, env, cx, fname)? {
             // any pointer can be freed (it calls libc free). Freeing stack/static
             // memory is your problem — like C.

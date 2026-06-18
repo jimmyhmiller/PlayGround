@@ -64,6 +64,7 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             StructDef {
                 name: sd.name.clone(),
                 type_params: vec![],
+                layout: sd.layout,
                 fields,
             },
         );
@@ -77,6 +78,17 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         m.out_funcs.insert(f.name.clone(), nf);
     }
 
+    let asserts = program
+        .asserts
+        .iter()
+        .map(|a| {
+            Ok(StaticAssert {
+                cond: m.resolve_expr(&a.cond, &empty)?,
+                msg: a.msg.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
     m.drain()?;
 
     Ok(Program {
@@ -85,6 +97,7 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         structs: m.out_structs.into_values().collect(),
         sums: m.out_sums.into_values().collect(),
         funcs: m.out_funcs.into_values().collect(),
+        asserts,
     })
 }
 
@@ -123,6 +136,7 @@ impl<'a> Mono<'a> {
                     StructDef {
                         name: mangled,
                         type_params: vec![],
+                        layout: gs.layout,
                         fields,
                     },
                 );
@@ -367,6 +381,8 @@ impl<'a> Mono<'a> {
                 expr: Box::new(go(self, expr)?),
             },
             Expr::SizeOf(ty) => Expr::SizeOf(self.resolve_ty(ty, map)?),
+            Expr::AlignOf(ty) => Expr::AlignOf(self.resolve_ty(ty, map)?),
+            Expr::OffsetOf(ty, f) => Expr::OffsetOf(self.resolve_ty(ty, map)?, f.clone()),
             Expr::Free(p) => Expr::Free(Box::new(go(self, p)?)),
             Expr::Construct { sum, variant, args } => Expr::Construct {
                 sum: sum.clone(),

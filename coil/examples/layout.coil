@@ -1,0 +1,25 @@
+; Explicit control of struct layout, like calling conventions: :layout c | packed
+; | (align N), with compile-time sizeof / alignof / offsetof and static-assert to
+; pin the layout down (drift becomes a compile error).
+;   coil run examples/layout.coil; echo $?   => 42
+
+; A network packet header, byte-exact (no padding) and verified.
+(defstruct Header :layout packed
+  [(magic   :u16)     ; offset 0
+   (version :u8)      ; offset 2
+   (flags   :u8)      ; offset 3
+   (length  :u32)])   ; offset 4   -> total 8 bytes
+
+(static-assert (icmp-eq (sizeof Header) 8)      "header must be 8 bytes")
+(static-assert (icmp-eq (offsetof Header length) 4) "length at offset 4")
+
+; The same fields under the C ABI would be padded differently:
+(defstruct HeaderC [(magic :u16) (version :u8) (flags :u8) (length :u32)])
+(static-assert (icmp-eq (sizeof HeaderC) 8) "this one happens to also be 8")
+
+(defn main [] (-> :i64)
+  (let [h (alloc-stack Header)]
+    (store! (field h length) (cast :u32 40))
+    (store! (field h version) (cast :u8 2))
+    (iadd (cast :i64 (load (field h length)))
+          (cast :i64 (load (field h version))))))   ; 40 + 2 = 42

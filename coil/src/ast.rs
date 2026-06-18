@@ -128,6 +128,10 @@ pub enum Expr {
     },
     /// Size in bytes of a type's layout, as an i64 constant.
     SizeOf(Type),
+    /// Alignment in bytes of a type, as an i64 constant.
+    AlignOf(Type),
+    /// Byte offset of a field within a struct, as an i64 constant.
+    OffsetOf(Type, String),
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
     /// Construct a sum-type variant. Produced by monomorphization from a call to
@@ -180,12 +184,24 @@ pub struct Extern {
     pub ret: Type,
 }
 
+/// How a struct is laid out in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Target C ABI: natural alignment + padding (the default; for FFI).
+    C,
+    /// No padding between fields.
+    Packed,
+    /// C layout but with the whole struct force-aligned to N bytes.
+    Aligned(u32),
+}
+
 /// A named struct definition: ordered (field-name, field-type) pairs.
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
     /// Generic type parameters (empty for an ordinary struct).
     pub type_params: Vec<String>,
+    pub layout: Layout,
     pub fields: Vec<(String, Type)>,
 }
 
@@ -211,6 +227,13 @@ pub struct SumVariant {
     pub fields: Vec<(String, Type)>,
 }
 
+/// A compile-time assertion: `cond` must evaluate (at compile time) to nonzero.
+#[derive(Debug, Clone)]
+pub struct StaticAssert {
+    pub cond: Expr,
+    pub msg: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub conventions: HashMap<String, Convention>,
@@ -218,6 +241,7 @@ pub struct Program {
     pub sums: Vec<SumDef>,
     pub externs: Vec<Extern>,
     pub funcs: Vec<Func>,
+    pub asserts: Vec<StaticAssert>,
 }
 
 impl Program {

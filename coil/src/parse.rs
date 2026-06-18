@@ -13,6 +13,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     let mut externs = Vec::new();
     let mut structs = Vec::new();
     let mut sums = Vec::new();
+    let mut asserts = Vec::new();
 
     for form in forms {
         let items = as_list(form, "top-level form must be a list")?;
@@ -34,6 +35,15 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
                 funcs.push(f);
             }
             "extern" => externs.push(parse_extern(&items[1..])?),
+            "static-assert" => {
+                let cond = parse_expr(items.get(1).ok_or("static-assert: missing condition")?)?;
+                let msg = match items.get(2) {
+                    Some(Sexp::Str(s)) => s.clone(),
+                    None => "static assertion failed".to_string(),
+                    _ => return Err("static-assert: message must be a string".to_string()),
+                };
+                asserts.push(StaticAssert { cond, msg });
+            }
             other => return Err(format!("unknown top-level form '{other}'")),
         }
     }
@@ -44,6 +54,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
         sums,
         externs,
         funcs,
+        asserts,
     })
 }
 
@@ -82,8 +93,14 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
 
 fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
-    // optional generic params: a vector immediately followed by the field vector.
     let mut i = 1;
+    // optional `:layout c | packed | (align N)`
+    let mut layout = Layout::C;
+    if matches!(rest.get(i), Some(Sexp::Keyword(k)) if k == "layout") {
+        layout = parse_layout(rest.get(i + 1).ok_or("defstruct: :layout missing value")?)?;
+        i += 2;
+    }
+    // optional generic params: a vector immediately followed by the field vector.
     let type_params = parse_type_params(rest, &mut i)?;
     let fields_v = match rest.get(i) {
         Some(Sexp::Vector(v)) => v,
@@ -99,8 +116,25 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     Ok(StructDef {
         name,
         type_params,
+        layout,
         fields,
     })
+}
+
+fn parse_layout(s: &Sexp) -> Result<Layout, String> {
+    match s {
+        Sexp::Sym(k) if k == "c" => Ok(Layout::C),
+        Sexp::Sym(k) if k == "packed" => Ok(Layout::Packed),
+        Sexp::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
+            match items.get(1) {
+                Some(Sexp::Int(n)) if *n > 0 && (*n as u64).is_power_of_two() => {
+                    Ok(Layout::Aligned(*n as u32))
+                }
+                _ => Err("(align N): N must be a positive power of two".to_string()),
+            }
+        }
+        _ => Err("layout must be c, packed, or (align N)".to_string()),
+    }
 }
 
 /// If `rest[i]` is a vector immediately followed by another vector, the first is
@@ -528,6 +562,18 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 return Err("sizeof: expects (sizeof TYPE)".to_string());
             }
             Ok(Expr::SizeOf(parse_type(&args[0])?))
+        }
+        "alignof" => {
+            if args.len() != 1 {
+                return Err("alignof: expects (alignof TYPE)".to_string());
+            }
+            Ok(Expr::AlignOf(parse_type(&args[0])?))
+        }
+        "offsetof" => {
+            if args.len() != 2 {
+                return Err("offsetof: expects (offsetof TYPE field)".to_string());
+            }
+            Ok(Expr::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
         }
         // direct application: (fib n) == (call fib n). A leading vector is an
         // explicit type-argument list for a generic call: (id [i64] 5).
