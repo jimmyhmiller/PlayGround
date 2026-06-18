@@ -30,6 +30,53 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v0.8 — GENERAL inductive families + dependent eliminators)
+
+The QTT core (`src/dep.rs`) now has **general, user-declared inductive
+families**, the gate to everything Idris-like. A `Signature` holds
+strictly-positive datatype declarations (parameters, indices, constructors —
+each constructor a telescope ending in `D params idxs`), and **every family
+gets a dependent eliminator whose type is *computed from its constructors*** —
+with an induction hypothesis inserted for each recursive argument. The
+eliminator is the only recursion, so anything defined with it is **total by
+construction** (docs/09 §1.3).
+
+`Nat`, `Vec n`, and `Fin n` are now **ordinary declarations**, not built-ins:
+
+```
+data N    where z | s N
+data Vec (A:Type) : (Nat) where vnil : Vec A 0
+                                vcons : Π(n).A → Vec A n → Vec A (suc n)
+data Fin : (Nat)  where fz : Fin (suc n) | fs : Fin n → Fin (suc n)
+```
+
+and are exercised through the *one* generic `elim`:
+
+```
+add    = λm.λn. elim[N]   (λ_.N)        n  (λk.λih. s ih)              m   -- 2+3 ↝ 5
+append = λA.…   elim[Vec] (λk._.Vec A (add k n)) ys (λk h t ih. vcons A (add k n) h ih) xs
+fin2nat= λn.λi. elim[Fin] (λm._.Nat)    (λm.0) (λm prev ih. suc ih)    i
+```
+
+`append Nat 2 1 [10,20] [30] : Vec Nat 3 ↝ [10,20,30]` — the length index `add
+m n` is tracked in the type and only checks because the eliminator makes
+`add` reduce definitionally. Non-strictly-positive declarations (e.g.
+`mk : (Bad → Bad) → Bad`) are **rejected**. The mechanism: a `Signature`
+threaded through NbE; `Data`/`Constr`/`Elim` terms; the eliminator type built
+by de Bruijn `shift`/`subst` over the constructor telescopes; a generic ι-rule
+that reads recursion off the constructor's declared argument types. `cargo
+test`: 16 lib tests (incl. `nat_as_a_user_datatype_with_generic_elim`,
+`append_via_generic_elim_tracks_length_and_computes`,
+`fin_is_a_recursive_indexed_family`, `strict_positivity_is_enforced`).
+
+Remaining Route-B steps: **(1)** a surface parser + elaborator (Idris-style
+dependent pattern matching → eliminators; implicit/erased args via `Π[0]`);
+**(2)** merge with the low-level layer so `Own`/`Vec<n>` are declarations and
+capabilities are **indexed by propositions**; **(3)** a universe hierarchy for
+logical consistency. (The hand-written built-in `Nat` with literals and `+` is
+kept as a convenient index type; built-in `Vec` has been removed in favour of
+the user-declared one.)
+
 ## Status (v0.7 — the FUSED dependent+linear core: QTT, via NbE)
 
 The Route-B core (`src/dep.rs`): a **Quantitative Type Theory** checker —
@@ -56,67 +103,11 @@ refl : Eq Nat (2 + 2) 5        -- REJECTED
 
 This is the dependent + linear + erasure unification — the same as
 `agda/Dependent.agda`'s `dep-id`, and a port of `../prototype/qtt_checker.py`.
-
-**The dependent eliminator (induction), totality by construction.** `Nat` now
-has its constructors `zero`/`suc` and the **dependent eliminator** `natElim`:
-
-```
-natElim P z s n : P n
-  P : Nat → Type     z : P 0     s : Π(k:Nat). P k → P (suc k)
-```
-
-`natElim` is the *only* recursion, so every function written with it is **total
-by construction** (docs/09 §1.3) — there is no `fix`, no way to write a
-non-terminating or non-covering term. `add` is then a *definition*, not a
-built-in: `add = λm.λn. natElim (λ_.Nat) n (λk.λr. suc r) m`. It **computes** by
-the eliminator's ι-rules under NbE (`add 2 3 ↝ 5`), and proofs are discharged by
-that user-defined computation:
-
-```
-refl : Eq Nat (add 2 3) 5        -- checks, via natElim's own reduction
-```
-
-**Length-indexed vectors (a dependent family), like Idris.** `Vec A n` is in
-the core with `nil`/`cons` and the **dependent eliminator** `vecElim`:
-
-```
-vecElim A P pnil pcons n xs : P n xs
-  P     : Π(k:Nat). Vec A k → Type
-  pnil  : P 0 (nil A)
-  pcons : Π(k:Nat). Π(h:A). Π(t:Vec A k). P k t → P (suc k) (cons A k h t)
-```
-
-`append : Π[0](A). Π[0](m). Π[0](n). Vec A m → Vec A n → Vec A (add m n)` is
-*defined* by `vecElim` and **the length is tracked in the type**:
-
-```
-append Nat 2 1 [10,20] [30]  :  Vec Nat 3       -- the index add 2 1 ↝ 3
-                             ↝  [10,20,30]       -- and it computes
-```
-
-This only type-checks because `add` (itself defined by `natElim`) makes
-`0 + n ≡ n` and `(suc k) + n ≡ suc (k + n)` hold **definitionally** — the
-dependent + total story paying off. (`A`, `m`, `n` are `Π[0]` = erased indices;
-the vectors are `Π[ω]`.)
-
-`cargo test`: 14 tests (incl. `polymorphic_linear_identity`,
-`linearity_is_enforced_under_dependency`, `natelim_is_a_total_recursor`,
-`proof_by_user_defined_computation`, `vectors_are_length_indexed`,
-`append_tracks_length_in_the_type_and_computes`).
-
-Standalone for now (its own `Term` syntax). `Nat`/`Vec` + their eliminators are
-the hand-written template; remaining Route-B steps: **(1)** **general inductive
-families** — generalise the hardcoded `natElim`/`vecElim` to *any*
-strictly-positive family with an eliminator *typed from its constructors* (a
-signature threaded through NbE), so `Fin n`/`lseg`/`List` and `Nat`/`Vec`
-themselves become user declarations rather than built-ins (this completes the
-gate to everything Idris-like, and makes the totality story general); **(2)** a
-surface parser for the dependent syntax;
-**(3)** merge with the low-level layer so `Own`/`Vec<n>` are definitions in the
-calculus and capabilities are **indexed by propositions** (so proofs constrain
-the memory operations); **(4)** a universe hierarchy for logical consistency
-(`Type : Type` today is fine for a language, not for a logic —
-`../docs/07-implementation-guide.md` §7).
+The dependent eliminator (induction) and length-indexed vectors that this
+version introduced as *hand-written* built-ins are, as of **v0.8 above**,
+subsumed by general user-declared inductive families — `Nat`/`Vec`/`Fin` are now
+declarations exercised through one generic `elim`. (Built-in `Nat` with literals
+and `+` is kept as a convenient index type.)
 
 ## Status (v0.5 — linear cursors: the intrusive DLL with O(1) remove)
 

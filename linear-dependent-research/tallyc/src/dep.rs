@@ -14,61 +14,53 @@
 //! The headline is the dependent+linear+erasure unification, the polymorphic
 //! LINEAR identity, machine-checked here:
 //!     λA. λx. x   :   Π[0](A:Type). Π[1](x:A). A
-//! `A` is used 0 times at runtime (erased, appears only in the type); `x` is used
-//! exactly once. And proofs are still terms checked by computation
-//! (`refl : Eq Nat (2+2) 4`), now living in the 0-fragment.
+//!
+//! GENERAL INDUCTIVE FAMILIES (the gate to Idris-like data). A `Signature` holds
+//! strictly-positive datatype declarations: parameters, indices, and
+//! constructors (each a telescope ending in `D params idxs`). Each family gets a
+//! DEPENDENT ELIMINATOR whose type is *computed from its constructors* (with an
+//! induction hypothesis for every recursive argument). The eliminator is the
+//! only recursion, so every function written with it is TOTAL BY CONSTRUCTION
+//! (docs/09 §1.3). `Nat`, `Vec n`, `Fin n`, `List` are then *declarations*, not
+//! built-ins — see the tests. (`Nat` is also kept as a primitive, with literals
+//! and `+`, because it is a convenient index type.)
 //!
 //! `Type : Type` for now (fine for a language; for a logic, a universe hierarchy
 //! is needed — ../../docs/07-implementation-guide.md §7).
-//!
-//! Inductive families with DEPENDENT ELIMINATORS (the gate to Idris-like data):
-//! `Nat` (zero/suc + `natElim`) and the length-indexed `Vec A n` (nil/cons +
-//! `vecElim`). The eliminator is the only recursion, so functions written with
-//! it are TOTAL BY CONSTRUCTION (docs/09 §1.3). `add`/`append` are then
-//! *definitions*; `append`'s result index `add m n` type-checks because the
-//! eliminator makes `+` reduce definitionally. (These two families are
-//! hand-written; generalising to user-declared strictly-positive families is
-//! the next step — see the README.)
 
 use crate::mult::Mult;
+use std::rc::Rc;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Term {
-    Var(usize),                                   // de Bruijn index (0 = innermost)
+    Var(usize), // de Bruijn index (0 = innermost)
     Type,
-    Pi(Mult, Box<Term>, Box<Term>),               // Π[π](_:A). B
+    Pi(Mult, Box<Term>, Box<Term>), // Π[π](_:A). B
     Lam(Box<Term>),
     App(Box<Term>, Box<Term>),
-    Sigma(Mult, Box<Term>, Box<Term>),            // Σ[π](_:A). B   (dependent pair type)
+    Sigma(Mult, Box<Term>, Box<Term>), // Σ[π](_:A). B
     Pair(Box<Term>, Box<Term>),
     Fst(Box<Term>),
     Snd(Box<Term>),
+    // ---- built-in Nat (a convenient primitive index type) ----
     Nat,
     NatLit(u64),
-    Zero,                                         // the constructor 0
-    Suc(Box<Term>),                               // the constructor suc
-    /// the dependent eliminator (induction):  natElim P z s n : P n
-    ///   P : Nat → Type,  z : P 0,  s : Π(k:Nat). P k → P (suc k)
+    Zero,
+    Suc(Box<Term>),
     NatElim(Box<Term>, Box<Term>, Box<Term>, Box<Term>),
     Add(Box<Term>, Box<Term>),
-    // ---- Vec: a LENGTH-INDEXED inductive family (the headline dependent data) ----
-    VecTy(Box<Term>, Box<Term>),                  // Vec A n           : Type
-    Nil(Box<Term>),                               // nil A             : Vec A 0
-    Cons(Box<Term>, Box<Term>, Box<Term>, Box<Term>), // cons A n h t  : Vec A (suc n)
-    /// the dependent eliminator:  vecElim A P pnil pcons n xs : P n xs
-    ///   P     : Π(k:Nat). Vec A k → Type
-    ///   pnil  : P 0 (nil A)
-    ///   pcons : Π(k:Nat). Π(h:A). Π(t:Vec A k). P k t → P (suc k) (cons A k h t)
-    VecElim(
-        Box<Term>,
-        Box<Term>,
-        Box<Term>,
-        Box<Term>,
-        Box<Term>,
-        Box<Term>,
-    ),
+    // ---- the identity type ----
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
+    // ---- GENERAL inductive families (looked up in the Signature) ----
+    /// `D` applied to its parameters then indices: a fully-applied type.
+    Data(String, Vec<Term>),
+    /// constructor `c` applied to the family's parameters then the ctor's args.
+    Constr(String, Vec<Term>),
+    /// the dependent eliminator:  Elim(D, motive, methods, scrutinee) : P idxs scrut
+    /// `methods` is one per constructor, in declaration order. The parameters
+    /// and indices are recovered from the scrutinee's type.
+    Elim(String, Box<Term>, Vec<Term>, Box<Term>),
     Ann(Box<Term>, Box<Term>),
 }
 
@@ -81,12 +73,11 @@ pub enum Value {
     VPair(Box<Value>, Box<Value>),
     VNat,
     VNatLit(u64),
-    VSuc(Box<Value>),                             // suc of a *neutral* Nat (open term)
-    VVecTy(Box<Value>, Box<Value>),               // Vec A n
-    VNil(Box<Value>),                             // nil A
-    VCons(Box<Value>, Box<Value>, Box<Value>, Box<Value>), // cons A n h t
+    VSuc(Box<Value>), // suc of a neutral Nat
     VEq(Box<Value>, Box<Value>, Box<Value>),
     VRefl(Box<Value>),
+    VData(String, Vec<Value>),
+    VConstr(String, Vec<Value>),
     VNeu(Neutral),
 }
 
@@ -97,21 +88,14 @@ pub enum Neutral {
     NAdd(Box<Value>, Box<Value>),
     NFst(Box<Neutral>),
     NSnd(Box<Neutral>),
-    /// natElim stuck on a neutral scrutinee: P, z, s, and the stuck Nat.
     NNatElim(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
-    /// vecElim stuck on a neutral scrutinee: A, P, pnil, pcons, n, and the stuck Vec.
-    NVecElim(
-        Box<Value>,
-        Box<Value>,
-        Box<Value>,
-        Box<Value>,
-        Box<Value>,
-        Box<Neutral>,
-    ),
+    /// elim stuck on a neutral scrutinee: data name, motive, methods, scrutinee.
+    NElim(String, Box<Value>, Vec<Value>, Box<Neutral>),
 }
 
 #[derive(Clone)]
 pub struct Closure {
+    sig: Rc<Signature>,
     env: Vec<Value>,
     body: Term,
 }
@@ -120,67 +104,115 @@ impl Closure {
     fn apply(&self, arg: Value) -> Value {
         let mut env = self.env.clone();
         env.push(arg);
-        eval(&env, &self.body)
+        eval(&self.sig, &env, &self.body)
     }
 }
 
 // ---------------------------------------------------------------------------
-// evaluation / quotation / conversion (NbE) -- unchanged except Π carries π
+// signatures: strictly-positive inductive families
 // ---------------------------------------------------------------------------
 
-fn eval(env: &[Value], t: &Term) -> Value {
+#[derive(Clone)]
+pub struct Constructor {
+    pub name: String,
+    /// argument telescope, in the context [params].
+    pub args: Vec<(Mult, Term)>,
+    /// the index arguments of the result `D params idxs`, in context [params++args].
+    pub idxs: Vec<Term>,
+}
+
+#[derive(Clone)]
+pub struct DataDecl {
+    pub name: String,
+    /// parameter telescope, in the empty context.
+    pub params: Vec<(Mult, Term)>,
+    /// index telescope, in the context [params].
+    pub indices: Vec<(Mult, Term)>,
+    pub ctors: Vec<Constructor>,
+}
+
+#[derive(Clone, Default)]
+pub struct Signature {
+    pub datas: Vec<DataDecl>,
+}
+
+impl Signature {
+    fn data(&self, name: &str) -> Option<&DataDecl> {
+        self.datas.iter().find(|d| d.name == name)
+    }
+    fn ctor(&self, name: &str) -> Option<(&DataDecl, &Constructor)> {
+        for d in &self.datas {
+            for c in &d.ctors {
+                if c.name == name {
+                    return Some((d, c));
+                }
+            }
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// evaluation (NbE)
+// ---------------------------------------------------------------------------
+
+fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
     match t {
         Term::Var(i) => env[env.len() - 1 - i].clone(),
         Term::Type => Value::VType,
         Term::Pi(pi, a, b) => Value::VPi(
             *pi,
-            Box::new(eval(env, a)),
-            Closure { env: env.to_vec(), body: (**b).clone() },
+            Box::new(eval(sig, env, a)),
+            Closure { sig: sig.clone(), env: env.to_vec(), body: (**b).clone() },
         ),
-        Term::Lam(b) => Value::VLam(Closure { env: env.to_vec(), body: (**b).clone() }),
-        Term::App(f, a) => vapp(eval(env, f), eval(env, a)),
+        Term::Lam(b) => Value::VLam(Closure {
+            sig: sig.clone(),
+            env: env.to_vec(),
+            body: (**b).clone(),
+        }),
+        Term::App(f, a) => vapp(eval(sig, env, f), eval(sig, env, a)),
         Term::Sigma(pi, a, b) => Value::VSigma(
             *pi,
-            Box::new(eval(env, a)),
-            Closure { env: env.to_vec(), body: (**b).clone() },
+            Box::new(eval(sig, env, a)),
+            Closure { sig: sig.clone(), env: env.to_vec(), body: (**b).clone() },
         ),
-        Term::Pair(a, b) => Value::VPair(Box::new(eval(env, a)), Box::new(eval(env, b))),
-        Term::Fst(p) => vfst(eval(env, p)),
-        Term::Snd(p) => vsnd(eval(env, p)),
+        Term::Pair(a, b) => {
+            Value::VPair(Box::new(eval(sig, env, a)), Box::new(eval(sig, env, b)))
+        }
+        Term::Fst(p) => vfst(eval(sig, env, p)),
+        Term::Snd(p) => vsnd(eval(sig, env, p)),
         Term::Nat => Value::VNat,
         Term::NatLit(n) => Value::VNatLit(*n),
         Term::Zero => Value::VNatLit(0),
-        Term::Suc(t) => vsuc(eval(env, t)),
-        Term::NatElim(p, z, s, scrut) => {
-            vnatelim(eval(env, p), eval(env, z), eval(env, s), eval(env, scrut))
-        }
-        Term::VecTy(a, n) => Value::VVecTy(Box::new(eval(env, a)), Box::new(eval(env, n))),
-        Term::Nil(a) => Value::VNil(Box::new(eval(env, a))),
-        Term::Cons(a, n, h, t) => Value::VCons(
-            Box::new(eval(env, a)),
-            Box::new(eval(env, n)),
-            Box::new(eval(env, h)),
-            Box::new(eval(env, t)),
+        Term::Suc(t) => vsuc(eval(sig, env, t)),
+        Term::NatElim(p, z, s, scrut) => vnatelim(
+            eval(sig, env, p),
+            eval(sig, env, z),
+            eval(sig, env, s),
+            eval(sig, env, scrut),
         ),
-        Term::VecElim(a, p, pn, pc, n, xs) => vvecelim(
-            eval(env, a),
-            eval(env, p),
-            eval(env, pn),
-            eval(env, pc),
-            eval(env, n),
-            eval(env, xs),
-        ),
-        Term::Add(a, b) => match (eval(env, a), eval(env, b)) {
+        Term::Add(a, b) => match (eval(sig, env, a), eval(sig, env, b)) {
             (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
             (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
         },
         Term::Eq(a, x, y) => Value::VEq(
-            Box::new(eval(env, a)),
-            Box::new(eval(env, x)),
-            Box::new(eval(env, y)),
+            Box::new(eval(sig, env, a)),
+            Box::new(eval(sig, env, x)),
+            Box::new(eval(sig, env, y)),
         ),
-        Term::Refl(a) => Value::VRefl(Box::new(eval(env, a))),
-        Term::Ann(e, _) => eval(env, e),
+        Term::Refl(a) => Value::VRefl(Box::new(eval(sig, env, a))),
+        Term::Data(name, args) => {
+            Value::VData(name.clone(), args.iter().map(|a| eval(sig, env, a)).collect())
+        }
+        Term::Constr(name, args) => {
+            Value::VConstr(name.clone(), args.iter().map(|a| eval(sig, env, a)).collect())
+        }
+        Term::Elim(data, motive, methods, scrut) => {
+            let vm = eval(sig, env, motive);
+            let vmeth: Vec<Value> = methods.iter().map(|m| eval(sig, env, m)).collect();
+            velim(sig, data, &vm, &vmeth, eval(sig, env, scrut))
+        }
+        Term::Ann(e, _) => eval(sig, env, e),
     }
 }
 
@@ -192,17 +224,29 @@ fn vapp(f: Value, a: Value) -> Value {
     }
 }
 
-fn vsuc(n: Value) -> Value {
-    match n {
-        Value::VNatLit(k) => Value::VNatLit(k + 1),
-        other => Value::VSuc(Box::new(other)), // suc of a stuck Nat
+fn vfst(p: Value) -> Value {
+    match p {
+        Value::VPair(a, _) => *a,
+        Value::VNeu(n) => Value::VNeu(Neutral::NFst(Box::new(n))),
+        _ => unreachable!("fst of a non-pair"),
     }
 }
 
-/// The ι-rule for `natElim P z s n`:
-///   natElim P z s 0       = z
-///   natElim P z s (suc k) = s k (natElim P z s k)
-/// stuck when `n` is neutral.
+fn vsnd(p: Value) -> Value {
+    match p {
+        Value::VPair(_, b) => *b,
+        Value::VNeu(n) => Value::VNeu(Neutral::NSnd(Box::new(n))),
+        _ => unreachable!("snd of a non-pair"),
+    }
+}
+
+fn vsuc(n: Value) -> Value {
+    match n {
+        Value::VNatLit(k) => Value::VNatLit(k + 1),
+        other => Value::VSuc(Box::new(other)),
+    }
+}
+
 fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
     match scrut {
         Value::VNatLit(0) => z,
@@ -225,42 +269,50 @@ fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
     }
 }
 
-/// The ι-rule for `vecElim A P pnil pcons n xs`:
-///   vecElim _ _ pnil _     0       (nil _)        = pnil
-///   vecElim A P pnil pcons (suc m) (cons _ m h t) = pcons m h t (vecElim A P pnil pcons m t)
-/// stuck when `xs` is neutral.
-fn vvecelim(va: Value, vp: Value, vpn: Value, vpc: Value, vn: Value, vxs: Value) -> Value {
-    match vxs {
-        Value::VNil(_) => vpn,
-        Value::VCons(_, m, h, t) => {
-            let rec = vvecelim(va, vp, vpn.clone(), vpc.clone(), (*m).clone(), (*t).clone());
-            vapp(vapp(vapp(vapp(vpc, *m), *h), *t), rec)
+/// The generic ι-rule for a dependent eliminator. On a constructor, it applies
+/// the corresponding method to the constructor's arguments, inserting — after
+/// each RECURSIVE argument — the result of eliminating that argument (the
+/// induction hypothesis). Recursion + the recursive indices are read off the
+/// constructor's declared argument types.
+fn velim(
+    sig: &Rc<Signature>,
+    data: &str,
+    motive: &Value,
+    methods: &[Value],
+    scrut: Value,
+) -> Value {
+    match scrut {
+        Value::VConstr(cname, vargs) => {
+            let decl = sig.data(data).expect("eliminating an undeclared family");
+            let (cidx, ctor) = decl
+                .ctors
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.name == cname)
+                .expect("constructor not in this family");
+            let p = decl.params.len();
+            let mut result = methods[cidx].clone();
+            for (i, (_, aty)) in ctor.args.iter().enumerate() {
+                let arg_val = vargs[p + i].clone();
+                result = vapp(result, arg_val.clone());
+                // is this argument a recursive occurrence of `data`?
+                let env: Vec<Value> = vargs[0..p + i].to_vec();
+                if let Value::VData(dn, _) = eval(sig, &env, aty) {
+                    if dn == data {
+                        let rec = velim(sig, data, motive, methods, arg_val);
+                        result = vapp(result, rec);
+                    }
+                }
+            }
+            result
         }
-        Value::VNeu(nu) => Value::VNeu(Neutral::NVecElim(
-            Box::new(va),
-            Box::new(vp),
-            Box::new(vpn),
-            Box::new(vpc),
-            Box::new(vn),
+        Value::VNeu(nu) => Value::VNeu(Neutral::NElim(
+            data.to_string(),
+            Box::new(motive.clone()),
+            methods.to_vec(),
             Box::new(nu),
         )),
-        _ => unreachable!("vecElim on a non-Vec (ill-typed term reached eval)"),
-    }
-}
-
-fn vfst(p: Value) -> Value {
-    match p {
-        Value::VPair(a, _) => *a,
-        Value::VNeu(n) => Value::VNeu(Neutral::NFst(Box::new(n))),
-        _ => unreachable!("fst of a non-pair"),
-    }
-}
-
-fn vsnd(p: Value) -> Value {
-    match p {
-        Value::VPair(_, b) => *b,
-        Value::VNeu(n) => Value::VNeu(Neutral::NSnd(Box::new(n))),
-        _ => unreachable!("snd of a non-pair"),
+        _ => unreachable!("elim on a non-data value (ill-typed term reached eval)"),
     }
 }
 
@@ -284,20 +336,18 @@ fn quote(lvl: usize, v: &Value) -> Term {
         Value::VNat => Term::Nat,
         Value::VNatLit(n) => Term::NatLit(*n),
         Value::VSuc(k) => Term::Suc(Box::new(quote(lvl, k))),
-        Value::VVecTy(a, n) => Term::VecTy(Box::new(quote(lvl, a)), Box::new(quote(lvl, n))),
-        Value::VNil(a) => Term::Nil(Box::new(quote(lvl, a))),
-        Value::VCons(a, n, h, t) => Term::Cons(
-            Box::new(quote(lvl, a)),
-            Box::new(quote(lvl, n)),
-            Box::new(quote(lvl, h)),
-            Box::new(quote(lvl, t)),
-        ),
         Value::VEq(a, x, y) => Term::Eq(
             Box::new(quote(lvl, a)),
             Box::new(quote(lvl, x)),
             Box::new(quote(lvl, y)),
         ),
         Value::VRefl(a) => Term::Refl(Box::new(quote(lvl, a))),
+        Value::VData(name, args) => {
+            Term::Data(name.clone(), args.iter().map(|a| quote(lvl, a)).collect())
+        }
+        Value::VConstr(name, args) => {
+            Term::Constr(name.clone(), args.iter().map(|a| quote(lvl, a)).collect())
+        }
         Value::VNeu(n) => quote_neu(lvl, n),
     }
 }
@@ -315,12 +365,10 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
             Box::new(quote(lvl, s)),
             Box::new(quote_neu(lvl, scrut)),
         ),
-        Neutral::NVecElim(a, p, pn, pc, n, scrut) => Term::VecElim(
-            Box::new(quote(lvl, a)),
-            Box::new(quote(lvl, p)),
-            Box::new(quote(lvl, pn)),
-            Box::new(quote(lvl, pc)),
-            Box::new(quote(lvl, n)),
+        Neutral::NElim(data, m, methods, scrut) => Term::Elim(
+            data.clone(),
+            Box::new(quote(lvl, m)),
+            methods.iter().map(|x| quote(lvl, x)).collect(),
             Box::new(quote_neu(lvl, scrut)),
         ),
     }
@@ -330,65 +378,64 @@ fn conv(lvl: usize, a: &Value, b: &Value) -> bool {
     quote(lvl, a) == quote(lvl, b)
 }
 
-/// de Bruijn shift: add `d` to every free `Var(i)` with `i >= cutoff`. Used to
-/// lift a quoted term under newly-introduced binders when building the expected
-/// type of `natElim`'s step argument.
+// ---------------------------------------------------------------------------
+// de Bruijn shift + simultaneous substitution (used to build eliminator types)
+// ---------------------------------------------------------------------------
+
+/// Add `d` to every free `Var(i)` with `i >= cutoff`.
 fn shift(d: usize, cutoff: usize, t: &Term) -> Term {
+    map_vars(t, cutoff, &|i, c| {
+        Term::Var(if i >= c { i + d } else { i })
+    })
+}
+
+/// Simultaneous substitution: in `t` (valid in a context of size `sub.len()`),
+/// replace the variable with de Bruijn index `i` by `sub[i]` (lifted under any
+/// binders crossed). Variables are assumed in range.
+fn subst(t: &Term, sub: &[Term]) -> Term {
+    map_vars(t, 0, &|i, depth| {
+        if i < depth {
+            Term::Var(i) // bound locally inside `t`
+        } else {
+            shift(depth, 0, &sub[i - depth])
+        }
+    })
+}
+
+/// Generic variable traversal: `f(index, binder_depth)` is called for each
+/// `Var`, with `binder_depth` = number of binders crossed so far.
+fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
+    let go = |t: &Term| map_vars(t, depth, f);
+    let go1 = |t: &Term| map_vars(t, depth + 1, f);
     match t {
-        Term::Var(i) => Term::Var(if *i >= cutoff { *i + d } else { *i }),
+        Term::Var(i) => f(*i, depth),
         Term::Type | Term::Nat | Term::NatLit(_) | Term::Zero => t.clone(),
-        Term::Pi(pi, a, b) => Term::Pi(
-            *pi,
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff + 1, b)),
+        Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
+        Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
+        Term::Lam(b) => Term::Lam(Box::new(go1(b))),
+        Term::App(f0, a) => Term::App(Box::new(go(f0)), Box::new(go(a))),
+        Term::Pair(a, b) => Term::Pair(Box::new(go(a)), Box::new(go(b))),
+        Term::Fst(p) => Term::Fst(Box::new(go(p))),
+        Term::Snd(p) => Term::Snd(Box::new(go(p))),
+        Term::Suc(k) => Term::Suc(Box::new(go(k))),
+        Term::NatElim(p, z, s, sc) => Term::NatElim(
+            Box::new(go(p)),
+            Box::new(go(z)),
+            Box::new(go(s)),
+            Box::new(go(sc)),
         ),
-        Term::Sigma(pi, a, b) => Term::Sigma(
-            *pi,
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff + 1, b)),
+        Term::Add(a, b) => Term::Add(Box::new(go(a)), Box::new(go(b))),
+        Term::Eq(a, x, y) => Term::Eq(Box::new(go(a)), Box::new(go(x)), Box::new(go(y))),
+        Term::Refl(a) => Term::Refl(Box::new(go(a))),
+        Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(|a| go(a)).collect()),
+        Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(|a| go(a)).collect()),
+        Term::Elim(data, m, methods, sc) => Term::Elim(
+            data.clone(),
+            Box::new(go(m)),
+            methods.iter().map(|x| go(x)).collect(),
+            Box::new(go(sc)),
         ),
-        Term::Lam(b) => Term::Lam(Box::new(shift(d, cutoff + 1, b))),
-        Term::App(f, a) => Term::App(Box::new(shift(d, cutoff, f)), Box::new(shift(d, cutoff, a))),
-        Term::Pair(a, b) => {
-            Term::Pair(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, b)))
-        }
-        Term::Fst(p) => Term::Fst(Box::new(shift(d, cutoff, p))),
-        Term::Snd(p) => Term::Snd(Box::new(shift(d, cutoff, p))),
-        Term::Suc(k) => Term::Suc(Box::new(shift(d, cutoff, k))),
-        Term::NatElim(p, z, s, scrut) => Term::NatElim(
-            Box::new(shift(d, cutoff, p)),
-            Box::new(shift(d, cutoff, z)),
-            Box::new(shift(d, cutoff, s)),
-            Box::new(shift(d, cutoff, scrut)),
-        ),
-        Term::VecTy(a, n) => {
-            Term::VecTy(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, n)))
-        }
-        Term::Nil(a) => Term::Nil(Box::new(shift(d, cutoff, a))),
-        Term::Cons(a, n, h, t) => Term::Cons(
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff, n)),
-            Box::new(shift(d, cutoff, h)),
-            Box::new(shift(d, cutoff, t)),
-        ),
-        Term::VecElim(a, p, pn, pc, n, xs) => Term::VecElim(
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff, p)),
-            Box::new(shift(d, cutoff, pn)),
-            Box::new(shift(d, cutoff, pc)),
-            Box::new(shift(d, cutoff, n)),
-            Box::new(shift(d, cutoff, xs)),
-        ),
-        Term::Add(a, b) => Term::Add(Box::new(shift(d, cutoff, a)), Box::new(shift(d, cutoff, b))),
-        Term::Eq(a, x, y) => Term::Eq(
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff, x)),
-            Box::new(shift(d, cutoff, y)),
-        ),
-        Term::Refl(a) => Term::Refl(Box::new(shift(d, cutoff, a))),
-        Term::Ann(e, ty) => {
-            Term::Ann(Box::new(shift(d, cutoff, e)), Box::new(shift(d, cutoff, ty)))
-        }
+        Term::Ann(e, ty) => Term::Ann(Box::new(go(e)), Box::new(go(ty))),
     }
 }
 
@@ -414,16 +461,171 @@ fn uscale(p: Mult, a: &Usage) -> Usage {
 }
 
 // ---------------------------------------------------------------------------
-// resourced bidirectional checking: check/infer compute a usage context
+// building eliminator types (motive + per-constructor methods) from a decl
+// ---------------------------------------------------------------------------
+
+/// Map a declaration term `t`, living in context `[params, prior(j)]` (params
+/// instantiated to the concrete `sparam_tms`, the `j` prior binders recorded by
+/// their bind-depth in `prior_bd`), into the current context at depth `cur`.
+fn map_decl(t: &Term, p: usize, sparam_tms: &[Term], prior_bd: &[usize], cur: usize) -> Term {
+    let j = prior_bd.len();
+    let m = p + j;
+    let mut sub: Vec<Term> = Vec::with_capacity(m);
+    // decl indices 0..j are the prior binders, innermost first.
+    for d in 0..j {
+        let arg = j - 1 - d;
+        sub.push(Term::Var(cur - 1 - prior_bd[arg]));
+    }
+    // decl indices j..m are the parameters, p_{p-1} first.
+    for d in j..m {
+        let k = m - 1 - d;
+        sub.push(shift(cur, 0, &sparam_tms[k]));
+    }
+    subst(t, &sub)
+}
+
+/// `P : Π(indices). D params indices → Type`, instantiated at `sparam_tms`.
+fn motive_ty_tm(decl: &DataDecl, sparam_tms: &[Term]) -> Term {
+    fn go(decl: &DataDecl, sparam_tms: &[Term], i: usize, bd: &mut Vec<usize>, cur: usize) -> Term {
+        let p = decl.params.len();
+        if i < decl.indices.len() {
+            let dom = map_decl(&decl.indices[i].1, p, sparam_tms, bd, cur);
+            bd.push(cur);
+            let body = go(decl, sparam_tms, i + 1, bd, cur + 1);
+            bd.pop();
+            Term::Pi(Mult::Omega, Box::new(dom), Box::new(body))
+        } else {
+            // Π(_ : D params index-vars). Type
+            let mut dargs: Vec<Term> =
+                (0..p).map(|k| shift(cur, 0, &sparam_tms[k])).collect();
+            for ii in 0..decl.indices.len() {
+                dargs.push(Term::Var(cur - 1 - bd[ii]));
+            }
+            Term::Pi(
+                Mult::Omega,
+                Box::new(Term::Data(decl.name.clone(), dargs)),
+                Box::new(Term::Type),
+            )
+        }
+    }
+    go(decl, sparam_tms, 0, &mut Vec::new(), 0)
+}
+
+/// The method type for one constructor:
+///   Π(args). Π(IH for each recursive arg). motive result-idxs (c params args)
+fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive_tm: &Term) -> Term {
+    let p = decl.params.len();
+    let data = &decl.name;
+    let rec_args: Vec<usize> = ctor
+        .args
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, aty))| matches!(aty, Term::Data(dn, _) if dn == data))
+        .map(|(i, _)| i)
+        .collect();
+
+    // result: motive (result idxs) (c params args)   [all `args` bound, depth=cur]
+    fn result(
+        decl: &DataDecl,
+        ctor: &Constructor,
+        sparam_tms: &[Term],
+        motive_tm: &Term,
+        bd: &[usize],
+        cur: usize,
+    ) -> Term {
+        let p = decl.params.len();
+        let k = ctor.args.len();
+        let mut res = shift(cur, 0, motive_tm);
+        for it in &ctor.idxs {
+            let mi = map_decl(it, p, sparam_tms, &bd[..k], cur);
+            res = Term::App(Box::new(res), Box::new(mi));
+        }
+        let mut cargs: Vec<Term> = (0..p).map(|kk| shift(cur, 0, &sparam_tms[kk])).collect();
+        for jj in 0..k {
+            cargs.push(Term::Var(cur - 1 - bd[jj]));
+        }
+        res = Term::App(
+            Box::new(res),
+            Box::new(Term::Constr(ctor.name.clone(), cargs)),
+        );
+        res
+    }
+
+    // bind the induction hypotheses (one per recursive arg), then the result.
+    fn ihs(
+        decl: &DataDecl,
+        ctor: &Constructor,
+        sparam_tms: &[Term],
+        motive_tm: &Term,
+        rec_args: &[usize],
+        w: usize,
+        bd: &[usize],
+        cur: usize,
+    ) -> Term {
+        let p = decl.params.len();
+        if w < rec_args.len() {
+            let j = rec_args[w];
+            let idx_terms = match &ctor.args[j].1 {
+                Term::Data(_, dargs) => dargs[p..].to_vec(),
+                _ => unreachable!(),
+            };
+            let mut ih = shift(cur, 0, motive_tm);
+            for it in &idx_terms {
+                // a_j's type lives in context [params, args 0..j-1]
+                let mi = map_decl(it, p, sparam_tms, &bd[..j], cur);
+                ih = Term::App(Box::new(ih), Box::new(mi));
+            }
+            ih = Term::App(Box::new(ih), Box::new(Term::Var(cur - 1 - bd[j])));
+            let body = ihs(decl, ctor, sparam_tms, motive_tm, rec_args, w + 1, bd, cur + 1);
+            Term::Pi(Mult::Omega, Box::new(ih), Box::new(body))
+        } else {
+            result(decl, ctor, sparam_tms, motive_tm, bd, cur)
+        }
+    }
+
+    // bind the constructor's arguments.
+    fn args(
+        decl: &DataDecl,
+        ctor: &Constructor,
+        sparam_tms: &[Term],
+        motive_tm: &Term,
+        rec_args: &[usize],
+        i: usize,
+        bd: &mut Vec<usize>,
+        cur: usize,
+    ) -> Term {
+        let p = decl.params.len();
+        if i < ctor.args.len() {
+            let (mult, aty) = &ctor.args[i];
+            let dom = map_decl(aty, p, sparam_tms, bd, cur);
+            bd.push(cur);
+            let body = args(decl, ctor, sparam_tms, motive_tm, rec_args, i + 1, bd, cur + 1);
+            bd.pop();
+            Term::Pi(*mult, Box::new(dom), Box::new(body))
+        } else {
+            ihs(decl, ctor, sparam_tms, motive_tm, rec_args, 0, bd, cur)
+        }
+    }
+
+    let _ = (p, data);
+    args(decl, ctor, sparam_tms, motive_tm, &rec_args, 0, &mut Vec::new(), 0)
+}
+
+// ---------------------------------------------------------------------------
+// resourced bidirectional checking
 // ---------------------------------------------------------------------------
 
 pub struct Ctx {
+    sig: Rc<Signature>,
     types: Vec<Value>,
 }
 
 impl Ctx {
     pub fn new() -> Ctx {
-        Ctx { types: Vec::new() }
+        Ctx { sig: Rc::new(Signature::default()), types: Vec::new() }
+    }
+    fn with_sig(sig: Rc<Signature>) -> Ctx {
+        Ctx { sig, types: Vec::new() }
     }
     fn level(&self) -> usize {
         self.types.len()
@@ -434,14 +636,38 @@ impl Ctx {
     fn extend(&self, ty: Value) -> Ctx {
         let mut types = self.types.clone();
         types.push(ty);
-        Ctx { types }
+        Ctx { sig: self.sig.clone(), types }
     }
 }
 
-/// Check that `t` is a well-formed TYPE. Type formation is the 0-fragment, so
-/// the usage it incurs is discarded (everything in a type is used 0 times).
 fn check_type(ctx: &Ctx, t: &Term) -> Result<(), String> {
     check(ctx, t, &Value::VType).map(|_| ())
+}
+
+/// Check a spine of arguments against a telescope (each entry in the context of
+/// the preceding ones). Returns the argument VALUES and the combined usage
+/// (each scaled by its declared multiplicity).
+fn check_spine(
+    ctx: &Ctx,
+    args: &[Term],
+    tele: &[(Mult, Term)],
+) -> Result<(Vec<Value>, Usage), String> {
+    if args.len() != tele.len() {
+        return Err(format!(
+            "wrong number of arguments: expected {}, got {}",
+            tele.len(),
+            args.len()
+        ));
+    }
+    let mut vals: Vec<Value> = Vec::new();
+    let mut usage = uzero(ctx.level());
+    for (i, (mult, ty_tm)) in tele.iter().enumerate() {
+        let tyv = eval(&ctx.sig, &vals, ty_tm); // telescope is in the context of prior args
+        let u = check(ctx, &args[i], &tyv)?;
+        usage = uadd(&usage, &uscale(*mult, &u));
+        vals.push(eval(&ctx.sig, &ctx.env(), &args[i]));
+    }
+    Ok((vals, usage))
 }
 
 fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
@@ -450,8 +676,8 @@ fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
         (Term::Lam(body), Value::VPi(pi, dom, cod)) => {
             let ctx2 = ctx.extend((**dom).clone());
             let codty = cod.apply(Value::VNeu(Neutral::NVar(n)));
-            let mut ub = check(&ctx2, body, &codty)?; // length n+1
-            let sigma = ub.pop().unwrap(); // the bound variable's usage
+            let mut ub = check(&ctx2, body, &codty)?;
+            let sigma = ub.pop().unwrap();
             if !sigma.leq(*pi) {
                 return Err(format!(
                     "the variable bound at multiplicity {pi} is used {sigma} time(s) \
@@ -462,13 +688,13 @@ fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
         }
         (Term::Pair(a, b), Value::VSigma(pi, dom, cod)) => {
             let ua = check(ctx, a, dom)?;
-            let va = eval(&ctx.env(), a);
-            let ub = check(ctx, b, &cod.apply(va))?; // B[a] — the dependency
-            Ok(uadd(&uscale(*pi, &ua), &ub)) // first component used at multiplicity π
+            let va = eval(&ctx.sig, &ctx.env(), a);
+            let ub = check(ctx, b, &cod.apply(va))?;
+            Ok(uadd(&uscale(*pi, &ua), &ub))
         }
         (Term::Refl(a), Value::VEq(aty, x, y)) => {
-            check(ctx, a, aty)?; // a proof lives in the 0-fragment; discard usage
-            let va = eval(&ctx.env(), a);
+            check(ctx, a, aty)?;
+            let va = eval(&ctx.sig, &ctx.env(), a);
             if conv(n, x, &va) && conv(n, y, &va) {
                 Ok(uzero(n))
             } else {
@@ -511,166 +737,38 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             Ok((Value::VNat, u))
         }
         Term::NatElim(p, z, s, scrut) => {
-            // P : Nat → Type  (a type-former; its usage is in the 0-fragment)
             let motive_ty = Value::VPi(
                 Mult::Omega,
                 Box::new(Value::VNat),
-                Closure { env: vec![], body: Term::Type },
+                Closure { sig: ctx.sig.clone(), env: vec![], body: Term::Type },
             );
             check(ctx, p, &motive_ty)?;
-            let vp = eval(&ctx.env(), p);
+            let vp = eval(&ctx.sig, &ctx.env(), p);
 
-            // z : P 0
             let pzero = vapp(vp.clone(), Value::VNatLit(0));
             let uz = check(ctx, z, &pzero)?;
 
-            // s : Π[ω](k:Nat). Π[ω](_:P k). P (suc k)
             let p_tm = quote(n, &vp);
             let sty_term = Term::Pi(
                 Mult::Omega,
                 Box::new(Term::Nat),
                 Box::new(Term::Pi(
                     Mult::Omega,
-                    // P k          (k is Var(0) under the outer binder)
                     Box::new(Term::App(Box::new(shift(1, 0, &p_tm)), Box::new(Term::Var(0)))),
-                    // P (suc k)    (k is Var(1) under both binders)
                     Box::new(Term::App(
                         Box::new(shift(2, 0, &p_tm)),
                         Box::new(Term::Suc(Box::new(Term::Var(1)))),
                     )),
                 )),
             );
-            let vsty = eval(&ctx.env(), &sty_term);
+            let vsty = eval(&ctx.sig, &ctx.env(), &sty_term);
             let us = check(ctx, s, &vsty)?;
 
-            // n : Nat
             let uscr = check(ctx, scrut, &Value::VNat)?;
-
-            // result type: P n
-            let result = vapp(vp, eval(&ctx.env(), scrut));
-            // z is used 0/1×, s is used n×, the scrutinee is inspected — all
-            // bounded above by ω, so scale conservatively (sound; see docs/09).
+            let result = vapp(vp, eval(&ctx.sig, &ctx.env(), scrut));
             let u = uadd(
                 &uscale(Mult::Omega, &uz),
                 &uadd(&uscale(Mult::Omega, &us), &uscale(Mult::Omega, &uscr)),
-            );
-            Ok((result, u))
-        }
-        Term::VecTy(a, len) => {
-            check_type(ctx, a)?; // A : Type
-            check(ctx, len, &Value::VNat)?; // n : Nat   (the index, 0-fragment)
-            Ok((Value::VType, uzero(n)))
-        }
-        Term::Nil(a) => {
-            check_type(ctx, a)?; // A : Type (the element type is a parameter)
-            let va = eval(&ctx.env(), a);
-            // nil A : Vec A 0
-            Ok((
-                Value::VVecTy(Box::new(va), Box::new(Value::VNatLit(0))),
-                uzero(n),
-            ))
-        }
-        Term::Cons(a, len, h, t) => {
-            check_type(ctx, a)?;
-            check(ctx, len, &Value::VNat)?; // the index is erased
-            let va = eval(&ctx.env(), a);
-            let vlen = eval(&ctx.env(), len);
-            let uh = check(ctx, h, &va)?; // head : A
-            let ut = check(ctx, t, &Value::VVecTy(Box::new(va.clone()), Box::new(vlen.clone())))?;
-            // cons A n h t : Vec A (suc n)
-            Ok((
-                Value::VVecTy(Box::new(va), Box::new(vsuc(vlen))),
-                uadd(&uh, &ut),
-            ))
-        }
-        Term::VecElim(a, p, pn, pc, len, xs) => {
-            check_type(ctx, a)?; // A : Type (a parameter, 0-fragment)
-            let va = eval(&ctx.env(), a);
-            let a_tm = quote(n, &va);
-
-            // P : Π[ω](k:Nat). Π[ω](_:Vec A k). Type
-            let motive_ty_tm = Term::Pi(
-                Mult::Omega,
-                Box::new(Term::Nat),
-                Box::new(Term::Pi(
-                    Mult::Omega,
-                    Box::new(Term::VecTy(Box::new(shift(1, 0, &a_tm)), Box::new(Term::Var(0)))),
-                    Box::new(Term::Type),
-                )),
-            );
-            let motive_ty = eval(&ctx.env(), &motive_ty_tm);
-            check(ctx, p, &motive_ty)?; // motive: 0-fragment, usage discarded
-            let vp = eval(&ctx.env(), p);
-            let p_tm = quote(n, &vp);
-
-            // pnil : P 0 (nil A)
-            let pnil_ty = vapp(
-                vapp(vp.clone(), Value::VNatLit(0)),
-                Value::VNil(Box::new(va.clone())),
-            );
-            let upn = check(ctx, pn, &pnil_ty)?;
-
-            // pcons : Π[ω](k:Nat). Π[ω](h:A). Π[ω](t:Vec A k). Π[ω](_:P k t).
-            //         P (suc k) (cons A k h t)
-            // binders, outside→in: k, h, t, ih   (so k=Var(3), h=Var(2), t=Var(1), ih=Var(0)
-            // at the deepest point).
-            let pcons_ty_tm = Term::Pi(
-                Mult::Omega,
-                Box::new(Term::Nat), // k
-                Box::new(Term::Pi(
-                    Mult::Omega,
-                    Box::new(shift(1, 0, &a_tm)), // h : A
-                    Box::new(Term::Pi(
-                        Mult::Omega,
-                        // t : Vec A k        (k = Var(1) under {k,h})
-                        Box::new(Term::VecTy(
-                            Box::new(shift(2, 0, &a_tm)),
-                            Box::new(Term::Var(1)),
-                        )),
-                        Box::new(Term::Pi(
-                            Mult::Omega,
-                            // ih : P k t      (k = Var(2), t = Var(0) under {k,h,t})
-                            Box::new(Term::App(
-                                Box::new(Term::App(
-                                    Box::new(shift(3, 0, &p_tm)),
-                                    Box::new(Term::Var(2)),
-                                )),
-                                Box::new(Term::Var(0)),
-                            )),
-                            // result: P (suc k) (cons A k h t)
-                            // under {k,h,t,ih}: k=Var(3), h=Var(2), t=Var(1)
-                            Box::new(Term::App(
-                                Box::new(Term::App(
-                                    Box::new(shift(4, 0, &p_tm)),
-                                    Box::new(Term::Suc(Box::new(Term::Var(3)))),
-                                )),
-                                Box::new(Term::Cons(
-                                    Box::new(shift(4, 0, &a_tm)),
-                                    Box::new(Term::Var(3)),
-                                    Box::new(Term::Var(2)),
-                                    Box::new(Term::Var(1)),
-                                )),
-                            )),
-                        )),
-                    )),
-                )),
-            );
-            let pcons_ty = eval(&ctx.env(), &pcons_ty_tm);
-            let upc = check(ctx, pc, &pcons_ty)?;
-
-            // n : Nat (the length index — erased, 0-fragment)
-            check(ctx, len, &Value::VNat)?;
-            let vlen = eval(&ctx.env(), len);
-
-            // xs : Vec A n
-            let uxs = check(ctx, xs, &Value::VVecTy(Box::new(va), Box::new(vlen.clone())))?;
-            let vxs = eval(&ctx.env(), xs);
-
-            // result type: P n xs
-            let result = vapp(vapp(vp, vlen), vxs);
-            let u = uadd(
-                &uscale(Mult::Omega, &upn),
-                &uadd(&uscale(Mult::Omega, &upc), &uscale(Mult::Omega, &uxs)),
             );
             Ok((result, u))
         }
@@ -681,7 +779,7 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
         }
         Term::Pi(_, a, b) | Term::Sigma(_, a, b) => {
             check_type(ctx, a)?;
-            let va = eval(&ctx.env(), a);
+            let va = eval(&ctx.sig, &ctx.env(), a);
             check_type(&ctx.extend(va), b)?;
             Ok((Value::VType, uzero(n)))
         }
@@ -691,7 +789,7 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
         },
         Term::Snd(p) => match infer(ctx, p)? {
             (Value::VSigma(_, _, cod), up) => {
-                let v1 = vfst(eval(&ctx.env(), p)); // snd's type depends on fst
+                let v1 = vfst(eval(&ctx.sig, &ctx.env(), p));
                 Ok((cod.apply(v1), up))
             }
             (other, _) => Err(format!("snd of a non-pair (type {:?})", quote(n, &other))),
@@ -699,14 +797,14 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
         Term::Pair(_, _) => Err("cannot infer a bare pair; annotate it `(e : T)`".to_string()),
         Term::Eq(a, x, y) => {
             check_type(ctx, a)?;
-            let va = eval(&ctx.env(), a);
-            check(ctx, x, &va)?; // type-level, usage discarded
+            let va = eval(&ctx.sig, &ctx.env(), a);
+            check(ctx, x, &va)?;
             check(ctx, y, &va)?;
             Ok((Value::VType, uzero(n)))
         }
         Term::Refl(a) => {
             let (ta, _) = infer(ctx, a)?;
-            let va = eval(&ctx.env(), a);
+            let va = eval(&ctx.sig, &ctx.env(), a);
             Ok((
                 Value::VEq(Box::new(ta), Box::new(va.clone()), Box::new(va)),
                 uzero(n),
@@ -715,17 +813,101 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
         Term::App(f, x) => match infer(ctx, f)? {
             (Value::VPi(pi, dom, cod), uf) => {
                 let ux = check(ctx, x, &dom)?;
-                let vx = eval(&ctx.env(), x);
-                Ok((cod.apply(vx), uadd(&uf, &uscale(pi, &ux)))) // u_f + π · u_x
+                let vx = eval(&ctx.sig, &ctx.env(), x);
+                Ok((cod.apply(vx), uadd(&uf, &uscale(pi, &ux))))
             }
             (other, _) => Err(format!(
                 "application of a non-function (type {:?})",
                 quote(n, &other)
             )),
         },
+        Term::Data(name, args) => {
+            let decl = ctx
+                .sig
+                .data(name)
+                .ok_or_else(|| format!("unknown datatype `{name}`"))?
+                .clone();
+            let tele: Vec<(Mult, Term)> =
+                decl.params.iter().chain(decl.indices.iter()).cloned().collect();
+            check_spine(ctx, args, &tele)?; // a type former: usage is 0-fragment
+            Ok((Value::VType, uzero(n)))
+        }
+        Term::Constr(name, args) => {
+            let (decl, ctor) = ctx
+                .sig
+                .ctor(name)
+                .map(|(d, c)| (d.clone(), c.clone()))
+                .ok_or_else(|| format!("unknown constructor `{name}`"))?;
+            let tele: Vec<(Mult, Term)> =
+                decl.params.iter().cloned().chain(ctor.args.iter().cloned()).collect();
+            let (vals, usage) = check_spine(ctx, args, &tele)?;
+            // result type: D params (idxs evaluated at the full arg environment)
+            let p = decl.params.len();
+            let mut dargs: Vec<Value> = vals[0..p].to_vec();
+            for it in &ctor.idxs {
+                dargs.push(eval(&ctx.sig, &vals, it));
+            }
+            Ok((Value::VData(decl.name.clone(), dargs), usage))
+        }
+        Term::Elim(data, motive, methods, scrut) => {
+            let decl = ctx
+                .sig
+                .data(data)
+                .ok_or_else(|| format!("unknown datatype `{data}`"))?
+                .clone();
+            let p = decl.params.len();
+            let ni = decl.indices.len();
+
+            let (scrut_ty, u_scrut) = infer(ctx, scrut)?;
+            let sargs = match scrut_ty {
+                Value::VData(ref sn, ref a) if *sn == *data => a.clone(),
+                other => {
+                    return Err(format!(
+                        "elim[{data}] on a scrutinee of type {:?} (not `{data}`)",
+                        quote(n, &other)
+                    ))
+                }
+            };
+            let sparams: Vec<Value> = sargs[0..p].to_vec();
+            let sindices: Vec<Value> = sargs[p..p + ni].to_vec();
+            let sparam_tms: Vec<Term> = sparams.iter().map(|v| quote(n, v)).collect();
+
+            // motive
+            let mty_tm = motive_ty_tm(&decl, &sparam_tms);
+            let mty = eval(&ctx.sig, &ctx.env(), &mty_tm);
+            check(ctx, motive, &mty)?; // 0-fragment: usage discarded
+            let vmotive = eval(&ctx.sig, &ctx.env(), motive);
+            let motive_tm = quote(n, &vmotive);
+
+            // methods
+            if methods.len() != decl.ctors.len() {
+                return Err(format!(
+                    "elim[{data}]: expected {} method(s), got {}",
+                    decl.ctors.len(),
+                    methods.len()
+                ));
+            }
+            let mut umeth = uzero(n);
+            for (ci, ctor) in decl.ctors.iter().enumerate() {
+                let meth_ty_tm = method_ty_tm(&decl, ctor, &sparam_tms, &motive_tm);
+                let meth_ty = eval(&ctx.sig, &ctx.env(), &meth_ty_tm);
+                let um = check(ctx, &methods[ci], &meth_ty)?;
+                umeth = uadd(&umeth, &um);
+            }
+
+            // result: motive indices scrutinee
+            let vscrut = eval(&ctx.sig, &ctx.env(), scrut);
+            let mut res = vmotive;
+            for si in sindices {
+                res = vapp(res, si);
+            }
+            res = vapp(res, vscrut);
+            let u = uadd(&uscale(Mult::Omega, &umeth), &uscale(Mult::Omega, &u_scrut));
+            Ok((res, u))
+        }
         Term::Ann(e, ty) => {
             check_type(ctx, ty)?;
-            let vty = eval(&ctx.env(), ty);
+            let vty = eval(&ctx.sig, &ctx.env(), ty);
             let u = check(ctx, e, &vty)?;
             Ok((vty, u))
         }
@@ -733,228 +915,180 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
     }
 }
 
-/// Check a closed term against a closed type (usage context is empty).
-pub fn check_closed(t: &Term, ty: &Term) -> Result<(), String> {
-    let ctx = Ctx::new();
+// ---------------------------------------------------------------------------
+// signature well-formedness: telescopes type-check + strict positivity
+// ---------------------------------------------------------------------------
+
+/// Does the datatype `data` occur anywhere in `t`?
+fn occurs(data: &str, t: &Term) -> bool {
+    let mut found = false;
+    fn go(data: &str, t: &Term, found: &mut bool) {
+        if let Term::Data(n, _) = t {
+            if n == data {
+                *found = true;
+            }
+        }
+        // structural recursion over children
+        match t {
+            Term::Pi(_, a, b) | Term::Sigma(_, a, b) | Term::App(a, b) | Term::Add(a, b) => {
+                go(data, a, found);
+                go(data, b, found);
+            }
+            Term::Lam(b) | Term::Fst(b) | Term::Snd(b) | Term::Suc(b) | Term::Refl(b) => {
+                go(data, b, found)
+            }
+            Term::Pair(a, b) => {
+                go(data, a, found);
+                go(data, b, found);
+            }
+            Term::Eq(a, x, y) => {
+                go(data, a, found);
+                go(data, x, found);
+                go(data, y, found);
+            }
+            Term::NatElim(a, b, c, d) => {
+                for s in [a, b, c, d] {
+                    go(data, s, found);
+                }
+            }
+            Term::Data(_, args) | Term::Constr(_, args) => {
+                for a in args {
+                    go(data, a, found);
+                }
+            }
+            Term::Elim(_, m, methods, sc) => {
+                go(data, m, found);
+                for s in methods {
+                    go(data, s, found);
+                }
+                go(data, sc, found);
+            }
+            Term::Ann(e, ty) => {
+                go(data, e, found);
+                go(data, ty, found);
+            }
+            _ => {}
+        }
+    }
+    go(data, t, &mut found);
+    found
+}
+
+/// A constructor argument is strictly positive if the family occurs only as a
+/// direct head `Data(self, idxs)` (with no further occurrence in the indices),
+/// or not at all.
+fn strictly_positive(data: &str, t: &Term) -> bool {
+    match t {
+        Term::Data(name, args) if name == data => args.iter().all(|a| !occurs(data, a)),
+        _ => !occurs(data, t),
+    }
+}
+
+/// Check a signature: every telescope type-checks, constructors return the right
+/// family with the right index arity, and recursion is strictly positive.
+pub fn check_signature(sig: &Signature) -> Result<(), String> {
+    let rc = Rc::new(sig.clone());
+    for decl in &sig.datas {
+        // params telescope well-formed
+        let mut ctx = Ctx::with_sig(rc.clone());
+        for (_, ty) in &decl.params {
+            check_type(&ctx, ty).map_err(|e| format!("in {} params: {e}", decl.name))?;
+            let v = eval(&rc, &ctx.env(), ty);
+            ctx = ctx.extend(v);
+        }
+        let params_ctx = ctx; // context [params]
+        // index telescope well-formed (in context [params])
+        let mut ictx = params_ctx.extend_clone();
+        for (_, ty) in &decl.indices {
+            check_type(&ictx, ty).map_err(|e| format!("in {} indices: {e}", decl.name))?;
+            let v = eval(&rc, &ictx.env(), ty);
+            ictx = ictx.extend(v);
+        }
+        // each constructor
+        for ctor in &decl.ctors {
+            let mut cctx = params_ctx.extend_clone();
+            for (_, aty) in &ctor.args {
+                if !strictly_positive(&decl.name, aty) {
+                    return Err(format!(
+                        "{}.{}: argument is not strictly positive in `{}`",
+                        decl.name, ctor.name, decl.name
+                    ));
+                }
+                check_type(&cctx, aty)
+                    .map_err(|e| format!("in {}.{} args: {e}", decl.name, ctor.name))?;
+                let v = eval(&rc, &cctx.env(), aty);
+                cctx = cctx.extend(v);
+            }
+            if ctor.idxs.len() != decl.indices.len() {
+                return Err(format!(
+                    "{}.{}: returns {} index(es), the family has {}",
+                    decl.name,
+                    ctor.name,
+                    ctor.idxs.len(),
+                    decl.indices.len()
+                ));
+            }
+            // index terms type-check against the (instantiated) index telescope
+            let mut env_for_idx: Vec<Value> = cctx.env(); // [params, args] as neutrals
+            // index i's expected type is decl.indices[i] in env [params, idx0..i-1]
+            let mut idx_vals: Vec<Value> = Vec::new();
+            for (i, it) in ctor.idxs.iter().enumerate() {
+                // expected type: eval indices[i].1 in [params(neutral) ++ idx_vals]
+                let mut idx_env: Vec<Value> =
+                    (0..decl.params.len()).map(|k| Value::VNeu(Neutral::NVar(k))).collect();
+                idx_env.extend(idx_vals.iter().cloned());
+                let exp = eval(&rc, &idx_env, &decl.indices[i].1);
+                check(&cctx, it, &exp)
+                    .map_err(|e| format!("in {}.{} index {i}: {e}", decl.name, ctor.name))?;
+                idx_vals.push(eval(&rc, &cctx.env(), it));
+            }
+            let _ = &mut env_for_idx;
+        }
+    }
+    Ok(())
+}
+
+impl Ctx {
+    fn extend_clone(&self) -> Ctx {
+        Ctx { sig: self.sig.clone(), types: self.types.clone() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
+pub fn check_closed_in(sig: Signature, t: &Term, ty: &Term) -> Result<(), String> {
+    let ctx = Ctx::with_sig(Rc::new(sig));
     check_type(&ctx, ty)?;
-    let vty = eval(&[], ty);
+    let vty = eval(&ctx.sig, &[], ty);
     check(&ctx, t, &vty).map(|_| ())
 }
 
-/// Infer the (β-normal) type of a closed term.
-pub fn infer_closed(t: &Term) -> Result<Term, String> {
-    Ok(quote(0, &infer(&Ctx::new(), t)?.0))
+pub fn infer_closed_in(sig: Signature, t: &Term) -> Result<Term, String> {
+    let ctx = Ctx::with_sig(Rc::new(sig));
+    Ok(quote(0, &infer(&ctx, t)?.0))
 }
 
-/// Fully normalize a closed term (NbE: eval then quote). This is the partial
-/// evaluator — see docs/09 §2: type-level computation, applied known functions,
-/// and ι-reductions of `natElim` are all carried out here.
+pub fn normalize_closed_in(sig: Signature, t: &Term) -> Term {
+    let rc = Rc::new(sig);
+    quote(0, &eval(&rc, &[], t))
+}
+
+/// Check a closed term against a closed type (no datatypes).
+pub fn check_closed(t: &Term, ty: &Term) -> Result<(), String> {
+    check_closed_in(Signature::default(), t, ty)
+}
+
+/// Infer the (β-normal) type of a closed term (no datatypes).
+pub fn infer_closed(t: &Term) -> Result<Term, String> {
+    infer_closed_in(Signature::default(), t)
+}
+
+/// Fully normalize a closed term (no datatypes). This is the partial evaluator.
 pub fn normalize_closed(t: &Term) -> Term {
-    quote(0, &eval(&[], t))
+    normalize_closed_in(Signature::default(), t)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Term::*;
-    use super::*;
-    use crate::mult::Mult::{Omega, One, Zero};
-
-    fn b(t: Term) -> Box<Term> {
-        Box::new(t)
-    }
-
-    #[test]
-    fn polymorphic_linear_identity() {
-        // λA. λx. x  :  Π[0](A:Type). Π[1](x:A). A
-        // A is erased (used 0× at runtime, appears only in the type); x is linear.
-        let ty = Pi(Zero, b(Type), b(Pi(One, b(Var(0)), b(Var(1)))));
-        let tm = Lam(b(Lam(b(Var(0)))));
-        assert!(check_closed(&tm, &ty).is_ok(), "{:?}", check_closed(&tm, &ty));
-
-        // applying it:  id Nat 3  :  Nat   (A erased, the 3 used once)
-        let app = App(b(App(b(Ann(b(tm), b(ty))), b(Nat))), b(NatLit(3)));
-        assert_eq!(infer_closed(&app), Ok(Nat));
-    }
-
-    #[test]
-    fn linearity_is_enforced_under_dependency() {
-        // Π[1](x:Nat). Nat
-        let lin = Pi(One, b(Nat), b(Nat));
-        // using x exactly once: ok
-        assert!(check_closed(&Lam(b(Var(0))), &lin).is_ok());
-        // using x twice: ω ⋢ 1  -> rejected
-        assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &lin).is_err());
-        // dropping x: 0 ⋢ 1  -> rejected
-        assert!(check_closed(&Lam(b(NatLit(5))), &lin).is_err());
-
-        // Π[ω](x:Nat). Nat  -- now using x twice is fine
-        let unr = Pi(Omega, b(Nat), b(Nat));
-        assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &unr).is_ok());
-    }
-
-    #[test]
-    fn dependent_pairs() {
-        // Σ[ω](b:Nat). Eq Nat b 4   -- "a Nat together with a proof it equals 4"
-        let ty = Sigma(Omega, b(Nat), b(Eq(b(Nat), b(Var(0)), b(NatLit(4)))));
-        // (2+2, refl) inhabits it: the second component's type is Eq Nat (2+2) 4
-        let good = Pair(b(Add(b(NatLit(2)), b(NatLit(2)))), b(Refl(b(NatLit(4)))));
-        assert!(check_closed(&good, &ty).is_ok(), "{:?}", check_closed(&good, &ty));
-
-        // (5, refl) does NOT: its proof obligation Eq Nat 5 4 is false
-        let bad = Pair(b(NatLit(5)), b(Refl(b(NatLit(5)))));
-        assert!(check_closed(&bad, &ty).is_err());
-
-        // projection: fst (2+2, _) reduces to 4 : Nat
-        let proj = Fst(b(Ann(b(good), b(ty))));
-        assert_eq!(infer_closed(&proj), Ok(Nat));
-    }
-
-    // `add` defined by the dependent eliminator (induction on the first arg):
-    //   add = λm. λn. natElim (λ_.Nat) n (λk. λrec. suc rec) m
-    // recursing structurally on m, so it is TOTAL BY CONSTRUCTION (docs/09 §1.3).
-    fn add_def() -> Term {
-        Lam(b(Lam(b(NatElim(
-            b(Lam(b(Nat))),            // motive P = λ_. Nat
-            b(Var(0)),                 // base:  add 0 n = n
-            b(Lam(b(Lam(b(Suc(b(Var(0)))))))), // step: λk. λrec. suc rec
-            b(Var(1)),                 // scrutinee = m
-        )))))
-    }
-    fn add_ty() -> Term {
-        Pi(Omega, b(Nat), b(Pi(Omega, b(Nat), b(Nat))))
-    }
-
-    #[test]
-    fn natelim_is_a_total_recursor() {
-        // add type-checks at Π[ω](m:Nat). Π[ω](n:Nat). Nat
-        assert!(
-            check_closed(&add_def(), &add_ty()).is_ok(),
-            "{:?}",
-            check_closed(&add_def(), &add_ty())
-        );
-        // and it COMPUTES: add 2 3  ↝  5   (ι-reduction of natElim by NbE)
-        let add = Ann(b(add_def()), b(add_ty()));
-        let app = App(b(App(b(add), b(NatLit(2)))), b(NatLit(3)));
-        assert_eq!(normalize_closed(&app), NatLit(5));
-    }
-
-    #[test]
-    fn proof_by_user_defined_computation() {
-        // refl : Eq Nat (add 2 3) 5   — a proof discharged by the eliminator's
-        // own computation, not a built-in `+`. This is the Idris-like payoff.
-        let add = Ann(b(add_def()), b(add_ty()));
-        let app = App(b(App(b(add), b(NatLit(2)))), b(NatLit(3)));
-        let prop = Eq(b(Nat), b(app.clone()), b(NatLit(5)));
-        assert!(check_closed(&Refl(b(app)), &prop).is_ok());
-
-        // the false equation add 2 3 = 6 is rejected
-        let add2 = Ann(b(add_def()), b(add_ty()));
-        let app2 = App(b(App(b(add2), b(NatLit(2)))), b(NatLit(3)));
-        let bad = Eq(b(Nat), b(app2.clone()), b(NatLit(6)));
-        assert!(check_closed(&Refl(b(app2)), &bad).is_err());
-    }
-
-    #[test]
-    fn natelim_is_type_checked() {
-        // an ill-typed eliminator is rejected: motive P = λ_. Eq Nat 0 0, so the
-        // base case z must be a PROOF (Eq Nat 0 0), but we hand it a Nat.
-        let motive = Lam(b(Eq(b(Nat), b(NatLit(0)), b(NatLit(0)))));
-        let bad = NatElim(
-            b(motive),
-            b(NatLit(3)),                       // wrong: should be `refl`
-            b(Lam(b(Lam(b(Var(0)))))),
-            b(NatLit(2)),
-        );
-        assert!(infer_closed(&bad).is_err());
-    }
-
-    // `add m n` INLINED as an eliminator (recursing on m), so 0+n≡n and
-    // (suc k)+n≡suc(k+n) hold DEFINITIONALLY — which is what lets `append`
-    // below type-check against the index `add m n`.
-    fn add_tm(m: Term, n: Term) -> Term {
-        NatElim(b(Lam(b(Nat))), b(n), b(Lam(b(Lam(b(Suc(b(Var(0)))))))), b(m))
-    }
-
-    // a concrete vector  cons … : Vec Nat len
-    fn cons(n: u64, h: u64, t: Term) -> Term {
-        Cons(b(Nat), b(NatLit(n)), b(NatLit(h)), b(t))
-    }
-
-    #[test]
-    fn vectors_are_length_indexed() {
-        // [10,20,30] : Vec Nat 3
-        let v3 = cons(2, 10, cons(1, 20, cons(0, 30, Nil(b(Nat)))));
-        assert!(check_closed(&v3, &VecTy(b(Nat), b(NatLit(3)))).is_ok());
-        // the SAME term is rejected at Vec Nat 2 — the length is in the type
-        assert!(check_closed(&v3, &VecTy(b(Nat), b(NatLit(2)))).is_err());
-        // a cons whose tail length disagrees with the index is rejected
-        let bad = Cons(b(Nat), b(NatLit(5)), b(NatLit(0)), b(Nil(b(Nat)))); // claims tail len 5, is 0
-        assert!(check_closed(&bad, &VecTy(b(Nat), b(NatLit(6)))).is_err());
-    }
-
-    #[test]
-    fn append_tracks_length_in_the_type_and_computes() {
-        // append : Π[0](A:Type). Π[0](m:Nat). Π[0](n:Nat).
-        //          Π[ω](xs:Vec A m). Π[ω](ys:Vec A n). Vec A (add m n)
-        let result = VecTy(b(Var(4)), b(add_tm(Var(3), Var(2)))); // Vec A (add m n)
-        let p5 = Pi(Omega, b(VecTy(b(Var(3)), b(Var(1)))), b(result)); // ys : Vec A n
-        let p4 = Pi(Omega, b(VecTy(b(Var(2)), b(Var(1)))), b(p5)); // xs : Vec A m
-        let p3 = Pi(Zero, b(Nat), b(p4)); // n
-        let p2 = Pi(Zero, b(Nat), b(p3)); // m
-        let append_ty = Pi(Zero, b(Type), b(p2)); // A
-        // append = λA.λm.λn.λxs.λys. vecElim A P ys pcons m xs
-        //   P     = λk.λ_. Vec A (add k n)
-        //   pcons = λk.λh.λt.λrec. cons A (add k n) h rec
-        let motive = Lam(b(Lam(b(VecTy(b(Var(6)), b(add_tm(Var(1), Var(4))))))));
-        let pcons = Lam(b(Lam(b(Lam(b(Lam(b(Cons(
-            b(Var(8)),
-            b(add_tm(Var(3), Var(6))),
-            b(Var(2)),
-            b(Var(0)),
-        )))))))));
-        let append = Lam(b(Lam(b(Lam(b(Lam(b(Lam(b(VecElim(
-            b(Var(4)),   // A
-            b(motive),
-            b(Var(0)),   // pnil = ys
-            b(pcons),
-            b(Var(3)),   // length = m
-            b(Var(1)),   // scrutinee = xs
-        )))))))))));
-
-        assert!(
-            check_closed(&append, &append_ty).is_ok(),
-            "{:?}",
-            check_closed(&append, &append_ty)
-        );
-
-        // append Nat 2 1 [10,20] [30]  ↝  [10,20,30]  : Vec Nat 3
-        let xs = cons(1, 10, cons(0, 20, Nil(b(Nat))));
-        let ys = cons(0, 30, Nil(b(Nat)));
-        let app = App(
-            b(App(
-                b(App(
-                    b(App(b(App(b(Ann(b(append), b(append_ty))), b(Nat))), b(NatLit(2)))),
-                    b(NatLit(1)),
-                )),
-                b(xs),
-            )),
-            b(ys),
-        );
-        // the type carries the summed length: Vec Nat (add 2 1) = Vec Nat 3
-        assert_eq!(infer_closed(&app), Ok(VecTy(b(Nat), b(NatLit(3)))));
-        // and it actually concatenates, by the eliminator's ι-rules
-        let expected = cons(2, 10, cons(1, 20, cons(0, 30, Nil(b(Nat)))));
-        assert_eq!(normalize_closed(&app), expected);
-    }
-
-    #[test]
-    fn proofs_by_computation_still_work() {
-        // refl : Eq Nat (2 + 2) 4   -- a proof, in the 0-fragment
-        let good = Refl(b(Add(b(NatLit(2)), b(NatLit(2)))));
-        let prop = Eq(b(Nat), b(Add(b(NatLit(2)), b(NatLit(2)))), b(NatLit(4)));
-        assert!(check_closed(&good, &prop).is_ok());
-        // a false equation is rejected
-        let falseprop = Eq(b(Nat), b(Add(b(NatLit(2)), b(NatLit(2)))), b(NatLit(5)));
-        assert!(check_closed(&good, &falseprop).is_err());
-    }
-}
+mod tests;
