@@ -1,12 +1,12 @@
-//! Recursive-descent parser for the v0 surface language.
+//! Recursive-descent parser for the v0.2 surface language.
 
-use crate::ast::{Expr, Program, Stmt};
+use crate::ast::{Expr, Program, Stmt, StructDecl, Ty};
 use crate::lexer::{lex, Tok};
 
 pub fn parse(src: &str) -> Result<Program, String> {
     let toks = lex(src)?;
     let mut p = Parser { toks, i: 0 };
-    p.block()
+    p.program()
 }
 
 struct Parser {
@@ -26,6 +26,9 @@ impl Parser {
     fn is_punc(&self, c: char) -> bool {
         matches!(self.peek(), Tok::Punc(x) if *x == c)
     }
+    fn is_kw(&self, kw: &str) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if s == kw)
+    }
     fn eat_punc(&mut self, c: char) -> Result<(), String> {
         match self.bump() {
             Tok::Punc(x) if x == c => Ok(()),
@@ -39,32 +42,79 @@ impl Parser {
         }
     }
 
-    fn block(&mut self) -> Result<Program, String> {
-        let mut out = Vec::new();
-        while !matches!(self.peek(), Tok::Eof) {
-            out.push(self.stmt()?);
+    fn program(&mut self) -> Result<Program, String> {
+        let mut structs = Vec::new();
+        let mut body = Vec::new();
+        loop {
+            match self.peek() {
+                Tok::Eof => break,
+                Tok::Ident(s) if s == "struct" => structs.push(self.struct_decl()?),
+                _ => body.push(self.stmt()?),
+            }
         }
-        Ok(out)
+        Ok(Program { structs, body })
+    }
+
+    fn struct_decl(&mut self) -> Result<StructDecl, String> {
+        self.bump(); // struct
+        let name = self.eat_ident()?;
+        self.eat_punc('{')?;
+        let mut fields = Vec::new();
+        while !self.is_punc('}') {
+            let f = self.eat_ident()?;
+            self.eat_punc(':')?;
+            let t = self.ty()?;
+            fields.push((f, t));
+            if self.is_punc(',') {
+                self.bump();
+            }
+        }
+        self.eat_punc('}')?;
+        Ok(StructDecl { name, fields })
+    }
+
+    fn ty(&mut self) -> Result<Ty, String> {
+        let name = self.eat_ident()?;
+        match name.as_str() {
+            "Int" => Ok(Ty::Int),
+            "Unit" => Ok(Ty::Unit),
+            "Own" => {
+                self.eat_punc('<')?;
+                let s = self.eat_ident()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Own(s))
+            }
+            "Ptr" => {
+                self.eat_punc('<')?;
+                let s = self.eat_ident()?;
+                self.eat_punc('>')?;
+                Ok(Ty::Ptr(s))
+            }
+            other => Err(format!("unknown type `{other}`")),
+        }
     }
 
     fn stmt(&mut self) -> Result<Stmt, String> {
-        if let Tok::Ident(kw) = self.peek().clone() {
-            if kw == "let" {
+        if self.is_kw("let") {
+            self.bump();
+            let name = self.eat_ident()?;
+            let ann = if self.is_punc(':') {
                 self.bump();
-                let name = self.eat_ident()?;
-                self.eat_punc('=')?;
-                let rhs = self.expr()?;
-                self.eat_punc(';')?;
-                return Ok(Stmt::Let(name, rhs));
-            }
-            if kw == "free" {
-                self.bump();
-                let name = self.eat_ident()?;
-                self.eat_punc(';')?;
-                return Ok(Stmt::Free(name));
-            }
+                Some(self.ty()?)
+            } else {
+                None
+            };
+            self.eat_punc('=')?;
+            let rhs = self.expr()?;
+            self.eat_punc(';')?;
+            return Ok(Stmt::Let(name, ann, rhs));
         }
-        // expression statement, or a field-write if it is `path.fld = rhs;`
+        if self.is_kw("free") {
+            self.bump();
+            let name = self.eat_ident()?;
+            self.eat_punc(';')?;
+            return Ok(Stmt::Free(name));
+        }
         let e = self.expr()?;
         if let Expr::Field(base, fld) = e {
             if self.is_punc('=') {
@@ -73,7 +123,6 @@ impl Parser {
                 self.eat_punc(';')?;
                 return Ok(Stmt::Write(*base, fld, rhs));
             }
-            // not a write; reconstruct and finish as an expression statement
             self.eat_punc(';')?;
             return Ok(Stmt::Expr(Expr::Field(base, fld)));
         }
@@ -109,7 +158,23 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Unit)
             }
-            Tok::Ident(s) if s == "alloc" => self.alloc(),
+            Tok::Ident(s) if s == "alloc" => {
+                self.bump();
+                let name = self.eat_ident()?;
+                self.eat_punc('{')?;
+                let mut fields = Vec::new();
+                while !self.is_punc('}') {
+                    let f = self.eat_ident()?;
+                    self.eat_punc(':')?;
+                    let e = self.expr()?;
+                    fields.push((f, e));
+                    if self.is_punc(',') {
+                        self.bump();
+                    }
+                }
+                self.eat_punc('}')?;
+                Ok(Expr::Alloc(name, fields))
+            }
             Tok::Ident(s) if s == "addr" => {
                 self.bump();
                 self.eat_punc('(')?;
@@ -129,22 +194,5 @@ impl Parser {
             }
             t => Err(format!("unexpected token {t:?}")),
         }
-    }
-
-    fn alloc(&mut self) -> Result<Expr, String> {
-        self.bump(); // alloc
-        self.eat_punc('{')?;
-        let mut fields = Vec::new();
-        while !self.is_punc('}') {
-            let f = self.eat_ident()?;
-            self.eat_punc(':')?;
-            let e = self.expr()?;
-            fields.push((f, e));
-            if self.is_punc(',') {
-                self.bump();
-            }
-        }
-        self.eat_punc('}')?;
-        Ok(Expr::Alloc(fields))
     }
 }

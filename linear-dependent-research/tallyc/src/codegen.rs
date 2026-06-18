@@ -37,7 +37,7 @@ pub fn smoke() -> i64 {
 pub fn compile_and_run(prog: &Program) -> i64 {
     // assign every field name a stable slot index; cells are uniform i64 arrays
     let mut slot: HashMap<String, u32> = HashMap::new();
-    for s in prog {
+    for s in &prog.body {
         collect_fields(s, &mut slot);
     }
 
@@ -58,9 +58,9 @@ pub fn compile_and_run(prog: &Program) -> i64 {
     let mut env: HashMap<String, BasicValueEnum> = HashMap::new();
     let mut last = i64t.const_zero();
 
-    for s in prog {
+    for s in &prog.body {
         match s {
-            Stmt::Let(name, rhs) => {
+            Stmt::Let(name, _ty, rhs) => {
                 let v = eval_expr(&builder, &ctx, i64t, ptr, malloc, &slot, &env, rhs);
                 env.insert(name.clone(), v.into());
                 last = v;
@@ -115,7 +115,7 @@ fn eval_expr<'c>(
         Expr::Null | Expr::Unit => i64t.const_zero(),
         Expr::Var(x) => env.get(x).unwrap().into_int_value(),
         Expr::AddrOf(x) => env.get(x).unwrap().into_int_value(),
-        Expr::Alloc(fields) => {
+        Expr::Alloc(_, fields) => {
             let sz = i64t.const_int(nslots * 8, false);
             let raw = builder
                 .build_call(malloc, &[sz.into()], "cell")
@@ -160,7 +160,7 @@ fn collect_fields(s: &Stmt, slot: &mut HashMap<String, u32>) {
     };
     fn fields_in_expr(e: &Expr, add: &mut dyn FnMut(&str)) {
         match e {
-            Expr::Alloc(fs) => {
+            Expr::Alloc(_, fs) => {
                 for (f, fe) in fs {
                     add(f);
                     fields_in_expr(fe, add);
@@ -174,7 +174,7 @@ fn collect_fields(s: &Stmt, slot: &mut HashMap<String, u32>) {
         }
     }
     match s {
-        Stmt::Let(_, e) | Stmt::Expr(e) => fields_in_expr(e, &mut |f| add(f, slot)),
+        Stmt::Let(_, _, e) | Stmt::Expr(e) => fields_in_expr(e, &mut |f| add(f, slot)),
         Stmt::Write(b, f, r) => {
             add(f, slot);
             fields_in_expr(b, &mut |f| add(f, slot));
@@ -198,7 +198,8 @@ mod tests {
     fn alloc_write_read_free_runs() {
         // allocate a cell, store 42, read it back into the result, free.
         let prog = parse(
-            "let a = alloc { val: 0 };
+            "struct C { val: Int }
+             let a = alloc C { val: 0 };
              a.val = 42;
              let r = a.val;
              free a;
