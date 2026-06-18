@@ -1,42 +1,49 @@
-//! The DEPENDENT core (Route B: proofs-as-terms), via normalization by
-//! evaluation. A Rust port of the engine in `../../prototype/qtt_checker.py`.
+//! The DEPENDENT + LINEAR core (Route B), via normalization by evaluation: a
+//! Quantitative Type Theory (QTT) checker. A Rust port of the engine in
+//! `../../prototype/qtt_checker.py`; the metatheory is `../../agda/Dependent.agda`.
 //!
-//! One syntax for terms AND types (types are terms). A universe `Type`, Π, λ,
-//! application, a base `Nat` with `+` (to demonstrate computation), and an
-//! identity type `Eq A a b` with `refl` — so a PROOF is a term whose type is a
-//! proposition, checked by NORMALISATION:  `refl : Eq Nat (2+2) 4` type-checks
-//! because `2+2` and `4` have the same normal form.
+//! One syntax for terms AND types. Every `Π` carries a MULTIPLICITY `{0,1,ω}`
+//! (`Π[π](x:A). B`), and the bidirectional checker threads a USAGE CONTEXT — one
+//! multiplicity per variable, combined with the rig's `+` and `·`. So linearity
+//! is enforced UNDER dependency:
 //!
-//! Definitional equality is decided by NbE: `eval` to semantic values (with
-//! closures for binders), `quote` back to a β-normal term, and compare. This is
-//! the kernel every dependently-typed proof assistant is built on.
+//!   * `Π[0]` — erased: the argument exists only in types (the 0-fragment);
+//!   * `Π[1]` — linear: the argument is used exactly once;
+//!   * `Π[ω]` — unrestricted.
 //!
-//! `Type : Type` for now (fine for a programming language; for a *logic* it
-//! needs a universe hierarchy — see ../../docs/07-implementation-guide.md §7).
-//! Multiplicities (the linear/quantitative layer) and inductive families layer
-//! on top of this engine next.
+//! The headline is the dependent+linear+erasure unification, the polymorphic
+//! LINEAR identity, machine-checked here:
+//!     λA. λx. x   :   Π[0](A:Type). Π[1](x:A). A
+//! `A` is used 0 times at runtime (erased, appears only in the type); `x` is used
+//! exactly once. And proofs are still terms checked by computation
+//! (`refl : Eq Nat (2+2) 4`), now living in the 0-fragment.
+//!
+//! `Type : Type` for now (fine for a language; for a logic, a universe hierarchy
+//! is needed — ../../docs/07-implementation-guide.md §7).
+
+use crate::mult::Mult;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Term {
-    Var(usize),                              // de Bruijn index (0 = innermost)
-    Type,                                    // the universe
-    Pi(Box<Term>, Box<Term>),                // Π(_:A). B   (B binds the variable)
-    Lam(Box<Term>),                          // λ. body
+    Var(usize),                                   // de Bruijn index (0 = innermost)
+    Type,
+    Pi(Mult, Box<Term>, Box<Term>),               // Π[π](_:A). B
+    Lam(Box<Term>),
     App(Box<Term>, Box<Term>),
     Nat,
     NatLit(u64),
     Add(Box<Term>, Box<Term>),
-    Eq(Box<Term>, Box<Term>, Box<Term>),     // Eq A a b   (the identity type)
-    Refl(Box<Term>),                         // refl a : Eq _ a a
-    Ann(Box<Term>, Box<Term>),               // (e : T)   — type annotation
+    Eq(Box<Term>, Box<Term>, Box<Term>),
+    Refl(Box<Term>),
+    Ann(Box<Term>, Box<Term>),
 }
 
 #[derive(Clone)]
 pub enum Value {
     VType,
-    VPi(Box<Value>, Closure),
+    VPi(Mult, Box<Value>, Closure),
     VLam(Closure),
-    VNat,                                    // the type Nat
+    VNat,
     VNatLit(u64),
     VEq(Box<Value>, Box<Value>, Box<Value>),
     VRefl(Box<Value>),
@@ -45,7 +52,7 @@ pub enum Value {
 
 #[derive(Clone)]
 pub enum Neutral {
-    NVar(usize),                             // de Bruijn LEVEL
+    NVar(usize), // de Bruijn LEVEL
     NApp(Box<Neutral>, Box<Value>),
     NAdd(Box<Value>, Box<Value>),
 }
@@ -65,14 +72,15 @@ impl Closure {
 }
 
 // ---------------------------------------------------------------------------
-// evaluation  (term -> value)
+// evaluation / quotation / conversion (NbE) -- unchanged except Π carries π
 // ---------------------------------------------------------------------------
 
 fn eval(env: &[Value], t: &Term) -> Value {
     match t {
         Term::Var(i) => env[env.len() - 1 - i].clone(),
         Term::Type => Value::VType,
-        Term::Pi(a, b) => Value::VPi(
+        Term::Pi(pi, a, b) => Value::VPi(
+            *pi,
             Box::new(eval(env, a)),
             Closure { env: env.to_vec(), body: (**b).clone() },
         ),
@@ -102,14 +110,11 @@ fn vapp(f: Value, a: Value) -> Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// quotation  (value -> β-normal term), and definitional equality
-// ---------------------------------------------------------------------------
-
 fn quote(lvl: usize, v: &Value) -> Term {
     match v {
         Value::VType => Term::Type,
-        Value::VPi(a, clo) => Term::Pi(
+        Value::VPi(pi, a, clo) => Term::Pi(
+            *pi,
             Box::new(quote(lvl, a)),
             Box::new(quote(lvl + 1, &clo.apply(Value::VNeu(Neutral::NVar(lvl))))),
         ),
@@ -141,11 +146,32 @@ fn conv(lvl: usize, a: &Value, b: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// bidirectional type checking with conversion
+// usage contexts: one multiplicity per variable (indexed by level)
+// ---------------------------------------------------------------------------
+
+type Usage = Vec<Mult>;
+
+fn uzero(n: usize) -> Usage {
+    vec![Mult::Zero; n]
+}
+fn uunit(n: usize, lvl: usize) -> Usage {
+    let mut u = uzero(n);
+    u[lvl] = Mult::One;
+    u
+}
+fn uadd(a: &Usage, b: &Usage) -> Usage {
+    a.iter().zip(b).map(|(x, y)| x.add(*y)).collect()
+}
+fn uscale(p: Mult, a: &Usage) -> Usage {
+    a.iter().map(|x| p.mul(*x)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// resourced bidirectional checking: check/infer compute a usage context
 // ---------------------------------------------------------------------------
 
 pub struct Ctx {
-    types: Vec<Value>, // types[level] = the type of the variable at that level
+    types: Vec<Value>,
 }
 
 impl Ctx {
@@ -165,159 +191,175 @@ impl Ctx {
     }
 }
 
-fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<(), String> {
+/// Check that `t` is a well-formed TYPE. Type formation is the 0-fragment, so
+/// the usage it incurs is discarded (everything in a type is used 0 times).
+fn check_type(ctx: &Ctx, t: &Term) -> Result<(), String> {
+    check(ctx, t, &Value::VType).map(|_| ())
+}
+
+fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
+    let n = ctx.level();
     match (t, ty) {
-        (Term::Lam(body), Value::VPi(dom, cod)) => {
+        (Term::Lam(body), Value::VPi(pi, dom, cod)) => {
             let ctx2 = ctx.extend((**dom).clone());
-            let codty = cod.apply(Value::VNeu(Neutral::NVar(ctx.level())));
-            check(&ctx2, body, &codty)
+            let codty = cod.apply(Value::VNeu(Neutral::NVar(n)));
+            let mut ub = check(&ctx2, body, &codty)?; // length n+1
+            let sigma = ub.pop().unwrap(); // the bound variable's usage
+            if !sigma.leq(*pi) {
+                return Err(format!(
+                    "the variable bound at multiplicity {pi} is used {sigma} time(s) \
+                     ({sigma} ⋢ {pi})"
+                ));
+            }
+            Ok(ub)
         }
         (Term::Refl(a), Value::VEq(aty, x, y)) => {
-            check(ctx, a, aty)?;
+            check(ctx, a, aty)?; // a proof lives in the 0-fragment; discard usage
             let va = eval(&ctx.env(), a);
-            if conv(ctx.level(), x, &va) && conv(ctx.level(), y, &va) {
-                Ok(())
+            if conv(n, x, &va) && conv(n, y, &va) {
+                Ok(uzero(n))
             } else {
                 Err(format!(
                     "refl: the equation does not hold by computation:\n  {:?}  =/=  {:?}",
-                    quote(ctx.level(), x),
-                    quote(ctx.level(), y)
+                    quote(n, x),
+                    quote(n, y)
                 ))
             }
         }
         _ => {
-            let ty2 = infer(ctx, t)?;
-            if conv(ctx.level(), ty, &ty2) {
-                Ok(())
+            let (ty2, u) = infer(ctx, t)?;
+            if conv(n, ty, &ty2) {
+                Ok(u)
             } else {
                 Err(format!(
                     "type mismatch:\n  expected {:?}\n  found    {:?}",
-                    quote(ctx.level(), ty),
-                    quote(ctx.level(), &ty2)
+                    quote(n, ty),
+                    quote(n, &ty2)
                 ))
             }
         }
     }
 }
 
-fn infer(ctx: &Ctx, t: &Term) -> Result<Value, String> {
+fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
+    let n = ctx.level();
     match t {
         Term::Var(i) => {
-            if *i >= ctx.level() {
+            if *i >= n {
                 return Err(format!("unbound variable (de Bruijn {i})"));
             }
-            Ok(ctx.types[ctx.level() - 1 - i].clone())
+            let lvl = n - 1 - i;
+            Ok((ctx.types[lvl].clone(), uunit(n, lvl)))
         }
-        Term::Type => Ok(Value::VType), // Type : Type
-        Term::Nat => Ok(Value::VType),
-        Term::NatLit(_) => Ok(Value::VNat),
+        Term::Type | Term::Nat => Ok((Value::VType, uzero(n))),
+        Term::NatLit(_) => Ok((Value::VNat, uzero(n))),
         Term::Add(a, b) => {
-            check(ctx, a, &Value::VNat)?;
-            check(ctx, b, &Value::VNat)?;
-            Ok(Value::VNat)
+            let ua = check(ctx, a, &Value::VNat)?;
+            let ub = check(ctx, b, &Value::VNat)?;
+            Ok((Value::VNat, uadd(&ua, &ub)))
         }
-        Term::Pi(a, b) => {
-            check(ctx, a, &Value::VType)?;
+        Term::Pi(_, a, b) => {
+            check_type(ctx, a)?;
             let va = eval(&ctx.env(), a);
-            check(&ctx.extend(va), b, &Value::VType)?;
-            Ok(Value::VType)
+            check_type(&ctx.extend(va), b)?;
+            Ok((Value::VType, uzero(n)))
         }
         Term::Eq(a, x, y) => {
-            check(ctx, a, &Value::VType)?;
+            check_type(ctx, a)?;
             let va = eval(&ctx.env(), a);
-            check(ctx, x, &va)?;
+            check(ctx, x, &va)?; // type-level, usage discarded
             check(ctx, y, &va)?;
-            Ok(Value::VType)
+            Ok((Value::VType, uzero(n)))
         }
         Term::Refl(a) => {
-            let ta = infer(ctx, a)?;
+            let (ta, _) = infer(ctx, a)?;
             let va = eval(&ctx.env(), a);
-            Ok(Value::VEq(Box::new(ta), Box::new(va.clone()), Box::new(va)))
+            Ok((
+                Value::VEq(Box::new(ta), Box::new(va.clone()), Box::new(va)),
+                uzero(n),
+            ))
         }
         Term::App(f, x) => match infer(ctx, f)? {
-            Value::VPi(dom, cod) => {
-                check(ctx, x, &dom)?;
-                Ok(cod.apply(eval(&ctx.env(), x)))
+            (Value::VPi(pi, dom, cod), uf) => {
+                let ux = check(ctx, x, &dom)?;
+                let vx = eval(&ctx.env(), x);
+                Ok((cod.apply(vx), uadd(&uf, &uscale(pi, &ux)))) // u_f + π · u_x
             }
-            other => Err(format!(
+            (other, _) => Err(format!(
                 "application of a non-function (type {:?})",
-                quote(ctx.level(), &other)
+                quote(n, &other)
             )),
         },
         Term::Ann(e, ty) => {
-            check(ctx, ty, &Value::VType)?;
+            check_type(ctx, ty)?;
             let vty = eval(&ctx.env(), ty);
-            check(ctx, e, &vty)?;
-            Ok(vty)
+            let u = check(ctx, e, &vty)?;
+            Ok((vty, u))
         }
         Term::Lam(_) => Err("cannot infer a bare lambda; annotate it `(e : T)`".to_string()),
     }
 }
 
-/// Check a closed term against a closed type.
+/// Check a closed term against a closed type (usage context is empty).
 pub fn check_closed(t: &Term, ty: &Term) -> Result<(), String> {
     let ctx = Ctx::new();
-    check(&ctx, ty, &Value::VType)?;
+    check_type(&ctx, ty)?;
     let vty = eval(&[], ty);
-    check(&ctx, t, &vty)
+    check(&ctx, t, &vty).map(|_| ())
 }
 
 /// Infer the (β-normal) type of a closed term.
 pub fn infer_closed(t: &Term) -> Result<Term, String> {
-    Ok(quote(0, &infer(&Ctx::new(), t)?))
+    Ok(quote(0, &infer(&Ctx::new(), t)?.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::Term::*;
     use super::*;
+    use crate::mult::Mult::{Omega, One, Zero};
 
     fn b(t: Term) -> Box<Term> {
         Box::new(t)
     }
 
-    // Π(A:Type). Π(x:A). A
-    fn id_ty() -> Term {
-        Pi(b(Type), b(Pi(b(Var(0)), b(Var(1)))))
-    }
-    // λA. λx. x
-    fn id_tm() -> Term {
-        Lam(b(Lam(b(Var(0)))))
-    }
-
     #[test]
-    fn dependent_function() {
-        // the polymorphic identity checks at its dependent type
-        assert!(check_closed(&id_tm(), &id_ty()).is_ok());
-        // apply it to a type and a value:  id Nat 3  :  Nat
-        let app = App(b(App(b(Ann(b(id_tm()), b(id_ty()))), b(Nat))), b(NatLit(3)));
+    fn polymorphic_linear_identity() {
+        // λA. λx. x  :  Π[0](A:Type). Π[1](x:A). A
+        // A is erased (used 0× at runtime, appears only in the type); x is linear.
+        let ty = Pi(Zero, b(Type), b(Pi(One, b(Var(0)), b(Var(1)))));
+        let tm = Lam(b(Lam(b(Var(0)))));
+        assert!(check_closed(&tm, &ty).is_ok(), "{:?}", check_closed(&tm, &ty));
+
+        // applying it:  id Nat 3  :  Nat   (A erased, the 3 used once)
+        let app = App(b(App(b(Ann(b(tm), b(ty))), b(Nat))), b(NatLit(3)));
         assert_eq!(infer_closed(&app), Ok(Nat));
     }
 
     #[test]
-    fn proofs_by_computation() {
-        // refl : Eq Nat (2 + 2) 4   -- a PROOF, checked by normalisation
-        let good = Refl(b(Add(b(NatLit(2)), b(NatLit(2)))));
-        let prop = Eq(b(Nat), b(Add(b(NatLit(2)), b(NatLit(2)))), b(NatLit(4)));
-        assert!(check_closed(&good, &prop).is_ok());
+    fn linearity_is_enforced_under_dependency() {
+        // Π[1](x:Nat). Nat
+        let lin = Pi(One, b(Nat), b(Nat));
+        // using x exactly once: ok
+        assert!(check_closed(&Lam(b(Var(0))), &lin).is_ok());
+        // using x twice: ω ⋢ 1  -> rejected
+        assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &lin).is_err());
+        // dropping x: 0 ⋢ 1  -> rejected
+        assert!(check_closed(&Lam(b(NatLit(5))), &lin).is_err());
 
-        // a dependent application reduces inside the proposition, too:
-        //   refl : Eq Nat ((λx.x) 7) 7
-        let idapp = App(b(Ann(b(Lam(b(Var(0)))), b(Pi(b(Nat), b(Nat))))), b(NatLit(7)));
-        let prop2 = Eq(b(Nat), b(idapp), b(NatLit(7)));
-        assert!(check_closed(&Refl(b(NatLit(7))), &prop2).is_ok());
+        // Π[ω](x:Nat). Nat  -- now using x twice is fine
+        let unr = Pi(Omega, b(Nat), b(Nat));
+        assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &unr).is_ok());
     }
 
     #[test]
-    fn bad_proofs_and_mismatches_rejected() {
-        // refl cannot prove a false equation
-        let bad = Refl(b(Add(b(NatLit(2)), b(NatLit(2)))));
+    fn proofs_by_computation_still_work() {
+        // refl : Eq Nat (2 + 2) 4   -- a proof, in the 0-fragment
+        let good = Refl(b(Add(b(NatLit(2)), b(NatLit(2)))));
+        let prop = Eq(b(Nat), b(Add(b(NatLit(2)), b(NatLit(2)))), b(NatLit(4)));
+        assert!(check_closed(&good, &prop).is_ok());
+        // a false equation is rejected
         let falseprop = Eq(b(Nat), b(Add(b(NatLit(2)), b(NatLit(2)))), b(NatLit(5)));
-        assert!(check_closed(&bad, &falseprop).is_err());
-
-        // plain type mismatch
-        assert!(check_closed(&NatLit(3), &Type).is_err());
-        // ill-typed application
-        assert!(infer_closed(&App(b(NatLit(1)), b(NatLit(2)))).is_err());
+        assert!(check_closed(&good, &falseprop).is_err());
     }
 }

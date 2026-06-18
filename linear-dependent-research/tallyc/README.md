@@ -30,36 +30,43 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
-## Status (v0.6 — the dependent core: proofs as terms, via NbE)
+## Status (v0.7 — the FUSED dependent+linear core: QTT, via NbE)
 
-The Route-B foundation (`src/dep.rs`): a **dependent type checker with
-normalization by evaluation** — one syntax for terms *and* types, a universe,
-`Π`, `λ`, application, a base `Nat`/`+`, and an **identity type** `Eq A a b` with
-`refl`. Definitional equality is decided by NbE (eval to values with closures,
-quote to a β-normal term, compare). The upshot: **a proof is a term, checked by
-computation** —
+The Route-B core (`src/dep.rs`): a **Quantitative Type Theory** checker —
+dependent types and linearity in one calculus. One syntax for terms *and* types,
+a universe, `Π`/`λ`/application, a base `Nat`/`+`, and an identity type
+`Eq A a b` with `refl`. Definitional equality is decided by **normalization by
+evaluation**; and every `Π` carries a **multiplicity** `Π[π]` with the
+bidirectional checker threading a **usage context** (combined by the rig's `+`
+and `·`), so linearity is enforced *under dependency*:
 
 ```
-refl : Eq Nat (2 + 2) 4        -- type-checks: 2+2 and 4 share a normal form
-refl : Eq Nat ((λx.x) 7) 7     -- β-reduction happens inside the proposition
-refl : Eq Nat (2 + 2) 5        -- REJECTED: the equation does not hold
+λA. λx. x  :  Π[0](A:Type). Π[1](x:A). A     -- the polymorphic LINEAR identity
+```
+`A` is **erased** (used 0× at runtime — the 0-fragment — it appears only in the
+type); `x` is **linear** (used exactly once). Misuse is caught by the rig:
+using a `Π[1]` argument twice fails `ω ⋢ 1`, dropping it fails `0 ⋢ 1`, while a
+`Π[ω]` argument may be used freely. And **proofs are terms checked by
+computation**, now living in the 0-fragment:
+
+```
+refl : Eq Nat (2 + 2) 4        -- checks: 2+2 and 4 share a normal form
+refl : Eq Nat (2 + 2) 5        -- REJECTED
 ```
 
-The polymorphic identity `λA.λx.x : Π(A:Type).Π(x:A).A` checks at its dependent
-type and applies. This is a port of the engine in `../prototype/qtt_checker.py`
-and the kernel every dependent proof assistant is built on. `cargo test`: 8
-tests incl. `proofs_by_computation`.
+This is the dependent + linear + erasure unification — the same as
+`agda/Dependent.agda`'s `dep-id`, and a port of `../prototype/qtt_checker.py`.
+`cargo test`: 8 tests (incl. `polymorphic_linear_identity`,
+`linearity_is_enforced_under_dependency`).
 
-Currently standalone (its own `Term` syntax, separate from the simply-typed
-surface). The remaining Route-B steps, in order: **(1)** fuse the multiplicity
-layer (resourced bidirectional checking — `qtt_checker.py` shows how; we already
-have the rig and usage context); **(2)** **inductive families** + a recursor
-(so `Nat`/`Vec`/`lseg` and real propositions are user-defined, not built-in);
-**(3)** a surface parser for the dependent syntax; **(4)** merge with the
-low-level layer so `Own`/`Vec<n>` are definitions in the dependent calculus and
-proofs constrain the memory operations; **(5)** a universe hierarchy for logical
-consistency (`Type : Type` today is fine for a language, not for a logic — see
-`../docs/07-implementation-guide.md` §7).
+Standalone for now (its own `Term` syntax). Remaining Route-B steps: **(1)**
+**inductive families** + a recursor (so `Nat`/`Vec`/`lseg` and real propositions
+are user-defined, not built-in — this is what enables proofs by induction);
+**(2)** a surface parser for the dependent syntax; **(3)** merge with the
+low-level layer so `Own`/`Vec<n>` are definitions in the calculus and
+capabilities are **indexed by propositions** (so proofs constrain the memory
+operations); **(4)** a universe hierarchy for logical consistency (`Type : Type`
+today is fine for a language, not for a logic — `../docs/07-implementation-guide.md` §7).
 
 ## Status (v0.5 — linear cursors: the intrusive DLL with O(1) remove)
 
