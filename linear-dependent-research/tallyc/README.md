@@ -12,6 +12,47 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
                             codegen (inkwell, behind `--features llvm`)
 ```
 
+## Status (v0.4 — dependent indices + the 0-fragment)
+
+- **Type-level dependency.** New types `Nat` and `Vec<n>` (a LINEAR
+  length-indexed vector). The index `n` is a Nat term in normal form
+  (`k` | `m` | `m + k`) with structural definitional equality.
+- **Length arithmetic in the operations' types**, so safety is decided by the
+  index: `vnew : Vec<0>`, `vpush : Vec<n> → Int → Vec<n+1>`, `vhead`/`vtail`
+  require a statically non-empty `Vec<n+1>`, `vfree` requires `Vec<0>`.
+  Pop-from-empty and free-of-nonempty are **type errors**.
+- **The 0-fragment.** Multiplicity-0 parameters are ERASED and IMPLICIT: not
+  passed at the call site, but solved by unifying argument types against
+  parameter types (index unification). E.g.
+  `fn push_zero(0 n: Nat, v: Vec<n>) -> Vec<n+1> { vpush(v, 0) }` — `n` is
+  inferred per call; using an erased index at runtime is a type error.
+- Backend: vectors lower to a linked stack; the length is never materialised
+  (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
+  Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
+
+### Next: the region / cursor discipline (the intrusive DLL with O(1) remove)
+
+This is the headline application and a genuinely larger milestone. Doing it
+*soundly* (the project's whole point) forces a design choice, because a
+**copyable** cursor that doesn't borrow the list AND O(1) `remove` requires
+tracking per-node liveness — which a simple type system can't do without one of:
+
+- **linear cursors** (Vale's `LinearKey` style): a cursor is linear, so
+  `remove` consumes it and a stale cursor cannot be used — sound and type-level,
+  but the cursor cannot be freely copied (needs pairs/tuples to thread results);
+- **lexically-scoped regions** (Tofte–Talpin): aliased `Ptr<'r,S>` are copyable,
+  deref is gated by holding the region `'r`, and the whole region is freed at
+  scope exit — sound, zero-cost, but no individual free / no cursor invalidation;
+- **a symbolic region checker** (what `../poc/tally_dll.py` does): tracks the
+  exact live-node set for *closed* programs, giving the full copyable-cursor +
+  O(1) `remove` story, sound for bounded programs but not a compositional type;
+- **region polymorphism + generational references** (Vale's runtime model): a
+  small runtime check, general but not zero-cost.
+
+These are real, different points on the design space (see `../docs/08-prior-art-vale.md`).
+The cleanest fit for this linear system is **linear cursors**; the most faithful
+to the POC is the **symbolic region checker**.
+
 ## Status (v0.3 — functions + multiplicities)
 
 - **Quantitative type system.** A multiplicity rig `{0,1,ω}` (`mult.rs`, the one
