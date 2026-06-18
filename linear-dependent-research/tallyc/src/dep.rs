@@ -137,10 +137,10 @@ pub struct Signature {
 }
 
 impl Signature {
-    fn data(&self, name: &str) -> Option<&DataDecl> {
+    pub(crate) fn data(&self, name: &str) -> Option<&DataDecl> {
         self.datas.iter().find(|d| d.name == name)
     }
-    fn ctor(&self, name: &str) -> Option<(&DataDecl, &Constructor)> {
+    pub(crate) fn ctor(&self, name: &str) -> Option<(&DataDecl, &Constructor)> {
         for d in &self.datas {
             for c in &d.ctors {
                 if c.name == name {

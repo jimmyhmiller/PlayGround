@@ -11,6 +11,7 @@ pub mod dep;
 pub mod lexer;
 pub mod mult;
 pub mod parser;
+pub mod surface;
 
 #[cfg(feature = "llvm")]
 pub mod codegen;

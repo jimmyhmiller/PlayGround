@@ -32,8 +32,44 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("dep") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: tally dep <file>");
+                return ExitCode::FAILURE;
+            };
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match tally::surface::check_program(&src) {
+                Ok(prog) => {
+                    println!(
+                        "ok: {path} elaborates and type-checks ({} datatype(s), {} def(s))",
+                        prog.sig.datas.len(),
+                        prog.defs.len()
+                    );
+                    // normalize a `main` if present
+                    if let Some(nf) = prog.normalize("main") {
+                        println!("main = {}", tally::surface::pretty(&nf));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(diags) => {
+                    eprintln!("{path}: rejected ({} error(s)):", diags.len());
+                    for d in &diags {
+                        eprintln!("  - {d}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
-            eprintln!("lambda-Tally compiler\nusage:\n  tally check <file>");
+            eprintln!(
+                "lambda-Tally compiler\nusage:\n  tally check <file>   (low-level linear checker)\n  tally dep <file>     (dependent+linear surface language)"
+            );
             ExitCode::FAILURE
         }
     }

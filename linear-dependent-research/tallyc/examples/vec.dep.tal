@@ -1,0 +1,32 @@
+-- Dependent + linear surface language (`tally dep examples/vec.dep.tal`).
+-- Peano naturals and length-indexed vectors, defined entirely through the
+-- generic dependent eliminator `elim` (the ONLY recursion — so every `def` is
+-- total by construction).
+
+data N where
+  | z : N
+  | s : N -> N
+
+def add : (m : N) -> (n : N) -> N
+  = fun m n => elim m to (fun _ => N) {
+      | z      => n ;
+      | s k ih => s ih
+    }
+
+data Vec (A : Type) : N -> Type where
+  | nil  : Vec A z
+  | cons : (0 k : N) -> A -> Vec A k -> Vec A (s k)
+
+-- the length is tracked in the result type: `add m n`.
+-- A, m, n are erased (`0`); the vectors are linear-or-more (`w` by default).
+def append : (0 A : Type) -> (0 m : N) -> (0 n : N)
+           -> Vec A m -> Vec A n -> Vec A (add m n)
+  = fun A m n xs ys =>
+      elim xs to (fun k _ => Vec A (add k n)) {
+        | nil           => ys ;
+        | cons k h t ih => cons A (add k n) h ih
+      }
+
+-- append [1] [2] : Vec N 2  ↝  [1,2]   (checked, and computes)
+def main : Vec N (s (s z))
+  = append N (s z) (s z) (cons N z (s z) (nil N)) (cons N z (s (s z)) (nil N))

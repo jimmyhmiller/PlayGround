@@ -30,6 +30,62 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v0.9 — a SURFACE language: parser + elaborator)
+
+You no longer write the kernel's de Bruijn `Term`s by hand. `src/surface.rs` is a
+**named surface syntax** with a parser and an elaborator that compiles down to the
+`dep.rs` kernel (which still does all type-checking). You write `data`
+declarations, `def`s, `fun`/`->`/application, and a `match`-style `elim`; run it
+with `tally dep <file>`:
+
+```
+data N where
+  | z : N
+  | s : N -> N
+
+def add : (m : N) -> (n : N) -> N
+  = fun m n => elim m to (fun _ => N) {
+      | z      => n ;
+      | s k ih => s ih
+    }
+
+data Vec (A : Type) : N -> Type where
+  | nil  : Vec A z
+  | cons : (0 k : N) -> A -> Vec A k -> Vec A (s k)
+
+def append : (0 A : Type) -> (0 m : N) -> (0 n : N)
+           -> Vec A m -> Vec A n -> Vec A (add m n)
+  = fun A m n xs ys => elim xs to (fun k _ => Vec A (add k n)) {
+      | nil           => ys ;
+      | cons k h t ih => cons A (add k n) h ih
+    }
+```
+
+```
+$ tally dep examples/vec.dep.tal
+ok: examples/vec.dep.tal elaborates and type-checks (2 datatype(s), 3 def(s))
+main = cons N (s z) (s z) (cons N z (s (s z)) (nil N))    -- [1,2] : Vec N 2
+```
+
+- **Multiplicities** use Idris's QTT notation: `(0 x : A)` erased, `(1 x : A)`
+  linear, plain `(x : A)` unrestricted; `data` params/indices default to erased.
+- **`elim … to MOTIVE { | ctor binders => body … }`** is the eliminator with
+  named binders: each branch names the constructor's arguments *and* its
+  induction hypotheses (one per recursive argument). It elaborates directly to
+  the kernel's dependent eliminator — recursion is *only* via `elim`, so every
+  `def` is total by construction.
+- Elaboration is purely syntactic (name resolution + eliminator assembly); the
+  kernel re-checks everything, so a buggy front-end cannot make an ill-typed
+  program pass. Strict-positivity violations, length mismatches, and ill-typed
+  defs are all rejected. Examples: `examples/vec.dep.tal`, `examples/fin.dep.tal`.
+- `cargo test`: surface tests for `N`/`add`, indexed `Vec`/`append`, `Fin`/
+  `fin2nat`, a `refl` proof by computation, and the rejections (23 lib tests total).
+
+Still pending: Idris-style dependent *pattern matching* (auto-elaborated to
+eliminators, so you don't name IHs by hand), then the merge with the low-level
+memory layer (`Own`/`Vec<n>` as declarations, capabilities indexed by
+propositions), and a universe hierarchy.
+
 ## Status (v0.8 — GENERAL inductive families + dependent eliminators)
 
 The QTT core (`src/dep.rs`) now has **general, user-declared inductive
