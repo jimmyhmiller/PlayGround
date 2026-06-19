@@ -97,11 +97,16 @@ pub fn check(program: &Program) -> Result<Program, String> {
     let mut sigs: HashMap<String, Sig> = HashMap::new();
     for f in &program.funcs {
         let native = program.conventions.get(&f.cc).is_some_and(|c| !c.is_shim());
+        let ftps: HashSet<String> = f.type_params.iter().cloned().collect();
         sigs.insert(
             f.name.clone(),
             Sig {
                 type_params: f.type_params.clone(),
-                params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                params: f
+                    .params
+                    .iter()
+                    .map(|p| param_ref_type(&p.ty, &structs, &ftps))
+                    .collect(),
                 ret: f.ret.clone(),
                 is_extern: false,
                 cc: f.cc.clone(),
@@ -203,8 +208,13 @@ pub fn check(program: &Program) -> Result<Program, String> {
         validate_type(&f.ret, &cx, &tps)
             .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
 
-        let mut env: HashMap<String, Type> =
-            f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+        // Inside the body, a struct parameter is an (immutable) reference and a
+        // `(mut T)` parameter a mutable one; scalars/sums/pointers are unchanged.
+        let mut env: HashMap<String, Type> = f
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), param_ref_type(&p.ty, &cx.structs, &tps)))
+            .collect();
 
         let mut body: Vec<Expr> = Vec::with_capacity(f.body.len());
         let n = f.body.len();
@@ -236,12 +246,22 @@ pub fn check(program: &Program) -> Result<Program, String> {
             ));
         }
 
+        // Codegen sees only pointers: erase the reference tier in the output
+        // signature (a struct/`mut` param becomes a `(ptr …)` parameter).
+        let out_params: Vec<Param> = f
+            .params
+            .iter()
+            .map(|p| Param {
+                name: p.name.clone(),
+                ty: erase_refs(&param_ref_type(&p.ty, &cx.structs, &tps)),
+            })
+            .collect();
         funcs.push(Func {
             name: f.name.clone(),
             type_params: f.type_params.clone(),
             cc: f.cc.clone(),
-            params: f.params.clone(),
-            ret: f.ret.clone(),
+            params: out_params,
+            ret: erase_refs(&f.ret),
             body,
         });
     }
@@ -280,6 +300,7 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
     match t {
         Type::Int(..) => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
+        Type::Ref(_, p) => validate_type(p, cx, tps),
         Type::Array(e, _) => validate_type(e, cx, tps),
         Type::Struct(name) => {
             if tps.contains(name) {
@@ -347,6 +368,27 @@ fn synth(
     match e {
         Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
         Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
+        Expr::Zeroed(ty) => {
+            validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': zeroed: {e}"))?;
+            Ok((Expr::Zeroed(ty.clone()), ty.clone()))
+        }
+        Expr::Borrow { mutable, place } => {
+            // Borrow a place as a reference. The place must be an lvalue (a
+            // variable/field/index whose type is a ref or pointer); a mutable
+            // borrow additionally requires the place itself be writable. The
+            // reference is erased to the underlying pointer expression.
+            let (pe, pt) = synth(place, None, env, cx, tps, fname)?;
+            let pointee = place_pointee(&pt)
+                .cloned()
+                .ok_or_else(|| format!("in '{fname}': cannot borrow a non-place of type {}", ty_str(&pt)))?;
+            if *mutable && !is_writable(&pt) {
+                return Err(format!(
+                    "in '{fname}': cannot take a mutable borrow of immutable '{}'",
+                    ty_str(&pt)
+                ));
+            }
+            Ok((pe, Type::Ref(*mutable, Box::new(pointee))))
+        }
         Expr::Var(name) => {
             let t = env
                 .get(name)
@@ -467,12 +509,52 @@ fn synth(
         Expr::Let { binds, body } => {
             let saved = env.clone();
             let mut new_binds = Vec::with_capacity(binds.len());
-            for (name, val) in binds {
+            // A `(mut name)` binding becomes a stack place: the name is bound to
+            // an `alloc-stack` pointer, and the init value is stored into it.
+            // These injected stores run before the body.
+            let mut init_stores: Vec<Expr> = Vec::new();
+            for (name, mutable, val) in binds {
                 let (ve, vt) = synth(val, None, env, cx, tps, fname)?;
-                env.insert(name.clone(), vt);
-                new_binds.push((name.clone(), ve));
+                match &vt {
+                    // binding to an existing place is an *alias* (no new storage);
+                    // it's immutable unless asked for `(mut name)`, and you can't
+                    // make a mutable alias of an immutable place.
+                    Type::Ref(src_mut, pointee) => {
+                        if *mutable && !src_mut {
+                            return Err(format!(
+                                "in '{fname}': cannot make a mutable alias '{name}' of an \
+                                 immutable reference"
+                            ));
+                        }
+                        env.insert(name.clone(), Type::Ref(*mutable, pointee.clone()));
+                        new_binds.push((name.clone(), false, ve));
+                    }
+                    // `(mut name)` or an aggregate value becomes a fresh stack
+                    // place (its fields are addressable, it can be borrowed).
+                    _ if *mutable || is_place_value_type(&vt, cx) => {
+                        env.insert(name.clone(), Type::Ref(*mutable, Box::new(vt.clone())));
+                        new_binds.push((
+                            name.clone(),
+                            false,
+                            Expr::Alloc {
+                                storage: Storage::Stack,
+                                ty: erase_refs(&vt),
+                            },
+                        ));
+                        init_stores.push(Expr::Store {
+                            ptr: Box::new(Expr::Var(name.clone())),
+                            val: Box::new(ve),
+                        });
+                    }
+                    // scalars/pointers/sums stay ordinary immutable SSA values.
+                    _ => {
+                        env.insert(name.clone(), vt);
+                        new_binds.push((name.clone(), false, ve));
+                    }
+                }
             }
-            let mut out = Vec::with_capacity(body.len());
+            let mut out = Vec::with_capacity(init_stores.len() + body.len());
+            out.append(&mut init_stores);
             let mut last = Type::Int(64, true);
             let n = body.len();
             for (i, e) in body.iter().enumerate() {
@@ -534,8 +616,11 @@ fn synth(
                 let mut new_args = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
                     let want = sig.params[i].clone();
-                    let (ae, at) = synth(a, Some(&want), env, cx, tps, fname)?;
-                    let ae = coerce(
+                    let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
+                    let exp = if matches!(want, Type::Ref(..)) { None } else { Some(&want) };
+                    let (ae, at) = synth(a, exp, env, cx, tps, fname)?;
+                    let ae = coerce_arg(
+                        is_mut_borrow,
                         ae,
                         at,
                         &want,
@@ -574,9 +659,11 @@ fn synth(
                 func,
             )?;
             let mut new_args = Vec::with_capacity(args.len());
-            for (i, (ae, at)) in arglist.into_iter().enumerate() {
+            for (i, ((ae, at), a)) in arglist.into_iter().zip(args.iter()).enumerate() {
                 let want = subst_apply(&sig.params[i], &subst);
-                let ae = coerce(
+                let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
+                let ae = coerce_arg(
+                    is_mut_borrow,
                     ae,
                     at,
                     &want,
@@ -643,15 +730,12 @@ fn synth(
         }
         Expr::Field { ptr, field } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
-            let pointee = match pt {
-                Type::Ptr(p) => *p,
-                other => {
-                    return Err(format!(
-                        "in '{fname}': field access needs a pointer, got {}",
-                        ty_str(&other)
-                    ))
-                }
-            };
+            let pointee = place_pointee(&pt).cloned().ok_or_else(|| {
+                format!(
+                    "in '{fname}': field access needs a pointer or reference, got {}",
+                    ty_str(&pt)
+                )
+            })?;
             let sname = struct_name(&pointee).ok_or_else(|| {
                 format!(
                     "in '{fname}': field access needs a pointer to a struct, got (ptr {})",
@@ -670,66 +754,76 @@ fn synth(
                 .find(|(n, _)| n == field)
                 .map(|(_, t)| t.clone())
                 .ok_or_else(|| format!("in '{fname}': struct '{sname}' has no field '{field}'"))?;
+            // a field of a place is itself a place, inheriting its mutability.
             Ok((
                 Expr::Field {
                     ptr: Box::new(pe),
                     field: field.clone(),
                 },
-                Type::Ptr(Box::new(fty)),
+                replace_pointee(&pt, fty),
             ))
         }
         Expr::Load(p) => {
             let (pe, pt) = synth(p, None, env, cx, tps, fname)?;
-            match pt {
-                Type::Ptr(pointee) => Ok((Expr::Load(Box::new(pe)), *pointee)),
-                other => Err(format!(
-                    "in '{fname}': load expects a pointer, got {}",
-                    ty_str(&other)
+            match place_pointee(&pt) {
+                Some(pointee) => Ok((Expr::Load(Box::new(pe)), pointee.clone())),
+                None => Err(format!(
+                    "in '{fname}': load expects a pointer or reference, got {}",
+                    ty_str(&pt)
                 )),
             }
         }
         Expr::Store { ptr, val } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
-            match pt {
-                Type::Ptr(pointee) => {
-                    let (ve, vt) = synth(val, Some(&pointee), env, cx, tps, fname)?;
-                    let ve = coerce(ve, vt, &pointee, false, fname, "store! value")?;
-                    Ok((
-                        Expr::Store {
-                            ptr: Box::new(pe),
-                            val: Box::new(ve),
-                        },
-                        *pointee,
+            let pointee = match place_pointee(&pt) {
+                Some(p) => p.clone(),
+                None => {
+                    return Err(format!(
+                        "in '{fname}': store! expects a pointer or reference, got {}",
+                        ty_str(&pt)
                     ))
                 }
-                other => Err(format!(
-                    "in '{fname}': store! expects a pointer, got {}",
-                    ty_str(&other)
-                )),
+            };
+            if !is_writable(&pt) {
+                return Err(format!(
+                    "in '{fname}': cannot store! through immutable reference of type {} \
+                     (declare it `(mut …)` to make it writable)",
+                    ty_str(&pt)
+                ));
             }
+            let (ve, vt) = synth(val, Some(&pointee), env, cx, tps, fname)?;
+            let ve = coerce(ve, vt, &pointee, false, fname, "store! value")?;
+            Ok((
+                Expr::Store {
+                    ptr: Box::new(pe),
+                    val: Box::new(ve),
+                },
+                pointee,
+            ))
         }
         Expr::Index { ptr, idx } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             let (ie, it) = synth(idx, None, env, cx, tps, fname)?;
             let ie = coerce(ie, it, &Type::Int(64, true), false, fname, "index")
                 .map_err(|_| format!("in '{fname}': index must be i64"))?;
-            match pt {
-                Type::Ptr(pointee) => {
-                    let elem_ptr = match *pointee {
-                        Type::Array(elem, _) => Type::Ptr(elem),
-                        p => Type::Ptr(Box::new(p)),
+            match place_pointee(&pt) {
+                Some(pointee) => {
+                    let elem = match pointee {
+                        Type::Array(elem, _) => (**elem).clone(),
+                        p => p.clone(),
                     };
+                    // an element of a place is a place, inheriting its mutability.
                     Ok((
                         Expr::Index {
                             ptr: Box::new(pe),
                             idx: Box::new(ie),
                         },
-                        elem_ptr,
+                        replace_pointee(&pt, elem),
                     ))
                 }
-                other => Err(format!(
-                    "in '{fname}': index expects a pointer, got {}",
-                    ty_str(&other)
+                None => Err(format!(
+                    "in '{fname}': index expects a pointer or reference, got {}",
+                    ty_str(&pt)
                 )),
             }
         }
@@ -1153,6 +1247,10 @@ fn unify(
     }
     match (decl, actual) {
         (Type::Ptr(a), Type::Ptr(b)) => unify(a, b, tpset, subst, fname),
+        // a reference parameter unifies against any place (ref or pointer).
+        (Type::Ref(_, a), Type::Ref(_, b))
+        | (Type::Ref(_, a), Type::Ptr(b))
+        | (Type::Ptr(a), Type::Ref(_, b)) => unify(a, b, tpset, subst, fname),
         (Type::Array(a, _), Type::Array(b, _)) => unify(a, b, tpset, subst, fname),
         (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
             for (x, y) in a1.iter().zip(a2) {
@@ -1172,11 +1270,126 @@ fn unify(
     }
 }
 
+/// Erase the reference tier to plain pointers: a `Ref` is represented as a
+/// `Ptr` at the machine level, so once the const-correctness check has run the
+/// elaborated program codegen sees carries only `Ptr`.
+fn erase_refs(t: &Type) -> Type {
+    match t {
+        Type::Ref(_, p) | Type::Ptr(p) => Type::Ptr(Box::new(erase_refs(p))),
+        Type::Array(e, n) => Type::Array(Box::new(erase_refs(e)), *n),
+        Type::Fn(cc, ps, r) => Type::Fn(
+            cc.clone(),
+            ps.iter().map(erase_refs).collect(),
+            Box::new(erase_refs(r)),
+        ),
+        _ => t.clone(),
+    }
+}
+
+/// How a parameter's written type is seen inside the body: a struct (concrete or
+/// generic-instance) is passed by **immutable reference**; `(mut T)` is a mutable
+/// reference; sums, scalars, pointers, and type parameters are unchanged.
+fn param_ref_type(
+    t: &Type,
+    structs: &HashMap<String, StructInfo>,
+    tps: &HashSet<String>,
+) -> Type {
+    match t {
+        Type::Ref(..) | Type::Ptr(..) => t.clone(),
+        Type::Struct(name) if structs.contains_key(name) && !tps.contains(name) => {
+            Type::Ref(false, Box::new(t.clone()))
+        }
+        Type::App(name, _) if structs.contains_key(name) => Type::Ref(false, Box::new(t.clone())),
+        _ => t.clone(),
+    }
+}
+
+/// Coerce a call argument to a (possibly reference) parameter type. References
+/// require the argument to be a *place*; a `(mut T)` parameter additionally
+/// requires the argument be passed mutably — written `(mut x)`, or a raw pointer.
+fn coerce_arg(
+    is_mut_borrow: bool,
+    ae: Expr,
+    at: Type,
+    want: &Type,
+    is_extern: bool,
+    fname: &str,
+    what: &str,
+) -> Result<Expr, String> {
+    match want {
+        Type::Ref(want_mut, wp) => {
+            let ap = place_pointee(&at).ok_or_else(|| {
+                format!("in '{fname}': {what} expects a reference to {}, got {}", ty_str(wp), ty_str(&at))
+            })?;
+            if ap != &**wp {
+                return Err(format!(
+                    "in '{fname}': {what} has type {} but expected a reference to {}",
+                    ty_str(&at),
+                    ty_str(wp)
+                ));
+            }
+            if *want_mut {
+                let explicitly_mut = is_mut_borrow || matches!(at, Type::Ptr(_));
+                if !explicitly_mut {
+                    return Err(format!(
+                        "in '{fname}': {what} is a (mut {}) parameter; pass it mutably as (mut …)",
+                        ty_str(wp)
+                    ));
+                }
+                if !is_writable(&at) {
+                    return Err(format!(
+                        "in '{fname}': {what} cannot be mutably borrowed (it is immutable)"
+                    ));
+                }
+            }
+            Ok(ae) // the borrow was already erased to the underlying pointer
+        }
+        _ => coerce(ae, at, want, is_extern, fname, what),
+    }
+}
+
+/// True for aggregate value types (a struct or array) — values that a `let`
+/// binding materializes into a stack place so they can be borrowed/field-accessed.
+/// Sums stay by-value (they're matched, not field-mutated).
+fn is_place_value_type(t: &Type, cx: &Cx) -> bool {
+    match t {
+        Type::Struct(name) => cx.structs.contains_key(name),
+        Type::App(name, _) => cx.structs.contains_key(name),
+        Type::Array(..) => true,
+        _ => false,
+    }
+}
+
+/// The pointee of a reference or pointer (a "place" type), if `t` is one.
+fn place_pointee(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Ref(_, p) | Type::Ptr(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// True if a place of this type may be written through (a `mut` ref, or a raw
+/// pointer — pointers are always writable).
+fn is_writable(t: &Type) -> bool {
+    matches!(t, Type::Ref(true, _) | Type::Ptr(_))
+}
+
+/// Build a place type with the same kind/mutability as `place` but a new
+/// pointee — so a field/element of a `(mut T)` is a `(mut field)`, of a `(ptr
+/// T)` is a `(ptr field)`, etc.
+fn replace_pointee(place: &Type, new: Type) -> Type {
+    match place {
+        Type::Ref(m, _) => Type::Ref(*m, Box::new(new)),
+        _ => Type::Ptr(Box::new(new)),
+    }
+}
+
 /// Substitute bound type parameters throughout a type.
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
         Type::Int(..) => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
+        Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
         Type::Struct(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
         Type::App(name, args) => {
@@ -1437,6 +1650,8 @@ fn ty_str(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Ptr(pointee) => format!("(ptr {})", ty_str(pointee)),
+        Type::Ref(true, pointee) => format!("(mut {})", ty_str(pointee)),
+        Type::Ref(false, pointee) => format!("(ref {})", ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
         Type::Fn(cc, params, ret) => {

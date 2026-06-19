@@ -99,6 +99,18 @@ template substitution.
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);
   allocate any type with `(alloc-stack/static/heap TYPE)`.
+- References & mutability (the everyday tier over `ptr`): a bare struct
+  parameter `(p Point)` is an **immutable reference** — read its fields, but a
+  `store!` through it is a compile error; `(mut Point)` is a **mutable
+  reference**, opt-in. A `let` of a struct/array value (e.g.
+  `(let [(mut v) (zeroed Vec)] …)`) is a **stack place** of that value type — no
+  `(ptr …)`, no `alloc-stack` — and `(mut place)` borrows a place mutably at a
+  call site (`(push (mut v) x)`), the one marker that points where a write can
+  escape. It's **const-correctness, not borrow-checking** (no lifetimes/aliasing
+  analysis) — purely "is this handle allowed to write." References are the same
+  machine representation as `ptr`; the checker erases them to pointers after the
+  mutability check, so codegen is unchanged and `ptr` stays the metal tier for
+  allocators/FFI/arithmetic.
 - Layout control (the dual of calling conventions): `(defstruct Name :layout
   c | packed | (align N) | explicit ...)`. `explicit` places each field at a
   per-field `:at` offset (gaps = padding, overlap = a union), realized as a byte
@@ -156,7 +168,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 115 tests (build + run native exes)
+cargo test                                     # 123 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
@@ -167,6 +179,7 @@ cargo run -- run   examples/allocation.coil; echo $?                       # => 
 cargo run -- run   examples/inference.coil; echo $?                        # => 42 (literal inference)
 cargo run -- run   examples/extern.coil                                    # prints 12345
 cargo run -- run   examples/io.coil                                        # prints answer=42 (Writer capability)
+cargo run -- run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
 # Inspect the pipeline

@@ -14,6 +14,12 @@ pub enum Type {
     /// pointer is a pointer, à la Zig/C); where the memory came from is the
     /// `alloc` operation's concern, not the type's.
     Ptr(Box<Type>),
+    /// A reference to a place holding the pointee type — the everyday tier above
+    /// `Ptr`. `mutable` is opt-in: an immutable reference may be read but not
+    /// written through. Same machine representation as `Ptr`; the checker erases
+    /// it to `Ptr` (after the const-correctness check) before codegen, so this
+    /// never reaches monomorphization or codegen.
+    Ref(bool, Box<Type>), // (mutable, pointee)
     /// A named struct (defined by `defstruct`).
     Struct(String),
     /// A fixed-size array of `len` elements.
@@ -74,8 +80,21 @@ pub enum Expr {
     /// its value is a `(ptr i8)` to the first byte (C-string compatible).
     Str(String),
     Var(String),
+    /// The zero value of a type (`(zeroed T)`) — used to initialize a fresh
+    /// `let`-bound stack local. Codegen lowers it to LLVM's `zeroinitializer`.
+    Zeroed(Type),
+    /// Borrow a place as a reference: `(mut x)` (mutable) or the implicit
+    /// immutable borrow inserted when a place is used where a reference is
+    /// expected. The checker erases it to the underlying pointer.
+    Borrow {
+        mutable: bool,
+        place: Box<Expr>,
+    },
     Let {
-        binds: Vec<(String, Expr)>,
+        /// Each binding is (name, mutable, value). A `mutable` binding becomes a
+        /// stack place (its name is a reference you can write through); a plain
+        /// binding is an ordinary immutable value as before.
+        binds: Vec<(String, bool, Expr)>,
         body: Vec<Expr>,
     },
     Bin {

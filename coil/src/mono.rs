@@ -210,6 +210,7 @@ impl<'a> Mono<'a> {
         Ok(match t {
             Type::Int(b, s) => Type::Int(*b, *s),
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
+            Type::Ref(m, p) => Type::Ref(*m, Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
             Type::Fn(cc, ps, r) => Type::Fn(
                 cc.clone(),
@@ -283,6 +284,11 @@ impl<'a> Mono<'a> {
             Expr::Int(n) => Expr::Int(*n),
             Expr::Str(s) => Expr::Str(s.clone()),
             Expr::Var(s) => Expr::Var(s.clone()),
+            Expr::Zeroed(t) => Expr::Zeroed(self.resolve_ty(t, map)?),
+            Expr::Borrow { mutable, place } => Expr::Borrow {
+                mutable: *mutable,
+                place: Box::new(go(self, place)?),
+            },
             Expr::Bin { op, lhs, rhs } => Expr::Bin {
                 op: *op,
                 lhs: Box::new(go(self, lhs)?),
@@ -302,7 +308,7 @@ impl<'a> Mono<'a> {
             Expr::Let { binds, body } => Expr::Let {
                 binds: binds
                     .iter()
-                    .map(|(n, e)| Ok((n.clone(), go(self, e)?)))
+                    .map(|(n, m, e)| Ok((n.clone(), *m, go(self, e)?)))
                     .collect::<Result<_, String>>()?,
                 body: body.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?,
             },
@@ -448,6 +454,7 @@ fn type_key(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Ptr(p) => format!("ptr_{}", type_key(p)),
+        Type::Ref(_, p) => format!("ref_{}", type_key(p)),
         Type::Struct(s) => s.clone(),
         Type::Array(e, n) => format!("arr{n}_{}", type_key(e)),
         Type::Fn(..) => "fn".to_string(),

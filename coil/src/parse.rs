@@ -407,6 +407,11 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
         Sexp::Keyword(k) => int_type(k),
         Sexp::Sym(k) => Ok(int_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
         Sexp::List(items) => match head_sym(items)?.as_str() {
+            // (mut TYPE) -> a mutable reference to TYPE.
+            "mut" => {
+                let pointee = parse_type(items.get(1).ok_or("mut: expects (mut TYPE)")?)?;
+                Ok(Type::Ref(true, Box::new(pointee)))
+            }
             // (ptr TYPE) -> pointer to TYPE; (ptr) defaults the pointee to i64.
             "ptr" => {
                 let pointee = match items.get(1) {
@@ -542,8 +547,22 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             }
             let mut binds = Vec::new();
             for pair in binds_v.chunks(2) {
-                let name = sym(&pair[0], "let binding name")?;
-                binds.push((name, parse_expr(&pair[1])?));
+                // A binding name is either `name` (immutable) or `(mut name)`
+                // (a mutable stack place).
+                let (name, mutable) = match &pair[0] {
+                    Sexp::Sym(s) => (s.clone(), false),
+                    Sexp::List(items)
+                        if head_sym(items).ok().as_deref() == Some("mut") && items.len() == 2 =>
+                    {
+                        (sym(&items[1], "let binding name")?, true)
+                    }
+                    other => {
+                        return Err(format!(
+                            "let binding name must be `name` or `(mut name)`, got {other:?}"
+                        ))
+                    }
+                };
+                binds.push((name, mutable, parse_expr(&pair[1])?));
             }
             let body: Vec<Expr> = args[1..]
                 .iter()
@@ -564,6 +583,24 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 func: f,
                 type_args: vec![],
                 args: cargs,
+            })
+        }
+        // `(zeroed T)` — the zero value of T, for initializing a fresh local.
+        "zeroed" => {
+            if args.len() != 1 {
+                return Err("zeroed: expects (zeroed TYPE)".to_string());
+            }
+            Ok(Expr::Zeroed(parse_type(&args[0])?))
+        }
+        // `(mut x)` — borrow a place mutably (e.g. a call argument that may be
+        // written through).
+        "mut" => {
+            if args.len() != 1 {
+                return Err("mut: expects (mut PLACE)".to_string());
+            }
+            Ok(Expr::Borrow {
+                mutable: true,
+                place: Box::new(parse_expr(&args[0])?),
             })
         }
         "alloc-stack" => alloc_form(args, Storage::Stack),

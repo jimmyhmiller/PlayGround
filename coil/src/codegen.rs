@@ -298,6 +298,7 @@ impl<'ctx> Cg<'ctx> {
             }
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
+            Type::Ref(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
         }
     }
@@ -415,6 +416,11 @@ impl<'ctx> Cg<'ctx> {
         let i64t = self.ctx.i64_type();
         match e {
             Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
+            // The zero value of a type (used to initialize a fresh local).
+            Expr::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
+            // A borrow is the underlying place's pointer (the checker normally
+            // erases these, but a place used directly lowers to its pointer).
+            Expr::Borrow { place, .. } => self.emit_expr(place, scope),
             Expr::Str(s) => {
                 // Private, NUL-terminated [N x i8] global; value is a (ptr i8).
                 let bytes = self.ctx.const_string(s.as_bytes(), true);
@@ -481,7 +487,9 @@ impl<'ctx> Cg<'ctx> {
             }
             Expr::Let { binds, body } => {
                 let mut child = scope.clone();
-                for (name, val) in binds {
+                for (name, _mutable, val) in binds {
+                    // The checker erases mutable `let` places to an alloca plus a
+                    // store, so by codegen every binding is an ordinary value.
                     let v = self.emit_expr(val, &child)?;
                     child.insert(name.clone(), v);
                 }
@@ -1093,7 +1101,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
-        Type::Ptr(_) | Type::Fn(..) => 8,
+        Type::Ptr(_) | Type::Fn(..) | Type::Ref(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
         Type::Struct(name) => {
             if let Some(s) = structs.get(name.as_str()) {

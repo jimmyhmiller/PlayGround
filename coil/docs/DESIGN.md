@@ -325,6 +325,43 @@ general-purpose rather than IO/alloc-specific:
 
 ---
 
+### 5.6 References & mutability (the everyday tier over `ptr`)
+
+Threading `(ptr T)` everywhere — and the `load`/`store!`/`field` it implies — is
+the right vocabulary for the *metal* (allocators, FFI, arithmetic) but the wrong
+one for everyday code, where "pointer" really means "this operates on a value
+that lives elsewhere." So there are **two named tiers over the same machine
+representation**:
+
+- **Reference tier (everyday).** A bare struct/array parameter `(p Point)` is an
+  **immutable reference**; `(mut Point)` a **mutable** one. Mutability is opt-in:
+  a `store!` through an immutable reference is a compile error. A `let` whose
+  value is an aggregate — `(let [(mut v) (zeroed Vec)] …)` — is a **stack place**
+  of that value type (no `(ptr …)`, no `alloc-stack`), mutable iff `(mut name)`.
+  At a call site `(mut place)` borrows a place mutably (`(push (mut v) x)`); a
+  bare argument borrows immutably. The single `mut` marker points exactly where a
+  write can escape.
+- **Pointer tier (metal).** `(ptr T)`, `alloc-stack/heap/static`, raw `load`/
+  `store!`, pointer arithmetic, FFI — unchanged. A raw pointer satisfies a `(mut
+  T)` reference parameter (it's already explicitly writable).
+
+This is **const-correctness, not borrow-checking** — the deliberate, narrow
+slice of Rust/Swift/Hylo's value-semantics that fits a *descriptive, not
+memory-safe* language. There are no lifetimes, no aliasing analysis, no escape
+checking; a `mut` reference can dangle, alias, and outlive its referent exactly
+like a `ptr`. The checker answers one question — "is this handle allowed to
+write?" — and nothing more. It catches the single most useful thing C's `const`
+does (mutating a thing you meant to only read) for none of the borrow-checker
+tax.
+
+**Implementation: erasure.** A reference is just a pointer with a one-bit
+"writable" tag, so the checker carries `Ref { mutable, pointee }` *during*
+checking and then **erases it to `Ptr`** in the elaborated program — and lowers
+`let` places to `alloc-stack` + a store. By the time monomorphization and codegen
+run, the reference tier is gone: they see only the pointers, allocas, and stores
+they always have. The whole feature is a parser surface, a `Ref` type, and one
+const-correctness rule; codegen gained only `(zeroed T)` → LLVM `zeroinitializer`.
+
 ## 6. The payoff: closures (and friends) are *derived*
 
 With both features, a closure is constructed, not built-in:
