@@ -1109,18 +1109,18 @@ pub(crate) fn nvar(lvl: usize) -> Value {
     Value::VNeu(Neutral::NVar(lvl))
 }
 
-/// The return type of constructor `ctor`'s eliminator method, in the context of
-/// the eliminator (`base`), extended by the method's binders (the constructor's
-/// arguments followed by one induction hypothesis per recursive argument).
-/// `sparam_tms` are the family's parameters, `motive_tm` the (quoted) motive —
-/// both valid at level `base`. Used to find the expected type of a `match` arm.
-pub(crate) fn elim_method_return(
+/// The eliminator method telescope for `ctor`: the types of its binders (the
+/// constructor's arguments, then one induction hypothesis per recursive
+/// argument) and the method's return type, all in the eliminator's context
+/// extended left-to-right by the binders. Used by the surface elaborator to set
+/// up a `match` arm's typing context.
+pub(crate) fn elim_method_telescope(
     sig: &Signature,
     data: &str,
     sparam_tms: &[Term],
     motive_tm: &Term,
     ctor_name: &str,
-) -> Result<Term, String> {
+) -> Result<(Vec<(Mult, Term)>, Term), String> {
     let decl = sig.data(data).ok_or_else(|| format!("unknown datatype `{data}`"))?;
     let ctor = decl
         .ctors
@@ -1133,13 +1133,17 @@ pub(crate) fn elim_method_return(
         .filter(|(_, a)| matches!(a, Term::Data(dn, _) if dn == data))
         .count();
     let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm);
+    let mut binders = Vec::new();
     for _ in 0..(ctor.args.len() + nrec) {
         match t {
-            Term::Pi(_, _, b) => t = *b,
+            Term::Pi(m, a, b) => {
+                binders.push((m, *a));
+                t = *b;
+            }
             _ => return Err("internal: malformed method type".into()),
         }
     }
-    Ok(t)
+    Ok((binders, t))
 }
 
 #[cfg(test)]

@@ -33,8 +33,15 @@ fn append(xs, ys) {
     }
 }
 
-// a vector literal: `a` and the per-cons lengths are inferred from the type
+xs : Vec Nat (Succ Zero)
+fn xs() { Cons(Succ(Zero), Nil) }
+
+ys : Vec Nat (Succ Zero)
+fn ys() { Cons(Zero, Nil) }
+
+// `append(xs, ys)` — the element type and BOTH lengths are inferred from the
+// argument types; nothing but the two vectors is written.
 main : Vec Nat (Succ (Succ Zero))
 fn main() {
-    Cons(Succ(Zero), Cons(Zero, Nil))
+    append(xs, ys)
 }

@@ -83,11 +83,14 @@ positivity all work. Example: `examples/vec.rs.tal`. `cargo test`: 9
 `rust_surface` tests (Nat/add, implicit indexed Vec/append, implicit Fin, a
 struct, a proof, and the coverage/recursion/parse rejections).
 
-Not yet (the remaining Phase 2 slice): **implicit *function*-call arguments**
-(solving a called function's implicits from its explicit arguments' types, e.g.
-`fin_to_nat(x)` — recursive calls already work, since they become the IH), full
-nested/deep pattern matching, and a real occurs/scope check in the unifier.
-Then the **merge** with the low-level memory layer (`docs/10` §10).
+**Implicit function-call arguments** are also solved: `append(xs, ys)` and
+`fin_to_nat(x)` infer the callee's implicits from the *arguments'* types (and the
+expected result type), via a small typing context built from the eliminator
+method telescope. So `append(xs, ys)` at a call site writes neither the element
+type nor either length.
+
+Not yet: full nested/deep pattern matching and a real occurs/scope check in the
+unifier. Next is the **merge** with the low-level memory layer (`docs/10` §10).
 
 ## Status (v0.9 — a SURFACE language: parser + elaborator)
 

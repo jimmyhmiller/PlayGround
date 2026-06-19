@@ -491,6 +491,30 @@ struct Rec<'a> {
     fields: &'a HashMap<String, String>,
 }
 
+/// A typing context: each bound variable's name and type (as a Value).
+#[derive(Clone, Default)]
+struct Cx {
+    names: Vec<String>,
+    types: Vec<Value>,
+}
+
+impl Cx {
+    fn len(&self) -> usize {
+        self.names.len()
+    }
+    fn push(&mut self, name: String, ty: Value) {
+        self.names.push(name);
+        self.types.push(ty);
+    }
+    fn debruijn(&self, name: &str) -> Option<usize> {
+        self.names.iter().rev().position(|s| s == name)
+    }
+    fn var_type(&self, name: &str) -> Option<Value> {
+        let lvl = self.names.iter().rposition(|s| s == name)?;
+        Some(self.types[lvl].clone())
+    }
+}
+
 struct Elab {
     rc: Rc<Signature>,
     data_arity: HashMap<String, usize>,
@@ -498,6 +522,8 @@ struct Elab {
     ctor_arity: HashMap<String, usize>,
     ctor_info: HashMap<String, CtorInfo>,
     defs: HashMap<String, (Term, Term)>,
+    /// per-definition implicit flags (one per parameter)
+    def_implicit: HashMap<String, Vec<bool>>,
 }
 
 fn neutral_env(n: usize) -> Vec<Value> {
@@ -514,6 +540,10 @@ impl Elab {
             .get(name)
             .map(|ci| ci.param_implicit.iter().chain(&ci.arg_implicit).any(|b| *b))
             .unwrap_or(false)
+    }
+
+    fn def_has_implicits(&self, name: &str) -> bool {
+        self.def_implicit.get(name).map(|f| f.iter().any(|b| *b)).unwrap_or(false)
     }
 
     fn eval(&self, scope_len: usize, t: &Term) -> Value {
@@ -592,34 +622,34 @@ impl Elab {
     }
 
     /// Elaborate a term in CHECK mode against `expected` (a Value in `scope`).
-    fn check(&self, tm: &Tm, expected: &Value, scope: &[String], rec: Option<&Rec>) -> Result<Term, String> {
+    fn check(&self, tm: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match tm {
-            Tm::Var(name) if self.ctor_has_implicits(name) => {
-                self.solve_ctor(name, &[], expected, scope, rec)
-            }
+            Tm::Var(name) if self.ctor_has_implicits(name) => self.solve_ctor(name, &[], expected, cx, rec),
             Tm::Call(name, args) => {
-                // a structural recursive call ↦ the induction hypothesis
                 if let Some(r) = rec {
                     if name == r.fnname {
-                        return self.ih_for(r, args, scope);
+                        return self.ih_for(r, args, cx);
                     }
                 }
                 if self.ctor_has_implicits(name) {
-                    return self.solve_ctor(name, args, expected, scope, rec);
+                    return self.solve_ctor(name, args, expected, cx, rec);
                 }
-                self.elab_tm(tm, scope, rec)
+                if self.def_has_implicits(name) {
+                    return Ok(self.solve_fn_call(name, args, Some(expected), cx, rec)?.0);
+                }
+                self.elab_tm(tm, cx, rec)
             }
-            _ => self.elab_tm(tm, scope, rec),
+            _ => self.elab_tm(tm, cx, rec),
         }
     }
 
-    fn ih_for(&self, r: &Rec, args: &[Tm], scope: &[String]) -> Result<Term, String> {
+    fn ih_for(&self, r: &Rec, args: &[Tm], cx: &Cx) -> Result<Term, String> {
         if args.len() <= r.scrut_pos {
             return Err(format!("recursive call to `{}` has too few arguments", r.fnname));
         }
         if let Tm::Var(v) = &args[r.scrut_pos] {
             if let Some(ih) = r.fields.get(v) {
-                let i = Self::debruijn(scope, ih).expect("ih var in scope");
+                let i = cx.debruijn(ih).expect("ih var in scope");
                 return Ok(Term::Var(i));
             }
         }
@@ -630,32 +660,60 @@ impl Elab {
     }
 
     /// Plain (no-implicit) elaboration; used for vars, functions, explicit ctors.
-    fn elab_tm(&self, t: &Tm, scope: &[String], rec: Option<&Rec>) -> Result<Term, String> {
+    fn elab_tm(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match t {
-            Tm::Var(name) => self.resolve(name, vec![], scope, true),
+            Tm::Var(name) => self.resolve(name, vec![], &cx.names, true),
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
                     if name == r.fnname {
-                        return self.ih_for(r, args, scope);
+                        return self.ih_for(r, args, cx);
                     }
                 }
-                let eargs = args.iter().map(|a| self.elab_tm(a, scope, rec)).collect::<Result<Vec<_>, _>>()?;
-                self.resolve(name, eargs, scope, true)
+                if self.def_has_implicits(name) {
+                    return Ok(self.solve_fn_call(name, args, None, cx, rec)?.0);
+                }
+                let eargs = args.iter().map(|a| self.elab_tm(a, cx, rec)).collect::<Result<Vec<_>, _>>()?;
+                self.resolve(name, eargs, &cx.names, true)
             }
             Tm::Match(_, _) => Err("nested `match` is not supported".into()),
         }
     }
 
+    /// Infer the type of a simple argument (a variable or a definition reference,
+    /// or a call/constructor that can itself be solved). Returns `(term, type)`.
+    fn infer_arg(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
+        match t {
+            Tm::Var(name) => {
+                if let Some(ty) = cx.var_type(name) {
+                    let i = cx.debruijn(name).unwrap();
+                    Ok((Term::Var(i), ty))
+                } else if let Some((body, ty)) = self.defs.get(name) {
+                    let head = Term::Ann(Box::new(body.clone()), Box::new(ty.clone()));
+                    Ok((head, dep::eval_rc(&self.rc, &[], ty)))
+                } else {
+                    Err(format!("cannot infer the type of `{name}` (Phase 2)"))
+                }
+            }
+            Tm::Call(name, _) if self.def_has_implicits(name) => {
+                if let Tm::Call(n2, args) = t {
+                    return self.solve_fn_call(n2, args, None, cx, rec);
+                }
+                unreachable!()
+            }
+            _ => Err("cannot infer the type of this argument (Phase 2)".into()),
+        }
+    }
+
     /// Solve a constructor's implicit arguments by matching its result type
     /// against `expected`, then elaborate the explicit arguments.
-    fn solve_ctor(&self, cname: &str, user_args: &[Tm], expected: &Value, scope: &[String], rec: Option<&Rec>) -> Result<Term, String> {
+    fn solve_ctor(&self, cname: &str, user_args: &[Tm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         let info = self.ctor_info[cname].clone();
         let decl = self.rc.data(&info.data).unwrap().clone();
         let ctor = decl.ctors.iter().find(|c| c.name == cname).unwrap().clone();
         let np = decl.params.len();
         let nargs = ctor.args.len();
         let total = np + nargs;
-        let n = scope.len();
+        let n = cx.len();
 
         let implicit_of = |pos: usize| {
             if pos < np {
@@ -665,7 +723,6 @@ impl Elab {
             }
         };
 
-        // explicit positions consume user args in order
         let nexplicit = (0..total).filter(|&p| !implicit_of(p)).count();
         if user_args.len() != nexplicit {
             return Err(format!(
@@ -674,7 +731,7 @@ impl Elab {
             ));
         }
 
-        // 1) fresh holes for every position; build the result type with holes
+        // fresh holes for every position; build the result type with holes
         let mut holes: Vec<Option<Value>> = (0..total).map(|_| None).collect();
         let hole_env: Vec<Value> = (0..total).map(|id| dep::nvar(HOLE_BASE + id)).collect();
         let mut result_args: Vec<Value> = (0..np).map(|p| hole_env[p].clone()).collect();
@@ -684,7 +741,7 @@ impl Elab {
         let result = Value::VData(info.data.clone(), result_args);
         solve(&mut holes, &result, expected);
 
-        // 2) walk positions left to right, filling values + terms
+        // walk positions left to right, filling values + terms
         let mut env: Vec<Value> = Vec::with_capacity(total);
         let mut terms: Vec<Term> = Vec::with_capacity(total);
         let mut next_user = 0;
@@ -697,9 +754,8 @@ impl Elab {
                 terms.push(dep::quote_at(n, &sol));
                 env.push(sol);
             } else {
-                // the domain references only earlier positions: eval in `env` (length `pos`)
                 let dom_val = dep::eval_rc(&self.rc, &env, dom_tm);
-                let arg_tm = self.check(&user_args[next_user], &dom_val, scope, rec)?;
+                let arg_tm = self.check(&user_args[next_user], &dom_val, cx, rec)?;
                 next_user += 1;
                 let v = self.eval(n, &arg_tm);
                 terms.push(arg_tm);
@@ -707,6 +763,82 @@ impl Elab {
             }
         }
         Ok(Term::Constr(cname.to_string(), terms))
+    }
+
+    /// Solve a function's implicit arguments from the explicit arguments' types
+    /// (and the expected result type, if known). Returns `(term, result_type)`.
+    fn solve_fn_call(&self, fname: &str, user_args: &[Tm], expected: Option<&Value>, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
+        let (body, fty) = self.defs[fname].clone();
+        let flags = self.def_implicit[fname].clone();
+        let total = flags.len();
+        let nexplicit = flags.iter().filter(|b| !**b).count();
+        if user_args.len() != nexplicit {
+            return Err(format!(
+                "`{fname}` expects {nexplicit} explicit argument(s), got {}",
+                user_args.len()
+            ));
+        }
+        // collect the parameter domains and the codomain from the function's type
+        let mut domains: Vec<Term> = Vec::new();
+        let mut t = fty.clone();
+        for _ in 0..total {
+            match t {
+                Term::Pi(_, a, b) => {
+                    domains.push(*a);
+                    t = *b;
+                }
+                _ => return Err(format!("internal: `{fname}` has too few arrows")),
+            }
+        }
+        let codomain = t;
+        let n = cx.len();
+
+        let mut holes: Vec<Option<Value>> = (0..total).map(|_| None).collect();
+        let mut env: Vec<Value> = Vec::with_capacity(total); // arg values, in `cx`'s context
+        let mut terms: Vec<Option<Term>> = vec![None; total];
+        let mut next_user = 0;
+        for pos in 0..total {
+            let dom_val = dep::eval_rc(&self.rc, &env, &domains[pos]);
+            if flags[pos] {
+                env.push(dep::nvar(HOLE_BASE + pos)); // a hole, solved below
+            } else {
+                let (arg_tm, arg_ty) = self.infer_arg(&user_args[next_user], cx, rec)?;
+                next_user += 1;
+                solve(&mut holes, &dom_val, &arg_ty); // solve the implicits this arg pins down
+                let v = self.eval(n, &arg_tm);
+                env.push(v);
+                terms[pos] = Some(arg_tm);
+            }
+        }
+        if let Some(exp) = expected {
+            let cod_val = dep::eval_rc(&self.rc, &env, &codomain);
+            solve(&mut holes, &cod_val, exp);
+        }
+        for pos in 0..total {
+            if flags[pos] {
+                let sol = holes[pos]
+                    .clone()
+                    .ok_or_else(|| format!("cannot infer implicit argument {pos} of `{fname}`"))?;
+                terms[pos] = Some(dep::quote_at(n, &sol));
+            }
+        }
+        // re-evaluate the codomain with solved holes for the returned type
+        let solved_env: Vec<Value> = (0..total)
+            .map(|p| {
+                if flags[p] {
+                    holes[p].clone().unwrap()
+                } else {
+                    env[p].clone()
+                }
+            })
+            .collect();
+        let result_ty = dep::eval_rc(&self.rc, &solved_env, &codomain);
+        let head = Term::Ann(Box::new(body), Box::new(fty));
+        let term = terms
+            .into_iter()
+            .map(Option::unwrap)
+            .fold(head, |f, a| Term::App(Box::new(f), Box::new(a)));
+        Ok((term, result_ty))
     }
 }
 
@@ -816,13 +948,14 @@ impl Elab {
     fn elab_match_body(
         &self,
         fnname: &str,
-        full_params: &[String], // implicit + explicit, in signature order
+        fn_cx: &Cx, // the fn's parameters (names + types), in signature order
         explicit_params: &[String],
-        param_tys: &[Ty], // type of each FULL param
+        param_tys: &[Ty], // surface type of each FULL param
         ret: &Ty,
         scrut: &str,
         arms: &[Arm],
     ) -> Result<Term, String> {
+        let full_params: &[String] = &fn_cx.names;
         let full_pos = full_params.iter().position(|p| p == scrut)
             .ok_or_else(|| format!("`match` scrutinee `{scrut}` is not a parameter"))?;
         let explicit_pos = explicit_params.iter().position(|p| p == scrut)
@@ -857,7 +990,6 @@ impl Elab {
             motive = Term::Lam(Box::new(motive));
         }
 
-        let nfull = full_params.len();
         let sparam_tms: Vec<Term> = dargs[..np]
             .iter()
             .map(|a| self.elab_ty(a, full_params))
@@ -889,30 +1021,39 @@ impl Elab {
                     arm.binders.len()
                 ));
             }
-            let mut scope = full_params.to_vec();
+            // binder names: each ctor arg (implicit→its name, explicit→pattern
+            // name), then one IH per recursive arg
+            let mut binder_names: Vec<String> = Vec::new();
             let mut next_pat = 0;
             for j in 0..nargs {
                 if info.arg_implicit[j] {
-                    let nm = info.arg_names[j].clone().unwrap_or_else(|| format!("$imp{j}"));
-                    scope.push(nm);
+                    binder_names.push(info.arg_names[j].clone().unwrap_or_else(|| format!("$imp{j}")));
                 } else {
-                    scope.push(arm.binders[next_pat].clone());
+                    binder_names.push(arm.binders[next_pat].clone());
                     next_pat += 1;
                 }
             }
             let mut fields: HashMap<String, String> = HashMap::new();
             for (kk, &fi) in rec_fields.iter().enumerate() {
                 let ih = format!("$ih{kk}");
-                fields.insert(scope[nfull + fi].clone(), ih.clone());
-                scope.push(ih);
+                fields.insert(binder_names[fi].clone(), ih.clone());
+                binder_names.push(ih);
             }
 
+            // typing context: the fn params, then the method binders with their
+            // kernel types (from the eliminator method telescope)
             let motive_tm = motive.clone();
-            let ret_ty_tm = dep::elim_method_return(&self.rc, &data, &sparam_tms, &motive_tm, &ctor.name)?;
-            let expected = dep::eval_rc(&self.rc, &neutral_env(scope.len()), &ret_ty_tm);
+            let (binder_tys, ret_ty_tm) =
+                dep::elim_method_telescope(&self.rc, &data, &sparam_tms, &motive_tm, &ctor.name)?;
+            let mut arm_cx = fn_cx.clone();
+            for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
+                let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
+                arm_cx.push(bn.clone(), v);
+            }
+            let expected = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &ret_ty_tm);
 
             let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields };
-            let mut body = self.check(&arm.body, &expected, &scope, Some(&r))?;
+            let mut body = self.check(&arm.body, &expected, &arm_cx, Some(&r))?;
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
             }
@@ -930,8 +1071,9 @@ impl Elab {
 
 /// Build the full ordered parameter list of a `fn` from its signature and the
 /// `fn`'s explicit parameter names. Returns (full_names, full_tys, ret_ty).
-fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<Ty>, Ty), String> {
+fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<bool>, Vec<Ty>, Ty), String> {
     let mut names = Vec::new();
+    let mut imps = Vec::new();
     let mut tys = Vec::new();
     let mut t = sig.clone();
     let mut next_explicit = 0;
@@ -946,14 +1088,14 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<Ty
                     nm
                 } else {
                     // no more fn params: this arrow belongs to the return type
-                    return Ok((names, tys, Ty::Arrow(Mult::Omega, implicit, name, a, b)));
+                    return Ok((names, imps, tys, Ty::Arrow(Mult::Omega, implicit, name, a, b)));
                 };
-                // rename later occurrences of the signature's binder name
                 let rest = match &name {
                     Some(sn) if Some(&nm) != name.as_ref() => rename_ty(&b, sn, &nm),
                     _ => *b,
                 };
                 names.push(nm);
+                imps.push(implicit);
                 tys.push(*a);
                 t = rest;
             }
@@ -961,7 +1103,7 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<Ty
                 if next_explicit != explicit.len() {
                     return Err("more `fn` parameters than the signature has arrows".into());
                 }
-                return Ok((names, tys, other));
+                return Ok((names, imps, tys, other));
             }
         }
     }
@@ -990,6 +1132,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         ctor_arity: HashMap::new(),
         ctor_info: HashMap::new(),
         defs: HashMap::new(),
+        def_implicit: HashMap::new(),
     };
 
     // pass B: arities
@@ -1099,15 +1242,24 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         if let Item::Fn(name, params, body) = it {
             let sig = sigs.get(name).ok_or_else(|| format!("`fn {name}` has no type signature"))?.clone();
             let ty_term = elab.elab_ty(&sig, &[])?;
-            let (full_names, full_tys, ret) = split_signature(&sig, params)?;
+            let (full_names, full_imps, full_tys, ret) = split_signature(&sig, params)?;
+            elab.def_implicit.insert(name.clone(), full_imps.clone());
+
+            // the fn's typing context: each parameter's name + kernel type
+            let mut fn_cx = Cx::default();
+            for (i, (pn, pty)) in full_names.iter().zip(&full_tys).enumerate() {
+                let kty = elab.elab_ty(pty, &full_names[..i])?;
+                let v = dep::eval_rc(&elab.rc, &neutral_env(i), &kty);
+                fn_cx.push(pn.clone(), v);
+            }
 
             let body_inner = match body {
                 Tm::Match(scrut, arms) => {
-                    elab.elab_match_body(name, &full_names, params, &full_tys, &ret, scrut, arms)?
+                    elab.elab_match_body(name, &fn_cx, params, &full_tys, &ret, scrut, arms)?
                 }
                 other => {
                     let expected = dep::eval_rc(&elab.rc, &neutral_env(full_names.len()), &elab.elab_ty(&ret, &full_names)?);
-                    elab.check(other, &expected, &full_names, None)?
+                    elab.check(other, &expected, &fn_cx, None)?
                 }
             };
             let mut term = body_inner;

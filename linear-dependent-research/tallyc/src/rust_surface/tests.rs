@@ -144,6 +144,35 @@ fn fin_indexed_implicits() {
 }
 
 #[test]
+fn function_call_implicits_are_solved_from_argument_types() {
+    // `append(xs, ys)` — append's implicit a, m, n are solved from the (def)
+    // argument types; no type or length is written at the call site.
+    let src = format!(
+        "{VEC}\n\
+         xs : Vec Nat (Succ Zero)\nfn xs() {{ Cons(Succ(Zero), Nil) }}\n\
+         ys : Vec Nat (Succ Zero)\nfn ys() {{ Cons(Zero, Nil) }}\n\
+         main : Vec Nat (Succ (Succ Zero))\nfn main() {{ append(xs, ys) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    let nil = Term::Constr("Nil".into(), vec![ndata()]);
+    let cons = |k: Term, h: Term, t: Term| Term::Constr("Cons".into(), vec![ndata(), k, h, t]);
+    let expected = cons(succ(zero()), succ(zero()), cons(zero(), zero(), nil)); // [1, 0]
+    assert_eq!(prog.normalize("main"), Some(expected));
+}
+
+#[test]
+fn fin_to_nat_called_with_inferred_implicit() {
+    // fin_to_nat(one) — the implicit `n` is solved from `one`'s type (Fin 2)
+    let src = format!(
+        "{FIN}\n\
+         one : Fin (Succ (Succ Zero))\nfn one() {{ FS(FZ) }}\n\
+         main : Nat\nfn main() {{ fin_to_nat(one) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(prog.normalize("main"), Some(num(1)));
+}
+
+#[test]
 fn structs_with_implicit_param() {
     let src = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
