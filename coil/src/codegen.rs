@@ -286,6 +286,7 @@ impl<'ctx> Cg<'ctx> {
             Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
             Type::Float(32) => self.ctx.f32_type().into(),
             Type::Float(_) => self.ctx.f64_type().into(),
+            Type::Bool => self.ctx.bool_type().into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Struct(name) => {
                 if let Some(s) = self.structs.get(name) {
@@ -421,6 +422,7 @@ impl<'ctx> Cg<'ctx> {
         match e {
             Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
             Expr::Float(x) => Ok((self.ctx.f64_type().const_float(*x).into(), Type::Float(64))),
+            Expr::Bool(b) => Ok((self.ctx.bool_type().const_int(*b as u64, false).into(), Type::Bool)),
             // The zero value of a type (used to initialize a fresh local).
             Expr::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
@@ -500,10 +502,7 @@ impl<'ctx> Cg<'ctx> {
                         .builder
                         .build_float_compare(pred, lv.into_float_value(), rv.into_float_value(), "fcmp")
                         .map_err(le)?;
-                    return Ok((
-                        self.builder.build_int_z_extend(b, i64t, "fcmp64").map_err(le)?.into(),
-                        Type::Int(64, true),
-                    ));
+                    return Ok((b.into(), Type::Bool));
                 }
                 let signed = matches!(lt, Type::Int(_, true));
                 let pred = match op {
@@ -522,10 +521,7 @@ impl<'ctx> Cg<'ctx> {
                     .builder
                     .build_int_compare(pred, lv.into_int_value(), rv.into_int_value(), "cmp")
                     .map_err(le)?;
-                Ok((
-                    self.builder.build_int_z_extend(b, i64t, "cmp64").map_err(le)?.into(),
-                    Type::Int(64, true),
-                ))
+                Ok((b.into(), Type::Bool))
             }
             Expr::Do(es) => {
                 let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
@@ -1075,6 +1071,15 @@ impl<'ctx> Cg<'ctx> {
     fn const_eval(&self, e: &Expr) -> Result<i64, String> {
         match e {
             Expr::Int(n) => Ok(*n),
+            Expr::Bool(b) => Ok(*b as i64),
+            Expr::If { cond, then, els } => {
+                // covers `and`/`or`/`not`, which desugar to `if`.
+                if self.const_eval(cond)? != 0 {
+                    self.const_eval(then)
+                } else {
+                    self.const_eval(els)
+                }
+            }
             Expr::SizeOf(t) => Ok(self.target_data.get_abi_size(&self.basic_ty(t)) as i64),
             Expr::AlignOf(t) => Ok(self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64),
             Expr::OffsetOf(t, f) => Ok(self.offset_of(t, f)? as i64),
@@ -1194,6 +1199,7 @@ fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str
     match t {
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
         Type::Float(bits) => (*bits as u64) / 8,
+        Type::Bool => 1,
         Type::Ptr(_) | Type::Fn(..) | Type::Ref(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
         Type::Struct(name) => {

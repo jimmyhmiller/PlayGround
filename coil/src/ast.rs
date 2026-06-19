@@ -12,6 +12,8 @@ pub enum Type {
     Int(u32, bool), // (bits, signed)
     /// IEEE floating point: `f32` or `f64` (bits = 32 or 64).
     Float(u32),
+    /// A boolean (`i1`). The result of comparisons; the condition of `if`.
+    Bool,
     /// A pointer to a value of the pointee type. Pointers are region-less (a
     /// pointer is a pointer, à la Zig/C); where the memory came from is the
     /// `alloc` operation's concern, not the type's.
@@ -113,6 +115,8 @@ pub enum Expr {
     Not(Box<Expr>),
     /// A floating-point literal (defaults to `f64`, adopts `f32` from context).
     Float(f64),
+    /// A boolean literal (`true` / `false`).
+    Bool(bool),
     Cmp {
         op: CmpOp,
         lhs: Box<Expr>,

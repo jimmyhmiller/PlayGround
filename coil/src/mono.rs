@@ -210,6 +210,7 @@ impl<'a> Mono<'a> {
         Ok(match t {
             Type::Int(b, s) => Type::Int(*b, *s),
             Type::Float(b) => Type::Float(*b),
+            Type::Bool => Type::Bool,
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
             Type::Ref(m, p) => Type::Ref(*m, Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
@@ -284,6 +285,7 @@ impl<'a> Mono<'a> {
         Ok(match e {
             Expr::Int(n) => Expr::Int(*n),
             Expr::Float(x) => Expr::Float(*x),
+            Expr::Bool(b) => Expr::Bool(*b),
             Expr::Str(s) => Expr::Str(s.clone()),
             Expr::Var(s) => Expr::Var(s.clone()),
             Expr::Zeroed(t) => Expr::Zeroed(self.resolve_ty(t, map)?),
@@ -457,6 +459,7 @@ fn type_key(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),
+        Type::Bool => "bool".to_string(),
         Type::Ptr(p) => format!("ptr_{}", type_key(p)),
         Type::Ref(_, p) => format!("ref_{}", type_key(p)),
         Type::Struct(s) => s.clone(),

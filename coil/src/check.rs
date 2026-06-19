@@ -276,9 +276,9 @@ pub fn check(program: &Program) -> Result<Program, String> {
     for a in &program.asserts {
         let mut env: HashMap<String, Type> = HashMap::new();
         let (cond, t) = synth(&a.cond, None, &mut env, &cx, &empty_tps, "static-assert")?;
-        if !t.is_int() {
+        if !is_cond(&t) {
             return Err(format!(
-                "static-assert: condition must be an integer, got {}",
+                "static-assert: condition must be a bool or integer, got {}",
                 ty_str(&t)
             ));
         }
@@ -303,7 +303,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
 fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String> {
     match t {
         Type::Int(..) => Ok(()),
-        Type::Float(..) => Ok(()),
+        Type::Float(..) | Type::Bool => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
         Type::Ref(_, p) => validate_type(p, cx, tps),
         Type::Array(e, _) => validate_type(e, cx, tps),
@@ -373,6 +373,7 @@ fn synth(
     match e {
         Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
         Expr::Float(x) => Ok((Expr::Float(*x), Type::Float(64))),
+        Expr::Bool(b) => Ok((Expr::Bool(*b), Type::Bool)),
         Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
         Expr::Zeroed(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': zeroed: {e}"))?;
@@ -453,14 +454,14 @@ fn synth(
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 },
-                Type::Int(64, true),
+                Type::Bool,
             ))
         }
         Expr::If { cond, then, els } => {
             let (ce, ct) = synth(cond, None, env, cx, tps, fname)?;
-            if !ct.is_int() {
+            if !is_cond(&ct) {
                 return Err(format!(
-                    "in '{fname}': if condition must be an integer, got {}",
+                    "in '{fname}': if condition must be a bool or integer, got {}",
                     ty_str(&ct)
                 ));
             }
@@ -1419,7 +1420,7 @@ fn replace_pointee(place: &Type, new: Type) -> Type {
 /// Substitute bound type parameters throughout a type.
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
-        Type::Int(..) | Type::Float(..) => t.clone(),
+        Type::Int(..) | Type::Float(..) | Type::Bool => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
@@ -1553,6 +1554,12 @@ fn is_literal(e: &Expr) -> bool {
 /// each monomorphic instantiation is what actually reaches codegen).
 fn numeric(t: &Type, tps: &HashSet<String>) -> bool {
     matches!(t, Type::Int(..) | Type::Float(..)) || matches!(t, Type::Struct(n) if tps.contains(n))
+}
+
+/// Valid as an `if`/`static-assert` condition: a bool or any integer (nonzero
+/// = true), so both `(icmp-lt …)` and a raw flag work.
+fn is_cond(t: &Type) -> bool {
+    matches!(t, Type::Bool | Type::Int(..))
 }
 
 /// Two scalar types that a literal may slide between (both ints, or both floats).
@@ -1694,6 +1701,7 @@ fn ty_str(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),
+        Type::Bool => "bool".to_string(),
         Type::Ptr(pointee) => format!("(ptr {})", ty_str(pointee)),
         Type::Ref(true, pointee) => format!("(mut {})", ty_str(pointee)),
         Type::Ref(false, pointee) => format!("(ref {})", ty_str(pointee)),

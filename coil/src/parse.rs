@@ -472,6 +472,7 @@ fn prim_type(name: &str) -> Result<Type, String> {
     match name {
         "f32" => Ok(Type::Float(32)),
         "f64" => Ok(Type::Float(64)),
+        "bool" => Ok(Type::Bool),
         _ => int_type(name),
     }
 }
@@ -499,6 +500,8 @@ fn parse_expr(s: &Sexp) -> Result<Expr, String> {
     match s {
         Sexp::Int(n) => Ok(Expr::Int(*n)),
         Sexp::Float(x) => Ok(Expr::Float(*x)),
+        Sexp::Sym(name) if name == "true" => Ok(Expr::Bool(true)),
+        Sexp::Sym(name) if name == "false" => Ok(Expr::Bool(false)),
         Sexp::Sym(name) => Ok(Expr::Var(name.clone())),
         Sexp::Keyword(k) => Err(format!("unexpected keyword :{k} in expression")),
         Sexp::Str(s) => Ok(Expr::Str(s.clone())),
@@ -561,6 +564,33 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         "icmp-ge" => cmp(CmpOp::Ge),
         "icmp-eq" => cmp(CmpOp::Eq),
         "icmp-ne" => cmp(CmpOp::Ne),
+        // short-circuiting logical operators desugar to `if` over booleans.
+        "and" => {
+            let (a, b) = two(args, "and")?;
+            Ok(Expr::If {
+                cond: Box::new(parse_expr(a)?),
+                then: Box::new(parse_expr(b)?),
+                els: Box::new(Expr::Bool(false)),
+            })
+        }
+        "or" => {
+            let (a, b) = two(args, "or")?;
+            Ok(Expr::If {
+                cond: Box::new(parse_expr(a)?),
+                then: Box::new(Expr::Bool(true)),
+                els: Box::new(parse_expr(b)?),
+            })
+        }
+        "not" => {
+            if args.len() != 1 {
+                return Err("not: expects (not x)".to_string());
+            }
+            Ok(Expr::If {
+                cond: Box::new(parse_expr(&args[0])?),
+                then: Box::new(Expr::Bool(false)),
+                els: Box::new(Expr::Bool(true)),
+            })
+        }
         "if" => {
             if args.len() != 3 {
                 return Err("if: expects (if cond then else)".to_string());
