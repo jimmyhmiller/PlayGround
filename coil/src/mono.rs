@@ -294,6 +294,7 @@ impl<'a> Mono<'a> {
                 lhs: Box::new(go(self, lhs)?),
                 rhs: Box::new(go(self, rhs)?),
             },
+            Expr::Not(x) => Expr::Not(Box::new(go(self, x)?)),
             Expr::Cmp { op, lhs, rhs } => Expr::Cmp {
                 op: *op,
                 lhs: Box::new(go(self, lhs)?),

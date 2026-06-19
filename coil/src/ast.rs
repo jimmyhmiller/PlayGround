@@ -61,6 +61,11 @@ pub enum BinOp {
     Mul,
     Div,
     Rem,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +107,8 @@ pub enum Expr {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// Bitwise complement `(inot x)` (`~x`).
+    Not(Box<Expr>),
     Cmp {
         op: CmpOp,
         lhs: Box<Expr>,

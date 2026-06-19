@@ -518,6 +518,17 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         "imul" => bin(BinOp::Mul),
         "idiv" => bin(BinOp::Div),
         "irem" => bin(BinOp::Rem),
+        "iand" => bin(BinOp::And),
+        "ior" => bin(BinOp::Or),
+        "ixor" => bin(BinOp::Xor),
+        "ishl" => bin(BinOp::Shl),
+        "ishr" => bin(BinOp::Shr),
+        "inot" => {
+            if args.len() != 1 {
+                return Err("inot: expects (inot x)".to_string());
+            }
+            Ok(Expr::Not(Box::new(parse_expr(&args[0])?)))
+        }
         "icmp-lt" => cmp(CmpOp::Lt),
         "icmp-le" => cmp(CmpOp::Le),
         "icmp-gt" => cmp(CmpOp::Gt),

@@ -450,8 +450,19 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Div => self.builder.build_int_unsigned_div(l, r, "div"),
                     BinOp::Rem if signed => self.builder.build_int_signed_rem(l, r, "rem"),
                     BinOp::Rem => self.builder.build_int_unsigned_rem(l, r, "rem"),
+                    BinOp::And => self.builder.build_and(l, r, "and"),
+                    BinOp::Or => self.builder.build_or(l, r, "or"),
+                    BinOp::Xor => self.builder.build_xor(l, r, "xor"),
+                    BinOp::Shl => self.builder.build_left_shift(l, r, "shl"),
+                    // arithmetic shift for signed, logical for unsigned.
+                    BinOp::Shr => self.builder.build_right_shift(l, r, signed, "shr"),
                 };
                 Ok((v.map_err(le)?.into(), lt))
+            }
+            Expr::Not(x) => {
+                let (xv, xt) = self.emit_expr(x, scope)?;
+                let v = self.builder.build_not(xv.into_int_value(), "not").map_err(le)?;
+                Ok((v.into(), xt))
             }
             Expr::Cmp { op, lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(lhs, scope)?;
@@ -999,6 +1010,11 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Add => l.wrapping_add(r),
                     BinOp::Sub => l.wrapping_sub(r),
                     BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::And => l & r,
+                    BinOp::Or => l | r,
+                    BinOp::Xor => l ^ r,
+                    BinOp::Shl => l.wrapping_shl(r as u32),
+                    BinOp::Shr => l.wrapping_shr(r as u32),
                     BinOp::Div if r != 0 => l / r,
                     BinOp::Rem if r != 0 => l % r,
                     _ => return Err("static-assert: divide/mod by zero".to_string()),

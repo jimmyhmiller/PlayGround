@@ -418,6 +418,16 @@ fn synth(
                 t,
             ))
         }
+        Expr::Not(x) => {
+            let (xe, xt) = synth(x, None, env, cx, tps, fname)?;
+            if !numeric(&xt, tps) {
+                return Err(format!(
+                    "in '{fname}': inot requires an integer, got {}",
+                    ty_str(&xt)
+                ));
+            }
+            Ok((Expr::Not(Box::new(xe)), xt))
+        }
         Expr::Cmp { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
             let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;
