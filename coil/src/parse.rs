@@ -259,7 +259,10 @@ fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
         _ => return Err(format!("extern '{name}': expected a vector of parameter types")),
     };
     i += 1;
-    let params = params_v.iter().map(parse_type).collect::<Result<_, _>>()?;
+    // A trailing `...` in the parameter vector marks a C variadic function.
+    let variadic = matches!(params_v.last(), Some(Sexp::Sym(s)) if s == "...");
+    let fixed = if variadic { &params_v[..params_v.len() - 1] } else { &params_v[..] };
+    let params = fixed.iter().map(parse_type).collect::<Result<_, _>>()?;
 
     let ret_l = as_list(
         rest.get(i).ok_or("extern: missing (-> :type)")?,
@@ -274,6 +277,7 @@ fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
         name,
         cc,
         params,
+        variadic,
         ret,
     })
 }

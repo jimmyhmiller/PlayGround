@@ -225,6 +225,9 @@ pub struct Extern {
     pub name: String,
     pub cc: String,
     pub params: Vec<Type>,
+    /// A C variadic function (`...`): `params` are the fixed prefix; calls may
+    /// pass additional trailing arguments.
+    pub variadic: bool,
     pub ret: Type,
 }
 

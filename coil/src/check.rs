@@ -37,6 +37,8 @@ struct Sig {
     ret: Type,
     /// Calls to externs erase pointer regions at the boundary (see `arg_ok`).
     is_extern: bool,
+    /// A C variadic extern: extra trailing arguments past `params` are allowed.
+    variadic: bool,
     /// The calling convention's name, and whether a function pointer can be
     /// taken to it (only native conventions, for now).
     cc: String,
@@ -109,6 +111,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                     .collect(),
                 ret: f.ret.clone(),
                 is_extern: false,
+                variadic: false,
                 cc: f.cc.clone(),
                 // a generic function has no single address, so no fnptr.
                 fnptr_ok: native && f.type_params.is_empty(),
@@ -136,6 +139,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 params: e.params.clone(),
                 ret: e.ret.clone(),
                 is_extern: true,
+                variadic: e.variadic,
                 cc: e.cc.clone(),
                 fnptr_ok: true,
             },
@@ -610,9 +614,15 @@ fn synth(
                 .sigs
                 .get(func)
                 .ok_or_else(|| format!("in '{fname}': call to undefined function '{func}'"))?;
-            if sig.params.len() != args.len() {
+            let arity_ok = if sig.variadic {
+                args.len() >= sig.params.len()
+            } else {
+                args.len() == sig.params.len()
+            };
+            if !arity_ok {
                 return Err(format!(
-                    "in '{fname}': '{func}' expects {} args, got {}",
+                    "in '{fname}': '{func}' expects {}{} args, got {}",
+                    if sig.variadic { "at least " } else { "" },
                     sig.params.len(),
                     args.len()
                 ));
@@ -627,6 +637,13 @@ fn synth(
                 }
                 let mut new_args = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
+                    // Variadic extra arguments have no declared parameter type:
+                    // synthesize and pass them through (C default-promotion rules).
+                    if i >= sig.params.len() {
+                        let (ae, _) = synth(a, None, env, cx, tps, fname)?;
+                        new_args.push(ae);
+                        continue;
+                    }
                     let want = sig.params[i].clone();
                     let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
                     let exp = if matches!(want, Type::Ref(..)) { None } else { Some(&want) };

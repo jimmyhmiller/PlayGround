@@ -202,7 +202,9 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         let cc_id = conv
             .native_id()
             .ok_or_else(|| format!("codegen: extern '{}' needs a native convention", e.name))?;
-        let fn_ty = cg.fn_type_types(&e.params, &e.ret);
+        let p: Vec<BasicMetadataTypeEnum> =
+            e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
+        let fn_ty = cg.basic_ty(&e.ret).fn_type(&p, e.variadic);
         let fv = cg.module.add_function(&e.name, fn_ty, None);
         fv.set_call_conventions(cc_id);
         cg.funcs.insert(e.name.clone(), fv);
