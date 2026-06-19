@@ -169,6 +169,22 @@ make you think a value was used at runtime. Get this wrong and either erasure is
 unsound (you erase something you needed) or linearity is too strict (a value
 "used" only in a type annotation is reported as consumed).
 
+**Erasure in the native backend, and how we keep it honest.** `tallyc`'s
+dependent backend (`tallyc/src/dep_codegen.rs`, behind `--features llvm`) lowers
+a checked `dep::Term` to LLVM and JIT-runs it. Erasure there is concrete: a
+multiplicity-`0` constructor argument gets **no heap slot**, and a `Π[0]`
+function argument is **never compiled** (the application β-reducer reads each
+binder's multiplicity off the head's `Π` telescope and binds `None` for the
+erased ones, so an index/proof never becomes an instruction). The reading-`None`
+path is a hard error, so the kernel's guarantee — a checked term never reads an
+erased variable at runtime — is enforced rather than assumed. This is checked
+empirically by reading the emitted IR (`emit_ir`): in the test
+`vec_ir_has_zero_overhead`, a length-indexed `Vec`'s `Cons` cell is `malloc(24)`
+(tag + element + tail), *not* 32 bytes, and the fold over it is handed no length;
+in `dll_ir_has_zero_overhead`, the ghost region/cursor identity appears nowhere
+in the IR and `alloc`/`free` are direct libc calls. These are evidence for —
+not a proof of — the erasure theorem T1.2 (`docs/04` Phase 1).
+
 ---
 
 ## 5. The memory model
@@ -340,6 +356,7 @@ metatheory.
 | the QTT core on paper | `docs/01-qtt-core.md` |
 | the pointer/view = two-multiplicities thesis | `docs/02-memory-views.md` |
 | a runnable checker to copy | `prototype/qtt_checker.py` |
+| the native backend (checked `dep::Term` → LLVM, erasing) | `tallyc/src/dep_codegen.rs` (`tally run <file>`, `--features llvm`) |
 | a runnable memory model | `prototype/lambda_tally_memory.py`, `prototype/memory-model.rkt` |
 | bounded verification harnesses | `prototype/*-rosette.rkt` |
 | the proved metatheory + module table | `agda/` and `agda/README.md` |

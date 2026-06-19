@@ -27,6 +27,12 @@ Goal: nail QTT on paper for *our* rig and notation, independent of memory.
 - [ ] **T1.2 (Erasure).** Define `|·|`; prove `Γ ⊢ M :^1 A` ⇒ `|M|` simulates `M`
       and contains no `0`-budget variable. *This is the "free dependent types"
       theorem.* (Mirror Atkey's semantic erasure; aim for a syntactic version too.)
+      *Empirical evidence (not the proof):* the `tallyc` native backend already
+      realizes `|·|` — `0`-budget constructor args take no heap slot and `Π[0]`
+      args are never compiled — and two IR tests assert the erasure holds on real
+      LLVM output (length index, proofs, and the ghost region/cursor never
+      materialize): `tallyc/src/dep_codegen.rs::{vec_ir_has_zero_overhead,
+      dll_ir_has_zero_overhead}`.
 - [ ] **T1.3 (Substitution/scaling lemmas).** The algebraic lemmas about `+`/`·`
       on contexts that all later proofs lean on.
 

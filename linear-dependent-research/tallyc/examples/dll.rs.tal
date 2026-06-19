@@ -19,6 +19,11 @@ postulate Cursor : Region -> Type
 enum CL (r : Region) { MkCL : (1 c : Cursor r) -> (1 l : List r) -> CL r }
 enum VL (r : Region) { MkVL : Nat -> (1 l : List r) -> VL r }
 
+// `R0` is one concrete ghost region; `new` creates the empty list living in it.
+// (A polymorphic `{0 r} -> List r` cannot have its region inferred at a use site
+// with no other handle to pin `r`, so the runnable driver names a single region.)
+postulate R0     : Region
+postulate new    : List R0
 postulate insert : {0 r : Region} -> (1 l : List r) -> Nat -> CL r
 postulate remove : {0 r : Region} -> (1 c : Cursor r) -> (1 l : List r) -> VL r
 postulate free   : {0 r : Region} -> (1 l : List r) -> Unit
@@ -30,6 +35,22 @@ fn client(l0) {
     let (c, l1) = insert(l0, Succ(Zero));
     let (v, l2) = remove(c, l1);
     l2
+}
+
+// sequence a consumed (linear) Unit before returning a Nat (no statement form in
+// the surface yet, so we thread the Unit through a function call; the Unit is
+// taken linearly so the `free` that produced it keeps its single use).
+seq : (1 u : Unit) -> Nat -> Nat
+fn seq(u, n) { match u { U => n } }
+
+// a runnable driver: make an empty list, insert `1`, remove it by its cursor in
+// O(1), free the now-empty list, and return the removed value (1).
+//   tally run examples/dll.rs.tal   →   1
+main : Nat
+fn main() {
+    let (c, l1) = insert(new, Succ(Zero));
+    let (v, l2) = remove(c, l1);
+    seq(free(l2), v)
 }
 
 // The safety net (copy any of these in to see it rejected):

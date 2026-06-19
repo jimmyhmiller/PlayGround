@@ -12,6 +12,59 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
                             codegen (inkwell, behind `--features llvm`)
 ```
 
+## Status (v1.4 — GENERAL boxed datatypes run natively; the memory layer is real libc; erasure proven in the IR)
+
+The native backend (`src/dep_codegen.rs`, behind `--features llvm`) is no longer
+limited to `Nat`. **Every checked datatype now compiles and runs end to end:**
+
+- **`Nat`-like families stay UNBOXED `i64`** (one nullary + one single-recursive
+  constructor); their eliminator is a native counting loop.
+- **Every other inductive family is a BOXED heap cell**: a constructor `malloc`s
+  a block of `i64` slots — slot 0 is an integer constructor TAG, the remaining
+  slots hold its **non-erased** arguments in declaration order. Its eliminator
+  becomes a recursive native function that switches on the tag and recurses on
+  the recursive fields (one induction hypothesis per recursive argument). So
+  `Vec` and `Fin` run as real boxed data, not via the type checker's evaluator.
+- **The linear memory layer runs on real libc `malloc`/`free`.** `alloc`/`free`
+  lower to direct `@malloc`/`@free` calls; the intrusive **circular sentinel
+  doubly-linked list** (`new`/`insert`/`remove`) is branch-free pointer surgery
+  with an O(1) unlink-and-`free` by cursor — the same representation the older
+  non-dependent backend (`src/codegen.rs`) used, now driven from the dependent
+  core. The cursor IS the node pointer; the region/list identity is ghost.
+
+```
+$ tally run examples/vec_sum.run.tal   →  60      # boxed Vec, folded natively
+$ tally run examples/fin_run.run.tal   →  2       # boxed Fin, native eliminator
+$ tally run examples/dll.rs.tal        →  1       # insert, O(1) remove, free
+$ tally run examples/memory.rs.tal     →  0       # alloc then free (libc)
+```
+
+**Erasure is the zero-overhead guarantee, and it is now *proven in the emitted
+LLVM IR*** (`emit_ir`, exercised by `vec_ir_has_zero_overhead` and
+`dll_ir_has_zero_overhead` in `src/dep_codegen.rs`). The tests read the actual
+generated IR and assert:
+
+- The Vec constructor's length index `{0 k : Nat}` is **never materialized**:
+  each `Cons` cell is `malloc(24)` = 3 slots (tag, element, tail) — *not* 32
+  bytes, which a stored index would require — and no length value is threaded
+  into the eliminator (`vsum` over a 3-element vec contains no `store i64 3`, and
+  its helper takes only the scrutinee, never a separate `n`). This last point was
+  a real erasure leak the IR inspection surfaced and we fixed: the application
+  β-reducer now reads each binder's multiplicity off the head function's `Π`
+  telescope and **drops `Π[0]` arguments entirely** (never compiled, never
+  stored), instead of compiling every argument.
+- The DLL's ghost region machinery (`Region`/`R0`/`Cursor`) leaves **no trace**
+  in the runtime IR — no symbol, no cell, no value. Every heap cell is 24 bytes
+  (node/sentinel/linear-pair); there is no region cell or cursor-identity cell.
+  `alloc`/`free` are direct `call ptr @malloc` / `call void @free`, with exactly
+  two frees (the removed node, then the freed list). The only heap traffic is the
+  actual data.
+
+`cargo test --features llvm`: **59 tests** (the 50 v1.3 tests plus boxed
+`dependent_vec_sum_runs`/`dependent_vec_length_runs`/`dependent_vec_head_runs`/
+`fin_to_nat_runs`/`fin_zero_runs`, the linear `linear_alloc_free_runs`/
+`dependent_dll_remove_runs`, and the two IR zero-overhead tests).
+
 ## Status (v0.4 — dependent indices + the 0-fragment)
 
 - **Type-level dependency.** New types `Nat` and `Vec<n>` (a LINEAR
@@ -49,10 +102,10 @@ examples/nat.run.tal: type-checks, compiled to native, ran → 14
 (which compiles to the eliminator), run as native loops — `(3+4)*2 = 14` is
 computed by generated machine code, not by the type checker's evaluator.
 
-Scope (first slice): `Nat`-like datatypes as `i64`. General (boxed) datatypes
-and linking the memory postulates to libc are the remaining backend work — see
-the gap analysis in the research notes. `cargo test --features llvm`: 50 tests
-(incl. `nat_add_runs_natively`, `nat_mul_runs_natively`).
+Scope at v1.3 (first slice): `Nat`-like datatypes as `i64`. **General (boxed)
+datatypes and linking the memory postulates to libc are now done — see v1.4
+above.** `cargo test --features llvm`: 50 tests at v1.3 (incl.
+`nat_add_runs_natively`, `nat_mul_runs_natively`).
 
 ## Status (v1.2 — proofs-as-capabilities, and the intrusive DLL, in the core)
 
