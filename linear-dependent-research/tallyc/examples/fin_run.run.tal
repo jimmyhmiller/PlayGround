@@ -1,0 +1,33 @@
+// END TO END: a bounded index `Fin n` built, then forgotten to a Nat, compiled
+// to NATIVE code and run.  `tally run examples/fin_run.run.tal`  (--features llvm)
+//
+// `Fin n` (the type with exactly n inhabitants) is a boxed, indexed family:
+// FZ/FS become heap cells distinguished by a constructor TAG. The bound `n` is
+// ERASED (never stored). `fin2nat` is the dependent eliminator over Fin, lowered
+// to a native traversal that forgets the bound. The element `fs (fz)` of Fin 3
+// forgets to the i64 2.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Fin : Nat -> Type {
+    FZ : {0 n : Nat} -> Fin (Succ n),
+    FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
+}
+
+fin2nat : {0 n : Nat} -> Fin n -> Nat
+fn fin2nat(i) {
+    match i {
+        FZ      => Zero,
+        FS(prev) => Succ(fin2nat(prev)),
+    }
+}
+
+// the element "2" of Fin 3 : FS (FS FZ).  The implicit bounds are inferred from
+// the result-type annotation.
+two : Fin (Succ (Succ (Succ Zero)))
+fn two() { FS(FS(FZ)) }
+
+main : Nat
+fn main() {
+    fin2nat(two)
+}

@@ -1,0 +1,47 @@
+// The v1.0 surface with IMPLICIT arguments (Phase 2).
+//   tally lang examples/vec.rs.tal
+//
+// The element type `a` and the length indices `k`/`m`/`n` are written nowhere
+// at the use sites — they are inferred. `match` still compiles to the kernel's
+// dependent eliminator (total by construction), with the recursive call turned
+// into the induction hypothesis.
+
+enum Nat {
+    Zero : Nat,
+    Succ : Nat -> Nat,
+}
+
+add : Nat -> Nat -> Nat
+fn add(m, n) {
+    match m {
+        Zero    => n,
+        Succ(k) => Succ(add(k, n)),
+    }
+}
+
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
+}
+
+// `a`, `m`, `n` are implicit (erased + inferred); the length `add m n` is in the type.
+append : {0 a : Type} -> {0 m : Nat} -> {0 n : Nat} -> Vec a m -> Vec a n -> Vec a (add m n)
+fn append(xs, ys) {
+    match xs {
+        Nil        => ys,
+        Cons(h, t) => Cons(h, append(t, ys)),   // no a, no k — inferred
+    }
+}
+
+xs : Vec Nat (Succ Zero)
+fn xs() { Cons(Succ(Zero), Nil) }
+
+ys : Vec Nat (Succ Zero)
+fn ys() { Cons(Zero, Nil) }
+
+// `append(xs, ys)` — the element type and BOTH lengths are inferred from the
+// argument types; nothing but the two vectors is written.
+main : Vec Nat (Succ (Succ Zero))
+fn main() {
+    append(xs, ys)
+}

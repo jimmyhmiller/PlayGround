@@ -1,0 +1,18 @@
+struct C { val: Int }
+
+// a factory that returns ownership of a fresh capability
+fn make(n: Int) -> Own<C> {
+  alloc C { val: n }
+}
+
+// a consumer that takes ownership and must free it exactly once
+fn consume(c: Own<C>) -> Int {
+  let r = c.val;
+  free c;
+  r
+}
+
+fn main() -> Int {
+  let a = make(42);
+  consume(a)
+}

@@ -1,0 +1,8 @@
+struct Node { next: Ptr<Node>, prev: Ptr<Node>, elem: Int }
+
+let a = alloc Node { next: null, prev: null, elem: 1 };
+let b = alloc Node { next: null, prev: null, elem: 2 };
+a.next = addr(b);
+b.prev = addr(a);
+free a;
+free b;

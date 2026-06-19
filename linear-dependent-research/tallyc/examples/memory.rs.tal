@@ -1,0 +1,40 @@
+// PHASE 3: the memory layer, folded into the dependent + linear core.
+//   tally lang examples/memory.rs.tal
+//
+// The L3 memory primitives are POSTULATES — opaque typed constants — so they are
+// checked by the same QTT core as everything else. Memory safety is not a
+// separate analysis: it falls out of LINEARITY. An owning capability `Own a` is
+// taken at multiplicity `1` (exactly once), so:
+//   * dropping it      ⇒ leak             (0 ⋢ 1, rejected)
+//   * using it twice   ⇒ use-after-free   (ω ⋢ 1, rejected)
+// and the kernel re-checks the elaborated term, so the discipline is not
+// trusted to the front end.
+
+enum Unit { U : Unit }
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+
+postulate Own   : Type -> Type
+postulate alloc : {0 a : Type} -> a -> Own a
+postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+
+// allocate a cell and free it exactly once — accepted. (`a` is inferred at both
+// `alloc` and `free`; nothing but the value is written.)
+main : Unit
+fn main() {
+    free(alloc(Zero))
+}
+
+// a function that consumes its owned argument exactly once — accepted.
+consume : (1 o : Own Nat) -> Unit
+fn consume(o) {
+    free(o)
+}
+
+// To see the safety net, copy one of these into the file:
+//
+//   leak : (1 o : Own Nat) -> Unit
+//   fn leak(o) { U }                       -- REJECTED: `o` leaked (0 ⋢ 1)
+//
+//   enum Pair (a : Type) (b : Type) { MkPair : a -> b -> Pair a b }
+//   dbl : (1 o : Own Nat) -> Pair Unit Unit
+//   fn dbl(o) { MkPair(free(o), free(o)) } -- REJECTED: use-after-free (ω ⋢ 1)

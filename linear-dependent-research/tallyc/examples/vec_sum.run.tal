@@ -1,0 +1,51 @@
+// END TO END: a length-indexed Vec built, then summed to a Nat, compiled to
+// NATIVE code and run.  `tally run examples/vec_sum.run.tal`  (needs --features llvm)
+//
+// Vec lowers to a boxed linked stack of cons cells (the length index is ERASED,
+// never materialised). `vsum` is the dependent eliminator over Vec, lowered to a
+// real native traversal; `add` is the Nat eliminator (a native loop). The whole
+// program reduces to the i64 60.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+add : Nat -> Nat -> Nat
+fn add(m, n) {
+    match m {
+        Zero    => n,
+        Succ(k) => Succ(add(k, n)),
+    }
+}
+
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
+}
+
+// sum a vector of Nats; `n` (the length) is implicit/erased.
+vsum : {0 n : Nat} -> Vec Nat n -> Nat
+fn vsum(xs) {
+    match xs {
+        Nil        => Zero,
+        Cons(h, t) => add(h, vsum(t)),
+    }
+}
+
+ten : Nat
+fn ten() { Succ(Succ(Succ(Succ(Succ(Succ(Succ(Succ(Succ(Succ(Zero)))))))))) }
+
+twenty : Nat
+fn twenty() { add(ten, ten) }
+
+thirty : Nat
+fn thirty() { add(ten, twenty) }
+
+// the length index (3) is fixed by the result-type annotation, so the implicit
+// `k` at each `Cons` is inferred.
+v3 : Vec Nat (Succ (Succ (Succ Zero)))
+fn v3() { Cons(ten, Cons(twenty, Cons(thirty, Nil))) }
+
+// build [10, 20, 30] and sum it = 60
+main : Nat
+fn main() {
+    vsum(v3)
+}
