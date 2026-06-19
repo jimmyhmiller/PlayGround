@@ -1,0 +1,33 @@
+// PHASE 3b: capabilities INDEXED BY PROPOSITIONS — a proof gates the operation.
+//   tally lang examples/proofs.rs.tal
+//
+// This is the thing neither Rust nor a plain linear type system can express: a
+// memory operation that DEMANDS a compile-time proof. Reading element `i` of a
+// length-`n` array requires a proof that `i < n`. The proof is erased (`0`), so
+// it costs nothing at runtime — it exists only to convince the type checker.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// `LT m n` is the proposition (and proof type) that m < n
+enum LT : Nat -> Nat -> Type {
+    LTZ : {0 n : Nat} -> LT Zero (Succ n),                         // 0 < n+1
+    LTS : {0 m : Nat} -> {0 n : Nat} -> LT m n -> LT (Succ m) (Succ n),  // m<n ⟹ m+1<n+1
+}
+
+postulate Arr : Type -> Nat -> Type
+// bounds-checked read: the `LT i n` argument is the proof obligation
+postulate get : {0 a : Type} -> {0 n : Nat} -> {0 i : Nat}
+             -> (0 _ : LT i n) -> Arr a n -> a
+
+// a proof that 1 < 3, constructed by the dependent core
+p13 : LT (Succ Zero) (Succ (Succ (Succ Zero)))
+fn p13() { LTS(LTZ) }
+
+// reading index 1 of a length-3 array is allowed — the proof discharges the bound
+read1 : {0 a : Type} -> Arr a (Succ (Succ (Succ Zero))) -> a
+fn read1(arr) { get(p13, arr) }
+
+// There is NO proof of 3 < 3, so an out-of-bounds read cannot even be written:
+//
+//   p33 : LT (Succ (Succ (Succ Zero))) (Succ (Succ (Succ Zero)))
+//   fn p33() { LTS(LTS(LTS(LTZ))) }     -- REJECTED: LTZ needs LT 0 (Succ n), not LT 0 0

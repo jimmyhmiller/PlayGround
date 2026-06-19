@@ -244,6 +244,46 @@ fn leaking_an_owned_value_is_a_linearity_error() {
     assert!(check_program(&src).is_err());
 }
 
+// ---- Phase 3b: capabilities INDEXED BY PROPOSITIONS (a proof gates the op) ----
+
+const PROOFS: &str = r#"
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+-- `LT m n` : a proof that m < n
+enum LT : Nat -> Nat -> Type {
+    LTZ : {0 n : Nat} -> LT Zero (Succ n),
+    LTS : {0 m : Nat} -> {0 n : Nat} -> LT m n -> LT (Succ m) (Succ n),
+}
+
+postulate Arr : Type -> Nat -> Type
+-- reading index `i` REQUIRES a proof that i < n (erased at runtime)
+postulate get : {0 a : Type} -> {0 n : Nat} -> {0 i : Nat} -> (0 _ : LT i n) -> Arr a n -> a
+
+-- a proof 1 < 3, built by the dependent core
+p13 : LT (Succ Zero) (Succ (Succ (Succ Zero)))
+fn p13() { LTS(LTZ) }
+"#;
+
+#[test]
+fn a_proof_gates_a_memory_read() {
+    // read index 1 of a length-3 array — the proof `p13 : LT 1 3` is required
+    let src = format!(
+        "{PROOFS}\nread1 : {{0 a : Type}} -> Arr a (Succ (Succ (Succ Zero))) -> a\n\
+         fn read1(arr) {{ get(p13, arr) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn an_impossible_bound_has_no_proof() {
+    // there is no proof of 3 < 3, so the out-of-bounds witness cannot be built
+    let src = format!(
+        "{PROOFS}\np33 : LT (Succ (Succ (Succ Zero))) (Succ (Succ (Succ Zero)))\n\
+         fn p33() {{ LTS(LTS(LTS(LTZ))) }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
 #[test]
 fn parse_and_name_errors() {
     assert!(check_program("fn f( {").is_err());
