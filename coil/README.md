@@ -76,8 +76,18 @@ template substitution.
 - C interop: `(extern name :cc c [types] (-> ret))` declares a foreign
   function's convention + signature; calls are type-checked and the symbol is
   resolved at link time (libc, etc.). At the extern boundary any pointer matches
-  a pointer parameter (`void*`-style). So programs can do I/O — e.g.
-  `putchar`/`write`/`puts`.
+  a pointer parameter (`void*`-style). A trailing `...` marks a **variadic**
+  function, so `printf`/`snprintf`/`scanf` and friends are callable
+  (`(extern printf :cc c [(ptr i8) ...] (-> i32))`). Scalars, pointers, and
+  floats cross the boundary correctly; passing a *struct by value* to/from C is
+  not yet ABI-correct (pass a pointer). So programs can do I/O — e.g.
+  `putchar`/`write`/`printf`.
+- Scalars: **floats** `f32`/`f64` (literals `3.14`/`1e9`, `fadd`/`fsub`/`fmul`/
+  `fdiv`/`frem`, ordered compares `fcmp-lt…`, and `cast` among int↔float and
+  f32↔f64); a real **`bool`** (comparisons return it; `true`/`false`; short-
+  circuiting `and`/`or`/`not`); and **bitwise/shift** ops on integers
+  (`iand`/`ior`/`ixor`/`ishl`/`ishr` — arithmetic shift for signed, logical for
+  unsigned — and `inot`).
 - C types: **arbitrary-width integers** `iN`/`uN` for any `N` (Zig-style: `u2`,
   `i7`, `u23`, `i64`) with real signed/unsigned semantics (sext vs zext, sdiv vs
   udiv, signed vs unsigned compares; mixing widths or signedness is a type
@@ -168,7 +178,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 123 tests (build + run native exes)
+cargo test                                     # 141 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
