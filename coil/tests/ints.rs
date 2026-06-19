@@ -1,0 +1,125 @@
+//! Arbitrary-width integers (Zig-style uN/iN) and signed/unsigned semantics.
+
+mod common;
+use common::build_and_run;
+
+#[test]
+fn arbitrary_widths_truncate() {
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (cast :i64 (cast :u2 7)))"), 3); // 7 mod 4
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (cast :i64 (cast :u7 200)))"), 72); // 200 mod 128
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (cast :i64 (cast :u23 42)))"), 42);
+}
+
+#[test]
+fn unsigned_vs_signed_compare() {
+    // 200 is > 100 as u8, but (= -56) < 100 as i8.
+    let u = "(defn main [] (-> :i64) (if (icmp-gt (cast :u8 200) (cast :u8 100)) 42 0))";
+    let s = "(defn main [] (-> :i64) (if (icmp-gt (cast :i8 200) (cast :i8 100)) 42 0))";
+    assert_eq!(build_and_run(u), 42);
+    assert_eq!(build_and_run(s), 0);
+}
+
+#[test]
+fn unsigned_vs_signed_divide() {
+    // 200/50 = 4 unsigned; signed (200 = -56) gives a different result.
+    let u = "(defn main [] (-> :i64) (cast :i64 (idiv (cast :u8 200) (cast :u8 50))))";
+    assert_eq!(build_and_run(u), 4);
+}
+
+#[test]
+fn zero_extend_for_unsigned() {
+    // u8 100 widened to i64 zero-extends to 100.
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (cast :i64 (cast :u8 100)))"), 100);
+}
+
+#[test]
+fn arbitrary_width_struct_field() {
+    let src = r#"
+        (defstruct Bits [(small :u12) (big :i64)])
+        (defn main [] (-> :i64)
+          (let [p (alloc-stack Bits)]
+            (store! (field p small) (cast :u12 40))
+            (store! (field p big) 2)
+            (iadd (cast :i64 (load (field p small))) (load (field p big)))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn rejects_mixed_signedness() {
+    let src = "(defn main [] (-> :i64) (iadd (cast :u8 1) (cast :i8 1)))";
+    assert!(coil::check_source(src).unwrap_err().contains("mixed signedness"));
+}
+
+#[test]
+fn rejects_mixed_width() {
+    // Two *concrete* widths: a literal would just adopt the other's type, so
+    // this uses casts on both sides to force a genuine mismatch.
+    let src = "(defn main [] (-> :i64) (iadd (cast :i32 1) (cast :i64 2)))";
+    assert!(coil::check_source(src).unwrap_err().contains("mixed widths"));
+}
+
+// --- bidirectional literal inference ----------------------------------------
+
+#[test]
+fn literal_adopts_operand_width() {
+    // `x : u8`; the bare `1` is inferred as u8 (no cast needed). Result 41 fits.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [x (cast :u8 41)]
+            (cast :i64 (iadd x 1))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_stored_into_typed_pointer() {
+    // (store! p 42) into a (ptr u8) — the literal adopts u8, no (cast :u8 ...).
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc-stack :u8)]
+            (store! p 42)
+            (cast :i64 (load p))))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_from_return_type() {
+    // The function returns u8; the body literal is coerced to u8 at the boundary.
+    let src = r#"
+        (defn answer [] (-> :u8) 42)
+        (defn main [] (-> :i64) (cast :i64 (answer)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_through_if_branches() {
+    // One branch is `(cast :u8 ...)`, the other a bare literal that adopts u8.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (cast :i64 (if 1 (cast :u8 42) 0)))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn literal_inferred_as_call_argument() {
+    let src = r#"
+        (defn take :cc c [(x :u8)] (-> :i64) (cast :i64 x))
+        (defn main [] (-> :i64) (take 42))
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn out_of_range_literal_is_rejected() {
+    // 300 doesn't fit in u8 — even with inference, that's a compile error.
+    let src = r#"
+        (defn main [] (-> :i64)
+          (let [p (alloc-stack :u8)] (store! p 300) (cast :i64 (load p))))
+    "#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("does not fit in u8"), "got: {err}");
+}

@@ -1,0 +1,15 @@
+; Full C interop: receive argc/argv and print each argument with puts.
+; argv is a char** -> (ptr (ptr i8)); argv[i] is a char* -> (ptr i8).
+;   coil build examples/args.coil -o /tmp/args && /tmp/args one two three
+
+(extern puts :cc c [(ptr i8)] (-> :i32))   ; int puts(const char*)
+
+(defn each [(i :i64) (argc :i64) (argv (ptr (ptr i8)))] (-> :i64)
+  (if (icmp-ge i argc)
+      0
+      (do (puts (load (index argv i)))         ; puts(argv[i])
+          (each (iadd i 1) argc argv))))
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (do (each 0 (cast :i64 argc) argv)            ; widen argc i32 -> i64
+      0))

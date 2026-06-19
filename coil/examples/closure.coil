@@ -1,0 +1,52 @@
+; Closures with manual memory. A closure = { code pointer, environment pointer }.
+; The environment is a struct on the heap; the env pointer is type-erased to
+; (ptr i8) so heterogeneous closures share ONE Closure type and ONE generic
+; `apply`. You allocate the env + closure, and you free them. No GC.
+;   coil run examples/closure.coil; echo $?   => 42
+
+(defstruct Closure
+  [(code (fnptr c [(ptr i8) :i64] :i64))   ; code(env, x) -> i64
+   (env  (ptr i8))])                        ; type-erased captured state
+
+; ---- an adder: captures n, computes n + x ----
+(defstruct AdderEnv [(n :i64)])
+(defn adder-code [(env (ptr i8)) (x :i64)] (-> :i64)
+  (iadd (load (field (cast (ptr AdderEnv) env) n)) x))
+
+(defn make-adder [(n :i64)] (-> (ptr Closure))
+  (let [e (alloc-heap AdderEnv)
+        c (alloc-heap Closure)]
+    (store! (field e n) n)
+    (store! (field c code) (fnptr-of adder-code))
+    (store! (field c env) (cast (ptr i8) e))
+    c))
+
+; ---- a multiplier: captures k, computes k * x (different env, same Closure) ----
+(defstruct MulEnv [(k :i64)])
+(defn mul-code [(env (ptr i8)) (x :i64)] (-> :i64)
+  (imul (load (field (cast (ptr MulEnv) env) k)) x))
+
+(defn make-mul [(k :i64)] (-> (ptr Closure))
+  (let [e (alloc-heap MulEnv)
+        c (alloc-heap Closure)]
+    (store! (field e k) k)
+    (store! (field c code) (fnptr-of mul-code))
+    (store! (field c env) (cast (ptr i8) e))
+    c))
+
+; one generic apply works for ANY closure
+(defn apply [(c (ptr Closure)) (x :i64)] (-> :i64)
+  (call-ptr (load (field c code)) (load (field c env)) x))
+
+(defn free-closure [(c (ptr Closure))] (-> :i64)
+  (do (free (load (field c env)))    ; free the captured environment
+      (free c)))                      ; free the closure itself
+
+(defn main [] (-> :i64)
+  (let [add5 (make-adder 5)
+        mul3 (make-mul 3)]
+    (let [a (apply add5 37)      ; 5 + 37 = 42
+          b (apply mul3 14)]     ; 3 * 14 = 42
+      (free-closure add5)
+      (free-closure mul3)
+      (iadd a (isub b 42)))))    ; 42 + (42 - 42) = 42

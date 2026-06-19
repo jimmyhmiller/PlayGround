@@ -1,0 +1,34 @@
+; A convention LLVM's calling-convention enum cannot express: integer args are
+; pinned to registers the SysV/AAPCS64 C conventions would not use, and
+; `:lower shim` makes Coil realize it with a naked trampoline + register-
+; constrained call sites.
+;   coil examples/shim.coil            =>  42
+;   coil --emit-ir examples/shim.coil  =>  see the trampoline + inline asm
+;
+; The register names are load-bearing for a shim, so they must be valid for the
+; target architecture. We pick them per-arch from `target-arch` (a compile-time
+; string), exotic enough that swapping arg order would change the result:
+;   x86_64 : args in rax/rdx (not the SysV rdi/rsi), result in rax
+;   aarch64: args in x9/x10  (not the AAPCS64 x0/x1), result in x9
+
+(defmacro def-reg2 [name]
+  (if (= target-arch "x86_64")
+      `(defcc ~name
+         :params [rax rdx]
+         :ret rax
+         :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11]
+         :lower shim)
+      `(defcc ~name
+         :params [x9 x10]
+         :ret x9
+         :clobber [x9 x10 x11 x12 x13 x14 x15]
+         :lower shim)))
+
+(def-reg2 reg2)
+
+(defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64)
+  (isub a b))
+
+(defn main [] (-> :i64)
+  (let [x (iadd 40 10)]   ; 50, computed so register placement is real
+    (sub2 x 8)))          ; 50 - 8 = 42  (swap the arg registers and you'd get -42)

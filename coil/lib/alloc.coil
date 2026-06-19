@@ -1,0 +1,100 @@
+; Zig-style allocators: an allocator is a VALUE (a vtable struct) threaded
+; explicitly. There is no ambient heap -- a function that allocates *takes* an
+; Allocator, so allocation is visible in its type. Built entirely in Coil; the
+; compiler has no allocator concept.
+;
+; The vtable is alignment-aware and carries the size+alignment back to `free`
+; (so bump/pool allocators can reclaim precisely), mirroring Zig's interface:
+;   alloc  (ctx, len, align)            -> (Option bytes)   None = out of memory
+;   resize (ctx, ptr, old, new, align)  -> (Option bytes)   None = couldn't grow
+;   free   (ctx, ptr, len, align)       -> _
+; Failure is a sum type (Option), never a null sentinel.
+
+(include "result.coil")     ; resolved relative to this file (lib/)
+
+(extern malloc  :cc c [:i64] (-> (ptr i8)))            ; void* malloc(size_t)
+(extern realloc :cc c [(ptr i8) :i64] (-> (ptr i8)))   ; void* realloc(void*, size_t)
+
+(defstruct Allocator
+  [(alloc  (fnptr c [(ptr i8) :i64 :i64] (Option (ptr i8))))
+   (resize (fnptr c [(ptr i8) (ptr i8) :i64 :i64 :i64] (Option (ptr i8))))
+   (free   (fnptr c [(ptr i8) (ptr i8) :i64 :i64] :i64))
+   (ctx    (ptr i8))])
+
+; ---- raw, byte-level interface --------------------------------------------
+(defn raw-alloc [(a (ptr Allocator)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (call-ptr (load (field a alloc)) (load (field a ctx)) size align))
+(defn raw-resize [(a (ptr Allocator)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (call-ptr (load (field a resize)) (load (field a ctx)) p old new align))
+(defn raw-free [(a (ptr Allocator)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64)
+  (call-ptr (load (field a free)) (load (field a ctx)) p size align))
+
+; ---- typed interface (generic; sizes/aligns itself with sizeof/alignof) ----
+; `create` and `alloc-slice` take T explicitly (it appears only in the result);
+; `destroy` infers T from its pointer argument.
+(defn create [T] [(a (ptr Allocator))] (-> (Option (ptr T)))
+  (match (raw-alloc a (sizeof T) (alignof T))
+    (None []  (None))
+    (Some [p] (Some (cast (ptr T) p)))))
+
+(defn alloc-slice [T] [(a (ptr Allocator)) (n :i64)] (-> (Option (ptr T)))
+  (match (raw-alloc a (imul n (sizeof T)) (alignof T))
+    (None []  (None))
+    (Some [p] (Some (cast (ptr T) p)))))
+
+(defn destroy [T] [(a (ptr Allocator)) (p (ptr T))] (-> :i64)
+  (raw-free a (cast (ptr i8) p) (sizeof T) (alignof T)))
+
+; `.?`-style escape hatch: take the pointer, or null on failure (Coil doesn't
+; promise memory safety, so this is a legitimate, Zig-like convenience).
+(defn unwrap-ptr [T] [(o (Option (ptr T)))] (-> (ptr T))
+  (match o (None [] (cast (ptr T) 0)) (Some [p] p)))
+
+; ---- a malloc-backed general-purpose allocator ----
+; malloc/realloc guarantee alignment up to max_align_t (16 on x86-64), which
+; covers every scalar and pointer; over-aligned requests aren't honored here.
+(defn ma-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (let [p (malloc size)]
+    (if (icmp-eq (cast :i64 p) 0) (None) (Some p))))
+(defn ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (let [q (realloc p new)]
+    (if (icmp-eq (cast :i64 q) 0) (None) (Some q))))
+(defn ma-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) (free p))
+(defn malloc-allocator [] (-> (ptr Allocator))
+  (let [a (alloc-static Allocator)]
+    (store! (field a alloc)  (fnptr-of ma-alloc))
+    (store! (field a resize) (fnptr-of ma-resize))
+    (store! (field a free)   (fnptr-of ma-free))
+    (store! (field a ctx)    (cast (ptr i8) a))
+    a))
+
+; ---- an arena (bump) allocator: alloc bumps a pointer (rounded up to the
+;      requested alignment), per-alloc free is a no-op, everything is reclaimed
+;      at once by freeing the backing block ----
+(defstruct Arena [(base (ptr i8)) (off :i64) (cap :i64)])
+(defn align-up [(x :i64) (a :i64)] (-> :i64)
+  (imul (idiv (iadd x (isub a 1)) a) a))
+(defn ar-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (let [ar (cast (ptr Arena) ctx)
+        o  (align-up (load (field ar off)) align)]
+    (if (icmp-gt (iadd o size) (load (field ar cap)))
+        (None)                                  ; arena exhausted
+        (do (store! (field ar off) (iadd o size))
+            (Some (index (load (field ar base)) o))))))     ; base + o
+(defn ar-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (None))                                         ; no in-place resize
+(defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0) ; bulk-freed
+(defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
+  (let [ar (alloc-static Arena)
+        a  (alloc-static Allocator)]
+    (store! (field ar base) (malloc cap))
+    (store! (field ar off) 0)
+    (store! (field ar cap) cap)
+    (store! (field a alloc)  (fnptr-of ar-alloc))
+    (store! (field a resize) (fnptr-of ar-resize))
+    (store! (field a free)   (fnptr-of ar-free))
+    (store! (field a ctx)    (cast (ptr i8) ar))
+    a))

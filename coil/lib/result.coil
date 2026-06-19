@@ -1,0 +1,21 @@
+; Error-handling vocabulary, shared by the allocator and IO interfaces.
+;
+;   Option T   — a value that may be absent      (None | (Some v))
+;   Result T E — a value or an error             ((Ok v) | (Err e))
+;
+; These are ordinary generic sum types; the compiler has no built-in notion of
+; them. `match` recovers the concrete instance from the scrutinee, so *consuming*
+; an Option/Result needs no annotations — and neither does *constructing* one:
+; bidirectional checking pushes the expected type into a bare `(None)`/`(Ok v)`/
+; `(Err e)` (from the function's return type, a store/branch/argument target, or
+; an enclosing constructor's field), filling even the `Result` error type that
+; `Ok` mentions in no field. Explicit `[T …]` is only needed where no expected
+; type is available (e.g. a bare `(None)` in a plain `let`).
+
+(defsum Option [T]
+  (None)
+  (Some [(val T)]))
+
+(defsum Result [T E]
+  (Ok  [(val T)])
+  (Err [(err E)]))

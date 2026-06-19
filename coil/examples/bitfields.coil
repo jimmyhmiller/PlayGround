@@ -1,0 +1,21 @@
+; Bitfields: a :layout bits struct packs sub-byte fields into one backing int.
+; Fields are accessed by value with get/set! (bits have no address), and each
+; field reads/writes as its uN type -- composing with the arbitrary-width ints.
+;   coil run examples/bitfields.coil; echo $?   => 42
+
+; An RGB565 colour packed into 16 bits.
+(defstruct Rgb565 :layout bits :backing :i16
+  [(b :bits 5)     ; bits 0-4
+   (g :bits 6)     ; bits 5-10
+   (r :bits 5)])   ; bits 11-15
+
+(static-assert (icmp-eq (sizeof Rgb565) 2) "RGB565 is exactly 16 bits")
+
+(defn main [] (-> :i64)
+  (let [c (alloc-stack Rgb565)]
+    (set! c r (cast :u5 20))
+    (set! c g (cast :u6 10))     ; setting g must not disturb r
+    (set! c b (cast :u5 12))
+    (iadd (imul (cast :i64 (get c r)) 1)    ; 20
+          (iadd (cast :i64 (get c g))       ; 10
+                (cast :i64 (get c b))))))    ; 12  -> 42

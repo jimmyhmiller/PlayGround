@@ -1,0 +1,15 @@
+; Macros branch on the target. `target-arch` is a compile-time string, so a macro
+; can stamp out a different `defcc` per architecture. (Here the conventions are
+; `:native`, so the register lists are informational; the *selection* is the
+; point — a `:shim` convention would make the registers load-bearing.)
+;   coil run examples/per-arch.coil; echo $?   => 42
+
+(defmacro def-arch-cc [name]
+  (if (= target-arch "x86_64")
+      `(defcc ~name :params [rax rdx] :ret rax :clobber [rax rdx rcx] :native fast)
+      `(defcc ~name :params [x0  x1 ] :ret x0  :clobber [x0  x1  x2 ] :native fast)))
+
+(def-arch-cc platform-fast)
+
+(defn add :cc platform-fast [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+(defn main [] (-> :i64) (add 20 22))
