@@ -30,6 +30,47 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v1.2 — proofs-as-capabilities, and the intrusive DLL, in the core)
+
+Phase 3 continues — two payoffs that need *both* dependency and linearity:
+
+**Capabilities indexed by propositions** (`examples/proofs.rs.tal`). A memory op
+can demand a compile-time *proof* — the thing neither Rust nor a plain linear
+type system can express. With `LT m n` an inductive proposition (`m < n`):
+
+```rust
+postulate get : {0 a : Type} -> {0 n : Nat} -> {0 i : Nat}
+             -> (0 _ : LT i n) -> Arr a n -> a       -- reading index i needs i < n
+
+read1 : {0 a : Type} -> Arr a (Succ (Succ (Succ Zero))) -> a
+fn read1(arr) { get(p13, arr) }                       -- p13 : LT 1 3 discharges the bound
+```
+
+The proof is erased (`0`), so it's free at runtime; and an out-of-bounds read
+*cannot be written* because `LT 3 3` has no proof.
+
+**The intrusive doubly-linked list with O(1) remove** (`examples/dll.rs.tal`) —
+the headline application, in the core. `List r`/`Cursor r` are linear handles
+into a ghost region `r`; `let (a, b) = e;` threads the linear state (it compiles
+to a single eliminator on a *linear pair*):
+
+```rust
+client : {0 r : Region} -> (1 l0 : List r) -> List r
+fn client(l0) {
+    let (c, l1) = insert(l0, Succ(Zero));
+    let (v, l2) = remove(c, l1);            -- O(1) remove by handle
+    l2
+}
+```
+
+The region index makes a cursor usable only on its own list, and linearity makes
+the handles impossible to leak or use twice — so use-after-remove (`ω ⋢ 1`),
+leaks (`0 ⋢ 1`), and cross-list removal (`s ≠ r`) are all type errors. This
+needed one kernel fix: the eliminator's usage rule now consumes the scrutinee
+*once* and fires a method `ω` times only for a *recursive* family — so a linear
+pair can be destructured while a recursive eliminator stays conservative. 43 lib
+tests.
+
 ## Status (v1.1 — the memory layer in the dependent+linear core, via postulates)
 
 Phase 3 (the merge) has begun: the L3 memory primitives now live **inside** the

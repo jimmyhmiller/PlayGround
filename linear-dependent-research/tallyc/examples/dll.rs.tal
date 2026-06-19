@@ -1,0 +1,45 @@
+// PHASE 3c: regions + the intrusive doubly-linked list with O(1) remove —
+// the headline application, now in the dependent + linear core.
+//   tally lang examples/dll.rs.tal
+//
+// A `List r` / `Cursor r` are LINEAR handles into a ghost region `r`. The region
+// index makes a cursor usable only on its own list; linearity makes the handles
+// impossible to leak or use twice. `let (a, b) = e;` threads the linear state
+// (it compiles to a single eliminator on a linear pair). This is the operation
+// safe Rust cannot express — remove a node by handle in O(1), no GC, no unsafe.
+
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+enum Unit { U : Unit }
+
+postulate Region : Type
+postulate List   : Region -> Type
+postulate Cursor : Region -> Type
+
+// linear pairs: insert yields (cursor, list); remove yields (value, list)
+enum CL (r : Region) { MkCL : (1 c : Cursor r) -> (1 l : List r) -> CL r }
+enum VL (r : Region) { MkVL : Nat -> (1 l : List r) -> VL r }
+
+postulate insert : {0 r : Region} -> (1 l : List r) -> Nat -> CL r
+postulate remove : {0 r : Region} -> (1 c : Cursor r) -> (1 l : List r) -> VL r
+postulate free   : {0 r : Region} -> (1 l : List r) -> Unit
+
+// insert a node, then remove it by its cursor in O(1), returning the list.
+// ACCEPTED: every linear handle is used exactly once.
+client : {0 r : Region} -> (1 l0 : List r) -> List r
+fn client(l0) {
+    let (c, l1) = insert(l0, Succ(Zero));
+    let (v, l2) = remove(c, l1);
+    l2
+}
+
+// The safety net (copy any of these in to see it rejected):
+//
+//   -- use-after-remove: the cursor `c` is consumed twice (ω ⋢ 1)
+//   fn bad(l0) { let (c,l1)=insert(l0,Zero); let (v,l2)=remove(c,l1);
+//                let (w,l3)=remove(c,l2); l3 }
+//
+//   -- leak: returning `v` drops the linear list `l2` (0 ⋢ 1)
+//   fn bad(l0) { let (c,l1)=insert(l0,Zero); let (v,l2)=remove(c,l1); v }
+//
+//   -- cross-list: a `Cursor s` cannot remove from a `List r` (s ≠ r)
+//   fn cross(cs, lr) { remove(cs, lr) }

@@ -915,7 +915,15 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
                 res = vapp(res, si);
             }
             res = vapp(res, vscrut);
-            let u = uadd(&uscale(Mult::Omega, &umeth), &uscale(Mult::Omega, &u_scrut));
+            // usage: the scrutinee is consumed once; a method fires ω times for a
+            // RECURSIVE family (once per node) but exactly once for a non-recursive
+            // one — so a linear value can be destructured (a linear pair) while a
+            // recursive eliminator stays conservative.
+            let recursive = decl.ctors.iter().any(|c| {
+                c.args.iter().any(|(_, a)| matches!(a, Term::Data(dn, _) if *dn == *data))
+            });
+            let mscale = if recursive { Mult::Omega } else { Mult::One };
+            let u = uadd(&uscale(mscale, &umeth), &u_scrut);
             Ok((res, u))
         }
         Term::Const(c) => {
@@ -1133,6 +1141,12 @@ pub(crate) fn quote_at(lvl: usize, v: &Value) -> Term {
 /// The semantic free variable at level `lvl`.
 pub(crate) fn nvar(lvl: usize) -> Value {
     Value::VNeu(Neutral::NVar(lvl))
+}
+
+/// Lift a term by `d` (shift all free variables up). Used by the surface
+/// elaborator to build a constant motive for a non-dependent `match`.
+pub(crate) fn shift_term(d: usize, t: &Term) -> Term {
+    shift(d, 0, t)
 }
 
 /// The eliminator method telescope for `ctor`: the types of its binders (the

@@ -49,10 +49,12 @@ enum Tok {
     LBrace,
     RBrace,
     Comma,
+    Semi,
     Colon,
     Eq,
     FatArrow,
     Arrow,
+    KwLet,
     KwFn,
     KwEnum,
     KwStruct,
@@ -101,6 +103,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "enum" => Tok::KwEnum,
                 "struct" => Tok::KwStruct,
                 "match" => Tok::KwMatch,
+                "let" => Tok::KwLet,
                 "Type" => Tok::KwType,
                 "postulate" => Tok::KwPostulate,
                 _ => Tok::Ident(w.to_string()),
@@ -112,6 +115,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 '{' => Tok::LBrace,
                 '}' => Tok::RBrace,
                 ',' => Tok::Comma,
+                ';' => Tok::Semi,
                 ':' => Tok::Colon,
                 '=' => Tok::Eq,
                 _ => return Err(format!("unexpected character {c:?}")),
@@ -141,6 +145,8 @@ enum Tm {
     Var(String),
     Call(String, Vec<Tm>),
     Match(String, Vec<Arm>),
+    /// `let (a, b) = e; body` — destructure a single-constructor value
+    LetPair(Vec<String>, Box<Tm>, Box<Tm>),
 }
 
 #[derive(Clone, Debug)]
@@ -421,6 +427,23 @@ impl Parser {
     fn parse_tm(&mut self) -> Result<Tm, String> {
         match self.peek() {
             Some(Tok::KwMatch) => self.parse_match(),
+            Some(Tok::KwLet) => {
+                self.next();
+                self.eat(&Tok::LParen)?;
+                let mut names = Vec::new();
+                while self.peek() != Some(&Tok::RParen) {
+                    names.push(self.ident()?);
+                    if self.peek() == Some(&Tok::Comma) {
+                        self.next();
+                    }
+                }
+                self.eat(&Tok::RParen)?;
+                self.eat(&Tok::Eq)?;
+                let rhs = self.parse_call()?;
+                self.eat(&Tok::Semi)?;
+                let body = self.parse_tm()?;
+                Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
+            }
             _ => self.parse_call(),
         }
     }
@@ -639,6 +662,7 @@ impl Elab {
     /// Elaborate a term in CHECK mode against `expected` (a Value in `scope`).
     fn check(&self, tm: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match tm {
+            Tm::LetPair(names, e, body) => self.elab_let_pair(names, e, body, expected, cx, rec),
             Tm::Var(name) if self.ctor_has_implicits(name) => self.solve_ctor(name, &[], expected, cx, rec),
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
@@ -691,6 +715,7 @@ impl Elab {
                 self.resolve(name, eargs, &cx.names, true)
             }
             Tm::Match(_, _) => Err("nested `match` is not supported".into()),
+            Tm::LetPair(_, _, _) => Err("`let` must appear in a checked position".into()),
         }
     }
 
@@ -717,11 +742,8 @@ impl Elab {
                     Err(format!("cannot infer the type of `{name}` (Phase 2)"))
                 }
             }
-            Tm::Call(name, _) if self.def_has_implicits(name) => {
-                if let Tm::Call(n2, args) = t {
-                    return self.solve_fn_call(n2, args, None, cx, rec);
-                }
-                unreachable!()
+            Tm::Call(name, args) if self.defs.contains_key(name) => {
+                self.solve_fn_call(name, args, None, cx, rec)
             }
             _ => Err("cannot infer the type of this argument (Phase 2)".into()),
         }
@@ -825,9 +847,16 @@ impl Elab {
             if flags[pos] {
                 env.push(dep::nvar(HOLE_BASE + pos)); // a hole, solved below
             } else {
-                let (arg_tm, arg_ty) = self.infer_arg(&user_args[next_user], cx, rec)?;
+                // try to infer the arg's type (to pin implicits); else check it
+                // against the (current) domain — for args that pin nothing
+                let arg_tm = match self.infer_arg(&user_args[next_user], cx, rec) {
+                    Ok((arg_tm, arg_ty)) => {
+                        solve(&mut holes, &dom_val, &arg_ty);
+                        arg_tm
+                    }
+                    Err(_) => self.check(&user_args[next_user], &dom_val, cx, rec)?,
+                };
                 next_user += 1;
-                solve(&mut holes, &dom_val, &arg_ty); // solve the implicits this arg pins down
                 let v = self.eval(n, &arg_tm);
                 env.push(v);
                 terms[pos] = Some(arg_tm);
@@ -862,6 +891,95 @@ impl Elab {
             .map(Option::unwrap)
             .fold(head, |f, a| Term::App(Box::new(f), Box::new(a)));
         Ok((term, result_ty))
+    }
+
+    /// `let (a, b) = e; body` — destructure a single-constructor value `e` by
+    /// eliminating it (a *linear* pair is consumed once and its fields bound at
+    /// their declared multiplicities).
+    fn elab_let_pair(&self, names: &[String], e: &Tm, body: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let (e_term, e_ty) = self.infer_arg(e, cx, rec)?;
+        let (dname, dargs) = match &e_ty {
+            Value::VData(d, a) => (d.clone(), a.clone()),
+            _ => return Err("`let (..)` requires a value of a datatype".into()),
+        };
+        let decl = self.rc.data(&dname).unwrap().clone();
+        if decl.ctors.len() != 1 {
+            return Err(format!(
+                "`let (..)` needs a single-constructor type, but `{dname}` has {} constructors",
+                decl.ctors.len()
+            ));
+        }
+        let arm = Arm { ctor: decl.ctors[0].name.clone(), binders: names.to_vec(), body: body.clone() };
+        self.elab_nested_match(&e_term, &dname, &dargs, std::slice::from_ref(&arm), expected, cx, rec)
+    }
+
+    /// A `match`/`let` in CHECK mode (the motive is the constant expected type —
+    /// a non-dependent elimination). The scrutinee is an arbitrary elaborated term.
+    fn elab_nested_match(&self, e_term: &Term, dname: &str, dargs: &[Value], arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let decl = self.rc.data(dname).unwrap().clone();
+        let np = decl.params.len();
+        let ni = decl.indices.len();
+        let n = cx.len();
+        let sparam_tms: Vec<Term> = dargs[..np].iter().map(|v| dep::quote_at(n, v)).collect();
+
+        // constant motive: λ indices. λ _. expected
+        let exp_tm = dep::quote_at(n, expected);
+        let mut motive = dep::shift_term(ni + 1, &exp_tm);
+        for _ in 0..(ni + 1) {
+            motive = Term::Lam(Box::new(motive));
+        }
+        let motive_tm = motive.clone();
+
+        let mut methods = Vec::with_capacity(decl.ctors.len());
+        for ctor in &decl.ctors {
+            let info = &self.ctor_info[&ctor.name];
+            let nargs = ctor.args.len();
+            let rec_fields: Vec<usize> = ctor
+                .args
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, a))| matches!(a, Term::Data(d, _) if d == dname))
+                .map(|(i, _)| i)
+                .collect();
+            let arm = arms
+                .iter()
+                .find(|a| a.ctor == ctor.name)
+                .ok_or_else(|| format!("missing a case for `{}`", ctor.name))?;
+            let nexplicit = info.arg_implicit.iter().filter(|b| !**b).count();
+            if arm.binders.len() != nexplicit {
+                return Err(format!(
+                    "pattern `{}`: expected {nexplicit} binder(s), got {}",
+                    ctor.name,
+                    arm.binders.len()
+                ));
+            }
+            let mut binder_names = Vec::new();
+            let mut next_pat = 0;
+            for j in 0..nargs {
+                if info.arg_implicit[j] {
+                    binder_names.push(info.arg_names[j].clone().unwrap_or_else(|| format!("$imp{j}")));
+                } else {
+                    binder_names.push(arm.binders[next_pat].clone());
+                    next_pat += 1;
+                }
+            }
+            for kk in 0..rec_fields.len() {
+                binder_names.push(format!("$ih{kk}"));
+            }
+            let (binder_tys, _) =
+                dep::elim_method_telescope(&self.rc, dname, &sparam_tms, &motive_tm, &ctor.name)?;
+            let mut arm_cx = cx.clone();
+            for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
+                let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
+                arm_cx.push(bn.clone(), v);
+            }
+            let mut body = self.check(&arm.body, expected, &arm_cx, rec)?;
+            for _ in 0..(nargs + rec_fields.len()) {
+                body = Term::Lam(Box::new(body));
+            }
+            methods.push(body);
+        }
+        Ok(Term::Elim(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
     }
 }
 
@@ -1258,20 +1376,17 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 let ctor = Constructor { name: name.clone(), args, idxs: vec![] };
                 sig.datas.push(DataDecl { name: name.clone(), params: kparams, indices: vec![], ctors: vec![ctor] });
             }
+            // postulates (opaque typed constants — the memory primitives, etc.),
+            // processed in source order so each sees the earlier declarations
+            Item::Postulate(name, pty) => {
+                let ty_term = elab.elab_ty(pty, &[])?;
+                let (arrows, _) = peel_arrows(pty);
+                let flags: Vec<bool> = arrows.iter().map(|(_, i, _, _)| *i).collect();
+                elab.defs.insert(name.clone(), (Term::Const(name.clone()), ty_term.clone()));
+                elab.def_implicit.insert(name.clone(), flags);
+                sig.postulates.push((name.clone(), ty_term));
+            }
             _ => {}
-        }
-    }
-    elab.rc = Rc::new(sig.clone());
-
-    // pass C.5: postulates (opaque typed constants — the memory primitives, etc.)
-    for it in &items {
-        if let Item::Postulate(name, pty) = it {
-            let ty_term = elab.elab_ty(pty, &[])?;
-            let (arrows, _) = peel_arrows(pty);
-            let flags: Vec<bool> = arrows.iter().map(|(_, i, _, _)| *i).collect();
-            elab.defs.insert(name.clone(), (Term::Const(name.clone()), ty_term.clone()));
-            elab.def_implicit.insert(name.clone(), flags);
-            sig.postulates.push((name.clone(), ty_term));
         }
     }
     elab.rc = Rc::new(sig);

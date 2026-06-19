@@ -284,6 +284,65 @@ fn an_impossible_bound_has_no_proof() {
     assert!(check_program(&src).is_err());
 }
 
+// ---- Phase 3c: regions + the intrusive doubly-linked list (O(1) remove) ----
+
+const DLL: &str = r#"
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+
+postulate Region : Type
+postulate List   : Region -> Type
+postulate Cursor : Region -> Type
+
+enum CL (r : Region) { MkCL : (1 c : Cursor r) -> (1 l : List r) -> CL r }
+enum VL (r : Region) { MkVL : Nat -> (1 l : List r) -> VL r }
+
+postulate insert : {0 r : Region} -> (1 l : List r) -> Nat -> CL r
+postulate remove : {0 r : Region} -> (1 c : Cursor r) -> (1 l : List r) -> VL r
+postulate free   : {0 r : Region} -> (1 l : List r) -> Unit
+enum Unit { U : Unit }
+"#;
+
+#[test]
+fn intrusive_list_insert_remove_is_accepted() {
+    // insert a node, remove it by its cursor (O(1)), return the list
+    let src = format!(
+        "{DLL}\nclient : {{0 r : Region}} -> (1 l0 : List r) -> List r\n\
+         fn client(l0) {{ let (c, l1) = insert(l0, Succ(Zero)); let (v, l2) = remove(c, l1); l2 }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn double_remove_by_cursor_is_rejected() {
+    // using the cursor `c` twice is a use-after-remove (ω ⋢ 1)
+    let src = format!(
+        "{DLL}\nbad : {{0 r : Region}} -> (1 l0 : List r) -> List r\n\
+         fn bad(l0) {{ let (c, l1) = insert(l0, Succ(Zero)); \
+         let (v, l2) = remove(c, l1); let (w, l3) = remove(c, l2); l3 }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn leaking_the_list_is_rejected() {
+    // returning `v` drops the linear list `l2` — a leak (0 ⋢ 1)
+    let src = format!(
+        "{DLL}\nbad : {{0 r : Region}} -> (1 l0 : List r) -> Nat\n\
+         fn bad(l0) {{ let (c, l1) = insert(l0, Succ(Zero)); let (v, l2) = remove(c, l1); v }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn cross_region_remove_is_rejected() {
+    // a cursor from region `s` cannot remove from a list in region `r`
+    let src = format!(
+        "{DLL}\ncross : {{0 r : Region}} -> {{0 s : Region}} -> (1 cs : Cursor s) -> (1 lr : List r) -> VL r\n\
+         fn cross(cs, lr) {{ remove(cs, lr) }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
 #[test]
 fn parse_and_name_errors() {
     assert!(check_program("fn f( {").is_err());

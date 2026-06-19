@@ -372,17 +372,27 @@ this is the Rust-flavored skin over them.
   a callee's implicits from its explicit arguments' types — recursive calls
   already work as the IH), nested/deep patterns with absurd-case elimination,
   and an occurs/scope check in the unifier.
-- **Phase 3 — the merge ◑** (begun). The L3 memory primitives now live inside
-  the dependent+linear calculus as `postulate`s (opaque typed constants — kernel
-  `Term::Const`/`Neutral::NConst`, looked up in the `Signature`):
-  `Own : Type -> Type`, `alloc : {0 a} -> a -> Own a`,
-  `free : {0 a} -> (1 o : Own a) -> Unit`, etc. Memory safety is **not** a
-  separate analysis — it falls out of QTT linearity: an `Own` taken at
-  multiplicity `1` makes leaking (`0 ⋢ 1`) and use-after-free (`ω ⋢ 1`) type
-  errors, and the kernel re-checks the elaborated term
-  (`tallyc/examples/memory.rs.tal`). *Remaining:* capabilities **indexed by
-  propositions** so a proof can gate read/write (`docs/07` §6, `docs/09` §3),
-  and regions/`Ptr`/cursors (the O(1) intrusive DLL of `docs/02`/`08`).
+- **Phase 3 — the merge ◑** (largely done). The L3 memory primitives now live
+  inside the dependent+linear calculus as `postulate`s (opaque typed constants —
+  kernel `Term::Const`/`Neutral::NConst`, looked up in the `Signature`). Memory
+  safety is **not** a separate analysis — it falls out of QTT linearity. Done:
+  - **basic capabilities** (`Own`/`alloc`/`free`): an `Own` at multiplicity `1`
+    makes leaking (`0 ⋢ 1`) and use-after-free (`ω ⋢ 1`) type errors
+    (`tallyc/examples/memory.rs.tal`);
+  - **capabilities indexed by propositions**: a bounds-checked read
+    `get : {0 a}{0 n}{0 i} -> (0 _ : LT i n) -> Arr a n -> a` demands a proof
+    `LT i n`, erased at runtime; the impossible bound has no proof
+    (`tallyc/examples/proofs.rs.tal`);
+  - **regions + the intrusive DLL with O(1) remove**: `List r`/`Cursor r` linear
+    handles into a ghost region; `let (a,b)=e;` threads linear state (compiled to
+    one eliminator on a linear pair); use-after-remove / leak / cross-list are
+    type errors (`tallyc/examples/dll.rs.tal`). Needed a kernel fix to the
+    eliminator usage rule (scrutinee consumed once; methods `ω` only for
+    recursive families) so linear pairs can be destructured.
+
+  *Remaining:* `Ptr`/`View` borrow primitives and strong update, the existential
+  region introduction (`new` producing a fresh region), and a `let`/nested-match
+  story beyond single-constructor destructuring.
 
 ---
 
