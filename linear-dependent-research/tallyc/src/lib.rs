@@ -17,6 +17,9 @@ pub mod surface;
 #[cfg(feature = "llvm")]
 pub mod codegen;
 
+#[cfg(feature = "llvm")]
+pub mod dep_codegen;
+
 /// Parse + check a source string. `Ok(())` means it is accepted; `Err` carries
 /// either a parse error (one string) or the list of type/permission diagnostics.
 pub fn check_str(src: &str) -> Result<(), Vec<String>> {

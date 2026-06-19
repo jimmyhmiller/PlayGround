@@ -1,0 +1,30 @@
+// END TO END: dependent source -> QTT type-check -> NATIVE code -> run.
+//   tally run examples/nat.run.tal      (needs --features llvm)
+//
+// `add` and `mul` are total functions defined by `match` (which compiles to the
+// dependent eliminator). The eliminator is lowered to a real native LOOP — the
+// recursion runs in machine code, not in the type checker's evaluator.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+add : Nat -> Nat -> Nat
+fn add(m, n) {
+    match m {
+        Zero    => n,
+        Succ(k) => Succ(add(k, n)),
+    }
+}
+
+mul : Nat -> Nat -> Nat
+fn mul(m, n) {
+    match m {
+        Zero    => Zero,
+        Succ(k) => add(n, mul(k, n)),
+    }
+}
+
+// (3 + 4) * 2 = 14
+main : Nat
+fn main() {
+    mul(add(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Succ(Zero))))), Succ(Succ(Zero)))
+}

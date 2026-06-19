@@ -30,6 +30,30 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v1.3 — END TO END: dependent source → native code → run)
+
+The dependent front end and the native backend are now connected. `tally run
+<file>` (with `--features llvm`) type-checks a program through the QTT kernel and
+**compiles `main` to native code via LLVM, then JIT-executes it** — no
+intermediate normalization, so the recursion runs in machine code:
+
+```
+$ tally run examples/nat.run.tal
+examples/nat.run.tal: type-checks, compiled to native, ran → 14
+```
+
+`src/dep_codegen.rs` lowers a checked `dep::Term`: types/indices/proofs are
+**erased** (they never reach a runtime position), applications are β-reduced, and
+**each dependent eliminator becomes a real LLVM loop** (`elim z s n` ↦
+`acc = z; for k in 0..n { acc = s k acc }`). So `add`/`mul`, defined by `match`
+(which compiles to the eliminator), run as native loops — `(3+4)*2 = 14` is
+computed by generated machine code, not by the type checker's evaluator.
+
+Scope (first slice): `Nat`-like datatypes as `i64`. General (boxed) datatypes
+and linking the memory postulates to libc are the remaining backend work — see
+the gap analysis in the research notes. `cargo test --features llvm`: 50 tests
+(incl. `nat_add_runs_natively`, `nat_mul_runs_natively`).
+
 ## Status (v1.2 — proofs-as-capabilities, and the intrusive DLL, in the core)
 
 Phase 3 continues — two payoffs that need *both* dependency and linearity:
