@@ -810,6 +810,8 @@ pub fn pretty(t: &Term) -> String {
             }
             s
         }
+        Term::Const(c) => c.clone(),
+        Term::App(f, a) => format!("{} {}", pretty(f), atom(a)),
         Term::Lam(_) => "<fun>".into(),
         Term::Pi(_, _, _) => "<pi>".into(),
         other => format!("{other:?}"),

@@ -95,6 +95,7 @@ fn ctor(name: &str, args: Vec<(crate::mult::Mult, Term)>, idxs: Vec<Term>) -> Co
 
 fn nat_sig() -> Signature {
     Signature {
+        postulates: vec![],
         datas: vec![DataDecl {
             name: "N".into(),
             params: vec![],
@@ -151,6 +152,7 @@ fn nat_as_a_user_datatype_with_generic_elim() {
 
 fn vec_sig() -> Signature {
     Signature {
+        postulates: vec![],
         datas: vec![DataDecl {
             name: "Vec".into(),
             params: vec![(Zero, Type)],  // A : Type   (erased)
@@ -252,6 +254,7 @@ fn append_via_generic_elim_tracks_length_and_computes() {
 
 fn fin_sig() -> Signature {
     Signature {
+        postulates: vec![],
         datas: vec![DataDecl {
             name: "Fin".into(),
             params: vec![],
@@ -303,6 +306,7 @@ fn fin_is_a_recursive_indexed_family() {
 fn strict_positivity_is_enforced() {
     // a non-strictly-positive "Bad" with ctor  mk : (Bad → Bad) → Bad  is rejected
     let bad = Signature {
+        postulates: vec![],
         datas: vec![DataDecl {
             name: "Bad".into(),
             params: vec![],

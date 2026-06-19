@@ -205,6 +205,45 @@ fn non_structural_recursion_is_rejected() {
     assert!(check_program(&src).is_err());
 }
 
+// ---- Phase 3: the memory layer as postulates in the dependent+linear core ----
+
+const MEM: &str = r#"
+enum Unit { U : Unit }
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+enum Pair (a : Type) (b : Type) { MkPair : a -> b -> Pair a b }
+
+postulate Own   : Type -> Type
+postulate alloc : {0 a : Type} -> a -> Own a
+postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+"#;
+
+#[test]
+fn linear_memory_capability_accepts_alloc_then_free() {
+    // alloc a cell, then free it once — the Own capability is consumed exactly once
+    let src = format!("{MEM}\nroundtrip : Unit\nfn roundtrip() {{ free(alloc(Zero)) }}\n");
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+
+    // a function that consumes its owned argument exactly once
+    let src2 = format!("{MEM}\nuse_once : (1 o : Own Nat) -> Unit\nfn use_once(o) {{ free(o) }}\n");
+    assert!(check_program(&src2).is_ok(), "{:?}", check_program(&src2).err());
+}
+
+#[test]
+fn double_free_is_a_linearity_error() {
+    // using the owned `o` twice violates linearity (ω ⋢ 1) — rejected by the kernel
+    let src = format!(
+        "{MEM}\ndbl : (1 o : Own Nat) -> Pair Unit Unit\nfn dbl(o) {{ MkPair(free(o), free(o)) }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn leaking_an_owned_value_is_a_linearity_error() {
+    // dropping `o` (using it 0 times) violates linearity (0 ⋢ 1) — rejected
+    let src = format!("{MEM}\nleak : (1 o : Own Nat) -> Unit\nfn leak(o) {{ U }}\n");
+    assert!(check_program(&src).is_err());
+}
+
 #[test]
 fn parse_and_name_errors() {
     assert!(check_program("fn f( {").is_err());

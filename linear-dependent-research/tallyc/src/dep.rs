@@ -61,6 +61,10 @@ pub enum Term {
     /// `methods` is one per constructor, in declaration order. The parameters
     /// and indices are recovered from the scrutinee's type.
     Elim(String, Box<Term>, Vec<Term>, Box<Term>),
+    /// an opaque POSTULATE (a typed constant with no reduction rule), looked up
+    /// in the Signature. Used to embed the memory primitives (`Own`, `alloc`, …)
+    /// in the calculus so they are checked by the QTT core.
+    Const(String),
     Ann(Box<Term>, Box<Term>),
 }
 
@@ -91,6 +95,8 @@ pub enum Neutral {
     NNatElim(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
     /// elim stuck on a neutral scrutinee: data name, motive, methods, scrutinee.
     NElim(String, Box<Value>, Vec<Value>, Box<Neutral>),
+    /// an opaque postulate constant.
+    NConst(String),
 }
 
 #[derive(Clone)]
@@ -134,11 +140,16 @@ pub struct DataDecl {
 #[derive(Clone, Default)]
 pub struct Signature {
     pub datas: Vec<DataDecl>,
+    /// opaque postulates: a name and its (closed) type.
+    pub postulates: Vec<(String, Term)>,
 }
 
 impl Signature {
     pub(crate) fn data(&self, name: &str) -> Option<&DataDecl> {
         self.datas.iter().find(|d| d.name == name)
+    }
+    pub(crate) fn postulate(&self, name: &str) -> Option<&Term> {
+        self.postulates.iter().find(|(n, _)| n == name).map(|(_, t)| t)
     }
     pub(crate) fn ctor(&self, name: &str) -> Option<(&DataDecl, &Constructor)> {
         for d in &self.datas {
@@ -212,6 +223,7 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             let vmeth: Vec<Value> = methods.iter().map(|m| eval(sig, env, m)).collect();
             velim(sig, data, &vm, &vmeth, eval(sig, env, scrut))
         }
+        Term::Const(c) => Value::VNeu(Neutral::NConst(c.clone())),
         Term::Ann(e, _) => eval(sig, env, e),
     }
 }
@@ -371,6 +383,7 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
             methods.iter().map(|x| quote(lvl, x)).collect(),
             Box::new(quote_neu(lvl, scrut)),
         ),
+        Neutral::NConst(c) => Term::Const(c.clone()),
     }
 }
 
@@ -409,7 +422,7 @@ fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
     let go1 = |t: &Term| map_vars(t, depth + 1, f);
     match t {
         Term::Var(i) => f(*i, depth),
-        Term::Type | Term::Nat | Term::NatLit(_) | Term::Zero => t.clone(),
+        Term::Type | Term::Nat | Term::NatLit(_) | Term::Zero | Term::Const(_) => t.clone(),
         Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Lam(b) => Term::Lam(Box::new(go1(b))),
@@ -905,6 +918,14 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let u = uadd(&uscale(Mult::Omega, &umeth), &uscale(Mult::Omega, &u_scrut));
             Ok((res, u))
         }
+        Term::Const(c) => {
+            let ty = ctx
+                .sig
+                .postulate(c)
+                .ok_or_else(|| format!("unknown postulate `{c}`"))?
+                .clone();
+            Ok((eval(&ctx.sig, &[], &ty), uzero(n))) // a constant is used 0 times itself
+        }
         Term::Ann(e, ty) => {
             check_type(ctx, ty)?;
             let vty = eval(&ctx.sig, &ctx.env(), ty);
@@ -1044,6 +1065,11 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
             }
             let _ = &mut env_for_idx;
         }
+    }
+    // postulate types must be well-formed types
+    let pctx = Ctx::with_sig(rc.clone());
+    for (name, ty) in &sig.postulates {
+        check_type(&pctx, ty).map_err(|e| format!("postulate {name}: {e}"))?;
     }
     Ok(())
 }

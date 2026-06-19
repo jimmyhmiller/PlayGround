@@ -372,10 +372,17 @@ this is the Rust-flavored skin over them.
   a callee's implicits from its explicit arguments' types — recursive calls
   already work as the IH), nested/deep patterns with absurd-case elimination,
   and an occurs/scope check in the unifier.
-- **Phase 3 — the merge.** Fold the low-level memory layer (`Own`/`Ptr`/
-  regions/cursors, today in `check.rs`) into this one front end, with
-  capabilities **indexed by propositions** so proofs constrain memory operations
-  (`docs/07` §6, `docs/09` §3) — the dependent + linear payoff.
+- **Phase 3 — the merge ◑** (begun). The L3 memory primitives now live inside
+  the dependent+linear calculus as `postulate`s (opaque typed constants — kernel
+  `Term::Const`/`Neutral::NConst`, looked up in the `Signature`):
+  `Own : Type -> Type`, `alloc : {0 a} -> a -> Own a`,
+  `free : {0 a} -> (1 o : Own a) -> Unit`, etc. Memory safety is **not** a
+  separate analysis — it falls out of QTT linearity: an `Own` taken at
+  multiplicity `1` makes leaking (`0 ⋢ 1`) and use-after-free (`ω ⋢ 1`) type
+  errors, and the kernel re-checks the elaborated term
+  (`tallyc/examples/memory.rs.tal`). *Remaining:* capabilities **indexed by
+  propositions** so a proof can gate read/write (`docs/07` §6, `docs/09` §3),
+  and regions/`Ptr`/cursors (the O(1) intrusive DLL of `docs/02`/`08`).
 
 ---
 

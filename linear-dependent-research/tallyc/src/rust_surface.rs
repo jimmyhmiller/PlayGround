@@ -58,6 +58,7 @@ enum Tok {
     KwStruct,
     KwMatch,
     KwType,
+    KwPostulate,
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -101,6 +102,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "struct" => Tok::KwStruct,
                 "match" => Tok::KwMatch,
                 "Type" => Tok::KwType,
+                "postulate" => Tok::KwPostulate,
                 _ => Tok::Ident(w.to_string()),
             });
         } else {
@@ -171,6 +173,7 @@ enum Item {
         params: Vec<Binder>,
         fields: Vec<(String, Ty)>,
     },
+    Postulate(String, Ty),
 }
 
 // ===========================================================================
@@ -219,6 +222,13 @@ impl Parser {
             Some(Tok::KwEnum) => self.parse_enum(),
             Some(Tok::KwStruct) => self.parse_struct(),
             Some(Tok::KwFn) => self.parse_fn(),
+            Some(Tok::KwPostulate) => {
+                self.next();
+                let name = self.ident()?;
+                self.eat(&Tok::Colon)?;
+                let ty = self.parse_ty()?;
+                Ok(Item::Postulate(name, ty))
+            }
             Some(Tok::Ident(_)) => {
                 let name = self.ident()?;
                 self.eat(&Tok::Colon)?;
@@ -312,6 +322,11 @@ impl Parser {
     fn parse_ty_app(&mut self) -> Result<Ty, String> {
         let mut e = self.parse_ty_atom()?;
         while matches!(self.peek(), Some(Tok::Ident(_)) | Some(Tok::LParen) | Some(Tok::KwType)) {
+            // stop before a new top-level signature `Ident :` (no statement
+            // terminator, so an application would otherwise swallow it)
+            if matches!(self.peek(), Some(Tok::Ident(_))) && self.toks.get(self.pos + 1) == Some(&Tok::Colon) {
+                break;
+            }
             let arg = self.parse_ty_atom()?;
             e = Ty::App(Box::new(e), Box::new(arg));
         }
@@ -687,6 +702,14 @@ impl Elab {
                 if let Some(ty) = cx.var_type(name) {
                     let i = cx.debruijn(name).unwrap();
                     Ok((Term::Var(i), ty))
+                } else if self.ctor_arity.get(name) == Some(&0) && !self.ctor_has_implicits(name) {
+                    // a nullary constructor of a parameterless family (e.g. Zero)
+                    let ci = &self.ctor_info[name];
+                    let decl = self.rc.data(&ci.data).unwrap();
+                    let ctor = decl.ctors.iter().find(|c| &c.name == name).unwrap();
+                    let idxv: Vec<Value> =
+                        ctor.idxs.iter().map(|t| dep::eval_rc(&self.rc, &[], t)).collect();
+                    Ok((Term::Constr(name.clone(), vec![]), Value::VData(ci.data.clone(), idxv)))
                 } else if let Some((body, ty)) = self.defs.get(name) {
                     let head = Term::Ann(Box::new(body.clone()), Box::new(ty.clone()));
                     Ok((head, dep::eval_rc(&self.rc, &[], ty)))
@@ -867,7 +890,17 @@ fn solve(holes: &mut Vec<Option<Value>>, pat: &Value, target: &Value) {
             }
         }
         (Value::VSuc(a), Value::VSuc(b)) => solve(holes, a, b),
+        (Value::VNeu(n1), Value::VNeu(n2)) => solve_neu(holes, n1, n2),
         _ => {}
+    }
+}
+
+/// Descend into a neutral spine (e.g. `Own ?a` vs `Own Nat`) to bind holes.
+fn solve_neu(holes: &mut Vec<Option<Value>>, n1: &crate::dep::Neutral, n2: &crate::dep::Neutral) {
+    use crate::dep::Neutral::NApp;
+    if let (NApp(f1, a1), NApp(f2, a2)) = (n1, n2) {
+        solve_neu(holes, f1, f2);
+        solve(holes, a1, a2);
     }
 }
 
@@ -1226,6 +1259,19 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 sig.datas.push(DataDecl { name: name.clone(), params: kparams, indices: vec![], ctors: vec![ctor] });
             }
             _ => {}
+        }
+    }
+    elab.rc = Rc::new(sig.clone());
+
+    // pass C.5: postulates (opaque typed constants — the memory primitives, etc.)
+    for it in &items {
+        if let Item::Postulate(name, pty) = it {
+            let ty_term = elab.elab_ty(pty, &[])?;
+            let (arrows, _) = peel_arrows(pty);
+            let flags: Vec<bool> = arrows.iter().map(|(_, i, _, _)| *i).collect();
+            elab.defs.insert(name.clone(), (Term::Const(name.clone()), ty_term.clone()));
+            elab.def_implicit.insert(name.clone(), flags);
+            sig.postulates.push((name.clone(), ty_term));
         }
     }
     elab.rc = Rc::new(sig);

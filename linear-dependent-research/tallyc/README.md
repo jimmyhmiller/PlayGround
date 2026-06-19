@@ -30,6 +30,37 @@ src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
   (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
+## Status (v1.1 — the memory layer in the dependent+linear core, via postulates)
+
+Phase 3 (the merge) has begun: the L3 memory primitives now live **inside** the
+dependent+linear calculus as `postulate`s — opaque typed constants checked by
+the same QTT core as everything else. Memory safety is not a separate analysis;
+it falls out of **linearity**.
+
+```rust
+postulate Own   : Type -> Type
+postulate alloc : {0 a : Type} -> a -> Own a
+postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+
+main : Unit
+fn main() { free(alloc(Zero)) }            -- accepted; `a` inferred at both calls
+```
+
+An owning `Own a` is taken at multiplicity `1` (exactly once), so the QTT checker
+rejects the unsafe programs with no bespoke memory analysis:
+
+| program | verdict | why |
+|---|---|---|
+| `fn consume(o) { free(o) }` | ✓ accepted | `o` used once |
+| `fn leak(o) { U }` | ✗ rejected | `o` dropped — leak (`0 ⋢ 1`) |
+| `fn dbl(o) { MkPair(free(o), free(o)) }` | ✗ rejected | use-after-free (`ω ⋢ 1`) |
+
+The kernel re-checks the elaborated term (postulates added as `Term::Const` +
+`Neutral::NConst`, looked up in the `Signature`), so the discipline isn't trusted
+to the front end. Example: `examples/memory.rs.tal`. Next: capabilities
+**indexed by propositions** (so a proof can be required to read/write), and
+regions/`Ptr`/cursors (`docs/10` §10, the O(1) intrusive DLL).
+
 ## Status (v1.0 — Rust-flavored surface: `fn`/`enum`/`match`, ML types, implicits)
 
 `src/rust_surface.rs` implements `../docs/10-surface-syntax.md`: the language
