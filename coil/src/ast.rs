@@ -10,6 +10,8 @@ pub enum Type {
     /// Integer of an arbitrary bit width, signed or unsigned (Zig-style: `u2`,
     /// `i7`, `u23`, ...). LLVM has native `iN`; signedness drives the operations.
     Int(u32, bool), // (bits, signed)
+    /// IEEE floating point: `f32` or `f64` (bits = 32 or 64).
+    Float(u32),
     /// A pointer to a value of the pointee type. Pointers are region-less (a
     /// pointer is a pointer, à la Zig/C); where the memory came from is the
     /// `alloc` operation's concern, not the type's.
@@ -109,6 +111,8 @@ pub enum Expr {
     },
     /// Bitwise complement `(inot x)` (`~x`).
     Not(Box<Expr>),
+    /// A floating-point literal (defaults to `f64`, adopts `f32` from context).
+    Float(f64),
     Cmp {
         op: CmpOp,
         lhs: Box<Expr>,

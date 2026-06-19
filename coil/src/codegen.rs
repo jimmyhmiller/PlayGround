@@ -282,6 +282,8 @@ impl<'ctx> Cg<'ctx> {
     fn basic_ty(&self, t: &Type) -> BasicTypeEnum<'ctx> {
         match t {
             Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
+            Type::Float(32) => self.ctx.f32_type().into(),
+            Type::Float(_) => self.ctx.f64_type().into(),
             Type::Ptr(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Struct(name) => {
                 if let Some(s) = self.structs.get(name) {
@@ -416,6 +418,7 @@ impl<'ctx> Cg<'ctx> {
         let i64t = self.ctx.i64_type();
         match e {
             Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
+            Expr::Float(x) => Ok((self.ctx.f64_type().const_float(*x).into(), Type::Float(64))),
             // The zero value of a type (used to initialize a fresh local).
             Expr::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
@@ -439,6 +442,19 @@ impl<'ctx> Cg<'ctx> {
             Expr::Bin { op, lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(lhs, scope)?;
                 let (rv, _) = self.emit_expr(rhs, scope)?;
+                if matches!(lt, Type::Float(_)) {
+                    let l = lv.into_float_value();
+                    let r = rv.into_float_value();
+                    let v = match op {
+                        BinOp::Add => self.builder.build_float_add(l, r, "fadd"),
+                        BinOp::Sub => self.builder.build_float_sub(l, r, "fsub"),
+                        BinOp::Mul => self.builder.build_float_mul(l, r, "fmul"),
+                        BinOp::Div => self.builder.build_float_div(l, r, "fdiv"),
+                        BinOp::Rem => self.builder.build_float_rem(l, r, "frem"),
+                        _ => return Err("codegen: bitwise op on a float".to_string()),
+                    };
+                    return Ok((v.map_err(le)?.into(), lt));
+                }
                 let l = lv.into_int_value();
                 let r = rv.into_int_value();
                 let signed = matches!(lt, Type::Int(_, true));
@@ -467,6 +483,26 @@ impl<'ctx> Cg<'ctx> {
             Expr::Cmp { op, lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(lhs, scope)?;
                 let (rv, _) = self.emit_expr(rhs, scope)?;
+                if matches!(lt, Type::Float(_)) {
+                    use inkwell::FloatPredicate as FP;
+                    // ordered comparisons (false if either operand is NaN).
+                    let pred = match op {
+                        CmpOp::Lt => FP::OLT,
+                        CmpOp::Le => FP::OLE,
+                        CmpOp::Gt => FP::OGT,
+                        CmpOp::Ge => FP::OGE,
+                        CmpOp::Eq => FP::OEQ,
+                        CmpOp::Ne => FP::ONE,
+                    };
+                    let b = self
+                        .builder
+                        .build_float_compare(pred, lv.into_float_value(), rv.into_float_value(), "fcmp")
+                        .map_err(le)?;
+                    return Ok((
+                        self.builder.build_int_z_extend(b, i64t, "fcmp64").map_err(le)?.into(),
+                        Type::Int(64, true),
+                    ));
+                }
                 let signed = matches!(lt, Type::Int(_, true));
                 let pred = match op {
                     CmpOp::Lt if signed => IntPredicate::SLT,
@@ -692,6 +728,17 @@ impl<'ctx> Cg<'ctx> {
                             .map_err(le)?;
                         Ok((out.into(), ty.clone()))
                     }
+                    // float -> integer: fptosi / fptoui.
+                    Type::Int(to, signed) if matches!(vt, Type::Float(_)) => {
+                        let target = self.ctx.custom_width_int_type(*to);
+                        let fv = v.into_float_value();
+                        let out = if *signed {
+                            self.builder.build_float_to_signed_int(fv, target, "fptosi").map_err(le)?
+                        } else {
+                            self.builder.build_float_to_unsigned_int(fv, target, "fptoui").map_err(le)?
+                        };
+                        Ok((out.into(), ty.clone()))
+                    }
                     Type::Int(to, _) => {
                         let iv = v.into_int_value();
                         let from = iv.get_type().get_bit_width();
@@ -722,6 +769,33 @@ impl<'ctx> Cg<'ctx> {
                     }
                     // opaque pointers: a ptr->ptr reinterpret leaves it untouched.
                     Type::Ptr(..) => Ok((v, ty.clone())),
+                    // -> float: from an integer (sitofp/uitofp) or another float
+                    // (fpext/fptrunc).
+                    Type::Float(to) => {
+                        let ft = self.basic_ty(ty).into_float_type();
+                        let out = match vt {
+                            Type::Int(_, src_signed) => {
+                                let iv = v.into_int_value();
+                                if src_signed {
+                                    self.builder.build_signed_int_to_float(iv, ft, "sitofp").map_err(le)?
+                                } else {
+                                    self.builder.build_unsigned_int_to_float(iv, ft, "uitofp").map_err(le)?
+                                }
+                            }
+                            Type::Float(from) => {
+                                let fv = v.into_float_value();
+                                if *to > from {
+                                    self.builder.build_float_ext(fv, ft, "fpext").map_err(le)?
+                                } else if *to < from {
+                                    self.builder.build_float_trunc(fv, ft, "fptrunc").map_err(le)?
+                                } else {
+                                    fv
+                                }
+                            }
+                            other => return Err(format!("codegen: cannot cast {other:?} to float")),
+                        };
+                        Ok((out.into(), ty.clone()))
+                    }
                     other => Err(format!("codegen: cannot cast to {other:?}")),
                 }
             }
@@ -1117,6 +1191,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
+        Type::Float(bits) => (*bits as u64) / 8,
         Type::Ptr(_) | Type::Fn(..) | Type::Ref(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
         Type::Struct(name) => {

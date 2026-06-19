@@ -209,6 +209,7 @@ impl<'a> Mono<'a> {
     fn resolve_ty(&mut self, t: &Type, map: &Subst) -> Result<Type, String> {
         Ok(match t {
             Type::Int(b, s) => Type::Int(*b, *s),
+            Type::Float(b) => Type::Float(*b),
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
             Type::Ref(m, p) => Type::Ref(*m, Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
@@ -282,6 +283,7 @@ impl<'a> Mono<'a> {
         let go = |m: &mut Self, e: &Expr| m.resolve_expr(e, map);
         Ok(match e {
             Expr::Int(n) => Expr::Int(*n),
+            Expr::Float(x) => Expr::Float(*x),
             Expr::Str(s) => Expr::Str(s.clone()),
             Expr::Var(s) => Expr::Var(s.clone()),
             Expr::Zeroed(t) => Expr::Zeroed(self.resolve_ty(t, map)?),
@@ -454,6 +456,7 @@ fn mangle(name: &str, args: &[Type]) -> String {
 fn type_key(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
+        Type::Float(bits) => format!("f{bits}"),
         Type::Ptr(p) => format!("ptr_{}", type_key(p)),
         Type::Ref(_, p) => format!("ref_{}", type_key(p)),
         Type::Struct(s) => s.clone(),

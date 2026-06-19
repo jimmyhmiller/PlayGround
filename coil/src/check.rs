@@ -299,6 +299,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
 fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String> {
     match t {
         Type::Int(..) => Ok(()),
+        Type::Float(..) => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
         Type::Ref(_, p) => validate_type(p, cx, tps),
         Type::Array(e, _) => validate_type(e, cx, tps),
@@ -367,6 +368,7 @@ fn synth(
 ) -> Result<(Expr, Type), String> {
     match e {
         Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
+        Expr::Float(x) => Ok((Expr::Float(*x), Type::Float(64))),
         Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
         Expr::Zeroed(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': zeroed: {e}"))?;
@@ -841,12 +843,15 @@ fn synth(
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
             let (ee, et) = synth(expr, None, env, cx, tps, fname)?;
             match (ty, &et) {
-                // int<->int width change, ptr<->ptr reinterpret, or int<->ptr
-                // (address arithmetic, null, MMIO, tagged pointers).
+                // int<->int width change, ptr<->ptr reinterpret, int<->ptr
+                // (null/MMIO/tagged pointers), and int<->float / float<->float.
                 (Type::Int(..), Type::Int(..))
                 | (Type::Ptr(..), Type::Ptr(..))
                 | (Type::Int(..), Type::Ptr(..))
-                | (Type::Ptr(..), Type::Int(..)) => Ok((
+                | (Type::Ptr(..), Type::Int(..))
+                | (Type::Float(..), Type::Float(..))
+                | (Type::Float(..), Type::Int(..))
+                | (Type::Int(..), Type::Float(..)) => Ok((
                     Expr::Cast {
                         ty: ty.clone(),
                         expr: Box::new(ee),
@@ -854,7 +859,7 @@ fn synth(
                     ty.clone(),
                 )),
                 _ => Err(format!(
-                    "in '{fname}': cast only converts among int and ptr (got {} to {})",
+                    "in '{fname}': cast only converts among int, float, and ptr (got {} to {})",
                     ty_str(&et),
                     ty_str(ty)
                 )),
@@ -1397,7 +1402,7 @@ fn replace_pointee(place: &Type, new: Type) -> Type {
 /// Substitute bound type parameters throughout a type.
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
-        Type::Int(..) => t.clone(),
+        Type::Int(..) | Type::Float(..) => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
@@ -1517,7 +1522,7 @@ fn bit_field_type(
 /// can adopt a concrete `iN`/`uN` from context.
 fn is_literal(e: &Expr) -> bool {
     match e {
-        Expr::Int(_) => true,
+        Expr::Int(_) | Expr::Float(_) => true,
         Expr::Bin { lhs, rhs, .. } => is_literal(lhs) && is_literal(rhs),
         Expr::If { then, els, .. } => is_literal(then) && is_literal(els),
         Expr::Do(es) => es.last().is_some_and(is_literal),
@@ -1530,7 +1535,15 @@ fn is_literal(e: &Expr) -> bool {
 /// operands of an arithmetic/comparison op (a type parameter is assumed numeric;
 /// each monomorphic instantiation is what actually reaches codegen).
 fn numeric(t: &Type, tps: &HashSet<String>) -> bool {
-    t.is_int() || matches!(t, Type::Struct(n) if tps.contains(n))
+    matches!(t, Type::Int(..) | Type::Float(..)) || matches!(t, Type::Struct(n) if tps.contains(n))
+}
+
+/// Two scalar types that a literal may slide between (both ints, or both floats).
+fn same_number_kind(a: &Type, b: &Type) -> bool {
+    matches!(
+        (a, b),
+        (Type::Int(..), Type::Int(..)) | (Type::Float(..), Type::Float(..))
+    )
 }
 
 /// Whether the integer `n` is representable in `bits` with the given signedness.
@@ -1580,7 +1593,7 @@ fn coerce(
     if &et == target {
         return Ok(e);
     }
-    if matches!((&et, target), (Type::Int(..), Type::Int(..))) && is_literal(&e) {
+    if same_number_kind(&et, target) && is_literal(&e) {
         return coerce_lit(e, target, fname);
     }
     if arg_ok(&et, target, is_extern) {
@@ -1611,12 +1624,16 @@ fn unify_branches(
             }
         }
     }
-    let target = concrete.unwrap_or(Type::Int(64, true));
+    // With no concrete sibling, the result is the literals' own default type
+    // (i64 for integer literals, f64 for float literals).
+    let target = concrete
+        .or_else(|| branches.first().map(|(_, t)| t.clone()))
+        .unwrap_or(Type::Int(64, true));
     let mut out = Vec::with_capacity(branches.len());
     for (e, t) in branches {
         if t == target {
             out.push(e);
-        } else if matches!((&t, &target), (Type::Int(..), Type::Int(..))) && is_literal(&e) {
+        } else if same_number_kind(&t, &target) && is_literal(&e) {
             out.push(coerce_lit(e, &target, fname)?);
         } else {
             return Err(mismatch_msg(&t, &target, fname, what));
@@ -1659,6 +1676,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 fn ty_str(t: &Type) -> String {
     match t {
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
+        Type::Float(bits) => format!("f{bits}"),
         Type::Ptr(pointee) => format!("(ptr {})", ty_str(pointee)),
         Type::Ref(true, pointee) => format!("(mut {})", ty_str(pointee)),
         Type::Ref(false, pointee) => format!("(ref {})", ty_str(pointee)),

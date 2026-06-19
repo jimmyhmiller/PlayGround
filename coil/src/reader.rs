@@ -8,6 +8,8 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Sexp {
     Int(i64),
+    /// Floating-point literal, e.g. `3.14` or `1e9`.
+    Float(f64),
     Sym(String),
     /// Keyword `:foo` stored without the leading colon.
     Keyword(String),
@@ -170,6 +172,7 @@ impl std::fmt::Display for Sexp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Sexp::Int(n) => write!(f, "{n}"),
+            Sexp::Float(x) => write!(f, "{x:?}"),
             Sexp::Sym(s) => write!(f, "{s}"),
             Sexp::Keyword(k) => write!(f, ":{k}"),
             Sexp::Str(s) => write!(f, "{s:?}"),
@@ -202,7 +205,23 @@ fn atom(s: &str) -> Sexp {
     if let Ok(n) = s.parse::<i64>() {
         return Sexp::Int(n);
     }
+    // A float literal looks like a number (digit/sign-digit start) with a `.`
+    // or exponent — so type names like `f64` and symbols like `inf` stay symbols.
+    if looks_numeric(s) && (s.contains('.') || s.contains('e') || s.contains('E')) {
+        if let Ok(x) = s.parse::<f64>() {
+            return Sexp::Float(x);
+        }
+    }
     Sexp::Sym(s.to_string())
+}
+
+fn looks_numeric(s: &str) -> bool {
+    let b = s.as_bytes();
+    match b.first() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some(b'-') | Some(b'+') | Some(b'.') => b.get(1).is_some_and(u8::is_ascii_digit),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

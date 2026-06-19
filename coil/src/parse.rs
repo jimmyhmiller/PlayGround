@@ -404,8 +404,8 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
     match s {
         // `:i32` (keyword) must be an int. A bare symbol is an int name, or
         // otherwise a struct name (so `(ptr c i8)` and `Point` both read well).
-        Sexp::Keyword(k) => int_type(k),
-        Sexp::Sym(k) => Ok(int_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
+        Sexp::Keyword(k) => prim_type(k),
+        Sexp::Sym(k) => Ok(prim_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
         Sexp::List(items) => match head_sym(items)?.as_str() {
             // (mut TYPE) -> a mutable reference to TYPE.
             "mut" => {
@@ -463,6 +463,15 @@ fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, String> {
     Ok(Expr::Alloc { storage, ty })
 }
 
+/// A primitive scalar type name: `f32`/`f64`, or an integer `iN`/`uN`.
+fn prim_type(name: &str) -> Result<Type, String> {
+    match name {
+        "f32" => Ok(Type::Float(32)),
+        "f64" => Ok(Type::Float(64)),
+        _ => int_type(name),
+    }
+}
+
 /// Parse a Zig-style integer type name: `i<N>` (signed) or `u<N>` (unsigned),
 /// for any width N in 1..=65535 (e.g. `i64`, `u2`, `i7`, `u23`).
 fn int_type(name: &str) -> Result<Type, String> {
@@ -485,6 +494,7 @@ fn int_type(name: &str) -> Result<Type, String> {
 fn parse_expr(s: &Sexp) -> Result<Expr, String> {
     match s {
         Sexp::Int(n) => Ok(Expr::Int(*n)),
+        Sexp::Float(x) => Ok(Expr::Float(*x)),
         Sexp::Sym(name) => Ok(Expr::Var(name.clone())),
         Sexp::Keyword(k) => Err(format!("unexpected keyword :{k} in expression")),
         Sexp::Str(s) => Ok(Expr::Str(s.clone())),
@@ -523,6 +533,18 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         "ixor" => bin(BinOp::Xor),
         "ishl" => bin(BinOp::Shl),
         "ishr" => bin(BinOp::Shr),
+        // floating-point arithmetic & comparison (dispatched on operand type).
+        "fadd" => bin(BinOp::Add),
+        "fsub" => bin(BinOp::Sub),
+        "fmul" => bin(BinOp::Mul),
+        "fdiv" => bin(BinOp::Div),
+        "frem" => bin(BinOp::Rem),
+        "fcmp-lt" => cmp(CmpOp::Lt),
+        "fcmp-le" => cmp(CmpOp::Le),
+        "fcmp-gt" => cmp(CmpOp::Gt),
+        "fcmp-ge" => cmp(CmpOp::Ge),
+        "fcmp-eq" => cmp(CmpOp::Eq),
+        "fcmp-ne" => cmp(CmpOp::Ne),
         "inot" => {
             if args.len() != 1 {
                 return Err("inot: expects (inot x)".to_string());

@@ -33,6 +33,7 @@ use crate::reader::Sexp;
 #[derive(Clone)]
 enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(String),
     Sym(String),
@@ -680,6 +681,7 @@ fn parse_params(params: &[Sexp]) -> Result<(Vec<String>, Option<String>), String
 fn sexp_to_value(s: &Sexp) -> Value {
     match s {
         Sexp::Int(n) => Value::Int(*n),
+        Sexp::Float(x) => Value::Float(*x),
         Sexp::Sym(s) => Value::Sym(s.clone()),
         Sexp::Keyword(k) => Value::Keyword(k.clone()),
         Sexp::Str(s) => Value::Str(s.clone()),
@@ -691,6 +693,7 @@ fn sexp_to_value(s: &Sexp) -> Value {
 fn value_to_sexp(v: &Value) -> Result<Sexp, String> {
     match v {
         Value::Int(n) => Ok(Sexp::Int(*n)),
+        Value::Float(x) => Ok(Sexp::Float(*x)),
         Value::Sym(s) => Ok(Sexp::Sym(s.clone())),
         Value::Keyword(k) => Ok(Sexp::Keyword(k.clone())),
         Value::List(items) => Ok(Sexp::List(
