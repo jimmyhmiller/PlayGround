@@ -111,19 +111,29 @@ fn macro_reads_target_pointer_width() {
 
 #[test]
 fn macro_branches_on_target_arch() {
+    // The macro picks a different literal per arch; the expected value follows
+    // the host arch so the test is correct on both x86_64 and aarch64.
     let src = r#"
         (defmacro tag [] (if (= target-arch "x86_64") `42 `7))
         (defn main [] (-> :i64) (tag))
     "#;
-    assert_eq!(build_and_run(src), 42);
+    let expected = if cfg!(target_arch = "x86_64") { 42 } else { 7 };
+    assert_eq!(build_and_run(src), expected);
     assert!(!expand_to_string(src).unwrap().contains("(tag)"));
 }
 
 #[test]
 fn macro_selects_convention_per_arch() {
+    // per-arch.coil stamps out a different `defcc` per arch but always computes
+    // 42; check the expansion carries the host arch's register names.
     let src = include_str!("../examples/per-arch.coil");
     assert_eq!(build_and_run(src), 42);
-    assert!(expand_to_string(src).unwrap().contains("[rax rdx]"));
+    let expanded = expand_to_string(src).unwrap();
+    let expected_regs = if cfg!(target_arch = "x86_64") { "[rax rdx]" } else { "[x0 x1]" };
+    assert!(
+        expanded.contains(expected_regs),
+        "expected {expected_regs} in expansion:\n{expanded}"
+    );
 }
 
 // ---- automatic hygiene (auto-gensym) ------------------------------------

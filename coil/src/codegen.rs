@@ -19,14 +19,93 @@ use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
+use inkwell::types::{
+    AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType,
+};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
 use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate, OptimizationLevel};
 
+use crate::abi::{self, AbiCtx, Class, StructAbi};
 use crate::ast::*;
 use crate::convention::Lowering;
 
-const SYSV_ARG: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+/// The architecture codegen is targeting. This selects the C-ABI argument
+/// register sequence and the assembly dialect/prologue used by `:shim`
+/// trampolines and register-constrained shim call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetArch {
+    X86_64,
+    AArch64,
+}
+
+impl TargetArch {
+    /// Derive the arch from an LLVM triple's arch component (the part before
+    /// the first `-`). Unsupported arches are a hard error rather than a silent
+    /// fallback: shim trampolines emit raw asm and would miscompile otherwise.
+    fn from_triple(triple: &str) -> Result<TargetArch, String> {
+        let arch = triple.split('-').next().unwrap_or("");
+        match arch {
+            "x86_64" | "amd64" => Ok(TargetArch::X86_64),
+            "aarch64" | "arm64" | "arm64e" => Ok(TargetArch::AArch64),
+            other => Err(format!(
+                "codegen: unsupported target architecture '{other}' (triple '{triple}'); \
+                 shim calling conventions are only implemented for x86_64 and aarch64"
+            )),
+        }
+    }
+
+    /// The C-ABI integer/pointer argument registers, in order. x86-64 SysV uses
+    /// six; AArch64 AAPCS64 uses eight (x0-x7).
+    fn c_arg_regs(self) -> &'static [&'static str] {
+        match self {
+            TargetArch::X86_64 => &["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+            TargetArch::AArch64 => &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
+        }
+    }
+
+    /// The C-ABI integer return register.
+    fn c_ret_reg(self) -> &'static str {
+        match self {
+            TargetArch::X86_64 => "rax",
+            TargetArch::AArch64 => "x0",
+        }
+    }
+
+    /// Whether a register name is a valid general-purpose register on this arch.
+    /// Used to reject a convention naming registers that don't exist on the
+    /// target (e.g. an x86 `defcc` compiled for aarch64) with a clear error
+    /// instead of emitting asm the assembler will choke on.
+    fn is_valid_gpr(self, reg: &str) -> bool {
+        match self {
+            TargetArch::X86_64 => matches!(
+                reg,
+                "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "rbp" | "rsp"
+                    | "r8" | "r9" | "r10" | "r11" | "r12" | "r13" | "r14" | "r15"
+            ),
+            // x0..x30 plus the special names. (We don't model the 32-bit w-regs
+            // here; shim conventions pass 64-bit values.)
+            TargetArch::AArch64 => {
+                matches!(reg, "sp" | "lr" | "fp" | "xzr")
+                    || (reg.starts_with('x')
+                        && reg[1..].parse::<u8>().map(|n| n <= 30).unwrap_or(false))
+            }
+        }
+    }
+
+    fn arch_name(self) -> &'static str {
+        match self {
+            TargetArch::X86_64 => "x86_64",
+            TargetArch::AArch64 => "aarch64",
+        }
+    }
+
+    fn to_abi(self) -> abi::Arch {
+        match self {
+            TargetArch::X86_64 => abi::Arch::X86_64,
+            TargetArch::AArch64 => abi::Arch::AArch64,
+        }
+    }
+}
 
 /// A value plus its Coil type.
 type Tv<'ctx> = (BasicValueEnum<'ctx>, Type);
@@ -42,6 +121,34 @@ struct StructInfo<'ctx> {
     fields: Vec<(String, Type)>,
     ty: StructType<'ctx>,
     layout: Layout,
+}
+
+/// How one original parameter is realized at the LLVM/ABI level.
+enum ArgAbi<'ctx> {
+    /// An ordinary scalar/pointer/sum value, passed unchanged.
+    Scalar,
+    /// A by-value struct passed directly in registers, coerced to these slot
+    /// types (one LLVM parameter each).
+    Direct(StructAbi<'ctx>),
+    /// A by-value struct passed indirectly: a pointer to a copy, `byval(T)` on
+    /// x86-64, a plain pointer on AArch64.
+    Indirect(StructAbi<'ctx>),
+}
+
+/// The C-ABI realization of a callable's signature: how the return value and each
+/// argument are lowered, plus the resulting LLVM function type. Computed once per
+/// callable and reused at its declaration, body, and every call site so all three
+/// agree on the wire format.
+struct CSig<'ctx> {
+    /// If the return is a large struct, its `sret` classification (a hidden
+    /// pointer becomes the first LLVM parameter).
+    sret: Option<StructAbi<'ctx>>,
+    /// The coerced LLVM return type for a small by-value struct return (`None`
+    /// for a scalar return or an `sret` return, which is LLVM-void).
+    ret_direct: Option<StructAbi<'ctx>>,
+    /// Per original parameter, in source order.
+    args: Vec<ArgAbi<'ctx>>,
+    fn_ty: FunctionType<'ctx>,
 }
 
 /// A sum type's runtime shape: `{ i32 tag, [words x i64] payload }`, plus a
@@ -65,16 +172,45 @@ struct Cg<'ctx> {
     rets: HashMap<String, Type>,
     /// Full signature of every callable, for `fnptr-of` (cc, params, ret).
     callables: HashMap<String, (String, Vec<Type>, Type)>,
+    /// C-ABI realization of every native-C callable that passes/returns a struct
+    /// by value (so declaration, body, and call sites agree on the wire format).
+    csigs: HashMap<String, CSig<'ctx>>,
     /// Native LLVM calling-convention id for each convention name.
     conv_ids: HashMap<String, u32>,
     /// Target layout, for sizeof/alignof/offsetof and static asserts.
     target_data: TargetData,
+    /// Target architecture, selecting the ABI register sequence and the asm
+    /// dialect/prologue for `:shim` trampolines and call sites.
+    arch: TargetArch,
+    /// Whether the object format is Mach-O (Apple), where global symbols carry a
+    /// leading underscore that inline-asm symbol references must spell out.
+    mach_o: bool,
     globals: Cell<u32>,
 }
 
 pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ctx>, String> {
-    Target::initialize_native(&InitializationConfig::default())?;
-    let triple = TargetMachine::get_default_triple();
+    compile_for(ctx, program, target_triple())
+}
+
+/// The triple codegen and object emission target: the explicit `COIL_TARGET`
+/// override (e.g. `x86_64-apple-macosx11.0.0` to cross-produce the SysV ABI from
+/// an arm64 host), else the host triple. Shared by `codegen` and `lib` so the IR
+/// and the emitted object agree on the ABI.
+pub fn target_triple() -> inkwell::targets::TargetTriple {
+    match std::env::var("COIL_TARGET") {
+        Ok(t) if !t.is_empty() => inkwell::targets::TargetTriple::create(&t),
+        _ => TargetMachine::get_default_triple(),
+    }
+}
+
+/// Like `compile`, but for an explicitly chosen target triple (cross-targeting).
+pub fn compile_for<'ctx>(
+    ctx: &'ctx Context,
+    program: &Program,
+    triple: inkwell::targets::TargetTriple,
+) -> Result<Module<'ctx>, String> {
+    // Initialize all targets so an arbitrary (possibly non-host) triple resolves.
+    Target::initialize_all(&InitializationConfig::default());
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     let tm = target
         .create_target_machine(
@@ -87,6 +223,11 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         )
         .ok_or("codegen: could not create target machine")?;
     let target_data = tm.get_target_data();
+    let triple_str = triple.as_str().to_string_lossy().into_owned();
+    let arch = TargetArch::from_triple(&triple_str)?;
+    // Mach-O (Apple) prefixes global symbols with `_`; inline asm referencing a
+    // symbol by name must include it. ELF (Linux) does not.
+    let mach_o = triple_str.contains("apple") || triple_str.contains("darwin") || triple_str.contains("macosx");
     let module = ctx.create_module("coil");
     module.set_triple(&triple);
     module.set_data_layout(&target_data.get_data_layout());
@@ -101,8 +242,11 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         sums: HashMap::new(),
         rets: HashMap::new(),
         callables: HashMap::new(),
+        csigs: HashMap::new(),
         conv_ids: HashMap::new(),
         target_data,
+        arch,
+        mach_o,
         globals: Cell::new(0),
     };
 
@@ -202,11 +346,26 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
         let cc_id = conv
             .native_id()
             .ok_or_else(|| format!("codegen: extern '{}' needs a native convention", e.name))?;
-        let p: Vec<BasicMetadataTypeEnum> =
-            e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
-        let fn_ty = cg.basic_ty(&e.ret).fn_type(&p, e.variadic);
-        let fv = cg.module.add_function(&e.name, fn_ty, None);
-        fv.set_call_conventions(cc_id);
+        let native_c = matches!(&conv.lowering, Lowering::Native(crate::convention::NativeCc::C));
+        let fv = if cg.needs_c_abi(&e.params, &e.ret) {
+            // A by-value struct in the signature: lower via the C struct ABI
+            // (coerced register slots, `byval`/`sret`) instead of the naive types.
+            let sig = cg.c_signature(&e.name, &e.params, &e.ret, e.variadic, native_c)?;
+            let fv = cg.module.add_function(&e.name, sig.fn_ty, None);
+            fv.set_call_conventions(cc_id);
+            for (loc, attr) in cg.csig_attrs(&sig) {
+                fv.add_attribute(loc, attr);
+            }
+            cg.csigs.insert(e.name.clone(), sig);
+            fv
+        } else {
+            let p: Vec<BasicMetadataTypeEnum> =
+                e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
+            let fn_ty = cg.basic_ty(&e.ret).fn_type(&p, e.variadic);
+            let fv = cg.module.add_function(&e.name, fn_ty, None);
+            fv.set_call_conventions(cc_id);
+            fv
+        };
         cg.funcs.insert(e.name.clone(), fv);
         cg.rets.insert(e.name.clone(), e.ret.clone());
         cg.callables
@@ -230,11 +389,27 @@ pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ct
             ),
         );
 
+        let f_params: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
         match &conv.lowering {
             Lowering::Native(cc) => {
-                let fv = cg.module.add_function(&f.name, fn_ty, None);
-                fv.set_call_conventions(cc.id());
-                cg.funcs.insert(f.name.clone(), fv);
+                // A function that returns (or, in principle, takes) a struct by
+                // value across the C ABI is lowered the same way as an extern, so
+                // a C caller — or a Coil call site — agrees on the wire format.
+                if cg.needs_c_abi(&f_params, &f.ret) {
+                    let native_c = *cc == crate::convention::NativeCc::C;
+                    let sig = cg.c_signature(&f.name, &f_params, &f.ret, false, native_c)?;
+                    let fv = cg.module.add_function(&f.name, sig.fn_ty, None);
+                    fv.set_call_conventions(cc.id());
+                    for (loc, attr) in cg.csig_attrs(&sig) {
+                        fv.add_attribute(loc, attr);
+                    }
+                    cg.csigs.insert(f.name.clone(), sig);
+                    cg.funcs.insert(f.name.clone(), fv);
+                } else {
+                    let fv = cg.module.add_function(&f.name, fn_ty, None);
+                    fv.set_call_conventions(cc.id());
+                    cg.funcs.insert(f.name.clone(), fv);
+                }
             }
             Lowering::Shim => {
                 let ret_reg = conv
@@ -318,22 +493,430 @@ impl<'ctx> Cg<'ctx> {
         self.basic_ty(ret).fn_type(&p, false)
     }
 
+    /// If `t` is a real (C-layout) struct passed by value across the C boundary —
+    /// i.e. a `defstruct` (not a sum, not a `:layout bits` struct, which is just
+    /// an integer) — return its field list and LLVM struct type, so it can be
+    /// ABI-classified. Bits structs and sums return `None` (they're already a
+    /// scalar / handled separately).
+    fn abi_struct(&self, t: &Type) -> Option<(Vec<(String, Type)>, StructType<'ctx>)> {
+        if let Type::Struct(name) = t {
+            if let Some(info) = self.structs.get(name) {
+                if !matches!(info.layout, Layout::Bits(_)) {
+                    return Some((info.fields.clone(), info.ty));
+                }
+            }
+        }
+        None
+    }
+
+    /// Classify a struct for the current target's C ABI.
+    fn classify_struct(
+        &self,
+        fields: &[(String, Type)],
+        sty: StructType<'ctx>,
+    ) -> Result<StructAbi<'ctx>, String> {
+        let field_llvm = |t: &Type| self.basic_ty(t);
+        let resolve = |name: &str| -> Option<Vec<(String, Type)>> {
+            self.structs.get(name).map(|i| i.fields.clone())
+        };
+        let abi_ctx = AbiCtx {
+            field_llvm: &field_llvm,
+            resolve_struct: &resolve,
+        };
+        abi::classify(self.arch.to_abi(), self.ctx, &self.target_data, fields, sty, &abi_ctx)
+    }
+
+    /// Build the C-ABI realization of a signature: the LLVM function type plus how
+    /// the return value and each parameter are marshalled. Only `c`/native
+    /// conventions use the C struct ABI; any other convention with a by-value
+    /// struct parameter/return is a hard error (its lowering doesn't define one).
+    fn c_signature(
+        &self,
+        name: &str,
+        params: &[Type],
+        ret: &Type,
+        variadic: bool,
+        native_c: bool,
+    ) -> Result<CSig<'ctx>, String> {
+        let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        let mut args: Vec<ArgAbi<'ctx>> = Vec::with_capacity(params.len());
+
+        // Return classification (a hidden `sret` pointer is the first parameter).
+        // `None` LLVM return type means void (an `sret` return).
+        let mut sret: Option<StructAbi<'ctx>> = None;
+        let mut ret_direct: Option<StructAbi<'ctx>> = None;
+        let mut llvm_ret: Option<BasicTypeEnum<'ctx>> = None;
+        if let Some((fields, sty)) = self.abi_struct(ret) {
+            if !native_c {
+                return Err(format!(
+                    "codegen: '{name}' returns struct by value but its convention is not the C \
+                     convention; only the C ABI defines by-value struct passing"
+                ));
+            }
+            let sa = self.classify_struct(&fields, sty)?;
+            if sa.ret.is_indirect() {
+                // sret: void return, hidden pointer first arg.
+                llvm_params.push(self.ctx.ptr_type(AddressSpace::default()).into());
+                sret = Some(sa);
+            } else {
+                let rt = sa
+                    .direct_return_type(self.ctx)
+                    .ok_or_else(|| format!("codegen: '{name}': empty direct return classification"))?;
+                llvm_ret = Some(rt);
+                ret_direct = Some(sa);
+            }
+        } else {
+            llvm_ret = Some(self.basic_ty(ret));
+        }
+
+        for (i, pty) in params.iter().enumerate() {
+            if let Some((fields, sty)) = self.abi_struct(pty) {
+                if !native_c {
+                    return Err(format!(
+                        "codegen: '{name}' parameter {} is a by-value struct but its convention is \
+                         not the C convention; only the C ABI defines by-value struct passing",
+                        i + 1
+                    ));
+                }
+                let sa = self.classify_struct(&fields, sty)?;
+                match &sa.arg {
+                    Class::Direct(slots) => {
+                        for s in slots {
+                            llvm_params.push((*s).into());
+                        }
+                        args.push(ArgAbi::Direct(sa));
+                    }
+                    Class::Indirect { .. } => {
+                        llvm_params.push(self.ctx.ptr_type(AddressSpace::default()).into());
+                        args.push(ArgAbi::Indirect(sa));
+                    }
+                }
+            } else {
+                llvm_params.push(self.basic_ty(pty).into());
+                args.push(ArgAbi::Scalar);
+            }
+        }
+
+        let fn_ty = match llvm_ret {
+            Some(rt) => rt.fn_type(&llvm_params, variadic),
+            None => self.ctx.void_type().fn_type(&llvm_params, variadic),
+        };
+
+        Ok(CSig {
+            sret,
+            ret_direct,
+            args,
+            fn_ty,
+        })
+    }
+
+    /// True if the signature needs ABI struct marshalling (any by-value struct in
+    /// a parameter or the return). Scalar-only signatures keep the simple path.
+    fn needs_c_abi(&self, params: &[Type], ret: &Type) -> bool {
+        self.abi_struct(ret).is_some() || params.iter().any(|t| self.abi_struct(t).is_some())
+    }
+
+    /// The (location, attribute) pairs a `CSig` requires: `sret(T) align N` on a
+    /// hidden return pointer, `byval(T) align N` on x86-64 indirect arguments. The
+    /// same list applies to both the function declaration and every call site.
+    fn csig_attrs(&self, sig: &CSig<'ctx>) -> Vec<(AttributeLoc, Attribute)> {
+        let mut out = Vec::new();
+        let mut idx = 0u32;
+        if let Some(sa) = &sig.sret {
+            let loc = AttributeLoc::Param(idx);
+            out.push((loc, self.type_attr("sret", sa.llvm_ty)));
+            out.push((loc, self.align_attr(sa.align)));
+            idx += 1;
+        }
+        for a in &sig.args {
+            match a {
+                ArgAbi::Direct(sa) => {
+                    if let Class::Direct(slots) = &sa.arg {
+                        idx += slots.len() as u32; // one slot per coerced eightbyte
+                    }
+                }
+                ArgAbi::Indirect(sa) => {
+                    if self.arch == TargetArch::X86_64 {
+                        let loc = AttributeLoc::Param(idx);
+                        out.push((loc, self.type_attr("byval", sa.llvm_ty)));
+                        out.push((loc, self.align_attr(sa.align)));
+                    }
+                    idx += 1;
+                }
+                ArgAbi::Scalar => idx += 1,
+            }
+        }
+        out
+    }
+
+    /// A type attribute such as `byval(T)` or `sret(T)`.
+    fn type_attr(&self, kind: &str, ty: StructType<'ctx>) -> Attribute {
+        let kind_id = Attribute::get_named_enum_kind_id(kind);
+        self.ctx.create_type_attribute(kind_id, ty.as_any_type_enum())
+    }
+
+    fn align_attr(&self, align: u32) -> Attribute {
+        let kind_id = Attribute::get_named_enum_kind_id("align");
+        self.ctx.create_enum_attribute(kind_id, align as u64)
+    }
+
+    /// Allocate a scratch stack slot for a struct (for spilling a by-value
+    /// argument to memory or receiving an `sret`/coerced return). Aligned to at
+    /// least 8 so that whole-eightbyte (i64/double) coerced loads/stores into it
+    /// are naturally aligned, and never below the struct's own ABI alignment.
+    fn struct_slot(&self, sa: &StructAbi<'ctx>, name: &str) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let p = self.builder.build_alloca(sa.llvm_ty, name).map_err(le)?;
+        if let Some(instr) = p.as_instruction() {
+            let _ = instr.set_alignment(sa.align.max(8));
+        }
+        Ok(p)
+    }
+
+    /// Get a pointer to a by-value struct argument's bytes. The checker passes a
+    /// place (its value is already a pointer to the struct); a bare struct *value*
+    /// is spilled to a fresh stack slot first.
+    fn struct_arg_ptr(
+        &self,
+        tv: &Tv<'ctx>,
+        sa: &StructAbi<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let (v, _) = tv;
+        if v.is_pointer_value() {
+            return Ok(v.into_pointer_value());
+        }
+        // A struct value in SSA: materialize it in memory so we can read the
+        // coerced register slots / pass a pointer.
+        let slot = self.struct_slot(sa, "abi.arg")?;
+        self.builder.build_store(slot, *v).map_err(le)?;
+        Ok(slot)
+    }
+
+    /// Lower a call to a callable whose signature passes/returns a struct by value
+    /// (per its precomputed `CSig`). Marshals each argument into the coerced
+    /// register slots / `byval` pointers the C ABI requires, and reconstructs a
+    /// struct value from the coerced return / `sret` slot.
+    fn emit_c_call(
+        &self,
+        callee: FunctionValue<'ctx>,
+        sig: &CSig<'ctx>,
+        argtv: &[Tv<'ctx>],
+        ret_ty: Type,
+    ) -> Result<Tv<'ctx>, String> {
+        let mut meta: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+
+        // sret: allocate the result struct and pass its pointer as the hidden
+        // first argument.
+        let sret_slot = if let Some(sa) = &sig.sret {
+            let slot = self.struct_slot(sa, "abi.sret")?;
+            meta.push(slot.into());
+            Some((slot, sa))
+        } else {
+            None
+        };
+
+        for (a, tv) in sig.args.iter().zip(argtv) {
+            match a {
+                ArgAbi::Scalar => meta.push(tv.0.into()),
+                ArgAbi::Indirect(sa) => {
+                    // Pass a pointer to a fresh copy of the struct (the callee may
+                    // mutate its `byval` copy; the C ABI says caller-allocated).
+                    let src = self.struct_arg_ptr(tv, sa)?;
+                    let copy = self.struct_slot(sa, "abi.byval")?;
+                    self.copy_struct(copy, src, sa)?;
+                    meta.push(copy.into());
+                }
+                ArgAbi::Direct(sa) => {
+                    let src = self.struct_arg_ptr(tv, sa)?;
+                    let slots = match &sa.arg {
+                        Class::Direct(s) => s,
+                        Class::Indirect { .. } => unreachable!("Direct arg has Direct class"),
+                    };
+                    // Load each coerced slot from its eightbyte offset.
+                    for (i, slot_ty) in slots.iter().enumerate() {
+                        let off = (i as u64) * 8;
+                        let gep = if off == 0 {
+                            src
+                        } else {
+                            unsafe {
+                                self.builder
+                                    .build_gep(self.ctx.i8_type(), src, &[self.ctx.i64_type().const_int(off, false)], "abi.eb")
+                                    .map_err(le)?
+                            }
+                        };
+                        let v = self.builder.build_load(*slot_ty, gep, "abi.slot").map_err(le)?;
+                        meta.push(v.into());
+                    }
+                }
+            }
+        }
+
+        // Variadic extra arguments (past the fixed `sig.args`) are passed through
+        // as-is. A by-value *struct* in the variadic tail would need extra ABI
+        // work we don't do yet, so reject it loudly rather than miscompile.
+        for tv in argtv.iter().skip(sig.args.len()) {
+            if self.abi_struct(&tv.1).is_some() && !tv.0.is_pointer_value() {
+                return Err(
+                    "codegen: passing a struct by value in a variadic argument is not supported"
+                        .to_string(),
+                );
+            }
+            meta.push(tv.0.into());
+        }
+
+        let cs = self.builder.build_call(callee, &meta, "ccall").map_err(le)?;
+        cs.set_call_convention(callee.get_call_conventions());
+        for (loc, attr) in self.csig_attrs(sig) {
+            cs.add_attribute(loc, attr);
+        }
+
+        // Reconstruct the returned struct value.
+        if let Some((slot, sa)) = sret_slot {
+            let v = self.builder.build_load(sa.llvm_ty, slot, "abi.ret").map_err(le)?;
+            return Ok((v, ret_ty));
+        }
+        if let Some(sa) = &sig.ret_direct {
+            // The call returned the coerced type; store it into a struct slot and
+            // reload the struct value.
+            let coerced = cs
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| "codegen: C-ABI direct return produced void".to_string())?;
+            let slot = self.struct_slot(sa, "abi.ret")?;
+            self.builder.build_store(slot, coerced).map_err(le)?;
+            let v = self.builder.build_load(sa.llvm_ty, slot, "abi.ret.val").map_err(le)?;
+            return Ok((v, ret_ty));
+        }
+        // A scalar return (e.g. a function that only *takes* a struct by value).
+        let v = cs
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| "codegen: C-ABI call returned void".to_string())?;
+        Ok((v, ret_ty))
+    }
+
+    /// `memcpy` `size` bytes from `src` to `dst` (both struct pointers).
+    fn copy_struct(
+        &self,
+        dst: inkwell::values::PointerValue<'ctx>,
+        src: inkwell::values::PointerValue<'ctx>,
+        sa: &StructAbi<'ctx>,
+    ) -> Result<(), String> {
+        self.builder
+            .build_memcpy(dst, sa.align, src, sa.align, self.ctx.i64_type().const_int(sa.size, false))
+            .map_err(|e| le(format!("{e:?}")))?;
+        Ok(())
+    }
+
     fn emit_func(&self, f: &Func, function: FunctionValue<'ctx>) -> Result<(), String> {
         let entry = self.ctx.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
+        // A C-ABI'd function (one returning a struct by value, or — in principle —
+        // taking one) has its signature reshaped: a leading `sret` pointer and/or
+        // struct parameters split into coerced register slots. Map the user's
+        // parameters onto the right LLVM parameter indices.
+        let sig = self.csigs.get(&f.name);
+        let base = sig.and_then(|s| s.sret.as_ref()).map_or(0u32, |_| 1);
+
         let mut scope: HashMap<String, Tv<'ctx>> = HashMap::new();
-        for (i, p) in f.params.iter().enumerate() {
-            let v = function.get_nth_param(i as u32).ok_or("codegen: missing param")?;
-            v.set_name(&p.name);
-            scope.insert(p.name.clone(), (v, p.ty.clone()));
+        let mut idx = base;
+        for (pos, p) in f.params.iter().enumerate() {
+            // Struct-by-value parameters are reconstructed from their coerced
+            // slots into a stack copy whose pointer the body uses (the checker
+            // erases struct params to pointers, so this matches `(ptr S)`).
+            let abi = sig.and_then(|s| s.args.get(pos));
+            match abi {
+                Some(ArgAbi::Direct(sa)) => {
+                    let slot = self.struct_slot(sa, &format!("{}.arg", p.name))?;
+                    if let Class::Direct(slots) = &sa.arg {
+                        for (k, slot_ty) in slots.iter().enumerate() {
+                            let v = function
+                                .get_nth_param(idx)
+                                .ok_or("codegen: missing coerced struct param")?;
+                            let off = (k as u64) * 8;
+                            let gep = if off == 0 {
+                                slot
+                            } else {
+                                unsafe {
+                                    self.builder
+                                        .build_gep(self.ctx.i8_type(), slot, &[self.ctx.i64_type().const_int(off, false)], "abi.eb")
+                                        .map_err(le)?
+                                }
+                            };
+                            let _ = slot_ty;
+                            self.builder.build_store(gep, v).map_err(le)?;
+                            idx += 1;
+                        }
+                    }
+                    scope.insert(p.name.clone(), (slot.into(), p.ty.clone()));
+                }
+                Some(ArgAbi::Indirect(_)) => {
+                    let v = function.get_nth_param(idx).ok_or("codegen: missing param")?;
+                    v.set_name(&p.name);
+                    scope.insert(p.name.clone(), (v, p.ty.clone()));
+                    idx += 1;
+                }
+                _ => {
+                    let v = function.get_nth_param(idx).ok_or("codegen: missing param")?;
+                    v.set_name(&p.name);
+                    scope.insert(p.name.clone(), (v, p.ty.clone()));
+                    idx += 1;
+                }
+            }
         }
 
         let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
         for e in &f.body {
             last = self.emit_expr(e, &scope)?;
         }
-        self.builder.build_return(Some(&last.0)).map_err(le)?;
+
+        self.emit_c_return(function, sig, last)?;
+        Ok(())
+    }
+
+    /// Emit the function's return, applying the C-ABI return lowering when the
+    /// function returns a struct by value: store the struct value through the
+    /// hidden `sret` pointer (large), or coerce it to the register return type
+    /// (small). A scalar return is returned directly.
+    fn emit_c_return(
+        &self,
+        function: FunctionValue<'ctx>,
+        sig: Option<&CSig<'ctx>>,
+        last: Tv<'ctx>,
+    ) -> Result<(), String> {
+        let sig = match sig {
+            Some(s) if s.sret.is_some() || s.ret_direct.is_some() => s,
+            _ => {
+                self.builder.build_return(Some(&last.0)).map_err(le)?;
+                return Ok(());
+            }
+        };
+        // Get a pointer to the struct value being returned.
+        let sa = sig.sret.as_ref().or(sig.ret_direct.as_ref()).unwrap();
+        let src = if last.0.is_pointer_value() {
+            last.0.into_pointer_value()
+        } else {
+            let slot = self.struct_slot(sa, "ret.spill")?;
+            self.builder.build_store(slot, last.0).map_err(le)?;
+            slot
+        };
+        if let Some(sa) = &sig.sret {
+            // Copy the struct into the caller-provided sret slot, return void.
+            let dst = function
+                .get_nth_param(0)
+                .ok_or("codegen: missing sret param")?
+                .into_pointer_value();
+            self.copy_struct(dst, src, sa)?;
+            self.builder.build_return(None).map_err(le)?;
+            return Ok(());
+        }
+        // Direct: load the coerced return type from the struct memory.
+        let sa = sig.ret_direct.as_ref().unwrap();
+        let rt = sa
+            .direct_return_type(self.ctx)
+            .ok_or("codegen: empty direct return type")?;
+        let v = self.builder.build_load(rt, src, "abi.ret.coerce").map_err(le)?;
+        self.builder.build_return(Some(&v)).map_err(le)?;
         Ok(())
     }
 
@@ -343,21 +926,22 @@ impl<'ctx> Cg<'ctx> {
         shim: &ShimInfo<'ctx>,
         n: usize,
     ) -> Result<(), String> {
+        self.check_shim_regs(shim, n)?;
         let entry = self.ctx.append_basic_block(tramp, "entry");
         self.builder.position_at_end(entry);
 
-        let mut asm = String::new();
-        for i in 0..n {
-            asm += &format!("movq %{}, %{}\n", shim.param_regs[i], SYSV_ARG[i]);
-        }
-        asm += "subq $$8, %rsp\n";
         let impl_name = shim.impl_fn.get_name().to_str().map_err(|_| "bad impl name")?;
-        asm += &format!("call {}\n", impl_name);
-        asm += "addq $$8, %rsp\n";
-        if shim.ret_reg != "rax" {
-            asm += &format!("movq %rax, %{}\n", shim.ret_reg);
-        }
-        asm += "ret\n";
+        let impl_name = self.asm_sym(impl_name);
+        let impl_name = impl_name.as_str();
+        let (asm, dialect) = match self.arch {
+            TargetArch::X86_64 => (self.x86_trampoline(shim, n, impl_name), InlineAsmDialect::ATT),
+            // On AArch64 the ATT/Intel distinction is x86-only; we use ATT so
+            // LLVM does not prepend an x86 `.intel_syntax` directive (which the
+            // AArch64 assembler rejects) and writes the asm verbatim.
+            TargetArch::AArch64 => {
+                (self.aarch64_trampoline(shim, n, impl_name), InlineAsmDialect::ATT)
+            }
+        };
 
         let void_ty = self.ctx.void_type().fn_type(&[], false);
         let asm_ptr = self.ctx.create_inline_asm(
@@ -366,13 +950,93 @@ impl<'ctx> Cg<'ctx> {
             "~{memory}".to_string(),
             true,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(dialect),
             false,
         );
         self.builder
             .build_indirect_call(void_ty, asm_ptr, &[], "")
             .map_err(le)?;
         self.builder.build_unreachable().map_err(le)?;
+        Ok(())
+    }
+
+    /// x86-64 trampoline (AT&T): move the convention's arg registers into the
+    /// SysV arg registers, realign the stack to 16 across the call (the naked
+    /// entry has rsp%16==8 because of the return address), call the `ccc` impl,
+    /// then move rax into the convention's return register.
+    fn x86_trampoline(&self, shim: &ShimInfo<'ctx>, n: usize, impl_name: &str) -> String {
+        let c_args = self.arch.c_arg_regs();
+        let mut asm = String::new();
+        for i in 0..n {
+            asm += &format!("movq %{}, %{}\n", shim.param_regs[i], c_args[i]);
+        }
+        asm += "subq $$8, %rsp\n";
+        asm += &format!("call {}\n", impl_name);
+        asm += "addq $$8, %rsp\n";
+        if shim.ret_reg != self.arch.c_ret_reg() {
+            asm += &format!("movq %rax, %{}\n", shim.ret_reg);
+        }
+        asm += "ret\n";
+        asm
+    }
+
+    /// AArch64 trampoline (AAPCS64): the naked entry holds the return address in
+    /// LR (x30) and SP is 16-aligned. Save LR (and keep SP 16-aligned) on the
+    /// stack, marshal the convention's arg registers into x0-x7, `bl` the `ccc`
+    /// impl, move x0 into the convention's return register, restore LR, return.
+    fn aarch64_trampoline(&self, shim: &ShimInfo<'ctx>, n: usize, impl_name: &str) -> String {
+        let c_args = self.arch.c_arg_regs();
+        let mut asm = String::new();
+        // Prologue: push LR. `str lr, [sp, #-16]!` keeps SP 16-aligned (we only
+        // need 8 bytes for LR, but AAPCS64 requires 16-byte SP alignment).
+        asm += "str x30, [sp, #-16]!\n";
+        for i in 0..n {
+            // `mov dst, src`; a no-op self-move is harmless.
+            asm += &format!("mov {}, {}\n", c_args[i], shim.param_regs[i]);
+        }
+        asm += &format!("bl {}\n", impl_name);
+        if shim.ret_reg != self.arch.c_ret_reg() {
+            asm += &format!("mov {}, x0\n", shim.ret_reg);
+        }
+        // Epilogue: pop LR, return.
+        asm += "ldr x30, [sp], #16\n";
+        asm += "ret\n";
+        asm
+    }
+
+    /// The name to use when referencing a global symbol from inline asm. On
+    /// Mach-O (Apple) the linker symbol carries a leading `_`; on ELF it does not.
+    fn asm_sym(&self, name: &str) -> String {
+        if self.mach_o {
+            format!("_{name}")
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// Reject a shim convention whose registers don't exist on the target arch
+    /// (e.g. an x86 `defcc` reaching codegen on aarch64). Silently ignoring the
+    /// names would emit asm the assembler rejects or, worse, miscompile.
+    fn check_shim_regs(&self, shim: &ShimInfo<'ctx>, n: usize) -> Result<(), String> {
+        let check = |reg: &str, what: &str| -> Result<(), String> {
+            if self.arch.is_valid_gpr(reg) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "codegen: shim convention names {what} register '{reg}', which is not a \
+                     general-purpose register on the target architecture ({}). Declare the \
+                     convention per-arch (see examples/per-arch.coil).",
+                    self.arch.arch_name()
+                ))
+            }
+        };
+        for reg in &shim.param_regs[..n] {
+            check(reg, "parameter")?;
+        }
+        check(&shim.ret_reg, "return")?;
+        for reg in &shim.clobber {
+            check(reg, "clobber")?;
+        }
         Ok(())
     }
 
@@ -383,6 +1047,7 @@ impl<'ctx> Cg<'ctx> {
         args: &[BasicValueEnum<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let n = args.len();
+        self.check_shim_regs(shim, n)?;
         let mut cons = format!("={{{}}}", shim.ret_reg);
         for r in &shim.param_regs[..n] {
             cons += &format!(",{{{}}}", r);
@@ -394,17 +1059,35 @@ impl<'ctx> Cg<'ctx> {
                 cons += &format!(",~{{{}}}", c);
             }
         }
+        // The call clobbers the link register on AArch64 (`bl` writes x30/lr).
+        // Spell it `lr` (not `x30`): LLVM's clobber parser treats `~{lr}` as the
+        // link register and forces the caller to save/restore it (making a leaf
+        // caller non-leaf); `~{x30}` does not trigger that frame setup, so the
+        // caller's own return address would be lost.
+        if self.arch == TargetArch::AArch64 && !used.contains("lr") && !used.contains("x30") {
+            cons += ",~{lr}";
+        }
         cons += ",~{memory}";
+
+        // The convention's trampoline is reached with an ordinary direct call;
+        // the instruction mnemonic and dialect differ per arch.
+        let sym = self.asm_sym(name);
+        let (body, dialect) = match self.arch {
+            TargetArch::X86_64 => (format!("call {}", sym), InlineAsmDialect::ATT),
+            // ATT (not Intel) on AArch64: the dialect is x86-only and Intel would
+            // prepend a `.intel_syntax` directive the AArch64 assembler rejects.
+            TargetArch::AArch64 => (format!("bl {}", sym), InlineAsmDialect::ATT),
+        };
 
         let arg_types: Vec<BasicMetadataTypeEnum> = args.iter().map(|v| v.get_type().into()).collect();
         let fn_ty = self.ctx.i64_type().fn_type(&arg_types, false);
         let asm_ptr = self.ctx.create_inline_asm(
             fn_ty,
-            format!("call {}", name),
+            body,
             cons,
             true,
             true,
-            Some(InlineAsmDialect::ATT),
+            Some(dialect),
             false,
         );
         let argvals: Vec<_> = args.iter().map(|v| (*v).into()).collect();
@@ -564,6 +1247,11 @@ impl<'ctx> Cg<'ctx> {
                     .funcs
                     .get(func)
                     .ok_or_else(|| format!("codegen: call to undefined '{func}'"))?;
+                // A by-value-struct callable goes through the C ABI marshalling.
+                if self.csigs.contains_key(func) {
+                    let sig = &self.csigs[func];
+                    return self.emit_c_call(callee, sig, &argtv, ret_ty);
+                }
                 let meta: Vec<_> = argtv.iter().map(|(v, _)| (*v).into()).collect();
                 let cs = self.builder.build_call(callee, &meta, "call").map_err(le)?;
                 cs.set_call_convention(callee.get_call_conventions());

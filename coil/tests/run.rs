@@ -36,31 +36,48 @@ fn custom_convention_runs_and_emits_fastcc() {
     assert!(ir.contains("fastcc"), "expected fastcc in IR:\n{ir}");
 }
 
+// A `:shim` convention whose registers are load-bearing must name registers
+// valid for the target arch. We pick them per-arch from `target-arch` (exotic
+// enough — not the C arg registers — that the trampoline's register marshalling
+// is actually exercised).
+const REG2_DEFCC: &str = r#"
+    (defmacro def-reg2 [name]
+      (if (= target-arch "x86_64")
+          `(defcc ~name :params [rax rdx] :ret rax
+             :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+          `(defcc ~name :params [x9 x10] :ret x9
+             :clobber [x9 x10 x11 x12 x13 x14 x15] :lower shim)))
+"#;
+
 #[test]
 fn shim_convention_with_exotic_registers() {
-    let src = r#"
-        (defcc reg2 :params [rax rdx] :ret rax
-          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+    let src = format!(
+        r#"
+        {REG2_DEFCC}
+        (def-reg2 reg2)
         (defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64) (isub a b))
         (defn main [] (-> :i64)
           (let [x (iadd 40 10)] (sub2 x 8)))
-    "#;
-    assert_eq!(build_and_run(src), 42);
-    let ir = coil::emit_ir(src).unwrap();
+    "#
+    );
+    assert_eq!(build_and_run(&src), 42);
+    let ir = coil::emit_ir(&src).unwrap();
     assert!(ir.contains("naked"), "expected a naked trampoline:\n{ir}");
     assert!(ir.contains("__impl"), "expected a ccc impl:\n{ir}");
 }
 
 #[test]
 fn shim_convention_recurses() {
-    let src = r#"
-        (defcc reg2 :params [rax rdx] :ret rax
-          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+    let src = format!(
+        r#"
+        {REG2_DEFCC}
+        (def-reg2 reg2)
         (defn fact :cc reg2 [(n :i64) (acc :i64)] (-> :i64)
           (if (icmp-le n 1) acc (fact (isub n 1) (imul n acc))))
         (defn main [] (-> :i64) (fact 5 1))
-    "#;
-    assert_eq!(build_and_run(src), 120);
+    "#
+    );
+    assert_eq!(build_and_run(&src), 120);
 }
 
 #[test]

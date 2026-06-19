@@ -587,9 +587,9 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
    control"? Where's the line between portable convention and arch-specific one?
 4. **Soundness ceiling for allocation:** how much of a linear/`Owned<T>` layer do
    we ship as blessed library vs leave to users?
-5. **Vectors/aggregates by value** across custom conventions: defer to LLVM's
-   rules on the `:native` path, but `:shim` conventions need explicit
-   split/spill rules in the convention data.
+5. **Vectors/aggregates by value** across custom conventions: the C path is done
+   (the SysV/AAPCS64 struct classifier in `src/abi.rs` matches clang), but `:shim`
+   conventions still need explicit split/spill rules in the convention data.
 6. **Debug info / unwinding** for `:shim` (naked) functions — CFI is manual.
 7. **Reader & macro evaluator**: reuse the `mlir-lisp` reader, or fresh?
 
@@ -635,7 +635,12 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   with conventions and regions. The target is exposed as compile-time values
   (`target-arch`, `target-os`, `target-triple`, `target-pointer-width`), so
   macros can branch per architecture (e.g. `per-arch.coil` selects a `defcc` by
-  arch). Pipeline: `read → expand → parse → check → codegen`; inspect with
+  arch). The target defaults to the host but is selectable: every CLI command
+  takes `--target <triple>` (and the `COIL_TARGET` env var does the same), which
+  drives the macro target values, the ABI/IR lowering, *and* the linker's `-arch`
+  in one place — so `coil run foo.coil --target x86_64-apple-macosx11.0.0`
+  cross-compiles and (via Rosetta on macOS) runs the SysV build from an arm64
+  host. Pipeline: `read → expand → parse → check → codegen`; inspect with
   `--expand`. (`macros.coil` → 41.) *The "Lisp-like macros" half of the pitch.*
   **Automatic hygiene**: inside a quasiquote a symbol ending in `#` auto-gensyms
   consistently, so introduced temporaries can't capture caller bindings
@@ -644,8 +649,15 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   `defclosure` as a prelude. Remaining: hygiene is auto-gensym (not full
   referential `syntax-rules` hygiene — it doesn't unify a name across two
   separate quasiquotes); includes resolve from the working dir, not the
-  including file; per-arch *shim* lowering is still x86-64-only (only the
-  convention *selection* is portable, not the trampoline asm).
+  including file.
+- **Per-arch shim lowering — ✅ done.** The trampoline and register-constrained
+  shim-call asm are emitted per target architecture, not just the convention
+  *selection*: codegen derives the arch from the target triple and emits x86-64
+  (AT&T `call`, `%rsp` save/restore, `rdi…r9`/`rax`) or AArch64 (`bl`, `x0…x7`/
+  `x0`, `lr`/x30 save+clobber) accordingly. A `defcc` naming registers that don't
+  exist on the target (e.g. an x86 `defcc` compiled for arm64) is a hard error,
+  not silently mis-assembled. The arch is selectable via `--target`/`COIL_TARGET`,
+  so `per-arch.coil` cross-emits the x86-64 trampoline from an arm64 host.
 - **Function pointers — ✅ done.** `(fnptr CC [types] ret)` type, `(fnptr-of
   name)` for a function's address, indirect `(call-ptr fp args...)` honoring the
   convention (native conventions only — shim fnptrs are future). `cast` also
@@ -678,8 +690,21 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   `(array T N)`; `(alloc REGION TYPE)` allocates any type; `(field p name)` and
   array `(index p i)` produce element pointers (struct/array GEP); structs nest
   by value (built in definition order) or self-reference by pointer.
-  `structs.coil` → 42. Remaining: unsigned types, struct/array literals, and
-  passing aggregates by value across `:shim`/`extern` boundaries (ABI work).
+  `structs.coil` → 42.
+- **Struct-by-value C ABI — ✅ done.** Passing/returning a struct by value across
+  the `extern`/`c` boundary uses the real C ABI, not a pointer. `src/abi.rs`
+  classifies each struct for the target and produces the exact LLVM coercion clang
+  emits — **System V AMD64** (eightbyte INTEGER/SSE classification + merge →
+  register slots; two-eightbyte returns wrapped in `{T0,T1}`; > 16 B → `byval`/
+  `sret`) and **AArch64 AAPCS64** (HFA detection → `[N x fT]`/struct-typed return;
+  ≤ 16 B → x-register packing; > 16 B → indirect). Verified by diffing the emitted
+  `declare`/`define` lines against `clang -arch <a> -emit-llvm` for the equivalent
+  C, *and* by linking against C (libc `div`/`ldiv`, a `<=16B`/`>16B` round-trip
+  helper, a C caller of struct-returning Coil fns) and running — natively and, for
+  the SysV path on an arm64 host, cross-compiled and run under Rosetta. An
+  unclassifiable shape is a hard error, never a silent pointer. (`tests/struct_abi.rs`.)
+  Remaining: unsigned-typed externs at the boundary, struct/array literals, and
+  aggregate-by-value across *`:shim`* (custom-register) conventions.
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
 

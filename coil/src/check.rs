@@ -526,10 +526,6 @@ fn synth(
         Expr::Let { binds, body } => {
             let saved = env.clone();
             let mut new_binds = Vec::with_capacity(binds.len());
-            // A `(mut name)` binding becomes a stack place: the name is bound to
-            // an `alloc-stack` pointer, and the init value is stored into it.
-            // These injected stores run before the body.
-            let mut init_stores: Vec<Expr> = Vec::new();
             for (name, mutable, val) in binds {
                 let (ve, vt) = synth(val, None, env, cx, tps, fname)?;
                 match &vt {
@@ -547,21 +543,34 @@ fn synth(
                         new_binds.push((name.clone(), false, ve));
                     }
                     // `(mut name)` or an aggregate value becomes a fresh stack
-                    // place (its fields are addressable, it can be borrowed).
+                    // place (its fields are addressable, it can be borrowed). The
+                    // name is bound to an `alloc-stack` whose value is a `do` that
+                    // stores the init value into the slot and yields the slot
+                    // pointer — so the store happens *at the binding's position*,
+                    // before any later binding (or the body) reads the place.
+                    // (Deferring the stores to body-start would mis-order a later
+                    // binding that consumes this one, e.g. `[s (f) t (g s)]`.)
                     _ if *mutable || is_place_value_type(&vt, cx) => {
                         env.insert(name.clone(), Type::Ref(*mutable, Box::new(vt.clone())));
+                        let slot = format!("{name}.slot");
+                        let init = Expr::Do(vec![
+                            Expr::Store {
+                                ptr: Box::new(Expr::Var(slot.clone())),
+                                val: Box::new(ve),
+                            },
+                            Expr::Var(slot.clone()),
+                        ]);
+                        // Inner alias binding holds the alloc; the outer name is the
+                        // slot pointer after the store. Both lower trivially.
                         new_binds.push((
-                            name.clone(),
+                            slot.clone(),
                             false,
                             Expr::Alloc {
                                 storage: Storage::Stack,
                                 ty: erase_refs(&vt),
                             },
                         ));
-                        init_stores.push(Expr::Store {
-                            ptr: Box::new(Expr::Var(name.clone())),
-                            val: Box::new(ve),
-                        });
+                        new_binds.push((name.clone(), false, init));
                     }
                     // scalars/pointers/sums stay ordinary immutable SSA values.
                     _ => {
@@ -570,8 +579,7 @@ fn synth(
                     }
                 }
             }
-            let mut out = Vec::with_capacity(init_stores.len() + body.len());
-            out.append(&mut init_stores);
+            let mut out = Vec::with_capacity(body.len());
             let mut last = Type::Int(64, true);
             let n = body.len();
             for (i, e) in body.iter().enumerate() {
@@ -1376,6 +1384,24 @@ fn coerce_arg(
                 }
             }
             Ok(ae) // the borrow was already erased to the underlying pointer
+        }
+        // A by-value struct/sum parameter (an `extern`/`c`-cc function taking an
+        // aggregate by value) accepts the value directly, or a *place* holding it
+        // — a `let`-bound aggregate is materialized into a stack place, so a bare
+        // `x` referring to one is a `(ref S)`. The place's pointer is passed
+        // through; codegen reads the aggregate from it and applies the C ABI
+        // coercion. (Without this, by-value aggregate arguments would be
+        // unusable, since every aggregate `let` binding is a reference.)
+        Type::Struct(sname) => {
+            if &at == want {
+                return Ok(ae); // a bare aggregate value
+            }
+            if let Some(pointee) = place_pointee(&at) {
+                if struct_name(pointee) == Some(sname.as_str()) {
+                    return Ok(ae); // pass the place pointer; codegen loads + coerces
+                }
+            }
+            coerce(ae, at, want, is_extern, fname, what)
         }
         _ => coerce(ae, at, want, is_extern, fname, what),
     }

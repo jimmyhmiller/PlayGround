@@ -37,7 +37,9 @@ template substitution.
   `ccc` `__impl` body plus a **`naked` trampoline** that marshals the
   convention's registers into the SysV registers; call sites use
   register-constrained inline asm so each argument is genuinely pinned to its
-  register. Verified through JIT, including recursion through the exotic ABI.
+  register. The trampoline + call-site asm is emitted per target architecture
+  (x86-64 and AArch64); verified by AOT-compiling and running native
+  executables, including recursion through the exotic ABI, on both arches.
 - M3: allocation. Pointers are **region-less** — `(ptr T)` is just a pointer
   (à la Zig/C). *Where* memory comes from is an **operation**, not part of the
   type: `(alloc-stack T)` → `alloca`, `(alloc-static T)` → a global,
@@ -79,9 +81,12 @@ template substitution.
   a pointer parameter (`void*`-style). A trailing `...` marks a **variadic**
   function, so `printf`/`snprintf`/`scanf` and friends are callable
   (`(extern printf :cc c [(ptr i8) ...] (-> i32))`). Scalars, pointers, and
-  floats cross the boundary correctly; passing a *struct by value* to/from C is
-  not yet ABI-correct (pass a pointer). So programs can do I/O — e.g.
-  `putchar`/`write`/`printf`.
+  floats cross the boundary correctly, and **structs pass/return by value** with
+  the real C ABI — small structs are coerced into registers and large ones go
+  indirect (`byval`/`sret`), matching what clang emits on both **System V
+  AMD64** and **AArch64 AAPCS64** (see "Struct-by-value C ABI" below). So
+  programs can do I/O — e.g. `putchar`/`write`/`printf` — and call libc
+  functions that take or return structs by value (e.g. `div`/`ldiv`).
 - Scalars: **floats** `f32`/`f64` (literals `3.14`/`1e9`, `fadd`/`fsub`/`fmul`/
   `fdiv`/`frem`, ordered compares `fcmp-lt…`, and `cast` among int↔float and
   f32↔f64); a real **`bool`** (comparisons return it; `true`/`false`; short-
@@ -151,8 +156,41 @@ template substitution.
   (`lib/closure.coil`) is a userland macro that generates the whole closure
   (env struct + code + new/call/free) from one line — closures as a library.
 
-Not yet: the `adapt` macro (general convention-to-convention trampolines),
-per-field endianness, and a per-arch shim backend. See the design docs.
+Per-arch shim lowering is done: `:shim` trampolines and register-constrained
+shim call sites are emitted for both **x86-64** (AT&T `call`, `%rsp` prologue,
+`rdi…r9`/`rax`) and **AArch64** (`bl`, `x0…x7`/`x0`, `lr`-clobber), selected
+from the target triple. A `defcc` that names registers absent on the target
+(e.g. an x86 `defcc` compiled for arm64) is a clear hard error, not miscompiled
+asm.
+
+Not yet: the `adapt` macro (general convention-to-convention trampolines) and
+per-field endianness. See the design docs.
+
+## Struct-by-value C ABI
+
+When a struct crosses the C boundary by value — an `extern`/`c`-convention
+parameter or return, in either direction — Coil lowers it with the real C ABI
+rather than passing a pointer. `src/abi.rs` classifies each struct for the target
+and produces exactly the LLVM-level coercion clang emits:
+
+- **System V AMD64.** Structs ≤ 16 bytes are split into eightbytes, each
+  byte-classified (INTEGER vs SSE) and merged per the SysV field-walk rules, then
+  coerced to the matching register slot (`iN` for integer eightbytes; `float` /
+  `double` / `<2 x float>` for SSE). A two-eightbyte *return* is wrapped in a
+  `{T0, T1}` literal struct. Structs > 16 bytes go indirect — `byval(T)` for an
+  argument, an `sret(T)` hidden pointer for a return.
+- **AArch64 AAPCS64.** A Homogeneous Floating-point Aggregate (1–4 members of one
+  FP type) passes as `[N x fT]` and returns as the struct type. Other composites
+  ≤ 16 bytes pack into x-registers (`i64` / `[2 x i64]` for an arg; the natural
+  `iN` width for a small return). Composites > 16 bytes go indirect.
+
+This is **verified two ways**: the emitted IR's `declare`/`define` lines are
+diffed against what `clang -arch <a> -S -emit-llvm` produces for the equivalent C
+(`tests/struct_abi.rs::emits_abi_{x86_64_sysv,aarch64_aapcs64}`), and real
+programs are linked against C — calling libc `div`/`ldiv`, a C `<=16B`/`>16B`
+round-trip helper, and a C caller of Coil functions that *return* structs — and
+run, natively and (for the SysV path on an arm64 host) cross-compiled and run
+under Rosetta. An unclassifiable shape is a hard error, never a silent pointer.
 
 ## What it looks like
 
@@ -178,7 +216,7 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 141 tests (build + run native exes)
+cargo test                                     # 149 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
@@ -196,6 +234,13 @@ cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # ech
 cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file
 cargo run -- emit-ir  examples/shim.coil                  # LLVM IR (trampoline + inline asm)
 cargo run -- expand   examples/macros.coil                # program after macro expansion
+
+# Cross-compile for a non-host target with --target <triple> (any command).
+# The triple drives both the IR/ABI lowering and the linker's -arch; on macOS a
+# cross binary runs under Rosetta, so `run` works end-to-end.
+cargo run -- run     examples/per-arch.coil --target x86_64-apple-macosx11.0.0; echo $?  # => 42
+cargo run -- build   examples/per-arch.coil -o /tmp/pa --target x86_64-apple-macosx11.0.0
+cargo run -- emit-ir examples/per-arch.coil --target x86_64-apple-macosx11.0.0   # x86-64 SysV lowering
 ```
 
 There is no `eval`/JIT: the only way to run a program is to AOT-compile it.

@@ -4,6 +4,7 @@
 //!
 //! See `docs/DESIGN.md` for the full design.
 
+pub mod abi;
 pub mod ast;
 pub mod check;
 pub mod codegen;
@@ -58,11 +59,20 @@ fn host_target() -> macros::TargetInfo {
 /// types polymorphic code and infers/fills the generic type arguments, so the
 /// monomorphizer is a pure specializer over fully-explicit type args.
 fn build_module<'ctx>(ctx: &'ctx Context, src: &str) -> Result<Module<'ctx>, String> {
+    build_module_for(ctx, src, codegen::target_triple())
+}
+
+/// `build_module` for an explicitly chosen target triple (cross-targeting).
+fn build_module_for<'ctx>(
+    ctx: &'ctx Context,
+    src: &str,
+    triple: inkwell::targets::TargetTriple,
+) -> Result<Module<'ctx>, String> {
     let forms = read_and_expand(src)?;
     let program = parse::parse_program(&forms)?;
     let program = check::check(&program)?;
     let program = mono::monomorphize(program)?;
-    codegen::compile(ctx, &program)
+    codegen::compile_for(ctx, &program, triple)
 }
 
 /// Macro-expand and pretty-print the resulting forms (for `--expand`).
@@ -83,16 +93,35 @@ pub fn emit_ir(src: &str) -> Result<String, String> {
     Ok(module.print_to_string().to_string())
 }
 
+/// `emit_ir` for an explicitly chosen target triple — used to inspect a
+/// program's ABI lowering for a non-host target (e.g. verifying the x86-64 SysV
+/// struct coercion from an arm64 host).
+pub fn emit_ir_for(src: &str, triple: &str) -> Result<String, String> {
+    let ctx = Context::create();
+    let module = build_module_for(&ctx, src, inkwell::targets::TargetTriple::create(triple))?;
+    Ok(module.print_to_string().to_string())
+}
+
 /// AOT: compile to a native object file. This is the language's primary output
 /// — no runtime dependency on LLVM, links with a real linker, and the `:shim`
 /// trampolines become ordinary relocations the system toolchain resolves.
 pub fn compile_to_object(src: &str, obj_path: &Path) -> Result<(), String> {
-    Target::initialize_native(&InitializationConfig::default())?;
-    let ctx = Context::create();
-    let module = build_module(&ctx, src)?;
+    compile_to_object_for(src, obj_path, codegen::target_triple())
+}
 
-    let triple = TargetMachine::get_default_triple();
+/// `compile_to_object` for an explicitly chosen target triple. Used to
+/// cross-compile (e.g. an x86-64 object on an arm64 host to exercise the SysV
+/// struct ABI under Rosetta); the IR and the emitted machine code share `triple`.
+pub fn compile_to_object_for(
+    src: &str,
+    obj_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+) -> Result<(), String> {
+    Target::initialize_all(&InitializationConfig::default());
+    let ctx = Context::create();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    let module = build_module_for(&ctx, src, triple)?;
+    let triple = module.get_triple();
     let tm = target
         .create_target_machine(
             &triple,
@@ -114,9 +143,27 @@ pub fn compile_to_object(src: &str, obj_path: &Path) -> Result<(), String> {
 /// `main` (i64, no args) becomes the process entry; its return value is the
 /// exit code (low 8 bits).
 pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
+    build_executable_for(src, out_path, codegen::target_triple())
+}
+
+/// `build_executable` for an explicitly chosen target triple (cross-compile).
+/// The object is emitted for `triple` *and* the linker is told to produce an
+/// executable for that triple's architecture (`cc -arch <arch>`), so the result
+/// is a real binary for the chosen target (runnable under Rosetta on macOS for a
+/// cross arch). The triple's arch must be one codegen supports.
+pub fn build_executable_for(
+    src: &str,
+    out_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+) -> Result<(), String> {
+    let triple_str = triple.as_str().to_string_lossy().into_owned();
     let obj_path = out_path.with_extension("o");
-    compile_to_object(src, &obj_path)?;
-    let status = Command::new("cc")
+    compile_to_object_for(src, &obj_path, triple)?;
+    let mut cc = Command::new("cc");
+    if let Some(arch) = link_arch_flag(&triple_str) {
+        cc.arg("-arch").arg(arch);
+    }
+    let status = cc
         .arg(&obj_path)
         .arg("-o")
         .arg(out_path)
@@ -127,6 +174,25 @@ pub fn build_executable(src: &str, out_path: &Path) -> Result<(), String> {
         return Err(format!("linker (cc) failed with {status}"));
     }
     Ok(())
+}
+
+/// The `cc -arch` value for a target triple's architecture, or `None` if it is
+/// the host arch (no `-arch` needed). An unsupported arch is a hard error so a
+/// `--target` typo doesn't silently link for the host.
+fn link_arch_flag(triple: &str) -> Option<&'static str> {
+    let arch = triple.split('-').next().unwrap_or("");
+    let host = TargetMachine::get_default_triple()
+        .as_str()
+        .to_string_lossy()
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    match arch {
+        "x86_64" | "amd64" => (host != "x86_64").then_some("x86_64"),
+        "aarch64" | "arm64" | "arm64e" => (host != "aarch64" && host != "arm64").then_some("arm64"),
+        _ => None,
+    }
 }
 
 /// Front end only: read → expand → parse → check. No codegen, no LLVM
