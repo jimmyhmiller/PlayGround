@@ -53,3 +53,45 @@ boxed-datatype accumulator folds are follow-ups.
 ## Proof target
 `%total fuel-div` (+ `lt`/`sub` becoming total) — written in 1a surface syntax
 (`let`, nested/expression `match`), running natively.
+
+## Refinements worked out while building the verdict half (read these first)
+- **The verdict change is the EASY half** (drafted + validated): add
+  `scrut_is_nat: bool` to `FnClauses` (set in `fn_clauses` from
+  `nat_types.contains(scrut_datatype)`); in `structural_verdict`, wrap the
+  "other args verbatim" rejection in `if !f.scrut_is_nat { … }`. The scrutinee
+  strict-subterm descent check STAYS unconditional (dual-failure guard).
+- **CRITICAL CORRECTION on the motive shape** (I almost got this wrong): a
+  `NatElim` motive has type `Nat → Type`, so the motive is
+  `λ scrut'. PiChain(acc_tys → R)` — a function from `Nat` to a **Pi TYPE**
+  `T₁ → … → T_K → R`, i.e. `Term::Lam(Pi(ω,T₁', Pi(ω,T₂', …, R')))`. It is NOT
+  `K+1` nested lambdas. (Nested lambdas are the METHODS, which return VALUES.)
+  For `fuel-div`: `motive = Lam(Pi(ω,Nat, Pi(ω,Nat, Nat)))` = `λ_. (Nat→Nat→Nat)`.
+- **Methods** (these ARE nested value-lambdas): `z = λ a₁…a_K. <Zero body>`;
+  `s = λ k. λ ih. λ a₁…a_K. <Succ body>`, with `ih : T₁→…→T_K→R`.
+- **final fn body** = `(NatElim motive z s scrut_var) acc₁_var … acc_K_var` (apply
+  the built function to the actual accumulators), then pass-D λ-wraps the params.
+- **`ih_for` needs an ACCUMULATOR MODE**: a recursive call `f(k, e₁…e_K)` becomes
+  `App(…App(ih, e₁′)…, e_K′)` where the `eᵢ′` are the NON-scrutinee args
+  elaborated in the Succ-arm context (skip `scrut_pos`, in param order). Add an
+  `acc: Option<&[String]>` (accumulator param names) to `Rec`, or a parallel
+  path. The accumulator ORDER = non-scrutinee params in param order.
+- **v1 RESTRICTIONS** (error clearly otherwise): NO implicit params (all
+  explicit — `fuel-div`/`lt`/`sub` qualify); NON-dependent return type `R`
+  (independent of scrut/accs). Note `full_params` includes implicits but
+  `explicit_pos` is explicit-space — reconcile carefully (or require all-explicit).
+- **MUST LAND TOGETHER**: the verdict change alone (without the lowering) routes
+  accumulator Nat-folds through `elab_nat_match`, whose `ih_for` maps the call to
+  the plain IH and IGNORES the varying args → a well-typed-but-WRONG term (for a
+  non-dependent `R`, types match so the kernel does not catch it; the native-run
+  test does). It also flips the existing `total_certificate_rejects_accumulator…`
+  test (`addacc` would become accepted). So implement verdict + lowering + the
+  `addacc` test update + the routing in one diff.
+- **Routing**: simplest is for `elab_nat_match` to self-detect accumulator (some
+  recursive call varies a non-scrutinee arg) and dispatch to `elab_nat_match_acc`;
+  verbatim folds stay on the current simple path (no regression).
+
+## Suggested build+test order
+1. `elab_nat_match_acc` for ONE accumulator; prove with `sumacc` (native run = 3).
+2. Generalize to K accumulators; prove with `fuel-div` (+ `lt`,`sub`) native run.
+3. Verdict change + routing + `addacc`-test update; full suite green.
+4. Dual-failure red-team (non-descending fold still rejected; verbatim unchanged).
