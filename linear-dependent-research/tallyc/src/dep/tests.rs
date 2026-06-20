@@ -249,6 +249,94 @@ fn positivity_sees_through_natcase_and_fix_hiding_a_negative_occurrence() {
     assert!(check_signature(&sig2).is_err(), "negative occurrence under Fix must be rejected");
 }
 
+/// `data Bad { mk : <field> }` — for the positivity sibling-hunt.
+fn bad_with_field(field: Term) -> Signature {
+    Signature {
+        postulates: vec![],
+        datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field)], vec![])])],
+    }
+}
+
+#[test]
+fn occurs_finds_a_negative_occurrence_through_every_reducing_construct() {
+    // PERMANENT REGRESSION (ported from the kernel reviewer's sibling-hunt): a
+    // negative `Bad → Bad` hidden behind ANY subterm-bearing construct must be
+    // seen by `occurs` and rejected. `occurs` is a SYNTACTIC search, and (post
+    // E3) exhaustive + all-children, so a `Bad` anywhere in a domain is caught —
+    // no construct can hide it. We probe a representative spread, including a
+    // 3-layer nest (App → Lam → NatCase → Pi).
+    let bad = Data("Bad".into(), vec![]);
+    let neg = || Pi(Omega, b(bad.clone()), b(bad.clone())); // Bad → Bad
+    // each `hidden_*` reduces-or-not to something containing the negative `neg()`;
+    // syntactically `neg()` is in a Pi DOMAIN ⇒ must be rejected.
+    let probes: Vec<Term> = vec![
+        // App of a lambda: (λ_. (Bad→Bad)) Zero   in domain position
+        Pi(Omega, b(App(b(Lam(b(neg()))), b(NatLit(0)))), b(bad.clone())),
+        // under a Lam / Fst / Suc / Refl / Pair / Eq / Ann / Sigma:
+        Pi(Omega, b(Fst(b(Pair(b(neg()), b(Nat))))), b(bad.clone())),
+        Pi(Omega, b(Eq(b(Type(0)), b(neg()), b(neg()))), b(bad.clone())),
+        Pi(Omega, b(Sigma(Omega, b(neg()), b(Nat))), b(bad.clone())),
+        Pi(Omega, b(Ann(b(neg()), b(Type(0)))), b(bad.clone())),
+        Pi(Omega, b(Add(b(NatLit(0)), b(Snd(b(Pair(b(Nat), b(neg()))))))), b(bad.clone())),
+        // a 3-layer nest: App(Lam(NatCase(.., Pi-with-neg, ..)), 0)
+        Pi(
+            Omega,
+            b(App(
+                b(Lam(b(NatCase(b(Lam(b(Type(0)))), b(neg()), b(Lam(b(Nat))), b(Var(0)))))),
+                b(NatLit(0)),
+            )),
+            b(bad.clone()),
+        ),
+    ];
+    for (i, field) in probes.into_iter().enumerate() {
+        assert!(
+            check_signature(&bad_with_field(field)).is_err(),
+            "probe {i}: a hidden negative occurrence must be rejected"
+        );
+    }
+
+    // …yet `occurs` still DISCRIMINATES: a strictly-positive higher-order field
+    // (the W-type) is ACCEPTED — the fix did not over-reject.
+    assert!(check_signature(&tree_sig()).is_ok(), "W-type must stay accepted");
+}
+
+#[test]
+fn m2_higher_order_eliminator_uses_both_telescope_arguments() {
+    // m=2 ι-rule lock-in: a node whose children are a function of TWO arguments
+    // `Bool → Bool → Tri`. The IH is `(a:Bool)(b:Bool) → motive (f a b)`; the
+    // method must apply it at both arguments. Eliminating `node (λa b. leaf)`
+    // counts 4 leaves (2×2) ⇒ exercises build_ih at m=2 (nested native closure)
+    // and ih_type at m=2.
+    let bool_d = datadecl("Bool", vec![], vec![], vec![ctor("bt", vec![], vec![]), ctor("bf", vec![], vec![])]);
+    let bool_ty = Data("Bool".into(), vec![]);
+    // node : (Bool → Bool → Tri) → Tri
+    let field = Pi(Omega, b(bool_ty.clone()), b(Pi(Omega, b(bool_ty.clone()), b(Data("Tri".into(), vec![])))));
+    let tri_d = datadecl(
+        "Tri",
+        vec![],
+        vec![],
+        vec![ctor("tleaf", vec![], vec![]), ctor("tnode", vec![(Omega, field)], vec![])],
+    );
+    let sig = Signature { postulates: vec![], datas: vec![bool_d, tri_d] };
+    assert!(check_signature(&sig).is_ok(), "{:?}", check_signature(&sig));
+
+    let bt = Constr("bt".into(), vec![]);
+    let bf = Constr("bf".into(), vec![]);
+    let motive = Lam(b(Nat));
+    let tleaf_m = NatLit(1);
+    // λ f. λ ih. (ih bt bt) + (ih bt bf) + (ih bf bt) + (ih bf bf)   [ih : Bool→Bool→Nat]
+    let ap2 = |x: Term, y: Term| App(b(App(b(Var(0)), b(x))), b(y));
+    let tnode_m = Lam(b(Lam(b(Add(
+        b(Add(b(ap2(bt.clone(), bt.clone())), b(ap2(bt.clone(), bf.clone())))),
+        b(Add(b(ap2(bf.clone(), bt.clone())), b(ap2(bf.clone(), bf.clone())))),
+    )))));
+    // tnode (λa.λb. tleaf)
+    let tree = Constr("tnode".into(), vec![Lam(b(Lam(b(Constr("tleaf".into(), vec![])))))]);
+    let elim = Elim("Tri".into(), b(motive), vec![tleaf_m, tnode_m], b(tree));
+    assert_eq!(infer_closed_in(sig.clone(), &elim), Ok(Nat));
+    assert_eq!(normalize_closed_in(sig, &elim), NatLit(4));
+}
+
 #[test]
 fn indexed_higher_order_ih_uses_the_recursive_occurrences_own_index() {
     // The discriminating test for `ih_type`'s INDEX handling. `G : Nat → Type`:
