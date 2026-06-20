@@ -1,0 +1,17 @@
+[package]
+name = "age_of_models"
+version = "0.1.0"
+edition = "2021"
+description = "An Age-of-Empires-like RTS that visualizes live AI model / Claude session activity as cities and villagers."
+
+[dependencies]
+raylib = "5.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

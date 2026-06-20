@@ -24,6 +24,20 @@ final class AppStore: ObservableObject {
     /// Weigh-ins imported from HealthKit (e.g. a smart scale), merged with manual ones.
     @Published var healthWeighIns: [WeighIn] = []
 
+    /// Result of the last Health sync, so the UI can explain *why* there is (or isn't) data
+    /// instead of silently showing an empty screen.
+    struct SyncReport: Equatable {
+        var available: Bool
+        var requestApproved: Bool
+        var alreadyDetermined: Bool
+        var activeDays: Int
+        var basalDays: Int
+        var weighIns: Int
+        var hasEnergy: Bool { activeDays > 0 || basalDays > 0 }
+    }
+    @Published var lastSync: SyncReport?
+    @Published var isSyncing = false
+
     let health = HealthKitManager()
     private let cal = Calendar.current
     private let storeURL: URL
@@ -196,19 +210,30 @@ final class AppStore: ObservableObject {
 
     func syncHealth() async {
         guard state.healthKitEnabled else { return }
-        let authorized = await health.requestAuthorization()
-        guard authorized else { return }
+        guard health.isAvailable else {
+            lastSync = SyncReport(available: false, requestApproved: false,
+                                  alreadyDetermined: false, activeDays: 0, basalDays: 0, weighIns: 0)
+            return
+        }
+        isSyncing = true
+        defer { isSyncing = false }
+        let approved = await health.requestAuthorization()
+        let status = await health.requestStatus()
         let start = state.startDate.map { cal.startOfDay(for: $0) }
             ?? cal.date(byAdding: .day, value: -90, to: today)!
         let active = await health.dailyEnergy(.active, from: start, to: today)
         let basal = await health.dailyEnergy(.basal, from: start, to: today)
         let weights = await health.bodyMass(from: start, to: today)
-        await MainActor.run {
-            self.activeByDay = active
-            self.basalByDay = basal
-            self.healthWeighIns = weights
-            self.recompute()
-        }
+        // syncHealth is @MainActor-isolated, so these assignments are already on the main actor.
+        self.activeByDay = active
+        self.basalByDay = basal
+        self.healthWeighIns = weights
+        self.lastSync = SyncReport(available: true,
+                                   requestApproved: approved,
+                                   alreadyDetermined: status == .alreadyDetermined,
+                                   activeDays: active.count, basalDays: basal.count,
+                                   weighIns: weights.count)
+        self.recompute()
     }
 
     // MARK: - Demo / reset

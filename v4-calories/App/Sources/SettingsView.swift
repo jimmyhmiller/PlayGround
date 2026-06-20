@@ -4,6 +4,7 @@ import CalorieModel
 struct SettingsView: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var goal: Goal = Goal(targetWeightLb: 178, ratePerWeek: 0.85)
     @State private var hasProfile = false
     @State private var newShortcutName = ""
@@ -85,6 +86,60 @@ struct SettingsView: View {
                 set: { store.setHealthKitEnabled($0) }))
             Text("Reads active + resting energy (your true burn) and imports smart-scale weigh-ins. The app works fully without it.")
                 .font(.footnote).foregroundStyle(Theme.textDim(0.5))
+
+            if store.state.healthKitEnabled {
+                Button {
+                    Task { await store.syncHealth() }
+                } label: {
+                    HStack {
+                        Text("Sync now")
+                        Spacer()
+                        if store.isSyncing { ProgressView() }
+                    }
+                }
+                .disabled(store.isSyncing)
+
+                if let r = store.lastSync { healthDiagnostics(r) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func healthDiagnostics(_ r: AppStore.SyncReport) -> some View {
+        let dim = Theme.textDim(0.55)
+        VStack(alignment: .leading, spacing: 6) {
+            diagRow("Active energy", "\(r.activeDays) days", r.activeDays > 0)
+            diagRow("Resting energy", "\(r.basalDays) days", r.basalDays > 0)
+            diagRow("Weigh-ins", "\(r.weighIns)", r.weighIns > 0)
+        }
+        .font(.mono(13))
+        .padding(.vertical, 2)
+
+        if !r.available {
+            Text("Health data isn't available on this device.")
+                .font(.footnote).foregroundStyle(Theme.amber)
+        } else if !r.hasEnergy {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Health is connected but no energy is coming through. Read access for **Active Energy** and **Resting Energy** is most likely off — those default to OFF in the permission sheet and have to be turned on by hand.")
+                    .font(.footnote).foregroundStyle(dim)
+                Text("Apple Health → Sharing → Apps → Cumulative → turn on **Active Energy** + **Resting Energy** (or “Turn On All”), then come back and tap Sync now.")
+                    .font(.footnote).foregroundStyle(dim)
+                Button("Open Apple Health") {
+                    if let url = URL(string: "x-apple-health://") { openURL(url) }
+                }
+                .font(.system(size: 14, weight: .semibold))
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func diagRow(_ label: String, _ value: String, _ ok: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundStyle(ok ? Theme.green : Theme.textDim(0.4))
+            Text(label).foregroundStyle(Theme.textDim(0.7))
+            Spacer()
+            Text(value).foregroundStyle(ok ? Theme.text : Theme.textDim(0.4))
         }
     }
 

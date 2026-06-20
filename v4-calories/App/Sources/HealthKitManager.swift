@@ -8,6 +8,8 @@ import HealthKit
 /// unavailable (e.g. on a simulator without seeded data), so the app never depends on it.
 final class HealthKitManager {
     enum EnergyKind { case active, basal }
+    /// Whether the system would still show a permission sheet for our types.
+    enum AuthStatus { case unavailable, unknown, shouldRequest, alreadyDetermined }
 
     #if canImport(HealthKit)
     private let store = HKHealthStore()
@@ -27,6 +29,23 @@ final class HealthKitManager {
         let write: Set<HKSampleType> = [massType, dietType]
         return await withCheckedContinuation { cont in
             store.requestAuthorization(toShare: write, read: read) { ok, _ in cont.resume(returning: ok) }
+        }
+    }
+
+    /// HealthKit hides whether *read* access was granted, but it will tell us whether a
+    /// permission sheet would still appear. `.alreadyDetermined` + no data ≈ read denied.
+    func requestStatus() async -> AuthStatus {
+        guard isAvailable else { return .unavailable }
+        let read: Set<HKObjectType> = [activeType, basalType, massType]
+        let write: Set<HKSampleType> = [massType, dietType]
+        return await withCheckedContinuation { cont in
+            store.getRequestStatusForAuthorization(toShare: write, read: read) { status, _ in
+                switch status {
+                case .shouldRequest: cont.resume(returning: .shouldRequest)
+                case .unnecessary:   cont.resume(returning: .alreadyDetermined)
+                default:             cont.resume(returning: .unknown)
+                }
+            }
         }
     }
 
@@ -92,6 +111,7 @@ final class HealthKitManager {
     #else
     var isAvailable: Bool { false }
     func requestAuthorization() async -> Bool { false }
+    func requestStatus() async -> AuthStatus { .unavailable }
     func dailyEnergy(_ kind: EnergyKind, from start: Date, to end: Date) async -> [Date: Double] { [:] }
     func bodyMass(from start: Date, to end: Date) async -> [WeighIn] { [] }
     func saveBodyMass(lb value: Double, date: Date) async {}

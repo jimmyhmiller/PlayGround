@@ -166,13 +166,18 @@ struct BurnView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 14) {
+        let connectedNoEnergy = store.state.healthKitEnabled && (store.lastSync?.hasEnergy == false)
+        return VStack(spacing: 14) {
             Image(systemName: "flame").font(.system(size: 40)).foregroundStyle(Theme.textDim(0.3))
-            Text("No burn data yet").font(.system(size: 17, weight: .semibold))
-            Text("Connect Apple Health to see your active and resting energy here. The app uses it to learn your true calorie burn.")
+            Text(connectedNoEnergy ? "Health is on, but no energy yet" : "No burn data yet")
+                .font(.system(size: 17, weight: .semibold))
+            Text(connectedNoEnergy
+                 ? "Active & Resting Energy read access is most likely off — it defaults to OFF in Health's permission sheet. Open Settings to turn it on and re-sync."
+                 : "Connect Apple Health to see your active and resting energy here. The app uses it to learn your true calorie burn.")
                 .multilineTextAlignment(.center).font(.system(size: 14)).foregroundStyle(Theme.textDim(0.5))
             Button(action: openSettings) {
-                Text("Open settings").font(.system(size: 15, weight: .bold)).foregroundStyle(Theme.onGreen)
+                Text(connectedNoEnergy ? "Fix in settings" : "Open settings")
+                    .font(.system(size: 15, weight: .bold)).foregroundStyle(Theme.onGreen)
                     .padding(.horizontal, 24).padding(.vertical, 14)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Theme.green))
             }
