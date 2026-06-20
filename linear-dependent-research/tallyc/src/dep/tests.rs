@@ -91,6 +91,187 @@ fn ctor(name: &str, args: Vec<(crate::mult::Mult, Term)>, idxs: Vec<Term>) -> Co
     Constructor { name: name.to_string(), args, idxs }
 }
 
+// ===========================================================================
+// PHASE E3 — GENERAL strictly-positive eliminators (higher-order recursive args)
+// ===========================================================================
+
+fn datadecl(name: &str, params: Vec<(Mult, Term)>, indices: Vec<(Mult, Term)>, ctors: Vec<Constructor>) -> DataDecl {
+    DataDecl { name: name.into(), universe: 0, params, indices, ctors }
+}
+
+/// A W-type-shaped family: `Tree` with a finitely-branching node whose children
+/// are a FUNCTION `Bool → Tree` — a HIGHER-ORDER recursive constructor argument.
+fn tree_sig() -> Signature {
+    Signature {
+        postulates: vec![],
+        datas: vec![
+            datadecl("Bool", vec![], vec![], vec![ctor("btrue", vec![], vec![]), ctor("bfalse", vec![], vec![])]),
+            datadecl(
+                "Tree",
+                vec![],
+                vec![],
+                vec![
+                    ctor("leaf", vec![], vec![]),
+                    // node2 : (Bool → Tree) → Tree   (the higher-order recursive field)
+                    ctor(
+                        "node2",
+                        vec![(Omega, Pi(Omega, b(Data("Bool".into(), vec![])), b(Data("Tree".into(), vec![]))))],
+                        vec![],
+                    ),
+                ],
+            ),
+        ],
+    }
+}
+
+#[test]
+fn higher_order_recursive_datatype_is_well_formed_and_eliminates() {
+    // strict positivity ACCEPTS the higher-order field (Tree only in the codomain).
+    assert!(check_signature(&tree_sig()).is_ok(), "{:?}", check_signature(&tree_sig()));
+
+    // `size t = ` leaves count, via the eliminator. The node method receives the
+    // induction hypothesis `ih : (b:Bool) → Nat` (a NATIVE closure `λb. elim (f b)`)
+    // and sums it over both children: size(node2 f) = ih btrue + ih bfalse.
+    let btrue = Constr("btrue".into(), vec![]);
+    let bfalse = Constr("bfalse".into(), vec![]);
+    let motive = Lam(b(Nat)); // λ_. Nat
+    let leaf_m = NatLit(1);
+    // λ f. λ ih. (ih btrue) + (ih bfalse)
+    let node2_m = Lam(b(Lam(b(Add(
+        b(App(b(Var(0)), b(btrue.clone()))),
+        b(App(b(Var(0)), b(bfalse.clone()))),
+    )))));
+    // a concrete tree: node2 (λb. leaf) — two leaves ⇒ size 2.
+    let tree = Constr("node2".into(), vec![Lam(b(Constr("leaf".into(), vec![])))]);
+    let elim = Elim(
+        "Tree".into(),
+        b(motive),
+        vec![leaf_m, node2_m],
+        b(tree),
+    );
+    // it has type Nat and the higher-order IH genuinely fires: ↝ 2.
+    assert_eq!(infer_closed_in(tree_sig(), &elim), Ok(Nat));
+    assert_eq!(normalize_closed_in(tree_sig(), &elim), NatLit(2));
+}
+
+#[test]
+fn deeper_higher_order_recursion_computes() {
+    // node2 (λb. node2 (λc. leaf)) — four leaves ⇒ size 4. Exercises the native
+    // IH recursing through a nested node (the closure applied, then re-eliminated).
+    let btrue = Constr("btrue".into(), vec![]);
+    let bfalse = Constr("bfalse".into(), vec![]);
+    let motive = Lam(b(Nat));
+    let leaf_m = NatLit(1);
+    let node2_m = Lam(b(Lam(b(Add(
+        b(App(b(Var(0)), b(btrue))),
+        b(App(b(Var(0)), b(bfalse))),
+    )))));
+    let inner = Constr("node2".into(), vec![Lam(b(Constr("leaf".into(), vec![])))]);
+    let tree = Constr("node2".into(), vec![Lam(b(inner))]);
+    let elim = Elim("Tree".into(), b(motive), vec![leaf_m, node2_m], b(tree));
+    assert_eq!(normalize_closed_in(tree_sig(), &elim), NatLit(4));
+}
+
+#[test]
+fn strict_positivity_rejects_negative_and_double_negative_occurrences() {
+    // single NEGATIVE: `mk : (Bad → Bad) → Bad` — Bad left of an arrow. REJECTED.
+    let neg = Signature {
+        postulates: vec![],
+        datas: vec![datadecl(
+            "Bad",
+            vec![],
+            vec![],
+            vec![ctor("mk", vec![(Omega, Pi(Omega, b(Data("Bad".into(), vec![])), b(Data("Bad".into(), vec![]))))], vec![])],
+        )],
+    };
+    assert!(check_signature(&neg).is_err(), "single-negative occurrence must be rejected");
+
+    // DOUBLE NEGATIVE: `mk : ((Bad → Nat) → Nat) → Bad` — Bad two arrows deep (a
+    // strictly-positive checker conservatively REJECTS this; it is not strictly
+    // positive even though it is "positive").
+    let dneg = Signature {
+        postulates: vec![],
+        datas: vec![datadecl(
+            "Bad",
+            vec![],
+            vec![],
+            vec![ctor(
+                "mk",
+                vec![(
+                    Omega,
+                    Pi(
+                        Omega,
+                        b(Pi(Omega, b(Data("Bad".into(), vec![])), b(Nat))),
+                        b(Nat),
+                    ),
+                )],
+                vec![],
+            )],
+        )],
+    };
+    assert!(check_signature(&dneg).is_err(), "double-negative occurrence must be rejected");
+
+    // POSITIVE higher-order (Tree's node2) is ACCEPTED — the discriminating test.
+    assert!(check_signature(&tree_sig()).is_ok());
+}
+
+#[test]
+fn acc_accessibility_family_is_well_formed() {
+    // `Acc (A:Type) (R:A→A→Type) : A → Type` with
+    //   acc : (x:A) → ((y:A) → R y x → Acc A R y) → Acc A R x
+    // — the INDEXED higher-order recursive family at the heart of well-founded
+    // recursion. Its `acc` field is strictly positive (Acc only in the codomain
+    // head `Acc A R y`), and its eliminator (= the well-founded recursor) is
+    // generated by the general machinery. check_signature exercises the indexed
+    // strict-positivity + telescope type-checking of the higher-order field.
+    let r_ty = Pi(Omega, b(Var(0)), b(Pi(Omega, b(Var(1)), b(Type(0))))); // A→A→Type, ctx [A]
+    let acc_fn = Pi(
+        Omega,
+        b(Var(2)), // y : A           (ctx [A,R,x])
+        b(Pi(
+            Omega,
+            b(App(b(App(b(Var(2)), b(Var(0)))), b(Var(1)))), // R y x   (ctx [A,R,x,y])
+            b(Data("Acc".into(), vec![Var(4), Var(3), Var(1)])), // Acc A R y (ctx […,proof])
+        )),
+    );
+    let sig = Signature {
+        postulates: vec![],
+        datas: vec![datadecl(
+            "Acc",
+            vec![(Zero, Type(0)), (Zero, r_ty)],     // params A, R
+            vec![(Zero, Var(1))],                     // index x : A   (ctx [A,R])
+            vec![ctor(
+                "acc",
+                vec![(Zero, Var(1)), (Omega, acc_fn)], // x:A, then the accessibility fn
+                vec![Var(1)],                          // result index x  (ctx [A,R,x,fn])
+            )],
+        )],
+    };
+    assert!(check_signature(&sig).is_ok(), "{:?}", check_signature(&sig));
+
+    // and a NON-strictly-positive variant — `acc`'s field puts `Acc` to the LEFT
+    // of an arrow (`(Acc A R y → R y x) → …`) — must be REJECTED.
+    let bad_fn = Pi(
+        Omega,
+        b(Var(2)),
+        b(Pi(
+            Omega,
+            b(Pi(Omega, b(Data("Acc".into(), vec![Var(3), Var(2), Var(0)])), b(App(b(App(b(Var(2)), b(Var(0)))), b(Var(1)))))),
+            b(Data("Acc".into(), vec![Var(4), Var(3), Var(1)])),
+        )),
+    );
+    let bad = Signature {
+        postulates: vec![],
+        datas: vec![datadecl(
+            "Acc",
+            vec![(Zero, Pi(Omega, b(Var(0)), b(Pi(Omega, b(Var(1)), b(Type(0))))))],
+            vec![(Zero, Var(0))],
+            vec![ctor("acc", vec![(Zero, Var(0)), (Omega, bad_fn)], vec![Var(1)])],
+        )],
+    };
+    assert!(check_signature(&bad).is_err(), "Acc left of an arrow must be rejected");
+}
+
 // ---- Nat as a user datatype "N" ------------------------------------------
 
 fn nat_sig() -> Signature {

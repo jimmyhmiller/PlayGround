@@ -1213,7 +1213,7 @@ fn value_has_hole(v: &Value) -> bool {
         V::VPair(a, b) => value_has_hole(a) || value_has_hole(b),
         V::VPi(_, a, _) | V::VSigma(_, a, _) => value_has_hole(a),
         V::VEq(a, b, c) => value_has_hole(a) || value_has_hole(b) || value_has_hole(c),
-        V::VType(_) | V::VNat | V::VNatLit(_) | V::VLam(_) => false,
+        V::VType(_) | V::VNat | V::VNatLit(_) | V::VLam(_) | V::VLamNative(_) => false,
     }
 }
 

@@ -95,6 +95,19 @@ pub enum Value {
     VType(usize),
     VPi(Mult, Box<Value>, Closure),
     VLam(Closure),
+    /// A NATIVE (semantic / HOAS) function value: a Rust closure over the PURE
+    /// evaluator. Used ONLY to build the induction hypothesis of a HIGHER-ORDER
+    /// recursive constructor argument (e.g. `Acc`'s `acc` field, a W-type's `sup`)
+    /// in the eliminator's ι-rule (`velim`), where the IH is `λ z…. elim (f z…)`
+    /// — a function whose body is meta-computed and so has no `Term` body for an
+    /// ordinary `Closure`. It is treated EXACTLY like a `VLam` everywhere: `vapp`
+    /// applies it, and `quote` ETA-EXPANDS it (`λ x. quote (f x)`), so a native
+    /// closure is definitionally equal to its eta-`VLam` form and two closures
+    /// with different bodies quote to different terms — conversion (which is
+    /// quote-based) is therefore correct with no special-casing. The closure is
+    /// pure (no mutable capture); equality is decided by read-back, never by
+    /// pointer. (Phase E3 — general strictly-positive eliminators.)
+    VLamNative(std::rc::Rc<dyn Fn(Value) -> Value>),
     VSigma(Mult, Box<Value>, Closure),
     VPair(Box<Value>, Box<Value>),
     VNat,
@@ -274,6 +287,7 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
 fn vapp(f: Value, a: Value) -> Value {
     match f {
         Value::VLam(clo) => clo.apply(a),
+        Value::VLamNative(f) => f(a),
         Value::VNeu(n) => Value::VNeu(Neutral::NApp(Box::new(n), Box::new(a))),
         _ => unreachable!("vapp on a non-function (ill-typed term reached eval)"),
     }
@@ -348,11 +362,61 @@ fn vnatcase(p: Value, z: Value, s: Value, scrut: Value) -> Value {
     }
 }
 
+/// The RECURSIVE SPINE of a constructor-argument type, for the general dependent
+/// eliminator (Phase E3). A strictly-positive recursive argument has the shape
+/// `(z₁:C₁) → … → (zₘ:Cₘ) → D self-params idxs` (the `Cᵢ` do not mention `D` —
+/// strict positivity guarantees this). Returns `Some((doms, idxs))` — the domain
+/// telescope and the final index spine — when the type ends in the family `data`,
+/// else `None`. `m = 0` is the ordinary direct-recursion case `D … idxs`.
+fn rec_spine<'a>(data: &str, mut t: &'a Term) -> Option<(Vec<&'a Term>, &'a [Term])> {
+    let mut doms: Vec<&Term> = Vec::new();
+    loop {
+        match t {
+            Term::Pi(_, dom, cod) => {
+                doms.push(dom);
+                t = cod;
+            }
+            Term::Data(name, idxs) if name == data => return Some((doms, &idxs[..])),
+            _ => return None,
+        }
+    }
+}
+
+/// Build the induction hypothesis VALUE for a (possibly higher-order) recursive
+/// argument whose type has `m` telescope domains: `λ z₁…zₘ. elim (g z₁…zₘ)`. For
+/// `m = 0` this is just `elim g`. For `m > 0` the IH is a NATIVE closure (no
+/// `Term` body exists for "apply then recurse"); applying it feeds the arguments
+/// to `g` and eliminates the result — the genuine sub-derivation. Pure and total.
+fn build_ih(
+    sig: Rc<Signature>,
+    data: String,
+    motive: Value,
+    methods: Vec<Value>,
+    g: Value,
+    m: usize,
+) -> Value {
+    if m == 0 {
+        velim(&sig, &data, &motive, &methods, g)
+    } else {
+        Value::VLamNative(Rc::new(move |z: Value| {
+            build_ih(
+                sig.clone(),
+                data.clone(),
+                motive.clone(),
+                methods.clone(),
+                vapp(g.clone(), z),
+                m - 1,
+            )
+        }))
+    }
+}
+
 /// The generic ι-rule for a dependent eliminator. On a constructor, it applies
 /// the corresponding method to the constructor's arguments, inserting — after
-/// each RECURSIVE argument — the result of eliminating that argument (the
-/// induction hypothesis). Recursion + the recursive indices are read off the
-/// constructor's declared argument types.
+/// each RECURSIVE argument — the induction hypothesis (the result of eliminating
+/// that argument, under its telescope for a higher-order recursive position).
+/// Recursion + the recursive indices are read off the constructor's argument
+/// types via `rec_spine`.
 fn velim(
     sig: &Rc<Signature>,
     data: &str,
@@ -377,13 +441,21 @@ fn velim(
             }
             // …then one induction hypothesis per recursive argument, in order
             // (args-then-IHs — the standard method telescope; see `method_ty_tm`).
+            // A recursive argument may be HIGHER-ORDER (`(z…)→ D … idxs`); its IH
+            // is `λ z…. elim (arg z…)`, built by `build_ih`. The recursive shape is
+            // read off the DECLARED argument type (`rec_spine`), independent of the
+            // value, so it cannot be spoofed by the runtime value.
             for (i, (_, aty)) in ctor.args.iter().enumerate() {
-                let env: Vec<Value> = vargs[0..p + i].to_vec();
-                if let Value::VData(dn, _) = eval(sig, &env, aty) {
-                    if dn == data {
-                        let rec = velim(sig, data, motive, methods, vargs[p + i].clone());
-                        result = vapp(result, rec);
-                    }
+                if let Some((doms, _)) = rec_spine(data, aty) {
+                    let ih = build_ih(
+                        sig.clone(),
+                        data.to_string(),
+                        motive.clone(),
+                        methods.to_vec(),
+                        vargs[p + i].clone(),
+                        doms.len(),
+                    );
+                    result = vapp(result, ih);
                 }
             }
             result
@@ -408,6 +480,13 @@ fn quote(lvl: usize, v: &Value) -> Term {
         ),
         Value::VLam(clo) => {
             Term::Lam(Box::new(quote(lvl + 1, &clo.apply(Value::VNeu(Neutral::NVar(lvl))))))
+        }
+        // ETA read-back of a native closure: `λ x. quote (f x)` — identical in form
+        // to a `VLam`, so a native IH and its eta-`VLam` form quote equal, and two
+        // closures with different behaviour quote to different terms. This is what
+        // makes conversion (quote-based) correct on native closures.
+        Value::VLamNative(f) => {
+            Term::Lam(Box::new(quote(lvl + 1, &f(Value::VNeu(Neutral::NVar(lvl))))))
         }
         Value::VSigma(pi, a, clo) => Term::Sigma(
             *pi,
@@ -610,6 +689,58 @@ fn motive_level(ctx: &Ctx, motive: &Term, doms: &[Value]) -> Result<usize, Strin
     check_type(&mctx, &quote(mctx.level(), &applied))
 }
 
+/// The induction-hypothesis TYPE for recursive argument `j`, built in the method
+/// context at depth `cur` (where the constructor's arguments are bound at the
+/// depths recorded in `bd`). For a HIGHER-ORDER recursive position
+/// `a_j : (z₁:C₁)…(zₘ:Cₘ) → D self idxs` the IH is
+///     `(z₁:C₁) → … → (zₘ:Cₘ) → motive idxs (a_j z₁ … zₘ)`
+/// — the same telescope, with the family's result replaced by `motive idxs`
+/// applied to the field applied to the bound `zᵢ`. For a direct recursive
+/// argument (`m = 0`) this collapses to `motive idxs a_j`, the original rule.
+fn ih_type(
+    decl: &DataDecl,
+    ctor: &Constructor,
+    sparam_tms: &[Term],
+    motive_tm: &Term,
+    j: usize,
+    bd: &[usize],
+    cur: usize,
+) -> Term {
+    let p = decl.params.len();
+    let (doms, dargs) =
+        rec_spine(&decl.name, &ctor.args[j].1).expect("ih_type on a non-recursive argument");
+    let m = doms.len();
+    // the `zᵢ` binders sit at depths cur, cur+1, …, cur+m-1; the body at cur+m.
+    let z_depths: Vec<usize> = (0..m).map(|i| cur + i).collect();
+    let cur_m = cur + m;
+
+    // body: `motive idxs (a_j z₁ … zₘ)`, all in the context [params, a₀..a_{k-1},
+    // z₁..zₘ]. The index terms `idxs` live in the decl context [params, a₀..a_{j-1},
+    // z₁..zₘ]; map them with those j prior args + the m `z` binders.
+    let prior_full: Vec<usize> = bd[..j].iter().copied().chain(z_depths.iter().copied()).collect();
+    let mut ih = shift(cur_m, 0, motive_tm);
+    for it in &dargs[p..] {
+        let mi = map_decl(it, p, sparam_tms, &prior_full, cur_m);
+        ih = Term::App(Box::new(ih), Box::new(mi));
+    }
+    // `a_j z₁ … zₘ`
+    let mut applied = Term::Var(cur_m - 1 - bd[j]);
+    for zd in &z_depths {
+        applied = Term::App(Box::new(applied), Box::new(Term::Var(cur_m - 1 - zd)));
+    }
+    ih = Term::App(Box::new(ih), Box::new(applied));
+
+    // wrap the domain telescope, innermost (zₘ) first. `Cᵢ` lives in the decl
+    // context [params, a₀..a_{j-1}, z₁..z_{i-1}] (i prior `z`s = z_depths[..i]).
+    for i in (0..m).rev() {
+        let prior_i: Vec<usize> =
+            bd[..j].iter().copied().chain(z_depths[..i].iter().copied()).collect();
+        let dom = map_decl(doms[i], p, sparam_tms, &prior_i, cur + i);
+        ih = Term::Pi(Mult::Omega, Box::new(dom), Box::new(ih));
+    }
+    ih
+}
+
 /// The method type for one constructor:
 ///   Π(args). Π(IH for each recursive arg). motive result-idxs (c params args)
 fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive_tm: &Term) -> Term {
@@ -619,7 +750,7 @@ fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive
         .args
         .iter()
         .enumerate()
-        .filter(|(_, (_, aty))| matches!(aty, Term::Data(dn, _) if dn == data))
+        .filter(|(_, (_, aty))| rec_spine(data, aty).is_some())
         .map(|(i, _)| i)
         .collect();
 
@@ -661,20 +792,11 @@ fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive
         bd: &[usize],
         cur: usize,
     ) -> Term {
-        let p = decl.params.len();
         if w < rec_args.len() {
             let j = rec_args[w];
-            let idx_terms = match &ctor.args[j].1 {
-                Term::Data(_, dargs) => dargs[p..].to_vec(),
-                _ => unreachable!(),
-            };
-            let mut ih = shift(cur, 0, motive_tm);
-            for it in &idx_terms {
-                // a_j's type lives in context [params, args 0..j-1]
-                let mi = map_decl(it, p, sparam_tms, &bd[..j], cur);
-                ih = Term::App(Box::new(ih), Box::new(mi));
-            }
-            ih = Term::App(Box::new(ih), Box::new(Term::Var(cur - 1 - bd[j])));
+            // the IH type for recursive arg `j` — `(z…)→ motive idxs (a_j z…)` for a
+            // higher-order recursive position, `motive idxs a_j` for a direct one.
+            let ih = ih_type(decl, ctor, sparam_tms, motive_tm, j, bd, cur);
             let body = ihs(decl, ctor, sparam_tms, motive_tm, rec_args, w + 1, bd, cur + 1);
             Term::Pi(Mult::Omega, Box::new(ih), Box::new(body))
         } else {
@@ -1097,7 +1219,7 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             // one — so a linear value can be destructured (a linear pair) while a
             // recursive eliminator stays conservative.
             let recursive = decl.ctors.iter().any(|c| {
-                c.args.iter().any(|(_, a)| matches!(a, Term::Data(dn, _) if *dn == *data))
+                c.args.iter().any(|(_, a)| rec_spine(data, a).is_some())
             });
             let mscale = if recursive { Mult::Omega } else { Mult::One };
             let u = uadd(&uscale(mscale, &umeth), &u_scrut);
@@ -1180,13 +1302,30 @@ fn occurs(data: &str, t: &Term) -> bool {
     found
 }
 
-/// A constructor argument is strictly positive if the family occurs only as a
-/// direct head `Data(self, idxs)` (with no further occurrence in the indices),
-/// or not at all.
+/// A constructor argument is STRICTLY POSITIVE in the family `data` iff `data`
+/// occurs only in strictly-positive position: peeling the argument's function
+/// telescope `(z₁:C₁)→…→(zₘ:Cₘ)→ Head`, the family must NOT occur in ANY domain
+/// `Cᵢ` (an occurrence left of an arrow is NEGATIVE — the source of
+/// non-termination / `False`), and the `Head` is either the family applied
+/// `Data(self, idxs)` with the family not recurring in the `idxs`, or a term not
+/// mentioning the family at all. This is the standard rule (Agda/Coq/Idris); it
+/// admits higher-order recursive fields like `Acc`'s `acc`/a W-type's `sup`
+/// (family only in the codomain head) while still rejecting `(Bad→A)→Bad` and the
+/// double-negative `((Bad→A)→A)→Bad`. (Phase E3.)
 fn strictly_positive(data: &str, t: &Term) -> bool {
-    match t {
+    let mut cur = t;
+    // every Pi DOMAIN crossed must be free of the family (no negative occurrence).
+    while let Term::Pi(_, dom, cod) = cur {
+        if occurs(data, dom) {
+            return false;
+        }
+        cur = cod;
+    }
+    match cur {
+        // the head may be the family itself, but not recurring in its own indices.
         Term::Data(name, args) if name == data => args.iter().all(|a| !occurs(data, a)),
-        _ => !occurs(data, t),
+        // otherwise the family must not occur at all.
+        other => !occurs(data, other),
     }
 }
 
@@ -1403,7 +1542,7 @@ pub(crate) fn elim_method_telescope(
     let nrec = ctor
         .args
         .iter()
-        .filter(|(_, a)| matches!(a, Term::Data(dn, _) if dn == data))
+        .filter(|(_, a)| rec_spine(data, a).is_some())
         .count();
     let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm);
     let mut binders = Vec::new();
