@@ -424,19 +424,175 @@ fn total_certificate_accepts_structural_fold_and_does_not_dodge() {
 }
 
 #[test]
-fn total_certificate_rejects_accumulator_with_actionable_message() {
-    // accumulator-style recursion is terminating but not yet lowerable to an
-    // eliminator (E1) — `%total` declines it with a CLEAR, actionable message,
-    // and it is never silently mislabeled total.
+fn phase_1a_prime_accumulator_nat_fold_certified_total_and_computes() {
+    // PHASE 1a′: an accumulator-style fold on a `%builtin Nat` (a recursive call
+    // that DESCENDS on the scrutinee but VARIES another argument) is now certifiable
+    // `%total` — it lowers to a function-typed-motive `NatElim` (the IH is itself a
+    // function of the accumulator). `addacc(m, n) = m + n`.
     let src = format!(
         "{NATB}\n%total fn addacc(m, n) {{ match m {{ Zero => n, Succ(k) => addacc(k, Succ(n)) }} }}\n\
          addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(2, 3) }}\n"
     );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "addacc"), "addacc must be certified total (Phase 1a′)");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(5)), "addacc(2,3) must run to 5");
+
+    // `sumacc(m, acc) = acc + m` — the feasibility fold, now written in surface
+    // syntax and certified total + run natively.
+    let src = format!(
+        "{NATB}\n%total fn sumacc(m, acc) {{ match m {{ Zero => acc, Succ(k) => sumacc(k, Succ(acc)) }} }}\n\
+         sumacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ sumacc(3, 0) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "sumacc"), "sumacc must be certified total");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(3)), "sumacc(3,0) must run to 3");
+}
+
+#[test]
+fn phase_1a_prime_multi_accumulator_fold() {
+    // K=2 accumulators, BOTH varying across the recursive call (the IH is applied
+    // to two new accumulators). `twoacc(m, a, b) = match m { 0 => a; Succ k =>
+    // twoacc(k, b, Succ a) }`. twoacc(2,0,10) = 1 (see by hand: → (1,10,1) →
+    // (0,1,11) → 1).
+    let src = format!(
+        "{NATB}\n%total fn twoacc(m, a, b) {{ match m {{ Zero => a, Succ(k) => twoacc(k, b, Succ(a)) }} }}\n\
+         twoacc : Nat -> Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ twoacc(2, 0, 10) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "twoacc"), "twoacc (K=2) must be certified total");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(1)), "twoacc(2,0,10) must run to 1");
+}
+
+#[test]
+fn phase_1a_prime_sub_via_nested_match_accumulator() {
+    // truncated subtraction `sub(m, n) = m - n`, scrutinee `m`, accumulator `n`
+    // VARYING (n's predecessor). The recursive call sits inside a NESTED match on
+    // the accumulator — `rec` (the IH) is threaded through, so it still lowers to
+    // the function-typed-motive `NatElim`. sub(5,2) = 3, sub(2,5) = 0.
+    let src = format!(
+        "{NATB}\n\
+         %total fn sub(m, n) {{ match m {{ \
+             Zero => Zero, \
+             Succ(j) => match n {{ Zero => Succ(j), Succ(k) => sub(j, k) }} \
+         }} }}\n\
+         sub : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ sub(5, 2) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "sub"), "sub (nested-match accumulator) must be certified total");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(3)), "sub(5,2) must run to 3");
+
+    let src2 = format!(
+        "{NATB}\n\
+         %total fn sub(m, n) {{ match m {{ \
+             Zero => Zero, \
+             Succ(j) => match n {{ Zero => Succ(j), Succ(k) => sub(j, k) }} \
+         }} }}\n\
+         sub : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ sub(2, 5) }}\n"
+    );
+    let prog2 = check_program(&src2).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(prog2.normalize("main"), Some(Term::NatLit(0)), "sub(2,5) must run to 0 (truncated)");
+}
+
+#[test]
+fn phase_1a_prime_accumulator_with_non_nat_return_type() {
+    // the result type R need not be `Nat`: `lt(m, n) : Bool` returns a BOXED
+    // datatype value. The accumulator lowering uses a CLOSED `R` (here `Bool`), so
+    // the motive is `λ_. (Nat → Bool)`. lt(2,3) = True, lt(3,3) = False.
+    const BOOLNATB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                            enum Bool { False : Bool, True : Bool }\n";
+    let lt = "%total fn lt(m, n) { match m { \
+                 Zero => match n { Zero => False, Succ(x) => True }, \
+                 Succ(j) => match n { Zero => False, Succ(k) => lt(j, k) } \
+              } }\nlt : Nat -> Nat -> Bool\n";
+    let src = format!("{BOOLNATB}\n{lt}main : Bool\nfn main() {{ lt(2, 3) }}\n");
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "lt"), "lt (Bool return) must be certified total");
+    assert_eq!(prog.normalize("main"), Some(Term::Constr("True".into(), vec![])), "lt(2,3) = True");
+
+    let src2 = format!("{BOOLNATB}\n{lt}main : Bool\nfn main() {{ lt(3, 3) }}\n");
+    let prog2 = check_program(&src2).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(prog2.normalize("main"), Some(Term::Constr("False".into(), vec![])), "lt(3,3) = False");
+}
+
+#[test]
+fn phase_1a_prime_fuel_div_proof_target() {
+    // THE HEADLINE PROOF TARGET of Phase 1a′: `%total fuel-div`, written in 1a
+    // surface syntax (nested/expression `match`), composing two accumulator folds
+    // (`lt : Nat→Nat→Bool` and `sub : Nat→Nat→Nat`) and a fuel-driven divider
+    // (`div`, itself an accumulator fold on `fuel` with `n` varying). All three are
+    // certified `%total` and run natively. div(10, 7, 2) = 3.
+    const PRE: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                       enum Bool { False : Bool, True : Bool }\n";
+    let prog_src = format!(
+        "{PRE}\n\
+         %total fn lt(m, n) {{ match m {{ \
+             Zero => match n {{ Zero => False, Succ(x) => True }}, \
+             Succ(j) => match n {{ Zero => False, Succ(k) => lt(j, k) }} \
+         }} }}\nlt : Nat -> Nat -> Bool\n\
+         %total fn sub(m, n) {{ match m {{ \
+             Zero => Zero, \
+             Succ(j) => match n {{ Zero => Succ(j), Succ(k) => sub(j, k) }} \
+         }} }}\nsub : Nat -> Nat -> Nat\n\
+         %total fn div(fuel, n, d) {{ match fuel {{ \
+             Zero => Zero, \
+             Succ(f) => match lt(n, d) {{ True => Zero, False => Succ(div(f, sub(n, d), d)) }} \
+         }} }}\ndiv : Nat -> Nat -> Nat -> Nat\n\
+         main : Nat\nfn main() {{ div(10, 7, 2) }}\n"
+    );
+    let prog = check_program(&prog_src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "lt"), "lt must be total");
+    assert!(is_total(&prog, "sub"), "sub must be total");
+    assert!(is_total(&prog, "div"), "fuel-div must be certified total (the 1a′ proof target)");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(3)), "div(10,7,2) must run to 3");
+}
+
+#[test]
+fn phase_1a_prime_red_team_non_descending_accumulator_still_rejected() {
+    // DUAL-FAILURE GUARD: the accumulator gate loosens ONLY the "other args
+    // verbatim" rule — the SCRUTINEE-descent requirement is UNCONDITIONAL. A fold
+    // that varies an accumulator but does NOT decrease the scrutinee (here it
+    // recurses on `Succ(k)`, GROWING it) is non-terminating and must still be
+    // REJECTED — never mis-certified via the accumulator path.
+    let src = format!(
+        "{NATB}\n%total fn bad(m, a) {{ match m {{ Zero => a, Succ(k) => bad(Succ(k), Succ(a)) }} }}\n\
+         bad : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ bad(1, 0) }}\n"
+    );
     let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
     assert!(
-        err.contains("accumulator") && (err.contains("E2") || err.contains("E3")),
-        "must explain accumulator-style + point at the later phase, got: {err}"
+        err.contains("not total") && err.contains("decrease"),
+        "must reject for a scrutinee non-decrease, not accept via the accumulator path, got: {err}"
     );
+}
+
+#[test]
+fn phase_1a_prime_red_team_boxed_accumulator_still_partial() {
+    // the accumulator fold is implemented ONLY for a `%builtin Nat` scrutinee. The
+    // SAME accumulator recursion over a BOXED datatype is terminating but not yet
+    // lowerable, so `%total` still declines it — with a message that says BOXED and
+    // points at the later phase. (No regression: boxed verbatim folds stay total.)
+    let src = format!(
+        "{NAT}\n%total fn addacc(m, n) {{ match m {{ Zero => n, Succ(k) => addacc(k, Succ(n)) }} }}\n\
+         addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(2, 3) }}\n"
+    );
+    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    assert!(
+        err.contains("accumulator") && err.contains("BOXED") && (err.contains("E2") || err.contains("E3")),
+        "boxed accumulator must be declined as BOXED + point at the later phase, got: {err}"
+    );
+}
+
+#[test]
+fn phase_1a_prime_verbatim_fold_unchanged_no_regression() {
+    // a verbatim-arg structural fold on a `%builtin Nat` still lowers via the plain
+    // `NatElim` path (NOT the accumulator path) and stays total + reducible in types.
+    // `add(m, n) = match m { 0 => n; Succ k => Succ(add(k, n)) }` (n passed verbatim).
+    let src = format!(
+        "{NATB}\n%total fn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
+         add : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ add(2, 3) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "add"), "verbatim fold must stay total");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(5)), "add(2,3) must run to 5");
 }
 
 #[test]

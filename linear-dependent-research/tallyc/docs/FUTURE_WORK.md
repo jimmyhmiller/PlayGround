@@ -546,10 +546,20 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
   The trusted base does NOT grow: a `Total` verdict drives lowering to a kernel
   ELIMINATOR (re-checked total-by-construction); a `Partial` one to an opaque
   `Fix` (or an honest hard error), and `full ⊑ structural` monotonicity makes
-  "a `%total` fn can never lower to a `Fix`" airtight. Accumulator-style and
-  mutual recursion are honestly declined (Phase E2/E3), never mislabeled total.
-  *Still to do:* E2 (the real coverage / pattern-match compiler — nested + absurd
-  cases), E3 (well-founded `Acc` recursion), E4 (tighten strict positivity).
+  "a `%total` fn can never lower to a `Fix`" airtight. **Phase 1a′ extends this to
+  ACCUMULATOR-style folds on a `%builtin Nat` scrutinee** — a recursive call that
+  descends on the scrutinee but VARIES other arguments (`div`/`gcd`/`lt`/`sub`).
+  Such a fold lowers to a `NatElim` whose MOTIVE IS A FUNCTION TYPE (`λ_. T₁→…→T_K→R`),
+  so the induction hypothesis is itself a function of the accumulators and a
+  recursive call applies it to the new accumulators — still elaboration-only,
+  still kernel-re-checked (`elab_nat_match_acc`, v1: all-explicit params,
+  non-dependent `R`/accumulator types). The SCRUTINEE-descent requirement stays
+  unconditional, so a non-descending fold is still rejected; the same accumulator
+  recursion over a BOXED datatype is still honestly declined (not yet lowerable).
+  Mutual recursion remains declined (Phase E2). *Still to do:* E2 (the real
+  coverage / pattern-match compiler — nested + absurd cases), E3 (well-founded
+  `Acc` recursion), E4 (tighten strict positivity), and 1a′ follow-ups
+  (dependent-accumulator / boxed-datatype accumulator folds, implicit params).
 - **Phase F — universes.** Replace `Type : Type` with a cumulative hierarchy +
   universe polymorphism. *(Required before the totality guarantee is sound.)*
   **Status: the hierarchy is implemented.** `Type i : Type (i+1)`, predicative

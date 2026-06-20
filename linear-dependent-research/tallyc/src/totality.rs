@@ -73,6 +73,12 @@ pub(crate) struct FnClauses {
     pub arms: Vec<ArmInfo>,
     /// calls in a non-`match` body (empty if the body is a `match`).
     pub body_calls: Vec<Call>,
+    /// is the matched scrutinee a `%builtin Nat`? If so, an accumulator-style fold
+    /// (a recursive call that descends on the scrutinee but VARIES other arguments)
+    /// is certifiably total: it lowers to a function-typed-motive `NatElim` (Phase
+    /// 1a′). For a boxed datatype that lowering isn't available yet, so a varying
+    /// argument is still declined (`Partial`).
+    pub scrut_is_nat: bool,
 }
 
 impl FnClauses {
@@ -233,23 +239,31 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
                     ))
                 }
             }
-            // every OTHER argument must be passed through verbatim, else the
-            // recursion is accumulator-style — terminating, but not yet lowerable
-            // to an eliminator (so we honestly decline to certify it total).
-            for (i, a) in c.args.iter().enumerate() {
-                if i == sp {
-                    continue;
-                }
-                match a {
-                    Tm::Var(v) if v == &f.params[i] => {}
-                    _ => {
-                        return Totality::Partial(format!(
-                            "`{}` is accumulator-style recursion (argument `{}` changes \
-                             across the recursive call): this is terminating but not yet \
-                             certifiable as total — it needs the Phase E2/E3 lowering. \
-                             Mark it `%partial`, or restructure as a plain fold.",
-                            f.name, f.params[i]
-                        ))
+            // For a `%builtin Nat` scrutinee, varying a non-scrutinee argument is
+            // FINE: the call descends on the scrutinee, and the fold lowers to a
+            // function-typed-motive `NatElim` (Phase 1a′ accumulator fold) that the
+            // kernel re-checks total-by-construction. For a BOXED datatype that
+            // lowering isn't available yet, so every other argument must still be
+            // passed verbatim — an accumulator there is terminating but not yet
+            // certifiable, so it is honestly declined.
+            if !f.scrut_is_nat {
+                for (i, a) in c.args.iter().enumerate() {
+                    if i == sp {
+                        continue;
+                    }
+                    match a {
+                        Tm::Var(v) if v == &f.params[i] => {}
+                        _ => {
+                            return Totality::Partial(format!(
+                                "`{}` is accumulator-style recursion (argument `{}` changes \
+                                 across the recursive call) over a BOXED datatype: this is \
+                                 terminating but not yet lowerable to an eliminator (the \
+                                 accumulator fold is implemented only for a `%builtin Nat` \
+                                 scrutinee so far — Phase E2/E3). Mark it `%partial`, or \
+                                 restructure as a plain fold.",
+                                f.name, f.params[i]
+                            ))
+                        }
                     }
                 }
             }

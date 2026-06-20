@@ -626,6 +626,14 @@ struct Rec<'a> {
     /// position of the scrutinee among the fn's EXPLICIT parameters
     scrut_pos: usize,
     fields: &'a HashMap<String, String>,
+    /// ACCUMULATOR-FOLD mode (Phase 1a′). `None` ⇒ verbatim-arg structural fold:
+    /// a recursive call uses the induction hypothesis BARE (the IH is a value of
+    /// the result type), and the verdict has already guaranteed every non-scrutinee
+    /// argument is passed verbatim. `Some(acc_tys)` ⇒ the IH is itself a FUNCTION of
+    /// the accumulators (`T₁ → … → T_K → R`), so a recursive call `f(smaller, e₁…e_K)`
+    /// lowers to `App(…App(ih, e₁′)…, e_K′)`; `acc_tys` are the (closed) kernel types
+    /// of the non-scrutinee params in param order, used to check each new acc arg.
+    acc_tys: Option<&'a [Value]>,
 }
 
 /// A typing context: each bound variable's name and type (as a Value).
@@ -820,16 +828,51 @@ impl Elab {
         if args.len() <= r.scrut_pos {
             return Err(format!("recursive call to `{}` has too few arguments", r.fnname));
         }
-        if let Tm::Var(v) = &args[r.scrut_pos] {
-            if let Some(ih) = r.fields.get(v) {
+        // the matched-position argument must be a strict subterm (a recursive-field
+        // pattern binder), so it has an induction hypothesis in scope.
+        let ih_var = match &args[r.scrut_pos] {
+            Tm::Var(v) => r.fields.get(v).map(|ih| {
                 let i = cx.debruijn(ih).expect("ih var in scope");
-                return Ok(Term::Var(i));
+                Term::Var(i)
+            }),
+            _ => None,
+        };
+        let ih_var = ih_var.ok_or_else(|| {
+            format!(
+                "non-structural recursion: `{}` must recurse on a sub-component of the matched argument",
+                r.fnname
+            )
+        })?;
+        match r.acc_tys {
+            // verbatim-arg fold: the IH IS the recursive result (the verdict has
+            // guaranteed every other argument is passed verbatim).
+            None => Ok(ih_var),
+            // accumulator fold (Phase 1a′): the IH is a function of the accumulators,
+            // so apply it to the NEW accumulator arguments — every position but the
+            // scrutinee, in param order — each checked against its accumulator type.
+            Some(acc_tys) => {
+                let acc_args: Vec<&Tm> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != r.scrut_pos)
+                    .map(|(_, a)| a)
+                    .collect();
+                if acc_args.len() != acc_tys.len() {
+                    return Err(format!(
+                        "recursive call to `{}` has {} accumulator argument(s), expected {}",
+                        r.fnname,
+                        acc_args.len(),
+                        acc_tys.len()
+                    ));
+                }
+                let mut t = ih_var;
+                for (a, ty) in acc_args.iter().zip(acc_tys) {
+                    let ea = self.check(a, ty, cx, Some(r))?;
+                    t = Term::App(Box::new(t), Box::new(ea));
+                }
+                Ok(t)
             }
         }
-        Err(format!(
-            "non-structural recursion: `{}` must recurse on a sub-component of the matched argument",
-            r.fnname
-        ))
     }
 
     /// Plain (no-implicit) elaboration; used for vars, functions, explicit ctors.
@@ -1606,12 +1649,15 @@ impl Elab {
                         ArmInfo { smaller, calls }
                     })
                     .collect();
+                let scrut_is_nat =
+                    data.as_ref().map(|d| self.nat_types.contains(d)).unwrap_or(false);
                 FnClauses {
                     name: name.to_string(),
                     params: params.to_vec(),
                     scrut_pos,
                     arms: arm_infos,
                     body_calls: Vec::new(),
+                    scrut_is_nat,
                 }
             }
             other => {
@@ -1623,6 +1669,7 @@ impl Elab {
                     scrut_pos: None,
                     arms: Vec::new(),
                     body_calls: calls,
+                    scrut_is_nat: false,
                 }
             }
         }
@@ -1706,7 +1753,7 @@ impl Elab {
         let s_expected = p_at(Value::VSuc(Box::new(k_val)));
         let mut fields: HashMap<String, String> = HashMap::new();
         fields.insert(pred_name, ih_name);
-        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields };
+        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None };
         let body = self.check(&succ_arm.body, &s_expected, &succ_cx, Some(&r))?;
         let s_method = Term::Lam(Box::new(Term::Lam(Box::new(body))));
 
@@ -1717,6 +1764,193 @@ impl Elab {
             Box::new(s_method),
             Box::new(Term::Var(scrut_idx)),
         ))
+    }
+
+    /// Does this `Nat`-scrutinee `fn` recurse ACCUMULATOR-style — i.e. does some
+    /// recursive call vary a non-scrutinee argument (rather than pass it verbatim)?
+    /// If so it must use the function-typed-motive lowering (`elab_nat_match_acc`),
+    /// not the plain verbatim fold (`elab_nat_match`). Detection mirrors the
+    /// totality verdict's accumulator check, in EXPLICIT-parameter space (surface
+    /// recursive calls list only explicit arguments).
+    fn is_acc_fold(&self, fnname: &str, scrut: &str, explicit_params: &[String], arms: &[Arm]) -> bool {
+        let sp = match explicit_params.iter().position(|p| p == scrut) {
+            Some(p) => p,
+            None => return false,
+        };
+        let mut calls = Vec::new();
+        for arm in arms {
+            collect_all_calls(&arm.body, &mut calls);
+        }
+        for c in &calls {
+            if c.callee != fnname || c.args.len() != explicit_params.len() {
+                continue;
+            }
+            for (i, a) in c.args.iter().enumerate() {
+                if i == sp {
+                    continue;
+                }
+                let verbatim = matches!(a, Tm::Var(v) if v == &explicit_params[i]);
+                if !verbatim {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Lower an ACCUMULATOR-style `match m { Zero => …, Succ(k) => f(k, e₁…e_K) }`
+    /// fold on a `%builtin Nat` scrutinee (Phase 1a′). The standard fold-into-function
+    /// encoding: the eliminator's motive is a FUNCTION TYPE, so the induction
+    /// hypothesis is itself a function of the accumulators and a recursive call applies
+    /// it to the NEW accumulators.
+    ///
+    ///   motive = λscrut'. (T₁ → … → T_K → R)          -- a `Nat → Type`
+    ///   z      = λa₁…λa_K. <Zero arm body>            -- : T₁ → … → T_K → R
+    ///   s      = λk. λih. λa₁…λa_K. <Succ arm body>    -- ih : T₁ → … → T_K → R
+    ///   body   = (NatElim motive z s scrut) a₁ … a_K   -- apply to the real accs
+    ///
+    /// where a recursive call `f(k, e₁…e_K)` in the Succ arm becomes
+    /// `App(…App(ih, e₁′)…, e_K′)` (see `ih_for`'s accumulator mode). The kernel
+    /// re-checks this function-typed-motive `NatElim`, so a lowering bug can only
+    /// produce a rejected program, never an unsound one.
+    ///
+    /// v1 RESTRICTIONS (errored clearly otherwise): all params explicit; the
+    /// accumulator types and the result type `R` are NON-DEPENDENT (independent of
+    /// the scrutinee and the accumulators — true for `div`/`gcd`/`lt`/`sub`), hence
+    /// CLOSED kernel types. The accumulators are every non-scrutinee param, in order.
+    #[allow(clippy::too_many_arguments)]
+    fn elab_nat_match_acc(
+        &self,
+        fnname: &str,
+        fn_cx: &Cx,         // the fn's full params (names + types), in signature order
+        param_tys: &[Ty],   // surface type of each FULL param
+        ret: &Ty,
+        scrut: &str,
+        arms: &[Arm],
+        full_pos: usize,    // scrutinee's position among the full params
+    ) -> Result<Term, String> {
+        let full_params: &[String] = &fn_cx.names;
+        let n = fn_cx.len();
+
+        // the accumulators = every non-scrutinee param, in param order.
+        let acc_positions: Vec<usize> = (0..n).filter(|&i| i != full_pos).collect();
+        let acc_names: Vec<String> = acc_positions.iter().map(|&i| full_params[i].clone()).collect();
+        let k = acc_names.len();
+
+        // v1: elaborate each accumulator type and the result type as CLOSED kernel
+        // terms (independent of every parameter). Elaborating in the EMPTY scope
+        // makes a type that references a parameter fail with `unbound name …`, which
+        // we surface as the v1 non-dependence restriction.
+        let r_term = self.elab_ty(ret, &[]).map_err(|e| {
+            format!(
+                "Phase 1a′ accumulator fold `{fnname}`: the result type must be \
+                 non-dependent (independent of every parameter) in v1 — {e}"
+            )
+        })?;
+        let mut acc_ty_terms: Vec<Term> = Vec::with_capacity(k);
+        for &i in &acc_positions {
+            let t = self.elab_ty(&param_tys[i], &[]).map_err(|e| {
+                format!(
+                    "Phase 1a′ accumulator fold `{fnname}`: accumulator `{}`'s type must \
+                     be non-dependent (independent of every parameter) in v1 — {e}",
+                    full_params[i]
+                )
+            })?;
+            acc_ty_terms.push(t);
+        }
+
+        // motive = λscrut'. (T₁ → … → T_K → R). The Pi chain (and R) are closed, so
+        // they sit unshifted under the motive's binder; the binder itself is unused
+        // (the result is non-dependent on the scrutinee).
+        let mut pi_chain = r_term.clone();
+        for t in acc_ty_terms.iter().rev() {
+            pi_chain = Term::Pi(Mult::Omega, Box::new(t.clone()), Box::new(pi_chain));
+        }
+        let motive = Term::Lam(Box::new(pi_chain.clone()));
+
+        // closed type Values for checking method bodies and accumulator args.
+        let r_val = dep::eval_rc(&self.rc, &[], &r_term);
+        let ih_ty_val = dep::eval_rc(&self.rc, &[], &pi_chain); // p k = p Zero = the Pi chain
+        let acc_ty_vals: Vec<Value> =
+            acc_ty_terms.iter().map(|t| dep::eval_rc(&self.rc, &[], t)).collect();
+
+        // identify the Zero / Succ arms by their constructors' recorded roles.
+        let mut zero_arm = None;
+        let mut succ_arm = None;
+        for a in arms {
+            match self.nat_ctor.get(&a.ctor) {
+                Some(NatRole::Zero) if zero_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Succ) if succ_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Zero) => zero_arm = Some(a),
+                Some(NatRole::Succ) => succ_arm = Some(a),
+                None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
+            }
+        }
+        let zero_arm = zero_arm.ok_or("`match` on Nat is missing the zero case")?;
+        let succ_arm = succ_arm.ok_or("`match` on Nat is missing the successor case")?;
+        if !zero_arm.binders.is_empty() {
+            return Err(format!(
+                "the zero case binds no pattern variables, got {}",
+                zero_arm.binders.len()
+            ));
+        }
+        if succ_arm.binders.len() != 1 {
+            return Err(format!(
+                "the successor case binds exactly one predecessor, got {}",
+                succ_arm.binders.len()
+            ));
+        }
+        let pred_name = succ_arm.binders[0].clone();
+
+        // zero method : T₁ → … → T_K → R  =  λa₁…λa_K. <Zero body>. The accumulators
+        // are FRESH binders pushed atop the fn params, so a surface reference to an
+        // accumulator name resolves (innermost-first) to the method's own binder.
+        let mut z_cx = fn_cx.clone();
+        for (an, av) in acc_names.iter().zip(&acc_ty_vals) {
+            z_cx.push(an.clone(), av.clone());
+        }
+        let mut z_method = self.check(&zero_arm.body, &r_val, &z_cx, None)?;
+        for _ in 0..k {
+            z_method = Term::Lam(Box::new(z_method));
+        }
+
+        // succ method : Π(k:Nat). (p k) → p (Suc k)  =  λk. λih. λa₁…λa_K. <Succ body>.
+        // The IH is a function of the accumulators (type `T₁ → … → T_K → R`).
+        let mut succ_cx = fn_cx.clone();
+        succ_cx.push(pred_name.clone(), Value::VNat);
+        let ih_name = "$ih".to_string();
+        succ_cx.push(ih_name.clone(), ih_ty_val);
+        for (an, av) in acc_names.iter().zip(&acc_ty_vals) {
+            succ_cx.push(an.clone(), av.clone());
+        }
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert(pred_name, ih_name);
+        let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals) };
+        let mut s_method = self.check(&succ_arm.body, &r_val, &succ_cx, Some(&r))?;
+        for _ in 0..k {
+            s_method = Term::Lam(Box::new(s_method)); // a_K … a₁
+        }
+        s_method = Term::Lam(Box::new(s_method)); // ih
+        s_method = Term::Lam(Box::new(s_method)); // k
+
+        // body = (NatElim motive z s scrut) a₁ … a_K — apply the built function to
+        // the REAL accumulator params (pass D λ-wraps the whole thing afterwards).
+        let scrut_idx = fn_cx.debruijn(scrut).expect("scrutinee param in scope");
+        let mut body = Term::NatElim(
+            Box::new(motive),
+            Box::new(z_method),
+            Box::new(s_method),
+            Box::new(Term::Var(scrut_idx)),
+        );
+        for an in &acc_names {
+            let idx = fn_cx.debruijn(an).expect("accumulator param in scope");
+            body = Term::App(Box::new(body), Box::new(Term::Var(idx)));
+        }
+        Ok(body)
     }
 
     /// A recursive `fn` matching on a `Nat` whose recursion is not structural
@@ -1848,6 +2082,18 @@ impl Elab {
         // a `match` on a `%builtin Nat` scrutinee compiles to the kernel's native
         // `NatElim` (a counting loop), not a boxed datatype eliminator.
         if self.nat_types.contains(&data) {
+            // an ACCUMULATOR-style fold (a recursive call varies a non-scrutinee
+            // argument) needs the function-typed-motive lowering (Phase 1a′); a
+            // verbatim-arg fold stays on the plain `NatElim` path (no regression).
+            if self.is_acc_fold(fnname, scrut, explicit_params, arms) {
+                if explicit_params.len() != full_params.len() {
+                    return Err(format!(
+                        "Phase 1a′ accumulator fold `{fnname}`: implicit parameters are not \
+                         yet supported (v1 requires all-explicit parameters)"
+                    ));
+                }
+                return self.elab_nat_match_acc(fnname, fn_cx, param_tys, ret, scrut, arms, full_pos);
+            }
             return self.elab_nat_match(fnname, fn_cx, ret, scrut, arms, full_params, explicit_pos);
         }
         let decl = self.rc.data(&data).ok_or_else(|| format!("`{data}` is not a datatype"))?.clone();
@@ -1967,7 +2213,7 @@ impl Elab {
             }
             let expected = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &ret_ty_tm);
 
-            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields };
+            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None };
             let mut body = self.check(&arm.body, &expected, &arm_cx, Some(&r))?;
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));

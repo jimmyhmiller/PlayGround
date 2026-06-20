@@ -1,7 +1,21 @@
 # Phase 1a′ — accumulator-style `%total` (fold-into-function), implementation plan
 
-**Status:** designed + confirmed ELABORATION-ONLY (no kernel change). Feasibility
-proven by the kernel test `accumulator_fold_into_function_lowering_is_valid_today`
+**Status: ✅ IMPLEMENTED.** All three edits landed and proven (81 lib tests green).
+The verdict change (`scrut_is_nat` gates the verbatim-args rejection), the routing
+(`is_acc_fold` → `elab_nat_match_acc`), and the function-typed-motive lowering are
+all in. Proof target met: `%total fuel-div` (composing accumulator folds `lt`,
+`sub`, and the fuel-driven `div`) is certified total and runs natively
+(`div(10,7,2)=3`), written in 1a surface syntax (nested/expression `match`). The
+dual-failure red-team passes: a non-descending fold is still rejected (scrutinee
+descent stays unconditional), a boxed-datatype accumulator is still declined, and
+verbatim folds are unchanged. Tests: `phase_1a_prime_*` in
+`src/rust_surface/tests.rs`. The plan below is the original spec, kept for record.
+
+---
+
+**Original status (pre-implementation):** designed + confirmed ELABORATION-ONLY (no
+kernel change). Feasibility proven by the kernel test
+`accumulator_fold_into_function_lowering_is_valid_today`
 (commit 7d4944c6c): an accumulator fold lowers to a `NatElim` with a
 **function-typed motive** and type-checks + computes on today's kernel.
 
