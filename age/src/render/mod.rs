@@ -6,7 +6,7 @@ pub mod assets;
 
 use crate::achievements::Cat;
 use crate::data::Tool;
-use crate::game::{Biome, Building, City, Season, Tier, Villager, World, LIVE_WINDOW};
+use crate::game::{Biome, Building, City, Season, Villager, World, LIVE_WINDOW};
 use assets::{src, Assets};
 use raylib::prelude::*;
 
@@ -55,6 +55,84 @@ fn short_model(model: Option<&str>) -> &str {
     }
 }
 
+/// Component-wise multiply (used to apply season/biome tints over a base tint).
+fn mul_color(a: Color, b: Color) -> Color {
+    Color::new(
+        ((a.r as u16 * b.r as u16) / 255) as u8,
+        ((a.g as u16 * b.g as u16) / 255) as u8,
+        ((a.b as u16 * b.b as u16) / 255) as u8,
+        a.a,
+    )
+}
+
+/// Multiplicative tint applied to a whole city by how recently it was worked in.
+fn season_tint(s: Season) -> Color {
+    match s {
+        Season::HighSummer => Color::new(255, 255, 255, 255),
+        Season::Summer => Color::new(248, 250, 245, 255),
+        Season::LateSummer => Color::new(248, 240, 220, 255),
+        Season::Autumn => Color::new(236, 198, 158, 255),
+        Season::Winter => Color::new(206, 216, 236, 255),
+        Season::Dormant => Color::new(150, 156, 168, 255),
+    }
+}
+
+/// The ground patch colour for a biome (drawn under the settlement).
+fn biome_ground(b: Biome) -> Color {
+    match b {
+        Biome::Forge => Color::new(150, 120, 96, 150),
+        Biome::Coast => Color::new(228, 214, 168, 150),
+        Biome::Forest => Color::new(70, 120, 70, 150),
+        Biome::Port => Color::new(120, 160, 96, 150),
+        Biome::Steppe => Color::new(176, 168, 96, 150),
+        Biome::Stone => Color::new(140, 146, 140, 150),
+        Biome::Plains => Color::new(120, 160, 130, 150),
+        Biome::Vale => Color::new(206, 190, 150, 150),
+        Biome::Heartland => Color::new(120, 150, 96, 150),
+    }
+}
+
+/// The decoration tiles scattered around a biome's settlement (Tiny Town tiles).
+fn biome_decor(b: Biome) -> &'static [i32] {
+    match b {
+        Biome::Forge => &[assets::STONES, 43, 5],
+        Biome::Coast => &[28, 5],
+        Biome::Forest => &[5, 4, 28, assets::MUSHROOMS],
+        Biome::Port => &[57, 5, 28],
+        Biome::Steppe => &[27, 28, 5],
+        Biome::Stone => &[assets::STONES, 43],
+        Biome::Plains => &[28, 5],
+        Biome::Vale => &[assets::SIGNPOST, 5, 28],
+        Biome::Heartland => &[5, 4, 28],
+    }
+}
+
+/// Specialized building prop for a session's dominant tool.
+/// Returns `(use_chars_atlas, tile, scale)`.
+fn tool_prop(t: Tool) -> Option<(bool, i32, f32)> {
+    match t {
+        Tool::Bash => Some((true, assets::ANVIL, 1.6)),   // forge
+        Tool::Read => Some((false, assets::SIGNPOST, 1.7)), // library
+        Tool::Search => Some((false, assets::SIGNPOST, 1.5)),
+        Tool::Task => Some((true, assets::BANNER, 1.7)),  // barracks
+        Tool::Web => Some((false, assets::MARKET, 1.7)),  // harbor / trade
+        Tool::Plan => Some((true, assets::POTION, 1.3)),
+        Tool::Edit => None, // plain workshop
+    }
+}
+
+/// The monument icon (Tiny Dungeon tile) representing an achievement category.
+fn monument_icon(c: Cat) -> i32 {
+    match c {
+        Cat::Activity => assets::BANNER,
+        Cat::Craft => assets::ANVIL,
+        Cat::Codebase => assets::CHEST,
+        Cat::Mastery => assets::SWORD,
+        Cat::Time => assets::POTION,
+        Cat::Wealth => assets::COINS,
+    }
+}
+
 // ---- camera-space pass -------------------------------------------------------
 
 fn draw_tile<D: RaylibDraw>(
@@ -70,14 +148,23 @@ fn draw_tile<D: RaylibDraw>(
     d.draw_texture_pro(tex, src(idx), dst, Vector2::new(0.0, 0.0), 0.0, tint);
 }
 
-/// Draw a building's tile grid, bottom-center anchored at `base`.
-fn draw_building<D: RaylibDraw>(d: &mut D, tex: &Texture2D, b: &Building) {
-    let preset = if b.is_town_center {
-        &assets::TOWN_CENTER
+/// The preset + scale a building draws at (town center grows with tier; below a
+/// keep, the "town center" is just the largest hut).
+fn building_preset_scale(b: &Building) -> (&'static assets::Building<'static>, f32) {
+    if b.is_town_center {
+        if b.tier.has_keep() {
+            (&assets::TOWN_CENTER, b.tier.keep_scale())
+        } else {
+            (&assets::HOUSES[0], b.tier.keep_scale())
+        }
     } else {
-        &assets::HOUSES[b.preset.min(assets::HOUSES.len() - 1)]
-    };
-    let scale = if b.is_town_center { TC_SCALE } else { HOUSE_SCALE };
+        (&assets::HOUSES[b.preset.min(assets::HOUSES.len() - 1)], HOUSE_SCALE)
+    }
+}
+
+/// Draw a building's tile grid, bottom-center anchored at `base`, tinted by season.
+fn draw_building<D: RaylibDraw>(d: &mut D, assets: &Assets, b: &Building, season: Color) {
+    let (preset, scale) = building_preset_scale(b);
     let rows = preset.grid.len() as f32;
     let cols = preset.grid.iter().map(|r| r.len()).max().unwrap_or(1) as f32;
     let w = cols * assets::TILE * scale;
@@ -85,25 +172,27 @@ fn draw_building<D: RaylibDraw>(d: &mut D, tex: &Texture2D, b: &Building) {
     let left = b.pos.x - w / 2.0;
     let top = b.pos.y - h;
 
-    // Soft drop shadow.
-    d.draw_ellipse(
-        b.pos.x as i32,
-        b.pos.y as i32,
-        w * 0.42,
-        h * 0.10,
-        Color::new(0, 0, 0, 60),
-    );
+    d.draw_ellipse(b.pos.x as i32, b.pos.y as i32, w * 0.42, h * 0.10, Color::new(0, 0, 0, 60));
 
-    let tint = if b.live {
-        Color::WHITE
-    } else {
-        Color::new(225, 225, 235, 255)
-    };
+    let base = if b.live { Color::WHITE } else { Color::new(225, 225, 235, 255) };
+    let tint = mul_color(base, season);
     for (r, row) in preset.grid.iter().enumerate() {
         for (c, &idx) in row.iter().enumerate() {
             let x = left + c as f32 * assets::TILE * scale;
             let y = top + r as f32 * assets::TILE * scale;
-            draw_tile(d, tex, idx, x, y, scale, tint);
+            draw_tile(d, &assets.town, idx, x, y, scale, tint);
+        }
+    }
+
+    // Tool-type prop tells you what kind of work happens here (forge/library/…).
+    if !b.is_town_center {
+        if let Some((chars, prop, psc)) = tool_prop(b.tool) {
+            let pw = assets::TILE * psc;
+            let px = b.pos.x + w * 0.30 - pw / 2.0;
+            let py = b.pos.y - 1.0;
+            let atlas = if chars { &assets.chars } else { &assets.town };
+            d.draw_ellipse(px as i32 + (pw / 2.0) as i32, py as i32, pw * 0.3, pw * 0.1, Color::new(0, 0, 0, 50));
+            draw_tile(d, atlas, prop, px, py - pw, psc, tint);
         }
     }
 
@@ -111,7 +200,7 @@ fn draw_building<D: RaylibDraw>(d: &mut D, tex: &Texture2D, b: &Building) {
     if b.live {
         let fx = b.pos.x + w / 2.0 - 6.0;
         let fy = top - 8.0;
-        draw_tile(d, tex, assets::FLAG, fx, fy, 1.4, Color::WHITE);
+        draw_tile(d, &assets.town, assets::FLAG, fx, fy, 1.4, Color::WHITE);
         for k in 0..3 {
             let t = (b.smoke_t * 0.9 + k as f32 * 0.6) % 1.0;
             let sx = left + w * 0.3 + (t * 12.0) * (k as f32 - 1.0) * 0.6;
@@ -122,18 +211,14 @@ fn draw_building<D: RaylibDraw>(d: &mut D, tex: &Texture2D, b: &Building) {
     }
 }
 
-fn draw_villager<D: RaylibDraw>(d: &mut D, tex: &Texture2D, v: &Villager) {
+fn draw_villager<D: RaylibDraw>(d: &mut D, tex: &Texture2D, v: &Villager, season: Color) {
     let bob = (v.anim_t.sin() * 2.0).abs();
     let s = assets::TILE * VILLAGER_SCALE;
     let x = v.pos.x - s / 2.0;
     let y = v.pos.y - s - bob;
     d.draw_ellipse(v.pos.x as i32, v.pos.y as i32, s * 0.32, s * 0.12, Color::new(0, 0, 0, 70));
-    let tint = if v.on_trip {
-        Color::new(255, 240, 210, 255)
-    } else {
-        Color::WHITE
-    };
-    draw_tile(d, tex, v.sprite, x, y, VILLAGER_SCALE, tint);
+    let base = if v.on_trip { Color::new(255, 240, 210, 255) } else { Color::WHITE };
+    draw_tile(d, tex, v.sprite, x, y, VILLAGER_SCALE, mul_color(base, season));
 }
 
 /// Paint the whole world inside the active 2D camera.
@@ -218,50 +303,99 @@ pub fn draw_world_space<D: RaylibDraw>(
 }
 
 fn draw_city<D: RaylibDraw>(d: &mut D, city: &City, assets: &Assets, _now: f64, selected: bool) {
-    // Town plaza: a soft dirt disc under the settlement.
-    let radius = 96.0 + (city.buildings.len() as f32).sqrt() * 24.0;
-    d.draw_ellipse(
-        city.pos.x as i32,
-        (city.pos.y + 56.0) as i32,
-        radius,
-        radius * 0.46,
-        Color::new(120, 96, 64, 70),
-    );
+    let cx = city.pos.x;
+    let cy = city.pos.y + 56.0;
+    let season = season_tint(city.season);
+    // Bigger cities spread wider.
+    let radius = 84.0 + (city.buildings.len() as f32).sqrt() * 22.0 + city.tier.index() as f32 * 10.0;
+
+    // Biome-coloured plaza, tinted by season.
+    d.draw_ellipse(cx as i32, cy as i32, radius, radius * 0.46, mul_color(biome_ground(city.biome), season));
     if selected {
-        d.draw_ellipse_lines(
-            city.pos.x as i32,
-            (city.pos.y + 56.0) as i32,
-            radius + 6.0,
-            (radius + 6.0) * 0.46,
-            GOLD,
-        );
+        d.draw_ellipse_lines(cx as i32, cy as i32, radius + 6.0, (radius + 6.0) * 0.46, GOLD);
+        d.draw_ellipse_lines(cx as i32, cy as i32, radius + 8.0, (radius + 8.0) * 0.46, GOLD);
     }
     if city.live > 0 {
-        // Gentle activity aura.
-        d.draw_ellipse(
-            city.pos.x as i32,
-            (city.pos.y + 56.0) as i32,
-            radius * 0.9,
-            radius * 0.42,
-            Color::new(255, 200, 90, 26),
-        );
+        d.draw_ellipse(cx as i32, cy as i32, radius * 0.9, radius * 0.42, Color::new(255, 200, 90, 26));
     }
 
-    // A little market stall in the plaza — the trade hub villagers head for.
+    // Fortifications: a fence ring (village+) becomes a stone wall (city+).
+    draw_walls(d, assets, city, cx, cy, radius, season);
+
+    // Biome decorations scattered around the settlement edge.
+    let decor = biome_decor(city.biome);
+    let n_decor = 5 + city.tier.index() * 2;
+    for k in 0..n_decor {
+        let mut rng = crate::util::Rng::seeded(&(&city.id, k, "decor"));
+        let ang = rng.range(0.0, 6.2831);
+        let rr = radius * rng.range(0.82, 1.12);
+        let px = cx + ang.cos() * rr;
+        let py = cy + ang.sin() * rr * 0.5;
+        let tile = decor[rng.below(decor.len())];
+        let sc = 2.0;
+        let tw = assets::TILE * sc;
+        d.draw_ellipse((px) as i32, py as i32, tw * 0.3, tw * 0.1, Color::new(0, 0, 0, 45));
+        draw_tile(d, &assets.town, tile, px - tw / 2.0, py - tw, sc, season);
+    }
+
+    // Market stall — the trade hub villagers head for.
     let ms = 2.2;
     let mw = assets::TILE * ms;
-    let mx = city.pos.x - radius * 0.46;
+    let mx = cx - radius * 0.46;
     let my = city.pos.y + 78.0;
     d.draw_ellipse(mx as i32, my as i32, mw * 0.34, mw * 0.12, Color::new(0, 0, 0, 50));
-    draw_tile(d, &assets.town, assets::MARKET, mx - mw / 2.0, my - mw, ms, Color::WHITE);
+    draw_tile(d, &assets.town, assets::MARKET, mx - mw / 2.0, my - mw, ms, season);
 
     for b in &city.buildings {
-        draw_building(d, &assets.town, b);
+        draw_building(d, assets, b, season);
     }
     let mut vs: Vec<&Villager> = city.villagers.iter().collect();
     vs.sort_by(|a, b| a.pos.y.partial_cmp(&b.pos.y).unwrap_or(std::cmp::Ordering::Equal));
     for v in vs {
-        draw_villager(d, &assets.chars, v);
+        draw_villager(d, &assets.chars, v, season);
+    }
+
+    // Monuments: one per unlocked achievement, in an arc behind the town.
+    draw_monuments(d, assets, city, cx, cy, radius);
+}
+
+/// A ring of fortifications whose material upgrades with tier.
+fn draw_walls<D: RaylibDraw>(d: &mut D, assets: &Assets, city: &City, cx: f32, cy: f32, radius: f32, season: Color) {
+    if city.tier.index() < 2 {
+        return; // outposts/hamlets are unwalled
+    }
+    let (tile, sc) = if city.tier.has_walls() {
+        (assets::WALL, 1.8) // stone wall
+    } else {
+        (assets::SIGNPOST, 1.2) // light fence posts (reuse a slim tile)
+    };
+    let segs = 14 + city.tier.index() * 3;
+    let tw = assets::TILE * sc;
+    for k in 0..segs {
+        let ang = k as f32 / segs as f32 * 6.2831;
+        let px = cx + ang.cos() * (radius + 6.0);
+        let py = cy + ang.sin() * (radius + 6.0) * 0.5;
+        draw_tile(d, &assets.town, tile, px - tw / 2.0, py - tw, sc, mul_color(Color::new(235, 235, 240, 255), season));
+    }
+}
+
+/// Unlocked achievements rendered as a tidy "trophy shelf" in front of the city,
+/// so they read clearly without colliding with the buildings.
+fn draw_monuments<D: RaylibDraw>(d: &mut D, assets: &Assets, city: &City, cx: f32, cy: f32, radius: f32) {
+    let shown = city.achievements.len().min(10);
+    if shown == 0 {
+        return;
+    }
+    let sc = 1.5;
+    let tw = assets::TILE * sc;
+    let spacing = tw * 1.05;
+    let start_x = cx - (shown as f32 - 1.0) * spacing * 0.5;
+    let py = cy + radius * 0.52 + tw * 0.5;
+    for (i, ach) in city.achievements.iter().take(shown).enumerate() {
+        let px = start_x + i as f32 * spacing;
+        d.draw_ellipse(px as i32, py as i32, tw * 0.4, tw * 0.16, Color::new(0, 0, 0, 70));
+        d.draw_circle(px as i32, (py - tw * 0.5) as i32, tw * 0.52, Color::new(255, 210, 110, 40));
+        draw_tile(d, &assets.chars, monument_icon(ach.cat), px - tw / 2.0, py - tw, sc, Color::WHITE);
     }
 }
 
@@ -440,12 +574,7 @@ pub fn clear_bg<D: RaylibDraw>(d: &mut D) {
 
 /// World-space bounding box of a building sprite (bottom-anchored at `pos`).
 pub fn building_bounds(b: &Building) -> Rectangle {
-    let preset = if b.is_town_center {
-        &assets::TOWN_CENTER
-    } else {
-        &assets::HOUSES[b.preset.min(assets::HOUSES.len() - 1)]
-    };
-    let scale = if b.is_town_center { TC_SCALE } else { HOUSE_SCALE };
+    let (preset, scale) = building_preset_scale(b);
     let rows = preset.grid.len() as f32;
     let cols = preset.grid.iter().map(|r| r.len()).max().unwrap_or(1) as f32;
     let w = cols * assets::TILE * scale;

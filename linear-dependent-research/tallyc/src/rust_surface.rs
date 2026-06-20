@@ -828,50 +828,62 @@ impl Elab {
         if args.len() <= r.scrut_pos {
             return Err(format!("recursive call to `{}` has too few arguments", r.fnname));
         }
-        // the matched-position argument must be a strict subterm (a recursive-field
-        // pattern binder), so it has an induction hypothesis in scope.
-        let ih_var = match &args[r.scrut_pos] {
-            Tm::Var(v) => r.fields.get(v).map(|ih| {
-                let i = cx.debruijn(ih).expect("ih var in scope");
-                Term::Var(i)
-            }),
-            _ => None,
-        };
-        let ih_var = ih_var.ok_or_else(|| {
-            format!(
-                "non-structural recursion: `{}` must recurse on a sub-component of the matched argument",
-                r.fnname
-            )
-        })?;
-        match r.acc_tys {
-            // verbatim-arg fold: the IH IS the recursive result (the verdict has
-            // guaranteed every other argument is passed verbatim).
-            None => Ok(ih_var),
-            // accumulator fold (Phase 1a′): the IH is a function of the accumulators,
-            // so apply it to the NEW accumulator arguments — every position but the
-            // scrutinee, in param order — each checked against its accumulator type.
-            Some(acc_tys) => {
-                let acc_args: Vec<&Tm> = args
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != r.scrut_pos)
-                    .map(|(_, a)| a)
-                    .collect();
-                if acc_args.len() != acc_tys.len() {
-                    return Err(format!(
-                        "recursive call to `{}` has {} accumulator argument(s), expected {}",
-                        r.fnname,
-                        acc_args.len(),
-                        acc_tys.len()
-                    ));
+        match &args[r.scrut_pos] {
+            // DIRECT recursive field: the matched-position argument is a strict-subterm
+            // binder `v` whose induction hypothesis is in scope as `r.fields[v]`.
+            Tm::Var(v) if r.fields.contains_key(v) => {
+                let ih = Term::Var(cx.debruijn(&r.fields[v]).expect("ih var in scope"));
+                match r.acc_tys {
+                    // verbatim-arg fold: the IH IS the recursive result (the verdict has
+                    // guaranteed every other argument is passed verbatim).
+                    None => Ok(ih),
+                    // accumulator fold (Phase 1a′): the IH is a function of the
+                    // accumulators, so apply it to the NEW accumulator arguments — every
+                    // position but the scrutinee, in param order — each checked against
+                    // its accumulator type.
+                    Some(acc_tys) => {
+                        let acc_args: Vec<&Tm> = args
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != r.scrut_pos)
+                            .map(|(_, a)| a)
+                            .collect();
+                        if acc_args.len() != acc_tys.len() {
+                            return Err(format!(
+                                "recursive call to `{}` has {} accumulator argument(s), expected {}",
+                                r.fnname,
+                                acc_args.len(),
+                                acc_tys.len()
+                            ));
+                        }
+                        let mut t = ih;
+                        for (a, ty) in acc_args.iter().zip(acc_tys) {
+                            let ea = self.check(a, ty, cx, Some(r))?;
+                            t = Term::App(Box::new(t), Box::new(ea));
+                        }
+                        Ok(t)
+                    }
                 }
-                let mut t = ih_var;
-                for (a, ty) in acc_args.iter().zip(acc_tys) {
-                    let ea = self.check(a, ty, cx, Some(r))?;
+            }
+            // HIGHER-ORDER recursive field (Phase 1b / well-founded recursion): the
+            // matched-position argument is `f(callargs…)` where `f` is a higher-order
+            // recursive field (a W-type child-function / `Acc`'s accessibility fn). The
+            // kernel's IH for such a field is itself a function `λz…. elim (f z…)`, so a
+            // recursive call `g(f(callargs…))` lowers to `App(…App(ih, c₁)…, cₙ)`. Any
+            // OTHER arguments of the recursive call are determined by `f`'s application
+            // and are reconciled by the kernel re-check (not re-threaded here).
+            Tm::Call(f, callargs) if r.fields.contains_key(f) => {
+                let mut t = Term::Var(cx.debruijn(&r.fields[f]).expect("ih var in scope"));
+                for a in callargs {
+                    let ea = self.elab_tm(a, cx, Some(r))?;
                     t = Term::App(Box::new(t), Box::new(ea));
                 }
                 Ok(t)
             }
+            _ => Err(format!(
+                "non-structural recursion: `{}` must recurse on a sub-component of the matched argument",
+                r.fnname
+            )),
         }
     }
 
@@ -2169,11 +2181,14 @@ impl Elab {
         for ctor in &decl.ctors {
             let info = &self.ctor_info[&ctor.name];
             let nargs = ctor.args.len();
+            // recursive fields: DIRECT (`data idxs`) OR HIGHER-ORDER (`(z…) → data
+            // idxs`), detected via `rec_spine` exactly as the kernel's method-type /
+            // eliminator do — so the IH count here matches `elim_method_telescope`.
             let rec_fields: Vec<usize> = ctor
                 .args
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, aty))| matches!(aty, Term::Data(dn, _) if *dn == data))
+                .filter(|(_, (_, aty))| dep::rec_field_arity(&data, aty).is_some())
                 .map(|(i, _)| i)
                 .collect();
             let arm = arms

@@ -796,12 +796,12 @@ pub unsafe extern "C" fn gcr_runtime_main(
     // `TypeInfo`s as we build the table (so the GC traces refs embedded in
     // flattened value fields). The slices are leaked — the type table lives for
     // the whole program, a bounded one-time leak, matching the JIT path.
-    let (meta_types, meta_values, interior) = if meta_len > 0 {
+    let (meta_types, meta_values, interior, alloc_sites) = if meta_len > 0 {
         assert!(!meta.is_null(), "gcr_runtime_main: null metadata blob");
         let bytes = unsafe { std::slice::from_raw_parts(meta, meta_len) };
         crate::gc::reflect::decode(bytes)
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
 
     // Rebuild the type table exactly as `codegen::layouts_to_type_infos` does:
@@ -856,6 +856,11 @@ pub unsafe extern "C" fn gcr_runtime_main(
         rt.heap().set_type_meta(meta_types);
         rt.heap().set_value_meta(meta_values);
     }
+    // Install the allocation-site table (Target-1b) so a profile can name each
+    // site's (function, type). Installed even if empty is a no-op.
+    if !alloc_sites.is_empty() {
+        rt.heap().set_alloc_sites(alloc_sites);
+    }
     let thread = rt.thread_ptr();
     // Publish the current thread so FFI callback trampolines can recover it.
     set_current_thread(thread);
@@ -883,6 +888,11 @@ pub unsafe extern "C" fn gcr_runtime_main(
     }
     if let Some(path) = std::env::var_os("GCR_GC_LOG") {
         let _ = std::fs::write(&path, rt.heap().gc_log_jsonl());
+    }
+    // Opt-in allocation-site profile (Target-1b): GCR_ALLOC_PROFILE=1 prints the
+    // per-site count+bytes table at program end (heap quiescent).
+    if std::env::var_os("GCR_ALLOC_PROFILE").is_some() {
+        eprint!("{}", rt.heap().alloc_site_profile_report());
     }
     result
 }
@@ -1028,12 +1038,24 @@ pub unsafe extern "C" fn ai_reflect_field_name(
 /// `thread` must be a valid `*mut Thread` whose `heap` points at a live `Heap`,
 /// and `type_id` must index a registered `TypeInfo`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ai_gc_alloc_fixed(thread: *mut Thread, type_id: u32) -> *mut u8 {
+pub unsafe extern "C" fn ai_gc_alloc_fixed(
+    thread: *mut Thread,
+    type_id: u32,
+    site_id: u32,
+) -> *mut u8 {
     unsafe {
         let t = &*thread;
         let heap = &*t.heap;
         let info: &TypeInfo = heap.type_info_by_id(type_id as u16);
-        alloc_with_published_frame(t, heap, info, 0)
+        let p = alloc_with_published_frame(t, heap, info, 0);
+        // Allocation-site profiling (Target-1b): record this site's count+bytes
+        // on the OWNING thread's non-atomic per-site counter. `dyna_thread` is
+        // the same `ThreadState` `alloc_with_published_frame` already
+        // dereferenced, so it is non-null here. Only on a successful alloc.
+        if !p.is_null() {
+            (*t.dyna_thread).record_alloc(site_id, info.allocation_size(0) as u64);
+        }
+        p
     }
 }
 
@@ -1072,12 +1094,18 @@ pub unsafe extern "C" fn ai_gc_alloc_varlen(
     thread: *mut Thread,
     type_id: u32,
     varlen_len: u64,
+    site_id: u32,
 ) -> *mut u8 {
     unsafe {
         let t = &*thread;
         let heap = &*t.heap;
         let info: &TypeInfo = heap.type_info_by_id(type_id as u16);
-        alloc_with_published_frame(t, heap, info, varlen_len as usize)
+        let p = alloc_with_published_frame(t, heap, info, varlen_len as usize);
+        // Allocation-site profiling (Target-1b) — see `ai_gc_alloc_fixed`.
+        if !p.is_null() {
+            (*t.dyna_thread).record_alloc(site_id, info.allocation_size(varlen_len as usize) as u64);
+        }
+        p
     }
 }
 

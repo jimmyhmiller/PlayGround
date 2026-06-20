@@ -24,10 +24,12 @@ pub use field::{
     read_varlen_bytes, read_varlen_count, write_varlen_count,
 };
 pub use header::{Compact, Full, ObjHeader};
-pub use heap::Heap;
+pub use heap::{AllocSiteStat, Heap};
 pub use mutator::{GcRef, Mutator, Root, RootScope};
 pub use ptr_policy::IdentityPtrPolicy;
-pub use reflect::{FieldMeta, FieldTy, ScalarKind, TypeKind, TypeMeta, ValueMeta, VariantMeta};
+pub use reflect::{
+    AllocSite, FieldMeta, FieldTy, ScalarKind, TypeKind, TypeMeta, ValueMeta, VariantMeta,
+};
 pub use roots::{
     AtomicRootSet, DynRootFrame, FrameChain, FrameGuard, FrameHeader, RootFrame, RootSet,
     RootSource,

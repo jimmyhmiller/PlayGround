@@ -229,3 +229,40 @@ fn ref_type_param_rejects_write_through() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("immutable"), "got: {err}");
 }
+
+#[test]
+fn mut_bound_aggregate_reads_as_value_in_value_contexts() {
+    // DOGFOOD A2: a (mut)-bound aggregate is a place, but it reads AS its value
+    // wherever a value is needed — returned bare (no explicit (load)), stored
+    // through a pointer, and wrapped in a constructor — via the read-ref-as-value
+    // rule. (Locks the friction closed; the body never writes (load b).)
+    let src = r#"
+        (defsum Opt (ONone []) (OSome [(v i64)]))
+        (defstruct Box [(v i64)])
+        (defn make [(n i64)] (-> Box)
+          (let [(mut b) (zeroed Box)] (store! (field b v) n) b))   ; bare return
+        (defn copy-out [(dst (ptr Box)) (n i64)] (-> i64)
+          (let [(mut b) (zeroed Box)] (store! (field b v) n) (store! dst b) 0))
+        (defn main [] (-> i64)
+          (let [r (make 20) d (alloc-stack Box)]
+            (copy-out d 22)
+            (iadd (load (field r v)) (load (field d v)))))   ; 20 + 22 = 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn mut_bound_aggregate_borrows_to_byref_param() {
+    // A (mut)-bound aggregate passed to a by-value (immutable-ref) param is
+    // borrowed as a place — no explicit (load) and no copy needed.
+    let src = r#"
+        (defstruct Box [(v i64)])
+        (defn sumv [(a Box) (b Box)] (-> i64)
+          (iadd (load (field a v)) (load (field b v))))
+        (defn main [] (-> i64)
+          (let [(mut b) (zeroed Box)]
+            (store! (field b v) 21)
+            (sumv b b)))   ; 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}

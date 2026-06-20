@@ -26,6 +26,10 @@ pub struct CodegenError(pub String);
 pub struct Compiled<'ctx> {
     pub module: Module<'ctx>,
     pub entry_name: String,
+    /// Allocation-site table (Target-1b), indexed by `site_id`. Installed into
+    /// the heap via `Heap::set_alloc_sites` (JIT) or baked into the reflection
+    /// blob (AOT) so a profile can name each site's `(function, type)`.
+    pub alloc_sites: Vec<crate::gc::AllocSite>,
 }
 
 pub fn codegen<'ctx>(
@@ -34,7 +38,16 @@ pub fn codegen<'ctx>(
 ) -> Result<Compiled<'ctx>, CodegenError> {
     let module = ctx.create_module("gcr");
     let builder = ctx.create_builder();
-    let mut cg = Codegen { ctx, module, builder, prog, funcs: HashMap::new(), trampolines: HashMap::new() };
+    let mut cg = Codegen {
+        ctx,
+        module,
+        builder,
+        prog,
+        funcs: HashMap::new(),
+        trampolines: HashMap::new(),
+        alloc_sites: Vec::new(),
+        alloc_site_ids: HashMap::new(),
+    };
     cg.declare_runtime_externs();
 
     // Declare every function first (so calls can reference forward decls).
@@ -56,7 +69,7 @@ pub fn codegen<'ctx>(
     cg.module
         .verify()
         .map_err(|e| CodegenError(format!("LLVM module verify failed: {}", e.to_string())))?;
-    Ok(Compiled { module: cg.module, entry_name })
+    Ok(Compiled { module: cg.module, entry_name, alloc_sites: cg.alloc_sites })
 }
 
 /// Emit the LLVM IR text for a whole program — the `gcr emit llvm` tap that
@@ -82,6 +95,15 @@ struct Codegen<'ctx, 'p> {
     /// Cache of synthesized FFI callback trampolines, keyed by the gc-rust
     /// FuncId they wrap (one trampoline per referenced function).
     trampolines: HashMap<FuncId, FunctionValue<'ctx>>,
+    /// Allocation-site table (Target-1b), indexed by the `site_id` constant
+    /// passed to `ai_gc_alloc_*`. One entry per unique `(function, type_id)`
+    /// pair — the honest v1 granularity (Core IR has no source span, so two
+    /// allocations of the same type in the same function share a site).
+    alloc_sites: Vec<crate::gc::AllocSite>,
+    /// Dedup index: `(function symbol, type_id) -> site_id`, so a repeated
+    /// `(function, type)` pair reuses its id instead of minting a distinct id
+    /// we couldn't label distinctly.
+    alloc_site_ids: HashMap<(String, u16), u32>,
 }
 
 impl<'ctx, 'p> Codegen<'ctx, 'p> {
@@ -1037,6 +1059,34 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             CoreExprKind::CallClosure { callee, args } => self.gen_call_closure(fcx, callee, args, &e.repr),
             other => Err(CodegenError(format!("codegen unsupported in v0 slice: {:?}", core_disc(other)))),
         }
+    }
+
+    /// Return the allocation-site id (Target-1b) for `(function, type_id)`,
+    /// assigning a fresh id and recording the site on first sight. Dedups by
+    /// pair so the v1 function+type granularity stays honest: every emitted id
+    /// maps to exactly one labelable `(function, type)`, never a distinct id we
+    /// couldn't tell apart at profile time.
+    fn alloc_site_id(&mut self, function: &str, type_id: u16) -> u32 {
+        let key = (function.to_string(), type_id);
+        if let Some(&id) = self.alloc_site_ids.get(&key) {
+            return id;
+        }
+        let id = self.alloc_sites.len() as u32;
+        self.alloc_sites.push(crate::gc::AllocSite {
+            function: function.to_string(),
+            type_id,
+        });
+        self.alloc_site_ids.insert(key, id);
+        id
+    }
+
+    /// The current function's compiled symbol name (the site label).
+    fn current_fn_name(fcx: &FnCtx<'ctx>) -> String {
+        fcx.func
+            .get_name()
+            .to_str()
+            .unwrap_or("<unknown-fn>")
+            .to_string()
     }
 
     fn declare_runtime_externs(&self) {

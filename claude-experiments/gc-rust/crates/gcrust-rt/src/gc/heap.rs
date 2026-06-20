@@ -175,6 +175,15 @@ pub struct Heap {
     /// when the embedder supplies none (the per-thread counters still
     /// accumulate, just unlabelled). Reads are lock-free after the one-time set.
     alloc_sites: OnceLock<Vec<AllocSite>>,
+    /// Allocation-site counters salvaged from threads that have deregistered
+    /// (joined) before a profile is taken. Without this, a worker thread's
+    /// allocations would silently vanish from the profile when it exits. Folded
+    /// in at [`deregister_thread`](Self::deregister_thread) /
+    /// [`safe_deregister_thread`](Self::safe_deregister_thread) (under the
+    /// threads lock, on the departing thread itself — no concurrent
+    /// `record_alloc`), summed alongside the live threads in
+    /// [`alloc_site_profile`](Self::alloc_site_profile). Indexed by `site_id`.
+    retired_alloc_counters: Mutex<Vec<SiteCounter>>,
     collections: AtomicUsize,
 
     /// Cold-path GC event log: one [`GcEvent`] per collection, for the
@@ -218,6 +227,26 @@ pub struct Heap {
 unsafe impl Sync for Heap {}
 unsafe impl Send for Heap {}
 
+/// One row of the allocation-site profile (Target-1b): a `(function, type)`
+/// site with its cumulative allocation count and byte total, summed across all
+/// threads. Produced by [`Heap::alloc_site_profile`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllocSiteStat {
+    /// The compile-time site id (index into the alloc-site table).
+    pub site_id: u32,
+    /// The function containing the site (compiled symbol name), or a synthetic
+    /// `<site N>` if no site table was installed.
+    pub function: String,
+    /// The allocated object's `type_id`, if known from the site table.
+    pub type_id: Option<u16>,
+    /// The source type name (from reflection metadata), or a synthetic fallback.
+    pub type_name: String,
+    /// Objects allocated at this site, summed across all threads.
+    pub count: u64,
+    /// Bytes allocated at this site, summed across all threads.
+    pub bytes: u64,
+}
+
 impl Heap {
     /// Create a new heap with two spaces of `space_size` bytes each.
     pub fn new<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
@@ -239,6 +268,7 @@ impl Heap {
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
             alloc_sites: OnceLock::new(),
+            retired_alloc_counters: Mutex::new(Vec::new()),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
@@ -282,6 +312,7 @@ impl Heap {
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
             alloc_sites: OnceLock::new(),
+            retired_alloc_counters: Mutex::new(Vec::new()),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
@@ -441,6 +472,145 @@ impl Heap {
         self.value_meta.get()?.get(value_id as usize)
     }
 
+    /// Install the allocation-site table (Target-1b), indexed by `site_id`.
+    /// Called once at startup, before any mutator runs. Mirrors
+    /// [`set_type_meta`](Self::set_type_meta); a second call is ignored.
+    pub fn set_alloc_sites(&self, sites: Vec<AllocSite>) {
+        let _ = self.alloc_sites.set(sites);
+    }
+
+    /// The installed allocation-site table (empty slice if none installed).
+    pub fn alloc_sites_all(&self) -> &[AllocSite] {
+        self.alloc_sites.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Fold one (about-to-deregister) thread's per-site counters into the
+    /// heap-level retired accumulator. Called under the threads lock, on the
+    /// departing thread, so there is no concurrent `record_alloc`.
+    fn fold_retired_alloc_counters(&self, state: &Arc<ThreadState>) {
+        // Safety: the owning thread is deregistering (not allocating), and we
+        // hold the threads lock, so no `record_alloc` runs concurrently.
+        let counters = unsafe { state.alloc_site_counters() };
+        if counters.is_empty() {
+            return;
+        }
+        let mut retired = self.retired_alloc_counters.lock().unwrap();
+        if counters.len() > retired.len() {
+            retired.resize(counters.len(), SiteCounter::default());
+        }
+        for (i, c) in counters.iter().enumerate() {
+            retired[i].count += c.count;
+            retired[i].bytes += c.bytes;
+        }
+    }
+
+    /// Build the allocation-site profile (Target-1b): sum each site's
+    /// `(count, bytes)` across every live thread plus the retired accumulator,
+    /// join with the site table (function + type id) and reflection metadata
+    /// (type name), and return the sites sorted by bytes descending.
+    ///
+    /// Sites with zero allocations are omitted. Counters with no matching site
+    /// entry (e.g. profiling table not installed) are reported under a synthetic
+    /// `<site N>` / `<unknown>` label rather than dropped — no silent loss.
+    ///
+    /// NOTE: this covers allocations made through the compiled-code allocation
+    /// path (`ai_gc_alloc_*`). Runtime-internal allocations (e.g. `ai_str_concat`
+    /// building a new string) go through the heap directly and are **not**
+    /// attributed to a site in v1.
+    ///
+    /// Call only when the world is quiescent (program end / a safepoint): the
+    /// per-thread counters are read non-atomically.
+    pub fn alloc_site_profile(&self) -> Vec<AllocSiteStat> {
+        // Snapshot the live threads, then release the lock before reading their
+        // counters and the retired accumulator (avoids holding two locks).
+        let snapshot: Vec<Arc<ThreadState>> = self.threads.lock().unwrap().clone();
+        let mut totals: Vec<SiteCounter> = self.retired_alloc_counters.lock().unwrap().clone();
+        for ts in &snapshot {
+            // Safety: quiescent world — no concurrent `record_alloc`.
+            let counters = unsafe { ts.alloc_site_counters() };
+            if counters.len() > totals.len() {
+                totals.resize(counters.len(), SiteCounter::default());
+            }
+            for (i, c) in counters.iter().enumerate() {
+                totals[i].count += c.count;
+                totals[i].bytes += c.bytes;
+            }
+        }
+
+        let sites = self.alloc_sites_all();
+        let mut out = Vec::new();
+        for (id, c) in totals.iter().enumerate() {
+            if c.count == 0 {
+                continue;
+            }
+            let (function, type_id) = match sites.get(id) {
+                Some(s) => (s.function.clone(), Some(s.type_id)),
+                None => (format!("<site {id}>"), None),
+            };
+            let type_name = match type_id {
+                Some(tid) => self
+                    .type_meta_by_id(tid)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| format!("<type {tid}>")),
+                None => "<unknown>".to_string(),
+            };
+            out.push(AllocSiteStat {
+                site_id: id as u32,
+                function,
+                type_id,
+                type_name,
+                count: c.count,
+                bytes: c.bytes,
+            });
+        }
+        out.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| b.count.cmp(&a.count))
+                .then_with(|| a.function.cmp(&b.function))
+        });
+        out
+    }
+
+    /// Render the allocation-site profile as a human-readable table (used by
+    /// `GCR_ALLOC_PROFILE=1`). Empty string if nothing was allocated through a
+    /// profiled site. See [`alloc_site_profile`](Self::alloc_site_profile) for
+    /// the v1 coverage caveat (compiled-code sites only).
+    pub fn alloc_site_profile_report(&self) -> String {
+        use std::fmt::Write;
+        let stats = self.alloc_site_profile();
+        if stats.is_empty() {
+            return String::new();
+        }
+        let total_bytes: u64 = stats.iter().map(|s| s.bytes).sum();
+        let total_count: u64 = stats.iter().map(|s| s.count).sum();
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "gc-rust allocation-site profile (compiled-code sites; runtime-internal allocations excluded)"
+        );
+        let _ = writeln!(
+            out,
+            "  {:>14}  {:>10}  {:<24}  {}",
+            "bytes", "count", "type", "function"
+        );
+        for s in &stats {
+            let _ = writeln!(
+                out,
+                "  {:>14}  {:>10}  {:<24}  {}",
+                s.bytes, s.count, s.type_name, s.function
+            );
+        }
+        let _ = writeln!(
+            out,
+            "  {:>14}  {:>10}  (total over {} sites)",
+            total_bytes,
+            total_count,
+            stats.len()
+        );
+        out
+    }
+
     /// Walk every object currently allocated in the live spaces — the tenured
     /// from-space plus the nursery (if generational) — calling `visitor(obj,
     /// type_info)` for each. This is the engine for heap-exploration tooling:
@@ -594,6 +764,9 @@ impl Heap {
         let mut threads = self.threads.lock().unwrap();
         let ptr = Arc::as_ptr(state);
         if let Some(pos) = threads.iter().position(|t| Arc::as_ptr(t) == ptr) {
+            // Salvage this thread's alloc-site counters before it's dropped, so
+            // its allocations still appear in a later profile.
+            self.fold_retired_alloc_counters(&threads[pos]);
             threads.swap_remove(pos);
         }
     }
@@ -626,6 +799,8 @@ impl Heap {
             }
             let ptr = Arc::as_ptr(state);
             if let Some(pos) = threads.iter().position(|t| Arc::as_ptr(t) == ptr) {
+                // Salvage alloc-site counters before drop (see deregister_thread).
+                self.fold_retired_alloc_counters(&threads[pos]);
                 threads.swap_remove(pos);
             }
             break;
