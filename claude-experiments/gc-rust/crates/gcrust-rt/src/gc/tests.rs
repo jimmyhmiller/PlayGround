@@ -1336,6 +1336,97 @@ fn mutator_thread_basic_alloc() {
 }
 
 #[test]
+fn alloc_site_profile_merges_threads_and_salvages_retired() {
+    use crate::gc::reflect::{AllocSite, TypeKind, TypeMeta};
+
+    static INFO0: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(1);
+    static INFO1: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(1).with_fields(2);
+
+    let heap = Heap::new::<Full>(64 * 1024, vec![INFO0, INFO1]);
+    heap.set_type_meta(vec![
+        TypeMeta { type_id: 0, name: "Point".into(), kind: TypeKind::Opaque },
+        TypeMeta { type_id: 1, name: "Pair".into(), kind: TypeKind::Opaque },
+    ]);
+    // Three distinct sites: same type (Point) in two different functions is two
+    // sites — the honest function+type granularity.
+    heap.set_alloc_sites(vec![
+        AllocSite { function: "main".into(), type_id: 0 },   // site 0
+        AllocSite { function: "worker".into(), type_id: 1 }, // site 1
+        AllocSite { function: "worker".into(), type_id: 0 }, // site 2
+    ]);
+
+    let (main_ts, _) = heap.register_thread();
+    let (worker_ts, _) = heap.register_thread();
+
+    // Non-atomic per-thread counters, written by the owning thread.
+    unsafe {
+        for _ in 0..3 {
+            main_ts.record_alloc(0, 100);
+        }
+        for _ in 0..2 {
+            worker_ts.record_alloc(1, 40);
+        }
+        for _ in 0..5 {
+            worker_ts.record_alloc(2, 24);
+        }
+    }
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 3);
+    // Sorted by bytes desc: site0=300, site2=120, site1=80.
+    assert_eq!(prof[0].site_id, 0);
+    assert_eq!(prof[0].function, "main");
+    assert_eq!(prof[0].type_name, "Point");
+    assert_eq!(prof[0].count, 3);
+    assert_eq!(prof[0].bytes, 300);
+
+    assert_eq!(prof[1].site_id, 2);
+    assert_eq!(prof[1].function, "worker");
+    assert_eq!(prof[1].type_name, "Point");
+    assert_eq!(prof[1].count, 5);
+    assert_eq!(prof[1].bytes, 120);
+
+    assert_eq!(prof[2].site_id, 1);
+    assert_eq!(prof[2].type_name, "Pair");
+    assert_eq!(prof[2].count, 2);
+    assert_eq!(prof[2].bytes, 80);
+
+    // Deregister the worker: its allocations must survive via the retired
+    // accumulator (no silent loss when a thread joins before the profile).
+    heap.deregister_thread(&worker_ts);
+    drop(worker_ts);
+
+    let prof2 = heap.alloc_site_profile();
+    assert_eq!(prof2.len(), 3, "deregistered worker's sites must persist");
+    let site1 = prof2.iter().find(|s| s.site_id == 1).unwrap();
+    assert_eq!((site1.count, site1.bytes), (2, 80));
+    let site2 = prof2.iter().find(|s| s.site_id == 2).unwrap();
+    assert_eq!((site2.count, site2.bytes), (5, 120));
+    // main's live counters still summed in too.
+    let site0 = prof2.iter().find(|s| s.site_id == 0).unwrap();
+    assert_eq!((site0.count, site0.bytes), (3, 300));
+}
+
+#[test]
+fn alloc_site_profile_unlabelled_sites_not_dropped() {
+    // Counters with no matching site-table entry (e.g. table not installed) are
+    // surfaced under a synthetic label, never silently dropped.
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Heap::new::<Full>(4096, vec![INFO]);
+    let (ts, _) = heap.register_thread();
+    unsafe {
+        ts.record_alloc(7, 16);
+    }
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].site_id, 7);
+    assert_eq!(prof[0].count, 1);
+    assert_eq!(prof[0].bytes, 16);
+    assert!(prof[0].function.contains("site 7"));
+    assert_eq!(prof[0].type_id, None);
+}
+
+#[test]
 fn mutator_thread_deregisters_on_drop() {
     use std::sync::Arc;
     let heap = Arc::new(Heap::new::<Compact>(4096, vec![]));

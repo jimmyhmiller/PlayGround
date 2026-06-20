@@ -28,6 +28,36 @@ raises a banner and puffs smoke.
 | Villager on a trip| Cross-project movement (a "trade route" between cities)       |
 | Market stall      | The plaza hub the trade villagers head for                    |
 
+### Variety — read your whole dev life as a map
+
+Two cities should never look the same at a glance. See [`DESIGN.md`](DESIGN.md) for the
+full design.
+
+| System | What it shows | Driven by |
+|--------|---------------|-----------|
+| **Age / tier** | Outpost → Hamlet → Village → Town → City → Metropolis: bigger footprint, more houses, a castle keep, then walls | cumulative activity (messages + 2·tools) |
+| **Biome** | The plaza colour + decorations — Forge Hills, Enchanted Forest, The Coast, Trade Port, Ancient Stone… | dominant language in the codebase on disk |
+| **Season** | A tint over the whole city: High Summer (live) → Autumn → Winter → Dormant (overgrown) | how recently you worked there |
+| **Building type** | A prop on each house — forge anvil, library signpost, barracks banner, harbor stall | the session's dominant tool (Bash/Read/Task/Web…) |
+| **Monuments** | A trophy shelf of icons in front of the city | unlocked achievements |
+
+### Achievements for a codebase
+
+34 achievements, evaluated from **real** metrics only (never faked — if a signal is
+missing, the achievement just can't unlock). They become monuments in the city and a
+badge wall in the inspector. Examples:
+
+- **Activity** — Founding, Chatty (1k msgs), Epic Saga (20k), Marathon (a 400-msg session)
+- **Craft** — Smith (500 Bash), Scholar (1k reads), General (30 subagents), Toolsmith (5k tools)
+- **Codebase** — Grove (10k LOC), Old Growth (100k), Polyglot (4+ languages), Committed
+  (200 commits), Ancient (6+ months), Tested, Documented
+- **Mastery** — Opus/Sonnet/Haiku adept, Triumvirate (all three)
+- **Time** — Night Owl, Early Bird, Veteran (active 30+ days)
+- **Wealth** — Rich (10M tokens), Tycoon (100M)
+
+The inspector also reads out the four classic resources, mapped to real metrics:
+**food** = messages, **wood** = edits, **gold** = tokens, **stone** = commits.
+
 ## Run it
 
 ```sh

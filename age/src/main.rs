@@ -248,7 +248,10 @@ fn run_screenshot(
         if runner.poll_latest() {
             world.sync(runner.latest());
         }
-        if !runner.is_loading() && waited >= 1250 {
+        // Stop once we have data and every city's codebase has been scanned (mock
+        // data is ready immediately; real repos finish within ~20s), or we time out.
+        let scanned = !world.cities.is_empty() && world.cities.iter().all(|c| c.codebase.is_some());
+        if !runner.is_loading() && (scanned || waited >= 1250) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(16));

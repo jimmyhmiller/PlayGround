@@ -476,7 +476,7 @@ pub fn draw_hud<D: RaylibDraw>(
 
     // Bottom hint bar.
     let hint = if loading {
-        "scanning sessions…".to_string()
+        "scanning sessions...".to_string()
     } else {
         format!("{fps} fps   ·   drag / WASD pan   ·   wheel zoom   ·   click a city   ·   F frame all   ·   ESC quit")
     };
@@ -557,10 +557,10 @@ pub fn draw_inspector<D: RaylibDraw>(d: &mut D, city: &City, now: f64, screen: (
         y += 17;
         let mut flags = langs.join("  ");
         if cb.has_tests {
-            flags.push_str("  ✓tests");
+            flags.push_str("  +tests");
         }
         if cb.has_readme {
-            flags.push_str("  ✓readme");
+            flags.push_str("  +readme");
         }
         d.draw_text(&flags, px + 14, y, 11, Color::new(130, 160, 140, 255));
         y += 18;
@@ -595,7 +595,7 @@ pub fn draw_inspector<D: RaylibDraw>(d: &mut D, city: &City, now: f64, screen: (
                 row_y += 20;
             }
             if row_y > py + ph - 220 {
-                d.draw_text("…", bx, row_y + 3, 12, TEXT_DIM);
+                d.draw_text("...", bx, row_y + 3, 12, TEXT_DIM);
                 break;
             }
             let col = cat_color(ach.cat);
@@ -638,8 +638,8 @@ fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
+        let mut out: String = s.chars().take(max.saturating_sub(3)).collect();
+        out.push_str("...");
         out
     }
 }

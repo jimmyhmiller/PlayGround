@@ -172,7 +172,16 @@ missing the achievement simply can't unlock (it never silently passes).
 ## Status
 
 - ✅ Base map: projects → cities, sessions → buildings, villagers, live banners, inspector.
-- 🔜 This pass: **Ages (tiers)**, **Biomes**, **Seasons**, **tool-typed buildings**,
-  **Achievements + monuments**, **resources readout**. (Data enrichment: per-tool counts,
-  tokens, active days/hours, repo scan.)
+- ✅ Data enrichment: per-tool counts, tokens, active days/hours, and a cached repo
+  scan (languages, files, LOC, commits, tests/README).
+- ✅ **Ages (tiers)** — cities grow Outpost → Metropolis, scaling footprint, building
+  count, town-center keep, and walls.
+- ✅ **Biomes** — dominant language themes each city's plaza colour + decorations.
+- ✅ **Seasons** — recency tints the whole city (High Summer → Dormant).
+- ✅ **Tool-typed buildings** — dominant tool adds a prop (forge anvil, library
+  signpost, barracks banner, harbor stall, …).
+- ✅ **Achievements + monuments** — 34-achievement catalog evaluated from real
+  metrics; unlocked ones become a trophy shelf in front of the city and a badge
+  wall in the inspector.
+- ✅ **Resources readout** — food/wood/gold/stone in the inspector.
 - 🧊 Later: subagent squads/expeditions, fire-on-error events, festivals, minimap, sound.

@@ -1020,6 +1020,126 @@ impl<'c, 'a> DepCg<'c, 'a> {
         }
         Ok((func, erased))
     }
+
+    /// Compile a function-typed-motive `NatElim` applied to its accumulators (Phase
+    /// 1a′) as a native recursive function `g(i, a₁…a_K)`:
+    ///   g(0,   a…) = z a…
+    ///   g(i+1, a…) = s i ih a…       where the IH `ih(a'…)` recurses as `g(i, a'…)`.
+    /// The IH is NOT a heap closure: a call `ih(a'…)` in `s`'s body compiles to
+    /// `call g(i, a'…)` via the `acc_ih_selves` registry. No heap, no closures — the
+    /// exact loop/recursion a C programmer writes for the same accumulator fold, so
+    /// an accumulator fold the totality checker certifies total RUNS natively.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_acc_fold(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        _motive: &Term,
+        z: &Term,
+        s: &Term,
+        scrut: &Term,
+        args: &[&Term],
+    ) -> Result<IntValue<'c>, String> {
+        // K = number of accumulators = the count of args the NatElim is applied to.
+        // The zero method is `λa₁…λa_K. z_body`; the step `λk.λih.λa₁…λa_K. s_body`.
+        let k_count = args.len();
+        let z_body = peel_n_lams(z, k_count)
+            .ok_or("accumulator fold: zero method has too few binders")?;
+        let s_body = peel_n_lams(s, k_count + 2)
+            .ok_or("accumulator fold: step method has too few binders (k, ih, accumulators)")?;
+
+        // build the native recursive function once, memoized by the step's identity.
+        // (Copy the cache hit out FIRST so the immutable borrow is released before the
+        // `else` branch takes a mutable borrow to insert.)
+        let key = s as *const Term;
+        let cached = self.fix_cache.borrow().get(&key).copied();
+        let func = if let Some(func) = cached {
+            func
+        } else {
+            let n_params = k_count + 1; // the Nat `i`, then the K accumulators
+            let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                std::iter::repeat(self.i64t.into()).take(n_params).collect();
+            let fname = self.fresh("tally_accfold");
+            let func =
+                self.module.add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
+            self.fix_cache.borrow_mut().insert(key, func);
+
+            let saved = self.builder.get_insert_block();
+            // g's body is a FRESH scope with no free references to enclosing Fix/IH
+            // selves (no closure capture), so save+clear the registries while building.
+            let saved_fix = std::mem::take(&mut *self.fix_selves.borrow_mut());
+            let saved_ih = std::mem::take(&mut *self.acc_ih_selves.borrow_mut());
+
+            let i_param = func.get_nth_param(0).unwrap().into_int_value();
+            let acc_params: Vec<IntValue<'c>> = (0..k_count)
+                .map(|j| func.get_nth_param((j + 1) as u32).unwrap().into_int_value())
+                .collect();
+
+            let entry = self.ctx.append_basic_block(func, "entry");
+            let zero_bb = self.ctx.append_basic_block(func, "accfold.zero");
+            let succ_bb = self.ctx.append_basic_block(func, "accfold.succ");
+            self.builder.position_at_end(entry);
+            let is_zero = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::EQ, i_param, self.i64t.const_zero(), "iszero")
+                .unwrap();
+            self.builder.build_conditional_branch(is_zero, zero_bb, succ_bb).unwrap();
+
+            // zero: `z a₁…a_K` — env = [a₁ … a_K] (de Bruijn 0 = a_K, the innermost).
+            self.builder.position_at_end(zero_bb);
+            let zero_env: Vec<Slot<'c>> = acc_params.iter().map(|v| Some(*v)).collect();
+            let zr = self.compile(func, &zero_env, z_body)?;
+            self.builder.build_return(Some(&zr)).unwrap();
+
+            // succ: k = i - 1; env = [k, ih, a₁ … a_K]; the IH self sits at level 1.
+            self.builder.position_at_end(succ_bb);
+            let k_val = self
+                .builder
+                .build_int_sub(i_param, self.i64t.const_int(1, false), "k")
+                .unwrap();
+            let mut succ_env: Vec<Slot<'c>> = vec![Some(k_val), None]; // k, then ih (no witness)
+            succ_env.extend(acc_params.iter().map(|v| Some(*v)));
+            self.acc_ih_selves.borrow_mut().push(AccIhSelf { level: 1, func, k: k_val });
+            let sr = self.compile(func, &succ_env, s_body);
+            self.acc_ih_selves.borrow_mut().pop();
+            let sr = sr?;
+            self.builder.build_return(Some(&sr)).unwrap();
+
+            *self.fix_selves.borrow_mut() = saved_fix;
+            *self.acc_ih_selves.borrow_mut() = saved_ih;
+            if let Some(bb) = saved {
+                self.builder.position_at_end(bb);
+            }
+            func
+        };
+
+        // call `g(scrut, args…)` with the accumulators evaluated in the CURRENT env.
+        let scrut_v = self.compile(f, env, scrut)?;
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![scrut_v.into()];
+        for a in args {
+            call_args.push(self.compile(f, env, a)?.into());
+        }
+        Ok(self
+            .builder
+            .build_call(func, &call_args, "accfold.call")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_int_value())
+    }
+}
+
+/// Strip up to `n` leading `Lam`s (through `Ann`s); `None` if there are fewer.
+fn peel_n_lams(t: &Term, n: usize) -> Option<&Term> {
+    let mut t = strip_ann(t);
+    for _ in 0..n {
+        match t {
+            Term::Lam(inner) => t = strip_ann(inner),
+            _ => return None,
+        }
+    }
+    Some(t)
 }
 
 fn strip_ann(t: &Term) -> &Term {
@@ -1511,6 +1631,64 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             let src = format!("{G}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
             assert_eq!(run(&src), expect, "depth {d}");
         }
+    }
+
+    #[test]
+    fn accumulator_folds_run_natively() {
+        // PHASE 1a′ NATIVE BACKEND: a `%total` accumulator fold (descends on the
+        // scrutinee, VARIES another argument) lowers to a function-typed-motive
+        // `NatElim` that now compiles to a native recursive function (no closures) —
+        // so what the totality checker certifies total RUNS on the LLVM backend, not
+        // only in the kernel evaluator.
+        const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+
+        // single accumulator: addacc(m,n) = m+n, sumacc(m,acc) = acc+m.
+        let src = format!(
+            "{NB}\n%total fn addacc(m, n) {{ match m {{ Zero => n, Succ(k) => addacc(k, Succ(n)) }} }}\n\
+             addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(2, 3) }}\n"
+        );
+        assert_eq!(run(&src), 5, "addacc(2,3)");
+
+        let src = format!(
+            "{NB}\n%total fn sumacc(m, acc) {{ match m {{ Zero => acc, Succ(k) => sumacc(k, Succ(acc)) }} }}\n\
+             sumacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ sumacc(7, 0) }}\n"
+        );
+        assert_eq!(run(&src), 7, "sumacc(7,0)");
+
+        // two accumulators, both varying: twoacc(2,0,10) = 1.
+        let src = format!(
+            "{NB}\n%total fn twoacc(m, a, b) {{ match m {{ Zero => a, Succ(k) => twoacc(k, b, Succ(a)) }} }}\n\
+             twoacc : Nat -> Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ twoacc(2, 0, 10) }}\n"
+        );
+        assert_eq!(run(&src), 1, "twoacc(2,0,10)");
+
+        // nested-match accumulator: sub(m,n) = m - n (truncated). sub(5,2)=3, sub(2,5)=0.
+        const SUB: &str = "%total fn sub(m, n) { match m { \
+              Zero => Zero, Succ(j) => match n { Zero => Succ(j), Succ(k) => sub(j, k) } } }\n\
+              sub : Nat -> Nat -> Nat\n";
+        assert_eq!(run(&format!("{NB}\n{SUB}main : Nat\nfn main() {{ sub(5, 2) }}\n")), 3, "sub(5,2)");
+        assert_eq!(run(&format!("{NB}\n{SUB}main : Nat\nfn main() {{ sub(2, 5) }}\n")), 0, "sub(2,5)");
+    }
+
+    #[test]
+    fn fuel_div_runs_natively() {
+        // THE 1a′ PROOF TARGET, now ACTUALLY on the LLVM backend: `%total fuel-div`
+        // composing the accumulator folds `lt`/`sub` and the fuel-driven `div`.
+        // div(10,7,2) = 3 (7/2 with enough fuel). lt returns a boxed Bool.
+        const PRE: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                           enum Bool { False : Bool, True : Bool }\n";
+        let src = format!(
+            "{PRE}\n\
+             %total fn lt(m, n) {{ match m {{ \
+                 Zero => match n {{ Zero => False, Succ(x) => True }}, \
+                 Succ(j) => match n {{ Zero => False, Succ(k) => lt(j, k) }} }} }}\nlt : Nat -> Nat -> Bool\n\
+             %total fn sub(m, n) {{ match m {{ \
+                 Zero => Zero, Succ(j) => match n {{ Zero => Succ(j), Succ(k) => sub(j, k) }} }} }}\nsub : Nat -> Nat -> Nat\n\
+             %total fn div(fuel, n, d) {{ match fuel {{ \
+                 Zero => Zero, Succ(f) => match lt(n, d) {{ True => Zero, False => Succ(div(f, sub(n, d), d)) }} }} }}\ndiv : Nat -> Nat -> Nat -> Nat\n\
+             main : Nat\nfn main() {{ div(10, 7, 2) }}\n"
+        );
+        assert_eq!(run(&src), 3, "div(10,7,2)");
     }
 
     #[test]

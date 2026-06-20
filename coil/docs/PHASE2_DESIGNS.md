@@ -9,6 +9,18 @@ design, the alternatives, and the decisions that need a ruling.
 
 ## #4 — Aggregate reference model
 
+> **SHIPPED (conservative model, Jimmy's ruling).** Implemented in five commits:
+> #4a rvalue-auto-spill at by-immutable-ref args (`Expr::SpillRef`, reusing the
+> match-scrutinee spill); #4b uniform pass-by-reference for structs == sums ==
+> arrays; #4c `(ref T)` syntax; #4d locked the read-ref-as-value auto-load of
+> `(mut)`-bound aggregates (already covered by Phase-2 #1's `coerce`); #4e
+> auto-borrow a *writable* place to `(ptr T)`. The metal `ptr` tier stays
+> distinct (only `(mut)`/explicit/writable places auto-borrow), const-correctness
+> is intact (immutable refs reject write-through; mutable-ref params reject
+> rvalues), and the C ABI for by-value aggregate FFI is untouched (externs never
+> route through `param_ref_type` — verified in IR). Decisions resolved below.
+> **Open:** A5 (re-passing a `(mut)` param bare) — deferred as a character call.
+
 ### The friction (from the dogfood)
 The rule "a by-value aggregate param is really an immutable reference" leaks, and
 structs vs sums behave differently:
@@ -50,12 +62,16 @@ needed; borrow a place to get a pointer."**
 - *Leave sums by-value, structs by-ref* (status quo + #1 patch): functional but the
   asymmetry remains a latent surprise. Rejected — uniformity is the goal.
 
-### Decisions needed
-- OK to make sums (and arrays) pass by immutable reference like structs? (Internal ABI
-  change; external C sum-passing is rare but must be checked.)
+### Decisions needed → RESOLVED
+- OK to make sums (and arrays) pass by immutable reference like structs? **Yes (#4b).**
+  External C sum-passing is unaffected — externs keep by-value params (they never go
+  through `param_ref_type`); verified in IR (`declare i64 @consume_tag(%Tag)` stays
+  by-value while a Coil fn becomes `define i64 @f(ptr %t)`).
 - How far should auto-borrow-to-`(ptr T)` go — only `(mut)` places, or any place?
-  (Blurs the ref tier vs the metal `ptr` tier; pick the least-surprising line.)
-- Add `(ref T)` syntax now, or keep immutable-ref implicit?
+  **Only *writable* places (#4e):** `(mut T)`/`(ptr T)`/`(mut x)`. Immutable places do
+  NOT auto-borrow (a `(ptr T)` is writable; that would breach const-correctness), which
+  is exactly the line that keeps the metal `ptr` tier distinct.
+- Add `(ref T)` syntax now, or keep immutable-ref implicit? **Added now (#4c).**
 
 ---
 
