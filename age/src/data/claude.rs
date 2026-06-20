@@ -28,6 +28,8 @@ pub struct ClaudeProjectsSource {
     root: PathBuf,
     /// path -> (mtime_ns, size, parsed). Lets us skip unchanged files.
     cache: HashMap<PathBuf, CacheEntry>,
+    /// cwd -> scanned codebase facts. Scanned once; repos' character is stable.
+    repo_cache: HashMap<String, super::CodebaseInfo>,
 }
 
 struct CacheEntry {
@@ -43,7 +45,23 @@ impl ClaudeProjectsSource {
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".claude").join("projects")))
             .unwrap_or_else(|| PathBuf::from(".claude/projects"));
-        ClaudeProjectsSource { root, cache: HashMap::new() }
+        ClaudeProjectsSource { root, cache: HashMap::new(), repo_cache: HashMap::new() }
+    }
+
+    /// Return cached codebase facts for `path`, scanning at most `budget` new repos
+    /// per poll so the first snapshot paints quickly and codebases fill in over the
+    /// next few polls.
+    fn codebase_for(&mut self, path: &str, budget: &mut u32) -> Option<super::CodebaseInfo> {
+        if let Some(c) = self.repo_cache.get(path) {
+            return Some(c.clone());
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let info = super::repo::scan(Path::new(path));
+        self.repo_cache.insert(path.to_string(), info.clone());
+        Some(info)
     }
 }
 
@@ -64,6 +82,8 @@ impl WorldSource for ClaudeProjectsSource {
 
         // Keep the cache from growing without bound: forget files we don't see.
         let mut seen: Vec<PathBuf> = Vec::new();
+        // Cap fresh repo scans per poll so the first paint isn't blocked on disk.
+        let mut scan_budget: u32 = 8;
 
         for proj in entries.flatten() {
             let proj_path = proj.path();
@@ -114,7 +134,10 @@ impl WorldSource for ClaudeProjectsSource {
                 .unwrap_or("project")
                 .to_string();
             let name = city_name.unwrap_or_else(|| decode_dir_name(&id));
-            cities.push(CityInfo { id, name, path: city_path, sessions });
+            let codebase = city_path
+                .as_deref()
+                .and_then(|p| self.codebase_for(p, &mut scan_budget));
+            cities.push(CityInfo { id, name, path: city_path, sessions, codebase });
         }
 
         // Evict stale cache entries.
@@ -168,10 +191,15 @@ fn parse_session(path: &Path, mtime_secs: f64) -> Option<SessionInfo> {
         user_messages: 0,
         assistant_messages: 0,
         tool_uses: 0,
+        tools: super::ToolCounts::default(),
+        total_tokens: 0,
+        hours_mask: 0,
+        days: Vec::new(),
         first_active: None,
         last_active: Some(mtime_secs),
         git_branch: None,
     };
+    let mut day_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
     for line in reader.lines().map_while(Result::ok) {
         let line = line.trim();
@@ -187,6 +215,9 @@ fn parse_session(path: &Path, mtime_secs: f64) -> Option<SessionInfo> {
         if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) {
             if let Some(secs) = parse_rfc3339(ts) {
                 info.first_active = Some(info.first_active.map_or(secs, |f: f64| f.min(secs)));
+                let hour = ((secs as i64).rem_euclid(86_400) / 3_600) as u32;
+                info.hours_mask |= 1 << hour.min(23);
+                day_set.insert((secs / 86_400.0).floor() as i32);
             }
         }
         if info.git_branch.is_none() {
@@ -220,15 +251,22 @@ fn parse_session(path: &Path, mtime_secs: f64) -> Option<SessionInfo> {
                     if let Some(content) = m.get("content").and_then(|c| c.as_array()) {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                                info.tool_uses += 1;
+                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                info.tools.add(name);
                             }
                         }
+                    }
+                    if let Some(u) = m.get("usage") {
+                        let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                        info.total_tokens += n("input_tokens") + n("output_tokens");
                     }
                 }
             }
             _ => {}
         }
     }
+    info.tool_uses = info.tools.total;
+    info.days = day_set.into_iter().collect();
     Some(info)
 }
 

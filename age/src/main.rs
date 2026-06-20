@@ -9,6 +9,7 @@
 //!   age_of_models --mock     # synthetic demo data
 //!   age_of_models --screenshot out.png   # render a few frames headless, save PNG
 
+mod achievements;
 mod data;
 mod game;
 mod render;

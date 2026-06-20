@@ -173,6 +173,32 @@ fn fin_to_nat_called_with_inferred_implicit() {
 }
 
 #[test]
+fn explore_wtype_construction_and_recursion() {
+    // EXPLORATORY (1b scoping): a W-type `Tree` with a higher-order recursive field
+    // `node2 : (Bool -> Tree) -> Tree`. Construct a value by passing a NAMED helper
+    // (no surface lambdas needed), then recurse over it.
+    let src = format!(
+        "{NATB}\n\
+         enum Bool {{ btrue : Bool, bfalse : Bool }}\n\
+         enum Tree {{ leaf : Tree, node2 : (Bool -> Tree) -> Tree }}\n\
+         add : Nat -> Nat -> Nat\n\
+         fn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
+         kids : Bool -> Tree\nfn kids(b) {{ leaf }}\n\
+         t1 : Tree\nfn t1() {{ node2(kids) }}\n\
+         size : Tree -> Nat\n\
+         fn size(t) {{ match t {{ leaf => Succ(Zero), node2(f) => add(size(f(btrue)), size(f(bfalse))) }} }}\n\
+         main : Nat\nfn main() {{ size(t1) }}\n"
+    );
+    match check_program(&src) {
+        Ok(prog) => {
+            eprintln!("OK; is_total(size)={}", is_total(&prog, "size"));
+            eprintln!("main = {:?}", prog.normalize("main"));
+        }
+        Err(e) => eprintln!("ERR: {e:?}"),
+    }
+}
+
+#[test]
 fn structs_with_implicit_param() {
     let src = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }

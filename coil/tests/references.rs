@@ -164,3 +164,37 @@ fn rvalue_spill_does_not_apply_to_mut_params() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("mut") && err.contains("place"), "got: {err}");
 }
+
+#[test]
+fn sum_param_passes_by_reference() {
+    // A sum parameter is now passed by immutable reference (like a struct). It is
+    // still matched normally (the scrutinee reads the ref as its value), a sum
+    // RVALUE argument is spilled, and a sum PLACE argument is borrowed.
+    let src = r#"
+        (defsum Opt (ONone []) (OSome [(v i64)]))
+        (defn opt-or [(o Opt) (d i64)] (-> i64)
+          (match o (ONone [] d) (OSome [v] v)))
+        (defn relay [(o Opt)] (-> i64) (opt-or o 0))   ; re-pass a by-ref sum param
+        (defn main [] (-> i64)
+          (iadd (opt-or (OSome 40) 0)                   ; rvalue -> spill
+                (iadd (relay (OSome 2)) (opt-or (ONone) 0))))   ; 40 + 2 + 0 = 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn array_param_passes_by_reference() {
+    // A fixed-array parameter is passed by immutable reference; the callee indexes
+    // it. (Previously array params were by value.)
+    let src = r#"
+        (defn arr-sum [(a (array i64 4))] (-> i64)
+          (iadd (iadd (load (index a 0)) (load (index a 1)))
+                (iadd (load (index a 2)) (load (index a 3)))))
+        (defn main [] (-> i64)
+          (let [(mut a) (zeroed (array i64 4))]
+            (store! (index a 0) 10) (store! (index a 1) 11)
+            (store! (index a 2) 12) (store! (index a 3) 9)
+            (arr-sum a)))   ; 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}

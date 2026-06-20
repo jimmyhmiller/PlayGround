@@ -124,7 +124,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 params: f
                     .params
                     .iter()
-                    .map(|p| param_ref_type(&p.ty, &structs, &ftps))
+                    .map(|p| param_ref_type(&p.ty, &structs, &sums, &ftps))
                     .collect(),
                 ret: f.ret.clone(),
                 is_extern: false,
@@ -235,7 +235,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
         let mut env: HashMap<String, Type> = f
             .params
             .iter()
-            .map(|p| (p.name.clone(), param_ref_type(&p.ty, &cx.structs, &tps)))
+            .map(|p| (p.name.clone(), param_ref_type(&p.ty, &cx.structs, &cx.sums, &tps)))
             .collect();
 
         let mut body: Vec<Expr> = Vec::with_capacity(f.body.len());
@@ -275,7 +275,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
             .iter()
             .map(|p| Param {
                 name: p.name.clone(),
-                ty: erase_refs(&param_ref_type(&p.ty, &cx.structs, &tps)),
+                ty: erase_refs(&param_ref_type(&p.ty, &cx.structs, &cx.sums, &tps)),
             })
             .collect();
         funcs.push(Func {
@@ -798,7 +798,14 @@ fn synth(
                     }
                     let want = sig.params[i].clone();
                     let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
-                    let exp = if matches!(want, Type::Ref(..)) { None } else { Some(&want) };
+                    // A by-reference parameter takes a value (or place) of its
+                    // pointee type — impose the pointee as the expected type so a
+                    // literal or bare constructor argument adopts it (it is then
+                    // borrowed if it is a place, or spilled if it is an rvalue).
+                    let exp = match &want {
+                        Type::Ref(_, inner) => Some(&**inner),
+                        _ => Some(&want),
+                    };
                     let (ae, at) = synth(a, exp, env, cx, tps, fname)?;
                     let ae = coerce_arg(
                         is_mut_borrow,
@@ -1070,7 +1077,17 @@ fn synth(
                 .map(|(e, _)| (e, Type::Struct(sum.clone())))
         }
         Expr::Match { scrut, arms } => {
-            let (se, st) = synth(scrut, None, env, cx, tps, fname)?;
+            let (mut se, st0) = synth(scrut, None, env, cx, tps, fname)?;
+            // A by-reference sum (e.g. a sum parameter, now passed by immutable
+            // reference) reads as its value here: load it so the match sees a
+            // value scrutinee, exactly as `coerce` reads a ref as its value.
+            let st = match &st0 {
+                Type::Ref(_, inner) if sum_variants(inner, cx).is_some() => {
+                    se = Expr::Load(Box::new(se));
+                    (**inner).clone()
+                }
+                _ => st0,
+            };
             let (sumname, variants) = sum_variants(&st, cx).ok_or_else(|| {
                 format!("in '{fname}': match expects a sum value, got {}", ty_str(&st))
             })?;
@@ -1437,10 +1454,13 @@ fn unify(
     }
     match (decl, actual) {
         (Type::Ptr(a), Type::Ptr(b)) => unify(a, b, tpset, subst, fname),
-        // a reference parameter unifies against any place (ref or pointer).
-        (Type::Ref(_, a), Type::Ref(_, b))
-        | (Type::Ref(_, a), Type::Ptr(b))
-        | (Type::Ptr(a), Type::Ref(_, b)) => unify(a, b, tpset, subst, fname),
+        // A reference on either side — a by-reference parameter, or a place
+        // argument — unifies its pointee against the other side. So a by-ref
+        // aggregate parameter matches a value, a place, or a raw-pointer
+        // argument of the pointee type (it is read-as-value, borrowed, or
+        // spilled). Subsumes the (ref,ref)/(ref,ptr)/(ptr,ref) place cases.
+        (Type::Ref(_, a), b) => unify(a, b, tpset, subst, fname),
+        (a, Type::Ref(_, b)) => unify(a, b, tpset, subst, fname),
         (Type::Array(a, _), Type::Array(b, _)) => unify(a, b, tpset, subst, fname),
         (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
             for (x, y) in a1.iter().zip(a2) {
@@ -1476,20 +1496,26 @@ fn erase_refs(t: &Type) -> Type {
     }
 }
 
-/// How a parameter's written type is seen inside the body: a struct (concrete or
-/// generic-instance) is passed by **immutable reference**; `(mut T)` is a mutable
-/// reference; sums, scalars, pointers, and type parameters are unchanged.
+/// How a parameter's written type is seen inside the body: every aggregate — a
+/// struct, a sum, or a fixed array (concrete or generic-instance) — is passed by
+/// **immutable reference**; `(mut T)` is a mutable reference; scalars, pointers,
+/// and bare type parameters are unchanged. A `(ref T)`/`(mut T)` written by the
+/// user is already a reference and passes through. (Externs are never routed
+/// through here, so the C ABI for by-value aggregate FFI is untouched.)
 fn param_ref_type(
     t: &Type,
     structs: &HashMap<String, StructInfo>,
+    sums: &HashMap<String, SumInfo>,
     tps: &HashSet<String>,
 ) -> Type {
+    let is_aggregate = |name: &String| {
+        !tps.contains(name) && (structs.contains_key(name) || sums.contains_key(name))
+    };
     match t {
         Type::Ref(..) | Type::Ptr(..) => t.clone(),
-        Type::Struct(name) if structs.contains_key(name) && !tps.contains(name) => {
-            Type::Ref(false, Box::new(t.clone()))
-        }
-        Type::App(name, _) if structs.contains_key(name) => Type::Ref(false, Box::new(t.clone())),
+        Type::Struct(name) if is_aggregate(name) => Type::Ref(false, Box::new(t.clone())),
+        Type::App(name, _) if is_aggregate(name) => Type::Ref(false, Box::new(t.clone())),
+        Type::Array(..) => Type::Ref(false, Box::new(t.clone())),
         _ => t.clone(),
     }
 }
