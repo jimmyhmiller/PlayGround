@@ -21,4 +21,3 @@ pub(crate) mod totality;
 
 #[cfg(feature = "llvm")]
 pub mod dep_codegen;
-#[cfg(test)] mod probe_tmp;

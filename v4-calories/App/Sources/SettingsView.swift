@@ -145,6 +145,31 @@ struct SettingsView: View {
         }
     }
 
+    private var assistantSection: some View {
+        Section("Assistant") {
+            HStack {
+                Image(systemName: store.hasAIKey ? "checkmark.circle.fill" : "xmark.circle")
+                    .foregroundStyle(store.hasAIKey ? Theme.green : Theme.textDim(0.4))
+                Text(store.hasAIKey
+                     ? (store.aiKeyIsFromBuild ? "DeepSeek key: built in" : "DeepSeek key: custom")
+                     : "No DeepSeek key set")
+                Spacer()
+            }
+            SecureField("DeepSeek API key (sk-…)", text: $aiKeyDraft)
+                .font(.mono(13))
+            HStack {
+                Button("Save key") { store.setAIKey(aiKeyDraft); aiKeyDraft = "" }
+                    .disabled(aiKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                if !store.state.aiKey.isEmpty {
+                    Spacer()
+                    Button("Use built-in", role: .destructive) { store.setAIKey("") }
+                }
+            }
+            Text("Powers “Ask AI” on the calorie entry screen — type a meal in plain language and it estimates the calories. Leave blank to use the key built into this build.")
+                .font(.footnote).foregroundStyle(Theme.textDim(0.5))
+        }
+    }
+
     private var shortcutsSection: some View {
         Section("Shortcuts") {
             ForEach(store.state.shortcuts) { s in
