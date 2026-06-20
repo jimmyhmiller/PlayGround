@@ -481,6 +481,9 @@ pub fn compile_for<'ctx>(
 impl<'ctx> Cg<'ctx> {
     fn basic_ty(&self, t: &Type) -> BasicTypeEnum<'ctx> {
         match t {
+            // A Never value is never materialized (the expression diverges first);
+            // this placeholder only labels slots/phis on dead, unreachable paths.
+            Type::Never => self.ctx.i64_type().into(),
             Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
             Type::Float(32) => self.ctx.f32_type().into(),
             Type::Float(_) => self.ctx.f64_type().into(),
@@ -1778,11 +1781,13 @@ impl<'ctx> Cg<'ctx> {
                 child.insert(b.clone(), (fval, fty));
             }
             let (bval, bty) = self.emit_expr(&arm.body, &child)?;
-            result_ty = bty;
             // An arm may diverge (end in break/continue/return-from): only a
             // falling-through arm branches to the merge and feeds the result phi.
+            // Take the phi's type from a non-diverging arm — a diverging arm's
+            // type is Never (placeholder i64), which would mistype the phi.
             let end = self.builder.get_insert_block().unwrap();
             if end.get_terminator().is_none() {
+                result_ty = bty;
                 self.builder.build_unconditional_branch(merge).map_err(le)?;
                 incoming.push((bval, end));
             }
@@ -2186,6 +2191,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
+        Type::Never => unreachable!("Never type has no size"),
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
         Type::Float(bits) => (*bits as u64) / 8,
         Type::Bool => 1,

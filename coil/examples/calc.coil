@@ -99,9 +99,8 @@
         (TOp [op]
           (if (or (icmp-eq op 42) (icmp-eq op 47))
               (do (adv p)
-                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-primary p))))
-                  0)                      ; both branches i64 (break types as i64)
-              (break)))
+                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-primary p)))))
+              (break)))      ; the (break) branch is Never — unifies with the (ptr Ast) branch
         (TNum [_] (break)) (TVar [_] (break)) (TLP [] (break)) (TRP [] (break))
         (TEq [] (break)) (TSemi [] (break)) (TEnd [] (break))))
     (load acc)))
@@ -114,8 +113,7 @@
         (TOp [op]
           (if (or (icmp-eq op 43) (icmp-eq op 45))
               (do (adv p)
-                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-term p))))
-                  0)
+                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-term p)))))
               (break)))
         (TNum [_] (break)) (TVar [_] (break)) (TLP [] (break)) (TRP [] (break))
         (TEq [] (break)) (TSemi [] (break)) (TEnd [] (break))))

@@ -196,6 +196,7 @@ fn qualify_type(
     exports: &ExportMap,
 ) -> Result<(), String> {
     match ty {
+        Type::Never => {}   // synthesized only; never appears in user-written types
         Type::Struct(n) => {
             if !tps.contains(n) {
                 *n = resolve(n, m, imps, table, exports, |d| &d.types)?;

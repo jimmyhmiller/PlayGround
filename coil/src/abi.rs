@@ -257,6 +257,7 @@ fn flatten_type<'ctx>(
     abi: &AbiCtx<'_, 'ctx>,
 ) -> Result<(), String> {
     match ty {
+        Type::Never => unreachable!("Never type has no ABI representation"),
         Type::Float(bits) => {
             out.push(Leaf {
                 offset,

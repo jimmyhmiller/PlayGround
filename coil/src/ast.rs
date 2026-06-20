@@ -38,6 +38,13 @@ pub enum Type {
     /// A generic type application, e.g. `(Pair i64 i64)` -> `App("Pair", [i64,i64])`.
     /// Removed by monomorphization before the checker runs.
     App(String, Vec<Type>),
+    /// The bottom type: the type of an expression that never yields a value
+    /// (`break`/`continue`/`return-from`). It is *not* user-writable; the checker
+    /// produces it, and it unifies with any type (a `Never` branch adopts the
+    /// other branch's type) so `(if c (do …T…) (break))` type-checks without a
+    /// dummy value. It has no runtime representation (a `Never` value is never
+    /// materialized — the expression diverges first).
+    Never,
 }
 
 impl Type {

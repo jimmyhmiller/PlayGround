@@ -315,6 +315,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
 /// in-scope type parameter), and every generic application has the right arity.
 fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String> {
     match t {
+        Type::Never => Ok(()),   // synthesized only; not user-writable
         Type::Int(..) => Ok(()),
         Type::Float(..) | Type::Bool => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
@@ -518,7 +519,8 @@ fn synth(
                 }
             }
             let frame = cx.loops.borrow_mut().pop().expect("loop frame present");
-            let loop_ty = frame.break_ty.unwrap_or_else(Type::i64);
+            // No reachable break ⇒ the loop diverges: its type is Never.
+            let loop_ty = frame.break_ty.unwrap_or(Type::Never);
             Ok((Expr::Loop { label: label.clone(), body: body_e }, loop_ty))
         }
         // Exit a loop with an optional value; the value type is unified into the
@@ -560,7 +562,7 @@ fn synth(
                     Some(_) => {}
                 }
             }
-            Ok((Expr::Break { label: label.clone(), value: val_e }, Type::i64()))
+            Ok((Expr::Break { label: label.clone(), value: val_e }, Type::Never))
         }
         Expr::Continue { label } => {
             let loops = cx.loops.borrow();
@@ -572,7 +574,7 @@ fn synth(
                     return Err(format!("in '{fname}': continue to unknown loop label ':{l}'"));
                 }
             }
-            Ok((Expr::Continue { label: label.clone() }, Type::i64()))
+            Ok((Expr::Continue { label: label.clone() }, Type::Never))
         }
         Expr::If { cond, then, els } => {
             let (ce, ct) = synth(cond, None, env, cx, tps, fname)?;
@@ -1563,6 +1565,7 @@ fn replace_pointee(place: &Type, new: Type) -> Type {
 /// Substitute bound type parameters throughout a type.
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
+        Type::Never => Type::Never,
         Type::Int(..) | Type::Float(..) | Type::Bool => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
@@ -1761,6 +1764,11 @@ fn coerce(
     if &et == target {
         return Ok(e);
     }
+    // A divergent (Never-typed) expression — break/continue/return-from, or a
+    // break-less loop — has no value and stands in for any type.
+    if et == Type::Never {
+        return Ok(e);
+    }
     if same_number_kind(&et, target) && is_literal(&e) {
         return coerce_lit(e, target, fname);
     }
@@ -1795,7 +1803,10 @@ fn unify_branches(
 ) -> Result<(Vec<Expr>, Type), String> {
     let mut concrete: Option<Type> = None;
     for (e, t) in &branches {
-        if !is_literal(e) {
+        // A Never-typed branch (one that diverges) is non-constraining — like a
+        // literal, it adopts the other branch's concrete type. So
+        // `(if c (do …T…) (break))` reconciles to T (no dummy value needed).
+        if !is_literal(e) && t != &Type::Never {
             match &concrete {
                 None => concrete = Some(t.clone()),
                 Some(c) if c != t => return Err(mismatch_msg(c, t, fname, what)),
@@ -1804,13 +1815,20 @@ fn unify_branches(
         }
     }
     // With no concrete sibling, the result is the literals' own default type
-    // (i64 for integer literals, f64 for float literals).
+    // (i64 for integer literals, f64 for float literals) — skipping any Never
+    // (divergent) branch, which never constrains the result.
     let target = concrete
-        .or_else(|| branches.first().map(|(_, t)| t.clone()))
+        .or_else(|| {
+            branches
+                .iter()
+                .find(|(_, t)| t != &Type::Never)
+                .map(|(_, t)| t.clone())
+        })
         .unwrap_or(Type::Int(64, true));
     let mut out = Vec::with_capacity(branches.len());
     for (e, t) in branches {
-        if t == target {
+        if t == target || t == Type::Never {
+            // a Never branch diverges; keep it as-is (it yields no value).
             out.push(e);
         } else if same_number_kind(&t, &target) && is_literal(&e) {
             out.push(coerce_lit(e, &target, fname)?);
@@ -1854,6 +1872,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 
 fn ty_str(t: &Type) -> String {
     match t {
+        Type::Never => "!".to_string(),
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),
         Type::Bool => "bool".to_string(),

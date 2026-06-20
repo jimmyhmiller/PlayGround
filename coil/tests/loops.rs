@@ -83,6 +83,33 @@ fn break_value_type_mismatch_is_an_error() {
     assert!(err.contains("different value types"), "got: {err}");
 }
 
+#[test]
+fn break_typed_as_never_needs_no_dummy_branch() {
+    // break/continue type as Never (bottom), so `(if c (do …non-i64…) (break))`
+    // reconciles to the non-diverging branch's type — no dummy value required.
+    let code = build_and_run(
+        r#"(defn main [] (-> :i64)
+             (let [(mut acc) 0 (mut i) 0]
+               (loop
+                 (if (icmp-lt (load i) 5)
+                     (do (store! acc (iadd (load acc) (load i)))
+                         (store! i (iadd (load i) 1)))
+                     (break)))
+               (load acc)))"#,
+    );
+    assert_eq!(code, 10);
+}
+
+#[test]
+fn never_branch_in_if_yields_other_type() {
+    // (if c (break v) 5) — the break arm is Never, so the `if` is i64.
+    let code = build_and_run(
+        "(defn pick [(c i64)] (-> i64) (loop (break (if (icmp-eq c 1) (break 99) 5))))
+         (defn main [] (-> :i64) (pick 0))",
+    );
+    assert_eq!(code, 5);
+}
+
 // ---- derived macros (lib/control.coil) ------------------------------------
 
 const IMPORT: &str = "(module app)\n(import \"lib/control.coil\")\n";
