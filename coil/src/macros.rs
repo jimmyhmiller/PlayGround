@@ -801,7 +801,7 @@ fn global_env(target: &TargetInfo) -> Env {
     for name in [
         "+", "-", "*", "mod", "=", "<", ">", "<=", ">=", "list", "vector", "cons", "first", "rest",
         "nth", "count", "empty?", "concat", "not", "symbol", "name", "str", "gensym", "map",
-        "list?", "vector?", "symbol?", "number?", "keyword?",
+        "list?", "vector?", "symbol?", "number?", "keyword?", "error",
     ] {
         env_define(&env, name, Value::Builtin(name));
     }
@@ -901,6 +901,13 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "symbol?" => Ok(Value::Bool(matches!(args[0], Value::Sym(_)))),
         "number?" => Ok(Value::Bool(matches!(args[0], Value::Int(_)))),
         "keyword?" => Ok(Value::Bool(matches!(args[0], Value::Keyword(_)))),
+        // Abort macro expansion with a message. Lets a macro validate its
+        // arguments and hard-error (instead of silently emitting wrong code) —
+        // the building block for misuse checks like "(defer) only inside (scope)".
+        "error" => Err(args
+            .first()
+            .and_then(|v| text_of(v).ok())
+            .unwrap_or_else(|| "macro error".to_string())),
         other => Err(format!("compile-time: unknown builtin '{other}'")),
     }
 }
