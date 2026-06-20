@@ -586,3 +586,63 @@ fn missing_reachable_case_still_rejected_with_variable_index() {
     );
     assert!(check_program(&src).is_err(), "missing reachable FS must be rejected");
 }
+
+// ===========================================================================
+// PHASE 1a — surface expressiveness (let, nested/expression match)
+// ===========================================================================
+
+const ONEA: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+    enum Bool { T : Bool, F : Bool }\n\
+    enum Tree { leaf : Tree, node : Tree -> Tree -> Tree }\n\
+    add : Nat -> Nat -> Nat\n\
+    %total fn add(a, b) { match a { Zero => b, Succ(k) => Succ(add(k, b)) } }\n";
+
+#[test]
+fn simple_let_binding_works() {
+    let src = format!(
+        "{ONEA}f : Nat -> Nat\nfn f(n) {{ let x = add(n, n); add(x, n) }}\n\
+         main : Nat\nfn main() {{ f(3) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn match_on_a_let_bound_var_and_on_an_expression() {
+    // match on a let-bound var:
+    let s1 = format!(
+        "{ONEA}g : Bool -> Nat\nfn g(b) {{ let c = b; match c {{ T => Succ(Zero), F => Zero }} }}\n\
+         main : Nat\nfn main() {{ g(T) }}\n"
+    );
+    assert!(check_program(&s1).is_ok(), "{:?}", check_program(&s1).err());
+    // match directly on a CALL expression (desugars to a let):
+    let s2 = format!(
+        "{ONEA}not : Bool -> Bool\nfn not(b) {{ match b {{ T => F, F => T }} }}\n\
+         h : Bool -> Nat\nfn h(b) {{ match not(b) {{ T => Succ(Zero), F => Zero }} }}\n\
+         main : Nat\nfn main() {{ h(F) }}\n"
+    );
+    assert!(check_program(&s2).is_ok(), "{:?}", check_program(&s2).err());
+}
+
+#[test]
+fn nested_match_bool_and_nat() {
+    // a nested Bool match AND a nested Nat case (NatCase), non-recursive.
+    let src = format!(
+        "{ONEA}pick : Bool -> Nat -> Nat\n\
+         fn pick(b, n) {{ match b {{ T => match n {{ Zero => Zero, Succ(k) => k }}, F => n }} }}\n\
+         main : Nat\nfn main() {{ pick(T, Succ(Succ(Zero))) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn recursive_tree_fold_with_let_is_total() {
+    // a structural fold over a boxed binary tree (two induction hypotheses),
+    // using a `let` in the recursive arm — stays `%total`.
+    let src = format!(
+        "{ONEA}size : Tree -> Nat\n\
+         %total fn size(t) {{ match t {{ leaf => Succ(Zero), node(l, r) => let s = add(size(l), size(r)); s }} }}\n\
+         main : Nat\nfn main() {{ size(node(node(leaf, leaf), leaf)) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(prog.totality.iter().any(|(n, t, _)| n == "size" && *t), "size must be total");
+}

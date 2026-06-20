@@ -171,6 +171,8 @@ pub(crate) enum Tm {
     Add(Box<Tm>, Box<Tm>),
     /// `let (a, b) = e; body` — destructure a single-constructor value
     LetPair(Vec<String>, Box<Tm>, Box<Tm>),
+    /// `let x = e; body` — bind a single value (1a surface expressiveness).
+    Let(String, Box<Tm>, Box<Tm>),
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +228,7 @@ enum Item {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    fresh: usize,
 }
 
 impl Parser {
@@ -484,20 +487,30 @@ impl Parser {
             Some(Tok::KwMatch) => self.parse_match(),
             Some(Tok::KwLet) => {
                 self.next();
-                self.eat(&Tok::LParen)?;
-                let mut names = Vec::new();
-                while self.peek() != Some(&Tok::RParen) {
-                    names.push(self.ident()?);
-                    if self.peek() == Some(&Tok::Comma) {
-                        self.next();
+                // `let (a, b) = e; body`  (pair destructure)  OR  `let x = e; body`.
+                if self.peek() == Some(&Tok::LParen) {
+                    self.next();
+                    let mut names = Vec::new();
+                    while self.peek() != Some(&Tok::RParen) {
+                        names.push(self.ident()?);
+                        if self.peek() == Some(&Tok::Comma) {
+                            self.next();
+                        }
                     }
+                    self.eat(&Tok::RParen)?;
+                    self.eat(&Tok::Eq)?;
+                    let rhs = self.parse_call()?;
+                    self.eat(&Tok::Semi)?;
+                    let body = self.parse_tm()?;
+                    Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
+                } else {
+                    let name = self.ident()?;
+                    self.eat(&Tok::Eq)?;
+                    let rhs = self.parse_call()?;
+                    self.eat(&Tok::Semi)?;
+                    let body = self.parse_tm()?;
+                    Ok(Tm::Let(name, Box::new(rhs), Box::new(body)))
                 }
-                self.eat(&Tok::RParen)?;
-                self.eat(&Tok::Eq)?;
-                let rhs = self.parse_call()?;
-                self.eat(&Tok::Semi)?;
-                let body = self.parse_tm()?;
-                Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
             }
             _ => self.parse_add(),
         }
@@ -543,7 +556,17 @@ impl Parser {
 
     fn parse_match(&mut self) -> Result<Tm, String> {
         self.eat(&Tok::KwMatch)?;
-        let scrut = self.ident()?;
+        // the scrutinee may be an EXPRESSION (a call / paren), not just a var; a
+        // non-var scrutinee is desugared to `let $s = <expr>; match $s { … }`.
+        let scrut_tm = self.parse_call()?;
+        let (scrut, bind): (String, Option<Tm>) = match scrut_tm {
+            Tm::Var(v) => (v, None),
+            other => {
+                let s = format!("$m{}", self.fresh);
+                self.fresh += 1;
+                (s, Some(other))
+            }
+        };
         self.eat(&Tok::LBrace)?;
         let mut arms = Vec::new();
         while self.peek() != Some(&Tok::RBrace) {
@@ -567,7 +590,12 @@ impl Parser {
             }
         }
         self.eat(&Tok::RBrace)?;
-        Ok(Tm::Match(scrut, arms))
+        let m = Tm::Match(scrut.clone(), arms);
+        // wrap the desugared scrutinee binding, if any.
+        match bind {
+            Some(e) => Ok(Tm::Let(scrut, Box::new(e), Box::new(m))),
+            None => Ok(m),
+        }
     }
 }
 
@@ -764,6 +792,11 @@ impl Elab {
     fn check(&self, tm: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match tm {
             Tm::LetPair(names, e, body) => self.elab_let_pair(names, e, body, expected, cx, rec),
+            Tm::Let(name, e, body) => self.elab_let(name, e, body, expected, cx, rec),
+            // a `match` reached in CHECK position is a NESTED / expression case
+            // split (non-recursive — the recursive fold is the fn body, handled in
+            // pass D). Lower it to a non-dependent eliminator via elab_nested_match.
+            Tm::Match(scrut, arms) => self.elab_case(scrut, arms, expected, cx, rec),
             Tm::Var(name) if self.ctor_has_implicits(name) => self.solve_ctor(name, &[], expected, cx, rec),
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
@@ -820,8 +853,10 @@ impl Elab {
                 let eargs = args.iter().map(|a| self.elab_tm(a, cx, rec)).collect::<Result<Vec<_>, _>>()?;
                 self.resolve(name, eargs, &cx.names, true)
             }
-            Tm::Match(_, _) => Err("nested `match` is not supported".into()),
-            Tm::LetPair(_, _, _) => Err("`let` must appear in a checked position".into()),
+            Tm::Match(_, _) | Tm::Let(_, _, _) | Tm::LetPair(_, _, _) => {
+                Err("`match`/`let` must appear in a checked position (annotate the \
+                     surrounding expression's type)".into())
+            }
         }
     }
 
@@ -1047,6 +1082,82 @@ impl Elab {
     /// `let (a, b) = e; body` — destructure a single-constructor value `e` by
     /// eliminating it (a *linear* pair is consumed once and its fields bound at
     /// their declared multiplicities).
+    /// `let x = e; body` — infer `e`, bind `x`, check `body`, lower to the
+    /// β-redex `(λx. body) e` (the kernel reduces and re-checks it). No kernel
+    /// change — pure surface desugaring (Phase 1a).
+    fn elab_let(&self, name: &str, e: &Tm, body: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let n = cx.len();
+        let (e_term, e_ty) = self.infer_arg(e, cx, rec)?;
+        let e_ty_tm = dep::quote_at(n, &e_ty);
+        let mut body_cx = cx.clone();
+        body_cx.push(name.to_string(), e_ty);
+        let body_term = self.check(body, expected, &body_cx, rec)?;
+        // lower to `(λx. body : (x:E) → BODY) e` — the lambda is ANNOTATED so the
+        // kernel can check the β-redex (a bare lambda is not inferrable). The
+        // codomain doesn't depend on x, so it is the (shifted) expected type.
+        let exp_tm = dep::quote_at(n, expected);
+        let pi_ty = Term::Pi(Mult::Omega, Box::new(e_ty_tm), Box::new(dep::shift_term(1, &exp_tm)));
+        let lam = Term::Ann(Box::new(Term::Lam(Box::new(body_term))), Box::new(pi_ty));
+        Ok(Term::App(Box::new(lam), Box::new(e_term)))
+    }
+
+    /// A `match <scrut> { … }` in CHECK position — a NON-recursive case split on
+    /// an in-scope variable (a parameter or a `let`-bound value), lowered to a
+    /// non-dependent eliminator. The recursive structural fold stays the fn body
+    /// (pass D / elab_match_body); this handles every OTHER `match` (nested, after
+    /// a `let`, on an expression desugared through a `let`). (Phase 1a.)
+    fn elab_case(&self, scrut: &str, arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let (e_term, e_ty) = self.infer_arg(&Tm::Var(scrut.to_string()), cx, rec)?;
+        match &e_ty {
+            Value::VData(d, a) => {
+                let a = a.clone();
+                self.elab_nested_match(&e_term, d, &a, arms, expected, cx, rec)
+            }
+            // a nested/expression case split on a built-in `Nat` ⇒ a non-recursive
+            // `NatCase` (no induction hypothesis); the constant motive is the
+            // expected type. `rec` is threaded so a recursive self-call inside the
+            // arm still maps to the OUTER fn's IH.
+            Value::VNat => self.elab_nested_nat_case(&e_term, arms, expected, cx, rec),
+            _ => Err(format!("`match {scrut}`: cannot case-split a value of this type")),
+        }
+    }
+
+    fn elab_nested_nat_case(&self, scrut_tm: &Term, arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let mut zero_arm = None;
+        let mut succ_arm = None;
+        for a in arms {
+            match self.nat_ctor.get(&a.ctor) {
+                Some(NatRole::Zero) if zero_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Succ) if succ_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Zero) => zero_arm = Some(a),
+                Some(NatRole::Succ) => succ_arm = Some(a),
+                None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
+            }
+        }
+        let zero_arm = zero_arm.ok_or("`match` on Nat is missing the zero case")?;
+        let succ_arm = succ_arm.ok_or("`match` on Nat is missing the successor case")?;
+        if succ_arm.binders.len() != 1 {
+            return Err("the successor case binds exactly one predecessor".into());
+        }
+        // constant motive λ_. expected; methods checked at the same expected type.
+        let n = cx.len();
+        let motive = Term::Lam(Box::new(dep::shift_term(1, &dep::quote_at(n, expected))));
+        let z = self.check(&zero_arm.body, expected, cx, rec)?;
+        let mut succ_cx = cx.clone();
+        succ_cx.push(succ_arm.binders[0].clone(), Value::VNat);
+        let s_body = self.check(&succ_arm.body, expected, &succ_cx, rec)?;
+        Ok(Term::NatCase(
+            Box::new(motive),
+            Box::new(z),
+            Box::new(Term::Lam(Box::new(s_body))),
+            Box::new(scrut_tm.clone()),
+        ))
+    }
+
     fn elab_let_pair(&self, names: &[String], e: &Tm, body: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         let (e_term, e_ty) = self.infer_arg(e, cx, rec)?;
         let (dname, dargs) = match &e_ty {
@@ -1950,7 +2061,7 @@ fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
                 collect_all_calls(&a.body, out);
             }
         }
-        Tm::LetPair(_, e, body) => {
+        Tm::LetPair(_, e, body) | Tm::Let(_, e, body) => {
             collect_all_calls(e, out);
             collect_all_calls(body, out);
         }
@@ -1996,7 +2107,7 @@ fn item_name(it: &Item) -> Option<&str> {
 
 pub fn elaborate(src: &str) -> Result<Program, String> {
     let toks = lex(src)?;
-    let mut items = Parser { toks, pos: 0 }.parse_program()?;
+    let mut items = Parser { toks, pos: 0, fresh: 0 }.parse_program()?;
 
     // Prepend the memory prelude — but ALL-OR-NOTHING: if the program declares any
     // of the prelude's own names (Unit/Own/alloc/free), it is managing the memory
@@ -2004,7 +2115,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     // how every pre-prelude program keeps compiling, and it avoids a partial
     // injection that could reference a name the user declares later).
     let declared: std::collections::HashSet<&str> = items.iter().filter_map(item_name).collect();
-    let prelude_items = Parser { toks: lex(PRELUDE)?, pos: 0 }.parse_program()?;
+    let prelude_items = Parser { toks: lex(PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
     let collides = prelude_items
         .iter()
         .filter_map(item_name)
