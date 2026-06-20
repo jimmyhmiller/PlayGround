@@ -1,7 +1,8 @@
-//! `(Slice T)` — a fat-pointer `{data, len}` view over contiguous elements, as an
-//! ordinary generic-struct LIBRARY (lib/slice.coil), not a compiler type. Covers
-//! construction, indexing, length, subslicing (shared storage), write-through
-//! aliasing, and `slice-for` iteration (a macro over `for`/loop).
+//! `(slice T)` — a fat-pointer `{data, len}` view over contiguous elements. The
+//! fat-pointer TYPE is core (the one piece string literals need); every operation
+//! is a LIBRARY over `(llvm-ir …)` (lib/slice.coil). Covers construction, indexing,
+//! length, subslicing (shared storage), write-through aliasing, and `slice-for`
+//! iteration (a macro over `for`/loop).
 
 mod common;
 use common::build_and_run;

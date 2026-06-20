@@ -105,7 +105,7 @@ fn rejects_bare_place_to_mut_parameter() {
           (let [(mut p) (zeroed Point)] (set-x p)))
     "#;
     let err = coil::check_source(src).unwrap_err();
-    assert!(err.contains("pass it mutably"), "got: {err}");
+    assert!(err.contains("pass a mutable place as (mut"), "got: {err}");
 }
 
 #[test]

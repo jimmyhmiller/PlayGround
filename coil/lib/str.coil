@@ -1,0 +1,115 @@
+(module str)
+; Strings are `(slice u8)` VIEWS (UTF-8 bytes) — see lib/slice.coil. A `"…"`
+; literal is one, borrowing static bytes. These are the content operations over
+; that view: equality, hashing, search, and an allocator-aware concatenation.
+; Owned, growable strings are `StrBuf` (a library over ArrayList<u8>) at the
+; bottom of this file. Nothing here is compiler magic — it is all library over
+; the core `(slice u8)` type, the allocator value, and lib/mem.
+;
+;   (import "lib/str.coil" :use *) (import "lib/slice.coil" :use *)
+
+(import "slice.coil"     :use *)   ; slice-len/data/get, subslice, slice-new
+(import "mem.coil"       :use *)   ; mem-eql, mem-copy
+(import "result.coil"    :use *)   ; Option/Some/None for find / fallible alloc
+(import "alloc.coil"     :use *)   ; Allocator, raw-alloc — for concat / StrBuf
+(import "arraylist.coil" :use *)   ; ArrayList — owned StrBuf is a library over it
+(import "hashmap.coil"   :use *)   ; KeyOps — for str-keyops (string-keyed maps)
+
+; ---- the everyday view operations -----------------------------------------
+(defn str-len [(s (slice u8))] (-> i64) (slice-len s))
+(defn char-at [(s (slice u8)) (i :i64)] (-> :u8) (slice-get s i))
+(defn substr  [(s (slice u8)) (lo :i64) (hi :i64)] (-> (slice u8)) (subslice s lo hi))
+
+; Content equality: same length and same bytes.
+(defn str-eq [(a (slice u8)) (b (slice u8))] (-> bool)
+  (let [la (slice-len a)]
+    (if (icmp-ne la (slice-len b))
+        false
+        (mem-eql [u8] (slice-data a) (slice-data b) la))))
+
+; FNV-1a over the bytes (matches lib/hashmap's bytewise-hash, so a content hash).
+(defn str-hash [(s (slice u8))] (-> :i64)
+  (let [(mut h) -3750763034362895579    ; FNV-1a offset basis
+        (mut i) 0
+        n (slice-len s)]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (store! h (imul (ixor (load h) (cast :i64 (slice-get s (load i))))
+                              1099511628211))
+              (store! i (iadd (load i) 1)))))
+    (load h)))
+
+(defn starts-with [(s (slice u8)) (prefix (slice u8))] (-> bool)
+  (let [lp (slice-len prefix)]
+    (if (icmp-gt lp (slice-len s))
+        false
+        (str-eq (subslice s 0 lp) prefix))))
+
+; First index of `needle` in `hay`, or `(None)` — tail-recursive (TCO'd to a loop).
+(defn str-find-from [(hay (slice u8)) (needle (slice u8)) (i :i64)] (-> (Option :i64))
+  (if (icmp-gt (iadd i (slice-len needle)) (slice-len hay))
+      (None)
+      (if (str-eq (subslice hay i (iadd i (slice-len needle))) needle)
+          (Some i)
+          (str-find-from hay needle (iadd i 1)))))
+(defn str-find [(hay (slice u8)) (needle (slice u8))] (-> (Option :i64))
+  (str-find-from hay needle 0))
+
+; Concatenate into freshly-allocated bytes; `(None)` on OOM. The result owns its
+; buffer (allocated from `a`); free it with the same allocator when done.
+(defn str-concat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (Option (slice u8)))
+  (let [lx (slice-len x) ly (slice-len y)]
+    (match (raw-alloc a (iadd lx ly) 1)
+      (None [] (None))
+      (Some [buf]
+        (let [p (cast (ptr u8) buf)]
+          (mem-copy [u8] p (slice-data x) lx)
+          (mem-copy [u8] (index p lx) (slice-data y) ly)
+          (Some (slice-new p (iadd lx ly))))))))
+
+; ---- string-keyed HashMap: a KeyOps whose hash/eq read the slice's bytes ----
+; The map stores the (slice u8) key value in its slot; these deref that slot to
+; the fat pointer, then hash/compare the pointed-to CONTENT (not the 16 raw bytes
+; of the fat pointer, which would compare addresses).
+(defn str-key-hash [(slot (ptr i8)) (n :i64)] (-> :i64)
+  (str-hash (load (cast (ptr (slice u8)) slot))))
+(defn str-key-eq [(a (ptr i8)) (b (ptr i8)) (n :i64)] (-> bool)
+  (str-eq (load (cast (ptr (slice u8)) a)) (load (cast (ptr (slice u8)) b))))
+(defn str-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of str-key-hash))
+    (store! (field o eq)   (fnptr-of str-key-eq))
+    (store! (field o size) (sizeof (slice u8)))
+    o))
+
+; ---- owned, growable string: a LIBRARY over ArrayList<u8> ------------------
+; `StrBuf` is just an `(ArrayList u8)`; appending pushes bytes, and `sb-str` hands
+; back a `(slice u8)` VIEW over the current contents (no copy, invalidated by a
+; later growth that moves the buffer — same contract as al-slice).
+(defstruct StrBuf [(bytes (ArrayList u8))])
+
+(defn sb-new [(a (ptr Allocator))] (-> StrBuf)
+  (let [(mut sb) (zeroed StrBuf)]
+    (store! (field sb bytes) (al-new [u8] a))
+    (load sb)))
+
+; Append a (slice u8); returns the new length.
+(defn sb-push-str! [(sb (mut StrBuf)) (s (slice u8))] (-> :i64)
+  (let [(mut i) 0 n (slice-len s)]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (al-push! (mut (field sb bytes)) (slice-get s (load i)))
+              (store! i (iadd (load i) 1)))))
+    (al-len (field sb bytes))))
+
+(defn sb-push-byte! [(sb (mut StrBuf)) (b :u8)] (-> :i64)
+  (al-push! (mut (field sb bytes)) b))
+
+; A (slice u8) view over the current contents (shares storage with the StrBuf).
+(defn sb-str [(sb StrBuf)] (-> (slice u8))
+  (al-slice (field sb bytes)))
+
+(defn sb-free! [(sb (mut StrBuf))] (-> :i64)
+  (al-free! (mut (field sb bytes))))

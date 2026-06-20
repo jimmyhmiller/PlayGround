@@ -1547,7 +1547,7 @@ fn coerce_arg(
                 None => {
                     if *want_mut {
                         return Err(format!(
-                            "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place",
+                            "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place as (mut …)",
                             ty_str(wp)
                         ));
                     }
@@ -1573,7 +1573,7 @@ fn coerce_arg(
                 let explicitly_mut = is_mut_borrow || matches!(at, Type::Ptr(_));
                 if !explicitly_mut {
                     return Err(format!(
-                        "in '{fname}': {what} is a (mut {}) parameter; pass it mutably as (mut …)",
+                        "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place as (mut …)",
                         ty_str(wp)
                     ));
                 }

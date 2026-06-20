@@ -4,19 +4,33 @@
 //!
 //! It owns no rendering and no I/O — it consumes snapshots and advances motion.
 
+pub mod terrain;
+
 use crate::achievements::{self, AchievementDef, Metrics};
 use crate::data::{CityInfo, CodebaseInfo, SessionInfo, Tool, WorldSnapshot};
 use crate::render::assets;
 use crate::util::{hash64, Rng};
 use raylib::prelude::Vector2;
 use std::collections::{HashMap, HashSet};
+use terrain::Terrain;
 
 /// How recently (seconds) a session must have been touched to count as "live".
 pub const LIVE_WINDOW: f64 = 600.0;
 
-const GRID_COLS: i32 = 9;
-const CELL: f32 = 380.0;
+/// Fixed seed so the landscape is the same every run.
+const WORLD_SEED: u64 = 0xA6E_2026_C17;
+const GRID_COLS: i32 = 8;
+const CELL: f32 = 1080.0;
 const MAX_VILLAGERS: usize = 8;
+
+/// A road linking two cities: a curved dirt ribbon with bridges over rivers.
+pub struct Road {
+    pub a: usize,
+    pub b: usize,
+    pub points: Vec<Vector2>,
+    /// River crossings: `(point, angle)` so the bridge plank aligns to the road.
+    pub bridges: Vec<(Vector2, f32)>,
+}
 
 // ---- Civilization metadata derived from a city's data ------------------------
 
@@ -163,6 +177,10 @@ pub struct World {
     pub now: f64,
     /// Bounds of the placed cities, for centering the camera initially.
     pub extent: (Vector2, Vector2),
+    /// The procedural landscape (heightfield + rivers).
+    pub terrain: Terrain,
+    /// Roads linking nearby cities.
+    pub roads: Vec<Road>,
 }
 
 pub struct City {
@@ -222,6 +240,8 @@ impl World {
             occupied: HashSet::new(),
             now: 0.0,
             extent: (Vector2::new(0.0, 0.0), Vector2::new(CELL, CELL)),
+            terrain: Terrain::new(WORLD_SEED),
+            roads: Vec::new(),
         }
     }
 
@@ -276,6 +296,7 @@ impl World {
         }
 
         self.recompute_extent();
+        self.build_roads();
     }
 
     /// Advance villager motion and building animations by `dt` seconds.
@@ -321,7 +342,9 @@ impl World {
         best.map(|(i, _)| i)
     }
 
-    /// Claim the first free grid cell for a new city, jittered for an organic look.
+    /// Claim the first free grid cell for a new city, jittered for an organic
+    /// look, then nudged onto the nearest buildable lowland so it never spawns in
+    /// the sea or on a mountain.
     fn assign_cell(&mut self, id: &str) -> Vector2 {
         let mut cell = 0;
         while self.occupied.contains(&cell) {
@@ -331,10 +354,94 @@ impl World {
         let col = cell % GRID_COLS;
         let row = cell / GRID_COLS;
         let mut rng = Rng::seeded(&id);
-        let jx = rng.range(-CELL * 0.22, CELL * 0.22);
-        let jy = rng.range(-CELL * 0.22, CELL * 0.22);
-        Vector2::new(col as f32 * CELL + jx, row as f32 * CELL + jy)
+        let jx = rng.range(-CELL * 0.28, CELL * 0.28);
+        let jy = rng.range(-CELL * 0.28, CELL * 0.28);
+        let base = Vector2::new(col as f32 * CELL + jx, row as f32 * CELL + jy);
+        self.relocate_to_land(base)
     }
+
+    /// Search outward in rings for buildable ground (grass/hill, off rivers).
+    fn relocate_to_land(&self, p: Vector2) -> Vector2 {
+        if self.terrain.is_buildable(p) {
+            return p;
+        }
+        for ring in 1..=14 {
+            let r = ring as f32 * 80.0;
+            let spokes = ring * 6;
+            for k in 0..spokes {
+                let a = k as f32 / spokes as f32 * 6.2831;
+                let q = Vector2::new(p.x + a.cos() * r, p.y + a.sin() * r);
+                if self.terrain.is_buildable(q) {
+                    return q;
+                }
+            }
+        }
+        p
+    }
+
+    /// Connect each city to its two nearest neighbours with curved, bridged roads.
+    fn build_roads(&mut self) {
+        self.roads.clear();
+        let pts: Vec<Vector2> = self.cities.iter().map(|c| c.pos).collect();
+        let n = pts.len();
+        if n < 2 {
+            return;
+        }
+        let mut edges: HashSet<(usize, usize)> = HashSet::new();
+        for i in 0..n {
+            let mut order: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+            order.sort_by(|&x, &y| {
+                pts[i]
+                    .distance_to(pts[x])
+                    .partial_cmp(&pts[i].distance_to(pts[y]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &j in order.iter().take(2) {
+                edges.insert(if i < j { (i, j) } else { (j, i) });
+            }
+        }
+        for (a, b) in edges {
+            self.roads.push(make_road(a, b, pts[a], pts[b], &self.terrain));
+        }
+    }
+}
+
+fn quad_bezier(p0: Vector2, p1: Vector2, p2: Vector2, t: f32) -> Vector2 {
+    let u = 1.0 - t;
+    Vector2::new(
+        u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x,
+        u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y,
+    )
+}
+
+/// Build a gently-curved road polyline between two cities, recording where it
+/// crosses a river (a bridge).
+fn make_road(a: usize, b: usize, pa: Vector2, pb: Vector2, terrain: &Terrain) -> Road {
+    let d = pb - pa;
+    let len = d.length().max(1.0);
+    let perp = Vector2::new(-d.y / len, d.x / len);
+    let mut rng = Rng::seeded(&(a, b, "road"));
+    let bow = rng.range(-0.14, 0.14) * len;
+    let mid = Vector2::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
+    let ctrl = Vector2::new(mid.x + perp.x * bow, mid.y + perp.y * bow);
+
+    let steps = 24;
+    let mut points = Vec::with_capacity(steps + 1);
+    let mut bridges: Vec<(Vector2, f32)> = Vec::new();
+    let mut prev_water = false;
+    for s in 0..=steps {
+        let t = s as f32 / steps as f32;
+        let p = quad_bezier(pa, ctrl, pb, t);
+        let on_river = terrain.river_dist(p) < 42.0;
+        if on_river && !prev_water {
+            let prev = points.last().copied().unwrap_or(pa);
+            let dir = p - prev;
+            bridges.push((p, dir.y.atan2(dir.x)));
+        }
+        prev_water = on_river;
+        points.push(p);
+    }
+    Road { a, b, points, bridges }
 }
 
 /// Rebuild a city's stats, buildings and villager population from fresh info,
@@ -455,8 +562,10 @@ impl Villager {
         if dist < 4.0 {
             self.pick_target(my_city, centers);
         } else {
+            // Trips are long countryside caravans — move much faster while travelling.
+            let speed = if self.on_trip { self.speed * 4.0 } else { self.speed };
             let dir = Vector2::new(to.x / dist, to.y / dist);
-            self.pos = self.pos + dir * (self.speed * dt);
+            self.pos = self.pos + dir * (speed * dt);
         }
     }
 
@@ -467,9 +576,10 @@ impl Villager {
             self.target = self.home;
             return;
         }
-        // Occasionally set off on a trade trip to another project.
+        // Occasionally set off on a trade caravan to another project (rarer now
+        // that cities are far apart).
         let roll = self.rng.next_f32();
-        if roll < 0.06 && centers.len() > 1 {
+        if roll < 0.02 && centers.len() > 1 {
             let mut dest = self.rng.below(centers.len());
             if dest == my_city {
                 dest = (dest + 1) % centers.len();

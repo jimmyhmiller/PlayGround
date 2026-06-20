@@ -518,24 +518,43 @@ impl Heap {
     /// building a new string) go through the heap directly and are **not**
     /// attributed to a site in v1.
     ///
-    /// Call only when the world is quiescent (program end / a safepoint): the
-    /// per-thread counters are read non-atomically.
+    /// Data-race safety: the live per-thread counters are plain (non-atomic)
+    /// integers written by their owning thread on the allocation path. We read
+    /// them under a [`pause_world`](Self::pause_world) stop-the-world pause, so
+    /// every *other* mutator is parked at a safepoint — not mid-`record_alloc`
+    /// and not mid-`Vec` grow — while we read. This is the same discipline the
+    /// collector uses to read parked threads' non-atomic state (`frame_chain`,
+    /// `satb_buffer`); the park establishes the happens-before that makes the
+    /// non-atomic reads sound. The pause is cheap on the common path (no other
+    /// thread to park) and this is a cold (program-end / tooling) call. Keeping
+    /// the read at STW is what lets the hot path stay a plain, uncontended
+    /// increment rather than an atomic.
     pub fn alloc_site_profile(&self) -> Vec<AllocSiteStat> {
-        // Snapshot the live threads, then release the lock before reading their
-        // counters and the retired accumulator (avoids holding two locks).
-        let snapshot: Vec<Arc<ThreadState>> = self.threads.lock().unwrap().clone();
-        let mut totals: Vec<SiteCounter> = self.retired_alloc_counters.lock().unwrap().clone();
-        for ts in &snapshot {
-            // Safety: quiescent world — no concurrent `record_alloc`.
-            let counters = unsafe { ts.alloc_site_counters() };
-            if counters.len() > totals.len() {
-                totals.resize(counters.len(), SiteCounter::default());
+        // Sum the live per-thread counters under a stop-the-world pause, plus the
+        // retired accumulator. The pause guard holds `gc_lock` and parks every
+        // other mutator; we must not allocate on the GC heap or trigger a GC
+        // inside it (we don't — only counter reads + host-heap Vec ops). Drop the
+        // pause before building the report so the resumed world overlaps the
+        // (race-free, owned-data) formatting below.
+        let totals: Vec<SiteCounter> = {
+            let _pause = self.pause_world();
+            let snapshot: Vec<Arc<ThreadState>> = self.threads.lock().unwrap().clone();
+            let mut totals: Vec<SiteCounter> = self.retired_alloc_counters.lock().unwrap().clone();
+            for ts in &snapshot {
+                // Safety: every other mutator is parked at a safepoint (so not
+                // writing its counters), and the requesting thread is here (not
+                // allocating); the park establishes happens-before for the read.
+                let counters = unsafe { ts.alloc_site_counters() };
+                if counters.len() > totals.len() {
+                    totals.resize(counters.len(), SiteCounter::default());
+                }
+                for (i, c) in counters.iter().enumerate() {
+                    totals[i].count += c.count;
+                    totals[i].bytes += c.bytes;
+                }
             }
-            for (i, c) in counters.iter().enumerate() {
-                totals[i].count += c.count;
-                totals[i].bytes += c.bytes;
-            }
-        }
+            totals
+        };
 
         let sites = self.alloc_sites_all();
         let mut out = Vec::new();

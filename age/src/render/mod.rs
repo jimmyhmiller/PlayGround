@@ -6,7 +6,8 @@ pub mod assets;
 
 use crate::achievements::Cat;
 use crate::data::Tool;
-use crate::game::{Biome, Building, City, Season, Villager, World, LIVE_WINDOW};
+use crate::game::terrain::{self, Land, River};
+use crate::game::{Biome, Building, City, Road, Season, Villager, World, LIVE_WINDOW};
 use assets::{src, Assets};
 use raylib::prelude::*;
 
@@ -221,6 +222,125 @@ fn draw_villager<D: RaylibDraw>(d: &mut D, tex: &Texture2D, v: &Villager, season
     draw_tile(d, tex, v.sprite, x, y, VILLAGER_SCALE, mul_color(base, season));
 }
 
+// ---- terrain helpers ---------------------------------------------------------
+
+fn lu(a: i32, b: i32, t: f32) -> i32 {
+    (a as f32 + (b - a) as f32 * t.clamp(0.0, 1.0)) as i32
+}
+fn cu(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+/// Flat ground colour for a land type at height `h`, with a small per-cell jitter.
+fn land_color(land: Land, h: f32, jit: i32) -> Color {
+    let (r, g, b) = match land {
+        Land::Sea => {
+            let t = 1.0 - ((0.31 - h) / 0.31).clamp(0.0, 1.0); // shallower -> lighter
+            (lu(30, 60, t), lu(70, 122, t), lu(116, 170, t))
+        }
+        Land::Sand => (226, 208, 152),
+        Land::Grass => {
+            let t = (h - 0.35) / 0.25;
+            (lu(104, 150, t), lu(158, 168, t), lu(76, 98, t))
+        }
+        Land::Hill => {
+            let t = (h - 0.60) / 0.12;
+            (lu(120, 150, t), lu(150, 132, t), lu(80, 84, t))
+        }
+        Land::Mountain => {
+            let t = (h - 0.72) / 0.14;
+            (lu(142, 120, t), lu(138, 118, t), lu(130, 114, t))
+        }
+        Land::Snow => (236, 240, 248),
+    };
+    Color::new(cu(r + jit), cu(g + jit), cu(b + jit), 255)
+}
+
+fn rect_visible(p: Vector2, tl: Vector2, br: Vector2, pad: f32) -> bool {
+    p.x >= tl.x - pad && p.x <= br.x + pad && p.y >= tl.y - pad && p.y <= br.y + pad
+}
+fn seg_visible(a: Vector2, b: Vector2, tl: Vector2, br: Vector2, pad: f32) -> bool {
+    let minx = a.x.min(b.x) - pad;
+    let maxx = a.x.max(b.x) + pad;
+    let miny = a.y.min(b.y) - pad;
+    let maxy = a.y.max(b.y) + pad;
+    maxx >= tl.x && minx <= br.x && maxy >= tl.y && miny <= br.y
+}
+
+/// A shaded mountain peak with an optional snow cap, base-anchored at `(cx, base)`.
+fn draw_peak<D: RaylibDraw>(d: &mut D, cx: f32, base: f32, size: f32, snow: bool) {
+    let half = size * 0.62;
+    let apex = Vector2::new(cx, base - size);
+    let bl = Vector2::new(cx - half, base);
+    let br = Vector2::new(cx + half, base);
+    let bm = Vector2::new(cx, base);
+    d.draw_ellipse(cx as i32, base as i32, half, half * 0.26, Color::new(0, 0, 0, 50));
+    // Two faces so peaks have a lit and a shaded side.
+    d.draw_triangle(apex, bl, bm, Color::new(152, 148, 142, 255));
+    d.draw_triangle(apex, bm, br, Color::new(108, 104, 100, 255));
+    if snow {
+        let sy = base - size * 0.6;
+        let sh = half * 0.42;
+        d.draw_triangle(apex, Vector2::new(cx - sh, sy), Vector2::new(cx + sh, sy), Color::new(238, 242, 250, 255));
+    }
+}
+
+fn draw_river<D: RaylibDraw>(d: &mut D, r: &River, tl: Vector2, br: Vector2) {
+    let pad = r.width * 2.0;
+    let deep = Color::new(56, 114, 168, 255);
+    let lite = Color::new(98, 160, 208, 255);
+    for (col, scale) in [(deep, 1.0_f32), (lite, 0.52)] {
+        for w in r.points.windows(2) {
+            if seg_visible(w[0], w[1], tl, br, pad) {
+                d.draw_line_ex(w[0], w[1], r.width * scale, col);
+            }
+        }
+        for &p in &r.points {
+            if rect_visible(p, tl, br, pad) {
+                d.draw_circle_v(p, r.width * scale * 0.5, col);
+            }
+        }
+    }
+}
+
+fn draw_road<D: RaylibDraw>(d: &mut D, road: &Road, tl: Vector2, br: Vector2) {
+    let w = 16.0;
+    let edge = Color::new(92, 70, 46, 255);
+    let dirt = Color::new(178, 144, 98, 255);
+    for (col, width) in [(edge, w), (dirt, w * 0.66)] {
+        for seg in road.points.windows(2) {
+            if seg_visible(seg[0], seg[1], tl, br, w * 2.0) {
+                d.draw_line_ex(seg[0], seg[1], width, col);
+            }
+        }
+        for &p in &road.points {
+            if rect_visible(p, tl, br, w * 2.0) {
+                d.draw_circle_v(p, width * 0.5, col);
+            }
+        }
+    }
+    for &(p, ang) in &road.bridges {
+        if !rect_visible(p, tl, br, 80.0) {
+            continue;
+        }
+        let len = 70.0;
+        let thick = w + 12.0;
+        let deg = ang * 57.295_78;
+        d.draw_rectangle_pro(
+            Rectangle::new(p.x, p.y, len + 4.0, thick + 4.0),
+            Vector2::new((len + 4.0) / 2.0, (thick + 4.0) / 2.0),
+            deg,
+            Color::new(78, 54, 32, 255),
+        );
+        d.draw_rectangle_pro(
+            Rectangle::new(p.x, p.y, len, thick),
+            Vector2::new(len / 2.0, thick / 2.0),
+            deg,
+            Color::new(162, 120, 78, 255),
+        );
+    }
+}
+
 /// Paint the whole world inside the active 2D camera.
 pub fn draw_world_space<D: RaylibDraw>(
     d: &mut D,
@@ -241,50 +361,86 @@ pub fn draw_world_space<D: RaylibDraw>(
         tl.y + screen.1 as f32 * inv,
     );
 
-    // Grass.
-    let x0 = (tl.x / GROUND).floor() as i32 - 1;
-    let x1 = (br.x / GROUND).ceil() as i32 + 1;
-    let y0 = (tl.y / GROUND).floor() as i32 - 1;
-    let y1 = (br.y / GROUND).ceil() as i32 + 1;
-    for gy in y0..y1 {
-        for gx in x0..x1 {
-            let h = crate::util::hash64(&(gx, gy));
-            let idx = if h % 22 == 0 {
-                assets::GRASS[1 + (h as usize >> 4) % 2]
-            } else {
-                assets::GRASS[0]
-            };
-            // Olive-mute the field so bright-green trees, buildings and units pop.
-            draw_tile(d, &assets.town, idx, gx as f32 * GROUND, gy as f32 * GROUND, GROUND / assets::TILE, Color::new(176, 190, 150, 255));
+    let terrain = &world.terrain;
+
+    // --- terrain ground: heightfield bands (sea/sand/grass/hill/mountain/snow) -
+    let step = GROUND.max(5.0 / cam.zoom); // keep cells >= ~5px on screen
+    let gx0 = (tl.x / step).floor() as i32 - 1;
+    let gx1 = (br.x / step).ceil() as i32 + 1;
+    let gy0 = (tl.y / step).floor() as i32 - 1;
+    let gy1 = (br.y / step).ceil() as i32 + 1;
+    let cell = step.ceil() as i32 + 1;
+    for gy in gy0..gy1 {
+        for gx in gx0..gx1 {
+            let wx = gx as f32 * step;
+            let wy = gy as f32 * step;
+            let h = terrain.height(wx + step * 0.5, wy + step * 0.5);
+            let land = terrain::classify(h);
+            let jit = (crate::util::hash64(&(gx, gy)) % 13) as i32 - 6;
+            d.draw_rectangle(wx.floor() as i32, wy.floor() as i32, cell, cell, land_color(land, h, jit));
         }
     }
 
-    // Sparse wilderness trees on a coarse grid (kept clear of city centers).
-    let step = 96.0;
-    let tx0 = (tl.x / step).floor() as i32 - 1;
-    let tx1 = (br.x / step).ceil() as i32 + 1;
-    let ty0 = (tl.y / step).floor() as i32 - 1;
-    let ty1 = (br.y / step).ceil() as i32 + 1;
-    for ty in ty0..ty1 {
-        for tx in tx0..tx1 {
+    // --- mountain peaks (coarse grid over high ground) ------------------------
+    let ms = 70.0_f32.max(9.0 / cam.zoom);
+    let px0 = (tl.x / ms).floor() as i32 - 1;
+    let px1 = (br.x / ms).ceil() as i32 + 1;
+    let py0 = (tl.y / ms).floor() as i32 - 1;
+    let py1 = (br.y / ms).ceil() as i32 + 1;
+    for my in py0..py1 {
+        for mx in px0..px1 {
+            let hh = crate::util::hash64(&(mx, my, 31u8));
+            let wx = mx as f32 * ms + (hh % 37) as f32;
+            let wy = my as f32 * ms + ((hh >> 8) % 37) as f32;
+            let h = terrain.height(wx, wy);
+            if h > 0.72 {
+                let size = 22.0 + (h - 0.72) * 230.0 + (hh % 11) as f32;
+                draw_peak(d, wx, wy, size, h > 0.86);
+            }
+        }
+    }
+
+    // --- rivers, then roads + bridges -----------------------------------------
+    for r in terrain.rivers() {
+        draw_river(d, r, tl, br);
+    }
+    for road in &world.roads {
+        draw_road(d, road, tl, br);
+    }
+
+    // --- countryside: trees on grass/hills, rocks on the mountain feet ---------
+    let sstep = 88.0_f32.max(11.0 / cam.zoom);
+    let sx0 = (tl.x / sstep).floor() as i32 - 1;
+    let sx1 = (br.x / sstep).ceil() as i32 + 1;
+    let sy0 = (tl.y / sstep).floor() as i32 - 1;
+    let sy1 = (br.y / sstep).ceil() as i32 + 1;
+    for ty in sy0..sy1 {
+        for tx in sx0..sx1 {
             let h = crate::util::hash64(&(tx, ty, 7u8));
-            if h % 5 != 0 {
-                continue;
-            }
-            let px = tx as f32 * step + (h % 53) as f32;
-            let py = ty as f32 * step + ((h >> 8) % 53) as f32;
+            let px = tx as f32 * sstep + (h % 61) as f32;
+            let py = ty as f32 * sstep + ((h >> 8) % 61) as f32;
             let p = Vector2::new(px, py);
-            if world.cities.iter().any(|c| c.pos.distance_to(p) < 150.0) {
+            let land = terrain.land_at(px, py);
+            let chance = match land {
+                Land::Hill => 2,   // denser woods on the hills
+                Land::Grass => 5,
+                Land::Mountain => 7,
+                _ => 0,
+            };
+            if chance == 0 || h % chance != 0 {
                 continue;
             }
-            // Mostly trees, with the odd mushroom patch or rock for variety.
-            let (deco, sc) = match (h >> 5) % 9 {
-                0 => (assets::MUSHROOMS, 2.0),
-                1 => (assets::STONES, 2.2),
-                _ => (assets::TREES[(h as usize >> 3) % assets::TREES.len()], 2.5),
+            if world.cities.iter().any(|c| c.pos.distance_to(p) < 150.0) || terrain.river_dist(p) < 40.0 {
+                continue;
+            }
+            let (deco, sc) = if land == Land::Mountain {
+                (assets::STONES, 2.0)
+            } else if (h >> 5) % 8 == 0 {
+                (assets::MUSHROOMS, 1.9)
+            } else {
+                (assets::TREES[(h as usize >> 3) % assets::TREES.len()], 2.4)
             };
             let tw = assets::TILE * sc;
-            // Shadow grounds the sprite so it reads against same-green grass.
             d.draw_ellipse((px + tw / 2.0) as i32, py as i32, tw * 0.34, tw * 0.12, Color::new(0, 0, 0, 55));
             draw_tile(d, &assets.town, deco, px, py - tw, sc, Color::WHITE);
         }
