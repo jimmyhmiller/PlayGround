@@ -1,0 +1,17 @@
+; `defer`/`scope` — deterministic cleanup, a pure macro over block/break (nothing
+; in the compiler knows about it). Cleanups run LIFO on normal exit AND on
+; `(return-from :s …)` early exit.
+;   coil run examples/defer.coil; echo $?   => 42
+(module app)
+(import "lib/control.coil")
+
+; A `scope :s` whose two defers run in reverse (LIFO) when the scope exits — even
+; though we leave early via (return-from :s …). Here the "resource" is a counter.
+(defn main [] (-> :i64)
+  (let [(mut n) 20]
+    (scope :s
+      (defer (store! n (iadd (load n) 2)))    ; registered 1st → runs LAST  (40 → 42)
+      (defer (store! n (imul (load n) 2)))     ; registered 2nd → runs FIRST (20 → 40)
+      (store! n 20)
+      (return-from :s 0))                       ; early exit; both defers still fire
+    (load n)))                                  ; => 42

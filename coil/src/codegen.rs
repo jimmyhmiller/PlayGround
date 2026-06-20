@@ -2022,6 +2022,12 @@ impl<'ctx> Cg<'ctx> {
             Some(e) => self.emit_expr(e, scope)?,
             None => (self.ctx.i64_type().const_zero().into(), Type::Int(64, true)),
         };
+        // If the value expression itself diverged (e.g. it contained an inner
+        // `break`), control already left this block — our branch would be a
+        // second terminator. Nothing to contribute.
+        if self.block_terminated() {
+            return Ok((self.ctx.i64_type().const_zero().into(), Type::Int(64, true)));
+        }
         let pred = self.builder.get_insert_block().ok_or("codegen: no current block")?;
         let after = {
             let mut loops = self.loops.borrow_mut();

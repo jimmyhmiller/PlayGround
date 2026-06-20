@@ -15,6 +15,23 @@
     (if (>= lo hi) (list)
         (cons lo (range-list (+ lo 1) hi)))))
 
+(def reverse
+  (lambda [xs]
+    (if (empty? xs) (list)
+        (concat (reverse (rest xs)) (list (first xs))))))
+
+(def filter
+  (lambda [p xs]
+    (if (empty? xs) (list)
+        (if (p (first xs))
+            (cons (first xs) (filter p (rest xs)))
+            (filter p (rest xs))))))
+
+(def member?
+  (lambda [x xs]
+    (if (empty? xs) false
+        (if (= x (first xs)) true (member? x (rest xs))))))
+
 ; ---- conditionals ---------------------------------------------------------
 ; `(when c body...)` — evaluate body (yielding its last form) iff c is true,
 ; else 0. `(unless c body...)` is the negation.
@@ -104,6 +121,94 @@
 
 (defmacro return-from [label v]
   `(break ~label ~v))
+
+; ---- defer / scope guards (macros over block + break) ----------------------
+; `(scope :s body...)` runs body, then runs every `(defer cleanup)` form found
+; as a DIRECT child of the scope, in REVERSE (LIFO) order — on BOTH normal exit
+; and `(return-from :s v)` early exit (both route through the scope's `block :s`).
+; Cleanups are emitted inline (they see the scope's lexical bindings).
+;
+; NO-SILENT-SKIP guarantee: a `break`/`continue` in the body that would escape the
+; scope PAST its cleanups is a COMPILE ERROR, never a skipped cleanup. Allowed
+; control: break/continue targeting a loop nested *within* the body, and
+; `(return-from :s v)` / `(break :s v)` to exit the scope itself. Disallowed
+; (hard error): an unlabeled break/continue at scope level, or a labeled one
+; targeting an enclosing loop outside the scope.
+;
+; LIMITATIONS (documented, not hidden): defers are LEXICAL/static (Zig-style, not
+; Go's runtime list) and must be DIRECT forms of the scope body (a `(defer …)`
+; nested inside an `if`/loop hard-errors). `(continue :s)` is rejected.
+
+(def control-label   ; the target :label of a (break …)/(continue …)/(return-from …), or false
+  (lambda [form]
+    (let [r (rest form)]
+      (if (empty? r) false
+          (if (keyword? (first r)) (first r) false)))))
+
+(def loop-introducer?
+  (lambda [h]
+    (or (= h (quote loop)) (= h (quote while)) (= h (quote for))
+        (= h (quote block)) (= h (quote scope)))))
+
+; Walk one form; return an error string if it contains a scope-escaping control
+; transfer, else false. `depth` = enclosing in-body loops; `labels` = their
+; labels; `slabel` = the scope's own label.
+(def scope-escape
+  (lambda [form depth labels slabel]
+    (if (not (list? form))
+        false
+        (if (empty? form)
+            false
+            (let [h (first form)]
+              (if (or (= h (quote break)) (= h (quote continue)) (= h (quote return-from)))
+                  (let [lab (control-label form)]
+                    (if lab
+                        (if (member? lab labels)
+                            false
+                            (if (= lab slabel)
+                                (if (= h (quote continue))
+                                    "scope: (continue) cannot target the scope label; use return-from to exit"
+                                    false)
+                                "scope: a labeled break/continue escapes the (scope ...) past its defers"))
+                        (if (> depth 0)
+                            false
+                            "scope: an unlabeled break/continue cannot exit a (scope ...); use (return-from :label v)")))
+                  (if (loop-introducer? h)
+                      (scope-escape-list (rest form) (+ depth 1)
+                                         (let [r (rest form)]
+                                           (if (empty? r) labels
+                                               (if (keyword? (first r)) (cons (first r) labels) labels)))
+                                         slabel)
+                      (scope-escape-list (rest form) depth labels slabel))))))))
+
+(def scope-escape-list
+  (lambda [forms depth labels slabel]
+    (if (empty? forms) false
+        (let [e (scope-escape (first forms) depth labels slabel)]
+          (if e e (scope-escape-list (rest forms) depth labels slabel))))))
+
+(def is-defer?
+  (lambda [f] (and (list? f) (not (empty? f)) (= (first f) (quote defer)))))
+
+(defmacro scope [label & body]
+  (if (not (keyword? label))
+      (error "scope: first argument must be a :label, e.g. (scope :s body...)")
+      (let [bad (scope-escape-list body 0 (list) label)]
+        (if bad
+            (error bad)
+            (let [defers   (filter is-defer? body)
+                  mains    (filter (lambda [f] (not (is-defer? f))) body)
+                  cleanups (reverse (map (lambda [d] (first (rest d))) defers))
+                  r        (gensym "scope-r")]
+              `(let [~r (block ~label ~@mains)]
+                 ~@cleanups
+                 ~r))))))
+
+; A bare `(defer …)` is only meaningful as a direct child of `(scope …)`, where
+; `scope` extracts it before this macro runs. Reaching this expansion means it
+; was used outside a scope (or nested too deep) — hard-error, never a no-op.
+(defmacro defer [& _]
+  (error "defer: (defer expr) is only valid as a DIRECT form inside (scope :s ...)"))
 
 ; ---- comptime-unrolled loop ----------------------------------------------
 ; `(inline-for [i LO HI] body...)` — fully unrolls `body` for i = LO..HI-1,
