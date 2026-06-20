@@ -235,21 +235,21 @@ fn cu(v: i32) -> u8 {
 fn land_color(land: Land, h: f32, jit: i32) -> Color {
     let (r, g, b) = match land {
         Land::Sea => {
-            let t = 1.0 - ((0.31 - h) / 0.31).clamp(0.0, 1.0); // shallower -> lighter
-            (lu(30, 60, t), lu(70, 122, t), lu(116, 170, t))
+            let t = 1.0 - ((0.33 - h) / 0.33).clamp(0.0, 1.0); // shallower -> lighter
+            (lu(28, 62, t), lu(68, 124, t), lu(114, 172, t))
         }
         Land::Sand => (226, 208, 152),
         Land::Grass => {
-            let t = (h - 0.35) / 0.25;
+            let t = (h - 0.37) / 0.21;
             (lu(104, 150, t), lu(158, 168, t), lu(76, 98, t))
         }
         Land::Hill => {
-            let t = (h - 0.60) / 0.12;
+            let t = (h - 0.58) / 0.12;
             (lu(120, 150, t), lu(150, 132, t), lu(80, 84, t))
         }
         Land::Mountain => {
-            let t = (h - 0.72) / 0.14;
-            (lu(142, 120, t), lu(138, 118, t), lu(130, 114, t))
+            let t = (h - 0.70) / 0.14;
+            (lu(144, 118, t), lu(140, 116, t), lu(132, 112, t))
         }
         Land::Snow => (236, 240, 248),
     };
@@ -303,41 +303,45 @@ fn draw_river<D: RaylibDraw>(d: &mut D, r: &River, tl: Vector2, br: Vector2) {
     }
 }
 
-fn draw_road<D: RaylibDraw>(d: &mut D, road: &Road, tl: Vector2, br: Vector2) {
-    let w = 16.0;
-    let edge = Color::new(92, 70, 46, 255);
-    let dirt = Color::new(178, 144, 98, 255);
-    for (col, width) in [(edge, w), (dirt, w * 0.66)] {
-        for seg in road.points.windows(2) {
-            if seg_visible(seg[0], seg[1], tl, br, w * 2.0) {
-                d.draw_line_ex(seg[0], seg[1], width, col);
-            }
-        }
-        for &p in &road.points {
-            if rect_visible(p, tl, br, w * 2.0) {
-                d.draw_circle_v(p, width * 0.5, col);
-            }
+fn ribbon<D: RaylibDraw>(d: &mut D, pts: &[Vector2], width: f32, col: Color, tl: Vector2, br: Vector2) {
+    for seg in pts.windows(2) {
+        if seg_visible(seg[0], seg[1], tl, br, width * 2.0) {
+            d.draw_line_ex(seg[0], seg[1], width, col);
         }
     }
-    for &(p, ang) in &road.bridges {
-        if !rect_visible(p, tl, br, 80.0) {
-            continue;
+    for &p in pts {
+        if rect_visible(p, tl, br, width * 2.0) {
+            d.draw_circle_v(p, width * 0.5, col);
         }
-        let len = 70.0;
-        let thick = w + 12.0;
-        let deg = ang * 57.295_78;
-        d.draw_rectangle_pro(
-            Rectangle::new(p.x, p.y, len + 4.0, thick + 4.0),
-            Vector2::new((len + 4.0) / 2.0, (thick + 4.0) / 2.0),
-            deg,
-            Color::new(78, 54, 32, 255),
-        );
-        d.draw_rectangle_pro(
-            Rectangle::new(p.x, p.y, len, thick),
-            Vector2::new(len / 2.0, thick / 2.0),
-            deg,
-            Color::new(162, 120, 78, 255),
-        );
+    }
+}
+
+fn draw_road<D: RaylibDraw>(d: &mut D, road: &Road, tl: Vector2, br: Vector2) {
+    let w = 16.0;
+    // Continuous dirt road (dark edge then lighter fill).
+    ribbon(d, &road.points, w, Color::new(92, 70, 46, 255), tl, br);
+    ribbon(d, &road.points, w * 0.66, Color::new(178, 144, 98, 255), tl, br);
+
+    // Lay a plank bridge deck over each run of water crossings.
+    let n = road.points.len();
+    let mut s = 0;
+    while s < n {
+        if road.water[s] {
+            let mut e = s;
+            while e + 1 < n && road.water[e + 1] {
+                e += 1;
+            }
+            // Extend one point onto the banks so the deck reaches solid ground.
+            let lo = s.saturating_sub(1);
+            let hi = (e + 1).min(n - 1);
+            let span = &road.points[lo..=hi];
+            ribbon(d, span, w + 12.0, Color::new(74, 52, 32, 255), tl, br); // rails / underside
+            ribbon(d, span, w + 4.0, Color::new(168, 128, 82, 255), tl, br); // planks
+            ribbon(d, span, w * 0.4, Color::new(120, 90, 56, 255), tl, br); // seam
+            s = e + 1;
+        } else {
+            s += 1;
+        }
     }
 }
 
@@ -393,9 +397,9 @@ pub fn draw_world_space<D: RaylibDraw>(
             let wx = mx as f32 * ms + (hh % 37) as f32;
             let wy = my as f32 * ms + ((hh >> 8) % 37) as f32;
             let h = terrain.height(wx, wy);
-            if h > 0.72 {
-                let size = 22.0 + (h - 0.72) * 230.0 + (hh % 11) as f32;
-                draw_peak(d, wx, wy, size, h > 0.86);
+            if h > 0.70 {
+                let size = 22.0 + (h - 0.70) * 230.0 + (hh % 11) as f32;
+                draw_peak(d, wx, wy, size, h > 0.84);
             }
         }
     }

@@ -11,6 +11,8 @@ struct AppState: Codable {
     var startDate: Date? = nil
     var healthKitEnabled = false
     var hasOnboarded = false
+    /// Optional in-app override for the DeepSeek key; falls back to the build-injected one.
+    var aiKey: String = ""
 }
 
 @MainActor
@@ -75,6 +77,31 @@ final class AppStore: ObservableObject {
 
     var allWeighIns: [WeighIn] {
         (state.weighIns + healthWeighIns).sorted { $0.date > $1.date }
+    }
+
+    // MARK: - AI assistant
+
+    /// Resolved DeepSeek key: in-app override first, then the build-injected Info.plist value.
+    var aiKey: String? {
+        let override = state.aiKey.trimmingCharacters(in: .whitespaces)
+        if !override.isEmpty { return override }
+        if let k = Bundle.main.object(forInfoDictionaryKey: "DEEPSEEK_API_KEY") as? String {
+            let trimmed = k.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty, !trimmed.hasPrefix("$(") { return trimmed }
+        }
+        return nil
+    }
+
+    var hasAIKey: Bool { aiKey != nil }
+
+    /// True when the key came from the build (not a user override) — for display only.
+    var aiKeyIsFromBuild: Bool {
+        state.aiKey.trimmingCharacters(in: .whitespaces).isEmpty && hasAIKey
+    }
+
+    func setAIKey(_ key: String) {
+        state.aiKey = key.trimmingCharacters(in: .whitespaces)
+        persist()
     }
 
     // MARK: - Burn (energy expenditure)

@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var hasProfile = false
     @State private var newShortcutName = ""
     @State private var newShortcutKcal = ""
+    @State private var aiKeyDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -16,6 +17,7 @@ struct SettingsView: View {
                 goalSection
                 profileSection
                 healthSection
+                assistantSection
                 shortcutsSection
                 dataSection
             }

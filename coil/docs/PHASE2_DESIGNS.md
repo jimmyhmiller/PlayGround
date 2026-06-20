@@ -77,6 +77,16 @@ needed; borrow a place to get a pointer."**
 
 ## #5 — String type (the biggest capability gap)
 
+> **SHIPPED (option (a), Jimmy/Leader ruling).** `"…"` → `(slice u8)` VIEW;
+> `c"…"` → distinct NUL-terminated `(ptr i8)` FFI cstring. The ONLY core piece is
+> `Type::Slice(T)` (a fat pointer, mirroring `Type::Vec`) + the two literal
+> lowerings — `"…"` is a static `[N x i8]` global + a `{ptr, len}` constant (no
+> allocator, IR-verified `[5 x i8]` vs cstr `[6 x i8] …\00`). Everything else is
+> library: `lib/slice.coil` (ops via `llvm-ir` insert/extractvalue), `lib/str.coil`
+> (`str-eq`/`str-hash`/`str-find`/`str-concat`, `str-keyops` content-keyed map,
+> owned `StrBuf` over `ArrayList<u8>`). fmt/io migrated (`print-str` takes a slice,
+> `print-cstr` for FFI); calc lexes a `(slice u8)`. Decisions resolved below.
+
 ### The friction
 Strings are C-`(ptr i8)` (NUL-terminated): no length, no content ops without
 `strlen`/`strcmp` externs, and string map keys need a hand-written content-hash
@@ -96,20 +106,23 @@ Strings are C-`(ptr i8)` (NUL-terminated): no length, no content ops without
 This keeps the core minimal (one literal-lowering rule) with the whole string API as
 library — consistent with the macros/library-first thesis.
 
-### The hard decisions (why jimmyhmiller should weigh in — this defines Coil's character)
-- **C interop / NUL-termination.** `(slice u8)` strings are NOT NUL-terminated, but C
-  APIs need NUL. Options: keep a separate `c"…"` literal (→ `(ptr i8)`, NUL-terminated)
-  for FFI; or a `to-cstr` that allocates a NUL copy; or store strings NUL-terminated
-  *and* length-carrying. Pick the FFI story.
-- **Migration of existing `"…"` literals.** Today `"…"` is `(ptr i8)` and is used by
-  fmt/externs. Switching `"…"` to `(slice u8)` is a BREAKING change. Options:
-  (a) migrate `"…"`→`(slice u8)` and add `c"…"` for cstrings (clean end state, touches
-      existing code incl. fmt/io); (b) add a NEW slice-string literal syntax and leave
-      `"…"` as the cstr (non-breaking, two string spellings); (c) interim: a library
-      `Str` built from a cstr literal + `strlen` (no core change), native `(slice u8)`
-      literals later.
-- **Representation:** `(slice u8)` (reuse Slice) vs a dedicated `Str` struct (same shape,
-  named). Recommend reusing `(slice u8)` so all slice ops apply; a `Str` alias is cosmetic.
+### The hard decisions → RESOLVED
+- **C interop / NUL-termination.** A separate `c"…"` literal → `(ptr i8)`,
+  NUL-terminated (`[N+1 x i8]`), is the FFI story. `(slice u8)` strings are NOT
+  NUL-terminated (`[N x i8]`, length-carried). No `to-cstr` copy needed for the
+  common case (string literals you control are spelled `c"…"` directly at the FFI
+  site).
+- **Migration of `"…"`.** Chose **(a)**: `"…"`→`(slice u8)`, `c"…"` for cstrings.
+  The breaking surface was small and mechanical — printf/snprintf format strings
+  and `%s` args → `c"…"`; everything.coil's `(ptr i8)` demo → `c"coil"`; fmt/io's
+  `print-str` now takes a slice (`print-cstr` for the FFI path). The hashmap
+  `(ptr i8)`-content-keys test keeps its intent via `c"…"`; a new `(slice u8)`
+  str-keyops path is added.
+- **Representation.** Reused a single slice concept — but as the CORE `(slice T)`
+  fat-pointer type (mirroring `(vec T N)`), not a library struct: a string literal
+  needs a type with no import-coupling and no ambient allocator, so the type is the
+  justified core piece; all ops stay library. (The old `Slice` library struct is
+  gone; `lib/slice.coil` is now ops over the core type.)
 
 ### Recommendation
 Target `(slice u8)` strings with core literal-lowering + a `lib/str.coil` + `str-keyops`.

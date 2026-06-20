@@ -1408,6 +1408,47 @@ fn alloc_site_profile_merges_threads_and_salvages_retired() {
 }
 
 #[test]
+fn alloc_site_profile_real_threads_join_then_profile() {
+    use crate::gc::reflect::AllocSite;
+    use std::sync::Arc;
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0 }]);
+
+    let n_threads = 4u64;
+    let per_thread = 1000u64;
+    let bytes_each = 16u64;
+
+    // Real OS threads (distinct thread ids), each records into its OWN non-atomic
+    // counter, then drops its MutatorThread → deregisters → folds into the retired
+    // accumulator. After join, the profile must sum them with no loss and no
+    // double-count.
+    let handles: Vec<_> = (0..n_threads)
+        .map(|_| {
+            let h = heap.clone();
+            std::thread::spawn(move || {
+                let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+                for _ in 0..per_thread {
+                    // Safety: each thread writes only its own counter.
+                    unsafe { mt.state().record_alloc(0, bytes_each) };
+                }
+                // mt drops here → deregister → fold into retired.
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].function, "worker");
+    assert_eq!(prof[0].count, n_threads * per_thread);
+    assert_eq!(prof[0].bytes, n_threads * per_thread * bytes_each);
+}
+
+#[test]
 fn alloc_site_profile_unlabelled_sites_not_dropped() {
     // Counters with no matching site-table entry (e.g. table not installed) are
     // surfaced under a synthetic label, never silently dropped.

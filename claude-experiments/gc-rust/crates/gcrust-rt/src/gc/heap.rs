@@ -514,9 +514,10 @@ impl Heap {
     /// `<site N>` / `<unknown>` label rather than dropped — no silent loss.
     ///
     /// NOTE: this covers allocations made through the compiled-code allocation
-    /// path (`ai_gc_alloc_*`). Runtime-internal allocations (e.g. `ai_str_concat`
-    /// building a new string) go through the heap directly and are **not**
-    /// attributed to a site in v1.
+    /// path (`ai_gc_alloc_*`). Runtime-internal allocations — `ai_str_concat`,
+    /// `ai_str_substring`, the `ai_str_from_*` conversions, file/IO buffers, and
+    /// any other runtime fn that allocates via the heap directly rather than
+    /// through `ai_gc_alloc_*` — are **not** attributed to a site in v1.
     ///
     /// Data-race safety: the live per-thread counters are plain (non-atomic)
     /// integers written by their owning thread on the allocation path. We read
@@ -528,7 +529,9 @@ impl Heap {
     /// non-atomic reads sound. The pause is cheap on the common path (no other
     /// thread to park) and this is a cold (program-end / tooling) call. Keeping
     /// the read at STW is what lets the hot path stay a plain, uncontended
-    /// increment rather than an atomic.
+    /// increment rather than an atomic. Because the live-thread snapshot and the
+    /// retired accumulator are cloned together under the threads lock (inside the
+    /// pause), a thread can never be observed in both — no double counting.
     pub fn alloc_site_profile(&self) -> Vec<AllocSiteStat> {
         // Sum the live per-thread counters under a stop-the-world pause, plus the
         // retired accumulator. The pause guard holds `gc_lock` and parks every
@@ -538,8 +541,18 @@ impl Heap {
         // (race-free, owned-data) formatting below.
         let totals: Vec<SiteCounter> = {
             let _pause = self.pause_world();
-            let snapshot: Vec<Arc<ThreadState>> = self.threads.lock().unwrap().clone();
-            let mut totals: Vec<SiteCounter> = self.retired_alloc_counters.lock().unwrap().clone();
+            // Observe the {live, retired} partition ATOMICALLY: clone the live
+            // thread set and the retired accumulator under the same threads-lock
+            // critical section. A thread folds into `retired` only while holding
+            // the threads lock (deregister), so it cannot appear in both the
+            // snapshot and the retired clone — closing the double-count window.
+            // Lock order gc_lock(pause) → threads → retired matches every other
+            // path (pause_world: gc→threads; deregister: threads→retired).
+            let (snapshot, mut totals): (Vec<Arc<ThreadState>>, Vec<SiteCounter>) = {
+                let threads = self.threads.lock().unwrap();
+                let retired = self.retired_alloc_counters.lock().unwrap().clone();
+                (threads.clone(), retired)
+            };
             for ts in &snapshot {
                 // Safety: every other mutator is parked at a safepoint (so not
                 // writing its counters), and the requesting thread is here (not
@@ -606,7 +619,8 @@ impl Heap {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "gc-rust allocation-site profile (compiled-code sites; runtime-internal allocations excluded)"
+            "gc-rust allocation-site profile (compiled-code sites only; runtime-internal allocations \
+             — string/substring/concat, str-from-*, file/IO buffers — are NOT attributed to a site)"
         );
         let _ = writeln!(
             out,

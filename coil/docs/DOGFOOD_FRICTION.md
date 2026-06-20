@@ -69,6 +69,12 @@ a place to `(ptr T)` where unambiguous). — **Delivered by Phase-2 #4** (A5 asi
    map keys need a manual content-hash `KeyOps` + `strlen`/`strcmp` externs. The calc
    uses single-char vars (`i64` keys) to dodge this. A `(slice u8)`/string type +
    string-keyed HashMap convenience is the **biggest** stdlib gap.
+   — **Fixed (Phase-2 #5):** `"…"` is now a `(slice u8)` view (length-carrying,
+   no allocator), `c"…"` the distinct NUL-terminated `(ptr i8)` FFI cstring. The one
+   core piece is `Type::Slice` + the literal lowering; `lib/slice.coil` (ops via
+   `llvm-ir`) and `lib/str.coil` (`str-eq`/`str-hash`/`str-find`/`str-concat`,
+   `str-keyops` for string-keyed maps, owned `StrBuf` over `ArrayList<u8>`) are
+   library. calc now lexes a `(slice u8)`.
 10. **No generic `==` / hashing / ordering** as language facilities — every generic
     container needs explicit ops (the `KeyOps` pattern). Philosophically fine, but a
     derive/interface story (or comptime reflection) would cut real boilerplate.

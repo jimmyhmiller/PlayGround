@@ -109,7 +109,7 @@ fn aot_alloc_profile_reports_sites() {
     );
     // And the honesty caveat is stated, not hidden.
     assert!(
-        stderr.contains("runtime-internal allocations excluded"),
+        stderr.contains("runtime-internal allocations"),
         "profile must state its coverage caveat; stderr:\n{stderr}"
     );
 

@@ -41,9 +41,12 @@ impl Terrain {
         Terrain { seed, rivers: gen_rivers(seed) }
     }
 
-    /// Height in [0, 1] at a world point (fractal value noise).
+    /// Height in [0, 1] at a world point (fractal value noise, contrast-stretched
+    /// so the map has bolder seas, hills and mountain ranges rather than a uniform
+    /// plain).
     pub fn height(&self, x: f32, y: f32) -> f32 {
-        fbm(x / BASE, y / BASE, self.seed)
+        let h = fbm(x / BASE, y / BASE, self.seed);
+        ((h - 0.5) * 1.7 + 0.5).clamp(0.0, 1.0)
     }
 
     pub fn land_at(&self, x: f32, y: f32) -> Land {
@@ -74,11 +77,11 @@ impl Terrain {
 
 pub fn classify(h: f32) -> Land {
     match h {
-        x if x < 0.31 => Land::Sea,
-        x if x < 0.35 => Land::Sand,
-        x if x < 0.60 => Land::Grass,
-        x if x < 0.72 => Land::Hill,
-        x if x < 0.86 => Land::Mountain,
+        x if x < 0.33 => Land::Sea,
+        x if x < 0.37 => Land::Sand,
+        x if x < 0.58 => Land::Grass,
+        x if x < 0.70 => Land::Hill,
+        x if x < 0.84 => Land::Mountain,
         _ => Land::Snow,
     }
 }

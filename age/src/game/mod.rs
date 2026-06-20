@@ -23,13 +23,13 @@ const GRID_COLS: i32 = 8;
 const CELL: f32 = 1080.0;
 const MAX_VILLAGERS: usize = 8;
 
-/// A road linking two cities: a curved dirt ribbon with bridges over rivers.
+/// A road linking two cities: a curved dirt ribbon. `water[i]` marks points that
+/// cross a river or lake, so the renderer can lay a bridge deck over those spans.
 pub struct Road {
     pub a: usize,
     pub b: usize,
     pub points: Vec<Vector2>,
-    /// River crossings: `(point, angle)` so the bridge plank aligns to the road.
-    pub bridges: Vec<(Vector2, f32)>,
+    pub water: Vec<bool>,
 }
 
 // ---- Civilization metadata derived from a city's data ------------------------
@@ -425,23 +425,18 @@ fn make_road(a: usize, b: usize, pa: Vector2, pb: Vector2, terrain: &Terrain) ->
     let mid = Vector2::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
     let ctrl = Vector2::new(mid.x + perp.x * bow, mid.y + perp.y * bow);
 
-    let steps = 24;
+    let steps = 28;
     let mut points = Vec::with_capacity(steps + 1);
-    let mut bridges: Vec<(Vector2, f32)> = Vec::new();
-    let mut prev_water = false;
+    let mut water = Vec::with_capacity(steps + 1);
     for s in 0..=steps {
         let t = s as f32 / steps as f32;
         let p = quad_bezier(pa, ctrl, pb, t);
-        let on_river = terrain.river_dist(p) < 42.0;
-        if on_river && !prev_water {
-            let prev = points.last().copied().unwrap_or(pa);
-            let dir = p - prev;
-            bridges.push((p, dir.y.atan2(dir.x)));
-        }
-        prev_water = on_river;
+        let over_water =
+            terrain.river_dist(p) < 30.0 || terrain.land_at(p.x, p.y) == terrain::Land::Sea;
         points.push(p);
+        water.push(over_water);
     }
-    Road { a, b, points, bridges }
+    Road { a, b, points, water }
 }
 
 /// Rebuild a city's stats, buildings and villager population from fresh info,

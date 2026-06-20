@@ -14,6 +14,9 @@ targets:
   CumulativeTracker:
     type: application
     platform: iOS
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
     sources:
       - path: Sources
     dependencies:
@@ -33,6 +36,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSHealthShareUsageDescription: "Reads your active energy, resting energy, and weight so the app can learn your true calorie burn and reconcile your cumulative deficit against the scale."
         NSHealthUpdateUsageDescription: "Lets you save weigh-ins and logged calories back to Apple Health."
+        DEEPSEEK_API_KEY: "$(DEEPSEEK_API_KEY)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jimmyhmiller.CumulativeTracker
