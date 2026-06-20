@@ -216,6 +216,62 @@ fn strict_positivity_rejects_negative_and_double_negative_occurrences() {
 }
 
 #[test]
+fn indexed_higher_order_ih_uses_the_recursive_occurrences_own_index() {
+    // The discriminating test for `ih_type`'s INDEX handling. `G : Nat → Type`:
+    //   g0 : G Zero
+    //   gh : (Bool → G Zero) → G (Succ Zero)
+    // The recursive field's occurrence is at index ZERO (G Zero), while gh's
+    // RESULT is at Succ Zero. So the IH must be `(b:Bool) → motive Zero (f b)`,
+    // NOT `… motive (Succ Zero) …`. A DEPENDENT motive (`Nat` at Zero, `Bool` at
+    // Succ) makes the two distinguishable: the method consumes `ih btrue` AS A
+    // Nat (forcing the IH's index to be Zero) and returns a Bool. If `ih_type`
+    // used the wrong (result) index, `ih btrue : Bool` and the `NatCase` on it
+    // would FAIL the kernel re-check.
+    let bool_d = datadecl("Bool", vec![], vec![], vec![ctor("btrue", vec![], vec![]), ctor("bfalse", vec![], vec![])]);
+    let g_d = datadecl(
+        "G",
+        vec![],
+        vec![(Zero, Nat)],
+        vec![
+            ctor("g0", vec![], vec![NatLit(0)]),
+            ctor(
+                "gh",
+                vec![(Omega, Pi(Omega, b(Data("Bool".into(), vec![])), b(Data("G".into(), vec![NatLit(0)]))))],
+                vec![NatLit(1)],
+            ),
+        ],
+    );
+    let sig = Signature { postulates: vec![], datas: vec![bool_d, g_d] };
+    assert!(check_signature(&sig).is_ok(), "{:?}", check_signature(&sig));
+
+    let btrue = Constr("btrue".into(), vec![]);
+    let bfalse = Constr("bfalse".into(), vec![]);
+    let bool_ty = Data("Bool".into(), vec![]);
+    // motive = λ i. λ _. NatCase i Nat (λ_. Bool)
+    let motive = Lam(b(Lam(b(NatCase(
+        b(Lam(b(Type(0)))),
+        b(Nat),
+        b(Lam(b(bool_ty.clone()))),
+        b(Var(1)),
+    )))));
+    let g0_m = NatLit(0); // : motive Zero g0 = Nat
+    // gh method : (f:Bool→G Zero) → (ih:(b:Bool)→Nat) → Bool
+    //           = λf. λih. NatCase[λ_.Bool] (ih btrue) btrue (λ_. bfalse)
+    let gh_m = Lam(b(Lam(b(NatCase(
+        b(Lam(b(bool_ty.clone()))),
+        b(btrue.clone()),
+        b(Lam(b(bfalse))),
+        b(App(b(Var(0)), b(btrue))), // ih btrue : Nat  (the IH at index Zero)
+    )))));
+    let scrut = Constr("gh".into(), vec![Lam(b(Constr("g0".into(), vec![])))]);
+    let elim = Elim("G".into(), b(motive), vec![g0_m, gh_m], b(scrut));
+    // type-checks ONLY because the IH is correctly typed at index Zero (→ Nat);
+    // the result lives at Succ Zero (→ Bool) and computes to `btrue`.
+    assert_eq!(infer_closed_in(sig.clone(), &elim), Ok(bool_ty));
+    assert_eq!(normalize_closed_in(sig, &elim), Constr("btrue".into(), vec![]));
+}
+
+#[test]
 fn acc_accessibility_family_is_well_formed() {
     // `Acc (A:Type) (R:A→A→Type) : A → Type` with
     //   acc : (x:A) → ((y:A) → R y x → Acc A R y) → Acc A R x
