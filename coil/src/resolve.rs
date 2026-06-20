@@ -83,20 +83,43 @@ pub fn resolve_program(
         if let Some(m) = &module {
             qualify_program(&mut p, m, imports.get(m), &table, exports)?;
         }
-        merge(&mut out, p);
+        merge(&mut out, p)?;
     }
     Ok(out)
 }
 
-fn merge(out: &mut Program, p: Program) {
+/// Two extern declarations are the *same* declaration (dedup-able) when they agree
+/// on convention, parameter types, variadicness, and return type.
+fn extern_eq(a: &Extern, b: &Extern) -> bool {
+    a.cc == b.cc && a.params == b.params && a.variadic == b.variadic && a.ret == b.ret
+}
+
+fn merge(out: &mut Program, p: Program) -> Result<(), crate::span::Diag> {
     for (k, v) in p.conventions {
         out.conventions.entry(k).or_insert(v); // dedups the default `c`
     }
     out.structs.extend(p.structs);
     out.sums.extend(p.sums);
-    out.externs.extend(p.externs);
+    // Dedup identical extern declarations across modules (the same libc symbol
+    // declared by several libraries is allowed, as in C); only a same-name extern
+    // with a *conflicting* signature is an error. Coil has no other extern dedup,
+    // so this is where shared `(extern malloc …)`/`(extern abort …)` collisions
+    // are resolved.
+    for e in p.externs {
+        match out.externs.iter().find(|x| x.name == e.name) {
+            Some(prev) if extern_eq(prev, &e) => {} // identical redeclaration — drop
+            Some(_) => {
+                return Err(crate::span::Diag::new(format!(
+                    "extern '{}' declared with conflicting signatures",
+                    e.name
+                )))
+            }
+            None => out.externs.push(e),
+        }
+    }
     out.funcs.extend(p.funcs);
     out.asserts.extend(p.asserts);
+    Ok(())
 }
 
 type Pick = fn(&Defs) -> &HashSet<String>;

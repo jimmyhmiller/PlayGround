@@ -1,7 +1,30 @@
 //! `extern` + C interop: foreign declarations are type-checked and linked.
 
 mod common;
-use common::{build_and_capture, build_and_capture_args};
+use common::{build_and_capture, build_and_capture_args, build_and_run};
+
+#[test]
+fn identical_extern_redeclaration_is_deduped() {
+    // mem.coil declares memcmp; re-declaring it identically must NOT error — Coil
+    // dedups identical extern declarations across modules (as in C). This is what
+    // lets two libraries share a libc symbol (e.g. abort/malloc) and be co-imported.
+    let src = r#"(module app)
+(import "lib/mem.coil" :use *)
+(extern memcmp :cc c [(ptr i8) (ptr i8) :i64] (-> :i64))
+(defn main [] (-> :i64) 0)"#;
+    assert_eq!(build_and_run(src), 0);
+}
+
+#[test]
+fn conflicting_extern_redeclaration_errors() {
+    // Same name, DIFFERENT signature is a genuine conflict — hard error, not dedup.
+    let src = r#"(module app)
+(import "lib/mem.coil" :use *)
+(extern memcmp :cc c [(ptr i8)] (-> :i64))
+(defn main [] (-> :i64) 0)"#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("conflicting signatures"), "got: {err}");
+}
 
 #[test]
 fn putchar_prints_to_stdout() {
