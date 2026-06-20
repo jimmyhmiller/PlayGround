@@ -543,3 +543,46 @@ fn exhaustive_match_still_accepted_after_hygiene() {
                main : Bool\nfn main() { neg(T) }\n";
     assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
 }
+
+// ---- E2: absurd-case discharge (Fin 0 ⇒ zero clauses) ----
+
+const FIN2: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+    enum Bool { T : Bool, F : Bool }\n\
+    enum Fin : Nat -> Type {\n\
+      FZ : {0 n : Nat} -> Fin (Succ n),\n\
+      FS : {0 n : Nat} -> Fin n -> Fin (Succ n),\n\
+    }\n";
+
+#[test]
+fn absurd_match_on_fin_zero_is_discharged_with_zero_clauses() {
+    // `Fin Zero` is empty (both ctors need a `Succ` index) ⇒ a match with NO arms
+    // is accepted, for ANY result type. The derived term is kernel-rechecked.
+    let src = format!(
+        "{FIN2}absurdN : Fin Zero -> Nat\nfn absurdN(x) {{ match x {{ }} }}\n\
+         absurdB : Fin Zero -> Bool\nfn absurdB(x) {{ match x {{ }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn an_arm_on_an_absurd_match_is_rejected() {
+    // you cannot WRITE a clause for an impossible constructor.
+    let src = format!(
+        "{FIN2}bad : Fin Zero -> Nat\nfn bad(x) {{ match x {{ FZ => Zero }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    assert!(err.contains("absurd") || err.contains("NO arms"), "got: {err}");
+}
+
+#[test]
+fn missing_reachable_case_still_rejected_with_variable_index() {
+    // BOTH-DIRECTIONS guard: a reachable constructor may NOT be dropped — matching
+    // `Fin n` (n a variable) must still cover both FZ and FS.
+    let src = format!(
+        "{FIN2}f2n : {{0 n : Nat}} -> Fin n -> Nat\nfn f2n(x) {{ match x {{ FZ => Zero }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&src).is_err(), "missing reachable FS must be rejected");
+}

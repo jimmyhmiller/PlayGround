@@ -1283,6 +1283,119 @@ fn count_index_pis(t: &Ty) -> Result<usize, String> {
 // ---- the eliminator translation for a recursive `fn … { match p { … } }` ----
 
 impl Elab {
+    /// Try to discharge a `match` whose scrutinee type is EMPTY because its
+    /// concrete index makes every constructor impossible (an absurd case, e.g.
+    /// `Fin Zero`). Returns `Some(term)` if all constructors are absurd (the
+    /// match must then have ZERO arms), else `None` (fall back to ordinary
+    /// coverage). v1 scope: a single index whose constructor heads are decidably
+    /// disjoint from the scrutinee's; otherwise CONSERVATIVELY `None` (reachable).
+    ///
+    /// THE DISCHARGE (no kernel change, no `Void`/prelude needed): the result type
+    /// is computed through builtin `Nat` —
+    ///   motive `m = λ i. λ _. NatCase i T (λ_. Nat)`   (T at index, Nat elsewhere)
+    /// and each constructor method just returns `0 : Nat` (because at every
+    /// constructor's `Succ`-headed index `m` computes `Nat`). The eliminator then
+    /// has type `m idx scrut = NatCase idx T (λ_.Nat)`, which is `T` exactly when
+    /// `idx` is the absurd (`Zero`) index. THE LINCHPIN: if the unifier WRONGLY
+    /// called a reachable scrutinee absurd, `idx` is `Succ k`, `m` computes `Nat`,
+    /// and the term has type `Nat ≠ T` — the kernel re-check REJECTS it. So the
+    /// classifier is untrusted; it can only cause a rejection, never an unsound
+    /// accept (FUTURE_WORK §4.2).
+    fn try_absurd_match(
+        &self,
+        data: &str,
+        decl: &DataDecl,
+        dargs: &[&Ty],
+        full_params: &[String],
+        scrut: &str,
+        ret: &Ty,
+        arms: &[Arm],
+    ) -> Result<Option<Term>, String> {
+        let np = decl.params.len();
+        if decl.indices.len() != 1 {
+            return Ok(None); // v1: single-index families only
+        }
+        let p = full_params.len();
+        // scrutinee parameter + index values, in the function-parameter context.
+        let sparam_vals: Vec<Value> = dargs[..np]
+            .iter()
+            .map(|a| Ok(dep::eval_rc(&self.rc, &neutral_env(p), &self.elab_ty(a, full_params)?)))
+            .collect::<Result<_, String>>()?;
+        let sidx_tm = self.elab_ty(dargs[np], full_params)?;
+        let sidx_nf = dep::quote_at(p, &dep::eval_rc(&self.rc, &neutral_env(p), &sidx_tm));
+        let s_head = match ctor_head(&sidx_nf) {
+            Some(h) => h,
+            None => return Ok(None), // index not a known constructor ⇒ reachable
+        };
+        // every constructor's result index must be decidably disjoint from it.
+        for ctor in &decl.ctors {
+            let mut env = sparam_vals.clone();
+            for j in 0..ctor.args.len() {
+                env.push(dep::nvar(p + j));
+            }
+            let cidx_nf = dep::quote_at(p + ctor.args.len(), &dep::eval_rc(&self.rc, &env, &ctor.idxs[0]));
+            let disjoint = matches!(ctor_head(&cidx_nf), Some(h) if h != s_head);
+            if !disjoint {
+                return Ok(None); // some constructor may be reachable ⇒ ordinary coverage
+            }
+        }
+        // ALL constructors absurd ⇒ the type is empty. Reject any arms (the cases
+        // are impossible and cannot be written), then synthesize the discharge.
+        if !arms.is_empty() {
+            return Err(format!(
+                "`match` on `{data}` at this index is absurd (every constructor is \
+                 impossible) — it must have NO arms; remove `{}`",
+                arms[0].ctor
+            ));
+        }
+        let t_term = self.elab_ty(ret, full_params)?;
+        // ⚠️ BACKSTOP CAVEAT (read before extending to MIXED / per-constructor
+        // absurd discharge): the Nat sentinel below makes the kernel-rejection
+        // backstop T-DEPENDENT. At a mis-classified-REACHABLE index the discharge
+        // term has type `Nat`, so the kernel rejects it ONLY when the match's
+        // result type `T ≠ Nat`. That is SOUND HERE because v1 fires *only* when
+        // EVERY constructor is decidably absurd (the loop above returns `None`
+        // otherwise), so there is no reachable case to mis-classify and the
+        // verdict does not lean on the backstop at all. But a per-constructor /
+        // mixed discharge, where a reachable constructor COULD be wrongly called
+        // absurd, would SILENTLY accept the mistake when `T = Nat`. Before that
+        // extension, switch to a for-all-T sentinel (a fresh uninhabited type via
+        // the two-step `→ Void`, `elim Void`), or prove the classifier sound
+        // independently. Do NOT carry the Nat sentinel into mixed coverage.
+        // motive = λ idx. λ _scrut. NatCase[λ_.Type] idx (shift² T) (λ_. Nat) idx
+        let motive = Term::Lam(Box::new(Term::Lam(Box::new(Term::NatCase(
+            Box::new(Term::Lam(Box::new(Term::Type(0)))),
+            Box::new(dep::shift_term(2, &t_term)),
+            Box::new(Term::Lam(Box::new(Term::Nat))),
+            Box::new(Term::Var(1)), // the index binder
+        )))));
+        // one method per constructor: λ(args)…λ(IHs). 0   (: Nat = the Succ branch)
+        let methods: Vec<Term> = decl
+            .ctors
+            .iter()
+            .map(|ctor| {
+                let nrec = ctor
+                    .args
+                    .iter()
+                    .filter(|(_, a)| matches!(a, Term::Data(dn, _) if dn == data))
+                    .count();
+                let mut m = Term::NatLit(0);
+                for _ in 0..(ctor.args.len() + nrec) {
+                    m = Term::Lam(Box::new(m));
+                }
+                m
+            })
+            .collect();
+        let scrut_idx = Self::debruijn(full_params, scrut)
+            .ok_or_else(|| format!("`match` scrutinee `{scrut}` is not in scope"))?;
+        Ok(Some(Term::Elim(
+            data.to_string(),
+            Box::new(motive),
+            methods,
+            Box::new(Term::Var(scrut_idx)),
+        )))
+    }
+
     /// Which of a `match` arm's pattern binders are STRICT SUBTERMS of the
     /// scrutinee — i.e. recursive fields of the matched constructor (arguments
     /// whose type is the family itself). These are the only legal structural
@@ -1612,6 +1725,14 @@ impl Elab {
         if dargs.len() != np + ni {
             return Err(format!("scrutinee type `{data}` applied to the wrong number of arguments"));
         }
+        // E2: if the scrutinee's (concrete) index makes EVERY constructor
+        // impossible (e.g. `Fin Zero` — both `fz`/`fs` need a `Succ` index), the
+        // type is EMPTY: discharge the match with zero arms (an absurd case). The
+        // derived term is kernel-rechecked, so a mis-classification can only be
+        // REJECTED, never silently accepted (see `try_absurd_match`).
+        if let Some(t) = self.try_absurd_match(&data, &decl, &dargs, full_params, scrut, ret, arms)? {
+            return Ok(t);
+        }
         let index_names: Vec<String> = dargs[np..]
             .iter()
             .map(|a| match a {
@@ -1773,6 +1894,21 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<bo
 }
 
 /// Collect the argument lists of every call to `fnname` inside a term.
+/// The CONSTRUCTOR HEAD of a (normalized) index term, for decidable index
+/// disjointness: two indices with KNOWN, DIFFERENT heads cannot be equal (e.g.
+/// `Zero` vs `Succ _`). Returns `None` for a neutral/variable/non-constructor
+/// term — meaning "unknown", so disjointness is NOT concluded (conservative:
+/// when unsure, treat as possibly-reachable). Built-in `Nat` literals fold to
+/// `Zero`/`Succ`; boxed constructors report their own name.
+fn ctor_head(t: &Term) -> Option<String> {
+    match t {
+        Term::NatLit(0) | Term::Zero => Some("Zero".into()),
+        Term::NatLit(_) | Term::Suc(_) => Some("Succ".into()),
+        Term::Constr(name, _) => Some(name.clone()),
+        _ => None,
+    }
+}
+
 /// Collect EVERY call (to any function/constructor) in `t`, for the totality
 /// call graph: a `Call(name, args)` becomes `TCall { callee: name, args }`.
 /// Constructor applications are included too — harmless, since they are not in
