@@ -8,7 +8,7 @@ fn calls_printf_with_mixed_args() {
     let src = r#"
         (extern printf :cc c [(ptr i8) ...] (-> i32))
         (defn main [] (-> i64)
-          (printf "int=%d str=%s char=%c float=%.1f\n" 42 "hi" 33 2.5)
+          (printf c"int=%d str=%s char=%c float=%.1f\n" 42 c"hi" 33 2.5)
           0)
     "#;
     let (code, out) = build_and_capture(src);
@@ -23,7 +23,7 @@ fn snprintf_returns_length() {
         (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
         (defn main [] (-> i64)
           (let [buf (alloc-stack (array i8 32))]
-            (cast i64 (snprintf (cast (ptr i8) buf) 32 "%d-%d" 4 2))))  ; writes "4-2", len 3
+            (cast i64 (snprintf (cast (ptr i8) buf) 32 c"%d-%d" 4 2))))  ; writes "4-2", len 3
     "#;
     assert_eq!(build_and_run(src), 3);
 }

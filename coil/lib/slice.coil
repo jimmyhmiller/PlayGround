@@ -1,45 +1,50 @@
 (module slice)
-; A `(Slice T)` is a fat pointer `{ data, len }` over contiguous elements — the
-; everyday view into an array/buffer. It is an ORDINARY generic struct, NOT a
-; compiler type: nothing in the core knows about slices. (The `(slice T)` *sugar*
-; spelling and string-literals-as-slices would need core support — deferred.)
+; A `(slice T)` is a fat pointer `{ data: (ptr T), len: i64 }` over contiguous
+; elements — the everyday view into an array/buffer, and the representation of a
+; string (`(slice u8)`). The fat-pointer TYPE is the one piece of core support
+; slices need; every operation here is a LIBRARY over `(llvm-ir …)`, exactly as
+; lib/simd.coil builds SIMD over the core `(vec T N)` type.
 ;
 ;   (import "lib/slice.coil")
 ;   (let [arr (alloc-stack (array i64 3))] … (let [s (slice-of arr 3)] (slice-for [x s] …)))
 ;
 ; Slices ALIAS their backing storage: `slice-set!` writes through to the original,
-; and a `subslice` shares the same memory. Bounds are NOT checked here (debug-mode
-; bounds checking is Phase-2 safety work).
+; and a `subslice` shares the same memory. A slice is a small value (two words),
+; so it is passed/returned BY VALUE (like Rust's `&str`). Bounds are NOT checked
+; here (debug-mode bounds checking is Phase-2 safety work).
 
 (import "control.coil")   ; `for` (and its loop/break lowering) for slice-for
 
-(defstruct Slice [T] [(data (ptr T)) (len i64)])
+; Construct a slice from a base element pointer and a length — `{data, len}` built
+; with two `insertvalue`s. T is inferred from `data` at the call site.
+(defn slice-new [T] [(data (ptr T)) (len i64)] (-> (slice T))
+  (llvm-ir (slice T) [data len]
+    "%s0 = insertvalue $ret undef, $t0 $0, 0
+%s1 = insertvalue $ret %s0, $t1 $1, 1
+ret $ret %s1"))
 
-; Construct a slice from a base element pointer and a length. T is inferred from
-; `data` at the call site (no explicit [T] needed).
-(defn slice-new [T] [(data (ptr T)) (len i64)] (-> (Slice T))
-  (let [(mut s) (zeroed (Slice T))]
-    (store! (field s data) data)
-    (store! (field s len) len)
-    (load s)))
+; The element count (field 1).
+(defn slice-len [T] [(s (slice T))] (-> i64)
+  (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
+ret $ret %l"))
 
-(defn slice-len [T] [(s (Slice T))] (-> i64) (load (field s len)))
+; The base element pointer (field 0) — for interop / building sub-views.
+(defn slice-data [T] [(s (slice T))] (-> (ptr T))
+  (llvm-ir (ptr T) [s] "%d = extractvalue $t0 $0, 0
+ret $ret %d"))
 
-; The base element pointer (for interop / building sub-views).
-(defn slice-data [T] [(s (Slice T))] (-> (ptr T)) (load (field s data)))
-
-(defn slice-empty? [T] [(s (Slice T))] (-> bool) (icmp-eq (slice-len s) 0))
+(defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
 
 ; Read / write element i (no bounds check — Phase-2 adds debug checks).
-(defn slice-get [T] [(s (Slice T)) (i i64)] (-> T)
+(defn slice-get [T] [(s (slice T)) (i i64)] (-> T)
   (load (index (slice-data s) i)))
 
-(defn slice-set! [T] [(s (Slice T)) (i i64) (v T)] (-> i64)
+(defn slice-set! [T] [(s (slice T)) (i i64) (v T)] (-> i64)
   (store! (index (slice-data s) i) v)
   0)
 
 ; `subslice s lo hi` → the half-open view `[lo, hi)`, sharing storage.
-(defn subslice [T] [(s (Slice T)) (lo i64) (hi i64)] (-> (Slice T))
+(defn subslice [T] [(s (slice T)) (lo i64) (hi i64)] (-> (slice T))
   (slice-new (index (slice-data s) lo) (isub hi lo)))
 
 ; `(slice-of ARR LEN)` — a slice over a fixed array `ARR` (a `(ptr (array T N))`

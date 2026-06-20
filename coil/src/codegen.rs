@@ -503,6 +503,19 @@ impl<'ctx> Cg<'ctx> {
                 }
             }
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
+            // A slice is a fat pointer `{ data: ptr, len: i64 }`. The element
+            // type only matters at the source level (element pointer arithmetic
+            // lives in the library); the machine shape is always {ptr, i64}.
+            Type::Slice(_) => self
+                .ctx
+                .struct_type(
+                    &[
+                        self.ctx.ptr_type(AddressSpace::default()).into(),
+                        self.ctx.i64_type().into(),
+                    ],
+                    false,
+                )
+                .into(),
             Type::Vec(elem, n) => match self.basic_ty(elem) {
                 BasicTypeEnum::IntType(t) => t.vec_type(*n).into(),
                 BasicTypeEnum::FloatType(t) => t.vec_type(*n).into(),
@@ -1245,11 +1258,29 @@ impl<'ctx> Cg<'ctx> {
                 Ok((slot.into(), Type::Ptr(Box::new(t))))
             }
             Expr::Str(s) => {
-                // Private, NUL-terminated [N x i8] global; value is a (ptr i8).
-                let bytes = self.ctx.const_string(s.as_bytes(), true);
+                // "…" is a (slice u8) VIEW: a private [N x i8] global (no NUL —
+                // the length carries the extent) plus a {ptr, len} fat-pointer
+                // constant. No allocation, no copy.
+                let bytes = self.ctx.const_string(s.as_bytes(), false);
                 let n = self.globals.get();
                 self.globals.set(n + 1);
                 let g = self.module.add_global(bytes.get_type(), None, &format!("str.{n}"));
+                g.set_initializer(&bytes);
+                g.set_constant(true);
+                g.set_linkage(inkwell::module::Linkage::Private);
+                let len = self.ctx.i64_type().const_int(s.len() as u64, false);
+                let slice = self
+                    .ctx
+                    .const_struct(&[g.as_pointer_value().into(), len.into()], false);
+                Ok((slice.into(), Type::Slice(Box::new(Type::Int(8, false)))))
+            }
+            Expr::CStr(s) => {
+                // c"…" is a (ptr i8) to a private, NUL-terminated [N+1 x i8]
+                // global — the distinct FFI spelling.
+                let bytes = self.ctx.const_string(s.as_bytes(), true);
+                let n = self.globals.get();
+                self.globals.set(n + 1);
+                let g = self.module.add_global(bytes.get_type(), None, &format!("cstr.{n}"));
                 g.set_initializer(&bytes);
                 g.set_constant(true);
                 g.set_linkage(inkwell::module::Linkage::Private);
@@ -2206,6 +2237,8 @@ fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str
         Type::Bool => 1,
         Type::Ptr(_) | Type::Fn(..) | Type::Ref(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
+        // A slice is a fat pointer: a ptr (8) + an i64 length (8).
+        Type::Slice(_) => 16,
         // A vector is tightly packed (no per-lane padding): lanes * element bytes.
         Type::Vec(e, n) => type_bytes(e, structs, sums) * (*n as u64),
         Type::Struct(name) => {

@@ -293,6 +293,10 @@ fn flatten_type<'ctx>(
             "SysV ABI: passing a vec by value across the C boundary is not supported yet \
              (keep vectors inside Coil, or pass a pointer)".to_string(),
         ),
+        Type::Slice(..) => Err(
+            "SysV ABI: passing a slice by value across the C boundary is not supported \
+             (slices are a Coil view type; for FFI pass a c\"…\"/(ptr i8) and a length)".to_string(),
+        ),
         Type::App(..) => Err(format!(
             "SysV ABI: generic type {ty:?} survived to ABI classification (compiler bug)"
         )),

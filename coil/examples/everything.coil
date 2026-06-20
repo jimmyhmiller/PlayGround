@@ -151,7 +151,7 @@
 
 ; 7. extern C interop: variadic printf, putchar, string literals.
 (defn feat-extern [] (-> :i64)
-  (do (printf "coil: %d+%d=%d (%s)\n" 20 22 42 "ok")
+  (do (printf c"coil: %d+%d=%d (%s)\n" 20 22 42 c"ok")
       (putchar 33) (putchar 10)                          ; '!' then newline
       42))
 
@@ -287,9 +287,9 @@
     (iadd (pow2 (three) 3)                               ; compile-time pow: 3^3 = 27
           (dbl (inc1 6)))))                              ; (6+1)*2 = 14 => 41
 
-; 24. Typed pointers: (ptr i8) string literal, sizeof, int<->ptr cast, index/load.
+; 24. Typed pointers: c"…" (ptr i8) string literal, sizeof, int<->ptr cast, index/load.
 (defn feat-ptr [] (-> :i64)
-  (let [s "coil" p (alloc-stack (array i64 2))]
+  (let [s c"coil" p (alloc-stack (array i64 2))]
     (store! (index p 0) 10) (store! (index p 1) 19)
     (let [nullp (cast (ptr i8) 0)
           isnull (if (icmp-eq (cast :i64 nullp) 0) 1 0)]
@@ -304,7 +304,7 @@
 ; ======================================================================
 (defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
   (do
-    (printf "coil/everything.coil (argc=%d), running 24 checks:\n" argc)
+    (printf c"coil/everything.coil (argc=%d), running 24 checks:\n" argc)
     (puts (load (index argv 0)))                          ; argv[0] = program path
     (chk (feat-fib)        55  1
     (chk (feat-conv)       42  2

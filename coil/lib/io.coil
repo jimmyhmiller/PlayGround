@@ -13,6 +13,7 @@
 ; checking), filling even the error type that `Ok` mentions in no field.
 
 (import "result.coil" :use *)
+(import "slice.coil"  :use *)   ; (slice u8) strings: slice-data / slice-len
 
 (extern write  :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
 (extern read   :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t read(fd, buf, n)
@@ -50,8 +51,13 @@
     (store! p b)
     (write-all w (cast (ptr i8) p) 1)))
 
-; Write a NUL-terminated C string (e.g. a string literal).
-(defn print-str [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
+; Write a `(slice u8)` string — its length is carried, so no `strlen` scan and
+; embedded NULs are fine. This is the everyday string printer.
+(defn print-str [(w (ptr Writer)) (s (slice u8))] (-> (Result :i64 IoError))
+  (write-all w (cast (ptr i8) (slice-data s)) (slice-len s)))
+
+; Write a NUL-terminated C string (`c"…"` / a `(ptr i8)` from FFI).
+(defn print-cstr [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
   (write-all w s (strlen s)))
 
 ; Write a non-negative integer in decimal, most-significant digit first.

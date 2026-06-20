@@ -40,8 +40,8 @@
 (defn print-nl [(w (ptr Writer))] (-> (Result :i64 IoError))
   (write-byte w (cast :u8 10)))   ; '\n'
 
-; Print a C string followed by a newline.
-(defn print-line [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
+; Print a `(slice u8)` string followed by a newline.
+(defn print-line [(w (ptr Writer)) (s (slice u8))] (-> (Result :i64 IoError))
   (match (print-str w s)
     (Err [e] (Err e))
     (Ok [_] (print-nl w))))

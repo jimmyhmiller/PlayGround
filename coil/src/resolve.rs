@@ -210,7 +210,7 @@ fn qualify_type(
                 qualify_type(a, m, imps, table, tps, exports)?;
             }
         }
-        Type::Ptr(p) | Type::Ref(_, p) | Type::Array(p, _) | Type::Vec(p, _) => {
+        Type::Ptr(p) | Type::Ref(_, p) | Type::Array(p, _) | Type::Slice(p) | Type::Vec(p, _) => {
             qualify_type(p, m, imps, table, tps, exports)?
         }
         Type::Fn(cc, params, ret) => {
@@ -236,7 +236,7 @@ fn qualify_expr(
     let ty = |ty: &mut Type| qualify_type(ty, m, imps, table, tps, exports);
     let call = |name: &str, pick: Pick| resolve(name, m, imps, table, exports, pick);
     match e {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::CStr(_) | Expr::Var(_) => {}
         Expr::Zeroed(t) | Expr::SizeOf(t) | Expr::AlignOf(t) | Expr::OffsetOf(t, _) => ty(t)?,
         Expr::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports)?,
         // `SpillRef` is inserted by the checker, which runs after name

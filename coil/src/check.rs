@@ -326,6 +326,7 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
         Type::Ptr(p) => validate_type(p, cx, tps),
         Type::Ref(_, p) => validate_type(p, cx, tps),
         Type::Array(e, _) => validate_type(e, cx, tps),
+        Type::Slice(e) => validate_type(e, cx, tps),
         Type::Vec(e, n) => {
             if *n == 0 {
                 return Err("vec must have a positive lane count".to_string());
@@ -403,7 +404,10 @@ fn synth(
         Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
         Expr::Float(x) => Ok((Expr::Float(*x), Type::Float(64))),
         Expr::Bool(b) => Ok((Expr::Bool(*b), Type::Bool)),
-        Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
+        // "…" is a (slice u8) view over a static byte global (length known now).
+        Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Slice(Box::new(Type::Int(8, false))))),
+        // c"…" is a (ptr i8) to a NUL-terminated global, for FFI.
+        Expr::CStr(s) => Ok((Expr::CStr(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
         Expr::Zeroed(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': zeroed: {e}"))?;
             Ok((Expr::Zeroed(ty.clone()), ty.clone()))
@@ -1462,6 +1466,7 @@ fn unify(
         (Type::Ref(_, a), b) => unify(a, b, tpset, subst, fname),
         (a, Type::Ref(_, b)) => unify(a, b, tpset, subst, fname),
         (Type::Array(a, _), Type::Array(b, _)) => unify(a, b, tpset, subst, fname),
+        (Type::Slice(a), Type::Slice(b)) => unify(a, b, tpset, subst, fname),
         (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
             for (x, y) in a1.iter().zip(a2) {
                 unify(x, y, tpset, subst, fname)?;
@@ -1661,6 +1666,7 @@ fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
+        Type::Slice(e) => Type::Slice(Box::new(subst_apply(e, subst))),
         Type::Vec(e, n) => Type::Vec(Box::new(subst_apply(e, subst)), *n),
         Type::Struct(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
         Type::App(name, args) => {
@@ -1972,6 +1978,7 @@ fn ty_str(t: &Type) -> String {
         Type::Ref(false, pointee) => format!("(ref {})", ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
+        Type::Slice(e) => format!("(slice {})", ty_str(e)),
         Type::Vec(e, n) => format!("(vec {} {n})", ty_str(e)),
         Type::Fn(cc, params, ret) => {
             let ps: Vec<String> = params.iter().map(ty_str).collect();

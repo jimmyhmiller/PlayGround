@@ -215,6 +215,7 @@ impl<'a> Mono<'a> {
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
             Type::Ref(m, p) => Type::Ref(*m, Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
+            Type::Slice(e) => Type::Slice(Box::new(self.resolve_ty(e, map)?)),
             Type::Vec(e, n) => Type::Vec(Box::new(self.resolve_ty(e, map)?), *n),
             Type::Fn(cc, ps, r) => Type::Fn(
                 cc.clone(),
@@ -289,6 +290,7 @@ impl<'a> Mono<'a> {
             Expr::Float(x) => Expr::Float(*x),
             Expr::Bool(b) => Expr::Bool(*b),
             Expr::Str(s) => Expr::Str(s.clone()),
+            Expr::CStr(s) => Expr::CStr(s.clone()),
             Expr::Var(s) => Expr::Var(s.clone()),
             Expr::Zeroed(t) => Expr::Zeroed(self.resolve_ty(t, map)?),
             Expr::Borrow { mutable, place } => Expr::Borrow {
@@ -485,6 +487,7 @@ fn type_key(t: &Type) -> String {
         Type::Ref(_, p) => format!("ref_{}", type_key(p)),
         Type::Struct(s) => s.clone(),
         Type::Array(e, n) => format!("arr{n}_{}", type_key(e)),
+        Type::Slice(e) => format!("slice_{}", type_key(e)),
         Type::Vec(e, n) => format!("vec{n}_{}", type_key(e)),
         Type::Fn(..) => "fn".to_string(),
         Type::App(n, a) => mangle(n, a),

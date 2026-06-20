@@ -9,12 +9,11 @@
 (module app)
 (import "lib/alloc.coil"     :use *)
 (import "lib/result.coil"    :use *)
+(import "lib/slice.coil"     :use *)   ; (slice u8) source text: slice-len / slice-get
 (import "lib/arraylist.coil" :use *)
 (import "lib/hashmap.coil"   :use *)
 (import "lib/fmt.coil"       :use *)
 (import "lib/io.coil"        :use *)
-
-(extern strlen :cc c [(ptr i8)] (-> :i64))   ; dedups with io.coil's identical decl
 
 ; ---- tokens ----------------------------------------------------------------
 (defsum Tok
@@ -27,14 +26,14 @@
 (defn alpha? [(c i64)] (-> bool) (and (icmp-ge c 97) (icmp-le c 122)))
 
 ; ---- lexer: source C-string -> ArrayList<Tok> ------------------------------
-(defn lex [(a (ptr Allocator)) (s (ptr i8))] (-> (ArrayList Tok))
+(defn lex [(a (ptr Allocator)) (s (slice u8))] (-> (ArrayList Tok))
   (let [(mut toks) (al-new [Tok] a)
         (mut i) 0
-        n (strlen s)]
+        n (slice-len s)]
     (loop
       (if (icmp-ge (load i) n)
           (do (al-push! (mut toks) (TEnd)) (break))
-          (let [c (cast :i64 (load (index s (load i))))]
+          (let [c (cast :i64 (slice-get s (load i)))]
             (if (icmp-eq c 32)
                 (store! i (iadd (load i) 1))                       ; skip space
                 (if (digit? c)
@@ -42,7 +41,7 @@
                       (loop
                         (if (icmp-ge (load i) n)
                             (break)
-                            (let [d (cast :i64 (load (index s (load i))))]
+                            (let [d (cast :i64 (slice-get s (load i)))]
                               (if (digit? d)
                                   (do (store! v (iadd (imul (load v) 10) (isub d 48)))
                                       (store! i (iadd (load i) 1)))
@@ -155,7 +154,7 @@
   (TNum [_] false) (TVar [_] false) (TOp [_] false) (TLP [] false) (TRP [] false)
   (TEq [] false) (TSemi [] false)))
 
-(defn run [(a (ptr Allocator)) (w (ptr Writer)) (src (ptr i8))] (-> i64)
+(defn run [(a (ptr Allocator)) (w (ptr Writer)) (src (slice u8))] (-> i64)
   (let [(mut toks) (lex a src)
         pstate (alloc-stack P)]        ; a real (ptr P) the parser cursor shares
     (store! (field pstate t) (al-slice-data (mut toks)))

@@ -36,6 +36,9 @@ enum Value {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// A C-string literal `c"..."` — kept distinct from `Str` so it round-trips
+    /// through a macro without being downgraded to a `(slice u8)` string.
+    CStr(String),
     Sym(String),
     Keyword(String),
     List(Vec<Value>),
@@ -1027,6 +1030,7 @@ fn sexp_to_value(s: &Sexp) -> Value {
         SexpKind::Sym(s) => Value::Sym(s.clone()),
         SexpKind::Keyword(k) => Value::Keyword(k.clone()),
         SexpKind::Str(s) => Value::Str(s.clone()),
+        SexpKind::CStr(s) => Value::CStr(s.clone()),
         SexpKind::List(items) => Value::List(items.iter().map(sexp_to_value).collect()),
         SexpKind::Vector(items) => Value::Vector(items.iter().map(sexp_to_value).collect()),
     }
@@ -1051,6 +1055,7 @@ fn value_to_sexp(v: &Value) -> Result<Sexp, String> {
         // A string is a valid form (`SexpKind::Str`): a quasiquoted string
         // literal, or a `(llvm-ir ... "BODY")` body assembled by a macro.
         Value::Str(s) => Ok(Sexp::string(s.clone())),
+        Value::CStr(s) => Ok(Sexp::cstring(s.clone())),
         Value::Closure(_) | Value::Builtin(_) => {
             Err("macro produced a function where a form was expected".to_string())
         }

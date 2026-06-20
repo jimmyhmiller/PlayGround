@@ -28,6 +28,13 @@ pub enum Type {
     Struct(String),
     /// A fixed-size array of `len` elements.
     Array(Box<Type>, u32),
+    /// A slice: a fat pointer `{ data: (ptr T), len: i64 }` — a *view* into
+    /// contiguous elements (it borrows, it does not own). The everyday string
+    /// type is `(slice u8)`. This is the only core support slices need: the
+    /// fat-pointer type plus the string-literal lowering. Every slice/string
+    /// *operation* is a library over `(llvm-ir …)` (lib/slice.coil, lib/str.coil),
+    /// exactly as SIMD is a library over `(vec T N)`.
+    Slice(Box<Type>),
     /// A fixed-width SIMD vector of `lanes` elements (LLVM `<N x T>`). The
     /// element type must be a scalar (int or float). Distinct from `Array`: it
     /// lowers to an LLVM vector, so `(llvm-ir ...)` and the existing arithmetic
@@ -97,9 +104,14 @@ pub enum CmpOp {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
-    /// A string literal. Lowers to a private, NUL-terminated `[N x i8]` global;
-    /// its value is a `(ptr i8)` to the first byte (C-string compatible).
+    /// A string literal `"…"` — a `(slice u8)` VIEW over a private `[N x i8]`
+    /// global (length known at compile time). No allocator, no copy: it borrows
+    /// the static bytes. Content/ops live in lib/str.coil over `(slice u8)`.
     Str(String),
+    /// A C-string literal `c"…"` — a `(ptr i8)` to a private, NUL-terminated
+    /// `[N+1 x i8]` global, for FFI. The DISTINCT FFI spelling (not conflated
+    /// with the length-carrying `(slice u8)` string).
+    CStr(String),
     Var(String),
     /// The zero value of a type (`(zeroed T)`) — used to initialize a fresh
     /// `let`-bound stack local. Codegen lowers it to LLVM's `zeroinitializer`.

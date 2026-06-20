@@ -28,9 +28,12 @@ pub enum SexpKind {
     Sym(String),
     /// Keyword `:foo` stored without the leading colon.
     Keyword(String),
-    /// String literal `"..."` — used by macros (name munging); the core
-    /// language has no string type.
+    /// String literal `"..."` — at the value level a `(slice u8)` view; also
+    /// used by macros for name munging (compile-time string ops).
     Str(String),
+    /// C-string literal `c"..."` — a NUL-terminated `(ptr i8)` for FFI. Kept
+    /// distinct from `Str` so the slice string and the FFI cstring don't conflate.
+    CStr(String),
     List(Vec<Sexp>),
     Vector(Vec<Sexp>),
 }
@@ -54,6 +57,9 @@ impl Sexp {
     }
     pub fn keyword(s: impl Into<String>) -> Sexp {
         Sexp::new(SexpKind::Keyword(s.into()), Span::DUMMY)
+    }
+    pub fn cstring(s: impl Into<String>) -> Sexp {
+        Sexp::new(SexpKind::CStr(s.into()), Span::DUMMY)
     }
     pub fn string(s: impl Into<String>) -> Sexp {
         Sexp::new(SexpKind::Str(s.into()), Span::DUMMY)
@@ -118,7 +124,37 @@ enum TokKind {
     /// `~@`→unquote-splicing. The next form is wrapped in `(<sym> form)`.
     Prefix(&'static str),
     Str(String),
+    /// A `c"..."` C-string literal.
+    CStr(String),
     Atom(String),
+}
+
+/// Read a string body after the opening quote has been consumed, returning the
+/// unescaped contents and the byte offset just past the closing quote. `open` is
+/// the byte offset of the literal's start (for error spans).
+fn read_string_body(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    open: usize,
+    src_len: usize,
+) -> Result<(String, usize), Diag> {
+    let mut s = String::new();
+    loop {
+        match chars.next() {
+            None => return Err(Diag::at(Span::new(open, src_len), "unterminated string literal")),
+            Some((j, '"')) => return Ok((s, j + 1)),
+            Some((_, '\\')) => match chars.next() {
+                Some((_, 'n')) => s.push('\n'),
+                Some((_, 't')) => s.push('\t'),
+                Some((_, '"')) => s.push('"'),
+                Some((_, '\\')) => s.push('\\'),
+                Some((_, c)) => s.push(c),
+                None => {
+                    return Err(Diag::at(Span::new(open, src_len), "unterminated string escape"))
+                }
+            },
+            Some((_, c)) => s.push(c),
+        }
+    }
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
@@ -168,36 +204,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
             }
             '"' => {
                 chars.next();
-                let mut s = String::new();
-                let end;
-                loop {
-                    match chars.next() {
-                        None => {
-                            return Err(Diag::at(
-                                Span::new(i, src.len()),
-                                "unterminated string literal",
-                            ))
-                        }
-                        Some((j, '"')) => {
-                            end = j + 1;
-                            break;
-                        }
-                        Some((_, '\\')) => match chars.next() {
-                            Some((_, 'n')) => s.push('\n'),
-                            Some((_, 't')) => s.push('\t'),
-                            Some((_, '"')) => s.push('"'),
-                            Some((_, '\\')) => s.push('\\'),
-                            Some((_, c)) => s.push(c),
-                            None => {
-                                return Err(Diag::at(
-                                    Span::new(i, src.len()),
-                                    "unterminated string escape",
-                                ))
-                            }
-                        },
-                        Some((_, c)) => s.push(c),
-                    }
-                }
+                let (s, end) = read_string_body(&mut chars, i, src.len())?;
                 toks.push(Tok { kind: TokKind::Str(s), span: Span::new(i, end) });
             }
             _ => {
@@ -214,7 +221,15 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
                     end = j + c.len_utf8();
                     chars.next();
                 }
-                toks.push(Tok { kind: TokKind::Atom(s), span: Span::new(start, end) });
+                // `c"..."` (a bare `c` immediately followed by an opening quote) is
+                // a C-string literal, distinct from a `"..."` (slice) string.
+                if s == "c" && matches!(chars.peek(), Some((_, '"'))) {
+                    chars.next(); // consume the opening quote
+                    let (cs, cend) = read_string_body(&mut chars, start, src.len())?;
+                    toks.push(Tok { kind: TokKind::CStr(cs), span: Span::new(start, cend) });
+                } else {
+                    toks.push(Tok { kind: TokKind::Atom(s), span: Span::new(start, end) });
+                }
             }
         }
     }
@@ -276,6 +291,7 @@ impl Parser {
                 ))
             }
             TokKind::Str(s) => Ok(Sexp::new(SexpKind::Str(s), tok.span)),
+            TokKind::CStr(s) => Ok(Sexp::new(SexpKind::CStr(s), tok.span)),
             TokKind::Close(c) => Err(Diag::at(tok.span, format!("unexpected '{c}'"))),
             TokKind::Atom(s) => Ok(Sexp::new(atom(&s), tok.span)),
         }
@@ -290,6 +306,7 @@ impl std::fmt::Display for Sexp {
             SexpKind::Sym(s) => write!(f, "{s}"),
             SexpKind::Keyword(k) => write!(f, ":{k}"),
             SexpKind::Str(s) => write!(f, "{s:?}"),
+            SexpKind::CStr(s) => write!(f, "c{s:?}"),
             SexpKind::List(items) => write_seq(f, items, '(', ')'),
             SexpKind::Vector(items) => write_seq(f, items, '[', ']'),
         }

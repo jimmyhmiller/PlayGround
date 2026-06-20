@@ -163,10 +163,10 @@ fn string_keys_via_explicit_content_keyops() {
     o))
 (defn main [] (-> :i64)
   (let [a (malloc-allocator) (mut m) (hm-new [(ptr i8) i64] a (str-ops))]
-    (hm-put! (mut m) "alpha" 10)
-    (hm-put! (mut m) "beta" 20)
-    (hm-put! (mut m) "alpha" 100)   ; update by content
-    (iadd (match (hm-get [(ptr i8) i64] m "alpha") (None [] -1) (Some [v] v))
-          (match (hm-get [(ptr i8) i64] m "beta")  (None [] -1) (Some [v] v)))))"#;
+    (hm-put! (mut m) c"alpha" 10)
+    (hm-put! (mut m) c"beta" 20)
+    (hm-put! (mut m) c"alpha" 100)   ; update by content
+    (iadd (match (hm-get [(ptr i8) i64] m c"alpha") (None [] -1) (Some [v] v))
+          (match (hm-get [(ptr i8) i64] m c"beta")  (None [] -1) (Some [v] v)))))"#;
     assert_eq!(build_and_run(src), 120); // 100 + 20
 }

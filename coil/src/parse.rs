@@ -462,6 +462,11 @@ fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
                 };
                 Ok(Type::Array(Box::new(elem), n))
             }
+            // (slice TYPE) -> a fat-pointer view {ptr, len} over elements of TYPE.
+            "slice" => {
+                let elem = parse_type(items.get(1).ok_or("slice type: missing element type")?)?;
+                Ok(Type::Slice(Box::new(elem)))
+            }
             // (vec TYPE N) -> a SIMD vector <N x TYPE>; element must be a scalar.
             "vec" => {
                 let elem = parse_type(items.get(1).ok_or("vec type: missing element type")?)?;
@@ -549,6 +554,7 @@ fn parse_expr_inner(s: &Sexp) -> Result<Expr, Diag> {
         SexpKind::Sym(name) => Ok(Expr::Var(name.clone())),
         SexpKind::Keyword(k) => Err(Diag::at(s.span, format!("unexpected keyword :{k} in expression"))),
         SexpKind::Str(s) => Ok(Expr::Str(s.clone())),
+        SexpKind::CStr(s) => Ok(Expr::CStr(s.clone())),
         SexpKind::Vector(_) => Err(Diag::at(s.span, "unexpected vector in expression")),
         SexpKind::List(items) => parse_list_expr(items, s.span),
     }

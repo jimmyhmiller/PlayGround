@@ -95,7 +95,7 @@
 
 ; A slice view over the current elements (shares storage; invalidated by a later
 ; grow that moves the buffer).
-(defn al-slice [T] [(l (ArrayList T))] (-> (Slice T))
+(defn al-slice [T] [(l (ArrayList T))] (-> (slice T))
   (slice-new (load (field l data)) (load (field l len))))
 
 ; Free the backing buffer and reset to empty (the allocator itself is untouched).
