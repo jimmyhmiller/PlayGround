@@ -56,7 +56,8 @@
 ; state: 0 empty, 1 occupied, 2 tombstone
 (defstruct Entry [K V] [(state :i64) (key K) (val V)])
 (defstruct HashMap [K V]
-  [(slots (ptr (Entry K V))) (cap :i64) (len :i64) (alc (ptr Allocator)) (ops (ptr KeyOps))])
+  [(slots (ptr (Entry K V))) (cap :i64) (len :i64) (tombs :i64)
+   (alc (ptr Allocator)) (ops (ptr KeyOps))])
 
 ; Call the key vtable.
 (defn ko-hash [(opsp (ptr KeyOps)) (kp (ptr i8))] (-> :i64)
@@ -77,27 +78,43 @@
 (defn hm-len [K V] [(m (HashMap K V))] (-> :i64) (load (field m len)))
 (defn hm-cap [K V] [(m (HashMap K V))] (-> :i64) (load (field m cap)))
 
-; Insert (key-at kp, v) into raw slots (power-of-two cap), linear probing, using
-; the key vtable `opsp`. Returns 1 if a fresh slot was filled, 0 on update.
+; Insert (key-at kp, v) into raw slots (power-of-two cap), linear probing via the
+; key vtable `opsp`. Probes THROUGH tombstones to find an existing key (so an
+; update lands on the real entry, never duplicating it), remembering the first
+; tombstone to reuse on a confirmed-absent insert. Returns:
+;   0 = updated an existing key   1 = filled an empty slot   2 = reused a tombstone
+; (1 and 2 both add a key; 2 additionally consumes a tombstone). Terminates because
+; the caller keeps at least one empty slot (tombstones counted toward resize).
 (defn hm-insert-raw [K V]
     [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)] (-> :i64)
   (let [kpi (cast (ptr i8) kp)
         (mut i) (iand (ko-hash opsp kpi) (isub cap 1))
-        (mut fresh) 0]
+        (mut tomb) -1        ; index of the first tombstone seen, -1 = none yet
+        (mut result) 0
+        (mut done) 0]
     (loop
-      (let [e  (index slots (load i))
-            st (load (field e state))]
-        (if (icmp-eq st 1)
-            (if (ko-eq opsp (cast (ptr i8) (field e key)) kpi)
-                (do (store! (field e val) v) (break))
-                (store! i (iand (iadd (load i) 1) (isub cap 1))))
-            (do
-              (store! (field e state) 1)
-              (store! (field e key) (load kp))
-              (store! (field e val) v)
-              (store! fresh 1)
-              (break)))))
-    (load fresh)))
+      (if (icmp-eq (load done) 1)
+          (break)
+          (let [e  (index slots (load i))
+                st (load (field e state))]
+            (if (icmp-eq st 0)
+                ; empty ⇒ key is absent. Insert at the first tombstone if we saw
+                ; one, else here.
+                (let [target (if (icmp-ge (load tomb) 0) (load tomb) (load i))
+                      te     (index slots target)]
+                  (store! (field te state) 1)
+                  (store! (field te key) (load kp))
+                  (store! (field te val) v)
+                  (store! result (if (icmp-ge (load tomb) 0) 2 1))
+                  (store! done 1))
+                (if (icmp-eq st 1)
+                    (if (ko-eq opsp (cast (ptr i8) (field e key)) kpi)
+                        (do (store! (field e val) v) (store! result 0) (store! done 1))  ; update
+                        (store! i (iand (iadd (load i) 1) (isub cap 1))))                ; probe on
+                    (do                                                                  ; tombstone
+                      (if (icmp-lt (load tomb) 0) (store! tomb (load i)) 0)
+                      (store! i (iand (iadd (load i) 1) (isub cap 1)))))))))
+    (load result)))
 
 (defn hm-grow! [K V] [(m (mut (HashMap K V))) (newcap :i64)] (-> :i64)
   (let [a        (load (field m alc))
@@ -125,16 +142,28 @@
               0)
           (store! (field m slots) ns)
           (store! (field m cap) newcap)
+          (store! (field m tombs) 0)   ; rehash dropped all tombstones
           0)))))
 
 (defn hm-put! [K V] [(m (mut (HashMap K V))) (k K) (v V)] (-> :i64)
-  (if (icmp-ge (imul (iadd (load (field m len)) 1) 4) (imul (load (field m cap)) 3))
-      (hm-grow! (mut m) (if (icmp-eq (load (field m cap)) 0) 8 (imul (load (field m cap)) 2)))
-      0)
+  ; Resize when occupied + tombstones would pass 0.75 — counting tombstones keeps a
+  ; free slot (probe termination). Grow only if genuinely >half full; otherwise
+  ; rehash same-size to clear tombstones (so delete/insert churn can't grow forever).
+  (let [cap (load (field m cap))]
+    (if (icmp-ge (imul (iadd (iadd (load (field m len)) (load (field m tombs))) 1) 4) (imul cap 3))
+        (hm-grow! (mut m)
+                  (if (icmp-eq cap 0) 8
+                      (if (icmp-ge (imul (load (field m len)) 2) cap) (imul cap 2) cap)))
+        0))
   (let [kp (alloc-stack K)]
     (store! kp k)
-    (let [fresh (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v)]
-      (store! (field m len) (iadd (load (field m len)) fresh))))
+    (let [r (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v)]
+      (if (icmp-ge r 1)                                            ; added a new key
+          (do (store! (field m len) (iadd (load (field m len)) 1))
+              (if (icmp-eq r 2)                                    ; ...reusing a tombstone
+                  (store! (field m tombs) (isub (load (field m tombs)) 1))
+                  0))
+          0)))
   0)
 
 (defn hm-get [K V] [(m (HashMap K V)) (k K)] (-> (Option V))
@@ -180,8 +209,9 @@
                 (if (icmp-eq st 0)
                     (break)
                     (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
-                        (do (store! (field e state) 2)
+                        (do (store! (field e state) 2)                        ; tombstone
                             (store! (field m len) (isub (load (field m len)) 1))
+                            (store! (field m tombs) (iadd (load (field m tombs)) 1))
                             (store! res 1)
                             (break))
                         (store! i (iand (iadd (load i) 1) (isub cap 1))))))))
@@ -195,4 +225,5 @@
   (store! (field m slots) (cast (ptr (Entry K V)) 0))
   (store! (field m cap) 0)
   (store! (field m len) 0)
+  (store! (field m tombs) 0)
   0)

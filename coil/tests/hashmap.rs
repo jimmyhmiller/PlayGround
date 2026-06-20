@@ -72,6 +72,55 @@ fn get_absent_on_empty_map_is_none() {
 }
 
 #[test]
+fn reinsert_over_tombstoned_home_slot_does_not_duplicate() {
+    // Regression: re-inserting a key whose HOME slot is tombstoned must update the
+    // existing entry (found further down the probe chain), not fill the tombstone
+    // and create a DUPLICATE. A constant hash forces all keys into one chain so the
+    // collision is deterministic. Bug symptoms: len over-counts and a removed key
+    // resurrects. Correct result encodes len==1, value==131, and absent-after-remove.
+    let src = r#"(module app)
+(import "lib/hashmap.coil" :use *)
+(import "lib/alloc.coil" :use *)
+(import "lib/result.coil" :use *)
+(defn zero-hash [(p (ptr i8)) (n :i64)] (-> :i64) 0)
+(defn ks-ops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of zero-hash))
+    (store! (field o eq) (fnptr-of bytewise-eq))
+    (store! (field o size) 8)
+    o))
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator) (mut m) (hm-new [i64 i64] a (ks-ops))]
+    (hm-put! (mut m) 5 50)
+    (hm-put! (mut m) 13 130)    ; collides with 5
+    (hm-remove! (mut m) 5)      ; tombstone 5's home slot
+    (hm-put! (mut m) 13 131)    ; update 13 -- must not duplicate
+    (let [l1 (hm-len m)
+          g  (match (hm-get [i64 i64] m 13) (None [] -1) (Some [v] v))]
+      (hm-remove! (mut m) 13)
+      (let [g2 (match (hm-get [i64 i64] m 13) (None [] 0) (Some [v] 999))]
+        (iadd (imul l1 100) (iadd (isub g 131) g2))))))"#; // 1*100 + 0 + 0 = 100
+    assert_eq!(build_and_run(src), 100);
+}
+
+#[test]
+fn churn_does_not_grow_unbounded() {
+    // Many delete+insert cycles at low occupancy must not grow the table forever
+    // (tombstones are cleared by same-size rehash). Just must terminate + stay correct.
+    let code = run(
+        r#"(defn main [] (-> :i64)
+             (let [a (malloc-allocator) (mut m) (hm-new-scalar [i64 i64] a)]
+               (for [i 0 200]
+                 (hm-put! (mut m) i i)
+                 (hm-remove! (mut m) i))
+               (hm-put! (mut m) 42 42)
+               (iadd (hm-len m)                                ; 1
+                     (match (hm-get [i64 i64] m 42) (None [] -1) (Some [v] v)))))"#, // + 42 = 43
+    );
+    assert_eq!(code, 43);
+}
+
+#[test]
 fn arraylist_and_hashmap_compose() {
     // Regression: both libs once declared their own `abort` extern, which collided
     // when imported together (Coil doesn't dedup externs). OOM now routes through
