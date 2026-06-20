@@ -1,9 +1,21 @@
-//! `tally` CLI.  Currently: `tally check <file>` -- parse and run the
-//! linear/permission checker, printing diagnostics.
+//! `tally` CLI — the dependent + linear surface language.
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // The dependent kernel normalizes terms by recursion; deep recursion in a
+    // user program (e.g. a big eliminator) wants a deep native stack to type-check
+    // and lower. Run the whole driver on a large-stack worker thread. (The runtime
+    // it EMITS uses native loops and never recurses on data size.)
+    std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(run_cli)
+        .expect("spawn compiler thread")
+        .join()
+        .expect("compiler thread panicked")
+}
+
+fn run_cli() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("check") => {
@@ -18,76 +30,13 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match tally::check_str(&src) {
-                Ok(()) => {
-                    println!("ok: {path} type-checks (no leaks, no use-after-free)");
-                    ExitCode::SUCCESS
-                }
-                Err(diags) => {
-                    eprintln!("{path}: rejected ({} error(s)):", diags.len());
-                    for d in &diags {
-                        eprintln!("  - {d}");
-                    }
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        Some("dep") => {
-            let Some(path) = args.get(2) else {
-                eprintln!("usage: tally dep <file>");
-                return ExitCode::FAILURE;
-            };
-            let src = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("cannot read {path}: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            match tally::surface::check_program(&src) {
-                Ok(prog) => {
-                    println!(
-                        "ok: {path} elaborates and type-checks ({} datatype(s), {} def(s))",
-                        prog.sig.datas.len(),
-                        prog.defs.len()
-                    );
-                    // normalize a `main` if present
-                    if let Some(nf) = prog.normalize("main") {
-                        println!("main = {}", tally::surface::pretty(&nf));
-                    }
-                    ExitCode::SUCCESS
-                }
-                Err(diags) => {
-                    eprintln!("{path}: rejected ({} error(s)):", diags.len());
-                    for d in &diags {
-                        eprintln!("  - {d}");
-                    }
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        Some("lang") => {
-            let Some(path) = args.get(2) else {
-                eprintln!("usage: tally lang <file>");
-                return ExitCode::FAILURE;
-            };
-            let src = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("cannot read {path}: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
             match tally::rust_surface::check_program(&src) {
                 Ok(prog) => {
                     println!(
-                        "ok: {path} elaborates and type-checks ({} datatype(s), {} def(s))",
+                        "ok: {path} type-checks ({} datatype(s), {} def(s)) — no leaks, no use-after-free",
                         prog.sig.datas.len(),
                         prog.defs.len()
                     );
-                    if let Some(nf) = prog.normalize("main") {
-                        println!("main = {}", tally::rust_surface::pretty(&nf));
-                    }
                     ExitCode::SUCCESS
                 }
                 Err(diags) => {
@@ -113,9 +62,49 @@ fn main() -> ExitCode {
             };
             run_native(&src, path)
         }
+        Some("build") => {
+            // tally build <file> [-o <out>] [-O0|-O1|-O2|-O3]
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: tally build <file> [-o <out>] [-O2]");
+                return ExitCode::FAILURE;
+            };
+            let mut out: Option<String> = None;
+            let mut opt: u32 = 2;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" => {
+                        out = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "-O0" => { opt = 0; i += 1; }
+                    "-O1" => { opt = 1; i += 1; }
+                    "-O2" => { opt = 2; i += 1; }
+                    "-O3" => { opt = 3; i += 1; }
+                    other => {
+                        eprintln!("tally build: unknown flag `{other}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let out = out.unwrap_or_else(|| {
+                std::path::Path::new(path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "a.out".into())
+            });
+            build_native(&src, path, &out, opt)
+        }
         _ => {
             eprintln!(
-                "lambda-Tally compiler\nusage:\n  tally check <file>   (low-level linear checker)\n  tally dep <file>     (dependent surface, ML syntax)\n  tally lang <file>    (v1.0 surface: ML types, Rust terms)\n  tally run <file>     (type-check + COMPILE main to native, run it)"
+                "lambda-Tally compiler\nusage:\n  tally check <file>   (type-check: dependent + linear, no leaks/use-after-free)\n  tally run <file>     (type-check + JIT-compile main to native, run it)\n  tally build <file>   (type-check + AOT-compile to a native executable)\n     [-o out] [-O0|-O1|-O2|-O3]"
             );
             ExitCode::FAILURE
         }
@@ -138,7 +127,7 @@ fn run_native(src: &str, path: &str) -> ExitCode {
         eprintln!("{path}: no `main` to run");
         return ExitCode::FAILURE;
     };
-    match tally::dep_codegen::run_nat(&prog.sig, body) {
+    match tally::dep_codegen::run_main(&prog.sig, body) {
         Ok(v) => {
             println!("{path}: type-checks, compiled to native, ran → {v}");
             ExitCode::SUCCESS
@@ -153,5 +142,62 @@ fn run_native(src: &str, path: &str) -> ExitCode {
 #[cfg(not(feature = "llvm"))]
 fn run_native(_src: &str, _path: &str) -> ExitCode {
     eprintln!("`tally run` needs the native backend; rebuild with `--features llvm`");
+    ExitCode::FAILURE
+}
+
+#[cfg(feature = "llvm")]
+fn build_native(src: &str, path: &str, out: &str, opt: u32) -> ExitCode {
+    use inkwell::OptimizationLevel;
+    let prog = match tally::rust_surface::check_program(src) {
+        Ok(p) => p,
+        Err(diags) => {
+            eprintln!("{path}: rejected ({} error(s)):", diags.len());
+            for d in &diags {
+                eprintln!("  - {d}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((_, _, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
+        eprintln!("{path}: no `main` to build");
+        return ExitCode::FAILURE;
+    };
+    let opt = match opt {
+        0 => OptimizationLevel::None,
+        1 => OptimizationLevel::Less,
+        3 => OptimizationLevel::Aggressive,
+        _ => OptimizationLevel::Default,
+    };
+    let obj = format!("{out}.o");
+    let obj_path = std::path::Path::new(&obj);
+    if let Err(e) = tally::dep_codegen::build_object(&prog.sig, body, obj_path, opt) {
+        eprintln!("{path}: cannot compile to object: {e}");
+        return ExitCode::FAILURE;
+    }
+    // link the object into a standalone executable with the system C toolchain.
+    let status = std::process::Command::new("cc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(out)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("{path}: type-checks, AOT-compiled → {out}");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("{path}: linker (cc) failed with {s}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{path}: cannot invoke linker `cc`: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "llvm"))]
+fn build_native(_src: &str, _path: &str, _out: &str, _opt: u32) -> ExitCode {
+    eprintln!("`tally build` needs the native backend; rebuild with `--features llvm`");
     ExitCode::FAILURE
 }

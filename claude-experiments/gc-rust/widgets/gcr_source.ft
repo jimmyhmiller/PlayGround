@@ -1,0 +1,162 @@
+// gcr_source.ft — the SOURCE pane of the gc-rust Compiler Explorer + scratchpad.
+//
+// Half of a two-pane explorer (the other half is gcr_out.ft). Splitting into
+// two real panes gives each its OWN independent pane-level scroll — the source
+// here scrolls separately from the output — and a resizable split, using the
+// widget message bus to coordinate (the idiomatic jim multi-pane pattern).
+//
+// SCRATCHPAD: on every edit the buffer is (1) published to the output pane for
+// IR, and (2) evaluated via `gcr eval` — which runs it and reports the result
+// value + type, synthesizing a `main` when the buffer is a bare expression. The
+// result shows in a strip under the header, REPL-style. So you can type
+// `1 + 2 * 3` or `fib(20)` with no `main` and see the answer live.
+//
+// params: { file: "<abs .gcr to seed>", session: "<bus/tmp namespace>",
+//           gcr: "<abs gcr binary>" }
+import "host"
+import { col_text, col_muted, col_accent } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn seed_file() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/examples/fib.gcr")
+fn session()   = param("session", "default")
+fn gcr_bin()   = param("gcr", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/target/debug/gcr")
+fn tmp_path()  = "/tmp/gcr_explorer_" + session() + ".gcr"
+fn topic()     = "gcr/src/" + session()
+
+fn c_ok()  = "#a6df99"
+fn c_err() = "#e8908c"
+
+fn init_state() = {
+    src: "", loaded: false,
+    eval_msg: "", eval_color: "#8a93a3",
+    eval_proc: -1, eval_acc: [], eval_busy: false, eval_pending: false,
+}
+let state = atom(init_state())
+
+// Write the buffer to the shared temp file and tell the output pane where it
+// is (it recompiles the IR live). Evaluation is EXPLICIT — see eval_now(),
+// triggered by the ▶ Eval button — so you always know what just ran.
+fn publish() {
+    write_file(tmp_path(), (@state).src)
+    emit_retained(topic(), { tmp: tmp_path() })
+}
+
+// Run `gcr eval` on the temp file. Coalesced (one in flight + one pending) so
+// fast typing can't pile up JIT processes — we only care about the newest text.
+fn eval_now() {
+    let s = @state
+    if s.eval_busy {
+        reset!(state, { ..s, eval_pending: true })
+        return
+    }
+    let h = proc_spawn(gcr_bin(), ["eval", tmp_path()])
+    if h == -1 {
+        reset!(state, { ..s, eval_msg: "eval: spawn failed (check `gcr` param)", eval_color: c_err() })
+        request_render()
+        return
+    }
+    reset!(state, { ..s, eval_proc: h, eval_acc: [], eval_busy: true, eval_pending: false,
+                    eval_msg: "evaluating…", eval_color: col_muted() })
+    request_render()
+}
+
+// Turn the `gcr eval` JSON into a one-line { msg, color } readout.
+fn fmt_eval(text) {
+    let rec = unwrap_or(json_parse(text), {})
+    if typeof(rec) != "Record" { return { msg: "eval: unparseable output", color: c_err() } }
+    if not unwrap_or(get(rec, "ok"), false) {
+        let stage = unwrap_or(get(rec, "stage"), "error")
+        return { msg: "✗ " + stage + ": " + unwrap_or(get(rec, "error"), "?"), color: c_err() }
+    }
+    if unwrap_or(get(rec, "kind"), "") == "value" {
+        let note = if unwrap_or(get(rec, "wrapped"), false) { "   (expr)" } else { "" }
+        return { msg: "⮑  " + unwrap_or(get(rec, "value"), "?") + "  :  " + unwrap_or(get(rec, "type"), "?") + note,
+                 color: c_ok() }
+    }
+    return { msg: "— " + unwrap_or(get(rec, "message"), "no result"), color: col_muted() }
+}
+
+fn on_start() {
+    // Normalize to the CURRENT state shape every start. Hot-reload rehydrates
+    // the persisted state, which may be an older shape missing the eval_* fields;
+    // reading a missing field faults (→ blank pane). Rebuild all fields here,
+    // seeding `src` from the file param only when empty. Any in-flight proc
+    // handle from before the reload is dead, so reset busy/pending.
+    let s = @state
+    let cur = unwrap_or(get(s, "src"), "")
+    let text = if cur == "" {
+        let r = read_file(seed_file())
+        if typeof(r) == "Record" and unwrap_or(get(r, "ok"), false) {
+            unwrap_or(get(r, "text"), "")
+        } else {
+            "fn main() -> i64 {\n    let mut total = 0;\n    let mut i = 0;\n    while i < 10 { total = total + i * i; i = i + 1; }\n    total\n}\n"
+        }
+    } else { cur }
+    reset!(state, {
+        src: text, loaded: true,
+        eval_msg: "press  ▶ Eval  to run the whole buffer",
+        eval_color: "#8a93a3",
+        eval_proc: -1, eval_acc: [], eval_busy: false, eval_pending: false,
+    })
+    publish()
+    eval_now()  // one eval on start so the strip shows a result immediately
+}
+
+// The embedded editor owns the live buffer; edits arrive here (full buffer,
+// not echoed back). We mirror it into state and publish for the IR pane, but
+// we do NOT eval on every keystroke — eval is explicit (the ▶ Eval button).
+// Mark the last result stale so you always know it's behind your edits.
+fn on_editor_change(id, value) {
+    if id != "src" { return }
+    reset!(state, { ..(@state), src: value,
+                    eval_msg: "edited — press  ▶ Eval  to re-run", eval_color: "#8a93a3" })
+    publish()
+    request_render()
+}
+
+// Explicit eval triggers. (Cmd+Enter can't reach a widget while the editor has
+// focus yet — requested from the editor author — so the button is the way in.)
+fn on_click(x, y, shift, cmd, id) {
+    if id == "eval" { eval_now() }
+}
+
+fn on_proc_output(handle, line) {
+    let s = @state
+    if handle == s.eval_proc { reset!(state, { ..s, eval_acc: push(s.eval_acc, line) }) }
+}
+
+fn on_proc_exit(handle, code) {
+    let s = @state
+    if handle != s.eval_proc { return }
+    let r = fmt_eval(join(s.eval_acc, "\n"))
+    reset!(state, { ..s, eval_msg: r.msg, eval_color: r.color, eval_proc: -1, eval_acc: [], eval_busy: false })
+    request_render()
+    // A newer edit arrived while we were evaluating — run once more.
+    if s.eval_pending { eval_now() }
+}
+
+fn render(w, h) {
+    let s = @state
+    {
+        // height:"100%" MUST flow down the ancestor chain or the editor leaf
+        // falls back to its 420x280 default — which both shrinks it AND lets its
+        // viewport transiently resolve to ~0, the trigger for the blank-portal bug.
+        kind: "vstack", gap: 6.0, pad: 10.0, style: { height: "100%" }, children: [
+            { kind: "hstack", gap: 8.0, align: "center", children: [
+                { kind: "text", value: "◆ gcr source", size: 13.0, weight: "bold", color: col_accent() },
+                { kind: "button", id: "eval", label: "▶ Eval" },
+                { kind: "text", value: "runs the whole buffer — a bare expression needs no `main`", size: 10.0, color: col_muted() },
+            ]},
+            // Scratchpad result strip: ⮑ <value> : <type>, or a compile error.
+            // Defensive reads: render can run once before on_start normalizes
+            // the state shape after a hot-reload.
+            { kind: "text", value: if unwrap_or(get(s, "eval_msg"), "") == "" { " " } else { unwrap_or(get(s, "eval_msg"), "") },
+              size: 12.0, family: "mono", color: unwrap_or(get(s, "eval_color"), "#8a93a3"), selectable: true },
+            // A real embedded jim editor: Rust syntax highlighting, caret,
+            // selection, undo, internal caret-scroll. State is keyed by `id`
+            // and survives re-render + hot-reload while the pane lives.
+            { kind: "editor", id: "src", value: s.src, lang: "rust",
+              style: { flex_grow: 1.0, width: "100%", height: "100%", min_height: "200" } },
+        ]
+    }
+}

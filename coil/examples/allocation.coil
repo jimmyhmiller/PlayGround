@@ -1,19 +1,22 @@
-; Allocation is part of the type: a pointer's *region* is in its type, picks its
-; storage, and is checked. `make` returns a (ptr i64) -- allowed to cross a
-; function boundary -- while a (ptr i64) may not (it would fail to type-check).
-;   coil examples/allocation.coil  =>  42
+; Allocation is an OPERATION, not part of the pointer type (Zig/C-style).
+; `(ptr T)` is region-less -- just a pointer. *Where* memory comes from is the
+; choice: `alloc-stack` -> alloca, `alloc-static` -> a global, `alloc-heap` ->
+; malloc; all three yield the same `(ptr T)`. No regions, lifetimes, or escape
+; checks -- a stack pointer is a pointer like any other, and `free` is yours to
+; call (paired by hand with a heap allocation).
+;   coil run examples/allocation.coil; echo $?  =>  42
 
 (defn make [(v :i64)] (-> (ptr i64))
-  (let [p (alloc-heap i64)]      ; malloc
+  (let [p (alloc-heap i64)]      ; malloc; this (ptr i64) freely crosses the boundary
     (store! p v)
     p))
 
 (defn main [] (-> :i64)
   (let [h (make 10)          ; heap pointer from another function
         s (alloc-static i64)     ; a global
-        f (alloc-stack i64)]     ; an alloca, cannot escape this frame
+        f (alloc-stack i64)]     ; an alloca on this frame
     (store! s 30)
     (store! f 2)
     (let [sum (iadd (load h) (iadd (load s) (load f)))]
-      (free h)               ; only heap pointers can be freed
+      (free h)               ; pair the explicit free with the heap allocation
       sum)))                 ; 10 + 30 + 2 = 42

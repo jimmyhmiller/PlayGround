@@ -307,6 +307,16 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
         Type::Ptr(p) => validate_type(p, cx, tps),
         Type::Ref(_, p) => validate_type(p, cx, tps),
         Type::Array(e, _) => validate_type(e, cx, tps),
+        Type::Vec(e, n) => {
+            if *n == 0 {
+                return Err("vec must have a positive lane count".to_string());
+            }
+            match &**e {
+                Type::Int(..) | Type::Float(..) => Ok(()),
+                Type::Struct(p) if tps.contains(p) => Ok(()), // opaque param; checked at mono
+                other => Err(format!("vec element must be a scalar int/float, got {}", ty_str(other))),
+            }
+        }
         Type::Struct(name) => {
             if tps.contains(name) {
                 Ok(()) // an in-scope, opaque type parameter
@@ -402,6 +412,21 @@ fn synth(
                 .cloned()
                 .ok_or_else(|| format!("in '{fname}': unbound variable '{name}'"))?;
             Ok((Expr::Var(name.clone()), t))
+        }
+        Expr::LlvmIr { result, args, body } => {
+            // The raw-IR escape hatch: the form's type *is* the declared result
+            // (the checker trusts the annotation; the LLVM verifier checks the
+            // body). Operands are synthesized so they compose like any value.
+            validate_type(result, cx, tps)
+                .map_err(|e| format!("in '{fname}': llvm-ir result type: {e}"))?;
+            let eargs = args
+                .iter()
+                .map(|a| synth(a, None, env, cx, tps, fname).map(|(e, _)| e))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                Expr::LlvmIr { result: result.clone(), args: eargs, body: body.clone() },
+                result.clone(),
+            ))
         }
         Expr::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
@@ -1450,6 +1475,7 @@ fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
+        Type::Vec(e, n) => Type::Vec(Box::new(subst_apply(e, subst)), *n),
         Type::Struct(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
         Type::App(name, args) => {
             Type::App(name.clone(), args.iter().map(|a| subst_apply(a, subst)).collect())
@@ -1733,6 +1759,7 @@ fn ty_str(t: &Type) -> String {
         Type::Ref(false, pointee) => format!("(ref {})", ty_str(pointee)),
         Type::Struct(name) => name.clone(),
         Type::Array(e, n) => format!("(array {} {n})", ty_str(e)),
+        Type::Vec(e, n) => format!("(vec {} {n})", ty_str(e)),
         Type::Fn(cc, params, ret) => {
             let ps: Vec<String> = params.iter().map(ty_str).collect();
             format!("(fnptr {cc} [{}] {})", ps.join(" "), ty_str(ret))

@@ -59,6 +59,20 @@ pub fn codegen<'ctx>(
     Ok(Compiled { module: cg.module, entry_name })
 }
 
+/// Emit the LLVM IR text for a whole program — the `gcr emit llvm` tap that
+/// completes the source→silicon chain. With `optimize`, runs the same O2
+/// pipeline the JIT/AOT paths use, so you see the IR that actually executes;
+/// without it, the naive pre-optimization IR (every local a stack slot), which
+/// maps more directly onto the Core IR.
+pub fn emit_llvm_ir(prog: &CoreProgram, optimize: bool) -> Result<String, CodegenError> {
+    let ctx = Context::create();
+    let compiled = codegen(&ctx, prog)?;
+    if optimize {
+        optimize_module(&compiled.module);
+    }
+    Ok(compiled.module.print_to_string().to_string())
+}
+
 struct Codegen<'ctx, 'p> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
@@ -87,14 +101,32 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     /// [N x i8] payload }` (handled by their byte size).
     fn value_struct_ty(&self, vid: ValueId) -> inkwell::types::StructType<'ctx> {
         let v = &self.prog.values[vid as usize];
-        if v.variants.is_some() {
-            // Value enum: tag + opaque payload bytes (size from layout).
-            let payload_bytes = v.size.saturating_sub(4) as u32;
-            let fields: Vec<BasicTypeEnum> = vec![
-                self.ctx.i32_type().as_basic_type_enum(),
-                self.ctx.i8_type().array_type(payload_bytes).as_basic_type_enum(),
-            ];
-            return self.ctx.struct_type(&fields, false);
+        if let Some(variants) = &v.variants {
+            let max_ptrs = crate::core::value_enum_max_ptrs(variants) as u32;
+            if max_ptrs == 0 {
+                // Compact value enum: `{ i32 tag, [payload bytes] }`.
+                let payload_bytes = v.size.saturating_sub(4) as u32;
+                return self.ctx.struct_type(
+                    &[
+                        self.ctx.i32_type().as_basic_type_enum(),
+                        self.ctx.i8_type().array_type(payload_bytes).as_basic_type_enum(),
+                    ],
+                    false,
+                );
+            }
+            // Pointers-first value enum: `{ [max_ptrs x ptr], i32 tag, [raw] }`.
+            // Ref payloads share the leading slots across variants (fixed offsets,
+            // GC-traceable); scalars/POD-values go in the raw byte region.
+            let ptr = self.ctx.ptr_type(AddressSpace::default());
+            let raw_bytes = v.size.saturating_sub(max_ptrs * 8 + 4) as u32;
+            return self.ctx.struct_type(
+                &[
+                    ptr.array_type(max_ptrs).as_basic_type_enum(),
+                    self.ctx.i32_type().as_basic_type_enum(),
+                    self.ctx.i8_type().array_type(raw_bytes).as_basic_type_enum(),
+                ],
+                false,
+            );
         }
         let fields: Vec<BasicTypeEnum> = v.fields.iter()
             .filter_map(|r| self.llvm_ty(r))
@@ -242,8 +274,8 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
 
         let ptr = self.ctx.ptr_type(AddressSpace::default());
 
-        // Partition locals: Ref-typed locals become GC frame root slots; all
-        // others get plain allocas. Count the refs to size the frame.
+        // Partition locals: Ref-typed locals become GC frame *direct* root slots;
+        // all others get plain allocas. Count the refs to size the frame.
         let num_roots = f.locals.iter().filter(|r| matches!(r, Repr::Ref(_))).count();
         // Map: local id -> root index (only for Ref locals).
         let mut root_index: Vec<Option<u32>> = vec![None; f.locals.len()];
@@ -257,17 +289,40 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
         }
 
-        // Emit the GC frame `{ parent, origin, [num_roots x ptr] }` when there
-        // are any roots. Even with zero roots we keep the chain consistent so
-        // the GC always sees a well-formed parent link; but if there are no
-        // roots and no allocations, the frame is unnecessary — we still emit it
-        // when num_roots > 0.
-        let frame = if num_roots > 0 {
+        // Value-with-ref locals: a flattened `#[value]` aggregate (in a plain
+        // alloca) holding GC refs. Those refs live in untraced stack memory, so a
+        // collection while the local is live would dangle them. We register each
+        // interior ref's *address* as an INDIRECT frame root: the GC dereferences
+        // it and relocates the pointer in place inside the alloca. `(local_idx,
+        // value-relative ref offsets)`.
+        let value_indirect: Vec<(usize, Vec<u16>)> = f
+            .locals
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| match r {
+                Repr::Value(vid) if value_has_ref(&self.prog.values, *vid) => {
+                    let mut offs = Vec::new();
+                    value_interior_offsets(&self.prog.values, *vid, 0, &mut offs);
+                    if offs.is_empty() { None } else { Some((i, offs)) }
+                }
+                _ => None,
+            })
+            .collect();
+        let num_indirect: usize = value_indirect.iter().map(|(_, o)| o.len()).sum();
+
+        // Emit the GC frame `{ parent, origin, [num_roots x ptr], [num_indirect x
+        // ptr] }` when there are any roots (direct or indirect). A zero-length
+        // trailing array adds no bytes, so frames without indirect roots are
+        // byte-identical to before.
+        let i32t = self.ctx.i32_type();
+        let frame = if num_roots > 0 || num_indirect > 0 {
             let roots_arr = ptr.array_type(num_roots as u32);
-            let frame_ty = self.ctx.struct_type(&[ptr.into(), ptr.into(), roots_arr.into()], false);
+            let ind_arr = ptr.array_type(num_indirect as u32);
+            let frame_ty = self
+                .ctx
+                .struct_type(&[ptr.into(), ptr.into(), roots_arr.into(), ind_arr.into()], false);
             let frame = self.builder.build_alloca(frame_ty, "gcframe").unwrap();
-            // origin global
-            let origin = self.frame_origin(&f.name, num_roots as u32);
+            let origin = self.frame_origin(&f.name, num_roots as u32, num_indirect as u32);
             let origin_field = self.builder.build_struct_gep(frame_ty, frame, 1, "origin.f").unwrap();
             self.builder.build_store(origin_field, origin).unwrap();
             // link: parent = thread.top_frame; thread.top_frame = &frame
@@ -276,19 +331,31 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             let parent_field = self.builder.build_struct_gep(frame_ty, frame, 0, "parent.f").unwrap();
             self.builder.build_store(parent_field, prev).unwrap();
             self.builder.build_store(tf_ptr, frame).unwrap();
-            // zero all root slots
+            // Zero all direct root slots.
             let roots_field = self.builder.build_struct_gep(frame_ty, frame, 2, "roots.f").unwrap();
             for k in 0..num_roots {
                 let slot = unsafe {
                     self.builder.build_in_bounds_gep(
                         roots_arr, roots_field,
-                        &[self.ctx.i32_type().const_zero(), self.ctx.i32_type().const_int(k as u64, false)],
+                        &[i32t.const_zero(), i32t.const_int(k as u64, false)],
                         "rinit",
                     ).unwrap()
                 };
                 self.builder.build_store(slot, ptr.const_null()).unwrap();
             }
-            Some((frame, frame_ty, roots_arr, roots_field, tf_ptr))
+            // Zero all indirect slots (filled with alloca-interior addresses below).
+            let ind_field = self.builder.build_struct_gep(frame_ty, frame, 3, "ind.f").unwrap();
+            for k in 0..num_indirect {
+                let slot = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        ind_arr, ind_field,
+                        &[i32t.const_zero(), i32t.const_int(k as u64, false)],
+                        "iinit",
+                    ).unwrap()
+                };
+                self.builder.build_store(slot, ptr.const_null()).unwrap();
+            }
+            Some((frame, frame_ty, roots_arr, roots_field, ind_arr, ind_field, tf_ptr))
         } else {
             None
         };
@@ -298,11 +365,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let mut slots: Vec<Option<PointerValue<'ctx>>> = Vec::with_capacity(f.locals.len());
         for (i, lr) in f.locals.iter().enumerate() {
             if let Some(ri) = root_index[i] {
-                let (_, _, roots_arr, roots_field, _) = frame.unwrap();
+                let (_, _, roots_arr, roots_field, ..) = frame.unwrap();
                 let slot = unsafe {
                     self.builder.build_in_bounds_gep(
                         roots_arr, roots_field,
-                        &[self.ctx.i32_type().const_zero(), self.ctx.i32_type().const_int(ri as u64, false)],
+                        &[i32t.const_zero(), i32t.const_int(ri as u64, false)],
                         &format!("root{}", ri),
                     ).unwrap()
                 };
@@ -311,6 +378,33 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 match self.llvm_ty(lr) {
                     Some(t) => slots.push(Some(self.builder.build_alloca(t, &format!("l{}", i)).unwrap())),
                     None => slots.push(None),
+                }
+            }
+        }
+
+        // Wire indirect roots: zero each value-with-ref local's alloca (so its
+        // interior refs start null and GC-safe before assignment), then store the
+        // address of each interior ref into an indirect slot. The alloca is stable
+        // on the stack, so these addresses are set once and the GC updates the
+        // refs they point at in place.
+        if let Some((_, _, _, _, ind_arr, ind_field, _)) = frame {
+            let mut j = 0u32;
+            for (local_idx, offs) in &value_indirect {
+                let alloca = slots[*local_idx].expect("value-with-ref local has an alloca");
+                if let Some(vty) = self.llvm_ty(&f.locals[*local_idx]) {
+                    self.builder.build_store(alloca, vty.const_zero()).unwrap();
+                }
+                for &off in offs {
+                    let addr = self.obj_addr(alloca, off as u64);
+                    let slot = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            ind_arr, ind_field,
+                            &[i32t.const_zero(), i32t.const_int(j as u64, false)],
+                            "islot",
+                        ).unwrap()
+                    };
+                    self.builder.build_store(slot, addr).unwrap();
+                    j += 1;
                 }
             }
         }
@@ -347,8 +441,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
         }
 
-        let unlink = frame.map(|(_, _, _, _, tf_ptr)| {
-            let (frame_ptr, frame_ty, ..) = frame.unwrap();
+        let unlink = frame.map(|(frame_ptr, frame_ty, _, _, _, _, tf_ptr)| {
             (frame_ptr, frame_ty, tf_ptr)
         });
 
@@ -400,15 +493,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     }
 
     /// A private constant `FrameOrigin { num_roots, pad, name }` global.
-    fn frame_origin(&self, fn_name: &str, num_roots: u32) -> PointerValue<'ctx> {
+    fn frame_origin(&self, fn_name: &str, num_roots: u32, num_indirect: u32) -> PointerValue<'ctx> {
         let i32t = self.ctx.i32_type();
         let ptr = self.ctx.ptr_type(AddressSpace::default());
+        // FrameOrigin (runtime, #[repr(C)]): { u32 num_roots, u32 num_indirect, ptr name }.
         let origin_ty = self.ctx.struct_type(&[i32t.into(), i32t.into(), ptr.into()], false);
         let g = self.module.add_global(origin_ty, None, &format!("__origin_{}", fn_name));
         g.set_constant(true);
         g.set_initializer(&origin_ty.const_named_struct(&[
             i32t.const_int(num_roots as u64, false).into(),
-            i32t.const_zero().into(),
+            i32t.const_int(num_indirect as u64, false).into(),
             ptr.const_null().into(),
         ]));
         g.as_pointer_value()
@@ -514,6 +608,12 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "prints").unwrap());
                 Ok(Some(r))
             }
+            CoreExprKind::PrintStrRaw(s) => {
+                let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
+                let f = self.module.get_function("ai_print_str_raw").unwrap();
+                let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "printsr").unwrap());
+                Ok(Some(r))
+            }
             CoreExprKind::StrLen(s) => {
                 let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
                 let f = self.module.get_function("ai_str_len").unwrap();
@@ -565,16 +665,54 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 ).unwrap());
                 Ok(Some(r))
             }
+            CoreExprKind::ReadFile { layout, path } => {
+                let pv = self.gen_expr(fcx, path)?.unwrap().into_pointer_value();
+                let i32t = self.ctx.i32_type();
+                let f = self.module.get_function("ai_read_file").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), pv.into()],
+                    "readfile",
+                ).unwrap());
+                Ok(Some(r))
+            }
             CoreExprKind::StrToFloat(s) => {
                 let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
                 let f = self.module.get_function("ai_str_to_float").unwrap();
                 let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "strtof").unwrap());
                 Ok(Some(r))
             }
+            CoreExprKind::FloatBits(f) => {
+                let fv = self.gen_expr(fcx, f)?.unwrap().into_float_value();
+                let r = self.builder.build_bit_cast(fv, self.ctx.i64_type(), "fbits").unwrap();
+                Ok(Some(r))
+            }
             CoreExprKind::StrHash(s) => {
                 let sv = self.gen_expr(fcx, s)?.unwrap().into_pointer_value();
                 let f = self.module.get_function("ai_str_hash").unwrap();
                 let r = call_result(self.builder.build_call(f, &[fcx.thread.into(), sv.into()], "strhash").unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::TypeIdOf(obj) => {
+                // The type_id is a u16 in the object header at offset 8
+                // ([gc_word: u64 @0][type_id: u16 @8]); zero-extend to i64.
+                let ov = self.gen_expr(fcx, obj)?.unwrap().into_pointer_value();
+                let i16t = self.ctx.i16_type();
+                let i64t = self.ctx.i64_type();
+                let addr = self.obj_addr(ov, 8);
+                let tid = self.builder.build_load(i16t, addr, "tid").unwrap().into_int_value();
+                let r = self.builder.build_int_z_extend(tid, i64t, "tid64").unwrap();
+                Ok(Some(r.into()))
+            }
+            CoreExprKind::TypeNameOf { layout, obj } => {
+                let ov = self.gen_expr(fcx, obj)?.unwrap().into_pointer_value();
+                let i32t = self.ctx.i32_type();
+                let f = self.module.get_function("ai_type_name").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), ov.into()],
+                    "typename",
+                ).unwrap());
                 Ok(Some(r))
             }
             CoreExprKind::AsCBytes { src, elem, is_string, copy_out } => {
@@ -630,6 +768,17 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     f,
                     &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), vv.into()],
                     "strfromnum",
+                ).unwrap());
+                Ok(Some(r))
+            }
+            CoreExprKind::StrFromChar { layout, cp } => {
+                let cpv = self.gen_expr(fcx, cp)?.unwrap();
+                let i32t = self.ctx.i32_type();
+                let f = self.module.get_function("ai_char_to_str").unwrap();
+                let r = call_result(self.builder.build_call(
+                    f,
+                    &[fcx.thread.into(), i32t.const_int(*layout as u64, false).into(), cpv.into()],
+                    "strfromchar",
                 ).unwrap());
                 Ok(Some(r))
             }
@@ -810,7 +959,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 let v = self.gen_expr(fcx, value)?.unwrap();
                 let off = match loc {
                     FieldLoc::Ptr { idx } => Self::HEADER + (*idx as u64) * 8,
-                    FieldLoc::Raw { offset, .. } => {
+                    FieldLoc::Raw { offset, .. } | FieldLoc::ValueAt { offset, .. } => {
                         let lid = match &base.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("setfield on non-ref".into())) };
                         let lay = &self.prog.layouts[lid as usize];
                         Self::HEADER + (lay.ptr_fields as u64) * 8 + *offset as u64
@@ -929,6 +1078,12 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             i64t.fn_type(&[ptr.into(), ptr.into()], false),
             Some(inkwell::module::Linkage::External),
         );
+        // i64 ai_print_str_raw(ptr thread, ptr s) — no trailing newline
+        self.module.add_function(
+            "ai_print_str_raw",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
         // i64 ai_str_len(ptr thread, ptr s)
         self.module.add_function(
             "ai_str_len",
@@ -959,10 +1114,53 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into(), i64t.into(), i64t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
+        // ptr ai_read_file(ptr thread, i32 type_id, ptr path)
+        self.module.add_function(
+            "ai_read_file",
+            ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
         // ptr ai_str_from_int(ptr thread, i32 type_id, i64 v)
         self.module.add_function(
             "ai_str_from_int",
             ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_char_to_str(ptr thread, i32 type_id, i64 cp)
+        self.module.add_function(
+            "ai_char_to_str",
+            ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_type_name(ptr thread, i32 str_type_id, ptr obj)
+        self.module.add_function(
+            "ai_type_name",
+            ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // In-language field reflection (all thread-first; RuntimeCall-dispatched).
+        // i64 ai_reflect_field_count(ptr thread, ptr obj)
+        self.module.add_function(
+            "ai_reflect_field_count",
+            i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_reflect_field_kind(ptr thread, ptr obj, i64 i)
+        self.module.add_function(
+            "ai_reflect_field_kind",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // i64 ai_reflect_field_i64(ptr thread, ptr obj, i64 i)
+        self.module.add_function(
+            "ai_reflect_field_i64",
+            i64t.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
+        // ptr ai_reflect_field_name(ptr thread, i64 str_type_id, ptr obj, i64 i)
+        self.module.add_function(
+            "ai_reflect_field_name",
+            ptr.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
         // ptr ai_str_from_float(ptr thread, i32 type_id, f64 v)
@@ -1083,6 +1281,17 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     /// The byte offset of a heap object's data start (the `Full` header size).
     const HEADER: u64 = 16;
 
+    /// Whether a value of this repr can be moved by the GC — a heap reference, or
+    /// a flattened `#[value]` aggregate holding one. Such a value cached in a
+    /// register before a safepoint goes stale and must be reloaded after.
+    fn repr_relocates(&self, r: &Repr) -> bool {
+        match r {
+            Repr::Ref(_) => true,
+            Repr::Value(v) => value_has_ref(&self.prog.values, *v),
+            _ => false,
+        }
+    }
+
     /// Allocate a heap object of `layout`, store `tag` (for enums) + `fields`,
     /// and return the pointer. The fields are evaluated and stored; pointer
     /// fields go in the leading pointer slots, raw fields at their byte offset.
@@ -1098,7 +1307,13 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let i64t = self.ctx.i64_type();
 
         // Evaluate field values FIRST (they may allocate; their own roots are
-        // already spilled by their sub-expressions). Then allocate, then store.
+        // Evaluate field values FIRST. Then allocate, then store. The allocation
+        // is a SAFEPOINT: a GC there relocates every rooted local, so any GC value
+        // we cached in a register before the alloc is now STALE (it points at the
+        // pre-relocation address). ANF guarantees every GC field is an atomic
+        // local (or null), so after the alloc we RELOAD those fields from their
+        // (now-relocated) slots — a side-effect-free load — before storing them.
+        // Scalar/POD-value fields don't relocate, so their cached values stand.
         let mut vals = Vec::with_capacity(fields.len());
         for fe in fields {
             vals.push((self.gen_expr(fcx, fe)?, fe.repr.clone()));
@@ -1112,6 +1327,13 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 "obj",
             ).unwrap(),
         ).into_pointer_value();
+
+        // Reload GC-valued fields from their slots post-allocation (see above).
+        for (fe, slot) in fields.iter().zip(vals.iter_mut()) {
+            if self.repr_relocates(&fe.repr) {
+                slot.0 = self.gen_expr(fcx, fe)?;
+            }
+        }
 
         let lay = &self.prog.layouts[layout as usize];
         // Tag (for enums) at raw offset 0.
@@ -1141,8 +1363,23 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     raw_cursor += sz;
                     if let Some(v) = v { self.builder.build_store(addr, *v).unwrap(); }
                 }
-                Repr::Value(_) | Repr::Unit => {
-                    // value-typed fields: not yet stored field-by-field in v0.
+                Repr::Value(vid) => {
+                    // A flattened value aggregate: store the whole LLVM struct at
+                    // its inline byte offset. Offset progression mirrors
+                    // `build_ref_layout` (align to 8, advance by the value's
+                    // size), so loads via `FieldLoc::ValueAt` find it. Value types
+                    // reaching here are POD (no embedded GC refs — `build_ref_layout`
+                    // rejects ref-containing ones), so no write barrier is needed.
+                    let sz = self.prog.values[*vid as usize].size as u64;
+                    raw_cursor = align_up64(raw_cursor, 8);
+                    let addr = self.obj_addr(obj, raw_cursor);
+                    raw_cursor += sz;
+                    if let Some(v) = v {
+                        self.builder.build_store(addr, *v).unwrap();
+                    }
+                }
+                Repr::Unit => {
+                    // Zero-size: no storage.
                 }
             }
         }
@@ -1185,6 +1422,9 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let sty = self.value_struct_ty(value);
         let i32t = self.ctx.i32_type();
+        let max_ptrs = crate::core::value_enum_max_ptrs(
+            self.prog.values[value as usize].variants.as_ref().unwrap(),
+        ) as u32;
         // Evaluate payload field values first.
         let mut vals = Vec::with_capacity(fields.len());
         for f in fields {
@@ -1192,22 +1432,58 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 vals.push((v, f.repr.clone()));
             }
         }
-        // Alloca the aggregate, zero it, store tag + payload, reload.
         let slot = self.builder.build_alloca(sty, "ve").unwrap();
         self.builder.build_store(slot, sty.const_zero()).unwrap();
-        // tag = field 0.
-        let tag_addr = self.builder.build_struct_gep(sty, slot, 0, "ve.tag").unwrap();
-        self.builder.build_store(tag_addr, i32t.const_int(tag as u64, false)).unwrap();
-        // payload bytes = field 1; store each field at its running byte offset.
-        if sty.count_fields() > 1 {
-            let payload_addr = self.builder.build_struct_gep(sty, slot, 1, "ve.pl").unwrap();
-            let mut off = 0u64;
+
+        if max_ptrs == 0 {
+            // Compact `{ i32 tag, [payload bytes] }`: tag field 0, payload field 1.
+            let tag_addr = self.builder.build_struct_gep(sty, slot, 0, "ve.tag").unwrap();
+            self.builder.build_store(tag_addr, i32t.const_int(tag as u64, false)).unwrap();
+            if sty.count_fields() > 1 {
+                let payload_addr = self.builder.build_struct_gep(sty, slot, 1, "ve.pl").unwrap();
+                let mut off = 0u64;
+                for (v, repr) in &vals {
+                    let (sz, _) = Self::repr_size_align(repr);
+                    off = align_up64(off, sz);
+                    let field_addr = self.payload_field_addr(payload_addr, off);
+                    self.builder.build_store(field_addr, *v).unwrap();
+                    off += sz;
+                }
+            }
+        } else {
+            // Pointers-first `{ [max_ptrs x ptr], i32 tag, [raw] }`: ref payloads
+            // into the shared leading slots (field 0), tag (field 1), scalars/
+            // POD-values into the raw region (field 2). Mirrors the reference-enum
+            // heap layout so embedded refs sit at fixed, GC-traceable offsets.
+            let ptr = self.ctx.ptr_type(AddressSpace::default());
+            let ptr_arr_ty = ptr.array_type(max_ptrs);
+            let ptr_arr = self.builder.build_struct_gep(sty, slot, 0, "ve.ptrs").unwrap();
+            let tag_addr = self.builder.build_struct_gep(sty, slot, 1, "ve.tag").unwrap();
+            self.builder.build_store(tag_addr, i32t.const_int(tag as u64, false)).unwrap();
+            let raw_addr = self.builder.build_struct_gep(sty, slot, 2, "ve.raw").unwrap();
+            let mut ptr_slot = 0u64;
+            let mut raw_off = 0u64;
             for (v, repr) in &vals {
-                let (sz, _) = Self::repr_size_align(repr);
-                off = align_up64(off, sz);
-                let field_addr = self.payload_field_addr(payload_addr, off);
-                self.builder.build_store(field_addr, *v).unwrap();
-                off += sz;
+                match repr {
+                    Repr::Ref(_) => {
+                        let elem = unsafe {
+                            self.builder.build_in_bounds_gep(
+                                ptr_arr_ty, ptr_arr,
+                                &[i32t.const_zero(), i32t.const_int(ptr_slot, false)],
+                                "ve.pslot",
+                            ).unwrap()
+                        };
+                        ptr_slot += 1;
+                        self.builder.build_store(elem, *v).unwrap();
+                    }
+                    _ => {
+                        let (sz, _) = Self::repr_size_align(repr);
+                        raw_off = align_up64(raw_off, sz);
+                        let field_addr = self.payload_field_addr(raw_addr, raw_off);
+                        raw_off += sz;
+                        self.builder.build_store(field_addr, *v).unwrap();
+                    }
+                }
             }
         }
         let agg = self.builder.build_load(sty, slot, "ve.val").unwrap();
@@ -1407,7 +1683,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         captures: &[CoreExpr],
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i32t = self.ctx.i32_type();
-        // Evaluate captures first (they may allocate).
+        // Evaluate captures first. The env allocation below is a SAFEPOINT, so any
+        // GC-valued capture cached in a register before it goes stale on a
+        // collection (relocated slot, stale register) — exactly the `gen_alloc`
+        // hazard. ANF makes every GC capture an atomic local, so we reload them
+        // from their relocated slots after the alloc (a side-effect-free load).
         let mut vals = Vec::with_capacity(captures.len());
         for c in captures {
             vals.push((self.gen_expr(fcx, c)?, c.repr.clone()));
@@ -1416,6 +1696,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let obj = call_result(
             self.builder.build_call(alloc, &[fcx.thread.into(), i32t.const_int(env as u64, false).into()], "clo").unwrap(),
         ).into_pointer_value();
+        for (c, slot) in captures.iter().zip(vals.iter_mut()) {
+            if self.repr_relocates(&c.repr) {
+                slot.0 = self.gen_expr(fcx, c)?;
+            }
+        }
 
         let lay = &self.prog.layouts[env as usize];
         let ptr_fields = lay.ptr_fields as u64;
@@ -1525,6 +1810,14 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 let raw_base = Self::HEADER + (lay.ptr_fields as u64) * 8;
                 (raw_base + *offset as u64, self.scalar_ty(*repr))
             }
+            FieldLoc::ValueAt { offset, value } => {
+                // A flattened value aggregate: load the whole LLVM struct from
+                // its inline byte offset in the raw region.
+                let lid = match &base.repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("field on non-ref".into())) };
+                let lay = &self.prog.layouts[lid as usize];
+                let raw_base = Self::HEADER + (lay.ptr_fields as u64) * 8;
+                (raw_base + *offset as u64, self.value_struct_ty(*value).as_basic_type_enum())
+            }
             FieldLoc::ValueField { .. } => unreachable!(),
         };
         let addr = self.obj_addr(obj, off);
@@ -1540,16 +1833,27 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         repr: &Repr,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let scrut_ty = self.llvm_ty(&scrutinee.repr).unwrap().into_struct_type();
+        let vid = match &scrutinee.repr { Repr::Value(v) => *v, _ => unreachable!("value match on non-value") };
+        let max_ptrs = crate::core::value_enum_max_ptrs(
+            self.prog.values[vid as usize].variants.as_ref().unwrap(),
+        ) as u32;
         let agg = self.gen_expr(fcx, scrutinee)?.unwrap().into_struct_value();
         // Spill the aggregate so we can address its payload bytes for binds.
         let scrut_slot = self.builder.build_alloca(scrut_ty, "vm.scrut").unwrap();
         self.builder.build_store(scrut_slot, agg).unwrap();
-        let tag = self.builder.build_extract_value(agg, 0, "vetag").unwrap().into_int_value();
-        // Compute the payload pointer while still in the current (entry) block,
-        // before we move the builder to the switch/arm blocks.
-        let payload_ptr = if scrut_ty.count_fields() > 1 {
-            Some(self.builder.build_struct_gep(scrut_ty, scrut_slot, 1, "vm.pl").unwrap())
-        } else { None };
+        // Compact layout: tag is field 0, payload bytes field 1. Pointers-first:
+        // tag is field 1, the ptr-slot array field 0, the raw bytes field 2.
+        let (tag_idx, ptr_arr, payload_ptr) = if max_ptrs == 0 {
+            let pl = if scrut_ty.count_fields() > 1 {
+                Some(self.builder.build_struct_gep(scrut_ty, scrut_slot, 1, "vm.pl").unwrap())
+            } else { None };
+            (0u32, None, pl)
+        } else {
+            let arr = self.builder.build_struct_gep(scrut_ty, scrut_slot, 0, "vm.ptrs").unwrap();
+            let raw = self.builder.build_struct_gep(scrut_ty, scrut_slot, 2, "vm.raw").unwrap();
+            (1u32, Some(arr), Some(raw))
+        };
+        let tag = self.builder.build_extract_value(agg, tag_idx, "vetag").unwrap().into_int_value();
         let func = fcx.func;
         let cont_bb = self.ctx.append_basic_block(func, "vm.cont");
         let result_slot = self.llvm_ty(repr).map(|t| self.builder.build_alloca(t, "vm.res").unwrap());
@@ -1569,23 +1873,38 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         self.builder.position_at_end(unreachable_bb);
         self.builder.build_unreachable().unwrap();
 
+        let ptr_arr_ty = self.ctx.ptr_type(AddressSpace::default()).array_type(max_ptrs);
         for (arm, bb) in arm_blocks {
             self.builder.position_at_end(bb);
-            // Bind payload fields by loading them from the byte region.
-            if let Some(payload_ptr) = payload_ptr {
-                let mut off = 0u64;
-                for &local in &arm.binds {
-                    let lrepr = fcx.local_reprs[local as usize].clone();
-                    if let Some(lty) = self.llvm_ty(&lrepr) {
-                        let (sz, _) = Self::repr_size_align(&lrepr);
-                        off = align_up64(off, sz);
-                        let faddr = self.payload_field_addr(payload_ptr, off);
-                        off += sz;
-                        let v = self.builder.build_load(lty, faddr, "vm.bind").unwrap();
-                        if let Some(slot) = fcx.slots[local as usize] {
-                            self.builder.build_store(slot, v).unwrap();
-                        }
-                    }
+            // Bind payload fields. Compact: all binds come from the byte region at
+            // running offsets. Pointers-first: `Ref` binds come from the leading
+            // ptr-slot array, the rest from the raw byte region — the exact
+            // partition `gen_make_value_variant` used to store them.
+            let mut raw_off = 0u64;
+            let mut ptr_slot = 0u64;
+            for &local in &arm.binds {
+                let lrepr = fcx.local_reprs[local as usize].clone();
+                let Some(lty) = self.llvm_ty(&lrepr) else { continue };
+                let faddr = if max_ptrs > 0 && matches!(lrepr, Repr::Ref(_)) {
+                    let elem = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            ptr_arr_ty, ptr_arr.unwrap(),
+                            &[i32t.const_zero(), i32t.const_int(ptr_slot, false)],
+                            "vm.pslot",
+                        ).unwrap()
+                    };
+                    ptr_slot += 1;
+                    elem
+                } else {
+                    let (sz, _) = Self::repr_size_align(&lrepr);
+                    raw_off = align_up64(raw_off, sz);
+                    let a = self.payload_field_addr(payload_ptr.unwrap(), raw_off);
+                    raw_off += sz;
+                    a
+                };
+                let v = self.builder.build_load(lty, faddr, "vm.bind").unwrap();
+                if let Some(slot) = fcx.slots[local as usize] {
+                    self.builder.build_store(slot, v).unwrap();
                 }
             }
             let v = self.gen_expr(fcx, &arm.body)?;
@@ -2285,7 +2604,134 @@ pub fn layouts_to_type_infos(prog: &CoreProgram) -> Vec<crate::gc::TypeInfo> {
                 crate::core::VarLen::Values => ti.with_varlen_values(l.ptr_fields),
                 crate::core::VarLen::Bytes => ti.with_varlen_bytes(l.ptr_fields),
             };
+            // Interior pointers (GC refs inside flattened value fields). Leaked
+            // to `&'static` — the type table lives for the whole program, so this
+            // is a bounded one-time leak, not a per-object cost. Empty stays `&[]`.
+            if !l.interior_ptrs.is_empty() {
+                let leaked: &'static [u16] = Box::leak(l.interior_ptrs.clone().into_boxed_slice());
+                ti = ti.with_interior_ptrs(leaked);
+            }
             ti
+        })
+        .collect()
+}
+
+/// Size and alignment (bytes) of a value-aggregate field's repr — mirrors
+/// `layout::value_size_align`'s per-field rule so interior offsets match the LLVM
+/// struct layout codegen actually uses.
+fn value_field_size_align(values: &[crate::core::ValueLayout], f: &crate::core::Repr) -> (u32, u32) {
+    use crate::core::Repr;
+    match f {
+        Repr::Unit => (0, 1),
+        Repr::Scalar(s) => {
+            let b = (s.bits().max(8) / 8).max(1);
+            (b, b)
+        }
+        Repr::Ref(_) => (8, 8),
+        Repr::Value(sub) => (values[*sub as usize].size, values[*sub as usize].align),
+    }
+}
+
+/// Whether value type `vid` (transitively) holds a GC reference.
+fn value_has_ref(values: &[crate::core::ValueLayout], vid: u32) -> bool {
+    use crate::core::Repr;
+    let vl = &values[vid as usize];
+    let mut all: Vec<&Repr> = Vec::new();
+    match &vl.variants {
+        Some(variants) => variants.iter().for_each(|v| all.extend(v.fields.iter())),
+        None => all.extend(vl.fields.iter()),
+    }
+    all.iter().any(|f| match f {
+        Repr::Ref(_) => true,
+        Repr::Value(s) => value_has_ref(values, *s),
+        _ => false,
+    })
+}
+
+/// Byte offsets (value-relative, shifted by `base`) of GC refs inside a flattened
+/// value aggregate `vid`, recursing into nested value structs. Mirrors
+/// `layout::value_ref_offsets`. A value **enum** reserves `max_ptrs` leading slots
+/// shared across variants (pointers-first layout), so its embedded refs are at
+/// fixed offsets `base, base+8, …` regardless of the active variant.
+fn value_interior_offsets(values: &[crate::core::ValueLayout], vid: u32, base: u16, out: &mut Vec<u16>) {
+    use crate::core::Repr;
+    let vl = &values[vid as usize];
+    if let Some(variants) = &vl.variants {
+        let max_ptrs = crate::core::value_enum_max_ptrs(variants);
+        for k in 0..max_ptrs {
+            out.push(base + k * 8);
+        }
+        return;
+    }
+    let mut off = 0u32;
+    for f in &vl.fields {
+        let (sz, align) = value_field_size_align(values, f);
+        off = (off + align - 1) & !(align - 1);
+        match f {
+            Repr::Ref(_) => out.push(base + off as u16),
+            Repr::Value(sub) => value_interior_offsets(values, *sub, base + off as u16, out),
+            _ => {}
+        }
+        off += sz;
+    }
+}
+
+/// Collect the program's per-layout reflection metadata into a runtime
+/// [`gc::TypeMeta`] table, one entry per `LayoutId` (index = `type_id`). The
+/// metadata is built during layout lowering (see `src/layout.rs`) and travels
+/// inside each `Layout`; here we just clone it out and stamp the `type_id` from
+/// its table position. Parallel to [`layouts_to_type_infos`].
+pub fn layouts_to_type_meta(prog: &CoreProgram) -> Vec<crate::gc::TypeMeta> {
+    prog.layouts
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut m = l.meta.clone();
+            m.type_id = i as u16;
+            m
+        })
+        .collect()
+}
+
+/// Build the runtime [`gc::ValueMeta`] table — reflection metadata for inline
+/// `#[value]` aggregates, indexed by `ValueId`. Value-struct fields get
+/// value-relative byte offsets (mirroring `value_size_align`'s placement) so the
+/// heap-dump renderer can recurse into flattened value fields. Value enums are
+/// emitted as `Opaque` for now (their tag/union offsets aren't decoded yet).
+pub fn layouts_to_value_meta(prog: &CoreProgram) -> Vec<crate::gc::ValueMeta> {
+    use crate::core::Repr;
+    use crate::gc::{FieldMeta, FieldTy, TypeKind, ValueMeta};
+    let align_up = |off: u32, a: u32| -> u32 { (off + a - 1) & !(a - 1) };
+    prog.values
+        .iter()
+        .enumerate()
+        .map(|(vid, vl)| {
+            let kind = if vl.variants.is_some() {
+                TypeKind::Opaque
+            } else {
+                let mut off = 0u32;
+                let mut fields = Vec::new();
+                for (i, r) in vl.fields.iter().enumerate() {
+                    let name = vl.field_names.get(i).cloned().unwrap_or_else(|| i.to_string());
+                    let (sz, align, fty) = match r {
+                        Repr::Unit => continue,
+                        Repr::Scalar(s) => {
+                            let b = (s.bits().max(8) / 8).max(1);
+                            (b, b, FieldTy::Scalar(crate::layout::scalar_kind(*s)))
+                        }
+                        Repr::Ref(lid) => (8, 8, FieldTy::Ref(*lid as u16)),
+                        Repr::Value(sub) => {
+                            let v = &prog.values[*sub as usize];
+                            (v.size, v.align, FieldTy::Value(*sub as u16))
+                        }
+                    };
+                    off = align_up(off, align);
+                    fields.push(FieldMeta { name, offset: off as u16, ty: fty });
+                    off += sz;
+                }
+                TypeKind::Struct { fields }
+            };
+            ValueMeta { value_id: vid as u16, name: vl.name.clone(), kind }
         })
         .collect()
 }
@@ -2294,7 +2740,27 @@ pub fn layouts_to_type_infos(prog: &CoreProgram) -> Vec<crate::gc::TypeInfo> {
 /// its result. Sets up a [`RuntimeContext`] over the program's layouts, wires
 /// the `ai_gc_*` externs, and passes a live `Thread*`. `stress` forces a
 /// collection on every allocation (exercises the GC + precise roots).
+/// How the JIT driver configures the GC heap. Lets tests force frequent
+/// collections (a tiny semi-space that fills during construction) to exercise
+/// precise rooting and relocation without the (multithread-unsafe) every-alloc
+/// stress mode.
+#[derive(Clone, Copy)]
+pub enum GcRunMode {
+    /// Production default: generational nursery over tenured.
+    Generational,
+    /// `--gc-stress`: semi-space + collect on every allocation (single-thread aid).
+    Stress,
+    /// Semi-space of the given byte size; collects when it fills. A small size
+    /// triggers real collections during a program's own construction.
+    SemiSpace(usize),
+}
+
 pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenError> {
+    jit_run_i64_mode(prog, if stress { GcRunMode::Stress } else { GcRunMode::Generational })
+}
+
+/// JIT-run with an explicit GC heap mode (see [`GcRunMode`]).
+pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, CodegenError> {
     use crate::runtime::{self, RuntimeContext};
     let ctx = Context::create();
     let compiled = codegen(&ctx, prog)?;
@@ -2320,6 +2786,7 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
         ("ai_print_int", runtime::ai_print_int as *const () as usize),
         ("ai_print_float", runtime::ai_print_float as *const () as usize),
         ("ai_print_str", runtime::ai_print_str as *const () as usize),
+        ("ai_print_str_raw", runtime::ai_print_str_raw as *const () as usize),
         ("ai_str_len", runtime::ai_str_len as *const () as usize),
         ("ai_str_eq", runtime::ai_str_eq as *const () as usize),
         ("ai_str_concat", runtime::ai_str_concat as *const () as usize),
@@ -2327,6 +2794,12 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
         ("ai_str_substring", runtime::ai_str_substring as *const () as usize),
         ("ai_str_from_int", runtime::ai_str_from_int as *const () as usize),
         ("ai_str_from_float", runtime::ai_str_from_float as *const () as usize),
+        ("ai_char_to_str", runtime::ai_char_to_str as *const () as usize),
+        ("ai_type_name", runtime::ai_type_name as *const () as usize),
+        ("ai_reflect_field_count", runtime::ai_reflect_field_count as *const () as usize),
+        ("ai_reflect_field_kind", runtime::ai_reflect_field_kind as *const () as usize),
+        ("ai_reflect_field_i64", runtime::ai_reflect_field_i64 as *const () as usize),
+        ("ai_reflect_field_name", runtime::ai_reflect_field_name as *const () as usize),
         ("ai_str_to_float", runtime::ai_str_to_float as *const () as usize),
         ("ai_str_hash", runtime::ai_str_hash as *const () as usize),
         ("ai_str_copy_to_buf", runtime::ai_str_copy_to_buf as *const () as usize),
@@ -2364,13 +2837,19 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
     // points to from-space after a flip") are semi-space-specific and don't hold
     // for a nursery, so stress validates relocation correctness on the
     // semi-space collector, the collector it was designed to torture-test.
-    let mut rt = if stress {
-        let mut rt = RuntimeContext::new(8 << 20, tis);
-        rt.heap().set_gc_every_alloc(true);
-        rt
-    } else {
-        RuntimeContext::new_generational(16 << 20, 256 << 20, tis)
+    let mut rt = match mode {
+        GcRunMode::Stress => {
+            let rt = RuntimeContext::new(8 << 20, tis);
+            rt.heap().set_gc_every_alloc(true);
+            rt
+        }
+        GcRunMode::SemiSpace(size) => RuntimeContext::new(size, tis),
+        GcRunMode::Generational => RuntimeContext::new_generational(16 << 20, 256 << 20, tis),
     };
+    // Install reflection metadata so heap-exploration tooling and in-language
+    // reflection can recover type/field names (the GC type table is nameless).
+    rt.heap().set_type_meta(layouts_to_type_meta(prog));
+    rt.heap().set_value_meta(layouts_to_value_meta(prog));
 
     let addr = ee
         .get_function_address(&compiled.entry_name)
@@ -2381,6 +2860,15 @@ pub fn jit_run_i64_gc(prog: &CoreProgram, stress: bool) -> Result<i64, CodegenEr
     // Publish the current thread so FFI callback trampolines can recover it.
     runtime::set_current_thread(thread);
     let result = unsafe { f(thread) };
+    // Opt-in heap dump once the program returns (heap quiescent).
+    // `GCR_HEAP_DUMP=json` emits a structured snapshot; other values emit text.
+    if let Some(mode) = std::env::var_os("GCR_HEAP_DUMP") {
+        if mode == "json" {
+            eprint!("{}", unsafe { crate::gc::dump_heap_json(rt.heap()) });
+        } else {
+            eprint!("{}", unsafe { crate::gc::dump_heap_text(rt.heap()) });
+        }
+    }
     // Opt-in GC stats (set GCR_GC_STATS=1) — useful to confirm the generational
     // split is working: minor collections should dominate on young-heavy loads.
     if std::env::var("GCR_GC_STATS").is_ok() {
@@ -2511,9 +2999,36 @@ pub fn codegen_aot_object(
     table_global.set_constant(true);
     table_global.set_initializer(&table_arr);
 
+    // ---- Emit the reflection metadata blob as an i8[] constant ------------
+    // Encoded by `gc::reflect::encode`; decoded by `gcr_runtime_main` at startup
+    // into the heap's TypeMeta table (type/field names + field types). Nameless
+    // programs (no reflection) still get a valid empty-table blob.
+    let interior: Vec<Vec<u16>> = prog.layouts.iter().map(|l| l.interior_ptrs.clone()).collect();
+    let meta_bytes = crate::gc::reflect::encode(
+        &layouts_to_type_meta(prog),
+        &layouts_to_value_meta(prog),
+        &interior,
+    );
+    let meta_vals: Vec<_> = meta_bytes
+        .iter()
+        .map(|b| i8t.const_int(*b as u64, false))
+        .collect();
+    let meta_arr = i8t.const_array(&meta_vals);
+    let meta_global = module.add_global(
+        i8t.array_type(meta_bytes.len() as u32),
+        None,
+        "gcrust_type_meta",
+    );
+    meta_global.set_constant(true);
+    meta_global.set_initializer(&meta_arr);
+
     // ---- Declare gcr_runtime_main -----------------------------------------
-    // i64 gcr_runtime_main(ptr layouts, i64 ti_count, ptr entry)
-    let runtime_main_ty = i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], false);
+    // i64 gcr_runtime_main(ptr layouts, i64 ti_count, ptr meta, i64 meta_len,
+    //                      ptr entry)
+    let runtime_main_ty = i64t.fn_type(
+        &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+        false,
+    );
     let runtime_main = module.add_function(
         "gcr_runtime_main",
         runtime_main_ty,
@@ -2533,6 +3048,8 @@ pub fn codegen_aot_object(
             &[
                 table_global.as_pointer_value().into(),
                 i64t.const_int(records.len() as u64, false).into(),
+                meta_global.as_pointer_value().into(),
+                i64t.const_int(meta_bytes.len() as u64, false).into(),
                 entry_ptr.into(),
             ],
             "rc",
@@ -2565,6 +3082,7 @@ pub fn codegen_aot_object(
 pub fn build_executable(
     prog: &CoreProgram,
     out_path: &std::path::Path,
+    extra_link_args: &[String],
 ) -> Result<(), CodegenError> {
     // Emit the object next to the output so cleanup is easy and paths are stable.
     let obj_path = out_path.with_extension("o");
@@ -2574,13 +3092,16 @@ pub fn build_executable(
 
     // Link: object + runtime staticlib + system libs. The runtime is Rust, so it
     // needs libpthread/libdl/libm/libc + (on glibc) libgcc_s for unwinding. `cc`
-    // pulls libc; we add the rest explicitly.
+    // pulls libc; we add the rest explicitly. `extra_link_args` (from `gcr build
+    // --link-arg …`) is appended for FFI programs — notably the self-hosting
+    // compiler, which links libLLVM (`-L<llvm>/lib -lLLVM -Wl,-rpath,…`).
     let status = std::process::Command::new("cc")
         .arg("-o")
         .arg(out_path)
         .arg(&obj_path)
         .arg(&staticlib)
         .args(["-lpthread", "-ldl", "-lm"])
+        .args(extra_link_args)
         .status()
         .map_err(|e| CodegenError(format!("failed to invoke linker (cc): {}", e)))?;
     if !status.success() {
@@ -2617,6 +3138,14 @@ fn locate_runtime_staticlib() -> Result<std::path::PathBuf, CodegenError> {
     }
     // Baked in by build.rs — always matches this binary's build profile.
     let baked = PathBuf::from(env!("GCRUST_RT_STATICLIB"));
+    // Auto-refresh stale staticlibs. Cargo rebuilds the gcrust-rt *rlib* on every
+    // `cargo build`/`run`/`test` (it's a dependency of `gcr`), but NOT the
+    // *staticlib* AOT links — only `-p gcrust-rt` does. So after a runtime change
+    // the `.a` goes stale and AOT binaries crash from an ABI mismatch. Here, in a
+    // dev tree, we detect that (the always-fresh rlib being newer than the `.a`)
+    // and rebuild the staticlib once, so `gcr build` is always correct without the
+    // caller remembering `cargo build -p gcrust-rt`.
+    refresh_staticlib_if_stale(&baked);
     if baked.exists() {
         return Ok(baked);
     }
@@ -2625,6 +3154,76 @@ fn locate_runtime_staticlib() -> Result<std::path::PathBuf, CodegenError> {
          Rebuild gcr (`cargo build [--release]`), or set $GCRUST_RUNTIME_LIB.",
         baked.display()
     )))
+}
+
+/// Rebuild the gcrust-rt staticlib via `cargo` if it is missing or older than the
+/// runtime's own sources. No-op outside a dev tree — for an installed `gcr` the
+/// source tree is absent, so the baked staticlib is used as-is.
+///
+/// Staleness is measured against the *sources* (newest `.rs`/`Cargo.toml` under
+/// `crates/gcrust-rt`), not against the sibling top-level rlib: that rlib, like
+/// the staticlib, is only refreshed by `-p gcrust-rt`/`--workspace`, so the two
+/// move in lockstep and never reveal staleness. (The genuinely-fresh rlib a
+/// normal `cargo build` produces lives hashed under `target/<p>/deps/`.) Source
+/// mtime directly answers the real question: "was the `.a` built after the last
+/// runtime edit?"
+fn refresh_staticlib_if_stale(staticlib: &std::path::Path) {
+    use std::fs;
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rt_dir = manifest.join("crates").join("gcrust-rt");
+    // Outside a dev checkout (installed gcr) there is nothing to rebuild from.
+    if !rt_dir.exists() {
+        return;
+    }
+    let mtime = |p: &std::path::Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let a_time = mtime(staticlib);
+    let newest_src = newest_mtime_under(&rt_dir.join("src"))
+        .into_iter()
+        .chain(mtime(&rt_dir.join("Cargo.toml")))
+        .max();
+    let stale = match (a_time, newest_src) {
+        (None, _) => true,                 // missing/cleaned → build it
+        (Some(a), Some(src)) => src > a,    // a runtime source is newer than the .a
+        (Some(_), None) => false,           // no sources found (shouldn't happen)
+    };
+    if !stale {
+        return;
+    }
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    eprintln!("gcr: gcrust-rt staticlib is stale — rebuilding (cargo build -p gcrust-rt)…");
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.args(["build", "-p", "gcrust-rt"]).current_dir(manifest);
+    if !cfg!(debug_assertions) {
+        cmd.arg("--release");
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => eprintln!("gcr: warning: staticlib rebuild exited with {s} (linking the existing .a)"),
+        Err(e) => eprintln!("gcr: warning: could not run cargo to refresh staticlib: {e} (linking the existing .a)"),
+    }
+}
+
+/// Newest modification time of any file in `dir` (recursive), or `None` if the
+/// directory is empty/absent.
+fn newest_mtime_under(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(path),
+                Ok(_) => {
+                    if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+                        newest = Some(newest.map_or(m, |n| n.max(m)));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    newest
 }
 
 #[cfg(test)]

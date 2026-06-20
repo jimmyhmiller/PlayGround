@@ -25,8 +25,15 @@
 //! built-ins — see the tests. (`Nat` is also kept as a primitive, with literals
 //! and `+`, because it is a convenient index type.)
 //!
-//! `Type : Type` for now (fine for a language; for a logic, a universe hierarchy
-//! is needed — ../../docs/07-implementation-guide.md §7).
+//! UNIVERSES (Phase F): a predicative, cumulative hierarchy `Type i : Type
+//! (i+1)` (NOT the old, inconsistent `Type : Type`). `Π`/`Σ` live at the `max`
+//! of their parts; cumulativity is one-directional (`Type i` is accepted where
+//! `Type j` is wanted iff `i ≤ j`) and conversion stays strict, so the hierarchy
+//! never collapses. A datatype's universe must be ≥ every constructor argument's
+//! level (`check_signature`), which blocks the Girard/Hurkens paradox — a total
+//! program can no longer inhabit `False`. Universe POLYMORPHISM in definitions is
+//! not yet implemented; the surface defaults every `Type` to `Type 0` (a sound
+//! sublanguage). See FUTURE_WORK §3.1, §4.3, §13.
 
 use crate::mult::Mult;
 use std::rc::Rc;
@@ -34,7 +41,11 @@ use std::rc::Rc;
 #[derive(Clone, PartialEq, Debug)]
 pub enum Term {
     Var(usize), // de Bruijn index (0 = innermost)
-    Type,
+    /// `Type i` — the `i`-th universe. `Type i : Type (i+1)`, predicative and
+    /// cumulative (a `Type i` is also a `Type j` for `i ≤ j`). The hierarchy is
+    /// what makes the total fragment a consistent logic: with the old `Type :
+    /// Type`, Girard's paradox inhabits `False` (FUTURE_WORK §3.1, §13).
+    Type(usize),
     Pi(Mult, Box<Term>, Box<Term>), // Π[π](_:A). B
     Lam(Box<Term>),
     App(Box<Term>, Box<Term>),
@@ -48,7 +59,18 @@ pub enum Term {
     Zero,
     Suc(Box<Term>),
     NatElim(Box<Term>, Box<Term>, Box<Term>, Box<Term>),
+    /// `NatCase(motive, z, s, scrut)` — a NON-recursive case split on a `Nat`:
+    /// `z : motive 0`, `s : (k:Nat) → motive (Suc k)` (NO induction hypothesis),
+    /// result `motive scrut`. Used to express the case-split inside a general
+    /// recursive function (`Fix`), where recursion is by explicit self-call.
+    NatCase(Box<Term>, Box<Term>, Box<Term>, Box<Term>),
     Add(Box<Term>, Box<Term>),
+    /// `Fix(ty, body)` — GENERAL recursion: `body : ty` may reference itself via
+    /// de Bruijn 0 (bound by the `Fix`). This is NOT total — it is the program-level
+    /// recursion for value computations (not for type-level indices). The kernel
+    /// treats it OPAQUELY (it never unfolds during type-checking, so normalization
+    /// stays terminating); only the backend unfolds it, as a real native function.
+    Fix(Box<Term>, Box<Term>),
     // ---- the identity type ----
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
@@ -70,7 +92,7 @@ pub enum Term {
 
 #[derive(Clone)]
 pub enum Value {
-    VType,
+    VType(usize),
     VPi(Mult, Box<Value>, Closure),
     VLam(Closure),
     VSigma(Mult, Box<Value>, Closure),
@@ -93,6 +115,11 @@ pub enum Neutral {
     NFst(Box<Neutral>),
     NSnd(Box<Neutral>),
     NNatElim(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
+    /// a `NatCase` stuck on a neutral scrutinee.
+    NNatCase(Box<Value>, Box<Value>, Box<Value>, Box<Neutral>),
+    /// an OPAQUE recursive function (`Fix`): never unfolds in the kernel. Holds
+    /// the (closed) type and body terms; applications accumulate as `NApp`.
+    NFix(Box<Term>, Box<Term>),
     /// elim stuck on a neutral scrutinee: data name, motive, methods, scrutinee.
     NElim(String, Box<Value>, Vec<Value>, Box<Neutral>),
     /// an opaque postulate constant.
@@ -135,6 +162,14 @@ pub struct DataDecl {
     /// index telescope, in the context [params].
     pub indices: Vec<(Mult, Term)>,
     pub ctors: Vec<Constructor>,
+    /// The universe the fully-applied family `D params idxs` inhabits: `D … :
+    /// Type universe`. `check_signature` REQUIRES `universe ≥ i` for every
+    /// constructor argument of type `Type i` — a constructor that stores a
+    /// `Type j` forces the family up to `Type (j+1)`, so a datatype cannot sit
+    /// in a universe small enough to quantify over itself. This is the
+    /// predicativity side-condition that blocks Girard's/Hurkens' paradox; with
+    /// the old `Type : Type` it was vacuous (FUTURE_WORK §3.1, §4.3, §13).
+    pub universe: usize,
 }
 
 #[derive(Clone, Default)]
@@ -170,7 +205,7 @@ impl Signature {
 fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
     match t {
         Term::Var(i) => env[env.len() - 1 - i].clone(),
-        Term::Type => Value::VType,
+        Term::Type(i) => Value::VType(*i),
         Term::Pi(pi, a, b) => Value::VPi(
             *pi,
             Box::new(eval(sig, env, a)),
@@ -202,6 +237,14 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             eval(sig, env, s),
             eval(sig, env, scrut),
         ),
+        Term::NatCase(p, z, s, scrut) => vnatcase(
+            eval(sig, env, p),
+            eval(sig, env, z),
+            eval(sig, env, s),
+            eval(sig, env, scrut),
+        ),
+        // Fix is OPAQUE: it evaluates to a neutral and never unfolds in the kernel.
+        Term::Fix(ty, body) => Value::VNeu(Neutral::NFix(ty.clone(), body.clone())),
         Term::Add(a, b) => match (eval(sig, env, a), eval(sig, env, b)) {
             (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
             (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
@@ -261,12 +304,19 @@ fn vsuc(n: Value) -> Value {
 
 fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
     match scrut {
-        Value::VNatLit(0) => z,
-        Value::VNatLit(k) => {
-            let pred = Value::VNatLit(k - 1);
-            let rec = vnatelim(p.clone(), z, s.clone(), pred.clone());
-            vapp(vapp(s, pred), rec)
+        // A CLOSED literal `n` folds ITERATIVELY: acc = z; for k in 0..n { acc =
+        // s k acc }. This is the `%builtin Nat` representation optimization at the
+        // evaluator (à la Idris 2): a `Nat` is a machine integer, so normalizing an
+        // eliminator over a big `n` is a counting loop — never a recursion `n` deep
+        // that would blow the host stack during type-checking.
+        Value::VNatLit(n) => {
+            let mut acc = z;
+            for k in 0..n {
+                acc = vapp(vapp(s.clone(), Value::VNatLit(k)), acc);
+            }
+            acc
         }
+        // `suc pred` for a NEUTRAL pred: one unfolding, then stuck on `pred`.
         Value::VSuc(pred) => {
             let rec = vnatelim(p.clone(), z, s.clone(), (*pred).clone());
             vapp(vapp(s, *pred), rec)
@@ -278,6 +328,23 @@ fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
             Box::new(nu),
         )),
         _ => unreachable!("natElim on a non-Nat (ill-typed term reached eval)"),
+    }
+}
+
+/// `natCase z s n` — a single case split (no recursion): `n = 0 ⇒ z`,
+/// `n = suc k ⇒ s k`. Stuck on a neutral.
+fn vnatcase(p: Value, z: Value, s: Value, scrut: Value) -> Value {
+    match scrut {
+        Value::VNatLit(0) => z,
+        Value::VNatLit(n) => vapp(s, Value::VNatLit(n - 1)),
+        Value::VSuc(pred) => vapp(s, *pred),
+        Value::VNeu(nu) => Value::VNeu(Neutral::NNatCase(
+            Box::new(p),
+            Box::new(z),
+            Box::new(s),
+            Box::new(nu),
+        )),
+        _ => unreachable!("natCase on a non-Nat (ill-typed term reached eval)"),
     }
 }
 
@@ -304,14 +371,17 @@ fn velim(
                 .expect("constructor not in this family");
             let p = decl.params.len();
             let mut result = methods[cidx].clone();
+            // Apply ALL the constructor's arguments first…
+            for (i, _) in ctor.args.iter().enumerate() {
+                result = vapp(result, vargs[p + i].clone());
+            }
+            // …then one induction hypothesis per recursive argument, in order
+            // (args-then-IHs — the standard method telescope; see `method_ty_tm`).
             for (i, (_, aty)) in ctor.args.iter().enumerate() {
-                let arg_val = vargs[p + i].clone();
-                result = vapp(result, arg_val.clone());
-                // is this argument a recursive occurrence of `data`?
                 let env: Vec<Value> = vargs[0..p + i].to_vec();
                 if let Value::VData(dn, _) = eval(sig, &env, aty) {
                     if dn == data {
-                        let rec = velim(sig, data, motive, methods, arg_val);
+                        let rec = velim(sig, data, motive, methods, vargs[p + i].clone());
                         result = vapp(result, rec);
                     }
                 }
@@ -330,7 +400,7 @@ fn velim(
 
 fn quote(lvl: usize, v: &Value) -> Term {
     match v {
-        Value::VType => Term::Type,
+        Value::VType(i) => Term::Type(*i),
         Value::VPi(pi, a, clo) => Term::Pi(
             *pi,
             Box::new(quote(lvl, a)),
@@ -377,6 +447,14 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
             Box::new(quote(lvl, s)),
             Box::new(quote_neu(lvl, scrut)),
         ),
+        Neutral::NNatCase(p, z, s, scrut) => Term::NatCase(
+            Box::new(quote(lvl, p)),
+            Box::new(quote(lvl, z)),
+            Box::new(quote(lvl, s)),
+            Box::new(quote_neu(lvl, scrut)),
+        ),
+        // a `Fix` is closed and opaque — re-emit it verbatim.
+        Neutral::NFix(ty, body) => Term::Fix(ty.clone(), body.clone()),
         Neutral::NElim(data, m, methods, scrut) => Term::Elim(
             data.clone(),
             Box::new(quote(lvl, m)),
@@ -422,7 +500,7 @@ fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
     let go1 = |t: &Term| map_vars(t, depth + 1, f);
     match t {
         Term::Var(i) => f(*i, depth),
-        Term::Type | Term::Nat | Term::NatLit(_) | Term::Zero | Term::Const(_) => t.clone(),
+        Term::Type(_) | Term::Nat | Term::NatLit(_) | Term::Zero | Term::Const(_) => t.clone(),
         Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Lam(b) => Term::Lam(Box::new(go1(b))),
@@ -431,6 +509,14 @@ fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
         Term::Fst(p) => Term::Fst(Box::new(go(p))),
         Term::Snd(p) => Term::Snd(Box::new(go(p))),
         Term::Suc(k) => Term::Suc(Box::new(go(k))),
+        Term::NatCase(p, z, s, sc) => Term::NatCase(
+            Box::new(go(p)),
+            Box::new(go(z)),
+            Box::new(go(s)),
+            Box::new(go(sc)),
+        ),
+        // `Fix(ty, body)` binds `self` (de Bruijn 0) in `body`; `ty` does not see it.
+        Term::Fix(ty, body) => Term::Fix(Box::new(go(ty)), Box::new(go1(body))),
         Term::NatElim(p, z, s, sc) => Term::NatElim(
             Box::new(go(p)),
             Box::new(go(z)),
@@ -497,31 +583,31 @@ fn map_decl(t: &Term, p: usize, sparam_tms: &[Term], prior_bd: &[usize], cur: us
     subst(t, &sub)
 }
 
-/// `P : Π(indices). D params indices → Type`, instantiated at `sparam_tms`.
-fn motive_ty_tm(decl: &DataDecl, sparam_tms: &[Term]) -> Term {
-    fn go(decl: &DataDecl, sparam_tms: &[Term], i: usize, bd: &mut Vec<usize>, cur: usize) -> Term {
-        let p = decl.params.len();
-        if i < decl.indices.len() {
-            let dom = map_decl(&decl.indices[i].1, p, sparam_tms, bd, cur);
-            bd.push(cur);
-            let body = go(decl, sparam_tms, i + 1, bd, cur + 1);
-            bd.pop();
-            Term::Pi(Mult::Omega, Box::new(dom), Box::new(body))
-        } else {
-            // Π(_ : D params index-vars). Type
-            let mut dargs: Vec<Term> =
-                (0..p).map(|k| shift(cur, 0, &sparam_tms[k])).collect();
-            for ii in 0..decl.indices.len() {
-                dargs.push(Term::Var(cur - 1 - bd[ii]));
+/// Validate an eliminator MOTIVE and return the universe `ℓ` it targets. The
+/// motive must denote `Π[ω](dom₀)…(domₖ). Type ℓ` for the given domain telescope
+/// `doms` (innermost last). We extend the context by each domain, apply the
+/// (evaluated) motive to a fresh variable per domain, and `check_type` the
+/// resulting body — so a bad motive is rejected by a real type error, and `ℓ` is
+/// whatever universe the body lives in (large elimination ⇒ any `ℓ`). This
+/// replaces the old fixed `… → Type` motive type, which baked in `Type : Type`.
+fn motive_level(ctx: &Ctx, motive: &Term, doms: &[Value]) -> Result<usize, String> {
+    let base = ctx.level();
+    let mut mctx = ctx.extend_clone();
+    let mut applied = eval(&ctx.sig, &ctx.env(), motive);
+    for (k, dom) in doms.iter().enumerate() {
+        mctx = mctx.extend(dom.clone());
+        match applied {
+            Value::VLam(_) | Value::VNeu(_) => {
+                applied = vapp(applied, Value::VNeu(Neutral::NVar(base + k)));
             }
-            Term::Pi(
-                Mult::Omega,
-                Box::new(Term::Data(decl.name.clone(), dargs)),
-                Box::new(Term::Type),
-            )
+            _ => {
+                return Err(
+                    "eliminator motive is not a function of its indices and scrutinee".into(),
+                )
+            }
         }
     }
-    go(decl, sparam_tms, 0, &mut Vec::new(), 0)
+    check_type(&mctx, &quote(mctx.level(), &applied))
 }
 
 /// The method type for one constructor:
@@ -653,8 +739,21 @@ impl Ctx {
     }
 }
 
-fn check_type(ctx: &Ctx, t: &Term) -> Result<(), String> {
-    check(ctx, t, &Value::VType).map(|_| ())
+/// Check that `t` denotes a TYPE, and return the universe level `i` it lives in
+/// (`t : Type i`). A type is always inferrable (Π/Σ/Data/Eq/Var/Const/Type/Nat),
+/// so this infers `t`'s type and reads off the universe; anything whose type is
+/// not a `Type i` is rejected. The returned level feeds the `max` rules for
+/// Π/Σ and the datatype-universe constraint that blocks Girard's paradox.
+fn check_type(ctx: &Ctx, t: &Term) -> Result<usize, String> {
+    let n = ctx.level();
+    let (ty, _u) = infer(ctx, t)?;
+    match ty {
+        Value::VType(i) => Ok(i),
+        other => Err(format!(
+            "expected a type, but this term has type {:?}",
+            quote(n, &other)
+        )),
+    }
 }
 
 /// Check a spine of arguments against a telescope (each entry in the context of
@@ -720,6 +819,20 @@ fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
         }
         _ => {
             let (ty2, u) = infer(ctx, t)?;
+            // CUMULATIVITY (one-directional): if `t` is itself a type living in
+            // `Type i`, it is accepted where a `Type j` is expected as long as
+            // `i ≤ j`. This is the ONLY subtyping — conversion (`conv`) stays
+            // strict, so `Type i ≢ Type j` for `i ≠ j` and the hierarchy never
+            // collapses. (FUTURE_WORK §3.1.)
+            if let (Value::VType(i), Value::VType(j)) = (&ty2, ty) {
+                if i <= j {
+                    return Ok(u);
+                }
+                return Err(format!(
+                    "universe mismatch: this is a `Type {i}` but a `Type {j}` was \
+                     expected ({i} ⋠ {j}; cumulativity only lifts upward)"
+                ));
+            }
             if conv(n, ty, &ty2) {
                 Ok(u)
             } else {
@@ -743,19 +856,24 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let lvl = n - 1 - i;
             Ok((ctx.types[lvl].clone(), uunit(n, lvl)))
         }
-        Term::Type | Term::Nat => Ok((Value::VType, uzero(n))),
+        // `Type i : Type (i+1)` — the universe hierarchy (NOT `Type : Type`).
+        // Guard the successor: an unchecked `i + 1` would wrap `Type usize::MAX`
+        // to `VType(0)` (release) — accepting `Type MAX : Type 0`, i.e. reinstating
+        // `Type : Type` at the apex — or panic (debug). Levels never legitimately
+        // approach this; overflow is a hard error.
+        Term::Type(i) => match i.checked_add(1) {
+            Some(j) => Ok((Value::VType(j), uzero(n))),
+            None => Err("universe level overflow (`Type` level too large)".to_string()),
+        },
+        Term::Nat => Ok((Value::VType(0), uzero(n))), // Nat : Type 0
         Term::NatLit(_) | Term::Zero => Ok((Value::VNat, uzero(n))),
         Term::Suc(k) => {
             let u = check(ctx, k, &Value::VNat)?;
             Ok((Value::VNat, u))
         }
         Term::NatElim(p, z, s, scrut) => {
-            let motive_ty = Value::VPi(
-                Mult::Omega,
-                Box::new(Value::VNat),
-                Closure { sig: ctx.sig.clone(), env: vec![], body: Term::Type },
-            );
-            check(ctx, p, &motive_ty)?;
+            // motive `p : Nat → Type ℓ` for any ℓ (large elimination permitted).
+            motive_level(ctx, p, &[Value::VNat])?;
             let vp = eval(&ctx.sig, &ctx.env(), p);
 
             let pzero = vapp(vp.clone(), Value::VNatLit(0));
@@ -785,16 +903,60 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             );
             Ok((result, u))
         }
+        // `NatCase` is `NatElim` without the induction hypothesis: the successor
+        // method has type `(k:Nat) → motive (Suc k)`, no `motive k →` premise.
+        Term::NatCase(p, z, s, scrut) => {
+            // motive `p : Nat → Type ℓ` for any ℓ (large elimination permitted).
+            motive_level(ctx, p, &[Value::VNat])?;
+            let vp = eval(&ctx.sig, &ctx.env(), p);
+
+            let pzero = vapp(vp.clone(), Value::VNatLit(0));
+            let uz = check(ctx, z, &pzero)?;
+
+            let p_tm = quote(n, &vp);
+            let sty_term = Term::Pi(
+                Mult::Omega,
+                Box::new(Term::Nat),
+                Box::new(Term::App(
+                    Box::new(shift(1, 0, &p_tm)),
+                    Box::new(Term::Suc(Box::new(Term::Var(0)))),
+                )),
+            );
+            let vsty = eval(&ctx.sig, &ctx.env(), &sty_term);
+            let us = check(ctx, s, &vsty)?;
+
+            let uscr = check(ctx, scrut, &Value::VNat)?;
+            let result = vapp(vp, eval(&ctx.sig, &ctx.env(), scrut));
+            let u = uadd(
+                &uscale(Mult::Omega, &uz),
+                &uadd(&uscale(Mult::Omega, &us), &uscale(Mult::Omega, &uscr)),
+            );
+            Ok((result, u))
+        }
+        // `Fix(ty, body)` — general recursion. Check `body : ty` with `self : ty`
+        // in scope (the recursion is unrestricted: ω). NOT total; the kernel never
+        // unfolds it, so this does not affect normalization/termination of checking.
+        Term::Fix(ty_tm, body) => {
+            check_type(ctx, ty_tm)?;
+            let vty = eval(&ctx.sig, &ctx.env(), ty_tm);
+            let ctx2 = ctx.extend(vty.clone());
+            let mut ub = check(&ctx2, body, &vty)?;
+            ub.pop(); // discard the self-binder's usage (recursion is unrestricted)
+            Ok((vty, ub))
+        }
         Term::Add(a, b) => {
             let ua = check(ctx, a, &Value::VNat)?;
             let ub = check(ctx, b, &Value::VNat)?;
             Ok((Value::VNat, uadd(&ua, &ub)))
         }
+        // PREDICATIVE Π/Σ: `(x:A)→B` lives in `Type (max i j)` where `A : Type i`
+        // and `B : Type j`. Predicativity (no impredicative `Prop`) is what keeps
+        // the hierarchy consistent (FUTURE_WORK §3.1).
         Term::Pi(_, a, b) | Term::Sigma(_, a, b) => {
-            check_type(ctx, a)?;
+            let la = check_type(ctx, a)?;
             let va = eval(&ctx.sig, &ctx.env(), a);
-            check_type(&ctx.extend(va), b)?;
-            Ok((Value::VType, uzero(n)))
+            let lb = check_type(&ctx.extend(va), b)?;
+            Ok((Value::VType(la.max(lb)), uzero(n)))
         }
         Term::Fst(p) => match infer(ctx, p)? {
             (Value::VSigma(_, dom, _), up) => Ok((*dom, up)),
@@ -808,12 +970,13 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             (other, _) => Err(format!("snd of a non-pair (type {:?})", quote(n, &other))),
         },
         Term::Pair(_, _) => Err("cannot infer a bare pair; annotate it `(e : T)`".to_string()),
+        // `Id A x y : Type i` when `A : Type i` (equality lives at its type's level).
         Term::Eq(a, x, y) => {
-            check_type(ctx, a)?;
+            let la = check_type(ctx, a)?;
             let va = eval(&ctx.sig, &ctx.env(), a);
             check(ctx, x, &va)?;
             check(ctx, y, &va)?;
-            Ok((Value::VType, uzero(n)))
+            Ok((Value::VType(la), uzero(n)))
         }
         Term::Refl(a) => {
             let (ta, _) = infer(ctx, a)?;
@@ -843,7 +1006,8 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let tele: Vec<(Mult, Term)> =
                 decl.params.iter().chain(decl.indices.iter()).cloned().collect();
             check_spine(ctx, args, &tele)?; // a type former: usage is 0-fragment
-            Ok((Value::VType, uzero(n)))
+            // the fully-applied family lives in its declared universe.
+            Ok((Value::VType(decl.universe), uzero(n)))
         }
         Term::Constr(name, args) => {
             let (decl, ctor) = ctx
@@ -885,10 +1049,23 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let sindices: Vec<Value> = sargs[p..p + ni].to_vec();
             let sparam_tms: Vec<Term> = sparams.iter().map(|v| quote(n, v)).collect();
 
-            // motive
-            let mty_tm = motive_ty_tm(&decl, &sparam_tms);
-            let mty = eval(&ctx.sig, &ctx.env(), &mty_tm);
-            check(ctx, motive, &mty)?; // 0-fragment: usage discarded
+            // motive : Π[ω](indices). D params indices → Type ℓ. We validate it
+            // against this telescope and read off ℓ (ANY ℓ — large elimination is
+            // allowed; the result universe is whatever the motive targets). The
+            // motive's body is genuinely type-checked, so this is not a no-op.
+            let mut idx_doms: Vec<Value> = Vec::new();
+            let mut idx_neus: Vec<Value> = Vec::new();
+            for i in 0..ni {
+                let mut env: Vec<Value> = sparams.clone();
+                env.extend(idx_neus.iter().cloned());
+                idx_doms.push(eval(&ctx.sig, &env, &decl.indices[i].1));
+                idx_neus.push(Value::VNeu(Neutral::NVar(n + i)));
+            }
+            let mut d_args: Vec<Value> = sparams.clone();
+            d_args.extend(idx_neus.iter().cloned());
+            let mut doms = idx_doms;
+            doms.push(Value::VData(data.clone(), d_args));
+            motive_level(ctx, motive, &doms)?; // 0-fragment: usage discarded
             let vmotive = eval(&ctx.sig, &ctx.env(), motive);
             let motive_tm = quote(n, &vmotive);
 
@@ -1013,6 +1190,33 @@ fn strictly_positive(data: &str, t: &Term) -> bool {
     }
 }
 
+/// A parameter or index binder `x : T` that RANGES OVER a universe (`T = Type i`)
+/// forces the datatype into `Type i` or higher: a `Type 0`-sized family must not
+/// quantify (even phantomly) over `Type 0` or above. Reject when `decl.universe`
+/// is too small. This complements the constructor-argument check — together they
+/// stop a universe from being smuggled through ANY telescope (the params/indices
+/// case the constructor-arg check alone misses). Non-universe binders (`n : Nat`,
+/// a value parameter) contribute nothing here; if a constructor STORES such a
+/// value it is caught by the argument-level check instead. (FUTURE_WORK §4.3.)
+fn enforce_binder_universe(
+    decl_name: &str,
+    decl_universe: usize,
+    kind: &str,
+    v: &Value,
+) -> Result<(), String> {
+    if let Value::VType(i) = v {
+        if *i > decl_universe {
+            return Err(format!(
+                "{decl_name}: a {kind} ranging over `Type {i}` forces `{decl_name}` into \
+                 `Type {i}` or higher, but it is declared in `Type {decl_universe}`. A \
+                 datatype cannot quantify over a universe at or above its own \
+                 (predicativity; this is part of what blocks Girard's paradox)."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Check a signature: every telescope type-checks, constructors return the right
 /// family with the right index arity, and recursion is strictly positive.
 pub fn check_signature(sig: &Signature) -> Result<(), String> {
@@ -1023,6 +1227,7 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
         for (_, ty) in &decl.params {
             check_type(&ctx, ty).map_err(|e| format!("in {} params: {e}", decl.name))?;
             let v = eval(&rc, &ctx.env(), ty);
+            enforce_binder_universe(&decl.name, decl.universe, "parameter", &v)?;
             ctx = ctx.extend(v);
         }
         let params_ctx = ctx; // context [params]
@@ -1031,6 +1236,7 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
         for (_, ty) in &decl.indices {
             check_type(&ictx, ty).map_err(|e| format!("in {} indices: {e}", decl.name))?;
             let v = eval(&rc, &ictx.env(), ty);
+            enforce_binder_universe(&decl.name, decl.universe, "index", &v)?;
             ictx = ictx.extend(v);
         }
         // each constructor
@@ -1043,8 +1249,23 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
                         decl.name, ctor.name, decl.name
                     ));
                 }
-                check_type(&cctx, aty)
+                let la = check_type(&cctx, aty)
                     .map_err(|e| format!("in {}.{} args: {e}", decl.name, ctor.name))?;
+                // THE PARADOX BLOCKER (predicativity side-condition): a field of
+                // type `Type la` forces the family into a universe ≥ la. If the
+                // declared `universe` is too small, the datatype would be able to
+                // quantify over (a universe containing) itself — exactly the
+                // Girard/Hurkens loop — so reject it. With the old `Type : Type`
+                // every `la` was 0 and this was vacuous (FUTURE_WORK §4.3, §13).
+                if la > decl.universe {
+                    return Err(format!(
+                        "{}.{}: this argument is a `Type {la}`, so `{}` must live in \
+                         `Type {la}` or higher, but it is declared in `Type {}`. A \
+                         datatype cannot store a type from its own universe \
+                         (predicativity; this is what blocks Girard's paradox).",
+                        decl.name, ctor.name, decl.name, decl.universe
+                    ));
+                }
                 let v = eval(&rc, &cctx.env(), aty);
                 cctx = cctx.extend(v);
             }

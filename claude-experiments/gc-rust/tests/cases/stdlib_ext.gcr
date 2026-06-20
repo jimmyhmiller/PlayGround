@@ -1,0 +1,9 @@
+fn main() -> i64 {
+  let mut v = vec_new(); v=vec_push(v,1); v=vec_push(v,2); v=vec_push(v,3);
+  let r = vec_reverse(v);
+  let hit = if vec_contains_i64(r, 2) { 1 } else { 0 };
+  let idx = vec_index_of_i64(r, 1);
+  let sl = str_len(str_repeat("xy", 4));
+  let si = str_index_of("find the needle", "needle");
+  vec_get(r,0) + hit + idx + sl + si + 19
+}

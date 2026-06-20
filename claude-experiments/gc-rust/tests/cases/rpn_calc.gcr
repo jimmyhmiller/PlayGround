@@ -1,0 +1,25 @@
+// RPN calculator: tokenize, evaluate with a stack, return Result on error.
+fn rpn(input: String) -> Result<i64, i64> {
+  let parts = str_split_byte(input, 32);
+  let mut stack: Vec<i64> = vec_new();
+  let mut i = 0;
+  while i < vec_len(parts) {
+    let p = vec_get(parts, i);
+    if string_eq(p, "+") || string_eq(p, "*") || string_eq(p, "-") {
+      if vec_len(stack) < 2 { return Result::Err(1); }
+      let b = vec_pop(stack); let a = vec_pop(stack);
+      let r = if string_eq(p, "+") { a + b } else { if string_eq(p, "*") { a * b } else { a - b } };
+      stack = vec_push(stack, r);
+    } else {
+      match parse_int(p) { Option::Some(n) => { stack = vec_push(stack, n); } Option::None => { return Result::Err(2); } }
+    }
+    i = i + 1;
+  }
+  if vec_len(stack) == 1 { Result::Ok(vec_pop(stack)) } else { Result::Err(3) }
+}
+fn main() -> i64 {
+  let a = match rpn("3 4 + 6 *") { Result::Ok(v) => v, Result::Err(e) => 0 };   // 42
+  let b = match rpn("1 +") { Result::Ok(v) => v, Result::Err(e) => e };          // Err(1) -> 1
+  let c = match rpn("5 x +") { Result::Ok(v) => v, Result::Err(e) => e };        // Err(2) -> 2
+  a - b - c + 3   // 42 - 1 - 2 + 3 = 42
+}

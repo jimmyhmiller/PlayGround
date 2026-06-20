@@ -1,0 +1,49 @@
+// Dijkstra shortest path (O(V^2)) over an adjacency matrix.
+struct Graph { n: i64, w: Vec<Vec<i64>> }   // w[i][j] = weight, or INF for no edge
+fn inf() -> i64 { 1000000 }
+fn shortest(g: Graph, src: i64, dst: i64) -> i64 {
+    let mut dist: Vec<i64> = vec_new();
+    let mut visited: Vec<i64> = vec_new();
+    let mut i = 0;
+    while i < g.n { dist = vec_push(dist, inf()); visited = vec_push(visited, 0); i = i + 1; }
+    dist = vec_set(dist, src, 0);
+    let mut count = 0;
+    while count < g.n {
+        // pick the unvisited node with the smallest dist
+        let mut u = 0 - 1; let mut best = inf();
+        let mut j = 0;
+        while j < g.n {
+            if vec_get(visited, j) == 0 && vec_get(dist, j) < best { best = vec_get(dist, j); u = j; }
+            j = j + 1;
+        }
+        if u < 0 { count = g.n; }
+        else {
+            visited = vec_set(visited, u, 1);
+            let row = vec_get(g.w, u);
+            let mut v = 0;
+            while v < g.n {
+                let wuv = vec_get(row, v);
+                if wuv < inf() && vec_get(dist, u) + wuv < vec_get(dist, v) {
+                    dist = vec_set(dist, v, vec_get(dist, u) + wuv);
+                }
+                v = v + 1;
+            }
+            count = count + 1;
+        }
+    }
+    vec_get(dist, dst)
+}
+fn row5(a: i64, b: i64, c: i64, d: i64, e: i64) -> Vec<i64> {
+    let mut r = vec_new(); r = vec_push(r, a); r = vec_push(r, b); r = vec_push(r, c); r = vec_push(r, d); r = vec_push(r, e); r
+}
+fn main() -> i64 {
+    let n = inf();
+    let mut w: Vec<Vec<i64>> = vec_new();
+    w = vec_push(w, row5(n, 10, 3, n, n));   // 0 -> 1(10), 2(3)
+    w = vec_push(w, row5(n, n, n, 2, n));    // 1 -> 3(2)
+    w = vec_push(w, row5(n, 4, n, 8, n));    // 2 -> 1(4), 3(8)
+    w = vec_push(w, row5(n, n, n, n, 5));    // 3 -> 4(5)
+    w = vec_push(w, row5(n, n, n, n, n));    // 4 -> (none)
+    let g = Graph { n: 5, w: w };
+    shortest(g, 0, 4) + 28   // shortest 0->4 = 0->2->1->3->4 = 3+4+2+5 = 14; +28 = 42
+}

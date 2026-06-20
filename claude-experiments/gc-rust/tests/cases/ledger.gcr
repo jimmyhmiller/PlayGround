@@ -1,0 +1,60 @@
+// A small ledger: accounts + transactions, exercising structs, enums, match,
+// closures, higher-order combinators, generics, for-loops, and the ? operator.
+struct Account { id: i64, balance: i64 }
+enum Tx { Deposit(i64, i64), Withdraw(i64, i64), Transfer(i64, i64, i64) }
+
+fn find(accts: Vec<Account>, id: i64) -> i64 {
+    let mut i = 0;
+    while i < vec_len(accts) {
+        let a = vec_get(accts, i);
+        if a.id == id { return a.balance; }
+        i = i + 1;
+    }
+    0
+}
+
+fn apply(mut accts: Vec<Account>, t: Tx) -> Vec<Account> {
+    let mut out = vec_new();
+    let mut i = 0;
+    while i < vec_len(accts) {
+        let a = vec_get(accts, i);
+        let nb = match t {
+            Tx::Deposit(id, amt) => if a.id == id { a.balance + amt } else { a.balance },
+            Tx::Withdraw(id, amt) => if a.id == id { a.balance - amt } else { a.balance },
+            Tx::Transfer(from, to, amt) => {
+                if a.id == from { a.balance - amt }
+                else { if a.id == to { a.balance + amt } else { a.balance } }
+            }
+        };
+        out = vec_push(out, Account { id: a.id, balance: nb });
+        i = i + 1;
+    }
+    out
+}
+
+fn main() -> i64 {
+    let mut accts = vec_new();
+    accts = vec_push(accts, Account { id: 1, balance: 100 });
+    accts = vec_push(accts, Account { id: 2, balance: 50 });
+
+    let mut txs = vec_new();
+    txs = vec_push(txs, Tx::Deposit(1, 20));
+    txs = vec_push(txs, Tx::Withdraw(2, 10));
+    txs = vec_push(txs, Tx::Transfer(1, 2, 30));
+
+    for t in txs { accts = apply(accts, t); }
+
+    // a1: 100 + 20 - 30 = 90 ; a2: 50 - 10 + 30 = 70
+    let bal1 = find(accts, 1);
+    let bal2 = find(accts, 2);
+
+    // closures + higher-order over the balances
+    let mut bals = vec_new();
+    let mut j = 0;
+    while j < vec_len(accts) { let a = vec_get(accts, j); bals = vec_push(bals, a.balance); j = j + 1; }
+    let scale = 1;
+    let scaled = vec_map(bals, |b: i64| b * scale);
+    let total = vec_fold(scaled, 0, |acc: i64, b: i64| acc + b);   // 90 + 70 = 160
+
+    bal1 + bal2 - total + 42   // 90 + 70 - 160 + 42 = 42
+}

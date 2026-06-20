@@ -1,0 +1,9 @@
+struct Score { name: String, points: i64 }
+fn main() -> i64 {
+  let mut v = vec_new(); v=vec_push(v,5); v=vec_push(v,2); v=vec_push(v,8); v=vec_push(v,1); v=vec_push(v,9);
+  let s = vec_sort_i64(v);                                  // [1,2,5,8,9]
+  let mut b = vec_new();
+  b=vec_push(b, Score{name:"a",points:30}); b=vec_push(b, Score{name:"b",points:50}); b=vec_push(b, Score{name:"c",points:40});
+  let sb = vec_sort_by(b, |x: Score, y: Score| x.points - y.points);   // [30,40,50]
+  vec_get(s,0) + vec_get(s,4) + vec_get(sb,0).points + vec_get(sb,2).points - 48   // 1+9+30+50-48 = 42
+}

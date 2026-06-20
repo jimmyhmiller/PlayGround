@@ -152,6 +152,9 @@ pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgr
 
     prog.layouts = reg.layouts;
     prog.values = reg.values;
+    // GC-safety normalization: let-bind every GC temporary so the collector can
+    // find it (no live pointer is ever stranded in a register across a safepoint).
+    crate::anf::anf_program(&mut prog);
     Ok(prog)
 }
 
@@ -1660,6 +1663,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 let a = str_arg(self, &args[0])?;
                 Ok((CoreExpr::new(CoreExprKind::PrintStr(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
             }
+            "print" => {
+                if args.len() != 1 { return err("`print` takes 1 argument", span); }
+                let a = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::PrintStrRaw(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "char_to_str" => {
+                if args.len() != 1 { return err("`char_to_str` takes 1 argument", span); }
+                let (cp, cpt) = self.expr(&args[0], Some(&Ty::i64()))?;
+                check_assignable(&cpt, &Ty::i64(), args[0].span)?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::StrFromChar { layout, cp: Box::new(cp) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
+            }
             "str_len" => {
                 if args.len() != 1 { return err("`str_len` takes 1 argument", span); }
                 let a = str_arg(self, &args[0])?;
@@ -1692,6 +1710,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 if args.len() != 1 { return err("`str_to_float` takes 1 argument", span); }
                 let s = str_arg(self, &args[0])?;
                 Ok((CoreExpr::new(CoreExprKind::StrToFloat(Box::new(s)), Repr::Scalar(ScalarRepr::F64)), Ty::Prim(Prim::F64)))
+            }
+            "float_bits" => {
+                if args.len() != 1 { return err("`float_bits` takes 1 argument", span); }
+                let (f, ft) = self.expr(&args[0], Some(&Ty::Prim(Prim::F64)))?;
+                check_assignable(&ft, &Ty::Prim(Prim::F64), args[0].span)?;
+                Ok((CoreExpr::new(CoreExprKind::FloatBits(Box::new(f)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "read_file" => {
+                if args.len() != 1 { return err("`read_file` takes 1 argument", span); }
+                let p = str_arg(self, &args[0])?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::ReadFile { layout, path: Box::new(p) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
             }
             "str_hash" => {
                 if args.len() != 1 { return err("`str_hash` takes 1 argument", span); }
@@ -1729,6 +1762,99 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 ))
             }
             _ => err(format!("unknown string intrinsic `{}`", name), span),
+        }
+    }
+
+    /// Lower the built-in reflection intrinsics. The first argument is always a
+    /// heap (`Ref`) value — reflection reads its object header (`type_id`) and the
+    /// metadata table. Field intrinsics take a second `i64` field index and lower
+    /// to `RuntimeCall`s into the `ai_reflect_*` externs.
+    ///
+    /// Surface:
+    ///   `type_id_of(x) -> i64`, `type_name_of(x) -> String`
+    ///   `field_count(x) -> i64`
+    ///   `field_name(x, i) -> String`, `field_kind(x, i) -> i64`, `field_i64(x, i) -> i64`
+    fn reflect_intrinsic(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<(CoreExpr, Ty)> {
+        let arity = if matches!(name, "type_id_of" | "type_name_of" | "field_count") { 1 } else { 2 };
+        if args.len() != arity {
+            return err(format!("`{}` takes {} argument(s)", name, arity), span);
+        }
+        let (obj, oty) = self.expr(&args[0], None)?;
+        if !matches!(obj.repr, Repr::Ref(_)) {
+            return err(
+                format!("`{}` requires a heap (reference) value, got `{:?}`", name, oty),
+                span,
+            );
+        }
+        // Field intrinsics take an i64 index as the second argument.
+        let idx = if arity == 2 {
+            let (i, it) = self.expr(&args[1], Some(&Ty::i64()))?;
+            check_assignable(&it, &Ty::i64(), args[1].span)?;
+            Some(i)
+        } else {
+            None
+        };
+        let i64r = Repr::Scalar(ScalarRepr::I64);
+        match name {
+            "type_id_of" => Ok((
+                CoreExpr::new(CoreExprKind::TypeIdOf(Box::new(obj)), i64r),
+                Ty::i64(),
+            )),
+            "type_name_of" => {
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::TypeNameOf { layout, obj: Box::new(obj) },
+                        Repr::Ref(layout),
+                    ),
+                    Ty::Prim(Prim::Str),
+                ))
+            }
+            "field_count" => Ok((
+                CoreExpr::new(
+                    CoreExprKind::RuntimeCall {
+                        func: "ai_reflect_field_count",
+                        args: vec![obj],
+                        ret: i64r.clone(),
+                    },
+                    i64r,
+                ),
+                Ty::i64(),
+            )),
+            "field_kind" | "field_i64" => {
+                let func = if name == "field_kind" { "ai_reflect_field_kind" } else { "ai_reflect_field_i64" };
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::RuntimeCall {
+                            func,
+                            args: vec![obj, idx.unwrap()],
+                            ret: i64r.clone(),
+                        },
+                        i64r,
+                    ),
+                    Ty::i64(),
+                ))
+            }
+            "field_name" => {
+                let layout = self.string_layout_id(span)?;
+                // ai_reflect_field_name(thread, i64 str_type_id, ptr obj, i64 i)
+                let str_tid = CoreExpr::new(
+                    CoreExprKind::ConstInt(layout as u64, ScalarRepr::I64),
+                    Repr::Scalar(ScalarRepr::I64),
+                );
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::RuntimeCall {
+                            func: "ai_reflect_field_name",
+                            args: vec![str_tid, obj, idx.unwrap()],
+                            ret: Repr::Ref(layout),
+                        },
+                        Repr::Ref(layout),
+                    ),
+                    Ty::Prim(Prim::Str),
+                ))
+            }
+            _ => err(format!("unknown reflection intrinsic `{}`", name), span),
         }
     }
 
@@ -2236,13 +2362,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         }
     }
 
-    fn variant_in(&self, _enum_name: &str, vlast: &str, variants: &[(u32, Vec<Ty>)], span: Span) -> LResult<(u32, Vec<Ty>)> {
-        if let Some((_, tag)) = self.ctx.variants.get(vlast).cloned() {
-            if let Some((t, tys)) = variants.iter().find(|(i, _)| *i == tag) {
-                return Ok((*t, tys.clone()));
+    fn variant_in(&self, enum_name: &str, vlast: &str, variants: &[(u32, Vec<Ty>)], span: Span) -> LResult<(u32, Vec<Ty>)> {
+        // Resolve the variant by name WITHIN this enum — variant names are
+        // per-enum, not global (two enums may share a variant name, e.g.
+        // `TokKind::Not` and `UnOp::Not`). Looking it up in the global
+        // `ctx.variants` map (keyed partly by bare name) conflated same-named
+        // variants across enums; scope it to `enum_name`'s own declaration.
+        if let Some(edef) = self.ctx.enums.get(enum_name) {
+            if let Some(idx) = edef.variants.iter().position(|v| v.name == vlast) {
+                let tag = idx as u32;
+                if let Some((t, tys)) = variants.iter().find(|(i, _)| *i == tag) {
+                    return Ok((*t, tys.clone()));
+                }
             }
         }
-        err(format!("unknown variant `{}`", vlast), span)
+        err(format!("unknown variant `{}` of `{}`", vlast, enum_name), span)
     }
 
     fn binary(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -2465,9 +2599,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         // Skipped if shadowed by a user-defined function of the same name.
         if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
             match name {
-                "print_str" | "str_len" | "str_eq" | "str_concat"
-                | "str_get" | "str_substring" | "to_string" | "str_to_float" | "str_hash" => {
+                "print_str" | "print" | "str_len" | "str_eq" | "str_concat"
+                | "str_get" | "str_substring" | "to_string" | "str_to_float" | "str_hash"
+                | "read_file" | "float_bits" | "char_to_str" => {
                     return self.str_intrinsic(name, args, span);
+                }
+                "type_id_of" | "type_name_of" | "field_count" | "field_name" | "field_kind"
+                | "field_i64" => {
+                    return self.reflect_intrinsic(name, args, span);
                 }
                 _ => {}
             }

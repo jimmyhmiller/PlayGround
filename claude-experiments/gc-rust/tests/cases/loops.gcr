@@ -1,0 +1,8 @@
+fn main() -> i64 {
+    let mut s = 0;
+    for i in 0..10 { s = s + i; }        // 45
+    let mut n = 0;
+    loop { if n >= 5 { break; } n = n + 1; }
+    while n < 8 { n = n + 1; if n == 7 { continue; } }
+    s - 5 + n - 8 + 2                      // 45-5 + 8-8 + 2 = 42
+}

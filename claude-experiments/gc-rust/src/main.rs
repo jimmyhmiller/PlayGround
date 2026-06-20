@@ -22,6 +22,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cmd = &args[1];
+
+    // `emit` has its own argument shape (`gcr emit <stage> <file>`), so it is
+    // dispatched before the generic `<cmd> <file>` path resolution below.
+    if cmd == "emit" {
+        return run_emit(&args);
+    }
+    // `eval` is the scratchpad/REPL path: it may synthesize a `main` from a
+    // bare trailing expression, so it reads + rewrites the source itself rather
+    // than going through the normal module parse below.
+    if cmd == "eval" {
+        return run_eval(&args);
+    }
+
     let arg_path = &args[2];
 
     // Resolve the entry file. If the argument is a directory (or a `gcr.toml`),
@@ -165,6 +178,10 @@ fn main() -> ExitCode {
             }
         }
         "build" => {
+            // Extra linker args: `--link-arg <arg>` (repeatable) are passed
+            // straight to `cc`. FFI programs use this to link native libs — the
+            // self-hosting compiler links libLLVM this way.
+            let link_args = parse_link_args(&args);
             // Output path: `gcr build foo.gcr -o foo`. Defaults to the source
             // stem with no extension if `-o` is omitted.
             let out = match parse_output_flag(&args) {
@@ -199,7 +216,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match build_executable(&prog, &out) {
+            match build_executable(&prog, &out, &link_args) {
                 Ok(()) => {
                     println!("gcr: wrote {}", out.display());
                     ExitCode::SUCCESS
@@ -225,6 +242,401 @@ fn report_errors(path: &str, src: &str, errs: &[gcrust::lower::LowerError]) {
     }
     let n = errs.len();
     eprintln!("gcr: {} error{} found", n, if n == 1 { "" } else { "s" });
+}
+
+/// `gcr emit <stage> <file>` — dump a single pipeline stage as JSON (the
+/// compiler "X-ray"). `tokens`/`ast` need only lex+parse; `core`/`layout`/`mono`
+/// run the full front end (resolve + typecheck + monomorphize) to a Core IR.
+fn run_emit(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: gcr emit <tokens|ast|core|layout|reflect|mono|llvm> <file.gcr> [--no-opt (llvm)]";
+    let stage = match args.get(2) {
+        Some(s) => s.as_str(),
+        None => {
+            eprintln!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let arg_path = match args.get(3) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("gcr: emit needs a file. {USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = match resolve_entry(&arg_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gcr: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gcr: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match stage {
+        // Raw lexer output — no prelude, no parse.
+        "tokens" => match lex(&src) {
+            Ok(toks) => {
+                println!("{}", gcrust::emit::pretty(&toks));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("gcr: lex error at {:?}: {}", e.span, e.msg);
+                ExitCode::FAILURE
+            }
+        },
+        // Surface AST of the user's OWN module (prelude omitted, like `gcr parse`,
+        // so the dump is the program you wrote, not 200 prelude items).
+        "ast" => {
+            let toks = match lex(&src) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("gcr: lex error at {:?}: {}", e.span, e.msg);
+                    return ExitCode::FAILURE;
+                }
+            };
+            match parse_module(&toks) {
+                Ok(m) => {
+                    println!("{}", gcrust::emit::pretty(&m));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("gcr: parse error at {:?}: {}", e.span, e.msg);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // Monomorphic Core IR, its curated layout/mono views, and the LLVM IR.
+        // These need the full front end with the prelude injected.
+        "core" | "layout" | "reflect" | "mono" | "llvm" => {
+            let module = match gcrust::compile::parse_file_with_prelude(std::path::Path::new(&path)) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("{}", gcrust::diag::render(&path, &src, e.span, &e.msg));
+                    return ExitCode::FAILURE;
+                }
+            };
+            let resolved = match resolve_module(module) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{}", gcrust::diag::render(&path, &src, e.span, &e.msg));
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
+                report_errors(&path, &src, &errs);
+                return ExitCode::FAILURE;
+            }
+            let prog = match lower_program(&resolved.globals) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("{}", gcrust::diag::render(&path, &src, e.span, &e.msg));
+                    return ExitCode::FAILURE;
+                }
+            };
+            // `llvm` is raw IR text (not JSON): default to the optimized IR that
+            // actually runs; `--no-opt` shows the naive pre-O2 IR.
+            if stage == "llvm" {
+                let optimize = !args.iter().any(|a| a == "--no-opt");
+                return match gcrust::codegen::emit_llvm_ir(&prog, optimize) {
+                    Ok(ir) => {
+                        println!("{ir}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("gcr: codegen error: {}", e.0);
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let out = match stage {
+                "core" => gcrust::emit::pretty(&prog),
+                "layout" => gcrust::emit::pretty(&gcrust::emit::layouts_view(&prog)),
+                "reflect" => gcrust::emit::pretty(&gcrust::emit::reflect_view(&prog)),
+                "mono" => gcrust::emit::pretty(&gcrust::emit::mono_table(&prog)),
+                _ => unreachable!(),
+            };
+            println!("{out}");
+            ExitCode::SUCCESS
+        }
+        // No silent stubs: an unsupported stage is a clear, loud error.
+        other => {
+            eprintln!(
+                "gcr: emit stage `{other}` is not implemented. \
+                 Available: tokens, ast, core, layout, reflect, mono, llvm. \
+                 (resolved/types/asm not yet wired — see src/emit.rs.)"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Resolve an `emit` path argument: a plain source file is used as-is; a
+/// directory or a `gcr.toml` is read as a project manifest and its `entry` is
+/// used. Mirrors the resolution `main` does for the other subcommands.
+fn resolve_entry(arg: &str) -> Result<String, String> {
+    let p = std::path::Path::new(arg);
+    if p.is_dir() || p.file_name().map(|n| n == "gcr.toml").unwrap_or(false) {
+        let dir = if p.is_dir() { p } else { p.parent().unwrap_or(std::path::Path::new(".")) };
+        let m = gcrust::manifest::Manifest::load(dir).map_err(|e| e.0)?;
+        Ok(m.entry_path().to_string_lossy().into_owned())
+    } else {
+        Ok(arg.to_string())
+    }
+}
+
+/// `gcr eval <file>` — the scratchpad / REPL evaluator. Compiles + JIT-runs the
+/// program and emits a single JSON object describing the result, so the editor
+/// scratchpad can render `<value> : <type>` or a compile error inline. When the
+/// buffer is (or ends in) a bare expression with no `main`, a `main` is
+/// synthesized around it. A compile error is a *result* (reported in the JSON),
+/// not a process failure, so this exits SUCCESS unless the file is unreadable.
+fn run_eval(args: &[String]) -> ExitCode {
+    let arg_path = match args.get(2) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("usage: gcr eval <file.gcr> [--expr-file <f>] [--gc-stress]");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = match resolve_entry(&arg_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gcr: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gcr: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stress = args.iter().any(|a| a == "--gc-stress");
+    // `--expr-file <f>`: evaluate the expression in <f> against the definitions
+    // in <file> (the file's own `main` is neutralized). This is the editor's
+    // "eval the selection" path — the selection is the expression, the buffer
+    // is the context. Passed via a file (not an arg) so multi-line selections
+    // need no escaping.
+    let expr = args.iter().position(|a| a == "--expr-file").and_then(|i| args.get(i + 1));
+    let out = match expr {
+        Some(ef) => match std::fs::read_to_string(ef) {
+            Ok(e) => eval_expr_in_context(&src, e.trim(), stress),
+            Err(e) => serde_json::json!({ "ok": false, "stage": "read", "error": format!("expr file: {e}") }),
+        },
+        None => eval_source(&src, stress),
+    };
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+    ExitCode::SUCCESS
+}
+
+/// Evaluate `expr` with the definitions from `context` in scope (the editor's
+/// "eval the selection" path). The context's own `main` is renamed so the
+/// synthesized expr-`main` is the sole entry point.
+fn eval_expr_in_context(context: &str, expr: &str, stress: bool) -> serde_json::Value {
+    use serde_json::json;
+    if expr.is_empty() {
+        return json!({ "ok": true, "kind": "no_result", "message": "empty selection" });
+    }
+    let program = wrap_expr(&neutralize_main(context), expr);
+    match compile_and_run(&program, stress) {
+        Ok(v) => json!({ "ok": true, "kind": "value", "value": v.to_string(), "type": "i64", "wrapped": true, "selection": true }),
+        Err((stage, msg)) => json!({ "ok": false, "stage": stage, "error": msg, "selection": true }),
+    }
+}
+
+/// Rename a top-level `fn main` to a dead name so a synthesized expr-`main` can
+/// be the sole entry. Matches `fn main` only when not followed by an identifier
+/// char (so `fn mainframe` is left alone). No `main` → returned unchanged.
+fn neutralize_main(src: &str) -> String {
+    const NEEDLE: &str = "fn main";
+    let mut start = 0;
+    while let Some(rel) = src[start..].find(NEEDLE) {
+        let at = start + rel;
+        let after = src[at + NEEDLE.len()..].chars().next();
+        let is_boundary = after.map_or(true, |c| !(c.is_alphanumeric() || c == '_'));
+        if is_boundary {
+            return format!("{}fn __scratch_prev_main{}", &src[..at], &src[at + NEEDLE.len()..]);
+        }
+        start = at + NEEDLE.len();
+    }
+    src.to_string()
+}
+
+/// Decide what to compile (the buffer as-is, or a synthesized `main` around a
+/// trailing expression), run it, and return the scratchpad JSON result.
+fn eval_source(src: &str, stress: bool) -> serde_json::Value {
+    use serde_json::json;
+    let (program_src, wrapped, result_ty) = match gcrust::compile::parse_with_prelude(src) {
+        // Parses as a whole module: run `main` if present, else it's a
+        // definitions-only buffer with nothing to evaluate yet.
+        Ok(module) => match main_ret_type(&module) {
+            Some(ty) => (src.to_string(), false, ty),
+            None => {
+                return json!({
+                    "ok": true,
+                    "kind": "no_result",
+                    "message": "type-checks — no `main` or trailing expression to evaluate",
+                });
+            }
+        },
+        // Doesn't parse as a module — most likely a trailing expression (not a
+        // valid top-level item). Split items from the trailing expression and
+        // wrap it in a `main`. If the wrapped form still won't parse, the
+        // original error is the honest one (it points into the user's text).
+        Err(orig_err) => {
+            let (head, tail) = split_trailing_expr(src);
+            if tail.is_empty() || gcrust::compile::parse_with_prelude(&wrap_expr(head, tail)).is_err() {
+                return json!({ "ok": false, "stage": "parse", "error": orig_err.msg });
+            }
+            (wrap_expr(head, tail), true, "i64".to_string())
+        }
+    };
+
+    match compile_and_run(&program_src, stress) {
+        Ok(v) => json!({
+            "ok": true,
+            "kind": "value",
+            "value": v.to_string(),
+            "type": result_ty,
+            "wrapped": wrapped,
+        }),
+        Err((stage, msg)) => json!({
+            "ok": false,
+            "stage": stage,
+            "error": msg,
+            "wrapped": wrapped,
+        }),
+    }
+}
+
+/// Synthesize `<items> fn main() -> i64 { <expr> }`. The result repr is i64
+/// because the JIT entry (`jit_run_i64`) returns an i64; a non-i64 expression
+/// surfaces as a type error, which the scratchpad reports.
+fn wrap_expr(head: &str, expr: &str) -> String {
+    format!("{head}\nfn main() -> i64 {{\n{expr}\n}}\n")
+}
+
+/// Run the full front end + JIT on a program string. On error, returns the
+/// pipeline stage that failed and a concise message (no source rendering — the
+/// scratchpad shows this in a one-line strip).
+fn compile_and_run(src: &str, stress: bool) -> Result<i64, (String, String)> {
+    let module = gcrust::compile::parse_with_prelude(src).map_err(|e| ("parse".into(), e.msg))?;
+    let resolved = resolve_module(module).map_err(|e| ("resolve".into(), e.msg))?;
+    if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
+        let msg = errs.iter().map(|e| e.msg.clone()).collect::<Vec<_>>().join("; ");
+        return Err(("typecheck".into(), msg));
+    }
+    let prog = lower_program(&resolved.globals).map_err(|e| ("lower".into(), e.msg))?;
+    let res = if stress { jit_run_i64_gc(&prog, true) } else { jit_run_i64(&prog) };
+    res.map_err(|e| ("codegen".into(), e.0))
+}
+
+/// The declared return type of a user `main`, rendered as a source-level string
+/// (e.g. `i64`, `bool`, `Vec<i64>`). `None` when there is no `main`.
+fn main_ret_type(module: &gcrust::ast::Module) -> Option<String> {
+    module.items.iter().find_map(|it| match &it.kind {
+        ItemKind::Fn(f) if f.name == "main" => {
+            Some(f.ret.as_ref().map(type_to_string).unwrap_or_else(|| "()".to_string()))
+        }
+        _ => None,
+    })
+}
+
+/// Render an AST type as a source-level string for the scratchpad readout.
+fn type_to_string(t: &gcrust::ast::Type) -> String {
+    use gcrust::ast::TypeKind::*;
+    let join = |ts: &[gcrust::ast::Type]| ts.iter().map(type_to_string).collect::<Vec<_>>().join(", ");
+    match &t.kind {
+        Path(p, generics) => {
+            let base = p.segments.join("::");
+            if generics.is_empty() { base } else { format!("{base}<{}>", join(generics)) }
+        }
+        Tuple(ts) => format!("({})", join(ts)),
+        Array(elem, _) => format!("[{}; N]", type_to_string(elem)),
+        Fn(params, ret) => format!(
+            "fn({}){}",
+            join(params),
+            ret.as_ref().map(|r| format!(" -> {}", type_to_string(r))).unwrap_or_default()
+        ),
+        ExternFn(params, ret) => format!(
+            "extern fn({}){}",
+            join(params),
+            ret.as_ref().map(|r| format!(" -> {}", type_to_string(r))).unwrap_or_default()
+        ),
+        SelfType => "Self".to_string(),
+    }
+}
+
+/// Split a buffer into `(items, trailing_expression)` by brace depth: the
+/// trailing expression is everything after the last top-level `}` (i.e. after
+/// the final top-level item). With no items, the whole buffer is the
+/// expression. Line comments and string literals are skipped so their braces
+/// don't throw off the depth count.
+fn split_trailing_expr(src: &str) -> (&str, &str) {
+    let bytes = src.as_bytes();
+    let mut depth: i32 = 0;
+    let mut last_top_close = 0usize;
+    let mut i = 0;
+    let (mut in_line_comment, mut in_str) = (false, false);
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_line_comment {
+            if c == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_str {
+            match c {
+                b'\\' => i += 1, // skip the escaped char
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                in_line_comment = true;
+                i += 1;
+            }
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    last_top_close = i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (&src[..last_top_close], src[last_top_close..].trim())
+}
+
+/// Collect every `--link-arg <value>` (repeatable) from the argument vector.
+/// Passed verbatim to `cc` at link time. Used by FFI programs — notably the
+/// self-hosting compiler, which links libLLVM.
+fn parse_link_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--link-arg" {
+            if let Some(v) = it.next() {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Parse an optional `-o <path>` (or `--output <path>`) flag from the argument

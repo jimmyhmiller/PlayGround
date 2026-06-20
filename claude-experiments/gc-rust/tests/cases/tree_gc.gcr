@@ -1,0 +1,21 @@
+enum Tree { Leaf(i64), Node(Tree, Tree) }
+fn build(depth: i64, v: i64) -> Tree {
+    if depth == 0 { Tree::Leaf(v) }
+    else { Tree::Node(build(depth - 1, v * 2), build(depth - 1, v * 2 + 1)) }
+}
+fn count_leaves(t: Tree) -> i64 {
+    match t { Tree::Leaf(v) => 1, Tree::Node(l, r) => count_leaves(l) + count_leaves(r) }
+}
+fn sum_leaves(t: Tree) -> i64 {
+    match t { Tree::Leaf(v) => v, Tree::Node(l, r) => sum_leaves(l) + sum_leaves(r) }
+}
+fn main() -> i64 {
+    let t = build(18, 1);   // 2^18 = 262144 leaves, ~524287 nodes (~a deep branching heap)
+    // churn garbage so a collection runs while the tree is live -> it must survive
+    let mut j = 0;
+    while j < 1000000 { let mut v = vec_new(); v = vec_push(v, j); j = j + 1; }
+    let leaves = count_leaves(t);
+    let s = sum_leaves(t);
+    // leaves must be exactly 262144; s is deterministic; encode both into the exit
+    if leaves == 262144 && s > 0 { 42 } else { 0 }
+}

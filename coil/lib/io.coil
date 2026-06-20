@@ -1,3 +1,4 @@
+(module io)
 ; Zig-style IO: a capability is a VALUE (a vtable struct) threaded explicitly,
 ; exactly like the allocator. A `Writer` is `{ write-fn, ctx }`; a function that
 ; does output *takes* a Writer, so IO shows up in its type. There is no ambient
@@ -11,7 +12,7 @@
 ; `(Result :i64 IoError)` in from each function's return type (bidirectional
 ; checking), filling even the error type that `Ok` mentions in no field.
 
-(include "result.coil")
+(import "result.coil" :use *)
 
 (extern write  :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
 (extern read   :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t read(fd, buf, n)

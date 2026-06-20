@@ -1,0 +1,7 @@
+; Takeuchi function -- deeply nested non-tail recursion.
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+(defn tak [(x :i64) (y :i64) (z :i64)] (-> :i64)
+  (if (icmp-ge y x)
+      z
+      (tak (tak (isub x 1) y z) (tak (isub y 1) z x) (tak (isub z 1) x y))))
+(defn main [] (-> :i64) (do (printf "%ld\n" (tak 24 16 8)) 0))

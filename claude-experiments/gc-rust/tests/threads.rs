@@ -263,7 +263,7 @@ fn aot_spawn_join() {
     out.push(format!("gcrust_threads_test_{}", std::process::id()));
 
     let src = include_str!("../examples/threads.gcr");
-    build_executable(&prog_of(src), &out).expect("build_executable failed");
+    build_executable(&prog_of(src), &out, &[]).expect("build_executable failed");
     // 37492500 & 0xFF = 0x... low byte
     assert_eq!(run_exit_code(&out), 37492500 & 0xFF);
     let _ = std::fs::remove_file(&out);

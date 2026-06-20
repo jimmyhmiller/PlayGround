@@ -14,8 +14,10 @@ fn main() {
     let initial = game/initial_world()
     // Jump straight to the second room (dungeon_1) and autoplay-wander there.
     let room2 = game/switch_map(initial, "dungeon_1", "default")
+    // The loop reads the world from `world_state`; seed it with room2.
+    reset!(game/world_state, room2)
     let ui_bufs = game/alloc_ui_buffers(room2.tuning)
-    let final = game/game_loop(room2, shader_ctx, ui_bufs, 6000)
+    let final = game/game_loop(shader_ctx, ui_bufs, 6000)
     r/close_window()
     println("reached frame " ++ to-string(final.frame))
     0

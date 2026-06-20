@@ -47,7 +47,7 @@ fn main() -> ExitCode {
                 Some(t) => coil::build_executable_for(&src, &out, t),
                 None => coil::build_executable(&src, &out),
             };
-            report(r.map(|_| format!("wrote {}", out.display())))
+            report(r.map(|_| format!("wrote {}", out.display())), file)
         }
         "emit-obj" => {
             let out = opts.out.unwrap_or_else(|| default_out(file, "o"));
@@ -55,28 +55,39 @@ fn main() -> ExitCode {
                 Some(t) => coil::compile_to_object_for(&src, &out, t),
                 None => coil::compile_to_object(&src, &out),
             };
-            report(r.map(|_| format!("wrote {}", out.display())))
+            report(r.map(|_| format!("wrote {}", out.display())), file)
         }
-        "emit-ir" => report(match &opts.target {
-            Some(t) => coil::emit_ir_for(&src, t),
-            None => coil::emit_ir(&src),
-        }),
-        "expand" => report(coil::expand_to_string(&src)),
-        "run" => run_aot(&src, opts.target.as_deref()),
+        "emit-ir" => report(
+            match &opts.target {
+                Some(t) => coil::emit_ir_for(&src, t),
+                None => coil::emit_ir(&src),
+            },
+            file,
+        ),
+        "expand" => report(coil::expand_to_string(&src), file),
+        "run" => run_aot(&src, file, opts.target.as_deref()),
         _ => usage(),
     }
 }
 
+/// Print a finished diagnostic body under a single `error:` prefix, substituting
+/// the real source path for the `<source>` placeholder the library renders (it
+/// has the text but not the file name). A spanless message has no placeholder,
+/// so the substitution is a harmless no-op there.
+fn print_error(body: &str, file: &str) {
+    eprintln!("error: {}", body.replacen("<source>", file, 1));
+}
+
 /// Build to a temp executable, run it, and propagate its exit code. With a cross
 /// `--target` the binary is run via `arch -<arch>` (Rosetta on macOS).
-fn run_aot(src: &str, triple: Option<&str>) -> ExitCode {
+fn run_aot(src: &str, file: &str, triple: Option<&str>) -> ExitCode {
     let exe = std::env::temp_dir().join(format!("coil_run_{}", std::process::id()));
     let build = match triple {
         Some(t) => coil::build_executable_for(src, &exe, TargetTriple::create(t)),
         None => coil::build_executable(src, &exe),
     };
     if let Err(e) = build {
-        eprintln!("error: {e}");
+        print_error(&e, file);
         return ExitCode::FAILURE;
     }
     let status = match run_arch(triple) {
@@ -142,14 +153,14 @@ impl Opts {
     }
 }
 
-fn report(result: Result<String, String>) -> ExitCode {
+fn report(result: Result<String, String>, file: &str) -> ExitCode {
     match result {
         Ok(out) => {
             println!("{out}");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            print_error(&e, file);
             ExitCode::FAILURE
         }
     }

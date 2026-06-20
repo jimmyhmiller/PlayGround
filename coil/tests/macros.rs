@@ -161,10 +161,10 @@ fn auto_gensym_is_consistent_within_one_template() {
     assert_eq!(build_and_run(src), 42); // (20+1)*2, argument evaluated once
 }
 
-// ---- module system: (include ...) ---------------------------------------
+// ---- module system: (import ...) -----------------------------------------
 
 #[test]
-fn include_pulls_in_a_prelude() {
+fn import_pulls_in_a_prelude() {
     // `lib/closure.coil` defines the `defclosure` macro; resolved relative to
     // the crate root (cargo test's working directory).
     let src = include_str!("../examples/closure-lib.coil");
@@ -172,10 +172,11 @@ fn include_pulls_in_a_prelude() {
 }
 
 #[test]
-fn include_guard_allows_double_include() {
+fn import_guard_allows_double_import() {
     let src = r#"
-        (include "lib/closure.coil")
-        (include "lib/closure.coil")
+        (module test)
+        (import "lib/closure.coil")
+        (import "lib/closure.coil")
         (defclosure adder [(n :i64)] [(x :i64)] :i64 (iadd n x))
         (defn main [] (-> :i64)
           (let [a (adder-new 40)] (let [r (adder-call a 2)] (adder-free a) r)))

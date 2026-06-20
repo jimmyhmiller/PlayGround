@@ -1,0 +1,2 @@
+fn ap(f: i64, x: i64) -> i64 { f(x) }
+fn main() -> i64 { let b = 40; let add = |n: i64| n + b; add(2) + ap(add, 0) - 40 }

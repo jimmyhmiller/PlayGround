@@ -1,0 +1,333 @@
+; ======================================================================
+; everything.coil -- one program exercising every feature Coil supports
+; today. Each `feat-*` returns a value the harness in `main` checks; if any
+; check fails, `main` returns that check's number (1..24) instead of 42, so
+; the exit code names the broken feature. Success => exit 42 (plus some
+; printed output from the IO / extern demos).
+;   coil run examples/everything.coil; echo $?     => 42
+;
+; Run from the project root so the (import "lib/...") paths resolve.
+; ======================================================================
+
+; --- Modules: pull in the userland allocator, IO, and closure libraries.
+;     `import` loads another module; `:use *` brings its names in unqualified
+;     (`result.coil` arrives once, via the load-once guard).
+(module app)
+(import "lib/alloc.coil" :use *)   ; Allocator vtable, malloc + arena, create/destroy
+(import "lib/io.coil" :use *)      ; Writer/Reader capability, print-int/str, FixBuf
+(import "lib/result.coil" :use *)  ; Option/Result/Some/None/Ok/Err
+(import "lib/closure.coil")        ; the `defclosure` macro
+
+; --- C interop: extern declarations (convention + signature, link-time symbol).
+(extern printf  :cc c [(ptr i8) ...] (-> i32))   ; variadic
+(extern putchar :cc c [:i64] (-> :i64))
+(extern puts    :cc c [(ptr i8)] (-> :i32))
+(extern div     [:i32 :i32] (-> DivT))           ; returns a struct BY VALUE (SysV/AAPCS64)
+
+; ======================================================================
+; Types: structs, arrays, nested structs, sums, generic struct, layouts
+; ======================================================================
+(defstruct Point  [(x :i64) (y :i64)])
+(defstruct Rect   [(lo Point) (hi Point)])              ; nested structs by value
+(defstruct DivT   [(quot :i32) (rem :i32)])             ; libc div_t
+(defstruct Pair   [A B] [(fst A) (snd B)])              ; generic struct
+(defstruct Px     [(r :u8) (g :u8)])                    ; arbitrary-width int fields
+(defstruct Flags  [(on bool) (off bool)])              ; real bool fields
+
+(defsum Shape                                           ; non-generic sum type
+  (Circle [(r :i64)])
+  (Rect2  [(w :i64) (h :i64)]))
+
+; Layout control (the dual of calling conventions), pinned with static-assert:
+(defstruct Header :layout packed                        ; :packed = no padding
+  [(magic :u16) (version :u8) (flags :u8) (length :u32)])
+(static-assert (icmp-eq (sizeof Header) 8)            "packed header is 8 bytes")
+(static-assert (icmp-eq (offsetof Header length) 4)   "length at byte 4")
+
+(defstruct Line :layout (align 16) [(a :i64) (b :i64)]) ; over-aligned (alloca gets align 16)
+(static-assert (icmp-eq (alignof :i64) 8)             "i64 aligns to 8")
+
+(defstruct Reg :layout explicit :size 16 :align 8       ; :explicit = exact offsets
+  [(status :u32         :at 0)
+   (sbytes (array u8 4) :at 0)     ; same :at as status => an intentional union
+   (data   :i64         :at 8)])   ; bytes 4..7 are explicit padding
+(static-assert (icmp-eq (sizeof Reg) 16)              "Reg is 16 bytes")
+(static-assert (icmp-eq (offsetof Reg data) 8)        "data at byte 8")
+
+(defstruct Rgb565 :layout bits :backing :i16            ; :bits = sub-byte fields
+  [(b :bits 5) (g :bits 6) (r :bits 5)])
+(static-assert (icmp-eq (sizeof Rgb565) 2)            "RGB565 packs into 16 bits")
+
+; ======================================================================
+; User macros: a real compile-time Lisp (quasiquote/unquote/splice, & rest,
+; recursion, helper lambdas, gensym hygiene, emitting top-level defs)
+; ======================================================================
+(defmacro when2 [c & body] `(if ~c (do ~@body) 0))       ; & rest + ~@ splice
+(defmacro inc1 [x] `(iadd ~x 1))
+(defmacro cond2 [& cs]                                   ; recursive macro
+  (if (empty? cs)
+      0
+      (if (= (count cs) 1)
+          (first cs)
+          `(if ~(first cs) ~(first (rest cs)) (cond2 ~@(rest (rest cs)))))))
+(def powf (lambda [x n]                                  ; compile-time helper fn
+  (if (= n 0) 1 `(imul ~x ~(powf x (- n 1))))))
+(defmacro pow2 [x n] (powf x n))                          ; unrolls to nested imuls
+(defmacro dbl [x] `(let [t# ~x] (iadd t# t#)))           ; t# auto-gensyms (hygiene)
+(defmacro defconst [name v] `(defn ~name [] (-> :i64) ~v)); macro emits a top-level defn
+(defconst three 3)
+
+; The check harness, itself a macro:
+(defmacro chk [got want code rest] `(if (icmp-eq ~got ~want) ~rest ~code))
+
+; ======================================================================
+; Calling conventions (convention as type)
+; ======================================================================
+; :native -> a real LLVM calling convention (fastcc) on the fn and call sites.
+(defcc fast2 :params [rax rdx] :ret rax :clobber [rax rdx rcx] :preserve [rbx rbp]
+  :native fast)
+(defn cadd :cc fast2 [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+
+; :lower shim -> a register layout LLVM's CC enum can't express; realized with a
+; naked trampoline. Registers are load-bearing, so pick them per target arch.
+(defmacro def-shimcc [name]
+  (if (= target-arch "x86_64")
+      `(defcc ~name :params [rax rdx] :ret rax
+         :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
+      `(defcc ~name :params [x9 x10] :ret x9
+         :clobber [x9 x10 x11 x12 x13 x14 x15] :lower shim)))
+(def-shimcc shimcc)
+(defn ssub :cc shimcc [(a :i64) (b :i64)] (-> :i64) (isub a b))
+
+; ======================================================================
+; Feature demos
+; ======================================================================
+
+; 1. Recursion, the `c` convention, integer arithmetic, `if`, comparisons.
+(defn fib :cc c [(n :i64)] (-> :i64)
+  (if (icmp-le n 1) n (iadd (fib (isub n 1)) (fib (isub n 2)))))
+(defn feat-fib [] (-> :i64) (fib 10))                    ; => 55
+
+; 2. A user convention lowering to fastcc.
+(defn feat-conv [] (-> :i64) (cadd 20 22))               ; => 42
+
+; 3. A shim convention (exotic registers) + per-arch macro selection.
+(defn feat-shim [] (-> :i64) (let [x (iadd 40 10)] (ssub x 8)))   ; 50-8 => 42
+
+; 4. Allocation as an operation: stack / static / heap + free (region-less ptrs).
+(defn make-heap [(v :i64)] (-> (ptr i64))
+  (let [p (alloc-heap i64)] (store! p v) p))             ; heap ptr crosses the boundary
+(defn feat-alloc [] (-> :i64)
+  (let [h (make-heap 10) s (alloc-static i64) f (alloc-stack i64)]
+    (store! s 30) (store! f 2)
+    (let [sum (iadd (load h) (iadd (load s) (load f)))]
+      (free h) sum)))                                    ; 10+30+2 => 42
+
+; 5. Allocators as values (Zig-style): the SAME code under malloc and an arena.
+;    `create`/`destroy` are the typed generic layer (size/align via sizeof/alignof).
+(defn boxed-add [(a (ptr Allocator)) (x :i64) (y :i64)] (-> :i64)
+  (match (create [i64] a)                                ; (Option (ptr i64))
+    (None []  0)
+    (Some [p] (do (store! p (iadd x y))
+                  (let [v (load p)] (destroy a p) v)))))
+(defn feat-allocators [] (-> :i64)
+  (let [gpa (malloc-allocator) arena (arena-allocator 1024)]
+    (iadd (boxed-add gpa 30 5) (boxed-add arena 5 2))))  ; 35+7 => 42
+
+; 6. IO as a capability value (Writer) composing with the allocator: an allocator
+;    hands out a buffer, a fixed-buffer Writer formats into it, we flush to stdout.
+(defn greet [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (do (print-str w "answer=") (print-int w n) (write-byte w (cast :u8 10))))
+(defn feat-io [] (-> :i64)
+  (let [a   (malloc-allocator)
+        buf (unwrap-ptr (alloc-slice [i8] a 64))
+        fb  (alloc-static FixBuf)]
+    (store! (field fb data) buf)
+    (store! (field fb cap) 64)
+    (greet (fixed-buffer-writer fb) 42)                  ; format into the buffer
+    (match (write-all (stdout) (load (field fb data)) (load (field fb len)))
+      (Ok  [n] 42)
+      (Err [e] 1))))                                     ; prints "answer=42" => 42
+
+; 7. extern C interop: variadic printf, putchar, string literals.
+(defn feat-extern [] (-> :i64)
+  (do (printf "coil: %d+%d=%d (%s)\n" 20 22 42 "ok")
+      (putchar 33) (putchar 10)                          ; '!' then newline
+      42))
+
+; 8. Struct-by-value across the C ABI: libc div() returns div_t by value.
+(defn feat-structabi [] (-> :i64)
+  (let [d (div 47 5)]                                    ; { quot:9, rem:2 }
+    (iadd (imul (cast :i64 (load (field d quot))) 10)
+          (cast :i64 (load (field d rem))))))            ; 9*10+2 => 92
+
+; 9. Floats: f32/f64, fadd/fsub/fmul/fdiv/frem, ordered compares, int<->float cast.
+(defn feat-floats [] (-> :i64)
+  (let [base (fmul 3.0 14.0)                             ; 42.0
+        adj  (fadd (fsub 5.0 5.0) (fdiv 0.0 2.0))]       ; 0.0
+    (if (and (fcmp-lt 1.5 2.5) (fcmp-ge (frem 85.0 43.0) 41.0))
+        (cast :i64 (cast :f32 (fadd base adj)))          ; f64 -> f32 -> i64
+        0)))                                             ; => 42
+
+; 10. Bitwise / shift ops (logical vs arithmetic shift by signedness).
+(defn feat-bitwise [] (-> :i64)
+  (let [hi (iand 255 (ior (ishl 1 5) 8))                 ; (32|8) & 255 = 40
+        lo (ixor 3 1)                                    ; 2
+        sh (cast :i64 (ishr (cast :u8 200) 2))           ; unsigned 200>>2 = 50
+        nt (cast :i64 (iand (cast :u8 255) (inot (cast :u8 7))))]  ; ~7 & 255 = 248
+    (iadd (isub (iadd hi lo) (isub sh 50))               ; 42
+          (isub nt 248))))                               ; + 0 => 42
+
+; 11. bool: literals, short-circuiting and/or/not, comparisons return bool.
+(defn feat-bool [] (-> :i64)
+  (let [(mut f) (zeroed Flags)]
+    (store! (field f on) true)
+    (store! (field f off) false)
+    (if (and (load (field f on)) (not (load (field f off))))
+        (if (or false true) 42 0)
+        0)))
+
+; 12. Arbitrary-width integers with real unsigned semantics (udiv, wrap).
+(defn feat-widths [] (-> :i64)
+  (let [a (cast :u8 200) b (cast :u8 50)]
+    (iadd (imul (cast :i64 (idiv a b)) 10)               ; unsigned 200/50 = 4 -> 40
+          (cast :i64 (cast :u2 6)))))                     ; 6 mod 4 = 2 => 42
+
+; 13. Literal inference: bare literals adopt the iN/uN of their context.
+(defn channel [(base :u8)] (-> :u8) (iadd base 1))        ; `1` infers u8
+(defn feat-inference [] (-> :i64)
+  (let [px (alloc-stack Px)]
+    (store! (field px r) 40)                             ; 40 adopts u8 from (ptr u8)
+    (store! (field px g) (channel 1))                    ; arg 1 adopts u8 -> 2
+    (iadd (cast :i64 (load (field px r))) (cast :i64 (load (field px g))))))  ; => 42
+
+; 14. Structs + arrays: field/index give pointers, then load/store!.
+(defn feat-structs [] (-> :i64)
+  (let [p (alloc-stack Point) a (alloc-stack (array i64 3))]
+    (store! (field p x) 30) (store! (field p y) 4)
+    (store! (index a 0) 1) (store! (index a 1) 2) (store! (index a 2) 5)
+    (iadd (iadd (load (field p x)) (load (field p y)))
+          (iadd (load (index a 0)) (iadd (load (index a 1)) (load (index a 2)))))))
+
+; 15. References & mutability: immutable ref, `(mut T)`, `let` stack place, `(mut place)`.
+(defn rect-area [(r Rect)] (-> :i64)                      ; immutable ref: reads only
+  (imul (isub (load (field (field r hi) x)) (load (field (field r lo) x)))
+        (isub (load (field (field r hi) y)) (load (field (field r lo) y)))))
+(defn translate [(p (mut Point)) (dx :i64) (dy :i64)] (-> :i64)   ; mutable ref
+  (do (store! (field p x) (iadd (load (field p x)) dx))
+      (store! (field p y) (iadd (load (field p y)) dy)) 0))
+(defn feat-refs [] (-> :i64)
+  (let [(mut r) (zeroed Rect)]                            ; stack place of value type
+    (store! (field (field r hi) x) 5)
+    (store! (field (field r hi) y) 5)
+    (translate (mut (field r hi)) 1 2)                    ; mutably borrow a nested place
+    (rect-area r)))                                       ; hi now (6,7): 6*7 => 42
+
+; 16. Generics by monomorphization, with inferred type arguments.
+(defn id [T] [(x T)] (-> T) x)
+(defn pair-sum [T] [(p (ptr (Pair T T)))] (-> T)
+  (iadd (load (field p fst)) (load (field p snd))))
+(defn feat-generics [] (-> :i64)
+  (let [p (alloc-stack (Pair i64 i64))]
+    (store! (field p fst) (id 40))                       ; T inferred = i64
+    (store! (field p snd) 2)
+    (pair-sum p)))                                        ; => 42
+
+; 17. Sum types + match.
+(defn area [(s Shape)] (-> :i64)
+  (match s (Circle [r] (imul 3 (imul r r))) (Rect2 [w h] (imul w h))))
+(defn feat-sum [] (-> :i64)
+  (iadd (area (Circle 2)) (area (Rect2 5 6))))            ; 12 + 30 => 42
+
+; 18. Closures as a LIBRARY (the `defclosure` macro): env struct + code + new/call/free.
+(defclosure adder  [(n :i64)] [(x :i64)] :i64 (iadd n x))
+(defclosure scaler [(k :i64)] [(x :i64)] :i64 (imul k x))
+(defn feat-closure [] (-> :i64)
+  (let [a (adder-new 5) s (scaler-new 3)]
+    (let [res (iadd (adder-call a 37) (isub (scaler-call s 14) 42))]
+      (adder-free a) (scaler-free s) res)))              ; (5+37)+(42-42) => 42
+
+; 19. Function pointers + a vtable (array of fnptr), fnptr-of, call-ptr.
+(defn op-add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+(defn op-mul [(a :i64) (b :i64)] (-> :i64) (imul a b))
+(defn feat-vtable [] (-> :i64)
+  (let [vt (alloc-stack (array (fnptr c [:i64 :i64] :i64) 2))]
+    (store! (index vt 0) (fnptr-of op-add))
+    (store! (index vt 1) (fnptr-of op-mul))
+    (iadd (call-ptr (load (index vt 0)) 20 20)           ; 40
+          (call-ptr (load (index vt 1)) 1 2))))          ; 2 => 42
+
+; 20. Bitfields: by-value get/set! on a packed backing integer.
+(defn feat-bits [] (-> :i64)
+  (let [c (alloc-stack Rgb565)]
+    (set! c r (cast :u5 20)) (set! c g (cast :u6 10)) (set! c b (cast :u5 12))
+    (iadd (cast :i64 (get c r)) (iadd (cast :i64 (get c g)) (cast :i64 (get c b))))))
+
+; 21. Explicit layout + union: byte-offset field access into a blob.
+(defn feat-explicit [] (-> :i64)
+  (let [rg (alloc-stack Reg)]
+    (store! (field rg status) (cast :u32 2))             ; 32-bit word
+    (store! (field rg data) 40)
+    (iadd (cast :i64 (load (index (field rg sbytes) 0))) ; low byte of status (union) = 2
+          (load (field rg data)))))                      ; 40 => 42
+
+; 22. Packed/aligned layout + sizeof/offsetof/alignof (asserted above).
+(defn feat-packed [] (-> :i64)
+  (let [h (alloc-stack Header) ln (alloc-stack Line)]    ; Line exercises (align 16)
+    (store! (field ln a) 0) (store! (field ln b) 0)
+    (store! (field h length) (cast :u32 40))
+    (store! (field h version) (cast :u8 2))
+    (iadd (cast :i64 (load (field h length))) (cast :i64 (load (field h version))))))
+
+; 23. The user macros above, exercised together.
+(defn classify [(n :i64)] (-> :i64)
+  (cond2 (icmp-lt n 0) 100 (icmp-eq n 0) 200 300))       ; recursive cond macro
+(defn feat-macros [] (-> :i64)
+  (when2 (icmp-eq (classify 0) 200)                      ; when + & rest
+    (iadd (pow2 (three) 3)                               ; compile-time pow: 3^3 = 27
+          (dbl (inc1 6)))))                              ; (6+1)*2 = 14 => 41
+
+; 24. Typed pointers: (ptr i8) string literal, sizeof, int<->ptr cast, index/load.
+(defn feat-ptr [] (-> :i64)
+  (let [s "coil" p (alloc-stack (array i64 2))]
+    (store! (index p 0) 10) (store! (index p 1) 19)
+    (let [nullp (cast (ptr i8) 0)
+          isnull (if (icmp-eq (cast :i64 nullp) 0) 1 0)]
+      (iadd (sizeof i64)                                 ; 8
+            (iadd (strlen s)                             ; "coil" -> 4
+                  (iadd isnull                           ; null is 0 -> 1
+                        (iadd (load (index p 0)) (load (index p 1)))))))))  ; 29 => 42
+
+; ======================================================================
+; main: C entry taking argc/argv; runs every check. Exit 42 iff all pass,
+; else the failing check's number.
+; ======================================================================
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (do
+    (printf "coil/everything.coil (argc=%d), running 24 checks:\n" argc)
+    (puts (load (index argv 0)))                          ; argv[0] = program path
+    (chk (feat-fib)        55  1
+    (chk (feat-conv)       42  2
+    (chk (feat-shim)       42  3
+    (chk (feat-alloc)      42  4
+    (chk (feat-allocators) 42  5
+    (chk (feat-io)         42  6
+    (chk (feat-extern)     42  7
+    (chk (feat-structabi)  92  8
+    (chk (feat-floats)     42  9
+    (chk (feat-bitwise)    42 10
+    (chk (feat-bool)       42 11
+    (chk (feat-widths)     42 12
+    (chk (feat-inference)  42 13
+    (chk (feat-structs)    42 14
+    (chk (feat-refs)       42 15
+    (chk (feat-generics)   42 16
+    (chk (feat-sum)        42 17
+    (chk (feat-closure)    42 18
+    (chk (feat-vtable)     42 19
+    (chk (feat-bits)       42 20
+    (chk (feat-explicit)   42 21
+    (chk (feat-packed)     42 22
+    (chk (feat-macros)     41 23
+    (chk (feat-ptr)        42 24
+      42))))))))))))))))))))))))))

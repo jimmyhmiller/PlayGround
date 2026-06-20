@@ -214,6 +214,7 @@ impl<'a> Mono<'a> {
             Type::Ptr(p) => Type::Ptr(Box::new(self.resolve_ty(p, map)?)),
             Type::Ref(m, p) => Type::Ref(*m, Box::new(self.resolve_ty(p, map)?)),
             Type::Array(e, n) => Type::Array(Box::new(self.resolve_ty(e, map)?), *n),
+            Type::Vec(e, n) => Type::Vec(Box::new(self.resolve_ty(e, map)?), *n),
             Type::Fn(cc, ps, r) => Type::Fn(
                 cc.clone(),
                 ps.iter().map(|p| self.resolve_ty(p, map)).collect::<Result<_, _>>()?,
@@ -390,6 +391,11 @@ impl<'a> Mono<'a> {
                 field: field.clone(),
                 val: Box::new(go(self, val)?),
             },
+            Expr::LlvmIr { result, args, body } => Expr::LlvmIr {
+                result: self.resolve_ty(result, map)?,
+                args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
+                body: body.clone(),
+            },
             Expr::Load(p) => Expr::Load(Box::new(go(self, p)?)),
             Expr::Store { ptr, val } => Expr::Store {
                 ptr: Box::new(go(self, ptr)?),
@@ -464,6 +470,7 @@ fn type_key(t: &Type) -> String {
         Type::Ref(_, p) => format!("ref_{}", type_key(p)),
         Type::Struct(s) => s.clone(),
         Type::Array(e, n) => format!("arr{n}_{}", type_key(e)),
+        Type::Vec(e, n) => format!("vec{n}_{}", type_key(e)),
         Type::Fn(..) => "fn".to_string(),
         Type::App(n, a) => mangle(n, a),
     }

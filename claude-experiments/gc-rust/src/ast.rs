@@ -5,8 +5,9 @@
 //! lower it to a typed, monomorphic core IR (see `src/core.rs`, Phase 2).
 
 use crate::lexer::{NumSuffix, Span};
+use serde::Serialize;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Module {
     pub items: Vec<Item>,
 }
@@ -15,13 +16,13 @@ pub struct Module {
 // Items
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Item {
     pub kind: ItemKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum ItemKind {
     Fn(FnDef),
     Struct(StructDef),
@@ -34,7 +35,7 @@ pub enum ItemKind {
     Use(UsePath),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FnDef {
     pub vis: bool, // pub?
     pub name: String,
@@ -55,7 +56,7 @@ pub struct FnDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Param {
     pub is_mut: bool,
     pub name: String,
@@ -63,7 +64,7 @@ pub struct Param {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StructDef {
     pub vis: bool,
     pub is_value: bool,
@@ -73,14 +74,14 @@ pub struct StructDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum StructBody {
     Named(Vec<FieldDef>),
     Tuple(Vec<Type>),
     Unit,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FieldDef {
     pub vis: bool,
     pub name: String,
@@ -88,7 +89,7 @@ pub struct FieldDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct EnumDef {
     pub vis: bool,
     pub is_value: bool,
@@ -98,21 +99,21 @@ pub struct EnumDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct VariantDef {
     pub name: String,
     pub payload: VariantPayload,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum VariantPayload {
     None,
     Tuple(Vec<Type>),
     Named(Vec<FieldDef>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TraitDef {
     pub vis: bool,
     pub name: String,
@@ -122,7 +123,7 @@ pub struct TraitDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum TraitItem {
     /// A required method signature (no body).
     Required(FnSig),
@@ -132,7 +133,7 @@ pub enum TraitItem {
     AssocType(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FnSig {
     pub name: String,
     pub generics: Generics,
@@ -143,7 +144,7 @@ pub struct FnSig {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ImplBlock {
     pub generics: Generics,
     /// `Some(trait)` for a trait impl, `None` for an inherent impl.
@@ -153,7 +154,7 @@ pub struct ImplBlock {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TypeAlias {
     pub vis: bool,
     pub name: String,
@@ -162,7 +163,7 @@ pub struct TypeAlias {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ConstDef {
     pub vis: bool,
     pub name: String,
@@ -171,7 +172,7 @@ pub struct ConstDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ModDef {
     pub vis: bool,
     pub name: String,
@@ -183,7 +184,7 @@ pub struct ModDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct UsePath {
     pub segments: Vec<String>,
     pub span: Span,
@@ -193,27 +194,27 @@ pub struct UsePath {
 // Generics + trait bounds
 // ============================================================================
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Generics {
     pub params: Vec<TypeParam>,
     /// `where` clause predicates (in addition to inline `T: Bound`).
     pub where_clauses: Vec<WherePredicate>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TypeParam {
     pub name: String,
     pub bounds: Vec<TraitRef>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct WherePredicate {
     pub ty: Type,
     pub bounds: Vec<TraitRef>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TraitRef {
     pub path: Path,
     pub args: Vec<Type>,
@@ -224,13 +225,13 @@ pub struct TraitRef {
 // Types
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Type {
     pub kind: TypeKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum TypeKind {
     /// A named (possibly generic) type or a type variable: `i64`, `Vec<T>`,
     /// `geometry::Shape`, `T`, `Self`.
@@ -250,7 +251,7 @@ pub enum TypeKind {
 }
 
 /// A `::`-separated path, e.g. `Option::Some`, `geometry::area`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Path {
     pub segments: Vec<String>,
     pub span: Span,
@@ -272,13 +273,13 @@ impl Path {
 // Expressions
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Expr {
     pub kind: Box<ExprKind>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum ExprKind {
     // literals
     Int(u64, NumSuffix),
@@ -335,13 +336,13 @@ pub enum ExprKind {
     Range { lo: Option<Expr>, hi: Option<Expr>, inclusive: bool },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum FieldAccess {
     Named(String),
     Tuple(u32),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FieldInit {
     pub name: String,
     /// `None` for field shorthand `Point { x }`.
@@ -349,7 +350,7 @@ pub struct FieldInit {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum ArrayLit {
     /// `[a, b, c]`
     Elems(Vec<Expr>),
@@ -357,14 +358,14 @@ pub enum ArrayLit {
     Repeat(Box<Expr>, Box<Expr>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ClosureParam {
     pub name: String,
     pub ty: Option<Type>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
@@ -372,10 +373,10 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum UnOp { Neg, Not }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BinOp {
     Add, Sub, Mul, Div, Rem,
     And, Or,
@@ -387,7 +388,7 @@ pub enum BinOp {
 // Statements + blocks
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     /// Trailing expression (the block's value), if any.
@@ -395,7 +396,7 @@ pub struct Block {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum Stmt {
     Let {
         pattern: Pattern,
@@ -411,13 +412,13 @@ pub enum Stmt {
 // Patterns
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum PatternKind {
     Wildcard,
     /// A binding `x` or `mut x`. Could also be a unit variant — resolution
@@ -431,7 +432,7 @@ pub enum PatternKind {
     Tuple(Vec<Pattern>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum LitPattern {
     Int(u64),
     Bool(bool),

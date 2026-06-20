@@ -28,6 +28,49 @@ impl Ord for i64 {
 
 impl Eq for String { fn eq(self, other: String) -> bool { str_eq(self, other) } }
 
+impl Eq for bool { fn eq(self, other: bool) -> bool { self == other } }
+
+// `Hash` lets a type be used as a `HashMap<K, V>` key. Implement it (plus `Eq`)
+// for your own key types. The hash is folded into a power-of-two bucket index by
+// the map, so any i64 (including negative) is fine.
+trait Hash { fn hash(self) -> i64; }
+
+// SplitMix64-style finalizer: scrambles sequential integer keys so they don't
+// cluster in the open-addressed table. Arithmetic wraps (gc-rust ints wrap by
+// default); the constants are < 2^32 so the literals never overflow i64.
+impl Hash for i64 {
+    fn hash(self) -> i64 {
+        let mut z = self;
+        z = (z ^ (z >> 33)) * 2654435769;
+        z = (z ^ (z >> 29)) * 2246822519;
+        z = z ^ (z >> 32);
+        z
+    }
+}
+
+impl Hash for String { fn hash(self) -> i64 { str_hash(self) } }
+
+impl Hash for bool { fn hash(self) -> i64 { if self { 1 } else { 0 } } }
+
+// `Display` renders a value to a `String`. Implement it for your own types to
+// use the generic `str_of` / `print_line`. Built in for the scalar/string types;
+// `bool` renders as `true`/`false` (unlike `to_string`, which would give 1/0).
+trait Display { fn to_str(self) -> String; }
+
+impl Display for String { fn to_str(self) -> String { self } }
+impl Display for i64 { fn to_str(self) -> String { to_string(self) } }
+impl Display for f64 { fn to_str(self) -> String { to_string(self) } }
+impl Display for bool { fn to_str(self) -> String { if self { "true" } else { "false" } } }
+
+// Render any `Display` value to a `String`.
+fn str_of<T: Display>(x: T) -> String { x.to_str() }
+
+// Render a `Display` value and print it followed by a newline.
+fn print_line<T: Display>(x: T) -> i64 { println(x.to_str()) }
+
+// Render a `Display` value and print it with NO trailing newline.
+fn print_val<T: Display>(x: T) -> i64 { print(x.to_str()) }
+
 // Option combinators.
 fn opt_unwrap_or<T>(o: Option<T>, default: T) -> T {
     match o {
@@ -216,6 +259,80 @@ fn vec_last<T>(v: Vec<T>) -> Option<T> {
     if v.len == 0 { Option::None } else { Option::Some(array_get(v.data, v.len - 1)) }
 }
 
+// The first element, or None for an empty Vec.
+fn vec_first<T>(v: Vec<T>) -> Option<T> {
+    if v.len == 0 { Option::None } else { Option::Some(array_get(v.data, 0)) }
+}
+
+// Bounds-checked indexing: Some(elem) in range, None otherwise.
+fn vec_get_opt<T>(v: Vec<T>, i: i64) -> Option<T> {
+    if i < 0 || i >= v.len { Option::None } else { Option::Some(array_get(v.data, i)) }
+}
+
+// A fresh Vec with every element of `a` followed by every element of `b`.
+fn vec_concat<T>(a: Vec<T>, b: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = vec_with_capacity(a.len + b.len);
+    let mut i = 0;
+    while i < a.len { out = vec_push(out, array_get(a.data, i)); i = i + 1; }
+    let mut j = 0;
+    while j < b.len { out = vec_push(out, array_get(b.data, j)); j = j + 1; }
+    out
+}
+
+// Append `b`'s elements onto `a` in place; returns the grown `a`.
+fn vec_extend<T>(mut a: Vec<T>, b: Vec<T>) -> Vec<T> {
+    let mut j = 0;
+    while j < b.len { a = vec_push(a, array_get(b.data, j)); j = j + 1; }
+    a
+}
+
+// A fresh Vec copying elements [lo, hi). Indices are clamped to [0, len], so
+// out-of-range bounds yield a shorter slice rather than reading past the end.
+fn vec_slice<T>(v: Vec<T>, lo: i64, hi: i64) -> Vec<T> {
+    let mut a = lo; if a < 0 { a = 0; }
+    let mut b = hi; if b > v.len { b = v.len; }
+    let mut out: Vec<T> = vec_new();
+    while a < b { out = vec_push(out, array_get(v.data, a)); a = a + 1; }
+    out
+}
+
+// The first `n` elements (clamped); `vec_drop` is everything after them.
+fn vec_take<T>(v: Vec<T>, n: i64) -> Vec<T> { vec_slice(v, 0, n) }
+fn vec_drop<T>(v: Vec<T>, n: i64) -> Vec<T> { vec_slice(v, n, v.len) }
+
+// Swap two elements in place; returns the Vec.
+fn vec_swap<T>(mut v: Vec<T>, i: i64, j: i64) -> Vec<T> {
+    let tmp = array_get(v.data, i);
+    let _u1 = array_set(v.data, i, array_get(v.data, j));
+    let _u2 = array_set(v.data, j, tmp);
+    v
+}
+
+// The first element satisfying `pred`, or None.
+fn vec_find<T>(v: Vec<T>, pred: fn(T) -> bool) -> Option<T> {
+    let mut i = 0;
+    let mut result: Option<T> = Option::None;
+    while i < v.len {
+        if opt_is_some(result) == false {
+            let x = array_get(v.data, i);
+            if pred(x) { result = Option::Some(x); }
+        }
+        i = i + 1;
+    }
+    result
+}
+
+// The index of the first element satisfying `pred`, or -1.
+fn vec_position<T>(v: Vec<T>, pred: fn(T) -> bool) -> i64 {
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i < v.len {
+        if found < 0 { if pred(array_get(v.data, i)) { found = i; } }
+        i = i + 1;
+    }
+    found
+}
+
 // A shallow copy (own backing array), so the original is untouched by later
 // in-place ops on the copy.
 fn vec_copy<T>(v: Vec<T>) -> Vec<T> {
@@ -311,6 +428,176 @@ fn str_is_empty(s: String) -> bool { str_len(s) == 0 }
 // Concatenate three strings: `str_concat3(a, b, c)`.
 fn str_concat3(a: String, b: String, c: String) -> String {
     str_concat(str_concat(a, b), c)
+}
+
+// `s` repeated `n` times (empty for n <= 0).
+fn str_repeat(s: String, n: i64) -> String {
+    let mut out = "";
+    let mut i = 0;
+    while i < n { out = str_concat(out, s); i = i + 1; }
+    out
+}
+
+// Left-pad `s` with copies of `pad` until it is at least `width` bytes wide.
+// Pads in whole `pad` units (use a 1-byte `pad` for exact width).
+fn str_pad_left(s: String, width: i64, pad: String) -> String {
+    let mut out = s;
+    while str_len(out) < width { out = str_concat(pad, out); }
+    out
+}
+
+// Right-pad `s` with copies of `pad` until it is at least `width` bytes wide.
+fn str_pad_right(s: String, width: i64, pad: String) -> String {
+    let mut out = s;
+    while str_len(out) < width { out = str_concat(out, pad); }
+    out
+}
+
+// Reverse a string byte-wise (ASCII-correct; splits multi-byte UTF-8).
+fn str_reverse(s: String) -> String {
+    let n = str_len(s);
+    let mut out = "";
+    let mut i = n;
+    while i > 0 { out = str_concat(out, str_substring(s, i - 1, i)); i = i - 1; }
+    out
+}
+
+// Byte index of the first occurrence of `needle` in `s`, or -1. An empty needle
+// matches at 0 (mirrors most stdlibs).
+fn str_index_of(s: String, needle: String) -> i64 {
+    let hl = str_len(s); let nl = str_len(needle);
+    if nl == 0 { return 0; }
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i + nl <= hl && found < 0 {
+        if str_eq(str_substring(s, i, i + nl), needle) { found = i; }
+        i = i + 1;
+    }
+    found
+}
+
+// Split `s` on every (non-overlapping) occurrence of the string `sep`. An empty
+// `sep` yields the whole string as one part. Always returns at least one part.
+fn str_split(s: String, sep: String) -> Vec<String> {
+    let mut parts: Vec<String> = vec_new();
+    let sl = str_len(sep);
+    if sl == 0 { parts = vec_push(parts, s); return parts; }
+    let n = str_len(s);
+    let mut start = 0;
+    let mut i = 0;
+    while i + sl <= n {
+        if str_eq(str_substring(s, i, i + sl), sep) {
+            parts = vec_push(parts, str_substring(s, start, i));
+            i = i + sl;
+            start = i;
+        } else {
+            i = i + 1;
+        }
+    }
+    parts = vec_push(parts, str_substring(s, start, n));
+    parts
+}
+
+// ---- Unicode / code-point API ---------------------------------------------
+// `String`s are stored as UTF-8 bytes; `str_len`/`str_get`/`str_substring` work
+// in BYTES. These functions work in Unicode CODE POINTS instead: `str_chars`
+// decodes the UTF-8, and `char_to_str` (a runtime intrinsic) encodes one code
+// point back to a 1–4 byte string. Together they give character-aware length,
+// indexing, slicing, and (ASCII) case folding without splitting a code point.
+//
+// Decoding assumes well-formed UTF-8 (true for any string built from literals,
+// `str_concat`, `read_file` of UTF-8, etc.). A truncated/invalid sequence yields
+// a garbage code point rather than crashing.
+
+// Decode `s` into its Unicode code points.
+fn str_chars(s: String) -> Vec<i64> {
+    let n = str_len(s);
+    let mut out: Vec<i64> = vec_new();
+    let mut i = 0;
+    while i < n {
+        let b0 = str_get(s, i);
+        if b0 < 128 {
+            out = vec_push(out, b0);
+            i = i + 1;
+        } else {
+            if b0 < 224 {
+                let b1 = str_get(s, i + 1);
+                out = vec_push(out, ((b0 & 31) << 6) | (b1 & 63));
+                i = i + 2;
+            } else {
+                if b0 < 240 {
+                    let b1 = str_get(s, i + 1);
+                    let b2 = str_get(s, i + 2);
+                    out = vec_push(out, ((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63));
+                    i = i + 3;
+                } else {
+                    let b1 = str_get(s, i + 1);
+                    let b2 = str_get(s, i + 2);
+                    let b3 = str_get(s, i + 3);
+                    out = vec_push(out, ((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63));
+                    i = i + 4;
+                }
+            }
+        }
+    }
+    out
+}
+
+// The number of Unicode code points in `s` (vs `str_len`, which counts bytes).
+// Counts every byte that is not a UTF-8 continuation byte (0x80..0xBF).
+fn str_len_chars(s: String) -> i64 {
+    let n = str_len(s);
+    let mut count = 0;
+    let mut i = 0;
+    while i < n {
+        let b = str_get(s, i);
+        if b < 128 || b >= 192 { count = count + 1; }
+        i = i + 1;
+    }
+    count
+}
+
+// Build a `String` from a Vec of Unicode code points (inverse of `str_chars`).
+fn str_from_chars(cps: Vec<i64>) -> String {
+    let mut out = "";
+    let mut i = 0;
+    while i < vec_len(cps) { out = str_concat(out, char_to_str(vec_get(cps, i))); i = i + 1; }
+    out
+}
+
+// The code point at character index `i` (NOT byte index), or -1 if out of range.
+fn char_at(s: String, i: i64) -> i64 { opt_unwrap_or(vec_get_opt(str_chars(s), i), 0 - 1) }
+
+// Character-boundary-safe substring by CODE-POINT index `[lo, hi)`. Indices are
+// clamped, and it never splits a multibyte character (unlike `str_substring`).
+fn str_sub_chars(s: String, lo: i64, hi: i64) -> String {
+    str_from_chars(vec_slice(str_chars(s), lo, hi))
+}
+
+// ASCII-only upper/lower case (A–Z ↔ a–z); all other code points pass through
+// unchanged. (Full Unicode case folding is locale- and context-dependent and is
+// deliberately out of scope.)
+fn str_to_upper(s: String) -> String {
+    let cps = str_chars(s);
+    let mut out: Vec<i64> = vec_new();
+    let mut i = 0;
+    while i < vec_len(cps) {
+        let c = vec_get(cps, i);
+        out = vec_push(out, if c >= 97 && c <= 122 { c - 32 } else { c });
+        i = i + 1;
+    }
+    str_from_chars(out)
+}
+fn str_to_lower(s: String) -> String {
+    let cps = str_chars(s);
+    let mut out: Vec<i64> = vec_new();
+    let mut i = 0;
+    while i < vec_len(cps) {
+        let c = vec_get(cps, i);
+        out = vec_push(out, if c >= 65 && c <= 90 { c + 32 } else { c });
+        i = i + 1;
+    }
+    str_from_chars(out)
 }
 
 // ---- String algorithms (written in gc-rust over the primitives) -----------
@@ -587,6 +874,177 @@ fn mapstr_get<V>(m: MapStr<V>, key: String) -> Option<V> {
             Option::None
         }
     }
+}
+
+// An independent copy of a map (separate backing arrays). Use when a scope adds
+// bindings to a borrowed map and the original must stay unmutated — MapStr shares
+// its arrays across inserts, so aliasing + mutating both sides corrupts it.
+fn mapstr_copy<V>(m: MapStr<V>) -> MapStr<V> {
+    let mut c: MapStr<V> = mapstr_new();
+    let mut i = 0;
+    while i < m.cap {
+        if array_get(m.used, i) == 1 { c = mapstr_insert(c, array_get(m.keys, i), array_get(m.vals, i)); }
+        i = i + 1;
+    }
+    c
+}
+
+// Enumerate a map's occupied keys / values (same order). Used by the self-hosted
+// compiler to capture all in-scope locals when lowering a closure.
+// Substring search: 1 if `n` occurs in `h`, else 0 (i64 to match call sites).
+fn str_contains(h: String, n: String) -> i64 {
+    let hl = str_len(h); let nl = str_len(n);
+    if nl == 0 { return 1; }
+    let mut i = 0;
+    while i + nl <= hl {
+        if str_eq(str_substring(h, i, i + nl), n) { return 1; }
+        i = i + 1;
+    }
+    0
+}
+
+// Command-line arguments. Under the Rust seed these are stubs (the seed-built
+// compiler reads its target a different way); the self-hosted compiler's C runtime
+// (gcr_rt.c) provides the real argv-backed versions.
+fn arg_count() -> i64 { 0 }
+fn arg_str(i: i64) -> String { "" }
+
+fn mapstr_keys<V>(m: MapStr<V>) -> Vec<String> {
+    let mut ks: Vec<String> = vec_new();
+    let mut i = 0;
+    while i < m.cap { if array_get(m.used, i) == 1 { ks = vec_push(ks, array_get(m.keys, i)); } i = i + 1; }
+    ks
+}
+fn mapstr_vals<V>(m: MapStr<V>) -> Vec<V> {
+    let mut vs: Vec<V> = vec_new();
+    let mut i = 0;
+    while i < m.cap { if array_get(m.used, i) == 1 { vs = vec_push(vs, array_get(m.vals, i)); } i = i + 1; }
+    vs
+}
+
+// ---- HashMap<K, V>: a generic-keyed hash map ------------------------------
+// Open-addressing (linear probe) over three parallel arrays — the same shape as
+// `MapStr<V>`, but the key is any `K: Eq + Hash` instead of `String`. Like the
+// rest of the prelude it shares backing arrays across inserts, so use
+// `hashmap_copy` before letting two scopes mutate the same map. Grows past a 0.7
+// load factor. No deletion in v1 (matching `MapStr`).
+
+struct HashMap<K, V> { keys: Array<K>, vals: Array<V>, used: Array<i64>, len: i64, cap: i64 }
+
+fn hashmap_new<K, V>() -> HashMap<K, V> {
+    let cap = 8;
+    HashMap { keys: array_new(cap), vals: array_new(cap), used: array_new(cap), len: 0, cap: cap }
+}
+
+fn hashmap_len<K, V>(m: HashMap<K, V>) -> i64 { m.len }
+
+fn hashmap_is_empty<K, V>(m: HashMap<K, V>) -> bool { m.len == 0 }
+
+// The slot where `key` lives, or the first empty slot on its probe sequence.
+// Returns -1 only if the table is somehow full (callers grow before that).
+fn hashmap_slot<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> i64 {
+    let mask = m.cap - 1;
+    let mut i = key.hash() & mask;
+    let mut result = 0 - 1;
+    let mut steps = 0;
+    while steps < m.cap && result < 0 {
+        if array_get(m.used, i) == 0 {
+            result = i;
+        } else {
+            if array_get(m.keys, i).eq(key) {
+                result = i;
+            } else {
+                i = (i + 1) & mask;
+            }
+        }
+        steps = steps + 1;
+    }
+    result
+}
+
+// Insert into a map known to have a free slot (used by insert/grow).
+fn hashmap_put_raw<K: Eq + Hash, V>(mut m: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
+    let slot = hashmap_slot(m, key);
+    let was_used = array_get(m.used, slot);
+    let _u1 = array_set(m.keys, slot, key);
+    let _u2 = array_set(m.vals, slot, val);
+    let _u3 = array_set(m.used, slot, 1);
+    if was_used == 0 {
+        HashMap { keys: m.keys, vals: m.vals, used: m.used, len: m.len + 1, cap: m.cap }
+    } else {
+        m
+    }
+}
+
+// Double the table and re-insert every occupied entry.
+fn hashmap_grow<K: Eq + Hash, V>(m: HashMap<K, V>) -> HashMap<K, V> {
+    let new_cap = m.cap * 2;
+    let mut bigger: HashMap<K, V> = HashMap {
+        keys: array_new(new_cap), vals: array_new(new_cap), used: array_new(new_cap),
+        len: 0, cap: new_cap,
+    };
+    let mut i = 0;
+    while i < m.cap {
+        if array_get(m.used, i) == 1 {
+            bigger = hashmap_put_raw(bigger, array_get(m.keys, i), array_get(m.vals, i));
+        }
+        i = i + 1;
+    }
+    bigger
+}
+
+fn hashmap_insert<K: Eq + Hash, V>(mut m: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
+    if (m.len + 1) * 10 >= m.cap * 7 {
+        m = hashmap_grow(m);
+    }
+    hashmap_put_raw(m, key, val)
+}
+
+fn hashmap_contains<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> bool {
+    let slot = hashmap_slot(m, key);
+    if slot < 0 { false } else { array_get(m.used, slot) == 1 }
+}
+
+fn hashmap_get<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> Option<V> {
+    let slot = hashmap_slot(m, key);
+    if slot < 0 {
+        Option::None
+    } else {
+        if array_get(m.used, slot) == 1 {
+            Option::Some(array_get(m.vals, slot))
+        } else {
+            Option::None
+        }
+    }
+}
+
+// `get` with a fallback for the missing case.
+fn hashmap_get_or<K: Eq + Hash, V>(m: HashMap<K, V>, key: K, default: V) -> V {
+    opt_unwrap_or(hashmap_get(m, key), default)
+}
+
+// An independent copy (separate backing arrays); see the `MapStr` note.
+fn hashmap_copy<K: Eq + Hash, V>(m: HashMap<K, V>) -> HashMap<K, V> {
+    let mut c: HashMap<K, V> = hashmap_new();
+    let mut i = 0;
+    while i < m.cap {
+        if array_get(m.used, i) == 1 { c = hashmap_insert(c, array_get(m.keys, i), array_get(m.vals, i)); }
+        i = i + 1;
+    }
+    c
+}
+
+fn hashmap_keys<K, V>(m: HashMap<K, V>) -> Vec<K> {
+    let mut ks: Vec<K> = vec_new();
+    let mut i = 0;
+    while i < m.cap { if array_get(m.used, i) == 1 { ks = vec_push(ks, array_get(m.keys, i)); } i = i + 1; }
+    ks
+}
+fn hashmap_vals<K, V>(m: HashMap<K, V>) -> Vec<V> {
+    let mut vs: Vec<V> = vec_new();
+    let mut i = 0;
+    while i < m.cap { if array_get(m.used, i) == 1 { vs = vec_push(vs, array_get(m.vals, i)); } i = i + 1; }
+    vs
 }
 
 // ---- Functional iterator combinators over Vec -----------------------------

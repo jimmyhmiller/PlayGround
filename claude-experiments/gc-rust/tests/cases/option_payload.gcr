@@ -1,0 +1,10 @@
+struct Pt { x: i64, y: i64 }
+impl Pt { fn sum(self) -> i64 { self.x + self.y } }
+fn main() -> i64 {
+  let o: Option<Pt> = Option::Some(Pt { x: 10, y: 8 });
+  let a = match o { Option::Some(p) => p.sum(), Option::None => 0 };   // 18
+  let mut m: MapStr<Pt> = mapstr_new();
+  m = mapstr_insert(m, "k", Pt { x: 20, y: 4 });
+  let b = match mapstr_get(m, "k") { Option::Some(p) => p.x + p.y, Option::None => 0 };  // 24
+  a + b
+}

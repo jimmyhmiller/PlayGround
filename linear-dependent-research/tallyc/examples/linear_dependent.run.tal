@@ -1,0 +1,38 @@
+// Linear AND dependent types in one program, compiled to native code.
+//   tally run examples/linear_dependent.run.tal      (needs --features llvm)
+//
+// Dependent: a length-indexed Vec (the length index `n` is ERASED at runtime).
+// Linear:    an Own cell, alloc'd and freed exactly once (multiplicity 1).
+// main reduces to 1 + 2 + 3 = 6.
+
+enum Unit { U : Unit }
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+
+add : Nat -> Nat -> Nat
+fn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }
+
+// --- dependent: length-indexed vector -------------------------------------
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
+}
+vsum : {0 n : Nat} -> Vec Nat n -> Nat
+fn vsum(xs) { match xs { Nil => Zero, Cons(h, t) => add(h, vsum(t)) } }
+
+// --- linear: an owning capability, used exactly once ----------------------
+postulate Own   : Type -> Type
+postulate alloc : {0 a : Type} -> a -> Own a
+postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+
+seq : Unit -> Nat -> Nat                 // force the linear Unit, return the Nat
+fn seq(u, n) { match u { U => n } }
+
+one : Nat   fn one()   { Succ(Zero) }
+two : Nat   fn two()   { Succ(Succ(Zero)) }
+three : Nat fn three() { Succ(Succ(Succ(Zero))) }
+
+v3 : Vec Nat (Succ (Succ (Succ Zero)))
+fn v3() { Cons(one, Cons(two, Cons(three, Nil))) }
+
+main : Nat
+fn main() { seq(free(alloc(Zero)), vsum(v3)) }

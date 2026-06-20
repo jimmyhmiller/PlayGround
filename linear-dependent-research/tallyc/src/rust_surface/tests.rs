@@ -348,3 +348,37 @@ fn parse_and_name_errors() {
     assert!(check_program("fn f( {").is_err());
     assert!(check_program("enum Nat { Zero : Nat }\nfn g() { Bogus(Zero) }").is_err());
 }
+
+#[test]
+fn builtin_nat_pragma_requires_nat_shape() {
+    // a `%builtin Nat` on a non-Nat-shaped enum is rejected with a clear error.
+    assert!(check_program(
+        "%builtin Nat Foo\nenum Foo { A : Foo, B : Foo, C : Foo }\nmain : Foo\nfn main() { A }\n"
+    )
+    .is_err());
+    // naming an undeclared type is rejected.
+    assert!(check_program("%builtin Nat Nope\nmain : Nat\nfn main() { 0 }\n").is_err());
+}
+
+#[test]
+fn builtin_nat_unifies_literals_with_constructors() {
+    // with the pragma, `0`/`5` and `Zero`/`Succ` are the SAME packed type.
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               add : Nat -> Nat -> Nat\n\
+               fn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+               main : Nat\nfn main() { add(2, Succ(Succ(Zero))) }\n";
+    assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
+}
+
+#[test]
+fn implicit_solved_through_nested_constructor_arg() {
+    // regression: `alloc(Succ(Zero))` must let the enclosing call infer its erased
+    // implicit `a` THROUGH the constructor-application argument. This used to make
+    // the elaborator fall into check-mode and underflow when quoting an unsolved
+    // hole; now `infer_arg` infers `Succ(Zero) : Nat`, pinning `a = Nat`. (Uses the
+    // built-in memory prelude — no `postulate Own/alloc/free` boilerplate.)
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               main : Unit\n\
+               fn main() { free(alloc(Succ(Zero))) }\n";
+    assert!(check_program(src).is_ok(), "should type-check: {:?}", check_program(src).err());
+}

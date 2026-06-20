@@ -2,9 +2,14 @@
 
 > **Working name:** *Coil* (provisional — evokes low-level winding/control and "assembling"). Bikeshed later.
 >
-> **Status:** Design sketch v0. No implementation yet. This document specifies the
-> two type-system moves that define the language and the honest strategy for
-> lowering them to **raw LLVM**.
+> **Status:** Implemented (M0–M4 + macros + C interop). This document is the
+> design rationale; the roadmap at the end (§12) tracks what's built. Two notes
+> for the reader: (1) **allocation is no longer part of the pointer type.** The
+> original "region/allocator in `Ptr<T,R>`" sketch in §5.1–5.4 was *rejected* —
+> Coil moved to the **Zig model**: pointers are region-less (`(ptr T)`),
+> allocation is an *operation*, and an allocator is an explicit *value*. §5.1–5.4
+> are kept as the rejected alternative; §5.5 onward is what actually exists.
+> (2) The `adapt` macro (§4.5) and per-field endianness are still future.
 
 ---
 
@@ -39,7 +44,9 @@ core, plus a macro system powerful enough that "high-level" features are
 
 - Total control over calling convention, register placement, stack discipline,
   and clobber/preserve sets — expressed in source, enforced by the checker.
-- Total control over allocation — region/allocator is part of a pointer's type.
+- Total control over allocation — *where* memory comes from is an explicit
+  operation and an allocator is an explicit value (Zig-style), not a pointer-type
+  annotation. (The original "region in the pointer type" idea was dropped; §5.)
 - A homoiconic Lisp surface where almost everything lowers to explicit IR, and
   macros build the rest. (Same philosophy as the `mlir-lisp` experiment, but with
   a real type system layered on, and **LLVM** as the backend.)
@@ -87,6 +94,15 @@ core, plus a macro system powerful enough that "high-level" features are
   interop at link time, and `:shim` trampolines become ordinary relocations the
   assembler/linker resolves. There is no `eval`/JIT — the only way to run a
   program is to compile it.
+- **Optimized output.** Before emitting an object, Coil runs LLVM's new-pass-
+  manager `default<O3>` pipeline over the module (`run_passes` in `src/lib.rs`).
+  Coil's own codegen is naïve — every `let`/field is an `alloca`, nothing is
+  inlined, self-tail-recursion is a real call — and the pipeline is what cleans
+  that up (mem2reg, inlining, GVN, loop opts, **tail-call elimination** so the
+  one loop form doesn't grow the stack). Same backend and opt tier as clang, so
+  the result is on par with `cc -O3` (`bench/`). The textual `emit-ir` dump skips
+  this on purpose, so it shows the IR Coil generates and stays diff-able against
+  clang's unoptimized output.
 - **Comptime is a tree-walking interpreter, not a JIT.** Macro expansion runs
   the compile-time Lisp (see Macros, below) with no dependency on LLVM, and
   `coil build` expands every macro to a fixpoint *before* any code is emitted.
@@ -211,9 +227,15 @@ trampolines, and `extern` declarations — all one macro over convention data.
 
 ---
 
-## 5. Type-system move #2 — Allocation as type
+## 5. Type-system move #2 — Allocation as an explicit value (Zig-style)
 
-### 5.1 Pointers carry a region/allocator
+> **Reader's note.** §5.1–5.4 below are the *original, rejected* sketch, in which
+> the region/allocator lived **in the pointer type** (`Ptr<T, R>`). That model was
+> dropped. What Coil actually does — region-less pointers, allocation as an
+> operation, allocator as a threaded value — is in **§5.5 onward**. The rejected
+> sketch is kept because §5.5 reads as a diff against it.
+
+### 5.1 (rejected) Pointers carry a region/allocator
 
 A pointer type is parameterized by **where its target lives** and **how long**:
 
@@ -229,7 +251,7 @@ Ptr<T, R>       ; T = pointee type, R = region/allocator + lifetime
 (Ptr T    (in r12))       ; lives in a register (no address-of) — degenerate region
 ```
 
-### 5.2 Regions, allocators, escape
+### 5.2 (rejected) Regions, allocators, escape
 
 - A **region** is a named scope with a lifetime (`'frame`, `'arena`, user-defined).
   Pointers into a region cannot outlive it — assigning a `(Ptr T 'frame)` into a
@@ -247,7 +269,7 @@ Ptr<T, R>       ; T = pointee type, R = region/allocator + lifetime
     p))
 ```
 
-### 5.3 Soundness stance: *descriptive-but-checked* (a deliberate choice)
+### 5.3 (rejected) Soundness stance: *descriptive-but-checked*
 
 Full static memory safety here means rebuilding a borrow/region checker — the
 exact complexity the GC-lang experiment fled from. For a "complete control"
@@ -264,7 +286,7 @@ language we choose a middle path:
 This keeps "truly complete control" while adding guardrails, and leaves the
 safety/ergonomics ceiling open to library design rather than baking one policy in.
 
-### 5.4 Drop / free
+### 5.4 (rejected) Drop / free
 
 `free`/`drop` is convention-and-region aware: `(free A p)` requires `p :
 (Ptr T A)`. Region pointers (`'arena`, `'frame`) reject individual `free` — they
@@ -272,12 +294,20 @@ are released by region teardown. A `defer`/scope macro can emit the teardown.
 
 ### 5.5 Realized interface (what was actually built)
 
-The region-in-the-pointer model above (§5.1–5.4) was simplified away: pointers
-are **region-less** (`(ptr T)`), and control over allocation is expressed the
-**Zig way — an allocator is a value**, not a type annotation. This keeps the
-"allocation is explicit and visible in the type" goal (a function that allocates
-*takes* an `Allocator`, so its signature shows it) without a region/lifetime
-checker, matching the project's *descriptive, not memory-safe* stance.
+The region-in-the-pointer model above (§5.1–5.4) was dropped. What Coil actually
+does is the **Zig model**, in two parts:
+
+1. **Pointers are region-less.** `(ptr T)` is just a pointer (à la Zig/C). *Where*
+   memory comes from is an **operation**, not part of the type: `(alloc-stack T)`
+   → `alloca`, `(alloc-static T)` → a global, `(alloc-heap T)` → `malloc`; all
+   three yield the same `(ptr T)`. There are **no regions, lifetimes, or escape
+   checks** — a stack pointer is a pointer like any other and can be returned or
+   passed down freely; `free` is paired with `alloc-heap` by hand.
+2. **An allocator is a value, not a type annotation.** Control over allocation is
+   *which allocator you thread in*. A function that allocates *takes* an
+   `Allocator`, so its signature still shows it allocates — without a
+   region/lifetime checker, matching the project's *descriptive, not
+   memory-safe* stance.
 
 Both capabilities are **pure library code** (`lib/alloc.coil`, `lib/io.coil`) —
 the compiler has no notion of either. Each is a vtable struct of function
@@ -364,29 +394,38 @@ const-correctness rule; codegen gained only `(zeroed T)` → LLVM `zeroinitializ
 
 ## 6. The payoff: closures (and friends) are *derived*
 
-With both features, a closure is constructed, not built-in:
+A closure is constructed, not built-in — a struct of a code pointer (with a
+convention) and an environment pointer:
 
 ```lisp
-;; A closure value = (code ptr with convention C, env ptr with allocation R)
-(deftype (Closure C R Env)
+;; A closure value = (code ptr with convention C, env ptr)
+(deftype (Closure C Env)
   (struct
     (code (FnPtr C))          ; convention C decides how the env is threaded in
-    (env  (Ptr Env R))))      ; allocation R decides where the captured state lives
+    (env  (ptr Env))))        ; the env is a region-less pointer (§5.5)
 ```
 
-Different closure *representations* are different instantiations:
+> **Note.** This table predates the allocation-model change. With the original
+> region-in-the-pointer idea, the env's *placement* (`R`) was a type parameter;
+> now (§5.5) the env is a plain `(ptr Env)` and its placement is just *which
+> `alloc-*` op / allocator built it* — a value/operation choice, not a type. The
+> convention axis `C` is unchanged.
 
-| Representation                 | `C` (convention)                 | `R` (allocation) |
-|--------------------------------|----------------------------------|------------------|
-| Classic boxed closure          | env via `nest`/static-chain ptr  | `malloc`/heap    |
-| Stack closure (non-escaping)   | env via hidden first arg         | `'frame`         |
-| Arena closure                  | env via hidden first arg         | `'arena`         |
-| Register closure (tiny env)    | env captured in a pinned reg     | `(in rXX)`       |
+Different closure *representations* differ in convention and in how the env is
+allocated:
+
+| Representation                 | `C` (convention)                 | env placement (an operation) |
+|--------------------------------|----------------------------------|------------------------------|
+| Classic boxed closure          | env via `nest`/static-chain ptr  | `alloc-heap` / an allocator  |
+| Stack closure (non-escaping)   | env via hidden first arg         | `alloc-stack`                |
+| Arena closure                  | env via hidden first arg         | an arena allocator           |
+| Register closure (tiny env)    | env captured in a pinned reg     | no address (kept in a reg)   |
 
 The `nest` parameter attribute in LLVM (§7.5) exists precisely for the
 static-chain case — so the "classic" representation lowers cleanly. The others
-fall out by choosing `C` and `R`. Coroutine frames, vtables (a `Ptr` to a
-`'static` table of `FnPtr`s), and async state machines are the same story.
+fall out by choosing `C` and the allocation op. Coroutine frames, vtables (a
+`ptr` to a `static` table of `FnPtr`s), and async state machines are the same
+story.
 
 ---
 
@@ -456,13 +495,14 @@ hand-written per function.
 
 ### 7.4 Allocation lowering
 
-- `'frame` → `alloca` (escape-checked so it never leaks past the frame).
-- `'static` → an LLVM global.
-- `malloc`/custom allocator → calls to the allocator's declared alloc/free
-  symbols; the allocator value carries the symbol names.
-- `'arena` → bump-pointer over a region object; teardown frees the block.
-- `(in rXX)` → keep the value in a vreg / pinned physical reg; address-of is a
-  type error.
+The allocation *operations* (§5.5) lower directly; there is no region tag to carry:
+
+- `(alloc-stack T)` → `alloca`.
+- `(alloc-static T)` → an LLVM global.
+- `(alloc-heap T)` → a `malloc` call; `(free p)` → `free`.
+- A custom allocator value (`lib/alloc.coil`) is ordinary code: its `alloc`/
+  `free` are `extern`/fnptr calls, with no compiler involvement. A bump/arena
+  allocator is just such a value carrying its block and offset.
 
 ---
 
@@ -626,13 +666,19 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
     the strategy is the caller's choice. `lib/alloc.coil` ships a `malloc`-backed
     and an `arena` (bump) allocator; `allocators.coil` runs the same code under
     both → 42. No compiler support — structs + fnptrs + `extern`.
-  - **Next:** an IO capability (a `Writer` vtable) the same way — no ambient
-    stdout, thread it explicitly; and a `defer`/scope macro for cleanup.
+  - **IO as a capability value. ✅ done in userland.** The same move for IO: a
+    `Writer`/`Reader` is a vtable value `{ fn-ptr, ctx }` threaded in, so doing
+    IO shows in a function's type — no ambient stdout. `lib/io.coil` ships
+    `write-all`/`print-int`/`print-str` over a `Writer` with `stdout`/`stderr`, a
+    `null` sink, and a fixed-buffer sink (and a `Reader` with `stdin`); errors are
+    a sum type (`(Result :i64 IoError)`). It composes with allocation — a `Writer`
+    formats into an allocator-provided buffer (`examples/io.coil` → `answer=42`).
+    **Next:** a `defer`/scope macro for cleanup.
 - **Macros — ✅ done (engine).** `defmacro`/`def` evaluated by a compile-time
   Lisp interpreter (quasiquote/unquote/splicing, `gensym`, list & symbol
   builtins, lambdas, recursion, helper functions). Macros compute and can emit
   whole top-level definitions (a top-level `(do ...)` is spliced). They compose
-  with conventions and regions. The target is exposed as compile-time values
+  with conventions and allocators. The target is exposed as compile-time values
   (`target-arch`, `target-os`, `target-triple`, `target-pointer-width`), so
   macros can branch per architecture (e.g. `per-arch.coil` selects a `defcc` by
   arch). The target defaults to the host but is selectable: every CLI command
@@ -664,33 +710,35 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   reinterprets between pointer types (opaque-pointer no-op), enabling type-erased
   `void*` environments. Array-of-fnptr gives a vtable/dispatch table.
 - **M4 — Closures (manual memory) — ✅ done.** A closure is **not** a primitive:
-  it's a struct `{ code: fnptr-with-a-convention, env: ptr-with-a-region }`. The
-  env region is the lifetime/ownership story — `heap` closures escape and are
-  freed by hand; `frame` closures are non-escaping (the escape rule enforces it).
+  it's a struct `{ code: fnptr-with-a-convention, env: (ptr Env) }`. The env's
+  lifetime/ownership is manual — a heap env (`alloc-heap`) is freed by hand, a
+  stack env lives on the frame; there is no region tag or escape rule (§5.5).
   `closure.coil` shows two heterogeneous heap closures behind one `Closure` type
   and one generic `apply`, allocated and freed manually → 42. A `defclosure`
   macro (`defclosure.coil`, *userland* macro code) generates the env struct +
   code + closure struct + new/call/free from one line — closures as a library,
   not a language feature. Remaining: the `nest`-register convention so the env is
-  threaded out-of-band; downward `frame` closures (needs the borrow relaxation).
+  threaded out-of-band.
 - **`extern` + C interop — ✅ done.** `(extern name :cc c [types] (-> ret))`
   declares a foreign function's convention + signature; calls are type-checked
-  and the symbol is resolved at link time. Pointer regions are erased at the
-  boundary (the foreign side doesn't track them). Programs do real I/O
-  (`putchar`/`write`/`puts`); `extern.coil` prints `12345`. Remaining: variadics
-  (`printf`), and `:shim`-convention externs (calling hand-written asm through a
-  custom register ABI — the call-site marshalling already exists from M2).
-- **C types — ✅ done.** Integer widths `i8/i16/i32/i64`; typed pointers
-  `(ptr REGION TYPE)` with a foreign `c` region (so `(ptr c (ptr c i8))` is
-  `char**`); pointer indexing `(index p i)` (GEP); width `(cast :iN e)`
-  (sext/trunc). `main` may take `(argc :i32) (argv (ptr c (ptr c i8)))`.
-  Codegen threads each value's Coil type so loads/indexing use the right width
-  and pointee. `args.coil` reads and echoes its command line.
+  and the symbol is resolved at link time. Pointers are region-less, so they
+  cross the boundary unchanged (any pointer matches a pointer parameter,
+  `void*`-style). Programs do real I/O (`putchar`/`write`/`puts`); `extern.coil`
+  prints `12345`. **Variadics** are done — a trailing `...` makes
+  `printf`/`snprintf` callable (`varargs.rs`). Remaining: `:shim`-convention
+  externs (calling hand-written asm through a custom register ABI — the call-site
+  marshalling already exists from M2).
+- **C types — ✅ done.** Arbitrary-width integers `iN/uN` (signed/unsigned);
+  region-less typed pointers `(ptr TYPE)` (so `(ptr (ptr i8))` is `char**`);
+  pointer indexing `(index p i)` (GEP); width/int↔ptr `(cast TYPE e)`. `main` may
+  take `(argc :i32) (argv (ptr (ptr i8)))`. Codegen threads each value's Coil
+  type so loads/indexing use the right width and pointee. `args.coil` reads and
+  echoes its command line.
 - **Structs & arrays — ✅ done.** `(defstruct Name [(field :type) ...])` and
-  `(array T N)`; `(alloc REGION TYPE)` allocates any type; `(field p name)` and
-  array `(index p i)` produce element pointers (struct/array GEP); structs nest
-  by value (built in definition order) or self-reference by pointer.
-  `structs.coil` → 42.
+  `(array T N)`; `(alloc-stack/static/heap TYPE)` allocates any type (§5.5);
+  `(field p name)` and array `(index p i)` produce element pointers (struct/array
+  GEP); structs nest by value (built in definition order) or self-reference by
+  pointer. `structs.coil` → 42.
 - **Struct-by-value C ABI — ✅ done.** Passing/returning a struct by value across
   the `extern`/`c` boundary uses the real C ABI, not a pointer. `src/abi.rs`
   classifies each struct for the target and produces the exact LLVM coercion clang
@@ -705,6 +753,21 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   unclassifiable shape is a hard error, never a silent pointer. (`tests/struct_abi.rs`.)
   Remaining: unsigned-typed externs at the boundary, struct/array literals, and
   aggregate-by-value across *`:shim`* (custom-register) conventions.
+- **Raw LLVM IR + SIMD — ✅ done.** One general primitive exposes LLVM's whole
+  instruction set, the way Mojo reaches into MLIR: `(llvm-ir RESULT [operands…]
+  "BODY")` builds an `alwaysinline` helper from raw IR (filling `$ret`/`$tN`/`$N`
+  placeholders, hoisting `declare` lines), parses + links it in
+  (`create_module_from_ir`/`link_in_module`), and emits a call that `-O3` inlines
+  away to zero overhead. The checker is a pass-through that trusts the declared
+  `RESULT` type (so the form composes with the type system); the LLVM verifier
+  checks the body. No per-opcode compiler code — every instruction/intrinsic,
+  present or future, is reachable. The one supporting type is `(vec T N)` (LLVM
+  `<N x T>`); SIMD is then a macro library (`lib/simd.coil`: `vec4f`, `splat4f`,
+  `vmul4f`, `vfma4f`, `reduce-add4f`, `dot4f`), lowering to real NEON `fmul.4s`
+  (`examples/simd.coil`). Because Coil now hosts arbitrary LLVM IR, a C function
+  from `clang -emit-llvm` pastes into an `(llvm-ir …)` and runs identically
+  (`tests/llvm_ir.rs`). Deferred: passing a `vec` by value across the C ABI, and
+  overloaded-intrinsic name mangling (write the suffixed name yourself for now).
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
 

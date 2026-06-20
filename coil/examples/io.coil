@@ -3,8 +3,10 @@
 ; This also composes the two interfaces: an Allocator hands out a buffer, a
 ; fixed-buffer Writer formats into it, then we flush that buffer to stdout.
 ;   coil run examples/io.coil   prints: answer=42   => 0
-(include "lib/alloc.coil")
-(include "lib/io.coil")
+(module app)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/result.coil" :use *)   ; Ok/Err used in the match below
 
 ; Polymorphic over the sink: works with stdout, a buffer, or a null writer.
 (defn greet [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))

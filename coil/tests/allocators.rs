@@ -17,7 +17,9 @@ fn arena_bumps_and_reuses_one_block() {
     // Allocate several i64s from an arena, fill them, sum them. Per-alloc free is
     // a no-op; the whole block is freed once at the end.
     let src = r#"
-        (include "lib/alloc.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn main [] (-> :i64)
           (let [a (arena-allocator 1024)
                 p (unwrap-ptr (create [i64] a))
@@ -33,7 +35,9 @@ fn arena_bumps_and_reuses_one_block() {
 fn typed_create_sizes_and_aligns_itself() {
     // `create` allocates exactly sizeof(T) bytes; `destroy` infers T from the ptr.
     let src = r#"
-        (include "lib/alloc.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defstruct Pair [(a :i64) (b :i64)])
         (defn main [] (-> :i64)
           (let [al (malloc-allocator)]
@@ -52,7 +56,9 @@ fn typed_create_sizes_and_aligns_itself() {
 fn alloc_slice_allocates_an_array() {
     // alloc-slice gives n contiguous elements; index walks them.
     let src = r#"
-        (include "lib/alloc.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn main [] (-> :i64)
           (let [al (malloc-allocator)
                 xs (unwrap-ptr (alloc-slice [i64] al 3))]
@@ -68,7 +74,9 @@ fn alloc_slice_allocates_an_array() {
 fn allocation_failure_is_an_option() {
     // A tiny arena (8 bytes) can hand out one i64, then returns None.
     let src = r#"
-        (include "lib/alloc.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn main [] (-> :i64)
           (let [a (arena-allocator 8)]
             (match (create [i64] a)
@@ -86,7 +94,9 @@ fn allocator_is_visible_in_the_signature() {
     // A function with no allocator parameter has no way to allocate dynamically
     // -- the capability must be threaded in.
     let src = r#"
-        (include "lib/alloc.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn one [(a (ptr Allocator))] (-> :i64)
           (match (create [i64] a)
             (None [] 0)

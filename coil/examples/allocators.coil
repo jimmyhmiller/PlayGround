@@ -2,7 +2,9 @@
 ; so its type shows it allocates -- and you choose the strategy at the call site.
 ; Allocation can fail, and failure is a sum type (Option), not a null sentinel.
 ;   coil run examples/allocators.coil; echo $?   => 42
-(include "lib/alloc.coil")
+(module app)
+(import "lib/alloc.coil" :use *)
+(import "lib/result.coil" :use *)   ; Some/None used in the match below
 
 (defn boxed-add [(a (ptr Allocator)) (x :i64) (y :i64)] (-> :i64)
   (match (create [i64] a)            ; ask for one i64 (sized/aligned by sizeof/alignof)

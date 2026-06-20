@@ -644,8 +644,23 @@ fn render_world(world, shader_ctx, fade_alpha) {
     r/draw_rectangle_lines(10, hp_y, 100, 16, r/WHITE)
     r/draw_text("HP", 115, hp_y - 2, 18, r/WHITE)
 
+    // Stamina bar — sits just above the HP bar, same 100px footprint.
+    // Width tracks current/max stamina. Guarded against a stale or null
+    // tuning/player instance left over from a live struct edit.
+    let stam_max = if world.tuning.stamina_max == null { 100.0 }
+                   else { world.tuning.stamina_max }
+    let stam_cur = if world.player.stamina == null { 0.0 }
+                   else { world.player.stamina }
+    let stam_frac = if stam_max > 0.0 { stam_cur / stam_max } else { 0.0 }
+    let stam_w = to-int(stam_frac * 100.0)
+    let stam_y = hp_y - 22
+    r/draw_rectangle(10, stam_y, 100, 16, r/rgb(20, 45, 55))
+    if stam_w > 0 { r/draw_rectangle(10, stam_y, stam_w, 16, r/rgb(70, 180, 220)) }
+    r/draw_rectangle_lines(10, stam_y, 100, 16, r/WHITE)
+    r/draw_text("STA", 115, stam_y - 2, 18, r/WHITE)
+
     // Gold counter
-    let gold_y = hp_y - 26
+    let gold_y = stam_y - 26
     let gold_text = "Gold: ${world.gold_collected}"
     r/draw_text(gold_text, 10, gold_y, 18, r/rgb(255, 215, 0))
 

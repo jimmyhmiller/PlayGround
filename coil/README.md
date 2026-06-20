@@ -16,6 +16,14 @@ executable with the system `cc` — no runtime dependency on LLVM, and the exoti
 Macros run during compilation in a tree-walking interpreter (no JIT, no LLVM);
 `coil build` fully expands every macro before emitting any code.
 
+The compiled output is **fully optimized**: every object runs LLVM's `-O3`
+pipeline (mem2reg, inlining, GVN, loop optimizations, tail-call elimination — so
+Coil's only loop, self-tail-recursion, becomes an actual loop). On matched
+compute benchmarks this lands Coil at **parity with `cc -O3`** (within
+measurement noise, same LLVM backend and opt tier) — see
+[`bench/`](bench/README.md). (`emit-ir` deliberately shows the *un*optimized IR
+Coil generates, which is what the struct-ABI tests diff against clang.)
+
 - Full design: [`docs/DESIGN.md`](docs/DESIGN.md)
 
 ## Status
@@ -192,6 +200,36 @@ round-trip helper, and a C caller of Coil functions that *return* structs — an
 run, natively and (for the SysV path on an arm64 host) cross-compiled and run
 under Rosetta. An unclassifiable shape is a hard error, never a silent pointer.
 
+## Raw LLVM IR & SIMD
+
+Coil exposes LLVM's instruction set directly, the way Mojo reaches into MLIR —
+one general primitive, no per-opcode compiler support. `(llvm-ir RESULT
+[operands…] "BODY")` drops a snippet of LLVM IR into an `alwaysinline` helper:
+`$ret`/`$tN` expand to the result/operand LLVM type strings and `$N` to the
+operand SSA names, `declare` lines are hoisted to module scope, and the helper
+is linked in and **inlined away by `-O3` to zero overhead**. The form is
+**type-checked at the boundary** — it has exactly its declared `RESULT` type, so
+it composes with the rest of the type system — while the LLVM verifier checks the
+body. Every instruction and intrinsic (present or future) is reachable this way.
+
+The one supporting *type* is `(vec T N)` — an LLVM `<N x T>` SIMD vector (`load`/
+`store!` and the existing arithmetic work on it lane-wise). On top, **SIMD is a
+macro library** (`lib/simd.coil`): `vec4f`, `splat4f`, `vadd4f`/`vmul4f`, `vfma4f`
+(via `@llvm.fma`), `reduce-add4f`, and a `dot4f` — each a one-line macro over
+`(llvm-ir …)`. So it's *explicit* SIMD (you choose the width, not the
+auto-vectorizer) that still optimizes: `examples/simd.coil`'s dot product lowers
+to NEON `ldr q`, `fmul.4s`, and a horizontal reduce (`coil emit-ir` shows the
+`<4 x float>` ops pre-inline). Because Coil now hosts arbitrary LLVM IR, a C
+function compiled with `clang -emit-llvm` can be pasted into an `(llvm-ir …)` and
+runs identically (`tests/llvm_ir.rs` embeds the murmur3 finalizer). See
+`tests/llvm_ir.rs`.
+
+```lisp
+(include "lib/simd.coil")
+(defn main [] (-> :i64)                         ; dot([10,10,10,12],[1,1,1,1]) = 42
+  (cast :i64 (dot4f (vec4f 10 10 10 12) (splat4f 1))))
+```
+
 ## What it looks like
 
 ```lisp
@@ -216,9 +254,10 @@ apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
 Then:
 
 ```sh
-cargo test                                     # 149 tests (build + run native exes)
+cargo test                                     # 155 tests (build + run native exes)
 
 # AOT: compile + link a native executable, then run it (exit code = result)
+cargo run -- run   examples/everything.coil; echo $?                       # => 42 (every feature, 24 self-checks)
 cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
 cargo run -- run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
 cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
@@ -227,8 +266,13 @@ cargo run -- run   examples/allocation.coil; echo $?                       # => 
 cargo run -- run   examples/inference.coil; echo $?                        # => 42 (literal inference)
 cargo run -- run   examples/extern.coil                                    # prints 12345
 cargo run -- run   examples/io.coil                                        # prints answer=42 (Writer capability)
+cargo run -- run   examples/structabi.coil; echo $?                        # => 92 (struct-by-value C ABI: libc div)
+cargo run -- run   examples/simd.coil; echo $?                             # => 42 (explicit SIMD: NEON fmul.4s via macros)
 cargo run -- run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
+
+# Benchmark the optimized output against C (clang -O3) on matched programs
+bench/run.sh                                              # => bench/RESULTS.md (≈ cc -O3)
 
 # Inspect the pipeline
 cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file

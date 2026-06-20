@@ -1,0 +1,44 @@
+// Build a real binary tree, then traverse it. `build` is GENERAL recursion (it
+// recurses with a DIFFERENT label on each side — `2*label` and `2*label+1` — so no
+// two nodes share a label and the two subtrees are genuinely distinct). tallyc
+// compiles this to a real recursive native function (`Fix`), so `build(d, _)`
+// allocates 2^d - 1 DISTINCT `Node` cells on the heap. `sum` then traverses them.
+//
+//   tally build examples/tree.tal -o tree && ./tree
+//
+// Memory safety still comes from the type system; `build`/`sum` are ordinary
+// total-looking code. `Nat` is `%builtin` (machine integers), and because the
+// recursion is `Fix`, the type-checker treats `build` opaquely — it never unfolds
+// the 2^d computation at compile time, so this compiles in milliseconds and does
+// all its work at runtime.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Tree {
+    Leaf : Tree,
+    Node : Tree -> Nat -> Tree -> Tree,
+}
+
+// a full binary tree of depth d; each node carries a distinct label, so the left
+// and right subtrees differ and cannot be shared — real branching recursion.
+build : Nat -> Nat -> Tree
+fn build(d, label) {
+    match d {
+        Zero    => Leaf,
+        Succ(k) => Node(build(k, label + label), label, build(k, label + label + 1)),
+    }
+}
+
+// sum every node's label (a traversal with two induction hypotheses).
+sum : Tree -> Nat
+fn sum(t) {
+    match t {
+        Leaf          => 0,
+        Node(l, x, r) => sum(l) + x + sum(r),
+    }
+}
+
+// depth 22 ⇒ allocate 2^22 - 1 = 4194303 distinct nodes, then sum their labels.
+main : Nat
+fn main() { sum(build(22, 1)) }

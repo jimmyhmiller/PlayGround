@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::gc::field::{read_type_id, read_varlen_count};
 use crate::gc::header::ObjHeader;
+use crate::gc::reflect::{TypeMeta, ValueMeta};
 use crate::gc::roots::{AtomicRootSet, RootSource};
 use crate::gc::scan::scan_object;
 use crate::gc::type_info::{TypeInfo, VarLenKind};
@@ -16,6 +17,36 @@ use crate::gc::statemap::{StatemapTracer, TraceState};
 use crate::gc::thread::ThreadState;
 
 // ─── Heap ───────────────────────────────────────────────────────────
+
+/// Whether the precise-layout DETECTOR is armed: always in debug builds, and in
+/// release when `GCR_GC_VERIFY` is set (to anything but empty/`0`). When armed,
+/// the forward/promote loop asserts that every traced slot pointing into a
+/// collected space targets a real object (in-range `type_id`) and panics with a
+/// clear diagnostic otherwise — surfacing a scalar that leaked into a traced
+/// slot (a layout/rooting bug). This is a DETECTOR, never a silent skip: a
+/// moving collector must trust precise layout, not heuristically re-identify
+/// pointers (a false-positive int whose bits look like a header would be
+/// relocated). Release-default trusts the layout on the hot path (the bounds
+/// index still faults loudly if the invariant is ever violated); the env flag
+/// lets a corruption be diagnosed in the field without a debug rebuild.
+#[inline]
+pub(crate) fn gc_verify_armed() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    static STATE: AtomicU8 = AtomicU8::new(2); // 2 = uninitialised
+    match STATE.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let on = std::env::var_os("GCR_GC_VERIFY")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false);
+            STATE.store(on as u8, Ordering::Relaxed);
+            on
+        }
+    }
+}
 
 /// Thread-safe heap with stop-the-world semi-space collection.
 ///
@@ -87,6 +118,15 @@ pub struct Heap {
 
     type_id_offset: usize,
     type_table: Vec<TypeInfo>,
+    /// Cold, optional reflection metadata (type/field names + field types),
+    /// parallel to `type_table` by `type_id`. Set once at startup via
+    /// [`Heap::set_type_meta`]; empty when the embedder supplies none (tests,
+    /// non-reflective clients). Reads are lock-free after the one-time set.
+    type_meta: OnceLock<Vec<TypeMeta>>,
+    /// Cold reflection metadata for inline `#[value]` aggregates, indexed by
+    /// `value_id`. Set alongside `type_meta`; used to recursively render
+    /// flattened value fields in a heap dump.
+    value_meta: OnceLock<Vec<ValueMeta>>,
     collections: AtomicUsize,
 
     /// Current GC phase. Mutators check this to know if write barriers
@@ -142,6 +182,8 @@ impl Heap {
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
             type_table,
+            type_meta: OnceLock::new(),
+            value_meta: OnceLock::new(),
             collections: AtomicUsize::new(0),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
@@ -181,6 +223,8 @@ impl Heap {
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
             type_table,
+            type_meta: OnceLock::new(),
+            value_meta: OnceLock::new(),
             collections: AtomicUsize::new(0),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
@@ -304,6 +348,63 @@ impl Heap {
     /// walk an object's fields by shape.
     pub fn type_info_by_id(&self, type_id: u16) -> &TypeInfo {
         &self.type_table[type_id as usize]
+    }
+
+    /// Install the reflection metadata table (type/field names + field types).
+    /// Called once at startup, before any mutator runs. The full table is
+    /// supplied at once; a partial or absent table simply means reflection
+    /// queries return `None`. A second call is ignored (the table is immutable
+    /// once set).
+    pub fn set_type_meta(&self, meta: Vec<TypeMeta>) {
+        let _ = self.type_meta.set(meta);
+    }
+
+    /// Reflection metadata for a `type_id`, or `None` if no metadata was
+    /// installed or the id is out of range. Pairs with [`obj_type_id`] to render
+    /// an object with its source names.
+    pub fn type_meta_by_id(&self, type_id: u16) -> Option<&TypeMeta> {
+        self.type_meta.get()?.get(type_id as usize)
+    }
+
+    /// The full reflection metadata table (empty slice if none installed).
+    pub fn type_meta_all(&self) -> &[TypeMeta] {
+        self.type_meta.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Install the value-aggregate reflection metadata (indexed by `value_id`).
+    /// Set once at startup alongside [`set_type_meta`](Self::set_type_meta).
+    pub fn set_value_meta(&self, meta: Vec<ValueMeta>) {
+        let _ = self.value_meta.set(meta);
+    }
+
+    /// Reflection metadata for an inline `#[value]` aggregate by `value_id`, or
+    /// `None` if none was installed or the id is out of range.
+    pub fn value_meta_by_id(&self, value_id: u16) -> Option<&ValueMeta> {
+        self.value_meta.get()?.get(value_id as usize)
+    }
+
+    /// Walk every object currently allocated in the live spaces — the tenured
+    /// from-space plus the nursery (if generational) — calling `visitor(obj,
+    /// type_info)` for each. This is the engine for heap-exploration tooling:
+    /// paired with [`type_meta_by_id`](Self::type_meta_by_id) it can render the
+    /// whole object graph with source names.
+    ///
+    /// Note: this visits all *allocated* objects in those spaces, which between
+    /// collections may include not-yet-reclaimed garbage in the nursery. For a
+    /// strictly-live snapshot, trigger a collection first. Must not run
+    /// concurrently with a collection (call at a safepoint or program end).
+    ///
+    /// # Safety
+    /// All objects in the live spaces must be valid (headers initialized, varlen
+    /// counts written) — true for any object the mutator has finished
+    /// allocating.
+    pub unsafe fn walk_live_objects(&self, visitor: &mut dyn FnMut(*mut u8, &TypeInfo)) {
+        unsafe {
+            self.from_space().walk(&self.type_table, visitor);
+            if let Some(ns) = &self.nursery_state {
+                ns.nursery.walk(&self.type_table, visitor);
+            }
+        }
     }
 
     /// Check if GC should be triggered on every allocation.
@@ -1546,6 +1647,29 @@ impl Heap {
         }
 
         let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        // PRECISE-LAYOUT INVARIANT (no conservative pointer identification):
+        // the monomorphizing front end places every scalar in the untraced raw
+        // region and zeroes unused enum pointer-slots, so a TRACED slot only
+        // ever holds a pointer-or-null. A slot pointing into from-space
+        // therefore ALWAYS targets a real object with an in-range type_id. An
+        // out-of-range type_id means a non-pointer (scalar) leaked into a
+        // traced slot — a layout/rooting bug. We must NOT silently `return old`
+        // (that is conservative-GC pointer identification: unsound in a moving
+        // collector — a false-positive int whose bits look like a valid header
+        // would still be relocated — and it masks the real bug). Under
+        // debug/stress (or release with GCR_GC_VERIFY=1) we panic loudly as a
+        // DETECTOR; release-default trusts the layout and the bounds index
+        // below faults loudly if the invariant is ever broken. Never silent.
+        if gc_verify_armed() {
+            assert!(
+                (type_id as usize) < self.type_table.len(),
+                "GC precise-layout violation: traced slot points at {old:p} whose \
+                 header type_id={type_id} is out of range (type_table len {}). A \
+                 non-pointer reached a traced slot — fix the layout/rooting; do not \
+                 mask it.",
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
@@ -1592,6 +1716,21 @@ impl Heap {
             return (type_info_word & !FORWARDING_BIT) as *mut u8;
         }
 
+        // PRECISE-LAYOUT INVARIANT (see copy_or_forward): a traced slot pointing
+        // into from-space always targets a real object. Out-of-range type_id =
+        // a scalar leaked into a traced slot — a layout/rooting bug we surface
+        // loudly (detector under debug/stress; bounds fault in release), never a
+        // silent conservative skip.
+        if gc_verify_armed() {
+            assert!(
+                ((type_info_word as u16) as usize) < self.type_table.len(),
+                "GC precise-layout violation (concurrent): traced slot points at \
+                 {old:p} whose header type_id={} is out of range (type_table len \
+                 {}). A non-pointer reached a traced slot.",
+                type_info_word as u16,
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_info_word as u16 as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
@@ -1633,6 +1772,19 @@ impl Heap {
         }
 
         let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        // PRECISE-LAYOUT INVARIANT (see copy_or_forward): a nursery slot that is
+        // traced always targets a real object; an out-of-range type_id means a
+        // scalar leaked into a traced slot. Detector under debug/stress (or
+        // release+GCR_GC_VERIFY), never a silent skip.
+        if gc_verify_armed() {
+            assert!(
+                (type_id as usize) < self.type_table.len(),
+                "GC precise-layout violation (promote): traced slot points at \
+                 {old:p} whose header type_id={type_id} is out of range \
+                 (type_table len {}). A non-pointer reached a traced slot.",
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,

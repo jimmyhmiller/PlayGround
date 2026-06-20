@@ -1,8 +1,13 @@
-# Coil — Layout Control (design sketch)
+# Coil — Layout Control
 
-> Status: **design sketch, not implemented.** A proposal for total, explicit
-> control over data layout, built as the structural twin of Coil's
-> calling-convention support.
+> Status: **mostly implemented.** Tiers 1–3 are done and tested
+> (`tests/layout.rs`, `examples/layout.coil` / `bitfields.coil` /
+> `explicit-layout.coil`): `:c`/`:packed`/`(align N)` strategies, `:explicit`
+> `:at` offsets + unions, `:bits` bitfields, and the `sizeof`/`alignof`/
+> `offsetof`/`static-assert` primitives. Still future: per-field `:endian`,
+> `deflayout` policies, and sum-type tag/niche control (see the phasing at the
+> end). Total, explicit control over data layout, built as the structural twin
+> of Coil's calling-convention support.
 
 ## Thesis: layout is the dual of calling convention
 

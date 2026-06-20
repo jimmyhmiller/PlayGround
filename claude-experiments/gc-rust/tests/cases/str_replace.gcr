@@ -1,0 +1,9 @@
+fn main() -> i64 {
+  let a = str_replace("one,two,three", ",", " | ");      // longer
+  let b = str_replace("aXbXcXd", "X", "");               // remove
+  let c = str_replace("no match here", "zzz", "!");       // none
+  let ok1 = if string_eq(a, "one | two | three") { 1 } else { 0 };
+  let ok2 = if string_eq(b, "abcd") { 1 } else { 0 };
+  let ok3 = if string_eq(c, "no match here") { 1 } else { 0 };
+  ok1 * 10 + ok2 * 10 + ok3 * 10 + 12                    // 30 + 12 = 42
+}

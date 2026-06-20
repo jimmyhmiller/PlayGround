@@ -159,11 +159,20 @@ const _: () = {
 
 /// Static per-function descriptor. One emitted per compiled function as a
 /// private constant global; each frame's `origin` field points at it. The GC
-/// reads `num_roots` to know how many root slots follow the frame header.
+/// reads `num_roots` to know how many root slots follow the frame header, then
+/// `num_indirect` *indirect* slots after them.
+///
+/// A **direct** root slot holds a GC pointer the collector reads and updates in
+/// place. An **indirect** root slot holds the *address* of a GC pointer that
+/// lives elsewhere on the stack — namely a reference embedded in a flattened
+/// `#[value]` local's alloca (the alloca's interior). The collector dereferences
+/// the indirect slot once to reach the real pointer and updates it in place.
+/// This is how value-with-ref locals are kept precise across collections without
+/// moving the value out of its alloca.
 #[repr(C)]
 pub struct FrameOrigin {
     pub num_roots: u32,
-    _pad: u32,
+    pub num_indirect: u32,
     /// Function name, NUL-terminated, for debugging / GC tracing. May be null.
     pub name: *const u8,
 }
@@ -172,7 +181,7 @@ impl FrameOrigin {
     pub const fn new(num_roots: u32, name: *const u8) -> Self {
         FrameOrigin {
             num_roots,
-            _pad: 0,
+            num_indirect: 0,
             name,
         }
     }
@@ -199,15 +208,25 @@ pub unsafe fn walk_gc_frames(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64
     while !frame.is_null() {
         unsafe {
             let origin = (*frame).origin;
-            let num_roots = if origin.is_null() {
-                0
+            let (num_roots, num_indirect) = if origin.is_null() {
+                (0, 0)
             } else {
-                (*origin).num_roots as usize
+                ((*origin).num_roots as usize, (*origin).num_indirect as usize)
             };
-            // Root slots start at byte offset ROOTS past the frame header.
+            // Direct root slots start at byte offset ROOTS past the frame header.
             let slots = (frame as *const u8).add(frame_offsets::ROOTS) as *mut u64;
             for i in 0..num_roots {
                 visitor(slots.add(i));
+            }
+            // Indirect slots follow the direct ones: each holds the address of a
+            // GC pointer inside a value-with-ref local's alloca. Deref once, then
+            // visit that pointer's slot so the collector updates it in place.
+            for j in 0..num_indirect {
+                let cell = slots.add(num_roots + j);
+                let target = (*cell) as *mut u64;
+                if !target.is_null() {
+                    visitor(target);
+                }
             }
             frame = (*frame).parent;
         }
@@ -748,14 +767,21 @@ pub struct AotLayout {
 /// the alloc window is pointed at the heap. This MUST match the JIT path or the
 /// GC ABI breaks.
 ///
+/// `meta`/`meta_len` carry the reflection metadata blob (encoded by
+/// `gc::reflect::encode`); it is decoded into the heap's `TypeMeta` table so
+/// heap-exploration tooling and in-language reflection can recover type/field
+/// names. An empty blob (`meta_len == 0`) simply installs no metadata.
+///
 /// # Safety
-/// `layouts` must point at `ti_count` valid `AotLayout` records, and `entry`
-/// must be the compiled program entry with signature `extern "C" fn(*mut
-/// Thread) -> i64`.
+/// `layouts` must point at `ti_count` valid `AotLayout` records, `meta` at
+/// `meta_len` bytes produced by `gc::reflect::encode`, and `entry` must be the
+/// compiled program entry with signature `extern "C" fn(*mut Thread) -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gcr_runtime_main(
     layouts: *const AotLayout,
     ti_count: usize,
+    meta: *const u8,
+    meta_len: usize,
     entry: extern "C" fn(*mut Thread) -> i64,
 ) -> i64 {
     use crate::gc::{Full, ObjHeader, TypeInfo};
@@ -765,8 +791,22 @@ pub unsafe extern "C" fn gcr_runtime_main(
         assert!(!layouts.is_null(), "gcr_runtime_main: null layout table");
         unsafe { std::slice::from_raw_parts(layouts, ti_count) }
     };
+    // Decode the metadata blob FIRST: besides the reflection tables it carries
+    // the per-type interior-pointer offsets, which must be baked into the
+    // `TypeInfo`s as we build the table (so the GC traces refs embedded in
+    // flattened value fields). The slices are leaked — the type table lives for
+    // the whole program, a bounded one-time leak, matching the JIT path.
+    let (meta_types, meta_values, interior) = if meta_len > 0 {
+        assert!(!meta.is_null(), "gcr_runtime_main: null metadata blob");
+        let bytes = unsafe { std::slice::from_raw_parts(meta, meta_len) };
+        crate::gc::reflect::decode(bytes)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
     // Rebuild the type table exactly as `codegen::layouts_to_type_infos` does:
-    // pointer fields first (traced), then raw bytes, then any varlen tail.
+    // pointer fields first (traced), then raw bytes, then any varlen tail, plus
+    // interior pointers for flattened value-with-ref fields.
     let type_table: Vec<TypeInfo> = slice
         .iter()
         .enumerate()
@@ -781,6 +821,12 @@ pub unsafe extern "C" fn gcr_runtime_main(
                 2 => ti.with_varlen_bytes(l.ptr_fields),
                 other => panic!("gcr_runtime_main: invalid varlen kind {}", other),
             };
+            if let Some(offs) = interior.get(i) {
+                if !offs.is_empty() {
+                    let leaked: &'static [u16] = Box::leak(offs.clone().into_boxed_slice());
+                    ti = ti.with_interior_ptrs(leaked);
+                }
+            }
             ti
         })
         .collect();
@@ -788,13 +834,168 @@ pub unsafe extern "C" fn gcr_runtime_main(
     // Generational heap: a small nursery (collected cheaply and often) over a
     // large tenured generation. Most objects die young, so minor GCs reclaim the
     // bulk of garbage without touching tenured space.
-    let nursery = 16 << 20;   // 16 MB young generation
+    //
+    // The nursery is intentionally SMALL (1 MB) so real minor collections happen
+    // during ordinary workloads — including the self-compile — rather than being
+    // sized past the workload to avoid collecting. The old 256 MB nursery was an
+    // AVOIDANCE of a (since-disproven) "int-or-pointer mis-move" concern: on this
+    // moving path the monomorphizing front end is precise (every scalar lives in
+    // the untraced raw region; unused enum pointer-slots are zeroed), so a traced
+    // slot only ever holds a pointer-or-null and an int can never be mis-moved.
+    // See docs/FUTURE_WORK.md (P0 int/pointer entry) — that residual unsoundness
+    // is DORMANT here and only becomes live if the self-hosted toolchain ever
+    // links this moving GC instead of the non-moving gcr_rt.c (the M-RT split).
+    // The collector arms a precise-layout detector under debug / --gc-stress and
+    // under GCR_GC_VERIFY=1 (see gc::heap::gc_verify_armed).
+    let nursery = 1 << 20;     // 1 MB young generation — collect for real
     let tenured = 256 << 20;  // 256 MB old generation (per space)
     let mut rt = RuntimeContext::new_generational(nursery, tenured, type_table);
+    // Install the reflection metadata decoded above (type/field names + types)
+    // so heap-exploration tooling and in-language reflection have nominal info.
+    if !meta_types.is_empty() || !meta_values.is_empty() {
+        rt.heap().set_type_meta(meta_types);
+        rt.heap().set_value_meta(meta_values);
+    }
     let thread = rt.thread_ptr();
     // Publish the current thread so FFI callback trampolines can recover it.
     set_current_thread(thread);
-    entry(thread)
+    let result = entry(thread);
+    // Opt-in heap dump: render the live object graph with reflection metadata,
+    // after the program returns (heap quiescent). `GCR_HEAP_DUMP=json` emits a
+    // structured snapshot for tooling; any other non-empty value emits text.
+    if let Some(mode) = std::env::var_os("GCR_HEAP_DUMP") {
+        if mode == "json" {
+            eprint!("{}", unsafe { crate::gc::dump::dump_heap_json(rt.heap()) });
+        } else {
+            eprint!("{}", unsafe { crate::gc::dump::dump_heap_text(rt.heap()) });
+        }
+    }
+    result
+}
+
+// =============================================================================
+// In-language structural reflection (field iteration)
+// =============================================================================
+
+/// The reflection fields *active* for `obj` right now: a struct's fields, or the
+/// payload fields of an enum's currently-tagged variant. Empty for opaque
+/// builtins or when no metadata is installed. Borrows the heap's (immortal)
+/// metadata table.
+fn active_fields<'h>(heap: &'h Heap, obj: *const u8) -> &'h [crate::gc::FieldMeta] {
+    use crate::gc::TypeKind;
+    let tid = unsafe { heap.obj_type_id(obj) };
+    match heap.type_meta_by_id(tid) {
+        Some(m) => match &m.kind {
+            TypeKind::Struct { fields } => fields,
+            TypeKind::Enum { tag_offset, variants } => {
+                let tag = unsafe { (obj.add(*tag_offset as usize) as *const u32).read_unaligned() };
+                variants
+                    .iter()
+                    .find(|v| v.tag == tag)
+                    .map(|v| v.fields.as_slice())
+                    .unwrap_or(&[])
+            }
+            TypeKind::Opaque => &[],
+        },
+        None => &[],
+    }
+}
+
+/// `field_count(obj)` — number of reflectable fields of `obj` (a struct's fields,
+/// or the active enum variant's payload). 0 for opaque/builtin objects.
+///
+/// # Safety
+/// `thread` valid with a live heap; `obj` a valid heap object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_reflect_field_count(thread: *mut Thread, obj: *const u8) -> i64 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        active_fields(heap, obj).len() as i64
+    }
+}
+
+/// Bounds-check a reflection field index, panicking with a clear message (an
+/// out-of-range index is a caller bug — `field_count` is the guard).
+fn field_at<'a>(fields: &'a [crate::gc::FieldMeta], idx: i64, op: &str) -> &'a crate::gc::FieldMeta {
+    if idx < 0 || idx as usize >= fields.len() {
+        panic!("reflect::{op}: field index {idx} out of range (0..{})", fields.len());
+    }
+    &fields[idx as usize]
+}
+
+/// `field_kind(obj, i)` — the kind of field `i`: 0=ref, 1=int, 2=float, 3=bool,
+/// 4=char, 5=value-aggregate. Lets in-language code decide how to read it.
+///
+/// # Safety
+/// As [`ai_reflect_field_count`]; `i` must be in `0..field_count`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_reflect_field_kind(thread: *mut Thread, obj: *const u8, i: i64) -> i64 {
+    use crate::gc::{FieldTy, ScalarKind};
+    unsafe {
+        let heap = &*(*thread).heap;
+        let f = field_at(active_fields(heap, obj), i, "field_kind");
+        match f.ty {
+            FieldTy::Ref(_) => 0,
+            FieldTy::Scalar(ScalarKind::F32 | ScalarKind::F64) => 2,
+            FieldTy::Scalar(ScalarKind::Bool) => 3,
+            FieldTy::Scalar(ScalarKind::Char) => 4,
+            FieldTy::Scalar(_) => 1,
+            FieldTy::Value(_) => 5,
+        }
+    }
+}
+
+/// `field_i64(obj, i)` — field `i`'s value widened to i64: a scalar decoded by
+/// its kind (sign-extended for signed ints, float bits for floats), or a ref's
+/// pointer bits. Pairs with `field_kind` so the caller interprets it.
+///
+/// # Safety
+/// As [`ai_reflect_field_count`]; `i` must be in `0..field_count`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_reflect_field_i64(thread: *mut Thread, obj: *const u8, i: i64) -> i64 {
+    use crate::gc::{FieldTy, ScalarKind};
+    unsafe {
+        let heap = &*(*thread).heap;
+        let f = field_at(active_fields(heap, obj), i, "field_i64");
+        let at = obj.add(f.offset as usize);
+        match f.ty {
+            FieldTy::Ref(_) | FieldTy::Value(_) => (at as *const u64).read_unaligned() as i64,
+            FieldTy::Scalar(k) => match k {
+                ScalarKind::I8 => (at as *const i8).read_unaligned() as i64,
+                ScalarKind::I16 => (at as *const i16).read_unaligned() as i64,
+                ScalarKind::I32 => (at as *const i32).read_unaligned() as i64,
+                ScalarKind::I64 => (at as *const i64).read_unaligned(),
+                ScalarKind::U8 | ScalarKind::Bool => at.read_unaligned() as i64,
+                ScalarKind::U16 => (at as *const u16).read_unaligned() as i64,
+                ScalarKind::U32 | ScalarKind::Char => (at as *const u32).read_unaligned() as i64,
+                ScalarKind::U64 | ScalarKind::Ptr => (at as *const u64).read_unaligned() as i64,
+                ScalarKind::F32 => (at as *const f32).read_unaligned().to_bits() as i64,
+                ScalarKind::F64 => (at as *const f64).read_unaligned().to_bits() as i64,
+            },
+        }
+    }
+}
+
+/// `field_name(obj, i)` — a fresh `String` holding field `i`'s source name.
+/// `str_type_id` is the `String` layout id used to allocate the result.
+///
+/// # Safety
+/// As [`ai_reflect_field_count`]; `i` must be in `0..field_count`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_reflect_field_name(
+    thread: *mut Thread,
+    str_type_id: i64,
+    obj: *const u8,
+    i: i64,
+) -> *mut u8 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        // Clone the name out before allocating (the alloc may move the heap, but
+        // the metadata table is off-heap and immortal, so the &str stays valid;
+        // we copy to be explicit and avoid borrowing across the alloc).
+        let name = field_at(active_fields(heap, obj), i, "field_name").name.clone();
+        alloc_string_from_bytes(thread, str_type_id as u32, name.as_bytes())
+    }
 }
 
 // =============================================================================
@@ -1031,6 +1232,20 @@ unsafe fn alloc_with_published_frame(
         let dyna = &*t.dyna_thread;
         dyna.set_parked_jit_fp(t.top_frame as *const u8);
 
+        // Stress mode: collect on EVERY allocation, maximally exercising precise
+        // rooting and relocation. The frame is published above, so all live roots
+        // are scannable (ANF guarantees no GC value is stranded in a register, and
+        // construction sites reload GC operands after the alloc). Sound for both
+        // single- and multi-threaded programs. Minor GC for generational heaps; a
+        // full collection for the semi-space heap the `--gc-stress` driver uses.
+        if heap.gc_every_alloc() {
+            if heap.has_nursery() {
+                heap.mutator_triggered_minor_gc::<IdentityPtrPolicy>(dyna);
+            } else {
+                heap.mutator_triggered_gc::<IdentityPtrPolicy>(dyna);
+            }
+        }
+
         // `alloc_obj::<Full>` (not bare `alloc`) stamps the object header with
         // `info.type_id`; bare `alloc` only zeroes, leaving type_id 0, which
         // breaks the GC scanner.
@@ -1126,6 +1341,23 @@ pub unsafe extern "C" fn ai_print_str(_thread: *mut Thread, s: *const u8) -> i64
         // Lossy is fine for output; gc-rust strings are UTF-8 by construction.
         let text = String::from_utf8_lossy(str_bytes(s));
         println!("{}", text);
+    }
+    0
+}
+
+/// `print`: write a `String`'s bytes with NO trailing newline, then flush so
+/// partial-line output (prompts, progress) appears immediately. Returns 0.
+///
+/// # Safety
+/// `s` must point to a valid gc-rust `String` object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_print_str_raw(_thread: *mut Thread, s: *const u8) -> i64 {
+    use std::io::Write;
+    unsafe {
+        let bytes = str_bytes(s);
+        let mut out = std::io::stdout();
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
     }
     0
 }
@@ -1228,6 +1460,21 @@ pub unsafe extern "C" fn ai_str_substring(
     }
 }
 
+/// `read_file`: a fresh `String` with the bytes of the file at `path` (empty if
+/// it can't be read). Enables a self-hosted compiler driver to read source files.
+///
+/// # Safety
+/// `path` valid `String`; `thread`/`type_id` as `ai_str_concat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_read_file(thread: *mut Thread, type_id: u32, path: *const u8) -> *mut u8 {
+    unsafe {
+        let bytes = str_bytes(path);
+        let path_str = std::str::from_utf8(bytes).unwrap_or("");
+        let content = std::fs::read(path_str).unwrap_or_default();
+        alloc_string_from_bytes(thread, type_id, &content)
+    }
+}
+
 /// `str_from_int`: a fresh `String` holding the decimal rendering of `v`.
 ///
 /// # Safety
@@ -1238,6 +1485,42 @@ pub unsafe extern "C" fn ai_str_from_int(thread: *mut Thread, type_id: u32, v: i
         let s = v.to_string();
         alloc_string_from_bytes(thread, type_id, s.as_bytes())
     }
+}
+
+/// `type_name_of(obj)`: a fresh `String` holding the source type name of `obj`,
+/// looked up in the heap's reflection metadata table by the object's header
+/// `type_id`. `str_type_id` is the `String` layout id used to allocate the
+/// result. Falls back to `<type N>` when no metadata is installed for the type.
+///
+/// # Safety
+/// `thread` valid with a live heap; `obj` a valid heap object with an
+/// initialized header; `str_type_id` the registered `String` layout.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_type_name(thread: *mut Thread, str_type_id: u32, obj: *const u8) -> *mut u8 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        let obj_tid = heap.obj_type_id(obj);
+        let name = heap
+            .type_meta_by_id(obj_tid)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| format!("<type {}>", obj_tid));
+        alloc_string_from_bytes(thread, str_type_id, name.as_bytes())
+    }
+}
+
+/// `char_to_str`: a fresh `String` holding the UTF-8 encoding of the Unicode
+/// scalar value `cp` (1–4 bytes). Invalid scalars — negative, above U+10FFFF, or
+/// a surrogate (U+D800..U+DFFF) — become U+FFFD, so this is total and always
+/// produces valid UTF-8.
+///
+/// # Safety
+/// `thread`/`type_id` as `ai_str_concat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_char_to_str(thread: *mut Thread, type_id: u32, cp: i64) -> *mut u8 {
+    let ch = u32::try_from(cp).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}');
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    unsafe { alloc_string_from_bytes(thread, type_id, s.as_bytes()) }
 }
 
 /// `str_from_float`: a fresh `String` holding the rendering of `v`.

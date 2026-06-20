@@ -1,16 +1,107 @@
 # `tallyc` — the λ-Tally compiler (Rust + inkwell/LLVM)
 
-The real-compiler successor to the Python POC (`../poc/`). Same idea, native
-codegen: the L3 address/permission split, a linear/permission checker (the novel
-part), and an **erasing** lowering to LLVM IR — so permissions/regions/ghosts
-cost nothing at runtime.
+A dependent + linear (quantitative) language with one surface, one kernel, and an
+**erasing** lowering to LLVM IR — so types, indices, regions, and proofs cost
+nothing at runtime. The novel part is the linear/permission checker; the rest is a
+small, ordinary dependent-type compiler.
+
+> **Where this is headed:** [`docs/FUTURE_WORK.md`](docs/FUTURE_WORK.md) — the
+> north-star vision: as low-level as C with complete control over allocation, 100%
+> memory-safe, Idris-level dependent types, and an opt-in **total** subset whose
+> programs are provably terminating. (Aspirational; this README is what exists.)
 
 ```
-src/lexer  → parser → ast → check        (frontend: pure Rust, no deps)
-                              │ erase
-                              ▼
-                            codegen (inkwell, behind `--features llvm`)
+rust_surface   lex → parse → elaborate            (the surface language)
+     │  emits a checked dep::Term
+     ▼
+   dep          NbE kernel: eval / quote / conv + bidirectional QTT checker
+     │  erase types / indices / proofs (multiplicity 0)
+     ▼
+dep_codegen     LLVM lowering (inkwell, behind `--features llvm`)
 ```
+
+CLI: `tally check <f>` (type-check), `tally run <f>` (check + JIT-run `main`),
+`tally build <f> [-o out] [-O2]` (check + AOT to a native executable).
+
+**`Nat` is a normal inductive, optimized like Idris 2.** Write the ordinary
+`enum Nat { Zero, Succ }` and opt it into the packed machine-integer
+representation with a pragma:
+
+```
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+fn main() { mul(1000, 1000) }   // literals, `+`, and `match`→native loop;
+                                // normalizes on integers, never a unary blow-up
+```
+
+The pragma is validated (the type must be Nat-shaped), and without it an
+`enum Nat` stays an ordinary unary datatype. Numeric literals and `+` are sugar at
+the packed type.
+
+**The memory layer is a built-in prelude.** `Own`, `alloc`, and `free` are
+provided automatically (and given a real `malloc`/`free` lowering), so a program
+needs no boilerplate:
+
+```
+fn main() { free(alloc(Zero)) }   // alloc + free, checked by linearity
+```
+
+## Status (v1.6 — one Rust surface, `%builtin Nat`, a memory prelude, AOT vs C)
+
+The compiler was cut down to a single surface (`rust_surface`) over the QTT kernel
+(`dep`) and the LLVM backend (`dep_codegen`); the old low-level/ML frontends are
+gone. `tally build` is a real AOT compiler: it type-checks, lowers `main` to LLVM,
+runs the standard `-O` pipeline, emits an object (`<out>.o` + `<out>.o.ll`), and
+links a normal native executable with `cc` (run `main` once, print its result).
+
+**Does the safe memory layer cost anything? No — measured against C** as *normal
+programs* (see `bench/`, `bench/README.md`):
+
+`examples/bench.tal` folds 1,000,000 transactions on the intrusive circular DLL
+with O(1) remove-by-cursor (`new`/`insert`/`remove`/`free`), summing the value each
+round-trips through the heap — written with `%builtin Nat` literals, no
+scaffolding. `bench/bench.c` is the hand-written twin. At `-O2` **both** fold the
+entire pure workload (2,000,000 `malloc`/`free` + all the list surgery) to the same
+constant:
+
+```
+tally:  define i64 @tally_dep_main() { ret i64 499999500000 }
+C:      main: … mov x8, #0x746a4ae6e0  (= 499999500000) ; printf
+```
+
+Same machine code: the dependently-typed, linearity-checked program and the
+raw-pointer C are identical after erasure. (A workload whose allocations *escape*
+keeps the `malloc`/`free` on both sides and still matches C — see the bench notes.)
+
+**General recursion (`Fix`).** Recursion is a fold (an eliminator) when every
+recursive call passes its non-scrutinee arguments through unchanged — those stay
+total and reducible in types (so `mul(1000,1000)` never overflows). When a
+recursive call *varies* a non-scrutinee argument, it is **general recursion**: it
+lowers to a real recursive native function. So a binary tree with distinct
+subtrees actually allocates 2^d nodes:
+
+```
+build : Nat -> Nat -> Tree
+fn build(d, label) {
+    match d {
+        Zero    => Leaf,
+        Succ(k) => Node(build(k, label + label), label, build(k, label + label + 1)),
+    }
+}
+```
+
+The kernel treats a `Fix` *opaquely* (it never unfolds it during type-checking),
+so this stays decidable and compiles in milliseconds while doing all its work at
+runtime. `bench/tree.c` is its twin: tally builds + traverses a 4.2M-node tree at
+**parity with C** (ratio ≈ 1.05, identical RSS). Getting there fixed a real cost —
+nullary constructors (`Leaf`/`Nil`) used to `malloc` a cell each, doubling the
+allocations on a tree; they are now shared module-level constants (zero allocation),
+matching C's NULL-for-leaf (see `bench/README.md`).
+
+`cargo test --features llvm`: **53 tests**, including `%builtin Nat` (literals,
+`+`, `match`→native loop, no overflow at `mul(1000,1000)`), general recursion
+(`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
+elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
 ## Status (v1.4 — GENERAL boxed datatypes run natively; the memory layer is real libc; erasure proven in the IR)
 

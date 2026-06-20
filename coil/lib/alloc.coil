@@ -1,3 +1,4 @@
+(module alloc)
 ; Zig-style allocators: an allocator is a VALUE (a vtable struct) threaded
 ; explicitly. There is no ambient heap -- a function that allocates *takes* an
 ; Allocator, so allocation is visible in its type. Built entirely in Coil; the
@@ -10,7 +11,7 @@
 ;   free   (ctx, ptr, len, align)       -> _
 ; Failure is a sum type (Option), never a null sentinel.
 
-(include "result.coil")     ; resolved relative to this file (lib/)
+(import "result.coil" :use *)   ; Option/Result/Some/None/Ok/Err, brought in bare
 
 (extern malloc  :cc c [:i64] (-> (ptr i8)))            ; void* malloc(size_t)
 (extern realloc :cc c [(ptr i8) :i64] (-> (ptr i8)))   ; void* realloc(void*, size_t)

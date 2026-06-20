@@ -41,7 +41,7 @@ fn build(src: &str, out: &Path, runtime_lib: &Path) {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, out).expect("build_executable failed");
+    build_executable(&prog, out, &[]).expect("build_executable failed");
 }
 
 /// Run an executable and return its process exit code.

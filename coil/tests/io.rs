@@ -16,7 +16,9 @@ fn writes_to_stdout_through_a_writer() {
 #[test]
 fn print_int_formats_decimal() {
     let src = r#"
-        (include "lib/io.coil")
+        (module test)
+        (import "lib/io.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn main [] (-> :i64)
           (do (print-int (stdout) 12345)
               (write-byte (stdout) (cast :u8 10))
@@ -31,8 +33,10 @@ fn print_int_formats_decimal() {
 fn fixed_buffer_writer_captures_bytes() {
     // Format into an in-memory buffer (no syscalls), then read the length back.
     let src = r#"
-        (include "lib/alloc.coil")
-        (include "lib/io.coil")
+        (module test)
+        (import "lib/alloc.coil" :use *)
+        (import "lib/io.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn main [] (-> :i64)
           (let [a   (malloc-allocator)
                 buf (unwrap-ptr (alloc-slice [i8] a 64))
@@ -51,7 +55,9 @@ fn fixed_buffer_writer_captures_bytes() {
 fn writer_is_polymorphic_over_the_sink() {
     // The same `emit` runs against a null sink (discards, always succeeds).
     let src = r#"
-        (include "lib/io.coil")
+        (module test)
+        (import "lib/io.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn emit [(w (ptr Writer))] (-> (Result :i64 IoError))
           (do (print-str w "ignored") (print-int w 999)))
         (defn main [] (-> :i64)
@@ -64,7 +70,9 @@ fn writer_is_polymorphic_over_the_sink() {
 fn io_is_visible_in_the_signature() {
     // A function that outputs must take a Writer; the capability is threaded in.
     let src = r#"
-        (include "lib/io.coil")
+        (module test)
+        (import "lib/io.coil" :use *)
+        (import "lib/result.coil" :use *)
         (defn banner [(w (ptr Writer))] (-> (Result :i64 IoError))
           (print-str w "hi\n"))
         (defn main [] (-> :i64)

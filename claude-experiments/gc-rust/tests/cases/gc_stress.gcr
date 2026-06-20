@@ -1,0 +1,14 @@
+// Allocates ~40 MB of short-lived Vecs -> forces real GC collections (default-on)
+// and verifies no live object is ever freed (correct deterministic sum).
+fn main() -> i64 {
+    let mut i = 0; let mut s = 0;
+    while i < 500000 {
+        let mut v = vec_new();
+        v = vec_push(v, i % 100);
+        v = vec_push(v, 7);
+        s = s + vec_get(v, 0) - vec_get(v, 1) + 7;   // adds (i%100) each iter
+        i = i + 1;
+    }
+    // sum of (i%100) for i in 0..500000 = 5000 * (0+..+99) = 5000*4950 = 24750000
+    24750042 - s
+}

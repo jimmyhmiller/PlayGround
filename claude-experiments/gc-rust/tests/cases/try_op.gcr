@@ -1,0 +1,4 @@
+enum R { Ok(i64), Err(i64) }
+fn div(a: i64, b: i64) -> R { if b == 0 { R::Err(0-1) } else { R::Ok(a / b) } }
+fn calc(x: i64) -> R { let q = div(x, 2)?; R::Ok(q + 22) }
+fn main() -> i64 { match calc(40) { R::Ok(v) => v, R::Err(e) => 0 } }

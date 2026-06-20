@@ -5,9 +5,10 @@
 //! nested block comments, and recognizes typed numeric literals.
 
 use std::fmt;
+use serde::Serialize;
 
 /// A byte range into the source, `[start, end)`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -29,7 +30,7 @@ impl fmt::Debug for Span {
 }
 
 /// Integer/float literal suffix recording the requested concrete type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum NumSuffix {
     None,
     I8, I16, I32, I64,
@@ -37,7 +38,7 @@ pub enum NumSuffix {
     F32, F64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TokKind {
     // literals
     Int(u64, NumSuffix),
@@ -59,7 +60,7 @@ pub enum TokKind {
     Eof,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Kw {
     Fn, Let, Mut, Struct, Enum, Impl, Trait, For, In, If, Else, Match,
     While, Loop, Return, Break, Continue, True, False, As, Where, Pub, Mod,
@@ -86,7 +87,7 @@ impl Kw {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Token {
     pub kind: TokKind,
     pub span: Span,

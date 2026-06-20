@@ -258,7 +258,7 @@ fn aot_calls_libm_scalar_externs() {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, &out).expect("build_executable failed");
+    build_executable(&prog, &out, &[]).expect("build_executable failed");
 
     // 1066 & 0xFF = 42
     assert_eq!(run_exit_code(&out), 1066 & 0xFF);
@@ -276,7 +276,7 @@ fn aot_passes_value_struct_by_pointer() {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, &out).expect("build_executable failed");
+    build_executable(&prog, &out, &[]).expect("build_executable failed");
 
     // Returns 1 once C has written tv_sec (current Unix time > 2023).
     assert_eq!(run_exit_code(&out), 1);
@@ -294,7 +294,7 @@ fn aot_passes_string_bytes() {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, &out).expect("build_executable failed");
+    build_executable(&prog, &out, &[]).expect("build_executable failed");
 
     // strlen("hello, ffi")=10 + atoi("32")=32 -> 42
     assert_eq!(run_exit_code(&out), 42);
@@ -312,7 +312,7 @@ fn aot_array_copy_out_buffer() {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, &out).expect("build_executable failed");
+    build_executable(&prog, &out, &[]).expect("build_executable failed");
 
     // memset copy-out (7+7) + memcmp equal (0) -> 14
     assert_eq!(run_exit_code(&out), 14);
@@ -330,7 +330,7 @@ fn aot_c_callback_into_gcrust() {
     let module = parse_module(&lex(src).unwrap()).unwrap();
     let resolved = resolve_module(module).unwrap();
     let prog = lower_program(&resolved.globals).unwrap();
-    build_executable(&prog, &out).expect("build_executable failed");
+    build_executable(&prog, &out, &[]).expect("build_executable failed");
 
     // 1050 & 0xFF = 26
     assert_eq!(run_exit_code(&out), 1050 & 0xFF);

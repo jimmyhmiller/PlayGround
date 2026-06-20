@@ -6,11 +6,13 @@
 //! integrate with LLVM-compiled code. Everything else in this crate (the
 //! language, frontend, type system, monomorphization, codegen) is new.
 
+pub mod anf;
 pub mod ast;
 pub mod codegen;
 pub mod compile;
 pub mod core;
 pub mod diag;
+pub mod emit;
 // `gc` and `runtime` live in the LLVM-free `gcrust-rt` crate so AOT binaries
 // can statically link them without LLVM. Re-export under their original paths.
 pub use gcrust_rt::gc;

@@ -1,4 +1,5 @@
-; Closure library — written entirely in Coil macros. `(include "lib/closure.coil")`
+(module closure)
+; Closure library — written entirely in Coil macros. `(import "lib/closure.coil")`
 ; then `(defclosure NAME [captures] [params] RET body...)` to get a heap closure
 ; with NAME-new / NAME-call / NAME-free. Nothing in the compiler knows about it.
 

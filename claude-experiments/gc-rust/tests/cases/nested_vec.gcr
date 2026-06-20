@@ -1,0 +1,7 @@
+fn main() -> i64 {
+  let mut outer: Vec<Vec<i64>> = vec_new();
+  let mut a = vec_new(); a = vec_push(a, 20); a = vec_push(a, 22);
+  outer = vec_push(outer, a);
+  let row = vec_get(outer, 0);
+  vec_get(row, 0) + vec_get(row, 1)
+}

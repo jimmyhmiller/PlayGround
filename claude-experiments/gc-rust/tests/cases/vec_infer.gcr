@@ -1,0 +1,10 @@
+struct Pt { x: i64, y: i64 }
+fn main() -> i64 {
+    // No type annotation: element type inferred from vec_push.
+    let mut v = vec_new();
+    v = vec_push(v, Pt { x: 10, y: 4 });
+    v = vec_push(v, Pt { x: 20, y: 8 });
+    let mut s = 0;
+    for p in v { s = s + p.x + p.y; }   // 10+4+20+8 = 42
+    s
+}

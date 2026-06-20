@@ -9,9 +9,40 @@
 //! be ground (no `Ty::Var`/`Ty::Infer`); the monomorphizer guarantees this.
 
 use crate::core::*;
+use crate::gc::{FieldMeta, FieldTy, ScalarKind, TypeKind, TypeMeta, VariantMeta};
 use crate::types::{Prim, Ty, TyCtx};
 use crate::ast::{StructBody, VariantPayload};
 use std::collections::HashMap;
+
+/// Object header size in bytes (the GC `Full` header). Reflection field offsets
+/// are absolute from the object pointer, so they all include this. Kept in sync
+/// with `codegen::Self::HEADER` and `gc::Full::SIZE` (both 16).
+const HEADER: u16 = 16;
+
+/// Map a compiler `ScalarRepr` to the runtime reflection `ScalarKind`.
+pub(crate) fn scalar_kind(s: ScalarRepr) -> ScalarKind {
+    match s {
+        ScalarRepr::I8 => ScalarKind::I8,
+        ScalarRepr::I16 => ScalarKind::I16,
+        ScalarRepr::I32 => ScalarKind::I32,
+        ScalarRepr::I64 => ScalarKind::I64,
+        ScalarRepr::U8 => ScalarKind::U8,
+        ScalarRepr::U16 => ScalarKind::U16,
+        ScalarRepr::U32 => ScalarKind::U32,
+        ScalarRepr::U64 => ScalarKind::U64,
+        ScalarRepr::F32 => ScalarKind::F32,
+        ScalarRepr::F64 => ScalarKind::F64,
+        ScalarRepr::Bool => ScalarKind::Bool,
+        ScalarRepr::Char => ScalarKind::Char,
+        ScalarRepr::Ptr => ScalarKind::Ptr,
+    }
+}
+
+/// Reflection metadata for a builtin / opaque / varlen layout (String, Array,
+/// Vec, closure env): a name with no introspectable named fields.
+fn opaque_meta(name: &str) -> TypeMeta {
+    TypeMeta { type_id: 0, name: name.to_string(), kind: TypeKind::Opaque }
+}
 
 pub struct LayoutRegistry<'a> {
     ctx: &'a TyCtx,
@@ -121,7 +152,8 @@ impl<'a> LayoutRegistry<'a> {
         self.layouts.push(placeholder_layout(&key));
 
         let field_tys = struct_field_tys(s, args)?;
-        let layout = self.build_ref_layout(&key, &field_tys)?;
+        let field_names = struct_field_names(s);
+        let layout = self.build_ref_layout(&key, &field_names, &field_tys)?;
         self.layouts[id as usize] = layout;
         Ok(id)
     }
@@ -151,6 +183,21 @@ impl<'a> LayoutRegistry<'a> {
         }
         // tag occupies 4 bytes within the raw region; reserve 8 for alignment.
         let raw_bytes = max_raw + 8;
+        // Reflection metadata: one VariantMeta per source variant, with payload
+        // field offsets matching codegen's placement. Tag = variant index.
+        let mut variants_meta = Vec::with_capacity(e.variants.len());
+        for (vtag, v) in e.variants.iter().enumerate() {
+            let payload_tys = variant_payload_tys(v, &e.generics, args)?;
+            let reprs: Vec<Repr> = payload_tys.iter().map(|t| self.repr(t)).collect::<R<_>>()?;
+            let fnames = variant_field_names(v);
+            let fields = self.enum_variant_fields(&reprs, &fnames, max_ptrs);
+            variants_meta.push(VariantMeta { name: v.name.clone(), tag: vtag as u32, fields });
+        }
+        let meta = TypeMeta {
+            type_id: 0,
+            name: key.clone(),
+            kind: TypeKind::Enum { tag_offset: HEADER + max_ptrs * 8, variants: variants_meta },
+        };
         let layout = Layout {
             ptr_fields: max_ptrs,
             raw_bytes,
@@ -160,6 +207,8 @@ impl<'a> LayoutRegistry<'a> {
             field_map: vec![FieldLoc::Raw { offset: 0, repr: ScalarRepr::U32 }],
             name: key,
             elem_stride: 0,
+            interior_ptrs: vec![],
+            meta,
         };
         self.layouts[id as usize] = layout;
         Ok(id)
@@ -180,6 +229,11 @@ impl<'a> LayoutRegistry<'a> {
             "Result" => vec![vec![args[0].clone()], vec![args[1].clone()]],
             _ => unreachable!(),
         };
+        let variant_names: &[&str] = match name {
+            "Option" => &["None", "Some"],
+            "Result" => &["Ok", "Err"],
+            _ => unreachable!(),
+        };
         let mut max_ptrs = 0u16;
         let mut max_raw = 0u16;
         for vtys in &variants {
@@ -187,6 +241,18 @@ impl<'a> LayoutRegistry<'a> {
             max_ptrs = max_ptrs.max(ptrs);
             max_raw = max_raw.max(raw);
         }
+        let mut variants_meta = Vec::with_capacity(variants.len());
+        for (vtag, vtys) in variants.iter().enumerate() {
+            let reprs: Vec<Repr> = vtys.iter().map(|t| self.repr(t)).collect::<R<_>>()?;
+            let fnames: Vec<String> = (0..reprs.len()).map(|i| i.to_string()).collect();
+            let fields = self.enum_variant_fields(&reprs, &fnames, max_ptrs);
+            variants_meta.push(VariantMeta { name: variant_names[vtag].to_string(), tag: vtag as u32, fields });
+        }
+        let meta = TypeMeta {
+            type_id: 0,
+            name: key.clone(),
+            kind: TypeKind::Enum { tag_offset: HEADER + max_ptrs * 8, variants: variants_meta },
+        };
         let layout = Layout {
             ptr_fields: max_ptrs,
             raw_bytes: max_raw + 8,
@@ -194,6 +260,8 @@ impl<'a> LayoutRegistry<'a> {
             field_map: vec![FieldLoc::Raw { offset: 0, repr: ScalarRepr::U32 }],
             name: key,
             elem_stride: 0,
+            interior_ptrs: vec![],
+            meta,
         };
         self.layouts[id as usize] = layout;
         Ok(id)
@@ -208,8 +276,9 @@ impl<'a> LayoutRegistry<'a> {
         let field_tys = struct_field_tys(s, args)?;
         let fields: Vec<Repr> = field_tys.iter().map(|t| self.repr(t)).collect::<R<_>>()?;
         let (size, align) = value_size_align(&fields, &self.values);
+        let field_names = struct_field_names(s);
         let id = self.values.len() as ValueId;
-        self.values.push(ValueLayout { name: key.clone(), variants: None, fields, size, align });
+        self.values.push(ValueLayout { name: key.clone(), variants: None, fields, field_names, size, align });
         self.value_ids.insert(key, id);
         Ok(id)
     }
@@ -225,17 +294,37 @@ impl<'a> LayoutRegistry<'a> {
             let fields: Vec<Repr> = ptys.iter().map(|t| self.repr(t)).collect::<R<_>>()?;
             variants.push(ValueVariant { name: v.name.clone(), fields });
         }
-        // size = tag(4) + max variant payload size; align computed conservatively.
-        let mut max = 0u32;
-        let mut align = 4u32;
+        // Pointers-first layout (mirrors reference enums): `max_ptrs` leading GC
+        // slots shared across variants, then the u32 tag, then the raw region
+        // (scalar + POD-value payloads). Embedded refs land at fixed offsets
+        // (`0, 8, …`) regardless of the active variant, so the GC can trace them
+        // with a static interior-pointer list. `max_ptrs == 0` degenerates to the
+        // compact `{ tag, raw }` form — identical to before for ref-free enums.
+        let max_ptrs = value_enum_max_ptrs(&variants) as u32;
+        let mut max_raw = 0u32;
+        let mut align = if max_ptrs > 0 { 8 } else { 4 };
         for vv in &variants {
-            let (s, a) = value_size_align(&vv.fields, &self.values);
-            max = max.max(s);
-            align = align.max(a);
+            let mut raw = 0u32;
+            for f in &vv.fields {
+                match f {
+                    Repr::Ref(_) | Repr::Unit => {}
+                    Repr::Scalar(s) => {
+                        let b = (s.bits().max(8) / 8).max(1);
+                        raw = align_up(raw, b) + b;
+                        align = align.max(b);
+                    }
+                    Repr::Value(vid) => {
+                        let v = &self.values[*vid as usize];
+                        raw = align_up(raw, v.align) + v.size;
+                        align = align.max(v.align);
+                    }
+                }
+            }
+            max_raw = max_raw.max(raw);
         }
-        let size = align_up(4 + max, align);
+        let size = align_up(max_ptrs * 8 + 4 + max_raw, align);
         let id = self.values.len() as ValueId;
-        self.values.push(ValueLayout { name: key.clone(), variants: Some(variants), fields: vec![], size, align });
+        self.values.push(ValueLayout { name: key.clone(), variants: Some(variants), fields: vec![], field_names: vec![], size, align });
         self.value_ids.insert(key, id);
         Ok(id)
     }
@@ -246,8 +335,9 @@ impl<'a> LayoutRegistry<'a> {
             return *id;
         }
         let (size, align) = value_size_align(reprs, &self.values);
+        let field_names: Vec<String> = (0..reprs.len()).map(|i| i.to_string()).collect();
         let id = self.values.len() as ValueId;
-        self.values.push(ValueLayout { name: key.clone(), variants: None, fields: reprs.to_vec(), size, align });
+        self.values.push(ValueLayout { name: key.clone(), variants: None, fields: reprs.to_vec(), field_names, size, align });
         self.value_ids.insert(key, id);
         id
     }
@@ -257,6 +347,8 @@ impl<'a> LayoutRegistry<'a> {
         self.intern_ref("String", Layout {
             ptr_fields: 0, raw_bytes: 0, varlen: VarLen::Bytes,
             field_map: vec![], name: "String".into(), elem_stride: 0,
+            interior_ptrs: vec![],
+            meta: opaque_meta("String"),
         })
     }
     fn vec_layout(&mut self, elem: &Repr) -> LayoutId {
@@ -275,6 +367,8 @@ impl<'a> LayoutRegistry<'a> {
             ],
             name: if traced { format!("{key}#traced") } else { key.clone() },
             elem_stride: 0,
+            interior_ptrs: vec![],
+            meta: opaque_meta(&key),
         })
     }
     /// A varlen array layout for the given element repr. Pointer elements use a
@@ -303,6 +397,8 @@ impl<'a> LayoutRegistry<'a> {
             field_map: vec![],
             name: key.clone(),
             elem_stride: stride,
+            interior_ptrs: vec![],
+            meta: opaque_meta(&key),
         });
         self.ref_ids.insert(key, id);
         id
@@ -319,6 +415,8 @@ impl<'a> LayoutRegistry<'a> {
             field_map: vec![],
             name: key.clone(),
             elem_stride: stride,
+            interior_ptrs: vec![],
+            meta: opaque_meta(&key),
         })
     }
     fn closure_placeholder(&mut self) -> LayoutId {
@@ -354,6 +452,8 @@ impl<'a> LayoutRegistry<'a> {
             field_map: vec![],
             name: key.to_string(),
             elem_stride: 0,
+            interior_ptrs: vec![],
+            meta: opaque_meta(key),
         });
         id
     }
@@ -383,7 +483,7 @@ impl<'a> LayoutRegistry<'a> {
         Ok((ptrs, align_up(raw as u32, 8) as u16))
     }
 
-    fn build_ref_layout(&mut self, name: &str, field_tys: &[Ty]) -> R<Layout> {
+    fn build_ref_layout(&mut self, name: &str, field_names: &[String], field_tys: &[Ty]) -> R<Layout> {
         // Pointer fields first (traced), then raw scalar/value bytes.
         let mut ptr_idx = 0u16;
         let mut raw_off = 0u16;
@@ -409,12 +509,56 @@ impl<'a> LayoutRegistry<'a> {
                     raw_off += sz;
                 }
                 Repr::Value(vid) => {
+                    // A flattened value aggregate lives inline in the raw region.
+                    // References embedded in it are recorded as `interior_ptrs`
+                    // below so the GC traces them; value enums carrying refs are
+                    // still rejected there (their union offsets are tag-dependent).
                     let sz = self.values[*vid as usize].size as u16;
                     raw_off = align_up(raw_off as u32, 8) as u16;
-                    // Value-typed field stored as raw bytes; codegen knows the ValueId.
-                    field_map[i] = FieldLoc::Raw { offset: raw_off, repr: ScalarRepr::I64 };
+                    field_map[i] = FieldLoc::ValueAt { offset: raw_off, value: *vid };
                     raw_off += sz;
                 }
+            }
+        }
+        // Reflection metadata: absolute byte offsets (header included). Pointer
+        // fields live in the leading slots; raw fields after the pointer region.
+        let ptr_total = ptr_idx;
+        let mut meta_fields = Vec::with_capacity(reprs.len());
+        for (i, r) in reprs.iter().enumerate() {
+            let fname = field_names.get(i).cloned().unwrap_or_else(|| i.to_string());
+            match (r, &field_map[i]) {
+                (Repr::Ref(lid), FieldLoc::Ptr { idx }) => meta_fields.push(FieldMeta {
+                    name: fname,
+                    offset: HEADER + idx * 8,
+                    ty: FieldTy::Ref(*lid as u16),
+                }),
+                (Repr::Scalar(s), FieldLoc::Raw { offset, .. }) => meta_fields.push(FieldMeta {
+                    name: fname,
+                    offset: HEADER + ptr_total * 8 + offset,
+                    ty: FieldTy::Scalar(scalar_kind(*s)),
+                }),
+                (Repr::Value(vid), FieldLoc::ValueAt { offset, .. }) => meta_fields.push(FieldMeta {
+                    name: fname,
+                    offset: HEADER + ptr_total * 8 + offset,
+                    ty: FieldTy::Value(*vid as u16),
+                }),
+                // Unit fields are zero-size (no storage); skip.
+                _ => {}
+            }
+        }
+        let meta = TypeMeta {
+            type_id: 0,
+            name: name.to_string(),
+            kind: TypeKind::Struct { fields: meta_fields },
+        };
+        // Interior pointers: GC refs embedded in flattened value fields, at
+        // absolute offsets, so `gc::scan_object` traces them. Errors here if a
+        // value field is a ref-carrying value enum (unsupported union).
+        let mut interior_ptrs = Vec::new();
+        for (i, r) in reprs.iter().enumerate() {
+            if let (Repr::Value(vid), FieldLoc::ValueAt { offset, .. }) = (r, &field_map[i]) {
+                let base = HEADER + ptr_total * 8 + offset;
+                self.value_ref_offsets(*vid, base, &mut interior_ptrs)?;
             }
         }
         Ok(Layout {
@@ -424,14 +568,155 @@ impl<'a> LayoutRegistry<'a> {
             field_map,
             name: name.to_string(),
             elem_stride: 0,
+            interior_ptrs,
+            meta,
         })
+    }
+
+    /// Whether value type `vid` (transitively) contains a GC reference. Used to
+    /// gate flattening a value aggregate into a heap object's raw region (unsound
+    /// until interior-pointer rooting lands). Value types can't be recursive by
+    /// value, so this terminates.
+    fn value_contains_ref(&self, vid: ValueId) -> bool {
+        let vl = &self.values[vid as usize];
+        let mut reprs: Vec<&Repr> = Vec::new();
+        match &vl.variants {
+            Some(variants) => for v in variants { reprs.extend(v.fields.iter()) },
+            None => reprs.extend(vl.fields.iter()),
+        }
+        for r in reprs {
+            match r {
+                Repr::Ref(_) => return true,
+                Repr::Value(v) => {
+                    if self.value_contains_ref(*v) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Collect byte offsets of GC references inside a flattened value aggregate
+    /// `vid`, relative to its start plus `base`, into `out`. Recurses into nested
+    /// value structs, mirroring `value_size_align`'s (and thus the LLVM struct's)
+    /// field placement so the offsets match where codegen actually stores the refs.
+    ///
+    /// Errors on a value **enum** that carries a reference: its payload is a union,
+    /// so a ref's offset depends on the runtime tag — which a static interior-pointer
+    /// list can't express. (Ref-free value enums are fine and contribute nothing.)
+    fn value_ref_offsets(&self, vid: ValueId, base: u16, out: &mut Vec<u16>) -> R<()> {
+        let vl = &self.values[vid as usize];
+        if let Some(variants) = &vl.variants {
+            // Pointers-first value enum: every variant's `Ref` payloads share the
+            // leading slots at fixed offsets `0, 8, …`, so the embedded refs are
+            // expressible as a static interior-pointer list (trace all `max_ptrs`
+            // slots; an inactive variant simply leaves trailing slots null). A
+            // *nested* value-with-reference payload can't be flattened (its refs
+            // sit at tag-dependent sub-offsets in the raw union) — reject those.
+            for v in variants {
+                for f in &v.fields {
+                    if let Repr::Value(sub) = f {
+                        if self.value_contains_ref(*sub) {
+                            return Err(LayoutError(format!(
+                                "value enum `{}` has a variant whose payload is a value-with-reference; \
+                                 flattening it into a heap object isn't supported. Use a reference type.",
+                                vl.name
+                            )));
+                        }
+                    }
+                }
+            }
+            let max_ptrs = crate::core::value_enum_max_ptrs(variants);
+            for k in 0..max_ptrs {
+                out.push(base + k * 8);
+            }
+            return Ok(());
+        }
+        let mut off = 0u32;
+        for f in &vl.fields {
+            let (sz, align) = match f {
+                Repr::Unit => (0u32, 1u32),
+                Repr::Scalar(s) => {
+                    let b = (s.bits().max(8) / 8).max(1);
+                    (b, b)
+                }
+                Repr::Ref(_) => (8, 8),
+                Repr::Value(sub) => {
+                    (self.values[*sub as usize].size, self.values[*sub as usize].align)
+                }
+            };
+            off = align_up(off, align);
+            match f {
+                Repr::Ref(_) => out.push(base + off as u16),
+                Repr::Value(sub) => self.value_ref_offsets(*sub, base + off as u16, out)?,
+                _ => {}
+            }
+            off += sz;
+        }
+        Ok(())
+    }
+
+
+    /// Reflection field metadata for one enum variant, matching codegen's
+    /// payload placement (`gen_alloc` / `load_enum_payload`): pointer payloads
+    /// fill the shared pointer region (slots `0..`) in declaration order; scalar
+    /// payloads fill the raw region after the tag word (at `HEADER +
+    /// max_ptrs*8`). Offsets are absolute (header included). Value/Unit payloads
+    /// are omitted — codegen does not store them field-by-field (v0), so any
+    /// offset we recorded would be untrustworthy.
+    fn enum_variant_fields(&self, reprs: &[Repr], names: &[String], max_ptrs: u16) -> Vec<FieldMeta> {
+        let tag_off = HEADER + max_ptrs * 8;
+        let mut ptr_slot = 0u16;
+        let mut raw_cursor = tag_off + 8;
+        let mut out = Vec::new();
+        for (i, r) in reprs.iter().enumerate() {
+            let fname = names.get(i).cloned().unwrap_or_else(|| i.to_string());
+            match r {
+                Repr::Ref(lid) => {
+                    let off = HEADER + ptr_slot * 8;
+                    ptr_slot += 1;
+                    out.push(FieldMeta { name: fname, offset: off, ty: FieldTy::Ref(*lid as u16) });
+                }
+                Repr::Scalar(s) => {
+                    let sz = (s.bits().max(8) / 8) as u16;
+                    raw_cursor = align_up(raw_cursor as u32, sz as u32) as u16;
+                    let off = raw_cursor;
+                    raw_cursor += sz;
+                    out.push(FieldMeta { name: fname, offset: off, ty: FieldTy::Scalar(scalar_kind(*s)) });
+                }
+                Repr::Value(_) | Repr::Unit => {}
+            }
+        }
+        out
     }
 }
 
 // ---- free helpers ----------------------------------------------------------
 
 fn placeholder_layout(name: &str) -> Layout {
-    Layout { ptr_fields: 0, raw_bytes: 0, varlen: VarLen::None, field_map: vec![], name: name.to_string(), elem_stride: 0 }
+    Layout { ptr_fields: 0, raw_bytes: 0, varlen: VarLen::None, field_map: vec![], name: name.to_string(), elem_stride: 0, interior_ptrs: vec![], meta: opaque_meta(name) }
+}
+
+/// Source-order field names of a struct, for reflection metadata. Tuple structs
+/// use positional names (`"0"`, `"1"`, …); unit structs have none.
+fn struct_field_names(s: &crate::ast::StructDef) -> Vec<String> {
+    match &s.body {
+        StructBody::Named(fields) => fields.iter().map(|f| f.name.clone()).collect(),
+        StructBody::Tuple(tys) => (0..tys.len()).map(|i| i.to_string()).collect(),
+        StructBody::Unit => vec![],
+    }
+}
+
+/// Source-order payload field names of an enum variant, for reflection metadata.
+/// Tuple payloads use positional names (`"0"`, `"1"`, …).
+fn variant_field_names(v: &crate::ast::VariantDef) -> Vec<String> {
+    match &v.payload {
+        VariantPayload::None => vec![],
+        VariantPayload::Tuple(tys) => (0..tys.len()).map(|i| i.to_string()).collect(),
+        VariantPayload::Named(fields) => fields.iter().map(|f| f.name.clone()).collect(),
+    }
 }
 
 fn struct_field_tys(s: &crate::ast::StructDef, args: &[Ty]) -> R<Vec<Ty>> {

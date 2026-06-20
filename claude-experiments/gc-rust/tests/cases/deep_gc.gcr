@@ -1,0 +1,16 @@
+struct Node { val: i64, next: Option<Node> }
+fn sum_list(start: Option<Node>) -> i64 {
+    let mut s = 0; let mut cur = start; let mut go = 1;
+    while go == 1 { match cur { Option::Some(node) => { s = s + node.val; cur = node.next; } Option::None => { go = 0; } } }
+    s
+}
+fn main() -> i64 {
+    // a deep LIVE linked list that must survive collections triggered by the churn below
+    let mut head: Option<Node> = Option::None;
+    let mut i = 0;
+    while i < 200000 { head = Option::Some(Node { val: i % 100, next: head }); i = i + 1; }
+    let mut j = 0;
+    while j < 1000000 { let mut v = vec_new(); v = vec_push(v, j); j = j + 1; }
+    let total = sum_list(head);     // 200000 nodes, vals cycle 0..99 -> 2000*4950 = 9900000
+    total - 9899958                 // = 42 iff the deep live list survived GC intact
+}

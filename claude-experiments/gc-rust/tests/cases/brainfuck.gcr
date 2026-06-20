@@ -1,0 +1,33 @@
+// A Brainfuck interpreter: tape + pointer + on-the-fly bracket matching.
+fn run(prog: String) -> i64 {
+    let mut tape: Vec<i64> = vec_new();
+    let mut k = 0; while k < 256 { tape = vec_push(tape, 0); k = k + 1; }
+    let mut ptr = 0;
+    let mut pc = 0;
+    let n = str_len(prog);
+    while pc < n {
+        let c = str_get(prog, pc);
+        if c == 62 { ptr = ptr + 1; }                                                   // >
+        else { if c == 60 { ptr = ptr - 1; }                                            // <
+        else { if c == 43 { vec_set(tape, ptr, vec_get(tape, ptr) + 1); }               // +
+        else { if c == 45 { vec_set(tape, ptr, vec_get(tape, ptr) - 1); }               // -
+        else { if c == 91 {                                                             // [
+            if vec_get(tape, ptr) == 0 {
+                let mut depth = 1;
+                while depth > 0 { pc = pc + 1; let cc = str_get(prog, pc); if cc == 91 { depth = depth + 1; } else { if cc == 93 { depth = depth - 1; } } }
+            }
+        }
+        else { if c == 93 {                                                             // ]
+            if vec_get(tape, ptr) != 0 {
+                let mut depth = 1;
+                while depth > 0 { pc = pc - 1; let cc = str_get(prog, pc); if cc == 93 { depth = depth + 1; } else { if cc == 91 { depth = depth - 1; } } }
+            }
+        } } } } } }
+        pc = pc + 1;
+    }
+    vec_get(tape, 1)
+}
+fn main() -> i64 {
+    // cell0=8; [>+++++<-] adds 5 to cell1 eight times = 40; then >++ -> 42
+    run("++++++++[>+++++<-]>++")
+}

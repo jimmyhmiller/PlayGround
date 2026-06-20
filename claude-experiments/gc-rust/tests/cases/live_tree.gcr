@@ -1,0 +1,4 @@
+enum Tree { Leaf, Node(Tree, i64, Tree) }
+fn build(depth: i64) -> Tree { if depth == 0 { Tree::Leaf } else { Tree::Node(build(depth-1), 1, build(depth-1)) } }
+fn count(t: Tree) -> i64 { match t { Tree::Leaf => 0, Tree::Node(l, v, r) => v + count(l) + count(r) } }
+fn main() -> i64 { let t = build(18); count(t) - 262101 }

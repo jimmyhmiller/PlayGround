@@ -28,6 +28,11 @@ pub enum Type {
     Struct(String),
     /// A fixed-size array of `len` elements.
     Array(Box<Type>, u32),
+    /// A fixed-width SIMD vector of `lanes` elements (LLVM `<N x T>`). The
+    /// element type must be a scalar (int or float). Distinct from `Array`: it
+    /// lowers to an LLVM vector, so `(llvm-ir ...)` and the existing arithmetic
+    /// operate on it lane-wise.
+    Vec(Box<Type>, u32),
     /// A function pointer: calling convention, parameter types, return type.
     Fn(String, Vec<Type>, Box<Type>),
     /// A generic type application, e.g. `(Pair i64 i64)` -> `App("Pair", [i64,i64])`.
@@ -200,6 +205,18 @@ pub enum Expr {
     CallPtr {
         fp: Box<Expr>,
         args: Vec<Expr>,
+    },
+    /// Raw LLVM IR escape hatch: `(llvm-ir RESULT [operands…] "BODY")`. The body
+    /// is LLVM IR text for an inlined helper function: `$ret` / `$tN` expand to
+    /// the result / operand LLVM type strings and `$N` to the operand SSA names
+    /// (`%0`, `%1`, …). Lines beginning `declare` are hoisted to module scope.
+    /// The whole form has the declared `result` type (the checker trusts it; the
+    /// LLVM verifier checks the body). This is what makes every LLVM
+    /// instruction/intrinsic reachable without per-opcode compiler support.
+    LlvmIr {
+        result: Type,
+        args: Vec<Expr>,
+        body: String,
     },
 }
 

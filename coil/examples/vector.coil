@@ -5,8 +5,10 @@
 ;   * output goes to a Writer value (stdout here, but swappable)
 ; Both capabilities are ordinary values; the compiler knows about neither.
 ;   coil run examples/vector.coil   =>  prints the vector, exits 42
-(include "lib/alloc.coil")
-(include "lib/io.coil")
+(module app)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/result.coil" :use *)
 
 (defstruct Vec [T] [(data (ptr T)) (len :i64) (cap :i64)])
 

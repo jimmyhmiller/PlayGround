@@ -1,0 +1,14 @@
+; Allocate a 20M-element array, fill it, sum it -- load/store/GEP + bandwidth.
+; Counters are i64 (what `index` wants); the arithmetic wraps the same 64 bits
+; as the C version's unsigned long, so the %lu output is identical.
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+(extern malloc :cc c [:i64] (-> (ptr i8)))
+(defn fill [(a (ptr i64)) (i :i64) (n :i64)] (-> :i64)
+  (if (icmp-ge i n) 0 (do (store! (index a i) (imul i 2654435761)) (fill a (iadd i 1) n))))
+(defn sum [(a (ptr i64)) (i :i64) (n :i64) (s :i64)] (-> :i64)
+  (if (icmp-ge i n) s (sum a (iadd i 1) n (iadd s (load (index a i))))))
+(defn main [] (-> :i64)
+  (let [a (cast (ptr i64) (malloc (imul 20000000 8)))]
+    (do (fill a 0 20000000)
+        (printf "%lu\n" (sum a 0 20000000 0))
+        0)))

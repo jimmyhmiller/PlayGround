@@ -1,0 +1,6 @@
+enum Opt { Some(i64), Non }
+fn main() -> i64 {
+    let mut total = 0; let mut i = 0;
+    while i < 2000000 { let o = Opt::Some(i); let v = match o { Opt::Some(n) => n, Opt::Non => 0 }; total = total + (v % 2); i = i + 1; }
+    total - 999958
+}

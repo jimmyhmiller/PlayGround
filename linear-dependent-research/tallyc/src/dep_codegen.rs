@@ -28,10 +28,14 @@ use crate::mult::Mult;
 use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 use inkwell::module::Module;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
 use inkwell::types::IntType;
 use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use std::cell::RefCell;
+use std::path::Path;
 
 /// Is `data` a `Nat`-like family (no params/indices; one nullary constructor and
 /// one constructor with a single recursive argument)? If so, return
@@ -110,6 +114,19 @@ struct DepCg<'c, 'a> {
     sig: &'a Signature,
     /// monotonically-increasing counter for unique generated-function names.
     next_id: RefCell<u32>,
+    /// one compiled native function per `Fix` term (memoized by its address), so a
+    /// recursive function shared across call sites is emitted once.
+    fix_cache: RefCell<std::collections::HashMap<*const Term, FunctionValue<'c>>>,
+    /// the stack of `Fix` self-bindings currently in scope: a reference to the
+    /// self variable (at de Bruijn LEVEL `level`) compiles to a call to `func`,
+    /// passing only the non-erased arguments (`erased[i]` flags multiplicity-0).
+    fix_selves: RefCell<Vec<FixSelf<'c>>>,
+}
+
+struct FixSelf<'c> {
+    level: usize,
+    func: FunctionValue<'c>,
+    erased: Vec<bool>,
 }
 
 /// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
@@ -183,6 +200,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Var(i) => self.read_var(env, *i),
             Term::Ann(e, _) => self.compile(f, env, e),
             Term::NatElim(_p, z, s, scrut) => self.compile_fold(f, env, z, s, scrut),
+            Term::NatCase(_p, z, s, scrut) => self.compile_natcase(f, env, z, s, scrut),
+            // a fully-applied `Fix` is handled in the `App` spine below; a bare one
+            // (a function value with no call) has no runtime representation here.
+            Term::Fix(_, _) => Err("a recursive function must be applied to its arguments".into()),
             Term::Constr(name, args) => self.compile_constr(f, env, name, args),
             Term::Elim(data, _motive, methods, scrut) => {
                 self.compile_elim(f, env, data, methods, scrut)
@@ -195,6 +216,26 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 // native implementation, erasing its multiplicity-0 arguments.
                 if let Term::Const(c) = strip_ann(head) {
                     return self.compile_postulate(f, env, c, &args);
+                }
+                // A reference to an enclosing `Fix`'s self variable is a recursive
+                // CALL (not an inline): emit `call self_fn(non-erased args)`.
+                if let Term::Var(i) = strip_ann(head) {
+                    let lvl = env.len() - 1 - *i;
+                    let hit = self
+                        .fix_selves
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|fs| fs.level == lvl)
+                        .map(|fs| (fs.func, fs.erased.clone()));
+                    if let Some((func, erased)) = hit {
+                        return self.compile_call(f, env, func, &erased, &args);
+                    }
+                }
+                // The head is itself a `Fix`: build (memoized) its function and call.
+                if let Term::Fix(ty, body) = strip_ann(head) {
+                    let (func, erased) = self.build_fix(strip_ann(head), ty, body)?;
+                    return self.compile_call(f, env, func, &erased, &args);
                 }
                 // The head is an annotated function `(λ…. body : Π…. _)` (defs are
                 // inlined this way). Walk the body's lambdas and the type's Pi
@@ -484,10 +525,33 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
         }
 
+        let lay = ctor_layout(self.sig, &data, name)?;
+
+        // A NULLARY constructor (no runtime fields, e.g. `Leaf`/`Nil`) is an
+        // immutable, field-less value: it needs no per-use allocation. Represent it
+        // as the address of ONE shared, module-level constant cell `{tag}` — so a
+        // tree's 2^d leaves cost zero `malloc`s (matching C's NULL-for-leaf), while
+        // the eliminator still reads the tag the same way.
+        if lay.nfields == 0 {
+            let gname = format!("tally_nullary_{name}");
+            let global = self.module.get_global(&gname).unwrap_or_else(|| {
+                let arr_ty = self.i64t.array_type(1);
+                let g = self.module.add_global(arr_ty, None, &gname);
+                g.set_initializer(
+                    &self.i64t.const_array(&[self.i64t.const_int(lay.tag, false)]),
+                );
+                g.set_constant(true);
+                g
+            });
+            return Ok(self
+                .builder
+                .build_ptr_to_int(global.as_pointer_value(), self.i64t, "nullary")
+                .unwrap());
+        }
+
         // Boxed: malloc(8 * (1 + nfields)); store tag in slot 0; store each
         // non-erased ctor argument in its slot. Params and erased args store
         // NOTHING (erasure = zero overhead).
-        let lay = ctor_layout(self.sig, &data, name)?;
         let nslots = 1 + lay.nfields;
         let sz = self.i64t.const_int(nslots as u64 * 8, false);
         let raw = self
@@ -647,21 +711,25 @@ impl<'c, 'a> DepCg<'c, 'a> {
             self.builder.position_at_end(arm_blocks[ci]);
             let lay = ctor_layout(self.sig, data, &ctor.name)?;
 
-            // Bind the method's lambda parameters: for each ctor argument, push
-            // its value (loaded from its slot, or `None` if erased); right after
-            // each recursive argument, push the induction hypothesis (a recursive
-            // `self` call on that field).
+            // Bind the method's lambda parameters in the standard order: ALL the
+            // constructor's arguments first (each loaded from its slot, or `None`
+            // if erased), THEN one induction hypothesis per recursive argument (a
+            // recursive `self` call on that field). This args-then-IHs order
+            // matches `method_ty_tm` and the kernel `velim`.
             let mut menv = env.to_vec();
+            let mut arg_vals: Vec<Slot<'c>> = Vec::with_capacity(ctor.args.len());
             for ai in 0..ctor.args.len() {
-                let arg_slot = lay.arg_slot[ai];
-                let arg_val: Slot<'c> = match arg_slot {
+                let arg_val: Slot<'c> = match lay.arg_slot[ai] {
                     Some(s) => Some(self.load(scrut_ptr, s, "field")),
                     None => None, // erased argument: no runtime witness.
                 };
                 menv.push(arg_val);
+                arg_vals.push(arg_val);
+            }
+            for ai in 0..ctor.args.len() {
                 if lay.arg_recursive[ai] {
                     // induction hypothesis: elim recursively on the (boxed) field.
-                    let field_ptr = arg_val.ok_or_else(|| {
+                    let field_ptr = arg_vals[ai].ok_or_else(|| {
                         format!(
                             "{}.{}: a recursive argument was erased — impossible for a \
                              strictly-positive family",
@@ -768,6 +836,143 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.builder.position_at_end(exit);
         Ok(acc_val)
     }
+
+    /// `natCase z s n` as a single native branch: `if n == 0 then z else s (n-1)`.
+    /// (No loop, no induction hypothesis — used for case-splits inside `Fix`.)
+    fn compile_natcase(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        z: &Term,
+        s: &Term,
+        scrut: &Term,
+    ) -> Result<IntValue<'c>, String> {
+        let nv = self.compile(f, env, scrut)?;
+        let s_body = match strip_ann(s) {
+            Term::Lam(b) => &**b,
+            _ => return Err("natCase successor is not a function".into()),
+        };
+        let zero_bb = self.ctx.append_basic_block(f, "case.zero");
+        let succ_bb = self.ctx.append_basic_block(f, "case.succ");
+        let join_bb = self.ctx.append_basic_block(f, "case.join");
+        let is_zero = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, nv, self.i64t.const_zero(), "iszero")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_zero, zero_bb, succ_bb)
+            .unwrap();
+
+        self.builder.position_at_end(zero_bb);
+        let zv = self.compile(f, env, z)?;
+        let zero_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(join_bb).unwrap();
+
+        self.builder.position_at_end(succ_bb);
+        let k = self
+            .builder
+            .build_int_sub(nv, self.i64t.const_int(1, false), "k")
+            .unwrap();
+        let mut env2 = env.to_vec();
+        env2.push(Some(k));
+        let sv = self.compile(f, &env2, s_body)?;
+        let succ_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(join_bb).unwrap();
+
+        self.builder.position_at_end(join_bb);
+        let phi = self.builder.build_phi(self.i64t, "case").unwrap();
+        phi.add_incoming(&[(&zv, zero_end), (&sv, succ_end)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
+    /// Compile a call to a `Fix` function: evaluate the NON-erased arguments and
+    /// emit the call. (Erased — multiplicity-0 — arguments are not passed.)
+    fn compile_call(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        func: FunctionValue<'c>,
+        erased: &[bool],
+        args: &[&Term],
+    ) -> Result<IntValue<'c>, String> {
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if !erased.get(i).copied().unwrap_or(false) {
+                call_args.push(self.compile(f, env, a)?.into());
+            }
+        }
+        Ok(self
+            .builder
+            .build_call(func, &call_args, "call")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_int_value())
+    }
+
+    /// Build (once, memoized by term identity) the native function for a `Fix`.
+    /// `Fix(ty, body)` with `body = λp₁…λpₙ. inner` becomes a recursive function of
+    /// the non-erased parameters; self-references in `inner` compile to calls to it.
+    fn build_fix(
+        &self,
+        fix_term: &Term,
+        ty: &Term,
+        body: &Term,
+    ) -> Result<(FunctionValue<'c>, Vec<bool>), String> {
+        // erasure flags: pair each body lambda with its type's Π multiplicity.
+        let mut erased = Vec::new();
+        let mut t_ty = strip_ann(ty);
+        let mut t_body = strip_ann(body);
+        while let (Term::Lam(inner), Term::Pi(m, _d, cod)) = (t_body, t_ty) {
+            erased.push(*m == Mult::Zero);
+            t_body = strip_ann(inner);
+            t_ty = strip_ann(cod);
+        }
+        let inner = t_body;
+
+        let key = fix_term as *const Term;
+        if let Some(&func) = self.fix_cache.borrow().get(&key) {
+            return Ok((func, erased));
+        }
+
+        let n_runtime = erased.iter().filter(|e| !**e).count();
+        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            std::iter::repeat(self.i64t.into()).take(n_runtime).collect();
+        let fname = self.fresh("tally_fix");
+        let func = self
+            .module
+            .add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
+        self.fix_cache.borrow_mut().insert(key, func);
+
+        // Fresh body env: [self, p₁, …, pₙ] (self at level 0; erased params are None).
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        let mut body_env: Vec<Slot<'c>> = vec![None]; // self
+        let mut rt = 0u32;
+        for e in &erased {
+            if *e {
+                body_env.push(None);
+            } else {
+                body_env.push(Some(func.get_nth_param(rt).unwrap().into_int_value()));
+                rt += 1;
+            }
+        }
+        self.fix_selves.borrow_mut().push(FixSelf {
+            level: 0,
+            func,
+            erased: erased.clone(),
+        });
+        let result = self.compile(func, &body_env, inner);
+        self.fix_selves.borrow_mut().pop();
+        let result = result?;
+        self.builder.build_return(Some(&result)).unwrap();
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        Ok((func, erased))
+    }
 }
 
 fn strip_ann(t: &Term) -> &Term {
@@ -791,7 +996,7 @@ fn flatten_app(t: &Term) -> (&Term, Vec<&Term>) {
 /// Build the LLVM module for a closed term `main` that reduces to an `i64`,
 /// lowering `main` into `tally_dep_main` and running module verification. The
 /// caller owns the `Context`; the returned `Module` borrows it. Shared by both
-/// the JIT runner (`run_nat`) and the IR emitter (`emit_ir`).
+/// the JIT runner (`run_main`) and the IR emitter (`emit_ir`).
 fn build_module<'c>(
     ctx: &'c Context,
     sig: &Signature,
@@ -819,6 +1024,8 @@ fn build_module<'c>(
         free,
         sig,
         next_id: RefCell::new(0),
+        fix_cache: RefCell::new(std::collections::HashMap::new()),
+        fix_selves: RefCell::new(Vec::new()),
     };
     let result = cg.compile(f, &[], main)?;
     builder.build_return(Some(&result)).unwrap();
@@ -845,7 +1052,7 @@ pub fn emit_ir(sig: &Signature, main: &Term) -> Result<String, String> {
 /// JIT-compile and run a closed term that reduces to an `i64`, returning that
 /// `i64`. Nat eliminators run as native loops; boxed (Vec/Fin/…) eliminators run
 /// as recursive native functions over `malloc`'d cells — no pre-normalization.
-pub fn run_nat(sig: &Signature, main: &Term) -> Result<i64, String> {
+pub fn run_main(sig: &Signature, main: &Term) -> Result<i64, String> {
     let ctx = Context::create();
     let module = build_module(&ctx, sig, main)?;
     let ee = module
@@ -858,6 +1065,98 @@ pub fn run_nat(sig: &Signature, main: &Term) -> Result<i64, String> {
     }
 }
 
+/// Add a C-ABI `int main()` that runs the compiled program once and prints its
+/// `i64` result to stdout, so the module links into a standalone native
+/// executable. This is just normal program entry: run `main`, print, exit 0.
+fn add_c_main<'c>(ctx: &'c Context, module: &Module<'c>) {
+    let i32t = ctx.i32_type();
+    let ptr = ctx.ptr_type(AddressSpace::default());
+    let builder = ctx.create_builder();
+
+    let printf = module.add_function("printf", i32t.fn_type(&[ptr.into()], true), None);
+    let dep_main = module
+        .get_function("tally_dep_main")
+        .expect("tally_dep_main must be built before add_c_main");
+
+    let main = module.add_function("main", i32t.fn_type(&[], false), None);
+    let entry = ctx.append_basic_block(main, "entry");
+    builder.position_at_end(entry);
+    let fmt = builder.build_global_string_ptr("%lld\n", "fmt").unwrap();
+    let res = builder
+        .build_call(dep_main, &[], "res")
+        .unwrap()
+        .try_as_basic_value()
+        .left()
+        .unwrap();
+    builder
+        .build_call(printf, &[fmt.as_pointer_value().into(), res.into()], "_")
+        .unwrap();
+    builder.build_return(Some(&i32t.const_zero())).unwrap();
+}
+
+/// Host `TargetMachine` at the requested optimization level. Initializes the
+/// native target the first time it is called.
+fn host_machine(opt: OptimizationLevel) -> Result<TargetMachine, String> {
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("cannot initialize native target: {e}"))?;
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    target
+        .create_target_machine(
+            &triple,
+            &TargetMachine::get_host_cpu_name().to_string(),
+            &TargetMachine::get_host_cpu_features().to_string(),
+            opt,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| "cannot create host target machine".to_string())
+}
+
+/// AOT-compile a closed term `main` to a native object file at `obj_path` with a
+/// normal C-ABI entry point (run `main`, print its result, exit 0). Also writes
+/// the textual IR alongside (`<obj>.ll`) for inspection, and returns it. `opt`
+/// selects the LLVM optimization level.
+pub fn build_object(
+    sig: &Signature,
+    main: &Term,
+    obj_path: &Path,
+    opt: OptimizationLevel,
+) -> Result<String, String> {
+    let ctx = Context::create();
+    let module = build_module(&ctx, sig, main)?;
+    add_c_main(&ctx, &module);
+
+    let machine = host_machine(opt)?;
+    module.set_triple(&machine.get_triple());
+    module.set_data_layout(&machine.get_target_data().get_data_layout());
+
+    // run a standard optimization pipeline so erasure-clean IR is actually
+    // optimized to the same shape a C compiler would produce.
+    let opt_str = match opt {
+        OptimizationLevel::None => "default<O0>",
+        OptimizationLevel::Less => "default<O1>",
+        OptimizationLevel::Default => "default<O2>",
+        OptimizationLevel::Aggressive => "default<O3>",
+    };
+    module
+        .run_passes(opt_str, &machine, inkwell::passes::PassBuilderOptions::create())
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = module.verify() {
+        return Err(format!("optimized module failed verification:\n{}", e.to_string()));
+    }
+
+    let ir = module.print_to_string().to_string();
+    if let Some(ll) = obj_path.to_str().map(|s| format!("{s}.ll")) {
+        let _ = std::fs::write(&ll, &ir);
+    }
+    machine
+        .write_to_file(&module, FileType::Object, obj_path)
+        .map_err(|e| e.to_string())?;
+    Ok(ir)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::rust_surface;
@@ -865,7 +1164,7 @@ mod tests {
     fn run(src: &str) -> i64 {
         let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
         let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
-        super::run_nat(&prog.sig, body).unwrap_or_else(|e| panic!("{e}"))
+        super::run_main(&prog.sig, body).unwrap_or_else(|e| panic!("{e}"))
     }
 
     fn ir(src: &str) -> String {
@@ -922,14 +1221,19 @@ mod tests {
         );
         let ir = ir(&vec_src);
 
-        // (1) The ONLY heap traffic is the data: three Cons cells (24 bytes each:
-        // tag + element + tail pointer) and one Nil cell (8 bytes: just the tag).
-        // No 32-byte cell exists — that would mean a stored length index.
+        // (1) The ONLY heap traffic is the three Cons cells (24 bytes each: tag +
+        // element + tail pointer). `Nil` is nullary, so it is a shared module-level
+        // constant — zero allocation — not a per-use cell. No 32-byte cell exists;
+        // that would mean a stored (erased) length index.
         let sizes = malloc_sizes(&ir);
         assert_eq!(
             sizes,
-            [(8u64, 1usize), (24u64, 3usize)].into_iter().collect(),
-            "Vec heap traffic must be exactly 3×Cons(24B) + 1×Nil(8B); got {sizes:?}\n{ir}"
+            [(24u64, 3usize)].into_iter().collect(),
+            "Vec heap traffic must be exactly 3×Cons(24B), with Nil a shared constant; got {sizes:?}\n{ir}"
+        );
+        assert!(
+            ir.contains("@tally_nullary_Nil = constant"),
+            "Nil must be a shared module-level constant, not a malloc'd cell\n{ir}"
         );
         assert!(
             !sizes.contains_key(&32),
@@ -1012,6 +1316,58 @@ mod tests {
         assert_eq!(run(&dll), 1);
     }
 
+    // ---- AOT: build_object emits a real native executable ----
+
+    /// Compile `src`'s `main` to an object via `build_object`, link it with `cc`,
+    /// run it, and return its stdout's first line as an i64 — exactly what a user
+    /// gets from `tally build` then running the executable.
+    fn aot_run(src: &str, label: &str) -> i64 {
+        use inkwell::OptimizationLevel;
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let stem = format!("tally_aot_{pid}_{label}");
+        let obj = dir.join(format!("{stem}.o"));
+        let exe = dir.join(&stem);
+        super::build_object(&prog.sig, body, &obj, OptimizationLevel::Default)
+            .unwrap_or_else(|e| panic!("build_object: {e}"));
+        let link = std::process::Command::new("cc")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .expect("invoke cc");
+        assert!(link.success(), "cc failed");
+        let out = std::process::Command::new(&exe).output().expect("run exe");
+        let _ = std::fs::remove_file(&obj);
+        let _ = std::fs::remove_file(exe.with_extension("o.ll"));
+        let _ = std::fs::remove_file(&exe);
+        assert!(out.status.success(), "exe exited non-zero");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn aot_dll_transaction_executable() {
+        // examples/dll.rs.tal AOT-linked to a native exe: the transaction removes
+        // and returns the value 1.
+        let dll = std::fs::read_to_string("examples/dll.rs.tal").unwrap();
+        assert_eq!(aot_run(&dll, "dll"), 1);
+    }
+
+    #[test]
+    fn aot_memory_executable() {
+        // examples/memory.rs.tal: alloc then free, returns Unit (represented 0).
+        let src = std::fs::read_to_string("examples/memory.rs.tal").unwrap();
+        assert_eq!(aot_run(&src, "memory"), 0);
+    }
+
     const NAT: &str = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 add : Nat -> Nat -> Nat
@@ -1034,6 +1390,92 @@ fn mul(m, n) { match m { Zero => Zero, Succ(k) => add(n, mul(k, n)) } }
             "{NAT}\nmain : Nat\nfn main() {{ mul(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Succ(Zero))))) }}\n"
         );
         assert_eq!(run(&src), 12);
+    }
+
+    // ---- `%builtin Nat`: the packed (Idris-2-style) integer representation ----
+
+    const BNAT: &str = r#"
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+add : Nat -> Nat -> Nat
+fn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }
+mul : Nat -> Nat -> Nat
+fn mul(m, n) { match m { Zero => Zero, Succ(k) => add(n, mul(k, n)) } }
+"#;
+
+    #[test]
+    fn builtin_nat_literals_and_add() {
+        // literals and `+` are packed Nat; `2 + 3 + 4 = 9`.
+        let src = format!("{BNAT}\nmain : Nat\nfn main() {{ 2 + 3 + 4 }}\n");
+        assert_eq!(run(&src), 9);
+    }
+
+    #[test]
+    fn builtin_nat_no_overflow_at_scale() {
+        // `mul(1000, 1000)` = 1_000_000. With a UNARY Nat this overflows the
+        // checker's evaluator; with `%builtin Nat` it normalizes on machine ints.
+        let src = format!("{BNAT}\nmain : Nat\nfn main() {{ mul(1000, 1000) }}\n");
+        assert_eq!(run(&src), 1_000_000);
+    }
+
+    #[test]
+    fn builtin_nat_match_is_native() {
+        // `match` on a `%builtin Nat` lowers to NatElim (a native loop). A literal
+        // pattern-driven recursion summing 0..n via `add`.
+        let src = format!(
+            "{BNAT}\n\
+             sumto : Nat -> Nat\n\
+             fn sumto(n) {{ match n {{ Zero => 0, Succ(k) => add(Succ(k), sumto(k)) }} }}\n\
+             main : Nat\nfn main() {{ sumto(100) }}\n"
+        );
+        assert_eq!(run(&src), 5050);
+    }
+
+    // ---- boxed inductive with an INTERLEAVED recursive arg (binary tree) ----
+
+    const TREE: &str = r#"
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
+build : Nat -> Nat -> Tree
+fn build(d, x) { match d { Zero => Leaf, Succ(k) => Node(build(k, x), x, build(k, x)) } }
+tsum : Tree -> Nat
+fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
+"#;
+
+    #[test]
+    fn general_recursion_builds_distinct_tree() {
+        // GENERAL recursion (a `Fix`, not a fold): `build` recurses with a DIFFERENT
+        // label on each side, so the two subtrees are distinct and 2^d - 1 separate
+        // nodes are allocated. (A fold would reuse one induction hypothesis for both
+        // children — a shared DAG.) Sum of the distinct labels: d=1→1, d=2→1+2+3=6,
+        // d=3→28, d=4→120.
+        const G: &str = r#"
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
+build : Nat -> Nat -> Tree
+fn build(d, label) { match d { Zero => Leaf, Succ(k) => Node(build(k, label + label), label, build(k, label + label + 1)) } }
+tsum : Tree -> Nat
+fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
+"#;
+        for (d, expect) in [(1u64, 1i64), (2, 6), (3, 28), (4, 120)] {
+            let src = format!("{G}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
+            assert_eq!(run(&src), expect, "depth {d}");
+        }
+    }
+
+    #[test]
+    fn tree_build_and_traverse() {
+        // `Node : Tree -> Nat -> Tree -> Tree` has a recursive arg that is NOT last,
+        // so its eliminator method is `λl. λx. λr. λih_l. λih_r. …` (args-then-IHs).
+        // This used to be miscompiled (the backend/`velim` interleaved the IHs while
+        // the type said args-then-IHs), reading the value field as a pointer. Build a
+        // depth-d binary tree of 1s and sum every node: the result is 2^d - 1.
+        for (d, expect) in [(0u64, 0i64), (1, 1), (5, 31), (10, 1023)] {
+            let src = format!("{TREE}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
+            assert_eq!(run(&src), expect, "depth {d}");
+        }
     }
 
     // ---- boxed inductive families: Vec and Fin ----

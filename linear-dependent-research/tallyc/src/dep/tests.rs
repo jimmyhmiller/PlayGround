@@ -13,7 +13,7 @@ fn b(t: Term) -> Box<Term> {
 #[test]
 fn polymorphic_linear_identity() {
     // λA. λx. x  :  Π[0](A:Type). Π[1](x:A). A
-    let ty = Pi(Zero, b(Type), b(Pi(One, b(Var(0)), b(Var(1)))));
+    let ty = Pi(Zero, b(Type(0)), b(Pi(One, b(Var(0)), b(Var(1)))));
     let tm = Lam(b(Lam(b(Var(0)))));
     assert!(check_closed(&tm, &ty).is_ok(), "{:?}", check_closed(&tm, &ty));
 
@@ -98,6 +98,7 @@ fn nat_sig() -> Signature {
         postulates: vec![],
         datas: vec![DataDecl {
             name: "N".into(),
+            universe: 0,
             params: vec![],
             indices: vec![],
             ctors: vec![
@@ -155,7 +156,8 @@ fn vec_sig() -> Signature {
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Vec".into(),
-            params: vec![(Zero, Type)],  // A : Type   (erased)
+            universe: 0,
+            params: vec![(Zero, Type(0))],  // A : Type   (erased)
             indices: vec![(Zero, Nat)],  // n : Nat    (built-in Nat, erased index)
             ctors: vec![
                 // vnil : Vec A 0
@@ -207,7 +209,7 @@ fn append_via_generic_elim_tracks_length_and_computes() {
     let p4 = Pi(Omega, b(Data("Vec".into(), vec![Var(2), Var(1)])), b(p5)); // xs
     let p3 = Pi(Zero, b(Nat), b(p4)); // n
     let p2 = Pi(Zero, b(Nat), b(p3)); // m
-    let append_ty = Pi(Zero, b(Type), b(p2)); // A
+    let append_ty = Pi(Zero, b(Type(0)), b(p2)); // A
 
     // motive = λk.λ_. Vec A (add k n)
     let motive = Lam(b(Lam(b(Data("Vec".into(), vec![Var(6), add_tm(Var(1), Var(4))])))));
@@ -257,6 +259,7 @@ fn fin_sig() -> Signature {
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Fin".into(),
+            universe: 0,
             params: vec![],
             indices: vec![(Zero, Nat)],
             ctors: vec![
@@ -309,6 +312,7 @@ fn strict_positivity_is_enforced() {
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Bad".into(),
+            universe: 0,
             params: vec![],
             indices: vec![],
             ctors: vec![ctor(
@@ -319,4 +323,228 @@ fn strict_positivity_is_enforced() {
         }],
     };
     assert!(check_signature(&bad).is_err());
+}
+
+// ===========================================================================
+// PHASE F — the universe hierarchy (replaces `Type : Type`). These are the
+// ADVERSARIAL/soundness tests: programs that SHOULD be rejected, each shown to
+// be rejected for a genuine UNIVERSE reason (not an incidental one), plus the
+// invariants that prove the hierarchy did not silently collapse.
+// ===========================================================================
+
+#[test]
+fn universe_hierarchy_is_stratified_not_type_in_type() {
+    // `Type i : Type (i+1)` — and crucially NOT `Type i : Type i` (which was the
+    // old `Type : Type`, inconsistent by Girard's paradox).
+    assert_eq!(infer_closed(&Type(0)), Ok(Type(1)));
+    assert_eq!(infer_closed(&Type(1)), Ok(Type(2)));
+    assert_eq!(infer_closed(&Type(7)), Ok(Type(8)));
+    // `Type 0 : Type 0` must FAIL (the heart of the matter).
+    assert!(check_closed(&Type(0), &Type(0)).is_err());
+}
+
+#[test]
+fn cumulativity_is_one_directional_and_does_not_collapse_the_hierarchy() {
+    // CUMULATIVITY (upward only): a `Type 0` is accepted where `Type 2` is wanted.
+    assert!(check_closed(&Type(0), &Type(2)).is_ok());
+    assert!(check_closed(&Nat, &Type(0)).is_ok());
+    assert!(check_closed(&Nat, &Type(5)).is_ok()); // Nat : Type 0 ⊑ Type 5
+    // …but DOWNWARD subsumption is rejected — `Type 2` is NOT a `Type 1`. If the
+    // hierarchy had collapsed (`Type i ≡ Type j`), this would wrongly succeed and
+    // everything would look green. This is the decisive non-collapse check.
+    let err = check_closed(&Type(2), &Type(1)).unwrap_err();
+    assert!(
+        err.contains("universe") && err.contains("Type"),
+        "downward subsumption must fail with a universe error, got: {err}"
+    );
+    // and `Type 1 : Type 1` is likewise rejected (only `Type 1 : Type 2`).
+    assert!(check_closed(&Type(1), &Type(1)).is_err());
+    assert!(check_closed(&Type(1), &Type(2)).is_ok());
+}
+
+#[test]
+fn pi_lives_in_the_max_of_its_parts() {
+    // `(0 _ : Type 0) → Type 0`  is a `Type 1`  (max(1,1) — Type 0 itself is a
+    // Type 1), so it inhabits `Type 1` but NOT `Type 0`.
+    let arrow = Pi(Zero, b(Type(0)), b(Type(0)));
+    assert_eq!(infer_closed(&arrow), Ok(Type(1)));
+    assert!(check_closed(&arrow, &Type(1)).is_ok());
+    assert!(check_closed(&arrow, &Type(0)).is_err());
+    // `(0 _ : Type 3) → Nat`  is a `Type 4`  (max(4, 1)).
+    let arrow2 = Pi(Zero, b(Type(3)), b(Nat));
+    assert_eq!(infer_closed(&arrow2), Ok(Type(4)));
+}
+
+// --- THE PARADOX BLOCKER: a datatype may not quantify over its own universe ---
+
+/// `data U where mk : (_ : Type 0) → U` at a chosen universe. Storing a `Type 0`
+/// inside `U` is the type-in-type retract that Girard's/Hurkens' paradox needs:
+/// if `U : Type 0`, then `U` is a `Type 0` that contains a code for every `Type
+/// 0` — including itself — and `False` becomes inhabited in the total fragment.
+fn universe_storing_sig(universe: usize) -> Signature {
+    Signature {
+        postulates: vec![],
+        datas: vec![DataDecl {
+            name: "U".into(),
+            universe,
+            params: vec![],
+            indices: vec![],
+            ctors: vec![ctor("mk", vec![(Omega, Type(0))], vec![])],
+        }],
+    }
+}
+
+#[test]
+fn datatype_cannot_sit_in_its_own_universe_girard_blocker() {
+    // (a) Declared at `Type 0`: REJECTED, and for a GENUINE universe reason — the
+    //     error must talk about the universe restriction, not arity/positivity/a
+    //     name lookup. (A faked checker would error for an unrelated cause.)
+    let err = check_signature(&universe_storing_sig(0)).unwrap_err();
+    assert!(
+        err.contains("Type 0") && err.contains("Type 1"),
+        "must be rejected with a universe-level diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("predicativity") || err.contains("Girard") || err.contains("own universe"),
+        "rejection must cite the predicativity/Girard restriction, got: {err}"
+    );
+
+    // (b) RELAX ONLY THE UNIVERSE BOUND — the very same datatype, declared one
+    //     universe up (`U : Type 1`), is ACCEPTED. This proves the restriction is
+    //     LOAD-BEARING: it is the universe check doing the rejecting in (a), not
+    //     something incidental about the term.
+    assert!(
+        check_signature(&universe_storing_sig(1)).is_ok(),
+        "{:?}",
+        check_signature(&universe_storing_sig(1))
+    );
+    // …and declaring it even higher is fine too (cumulative headroom).
+    assert!(check_signature(&universe_storing_sig(3)).is_ok());
+}
+
+#[test]
+fn strict_positivity_and_universe_checks_are_independent() {
+    // A datatype storing a *higher* universe is caught by the UNIVERSE rule even
+    // though it is perfectly strictly-positive — the two guards are distinct.
+    let sig = universe_storing_sig(0);
+    // it IS strictly positive (no self-occurrence to the left of an arrow):
+    assert!(strictly_positive("U", &Type(0)));
+    // yet check_signature still rejects it — on universe grounds.
+    assert!(check_signature(&sig).is_err());
+}
+
+// --- large elimination still works, at universes above 0 ---
+
+#[test]
+fn large_elimination_into_a_higher_universe() {
+    // A type computed by recursion: `natElim (λ_. Type 0) Nat (λk.λih. Nat) 3`.
+    // The motive `λ_. Type 0 : Nat → Type 1` targets universe 1 (large elim), so
+    // this exercises `motive_level` at ℓ = 1 — a path that the old fixed `Nat →
+    // Type` motive (built on Type:Type) could not type honestly.
+    let motive = Lam(b(Type(0))); // λ_. Type 0
+    let elim = NatElim(
+        b(motive),
+        b(Nat),                                  // base:  Nat : Type 0
+        b(Lam(b(Lam(b(Nat))))),                  // step:  λk.λih. Nat
+        b(NatLit(3)),
+    );
+    // it has type `Type 0` and normalizes to `Nat`.
+    assert_eq!(infer_closed(&elim), Ok(Type(0)));
+    assert_eq!(normalize_closed(&elim), Nat);
+}
+
+// --- the linearity invariants are UNTOUCHED by the universe work ---
+
+#[test]
+fn linearity_still_enforced_after_universes() {
+    // ω ⋢ 1 : a linearly-bound variable used twice is still rejected.
+    let lin = Pi(One, b(Nat), b(Nat));
+    assert!(check_closed(&Lam(b(Add(b(Var(0)), b(Var(0))))), &lin).is_err());
+    // 0 ⋢ 1 : dropping a linear variable (a leak) is still rejected.
+    assert!(check_closed(&Lam(b(NatLit(5))), &lin).is_err());
+    // the polymorphic LINEAR identity still checks at the new `Type 0`.
+    let id_ty = Pi(Zero, b(Type(0)), b(Pi(One, b(Var(0)), b(Var(1)))));
+    assert!(check_closed(&Lam(b(Lam(b(Var(0))))), &id_ty).is_ok());
+}
+
+// --- regressions for holes found by the adversarial red-team ---
+
+#[test]
+fn universe_level_successor_does_not_overflow() {
+    // `Type usize::MAX` must NOT wrap to `Type 0` (which would re-accept
+    // `Type MAX : Type 0` — Type:Type at the apex) nor panic. It is a hard error.
+    assert!(infer_closed(&Type(usize::MAX)).is_err());
+    // and the wrap-to-Type-0 acceptance is gone:
+    assert!(check_closed(&Type(usize::MAX), &Type(0)).is_err());
+    // a normal large-but-finite level is still fine.
+    assert_eq!(infer_closed(&Type(1000)), Ok(Type(1001)));
+}
+
+#[test]
+fn a_parameter_ranging_over_a_universe_lifts_the_datatype_universe() {
+    // `data Box (A : Type 1) where mk : Box`  — a PHANTOM parameter over `Type 1`.
+    // The constructor stores nothing, so the ctor-arg check never fires; the
+    // PARAMETER-telescope check must still force `Box` up to `Type 1`.
+    let mk_box = |universe: usize| Signature {
+        postulates: vec![],
+        datas: vec![DataDecl {
+            name: "Box".into(),
+            universe,
+            params: vec![(Zero, Type(1))], // A : Type 1
+            indices: vec![],
+            ctors: vec![ctor("mk", vec![], vec![])],
+        }],
+    };
+    // declared at Type 0: REJECTED for a genuine universe/predicativity reason.
+    let err = check_signature(&mk_box(0)).unwrap_err();
+    assert!(
+        err.contains("Type 1") && err.contains("parameter") && err.contains("predicativity"),
+        "must be a predicativity rejection citing the parameter, got: {err}"
+    );
+    // relax ONLY the universe bound → accepted (load-bearing).
+    assert!(check_signature(&mk_box(1)).is_ok(), "{:?}", check_signature(&mk_box(1)));
+}
+
+#[test]
+fn an_index_ranging_over_a_universe_lifts_the_datatype_universe() {
+    // `data Tag : Type 1 → Type`  with  `mk : Tag (Type 0)` — the index ranges
+    // over `Type 1` and `mk` pins a genuine universe value into its type. The
+    // INDEX-telescope check must force `Tag` up to `Type 1`.
+    let mk_tag = |universe: usize| Signature {
+        postulates: vec![],
+        datas: vec![DataDecl {
+            name: "Tag".into(),
+            universe,
+            params: vec![],
+            indices: vec![(Zero, Type(1))], // index : Type 1
+            ctors: vec![ctor("mk", vec![], vec![Type(0)])], // mk : Tag (Type 0)
+        }],
+    };
+    let err = check_signature(&mk_tag(0)).unwrap_err();
+    assert!(
+        err.contains("Type 1") && err.contains("index") && err.contains("predicativity"),
+        "must be a predicativity rejection citing the index, got: {err}"
+    );
+    assert!(check_signature(&mk_tag(1)).is_ok(), "{:?}", check_signature(&mk_tag(1)));
+}
+
+#[test]
+fn vec_style_value_parameter_does_not_over_restrict() {
+    // GUARD AGAINST OVER-CORRECTION: a `Type 0` parameter (Vec-style) and a `Nat`
+    // index must NOT be forced above `Type 0` — only universes ≥ the family's
+    // level lift it. This keeps real length-indexed data at `Type 0`.
+    assert!(check_signature(&vec_sig()).is_ok(), "{:?}", check_signature(&vec_sig()));
+    assert!(check_signature(&fin_sig()).is_ok(), "{:?}", check_signature(&fin_sig()));
+    // and a `Type 0` parameter explicitly stays at universe 0:
+    let box0 = Signature {
+        postulates: vec![],
+        datas: vec![DataDecl {
+            name: "Phantom".into(),
+            universe: 0,
+            params: vec![(Zero, Type(0))], // A : Type 0  ⇒ contributes level 0
+            indices: vec![],
+            ctors: vec![ctor("mk", vec![], vec![])],
+        }],
+    };
+    assert!(check_signature(&box0).is_ok(), "{:?}", check_signature(&box0));
 }

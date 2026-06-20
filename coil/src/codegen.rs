@@ -23,6 +23,7 @@ use inkwell::types::{
     AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType,
 };
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
+use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::{AddressSpace, InlineAsmDialect, IntPredicate, OptimizationLevel};
 
 use crate::abi::{self, AbiCtx, Class, StructAbi};
@@ -186,6 +187,8 @@ struct Cg<'ctx> {
     /// leading underscore that inline-asm symbol references must spell out.
     mach_o: bool,
     globals: Cell<u32>,
+    /// Monotonic counter for naming `(llvm-ir ...)` inlined helper functions.
+    llvm_seq: Cell<u32>,
 }
 
 pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ctx>, String> {
@@ -248,6 +251,7 @@ pub fn compile_for<'ctx>(
         arch,
         mach_o,
         globals: Cell::new(0),
+        llvm_seq: Cell::new(0),
     };
 
     for (name, conv) in &program.conventions {
@@ -477,6 +481,11 @@ impl<'ctx> Cg<'ctx> {
                 }
             }
             Type::Array(elem, n) => self.basic_ty(elem).array_type(*n).into(),
+            Type::Vec(elem, n) => match self.basic_ty(elem) {
+                BasicTypeEnum::IntType(t) => t.vec_type(*n).into(),
+                BasicTypeEnum::FloatType(t) => t.vec_type(*n).into(),
+                other => panic!("vec element must be a scalar int/float, got {other:?}"),
+            },
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Ref(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
@@ -1100,12 +1109,97 @@ impl<'ctx> Cg<'ctx> {
             .ok_or_else(|| "codegen: shim call returned void".to_string())
     }
 
+    /// Lower a `(llvm-ir RESULT [ops…] "BODY")` form. Build an `alwaysinline`
+    /// helper function from the raw IR (filling `$ret`/`$tN`/`$N` placeholders
+    /// and hoisting `declare` lines to module scope), parse + link it into the
+    /// module, and emit a call. The `-O3` pipeline inlines the helper away, so
+    /// it is zero-overhead; the LLVM verifier validates the body.
+    fn emit_llvm_ir(
+        &self,
+        result: &Type,
+        args: &[Tv<'ctx>],
+        body: &str,
+    ) -> Result<Tv<'ctx>, String> {
+        let ret_str = self.basic_ty(result).print_to_string().to_string();
+        let arg_strs: Vec<String> = args
+            .iter()
+            .map(|(_, t)| self.basic_ty(t).print_to_string().to_string())
+            .collect();
+
+        // Substitute placeholders. Highest index first so `$t1` doesn't eat into
+        // `$t10`; `$tN` (types) before `$N` (operand SSA names) before `$ret`.
+        let mut text = body.to_string();
+        for i in (0..args.len()).rev() {
+            text = text.replace(&format!("$t{i}"), &arg_strs[i]);
+            text = text.replace(&format!("${i}"), &format!("%{i}"));
+        }
+        text = text.replace("$ret", &ret_str);
+
+        // Hoist top-level `declare` lines (e.g. intrinsics) out of the body.
+        let mut decls = String::new();
+        let mut fnbody = String::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with("declare") {
+                decls.push_str(line);
+                decls.push('\n');
+            } else {
+                fnbody.push_str(line);
+                fnbody.push('\n');
+            }
+        }
+
+        let seq = self.llvm_seq.get();
+        self.llvm_seq.set(seq + 1);
+        let name = format!("__coil_llvm_ir_{seq}");
+        let params: Vec<String> =
+            arg_strs.iter().enumerate().map(|(i, t)| format!("{t} %{i}")).collect();
+        let module_text = format!(
+            "{decls}define {ret_str} @{name}({}) alwaysinline {{\n{fnbody}}}\n",
+            params.join(", ")
+        );
+
+        let buf = MemoryBuffer::create_from_memory_range(module_text.as_bytes(), "coil_llvm_ir");
+        let helper = self.ctx.create_module_from_ir(buf).map_err(|e| {
+            format!("llvm-ir: could not parse IR: {e}\n--- generated module ---\n{module_text}")
+        })?;
+        helper.set_triple(&self.module.get_triple());
+        let dl = self.module.get_data_layout();
+        helper.set_data_layout(&dl);
+        self.module
+            .link_in_module(helper)
+            .map_err(|e| format!("llvm-ir: link failed: {e}"))?;
+
+        let callee = self
+            .module
+            .get_function(&name)
+            .ok_or("llvm-ir: helper function vanished after link")?;
+        // Emitted with external linkage so it survives `link_in_module` (an
+        // internal helper with no uses yet would be dropped at link time). Now
+        // flip it to internal so, once its `alwaysinline` body is inlined at the
+        // call below, `-O3`/globaldce deletes the helper entirely — zero cost.
+        callee.set_linkage(inkwell::module::Linkage::Internal);
+        let meta: Vec<BasicMetadataValueEnum> = args.iter().map(|(v, _)| (*v).into()).collect();
+        let cs = self.builder.build_call(callee, &meta, "llvmir").map_err(le)?;
+        let v = cs
+            .try_as_basic_value()
+            .left()
+            .ok_or("llvm-ir: helper returned void (the body must `ret` a value)")?;
+        Ok((v, result.clone()))
+    }
+
     fn emit_expr(&self, e: &Expr, scope: &HashMap<String, Tv<'ctx>>) -> Result<Tv<'ctx>, String> {
         let i64t = self.ctx.i64_type();
         match e {
             Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
             Expr::Float(x) => Ok((self.ctx.f64_type().const_float(*x).into(), Type::Float(64))),
             Expr::Bool(b) => Ok((self.ctx.bool_type().const_int(*b as u64, false).into(), Type::Bool)),
+            Expr::LlvmIr { result, args, body } => {
+                let argtv: Vec<Tv<'ctx>> = args
+                    .iter()
+                    .map(|a| self.emit_expr(a, scope))
+                    .collect::<Result<_, _>>()?;
+                self.emit_llvm_ir(result, &argtv, body)
+            }
             // The zero value of a type (used to initialize a fresh local).
             Expr::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
@@ -1890,6 +1984,8 @@ fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str
         Type::Bool => 1,
         Type::Ptr(_) | Type::Fn(..) | Type::Ref(..) => 8,
         Type::Array(e, n) => align8(type_bytes(e, structs, sums)) * (*n as u64),
+        // A vector is tightly packed (no per-lane padding): lanes * element bytes.
+        Type::Vec(e, n) => type_bytes(e, structs, sums) * (*n as u64),
         Type::Struct(name) => {
             if let Some(s) = structs.get(name.as_str()) {
                 s.fields.iter().map(|(_, t)| align8(type_bytes(t, structs, sums))).sum()

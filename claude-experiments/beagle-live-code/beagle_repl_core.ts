@@ -296,6 +296,11 @@ export function isPortOpen(host: string, port: number, timeoutMs = 500): Promise
 export function beagleStringEscape(s: string): string {
   return s
     .replace(/\\/g, "\\\\")
+    // Neutralize `${...}` so embedded Beagle source (e.g. passed to
+    // reflect/persist or eval) is treated as literal text, not interpolated
+    // in the REPL's own scope. Beagle parses `\$` back to a literal `$`.
+    // Must run after the backslash-doubling above so the inserted `\` survives.
+    .replace(/\$/g, () => "\\$")
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r")

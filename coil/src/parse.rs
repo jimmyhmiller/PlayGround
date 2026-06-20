@@ -1,12 +1,20 @@
 //! Surface s-expressions -> core AST.
+//!
+//! Diagnostics: every form carries a `Span` (from the reader). The recursive
+//! entry points (`parse_expr`, `parse_type`, and the top-level loop) attach the
+//! span of the form they're parsing to any error that bubbles up without one, so
+//! a parse error points at the most specific offending sub-form. The small
+//! matcher helpers (`as_list`, `sym`, …) attach the span of the node they were
+//! handed directly.
 
 use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::convention::{Convention, Lowering, NativeCc};
-use crate::reader::Sexp;
+use crate::reader::{Sexp, SexpKind};
+use crate::span::{Diag, Span};
 
-pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
+pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     let mut conventions = HashMap::new();
     conventions.insert("c".to_string(), Convention::default_c());
     let mut funcs = Vec::new();
@@ -16,36 +24,42 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     let mut asserts = Vec::new();
 
     for form in forms {
-        let items = as_list(form, "top-level form must be a list")?;
-        let head = head_sym(items)?;
-        match head.as_str() {
-            "defcc" => {
-                let c = parse_defcc(&items[1..])?;
-                if conventions.insert(c.name.clone(), c.clone()).is_some() && c.name != "c" {
-                    return Err(format!("convention '{}' defined twice", c.name));
+        // Any error from a top-level form gets that form's span as a fallback
+        // location (a deeper frame may already have set a more precise one).
+        let r = (|| -> Result<(), Diag> {
+            let items = as_list(form, "top-level form must be a list")?;
+            let head = head_sym(items)?;
+            match head.as_str() {
+                "defcc" => {
+                    let c = parse_defcc(&items[1..])?;
+                    if conventions.insert(c.name.clone(), c.clone()).is_some() && c.name != "c" {
+                        return Err(Diag::new(format!("convention '{}' defined twice", c.name)));
+                    }
                 }
-            }
-            "defstruct" => structs.push(parse_defstruct(&items[1..])?),
-            "defsum" => sums.push(parse_defsum(&items[1..])?),
-            "defn" => {
-                let f = parse_defn(&items[1..])?;
-                if funcs.iter().any(|g: &Func| g.name == f.name) {
-                    return Err(format!("function '{}' defined twice", f.name));
+                "defstruct" => structs.push(parse_defstruct(&items[1..])?),
+                "defsum" => sums.push(parse_defsum(&items[1..])?),
+                "defn" => {
+                    let f = parse_defn(&items[1..])?;
+                    if funcs.iter().any(|g: &Func| g.name == f.name) {
+                        return Err(Diag::new(format!("function '{}' defined twice", f.name)));
+                    }
+                    funcs.push(f);
                 }
-                funcs.push(f);
+                "extern" => externs.push(parse_extern(&items[1..])?),
+                "static-assert" => {
+                    let cond = parse_expr(items.get(1).ok_or("static-assert: missing condition")?)?;
+                    let msg = match items.get(2).map(|s| &s.kind) {
+                        Some(SexpKind::Str(s)) => s.clone(),
+                        None => "static assertion failed".to_string(),
+                        _ => return Err(Diag::new("static-assert: message must be a string")),
+                    };
+                    asserts.push(StaticAssert { cond, msg });
+                }
+                other => return Err(Diag::new(format!("unknown top-level form '{other}'"))),
             }
-            "extern" => externs.push(parse_extern(&items[1..])?),
-            "static-assert" => {
-                let cond = parse_expr(items.get(1).ok_or("static-assert: missing condition")?)?;
-                let msg = match items.get(2) {
-                    Some(Sexp::Str(s)) => s.clone(),
-                    None => "static assertion failed".to_string(),
-                    _ => return Err("static-assert: message must be a string".to_string()),
-                };
-                asserts.push(StaticAssert { cond, msg });
-            }
-            other => return Err(format!("unknown top-level form '{other}'")),
-        }
+            Ok(())
+        })();
+        r.map_err(|d| d.with_span(form.span))?;
     }
 
     Ok(Program {
@@ -58,11 +72,11 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, String> {
     })
 }
 
-fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
+fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, Diag> {
     let name = sym(rest.first().ok_or("defsum: missing name")?, "sum name")?;
     let mut i = 1;
     let mut type_params = vec![];
-    if let Some(Sexp::Vector(tp)) = rest.get(i) {
+    if let Some(SexpKind::Vector(tp)) = rest.get(i).map(|s| &s.kind) {
         type_params = tp.iter().map(|s| sym(s, "type parameter")).collect::<Result<_, _>>()?;
         i += 1;
     }
@@ -70,8 +84,8 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
     for v in &rest[i..] {
         let vl = as_list(v, "variant must be (Name [fields])")?;
         let vname = sym(vl.first().ok_or("variant: missing name")?, "variant name")?;
-        let fields = match vl.get(1) {
-            Some(Sexp::Vector(fv)) => {
+        let fields = match vl.get(1).map(|s| &s.kind) {
+            Some(SexpKind::Vector(fv)) => {
                 let mut fs = Vec::new();
                 for f in fv {
                     let fl = as_list(f, "field must be (name :type)")?;
@@ -80,7 +94,7 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
                 fs
             }
             None => vec![],
-            _ => return Err(format!("variant '{vname}': fields must be a vector")),
+            _ => return Err(Diag::at(v.span, format!("variant '{vname}': fields must be a vector"))),
         };
         variants.push(SumVariant { name: vname, fields });
     }
@@ -91,7 +105,7 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, String> {
     })
 }
 
-fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
+fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, Diag> {
     let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
     let mut i = 1;
     // struct-level options: :layout c|packed|explicit|(align N), :size N, :align N.
@@ -102,24 +116,24 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     let mut exp_size: Option<u64> = None;
     let mut exp_align: u32 = 0;
     let mut backing: Option<u32> = None;
-    while let Some(Sexp::Keyword(k)) = rest.get(i) {
+    while let Some(SexpKind::Keyword(k)) = rest.get(i).map(|s| &s.kind) {
         let val = rest.get(i + 1).ok_or_else(|| format!("defstruct: ':{k}' missing value"))?;
         match k.as_str() {
-            "layout" => match val {
-                Sexp::Sym(s) if s == "c" => {}
-                Sexp::Sym(s) if s == "packed" => packed = true,
-                Sexp::Sym(s) if s == "explicit" => explicit = true,
-                Sexp::Sym(s) if s == "bits" => bits = true,
-                Sexp::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
+            "layout" => match &val.kind {
+                SexpKind::Sym(s) if s == "c" => {}
+                SexpKind::Sym(s) if s == "packed" => packed = true,
+                SexpKind::Sym(s) if s == "explicit" => explicit = true,
+                SexpKind::Sym(s) if s == "bits" => bits = true,
+                SexpKind::List(items) if head_sym(items).ok().as_deref() == Some("align") => {
                     aligned = Some(pow2(items.get(1))?);
                 }
-                _ => return Err("layout must be c, packed, explicit, bits, or (align N)".to_string()),
+                _ => return Err(Diag::at(val.span, "layout must be c, packed, explicit, bits, or (align N)")),
             },
             "size" => exp_size = Some(int_val(val, "size")? as u64),
             "align" => exp_align = pow2(Some(val))?,
             "backing" => match parse_type(val)? {
                 Type::Int(b, _) => backing = Some(b),
-                _ => return Err(":backing must be an integer type".to_string()),
+                _ => return Err(Diag::at(val.span, ":backing must be an integer type")),
             },
             _ => break,
         }
@@ -127,9 +141,9 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     }
 
     let type_params = parse_type_params(rest, &mut i)?;
-    let fields_v = match rest.get(i) {
-        Some(Sexp::Vector(v)) => v,
-        _ => return Err(format!("defstruct '{name}': expected a field vector")),
+    let fields_v = match rest.get(i).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) => v,
+        _ => return Err(Diag::new(format!("defstruct '{name}': expected a field vector"))),
     };
 
     if bits {
@@ -139,9 +153,9 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
         for f in fields_v {
             let fl = as_list(f, "bitfield must be (name :bits N)")?;
             let fname = sym(&fl[0], "field name")?;
-            let width = match (fl.get(1), fl.get(2)) {
-                (Some(Sexp::Keyword(k)), Some(Sexp::Int(n))) if k == "bits" && *n > 0 => *n as u32,
-                _ => return Err(format!("field '{fname}' must be (name :bits N)")),
+            let width = match (fl.get(1).map(|s| &s.kind), fl.get(2).map(|s| &s.kind)) {
+                (Some(SexpKind::Keyword(k)), Some(SexpKind::Int(n))) if k == "bits" && *n > 0 => *n as u32,
+                _ => return Err(Diag::at(f.span, format!("field '{fname}' must be (name :bits N)"))),
             };
             fields.push((fname, Type::Int(width, false))); // a bitfield's value type is uN
             offsets.push(acc);
@@ -149,12 +163,12 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
         }
         let backing = match backing {
             Some(b) if b >= acc => b,
-            Some(b) => return Err(format!("defstruct '{name}': :backing i{b} too small for {acc} bits")),
+            Some(b) => return Err(Diag::new(format!("defstruct '{name}': :backing i{b} too small for {acc} bits"))),
             None if acc <= 8 => 8,
             None if acc <= 16 => 16,
             None if acc <= 32 => 32,
             None if acc <= 64 => 64,
-            None => return Err(format!("defstruct '{name}': {acc} bits needs an explicit :backing")),
+            None => return Err(Diag::new(format!("defstruct '{name}': {acc} bits needs an explicit :backing"))),
         };
         return Ok(StructDef {
             name,
@@ -174,12 +188,12 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
         let mut at = None;
         let mut j = 2;
         while j < fl.len() {
-            match &fl[j] {
-                Sexp::Keyword(k) if k == "at" => {
+            match &fl[j].kind {
+                SexpKind::Keyword(k) if k == "at" => {
                     at = Some(int_val(fl.get(j + 1).ok_or(":at missing value")?, "at")? as u64);
                     j += 2;
                 }
-                other => return Err(format!("unknown field option {other:?}")),
+                _ => return Err(Diag::at(fl[j].span, format!("unknown field option {}", fl[j]))),
             }
         }
         fields.push((fname, fty));
@@ -212,24 +226,26 @@ fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, String> {
     })
 }
 
-fn int_val(s: &Sexp, what: &str) -> Result<i64, String> {
-    match s {
-        Sexp::Int(n) => Ok(*n),
-        other => Err(format!("{what}: expected an integer, got {other:?}")),
+fn int_val(s: &Sexp, what: &str) -> Result<i64, Diag> {
+    match &s.kind {
+        SexpKind::Int(n) => Ok(*n),
+        _ => Err(Diag::at(s.span, format!("{what}: expected an integer, got {s}"))),
     }
 }
 
-fn pow2(s: Option<&Sexp>) -> Result<u32, String> {
-    match s {
-        Some(Sexp::Int(n)) if *n > 0 && (*n as u64).is_power_of_two() => Ok(*n as u32),
-        _ => Err("alignment must be a positive power of two".to_string()),
+fn pow2(s: Option<&Sexp>) -> Result<u32, Diag> {
+    match s.map(|s| &s.kind) {
+        Some(SexpKind::Int(n)) if *n > 0 && (*n as u64).is_power_of_two() => Ok(*n as u32),
+        _ => Err(Diag::new("alignment must be a positive power of two")),
     }
 }
 
 /// If `rest[i]` is a vector immediately followed by another vector, the first is
 /// a generic type-parameter list (bare symbols); consume it and advance `i`.
-fn parse_type_params(rest: &[Sexp], i: &mut usize) -> Result<Vec<String>, String> {
-    if let (Some(Sexp::Vector(tp)), Some(Sexp::Vector(_))) = (rest.get(*i), rest.get(*i + 1)) {
+fn parse_type_params(rest: &[Sexp], i: &mut usize) -> Result<Vec<String>, Diag> {
+    if let (Some(SexpKind::Vector(tp)), Some(SexpKind::Vector(_))) =
+        (rest.get(*i).map(|s| &s.kind), rest.get(*i + 1).map(|s| &s.kind))
+    {
         let params = tp.iter().map(|s| sym(s, "type parameter")).collect::<Result<_, _>>()?;
         *i += 1;
         Ok(params)
@@ -238,13 +254,13 @@ fn parse_type_params(rest: &[Sexp], i: &mut usize) -> Result<Vec<String>, String
     }
 }
 
-fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
+fn parse_extern(rest: &[Sexp]) -> Result<Extern, Diag> {
     let mut i = 0;
     let name = sym(rest.get(i).ok_or("extern: missing name")?, "extern name")?;
     i += 1;
 
     let mut cc = "c".to_string();
-    if let Some(Sexp::Keyword(k)) = rest.get(i) {
+    if let Some(SexpKind::Keyword(k)) = rest.get(i).map(|s| &s.kind) {
         if k == "cc" {
             cc = sym(
                 rest.get(i + 1).ok_or("extern: ':cc' missing convention")?,
@@ -254,13 +270,13 @@ fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
         }
     }
 
-    let params_v = match rest.get(i) {
-        Some(Sexp::Vector(v)) => v,
-        _ => return Err(format!("extern '{name}': expected a vector of parameter types")),
+    let params_v = match rest.get(i).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) => v,
+        _ => return Err(Diag::new(format!("extern '{name}': expected a vector of parameter types"))),
     };
     i += 1;
     // A trailing `...` in the parameter vector marks a C variadic function.
-    let variadic = matches!(params_v.last(), Some(Sexp::Sym(s)) if s == "...");
+    let variadic = matches!(params_v.last().map(|s| &s.kind), Some(SexpKind::Sym(s)) if s == "...");
     let fixed = if variadic { &params_v[..params_v.len() - 1] } else { &params_v[..] };
     let params = fixed.iter().map(parse_type).collect::<Result<_, _>>()?;
 
@@ -269,7 +285,7 @@ fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
         "expected (-> :type)",
     )?;
     if head_sym(ret_l)? != "->" {
-        return Err(format!("extern '{name}': expected (-> :type)"));
+        return Err(Diag::new(format!("extern '{name}': expected (-> :type)")));
     }
     let ret = parse_type(ret_l.get(1).ok_or("(-> ) missing type")?)?;
 
@@ -282,7 +298,7 @@ fn parse_extern(rest: &[Sexp]) -> Result<Extern, String> {
     })
 }
 
-fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
+fn parse_defcc(rest: &[Sexp]) -> Result<Convention, Diag> {
     let name = sym(rest.first().ok_or("defcc: missing name")?, "defcc name")?;
     let mut params = vec![];
     let mut ret = None;
@@ -306,7 +322,7 @@ fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
                 let n = sym(val, "native")?;
                 native = Some(
                     NativeCc::parse(&n)
-                        .ok_or_else(|| format!("defcc: unknown native cc '{n}'"))?,
+                        .ok_or_else(|| Diag::at(val.span, format!("defcc: unknown native cc '{n}'")))?,
                 );
             }
             "lower" => {
@@ -315,7 +331,7 @@ fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
                     shim = true;
                 }
             }
-            other => return Err(format!("defcc: unknown option ':{other}'")),
+            other => return Err(Diag::at(rest[i].span, format!("defcc: unknown option ':{other}'"))),
         }
         i += 2;
     }
@@ -324,9 +340,9 @@ fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
         (Some(cc), _) => Lowering::Native(cc),
         (None, true) => Lowering::Shim,
         (None, false) => {
-            return Err(format!(
+            return Err(Diag::new(format!(
                 "defcc '{name}': needs a lowering (:native <c|fast|cold> or :lower shim)"
-            ))
+            )))
         }
     };
 
@@ -340,14 +356,14 @@ fn parse_defcc(rest: &[Sexp]) -> Result<Convention, String> {
     })
 }
 
-fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
+fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
     let mut i = 0;
     let name = sym(rest.get(i).ok_or("defn: missing name")?, "defn name")?;
     i += 1;
 
     // optional `:cc <name>`
     let mut cc = "c".to_string();
-    if let Some(Sexp::Keyword(k)) = rest.get(i) {
+    if let Some(SexpKind::Keyword(k)) = rest.get(i).map(|s| &s.kind) {
         if k == "cc" {
             cc = sym(
                 rest.get(i + 1).ok_or("defn: ':cc' missing convention name")?,
@@ -361,9 +377,9 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
     let type_params = parse_type_params(rest, &mut i)?;
 
     // params vector
-    let params_v = match rest.get(i) {
-        Some(Sexp::Vector(v)) => v,
-        _ => return Err(format!("defn '{name}': expected parameter vector")),
+    let params_v = match rest.get(i).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) => v,
+        _ => return Err(Diag::new(format!("defn '{name}': expected parameter vector"))),
     };
     i += 1;
     let mut params = Vec::new();
@@ -380,7 +396,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
         "expected (-> :type)",
     )?;
     if head_sym(ret_l)? != "->" {
-        return Err("defn: expected (-> :type) after params".to_string());
+        return Err(Diag::new("defn: expected (-> :type) after params"));
     }
     let ret = parse_type(ret_l.get(1).ok_or("(-> ) missing type")?)?;
     i += 1;
@@ -391,7 +407,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
         .map(parse_expr)
         .collect::<Result<_, _>>()?;
     if body.is_empty() {
-        return Err(format!("defn '{name}': empty body"));
+        return Err(Diag::new(format!("defn '{name}': empty body")));
     }
 
     Ok(Func {
@@ -404,13 +420,18 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, String> {
     })
 }
 
-fn parse_type(s: &Sexp) -> Result<Type, String> {
-    match s {
+/// Parse a type, attaching the form's span to any spanless error from within.
+fn parse_type(s: &Sexp) -> Result<Type, Diag> {
+    parse_type_inner(s).map_err(|d| d.with_span(s.span))
+}
+
+fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
+    match &s.kind {
         // `:i32` (keyword) must be an int. A bare symbol is an int name, or
         // otherwise a struct name (so `(ptr c i8)` and `Point` both read well).
-        Sexp::Keyword(k) => prim_type(k),
-        Sexp::Sym(k) => Ok(prim_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
-        Sexp::List(items) => match head_sym(items)?.as_str() {
+        SexpKind::Keyword(k) => prim_type(k).map_err(Diag::from),
+        SexpKind::Sym(k) => Ok(prim_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
+        SexpKind::List(items) => match head_sym(items)?.as_str() {
             // (mut TYPE) -> a mutable reference to TYPE.
             "mut" => {
                 let pointee = parse_type(items.get(1).ok_or("mut: expects (mut TYPE)")?)?;
@@ -427,11 +448,20 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
             // (array TYPE N)
             "array" => {
                 let elem = parse_type(items.get(1).ok_or("array type: missing element type")?)?;
-                let n = match items.get(2) {
-                    Some(Sexp::Int(n)) if *n > 0 => *n as u32,
-                    _ => return Err("array type: expected a positive length".to_string()),
+                let n = match items.get(2).map(|s| &s.kind) {
+                    Some(SexpKind::Int(n)) if *n > 0 => *n as u32,
+                    _ => return Err(Diag::new("array type: expected a positive length")),
                 };
                 Ok(Type::Array(Box::new(elem), n))
+            }
+            // (vec TYPE N) -> a SIMD vector <N x TYPE>; element must be a scalar.
+            "vec" => {
+                let elem = parse_type(items.get(1).ok_or("vec type: missing element type")?)?;
+                let n = match items.get(2).map(|s| &s.kind) {
+                    Some(SexpKind::Int(n)) if *n > 0 => *n as u32,
+                    _ => return Err(Diag::new("vec type: expected a positive lane count")),
+                };
+                Ok(Type::Vec(Box::new(elem), n))
             }
             // (struct Name) — explicit form; bare `Name` also works.
             "struct" => {
@@ -441,9 +471,9 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
             // (fnptr CC [param-types] ret-type)
             "fnptr" => {
                 let cc = sym(items.get(1).ok_or("fnptr type: missing convention")?, "fnptr cc")?;
-                let params_v = match items.get(2) {
-                    Some(Sexp::Vector(v)) => v,
-                    _ => return Err("fnptr type: expected a vector of parameter types".to_string()),
+                let params_v = match items.get(2).map(|s| &s.kind) {
+                    Some(SexpKind::Vector(v)) => v,
+                    _ => return Err(Diag::new("fnptr type: expected a vector of parameter types")),
                 };
                 let params = params_v.iter().map(parse_type).collect::<Result<_, _>>()?;
                 let ret = parse_type(items.get(3).ok_or("fnptr type: missing return type")?)?;
@@ -455,11 +485,11 @@ fn parse_type(s: &Sexp) -> Result<Type, String> {
                 Ok(Type::App(other.to_string(), args))
             }
         },
-        other => Err(format!("unsupported type: {other:?}")),
+        _ => Err(Diag::at(s.span, format!("unsupported type: {s}"))),
     }
 }
 
-fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, String> {
+fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, Diag> {
     let ty = match args.first() {
         Some(t) => parse_type(t)?,
         None => Type::Int(64, true),
@@ -496,24 +526,30 @@ fn int_type(name: &str) -> Result<Type, String> {
     Ok(Type::Int(bits, signed))
 }
 
-fn parse_expr(s: &Sexp) -> Result<Expr, String> {
-    match s {
-        Sexp::Int(n) => Ok(Expr::Int(*n)),
-        Sexp::Float(x) => Ok(Expr::Float(*x)),
-        Sexp::Sym(name) if name == "true" => Ok(Expr::Bool(true)),
-        Sexp::Sym(name) if name == "false" => Ok(Expr::Bool(false)),
-        Sexp::Sym(name) => Ok(Expr::Var(name.clone())),
-        Sexp::Keyword(k) => Err(format!("unexpected keyword :{k} in expression")),
-        Sexp::Str(s) => Ok(Expr::Str(s.clone())),
-        Sexp::Vector(_) => Err("unexpected vector in expression".to_string()),
-        Sexp::List(items) => parse_list_expr(items),
+/// Parse an expression, attaching the form's span to any spanless error from
+/// within (so the diagnostic points at the most specific offending sub-form).
+fn parse_expr(s: &Sexp) -> Result<Expr, Diag> {
+    parse_expr_inner(s).map_err(|d| d.with_span(s.span))
+}
+
+fn parse_expr_inner(s: &Sexp) -> Result<Expr, Diag> {
+    match &s.kind {
+        SexpKind::Int(n) => Ok(Expr::Int(*n)),
+        SexpKind::Float(x) => Ok(Expr::Float(*x)),
+        SexpKind::Sym(name) if name == "true" => Ok(Expr::Bool(true)),
+        SexpKind::Sym(name) if name == "false" => Ok(Expr::Bool(false)),
+        SexpKind::Sym(name) => Ok(Expr::Var(name.clone())),
+        SexpKind::Keyword(k) => Err(Diag::at(s.span, format!("unexpected keyword :{k} in expression"))),
+        SexpKind::Str(s) => Ok(Expr::Str(s.clone())),
+        SexpKind::Vector(_) => Err(Diag::at(s.span, "unexpected vector in expression")),
+        SexpKind::List(items) => parse_list_expr(items, s.span),
     }
 }
 
-fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
+fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
     let head = head_sym(items)?;
     let args = &items[1..];
-    let bin = |op: BinOp| -> Result<Expr, String> {
+    let bin = |op: BinOp| -> Result<Expr, Diag> {
         let (l, r) = two(args, &head)?;
         Ok(Expr::Bin {
             op,
@@ -521,7 +557,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             rhs: Box::new(parse_expr(r)?),
         })
     };
-    let cmp = |op: CmpOp| -> Result<Expr, String> {
+    let cmp = |op: CmpOp| -> Result<Expr, Diag> {
         let (l, r) = two(args, &head)?;
         Ok(Expr::Cmp {
             op,
@@ -554,7 +590,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         "fcmp-ne" => cmp(CmpOp::Ne),
         "inot" => {
             if args.len() != 1 {
-                return Err("inot: expects (inot x)".to_string());
+                return Err(Diag::at(span, "inot: expects (inot x)"));
             }
             Ok(Expr::Not(Box::new(parse_expr(&args[0])?)))
         }
@@ -583,7 +619,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "not" => {
             if args.len() != 1 {
-                return Err("not: expects (not x)".to_string());
+                return Err(Diag::at(span, "not: expects (not x)"));
             }
             Ok(Expr::If {
                 cond: Box::new(parse_expr(&args[0])?),
@@ -593,7 +629,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "if" => {
             if args.len() != 3 {
-                return Err("if: expects (if cond then else)".to_string());
+                return Err(Diag::at(span, "if: expects (if cond then else)"));
             }
             Ok(Expr::If {
                 cond: Box::new(parse_expr(&args[0])?),
@@ -605,27 +641,28 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             args.iter().map(parse_expr).collect::<Result<_, _>>()?,
         )),
         "let" => {
-            let binds_v = match args.first() {
-                Some(Sexp::Vector(v)) => v,
-                _ => return Err("let: expected binding vector".to_string()),
+            let binds_v = match args.first().map(|s| &s.kind) {
+                Some(SexpKind::Vector(v)) => v,
+                _ => return Err(Diag::at(span, "let: expected binding vector")),
             };
             if binds_v.len() % 2 != 0 {
-                return Err("let: bindings must be name/value pairs".to_string());
+                return Err(Diag::at(span, "let: bindings must be name/value pairs"));
             }
             let mut binds = Vec::new();
             for pair in binds_v.chunks(2) {
                 // A binding name is either `name` (immutable) or `(mut name)`
                 // (a mutable stack place).
-                let (name, mutable) = match &pair[0] {
-                    Sexp::Sym(s) => (s.clone(), false),
-                    Sexp::List(items)
+                let (name, mutable) = match &pair[0].kind {
+                    SexpKind::Sym(s) => (s.clone(), false),
+                    SexpKind::List(items)
                         if head_sym(items).ok().as_deref() == Some("mut") && items.len() == 2 =>
                     {
                         (sym(&items[1], "let binding name")?, true)
                     }
-                    other => {
-                        return Err(format!(
-                            "let binding name must be `name` or `(mut name)`, got {other:?}"
+                    _ => {
+                        return Err(Diag::at(
+                            pair[0].span,
+                            format!("let binding name must be `name` or `(mut name)`, got {}", pair[0]),
                         ))
                     }
                 };
@@ -636,7 +673,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
                 .map(parse_expr)
                 .collect::<Result<_, _>>()?;
             if body.is_empty() {
-                return Err("let: empty body".to_string());
+                return Err(Diag::at(span, "let: empty body"));
             }
             Ok(Expr::Let { binds, body })
         }
@@ -655,7 +692,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         // `(zeroed T)` — the zero value of T, for initializing a fresh local.
         "zeroed" => {
             if args.len() != 1 {
-                return Err("zeroed: expects (zeroed TYPE)".to_string());
+                return Err(Diag::at(span, "zeroed: expects (zeroed TYPE)"));
             }
             Ok(Expr::Zeroed(parse_type(&args[0])?))
         }
@@ -663,7 +700,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         // written through).
         "mut" => {
             if args.len() != 1 {
-                return Err("mut: expects (mut PLACE)".to_string());
+                return Err(Diag::at(span, "mut: expects (mut PLACE)"));
             }
             Ok(Expr::Borrow {
                 mutable: true,
@@ -701,7 +738,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "fnptr-of" => {
             if args.len() != 1 {
-                return Err("fnptr-of: expects (fnptr-of name)".to_string());
+                return Err(Diag::at(span, "fnptr-of: expects (fnptr-of name)"));
             }
             Ok(Expr::FnPtrOf(sym(&args[0], "function name")?))
         }
@@ -715,7 +752,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "load" => {
             if args.len() != 1 {
-                return Err("load: expects (load ptr)".to_string());
+                return Err(Diag::at(span, "load: expects (load ptr)"));
             }
             Ok(Expr::Load(Box::new(parse_expr(&args[0])?)))
         }
@@ -728,7 +765,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "free" => {
             if args.len() != 1 {
-                return Err("free: expects (free ptr)".to_string());
+                return Err(Diag::at(span, "free: expects (free ptr)"));
             }
             Ok(Expr::Free(Box::new(parse_expr(&args[0])?)))
         }
@@ -741,7 +778,7 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "cast" => {
             if args.len() != 2 {
-                return Err("cast: expects (cast :type expr)".to_string());
+                return Err(Diag::at(span, "cast: expects (cast :type expr)"));
             }
             Ok(Expr::Cast {
                 ty: parse_type(&args[0])?,
@@ -754,11 +791,11 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
             for a in &args[1..] {
                 let al = as_list(a, "match arm must be (Variant [binds] body)")?;
                 let variant = sym(al.first().ok_or("arm: missing variant")?, "variant")?;
-                let binds = match al.get(1) {
-                    Some(Sexp::Vector(bv)) => {
+                let binds = match al.get(1).map(|s| &s.kind) {
+                    Some(SexpKind::Vector(bv)) => {
                         bv.iter().map(|s| sym(s, "bind")).collect::<Result<_, _>>()?
                     }
-                    _ => return Err(format!("arm '{variant}': expected a bind vector")),
+                    _ => return Err(Diag::at(a.span, format!("arm '{variant}': expected a bind vector"))),
                 };
                 let body = parse_expr(al.get(2).ok_or("arm: missing body")?)?;
                 arms.push(Arm { variant, binds, body });
@@ -770,27 +807,43 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
         }
         "sizeof" => {
             if args.len() != 1 {
-                return Err("sizeof: expects (sizeof TYPE)".to_string());
+                return Err(Diag::at(span, "sizeof: expects (sizeof TYPE)"));
             }
             Ok(Expr::SizeOf(parse_type(&args[0])?))
         }
         "alignof" => {
             if args.len() != 1 {
-                return Err("alignof: expects (alignof TYPE)".to_string());
+                return Err(Diag::at(span, "alignof: expects (alignof TYPE)"));
             }
             Ok(Expr::AlignOf(parse_type(&args[0])?))
         }
         "offsetof" => {
             if args.len() != 2 {
-                return Err("offsetof: expects (offsetof TYPE field)".to_string());
+                return Err(Diag::at(span, "offsetof: expects (offsetof TYPE field)"));
             }
             Ok(Expr::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
+        }
+        // (llvm-ir RESULT-TYPE [operand...] "BODY") — raw LLVM IR escape hatch.
+        "llvm-ir" => {
+            if args.len() != 3 {
+                return Err(Diag::at(span, "llvm-ir: expects (llvm-ir RESULT-TYPE [operands...] \"BODY\")"));
+            }
+            let result = parse_type(&args[0])?;
+            let operands = match &args[1].kind {
+                SexpKind::Vector(v) => v.iter().map(parse_expr).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(Diag::at(args[1].span, "llvm-ir: expected a [operand...] vector")),
+            };
+            let body = match &args[2].kind {
+                SexpKind::Str(s) => s.clone(),
+                _ => return Err(Diag::at(args[2].span, "llvm-ir: body must be a string literal")),
+            };
+            Ok(Expr::LlvmIr { result, args: operands, body })
         }
         // direct application: (fib n) == (call fib n). A leading vector is an
         // explicit type-argument list for a generic call: (id [i64] 5).
         other => {
-            let (type_args, value_args): (Vec<Type>, &[Sexp]) = match args.first() {
-                Some(Sexp::Vector(tv)) => {
+            let (type_args, value_args): (Vec<Type>, &[Sexp]) = match args.first().map(|s| &s.kind) {
+                Some(SexpKind::Vector(tv)) => {
                     (tv.iter().map(parse_type).collect::<Result<_, _>>()?, &args[1..])
                 }
                 _ => (vec![], args),
@@ -807,45 +860,45 @@ fn parse_list_expr(items: &[Sexp]) -> Result<Expr, String> {
 
 // ---- small helpers -------------------------------------------------------
 
-fn as_list<'a>(s: &'a Sexp, msg: &str) -> Result<&'a [Sexp], String> {
-    match s {
-        Sexp::List(items) => Ok(items),
-        _ => Err(msg.to_string()),
+fn as_list<'a>(s: &'a Sexp, msg: &str) -> Result<&'a [Sexp], Diag> {
+    match &s.kind {
+        SexpKind::List(items) => Ok(items),
+        _ => Err(Diag::at(s.span, msg)),
     }
 }
 
-fn head_sym(items: &[Sexp]) -> Result<String, String> {
-    match items.first() {
-        Some(Sexp::Sym(s)) => Ok(s.clone()),
-        Some(other) => Err(format!("expected a symbol head, got {other:?}")),
-        None => Err("empty list".to_string()),
+fn head_sym(items: &[Sexp]) -> Result<String, Diag> {
+    match items.first().map(|s| (&s.kind, s.span)) {
+        Some((SexpKind::Sym(s), _)) => Ok(s.clone()),
+        Some((_, span)) => Err(Diag::at(span, format!("expected a symbol head, got {}", items[0]))),
+        None => Err(Diag::new("empty list")),
     }
 }
 
-fn sym(s: &Sexp, what: &str) -> Result<String, String> {
-    match s {
-        Sexp::Sym(s) => Ok(s.clone()),
-        other => Err(format!("{what}: expected symbol, got {other:?}")),
+fn sym(s: &Sexp, what: &str) -> Result<String, Diag> {
+    match &s.kind {
+        SexpKind::Sym(s) => Ok(s.clone()),
+        _ => Err(Diag::at(s.span, format!("{what}: expected symbol, got {s}"))),
     }
 }
 
-fn keyword(s: &Sexp, what: &str) -> Result<String, String> {
-    match s {
-        Sexp::Keyword(k) => Ok(k.clone()),
-        other => Err(format!("{what}: expected keyword, got {other:?}")),
+fn keyword(s: &Sexp, what: &str) -> Result<String, Diag> {
+    match &s.kind {
+        SexpKind::Keyword(k) => Ok(k.clone()),
+        _ => Err(Diag::at(s.span, format!("{what}: expected keyword, got {s}"))),
     }
 }
 
-fn sym_vec(s: &Sexp, what: &str) -> Result<Vec<String>, String> {
-    match s {
-        Sexp::Vector(v) => v.iter().map(|x| sym(x, what)).collect(),
-        other => Err(format!("{what}: expected vector, got {other:?}")),
+fn sym_vec(s: &Sexp, what: &str) -> Result<Vec<String>, Diag> {
+    match &s.kind {
+        SexpKind::Vector(v) => v.iter().map(|x| sym(x, what)).collect(),
+        _ => Err(Diag::at(s.span, format!("{what}: expected vector, got {s}"))),
     }
 }
 
-fn two<'a>(args: &'a [Sexp], head: &str) -> Result<(&'a Sexp, &'a Sexp), String> {
+fn two<'a>(args: &'a [Sexp], head: &str) -> Result<(&'a Sexp, &'a Sexp), Diag> {
     if args.len() != 2 {
-        return Err(format!("{head}: expects exactly 2 arguments"));
+        return Err(Diag::new(format!("{head}: expects exactly 2 arguments")));
     }
     Ok((&args[0], &args[1]))
 }

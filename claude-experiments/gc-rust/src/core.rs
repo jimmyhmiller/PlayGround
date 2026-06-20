@@ -6,9 +6,11 @@
 //! `gc::TypeInfo`.
 
 use crate::ast::{BinOp, UnOp};
+use crate::gc::TypeMeta;
+use serde::Serialize;
 
 /// How a value is represented at the machine level.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Repr {
     /// Zero-size, no storage.
     Unit,
@@ -20,7 +22,7 @@ pub enum Repr {
     Ref(LayoutId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ScalarRepr {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
@@ -63,7 +65,7 @@ pub type LocalId = u32;
 // Heap object layout → gc::TypeInfo
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Layout {
     /// Number of leading 8-byte GC pointer slots (traced). Must come first.
     pub ptr_fields: u16,
@@ -77,17 +79,34 @@ pub struct Layout {
     /// For array layouts: the element stride in bytes (codegen-only; does not
     /// affect the GC `TypeInfo`). 0 for non-array layouts.
     pub elem_stride: u16,
+    /// Absolute byte offsets (header included) of GC pointers embedded in the raw
+    /// region — i.e. references inside flattened `#[value]` fields. These become
+    /// `gc::TypeInfo::interior_ptrs` so the collector traces them. Empty for the
+    /// common case (no value-with-ref fields).
+    pub interior_ptrs: Vec<u16>,
+    /// Runtime reflection metadata (nominal type/field names + field types) for
+    /// this layout. Travels 1:1 with the layout so the JIT/AOT paths and the
+    /// `emit reflect` view all read the same source of truth. Skipped in the
+    /// `core` JSON dump (it has a dedicated `reflect` view) and not consumed by
+    /// the GC, which only needs the structural fields above.
+    #[serde(skip)]
+    pub meta: TypeMeta,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum VarLen { None, Values, Bytes }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub enum FieldLoc {
     /// A GC pointer slot at pointer-index `idx` (byte offset = header + idx*8).
     Ptr { idx: u16 },
     /// A raw scalar at byte `offset` within the raw section.
     Raw { offset: u16, repr: ScalarRepr },
+    /// A flattened `#[value]` aggregate stored inline at byte `offset` within the
+    /// raw section. `value` is its [`ValueId`]; codegen stores/loads it as the
+    /// whole LLVM aggregate (not a scalar). Distinct from `ValueField`, which
+    /// addresses a sub-field of an already-loaded value aggregate.
+    ValueAt { offset: u16, value: ValueId },
     /// A field of an inline value aggregate, by its index in the LLVM struct.
     ValueField { index: u32 },
 }
@@ -96,28 +115,46 @@ pub enum FieldLoc {
 // Inline value aggregates (unboxed)
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ValueLayout {
     pub name: String,
     /// `None` for a value struct; `Some` for a value enum (tagged union).
     pub variants: Option<Vec<ValueVariant>>,
     /// For a value struct: its fields in order.
     pub fields: Vec<Repr>,
+    /// Source field names for a value struct (`"0"`,`"1"`,… for tuples), for
+    /// reflection. Empty for value enums and tuples-without-names.
+    pub field_names: Vec<String>,
     pub size: u32,
     pub align: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ValueVariant {
     pub name: String,
     pub fields: Vec<Repr>,
+}
+
+/// The number of leading GC-pointer slots a flattened value enum reserves —
+/// the max over its variants of their `Ref` payload count. Pointer payloads of
+/// every variant share these leading slots (at fixed offsets `0, 8, …`), exactly
+/// like a reference enum's heap layout, so an embedded ref's offset does not
+/// depend on the runtime tag. The single source of truth for layout, codegen,
+/// and GC interior-pointer offsets. `0` means no ref payloads (the value enum
+/// keeps its compact `{ tag, raw }` form).
+pub fn value_enum_max_ptrs(variants: &[ValueVariant]) -> u16 {
+    variants
+        .iter()
+        .map(|v| v.fields.iter().filter(|f| matches!(f, Repr::Ref(_))).count() as u16)
+        .max()
+        .unwrap_or(0)
 }
 
 // ============================================================================
 // Program / functions
 // ============================================================================
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct CoreProgram {
     pub funcs: Vec<CoreFn>,
     /// Index = `type_id` in the runtime type table.
@@ -126,7 +163,7 @@ pub struct CoreProgram {
     pub entry: Option<FuncId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreFn {
     /// Mangled, globally-unique name.
     pub name: String,
@@ -148,7 +185,7 @@ pub struct CoreFn {
 }
 
 /// How to initialize one capture local from the closure env object.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct ClosureCapture {
     /// The local slot (in `CoreFn.locals`) this capture initializes.
     pub local: LocalId,
@@ -157,13 +194,13 @@ pub struct ClosureCapture {
     pub offset: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreBlock {
     pub stmts: Vec<CoreStmt>,
     pub tail: Option<CoreExpr>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum CoreStmt {
     Let(LocalId, CoreExpr),
     Expr(CoreExpr),
@@ -173,13 +210,13 @@ pub enum CoreStmt {
 // Expressions
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreExpr {
     pub kind: Box<CoreExprKind>,
     pub repr: Repr,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum CoreExprKind {
     ConstInt(u64, ScalarRepr),
     ConstFloat(f64, ScalarRepr),
@@ -204,6 +241,8 @@ pub enum CoreExprKind {
     /// String primitives. Operands are `Ref`s to `String` heap objects.
     /// `print_str(s)` → i64 0.
     PrintStr(Box<CoreExpr>),
+    /// `print(s)` → i64 0. Like `PrintStr` but NO trailing newline; flushes.
+    PrintStrRaw(Box<CoreExpr>),
     /// `str_len(s)` → i64 byte length.
     StrLen(Box<CoreExpr>),
     /// `str_eq(a, b)` → bool.
@@ -218,10 +257,26 @@ pub enum CoreExprKind {
     /// `to_string(v)` → a fresh `String` (int or float rendering). `is_float`
     /// selects the runtime entry point.
     StrFromNum { layout: LayoutId, is_float: bool, v: Box<CoreExpr> },
+    /// `char_to_str(cp)` → a fresh 1–4 byte `String`, the UTF-8 encoding of the
+    /// Unicode scalar `cp` (invalid scalars become U+FFFD).
+    StrFromChar { layout: LayoutId, cp: Box<CoreExpr> },
+    /// `read_file(path)` → a fresh `String` with the file's bytes (empty if the
+    /// file can't be read). Lets a self-hosted compiler driver read source files.
+    ReadFile { layout: LayoutId, path: Box<CoreExpr> },
     /// `str_to_float(s)` → f64 (0.0 on malformed input).
     StrToFloat(Box<CoreExpr>),
+    /// `float_bits(f)` → i64 reinterpreting the f64's bit pattern (bitcast). Lets a
+    /// self-hosted compiler get a float literal's raw bits for uniform i64 storage.
+    FloatBits(Box<CoreExpr>),
     /// `str_hash(s)` → i64 non-negative hash.
     StrHash(Box<CoreExpr>),
+    /// `type_id_of(x)` → i64: the runtime `type_id` from a heap object's header.
+    /// `x` must be a `Ref` (heap) value. Reflection primitive.
+    TypeIdOf(Box<CoreExpr>),
+    /// `type_name_of(x)` → String: the source type name from the reflection
+    /// metadata table, allocated as a heap String (`layout` is the String
+    /// layout). `obj` must be a `Ref` value. Reflection primitive.
+    TypeNameOf { layout: LayoutId, obj: Box<CoreExpr> },
     /// FFI `as_c_bytes(x)` → a `RawPtr` (`Scalar(Ptr)`) to a stack-resident copy
     /// of a `String`'s or scalar `Array`'s contents. Codegen copies the heap
     /// bytes into a fresh stack alloca for the duration of the enclosing extern
@@ -345,7 +400,7 @@ pub enum CoreExprKind {
     Assign { local: LocalId, value: Box<CoreExpr> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreArm {
     /// Variant tag this arm matches.
     pub tag: u32,
@@ -354,7 +409,7 @@ pub struct CoreArm {
     pub body: CoreExpr,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum FloatIntrinsic { Sqrt, Abs, Floor, Ceil }
 
 impl CoreExpr {

@@ -52,6 +52,7 @@ enum Tok {
     Semi,
     Colon,
     Eq,
+    Plus,
     FatArrow,
     Arrow,
     KwLet,
@@ -61,6 +62,7 @@ enum Tok {
     KwMatch,
     KwType,
     KwPostulate,
+    KwBuiltin,
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -83,6 +85,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
         } else if c == '=' && i + 1 < b.len() && b[i + 1] as char == '>' {
             out.push(Tok::FatArrow);
             i += 2;
+        } else if c == '%' {
+            // a pragma keyword, e.g. `%builtin`.
+            let s = i + 1;
+            let mut j = s;
+            while j < b.len() && (b[j] as char).is_alphabetic() {
+                j += 1;
+            }
+            match &src[s..j] {
+                "builtin" => out.push(Tok::KwBuiltin),
+                other => return Err(format!("unknown pragma `%{other}`")),
+            }
+            i = j;
         } else if c.is_ascii_digit() {
             let s = i;
             while i < b.len() && (b[i] as char).is_ascii_digit() {
@@ -118,6 +132,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 ';' => Tok::Semi,
                 ':' => Tok::Colon,
                 '=' => Tok::Eq,
+                '+' => Tok::Plus,
                 _ => return Err(format!("unexpected character {c:?}")),
             };
             out.push(t);
@@ -145,6 +160,10 @@ enum Tm {
     Var(String),
     Call(String, Vec<Tm>),
     Match(String, Vec<Arm>),
+    /// a built-in `Nat` literal, e.g. `0`, `5`, `1000000`.
+    Lit(u64),
+    /// built-in `Nat` addition `a + b`.
+    Add(Box<Tm>, Box<Tm>),
     /// `let (a, b) = e; body` — destructure a single-constructor value
     LetPair(Vec<String>, Box<Tm>, Box<Tm>),
 }
@@ -180,6 +199,9 @@ enum Item {
         fields: Vec<(String, Ty)>,
     },
     Postulate(String, Ty),
+    /// `%builtin Nat <Type>` — opt `<Type>` into the packed integer
+    /// representation (it must be a Nat-shaped enum). Holds the type name.
+    BuiltinNat(String),
 }
 
 // ===========================================================================
@@ -225,6 +247,16 @@ impl Parser {
 
     fn parse_item(&mut self) -> Result<Item, String> {
         match self.peek() {
+            Some(Tok::KwBuiltin) => {
+                // `%builtin Nat <TypeName>`
+                self.next();
+                let kind = self.ident()?;
+                if kind != "Nat" && kind != "Natural" {
+                    return Err(format!("unknown `%builtin` kind `{kind}` (expected `Nat`)"));
+                }
+                let ty = self.ident()?;
+                Ok(Item::BuiltinNat(ty))
+            }
             Some(Tok::KwEnum) => self.parse_enum(),
             Some(Tok::KwStruct) => self.parse_struct(),
             Some(Tok::KwFn) => self.parse_fn(),
@@ -444,13 +476,25 @@ impl Parser {
                 let body = self.parse_tm()?;
                 Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
             }
-            _ => self.parse_call(),
+            _ => self.parse_add(),
         }
+    }
+
+    /// `parse_call (+ parse_call)*` — left-associative built-in Nat addition.
+    fn parse_add(&mut self) -> Result<Tm, String> {
+        let mut lhs = self.parse_call()?;
+        while self.peek() == Some(&Tok::Plus) {
+            self.next();
+            let rhs = self.parse_call()?;
+            lhs = Tm::Add(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
     }
 
     fn parse_call(&mut self) -> Result<Tm, String> {
         let name = match self.next() {
             Some(Tok::Ident(s)) => s,
+            Some(Tok::Num(n)) => return Ok(Tm::Lit(n)),
             Some(Tok::LParen) => {
                 let t = self.parse_tm()?;
                 self.eat(&Tok::RParen)?;
@@ -553,6 +597,13 @@ impl Cx {
     }
 }
 
+/// The role a constructor of a `%builtin Nat` type plays.
+#[derive(Clone, Copy, PartialEq)]
+enum NatRole {
+    Zero,
+    Succ,
+}
+
 struct Elab {
     rc: Rc<Signature>,
     data_arity: HashMap<String, usize>,
@@ -562,6 +613,11 @@ struct Elab {
     defs: HashMap<String, (Term, Term)>,
     /// per-definition implicit flags (one per parameter)
     def_implicit: HashMap<String, Vec<bool>>,
+    /// type names opted into the packed built-in `Nat` (via `%builtin Nat T`).
+    /// These are NOT registered as datatypes; they alias the kernel's `Nat`.
+    nat_types: std::collections::HashSet<String>,
+    /// constructor name → its `Nat` role, for the `%builtin Nat` types.
+    nat_ctor: HashMap<String, NatRole>,
 }
 
 fn neutral_env(n: usize) -> Vec<Value> {
@@ -590,6 +646,19 @@ impl Elab {
 
     /// Resolve a name applied to elaborated args (no implicit solving).
     fn resolve(&self, name: &str, args: Vec<Term>, scope: &[String], prefer_ctor: bool) -> Result<Term, String> {
+        // `%builtin Nat` types alias the kernel's packed `Nat`: the type name → the
+        // `Nat` type, its nullary ctor → `Zero`, its successor ctor → `Suc`.
+        if self.nat_types.contains(name) && args.is_empty() {
+            return Ok(Term::Nat);
+        }
+        if let Some(role) = self.nat_ctor.get(name) {
+            return match (role, args.len()) {
+                (NatRole::Zero, 0) => Ok(Term::Zero),
+                (NatRole::Succ, 1) => Ok(Term::Suc(Box::new(args.into_iter().next().unwrap()))),
+                (NatRole::Zero, n) => Err(format!("`{name}` (Nat zero) takes no arguments, got {n}")),
+                (NatRole::Succ, n) => Err(format!("`{name}` (Nat successor) takes 1 argument, got {n}")),
+            };
+        }
         match name {
             "Eq" if args.len() == 3 => {
                 let mut a = args.into_iter();
@@ -640,7 +709,12 @@ impl Elab {
 
     fn elab_ty(&self, t: &Ty, scope: &[String]) -> Result<Term, String> {
         match t {
-            Ty::Type => Ok(Term::Type),
+            // Surface `Type` is the base universe `Type 0`. (Universe POLYMORPHISM
+            // in definitions is not yet surfaced — see `elab_ty` note / kernel
+            // `Term::Type`. Until it is, a definition that genuinely needs a higher
+            // universe must be written at the kernel level; the surface stays in
+            // `Type 0`, which is sound, just less polymorphic.)
+            Ty::Type => Ok(Term::Type(0)),
             Ty::Arrow(m, _, name, a, b) => {
                 let ta = self.elab_ty(a, scope)?;
                 let mut s2 = scope.to_vec();
@@ -701,6 +775,11 @@ impl Elab {
     /// Plain (no-implicit) elaboration; used for vars, functions, explicit ctors.
     fn elab_tm(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match t {
+            Tm::Lit(n) => Ok(Term::NatLit(*n)),
+            Tm::Add(a, b) => Ok(Term::Add(
+                Box::new(self.elab_tm(a, cx, rec)?),
+                Box::new(self.elab_tm(b, cx, rec)?),
+            )),
             Tm::Var(name) => self.resolve(name, vec![], &cx.names, true),
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
@@ -723,6 +802,23 @@ impl Elab {
     /// or a call/constructor that can itself be solved). Returns `(term, type)`.
     fn infer_arg(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
         match t {
+            // built-in Nat: literals, addition, and the `%builtin Nat` intro forms
+            // all have type `Nat` (packed), so they infer with no expected type.
+            Tm::Lit(n) => Ok((Term::NatLit(*n), Value::VNat)),
+            Tm::Add(a, b) => {
+                let ta = self.check(a, &Value::VNat, cx, rec)?;
+                let tb = self.check(b, &Value::VNat, cx, rec)?;
+                Ok((Term::Add(Box::new(ta), Box::new(tb)), Value::VNat))
+            }
+            Tm::Var(name) if self.nat_ctor.get(name) == Some(&NatRole::Zero) => {
+                Ok((Term::Zero, Value::VNat))
+            }
+            Tm::Call(name, args)
+                if self.nat_ctor.get(name) == Some(&NatRole::Succ) && args.len() == 1 =>
+            {
+                let a = self.check(&args[0], &Value::VNat, cx, rec)?;
+                Ok((Term::Suc(Box::new(a)), Value::VNat))
+            }
             Tm::Var(name) => {
                 if let Some(ty) = cx.var_type(name) {
                     let i = cx.debruijn(name).unwrap();
@@ -744,6 +840,24 @@ impl Elab {
             }
             Tm::Call(name, args) if self.defs.contains_key(name) => {
                 self.solve_fn_call(name, args, None, cx, rec)
+            }
+            // a constructor application of a NON-indexed, NON-parameterized family
+            // (e.g. `Succ(Zero)` : Nat). Its result type is the bare family, so we
+            // can infer it with no expected type — and pinning it lets an enclosing
+            // call solve an implicit through it (e.g. `alloc(Succ(Zero))`).
+            Tm::Call(name, args) if self.ctor_info.contains_key(name) => {
+                let info = self.ctor_info[name].clone();
+                let decl = self.rc.data(&info.data).unwrap();
+                if decl.params.is_empty() && decl.indices.is_empty() {
+                    let ty = Value::VData(info.data.clone(), vec![]);
+                    let tm = self.solve_ctor(name, args, &ty, cx, rec)?;
+                    Ok((tm, ty))
+                } else {
+                    Err(format!(
+                        "cannot infer the type of constructor `{name}` of an indexed or \
+                         parameterized family without an expected type"
+                    ))
+                }
             }
             _ => Err("cannot infer the type of this argument (Phase 2)".into()),
         }
@@ -871,6 +985,16 @@ impl Elab {
                 let sol = holes[pos]
                     .clone()
                     .ok_or_else(|| format!("cannot infer implicit argument {pos} of `{fname}`"))?;
+                // A solution that still mentions an unsolved hole means the implicit
+                // wasn't fully determined (it unified with another open metavariable).
+                // Report it cleanly rather than quoting it (which would underflow on
+                // the synthetic hole de Bruijn level).
+                if value_has_hole(&sol) {
+                    return Err(format!(
+                        "cannot infer implicit argument {pos} of `{fname}` (it depends on \
+                         another argument's type that is not yet determined)"
+                    ));
+                }
                 terms[pos] = Some(dep::quote_at(n, &sol));
             }
         }
@@ -1029,6 +1153,43 @@ fn hole_id(v: &Value) -> Option<usize> {
     }
 }
 
+/// Does `v` still mention an unsolved elaboration hole (a synthetic `NVar` at or
+/// above `HOLE_BASE`)? Used to reject an under-determined implicit cleanly instead
+/// of quoting the synthetic level (which would underflow). Covers the value shapes
+/// an implicit solution can take; closure bodies are not traversed (a hole there
+/// would not have escaped solving).
+fn value_has_hole(v: &Value) -> bool {
+    use crate::dep::{Neutral, Value as V};
+    fn neu(n: &Neutral) -> bool {
+        match n {
+            Neutral::NVar(l) => *l >= HOLE_BASE,
+            Neutral::NApp(f, a) => neu(f) || value_has_hole(a),
+            Neutral::NAdd(a, b) => value_has_hole(a) || value_has_hole(b),
+            Neutral::NFst(p) | Neutral::NSnd(p) => neu(p),
+            Neutral::NNatElim(p, z, s, sc) => {
+                value_has_hole(p) || value_has_hole(z) || value_has_hole(s) || neu(sc)
+            }
+            Neutral::NElim(_, m, ms, sc) => {
+                value_has_hole(m) || ms.iter().any(value_has_hole) || neu(sc)
+            }
+            Neutral::NNatCase(p, z, s, sc) => {
+                value_has_hole(p) || value_has_hole(z) || value_has_hole(s) || neu(sc)
+            }
+            // a `Fix` holds closed terms — no elaboration holes can survive in it.
+            Neutral::NConst(_) | Neutral::NFix(_, _) => false,
+        }
+    }
+    match v {
+        V::VNeu(n) => neu(n),
+        V::VData(_, args) | V::VConstr(_, args) => args.iter().any(value_has_hole),
+        V::VSuc(a) | V::VRefl(a) => value_has_hole(a),
+        V::VPair(a, b) => value_has_hole(a) || value_has_hole(b),
+        V::VPi(_, a, _) | V::VSigma(_, a, _) => value_has_hole(a),
+        V::VEq(a, b, c) => value_has_hole(a) || value_has_hole(b) || value_has_hole(c),
+        V::VType(_) | V::VNat | V::VNatLit(_) | V::VLam(_) => false,
+    }
+}
+
 fn deref(holes: &[Option<Value>], v: &Value) -> Value {
     if let Some(id) = hole_id(v) {
         if let Some(sol) = &holes[id] {
@@ -1095,6 +1256,179 @@ fn count_index_pis(t: &Ty) -> Result<usize, String> {
 // ---- the eliminator translation for a recursive `fn … { match p { … } }` ----
 
 impl Elab {
+    /// Lower `match n { Zero => z, Succ(k) => s }` on a `%builtin Nat` scrutinee to
+    /// the kernel's `NatElim(motive, z, λk.λih. s, n)`. A recursive call on the
+    /// predecessor `k` inside the `Succ` arm becomes the induction hypothesis `ih`.
+    #[allow(clippy::too_many_arguments)]
+    fn elab_nat_match(
+        &self,
+        fnname: &str,
+        fn_cx: &Cx,
+        ret: &Ty,
+        scrut: &str,
+        arms: &[Arm],
+        full_params: &[String],
+        explicit_pos: usize,
+    ) -> Result<Term, String> {
+        // identify the Zero / Succ arms by their constructors' recorded roles.
+        let mut zero_arm = None;
+        let mut succ_arm = None;
+        for a in arms {
+            match self.nat_ctor.get(&a.ctor) {
+                Some(NatRole::Zero) => zero_arm = Some(a),
+                Some(NatRole::Succ) => succ_arm = Some(a),
+                None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
+            }
+        }
+        let zero_arm = zero_arm.ok_or("`match` on Nat is missing the zero case")?;
+        let succ_arm = succ_arm.ok_or("`match` on Nat is missing the successor case")?;
+        if succ_arm.binders.len() != 1 {
+            return Err(format!(
+                "the successor case binds exactly one predecessor, got {}",
+                succ_arm.binders.len()
+            ));
+        }
+        let pred_name = succ_arm.binders[0].clone();
+
+        // motive = λn. ret   (ret elaborated with the scrutinee rebound to `n`).
+        let mut motive_scope = full_params.to_vec();
+        motive_scope.push(scrut.to_string());
+        let ret_term = self.elab_ty(ret, &motive_scope)?;
+        let motive = Term::Lam(Box::new(ret_term.clone()));
+
+        let n = fn_cx.len();
+        let base_env = neutral_env(n);
+        // expected types come from the motive applied to Zero / k / (Suc k).
+        let p_at = |scrut_val: Value| {
+            let mut env = base_env.clone();
+            env.push(scrut_val);
+            dep::eval_rc(&self.rc, &env, &ret_term)
+        };
+
+        // zero method : P Zero
+        let z_expected = p_at(Value::VNatLit(0));
+        let z_method = self.check(&zero_arm.body, &z_expected, fn_cx, None)?;
+
+        // succ method : λk. λih. body  with body : P (Suc k), ih : P k
+        let k_val = dep::nvar(n); // the predecessor, a fresh neutral at level n
+        let mut succ_cx = fn_cx.clone();
+        succ_cx.push(pred_name.clone(), Value::VNat);
+        let ih_ty = p_at(k_val.clone());
+        let ih_name = "$ih".to_string();
+        succ_cx.push(ih_name.clone(), ih_ty);
+        // body : P (Suc k) — the motive at the successor of the predecessor `k`.
+        let s_expected = p_at(Value::VSuc(Box::new(k_val)));
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert(pred_name, ih_name);
+        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields };
+        let body = self.check(&succ_arm.body, &s_expected, &succ_cx, Some(&r))?;
+        let s_method = Term::Lam(Box::new(Term::Lam(Box::new(body))));
+
+        let scrut_idx = Self::debruijn(full_params, scrut).unwrap();
+        Ok(Term::NatElim(
+            Box::new(motive),
+            Box::new(z_method),
+            Box::new(s_method),
+            Box::new(Term::Var(scrut_idx)),
+        ))
+    }
+
+    /// A recursive `fn` matching on a `Nat` whose recursive calls vary a
+    /// non-scrutinee argument (e.g. `build(k, leftLabel)` / `build(k, rightLabel)`)
+    /// is GENERAL recursion, not a fold: compile it to `Fix(ty, λparams. NatCase…)`,
+    /// where recursive calls are real self-calls and the case-split provides no
+    /// induction hypothesis. Used only when `is_simple_fold` is false, so folds
+    /// (`add`, `mul`, …) still lower to eliminators (reducible in types, iterative).
+    fn elab_fix_nat(
+        &self,
+        fnname: &str,
+        ty_term: &Term,
+        full_names: &[String],
+        full_tys: &[Ty],
+        ret: &Ty,
+        scrut: &str,
+        arms: &[Arm],
+    ) -> Result<Term, String> {
+        // context: `self` (named like the fn) : the fn's type, then the params.
+        let vty = dep::eval_rc(&self.rc, &[], ty_term);
+        let mut cx = Cx::default();
+        cx.push(fnname.to_string(), vty);
+        let mut scope: Vec<String> = vec![fnname.to_string()];
+        for (pn, pty) in full_names.iter().zip(full_tys) {
+            let kty = self.elab_ty(pty, &scope)?;
+            let v = dep::eval_rc(&self.rc, &neutral_env(cx.len()), &kty);
+            cx.push(pn.clone(), v);
+            scope.push(pn.clone());
+        }
+        let natcase = self.elab_nat_case(&cx, ret, scrut, arms, &scope)?;
+        let mut body = natcase;
+        for _ in 0..full_names.len() {
+            body = Term::Lam(Box::new(body));
+        }
+        Ok(Term::Fix(Box::new(ty_term.clone()), Box::new(body)))
+    }
+
+    /// Build `NatCase(motive, z, λk. s, scrut)` for a `match` on a `Nat`, in a
+    /// context `cx` that already binds `self` and the params. Recursion is by
+    /// explicit self-call (no `Rec`/IH), so the successor branch has no IH binder.
+    fn elab_nat_case(
+        &self,
+        cx: &Cx,
+        ret: &Ty,
+        scrut: &str,
+        arms: &[Arm],
+        scope: &[String],
+    ) -> Result<Term, String> {
+        let scrut_idx = cx
+            .debruijn(scrut)
+            .ok_or_else(|| format!("`match` scrutinee `{scrut}` is not in scope"))?;
+        let mut zero_arm = None;
+        let mut succ_arm = None;
+        for a in arms {
+            match self.nat_ctor.get(&a.ctor) {
+                Some(NatRole::Zero) => zero_arm = Some(a),
+                Some(NatRole::Succ) => succ_arm = Some(a),
+                None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
+            }
+        }
+        let zero_arm = zero_arm.ok_or("`match` on Nat is missing the zero case")?;
+        let succ_arm = succ_arm.ok_or("`match` on Nat is missing the successor case")?;
+        if succ_arm.binders.len() != 1 {
+            return Err("the successor case binds exactly one predecessor".into());
+        }
+        let pred_name = succ_arm.binders[0].clone();
+
+        let mut motive_scope = scope.to_vec();
+        motive_scope.push(scrut.to_string());
+        let ret_term = self.elab_ty(ret, &motive_scope)?;
+        let motive = Term::Lam(Box::new(ret_term.clone()));
+
+        let n = cx.len();
+        let base = neutral_env(n);
+        let p_at = |scrut_val: Value| {
+            let mut env = base.clone();
+            env.push(scrut_val);
+            dep::eval_rc(&self.rc, &env, &ret_term)
+        };
+
+        let z_expected = p_at(Value::VNatLit(0));
+        let z = self.check(&zero_arm.body, &z_expected, cx, None)?;
+
+        let k_val = dep::nvar(n);
+        let mut succ_cx = cx.clone();
+        succ_cx.push(pred_name, Value::VNat);
+        let s_expected = p_at(Value::VSuc(Box::new(k_val)));
+        let s_body = self.check(&succ_arm.body, &s_expected, &succ_cx, None)?;
+        let s = Term::Lam(Box::new(s_body));
+
+        Ok(Term::NatCase(
+            Box::new(motive),
+            Box::new(z),
+            Box::new(s),
+            Box::new(Term::Var(scrut_idx)),
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn elab_match_body(
         &self,
@@ -1117,6 +1451,11 @@ impl Elab {
             Ty::Var(n) => n.clone(),
             _ => return Err("the scrutinee's type must be a datatype".into()),
         };
+        // a `match` on a `%builtin Nat` scrutinee compiles to the kernel's native
+        // `NatElim` (a counting loop), not a boxed datatype eliminator.
+        if self.nat_types.contains(&data) {
+            return self.elab_nat_match(fnname, fn_cx, ret, scrut, arms, full_params, explicit_pos);
+        }
         let decl = self.rc.data(&data).ok_or_else(|| format!("`{data}` is not a datatype"))?.clone();
         let np = decl.params.len();
         let ni = decl.indices.len();
@@ -1172,8 +1511,10 @@ impl Elab {
                     arm.binders.len()
                 ));
             }
-            // binder names: each ctor arg (implicit→its name, explicit→pattern
-            // name), then one IH per recursive arg
+            // binder names: ALL the constructor's arguments, then one induction
+            // hypothesis per recursive argument — the standard (Coq-style) method
+            // telescope `∀ a l, P l → P (c a l)`, matching `method_ty_tm`, `velim`,
+            // and the backend (all kept consistent on args-then-IHs).
             let mut binder_names: Vec<String> = Vec::new();
             let mut next_pat = 0;
             for j in 0..nargs {
@@ -1260,6 +1601,61 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<bo
     }
 }
 
+/// Collect the argument lists of every call to `fnname` inside a term.
+fn collect_calls<'a>(t: &'a Tm, fnname: &str, out: &mut Vec<&'a [Tm]>) {
+    match t {
+        Tm::Call(n, args) => {
+            if n == fnname {
+                out.push(args);
+            }
+            for a in args {
+                collect_calls(a, fnname, out);
+            }
+        }
+        Tm::Add(a, b) => {
+            collect_calls(a, fnname, out);
+            collect_calls(b, fnname, out);
+        }
+        Tm::Match(_, arms) => {
+            for a in arms {
+                collect_calls(&a.body, fnname, out);
+            }
+        }
+        Tm::LetPair(_, e, body) => {
+            collect_calls(e, fnname, out);
+            collect_calls(body, fnname, out);
+        }
+        Tm::Var(_) | Tm::Lit(_) => {}
+    }
+}
+
+/// Is a recursive `fn` a SIMPLE FOLD — i.e. every recursive call leaves every
+/// NON-scrutinee argument unchanged (passes the parameter through verbatim)? If so
+/// it lowers to an eliminator (reducible in types, iterative, total). If not, the
+/// recursion varies an accumulator/label and must be compiled as general recursion
+/// (`Fix`). The scrutinee argument itself is the structural decrease and may differ.
+fn is_simple_fold(fnname: &str, scrut_pos: usize, params: &[String], arms: &[Arm]) -> bool {
+    let mut calls = Vec::new();
+    for arm in arms {
+        collect_calls(&arm.body, fnname, &mut calls);
+    }
+    for args in &calls {
+        if args.len() != params.len() {
+            return false;
+        }
+        for (i, a) in args.iter().enumerate() {
+            if i == scrut_pos {
+                continue;
+            }
+            match a {
+                Tm::Var(v) if v == &params[i] => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
 fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
     match t {
         Ty::Type => Ty::Type,
@@ -1273,9 +1669,49 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
     }
 }
 
+/// The built-in memory prelude. These are the trusted L3 primitives the native
+/// backend gives a real `malloc`/`free` lowering. They are provided automatically
+/// so a program need not re-declare the boilerplate — but ONLY for names the user
+/// has not declared themselves, so explicit (re)declarations always win and any
+/// existing program keeps compiling unchanged. The implementations live in
+/// `dep_codegen::compile_postulate`; the kernel checks every USE of them against
+/// these types (linearity ⇒ no leak / no use-after-free).
+const PRELUDE: &str = r#"
+enum Unit { U : Unit }
+postulate Own   : Type -> Type
+postulate alloc : {0 a : Type} -> a -> Own a
+postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+"#;
+
+/// The primary name a top-level item declares (`None` for a `%builtin` pragma).
+fn item_name(it: &Item) -> Option<&str> {
+    match it {
+        Item::Sig(n, _) | Item::Fn(n, _, _) | Item::Postulate(n, _) => Some(n),
+        Item::Enum { name, .. } | Item::Struct { name, .. } => Some(name),
+        Item::BuiltinNat(_) => None,
+    }
+}
+
 pub fn elaborate(src: &str) -> Result<Program, String> {
     let toks = lex(src)?;
-    let items = Parser { toks, pos: 0 }.parse_program()?;
+    let mut items = Parser { toks, pos: 0 }.parse_program()?;
+
+    // Prepend the memory prelude — but ALL-OR-NOTHING: if the program declares any
+    // of the prelude's own names (Unit/Own/alloc/free), it is managing the memory
+    // layer itself, so we inject nothing and leave it exactly as written (this is
+    // how every pre-prelude program keeps compiling, and it avoids a partial
+    // injection that could reference a name the user declares later).
+    let declared: std::collections::HashSet<&str> = items.iter().filter_map(item_name).collect();
+    let prelude_items = Parser { toks: lex(PRELUDE)?, pos: 0 }.parse_program()?;
+    let collides = prelude_items
+        .iter()
+        .filter_map(item_name)
+        .any(|n| declared.contains(n));
+    if !collides {
+        let mut merged = prelude_items;
+        merged.append(&mut items);
+        items = merged;
+    }
 
     let mut elab = Elab {
         rc: Rc::new(Signature::default()),
@@ -1284,12 +1720,64 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         ctor_info: HashMap::new(),
         defs: HashMap::new(),
         def_implicit: HashMap::new(),
+        nat_types: std::collections::HashSet::new(),
+        nat_ctor: HashMap::new(),
     };
 
-    // pass B: arities
+    // pass A: `%builtin Nat T` pragmas. Validate each names a Nat-shaped enum (one
+    // nullary constructor + one single-self-recursive constructor) and record the
+    // type + its two constructors as the packed built-in `Nat`. Such a type is
+    // NOT registered as a datatype — it aliases the kernel's `Nat`.
+    for it in &items {
+        if let Item::BuiltinNat(tyname) = it {
+            let decl = items.iter().find_map(|x| match x {
+                Item::Enum { name, params, index_ty, variants } if name == tyname => {
+                    Some((params, index_ty, variants))
+                }
+                _ => None,
+            });
+            let Some((params, index_ty, variants)) = decl else {
+                return Err(format!("`%builtin Nat {tyname}`: no `enum {tyname}` is declared"));
+            };
+            if !params.is_empty() || index_ty.is_some() || variants.len() != 2 {
+                return Err(format!(
+                    "`%builtin Nat {tyname}`: a built-in Nat must be a parameterless, \
+                     unindexed enum with exactly two constructors"
+                ));
+            }
+            let mut zero = None;
+            let mut succ = None;
+            for (cn, cty) in variants {
+                let (arrows, _) = peel_arrows(cty);
+                match arrows.as_slice() {
+                    [] => zero = Some(cn.clone()),
+                    [(_, _, _, dom)] if matches!(dom, Ty::Var(d) if d == tyname) => {
+                        succ = Some(cn.clone())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "`%builtin Nat {tyname}`: constructor `{cn}` is not Nat-shaped \
+                             (need one nullary `Zero` and one `{tyname} -> {tyname}` `Succ`)"
+                        ))
+                    }
+                }
+            }
+            let (Some(zero), Some(succ)) = (zero, succ) else {
+                return Err(format!(
+                    "`%builtin Nat {tyname}`: need exactly one nullary and one \
+                     single-recursive constructor"
+                ));
+            };
+            elab.nat_types.insert(tyname.clone());
+            elab.nat_ctor.insert(zero, NatRole::Zero);
+            elab.nat_ctor.insert(succ, NatRole::Succ);
+        }
+    }
+
+    // pass B: arities (skipping the `%builtin Nat` types — they alias the kernel Nat)
     for it in &items {
         match it {
-            Item::Enum { name, params, index_ty, variants } => {
+            Item::Enum { name, params, index_ty, variants } if !elab.nat_types.contains(name) => {
                 let np = params.len();
                 let ni = match index_ty {
                     Some(e) => count_index_pis(e)?,
@@ -1309,11 +1797,12 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         }
     }
 
-    // pass C: datatypes → signature, recording ctor implicit/name info
+    // pass C: datatypes → signature, recording ctor implicit/name info.
+    // `%builtin Nat` types are skipped — they are the kernel's `Nat`, not data.
     let mut sig = Signature::default();
     for it in &items {
         match it {
-            Item::Enum { name, params, index_ty, variants } => {
+            Item::Enum { name, params, index_ty, variants } if !elab.nat_types.contains(name) => {
                 let np = params.len();
                 // family parameters are always solved (implicit) at constructor use sites
                 let param_implicit: Vec<bool> = vec![true; np];
@@ -1347,7 +1836,19 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     });
                     ctors.push(Constructor { name: cn.clone(), args, idxs });
                 }
-                sig.datas.push(DataDecl { name: name.clone(), params: kparams, indices, ctors });
+                // Surface datatypes live in `Type 0` (all surface `Type`s are
+                // `Type 0`). A constructor that tried to store a `Type` would have
+                // an argument in `Type 1`, which `check_signature` rejects against
+                // this `universe: 0` — the predicativity/Girard guard. Until the
+                // surface gains universe annotations, such datatypes are written at
+                // the kernel level.
+                sig.datas.push(DataDecl {
+                    name: name.clone(),
+                    universe: 0,
+                    params: kparams,
+                    indices,
+                    ctors,
+                });
             }
             Item::Struct { name, params, fields } => {
                 let param_implicit: Vec<bool> = vec![true; params.len()];
@@ -1374,7 +1875,13 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     arg_names,
                 });
                 let ctor = Constructor { name: name.clone(), args, idxs: vec![] };
-                sig.datas.push(DataDecl { name: name.clone(), params: kparams, indices: vec![], ctors: vec![ctor] });
+                sig.datas.push(DataDecl {
+                    name: name.clone(),
+                    universe: 0, // surface structs live in `Type 0` (see enum note)
+                    params: kparams,
+                    indices: vec![],
+                    ctors: vec![ctor],
+                });
             }
             // postulates (opaque typed constants — the memory primitives, etc.),
             // processed in source order so each sees the earlier declarations
@@ -1412,6 +1919,24 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 let kty = elab.elab_ty(pty, &full_names[..i])?;
                 let v = dep::eval_rc(&elab.rc, &neutral_env(i), &kty);
                 fn_cx.push(pn.clone(), v);
+            }
+
+            // GENERAL recursion: a `match` on a `%builtin Nat` whose recursive calls
+            // vary a non-scrutinee argument compiles to a `Fix` (the whole term),
+            // not a fold. Emit it directly and skip the usual λ-wrapping.
+            if let Tm::Match(scrut, arms) = body {
+                if let Some(sp) = full_names.iter().position(|p| p == scrut) {
+                    let scrut_is_nat = matches!(
+                        flatten_ty(&full_tys[sp]).0,
+                        Ty::Var(n) if elab.nat_types.contains(n)
+                    );
+                    if scrut_is_nat && !is_simple_fold(name, sp, &full_names, arms) {
+                        let term = elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?;
+                        elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
+                        out_defs.push((name.clone(), ty_term, term));
+                        continue;
+                    }
+                }
             }
 
             let body_inner = match body {
@@ -1460,8 +1985,38 @@ impl Program {
     }
 }
 
+/// Pretty-print a kernel `Term` (used to display the normal form of `main`).
 pub fn pretty(t: &Term) -> String {
-    crate::surface::pretty(t)
+    fn atom(t: &Term) -> String {
+        match t {
+            Term::Data(_, args) | Term::Constr(_, args) if !args.is_empty() => {
+                format!("({})", pretty(t))
+            }
+            Term::App(_, _) | Term::Suc(_) => format!("({})", pretty(t)),
+            _ => pretty(t),
+        }
+    }
+    match t {
+        Term::Type(0) => "Type".into(),
+        Term::Type(i) => format!("Type {i}"),
+        Term::Nat => "Nat".into(),
+        Term::Var(i) => format!("#{i}"),
+        Term::NatLit(n) => n.to_string(),
+        Term::Suc(k) => format!("suc {}", atom(k)),
+        Term::Data(name, args) | Term::Constr(name, args) => {
+            let mut s = name.clone();
+            for a in args {
+                s.push(' ');
+                s.push_str(&atom(a));
+            }
+            s
+        }
+        Term::Const(c) => c.clone(),
+        Term::App(f, a) => format!("{} {}", pretty(f), atom(a)),
+        Term::Lam(_) => "<fun>".into(),
+        Term::Pi(_, _, _) => "<pi>".into(),
+        other => format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]

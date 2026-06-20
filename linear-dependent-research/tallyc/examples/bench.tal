@@ -1,0 +1,56 @@
+// A NORMAL tally program — no benchmark scaffolding, no special flags. It runs a
+// real memory workload and prints one number:
+//
+//   tally build examples/bench.tal -o bench && ./bench
+//
+// `run(n)` folds `n` transactions on an intrusive circular doubly-linked list with
+// O(1) remove-by-cursor — the headline safe-memory operation. Each `once(k)` does
+// a genuine `new`/`insert`/`remove`/`free` (two real `malloc`s and two `free`s plus
+// the pointer surgery), recovering the value it stored through the heap. Every
+// linear handle is used exactly once, so a leak or use-after-free is a TYPE error;
+// the region/cursor proofs are erased, so the emitted code is pure pointer work.
+//
+// `Nat` is `%builtin`, so the loop count is a literal (`1000000`) and the checker
+// normalizes on machine integers — no unary `Succ(Succ(...))`, no overflow. The
+// `match` on `n` lowers to a native counting loop.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Unit { U : Unit }
+
+postulate Region : Type
+postulate List   : Region -> Type
+postulate Cursor : Region -> Type
+
+enum CL (r : Region) { MkCL : (1 c : Cursor r) -> (1 l : List r) -> CL r }
+enum VL (r : Region) { MkVL : Nat -> (1 l : List r) -> VL r }
+
+postulate R0     : Region
+postulate new    : List R0
+postulate insert : {0 r : Region} -> (1 l : List r) -> Nat -> CL r
+postulate remove : {0 r : Region} -> (1 c : Cursor r) -> (1 l : List r) -> VL r
+postulate free   : {0 r : Region} -> (1 l : List r) -> Unit
+
+seq : (1 u : Unit) -> Nat -> Nat
+fn seq(u, n) { match u { U => n } }
+
+// one safe transaction; returns the value that round-tripped through the heap.
+once : Nat -> Nat
+fn once(x) {
+    let (c, l1) = insert(new, x);
+    let (v, l2) = remove(c, l1);
+    seq(free(l2), v)
+}
+
+// fold n transactions, summing the recovered values.
+run : Nat -> Nat
+fn run(n) {
+    match n {
+        Zero    => 0,
+        Succ(k) => once(k) + run(k),
+    }
+}
+
+main : Nat
+fn main() { run(1000000) }

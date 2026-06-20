@@ -1,0 +1,8 @@
+fn main() -> i64 {
+  let mut m: MapStr<i64> = mapstr_new();
+  let mut i = 0;
+  while i < 50000 { m = mapstr_insert(m, str_concat("k", to_string(i)), i); i = i + 1; }
+  let a = match mapstr_get(m, "k100") { Option::Some(n) => n, Option::None => 0 };
+  let b = match mapstr_get(m, "k49999") { Option::Some(n) => n, Option::None => 0 };
+  a + b - 50057
+}

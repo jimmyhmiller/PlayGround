@@ -1,0 +1,162 @@
+// gcr_out.ft — the OUTPUT pane of the gc-rust Compiler Explorer.
+//
+// The other half of the two-pane explorer (source = gcr_source.ft). Being its own
+// pane, it has its OWN independent pane-level scroll, so the output scrolls
+// separately from the source. It listens on the bus for the source temp file,
+// runs `gcr emit <stage> <tmp>`, and renders the (JSON-highlighted) result.
+//
+// params: { gcr: "<abs gcr binary>", session: "<bus/tmp namespace>" }
+import "host"
+import { col_text, col_muted, col_accent, col_panel } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn gcr_bin()  = param("gcr", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/target/debug/gcr")
+fn session()  = param("session", "default")
+fn srctopic() = "gcr/src/" + session()
+
+fn init_state() = {
+    stage: "mono", tmp: "", out: "", status: "waiting for source…",
+    proc: -1, acc: [], busy: false, pending: false,
+}
+let state = atom(init_state())
+
+fn compile() {
+    let s = @state
+    if s.tmp == "" { return }
+    if s.busy {
+        reset!(state, { ..s, pending: true })
+        return
+    }
+    let h = proc_spawn(gcr_bin(), ["emit", s.stage, s.tmp])
+    if h == -1 {
+        reset!(state, { ..s, status: "spawn failed (check `gcr` path param)" })
+        request_render()
+        return
+    }
+    reset!(state, { ..s, proc: h, acc: [], busy: true, pending: false, status: s.stage + " · compiling…" })
+    request_render()
+}
+
+// The source pane publishes the temp path (retained), so a freshly-spawned
+// output pane gets it immediately and compiles.
+fn on_message(topic, payload, sender) {
+    if topic != srctopic() { return }
+    let tmp = unwrap_or(get(payload, "tmp"), "")
+    reset!(state, { ..(@state), tmp: tmp })
+    compile()
+}
+
+fn on_tab_select(id, tab) {
+    reset!(state, { ..(@state), stage: tab })
+    compile()
+}
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "recompile" { compile() }
+    else if id == "copy" { clipboard_set((@state).out) }
+}
+
+fn on_proc_output(handle, line) {
+    let s = @state
+    if handle == s.proc { reset!(state, { ..s, acc: push(s.acc, line) }) }
+}
+
+fn on_proc_exit(handle, code) {
+    let s = @state
+    if handle != s.proc { return }
+    let text = join(s.acc, "\n")
+    let st = if code == 0 {
+        s.stage + " · " + str(len(s.acc)) + " lines"
+    } else {
+        s.stage + " · does not compile (exit " + str(code) + ")"
+    }
+    let new_out = if code == 0 { text } else { s.out }
+    reset!(state, { ..s, out: new_out, proc: -1, acc: [], busy: false, status: st })
+    request_render()
+    if s.pending { compile() }
+}
+
+// ---- rendering -------------------------------------------------------------
+
+fn tab_items() {
+    let mut items = []
+    for st in ["mono", "tokens", "ast", "core", "layout", "llvm"] {
+        items = push(items, { id: st, label: st })
+    }
+    items
+}
+
+fn stage_lang(stage) = if stage == "llvm" { "llvm" } else { "json" }
+
+fn kc(k) {
+    if k == "keyword" { "#c78fe6" }
+    else if k == "string" { "#a6df99" }
+    else if k == "comment" { "#7b8494" }
+    else if k == "function" { "#8cc7ff" }
+    else if k == "type" { "#f0d18c" }
+    else if k == "constructor" { "#f0d18c" }
+    else if k == "constant" { "#f29e7a" }
+    else if k == "property" { "#d9d2f2" }
+    else if k == "operator" { "#b3bdcc" }
+    else if k == "punctuation" { "#b3bdcc" }
+    else { col_text() }
+}
+
+fn hl_line(runs) {
+    let mut kids = []
+    if typeof(runs) != "List" or len(runs) == 0 {
+        kids = [ { kind: "text", value: " ", family: "mono", size: 11.0, color: col_text(), selectable: true, wrap: false } ]
+    } else {
+        for r in runs {
+            kids = push(kids, { kind: "text", value: unwrap_or(get(r, "text"), ""),
+                                family: "mono", size: 11.0, selectable: true, wrap: false,
+                                color: kc(unwrap_or(get(r, "kind"), "")) })
+        }
+    }
+    { kind: "hstack", gap: 0.0, align: "start", children: kids }
+}
+
+fn out_rows() {
+    let s = @state
+    if s.out == "" {
+        return [ { kind: "text", value: "(no output)", size: 12.0, color: col_muted() } ]
+    }
+    let lines = highlight(s.out, stage_lang(s.stage))
+    let n = len(lines)
+    let mut rows = []
+    let mut i = 0
+    for ln in lines {
+        if i < 800 { rows = push(rows, hl_line(ln)) }
+        i = i + 1
+    }
+    if n > 800 {
+        rows = push(rows, { kind: "text",
+            value: "… " + str(n - 800) + " more lines — `gcr emit` in a terminal for the full dump",
+            size: 11.0, color: col_muted() })
+    }
+    rows
+}
+
+fn render(w, h) {
+    let s = @state
+    {
+        // height:"100%" must flow down the chain or the editor leaf falls back
+        // to its 420x280 default instead of filling.
+        kind: "vstack", gap: 6.0, pad: 10.0, style: { height: "100%" }, children: [
+            { kind: "hstack", gap: 10.0, align: "center", children: [
+                { kind: "text", value: "◆ gcr output", size: 13.0, weight: "bold", color: col_accent() },
+                { kind: "button", id: "recompile", label: "↻" },
+                { kind: "button", id: "copy", label: "copy" },
+            ]},
+            { kind: "tabs", id: "stage", selected: s.stage, items: tab_items() },
+            { kind: "text", value: s.status, size: 11.0, color: col_muted() },
+            // Read-only editor portal: cross-line selection + copy, internal
+            // wheel-scroll, I-beam. `read_only` drops mutation; the host
+            // resync_embedded_editor swaps the buffer (resets caret/scroll +
+            // drops the wrap layout) on each recompile, so shrinking the buffer
+            // (e.g. core(218)→layout(6)) is safe. Highlight = editor Rust grammar.
+            { kind: "editor", id: "out", value: s.out, lang: "rust", read_only: true,
+              style: { flex_grow: 1.0, width: "100%", height: "100%", min_height: "200" } },
+        ]
+    }
+}

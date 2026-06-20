@@ -1,0 +1,9 @@
+struct Pt { x: i64 }
+fn find(v: Vec<Pt>, target: i64, i: i64) -> Option<Pt> {
+  if i >= vec_len(v) { Option::None }
+  else { let p = vec_get(v, i); if p.x == target { Option::Some(p) } else { find(v, target, i + 1) } }
+}
+fn main() -> i64 {
+  let mut v = vec_new(); v = vec_push(v, Pt { x: 7 }); v = vec_push(v, Pt { x: 42 });
+  match find(v, 42, 0) { Option::Some(p) => p.x, Option::None => 0 }
+}

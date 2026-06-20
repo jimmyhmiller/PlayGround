@@ -853,6 +853,96 @@ fn semi_space_pointer_fixup() {
     assert_ne!(new_child, child, "child should have moved too");
 }
 
+/// ADVERSARIAL precise-layout proof for the int/pointer-discrimination P0.
+///
+/// Models a monomorphized mixed enum like `Either { L(ref), R(i64) }`: one
+/// TRACED pointer slot (`with_fields(1)`) followed by an UNTRACED raw i64
+/// (`with_raw_bytes(8)` — the `R(i64)` payload region). Into that raw region we
+/// store the *bit pattern of a real, live, in-from-space heap address* — the
+/// maximally adversarial integer: it IS a valid 8-aligned from-space pointer, so
+/// the ONLY thing stopping the collector from relocating it is that the raw
+/// region is never scanned. (A small int like 42 proves nothing — it is not in
+/// from-space, so `from.contains` is false and it could never trip the bug even
+/// if it leaked into a traced slot.)
+///
+/// If the layout is genuinely precise, this adversarial int is UNTOUCHED across
+/// a collection (it keeps the stale pre-move address) even though the object it
+/// numerically points at moves. If a scalar could ever reach a traced slot,
+/// THIS is the value that would be silently mis-moved — the documented bug.
+#[test]
+fn semi_space_adversarial_int_payload_in_raw_region_not_relocated() {
+    // slot 0: traced (the `L` ref); raw i64: the `R(i64)` payload — UNTRACED.
+    static MIXED: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1)
+        .with_raw_bytes(8);
+    let type_table = vec![MIXED];
+
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    // `referee` is a real object kept live via the traced slot (so it survives
+    // and is relocated). `mixed` carries the adversarial int in its raw region.
+    let referee = gc.alloc_obj::<Compact>(&MIXED, 0);
+    let mixed = gc.alloc_obj::<Compact>(&MIXED, 0);
+
+    unsafe { write_u64_field(mixed, &MIXED, 0, referee as u64) }; // traced -> referee
+    let raw_off = MIXED.raw_data_offset();
+    let adversarial = referee as u64; // a REAL 8-aligned from-space address
+    assert_eq!(adversarial & 0b111, 0, "from-space objects are 8-aligned");
+    assert!(gc.contains(adversarial as *const u8), "addr is in from-space");
+    unsafe { core::ptr::write(mixed.add(raw_off) as *mut u64, adversarial) };
+
+    let root = SingleRoot(Cell::new(mixed as u64));
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+
+    // After GC both `mixed` and `referee` have moved.
+    let new_mixed = IdentityPtrPolicy::try_decode_ptr(root.0.get()).unwrap();
+    let new_referee = unsafe { read_u64_field(new_mixed, &MIXED, 0) };
+    assert!(gc.contains(new_referee as *const u8));
+    assert_ne!(new_referee, referee as u64, "traced slot must follow the move");
+
+    // THE PROOF: the raw-region int is UNCHANGED. The collector never scanned
+    // it, so even an int whose bits are a valid from-space address is never
+    // relocated. (It is now a stale/dangling address — correct: a scalar is
+    // opaque to the GC.) If this fires, a scalar reached a traced slot.
+    let raw_after = unsafe { core::ptr::read(new_mixed.add(raw_off) as *const u64) };
+    assert_eq!(
+        raw_after, adversarial,
+        "raw-region scalar was relocated — a non-pointer leaked into a traced \
+         slot (precise-layout violation)"
+    );
+}
+
+/// NEGATIVE CONTROL for the proof above: the collector itself does NOT and
+/// cannot distinguish an integer from a pointer — a real from-space address in
+/// a TRACED slot is unconditionally relocated. This is the counterfactual: if
+/// the front end ever placed a scalar in a traced slot, this is the silent
+/// mis-move that would result. Soundness rests ENTIRELY on precise layout
+/// (scalars in the raw region), never on the collector guessing — which is why
+/// the conservative `type_id`-range silent-skip was removed in favour of a
+/// layout invariant + a panicking detector.
+#[test]
+fn semi_space_traced_slot_relocated_regardless_of_value_negative_control() {
+    static TWO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    let type_table = vec![TWO];
+    let mut gc = SemiSpace::new::<Compact>(4096);
+    let referee = gc.alloc_obj::<Compact>(&TWO, 0);
+    let holder = gc.alloc_obj::<Compact>(&TWO, 0);
+    unsafe {
+        write_u64_field(holder, &TWO, 0, referee as u64);
+        write_u64_field(holder, &TWO, 1, referee as u64); // same bits in a 2nd traced slot
+    }
+    let root = SingleRoot(Cell::new(holder as u64));
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+    let new_holder = IdentityPtrPolicy::try_decode_ptr(root.0.get()).unwrap();
+    let s0 = unsafe { read_u64_field(new_holder, &TWO, 0) };
+    let s1 = unsafe { read_u64_field(new_holder, &TWO, 1) };
+    assert_ne!(s0, referee as u64, "traced slot 0 must be relocated");
+    assert_eq!(s0, s1, "both traced slots followed the same object to its new home");
+}
+
 #[test]
 fn semi_space_chain() {
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
@@ -1050,6 +1140,54 @@ fn semi_space_with_root_set() {
     let new_g2 = IdentityPtrPolicy::try_decode_ptr(globals.get(i1)).unwrap();
     assert!(gc.contains(new_g1));
     assert!(gc.contains(new_g2));
+}
+
+#[test]
+fn semi_space_traces_and_relocates_interior_pointer() {
+    // HOLDER: a 16-byte raw region holding a scalar at raw offset 0 and a GC ref
+    // at raw offset 8 (absolute offset header+8) — an *interior* pointer (a ref
+    // embedded in a flattened value field), not a leading value slot. It is only
+    // reachable to the collector via `interior_ptrs`.
+    static INTERIOR: [u16; 1] = [Compact::SIZE as u16 + 8];
+    static HOLDER: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_raw_bytes(16)
+        .with_interior_ptrs(&INTERIOR);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+
+    let type_table = vec![HOLDER, LEAF];
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    let child = gc.alloc_obj::<Compact>(&LEAF, 0);
+    let holder = gc.alloc_obj::<Compact>(&HOLDER, 0);
+    let scalar_off = Compact::SIZE; // raw offset 0 — NOT a pointer
+    let ref_off = Compact::SIZE + 8; // raw offset 8 — the interior pointer
+    unsafe {
+        (holder.add(scalar_off) as *mut u64).write(42);
+        (holder.add(ref_off) as *mut u64).write(child as u64);
+    }
+
+    // Root ONLY the holder. The child survives solely via the interior pointer —
+    // if `scan_object` doesn't trace `interior_ptrs`, it is collected (dangling).
+    let chain = FrameChain::new();
+    let frame = RootFrame::<1>::new();
+    frame.slots[0].set(holder as u64);
+    let _guard = chain.push(&frame);
+
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&chain]) };
+
+    let new_holder = IdentityPtrPolicy::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(gc.contains(new_holder));
+    // The raw scalar at offset 0 is untraced and preserved verbatim.
+    let scalar = unsafe { (new_holder.add(scalar_off) as *const u64).read() };
+    assert_eq!(scalar, 42);
+    // The interior ref was traced, the child relocated, and the slot fixed in place.
+    let raw = unsafe { (new_holder.add(ref_off) as *const u64).read() };
+    let new_child = IdentityPtrPolicy::try_decode_ptr(raw).unwrap();
+    assert!(
+        gc.contains(new_child),
+        "interior pointer not traced → child collected (dangling)"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────

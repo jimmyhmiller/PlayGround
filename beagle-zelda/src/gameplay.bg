@@ -286,44 +286,6 @@ fn ray_segment_hit(origin, dir, a, b) {
 // it mutates the Player, not the monsters.
 // ============================================================
 
-// Spiral outward from origin until we find a respawn point clear of every
-// monster's reach and every wall's AABB. Falls back to (0, 0) if nothing
-// better is found (shouldn't happen with the default level).
-fn pick_respawn(player, monsters, walls) {
-    let candidates = [
-        v/make(0.0, 0.0),
-        v/make(40.0, 0.0),  v/make(0.0 - 40.0, 0.0),
-        v/make(0.0, 40.0),  v/make(0.0, 0.0 - 40.0),
-        v/make(80.0, 0.0),  v/make(0.0 - 80.0, 0.0),
-        v/make(0.0, 80.0),  v/make(0.0, 0.0 - 80.0),
-        v/make(160.0, 0.0), v/make(0.0 - 160.0, 0.0)
-    ]
-    let mut chosen = v/ZERO
-    let mut found = false
-    let mut i = 0
-    while i < length(candidates) && !found {
-        let c = candidates[i]
-        let mut clear = true
-        let mut j = 0
-        while j < length(monsters) && clear {
-            if v/length(v/sub(c, monsters[j].pos)) < monsters[j].attack_reach + player.half.x + 8.0 {
-                clear = false
-            }
-            j = j + 1
-        }
-        let mut k = 0
-        while k < length(walls) && clear {
-            if v/aabb_overlap(c, player.half, walls[k].center, walls[k].half) {
-                clear = false
-            }
-            k = k + 1
-        }
-        if clear { chosen = c; found = true }
-        i = i + 1
-    }
-    chosen
-}
-
 fn apply_monster_attacks(player, monsters, walls) {
     if player.iframes > 0.0 {
         player
@@ -343,8 +305,11 @@ fn apply_monster_attacks(player, monsters, walls) {
         if !hit {
             player
         } else if hp <= 0.0 {
-            let spawn = pick_respawn(player, monsters, walls)
-            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 3.0, iframes: 1.5 }
+            // Death: leave hp at 0 and stop motion. The play tick detects
+            // hp <= 0 and triggers a fade-transition back to the starting
+            // room (see playing_tick in main.bg) — respawn is a map change,
+            // not an in-place teleport.
+            Player { ...player, hp: 0.0, vel: v/ZERO }
         } else {
             Player { ...player, hp: hp, iframes: 0.4 }
         }

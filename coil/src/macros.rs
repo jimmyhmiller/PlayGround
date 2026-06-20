@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::reader::Sexp;
+use crate::reader::{Sexp, SexpKind};
 
 // ---- compile-time values ------------------------------------------------
 
@@ -49,6 +49,10 @@ struct Closure {
     rest: Option<String>,
     body: Vec<Value>,
     env: Env,
+    /// The module this closure was defined in (for a macro: the module whose
+    /// namespace its template's symbol references resolve in). `None` for the
+    /// flat/global default and for helper lambdas.
+    module: Option<String>,
 }
 
 type Env = Rc<RefCell<Scope>>;
@@ -95,14 +99,210 @@ pub struct TargetInfo {
 /// `(include "path")` forms pull in another file's macros and definitions;
 /// paths resolve relative to the current working directory, with an include
 /// guard so a file is processed at most once.
-pub fn expand_program(forms: &[Sexp], target: &TargetInfo) -> Result<Vec<Sexp>, String> {
+/// What an `import`'s `:use` clause brings into the importer's scope unqualified.
+#[derive(Clone)]
+pub enum UseSpec {
+    /// `:use *` — all of the target module's definitions.
+    All,
+    /// `:use [a b c]` — just these names.
+    Names(Vec<String>),
+}
+
+/// One module's imports: `:as` aliases (qualified access) and `:use` clauses
+/// (unqualified access).
+#[derive(Default, Clone)]
+pub struct ModImports {
+    pub aliases: HashMap<String, String>, // alias -> target module
+    pub uses: Vec<(String, UseSpec)>,     // (target module, what to bring in)
+}
+
+/// Per-module import table: importing module name -> its imports.
+pub type ImportMap = HashMap<String, ModImports>;
+
+/// Per-module export table: module -> the names it makes public via `(export …)`.
+/// A module with *no* `(export …)` form is absent here, meaning **all public**
+/// (the default); a present entry restricts visibility to the listed names.
+pub type ExportMap = HashMap<String, HashSet<String>>;
+
+/// Whether module `m` exports `name` to other modules (own-module access is
+/// always allowed; absence from the table = everything public).
+pub fn exports(exports: &ExportMap, m: &str, name: &str) -> bool {
+    exports.get(m).map(|set| set.contains(name)).unwrap_or(true)
+}
+
+/// A top-level form tagged with the module it belongs to (`None` = flat, for a
+/// file with no `(module …)` declaration).
+pub type TaggedForm = (Sexp, Option<String>);
+
+/// Names defined in each module (functions, struct/sum types, sum variants,
+/// conventions — *not* externs). Used to qualify macro-template references to
+/// their defining module's namespace (referential hygiene).
+type DefNames = HashMap<String, HashSet<String>>;
+
+/// Thread-local context for macro-template name resolution: the def table, the
+/// import table, and a stack of the module each currently-expanding macro was
+/// defined in (top = innermost).
+struct MacroCtx {
+    stack: Vec<Option<String>>,
+    defs: DefNames,
+    imports: ImportMap,
+    exports: ExportMap,
+}
+thread_local! {
+    static MACRO_CTX: RefCell<Option<MacroCtx>> = const { RefCell::new(None) };
+}
+fn macro_ctx_init(defs: DefNames, imports: ImportMap, exports: ExportMap) {
+    MACRO_CTX
+        .with(|c| *c.borrow_mut() = Some(MacroCtx { stack: Vec::new(), defs, imports, exports }));
+}
+fn macro_ctx_clear() {
+    MACRO_CTX.with(|c| *c.borrow_mut() = None);
+}
+fn macro_push(module: Option<String>) {
+    MACRO_CTX.with(|c| {
+        if let Some(ctx) = c.borrow_mut().as_mut() {
+            ctx.stack.push(module);
+        }
+    });
+}
+fn macro_pop() {
+    MACRO_CTX.with(|c| {
+        if let Some(ctx) = c.borrow_mut().as_mut() {
+            ctx.stack.pop();
+        }
+    });
+}
+/// Record an (expanded) form's definitions into the live def table, so later
+/// macro expansions see macro-generated definitions too.
+fn macro_note_defs(form: &Sexp, module: &str) {
+    MACRO_CTX.with(|c| {
+        if let Some(ctx) = c.borrow_mut().as_mut() {
+            scan_defs(form, module, &mut ctx.defs);
+        }
+    });
+}
+
+/// If a macro-template symbol `s` names a definition reachable from the macro's
+/// defining module (its own def, a `:use`d module's, or an `alias/x`), return
+/// its absolute resolved name. Builtins, locals, and field names aren't in the
+/// def table, so they return `None` and stay bare. This is the Clojure
+/// syntax-quote rule: template references resolve where the macro was *defined*.
+fn macro_qualify(s: &str) -> Result<Option<String>, String> {
+    MACRO_CTX.with(|c| {
+        let c = c.borrow();
+        let ctx = match c.as_ref() {
+            Some(ctx) => ctx,
+            None => return Ok(None),
+        };
+        let module = match ctx.stack.last().and_then(|m| m.as_ref()) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        // explicit `alias/name` — a private target name is a hard error
+        if let Some((alias, rest)) = s.split_once('/') {
+            match ctx.imports.get(module).and_then(|i| i.aliases.get(alias)) {
+                Some(target) => {
+                    if !exports(&ctx.exports, target, rest) {
+                        return Err(format!("'{rest}' is private to module '{target}'"));
+                    }
+                    return Ok(Some(format!("{target}.{rest}")));
+                }
+                None => return Ok(None),
+            }
+        }
+        if ctx.defs.get(module).is_some_and(|d| d.contains(s)) {
+            return Ok(Some(format!("{module}.{s}")));
+        }
+        if let Some(imp) = ctx.imports.get(module) {
+            for (target, spec) in &imp.uses {
+                let used = match spec {
+                    UseSpec::All => true,
+                    UseSpec::Names(ns) => ns.iter().any(|n| n == s),
+                };
+                // `:use` only brings in *exported* names; a private one is skipped.
+                if used
+                    && ctx.defs.get(target).is_some_and(|d| d.contains(s))
+                    && exports(&ctx.exports, target, s)
+                {
+                    return Ok(Some(format!("{target}.{s}")));
+                }
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// Record the definition names a top-level form introduces under `module`.
+fn scan_defs(form: &Sexp, module: &str, defs: &mut DefNames) {
+    let items = match &form.kind {
+        SexpKind::List(i) => i,
+        _ => return,
+    };
+    let name = items.get(1).and_then(sym_name);
+    match items.first().and_then(sym_name) {
+        Some("defn") | Some("defstruct") | Some("defcc") => {
+            if let Some(n) = name {
+                defs.entry(module.to_string()).or_default().insert(n.to_string());
+            }
+        }
+        Some("defsum") => {
+            let set = defs.entry(module.to_string()).or_default();
+            if let Some(n) = name {
+                set.insert(n.to_string());
+            }
+            for it in items.iter().skip(2) {
+                if let SexpKind::List(v) = &it.kind {
+                    if let Some(vn) = v.first().and_then(sym_name) {
+                        set.insert(vn.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Read + load the module graph (pass 1), then macro-expand (pass 2). Returns
+/// the macro-free top-level forms (each tagged with its module) plus the import
+/// table. AST-level name resolution (the qualify pass) happens later in
+/// `resolve.rs`; macro-template references are resolved here, in pass 2, against
+/// the macro's *defining* module.
+pub fn expand_program(
+    forms: &[Sexp],
+    target: &TargetInfo,
+) -> Result<(Vec<TaggedForm>, ImportMap, ExportMap), String> {
     let genv = global_env(target);
     let mut macros: HashMap<String, Value> = HashMap::new();
-    let mut out: Vec<Sexp> = Vec::new();
+    let mut raw: Vec<TaggedForm> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut imports: ImportMap = HashMap::new();
+    let mut defs: DefNames = HashMap::new();
+    let mut exports: ExportMap = HashMap::new();
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    process_forms(forms, &genv, &mut macros, &mut out, &base, &mut visited)?;
-    Ok(out)
+    // Pass 1 — load: collect raw forms, build the def table, register macros + defs.
+    process_forms(forms, &genv, &mut macros, &mut raw, &base, &mut visited, None, &mut imports, &mut defs, &mut exports)?;
+    // Pass 2 — expand, with macro-template hygiene resolved against each macro's module.
+    macro_ctx_init(defs, imports.clone(), exports.clone());
+    let result: Result<Vec<TaggedForm>, String> = (|| {
+        let mut out: Vec<TaggedForm> = Vec::new();
+        for (form, module) in &raw {
+            let expanded = expand_form(form, &macros, &genv)?;
+            let start = out.len();
+            splice_toplevel_tagged(expanded, &mut out, module);
+            // Incremental namespace building (proper-lisp): a form's macro-generated
+            // definitions become visible to *later* forms' macro expansions. Since
+            // imports load before their users, a module is fully expanded — and its
+            // macro-generated defs recorded — before another module's macros run.
+            for (sf, m) in &out[start..] {
+                if let Some(mm) = m {
+                    macro_note_defs(sf, mm);
+                }
+            }
+        }
+        Ok(out)
+    })();
+    macro_ctx_clear();
+    Ok((result?, imports, exports))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -110,78 +310,165 @@ fn process_forms(
     forms: &[Sexp],
     genv: &Env,
     macros: &mut HashMap<String, Value>,
-    out: &mut Vec<Sexp>,
+    out: &mut Vec<TaggedForm>,
     base_dir: &Path,
     visited: &mut HashSet<PathBuf>,
+    mut cur_module: Option<String>,
+    imports: &mut ImportMap,
+    defs: &mut DefNames,
+    exports: &mut ExportMap,
 ) -> Result<(), String> {
     for form in forms {
         match list_head(form) {
             Some("defmacro") => {
-                let (name, clo) = make_macro(form, genv)?;
+                let (name, clo) = make_macro(form, genv, &cur_module)?;
                 macros.insert(name, clo);
             }
             Some("def") => eval_toplevel_def(form, genv)?,
-            Some("include") => process_include(form, genv, macros, out, base_dir, visited)?,
+            // `(module NAME)` — every following top-level def in this file is
+            // namespaced under NAME.
+            Some("module") => {
+                let name = module_name(form)?;
+                imports.entry(name.clone()).or_default();
+                cur_module = Some(name);
+            }
+            // `(export a b c)` — restrict this module's public names to those listed.
+            Some("export") => {
+                if let Some(m) = &cur_module {
+                    let set = exports.entry(m.clone()).or_default();
+                    for it in &as_list(form)?[1..] {
+                        let n = sym_name(it).ok_or("export: names must be symbols")?;
+                        set.insert(n.to_string());
+                    }
+                } else {
+                    return Err("export: only valid inside a (module …)".into());
+                }
+            }
+            // `(import "path" [:as alias] [:use *|[names]])` — load another module.
+            Some("import") => {
+                process_import(form, genv, macros, out, base_dir, visited, &cur_module, imports, defs, exports)?;
+            }
+            // Any other top-level form is collected raw (expanded in pass 2) and
+            // its definitions recorded for macro-hygiene resolution.
             _ => {
-                let expanded = expand_form(form, macros, genv)?;
-                splice_toplevel(expanded, out);
+                if let Some(m) = &cur_module {
+                    scan_defs(form, m, defs);
+                }
+                out.push((form.clone(), cur_module.clone()));
             }
         }
     }
     Ok(())
 }
 
-fn process_include(
+/// Parse the name out of `(module NAME)`.
+fn module_name(form: &Sexp) -> Result<String, String> {
+    match as_list(form)?.get(1).and_then(sym_name) {
+        Some(n) => Ok(n.to_string()),
+        None => Err("module: expected a name, e.g. (module math/vec)".into()),
+    }
+}
+
+/// Scan a freshly-read file's forms for its `(module NAME)` declaration.
+fn declared_module(forms: &[Sexp]) -> Option<String> {
+    forms.iter().find_map(|f| {
+        (list_head(f) == Some("module")).then(|| module_name(f).ok()).flatten()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_import(
     form: &Sexp,
     genv: &Env,
     macros: &mut HashMap<String, Value>,
-    out: &mut Vec<Sexp>,
+    out: &mut Vec<TaggedForm>,
     base_dir: &Path,
     visited: &mut HashSet<PathBuf>,
+    cur_module: &Option<String>,
+    imports: &mut ImportMap,
+    defs: &mut DefNames,
+    exports: &mut ExportMap,
 ) -> Result<(), String> {
     let items = as_list(form)?;
-    let path = match items.get(1) {
-        Some(Sexp::Str(p)) => p,
-        _ => return Err("include: expected a string path, e.g. (include \"lib/x.coil\")".into()),
+    let path = match items.get(1).map(|s| &s.kind) {
+        Some(SexpKind::Str(p)) => p,
+        _ => return Err("import: expected (import \"path\" [:as alias])".into()),
     };
-    let full = base_dir.join(path);
-    let canon = full
-        .canonicalize()
-        .map_err(|e| format!("include '{}': {e}", full.display()))?;
-    if !visited.insert(canon.clone()) {
-        return Ok(()); // already included
+    // optional `:as alias` and `:use *` / `:use [names]`
+    let mut alias: Option<String> = None;
+    let mut use_spec: Option<UseSpec> = None;
+    let mut i = 2;
+    while i < items.len() {
+        match items.get(i).map(|s| &s.kind) {
+            Some(SexpKind::Keyword(k)) if k == "as" => {
+                let a = items.get(i + 1).and_then(sym_name).ok_or("import: :as expects an alias symbol")?;
+                alias = Some(a.to_string());
+                i += 2;
+            }
+            Some(SexpKind::Keyword(k)) if k == "use" => {
+                use_spec = Some(match items.get(i + 1).map(|s| &s.kind) {
+                    Some(SexpKind::Sym(s)) if s == "*" => UseSpec::All,
+                    Some(SexpKind::Vector(v)) => UseSpec::Names(
+                        v.iter().filter_map(sym_name).map(str::to_string).collect(),
+                    ),
+                    _ => return Err("import: :use expects * or [names]".into()),
+                });
+                i += 2;
+            }
+            _ => return Err("import: expected :as alias or :use *|[names]".into()),
+        }
     }
-    let text = std::fs::read_to_string(&canon)
-        .map_err(|e| format!("include '{}': {e}", canon.display()))?;
-    let inc_forms = crate::reader::read_all(&text)?;
-    let inc_dir = canon
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| base_dir.to_path_buf());
-    process_forms(&inc_forms, genv, macros, out, &inc_dir, visited)
+    // Resolve relative to the importing file (NOT the cwd) — every import resolves
+    // the same way regardless of where `coil` is run.
+    let full = base_dir.join(path);
+    let canon = full.canonicalize().map_err(|e| format!("import '{}': {e}", full.display()))?;
+    let text = std::fs::read_to_string(&canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
+    // The included file's bytes are a *different* source than the one we render
+    // diagnostics against, so its spans would point into the wrong file — strip
+    // them (a proper multi-file SourceMap is future work).
+    let inc_forms = crate::reader::read_all_unspanned(&text)?;
+    let modname = declared_module(&inc_forms)
+        .ok_or_else(|| format!("import '{}': file has no (module …) declaration", path))?;
+    // Record the import in the importing module's table. `:as` adds a qualified
+    // alias (defaulting to the module's own name); `:use` brings names in bare.
+    let importer = cur_module.clone().unwrap_or_default();
+    let imp = imports.entry(importer).or_default();
+    imp.aliases.insert(alias.unwrap_or_else(|| modname.clone()), modname.clone());
+    if let Some(spec) = use_spec {
+        imp.uses.push((modname.clone(), spec));
+    }
+    // Load the imported file once (its own (module …) form tags its defs).
+    if visited.insert(canon.clone()) {
+        let inc_dir = canon.parent().map(Path::to_path_buf).unwrap_or_else(|| base_dir.to_path_buf());
+        process_forms(&inc_forms, genv, macros, out, &inc_dir, visited, None, imports, defs, exports)
+            .map_err(|e| trace(e, || format!("import \"{path}\"")))?;
+    }
+    Ok(())
 }
 
-/// A top-level `(do a b c)` is spliced into separate top-level forms.
-fn splice_toplevel(form: Sexp, out: &mut Vec<Sexp>) {
-    if let Sexp::List(items) = &form {
+/// A top-level `(do a b c)` is spliced into separate top-level forms, each
+/// tagged with the module it came from.
+fn splice_toplevel_tagged(form: Sexp, out: &mut Vec<(Sexp, Option<String>)>, module: &Option<String>) {
+    if let SexpKind::List(items) = &form.kind {
         if items.first().map(sym_name) == Some(Some("do")) {
             for child in &items[1..] {
-                splice_toplevel(child.clone(), out);
+                splice_toplevel_tagged(child.clone(), out, module);
             }
             return;
         }
     }
-    out.push(form);
+    out.push((form, module.clone()));
 }
 
-fn make_macro(form: &Sexp, genv: &Env) -> Result<(String, Value), String> {
+
+fn make_macro(form: &Sexp, genv: &Env, module: &Option<String>) -> Result<(String, Value), String> {
     let items = as_list(form)?;
     // (defmacro name [params] body...)
     let name = sym_name(&items[1])
         .ok_or("defmacro: name must be a symbol")?
         .to_string();
-    let params_v = match items.get(2) {
-        Some(Sexp::Vector(v)) => v,
+    let params_v = match items.get(2).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) => v,
         _ => return Err(format!("defmacro '{name}': expected parameter vector")),
     };
     let (params, rest) = parse_params(params_v)?;
@@ -194,6 +481,7 @@ fn make_macro(form: &Sexp, genv: &Env) -> Result<(String, Value), String> {
         rest,
         body,
         env: genv.clone(),
+        module: module.clone(),
     }));
     Ok((name, clo))
 }
@@ -211,31 +499,51 @@ fn eval_toplevel_def(form: &Sexp, genv: &Env) -> Result<(), String> {
 
 // ---- macro expansion walk ----------------------------------------------
 
+/// Append a context frame to an error message, building a "stack trace" as the
+/// error unwinds (deepest frame first). The leaf message stays on line 1; each
+/// enclosing context adds an indented `in …` line below it.
+pub fn trace(err: String, frame: impl FnOnce() -> String) -> String {
+    format!("{err}\n  in {}", frame())
+}
+
 fn expand_form(form: &Sexp, macros: &HashMap<String, Value>, genv: &Env) -> Result<Sexp, String> {
-    match form {
-        Sexp::List(items) if !items.is_empty() => {
+    match &form.kind {
+        SexpKind::List(items) if !items.is_empty() => {
             if let Some(name) = sym_name(&items[0]) {
                 if let Some(m) = macros.get(name) {
                     let args: Vec<Value> = items[1..].iter().map(sexp_to_value).collect();
-                    let result = apply(m.clone(), args)?;
-                    let result_sexp = value_to_sexp(&result)?;
-                    return expand_form(&result_sexp, macros, genv); // re-expand
+                    let frame = || format!("expansion of macro ({name} …)");
+                    // While this macro expands, its template's symbol references
+                    // resolve in *its* defining module (hygiene), not the use site.
+                    let mac_mod = match m {
+                        Value::Closure(c) => c.module.clone(),
+                        _ => None,
+                    };
+                    macro_push(mac_mod);
+                    let applied = apply(m.clone(), args);
+                    macro_pop();
+                    let result = applied.map_err(|e| trace(e, frame))?;
+                    let result_sexp = value_to_sexp(&result).map_err(|e| trace(e, frame))?;
+                    // re-expand the macro's output, attributing any error to this macro
+                    return expand_form(&result_sexp, macros, genv).map_err(|e| trace(e, frame));
                 }
             }
+            // Re-expand children but keep this node's source span, so a list
+            // whose head wasn't a macro still points at its origin.
             let children = items
                 .iter()
                 .map(|c| expand_form(c, macros, genv))
                 .collect::<Result<_, _>>()?;
-            Ok(Sexp::List(children))
+            Ok(Sexp::new(SexpKind::List(children), form.span))
         }
-        Sexp::Vector(items) => {
+        SexpKind::Vector(items) => {
             let children = items
                 .iter()
                 .map(|c| expand_form(c, macros, genv))
                 .collect::<Result<_, _>>()?;
-            Ok(Sexp::Vector(children))
+            Ok(Sexp::new(SexpKind::Vector(children), form.span))
         }
-        other => Ok(other.clone()),
+        _ => Ok(form.clone()),
     }
 }
 
@@ -351,6 +659,7 @@ fn make_lambda(items: &[Value], env: &Env) -> Result<Value, String> {
         rest,
         body: items[2..].to_vec(),
         env: env.clone(),
+        module: None, // helper lambdas inherit the executing macro's module at run time
     })))
 }
 
@@ -413,6 +722,10 @@ fn quasi(
                 .clone();
             Ok(Value::Sym(g))
         }
+        // Referential hygiene: a template symbol that names a definition of the
+        // macro's module is resolved to that module's namespace here. Builtins,
+        // locals, and field names aren't definitions, so they stay bare.
+        Value::Sym(s) => Ok(Value::Sym(macro_qualify(s)?.unwrap_or_else(|| s.clone()))),
         Value::List(items) => {
             // (unquote x) / (quasiquote x) as the whole form
             if items.len() == 2 {
@@ -679,31 +992,36 @@ fn parse_params(params: &[Sexp]) -> Result<(Vec<String>, Option<String>), String
 // ---- Sexp <-> Value conversion -----------------------------------------
 
 fn sexp_to_value(s: &Sexp) -> Value {
-    match s {
-        Sexp::Int(n) => Value::Int(*n),
-        Sexp::Float(x) => Value::Float(*x),
-        Sexp::Sym(s) => Value::Sym(s.clone()),
-        Sexp::Keyword(k) => Value::Keyword(k.clone()),
-        Sexp::Str(s) => Value::Str(s.clone()),
-        Sexp::List(items) => Value::List(items.iter().map(sexp_to_value).collect()),
-        Sexp::Vector(items) => Value::Vector(items.iter().map(sexp_to_value).collect()),
+    match &s.kind {
+        SexpKind::Int(n) => Value::Int(*n),
+        SexpKind::Float(x) => Value::Float(*x),
+        SexpKind::Sym(s) => Value::Sym(s.clone()),
+        SexpKind::Keyword(k) => Value::Keyword(k.clone()),
+        SexpKind::Str(s) => Value::Str(s.clone()),
+        SexpKind::List(items) => Value::List(items.iter().map(sexp_to_value).collect()),
+        SexpKind::Vector(items) => Value::Vector(items.iter().map(sexp_to_value).collect()),
     }
 }
 
+// Macro output is synthesized: it has no bytes in any source, so the forms are
+// span-less (`DUMMY`). Diagnostics on macro-generated code therefore fall back
+// to the bare message until macro-provenance spans (call site) are plumbed.
 fn value_to_sexp(v: &Value) -> Result<Sexp, String> {
     match v {
-        Value::Int(n) => Ok(Sexp::Int(*n)),
-        Value::Float(x) => Ok(Sexp::Float(*x)),
-        Value::Sym(s) => Ok(Sexp::Sym(s.clone())),
-        Value::Keyword(k) => Ok(Sexp::Keyword(k.clone())),
-        Value::List(items) => Ok(Sexp::List(
+        Value::Int(n) => Ok(Sexp::int(*n)),
+        Value::Float(x) => Ok(Sexp::float(*x)),
+        Value::Sym(s) => Ok(Sexp::sym(s.clone())),
+        Value::Keyword(k) => Ok(Sexp::keyword(k.clone())),
+        Value::List(items) => Ok(Sexp::list(
             items.iter().map(value_to_sexp).collect::<Result<_, _>>()?,
         )),
-        Value::Vector(items) => Ok(Sexp::Vector(
+        Value::Vector(items) => Ok(Sexp::vector(
             items.iter().map(value_to_sexp).collect::<Result<_, _>>()?,
         )),
         Value::Bool(_) => Err("macro produced a boolean where a form was expected".to_string()),
-        Value::Str(_) => Err("macro produced a string where a form was expected".to_string()),
+        // A string is a valid form (`SexpKind::Str`): a quasiquoted string
+        // literal, or a `(llvm-ir ... "BODY")` body assembled by a macro.
+        Value::Str(s) => Ok(Sexp::string(s.clone())),
         Value::Closure(_) | Value::Builtin(_) => {
             Err("macro produced a function where a form was expected".to_string())
         }
@@ -711,22 +1029,22 @@ fn value_to_sexp(v: &Value) -> Result<Sexp, String> {
 }
 
 fn as_list(s: &Sexp) -> Result<&[Sexp], String> {
-    match s {
-        Sexp::List(items) => Ok(items),
+    match &s.kind {
+        SexpKind::List(items) => Ok(items),
         _ => Err("expected a list".to_string()),
     }
 }
 
 fn list_head(s: &Sexp) -> Option<&str> {
-    match s {
-        Sexp::List(items) => items.first().and_then(sym_name),
+    match &s.kind {
+        SexpKind::List(items) => items.first().and_then(sym_name),
         _ => None,
     }
 }
 
 fn sym_name(s: &Sexp) -> Option<&str> {
-    match s {
-        Sexp::Sym(s) => Some(s.as_str()),
+    match &s.kind {
+        SexpKind::Sym(s) => Some(s.as_str()),
         _ => None,
     }
 }
