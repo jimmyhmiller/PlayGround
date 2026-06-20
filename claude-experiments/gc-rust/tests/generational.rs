@@ -46,6 +46,22 @@ fn binary_trees_triggers_minor_collections() {
 }
 
 #[test]
+fn interior_ref_write_barrier_keeps_young_pointee_alive() {
+    // Regression for the interior-reference write barrier. `gc_interior_barrier.gcr`
+    // promotes a Holder to tenured, then mutates its flattened value-with-reference
+    // field (`FieldLoc::ValueAt`) to point at a freshly-allocated YOUNG Box, then
+    // drives minor GCs. The barrier must mark the Holder's card so the minor GC
+    // scans the embedded reference; otherwise the young Box — reachable only via the
+    // tenured Holder — is reclaimed and the read returns garbage. With the barrier
+    // it reads 42; without it (verified by temporarily disabling the barrier) it
+    // returned 2796199. The run must also actually collect (minor > 0), else the
+    // test would pass vacuously.
+    let (result, minor, _major) = run_with_stats("examples/gc_interior_barrier.gcr");
+    assert_eq!(result, "42", "young pointee reclaimed — interior write barrier missing");
+    assert!(minor > 0, "test must trigger minor GCs to exercise the barrier (got {minor})");
+}
+
+#[test]
 fn correct_under_generational_collection() {
     // A spread of examples must all produce identical results to the semi-space
     // collector while running on the generational heap.

@@ -968,9 +968,45 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 };
                 let addr = self.obj_addr(obj, off);
                 self.builder.build_store(addr, v).unwrap();
-                // Generational write barrier on pointer-field stores.
-                if matches!(loc, FieldLoc::Ptr { .. }) {
-                    self.emit_write_barrier(fcx, obj, v);
+                // Generational write barrier. A direct pointer store (FieldLoc::Ptr)
+                // may create an old→young edge. So may a flattened value-with-
+                // references store (FieldLoc::ValueAt): each reference embedded in
+                // the value is its own potential old→young edge. The old code
+                // barriered only Ptr stores, so mutating a value-with-ref field in a
+                // TENURED object left the card unmarked — a minor GC would not
+                // rescan it and could reclaim a still-referenced young object. Mark
+                // for each interior reference of the stored value.
+                match loc {
+                    FieldLoc::Ptr { .. } => self.emit_write_barrier(fcx, obj, v),
+                    FieldLoc::ValueAt { value, .. } => {
+                        // `lay.interior_ptrs` are absolute object offsets of refs
+                        // embedded in flattened value fields; those within this
+                        // field's byte range [off, off+size) are exactly the refs
+                        // of the value we just stored. Re-load each and barrier it
+                        // (the barrier no-ops unless obj is tenured and the ref is
+                        // young), so the card is marked iff a real old→young edge
+                        // was created.
+                        let lid = match &base.repr {
+                            Repr::Ref(l) => *l,
+                            _ => return Err(CodegenError("setfield on non-ref".into())),
+                        };
+                        let lay = &self.prog.layouts[lid as usize];
+                        let vsize = self.prog.values[*value as usize].size as u64;
+                        let (lo, hi) = (off, off + vsize);
+                        let interior: Vec<u64> = lay
+                            .interior_ptrs
+                            .iter()
+                            .map(|&p| p as u64)
+                            .filter(|&p| p >= lo && p < hi)
+                            .collect();
+                        let ptrty = self.ctx.ptr_type(AddressSpace::default());
+                        for p in interior {
+                            let pa = self.obj_addr(obj, p);
+                            let refv = self.builder.build_load(ptrty, pa, "iref").unwrap();
+                            self.emit_write_barrier(fcx, obj, refv);
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(Some(self.ctx.i64_type().const_zero().into()))
             }

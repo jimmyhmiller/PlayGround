@@ -1,0 +1,47 @@
+// Regression for the interior-reference write barrier (FUTURE_WORK P0 history).
+//
+// `Holder` is a heap struct carrying a flattened `#[value] Slot` that embeds a
+// reference (`Box`). We promote a Holder to the tenured generation, then mutate
+// its value-with-reference field to point at a FRESHLY allocated (young) Box.
+// That store goes through `SetField` on a `FieldLoc::ValueAt` field: the
+// generational write barrier must mark Holder's card for the embedded reference,
+// or the next minor GC won't scan it and will reclaim the young Box — which is
+// reachable ONLY through the tenured Holder. With the barrier, the Box survives
+// (gets promoted) and reads back as 42; without it, this returns garbage.
+
+struct Box { val: i64 }
+
+#[value]
+struct Slot { b: Box, tag: i64 }
+
+struct Holder { s: Slot }
+
+// Allocate a lot of short-lived garbage to drive minor collections (so the live
+// `Holder` survives and is promoted to tenured).
+fn churn(n: i64) -> i64 {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n {
+        let b = Box { val: i };
+        acc = acc + b.val;
+        i = i + 1;
+    }
+    acc
+}
+
+fn main() -> i64 {
+    let mut h = Holder { s: Slot { b: Box { val: 1 }, tag: 0 } };
+
+    // Survive several minor GCs → `h` is promoted to the tenured generation.
+    churn(3000000);
+
+    // Mutate the now-tenured Holder's value-with-reference field to a fresh
+    // YOUNG Box. This is the old→young edge the interior barrier must record.
+    h.s = Slot { b: Box { val: 42 }, tag: 7 };
+
+    // Force more minor GCs. Box(42) is reachable only via tenured `h.s.b`.
+    churn(3000000);
+
+    // If the card was marked, Box(42) was promoted and this is 42.
+    h.s.b.val
+}

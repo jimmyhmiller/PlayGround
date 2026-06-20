@@ -943,6 +943,38 @@ fn semi_space_traced_slot_relocated_regardless_of_value_negative_control() {
     assert_eq!(s0, s1, "both traced slots followed the same object to its new home");
 }
 
+/// PROVE THE DETECTOR TRIPS. A detector that never demonstrably fires is
+/// indistinguishable from a no-op. Here we deliberately simulate the failure the
+/// precise-layout invariant forbids — a traced slot pointing at bits whose
+/// header `type_id` is out of range (what a leaked scalar, or a corrupted
+/// reference, looks like) — and assert the collector PANICS loudly rather than
+/// following garbage or silently skipping. Armed unconditionally in debug; the
+/// same panic occurs in release under `GCR_GC_VERIFY=1` (gated off here because
+/// release-default would instead fault with a generic bounds-check message).
+#[test]
+#[should_panic(expected = "precise-layout violation")]
+#[cfg_attr(not(debug_assertions), ignore = "detector armed via GCR_GC_VERIFY in release")]
+fn semi_space_detector_panics_on_bad_header_in_traced_slot() {
+    static ONE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let type_table = vec![ONE]; // table len 1 → only type_id 0 is valid
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    // A from-space object whose header we corrupt to an out-of-range type_id —
+    // standing in for a non-pointer (or corrupted ref) reached via a traced slot.
+    let bad_target = gc.alloc_obj::<Compact>(&ONE, 0);
+    unsafe { core::ptr::write(bad_target as *mut u64, 9999u64) }; // type_id 9999 ≫ len 1
+
+    let holder = gc.alloc_obj::<Compact>(&ONE, 0);
+    unsafe { write_u64_field(holder, &ONE, 0, bad_target as u64) }; // traced slot → bad bits
+
+    let root = SingleRoot(Cell::new(holder as u64));
+    // Following the traced slot, copy_or_forward reads the out-of-range type_id
+    // and the armed detector panics — NOT a silent `return old`.
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+}
+
 #[test]
 fn semi_space_chain() {
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
