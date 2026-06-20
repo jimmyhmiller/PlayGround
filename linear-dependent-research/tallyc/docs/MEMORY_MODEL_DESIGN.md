@@ -1,0 +1,189 @@
+# tallyc memory model — design (for review)
+
+*The differentiator: a language as low-level as C, with complete manual control over
+allocation, that is nonetheless 100% memory-safe — using ONE mechanism (QTT's per-
+variable quantity `0/1/ω`) for erasure, ownership, and borrowing, with NO garbage
+collector and NO reference counting, ever.* This document is the design to review
+before any kernel/implementation work; it synthesizes three layers (allocation,
+borrows/views, surface) into one coherent model, grounded in tallyc as it exists
+today, and resolves the cross-layer seams. Companion: `FUTURE_WORK.md` §5 (the
+vision), §6 (the safety theorem + TCB), §7 (erasure).
+
+## 0. The one-quantity spine (already true in tallyc)
+
+The kernel's only resource rule is `σ.leq(π)` over the semiring `{0,1,ω}`
+(`src/mult.rs`): using a binder adds usages (`1 + 1 = ω`), passing it to a `π`-binder
+scales by `π`. From this single rule:
+
+- **`0` ⇒ erasure ⇒ dependent types are free.** A `{0 n : Nat}` index, a proof, a
+  region tag, a view witness is scaled to `0` and never reaches codegen
+  (`compile_postulate` drops `Mult::Zero` args). Proven IR-checkable today (a length-
+  indexed `Vec` never materializes its index; the DLL leaves no region trace).
+- **`1` ⇒ ownership ⇒ safe manual memory.** `ω ⋢ 1` rejects using a linear value
+  twice (use-after-free / double-free); `0 ⋢ 1` rejects dropping it (leak). `0` and
+  `1` are deliberately *incomparable*.
+- **`ω` ⇒ ordinary values.** Plain data copies freely.
+
+The whole model is this rule applied to memory. Nothing below grows the trusted
+kernel: the primitives are `postulate`s with audited `unsafe` native lowerings, and
+the kernel re-checks every USE against their `0/1`-typed signatures.
+
+## 1. Layer A — Allocation & ownership
+
+- **Construction is not allocation.** A `struct`/`enum` constructor builds a *value*
+  with known size/align/offsets (Zig-style); it never touches the allocator. `box` is
+  the only thing that allocates. (tallyc already compiles a nullary constructor — a
+  leaf/`none` — to a shared constant with *zero* malloc.)
+- **`Own T` = a linear owned pointer, defined as a kernel linear pair** (NOT a new
+  opaque postulate):
+
+  ```
+  Own T  ≜  (0 p : Ptr) × (1 _ : p ↦ T)      -- erased address  +  its exclusive 1-view
+  free   : {0 a : Type} -> (1 o : Own a) -> Unit
+  ```
+
+  Reusing the existing `Σ[1]` makes free/move/arena-handoff/destructor all the *one*
+  type `(1 o : Own a) → R` — indistinguishable to the checker (each "consumes the 1"),
+  differing only in what the body does.
+- **`Opt (Own T)` is the null niche** — `none` is literally the null pointer (the
+  zero-malloc nullary path), so recursion via `struct Node { value : I64, left :
+  Opt (Own Node), right : Opt (Own Node) }` is exactly the C struct with `NULL` leaves.
+- **First-class allocators with region indices `@ r`** (`{0 r : Region}`, erased),
+  generalizing the existing DLL regions: `malloc`, bump/`Arena`, fixed `Pool`,
+  inline/stack.
+
+## 2. Layer B — Borrows, regions & views (the research-risk layer, done decidably)
+
+- **Points-to views**, `0`/`1`-quantity propositions (no runtime content): `p ↦ v`
+  (the right to read/write that cell), separating conjunction `(p↦a) ⊗ (q↦b)`
+  (DISJOINT ownership — the soundness core of aliasing-free mutation & parallelism),
+  and recursive views for linked heaps (pattern-matching a view UNFOLDS head-cell ⊗
+  tail by constructor disjointness — the same auto-generated eliminator the kernel
+  builds today, no solver).
+- **`&[r] T` shared (ω, copyable)** vs **`&mut[r] T` unique (1, linear)**. v1 uses
+  **read-back** primitives (`get`/`set` return the borrow token), threading exactly
+  like the existing DLL `Cursor r`; the kernel's "scrutinee consumed once" rule does
+  the accounting — `&mut`-as-linear-state, not as magic. (Fractional permissions are a
+  later option, not needed for v1.)
+- **Borrows are region-scoped views returned at scope end:** `borrow_mut` splits an
+  `Own` into a `&mut[r]` + a linear `Loan r a` the lender keeps; `return_mut` reunites
+  them into a full `Own`. Dangling references are impossible because `r` is a
+  `0`-erased kernel name: a borrow escaping its scope would reference an out-of-scope
+  `r` and not type-check — the *same* mechanism that rejects cross-region DLL splices
+  today. This is Rust's discipline in QTT + regions, **with no bespoke borrow checker**.
+- **Initialization typestate:** `alloc → p ↦ Raw`; `write : Raw → Init`; `read` needs
+  `Init`; `free` needs `Raw` (drop first). Reading uninitialized memory is a *type
+  error*; `box = alloc ; write` so the common path never exposes `Raw`.
+- **Concurrency** falls out: shared = `&T` (ω, shareable), unique = `&mut`/`Own` (1);
+  `⊗` disjointness forbids two threads holding `&mut` to the same cell.
+
+**Decidability (no SMT in the trusted loop).** F\*/Steel need a solver because
+permissions carry arbitrary heap predicates discharged by entailment. tallyc
+restricts views to: linear `Σ`/`⊗` of points-to atoms, strictly-positive recursive
+families, and region equality. View entailment then reduces to three *syntactic, no-
+search* checks the kernel already runs — (i) rig usage counting, (ii) inductive
+unfold by constructor-head disjointness, (iii) region-name unification. We trade
+Steel's automatic frame inference for decidability: non-trivial framing must be
+*written*, not solved. That is the accepted tradeoff (FUTURE_WORK §13).
+
+## 3. Layer C — Surface & ergonomics
+
+- **Quantity inference, ω-default.** Unannotated = `ω`; write `1` for ownership, `0`
+  (usually via implicits) for erasure. The elaborator never *raises* a budget — it
+  computes usage; the kernel checks `σ.leq(π)`. Ordinary code reads ordinary.
+- **Implicit indices + `Fin n`.** `{0 n : Nat}` solved by unification, written once;
+  `Fin n` bounds-safety erases to a *bare indexed load, no bounds branch*.
+- **No surface lambdas (decision).** Adding general closures invites hidden allocation
+  (a closure is a `box`ed environment) — violating "`box` is the only alloc," and the
+  capture-by-linear-value quantity inference is the hard, undecidable-flavored corner.
+  Higher-order memory ops take **named top-level fns** (no capture, no alloc); if a
+  real closure need arises, the answer is an *explicit, visibly-`box`ed* `Closure`
+  type, never an implicit one.
+- **`&mut` / `do` / `arena` are pure sugar over the Layer-B view threading**, e.g.
+
+  ```
+  &mut node { node.value = node.value + 1 }
+  -- desugars to:  let v0 = borrow_mut(node); let v1 = set_field(v0,.value, get_field(v0,.value)+1); let node = return_mut(v1);
+  ```
+
+  Each step is a `let` that lowers to a `(1 v : …)` binder, so skipping `return_mut`
+  is a `0 ⋢ 1` *leak* error and reusing `v0` after `v1` is an `ω ⋢ 1` *aliasing*
+  error — the sugar reads imperative, the desugaring is checked linear plumbing, and
+  the views erase to bare stores.
+- **Total/partial boundary** is the existing `%total`/`%partial` + `totality.rs`:
+  total code reduces in types; `Fix`/IO/unbounded loops are partial and opaque.
+
+## 4. Cross-layer decisions resolved (the seams)
+
+1. **`Own T` is the kernel linear `Σ` pair**, not a fresh postulate — so view-
+   splitting, move, and free-as-the-consuming-fn all fall out of existing typing.
+   (Surface hides the existential address `p`.)
+2. **Two allocator disciplines, both in QTT+regions** — resolving the A/B tension over
+   "is each pointer linear, or the region?":
+   - **Individual (malloc):** each `Own T` is its own `1`; freed individually by
+     `free`. The leak check forces every `Own` to be consumed.
+   - **Region/arena:** the **region capability is the single `1`**; pointers are
+     `&[r]`/region-scoped views (`ω` within the scope), and `release : (1 _ :
+     Allocator r) → Unit` bulk-frees. Soundness is by SCOPE, not per-pointer
+     consumption: after `release`, `r` is out of scope, so no `@ r` pointer can be
+     used (type error) — no scan needed. Individual `free` is NOT offered for arena
+     pointers (you can't double-free what you can't name post-release).
+   This gives arena ergonomics (one bulk free, often faster than C) AND malloc safety,
+   from the same machinery.
+3. **Read-back `&mut`** (token-returning `get`/`set`) for v1 — reuses the linear-pair
+   eliminator verbatim; fractions deferred.
+4. **Erasure is the hard gate, tested per-primitive.** Every new `0`-quantity
+   construct (`↦`, `⊗`, `Region`, `Loan`, `Raw`/`Init`, `&`/`&mut`, `borrow_mut`/
+   `return_mut`/`split`/`join`) must ship with an IR-trace test proving it leaves
+   ZERO trace (an `&mut` block → bare load/store; `borrow_mut`/`return_mut` → nothing,
+   identity on the address). This is the existing "erasure proven in IR" discipline
+   extended to each new primitive — non-negotiable and checkable.
+
+## 5. ⚠ VERIFIED soundness finding (the design process caught a real bug)
+
+The current surface `let x = e; body` lowers to an **`ω`-binder** β-redex
+(`rust_surface.rs` ~1150). For a *linear* `e`, that LAUNDERS linearity. Verified
+repro (run today): `fn dbl() { let o = alloc(Zero); let u = free(o); free(o) }` is
+**ACCEPTED** — a double-free the rig should reject. (Single-free is correctly
+accepted; the hole is specifically the `let`-bound linear value getting `ω`.)
+
+**Fix (Layer C, mandated):** a `let` binding a value of a linear type (`Own`/any
+linear postulate) must lower to a `(1 x : E)` binder, so the kernel's `σ.leq(1)`
+fires on the body. Decidable, local, untrusted (kernel backstops). **Red-team it to
+the 1a′ bar:** the double-free above must become REJECTED (`ω ⋢ 1`); a dropped
+let-bound `Own` must be REJECTED (`0 ⋢ 1`); single-use must stay ACCEPTED. This is a
+prerequisite for the whole model — without it, ownership is unsound through `let`.
+
+## 6. Non-negotiables — consolidated judgment
+
+| Non-negotiable | Verdict | How |
+|---|---|---|
+| No GC, no refcount, no temp leak | ✅ | reclamation = the `1`-consume obligation; no refcount slot, no tracing pass |
+| rig `0/1/ω` preserved (`ω⋢1` use-twice, `0⋢1` leak) | ✅ *after §5 fix* | exact accounting holds; the `let` hole is the one gap, with a fix + red-team |
+| erasure leaves ZERO IR trace, checkable | ✅ (target) | only `Ptr` (an `i64`) + real data survive; all views/regions/proofs vanish — per-primitive IR tests (§4.4) |
+| C/Zig-low-level, `box` the only alloc | ✅ | constructors don't allocate; arena `box` = one add; tree compiles to its C twin |
+| small kernel, decidable, no SMT | ✅ | primitives audited `unsafe` + kernel re-check; entailment = rig + ctor-disjointness + region-unification |
+
+## 7. Build roadmap (refines FUTURE_WORK §12 A–D)
+
+0. **§5 `let`-linearity fix + red-team** (prerequisite; small; do first).
+1. **Phase A — explicit allocation:** `Own T` as the `Σ[1]` pair, `box`/`free`, `Opt`
+   null-niche, recursion via `Opt (Own T)`; the malloc allocator. IR-trace tests.
+2. **Phase B — value layouts:** real size/align/offsets, by-value vs by-pointer,
+   niche opts (the representation rewrite from "everything is a tagged i64").
+3. **Phase C — views & borrows:** `p↦v`, `⊗`, `&`/`&mut` (read-back), init typestate,
+   region-scoped borrows. The research-risk layer — land behind IR-trace + red-team.
+4. **Phase D — allocators:** first-class `Arena`/`Pool`, region capabilities + bulk
+   `release`, the two-discipline model (§4.2).
+
+## 8. Open risks (honest)
+
+- **Borrow-ergonomics inference at scale** (which view, returned where) — the genuine
+  §13 research risk; unproven beyond single-region drivers. Mitigate: read-back v1 +
+  region pinned by an in-scope `Loan`, stress-tested before scaling.
+- **Decidable framing cost:** non-trivial frames must be written, not solved — the
+  accepted price for no-SMT.
+- **Region inference for multi-region nests** — believed decidable (each `r` pinned by
+  a `Loan`/`Allocator` in scope), must be proven out.
+- **`let`-quantity inference fail-safe:** default `let` to `1` and relax to `ω` only
+  when the type is provably copyable — fail toward linearity, never away.
