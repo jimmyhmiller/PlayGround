@@ -62,6 +62,55 @@ fn interior_ref_write_barrier_keeps_young_pointee_alive() {
 }
 
 #[test]
+fn gc_log_records_accurate_per_collection_events() {
+    // GCR_GC_LOG=<path> must write one JSON object per collection with consistent
+    // accounting. binary_trees triggers many minor GCs; we verify the log has the
+    // same number of events as GCR_GC_STATS reports, every event has a non-zero
+    // pause, and bytes balance: reclaimed + promoted + after == before.
+    let log = std::env::temp_dir().join("gcr_gclog_test.jsonl");
+    let _ = std::fs::remove_file(&log);
+    let out = Command::new(gcr_bin())
+        .args(["run", "examples/binary_trees.gcr"])
+        .env("GCR_GC_STATS", "1")
+        .env("GCR_GC_LOG", &log)
+        .output()
+        .expect("run gcr");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let minor: usize = stderr
+        .lines()
+        .find(|l| l.contains("minor +"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|n| n.parse().ok())
+        .expect("stats line");
+    let body = std::fs::read_to_string(&log).expect("gc log written");
+    let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+    assert!(minor > 0, "expected minor collections");
+    assert_eq!(lines.len(), minor, "one log line per collection");
+
+    let field = |l: &str, key: &str| -> u64 {
+        let pat = format!("\"{key}\":");
+        let start = l.find(&pat).expect(key) + pat.len();
+        let rest = &l[start..];
+        let end = rest.find(|c: char| c == ',' || c == '}').unwrap();
+        rest[..end].trim().parse().expect("number")
+    };
+    for l in &lines {
+        assert!(l.contains("\"kind\":\"minor\""), "binary_trees is young-heavy");
+        assert!(field(l, "pause_ns") > 0, "non-zero pause recorded");
+        let before = field(l, "before_bytes");
+        let after = field(l, "after_bytes");
+        let reclaimed = field(l, "reclaimed_bytes");
+        let promoted = field(l, "promoted_bytes");
+        assert_eq!(
+            reclaimed + promoted + after,
+            before,
+            "byte accounting must balance: {l}"
+        );
+    }
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
 fn correct_under_generational_collection() {
     // A spread of examples must all produce identical results to the semi-space
     // collector while running on the generational heap.

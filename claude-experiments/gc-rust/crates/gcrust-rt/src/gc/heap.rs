@@ -64,6 +64,48 @@ pub enum GcPhase {
     Copying = 1,
 }
 
+/// The kind of a collection, for the GC log / pause summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcKind {
+    /// Young-generation scavenge (generational minor GC).
+    Minor,
+    /// Stop-the-world copy of the old generation (semi-space major GC).
+    Major,
+    /// Concurrent major collection.
+    Concurrent,
+}
+
+impl GcKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GcKind::Minor => "minor",
+            GcKind::Major => "major",
+            GcKind::Concurrent => "concurrent",
+        }
+    }
+}
+
+/// One garbage-collection event, recorded once per collection for the GC log and
+/// pause-time summary (`GCR_GC_LOG` / `GCR_GC_STATS`). This is COLD-PATH
+/// observability: an event is pushed once per collection (collections are
+/// infrequent and already serialize on the gc lock), never on the allocation
+/// hot path. `before_bytes`/`after_bytes` are the collected space's occupancy
+/// around the collection; `reclaimed = before - after - promoted`.
+#[derive(Debug, Clone, Copy)]
+pub struct GcEvent {
+    pub kind: GcKind,
+    /// 0-based sequence number across all collections in this heap.
+    pub seq: u64,
+    /// Stop-the-world pause duration in nanoseconds (the copy/scan work).
+    pub pause_ns: u64,
+    /// Collected space's occupancy (bytes) before the collection.
+    pub before_bytes: u64,
+    /// Collected space's occupancy (bytes) after the collection.
+    pub after_bytes: u64,
+    /// Bytes promoted to the old generation (minor GC; 0 for major).
+    pub promoted_bytes: u64,
+}
+
 /// State for the generational nursery (young generation).
 struct NurseryState {
     /// The nursery bump allocator (young generation).
@@ -129,6 +171,12 @@ pub struct Heap {
     value_meta: OnceLock<Vec<ValueMeta>>,
     collections: AtomicUsize,
 
+    /// Cold-path GC event log: one [`GcEvent`] per collection, for the
+    /// pause-time summary and `GCR_GC_LOG`. Pushed under the gc lock at the end
+    /// of each collection (never on the allocation hot path). Read at program
+    /// end to format the summary / JSON-lines log.
+    gc_events: Mutex<Vec<GcEvent>>,
+
     /// Current GC phase. Mutators check this to know if write barriers
     /// should be active.
     gc_phase: AtomicU8,
@@ -185,6 +233,7 @@ impl Heap {
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
             collections: AtomicUsize::new(0),
+            gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
             tracer: None,
@@ -226,6 +275,7 @@ impl Heap {
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
             collections: AtomicUsize::new(0),
+            gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
             tracer: None,
@@ -758,6 +808,88 @@ impl Heap {
         self.collections.load(Ordering::Relaxed)
     }
 
+    /// Record a collection event (cold path). `t0` is the [`std::time::Instant`]
+    /// captured at the start of the stop-the-world copy/scan work; the pause is
+    /// its elapsed time. Pushed under the events lock once per collection — never
+    /// on the allocation hot path.
+    pub(crate) fn record_gc_event(
+        &self,
+        kind: GcKind,
+        t0: std::time::Instant,
+        before_bytes: u64,
+        after_bytes: u64,
+        promoted_bytes: u64,
+    ) {
+        let pause_ns = t0.elapsed().as_nanos() as u64;
+        if let Ok(mut ev) = self.gc_events.lock() {
+            let seq = ev.len() as u64;
+            ev.push(GcEvent { kind, seq, pause_ns, before_bytes, after_bytes, promoted_bytes });
+        }
+    }
+
+    /// Snapshot of all recorded GC events, for the log / summary.
+    pub fn gc_events(&self) -> Vec<GcEvent> {
+        self.gc_events.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// JSON-lines GC log: one object per collection (the `GCR_GC_LOG` format).
+    /// Stable schema for offline analysis.
+    pub fn gc_log_jsonl(&self) -> String {
+        let mut s = String::new();
+        for e in self.gc_events() {
+            s.push_str(&format!(
+                "{{\"seq\":{},\"kind\":\"{}\",\"pause_ns\":{},\"before_bytes\":{},\
+                 \"after_bytes\":{},\"reclaimed_bytes\":{},\"promoted_bytes\":{}}}\n",
+                e.seq,
+                e.kind.as_str(),
+                e.pause_ns,
+                e.before_bytes,
+                e.after_bytes,
+                e.before_bytes.saturating_sub(e.after_bytes).saturating_sub(e.promoted_bytes),
+                e.promoted_bytes,
+            ));
+        }
+        s
+    }
+
+    /// Human-readable GC stats summary: per-kind collection count, total bytes
+    /// reclaimed/promoted, and pause-time percentiles (p50/p99/max, ms). Used by
+    /// both the JIT (`GCR_GC_STATS`) and AOT exit paths so the two agree.
+    pub fn gc_stats_summary(&self) -> String {
+        let events = self.gc_events();
+        let mut out = String::new();
+        for kind in [GcKind::Minor, GcKind::Major, GcKind::Concurrent] {
+            let mut pauses: Vec<u64> =
+                events.iter().filter(|e| e.kind == kind).map(|e| e.pause_ns).collect();
+            if pauses.is_empty() {
+                continue;
+            }
+            pauses.sort_unstable();
+            let n = pauses.len();
+            let pct = |p: f64| pauses[((n as f64 * p) as usize).min(n - 1)];
+            let ms = |ns: u64| ns as f64 / 1.0e6;
+            let reclaimed: u64 = events
+                .iter()
+                .filter(|e| e.kind == kind)
+                .map(|e| e.before_bytes.saturating_sub(e.after_bytes).saturating_sub(e.promoted_bytes))
+                .sum();
+            let promoted: u64 =
+                events.iter().filter(|e| e.kind == kind).map(|e| e.promoted_bytes).sum();
+            out.push_str(&format!(
+                "gc-rust: {} {} collections | pause p50 {:.3}ms p99 {:.3}ms max {:.3}ms | \
+                 reclaimed {} B | promoted {} B\n",
+                n,
+                kind.as_str(),
+                ms(pct(0.50)),
+                ms(pct(0.99)),
+                ms(pauses[n - 1]),
+                reclaimed,
+                promoted,
+            ));
+        }
+        out
+    }
+
     /// Run a stop-the-world collection.
     ///
     /// This is designed to be called by one thread (the triggering thread)
@@ -776,6 +908,10 @@ impl Heap {
 
     /// Internal collection logic — caller must hold `gc_lock`.
     unsafe fn collect_inner<P: PtrPolicy>(&self, extra_roots: &[&dyn RootSource]) {
+        // GC-log timing (cold path): pause = the copy/scan work below; `before`
+        // is from-space occupancy now, `after` is occupancy after the swap.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
         // Phase 1: scan all roots → copy/forward targets into to-space
 
         self.globals.scan_roots(&mut |slot| {
@@ -853,6 +989,9 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+        // GC-log: after the swap, from-space holds the survivors (post-collect
+        // occupancy). Major collection promotes nothing here.
+        self.record_gc_event(GcKind::Major, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap
         if let Some(ns) = &self.nursery_state {
@@ -1013,6 +1152,9 @@ impl Heap {
         };
 
         // We won the race — we're the GC thread now.
+        // GC-log timing (cold path): the pause spans parking + copy/scan below.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
 
         // Snapshot thread refs and set gc_requested atomically (under threads lock).
         // This prevents a thread from deregistering between gc_requested being set
@@ -1129,6 +1271,7 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+        self.record_gc_event(GcKind::Major, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap (all tenured pointers updated)
         if let Some(ns) = &self.nursery_state {
@@ -1267,6 +1410,10 @@ impl Heap {
     /// Same as `collect`. The calling thread must NOT be a registered mutator.
     pub unsafe fn concurrent_collect<P: PtrPolicy>(&self) {
         let _gc_guard = self.gc_lock.lock().unwrap();
+        // GC-log timing (cold path). For a concurrent collection this spans the
+        // whole cycle, not just an STW pause; still a useful per-collection cost.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
 
         // ── STW Pause #1: Snapshot roots ─────────────────────────
 
@@ -1474,6 +1621,7 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+        self.record_gc_event(GcKind::Concurrent, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap
         if let Some(ns) = &self.nursery_state {
@@ -1892,6 +2040,14 @@ impl Heap {
             }
         }
 
+        // GC-log timing (cold path): captured here, AFTER any major-first above,
+        // so `promoted` reflects only this minor scavenge. `before` is the
+        // nursery occupancy being scavenged; tenured growth over the scavenge is
+        // the promoted volume.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before_nursery = ns.nursery.used() as u64;
+        let gc_before_tenured = self.from_used() as u64;
+
         // Snapshot threads and set gc_requested
         let trigger_ptr = triggering_thread as *const ThreadState as usize;
         let thread_snapshot: Vec<Arc<ThreadState>> = {
@@ -2002,6 +2158,15 @@ impl Heap {
         ns.nursery.reset();
         ns.card_tables[from_idx].clear_all();
         ns.minor_collections.fetch_add(1, Ordering::Relaxed);
+        // GC-log: nursery is reset (after ≈ 0); tenured growth = promoted volume.
+        let promoted = (self.from_used() as u64).saturating_sub(gc_before_tenured);
+        self.record_gc_event(
+            GcKind::Minor,
+            gc_t0,
+            gc_before_nursery,
+            ns.nursery.used() as u64,
+            promoted,
+        );
 
         // Resume threads
         self.gc_requested.store(false, Ordering::Release);

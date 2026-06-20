@@ -870,6 +870,20 @@ pub unsafe extern "C" fn gcr_runtime_main(
             eprint!("{}", unsafe { crate::gc::dump::dump_heap_text(rt.heap()) });
         }
     }
+    // Opt-in GC observability, matching the JIT path so AOT binaries report the
+    // same numbers. `GCR_GC_STATS=1` → collection counts + pause-time summary;
+    // `GCR_GC_LOG=<path>` → one JSON object per collection for offline analysis.
+    if std::env::var_os("GCR_GC_STATS").is_some() {
+        eprintln!(
+            "gc-rust: {} minor + {} major collections",
+            rt.heap().minor_collections(),
+            rt.heap().collections(),
+        );
+        eprint!("{}", rt.heap().gc_stats_summary());
+    }
+    if let Some(path) = std::env::var_os("GCR_GC_LOG") {
+        let _ = std::fs::write(&path, rt.heap().gc_log_jsonl());
+    }
     result
 }
 

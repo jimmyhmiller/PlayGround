@@ -2913,6 +2913,12 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
             rt.heap().minor_collections(),
             rt.heap().collections(),
         );
+        // Pause-time + reclaim/promote summary (per kind, p50/p99/max).
+        eprint!("{}", rt.heap().gc_stats_summary());
+    }
+    // Opt-in GC log: GCR_GC_LOG=<path> writes one JSON object per collection.
+    if let Some(path) = std::env::var_os("GCR_GC_LOG") {
+        let _ = std::fs::write(&path, rt.heap().gc_log_jsonl());
     }
     Ok(result)
 }

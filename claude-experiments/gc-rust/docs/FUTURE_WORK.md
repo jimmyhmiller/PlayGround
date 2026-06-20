@@ -57,10 +57,18 @@ already have strong substrates — make them an actual toolchain.
 
 - **Have today:** heap snapshot dumps (`GCR_HEAP_DUMP=1` text / `=json`
   structured, with per-type histogram, root set, and dominator-based retained
-  sizes — `gc::dump`); GC statistics (`GCR_GC_STATS=1`); a statemap tracer
-  (`StatemapTracer`); full runtime reflection metadata (nominal type/field
-  names, enum variants); and the `gcr emit <tokens|ast|core|layout|mono|reflect>`
-  structured-IR dump for compiler/tooling introspection.
+  sizes — `gc::dump`); a statemap tracer (`StatemapTracer`); full runtime
+  reflection metadata (nominal type/field names, enum variants); the `gcr emit
+  <tokens|ast|core|layout|mono|reflect>` structured-IR dump; and **GC stats +
+  pause-time histograms + a GC log** — `GCR_GC_STATS=1` prints collection counts
+  and per-kind pause p50/p99/max plus reclaimed/promoted bytes, and
+  `GCR_GC_LOG=<path>` writes one JSON object per collection (`{seq, kind,
+  pause_ns, before_bytes, after_bytes, reclaimed_bytes, promoted_bytes}`) for
+  offline analysis. Both work on the JIT (`gcr run`) AND AOT (`gcr build`) paths
+  via a shared `Heap::gc_stats_summary`/`gc_log_jsonl` (the events are recorded
+  cold-path, once per collection, in `Heap::record_gc_event` — never on the
+  allocation hot path). (Previously `GCR_GC_STATS` was JIT-only and printed only
+  raw counts — corrected here.)
 
 - **A real debugger.** Source-level breakpoints, stepping, locals/heap
   inspection that understands the GC object model (decode objects via reflection
@@ -68,14 +76,16 @@ already have strong substrates — make them an actual toolchain.
   from the LLVM backend is the natural substrate; pair it with the reflection
   table so a debugger renders *language* values, not raw words.
 
-- **Allocation-site profiling.** Which call sites allocate the most, by count and
-  bytes, with type breakdown. The runtime already routes every allocation through
-  `ai_gc_alloc_*`; thread an allocation-site id (or capture the return address)
-  and aggregate.
-
-- **Pause-time histograms + a GC log for offline analysis.** Per-collection
-  pause, bytes reclaimed, promotion volume, minor/major split, emitted as a
-  machine-readable log. Drives the pause-bound work in P2.
+- **Allocation-site profiling (NEXT).** Which call sites allocate the most, by
+  count and bytes, with type breakdown. The runtime already routes every
+  allocation through `ai_gc_alloc_*`; thread an allocation-site id and aggregate
+  per-thread (non-atomic counters on `ThreadState`, merged at dump — no hot-path
+  cross-thread traffic), with a baked side-table mapping site-id → (function,
+  type). v1 keys sites at **function + allocated-type** granularity, NOT
+  `file:line:col` — Core IR carries no source span. Source-precise sites need
+  span-threading through lower→core→codegen, scoped as the **shared prerequisite
+  for the debugger** below (it needs real source locations anyway), which also
+  upgrades alloc-profiling to line-precise.
 
 - **Live heap explorer.** The JSON snapshot is already a clean substrate; drive
   it from a safepoint *during* execution (not just at program end) into an
