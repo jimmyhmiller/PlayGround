@@ -1,0 +1,200 @@
+(module hashmap)
+; An open-addressing hash map `HashMap[K V]` — a generic-struct LIBRARY over the
+; allocator interface + lib/mem; no compiler support, no ambient heap (the map
+; carries its `(ptr Allocator)`).
+;
+; HASHING & EQUALITY ARE EXPLICIT CAPABILITY VALUES — a `KeyOps` vtable (hash + eq
+; fn pointers + the key size), threaded like the allocator and IO. This is correct
+; for EVERY key type and avoids the silent footgun of a byte-wise default (two
+; "equal" struct values with different uninitialized padding would silently fail
+; to match). It also handles content-keyed strings today (supply a content hash).
+;
+; Convenience: `scalar-keyops [K]` supplies the byte-wise hash/eq SAFELY — but only
+; for SCALAR/POINTER keys, where byte-equality provably IS value-equality (no
+; padding). A struct/string key MUST supply its own KeyOps (so correctness can't
+; be gotten silently wrong). `hm-new-scalar` wires the scalar ops in for you.
+;
+;   (import "lib/hashmap.coil" :use *) (import "lib/alloc.coil" :use *)
+;   (import "lib/result.coil" :use *)   ; for the (Option V) hm-get returns
+
+(import "alloc.coil"  :use *)
+(import "result.coil" :use *)
+(import "mem.coil"    :use *)
+
+(extern abort :cc c [] (-> :i64))
+
+; The key capability: hash a key, compare two keys; `size` is sizeof K (handed to
+; the byte-wise helpers; a custom hash/eq may ignore it). Type-erased over (ptr i8)
+; so one KeyOps shape serves any K. NOT generic — the map stores it by value.
+(defstruct KeyOps
+  [(hash (fnptr c [(ptr i8) :i64] :i64))
+   (eq   (fnptr c [(ptr i8) (ptr i8) :i64] bool))
+   (size :i64)])
+
+; Safe byte-wise ops — sound ONLY where byte-equality == value-equality.
+(defn bytewise-hash [(p (ptr i8)) (n :i64)] (-> :i64)
+  (let [(mut h) -3750763034362895579   ; FNV-1a offset basis
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (store! h (imul (ixor (load h) (cast :i64 (load (index p (load i)))))
+                              1099511628211))
+              (store! i (iadd (load i) 1)))))
+    (load h)))
+(defn bytewise-eq [(a (ptr i8)) (b (ptr i8)) (n :i64)] (-> bool)
+  (mem-eql a b n))   ; mem-eql [i8] compares n bytes
+
+; Build the safe scalar/pointer-key ops for K (uses sizeof K). The vtable lives in
+; static storage and is handed around by pointer (like the allocator). Do NOT use
+; for struct keys with padding — define an explicit KeyOps instead.
+(defn scalar-keyops [K] [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of bytewise-hash))
+    (store! (field o eq)   (fnptr-of bytewise-eq))
+    (store! (field o size) (sizeof K))
+    o))
+
+; state: 0 empty, 1 occupied, 2 tombstone
+(defstruct Entry [K V] [(state :i64) (key K) (val V)])
+(defstruct HashMap [K V]
+  [(slots (ptr (Entry K V))) (cap :i64) (len :i64) (alc (ptr Allocator)) (ops (ptr KeyOps))])
+
+; Call the key vtable.
+(defn ko-hash [(opsp (ptr KeyOps)) (kp (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp hash)) kp (load (field opsp size))))
+(defn ko-eq [(opsp (ptr KeyOps)) (a (ptr i8)) (b (ptr i8))] (-> bool)
+  (call-ptr (load (field opsp eq)) a b (load (field opsp size))))
+
+(defn hm-new [K V] [(a (ptr Allocator)) (ops (ptr KeyOps))] (-> (HashMap K V))
+  (let [(mut m) (zeroed (HashMap K V))]
+    (store! (field m alc) a)
+    (store! (field m ops) ops)   ; both vtables held by pointer (scalar stores)
+    (load m)))
+
+; Convenience for scalar/pointer keys: wires in the safe byte-wise ops.
+(defn hm-new-scalar [K V] [(a (ptr Allocator))] (-> (HashMap K V))
+  (hm-new [K V] a (scalar-keyops [K])))
+
+(defn hm-len [K V] [(m (HashMap K V))] (-> :i64) (load (field m len)))
+(defn hm-cap [K V] [(m (HashMap K V))] (-> :i64) (load (field m cap)))
+
+; Insert (key-at kp, v) into raw slots (power-of-two cap), linear probing, using
+; the key vtable `opsp`. Returns 1 if a fresh slot was filled, 0 on update.
+(defn hm-insert-raw [K V]
+    [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)] (-> :i64)
+  (let [kpi (cast (ptr i8) kp)
+        (mut i) (iand (ko-hash opsp kpi) (isub cap 1))
+        (mut fresh) 0]
+    (loop
+      (let [e  (index slots (load i))
+            st (load (field e state))]
+        (if (icmp-eq st 1)
+            (if (ko-eq opsp (cast (ptr i8) (field e key)) kpi)
+                (do (store! (field e val) v) (break))
+                (store! i (iand (iadd (load i) 1) (isub cap 1))))
+            (do
+              (store! (field e state) 1)
+              (store! (field e key) (load kp))
+              (store! (field e val) v)
+              (store! fresh 1)
+              (break)))))
+    (load fresh)))
+
+(defn hm-grow! [K V] [(m (mut (HashMap K V))) (newcap :i64)] (-> :i64)
+  (let [a        (load (field m alc))
+        oldslots (load (field m slots))
+        oldcap   (load (field m cap))]
+    (match (alloc-slice [(Entry K V)] a newcap)
+      (None [] (do (abort) -1))
+      (Some [ns]
+        (do
+          (mem-zero ns newcap)
+          (let [(mut j) 0]
+            (loop
+              (if (icmp-ge (load j) oldcap)
+                  (break)
+                  (do
+                    (let [e (index oldslots (load j))]
+                      (if (icmp-eq (load (field e state)) 1)
+                          (hm-insert-raw [K V] (load (field m ops)) ns newcap
+                                         (field e key) (load (field e val)))
+                          0))
+                    (store! j (iadd (load j) 1))))))
+          (if (icmp-gt oldcap 0)
+              (raw-free a (cast (ptr i8) oldslots)
+                        (imul oldcap (sizeof (Entry K V))) (alignof (Entry K V)))
+              0)
+          (store! (field m slots) ns)
+          (store! (field m cap) newcap)
+          0)))))
+
+(defn hm-put! [K V] [(m (mut (HashMap K V))) (k K) (v V)] (-> :i64)
+  (if (icmp-ge (imul (iadd (load (field m len)) 1) 4) (imul (load (field m cap)) 3))
+      (hm-grow! (mut m) (if (icmp-eq (load (field m cap)) 0) 8 (imul (load (field m cap)) 2)))
+      0)
+  (let [kp (alloc-stack K)]
+    (store! kp k)
+    (let [fresh (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v)]
+      (store! (field m len) (iadd (load (field m len)) fresh))))
+  0)
+
+(defn hm-get [K V] [(m (HashMap K V)) (k K)] (-> (Option V))
+  (let [cap (load (field m cap))]
+    (if (icmp-eq cap 0)
+        (None)
+        (let [slots (load (field m slots))
+              opsp  (load (field m ops))
+              kp    (alloc-stack K)]
+          (store! kp k)
+          (let [kpi (cast (ptr i8) kp)
+                (mut i) (iand (ko-hash opsp kpi) (isub cap 1))]
+            (loop
+              (let [e  (index slots (load i))
+                    st (load (field e state))]
+                (if (icmp-eq st 0)
+                    (break)
+                    (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
+                        (break)
+                        (store! i (iand (iadd (load i) 1) (isub cap 1)))))))
+            (let [e (index slots (load i))]
+              (if (icmp-eq (load (field e state)) 1)
+                  (Some (load (field e val)))
+                  (None))))))))
+
+(defn hm-contains? [K V] [(m (HashMap K V)) (k K)] (-> bool)
+  (match (hm-get [K V] m k) (None [] false) (Some [_] true)))
+
+(defn hm-remove! [K V] [(m (mut (HashMap K V))) (k K)] (-> :i64)
+  (let [cap (load (field m cap))]
+    (if (icmp-eq cap 0)
+        0
+        (let [slots (load (field m slots))
+              opsp  (load (field m ops))
+              kp    (alloc-stack K)
+              (mut res) 0]
+          (store! kp k)
+          (let [kpi (cast (ptr i8) kp)
+                (mut i) (iand (ko-hash opsp kpi) (isub cap 1))]
+            (loop
+              (let [e  (index slots (load i))
+                    st (load (field e state))]
+                (if (icmp-eq st 0)
+                    (break)
+                    (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
+                        (do (store! (field e state) 2)
+                            (store! (field m len) (isub (load (field m len)) 1))
+                            (store! res 1)
+                            (break))
+                        (store! i (iand (iadd (load i) 1) (isub cap 1))))))))
+          (load res)))))
+
+(defn hm-free! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (if (icmp-gt (load (field m cap)) 0)
+      (raw-free (load (field m alc)) (cast (ptr i8) (load (field m slots)))
+                (imul (load (field m cap)) (sizeof (Entry K V))) (alignof (Entry K V)))
+      0)
+  (store! (field m slots) (cast (ptr (Entry K V)) 0))
+  (store! (field m cap) 0)
+  (store! (field m len) 0)
+  0)

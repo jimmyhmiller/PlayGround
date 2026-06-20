@@ -1,0 +1,20 @@
+; HashMap[K V] — open-addressing map as a library over the allocator + lib/mem.
+; Hashing/equality are explicit capability values (a KeyOps vtable); hm-new-scalar
+; supplies the safe byte-wise ops for scalar keys.
+;   coil run examples/hashmap.coil; echo $?   => 42
+(module app)
+(import "lib/hashmap.coil" :use *)
+(import "lib/alloc.coil" :use *)
+(import "lib/result.coil" :use *)
+(import "lib/control.coil" :use *)
+
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator)
+        (mut m) (hm-new-scalar [i64 i64] a)]
+    (for [i 0 30] (hm-put! (mut m) i i))   ; 0..29, several resizes/rehashes
+    (hm-put! (mut m) 13 9)                  ; update key 13 -> 9
+    (hm-remove! (mut m) 1)                  ; tombstone key 1
+    (let [r (iadd (match (hm-get [i64 i64] m 13) (None [] -1) (Some [v] v))   ; 9
+                  (hm-len m))]                                                 ; 29 -> 38? 9+29=38
+      (hm-free! (mut m))
+      (iadd r 4))))                          ; 38 + 4 = 42
