@@ -1767,6 +1767,17 @@ fn coerce(
     if arg_ok(&et, target, is_extern) {
         return Ok(e);
     }
+    // A reference reads AS its pointee value where a value is expected — e.g.
+    // copying a by-reference struct param out via `store!`/return. Without this,
+    // struct params (passed by immutable reference) couldn't be used as values,
+    // while sum params (passed by value) could — an inconsistency. This is a READ
+    // (an immutable ref reads fine); storing THROUGH a ref is the separate
+    // `is_writable` check, so const-correctness is unaffected.
+    if let Type::Ref(_, inner) = &et {
+        if &**inner == target {
+            return Ok(Expr::Load(Box::new(e)));
+        }
+    }
     Err(format!(
         "in '{fname}': {what} has type {} but expected {}",
         ty_str(&et),

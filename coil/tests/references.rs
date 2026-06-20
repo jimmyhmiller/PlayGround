@@ -5,6 +5,38 @@ mod common;
 use common::build_and_run;
 
 #[test]
+fn struct_value_param_can_be_copied_via_store() {
+    // Regression: a by-value struct param (passed as an immutable reference) must
+    // be usable AS A VALUE — e.g. copied out via store! — just like a by-value sum
+    // param. Previously store! of a struct param errored ("(ref S) vs S") while a
+    // sum param worked: an inconsistency. (Reading a ref as its value is a read;
+    // const-correctness — storing THROUGH an immutable ref — is unaffected.)
+    let code = build_and_run(
+        r#"(defstruct S [(a :i64) (b :i64)])
+           (defn put [(p (ptr S)) (x S)] (-> :i64) (store! p x) 0)
+           (defn main [] (-> :i64)
+             (let [s (alloc-stack S) (mut src) (zeroed S)]
+               (store! (field src a) 7) (store! (field src b) 5)
+               (put s src)
+               (iadd (load (field s a)) (load (field s b)))))"#,
+    );
+    assert_eq!(code, 12);
+}
+
+#[test]
+fn storing_through_an_immutable_struct_ref_is_still_an_error() {
+    // The fix must NOT loosen const-correctness: mutating a field THROUGH an
+    // immutable (by-value) struct param remains rejected.
+    let err = coil::check_source(
+        "(defstruct S [(a :i64)])
+         (defn bad [(r S)] (-> :i64) (store! (field r a) 5) 0)
+         (defn main [] (-> :i64) 0)",
+    )
+    .unwrap_err();
+    assert!(err.contains("immutable reference"), "got: {err}");
+}
+
+#[test]
 fn references_example_runs() {
     assert_eq!(build_and_run(include_str!("../examples/references.coil")), 42);
 }
