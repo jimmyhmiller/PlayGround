@@ -435,8 +435,8 @@ pub fn draw_labels<D: RaylibDraw>(
         } else {
             d.draw_text(label, x + 9, y + 4, fs, TEXT_DIM);
         }
-        // Tiny stat line beneath the name.
-        let stat = format!("{} sess  {} msg", c.sessions.len(), c.total_messages);
+        // Tiny stat line beneath the name: age tier + session count.
+        let stat = format!("{} · {} sess", c.tier.name(), c.sessions.len());
         let sw = text_w(&stat, 10);
         d.draw_text(&stat, s.x as i32 - sw / 2, y + 24, 10, Color::new(150, 158, 178, 230));
     }
@@ -485,58 +485,152 @@ pub fn draw_hud<D: RaylibDraw>(
     d.draw_text(&hint, 12, screen.1 - 19, 13, TEXT_DIM);
 }
 
-/// Right-hand inspector for the selected city: its sessions, models, activity.
+fn cat_color(c: Cat) -> Color {
+    match c {
+        Cat::Activity => Color::new(255, 196, 64, 255),
+        Cat::Craft => Color::new(255, 150, 90, 255),
+        Cat::Codebase => Color::new(120, 220, 140, 255),
+        Cat::Mastery => Color::new(196, 148, 255, 255),
+        Cat::Time => Color::new(120, 200, 255, 255),
+        Cat::Wealth => Color::new(240, 220, 120, 255),
+    }
+}
+
+/// Group thousands with commas: 1234567 -> "1,234,567".
+fn commafy(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    let len = s.len();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Right-hand inspector for the selected city: civilization, codebase, resources,
+/// achievements, and recent sessions.
 pub fn draw_inspector<D: RaylibDraw>(d: &mut D, city: &City, now: f64, screen: (i32, i32)) {
-    let pw = 340;
+    let pw = 384;
     let px = screen.0 - pw;
     let py = 34;
     let ph = screen.1 - 34 - 26;
+    let right = px + pw - 14;
     d.draw_rectangle(px, py, pw, ph, PANEL_BG);
     d.draw_line(px, py, px, py + ph, PANEL_LINE);
 
-    let mut y = py + 14;
+    let mut y = py + 12;
     d.draw_text(&city.name, px + 14, y, 22, Color::WHITE);
-    y += 28;
+    y += 27;
+
+    // Civilization line: tier · biome · season.
+    let civ = format!("{} · {} · {}", city.tier.name(), city.biome.name(), city.season.name());
+    d.draw_text(&civ, px + 14, y, 13, GOLD);
+    y += 19;
     if let Some(path) = &city.path {
-        let shown = ellipsize(path, 44);
-        d.draw_text(&shown, px + 14, y, 12, Color::new(130, 138, 158, 255));
-        y += 20;
+        d.draw_text(&ellipsize(path, 50), px + 14, y, 11, Color::new(124, 132, 152, 255));
+        y += 17;
     }
     let summary = format!(
-        "{} sessions   {} live   {} msgs   {} tools",
+        "{} sessions · {} live · {} msgs · {} tools",
         city.sessions.len(),
         city.live,
-        city.total_messages,
-        city.total_tools,
+        commafy(city.total_messages as u64),
+        commafy(city.total_tools as u64),
     );
-    d.draw_text(&summary, px + 14, y, 13, TEXT_DIM);
-    y += 22;
-    d.draw_line(px + 14, y, px + pw - 14, y, PANEL_LINE);
+    d.draw_text(&summary, px + 14, y, 12, TEXT_DIM);
+    y += 20;
+
+    // Codebase facts.
+    if let Some(cb) = &city.codebase {
+        let langs: Vec<String> =
+            cb.languages.iter().take(3).map(|(e, n)| format!(".{e} {n}")).collect();
+        let line1 = format!(
+            "code: {} LOC · {} files · {} commits",
+            commafy(cb.loc),
+            commafy(cb.files as u64),
+            commafy(cb.commits as u64),
+        );
+        d.draw_text(&line1, px + 14, y, 12, Color::new(150, 200, 160, 255));
+        y += 17;
+        let mut flags = langs.join("  ");
+        if cb.has_tests {
+            flags.push_str("  ✓tests");
+        }
+        if cb.has_readme {
+            flags.push_str("  ✓readme");
+        }
+        d.draw_text(&flags, px + 14, y, 11, Color::new(130, 160, 140, 255));
+        y += 18;
+    }
+
+    // Resources: the four classic AoE piles, mapped to real metrics.
+    let m = &city.metrics;
+    let res = format!(
+        "food {}   wood {}   gold {}   stone {}",
+        commafy(m.messages as u64),
+        commafy(m.tools.edit as u64),
+        commafy(m.tokens),
+        commafy(m.commits as u64),
+    );
+    d.draw_text(&res, px + 14, y, 12, Color::new(200, 190, 150, 255));
+    y += 20;
+    d.draw_line(px + 14, y, right, y, PANEL_LINE);
     y += 10;
 
-    for s in city.sessions.iter().take(16) {
+    // Achievements as colour-coded badge pills, wrapped.
+    let total = crate::achievements::CATALOG.len();
+    d.draw_text(&format!("ACHIEVEMENTS  {}/{}", city.achievements.len(), total), px + 14, y, 13, Color::WHITE);
+    y += 20;
+    let mut bx = px + 14;
+    let badge_bottom;
+    {
+        let mut row_y = y;
+        for ach in &city.achievements {
+            let w = text_w(ach.name, 11) + 16;
+            if bx + w > right {
+                bx = px + 14;
+                row_y += 20;
+            }
+            if row_y > py + ph - 220 {
+                d.draw_text("…", bx, row_y + 3, 12, TEXT_DIM);
+                break;
+            }
+            let col = cat_color(ach.cat);
+            d.draw_rectangle_rounded(
+                Rectangle::new(bx as f32, row_y as f32, w as f32, 16.0),
+                0.5,
+                6,
+                Color::new(col.r, col.g, col.b, 46),
+            );
+            d.draw_circle(bx + 7, row_y + 8, 3.0, col);
+            d.draw_text(ach.name, bx + 13, row_y + 3, 11, Color::new(225, 228, 236, 255));
+            bx += w + 5;
+        }
+        badge_bottom = row_y + 22;
+    }
+    y = badge_bottom.max(y);
+    d.draw_line(px + 14, y, right, y, PANEL_LINE);
+    y += 10;
+
+    // Recent sessions.
+    d.draw_text("SESSIONS", px + 14, y, 13, Color::new(200, 206, 222, 255));
+    y += 20;
+    for s in city.sessions.iter() {
+        if y > py + ph - 26 {
+            break;
+        }
         let live = s.is_live(now, LIVE_WINDOW);
         d.draw_circle(px + 20, y + 7, 4.0, if live { GOLD } else { Color::new(96, 102, 116, 255) });
         let title = s.title.clone().unwrap_or_else(|| s.id.chars().take(8).collect());
-        d.draw_text(&ellipsize(&title, 36), px + 32, y, 14, if live { Color::WHITE } else { TEXT_DIM });
-        y += 18;
-        let mc = model_color(s.model.as_deref());
-        d.draw_text(short_model(s.model.as_deref()), px + 32, y, 11, mc);
-        let meta = format!(
-            "{} msg · {} tools · {}",
-            s.total_messages(),
-            s.tool_uses,
-            ago(s.idle_secs(now)),
-        );
-        d.draw_text(&meta, px + 90, y, 11, Color::new(140, 148, 168, 255));
-        y += 22;
-        if y > py + ph - 30 {
-            break;
-        }
-    }
-    let more = city.sessions.len().saturating_sub(16);
-    if more > 0 {
-        d.draw_text(&format!("+{more} more…"), px + 32, y, 12, TEXT_DIM);
+        d.draw_text(&ellipsize(&title, 40), px + 32, y, 13, if live { Color::WHITE } else { TEXT_DIM });
+        y += 17;
+        d.draw_text(short_model(s.model.as_deref()), px + 32, y, 11, model_color(s.model.as_deref()));
+        let meta = format!("{} msg · {} tools · {}", s.total_messages(), s.tool_uses, ago(s.idle_secs(now)));
+        d.draw_text(&meta, px + 92, y, 11, Color::new(140, 148, 168, 255));
+        y += 21;
     }
 }
 

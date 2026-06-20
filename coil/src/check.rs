@@ -1598,6 +1598,21 @@ fn coerce_arg(
             }
             coerce(ae, at, want, is_extern, fname, what)
         }
+        // A WRITABLE place — a `(mut T)`/`(ptr T)` place, or an explicit `(mut x)`
+        // borrow — auto-borrows to a `(ptr T)`: the address-of is implicit, since
+        // a reference is already a pointer. Removes the `alloc-stack` dance for
+        // `call-ptr` args, parser cursors, and hashmap key spills. An IMMUTABLE
+        // place does NOT auto-borrow — a `(ptr T)` is writable, so that would
+        // breach const-correctness — which is exactly what keeps the metal `ptr`
+        // tier distinct from the reference tier (only explicit/`(mut)` places).
+        Type::Ptr(wp) => {
+            if let Some(pointee) = place_pointee(&at) {
+                if pointee == &**wp && is_writable(&at) {
+                    return Ok(ae); // the place's pointer IS the (ptr T) value
+                }
+            }
+            coerce(ae, at, want, is_extern, fname, what)
+        }
         _ => coerce(ae, at, want, is_extern, fname, what),
     }
 }

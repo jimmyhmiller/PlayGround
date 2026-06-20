@@ -191,7 +191,7 @@ fn indirect_frame_root_relocates_value_interior_ref() {
 
     // Allocate a child. Its identity (pre-GC pointer) is captured via a sentinel
     // we can re-find: we read its type_id after relocation to confirm it's live.
-    let child = unsafe { runtime::ai_gc_alloc_fixed(thread, 0) };
+    let child = unsafe { runtime::ai_gc_alloc_fixed(thread, 0, 0) };
     assert!(!child.is_null());
 
     // Simulate a value-with-ref local's alloca interior: a stack word holding the
@@ -362,7 +362,7 @@ fn heap_dump_renders_flattened_value_field() {
     ctx.heap().set_value_meta(vec![point_vm]);
     let thread = ctx.thread_ptr();
     runtime::set_current_thread(thread);
-    let h = unsafe { runtime::ai_gc_alloc_fixed(thread, 0) };
+    let h = unsafe { runtime::ai_gc_alloc_fixed(thread, 0, 0) };
     unsafe {
         (h.add(16) as *mut i64).write(3); // Point.x (value-relative 0)
         (h.add(24) as *mut i64).write(4); // Point.y (value-relative 8)
@@ -411,13 +411,13 @@ fn heap_dump_renders_object_graph() {
 
     // Allocate a Point and write x=3, y=4. (No GC is triggered for two small
     // allocations, so raw pointers stay valid without rooting.)
-    let point = unsafe { runtime::ai_gc_alloc_fixed(thread, 0) };
+    let point = unsafe { runtime::ai_gc_alloc_fixed(thread, 0, 0) };
     unsafe {
         (point.add(16) as *mut i64).write(3);
         (point.add(24) as *mut i64).write(4);
     }
     // Allocate a Boxed whose `inner` points at the Point.
-    let boxed = unsafe { runtime::ai_gc_alloc_fixed(thread, 1) };
+    let boxed = unsafe { runtime::ai_gc_alloc_fixed(thread, 1, 0) };
     unsafe { (boxed.add(16) as *mut *mut u8).write(point) };
 
     let dump = unsafe { gcrust::gc::dump_heap_text(ctx.heap()) };

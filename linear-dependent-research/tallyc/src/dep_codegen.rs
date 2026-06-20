@@ -121,12 +121,27 @@ struct DepCg<'c, 'a> {
     /// self variable (at de Bruijn LEVEL `level`) compiles to a call to `func`,
     /// passing only the non-erased arguments (`erased[i]` flags multiplicity-0).
     fix_selves: RefCell<Vec<FixSelf<'c>>>,
+    /// the stack of accumulator-fold induction-hypothesis bindings in scope (Phase
+    /// 1a′ native codegen). Inside the successor method of a function-typed-motive
+    /// `NatElim`, the IH (at de Bruijn LEVEL `level`) is the recursive fold on the
+    /// predecessor `k`; `App(ih, accs…)` compiles to a call `func(k, accs…)`.
+    acc_ih_selves: RefCell<Vec<AccIhSelf<'c>>>,
 }
 
 struct FixSelf<'c> {
     level: usize,
     func: FunctionValue<'c>,
     erased: Vec<bool>,
+}
+
+/// An accumulator-fold induction-hypothesis binding (Phase 1a′ native codegen): the
+/// IH variable (at de Bruijn LEVEL `level`) stands for "the fold on the predecessor
+/// `k`", so `App(ih, accs…)` compiles to `call func(k, accs…)`. `func` is the native
+/// recursive function for the fold; `k` is its predecessor value at this point.
+struct AccIhSelf<'c> {
+    level: usize,
+    func: FunctionValue<'c>,
+    k: IntValue<'c>,
 }
 
 /// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
@@ -211,6 +226,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::App(_, _) => {
                 // β-reduce a fully-applied spine: (λ…λ. body) a₁ … aₙ
                 let (head, args) = flatten_app(t);
+                // A function-typed-motive `NatElim` applied to its accumulators is an
+                // ACCUMULATOR FOLD (Phase 1a′): compile it to a native recursive
+                // function threading the accumulators (the IH is the fold on `k`).
+                if let Term::NatElim(p, z, s, scrut) = strip_ann(head) {
+                    if !args.is_empty() {
+                        return self.compile_acc_fold(f, env, p, z, s, scrut, &args);
+                    }
+                }
                 // A postulate at the head of a spine (e.g. `alloc`, `free`,
                 // `insert`, `remove`) is a memory primitive: dispatch to its
                 // native implementation, erasing its multiplicity-0 arguments.
@@ -218,9 +241,33 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     return self.compile_postulate(f, env, c, &args);
                 }
                 // A reference to an enclosing `Fix`'s self variable is a recursive
-                // CALL (not an inline): emit `call self_fn(non-erased args)`.
+                // CALL (not an inline): emit `call self_fn(non-erased args)`. An
+                // accumulator-fold IH self is the same idea — a recursive fold call
+                // on the predecessor `k`, with `k` prepended to the accumulators.
                 if let Term::Var(i) = strip_ann(head) {
                     let lvl = env.len() - 1 - *i;
+                    if let Some((func, k)) = self
+                        .acc_ih_selves
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|a| a.level == lvl)
+                        .map(|a| (a.func, a.k))
+                    {
+                        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                            vec![k.into()];
+                        for a in &args {
+                            call_args.push(self.compile(f, env, a)?.into());
+                        }
+                        return Ok(self
+                            .builder
+                            .build_call(func, &call_args, "ih.call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_int_value());
+                    }
                     let hit = self
                         .fix_selves
                         .borrow()
@@ -1026,6 +1073,7 @@ fn build_module<'c>(
         next_id: RefCell::new(0),
         fix_cache: RefCell::new(std::collections::HashMap::new()),
         fix_selves: RefCell::new(Vec::new()),
+        acc_ih_selves: RefCell::new(Vec::new()),
     };
     let result = cg.compile(f, &[], main)?;
     builder.build_return(Some(&result)).unwrap();

@@ -266,3 +266,36 @@ fn mut_bound_aggregate_borrows_to_byref_param() {
     "#;
     assert_eq!(build_and_run(src), 42);
 }
+
+#[test]
+fn mut_place_auto_borrows_to_ptr_param() {
+    // DOGFOOD A4: a writable place — a (mut) local, a (mut x) borrow, or a scalar
+    // (mut) local — auto-borrows to a (ptr T) param, removing the alloc-stack
+    // dance. The address-of is implicit (a reference is already a pointer).
+    let src = r#"
+        (defstruct Box [(v i64)])
+        (defn via-ptr [(p (ptr Box))] (-> i64) (load (field p v)))
+        (defn add-one [(p (ptr i64))] (-> i64) (store! p (iadd (load p) 1)) 0)
+        (defn main [] (-> i64)
+          (let [(mut b) (zeroed Box) (mut n) 40]
+            (store! (field b v) 1)
+            (add-one (mut n))             ; scalar (mut) local -> (ptr i64)
+            (iadd (via-ptr (mut b)) (load n))))   ; (mut Box) -> (ptr Box); 1 + 41 = 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn immutable_place_does_not_auto_borrow_to_ptr_param() {
+    // The metal `ptr` tier stays distinct: an IMMUTABLE place (a (ref T) param)
+    // must NOT auto-borrow to a (ptr T) — a (ptr T) is writable, so allowing it
+    // would launder an immutable reference into a mutable pointer.
+    let src = r#"
+        (defstruct Box [(v i64)])
+        (defn writes [(p (ptr Box))] (-> i64) (store! (field p v) 99) 0)
+        (defn bad [(r (ref Box))] (-> i64) (writes r))
+        (defn main [] (-> i64) 0)
+    "#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("(ptr"), "got: {err}");
+}

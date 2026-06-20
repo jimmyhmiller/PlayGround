@@ -70,8 +70,12 @@ pub enum Cat {
 }
 
 pub struct AchievementDef {
+    /// Stable id for referencing/saving (part of the catalog API; not all UIs use it).
+    #[allow(dead_code)]
     pub id: &'static str,
     pub name: &'static str,
+    /// One-line description, shown in fuller achievement views.
+    #[allow(dead_code)]
     pub desc: &'static str,
     pub cat: Cat,
     pub test: fn(&Metrics) -> bool,

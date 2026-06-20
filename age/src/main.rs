@@ -28,15 +28,17 @@ const ASSET_BASE: &str = env!("CARGO_MANIFEST_DIR");
 struct Args {
     mock: bool,
     screenshot: Option<String>,
+    scan: Option<String>,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mock: false, screenshot: None };
+    let mut a = Args { mock: false, screenshot: None, scan: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--mock" => a.mock = true,
             "--screenshot" => a.screenshot = it.next(),
+            "--scan" => a.scan = it.next(),
             _ => {}
         }
     }
@@ -45,6 +47,17 @@ fn parse_args() -> Args {
 
 fn main() {
     let args = parse_args();
+
+    // Debug: scan a codebase and print what the biome/achievements would see.
+    if let Some(path) = args.scan {
+        let cb = data::repo::scan(std::path::Path::new(&path));
+        println!("{path}");
+        println!("  files={}  loc={}  commits={}  bytes={}", cb.files, cb.loc, cb.commits, cb.bytes);
+        println!("  readme={}  tests={}", cb.has_readme, cb.has_tests);
+        println!("  languages={:?}", cb.languages);
+        println!("  dominant={:?} -> biome {:?}", cb.dominant_lang(), cb.dominant_lang().map(game::Biome::from_lang));
+        return;
+    }
 
     let (mut rl, thread) = raylib::init()
         .size(1280, 800)
@@ -169,7 +182,7 @@ fn main() {
         let mouse_world = rl.get_screen_to_world2D(mouse, cam);
         let over_ui = mouse.y < 34.0
             || mouse.y > sh as f32 - 26.0
-            || (selected.is_some() && mouse.x > sw as f32 - 340.0);
+            || (selected.is_some() && mouse.x > sw as f32 - 384.0);
         let hovered = if dragging || over_ui {
             None
         } else {
@@ -228,17 +241,18 @@ fn run_screenshot(
     let sh = rl.get_screen_height();
     cam.offset = Vector2::new(sw as f32 / 2.0, sh as f32 / 2.0);
 
-    // Wait up to ~5s for data.
+    // Wait for the first snapshot, then keep polling ~20s so the incremental repo
+    // scans (a handful per poll) finish and biomes/codebase stats are representative.
     let mut waited = 0;
-    while runner.is_loading() && waited < 300 {
+    while waited < 1300 {
         if runner.poll_latest() {
             world.sync(runner.latest());
         }
+        if !runner.is_loading() && waited >= 1250 {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(16));
         waited += 1;
-    }
-    if runner.poll_latest() {
-        world.sync(runner.latest());
     }
     frame_all(cam, world, sw, sh);
 

@@ -1093,16 +1093,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let ptr = self.ctx.ptr_type(AddressSpace::default());
         let i32t = self.ctx.i32_type();
         let i64t = self.ctx.i64_type();
-        // ptr ai_gc_alloc_fixed(ptr thread, i32 type_id)
+        // ptr ai_gc_alloc_fixed(ptr thread, i32 type_id, i32 site_id)
         self.module.add_function(
             "ai_gc_alloc_fixed",
-            ptr.fn_type(&[ptr.into(), i32t.into()], false),
+            ptr.fn_type(&[ptr.into(), i32t.into(), i32t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
-        // ptr ai_gc_alloc_varlen(ptr thread, i32 type_id, i64 n)
+        // ptr ai_gc_alloc_varlen(ptr thread, i32 type_id, i64 n, i32 site_id)
         self.module.add_function(
             "ai_gc_alloc_varlen",
-            ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into()], false),
+            ptr.fn_type(&[ptr.into(), i32t.into(), i64t.into(), i32t.into()], false),
             Some(inkwell::module::Linkage::External),
         );
         // void ai_gc_write_barrier(ptr thread, ptr obj, ptr new_val)
@@ -1405,11 +1405,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             vals.push((self.gen_expr(fcx, fe)?, fe.repr.clone()));
         }
 
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16);
         let alloc = self.module.get_function("ai_gc_alloc_fixed").unwrap();
         let obj = call_result(
             self.builder.build_call(
                 alloc,
-                &[fcx.thread.into(), i32t.const_int(layout as u64, false).into()],
+                &[
+                    fcx.thread.into(),
+                    i32t.const_int(layout as u64, false).into(),
+                    i32t.const_int(site as u64, false).into(),
+                ],
                 "obj",
             ).unwrap(),
         ).into_pointer_value();
@@ -1655,10 +1660,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let lid = match repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("string repr".into())) };
         let bytes = s.as_bytes();
         let n = bytes.len() as u64;
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), lid as u16);
         let alloc = self.module.get_function("ai_gc_alloc_varlen").unwrap();
         let obj = call_result(self.builder.build_call(
             alloc,
-            &[fcx.thread.into(), i32t.const_int(lid as u64, false).into(), i64t.const_int(n, false).into()],
+            &[
+                fcx.thread.into(),
+                i32t.const_int(lid as u64, false).into(),
+                i64t.const_int(n, false).into(),
+                i32t.const_int(site as u64, false).into(),
+            ],
             "str",
         ).unwrap()).into_pointer_value();
         // Store bytes at HEADER + 8 (after the count word). Byte-by-byte; small
@@ -1690,10 +1701,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let varlen_len = if traced { n64 } else {
             self.builder.build_int_mul(n64, i64t.const_int(stride, false), "blen").unwrap()
         };
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16);
         let alloc = self.module.get_function("ai_gc_alloc_varlen").unwrap();
         let obj = call_result(self.builder.build_call(
             alloc,
-            &[fcx.thread.into(), i32t.const_int(layout as u64, false).into(), varlen_len.into()],
+            &[
+                fcx.thread.into(),
+                i32t.const_int(layout as u64, false).into(),
+                varlen_len.into(),
+                i32t.const_int(site as u64, false).into(),
+            ],
             "arr",
         ).unwrap()).into_pointer_value();
         Ok(Some(obj.into()))
@@ -1778,9 +1795,18 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         for c in captures {
             vals.push((self.gen_expr(fcx, c)?, c.repr.clone()));
         }
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), env as u16);
         let alloc = self.module.get_function("ai_gc_alloc_fixed").unwrap();
         let obj = call_result(
-            self.builder.build_call(alloc, &[fcx.thread.into(), i32t.const_int(env as u64, false).into()], "clo").unwrap(),
+            self.builder.build_call(
+                alloc,
+                &[
+                    fcx.thread.into(),
+                    i32t.const_int(env as u64, false).into(),
+                    i32t.const_int(site as u64, false).into(),
+                ],
+                "clo",
+            ).unwrap(),
         ).into_pointer_value();
         for (c, slot) in captures.iter().zip(vals.iter_mut()) {
             if self.repr_relocates(&c.repr) {
@@ -2936,6 +2962,9 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
     // reflection can recover type/field names (the GC type table is nameless).
     rt.heap().set_type_meta(layouts_to_type_meta(prog));
     rt.heap().set_value_meta(layouts_to_value_meta(prog));
+    // Install the allocation-site table (Target-1b) so GCR_ALLOC_PROFILE can
+    // name each site's (function, type).
+    rt.heap().set_alloc_sites(compiled.alloc_sites.clone());
 
     let addr = ee
         .get_function_address(&compiled.entry_name)
@@ -2969,6 +2998,11 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
     // Opt-in GC log: GCR_GC_LOG=<path> writes one JSON object per collection.
     if let Some(path) = std::env::var_os("GCR_GC_LOG") {
         let _ = std::fs::write(&path, rt.heap().gc_log_jsonl());
+    }
+    // Opt-in allocation-site profile (Target-1b): GCR_ALLOC_PROFILE=1 prints the
+    // per-site count+bytes table at program end (heap quiescent).
+    if std::env::var_os("GCR_ALLOC_PROFILE").is_some() {
+        eprint!("{}", rt.heap().alloc_site_profile_report());
     }
     Ok(result)
 }
@@ -3100,6 +3134,7 @@ pub fn codegen_aot_object(
         &layouts_to_type_meta(prog),
         &layouts_to_value_meta(prog),
         &interior,
+        &compiled.alloc_sites,
     );
     let meta_vals: Vec<_> = meta_bytes
         .iter()
