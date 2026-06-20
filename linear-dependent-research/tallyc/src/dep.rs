@@ -1306,7 +1306,18 @@ fn occurs(data: &str, t: &Term) -> bool {
                 go(data, e, found);
                 go(data, ty, found);
             }
-            _ => {}
+            // EXHAUSTIVE on purpose — NO catch-all. This is a soundness-critical
+            // traversal (it is the only barrier against non-positive datatypes); a
+            // `_ => {}` once silently swallowed `NatCase`/`Fix` and let a hidden
+            // negative occurrence reduce past positivity (Curry's paradox). Listing
+            // every LEAF explicitly means a future `Term` variant that carries
+            // subterms is a COMPILE ERROR here until it is handled.
+            Term::Var(_)
+            | Term::Type(_)
+            | Term::Nat
+            | Term::NatLit(_)
+            | Term::Zero
+            | Term::Const(_) => {}
         }
     }
     go(data, t, &mut found);
