@@ -75,6 +75,26 @@ fn cond_picks_first_true_then_else() {
 }
 
 #[test]
+fn block_yields_last_value() {
+    let code = run_with("(defn main [] (-> :i64) (block :b 40 2))");
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn return_from_short_circuits_across_a_loop() {
+    // Early return (itself a macro over loop/break) from *inside* a `for` (also
+    // a macro): integer square root of 49 = 7. Proves no 4th core form is needed.
+    let code = run_with(
+        r#"(defn isqrt [(n :i64)] (-> :i64)
+             (block :b
+               (for [i 0 100] (if (icmp-eq (imul i i) n) (return-from :b i) 0))
+               -1))
+           (defn main [] (-> :i64) (isqrt 49))"#,
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
 fn pipe_threads_first_and_last() {
     // `|>` threads x as the first arg: (5+1)*2 = 12. `|>>` threads it last:
     // (10-5) = 5. Sum 17. (Spelled `|>` because `->` is reserved for return types.)

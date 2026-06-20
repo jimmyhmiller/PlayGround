@@ -91,6 +91,20 @@
           (rest forms)))))
 (defmacro |>> [x & forms] (thread-last x forms))
 
+; ---- labeled block + early return (macros over loop/break) ----------------
+; `(block :b body...)` evaluates body and yields its value; `(return-from :b v)`
+; anywhere inside exits the block early with v. Implemented as a single-iteration
+; `loop` whose value is delivered by `break` — so EARLY RETURN is itself a macro,
+; needing no core support. This is the substrate `defer`/scope guards build on.
+;
+; `(block :b e...)` => `(loop :b (break :b (do e...)))`: the inner `do` runs to a
+; value then breaks; an early `(return-from :b v)` => `(break :b v)` short-circuits.
+(defmacro block [label & body]
+  `(loop ~label (break ~label (do ~@body))))
+
+(defmacro return-from [label v]
+  `(break ~label ~v))
+
 ; ---- comptime-unrolled loop ----------------------------------------------
 ; `(inline-for [i LO HI] body...)` — fully unrolls `body` for i = LO..HI-1,
 ; with i a compile-time literal each iteration (zero runtime loop overhead).
