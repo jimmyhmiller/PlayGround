@@ -198,3 +198,34 @@ fn array_param_passes_by_reference() {
     "#;
     assert_eq!(build_and_run(src), 42);
 }
+
+#[test]
+fn ref_type_syntax_immutable_reference_param() {
+    // (ref T) spells an explicit immutable-reference param — the dual of (mut T).
+    // For an aggregate it matches the implicit by-ref; for a scalar it lets a
+    // by-reference param be written. A reference reads-as-value at coercion points
+    // (return / args); arithmetic on a scalar ref needs an explicit (load).
+    let src = r#"
+        (defstruct Pt [(x i64) (y i64)])
+        (defn inc [(x (ref i64))] (-> i64) (iadd (load x) 1))
+        (defn ident [(x (ref i64))] (-> i64) x)
+        (defn px [(p (ref Pt))] (-> i64) (load (field p x)))
+        (defn main [] (-> i64)
+          (let [(mut p) (zeroed Pt)]
+            (store! (field p x) 30)
+            (iadd (px p) (iadd (inc 9) (ident 2)))))   ; 30 + 10 + 2 = 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn ref_type_param_rejects_write_through() {
+    // (ref T) is IMMUTABLE: writing through it is rejected (const-correctness).
+    let src = r#"
+        (defstruct Pt [(x i64)])
+        (defn bad [(p (ref Pt))] (-> i64) (store! (field p x) 1) 0)
+        (defn main [] (-> i64) 0)
+    "#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("immutable"), "got: {err}");
+}

@@ -437,6 +437,14 @@ fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
                 let pointee = parse_type(items.get(1).ok_or("mut: expects (mut TYPE)")?)?;
                 Ok(Type::Ref(true, Box::new(pointee)))
             }
+            // (ref TYPE) -> an immutable reference to TYPE. The dual of (mut T):
+            // it spells the by-immutable-reference parameter that an aggregate
+            // takes implicitly, and lets a non-aggregate param be taken by
+            // reference too.
+            "ref" => {
+                let pointee = parse_type(items.get(1).ok_or("ref: expects (ref TYPE)")?)?;
+                Ok(Type::Ref(false, Box::new(pointee)))
+            }
             // (ptr TYPE) -> pointer to TYPE; (ptr) defaults the pointee to i64.
             "ptr" => {
                 let pointee = match items.get(1) {

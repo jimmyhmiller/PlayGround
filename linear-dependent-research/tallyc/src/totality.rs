@@ -54,9 +54,16 @@ pub(crate) struct Call {
 /// One `match` arm, distilled for the analysis.
 #[derive(Clone, Debug)]
 pub(crate) struct ArmInfo {
-    /// pattern binders that are STRICT SUBTERMS of the scrutinee (recursive
+    /// pattern binders that are STRICT SUBTERMS of the scrutinee (DIRECT recursive
     /// fields of the matched constructor) — the legal structural-decrease targets.
     pub smaller: Vec<String>,
+    /// pattern binders that are HIGHER-ORDER recursive fields (`(z…) → data idxs`,
+    /// e.g. a W-type's children-function or `Acc`'s accessibility function). A
+    /// recursive call whose matched-position argument is `f(args…)` for such an `f`
+    /// descends structurally: each `f(args…)` is a strict subterm (Phase 1b /
+    /// well-founded recursion). The kernel's IH for such a field is itself a
+    /// function (`λz…. elim (f z…)`), so this is genuinely the sub-derivation.
+    pub ho_smaller: Vec<String>,
     /// every call (to any function) occurring in this arm's body.
     pub calls: Vec<Call>,
 }
@@ -226,9 +233,14 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
                     f.name
                 ));
             }
-            // scrutinee-position argument must be a strict subterm (a smaller var).
+            // scrutinee-position argument must be a strict subterm: either a DIRECT
+            // recursive-field binder (`smaller`), or — for a HIGHER-ORDER recursive
+            // field `f` (a W-type child-function / `Acc`'s accessibility fn) — an
+            // application `f(args…)` of it, which is the genuine sub-derivation the
+            // kernel's functional IH eliminates (Phase 1b / well-founded recursion).
             match &c.args[sp] {
                 Tm::Var(v) if arm.smaller.contains(v) => {}
+                Tm::Call(g, _) if arm.ho_smaller.contains(g) => {}
                 other => {
                     return Totality::Partial(format!(
                         "recursive call to `{}` does not decrease: the argument in the \

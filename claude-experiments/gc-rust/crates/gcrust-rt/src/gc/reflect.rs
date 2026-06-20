@@ -32,6 +32,23 @@ pub struct TypeMeta {
     pub kind: TypeKind,
 }
 
+/// Compile-time descriptor for one allocation site (Target-1b allocation-site
+/// profiling). Baked by the compiler (one entry per unique
+/// `(function, allocated-type)` pair — the honest v1 granularity, since Core IR
+/// carries no source span to distinguish two allocations of the same type in
+/// the same function) and installed at startup via
+/// [`super::heap::Heap::set_alloc_sites`]. The runtime's per-site counters are
+/// indexed by this entry's position in the table (the `site_id` passed to
+/// `ai_gc_alloc_*`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllocSite {
+    /// The function containing the allocation site (its compiled symbol name).
+    pub function: String,
+    /// The `type_id` (= `LayoutId`) of the object allocated here. Pairs with
+    /// [`TypeMeta`] to recover the source type name in a profile.
+    pub type_id: u16,
+}
+
 /// The shape category of a type, with the nominal detail the GC shape lacks.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeKind {
@@ -276,12 +293,19 @@ fn put_field_list(out: &mut Vec<u8>, fields: &[FieldMeta]) {
     }
 }
 
-/// Encode the type table, value table, and per-type interior-pointer offsets
-/// into the self-describing byte format above. Decoded by [`decode`] (the same
-/// code, so the JIT/AOT paths can't drift). `interior[i]` lists the absolute
-/// byte offsets of GC refs embedded in flattened value fields of type `i` (used
-/// to set `gc::TypeInfo::interior_ptrs` for the AOT type table).
-pub fn encode(types: &[TypeMeta], values: &[ValueMeta], interior: &[Vec<u16>]) -> Vec<u8> {
+/// Encode the type table, value table, per-type interior-pointer offsets, and
+/// the allocation-site table into the self-describing byte format above.
+/// Decoded by [`decode`] (the same code, so the JIT/AOT paths can't drift).
+/// `interior[i]` lists the absolute byte offsets of GC refs embedded in
+/// flattened value fields of type `i` (used to set
+/// `gc::TypeInfo::interior_ptrs` for the AOT type table). `alloc_sites[k]`
+/// describes the allocation site whose compile-time id is `k`.
+pub fn encode(
+    types: &[TypeMeta],
+    values: &[ValueMeta],
+    interior: &[Vec<u16>],
+    alloc_sites: &[AllocSite],
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(types.len() as u32).to_le_bytes());
     for m in types {
@@ -302,6 +326,11 @@ pub fn encode(types: &[TypeMeta], values: &[ValueMeta], interior: &[Vec<u16>]) -
         for &o in offs {
             out.extend_from_slice(&o.to_le_bytes());
         }
+    }
+    out.extend_from_slice(&(alloc_sites.len() as u32).to_le_bytes());
+    for s in alloc_sites {
+        put_str(&mut out, &s.function);
+        out.extend_from_slice(&s.type_id.to_le_bytes());
     }
     out
 }
@@ -373,11 +402,11 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Decode the type table, value table, and per-type interior-pointer offsets
-/// previously produced by [`encode`]. Panics (rather than silently truncating)
-/// on a malformed blob — a corrupt table means a build/link bug, not a
-/// recoverable condition.
-pub fn decode(bytes: &[u8]) -> (Vec<TypeMeta>, Vec<ValueMeta>, Vec<Vec<u16>>) {
+/// Decode the type table, value table, per-type interior-pointer offsets, and
+/// allocation-site table previously produced by [`encode`]. Panics (rather than
+/// silently truncating) on a malformed blob — a corrupt table means a build/link
+/// bug, not a recoverable condition.
+pub fn decode(bytes: &[u8]) -> (Vec<TypeMeta>, Vec<ValueMeta>, Vec<Vec<u16>>, Vec<AllocSite>) {
     let mut r = Reader { buf: bytes, pos: 0 };
     let tcount = r.u32() as usize;
     let mut types = Vec::with_capacity(tcount);
@@ -401,7 +430,14 @@ pub fn decode(bytes: &[u8]) -> (Vec<TypeMeta>, Vec<ValueMeta>, Vec<Vec<u16>>) {
         let n = r.u16() as usize;
         interior.push((0..n).map(|_| r.u16()).collect());
     }
-    (types, values, interior)
+    let scount = r.u32() as usize;
+    let mut alloc_sites = Vec::with_capacity(scount);
+    for _ in 0..scount {
+        let function = r.string();
+        let type_id = r.u16();
+        alloc_sites.push(AllocSite { function, type_id });
+    }
+    (types, values, interior, alloc_sites)
 }
 
 #[cfg(test)]
@@ -481,23 +517,35 @@ mod tests {
         }]
     }
 
+    fn sample_alloc_sites() -> Vec<AllocSite> {
+        vec![
+            AllocSite { function: "main".into(), type_id: 1 },
+            AllocSite { function: "build_list".into(), type_id: 2 },
+            // Same type allocated in a different function => distinct site.
+            AllocSite { function: "helper".into(), type_id: 1 },
+        ]
+    }
+
     #[test]
     fn encode_decode_roundtrip() {
         let types = sample();
         let values = sample_values();
         let interior = vec![vec![], vec![16u16], vec![16u16, 24u16]];
-        let bytes = encode(&types, &values, &interior);
-        let (t, v, i) = decode(&bytes);
+        let alloc_sites = sample_alloc_sites();
+        let bytes = encode(&types, &values, &interior, &alloc_sites);
+        let (t, v, i, s) = decode(&bytes);
         assert_eq!(types, t);
         assert_eq!(values, v);
         assert_eq!(interior, i);
+        assert_eq!(alloc_sites, s);
     }
 
     #[test]
     fn empty_table_roundtrips() {
-        let (t, v, i) = decode(&encode(&[], &[], &[]));
+        let (t, v, i, s) = decode(&encode(&[], &[], &[], &[]));
         assert_eq!(t, Vec::<TypeMeta>::new());
         assert_eq!(v, Vec::<ValueMeta>::new());
         assert_eq!(i, Vec::<Vec<u16>>::new());
+        assert_eq!(s, Vec::<AllocSite>::new());
     }
 }

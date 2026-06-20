@@ -35,7 +35,7 @@ pub use roots::{
 pub use scan::scan_object;
 pub use semi_space::{FORWARDING_BIT, PtrPolicy, SemiSpace, follow_forwarding};
 pub use statemap::StatemapTracer;
-pub use thread::{MutatorThread, ThreadState};
+pub use thread::{MutatorThread, SiteCounter, ThreadState};
 pub use type_info::{TypeInfo, VarLenKind};
 
 #[cfg(test)]

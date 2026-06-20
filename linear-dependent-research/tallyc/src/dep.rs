@@ -368,6 +368,15 @@ fn vnatcase(p: Value, z: Value, s: Value, scrut: Value) -> Value {
 /// strict positivity guarantees this). Returns `Some((doms, idxs))` — the domain
 /// telescope and the final index spine — when the type ends in the family `data`,
 /// else `None`. `m = 0` is the ordinary direct-recursion case `D … idxs`.
+/// Is `t` a recursive occurrence of `data` — either DIRECT (`data idxs`) or
+/// HIGHER-ORDER (`(z₁…zₘ) → data idxs`, a strictly-positive function field)? If so,
+/// returns the telescope arity `m` (0 for a direct field). Used by the surface
+/// match-compiler to detect recursive constructor fields (mirroring `method_ty_tm`
+/// /`velim`, which read recursion off the declared type via `rec_spine`).
+pub(crate) fn rec_field_arity(data: &str, t: &Term) -> Option<usize> {
+    rec_spine(data, t).map(|(doms, _)| doms.len())
+}
+
 fn rec_spine<'a>(data: &str, mut t: &'a Term) -> Option<(Vec<&'a Term>, &'a [Term])> {
     let mut doms: Vec<&Term> = Vec::new();
     loop {

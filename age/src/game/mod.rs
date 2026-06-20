@@ -4,9 +4,10 @@
 //!
 //! It owns no rendering and no I/O — it consumes snapshots and advances motion.
 
-use crate::data::{CityInfo, SessionInfo, WorldSnapshot};
+use crate::achievements::{self, AchievementDef, Metrics};
+use crate::data::{CityInfo, CodebaseInfo, SessionInfo, Tool, WorldSnapshot};
 use crate::render::assets;
-use crate::util::Rng;
+use crate::util::{hash64, Rng};
 use raylib::prelude::Vector2;
 use std::collections::{HashMap, HashSet};
 
@@ -15,8 +16,145 @@ pub const LIVE_WINDOW: f64 = 600.0;
 
 const GRID_COLS: i32 = 9;
 const CELL: f32 = 380.0;
-const MAX_HOUSES: usize = 14;
 const MAX_VILLAGERS: usize = 8;
+
+// ---- Civilization metadata derived from a city's data ------------------------
+
+/// The "age" of a city — how far the project has advanced. Drives footprint,
+/// building count, town-center sprite and walls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Outpost,
+    Hamlet,
+    Village,
+    Town,
+    City,
+    Metropolis,
+}
+
+impl Tier {
+    pub fn from_score(s: u64) -> Tier {
+        match s {
+            0..=49 => Tier::Outpost,
+            50..=499 => Tier::Hamlet,
+            500..=1_999 => Tier::Village,
+            2_000..=7_999 => Tier::Town,
+            8_000..=24_999 => Tier::City,
+            _ => Tier::Metropolis,
+        }
+    }
+    pub fn index(self) -> usize {
+        [Tier::Outpost, Tier::Hamlet, Tier::Village, Tier::Town, Tier::City, Tier::Metropolis]
+            .iter()
+            .position(|&t| t == self)
+            .unwrap_or(0)
+    }
+    pub fn name(self) -> &'static str {
+        ["Outpost", "Hamlet", "Village", "Town", "City", "Metropolis"][self.index()]
+    }
+    /// Max session-houses to render at this tier (bigger cities, more buildings).
+    pub fn max_houses(self) -> usize {
+        [2, 4, 7, 10, 13, 16][self.index()]
+    }
+    /// Town center is a proper castle keep from Town upward (else a hut/house).
+    pub fn has_keep(self) -> bool {
+        self.index() >= 3
+    }
+    /// A wall ring appears at City and Metropolis.
+    pub fn has_walls(self) -> bool {
+        self.index() >= 4
+    }
+    /// Town-center sprite scale grows with tier.
+    pub fn keep_scale(self) -> f32 {
+        [2.6, 3.0, 3.4, 3.8, 4.3, 4.9][self.index()]
+    }
+}
+
+/// The biome a city sits in, themed by its dominant language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Biome {
+    Forge,
+    Coast,
+    Forest,
+    Port,
+    Steppe,
+    Stone,
+    Plains,
+    Vale,
+    Heartland,
+}
+
+impl Biome {
+    pub fn from_lang(lang: &str) -> Biome {
+        match lang {
+            "rs" | "zig" | "v" | "nim" => Biome::Forge,
+            "swift" | "m" | "mm" => Biome::Coast,
+            "clj" | "cljs" | "cljc" | "edn" | "lisp" | "el" | "bg" | "scm" | "rkt" => Biome::Forest,
+            "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs" | "vue" | "svelte" => Biome::Port,
+            "py" => Biome::Steppe,
+            "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" => Biome::Stone,
+            "go" => Biome::Plains,
+            "md" | "txt" | "org" | "rst" => Biome::Vale,
+            _ => Biome::Heartland,
+        }
+    }
+    /// Stable fallback when the project's language is unknown.
+    pub fn from_hash(id: &str) -> Biome {
+        const OPTS: [Biome; 7] = [
+            Biome::Forge, Biome::Coast, Biome::Forest, Biome::Port, Biome::Steppe, Biome::Stone,
+            Biome::Plains,
+        ];
+        OPTS[(hash64(&id) % OPTS.len() as u64) as usize]
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Biome::Forge => "Forge Hills",
+            Biome::Coast => "The Coast",
+            Biome::Forest => "Enchanted Forest",
+            Biome::Port => "Trade Port",
+            Biome::Steppe => "Grass Steppe",
+            Biome::Stone => "Ancient Stone",
+            Biome::Plains => "Open Plains",
+            Biome::Vale => "Scholars' Vale",
+            Biome::Heartland => "Heartland",
+        }
+    }
+}
+
+/// How recently the city was active, as a "season" tint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Season {
+    HighSummer,
+    Summer,
+    LateSummer,
+    Autumn,
+    Winter,
+    Dormant,
+}
+
+impl Season {
+    pub fn from_idle(idle_secs: f64) -> Season {
+        const DAY: f64 = 86_400.0;
+        match idle_secs {
+            s if s < 600.0 => Season::HighSummer,
+            s if s < DAY => Season::Summer,
+            s if s < 7.0 * DAY => Season::LateSummer,
+            s if s < 30.0 * DAY => Season::Autumn,
+            s if s < 182.0 * DAY => Season::Winter,
+            _ => Season::Dormant,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Season::HighSummer => "High Summer",
+            Season::Summer => "Summer",
+            Season::LateSummer => "Late Summer",
+            Season::Autumn => "Autumn",
+            Season::Winter => "Winter",
+            Season::Dormant => "Dormant",
+        }
+    }
+}
 
 pub struct World {
     pub cities: Vec<City>,
@@ -39,6 +177,13 @@ pub struct City {
     pub total_tools: u32,
     pub live: usize,
     pub last_active: Option<f64>,
+    // Derived "civilization" metadata.
+    pub tier: Tier,
+    pub biome: Biome,
+    pub season: Season,
+    pub codebase: Option<CodebaseInfo>,
+    pub metrics: Metrics,
+    pub achievements: Vec<&'static AchievementDef>,
 }
 
 pub struct Building {
@@ -51,6 +196,10 @@ pub struct Building {
     pub live: bool,
     pub messages: u32,
     pub smoke_t: f32,
+    /// Tier of the owning city (drives the town-center sprite/scale).
+    pub tier: Tier,
+    /// Dominant tool for this session -> specialized building type.
+    pub tool: Tool,
 }
 
 pub struct Villager {
@@ -103,6 +252,12 @@ impl World {
                         total_tools: 0,
                         live: 0,
                         last_active: None,
+                        tier: Tier::Outpost,
+                        biome: Biome::Heartland,
+                        season: Season::Dormant,
+                        codebase: None,
+                        metrics: Metrics::default(),
+                        achievements: Vec::new(),
                     };
                     update_city(&mut city, info, pos, self.now);
                     self.index.insert(info.id.clone(), self.cities.len());
@@ -193,7 +348,22 @@ fn update_city(city: &mut City, info: &CityInfo, center: Vector2, now: f64) {
     city.live = info.live_sessions(now, LIVE_WINDOW);
     city.last_active = info.last_active();
 
-    // --- Buildings: town center + one house per session (capped) -------------
+    // --- Derived civilization metadata ---------------------------------------
+    city.tier = Tier::from_score(info.activity_score());
+    city.biome = info
+        .codebase
+        .as_ref()
+        .and_then(|c| c.dominant_lang())
+        .map(Biome::from_lang)
+        .unwrap_or_else(|| Biome::from_hash(&info.id));
+    let idle = city.last_active.map(|t| (now - t).max(0.0)).unwrap_or(f64::INFINITY);
+    city.season = Season::from_idle(idle);
+    city.codebase = info.codebase.clone();
+    city.metrics = Metrics::from_city(info, now);
+    city.achievements = achievements::unlocked(&city.metrics);
+
+    // --- Buildings: town center + one house per session (capped by tier) -----
+    let tier = city.tier;
     let mut existing: HashMap<String, Vector2> =
         city.buildings.iter().map(|b| (b.session_id.clone(), b.pos)).collect();
     let mut buildings = Vec::new();
@@ -207,9 +377,11 @@ fn update_city(city: &mut City, info: &CityInfo, center: Vector2, now: f64) {
         live: city.live > 0,
         messages: city.total_messages,
         smoke_t: 0.0,
+        tier,
+        tool: Tool::Edit,
     });
 
-    for (i, s) in info.sessions.iter().take(MAX_HOUSES).enumerate() {
+    for (i, s) in info.sessions.iter().take(tier.max_houses()).enumerate() {
         // Ring of houses around the town center, deterministic per session.
         let mut rng = Rng::seeded(&(&info.id, &s.id));
         let pos = *existing.entry(s.id.clone()).or_insert_with(|| {
@@ -221,12 +393,14 @@ fn update_city(city: &mut City, info: &CityInfo, center: Vector2, now: f64) {
             session_id: s.id.clone(),
             pos,
             is_town_center: false,
-            preset: 1 + (crate::util::hash64(&s.id) as usize % (assets::HOUSES.len() - 1)),
+            preset: 1 + (hash64(&s.id) as usize % (assets::HOUSES.len() - 1)),
             model: s.model.clone(),
             title: s.title.clone(),
             live: s.is_live(now, LIVE_WINDOW),
             messages: s.total_messages(),
             smoke_t: 0.0,
+            tier,
+            tool: s.tools.dominant(),
         });
     }
     // Sort by y so nearer buildings draw last (painter's order).

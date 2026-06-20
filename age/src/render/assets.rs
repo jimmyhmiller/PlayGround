@@ -31,6 +31,18 @@ pub const STONES: i32 = 43;
 pub const FLAG: i32 = 95;
 /// A market stall.
 pub const MARKET: i32 = 57;
+/// A wooden signpost (Tiny Town).
+pub const SIGNPOST: i32 = 83;
+/// A simple wall block / fence post for fortifications (Tiny Town stone brick).
+pub const WALL: i32 = 124;
+
+// ---- Tiny Dungeon props used for building types + monuments ------------------
+pub const ANVIL: i32 = 74; // smithy / forge
+pub const BANNER: i32 = 29; // barracks / activity
+pub const CHEST: i32 = 89; // treasure / codebase
+pub const COINS: i32 = 82; // wealth
+pub const SWORD: i32 = 103; // mastery
+pub const POTION: i32 = 116; // time
 
 /// A building is a small grid of Tiny-Town tiles, drawn bottom-anchored.
 pub struct Building<'a> {

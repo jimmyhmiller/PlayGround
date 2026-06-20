@@ -8,6 +8,7 @@
 use crate::data::{CityInfo, ToolCounts};
 
 /// Flattened, render-ready metrics for one city.
+#[derive(Clone, Default)]
 pub struct Metrics {
     pub sessions: usize,
     pub messages: u32,

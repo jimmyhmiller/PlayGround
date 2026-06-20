@@ -1568,7 +1568,11 @@ impl Elab {
     /// whose type is the family itself). These are the only legal structural
     /// decrease targets for the termination check. (Works uniformly for a
     /// `%builtin Nat`, whose `Succ` constructor's argument IS the family.)
-    fn smaller_binders(&self, data: &str, arm: &Arm) -> Vec<String> {
+    /// Returns `(direct, higher_order)`: the arm's pattern binders that are
+    /// DIRECT recursive fields (strict subterms — first-order `data idxs`), and
+    /// those that are HIGHER-ORDER recursive fields (`(z…) → data idxs`, e.g. a
+    /// W-type's child-function or `Acc`'s accessibility fn — Phase 1b).
+    fn smaller_binders(&self, data: &str, arm: &Arm) -> (Vec<String>, Vec<String>) {
         // `%builtin Nat` types are NOT in the kernel signature (they are natively
         // packed), so look up the constructor's recorded role: the successor's
         // single binder is the predecessor — the strict subterm. GATE this on the
@@ -1580,38 +1584,45 @@ impl Elab {
         if self.nat_types.contains(data) {
             if let Some(role) = self.nat_ctor.get(&arm.ctor) {
                 return match role {
-                    NatRole::Succ => arm.binders.first().cloned().into_iter().collect(),
-                    NatRole::Zero => vec![],
+                    NatRole::Succ => (arm.binders.first().cloned().into_iter().collect(), vec![]),
+                    NatRole::Zero => (vec![], vec![]),
                 };
             }
         }
         let decl = match self.rc.data(data) {
             Some(d) => d,
-            None => return vec![],
+            None => return (vec![], vec![]),
         };
         let ctor = match decl.ctors.iter().find(|c| c.name == arm.ctor) {
             Some(c) => c,
-            None => return vec![],
+            None => return (vec![], vec![]),
         };
         let info = match self.ctor_info.get(&arm.ctor) {
             Some(i) => i,
-            None => return vec![],
+            None => return (vec![], vec![]),
         };
         let mut smaller = Vec::new();
+        let mut ho_smaller = Vec::new();
         let mut explicit_idx = 0;
         for (ai, (_, aty)) in ctor.args.iter().enumerate() {
             let is_explicit = !info.arg_implicit.get(ai).copied().unwrap_or(false);
-            let is_rec = matches!(aty, Term::Data(dn, _) if dn == data);
             if is_explicit {
-                if is_rec {
+                // a recursive field is DIRECT (`data idxs`, arity 0) or HIGHER-ORDER
+                // (`(z…) → data idxs`, arity > 0). The kernel reads this off the
+                // declared type via `rec_spine`; mirror it here.
+                if let Some(arity) = dep::rec_field_arity(data, aty) {
                     if let Some(n) = arm.binders.get(explicit_idx) {
-                        smaller.push(n.clone());
+                        if arity == 0 {
+                            smaller.push(n.clone());
+                        } else {
+                            ho_smaller.push(n.clone());
+                        }
                     }
                 }
                 explicit_idx += 1;
             }
         }
-        smaller
+        (smaller, ho_smaller)
     }
 
     /// Distil one `fn` into the totality analyzer's input. The analysis works in
@@ -1642,11 +1653,11 @@ impl Elab {
                 let arm_infos = arms
                     .iter()
                     .map(|arm| {
-                        let smaller =
+                        let (smaller, ho_smaller) =
                             data.as_ref().map(|d| self.smaller_binders(d, arm)).unwrap_or_default();
                         let mut calls = Vec::new();
                         collect_all_calls(&arm.body, &mut calls);
-                        ArmInfo { smaller, calls }
+                        ArmInfo { smaller, ho_smaller, calls }
                     })
                     .collect();
                 let scrut_is_nat =

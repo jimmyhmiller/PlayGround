@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::gc::field::{read_type_id, read_varlen_count};
 use crate::gc::header::ObjHeader;
-use crate::gc::reflect::{TypeMeta, ValueMeta};
+use crate::gc::reflect::{AllocSite, TypeMeta, ValueMeta};
 use crate::gc::roots::{AtomicRootSet, RootSource};
 use crate::gc::scan::scan_object;
 use crate::gc::type_info::{TypeInfo, VarLenKind};
@@ -14,7 +14,7 @@ use crate::gc::card_table::CardTable;
 use crate::gc::semi_space::FORWARDING_BIT;
 use crate::gc::semi_space::PtrPolicy;
 use crate::gc::statemap::{StatemapTracer, TraceState};
-use crate::gc::thread::ThreadState;
+use crate::gc::thread::{SiteCounter, ThreadState};
 
 // ─── Heap ───────────────────────────────────────────────────────────
 
@@ -169,6 +169,12 @@ pub struct Heap {
     /// `value_id`. Set alongside `type_meta`; used to recursively render
     /// flattened value fields in a heap dump.
     value_meta: OnceLock<Vec<ValueMeta>>,
+    /// Cold allocation-site table (Target-1b), indexed by the `site_id` passed
+    /// to `ai_gc_alloc_*`. Each entry names the `(function, type_id)` that the
+    /// site allocates. Set once at startup via [`Heap::set_alloc_sites`]; empty
+    /// when the embedder supplies none (the per-thread counters still
+    /// accumulate, just unlabelled). Reads are lock-free after the one-time set.
+    alloc_sites: OnceLock<Vec<AllocSite>>,
     collections: AtomicUsize,
 
     /// Cold-path GC event log: one [`GcEvent`] per collection, for the
@@ -232,6 +238,7 @@ impl Heap {
             type_table,
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
+            alloc_sites: OnceLock::new(),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
@@ -274,6 +281,7 @@ impl Heap {
             type_table,
             type_meta: OnceLock::new(),
             value_meta: OnceLock::new(),
+            alloc_sites: OnceLock::new(),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
