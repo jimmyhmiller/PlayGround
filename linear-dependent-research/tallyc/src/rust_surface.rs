@@ -1537,6 +1537,13 @@ impl Elab {
         }
         let zero_arm = zero_arm.ok_or("`match` on Nat is missing the zero case")?;
         let succ_arm = succ_arm.ok_or("`match` on Nat is missing the successor case")?;
+        // the zero case is nullary; the successor case binds exactly one predecessor.
+        if !zero_arm.binders.is_empty() {
+            return Err(format!(
+                "the zero case binds no pattern variables, got {}",
+                zero_arm.binders.len()
+            ));
+        }
         if succ_arm.binders.len() != 1 {
             return Err(format!(
                 "the successor case binds exactly one predecessor, got {}",
