@@ -1,0 +1,17 @@
+; `(Slice T)` — a fat-pointer view over an array, as a generic-struct library
+; (lib/slice.coil); the compiler has no notion of slices. Subslices share storage;
+; slice-set! writes through.
+;   coil run examples/slice.coil; echo $?   => 32
+(module app)
+(import "lib/slice.coil" :use *)
+
+(defn main [] (-> :i64)
+  (let [arr (alloc-stack (array i64 5))]
+    (store! (index arr 0) 1) (store! (index arr 1) 2) (store! (index arr 2) 3)
+    (store! (index arr 3) 4) (store! (index arr 4) 5)
+    (let [s   (slice-of arr 5)
+          mid (subslice s 1 4)          ; view of [2 3 4], same memory
+          (mut acc) 0]
+      (slice-set! mid 0 20)             ; writes through: arr[1] becomes 20
+      (slice-for [x mid] (store! acc (iadd (load acc) x)))   ; 20 + 3 + 4 = 27
+      (iadd (load acc) (slice-len s)))))                      ; + len 5 = 32

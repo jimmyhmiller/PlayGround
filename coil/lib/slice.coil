@@ -1,0 +1,61 @@
+(module slice)
+; A `(Slice T)` is a fat pointer `{ data, len }` over contiguous elements — the
+; everyday view into an array/buffer. It is an ORDINARY generic struct, NOT a
+; compiler type: nothing in the core knows about slices. (The `(slice T)` *sugar*
+; spelling and string-literals-as-slices would need core support — deferred.)
+;
+;   (import "lib/slice.coil")
+;   (let [arr (alloc-stack (array i64 3))] … (let [s (slice-of arr 3)] (slice-for [x s] …)))
+;
+; Slices ALIAS their backing storage: `slice-set!` writes through to the original,
+; and a `subslice` shares the same memory. Bounds are NOT checked here (debug-mode
+; bounds checking is Phase-2 safety work).
+
+(import "control.coil")   ; `for` (and its loop/break lowering) for slice-for
+
+(defstruct Slice [T] [(data (ptr T)) (len i64)])
+
+; Construct a slice from a base element pointer and a length. T is inferred from
+; `data` at the call site (no explicit [T] needed).
+(defn slice-new [T] [(data (ptr T)) (len i64)] (-> (Slice T))
+  (let [(mut s) (zeroed (Slice T))]
+    (store! (field s data) data)
+    (store! (field s len) len)
+    (load s)))
+
+(defn slice-len [T] [(s (Slice T))] (-> i64) (load (field s len)))
+
+; The base element pointer (for interop / building sub-views).
+(defn slice-data [T] [(s (Slice T))] (-> (ptr T)) (load (field s data)))
+
+(defn slice-empty? [T] [(s (Slice T))] (-> bool) (icmp-eq (slice-len s) 0))
+
+; Read / write element i (no bounds check — Phase-2 adds debug checks).
+(defn slice-get [T] [(s (Slice T)) (i i64)] (-> T)
+  (load (index (slice-data s) i)))
+
+(defn slice-set! [T] [(s (Slice T)) (i i64) (v T)] (-> i64)
+  (store! (index (slice-data s) i) v)
+  0)
+
+; `subslice s lo hi` → the half-open view `[lo, hi)`, sharing storage.
+(defn subslice [T] [(s (Slice T)) (lo i64) (hi i64)] (-> (Slice T))
+  (slice-new (index (slice-data s) lo) (isub hi lo)))
+
+; `(slice-of ARR LEN)` — a slice over a fixed array `ARR` (a `(ptr (array T N))`
+; or element pointer) of length LEN. T is inferred.
+(defmacro slice-of [arr len]
+  `(slice-new (index ~arr 0) ~len))
+
+; `(slice-for [x s] body...)` — iterate a slice's elements, binding x to each.
+; A macro over `for` (hence over the loop primitive); break/continue work inside.
+(defmacro slice-for [binding & body]
+  (if (not (= (count binding) 2))
+      (error "slice-for: binding must be [x slice]")
+      (let [x  (first binding)
+            s  (first (rest binding))
+            sv (gensym "sl")
+            i  (gensym "sli")]
+        `(let [~sv ~s]
+           (for [~i 0 (slice-len ~sv)]
+             (let [~x (slice-get ~sv ~i)] ~@body))))))
