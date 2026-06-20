@@ -8,7 +8,7 @@
 //! and pointee, integer widths (i8/i16/i32/i64) and `cast` work, and pointers
 //! carry a region + pointee type (e.g. C `char**`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use inkwell::attributes::{Attribute, AttributeLoc};
@@ -189,6 +189,24 @@ struct Cg<'ctx> {
     globals: Cell<u32>,
     /// Monotonic counter for naming `(llvm-ir ...)` inlined helper functions.
     llvm_seq: Cell<u32>,
+    /// Stack of enclosing loops (innermost last) during body emission: their
+    /// continue/break target blocks and the values seen at break sites (for the
+    /// after-block phi). Interior mutability because `emit_expr` takes `&self`.
+    loops: RefCell<Vec<LoopCtxCg<'ctx>>>,
+}
+
+/// Codegen bookkeeping for one enclosing loop.
+struct LoopCtxCg<'ctx> {
+    label: Option<String>,
+    /// Loop header — the `continue` target and the back-edge destination.
+    body_bb: BasicBlock<'ctx>,
+    /// Block after the loop — the `break` target; the loop's value materializes
+    /// here as a phi over `breaks`.
+    after_bb: BasicBlock<'ctx>,
+    /// (value, predecessor-block) contributed by each `break` that fires.
+    breaks: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)>,
+    /// Coil type of the break value (from the first break), for the phi/result.
+    break_ty: Option<Type>,
 }
 
 pub fn compile<'ctx>(ctx: &'ctx Context, program: &Program) -> Result<Module<'ctx>, String> {
@@ -252,6 +270,7 @@ pub fn compile_for<'ctx>(
         mach_o,
         globals: Cell::new(0),
         llvm_seq: Cell::new(0),
+        loops: RefCell::new(Vec::new()),
     };
 
     for (name, conv) in &program.conventions {
@@ -876,10 +895,18 @@ impl<'ctx> Cg<'ctx> {
 
         let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
         for e in &f.body {
+            // A diverging statement (an unbroken loop, or a `break`/`continue`
+            // in a tail position) terminates the block; the rest is dead.
+            if self.block_terminated() {
+                break;
+            }
             last = self.emit_expr(e, &scope)?;
         }
 
-        self.emit_c_return(function, sig, last)?;
+        // If the body diverged, the block already has a terminator — no `ret`.
+        if !self.block_terminated() {
+            self.emit_c_return(function, sig, last)?;
+        }
         Ok(())
     }
 
@@ -1303,6 +1330,9 @@ impl<'ctx> Cg<'ctx> {
             Expr::Do(es) => {
                 let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
                 for e in es {
+                    if self.block_terminated() {
+                        break;
+                    }
                     last = self.emit_expr(e, scope)?;
                 }
                 Ok(last)
@@ -1317,11 +1347,19 @@ impl<'ctx> Cg<'ctx> {
                 }
                 let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
                 for e in body {
+                    if self.block_terminated() {
+                        break;
+                    }
                     last = self.emit_expr(e, &child)?;
                 }
                 Ok(last)
             }
             Expr::If { cond, then, els } => self.emit_if(cond, then, els, scope),
+            Expr::Loop { label, body } => self.emit_loop(label.as_deref(), body, scope),
+            Expr::Break { label, value } => {
+                self.emit_break(label.as_deref(), value.as_deref(), scope)
+            }
+            Expr::Continue { label } => self.emit_continue(label.as_deref()),
             Expr::Call { func, args, .. } => {
                 let argtv: Vec<Tv<'ctx>> = args
                     .iter()
@@ -1903,6 +1941,111 @@ impl<'ctx> Cg<'ctx> {
         }
     }
 
+    /// True if the block the builder currently sits on already ends with a
+    /// terminator — i.e. control diverged here (a `break`/`continue`, an
+    /// unbroken loop, or an `if`/`match` whose every arm diverged). Used to skip
+    /// dead trailing code and to avoid emitting a second terminator.
+    fn block_terminated(&self) -> bool {
+        self.builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_some()
+    }
+
+    /// The structured loop: a header block (the `continue` target and back-edge
+    /// destination), then an after block (the `break` target) where the loop's
+    /// value materializes as a phi over the break sites. A loop with no break is
+    /// divergent — the after block is `unreachable`.
+    fn emit_loop(
+        &self,
+        label: Option<&str>,
+        body: &[Expr],
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<Tv<'ctx>, String> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or("codegen: no current function")?;
+        let body_bb = self.ctx.append_basic_block(function, "loop.body");
+        let after_bb = self.ctx.append_basic_block(function, "loop.after");
+        self.builder.build_unconditional_branch(body_bb).map_err(le)?;
+
+        self.builder.position_at_end(body_bb);
+        self.loops.borrow_mut().push(LoopCtxCg {
+            label: label.map(str::to_string),
+            body_bb,
+            after_bb,
+            breaks: Vec::new(),
+            break_ty: None,
+        });
+        for e in body {
+            if self.block_terminated() {
+                break;
+            }
+            if let Err(err) = self.emit_expr(e, scope) {
+                self.loops.borrow_mut().pop();
+                return Err(err);
+            }
+        }
+        // Fall-through at the body's end is the back-edge to the header.
+        if !self.block_terminated() {
+            self.builder.build_unconditional_branch(body_bb).map_err(le)?;
+        }
+        let ctx = self.loops.borrow_mut().pop().expect("loop ctx present");
+
+        self.builder.position_at_end(after_bb);
+        if ctx.breaks.is_empty() {
+            // No `break` reaches here: the loop diverges; after is unreachable.
+            // The value is conventional and never consumed (callers check
+            // `block_terminated`).
+            self.builder.build_unreachable().map_err(le)?;
+            Ok((self.ctx.i64_type().const_zero().into(), Type::Int(64, true)))
+        } else {
+            let ty = ctx.break_ty.clone().unwrap_or(Type::Int(64, true));
+            let phi = self.builder.build_phi(self.basic_ty(&ty), "loop.val").map_err(le)?;
+            for (v, bb) in &ctx.breaks {
+                phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+            }
+            Ok((phi.as_basic_value(), ty))
+        }
+    }
+
+    fn emit_break(
+        &self,
+        label: Option<&str>,
+        value: Option<&Expr>,
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<Tv<'ctx>, String> {
+        // Evaluate the value (default i64 0) BEFORE borrowing the loop stack.
+        let (v, vty) = match value {
+            Some(e) => self.emit_expr(e, scope)?,
+            None => (self.ctx.i64_type().const_zero().into(), Type::Int(64, true)),
+        };
+        let pred = self.builder.get_insert_block().ok_or("codegen: no current block")?;
+        let after = {
+            let mut loops = self.loops.borrow_mut();
+            let idx = loop_index(&loops, label, "break")?;
+            loops[idx].breaks.push((v, pred));
+            if loops[idx].break_ty.is_none() {
+                loops[idx].break_ty = Some(vty);
+            }
+            loops[idx].after_bb
+        };
+        self.builder.build_unconditional_branch(after).map_err(le)?;
+        Ok((self.ctx.i64_type().const_zero().into(), Type::Int(64, true)))
+    }
+
+    fn emit_continue(&self, label: Option<&str>) -> Result<Tv<'ctx>, String> {
+        let body = {
+            let loops = self.loops.borrow();
+            let idx = loop_index(&loops, label, "continue")?;
+            loops[idx].body_bb
+        };
+        self.builder.build_unconditional_branch(body).map_err(le)?;
+        Ok((self.ctx.i64_type().const_zero().into(), Type::Int(64, true)))
+    }
+
     fn emit_if(
         &self,
         cond: &Expr,
@@ -1931,23 +2074,60 @@ impl<'ctx> Cg<'ctx> {
             .build_conditional_branch(cmp, then_bb, else_bb)
             .map_err(le)?;
 
+        // Each arm may diverge (e.g. end in a `break`/`continue`): only an arm
+        // that falls through branches to the merge and feeds the result phi.
         self.builder.position_at_end(then_bb);
         let (tv, tt) = self.emit_expr(then, scope)?;
         let then_end = self.builder.get_insert_block().unwrap();
-        self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+        let then_div = then_end.get_terminator().is_some();
+        if !then_div {
+            self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+        }
 
         self.builder.position_at_end(else_bb);
-        let (ev, _) = self.emit_expr(els, scope)?;
+        let (ev, et) = self.emit_expr(els, scope)?;
         let else_end = self.builder.get_insert_block().unwrap();
-        self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+        let else_div = else_end.get_terminator().is_some();
+        if !else_div {
+            self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+        }
 
         self.builder.position_at_end(merge_bb);
-        let phi = self.builder.build_phi(self.basic_ty(&tt), "ifval").map_err(le)?;
-        phi.add_incoming(&[
-            (&tv as &dyn BasicValue, then_end),
-            (&ev as &dyn BasicValue, else_end),
-        ]);
-        Ok((phi.as_basic_value(), tt))
+        match (then_div, else_div) {
+            // Both arms diverged: the merge is unreachable.
+            (true, true) => {
+                self.builder.build_unreachable().map_err(le)?;
+                Ok((self.ctx.i64_type().const_zero().into(), tt))
+            }
+            // Exactly one arm reaches the merge — its value dominates it; no phi.
+            (false, true) => Ok((tv, tt)),
+            (true, false) => Ok((ev, et)),
+            // Both reach: reconcile with a phi (the checker unified the types).
+            (false, false) => {
+                let phi = self.builder.build_phi(self.basic_ty(&tt), "ifval").map_err(le)?;
+                phi.add_incoming(&[
+                    (&tv as &dyn BasicValue, then_end),
+                    (&ev as &dyn BasicValue, else_end),
+                ]);
+                Ok((phi.as_basic_value(), tt))
+            }
+        }
+    }
+}
+
+/// Resolve a `break`/`continue` target on the loop stack: the loop named
+/// `label`, or the innermost loop when unlabeled. A hard error if none matches
+/// (the checker rejects this first; this guards codegen invariants).
+fn loop_index(loops: &[LoopCtxCg], label: Option<&str>, what: &str) -> Result<usize, String> {
+    match label {
+        Some(l) => loops
+            .iter()
+            .rposition(|c| c.label.as_deref() == Some(l))
+            .ok_or_else(|| format!("codegen: {what} to unknown loop label ':{l}'")),
+        None => loops
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| format!("codegen: {what} outside of a loop")),
     }
 }
 

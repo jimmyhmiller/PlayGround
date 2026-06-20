@@ -3,13 +3,11 @@
 ; then use `when`/`unless`/`cond`/`->`/`->>`/`inline-for`. Nothing in the compiler
 ; knows about any of these; they expand to `if`/`do`/`let` over the core.
 ;
-; SCOPE NOTE: these are the control forms expressible as pure macros over the
-; current primitives. Runtime `while`/`for`/`loop`/`break`/`continue` are NOT here
-; — they need a structured control-flow PRIMITIVE Coil doesn't have yet (its only
-; loop is self-tail-recursion; a macro can't introduce inline iteration). `inline-for`
-; below is the comptime-UNROLLED loop (bounds known at expand time), which IS a pure
-; macro. The runtime loops land as macros once the `loop`/`break`/`continue` primitive
-; exists.
+; `while` and `for` are MACROS over the core `loop`/`break`/`continue` primitive
+; (the 3 structured-control-flow forms in the compiler) — proof that the loop
+; *features* live in userland, not the compiler. `inline-for` is the separate
+; comptime-UNROLLED loop (bounds known at expand time), a pure macro needing no
+; primitive at all.
 
 ; ---- compile-time list helpers (not in the macro builtin set) -------------
 (def range-list
@@ -38,6 +36,30 @@
 ; with Coil's reserved `(-> :type)` return-type marker — the macro expander runs
 ; before parsing and is position-insensitive, so a `->` macro would clobber every
 ; defn/extern return type. A threading macro would need a non-reserved name.
+
+; ---- runtime loops (macros over the loop/break/continue primitive) --------
+; `(while cond body...)` — repeat body while cond is true. Desugars to a `loop`
+; that `break`s when cond goes false. `continue` re-checks cond (correct).
+(defmacro while [cond & body]
+  `(loop (if ~cond (do ~@body) (break))))
+
+; `(for [i LO HI] body...)` — count i from LO to HI-1 (runtime bounds), binding i
+; as an immutable value in body each iteration. The hidden counter is incremented
+; at the TOP of the loop (starting LO-1), so a `continue` in body still advances
+; the counter — matching C `for` semantics, no skipped increment.
+(defmacro for [binding & body]
+  (if (not (= (count binding) 3))
+      (error "for: binding must be [i LO HI]")
+      (let [i   (first binding)
+            lo  (first (rest binding))
+            hi  (first (rest (rest binding)))
+            idx (gensym "for-idx")]
+        `(let [(mut ~idx) (isub ~lo 1)]
+           (loop
+             (store! ~idx (iadd (load ~idx) 1))
+             (if (icmp-lt (load ~idx) ~hi)
+                 (let [~i (load ~idx)] ~@body)
+                 (break)))))))
 
 ; ---- comptime-unrolled loop ----------------------------------------------
 ; `(inline-for [i LO HI] body...)` — fully unrolls `body` for i = LO..HI-1,

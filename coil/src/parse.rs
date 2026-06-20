@@ -823,6 +823,35 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             }
             Ok(Expr::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
         }
+        // (loop [:label] body...) — the structured-loop primitive.
+        "loop" => {
+            let (label, rest) = parse_label(args);
+            let body: Vec<Expr> = rest.iter().map(parse_expr).collect::<Result<_, _>>()?;
+            if body.is_empty() {
+                return Err(Diag::at(span, "loop: expects (loop [:label] body...)"));
+            }
+            Ok(Expr::Loop { label, body })
+        }
+        // (break [:label] [value]) — exit the (named) loop, optionally with a value.
+        "break" => {
+            let (label, rest) = parse_label(args);
+            if rest.len() > 1 {
+                return Err(Diag::at(span, "break: expects (break [:label] [value])"));
+            }
+            let value = match rest.first() {
+                Some(e) => Some(Box::new(parse_expr(e)?)),
+                None => None,
+            };
+            Ok(Expr::Break { label, value })
+        }
+        // (continue [:label]) — restart the (named) loop's body.
+        "continue" => {
+            let (label, rest) = parse_label(args);
+            if !rest.is_empty() {
+                return Err(Diag::at(span, "continue: expects (continue [:label])"));
+            }
+            Ok(Expr::Continue { label })
+        }
         // (llvm-ir RESULT-TYPE [operand...] "BODY") — raw LLVM IR escape hatch.
         "llvm-ir" => {
             if args.len() != 3 {
@@ -893,6 +922,15 @@ fn sym_vec(s: &Sexp, what: &str) -> Result<Vec<String>, Diag> {
     match &s.kind {
         SexpKind::Vector(v) => v.iter().map(|x| sym(x, what)).collect(),
         _ => Err(Diag::at(s.span, format!("{what}: expected vector, got {s}"))),
+    }
+}
+
+/// A leading `:label` keyword names a loop for `loop`/`break`/`continue`. Returns
+/// the label (if present) and the remaining forms.
+fn parse_label(args: &[Sexp]) -> (Option<String>, &[Sexp]) {
+    match args.first().map(|s| &s.kind) {
+        Some(SexpKind::Keyword(k)) => (Some(k.clone()), &args[1..]),
+        _ => (None, args),
     }
 }
 

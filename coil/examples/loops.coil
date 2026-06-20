@@ -1,0 +1,23 @@
+; Structured loops. `loop`/`break`/`continue` are the only loop PRIMITIVES in the
+; compiler (3 forms); `while` and `for` are MACROS over them (lib/control.coil).
+;   coil run examples/loops.coil; echo $?   => 55
+(module app)
+(import "lib/control.coil")
+
+; Raw primitive: sum 1..=10 with an explicit loop that breaks with a value.
+(defn sum-to [(n :i64)] (-> :i64)
+  (let [(mut i) 1 (mut acc) 0]
+    (loop
+      (if (icmp-gt (load i) n)
+          (break (load acc))
+          (do (store! acc (iadd (load acc) (load i)))
+              (store! i (iadd (load i) 1)))))))
+
+; Same thing with the `for` macro; `while` and labeled `break`/`continue` also
+; available. Here: count evens in 0..10 (5), then return sum-to(10) = 55.
+(defn main [] (-> :i64)
+  (let [(mut evens) 0]
+    (for [i 0 10]
+      (if (icmp-eq (irem i 2) 1) (continue) 0)
+      (store! evens (iadd (load evens) 1)))   ; evens = 5 (unused result, shown for `for`)
+    (sum-to 10)))                              ; => 55

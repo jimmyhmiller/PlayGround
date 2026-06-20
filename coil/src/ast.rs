@@ -206,6 +206,27 @@ pub enum Expr {
         fp: Box<Expr>,
         args: Vec<Expr>,
     },
+    /// An unconditional loop: evaluate `body` repeatedly until a `Break` exits
+    /// it. The loop's value is the value carried by the `break` that fires
+    /// (unified across all break sites); a loop with no reachable `break` is
+    /// divergent. `label` (optional) names the loop so a nested `break`/`continue`
+    /// can target it. This is the one structured-control-flow PRIMITIVE; `while`,
+    /// `for`, `loop`/`recur`, and `defer` are macros over it.
+    Loop {
+        label: Option<String>,
+        body: Vec<Expr>,
+    },
+    /// Exit the enclosing loop (or the one named `label`), with an optional value
+    /// (defaults to the i64 `0`). The loop expression evaluates to this value.
+    Break {
+        label: Option<String>,
+        value: Option<Box<Expr>>,
+    },
+    /// Jump to the next iteration of the enclosing loop (or the one named
+    /// `label`) — i.e. restart its body.
+    Continue {
+        label: Option<String>,
+    },
     /// Raw LLVM IR escape hatch: `(llvm-ir RESULT [operands…] "BODY")`. The body
     /// is LLVM IR text for an inlined helper function: `$ret` / `$tN` expand to
     /// the result / operand LLVM type strings and `$N` to the operand SSA names

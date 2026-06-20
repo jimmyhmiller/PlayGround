@@ -240,6 +240,19 @@ fn qualify_expr(
                 qualify_expr(e, m, imps, table, tps, exports)?;
             }
         }
+        // Loop bodies and break values are ordinary expressions; labels are not
+        // names to resolve.
+        Expr::Loop { body, .. } => {
+            for e in body {
+                qualify_expr(e, m, imps, table, tps, exports)?;
+            }
+        }
+        Expr::Break { value, .. } => {
+            if let Some(v) = value {
+                qualify_expr(v, m, imps, table, tps, exports)?;
+            }
+        }
+        Expr::Continue { .. } => {}
         Expr::Call { func, type_args, args } => {
             *func = call(func, |d| &d.callables)?;
             for t in type_args {

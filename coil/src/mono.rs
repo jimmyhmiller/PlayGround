@@ -311,6 +311,18 @@ impl<'a> Mono<'a> {
                 els: Box::new(go(self, els)?),
             },
             Expr::Do(es) => Expr::Do(es.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?),
+            Expr::Loop { label, body } => Expr::Loop {
+                label: label.clone(),
+                body: body.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?,
+            },
+            Expr::Break { label, value } => Expr::Break {
+                label: label.clone(),
+                value: match value {
+                    Some(v) => Some(Box::new(go(self, v)?)),
+                    None => None,
+                },
+            },
+            Expr::Continue { label } => Expr::Continue { label: label.clone() },
             Expr::Let { binds, body } => Expr::Let {
                 binds: binds
                     .iter()

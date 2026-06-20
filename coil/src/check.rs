@@ -64,6 +64,18 @@ struct Cx {
     sums: HashMap<String, SumInfo>,
     /// Variant name -> its sum type's name (variant construction routes here).
     variant_to_sum: HashMap<String, String>,
+    /// Stack of enclosing loops (innermost last), for typing `break`/`continue`:
+    /// scoping, label resolution, and unifying the value type across break sites.
+    loops: std::cell::RefCell<Vec<LoopFrame>>,
+}
+
+/// One enclosing-loop frame while type-checking its body.
+struct LoopFrame {
+    label: Option<String>,
+    /// The unified type of the values seen at this loop's `break` sites so far
+    /// (`None` until the first break). The loop's own type is this, or `i64` if
+    /// no break carries a value / there is no break.
+    break_ty: Option<Type>,
 }
 
 pub fn check(program: &Program) -> Result<Program, String> {
@@ -151,6 +163,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
         structs,
         sums,
         variant_to_sum,
+        loops: std::cell::RefCell::new(Vec::new()),
     };
 
     // ---- validate struct/sum field types (each with its own params in scope)
@@ -481,6 +494,85 @@ fn synth(
                 },
                 Type::Bool,
             ))
+        }
+        // The structured-loop primitive. The body is typed as statements (its
+        // value is unused — a loop only yields a value by `break`ing). The loop's
+        // type is the value type unified across its break sites, or i64.
+        Expr::Loop { label, body } => {
+            if let Some(l) = label {
+                if cx.loops.borrow().iter().any(|f| f.label.as_deref() == Some(l)) {
+                    return Err(format!(
+                        "in '{fname}': loop label ':{l}' shadows an enclosing loop with the same label"
+                    ));
+                }
+            }
+            cx.loops.borrow_mut().push(LoopFrame { label: label.clone(), break_ty: None });
+            let mut body_e = Vec::with_capacity(body.len());
+            for e in body {
+                match synth(e, None, env, cx, tps, fname) {
+                    Ok((ee, _)) => body_e.push(ee),
+                    Err(err) => {
+                        cx.loops.borrow_mut().pop();
+                        return Err(err);
+                    }
+                }
+            }
+            let frame = cx.loops.borrow_mut().pop().expect("loop frame present");
+            let loop_ty = frame.break_ty.unwrap_or_else(Type::i64);
+            Ok((Expr::Loop { label: label.clone(), body: body_e }, loop_ty))
+        }
+        // Exit a loop with an optional value; the value type is unified into the
+        // target loop's frame. `break` itself diverges (type i64, never used).
+        Expr::Break { label, value } => {
+            {
+                let loops = cx.loops.borrow();
+                if loops.is_empty() {
+                    return Err(format!("in '{fname}': break outside of a loop"));
+                }
+                if let Some(l) = label {
+                    if !loops.iter().any(|f| f.label.as_deref() == Some(l)) {
+                        return Err(format!("in '{fname}': break to unknown loop label ':{l}'"));
+                    }
+                }
+            }
+            let (val_e, vty) = match value {
+                Some(v) => {
+                    let (ve, vt) = synth(v, None, env, cx, tps, fname)?;
+                    (Some(Box::new(ve)), vt)
+                }
+                None => (None, Type::i64()),
+            };
+            {
+                let mut loops = cx.loops.borrow_mut();
+                let idx = match label {
+                    Some(l) => loops.iter().rposition(|f| f.label.as_deref() == Some(l)).unwrap(),
+                    None => loops.len() - 1,
+                };
+                match &loops[idx].break_ty {
+                    None => loops[idx].break_ty = Some(vty),
+                    Some(prev) if *prev != vty => {
+                        return Err(format!(
+                            "in '{fname}': loop breaks with different value types ({} vs {})",
+                            ty_str(prev),
+                            ty_str(&vty)
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            Ok((Expr::Break { label: label.clone(), value: val_e }, Type::i64()))
+        }
+        Expr::Continue { label } => {
+            let loops = cx.loops.borrow();
+            if loops.is_empty() {
+                return Err(format!("in '{fname}': continue outside of a loop"));
+            }
+            if let Some(l) = label {
+                if !loops.iter().any(|f| f.label.as_deref() == Some(l)) {
+                    return Err(format!("in '{fname}': continue to unknown loop label ':{l}'"));
+                }
+            }
+            Ok((Expr::Continue { label: label.clone() }, Type::i64()))
         }
         Expr::If { cond, then, els } => {
             let (ce, ct) = synth(cond, None, env, cx, tps, fname)?;
