@@ -926,3 +926,22 @@ fn struct_predicativity_diagnostic_does_not_double_name() {
     assert!(err.contains("SBox:"), "expected `SBox:` prefix, got: {err}");
     assert!(!err.contains("SBox.SBox"), "must not double-name the struct, got: {err}");
 }
+
+#[test]
+fn accumulator_fold_into_function_lowering_is_valid_today() {
+    // FEASIBILITY for Phase 1a′ (elaboration-only): an accumulator-style fold
+    // `sumacc(m, acc) = match m { Zero => acc, Succ(k) => sumacc(k, Succ acc) }`
+    // lowers to a NatElim whose MOTIVE IS A FUNCTION TYPE (Nat → Nat), threading
+    // the accumulator through the induction hypothesis. This uses ONLY the
+    // existing kernel (large elimination + NatElim) — proving 1a′ needs no kernel
+    // change. `sumacc(3, 0) = 0 + 3 = 3`.
+    let motive = Lam(b(Pi(Omega, b(Nat), b(Nat)))); // λ_. (Nat → Nat)
+    let z = Lam(b(Var(0))); // λacc. acc
+    // λk. λih. λacc. ih (Succ acc)
+    let s = Lam(b(Lam(b(Lam(b(App(b(Var(1)), b(Suc(b(Var(0)))))))))));
+    let elim = NatElim(b(motive), b(z), b(s), b(NatLit(3)));
+    let app = App(b(elim), b(NatLit(0))); // apply the built function to acc0 = 0
+    assert_eq!(normalize_closed(&app), NatLit(3));
+    // and it type-checks at Nat:
+    assert_eq!(infer_closed(&app), Ok(Nat));
+}
