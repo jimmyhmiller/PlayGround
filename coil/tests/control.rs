@@ -75,6 +75,17 @@ fn cond_picks_first_true_then_else() {
 }
 
 #[test]
+fn pipe_threads_first_and_last() {
+    // `|>` threads x as the first arg: (5+1)*2 = 12. `|>>` threads it last:
+    // (10-5) = 5. Sum 17. (Spelled `|>` because `->` is reserved for return types.)
+    let code = run_with(
+        r#"(defn main [] (-> :i64)
+             (iadd (|> 5 (iadd 1) (imul 2)) (|>> 5 (isub 10))))"#,
+    );
+    assert_eq!(code, 17);
+}
+
+#[test]
 fn inline_for_bad_binding_hard_errors() {
     // Misuse must hard-error at expansion (no silent wrong code), via the
     // compile-time `error` builtin.

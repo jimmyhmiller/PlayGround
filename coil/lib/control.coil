@@ -61,11 +61,41 @@
                  (let [~i (load ~idx)] ~@body)
                  (break)))))))
 
+; ---- threading ------------------------------------------------------------
+; Spelled `|>`/`|>>` (F#/Elixir/OCaml) rather than Clojure's `->`/`->>`: `->`
+; collides with Coil's reserved `(-> :type)` return marker (the pre-parse,
+; position-blind expander would otherwise clobber every defn/extern return type).
+; `|>` is unreserved, so it's a clean macro.
+;
+; `(|> x (f a) g)` => `(g (f x a))` — thread x as the FIRST argument.
+(def thread-first
+  (lambda [x forms]
+    (if (empty? forms) x
+        (thread-first
+          (let [form (first forms)]
+            (if (list? form)
+                (cons (first form) (cons x (rest form)))
+                (list form x)))
+          (rest forms)))))
+(defmacro |> [x & forms] (thread-first x forms))
+
+; `(|>> x (f a) g)` => `(g (f a x))` — thread x as the LAST argument.
+(def thread-last
+  (lambda [x forms]
+    (if (empty? forms) x
+        (thread-last
+          (let [form (first forms)]
+            (if (list? form)
+                (concat form (list x))
+                (list form x)))
+          (rest forms)))))
+(defmacro |>> [x & forms] (thread-last x forms))
+
 ; ---- comptime-unrolled loop ----------------------------------------------
 ; `(inline-for [i LO HI] body...)` — fully unrolls `body` for i = LO..HI-1,
 ; with i a compile-time literal each iteration (zero runtime loop overhead).
-; LO/HI MUST be literal integers (known at expansion). This is the only loop
-; expressible as a pure macro today; runtime loops await the control primitive.
+; LO/HI MUST be literal integers (known at expansion); for runtime bounds use
+; `for`.
 (defmacro inline-for [binding & body]
   (if (not (= (count binding) 3))
       (error "inline-for: binding must be [i LO HI] with literal integer bounds")
