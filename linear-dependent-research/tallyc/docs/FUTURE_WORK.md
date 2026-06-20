@@ -536,7 +536,10 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
   `%total` certificates. *(Upgrades the current "simple fold" heuristic into a real
   checker.)* **E1 (termination + `%total`) is implemented.** A dedicated
   `src/totality.rs` runs a structural-descent / size-change analysis over the
-  recursive call graph (self + mutual via SCC), POSITIVELY verifying that every
+  recursive call graph (self-recursion checked structurally; mutual recursion
+  detected conservatively by reachability symmetry — any back-edge through
+  another function ⇒ `Partial`, erring toward rejection), POSITIVELY verifying
+  that every
   recursive call decreases on a strict-subterm pattern binder; `%total` is a
   CERTIFICATE — a `%total` fn the checker can't certify is a hard error
   (annotation ≠ proof), partiality is contagious, and per-fn status is reported.

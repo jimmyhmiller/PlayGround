@@ -165,7 +165,13 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
         return Totality::Total;
     }
 
-    // is the cycle MUTUAL (goes through another function) or a direct self-loop?
+    // Is the cycle MUTUAL (goes through another function) or a direct self-loop?
+    // This is a CONSERVATIVE reachability-symmetry test, not a precise Tarjan SCC:
+    // if `f` reaches some other `g` that reaches `f` back, treat `f` as mutually
+    // recursive ⇒ `Partial`. It can over-approximate (a `g` reachable from `f`
+    // that is only coincidentally in a cycle with `f` still trips it), which only
+    // ever errs toward REJECTING — sound for the certificate, never accepting a
+    // non-terminating set. A real SCC would be more precise; not needed yet.
     let empty = HashSet::new();
     let r = reach.get(&f.name).unwrap_or(&empty);
     let mutual = r

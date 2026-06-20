@@ -1468,12 +1468,13 @@ impl Elab {
         ))
     }
 
-    /// A recursive `fn` matching on a `Nat` whose recursive calls vary a
-    /// non-scrutinee argument (e.g. `build(k, leftLabel)` / `build(k, rightLabel)`)
-    /// is GENERAL recursion, not a fold: compile it to `Fix(ty, λparams. NatCase…)`,
-    /// where recursive calls are real self-calls and the case-split provides no
-    /// induction hypothesis. Used only when `is_simple_fold` is false, so folds
-    /// (`add`, `mul`, …) still lower to eliminators (reducible in types, iterative).
+    /// A recursive `fn` matching on a `Nat` whose recursion is not structural
+    /// (e.g. `build(k, leftLabel)` / `build(k, rightLabel)`, or a non-decreasing
+    /// call) is GENERAL recursion, not a fold: compile it to `Fix(ty, λparams.
+    /// NatCase…)`, where recursive calls are real self-calls and the case-split
+    /// provides no induction hypothesis. Used only when the totality analyzer's
+    /// STRUCTURAL verdict is `Partial`, so folds (`add`, `mul`, …) still lower to
+    /// eliminators (reducible in types, iterative). See `totality.rs`.
     fn elab_fix_nat(
         &self,
         fnname: &str,
