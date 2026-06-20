@@ -164,6 +164,17 @@ fn main() {
         // ---- simulate -------------------------------------------------------
         world.update(dt);
 
+        // Building hover (skip when dragging or hovering a UI panel).
+        let mouse_world = rl.get_screen_to_world2D(mouse, cam);
+        let over_ui = mouse.y < 34.0
+            || mouse.y > sh as f32 - 26.0
+            || (selected.is_some() && mouse.x > sw as f32 - 340.0);
+        let hovered = if dragging || over_ui {
+            None
+        } else {
+            render::pick_building(&world, mouse_world)
+        };
+
         // ---- render ---------------------------------------------------------
         let fps = rl.get_fps();
         let loading = runner.is_loading();
@@ -178,6 +189,12 @@ fn main() {
         render::draw_hud(&mut d, &world, &source_name, loading, fps, (sw, sh));
         if let Some(i) = sel {
             render::draw_inspector(&mut d, &world.cities[i], world.now, (sw, sh));
+        }
+        if let Some((ci, bi)) = hovered {
+            if ci < world.cities.len() && bi < world.cities[ci].buildings.len() {
+                let city = &world.cities[ci];
+                render::draw_building_tooltip(&mut d, city, &city.buildings[bi], world.now, mouse, (sw, sh));
+            }
         }
     }
 }

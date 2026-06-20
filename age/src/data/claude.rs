@@ -45,10 +45,6 @@ impl ClaudeProjectsSource {
             .unwrap_or_else(|| PathBuf::from(".claude/projects"));
         ClaudeProjectsSource { root, cache: HashMap::new() }
     }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
 }
 
 impl WorldSource for ClaudeProjectsSource {

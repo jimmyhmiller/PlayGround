@@ -21,8 +21,9 @@ pub fn src(i: i32) -> Rectangle {
 
 /// Plain grass + two flowered grass variants.
 pub const GRASS: [i32; 3] = [1, 0, 2];
-/// Single trees (mix of pine / round / small / autumn).
-pub const TREES: [i32; 4] = [5, 4, 28, 27];
+/// Single trees with internal contrast so they read against grass:
+/// round bush, green lollipop (has a trunk), small green, and one orange.
+pub const TREES: [i32; 4] = [5, 16, 28, 3];
 pub const MUSHROOMS: i32 = 29;
 /// A ring of pale stones — used as a "quarry"/resource decoration.
 pub const STONES: i32 = 43;

@@ -162,12 +162,13 @@ pub fn draw_world_space<D: RaylibDraw>(
     for gy in y0..y1 {
         for gx in x0..x1 {
             let h = crate::util::hash64(&(gx, gy));
-            let idx = if h % 13 == 0 {
+            let idx = if h % 22 == 0 {
                 assets::GRASS[1 + (h as usize >> 4) % 2]
             } else {
                 assets::GRASS[0]
             };
-            draw_tile(d, &assets.town, idx, gx as f32 * GROUND, gy as f32 * GROUND, GROUND / assets::TILE, Color::WHITE);
+            // Olive-mute the field so bright-green trees, buildings and units pop.
+            draw_tile(d, &assets.town, idx, gx as f32 * GROUND, gy as f32 * GROUND, GROUND / assets::TILE, Color::new(176, 190, 150, 255));
         }
     }
 
@@ -189,9 +190,16 @@ pub fn draw_world_space<D: RaylibDraw>(
             if world.cities.iter().any(|c| c.pos.distance_to(p) < 150.0) {
                 continue;
             }
-            let tree = assets::TREES[(h as usize >> 3) % assets::TREES.len()];
-            let sc = 2.2;
-            draw_tile(d, &assets.town, tree, px, py - assets::TILE * sc, sc, Color::WHITE);
+            // Mostly trees, with the odd mushroom patch or rock for variety.
+            let (deco, sc) = match (h >> 5) % 9 {
+                0 => (assets::MUSHROOMS, 2.0),
+                1 => (assets::STONES, 2.2),
+                _ => (assets::TREES[(h as usize >> 3) % assets::TREES.len()], 2.5),
+            };
+            let tw = assets::TILE * sc;
+            // Shadow grounds the sprite so it reads against same-green grass.
+            d.draw_ellipse((px + tw / 2.0) as i32, py as i32, tw * 0.34, tw * 0.12, Color::new(0, 0, 0, 55));
+            draw_tile(d, &assets.town, deco, px, py - tw, sc, Color::WHITE);
         }
     }
 
@@ -236,6 +244,14 @@ fn draw_city<D: RaylibDraw>(d: &mut D, city: &City, assets: &Assets, _now: f64, 
             Color::new(255, 200, 90, 26),
         );
     }
+
+    // A little market stall in the plaza — the trade hub villagers head for.
+    let ms = 2.2;
+    let mw = assets::TILE * ms;
+    let mx = city.pos.x - radius * 0.46;
+    let my = city.pos.y + 78.0;
+    d.draw_ellipse(mx as i32, my as i32, mw * 0.34, mw * 0.12, Color::new(0, 0, 0, 50));
+    draw_tile(d, &assets.town, assets::MARKET, mx - mw / 2.0, my - mw, ms, Color::WHITE);
 
     for b in &city.buildings {
         draw_building(d, &assets.town, b);
@@ -416,4 +432,78 @@ fn ago(secs: f64) -> String {
 
 pub fn clear_bg<D: RaylibDraw>(d: &mut D) {
     d.clear_background(SKY);
+}
+
+// ---- building hover tooltip --------------------------------------------------
+
+/// World-space bounding box of a building sprite (bottom-anchored at `pos`).
+pub fn building_bounds(b: &Building) -> Rectangle {
+    let preset = if b.is_town_center {
+        &assets::TOWN_CENTER
+    } else {
+        &assets::HOUSES[b.preset.min(assets::HOUSES.len() - 1)]
+    };
+    let scale = if b.is_town_center { TC_SCALE } else { HOUSE_SCALE };
+    let rows = preset.grid.len() as f32;
+    let cols = preset.grid.iter().map(|r| r.len()).max().unwrap_or(1) as f32;
+    let w = cols * assets::TILE * scale;
+    let h = rows * assets::TILE * scale;
+    Rectangle::new(b.pos.x - w / 2.0, b.pos.y - h, w, h)
+}
+
+/// Find the front-most building under a world point.
+pub fn pick_building(world: &World, p: Vector2) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, f32)> = None;
+    for (ci, c) in world.cities.iter().enumerate() {
+        for (bi, b) in c.buildings.iter().enumerate() {
+            let r = building_bounds(b);
+            if p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height {
+                if best.map_or(true, |(_, _, by)| b.pos.y > by) {
+                    best = Some((ci, bi, b.pos.y));
+                }
+            }
+        }
+    }
+    best.map(|(c, b, _)| (c, b))
+}
+
+/// A small panel by the cursor describing the hovered building / session.
+pub fn draw_building_tooltip<D: RaylibDraw>(
+    d: &mut D,
+    city: &City,
+    b: &Building,
+    now: f64,
+    mouse: Vector2,
+    screen: (i32, i32),
+) {
+    let header = if b.is_town_center {
+        format!("{}  (town center)", city.name)
+    } else {
+        b.title.clone().unwrap_or_else(|| "session".to_string())
+    };
+    let header = ellipsize(&header, 40);
+    let model = short_model(b.model.as_deref());
+    let line2 = format!("{}  ·  {} msgs", model, b.messages);
+
+    let w = (text_w(&header, 15).max(text_w(&line2, 12)) + 24).max(150);
+    let h = 50;
+    let mut x = mouse.x as i32 + 16;
+    let mut y = mouse.y as i32 + 16;
+    if x + w > screen.0 - 8 {
+        x = mouse.x as i32 - w - 16;
+    }
+    if y + h > screen.1 - 30 {
+        y = mouse.y as i32 - h - 16;
+    }
+
+    d.draw_rectangle_rounded(Rectangle::new(x as f32, y as f32, w as f32, h as f32), 0.18, 8, PANEL_BG);
+    d.draw_rectangle_rounded_lines(Rectangle::new(x as f32, y as f32, w as f32, h as f32), 0.18, 8, PANEL_LINE);
+    if b.live {
+        d.draw_circle(x + 12, y + 14, 4.0, GOLD);
+        d.draw_text(&header, x + 22, y + 7, 15, Color::WHITE);
+    } else {
+        d.draw_text(&header, x + 10, y + 7, 15, TEXT_DIM);
+    }
+    d.draw_text(&line2, x + 10, y + 27, 12, model_color(b.model.as_deref()));
+    let _ = now;
 }
