@@ -45,6 +45,36 @@ fn booleans() {
 }
 
 #[test]
+fn format_string_macro() {
+    // The positional (fmt …) macro expands to a sequence of print-* calls; specs
+    // d/s/x/c/b and {{ }} escapes. Pure library macro over str-bytes/bytes->str.
+    let s = out(
+        r#"(defn main [] (-> :i64)
+             (let [w (stdout)]
+               (fmt w "n={d} hex={x} s={s} ok={b} {{lit}}" -42 255 "hi" true) 0))"#,
+    );
+    assert_eq!(s, "n=-42 hex=ff s=hi ok=true {lit}");
+}
+
+#[test]
+fn format_string_too_few_args_is_compile_error() {
+    let err = coil::check_source(&format!(
+        "{IMPORT}(defn main [] (-> :i64) (let [w (stdout)] (fmt w \"{{d}} {{d}}\" 1) 0))"
+    ))
+    .unwrap_err();
+    assert!(err.contains("not enough arguments"), "got: {err}");
+}
+
+#[test]
+fn format_string_unknown_spec_is_compile_error() {
+    let err = coil::check_source(&format!(
+        "{IMPORT}(defn main [] (-> :i64) (let [w (stdout)] (fmt w \"{{q}}\" 1) 0))"
+    ))
+    .unwrap_err();
+    assert!(err.contains("unknown spec"), "got: {err}");
+}
+
+#[test]
 fn lines_and_newline() {
     let s = out(
         r#"(defn main [] (-> :i64)

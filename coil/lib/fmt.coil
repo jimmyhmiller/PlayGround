@@ -45,3 +45,62 @@
   (match (print-str w s)
     (Err [e] (Err e))
     (Ok [_] (print-nl w))))
+
+; ---- positional format strings (a MACRO over the printers + the str-bytes /
+;      bytes->str compile-time builtins; the compiler knows nothing of formats) ----
+; `(fmt w "n={d} s={s}" a b)` — specs: {d} signed int, {s} C string, {x} hex (>=0),
+; {c} char, {b} bool; `{{`/`}}` are literal braces. Expands to a sequence of print-*
+; calls. Too few args for the specs is a compile error (no silent wrong).
+
+(def fmt-reverse
+  (lambda [xs] (if (empty? xs) (list) (concat (fmt-reverse (rest xs)) (list (first xs))))))
+
+(def fmt-printer
+  (lambda [spec]
+    (if (= spec 100) (quote print-i)
+    (if (= spec 115) (quote print-str)
+    (if (= spec 120) (quote print-hex)
+    (if (= spec 99)  (quote print-char)
+    (if (= spec 98)  (quote print-bool)
+        (error "fmt: unknown spec; use {d} {s} {x} {c} {b}"))))))))
+
+; Flush accumulated literal bytes (reversed) as a (lit BYTES) part onto acc.
+(def fmt-flush
+  (lambda [cur acc]
+    (if (empty? cur) acc (cons (list (quote lit) (fmt-reverse cur)) acc))))
+
+; Parse format bytes into an ordered list of parts: (lit BYTES) | (spec BYTE).
+(def fmt-parse
+  (lambda [bytes acc cur]
+    (if (empty? bytes)
+        (fmt-reverse (fmt-flush cur acc))
+        (let [b (first bytes) bs (rest bytes)]
+          (if (= b 123)                                            ; '{'
+              (if (and (not (empty? bs)) (= (first bs) 123))
+                  (fmt-parse (rest bs) acc (cons 123 cur))         ; '{{' -> '{'
+                  (if (and (not (empty? bs)) (not (empty? (rest bs))) (= (first (rest bs)) 125))
+                      (fmt-parse (rest (rest bs))
+                                 (cons (list (quote spec) (first bs)) (fmt-flush cur acc))
+                                 (list))
+                      (error "fmt: malformed spec, expected {X}")))
+              (if (= b 125)                                        ; '}'
+                  (if (and (not (empty? bs)) (= (first bs) 125))
+                      (fmt-parse (rest bs) acc (cons 125 cur))     ; '}}' -> '}'
+                      (error "fmt: unmatched '}' (use '}}')"))
+                  (fmt-parse bs acc (cons b cur))))))))
+
+(def fmt-emit
+  (lambda [w parts args]
+    (if (empty? parts)
+        (list)
+        (let [p (first parts)]
+          (if (= (first p) (quote lit))
+              (cons (list (quote print-str) w (bytes->str (first (rest p))))
+                    (fmt-emit w (rest parts) args))
+              (if (empty? args)
+                  (error "fmt: not enough arguments for the format string")
+                  (cons (list (fmt-printer (first (rest p))) w (first args))
+                        (fmt-emit w (rest parts) (rest args)))))))))
+
+(defmacro fmt [w fmt-str & args]
+  (cons (quote do) (fmt-emit w (fmt-parse (str-bytes fmt-str) (list) (list)) args)))

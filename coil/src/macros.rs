@@ -802,6 +802,7 @@ fn global_env(target: &TargetInfo) -> Env {
         "+", "-", "*", "mod", "=", "<", ">", "<=", ">=", "list", "vector", "cons", "first", "rest",
         "nth", "count", "empty?", "concat", "not", "symbol", "name", "str", "gensym", "map",
         "list?", "vector?", "symbol?", "number?", "keyword?", "error",
+        "str-bytes", "bytes->str",
     ] {
         env_define(&env, name, Value::Builtin(name));
     }
@@ -908,6 +909,27 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             .first()
             .and_then(|v| text_of(v).ok())
             .unwrap_or_else(|| "macro error".to_string())),
+        // Compile-time string<->bytes, so macros can parse string literals (e.g. a
+        // `format` macro splitting "{d}" specs). General, reusable string-processing
+        // capability — not a feature-specific hook.
+        "str-bytes" => {
+            let s = text_of(args.first().ok_or("str-bytes: needs a string")?)?;
+            Ok(Value::List(s.bytes().map(|b| Value::Int(b as i64)).collect()))
+        }
+        "bytes->str" => {
+            let items = seq_items(args.first().ok_or("bytes->str: needs a list")?)?;
+            let mut bytes = Vec::with_capacity(items.len());
+            for v in &items {
+                let n = as_int(v)?;
+                if !(0..=255).contains(&n) {
+                    return Err(format!("bytes->str: byte {n} out of range 0..=255"));
+                }
+                bytes.push(n as u8);
+            }
+            let s = String::from_utf8(bytes)
+                .map_err(|_| "bytes->str: bytes are not valid UTF-8".to_string())?;
+            Ok(Value::Str(s))
+        }
         other => Err(format!("compile-time: unknown builtin '{other}'")),
     }
 }

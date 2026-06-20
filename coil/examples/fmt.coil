@@ -7,8 +7,7 @@
 
 (defn main [] (-> :i64)
   (let [w (stdout)]                 ; the IO capability is passed in, not ambient
-    (print-str w "n=")   (print-i w -42)
-    (print-str w " hex=") (print-hex w 255)
-    (print-str w " ok=") (print-bool w true)
-    (print-nl w)
+    ; the positional `fmt` macro expands to print-* calls — no format support in
+    ; the compiler; {d} int, {x} hex, {b} bool, {s} string, {{ }} literal braces.
+    (fmt w "n={d} hex={x} ok={b}\n" -42 255 true)
     0))
