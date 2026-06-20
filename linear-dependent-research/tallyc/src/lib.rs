@@ -17,6 +17,7 @@
 pub mod dep;
 pub mod mult;
 pub mod rust_surface;
+pub(crate) mod totality;
 
 #[cfg(feature = "llvm")]
 pub mod dep_codegen;

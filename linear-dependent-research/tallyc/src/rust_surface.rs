@@ -29,6 +29,7 @@
 
 use crate::dep::{self, Constructor, DataDecl, Signature, Term, Value};
 use crate::mult::Mult;
+use crate::totality::{self, ArmInfo, Call as TCall, FnClauses, Totality};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -63,6 +64,8 @@ enum Tok {
     KwType,
     KwPostulate,
     KwBuiltin,
+    KwTotal,
+    KwPartial,
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -94,6 +97,8 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             }
             match &src[s..j] {
                 "builtin" => out.push(Tok::KwBuiltin),
+                "total" => out.push(Tok::KwTotal),
+                "partial" => out.push(Tok::KwPartial),
                 other => return Err(format!("unknown pragma `%{other}`")),
             }
             i = j;
@@ -156,7 +161,7 @@ enum Ty {
 }
 
 #[derive(Clone, Debug)]
-enum Tm {
+pub(crate) enum Tm {
     Var(String),
     Call(String, Vec<Tm>),
     Match(String, Vec<Arm>),
@@ -169,10 +174,19 @@ enum Tm {
 }
 
 #[derive(Clone, Debug)]
-struct Arm {
-    ctor: String,
-    binders: Vec<String>,
-    body: Tm,
+pub(crate) struct Arm {
+    pub(crate) ctor: String,
+    pub(crate) binders: Vec<String>,
+    pub(crate) body: Tm,
+}
+
+/// A `%total` / `%partial` annotation on a `fn`. `%total` DEMANDS the totality
+/// checker certify the function (coverage + termination); failure is a hard
+/// error. `%partial` documents an intentionally-partial (general-recursion) fn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TotAnnot {
+    Total,
+    Partial,
 }
 
 #[derive(Clone, Debug)]
@@ -186,7 +200,8 @@ struct Binder {
 #[derive(Clone, Debug)]
 enum Item {
     Sig(String, Ty),
-    Fn(String, Vec<String>, Tm),
+    /// `(name, params, body, totality annotation)`
+    Fn(String, Vec<String>, Tm, Option<TotAnnot>),
     Enum {
         name: String,
         params: Vec<Binder>,
@@ -257,9 +272,17 @@ impl Parser {
                 let ty = self.ident()?;
                 Ok(Item::BuiltinNat(ty))
             }
+            Some(Tok::KwTotal) => {
+                self.next();
+                self.parse_fn(Some(TotAnnot::Total))
+            }
+            Some(Tok::KwPartial) => {
+                self.next();
+                self.parse_fn(Some(TotAnnot::Partial))
+            }
             Some(Tok::KwEnum) => self.parse_enum(),
             Some(Tok::KwStruct) => self.parse_struct(),
-            Some(Tok::KwFn) => self.parse_fn(),
+            Some(Tok::KwFn) => self.parse_fn(None),
             Some(Tok::KwPostulate) => {
                 self.next();
                 let name = self.ident()?;
@@ -438,7 +461,7 @@ impl Parser {
         Ok(Item::Struct { name, params, fields })
     }
 
-    fn parse_fn(&mut self) -> Result<Item, String> {
+    fn parse_fn(&mut self, annot: Option<TotAnnot>) -> Result<Item, String> {
         self.eat(&Tok::KwFn)?;
         let name = self.ident()?;
         self.eat(&Tok::LParen)?;
@@ -453,7 +476,7 @@ impl Parser {
         self.eat(&Tok::LBrace)?;
         let body = self.parse_tm()?;
         self.eat(&Tok::RBrace)?;
-        Ok(Item::Fn(name, params, body))
+        Ok(Item::Fn(name, params, body, annot))
     }
 
     fn parse_tm(&mut self) -> Result<Tm, String> {
@@ -555,6 +578,10 @@ impl Parser {
 pub struct Program {
     pub sig: Signature,
     pub defs: Vec<(String, Term, Term)>,
+    /// per-`fn` totality status: `(name, is_total, reason_if_partial)`. Reported
+    /// to the user; a `%total`-annotated `fn` that is not total is a hard error
+    /// raised during elaboration (it never reaches here).
+    pub totality: Vec<(String, bool, Option<String>)>,
 }
 
 /// per-constructor surface info (implicitness + binder names lost by the kernel)
@@ -1256,6 +1283,114 @@ fn count_index_pis(t: &Ty) -> Result<usize, String> {
 // ---- the eliminator translation for a recursive `fn … { match p { … } }` ----
 
 impl Elab {
+    /// Which of a `match` arm's pattern binders are STRICT SUBTERMS of the
+    /// scrutinee — i.e. recursive fields of the matched constructor (arguments
+    /// whose type is the family itself). These are the only legal structural
+    /// decrease targets for the termination check. (Works uniformly for a
+    /// `%builtin Nat`, whose `Succ` constructor's argument IS the family.)
+    fn smaller_binders(&self, data: &str, arm: &Arm) -> Vec<String> {
+        // `%builtin Nat` types are NOT in the kernel signature (they are natively
+        // packed), so look up the constructor's recorded role: the successor's
+        // single binder is the predecessor — the strict subterm. GATE this on the
+        // SCRUTINEE'S actual type being a built-in Nat: the role table is keyed by
+        // constructor NAME, so an unrelated enum that happens to reuse the name
+        // `Succ` must NOT be treated as a Nat here (it would over-approximate the
+        // strict-subterm set). With the gate, the structural verdict agrees with
+        // the eliminator lowering instead of relying on its hard-error backstop.
+        if self.nat_types.contains(data) {
+            if let Some(role) = self.nat_ctor.get(&arm.ctor) {
+                return match role {
+                    NatRole::Succ => arm.binders.first().cloned().into_iter().collect(),
+                    NatRole::Zero => vec![],
+                };
+            }
+        }
+        let decl = match self.rc.data(data) {
+            Some(d) => d,
+            None => return vec![],
+        };
+        let ctor = match decl.ctors.iter().find(|c| c.name == arm.ctor) {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let info = match self.ctor_info.get(&arm.ctor) {
+            Some(i) => i,
+            None => return vec![],
+        };
+        let mut smaller = Vec::new();
+        let mut explicit_idx = 0;
+        for (ai, (_, aty)) in ctor.args.iter().enumerate() {
+            let is_explicit = !info.arg_implicit.get(ai).copied().unwrap_or(false);
+            let is_rec = matches!(aty, Term::Data(dn, _) if dn == data);
+            if is_explicit {
+                if is_rec {
+                    if let Some(n) = arm.binders.get(explicit_idx) {
+                        smaller.push(n.clone());
+                    }
+                }
+                explicit_idx += 1;
+            }
+        }
+        smaller
+    }
+
+    /// Distil one `fn` into the totality analyzer's input. The analysis works in
+    /// EXPLICIT-parameter space (surface recursive calls only list explicit
+    /// arguments — implicits are inferred), so `params` is the user-written
+    /// parameter list. The scrutinee's datatype is recovered from the full
+    /// signature (`full_names`/`full_tys`, which interleave implicits).
+    fn fn_clauses(
+        &self,
+        name: &str,
+        params: &[String],
+        full_names: &[String],
+        full_tys: &[Ty],
+        body: &Tm,
+    ) -> FnClauses {
+        match body {
+            Tm::Match(scrut, arms) => {
+                let scrut_pos = params.iter().position(|p| p == scrut);
+                // the scrutinee's datatype: find it among ALL params (it may sit
+                // after some implicits) and read its type head.
+                let data = full_names
+                    .iter()
+                    .position(|p| p == scrut)
+                    .and_then(|fi| match flatten_ty(&full_tys[fi]).0 {
+                        Ty::Var(n) => Some(n.clone()),
+                        _ => None,
+                    });
+                let arm_infos = arms
+                    .iter()
+                    .map(|arm| {
+                        let smaller =
+                            data.as_ref().map(|d| self.smaller_binders(d, arm)).unwrap_or_default();
+                        let mut calls = Vec::new();
+                        collect_all_calls(&arm.body, &mut calls);
+                        ArmInfo { smaller, calls }
+                    })
+                    .collect();
+                FnClauses {
+                    name: name.to_string(),
+                    params: params.to_vec(),
+                    scrut_pos,
+                    arms: arm_infos,
+                    body_calls: Vec::new(),
+                }
+            }
+            other => {
+                let mut calls = Vec::new();
+                collect_all_calls(other, &mut calls);
+                FnClauses {
+                    name: name.to_string(),
+                    params: params.to_vec(),
+                    scrut_pos: None,
+                    arms: Vec::new(),
+                    body_calls: calls,
+                }
+            }
+        }
+    }
+
     /// Lower `match n { Zero => z, Succ(k) => s }` on a `%builtin Nat` scrutinee to
     /// the kernel's `NatElim(motive, z, λk.λih. s, n)`. A recursive call on the
     /// predecessor `k` inside the `Succ` arm becomes the induction hypothesis `ih`.
@@ -1602,58 +1737,33 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<bo
 }
 
 /// Collect the argument lists of every call to `fnname` inside a term.
-fn collect_calls<'a>(t: &'a Tm, fnname: &str, out: &mut Vec<&'a [Tm]>) {
+/// Collect EVERY call (to any function/constructor) in `t`, for the totality
+/// call graph: a `Call(name, args)` becomes `TCall { callee: name, args }`.
+/// Constructor applications are included too — harmless, since they are not in
+/// the user-function set and so are treated as total leaves by the analyzer.
+fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     match t {
         Tm::Call(n, args) => {
-            if n == fnname {
-                out.push(args);
-            }
+            out.push(TCall { callee: n.clone(), args: args.clone() });
             for a in args {
-                collect_calls(a, fnname, out);
+                collect_all_calls(a, out);
             }
         }
         Tm::Add(a, b) => {
-            collect_calls(a, fnname, out);
-            collect_calls(b, fnname, out);
+            collect_all_calls(a, out);
+            collect_all_calls(b, out);
         }
         Tm::Match(_, arms) => {
             for a in arms {
-                collect_calls(&a.body, fnname, out);
+                collect_all_calls(&a.body, out);
             }
         }
         Tm::LetPair(_, e, body) => {
-            collect_calls(e, fnname, out);
-            collect_calls(body, fnname, out);
+            collect_all_calls(e, out);
+            collect_all_calls(body, out);
         }
         Tm::Var(_) | Tm::Lit(_) => {}
     }
-}
-
-/// Is a recursive `fn` a SIMPLE FOLD — i.e. every recursive call leaves every
-/// NON-scrutinee argument unchanged (passes the parameter through verbatim)? If so
-/// it lowers to an eliminator (reducible in types, iterative, total). If not, the
-/// recursion varies an accumulator/label and must be compiled as general recursion
-/// (`Fix`). The scrutinee argument itself is the structural decrease and may differ.
-fn is_simple_fold(fnname: &str, scrut_pos: usize, params: &[String], arms: &[Arm]) -> bool {
-    let mut calls = Vec::new();
-    for arm in arms {
-        collect_calls(&arm.body, fnname, &mut calls);
-    }
-    for args in &calls {
-        if args.len() != params.len() {
-            return false;
-        }
-        for (i, a) in args.iter().enumerate() {
-            if i == scrut_pos {
-                continue;
-            }
-            match a {
-                Tm::Var(v) if v == &params[i] => {}
-                _ => return false,
-            }
-        }
-    }
-    true
 }
 
 fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
@@ -1686,7 +1796,7 @@ postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
 fn item_name(it: &Item) -> Option<&str> {
     match it {
-        Item::Sig(n, _) | Item::Fn(n, _, _) | Item::Postulate(n, _) => Some(n),
+        Item::Sig(n, _) | Item::Fn(n, _, _, _) | Item::Postulate(n, _) => Some(n),
         Item::Enum { name, .. } | Item::Struct { name, .. } => Some(name),
         Item::BuiltinNat(_) => None,
     }
@@ -1905,13 +2015,53 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             sigs.insert(n.clone(), t.clone());
         }
     }
-    let mut out_defs = Vec::new();
+    // PHASE E1 — totality (termination) PRE-PASS: distil every `fn` and run the
+    // structural-descent / mutual-recursion analyzer ONCE, before lowering. The
+    // verdict then DECIDES the lowering: `Total` ⇒ a kernel eliminator (which the
+    // kernel re-checks total-by-construction); `Partial` ⇒ an opaque `Fix`. This
+    // does not grow the trusted base — see `totality.rs`.
+    let mut clauses: Vec<FnClauses> = Vec::new();
     for it in &items {
-        if let Item::Fn(name, params, body) = it {
+        if let Item::Fn(name, params, body, _) = it {
+            let sig = sigs.get(name).ok_or_else(|| format!("`fn {name}` has no type signature"))?;
+            let (full_names, _imps, full_tys, _ret) = split_signature(sig, params)?;
+            clauses.push(elab.fn_clauses(name, params, &full_names, &full_tys, body));
+        }
+    }
+    let verdicts = totality::analyze(&clauses);
+
+    let mut out_defs = Vec::new();
+    let mut totality_status: Vec<(String, bool, Option<String>)> = Vec::new();
+    for it in &items {
+        if let Item::Fn(name, params, body, annot) = it {
             let sig = sigs.get(name).ok_or_else(|| format!("`fn {name}` has no type signature"))?.clone();
             let ty_term = elab.elab_ty(&sig, &[])?;
             let (full_names, full_imps, full_tys, ret) = split_signature(&sig, params)?;
             elab.def_implicit.insert(name.clone(), full_imps.clone());
+
+            // the totality verdicts for this fn (analyzed in the pre-pass):
+            //   `full`       — end-to-end (own recursion ∧ callees total): the
+            //                  CERTIFICATE and the reported status.
+            //   `structural` — own recursion only: drives LOWERING (eliminator
+            //                  vs Fix); a non-recursive fn is always structurally
+            //                  total, so it lowers normally even calling a partial.
+            let info = verdicts.get(name).cloned();
+            let full = info.as_ref().map(|i| i.full.clone()).unwrap_or(Totality::Total);
+            let structural =
+                info.as_ref().map(|i| i.structural.clone()).unwrap_or(Totality::Total);
+            // `%total` is a CERTIFICATE, not a hint: a `%total` fn that the checker
+            // cannot certify (its own recursion, OR a partial callee) is a HARD
+            // ERROR — annotation ≠ proof.
+            if *annot == Some(TotAnnot::Total) {
+                if let Some(reason) = full.reason() {
+                    return Err(format!("`%total fn {name}` is not total: {reason}"));
+                }
+            }
+            totality_status.push((
+                name.clone(),
+                full.is_total(),
+                full.reason().map(|s| s.to_string()),
+            ));
 
             // the fn's typing context: each parameter's name + kernel type
             let mut fn_cx = Cx::default();
@@ -1921,24 +2071,35 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 fn_cx.push(pn.clone(), v);
             }
 
-            // GENERAL recursion: a `match` on a `%builtin Nat` whose recursive calls
-            // vary a non-scrutinee argument compiles to a `Fix` (the whole term),
-            // not a fold. Emit it directly and skip the usual λ-wrapping.
-            if let Tm::Match(scrut, arms) = body {
-                if let Some(sp) = full_names.iter().position(|p| p == scrut) {
-                    let scrut_is_nat = matches!(
-                        flatten_ty(&full_tys[sp]).0,
-                        Ty::Var(n) if elab.nat_types.contains(n)
-                    );
-                    if scrut_is_nat && !is_simple_fold(name, sp, &full_names, arms) {
-                        let term = elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?;
-                        elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
-                        out_defs.push((name.clone(), ty_term, term));
-                        continue;
+            // PARTIAL ⇒ general recursion via an opaque `Fix` (the kernel never
+            // unfolds it, so it cannot reduce in a type — the partial/total
+            // boundary). Currently only `%builtin Nat` case-splits have a `Fix`
+            // lowering; a partial recursion on any other shape is an honest hard
+            // error (NOT silently accepted), pending the Phase E2 machinery.
+            if !structural.is_total() {
+                if let Tm::Match(scrut, arms) = body {
+                    if let Some(sp) = full_names.iter().position(|p| p == scrut) {
+                        let scrut_is_nat = matches!(
+                            flatten_ty(&full_tys[sp]).0,
+                            Ty::Var(n) if elab.nat_types.contains(n)
+                        );
+                        if scrut_is_nat {
+                            let term = elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?;
+                            elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
+                            out_defs.push((name.clone(), ty_term, term));
+                            continue;
+                        }
                     }
                 }
+                return Err(format!(
+                    "`fn {name}` is partial ({}) but cannot be lowered: general/mutual \
+                     recursion is only supported on a `%builtin Nat` scrutinee so far \
+                     (Phase E2). Restructure as a structural fold, or wait for E2.",
+                    structural.reason().unwrap_or("not total")
+                ));
             }
 
+            // TOTAL ⇒ lower to a kernel eliminator (or a non-recursive body).
             let body_inner = match body {
                 Tm::Match(scrut, arms) => {
                     elab.elab_match_body(name, &fn_cx, params, &full_tys, &ret, scrut, arms)?
@@ -1957,7 +2118,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         }
     }
 
-    Ok(Program { sig: (*elab.rc).clone(), defs: out_defs })
+    Ok(Program { sig: (*elab.rc).clone(), defs: out_defs, totality: totality_status })
 }
 
 pub fn check_program(src: &str) -> Result<Program, Vec<String>> {

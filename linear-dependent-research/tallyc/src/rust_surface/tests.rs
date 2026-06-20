@@ -382,3 +382,129 @@ fn implicit_solved_through_nested_constructor_arg() {
                fn main() { free(alloc(Succ(Zero))) }\n";
     assert!(check_program(src).is_ok(), "should type-check: {:?}", check_program(src).err());
 }
+
+// ===========================================================================
+// PHASE E1 — totality (termination) checker + `%total` certificates
+// ===========================================================================
+
+const NATB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+
+/// Is `fnname` reported total in the program's totality status?
+fn is_total(prog: &Program, fnname: &str) -> bool {
+    prog.totality.iter().any(|(n, t, _)| n == fnname && *t)
+}
+
+#[test]
+fn total_certificate_rejects_non_terminating() {
+    // `%total` on a genuinely non-terminating fn is a HARD ERROR, and for the
+    // RIGHT reason (a termination/decrease failure, not something incidental).
+    let src = format!(
+        "{NATB}\n%total fn loop(m) {{ match m {{ Zero => Zero, Succ(k) => loop(Succ(k)) }} }}\n\
+         loop : Nat -> Nat\nmain : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    assert!(err.contains("loop") && err.contains("not total"), "got: {err}");
+    assert!(
+        err.contains("does not decrease") && err.contains("Succ"),
+        "must cite the non-decreasing recursive argument, got: {err}"
+    );
+}
+
+#[test]
+fn total_certificate_accepts_structural_fold_and_does_not_dodge() {
+    // DUAL-FAILURE GUARD (other direction): a genuinely-total structural fold
+    // annotated `%total` PASSES, and is reported `total` — the checker does NOT
+    // dodge by making everything partial/Fix.
+    let src = format!(
+        "{NATB}\n%total fn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
+         add : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ add(2, 3) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "add"), "add must be certified total");
+}
+
+#[test]
+fn total_certificate_rejects_accumulator_with_actionable_message() {
+    // accumulator-style recursion is terminating but not yet lowerable to an
+    // eliminator (E1) — `%total` declines it with a CLEAR, actionable message,
+    // and it is never silently mislabeled total.
+    let src = format!(
+        "{NATB}\n%total fn addacc(m, n) {{ match m {{ Zero => n, Succ(k) => addacc(k, Succ(n)) }} }}\n\
+         addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(2, 3) }}\n"
+    );
+    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    assert!(
+        err.contains("accumulator") && (err.contains("E2") || err.contains("E3")),
+        "must explain accumulator-style + point at the later phase, got: {err}"
+    );
+}
+
+#[test]
+fn total_certificate_rejects_mutual_recursion() {
+    // a mutual-recursion cycle is not yet certifiable as total; `%total` on a
+    // member is a hard error citing the cycle (never silently accepted).
+    let src = format!(
+        "{NATB}\n\
+         %total fn iseven(m) {{ match m {{ Zero => Zero, Succ(k) => isodd(k) }} }}\niseven : Nat -> Nat\n\
+         fn isodd(m) {{ match m {{ Zero => Succ(Zero), Succ(k) => iseven(k) }} }}\nisodd : Nat -> Nat\n\
+         main : Nat\nfn main() {{ iseven(2) }}\n"
+    );
+    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    assert!(err.contains("mutual"), "must cite the mutual-recursion cycle, got: {err}");
+}
+
+#[test]
+fn unannotated_partial_recursion_lowers_to_fix_and_is_reported_partial() {
+    // WITHOUT `%total`, non-structural recursion on a `%builtin Nat` is honestly
+    // accepted as PARTIAL (an opaque `Fix` the kernel never unfolds) — and the
+    // status reports it partial, so the default is not "silently assumed total".
+    let src = format!(
+        "{NATB}\nfn loop(m) {{ match m {{ Zero => Zero, Succ(k) => loop(Succ(k)) }} }}\n\
+         loop : Nat -> Nat\nmain : Nat\nfn main() {{ loop(Zero) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(!is_total(&prog, "loop"), "loop must be reported partial, not total");
+}
+
+#[test]
+fn calling_a_partial_fn_taints_totality_but_still_compiles() {
+    // `main` calls a partial `loop`: main is reported NON-total (partiality is
+    // contagious for the certificate), but it still COMPILES — calling a partial
+    // helper does not change how a non-recursive fn lowers.
+    let src = format!(
+        "{NATB}\nfn loop(m) {{ match m {{ Zero => Zero, Succ(k) => loop(Succ(k)) }} }}\n\
+         loop : Nat -> Nat\nmain : Nat\nfn main() {{ loop(Zero) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(!is_total(&prog, "main"), "main calls a partial fn ⇒ not total");
+    // but a `%total main` here WOULD be rejected:
+    let src2 = src.replace("fn main()", "%total fn main()");
+    assert!(check_program(&src2).is_err(), "%total main calling a partial fn must be rejected");
+}
+
+#[test]
+fn structural_fold_is_total_without_annotation() {
+    // the default verdict still RECOGNISES totality (status), even un-annotated.
+    let src = format!(
+        "{NATB}\nfn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
+         add : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ add(2, 3) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "add") && is_total(&prog, "main"));
+}
+
+#[test]
+fn non_nat_enum_reusing_succ_name_is_not_treated_as_nat_descent() {
+    // Red-team hardening: a non-Nat enum `Bad` reuses the constructor name `Succ`.
+    // `Bad.Succ`'s field is a `Nat`, NOT a sub-structure of `Bad`, so recursing on
+    // it does NOT decrease. The structural check must NOT short-circuit on the
+    // name-keyed Nat role table; `%total` must reject (and it must never be
+    // certified total via the name collision).
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               enum Bad { Stop : Bad, Succ : Nat -> Bad }\n\
+               %total fn loop(b) { match b { Stop => Zero, Succ(x) => loop(x) } }\n\
+               loop : Bad -> Nat\nmain : Nat\nfn main() { Zero }\n";
+    // must be rejected — either by the totality gate (preferred) or a hard error,
+    // but NEVER accepted as a certified-total non-terminating fn.
+    assert!(check_program(src).is_err(), "name-collision Succ must not certify total");
+}

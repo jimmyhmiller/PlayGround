@@ -32,11 +32,26 @@ fn run_cli() -> ExitCode {
             };
             match tally::rust_surface::check_program(&src) {
                 Ok(prog) => {
+                    let total = prog.totality.iter().filter(|(_, t, _)| *t).count();
                     println!(
                         "ok: {path} type-checks ({} datatype(s), {} def(s)) — no leaks, no use-after-free",
                         prog.sig.datas.len(),
                         prog.defs.len()
                     );
+                    println!(
+                        "    totality: {total}/{} fn(s) total",
+                        prog.totality.len()
+                    );
+                    for (name, is_total, reason) in &prog.totality {
+                        if *is_total {
+                            println!("      • {name}: total");
+                        } else {
+                            println!(
+                                "      • {name}: partial — {}",
+                                reason.as_deref().unwrap_or("not total")
+                            );
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(diags) => {

@@ -1,0 +1,293 @@
+//! PHASE E1 — the termination half of the totality checker.
+//!
+//! This module is an ELABORATION-SIDE analysis. It does NOT grow the trusted
+//! base: a function the checker certifies `Total` is one whose recursion is
+//! structural and therefore lowers to a kernel ELIMINATOR (which the kernel then
+//! re-checks total-by-construction); a function it cannot certify lowers to an
+//! opaque `Fix` (partial) that the kernel never unfolds. So a bug here can only
+//! REJECT a program or downgrade it to partial — never make an unsound term pass.
+//!
+//! The verdict is purely about a function's OWN recursion:
+//!   * a recursive call must pass, in the matched-scrutinee position, an argument
+//!     that is a STRICT SUBTERM of the matched value (a recursive-field pattern
+//!     binder) — positively verified, not assumed;
+//!   * for the result to LOWER to an eliminator (so `%total` is kernel-backed),
+//!     every other argument must be passed verbatim — accumulator-varying
+//!     recursion is terminating but not yet lowerable, so it is honestly
+//!     reported `Partial` (Phase E2/E3), never silently called total;
+//!   * mutual recursion (a call-graph cycle through ≥2 functions) is not yet
+//!     lowerable to a single eliminator, so it is `Partial` (Phase E2);
+//!   * a `Total` verdict also requires every function it CALLS to be `Total`
+//!     (partiality is contagious) — so a `%total` certificate is airtight.
+
+use crate::rust_surface::Tm;
+use std::collections::{HashMap, HashSet};
+
+/// The verdict for one function.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Totality {
+    /// Structurally terminating AND lowerable to a kernel eliminator.
+    Total,
+    /// Not certifiable as total (with a clear, actionable reason).
+    Partial(String),
+}
+
+impl Totality {
+    pub(crate) fn is_total(&self) -> bool {
+        matches!(self, Totality::Total)
+    }
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            Totality::Partial(r) => Some(r),
+            Totality::Total => None,
+        }
+    }
+}
+
+/// One call occurrence: the callee name and the surface argument terms.
+#[derive(Clone, Debug)]
+pub(crate) struct Call {
+    pub callee: String,
+    pub args: Vec<Tm>,
+}
+
+/// One `match` arm, distilled for the analysis.
+#[derive(Clone, Debug)]
+pub(crate) struct ArmInfo {
+    /// pattern binders that are STRICT SUBTERMS of the scrutinee (recursive
+    /// fields of the matched constructor) — the legal structural-decrease targets.
+    pub smaller: Vec<String>,
+    /// every call (to any function) occurring in this arm's body.
+    pub calls: Vec<Call>,
+}
+
+/// One function, distilled.
+#[derive(Clone, Debug)]
+pub(crate) struct FnClauses {
+    pub name: String,
+    /// full positional parameter names.
+    pub params: Vec<String>,
+    /// position (in `params`) of the matched scrutinee, if the body is a `match`.
+    pub scrut_pos: Option<usize>,
+    /// the match arms (empty if the body is not a `match`).
+    pub arms: Vec<ArmInfo>,
+    /// calls in a non-`match` body (empty if the body is a `match`).
+    pub body_calls: Vec<Call>,
+}
+
+impl FnClauses {
+    fn all_calls(&self) -> impl Iterator<Item = &Call> {
+        self.body_calls.iter().chain(self.arms.iter().flat_map(|a| a.calls.iter()))
+    }
+}
+
+/// The two verdicts for one function.
+#[derive(Clone, Debug)]
+pub(crate) struct TotInfo {
+    /// verdict about the function's OWN recursion only — drives LOWERING (a
+    /// structurally-recursive fn lowers to an eliminator; a non-structural one
+    /// to an opaque `Fix`). A non-recursive fn is always `Total` here, so it
+    /// lowers normally even when it calls a partial helper.
+    pub structural: Totality,
+    /// the END-TO-END verdict (own recursion AND every callee total) — drives the
+    /// `%total` certificate and the reported status. Calling a partial function
+    /// makes you non-total, but does not change how you lower.
+    pub full: Totality,
+}
+
+/// Analyze a whole program's functions. `fn_names` is the set of names that are
+/// user functions (so calls to postulates / built-ins are treated as total
+/// leaves). Returns the structural and propagated verdict per function.
+pub(crate) fn analyze(fns: &[FnClauses]) -> HashMap<String, TotInfo> {
+    let fn_names: HashSet<&str> = fns.iter().map(|f| f.name.as_str()).collect();
+
+    // --- call graph over user functions only ---
+    let mut edges: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for f in fns {
+        let e = edges.entry(f.name.as_str()).or_default();
+        for c in f.all_calls() {
+            if fn_names.contains(c.callee.as_str()) {
+                e.insert(fns.iter().find(|g| g.name == c.callee).unwrap().name.as_str());
+            }
+        }
+    }
+    // reachability closure (who can each function reach, transitively).
+    let reach = transitive_closure(&edges);
+
+    // --- step 1: each function's STRUCTURAL verdict (own recursion only) ---
+    let structural: HashMap<String, Totality> =
+        fns.iter().map(|f| (f.name.clone(), structural_verdict(f, &reach))).collect();
+
+    // --- step 2: the END-TO-END verdict — partiality is contagious. A function
+    // whose own recursion is fine but which CALLS a non-total function is itself
+    // not total (so a `%total` certificate is airtight). This does NOT affect
+    // lowering — only the certificate/status. Monotone fixpoint. ---
+    let mut full = structural.clone();
+    loop {
+        let mut changed = false;
+        for f in fns {
+            if !full[&f.name].is_total() {
+                continue;
+            }
+            for c in f.all_calls() {
+                if let Some(v) = full.get(&c.callee) {
+                    if !v.is_total() {
+                        full.insert(
+                            f.name.clone(),
+                            Totality::Partial(format!("calls `{}`, which is not total", c.callee)),
+                        );
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    fns.iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                TotInfo { structural: structural[&f.name].clone(), full: full[&f.name].clone() },
+            )
+        })
+        .collect()
+}
+
+/// The structural verdict for one function, considering only its OWN recursion.
+fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -> Totality {
+    let reaches_self = reach.get(&f.name).map(|s| s.contains(&f.name)).unwrap_or(false);
+    if !reaches_self {
+        // not part of any recursive cycle ⇒ terminates (no self-dependence).
+        return Totality::Total;
+    }
+
+    // is the cycle MUTUAL (goes through another function) or a direct self-loop?
+    let empty = HashSet::new();
+    let r = reach.get(&f.name).unwrap_or(&empty);
+    let mutual = r
+        .iter()
+        .any(|g| g != &f.name && reach.get(g).map(|s| s.contains(&f.name)).unwrap_or(false));
+    if mutual {
+        return Totality::Partial(format!(
+            "`{}` is part of a mutual-recursion cycle, which is not yet certifiable \
+             as total (only direct structural self-recursion is — Phase E2)",
+            f.name
+        ));
+    }
+
+    // direct self-recursion: every self-call must structurally descend AND pass
+    // every non-scrutinee argument verbatim (so it lowers to an eliminator).
+    let sp = match f.scrut_pos {
+        Some(p) => p,
+        None => {
+            return Totality::Partial(format!(
+                "`{}` recurses but does not pattern-match an argument, so there is \
+                 no structural measure to decrease on",
+                f.name
+            ))
+        }
+    };
+
+    // self-calls live inside arms (each with its own `smaller` set) and possibly
+    // in a non-match body (no smaller set — can never descend).
+    for c in &f.body_calls {
+        if c.callee == f.name {
+            return Totality::Partial(format!(
+                "`{}` calls itself outside of any pattern-match arm, so the call \
+                 cannot decrease a structural measure",
+                f.name
+            ));
+        }
+    }
+    for arm in &f.arms {
+        for c in &arm.calls {
+            if c.callee != f.name {
+                continue;
+            }
+            if c.args.len() != f.params.len() {
+                return Totality::Partial(format!(
+                    "recursive call to `{}` has the wrong number of arguments",
+                    f.name
+                ));
+            }
+            // scrutinee-position argument must be a strict subterm (a smaller var).
+            match &c.args[sp] {
+                Tm::Var(v) if arm.smaller.contains(v) => {}
+                other => {
+                    return Totality::Partial(format!(
+                        "recursive call to `{}` does not decrease: the argument in the \
+                         matched position is {}, not a sub-structure of `{}`",
+                        f.name,
+                        describe(other),
+                        f.params[sp]
+                    ))
+                }
+            }
+            // every OTHER argument must be passed through verbatim, else the
+            // recursion is accumulator-style — terminating, but not yet lowerable
+            // to an eliminator (so we honestly decline to certify it total).
+            for (i, a) in c.args.iter().enumerate() {
+                if i == sp {
+                    continue;
+                }
+                match a {
+                    Tm::Var(v) if v == &f.params[i] => {}
+                    _ => {
+                        return Totality::Partial(format!(
+                            "`{}` is accumulator-style recursion (argument `{}` changes \
+                             across the recursive call): this is terminating but not yet \
+                             certifiable as total — it needs the Phase E2/E3 lowering. \
+                             Mark it `%partial`, or restructure as a plain fold.",
+                            f.name, f.params[i]
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    Totality::Total
+}
+
+fn describe(t: &Tm) -> String {
+    match t {
+        Tm::Var(v) => format!("the variable `{v}`"),
+        Tm::Call(c, _) => format!("a constructor/call `{c}(…)`"),
+        Tm::Lit(n) => format!("the literal `{n}`"),
+        Tm::Add(_, _) => "an addition".into(),
+        Tm::Match(_, _) => "a match".into(),
+        Tm::LetPair(_, _, _) => "a let".into(),
+    }
+}
+
+/// Transitive closure of a directed graph (Floyd-Warshall-style over reachable
+/// sets). Small graphs (one entry per user fn), so the naive fixpoint is fine.
+fn transitive_closure(edges: &HashMap<&str, HashSet<&str>>) -> HashMap<String, HashSet<String>> {
+    let mut reach: HashMap<String, HashSet<String>> = edges
+        .iter()
+        .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
+        .collect();
+    loop {
+        let mut changed = false;
+        let keys: Vec<String> = reach.keys().cloned().collect();
+        for k in &keys {
+            let succs: Vec<String> = reach[k].iter().cloned().collect();
+            for s in succs {
+                let add: Vec<String> = reach.get(&s).map(|x| x.iter().cloned().collect()).unwrap_or_default();
+                let entry = reach.get_mut(k).unwrap();
+                for a in add {
+                    if entry.insert(a) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    reach
+}
