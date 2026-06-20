@@ -1,6 +1,10 @@
 (module control)
+; `Option` (None | Some) is the iterator protocol's `next` return type; importing
+; it here means `for-in (iter …)` works without the user importing result too —
+; macro hygiene qualifies the None/Some in the template to result's namespace.
+(import "result.coil" :use *)
 ; Control-flow sugar — written entirely in Coil macros. `(import "lib/control.coil")`
-; then use `when`/`unless`/`cond`/`->`/`->>`/`inline-for`. Nothing in the compiler
+; then use `when`/`unless`/`cond`/`|>`/`inline-for`/`for-in`. Nothing in the compiler
 ; knows about any of these; they expand to `if`/`do`/`let` over the core.
 ;
 ; `while` and `for` are MACROS over the core `loop`/`break`/`continue` primitive
@@ -77,6 +81,42 @@
              (if (icmp-lt (load ~idx) ~hi)
                  (let [~i (load ~idx)] ~@body)
                  (break)))))))
+
+; `(for-in [x COLL] body...)` — iterate a collection, binding x to each element.
+; A macro over `for`, dispatching on the collection FORM (the expander has no
+; types): `(range LO HI)` yields the ints LO..HI-1; `(over ARR LEN)` yields the
+; elements of a fixed array ARR of length LEN. User collection types ride the
+; iterator-value protocol (`for-each`, below) instead. No core support.
+(defmacro for-in [binding & body]
+  (if (not (= (count binding) 2))
+      (error "for-in: binding must be [x COLL]")
+      (let [x    (first binding)
+            coll (first (rest binding))]
+        (if (not (list? coll))
+            (error "for-in: COLL must be a form, e.g. (range lo hi) or (over arr len)")
+            (let [h (first coll)]
+              (if (= h (quote range))
+                  `(for [~x ~(first (rest coll)) ~(first (rest (rest coll)))] ~@body)
+                  (if (= h (quote over))
+                      (let [arr (first (rest coll))
+                            len (first (rest (rest coll)))
+                            i   (gensym "fin-i")]
+                        `(for [~i 0 ~len]
+                           (let [~x (load (index ~arr ~i))] ~@body)))
+                      ; The extensible protocol: (iter NEXT STATE) where NEXT is a
+                      ; fnptr (ptr S) -> (Option T) advancing STATE (a (ptr S)).
+                      ; Any user collection becomes iterable by supplying these.
+                      (if (= h (quote iter))
+                          (let [nf (first (rest coll))
+                                st (first (rest (rest coll)))
+                                nfv (gensym "fin-next")
+                                stv (gensym "fin-state")]
+                            `(let [~nfv ~nf ~stv ~st]
+                               (loop
+                                 (match (call-ptr ~nfv ~stv)
+                                   (None [] (break))
+                                   (Some [~x] ~@body)))))
+                          (error "for-in: unsupported collection; use (range lo hi), (over arr len), or (iter next state)")))))))))
 
 ; ---- threading ------------------------------------------------------------
 ; Spelled `|>`/`|>>` (F#/Elixir/OCaml) rather than Clojure's `->`/`->>`: `->`

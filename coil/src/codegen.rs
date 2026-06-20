@@ -1778,13 +1778,22 @@ impl<'ctx> Cg<'ctx> {
                 child.insert(b.clone(), (fval, fty));
             }
             let (bval, bty) = self.emit_expr(&arm.body, &child)?;
-            let end = self.builder.get_insert_block().unwrap();
-            self.builder.build_unconditional_branch(merge).map_err(le)?;
-            incoming.push((bval, end));
             result_ty = bty;
+            // An arm may diverge (end in break/continue/return-from): only a
+            // falling-through arm branches to the merge and feeds the result phi.
+            let end = self.builder.get_insert_block().unwrap();
+            if end.get_terminator().is_none() {
+                self.builder.build_unconditional_branch(merge).map_err(le)?;
+                incoming.push((bval, end));
+            }
         }
 
         self.builder.position_at_end(merge);
+        if incoming.is_empty() {
+            // Every arm diverged: the merge is unreachable.
+            self.builder.build_unreachable().map_err(le)?;
+            return Ok((self.ctx.i64_type().const_zero().into(), result_ty));
+        }
         let phi = self.builder.build_phi(self.basic_ty(&result_ty), "match.val").map_err(le)?;
         let inc: Vec<(&dyn BasicValue, BasicBlock)> =
             incoming.iter().map(|(v, b)| (v as &dyn BasicValue, *b)).collect();
