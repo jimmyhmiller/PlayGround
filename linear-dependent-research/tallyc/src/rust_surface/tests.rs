@@ -508,3 +508,38 @@ fn non_nat_enum_reusing_succ_name_is_not_treated_as_nat_descent() {
     // but NEVER accepted as a certified-total non-terminating fn.
     assert!(check_program(src).is_err(), "name-collision Succ must not certify total");
 }
+
+// ===========================================================================
+// PHASE E2 — coverage / pattern-match hygiene (redundant + unknown arms)
+// ===========================================================================
+
+#[test]
+fn redundant_duplicate_arm_is_rejected() {
+    // boxed datatype: a second arm for the same constructor is rejected.
+    let src = "enum Bool { T : Bool, F : Bool }\n\
+               neg : Bool -> Bool\nfn neg(b) { match b { T => F, F => T, T => T } }\n\
+               main : Bool\nfn main() { neg(T) }\n";
+    assert!(check_program(src).is_err(), "duplicate arm must be rejected");
+    // %builtin Nat path too:
+    let nsrc = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                f : Nat -> Nat\nfn f(m) { match m { Zero => Zero, Succ(k) => k, Zero => m } }\n\
+                main : Nat\nfn main() { f(Zero) }\n";
+    assert!(check_program(nsrc).is_err(), "duplicate Nat arm must be rejected");
+}
+
+#[test]
+fn arm_for_a_non_constructor_is_rejected() {
+    let src = "enum Bool { T : Bool, F : Bool }\n\
+               neg : Bool -> Bool\nfn neg(b) { match b { T => F, F => T, Bogus => T } }\n\
+               main : Bool\nfn main() { neg(T) }\n";
+    assert!(check_program(src).is_err(), "unknown-constructor arm must be rejected");
+}
+
+#[test]
+fn exhaustive_match_still_accepted_after_hygiene() {
+    // the hygiene checks must not break a legitimate exhaustive match.
+    let src = "enum Bool { T : Bool, F : Bool }\n\
+               neg : Bool -> Bool\nfn neg(b) { match b { T => F, F => T } }\n\
+               main : Bool\nfn main() { neg(T) }\n";
+    assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
+}

@@ -1410,6 +1410,13 @@ impl Elab {
         let mut succ_arm = None;
         for a in arms {
             match self.nat_ctor.get(&a.ctor) {
+                // a redundant/duplicate arm for the same role is rejected (E2).
+                Some(NatRole::Zero) if zero_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Succ) if succ_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
                 Some(NatRole::Zero) => zero_arm = Some(a),
                 Some(NatRole::Succ) => succ_arm = Some(a),
                 None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
@@ -1522,6 +1529,13 @@ impl Elab {
         let mut succ_arm = None;
         for a in arms {
             match self.nat_ctor.get(&a.ctor) {
+                // a redundant/duplicate arm for the same role is rejected (E2).
+                Some(NatRole::Zero) if zero_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
+                Some(NatRole::Succ) if succ_arm.is_some() => {
+                    return Err(format!("`match` has a redundant/duplicate arm for `{}`", a.ctor))
+                }
                 Some(NatRole::Zero) => zero_arm = Some(a),
                 Some(NatRole::Succ) => succ_arm = Some(a),
                 None => return Err(format!("`{}` is not a constructor of the Nat scrutinee", a.ctor)),
@@ -1620,6 +1634,27 @@ impl Elab {
             .iter()
             .map(|a| self.elab_ty(a, full_params))
             .collect::<Result<_, _>>()?;
+
+        // COVERAGE HYGIENE (E2): every arm must name a REAL constructor of the
+        // scrutinee's family, and no constructor may be matched twice. (The
+        // per-constructor loop below finds the FIRST arm for each ctor, so without
+        // this an unknown-ctor arm or a duplicate would be silently ignored.)
+        let mut seen: Vec<&str> = Vec::new();
+        for arm in arms {
+            if !decl.ctors.iter().any(|c| c.name == arm.ctor) {
+                return Err(format!(
+                    "`match` arm `{}` is not a constructor of `{data}`",
+                    arm.ctor
+                ));
+            }
+            if seen.contains(&arm.ctor.as_str()) {
+                return Err(format!(
+                    "`match` has a redundant/duplicate arm for `{}`",
+                    arm.ctor
+                ));
+            }
+            seen.push(arm.ctor.as_str());
+        }
 
         let mut methods = Vec::with_capacity(decl.ctors.len());
         for ctor in &decl.ctors {
