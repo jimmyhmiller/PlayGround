@@ -1210,6 +1210,12 @@ fn synth(
                 )),
             }
         }
+        // Produced by `coerce_arg` as part of elaboration; never an input to
+        // synthesis (the checker runs once and `SpillRef` only appears in its
+        // output).
+        Expr::SpillRef(_) => {
+            unreachable!("SpillRef is checker-produced and is never re-synthesized")
+        }
     }
 }
 
@@ -1502,9 +1508,29 @@ fn coerce_arg(
 ) -> Result<Expr, String> {
     match want {
         Type::Ref(want_mut, wp) => {
-            let ap = place_pointee(&at).ok_or_else(|| {
-                format!("in '{fname}': {what} expects a reference to {}, got {}", ty_str(wp), ty_str(&at))
-            })?;
+            // A place argument is borrowed directly; an rvalue of the pointee
+            // type is spilled to a fresh stack slot first (only for an immutable
+            // reference — a mutable one needs a real, writable place).
+            let ap = match place_pointee(&at) {
+                Some(ap) => ap,
+                None => {
+                    if *want_mut {
+                        return Err(format!(
+                            "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place",
+                            ty_str(wp)
+                        ));
+                    }
+                    if &at != &**wp {
+                        return Err(format!(
+                            "in '{fname}': {what} expects a reference to {}, got {}",
+                            ty_str(wp),
+                            ty_str(&at)
+                        ));
+                    }
+                    // Spill the temporary and pass a pointer to it.
+                    return Ok(Expr::SpillRef(Box::new(ae)));
+                }
+            };
             if ap != &**wp {
                 return Err(format!(
                     "in '{fname}': {what} has type {} but expected a reference to {}",

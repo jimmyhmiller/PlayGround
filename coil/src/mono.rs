@@ -295,6 +295,7 @@ impl<'a> Mono<'a> {
                 mutable: *mutable,
                 place: Box::new(go(self, place)?),
             },
+            Expr::SpillRef(inner) => Expr::SpillRef(Box::new(go(self, inner)?)),
             Expr::Bin { op, lhs, rhs } => Expr::Bin {
                 op: *op,
                 lhs: Box::new(go(self, lhs)?),

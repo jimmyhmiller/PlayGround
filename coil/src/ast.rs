@@ -111,6 +111,12 @@ pub enum Expr {
         mutable: bool,
         place: Box<Expr>,
     },
+    /// Spill an rvalue to a fresh stack slot and yield a pointer to it. The
+    /// checker inserts this when an aggregate (or any) rvalue is passed to a
+    /// by-immutable-reference parameter — a temporary needs a place to borrow.
+    /// Codegen lowers it to `alloca` + `store` + the slot pointer (the same
+    /// spill the match scrutinee uses). Not user-writable.
+    SpillRef(Box<Expr>),
     Let {
         /// Each binding is (name, mutable, value). A `mutable` binding becomes a
         /// stack place (its name is a reference you can write through); a plain

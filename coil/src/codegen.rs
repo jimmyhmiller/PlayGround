@@ -1235,6 +1235,15 @@ impl<'ctx> Cg<'ctx> {
             // A borrow is the underlying place's pointer (the checker normally
             // erases these, but a place used directly lowers to its pointer).
             Expr::Borrow { place, .. } => self.emit_expr(place, scope),
+            // Spill an rvalue to a fresh stack slot and yield a pointer to it —
+            // the same `alloca` + `store` the match scrutinee uses — so a
+            // temporary can be passed to a by-immutable-reference parameter.
+            Expr::SpillRef(inner) => {
+                let (v, t) = self.emit_expr(inner, scope)?;
+                let slot = self.builder.build_alloca(self.basic_ty(&t), "spill").map_err(le)?;
+                self.builder.build_store(slot, v).map_err(le)?;
+                Ok((slot.into(), Type::Ptr(Box::new(t))))
+            }
             Expr::Str(s) => {
                 // Private, NUL-terminated [N x i8] global; value is a (ptr i8).
                 let bytes = self.ctx.const_string(s.as_bytes(), true);

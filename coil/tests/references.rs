@@ -133,3 +133,34 @@ fn ptr_tier_still_works_alongside() {
     "#;
     assert_eq!(build_and_run(src), 42);
 }
+
+#[test]
+fn rvalue_spill_struct_arg_to_byvalue_param() {
+    // A struct RVALUE (a function-call result) passed to a by-value aggregate
+    // param — which is an immutable reference — is spilled to a stack slot and
+    // borrowed. Previously this errored ("expects a reference to S, got S").
+    let src = r#"
+        (defstruct Pt [(x i64) (y i64)])
+        (defn mk [(x i64) (y i64)] (-> Pt)
+          (let [(mut p) (zeroed Pt)]
+            (store! (field p x) x) (store! (field p y) y) (load p)))
+        (defn sum-pt [(p Pt)] (-> i64)
+          (iadd (load (field p x)) (load (field p y))))
+        (defn main [] (-> i64) (sum-pt (mk 17 25)))   ; 42
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn rvalue_spill_does_not_apply_to_mut_params() {
+    // The spill is for IMMUTABLE references only: a temporary has no stable place
+    // to mutate, so a `(mut)` param still rejects an rvalue argument.
+    let src = r#"
+        (defstruct Pt [(x i64) (y i64)])
+        (defn mk [] (-> Pt) (zeroed Pt))
+        (defn bump [(p (mut Pt))] (-> i64) (store! (field p x) 1) 0)
+        (defn main [] (-> i64) (bump (mk)))
+    "#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("mut") && err.contains("place"), "got: {err}");
+}

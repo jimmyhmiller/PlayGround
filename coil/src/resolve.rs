@@ -239,6 +239,9 @@ fn qualify_expr(
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_) => {}
         Expr::Zeroed(t) | Expr::SizeOf(t) | Expr::AlignOf(t) | Expr::OffsetOf(t, _) => ty(t)?,
         Expr::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports)?,
+        // `SpillRef` is inserted by the checker, which runs after name
+        // resolution; the resolver never encounters one.
+        Expr::SpillRef(_) => unreachable!("SpillRef is produced after name resolution"),
         Expr::Let { binds, body } => {
             for (_, _, v) in binds {
                 qualify_expr(v, m, imps, table, tps, exports)?;
