@@ -1,0 +1,47 @@
+(module fmt)
+; Formatting helpers over the IO Writer capability (lib/io.coil) — all explicit:
+; every printer TAKES a `(ptr Writer)`, there is no ambient stdout. Builds on io's
+; print-str / print-int (non-negative) / write-byte, adding the everyday pieces:
+; signed decimal, hex, bool, char, and newline/line convenience.
+;
+; The positional FORMAT-STRING front end (`(fmt w "x={d} y={s}" a b)`) needs
+; compile-time string access in the macro evaluator and is a separate increment.
+;
+;   (import "lib/fmt.coil" :use *) (import "lib/io.coil" :use *) (import "lib/result.coil" :use *)
+
+(import "io.coil"     :use *)
+(import "result.coil" :use *)
+
+; Signed decimal (io's print-int is non-negative only). NOTE: i64 MIN's magnitude
+; isn't representable, so it prints as its wrapped value — documented edge case.
+(defn print-i [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-lt n 0)
+      (match (write-byte w (cast :u8 45))     ; '-'
+        (Err [e] (Err e))
+        (Ok [_] (print-int w (isub 0 n))))
+      (print-int w n)))
+
+; Lowercase hexadecimal (non-negative), no "0x" prefix.
+(defn print-hex [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-lt n 16)
+      (write-byte w (cast :u8 (if (icmp-lt n 10) (iadd n 48) (iadd n 87))))   ; 87 = 'a'-10
+      (match (print-hex w (idiv n 16))
+        (Err [e] (Err e))
+        (Ok [_]
+          (let [d (irem n 16)]
+            (write-byte w (cast :u8 (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))))))))
+
+(defn print-bool [(w (ptr Writer)) (b bool)] (-> (Result :i64 IoError))
+  (print-str w (if b "true" "false")))
+
+(defn print-char [(w (ptr Writer)) (c :i64)] (-> (Result :i64 IoError))
+  (write-byte w (cast :u8 c)))
+
+(defn print-nl [(w (ptr Writer))] (-> (Result :i64 IoError))
+  (write-byte w (cast :u8 10)))   ; '\n'
+
+; Print a C string followed by a newline.
+(defn print-line [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
+  (match (print-str w s)
+    (Err [e] (Err e))
+    (Ok [_] (print-nl w))))

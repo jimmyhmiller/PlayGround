@@ -1,0 +1,14 @@
+; lib/fmt.coil — formatting over the explicit IO Writer (no ambient stdout).
+;   coil run examples/fmt.coil    => prints: n=-42 hex=ff ok=true
+(module app)
+(import "lib/fmt.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/result.coil" :use *)
+
+(defn main [] (-> :i64)
+  (let [w (stdout)]                 ; the IO capability is passed in, not ambient
+    (print-str w "n=")   (print-i w -42)
+    (print-str w " hex=") (print-hex w 255)
+    (print-str w " ok=") (print-bool w true)
+    (print-nl w)
+    0))
