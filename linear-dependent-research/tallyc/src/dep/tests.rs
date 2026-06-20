@@ -216,6 +216,40 @@ fn strict_positivity_rejects_negative_and_double_negative_occurrences() {
 }
 
 #[test]
+fn positivity_sees_through_natcase_and_fix_hiding_a_negative_occurrence() {
+    // RED-TEAM REGRESSION (kernel-bar): a NEGATIVE occurrence hidden inside a
+    // `NatCase` that REDUCES to `Bad → Bad` must NOT pass the positivity check.
+    // `NatCase Zero (Bad→Bad) (λ_.Nat) Zero` ⇝ `Bad → Bad`, so the field is really
+    // `(Bad → Bad) → Bad` (the canonical non-strictly-positive type). Before the
+    // fix, `occurs` skipped `NatCase`, so this inhabited `False` via Curry.
+    let bad = Data("Bad".into(), vec![]);
+    let hidden = NatCase(
+        b(Lam(b(Type(0)))),                          // motive λ_. Type
+        b(Pi(Omega, b(bad.clone()), b(bad.clone()))), // Zero branch: Bad → Bad (NEGATIVE)
+        b(Lam(b(Nat))),                               // Succ branch: λ_. Nat
+        b(NatLit(0)),                                 // scrutinee 0 ⇒ reduces to the Zero branch
+    );
+    let field = Pi(Omega, b(hidden), b(bad.clone())); // (Bad→Bad) → Bad, obfuscated
+    let sig = Signature {
+        postulates: vec![],
+        datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field)], vec![])])],
+    };
+    assert!(
+        check_signature(&sig).is_err(),
+        "a negative occurrence hidden in a reducing NatCase must be rejected"
+    );
+
+    // and the same hidden inside a `Fix` is likewise rejected.
+    let fix_hidden = Fix(b(Type(0)), b(Pi(Omega, b(bad.clone()), b(bad.clone()))));
+    let field2 = Pi(Omega, b(fix_hidden), b(bad));
+    let sig2 = Signature {
+        postulates: vec![],
+        datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field2)], vec![])])],
+    };
+    assert!(check_signature(&sig2).is_err(), "negative occurrence under Fix must be rejected");
+}
+
+#[test]
 fn indexed_higher_order_ih_uses_the_recursive_occurrences_own_index() {
     // The discriminating test for `ih_type`'s INDEX handling. `G : Nat → Type`:
     //   g0 : G Zero

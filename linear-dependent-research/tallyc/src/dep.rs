@@ -1274,10 +1274,21 @@ fn occurs(data: &str, t: &Term) -> bool {
                 go(data, x, found);
                 go(data, y, found);
             }
-            Term::NatElim(a, b, c, d) => {
+            Term::NatElim(a, b, c, d) | Term::NatCase(a, b, c, d) => {
+                // BOTH the recursive eliminator AND the non-recursive case split
+                // must be traversed: `NatCase` does large elimination and REDUCES
+                // (`vnatcase`), so a family hidden in one of its branches can
+                // surface as a genuine (possibly NEGATIVE) occurrence after
+                // reduction. Missing this is a positivity bypass ⇒ unsoundness.
                 for s in [a, b, c, d] {
                     go(data, s, found);
                 }
+            }
+            // `Fix` is opaque to the checker, but it can still mention the family
+            // in its type or body; a positivity search must see through it.
+            Term::Fix(ty, body) => {
+                go(data, ty, found);
+                go(data, body, found);
             }
             Term::Data(_, args) | Term::Constr(_, args) => {
                 for a in args {
