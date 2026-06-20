@@ -165,7 +165,8 @@ public enum Analyzer {
                 return nil
             }()
             if let r = usableRate, let tg = toGo, abs(r) > 0.001 {
-                let weeks = tg / r          // r negative when losing, tg positive when above target
+                // Time to close the gap: need weight to change by (target - current) = -tg at rate r.
+                let weeks = -tg / r
                 if weeks > 0, weeks.isFinite, let last = records.last?.date {
                     eta = Calendar.current.date(byAdding: .day, value: Int((weeks * 7).rounded()), to: last)
                 }
@@ -323,14 +324,17 @@ public enum Analyzer {
         for end in start..<records.count {
             let subRecords = Array(records[0...end])
             let subPoints = Array(points[0...end])
-            if let e = Estimator.effectiveTDEE(records: subRecords, points: subPoints,
-                                               windowDays: config.tdeeWindowDays) {
-                tdee.append(DatedBand(date: records[end].date, value: e.value, se: e.standardError))
-                let t = Estimator.trueTDEE(records: subRecords, points: subPoints, goal: goal,
-                                           windowDays: config.tdeeWindowDays)
-                if let b = Estimator.loggingBias(effective: e, truth: t) {
-                    bias.append(DatedValue(date: records[end].date, value: (b.value - 1) * 100))
-                }
+            let e = Estimator.effectiveTDEE(records: subRecords, points: subPoints,
+                                            windowDays: config.tdeeWindowDays)
+            let t = Estimator.trueTDEE(records: subRecords, points: subPoints, goal: goal,
+                                       windowDays: config.tdeeWindowDays)
+            // Plot the best available TDEE so the chart matches the headline (true burn when
+            // HealthKit is connected, otherwise as-logged maintenance).
+            if let best = t ?? e {
+                tdee.append(DatedBand(date: records[end].date, value: best.value, se: best.standardError))
+            }
+            if let e, let b = Estimator.loggingBias(effective: e, truth: t) {
+                bias.append(DatedValue(date: records[end].date, value: (b.value - 1) * 100))
             }
         }
         return (tdee, bias)

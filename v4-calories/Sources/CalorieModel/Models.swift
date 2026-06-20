@@ -37,7 +37,7 @@ public struct DailyRecord: Sendable, Equatable {
 }
 
 /// A single weigh-in, before aggregation into days.
-public struct WeighIn: Sendable, Equatable, Identifiable {
+public struct WeighIn: Sendable, Equatable, Identifiable, Codable {
     public var id: UUID
     public var date: Date
     public var weightLb: Double
@@ -49,7 +49,7 @@ public struct WeighIn: Sendable, Equatable, Identifiable {
 }
 
 /// A single calorie entry. Name is optional by design — the fast path is just a number.
-public struct CalorieEntry: Sendable, Equatable, Identifiable {
+public struct CalorieEntry: Sendable, Equatable, Identifiable, Codable {
     public var id: UUID
     public var date: Date
     public var kcal: Double
@@ -60,7 +60,7 @@ public struct CalorieEntry: Sendable, Equatable, Identifiable {
 }
 
 /// A reusable one-tap shortcut for a common food/amount.
-public struct Shortcut: Sendable, Equatable, Identifiable {
+public struct Shortcut: Sendable, Equatable, Identifiable, Codable {
     public var id: UUID
     public var label: String
     public var kcal: Double
@@ -72,13 +72,13 @@ public struct Shortcut: Sendable, Equatable, Identifiable {
 /// The user's objective and physiology. Goal fields drive the budget and ETA; the
 /// optional body fields let us estimate resting metabolic rate when HealthKit has no
 /// basal data, which is what makes logging-bias identifiable without an Apple Watch.
-public struct Goal: Sendable, Equatable {
+public struct Goal: Sendable, Equatable, Codable {
     public var targetWeightLb: Double
     /// Desired loss rate, lb/week. Positive = lose. Negative = gain.
     public var ratePerWeek: Double
 
     // Optional profile for a Mifflin–St Jeor resting-energy fallback.
-    public enum Sex: Sendable, Equatable { case male, female }
+    public enum Sex: String, Sendable, Equatable, Codable { case male, female }
     public var sex: Sex?
     public var ageYears: Double?
     public var heightCm: Double?

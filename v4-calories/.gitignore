@@ -2,11 +2,12 @@
 .build/
 Package.resolved
 
-# Xcode
-*.xcodeproj/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcuserdata/
-*.xcworkspace/xcuserdata/
+# Xcode — the project is generated from App/project.yml by xcodegen, so it is not committed.
+*.xcodeproj/
+*.xcworkspace/
+build/
 DerivedData/
+App/Generated-Info.plist
 *.xcuserstate
 xcuserdata/
 

@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "CumulativeTracker",
+    name: "CalorieModel",
     platforms: [.macOS(.v13), .iOS(.v17)],
     products: [
         .library(name: "CalorieModel", targets: ["CalorieModel"]),
