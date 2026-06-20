@@ -83,6 +83,30 @@ fn for_in_extensible_iter_protocol() {
 }
 
 #[test]
+fn for_in_iter_multi_statement_body() {
+    // Regression for the match-arm truncation: a for-in (iter) body with MORE
+    // THAN ONE statement. The body lowers to (Some [x] stmt1 stmt2 …); if the
+    // parser drops all but stmt1, the second statement silently vanishes (and a
+    // body whose tail advances/terminates would infinite-loop). Both must run.
+    let src = r#"(module app)
+(import "lib/control.coil")
+(import "lib/result.coil" :use *)
+(defstruct RS [(cur i64) (hi i64)])
+(defn rn [(s (ptr RS))] (-> (Option i64))
+  (if (icmp-ge (load (field s cur)) (load (field s hi))) (None)
+    (let [v (load (field s cur))] (store! (field s cur) (iadd v 1)) (Some v))))
+(defn main [] (-> :i64)
+  (let [st (alloc-stack RS) (mut cnt) 0 (mut acc) 0]
+    (store! (field st cur) 0) (store! (field st hi) 5)
+    (for-in [x (iter (fnptr-of rn) st)]
+      (store! cnt (iadd (load cnt) 1))     ; stmt1
+      (store! acc (iadd (load acc) x)))    ; stmt2 — must NOT be dropped
+    (iadd (imul (load acc) 10) (load cnt))))"#;
+    // acc = 0+1+2+3+4 = 10, cnt = 5 → 10*10 + 5 = 105. (Pre-fix: stmt2 dropped ⇒ 5.)
+    assert_eq!(build_and_run(src), 105);
+}
+
+#[test]
 fn for_in_bad_binding_hard_errors() {
     let err = coil::check_source(&format!(
         "{IMPORT}(defn main [] (-> :i64) (for-in [x] 1))"

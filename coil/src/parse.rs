@@ -797,7 +797,17 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                     }
                     _ => return Err(Diag::at(a.span, format!("arm '{variant}': expected a bind vector"))),
                 };
-                let body = parse_expr(al.get(2).ok_or("arm: missing body")?)?;
+                // ALL forms after the bind vector are the arm body — sequence
+                // them in a `do` (a single form stays bare). Keeping only the
+                // first would silently drop the rest (an arm's tail statements),
+                // which silently breaks any multi-statement arm.
+                let body_forms: Vec<Expr> =
+                    al[2..].iter().map(parse_expr).collect::<Result<_, _>>()?;
+                let body = match body_forms.len() {
+                    0 => return Err(Diag::at(a.span, format!("arm '{variant}': missing body"))),
+                    1 => body_forms.into_iter().next().unwrap(),
+                    _ => Expr::Do(body_forms),
+                };
                 arms.push(Arm { variant, binds, body });
             }
             Ok(Expr::Match {

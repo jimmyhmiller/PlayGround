@@ -4,6 +4,27 @@ mod common;
 use common::build_and_run;
 
 #[test]
+fn match_arm_runs_all_forms_not_just_the_first() {
+    // Regression: the parser once kept ONLY the first form of a match arm and
+    // silently dropped the rest. An arm with multiple forms must run them in
+    // order and yield the LAST (here a side effect via the first two, value from
+    // the third) — otherwise a multi-statement arm silently mis-behaves.
+    let src = r#"
+        (defsum Box (Full [(v :i64)]) (Empty))
+        (defn take [(b Box)] (-> :i64)
+          (let [(mut acc) 0]
+            (match b
+              (Full [v]
+                (store! acc v)
+                (store! acc (iadd (load acc) v))
+                (load acc))
+              (Empty [] 0))))
+        (defn main [] (-> :i64) (take (Full 21)))   ; 21 + 21 = 42 (not 21)
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
 fn concrete_sum_and_match() {
     let src = r#"
         (defsum Shape
