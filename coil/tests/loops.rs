@@ -76,11 +76,25 @@ fn break_to_unknown_label_is_an_error() {
 
 #[test]
 fn break_value_type_mismatch_is_an_error() {
+    // Loop in an unannotated `let` (no expected type) → break values unify; two
+    // different value types are an error.
+    let err = coil::check_source(
+        "(defn main [] (-> :i64)
+           (let [x (loop (if 1 (break 5) (break (zeroed (ptr i64)))))] 0))",
+    )
+    .unwrap_err();
+    assert!(err.contains("different value types"), "got: {err}");
+}
+
+#[test]
+fn break_value_mismatch_against_expected_is_an_error() {
+    // In a typed (expected) position, each break is checked against that type — a
+    // wrong-typed break value is rejected (different message, still an error).
     let err = coil::check_source(
         "(defn main [] (-> :i64) (loop (if 1 (break 5) (break (zeroed (ptr i64))))))",
     )
     .unwrap_err();
-    assert!(err.contains("different value types"), "got: {err}");
+    assert!(err.contains("(ptr i64)"), "got: {err}");
 }
 
 #[test]

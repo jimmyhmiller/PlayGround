@@ -1,0 +1,36 @@
+(module try)
+; `?`/try-style early exit for Result/Option — a PURE LIBRARY MACRO over
+; block/return-from (themselves macros over loop/break). No core support: this is
+; the macros-first thesis continuing into Phase-2, killing the Result/Option
+; match-pyramids.
+;
+; Wrap a function body in `(try …)` (a `block :try`), then `(try! e)` unwraps an
+; `(Ok v)` to v or short-circuits the whole `try` with `(Err e)`; `(try? e)` does
+; the same for `(Some v)` / `(None)`. The function's return type is the Result/
+; Option, and the try body's normal tail must produce one (e.g. end in `(Ok …)`).
+;
+;   (import "lib/try.coil" :use *) (import "lib/result.coil" :use *)
+;   (defn f [...] (-> (Result i64 E))
+;     (try (let [a (try! (g ...)) b (try! (h ...))] (Ok (iadd a b)))))
+;
+; NOTE: the block label is the fixed `:try`, so nesting two `(try …)` blocks in ONE
+; function shadows (a compile error) — use one try-block per function (the common
+; case; functions compose via their Result returns).
+
+(import "result.coil"  :use *)   ; Ok / Err / Some / None
+(import "control.coil" :use *)   ; block / return-from / loop / break
+
+(defmacro try [& body]
+  `(block :try ~@body))
+
+; Result: (Ok v) -> v ; (Err e) -> short-circuit the enclosing (try) with (Err e).
+(defmacro try! [e]
+  `(match ~e
+     (Ok  [__v] __v)
+     (Err [__e] (return-from :try (Err __e)))))
+
+; Option: (Some v) -> v ; (None) -> short-circuit the enclosing (try) with (None).
+(defmacro try? [e]
+  `(match ~e
+     (Some [__v] __v)
+     (None []     (return-from :try (None)))))

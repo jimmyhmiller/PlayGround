@@ -1,0 +1,19 @@
+; lib/try.coil — `?`/try-style early exit for Result, a pure library macro over
+; block/return-from (no core support). No more match pyramids.
+;   coil run examples/try.coil; echo $?   => 6   (8 -> 4 -> 2, Ok 4+2)
+(module app)
+(import "lib/try.coil" :use *)
+(import "lib/result.coil" :use *)
+
+(defn half [(n i64)] (-> (Result i64 i64))
+  (if (icmp-eq (irem n 2) 0) (Ok (idiv n 2)) (Err n)))
+
+; Without try: two nested matches. With try!: linear, errors short-circuit.
+(defn sum-halves [(n i64)] (-> (Result i64 i64))
+  (try
+    (let [a (try! (half n))      ; if half errors, sum-halves returns that Err
+          b (try! (half a))]
+      (Ok (iadd a b)))))
+
+(defn main [] (-> :i64)
+  (match (sum-halves 8) (Ok [v] v) (Err [e] e)))   ; 8->4->2 => Ok 6
