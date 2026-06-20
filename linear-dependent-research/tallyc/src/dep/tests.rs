@@ -548,3 +548,22 @@ fn vec_style_value_parameter_does_not_over_restrict() {
     };
     assert!(check_signature(&box0).is_ok(), "{:?}", check_signature(&box0));
 }
+
+#[test]
+fn struct_predicativity_diagnostic_does_not_double_name() {
+    // a struct's single constructor shares the type's name; the predicativity
+    // error must read `SBox`, not `SBox.SBox`.
+    let sbox = Signature {
+        postulates: vec![],
+        datas: vec![DataDecl {
+            name: "SBox".into(),
+            universe: 0,
+            params: vec![],
+            indices: vec![],
+            ctors: vec![ctor("SBox", vec![(Omega, Type(0))], vec![])], // field : Type
+        }],
+    };
+    let err = check_signature(&sbox).unwrap_err();
+    assert!(err.contains("SBox:"), "expected `SBox:` prefix, got: {err}");
+    assert!(!err.contains("SBox.SBox"), "must not double-name the struct, got: {err}");
+}

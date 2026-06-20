@@ -1241,29 +1241,43 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
         }
         // each constructor
         for ctor in &decl.ctors {
+            // a struct's single constructor is named after the type, so collapse
+            // `Foo.Foo` to `Foo` in diagnostics; enums keep the `Type.ctor` form.
+            let owner = if ctor.name == decl.name {
+                decl.name.clone()
+            } else {
+                format!("{}.{}", decl.name, ctor.name)
+            };
             let mut cctx = params_ctx.extend_clone();
             for (_, aty) in &ctor.args {
                 if !strictly_positive(&decl.name, aty) {
                     return Err(format!(
-                        "{}.{}: argument is not strictly positive in `{}`",
-                        decl.name, ctor.name, decl.name
+                        "{owner}: argument is not strictly positive in `{}`",
+                        decl.name
                     ));
                 }
                 let la = check_type(&cctx, aty)
-                    .map_err(|e| format!("in {}.{} args: {e}", decl.name, ctor.name))?;
+                    .map_err(|e| format!("in {owner} args: {e}"))?;
                 // THE PARADOX BLOCKER (predicativity side-condition): a field of
                 // type `Type la` forces the family into a universe ≥ la. If the
                 // declared `universe` is too small, the datatype would be able to
                 // quantify over (a universe containing) itself — exactly the
                 // Girard/Hurkens loop — so reject it. With the old `Type : Type`
                 // every `la` was 0 and this was vacuous (FUTURE_WORK §4.3, §13).
+                //
+                // NOTE the bound is `la > universe`, NOT `la ≥ universe`: a field
+                // (or parameter/index) AT the family's own level is fine — a
+                // `Type 0` family may store `Type 0` *values* and quantify over a
+                // `Type 0` *parameter* (e.g. `Vec (A:Type 0) : Type 0`). Only
+                // storing a *universe itself* (`la = level+1 > level`) is the
+                // Girard retract, and that is what this rejects.
                 if la > decl.universe {
                     return Err(format!(
-                        "{}.{}: this argument is a `Type {la}`, so `{}` must live in \
+                        "{owner}: this argument is a `Type {la}`, so `{}` must live in \
                          `Type {la}` or higher, but it is declared in `Type {}`. A \
                          datatype cannot store a type from its own universe \
                          (predicativity; this is what blocks Girard's paradox).",
-                        decl.name, ctor.name, decl.name, decl.universe
+                        decl.name, decl.universe
                     ));
                 }
                 let v = eval(&rc, &cctx.env(), aty);
@@ -1271,9 +1285,7 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
             }
             if ctor.idxs.len() != decl.indices.len() {
                 return Err(format!(
-                    "{}.{}: returns {} index(es), the family has {}",
-                    decl.name,
-                    ctor.name,
+                    "{owner}: returns {} index(es), the family has {}",
                     ctor.idxs.len(),
                     decl.indices.len()
                 ));
@@ -1289,7 +1301,7 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
                 idx_env.extend(idx_vals.iter().cloned());
                 let exp = eval(&rc, &idx_env, &decl.indices[i].1);
                 check(&cctx, it, &exp)
-                    .map_err(|e| format!("in {}.{} index {i}: {e}", decl.name, ctor.name))?;
+                    .map_err(|e| format!("in {owner} index {i}: {e}"))?;
                 idx_vals.push(eval(&rc, &cctx.env(), it));
             }
             let _ = &mut env_for_idx;

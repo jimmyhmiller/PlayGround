@@ -560,9 +560,15 @@ G makes it usable.
   predicative, cumulative universe hierarchy (`Type i : Type (i+1)`), and a
   datatype can no longer sit in a universe small enough to quantify over itself
   (the predicativity side-condition that blocks Girard/Hurkens). A `total`
-  program can no longer inhabit `False` via the universe loophole. *Remaining
-  gap:* universe **polymorphism** is not yet implemented, so the surface is
-  restricted to `Type 0`; this is a sound restriction, not an unsoundness.
+  program can no longer inhabit `False` via the universe loophole. The
+  side-condition is `level(field/param/index) > universe` (strict), **not** `≥`:
+  a family deliberately may store *values* of, and quantify over a *parameter*
+  in, its own universe — `Vec (A : Type 0) : Type 0` does not lift to `Type 1`.
+  Only storing a *universe itself* is the Girard retract, and only that is
+  rejected; storing the parameter-type itself is caught by the same field check.
+  *Remaining gap:* universe **polymorphism** is not yet implemented, so the
+  surface is restricted to `Type 0` (positive multi-level datatypes are reachable
+  only from the kernel/tests); this is a sound restriction, not an unsoundness.
 - **Linearity × dependency interaction.** Combining quantities with dependent
   pattern matching and views has subtle corners (e.g. how a `1`-resource's *type*
   may depend on a value it is used with). QTT handles the basics; the view layer
