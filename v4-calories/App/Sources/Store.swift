@@ -63,6 +63,52 @@ final class AppStore: ObservableObject {
         (state.weighIns + healthWeighIns).sorted { $0.date > $1.date }
     }
 
+    // MARK: - Burn (energy expenditure)
+
+    struct BurnDay: Identifiable {
+        var date: Date
+        var active: Double?
+        var resting: Double?
+        var id: Date { date }
+        var total: Double? {
+            if active == nil && resting == nil { return nil }
+            return (active ?? 0) + (resting ?? 0)
+        }
+    }
+
+    /// Resting energy for a day: Apple Health basal if present, else a Mifflin estimate from
+    /// trend weight + profile (nil if neither basal nor a profile is available).
+    func restingEstimate(on day: Date) -> Double? {
+        if let b = basalByDay[cal.startOfDay(for: day)] { return b }
+        let w = analysis?.trendWeightLb ?? allWeighIns.first?.weightLb
+        guard let w else { return nil }
+        return Estimator.restingMifflin(weightLb: w, goal: state.goal)
+    }
+
+    /// Per-day burn over the tracked range, for days that have any Health energy data.
+    func burnSeries() -> [BurnDay] {
+        let start = state.startDate.map { cal.startOfDay(for: $0) } ?? today
+        var out: [BurnDay] = []
+        var day = start
+        while day <= today {
+            let active = activeByDay[day]
+            let resting = basalByDay[day] ?? (active != nil ? restingEstimate(on: day) : nil)
+            if active != nil || basalByDay[day] != nil {
+                out.append(BurnDay(date: day, active: active, resting: resting))
+            }
+            guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return out
+    }
+
+    var todayBurn: BurnDay {
+        BurnDay(date: today, active: activeByDay[today],
+                resting: basalByDay[today] ?? restingEstimate(on: today))
+    }
+
+    var hasBurnData: Bool { !activeByDay.isEmpty || !basalByDay.isEmpty }
+
     /// Contiguous per-day records spanning the tracked period, fed to the analyzer.
     func buildRecords() -> [DailyRecord] {
         let start = state.startDate.map { cal.startOfDay(for: $0) } ?? today
@@ -96,6 +142,14 @@ final class AppStore: ObservableObject {
         state.entries.append(CalorieEntry(date: date, kcal: kcal, label: label))
         ensureStartDate(date)
         if state.healthKitEnabled { Task { await health.saveDietaryEnergy(kcal: kcal, date: date) } }
+        persist()
+    }
+
+    func updateEntry(_ id: UUID, kcal: Double, label: String?) {
+        guard let i = state.entries.firstIndex(where: { $0.id == id }) else { return }
+        guard kcal > 0 else { return }
+        state.entries[i].kcal = kcal
+        state.entries[i].label = (label?.isEmpty == true) ? nil : label
         persist()
     }
 

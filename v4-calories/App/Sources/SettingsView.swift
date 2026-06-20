@@ -6,6 +6,8 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var goal: Goal = Goal(targetWeightLb: 178, ratePerWeek: 0.85)
     @State private var hasProfile = false
+    @State private var newShortcutName = ""
+    @State private var newShortcutKcal = ""
 
     var body: some View {
         NavigationStack {
@@ -96,10 +98,27 @@ struct SettingsView: View {
                 }
             }
             .onDelete { idx in idx.map { store.state.shortcuts[$0].id }.forEach(store.deleteShortcut) }
-            if store.state.shortcuts.isEmpty {
-                Text("Add shortcuts from the calorie entry screen via “+ save”.")
-                    .font(.footnote).foregroundStyle(Theme.textDim(0.5))
+
+            HStack(spacing: 8) {
+                TextField("Name", text: $newShortcutName)
+                TextField("kcal", text: $newShortcutKcal)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 70)
+                    .font(.mono(14))
+                Button {
+                    if let kcal = Double(newShortcutKcal), kcal > 0 {
+                        store.addShortcut(label: newShortcutName.isEmpty ? "Shortcut" : newShortcutName, kcal: kcal)
+                        newShortcutName = ""; newShortcutKcal = ""
+                    }
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .foregroundStyle(Double(newShortcutKcal) ?? 0 > 0 ? Theme.green : Theme.textDim(0.3))
+                }
+                .disabled(!(Double(newShortcutKcal) ?? 0 > 0))
             }
+            Text("Shortcuts appear as one-tap chips on the calorie entry screen. You can also save one there with the amount you just typed. Swipe to delete.")
+                .font(.footnote).foregroundStyle(Theme.textDim(0.5))
         }
     }
 

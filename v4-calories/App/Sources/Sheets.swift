@@ -46,17 +46,27 @@ private struct SheetShell<Content: View>: View {
 struct EntrySheet: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) private var dismiss
-    @State private var draft = ""
+
+    let editing: CalorieEntry?
+    @State private var draft: String
+    @State private var name: String
     @State private var showSave = false
     @State private var saveLabel = ""
 
+    init(editing: CalorieEntry? = nil) {
+        self.editing = editing
+        _draft = State(initialValue: editing.map { String(Int($0.kcal)) } ?? "")
+        _name = State(initialValue: editing?.label ?? "")
+    }
+
     private var value: Double { Double(draft) ?? 0 }
     private var hasDraft: Bool { value > 0 }
+    private var isEditing: Bool { editing != nil }
 
     var body: some View {
         SheetShell {
             HStack {
-                Text("Add calories").font(.system(size: 15, weight: .semibold))
+                Text(isEditing ? "Edit entry" : "Add calories").font(.system(size: 15, weight: .semibold))
                 Spacer()
                 Text("\(Fmt.int(store.todayTotal)) / \(Fmt.int(store.analysis?.dailyBudgetKcal ?? 2000))")
                     .font(.mono(12)).foregroundStyle(Theme.textDim(0.5))
@@ -68,14 +78,21 @@ struct EntrySheet: View {
                     .foregroundStyle(hasDraft ? Theme.text : Theme.textDim(0.28))
                 Text("kcal").font(.mono(16)).foregroundStyle(Theme.textDim(0.4))
             }
-            .padding(.vertical, 18)
+            .padding(.top, 14).padding(.bottom, 6)
+
+            TextField("", text: $name, prompt: Text("Name (optional)").foregroundColor(Theme.textDim(0.35)))
+                .font(.system(size: 14)).foregroundStyle(Theme.text)
+                .multilineTextAlignment(.center)
+                .padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Theme.key))
+                .padding(.bottom, 14)
 
             shortcuts.padding(.bottom, 16)
 
             Keypad(decimal: false) { handle($0) }
 
-            Button { log() } label: {
-                Text(hasDraft ? "Log \(Fmt.int(value)) kcal" : "Log calories")
+            Button { commit() } label: {
+                Text(buttonLabel)
                     .font(.system(size: 16, weight: .bold)).foregroundStyle(Theme.onGreen)
                     .frame(maxWidth: .infinity).padding(17)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Theme.green))
@@ -83,17 +100,32 @@ struct EntrySheet: View {
             }
             .disabled(!hasDraft)
             .padding(.top, 12)
+
+            if isEditing {
+                Button(role: .destructive) {
+                    if let e = editing { store.deleteEntry(e.id) }
+                    dismiss()
+                } label: {
+                    Text("Delete entry").font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.amber)
+                        .frame(maxWidth: .infinity).padding(.top, 12)
+                }
+            }
         }
         .alert("Save shortcut", isPresented: $showSave) {
             TextField("Name (e.g. Usual lunch)", text: $saveLabel)
             Button("Save") {
-                store.addShortcut(label: saveLabel.isEmpty ? "Shortcut" : saveLabel, kcal: value)
+                store.addShortcut(label: saveLabel.isEmpty ? (name.isEmpty ? "Shortcut" : name) : saveLabel, kcal: value)
                 saveLabel = ""
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Save \(Fmt.int(value)) kcal as a one-tap shortcut.")
         }
+    }
+
+    private var buttonLabel: String {
+        if isEditing { return "Save changes" }
+        return hasDraft ? "Log \(Fmt.int(value)) kcal" : "Log calories"
     }
 
     private var shortcuts: some View {
@@ -109,12 +141,16 @@ struct EntrySheet: View {
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
                     }
                 }
-                Button { if hasDraft { showSave = true } } label: {
-                    Text("+ save").font(.system(size: 12)).foregroundStyle(Theme.textDim(0.5))
-                        .padding(.horizontal, 14).padding(.vertical, 9)
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [3, 2])))
+                Button { if hasDraft { saveLabel = name; showSave = true } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bookmark").font(.system(size: 11))
+                        Text("Save shortcut").font(.system(size: 12))
+                    }
+                    .foregroundStyle(hasDraft ? Theme.green : Theme.textDim(0.4))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke((hasDraft ? Theme.green : Color.white).opacity(0.3), style: StrokeStyle(lineWidth: 0.5, dash: [3, 2])))
                 }
-                .opacity(hasDraft ? 1 : 0.4)
+                .disabled(!hasDraft)
             }
         }
     }
@@ -132,9 +168,14 @@ struct EntrySheet: View {
         draft = String(Int((Double(draft) ?? 0) + kcal))
     }
 
-    private func log() {
+    private func commit() {
         guard hasDraft else { return }
-        store.addEntry(kcal: value)
+        let label = name.trimmingCharacters(in: .whitespaces)
+        if let e = editing {
+            store.updateEntry(e.id, kcal: value, label: label.isEmpty ? nil : label)
+        } else {
+            store.addEntry(kcal: value, label: label.isEmpty ? nil : label)
+        }
         dismiss()
     }
 }

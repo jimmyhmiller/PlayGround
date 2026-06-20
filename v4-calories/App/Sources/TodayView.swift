@@ -5,6 +5,7 @@ struct TodayView: View {
     @EnvironmentObject var store: AppStore
     var openEntry: () -> Void
     var openSettings: () -> Void
+    var onEdit: (CalorieEntry) -> Void
 
     private var a: Analysis? { store.analysis }
     private var budget: Double { a?.dailyBudgetKcal ?? 2000 }
@@ -215,12 +216,13 @@ struct TodayView: View {
                         .font(.system(size: 14)).foregroundStyle(Theme.textDim(0.85))
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Text(Fmt.int(e.kcal)).font(.mono(17, .semibold))
-                    Button { store.deleteEntry(e.id) } label: {
-                        Image(systemName: "xmark").font(.system(size: 12)).foregroundStyle(Theme.textDim(0.25))
-                    }
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.textDim(0.25))
                 }
                 .padding(.horizontal, 20).padding(.vertical, 15)
+                .contentShape(Rectangle())
                 .overlay(Rectangle().fill(Theme.hairLight).frame(height: 0.5), alignment: .top)
+                .onTapGesture { onEdit(e) }
             }
 
             Button(action: openEntry) {
