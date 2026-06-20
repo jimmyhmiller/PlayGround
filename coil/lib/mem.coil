@@ -1,0 +1,45 @@
+(module mem)
+; Low-level memory operations — typed, generic wrappers over libc, each sizing
+; itself with `sizeof T`. They operate on raw `(ptr T)` regions and need no
+; allocator. Foundational: depends only on libc (no other Coil module), so any
+; layer (collections, fmt, …) can use it.
+;
+; mem-copy/move : copy n elements (move is overlap-safe)
+; mem-zero      : zero n elements
+; mem-fill      : set n elements to a value (element-wise, any T)
+; mem-eql       : byte-compare n elements
+
+(extern memcpy  :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern memmove :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern memset  :cc c [(ptr i8) :i64 :i64]     (-> (ptr i8)))
+(extern memcmp  :cc c [(ptr i8) (ptr i8) :i64] (-> :i64))
+
+; Copy n elements src -> dst (regions must NOT overlap).
+(defn mem-copy [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
+  (memcpy (cast (ptr i8) dst) (cast (ptr i8) src) (imul n (sizeof T)))
+  0)
+
+; Copy n elements src -> dst, safe when the regions overlap.
+(defn mem-move [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
+  (memmove (cast (ptr i8) dst) (cast (ptr i8) src) (imul n (sizeof T)))
+  0)
+
+; Zero the first n elements.
+(defn mem-zero [T] [(dst (ptr T)) (n :i64)] (-> :i64)
+  (memset (cast (ptr i8) dst) 0 (imul n (sizeof T)))
+  0)
+
+; Set each of the first n elements to v (element-wise — works for any T, unlike
+; memset's single-byte pattern). Built on the loop primitive; no imports needed.
+(defn mem-fill [T] [(dst (ptr T)) (v T) (n :i64)] (-> :i64)
+  (let [(mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (store! (index dst (load i)) v)
+              (store! i (iadd (load i) 1))))))
+  0)
+
+; True if the first n elements of a and b are byte-identical.
+(defn mem-eql [T] [(a (ptr T)) (b (ptr T)) (n :i64)] (-> bool)
+  (icmp-eq (memcmp (cast (ptr i8) a) (cast (ptr i8) b) (imul n (sizeof T))) 0))

@@ -804,6 +804,9 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                 let body_forms: Vec<Expr> =
                     al[2..].iter().map(parse_expr).collect::<Result<_, _>>()?;
                 let body = match body_forms.len() {
+                    // Reachable: an arm with a variant + bind vector but no body
+                    // forms, e.g. `(Variant [])` (the `al.get(1)` Vector guard
+                    // above ensures al[1] is the binds, so al[2..] is the body).
                     0 => return Err(Diag::at(a.span, format!("arm '{variant}': missing body"))),
                     1 => body_forms.into_iter().next().unwrap(),
                     _ => Expr::Do(body_forms),
