@@ -1,15 +1,21 @@
 # Phase 1a′ — accumulator-style `%total` (fold-into-function), implementation plan
 
-**Status: ✅ IMPLEMENTED.** All three edits landed and proven (81 lib tests green).
-The verdict change (`scrut_is_nat` gates the verbatim-args rejection), the routing
-(`is_acc_fold` → `elab_nat_match_acc`), and the function-typed-motive lowering are
-all in. Proof target met: `%total fuel-div` (composing accumulator folds `lt`,
-`sub`, and the fuel-driven `div`) is certified total and runs natively
-(`div(10,7,2)=3`), written in 1a surface syntax (nested/expression `match`). The
-dual-failure red-team passes: a non-descending fold is still rejected (scrutinee
-descent stays unconditional), a boxed-datatype accumulator is still declined, and
-verbatim folds are unchanged. Tests: `phase_1a_prime_*` in
-`src/rust_surface/tests.rs`. The plan below is the original spec, kept for record.
+**Status: ✅ IMPLEMENTED (elaboration + native backend).** All three edits landed
+and proven (default suite + `--features llvm` suite both green). The verdict change
+(`scrut_is_nat` gates the verbatim-args rejection), the routing (`is_acc_fold` →
+`elab_nat_match_acc`), and the function-typed-motive lowering are all in. Proof
+target met: `%total fuel-div` (composing accumulator folds `lt`, `sub`, and the
+fuel-driven `div`) is certified total and computes `div(10,7,2)=3`, written in 1a
+surface syntax (nested/expression `match`) — **both in the kernel evaluator AND on
+the LLVM backend**: `dep_codegen.rs` was taught to compile the function-typed-motive
+`NatElim` to a native recursive function (no closures — the loop a C programmer would
+write; the IH threads correctly through boxed-match helpers). The dual-failure
+red-team passes: a non-descending fold is still rejected (scrutinee descent stays
+unconditional), a boxed-datatype accumulator is still declined, and verbatim folds
+are unchanged. Tests: `phase_1a_prime_*` (kernel evaluator) in
+`src/rust_surface/tests.rs`; `accumulator_folds_run_natively` + `fuel_div_runs_natively`
+(LLVM backend) in `src/dep_codegen.rs`. The plan below is the original spec, kept for
+record.
 
 ---
 

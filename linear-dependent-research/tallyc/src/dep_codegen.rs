@@ -135,13 +135,15 @@ struct FixSelf<'c> {
 }
 
 /// An accumulator-fold induction-hypothesis binding (Phase 1a′ native codegen): the
-/// IH variable (at de Bruijn LEVEL `level`) stands for "the fold on the predecessor
-/// `k`", so `App(ih, accs…)` compiles to `call func(k, accs…)`. `func` is the native
-/// recursive function for the fold; `k` is its predecessor value at this point.
+/// IH variable (at de Bruijn LEVEL `ih_level`) stands for "the fold on the
+/// predecessor `k`", so `App(ih, accs…)` compiles to `call func(k, accs…)`. The
+/// predecessor `k` is identified by its env LEVEL (`k_level`), NOT a raw value — so
+/// it flows correctly through a boxed-match helper (which re-captures the env by
+/// level into its own parameters). `func` is the native function for the fold.
 struct AccIhSelf<'c> {
-    level: usize,
+    ih_level: usize,
     func: FunctionValue<'c>,
-    k: IntValue<'c>,
+    k_level: usize,
 }
 
 /// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
@@ -246,14 +248,21 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 // on the predecessor `k`, with `k` prepended to the accumulators.
                 if let Term::Var(i) = strip_ann(head) {
                     let lvl = env.len() - 1 - *i;
-                    if let Some((func, k)) = self
+                    // copy the lookup OUT of the borrow before compiling args (which may
+                    // re-enter and borrow `acc_ih_selves` again).
+                    let ih_hit = self
                         .acc_ih_selves
                         .borrow()
                         .iter()
                         .rev()
-                        .find(|a| a.level == lvl)
-                        .map(|a| (a.func, a.k))
-                    {
+                        .find(|a| a.ih_level == lvl)
+                        .map(|a| (a.func, a.k_level));
+                    if let Some((func, k_level)) = ih_hit {
+                        // read the predecessor `k` from the CURRENT env by level — inside
+                        // a boxed-match helper this is the helper's captured parameter.
+                        let k = env[k_level].ok_or_else(|| {
+                            format!("recursive fold call to `{}`: predecessor is erased", func.get_name().to_str().unwrap_or("?"))
+                        })?;
                         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
                             vec![k.into()];
                         for a in &args {
@@ -1058,7 +1067,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         } else {
             let n_params = k_count + 1; // the Nat `i`, then the K accumulators
             let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                std::iter::repeat(self.i64t.into()).take(n_params).collect();
+                vec![self.i64t.into(); n_params];
             let fname = self.fresh("tally_accfold");
             let func =
                 self.module.add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
@@ -1097,9 +1106,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 .builder
                 .build_int_sub(i_param, self.i64t.const_int(1, false), "k")
                 .unwrap();
-            let mut succ_env: Vec<Slot<'c>> = vec![Some(k_val), None]; // k, then ih (no witness)
+            let mut succ_env: Vec<Slot<'c>> = vec![Some(k_val), None]; // k (level 0), ih (level 1)
             succ_env.extend(acc_params.iter().map(|v| Some(*v)));
-            self.acc_ih_selves.borrow_mut().push(AccIhSelf { level: 1, func, k: k_val });
+            self.acc_ih_selves.borrow_mut().push(AccIhSelf { ih_level: 1, func, k_level: 0 });
             let sr = self.compile(func, &succ_env, s_body);
             self.acc_ih_selves.borrow_mut().pop();
             let sr = sr?;

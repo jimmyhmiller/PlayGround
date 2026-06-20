@@ -173,10 +173,14 @@ fn fin_to_nat_called_with_inferred_implicit() {
 }
 
 #[test]
-fn explore_wtype_construction_and_recursion() {
-    // EXPLORATORY (1b scoping): a W-type `Tree` with a higher-order recursive field
-    // `node2 : (Bool -> Tree) -> Tree`. Construct a value by passing a NAMED helper
-    // (no surface lambdas needed), then recurse over it.
+fn phase_1b_wtype_higher_order_recursive_fold() {
+    // PHASE 1b: a W-type `Tree` with a HIGHER-ORDER recursive field
+    // `node2 : (Bool -> Tree) -> Tree`. The surface match-compiler now recognizes
+    // the higher-order recursive field, generates the functional induction
+    // hypothesis, and certifies a fold over it `%total`. A recursive call
+    // `size(f(btrue))` (the field `f` applied to an argument) maps to the IH applied
+    // to that argument. Construction passes a NAMED helper (the surface has no
+    // lambdas). size(node2(kids)) = 2 (one leaf per Bool child). Kernel evaluator.
     let src = format!(
         "{NATB}\n\
          enum Bool {{ btrue : Bool, bfalse : Bool }}\n\
@@ -189,13 +193,9 @@ fn explore_wtype_construction_and_recursion() {
          fn size(t) {{ match t {{ leaf => Succ(Zero), node2(f) => add(size(f(btrue)), size(f(bfalse))) }} }}\n\
          main : Nat\nfn main() {{ size(t1) }}\n"
     );
-    match check_program(&src) {
-        Ok(prog) => {
-            eprintln!("OK; is_total(size)={}", is_total(&prog, "size"));
-            eprintln!("main = {:?}", prog.normalize("main"));
-        }
-        Err(e) => eprintln!("ERR: {e:?}"),
-    }
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(is_total(&prog, "size"), "higher-order recursive fold must be certified total");
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(2)), "size(node2(kids)) must run to 2");
 }
 
 #[test]
@@ -464,7 +464,8 @@ fn phase_1a_prime_accumulator_nat_fold_certified_total_and_computes() {
     assert_eq!(prog.normalize("main"), Some(Term::NatLit(5)), "addacc(2,3) must run to 5");
 
     // `sumacc(m, acc) = acc + m` — the feasibility fold, now written in surface
-    // syntax and certified total + run natively.
+    // syntax and certified total. (These assertions check the KERNEL EVALUATOR via
+    // `normalize`; the LLVM-backend native run is proven in `dep_codegen` tests.)
     let src = format!(
         "{NATB}\n%total fn sumacc(m, acc) {{ match m {{ Zero => acc, Succ(k) => sumacc(k, Succ(acc)) }} }}\n\
          sumacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ sumacc(3, 0) }}\n"
@@ -546,7 +547,8 @@ fn phase_1a_prime_fuel_div_proof_target() {
     // surface syntax (nested/expression `match`), composing two accumulator folds
     // (`lt : Nat→Nat→Bool` and `sub : Nat→Nat→Nat`) and a fuel-driven divider
     // (`div`, itself an accumulator fold on `fuel` with `n` varying). All three are
-    // certified `%total` and run natively. div(10, 7, 2) = 3.
+    // certified `%total`. This checks the KERNEL EVALUATOR (`normalize`); the actual
+    // LLVM-backend native run div(10,7,2)=3 is `dep_codegen::tests::fuel_div_runs_natively`.
     const PRE: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
                        enum Bool { False : Bool, True : Bool }\n";
     let prog_src = format!(
