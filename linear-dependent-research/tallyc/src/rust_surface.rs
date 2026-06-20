@@ -1348,6 +1348,19 @@ impl Elab {
                 arms[0].ctor
             ));
         }
+        // The discharge below builds a `NatCase` over the index, so it requires a
+        // `%builtin Nat` index. For a family indexed by a BOXED type the derived
+        // term would fail the kernel re-check with a cryptic `expected Nat, found
+        // Data(..)`; give the honest message instead (sound either way — this is a
+        // completeness limit, not an unsoundness).
+        if !matches!(decl.indices[0].1, Term::Nat) {
+            return Err(format!(
+                "`match` on `{data}` here is an absurd (empty) case, but absurd \
+                 discharge currently requires the family to be indexed by a \
+                 `%builtin Nat` — this one is indexed by a boxed type. Mark the index \
+                 type `%builtin Nat`, or wait for the general Phase E2 discharge."
+            ));
+        }
         let t_term = self.elab_ty(ret, full_params)?;
         // ⚠️ BACKSTOP CAVEAT (read before extending to MIXED / per-constructor
         // absurd discharge): the Nat sentinel below makes the kernel-rejection
