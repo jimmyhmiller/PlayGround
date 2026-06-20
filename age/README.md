@@ -124,16 +124,19 @@ Two sources ship today:
 ```
 src/
   data/        the pluggable source layer — the ONLY thing the game reads from
-    mod.rs       WorldSource trait, WorldSnapshot/CityInfo/SessionInfo, SourceRunner (bg thread)
-    claude.rs    ClaudeProjectsSource (reads ~/.claude/projects)
+    mod.rs       WorldSource trait, WorldSnapshot/CityInfo/SessionInfo/ToolCounts/
+                 CodebaseInfo, SourceRunner (bg thread)
+    claude.rs    ClaudeProjectsSource (reads ~/.claude/projects; per-tool/token stats)
+    repo.rs      cheap cached codebase scan (languages, LOC, files, commits, tests)
     mock.rs      MockSource (demo)
+  achievements.rs  the 34-achievement catalog + Metrics, evaluated from real data
   game/
-    mod.rs       World/City/Building/Villager + snapshot->entities + motion
+    mod.rs       World/City/Building/Villager, Tier/Biome/Season, snapshot->entities
   render/
-    mod.rs       camera-space drawing + screen-space HUD/labels/inspector/tooltip
+    mod.rs       camera-space drawing + screen-space HUD/labels/inspector/monuments
     assets.rs    loads the Kenney atlases, names the tiles
   util.rs        time, deterministic RNG/hashing, RFC-3339 parsing (no chrono)
-  main.rs        window, game loop, camera controls, --screenshot mode
+  main.rs        window, game loop, camera controls, --screenshot / --scan modes
 ```
 
 Data lives on a background thread and arrives as immutable snapshots over a channel;
