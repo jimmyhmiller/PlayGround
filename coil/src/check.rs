@@ -567,7 +567,12 @@ fn synth(
                 },
                 None => (None, Type::i64()),
             };
-            {
+            // A Never-typed break value is divergent (its `value` already broke,
+            // e.g. `(break :s (do … (break :s v)))`): it never yields that value, so
+            // it must NOT constrain the loop's break type — mirror the Never-skip in
+            // unify_branches. (Missing this regressed block/return-from/defer, whose
+            // wrapper's outer break value is exactly such a divergent `do`.)
+            if vty != Type::Never {
                 let mut loops = cx.loops.borrow_mut();
                 match &loops[idx].break_ty {
                     None => loops[idx].break_ty = Some(vty),

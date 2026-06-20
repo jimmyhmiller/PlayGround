@@ -48,18 +48,19 @@ fn cleanups_run_lifo() {
 
 #[test]
 fn cleanup_runs_on_return_from_early_exit() {
-    // return-from before the rest of the body; the defer must still fire.
+    // return-from as the GENUINE LAST form of the scope (no dead code after it) —
+    // the scope wrapper's outer break value is then a divergent `do` (type Never),
+    // which must not break break-type unification. The defer must still fire.
     let code = run_with(
         r#"(defn main [] (-> :i64)
              (let [(mut log) 0]
                (scope :s
                  (defer (store! log (iadd (load log) 100)))
                  (store! log 1)
-                 (return-from :s 0)
-                 (store! log 999))
+                 (return-from :s 0))
                (load log)))"#,
     );
-    assert_eq!(code, 101);
+    assert_eq!(code, 101); // body sets 1, return-from exits, defer +100
 }
 
 #[test]
