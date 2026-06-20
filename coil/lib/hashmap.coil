@@ -21,8 +21,6 @@
 (import "result.coil" :use *)
 (import "mem.coil"    :use *)
 
-(extern abort :cc c [] (-> :i64))
-
 ; The key capability: hash a key, compare two keys; `size` is sizeof K (handed to
 ; the byte-wise helpers; a custom hash/eq may ignore it). Type-erased over (ptr i8)
 ; so one KeyOps shape serves any K. NOT generic — the map stores it by value.
@@ -106,7 +104,7 @@
         oldslots (load (field m slots))
         oldcap   (load (field m cap))]
     (match (alloc-slice [(Entry K V)] a newcap)
-      (None [] (do (abort) -1))
+      (None [] (do (oom) -1))
       (Some [ns]
         (do
           (mem-zero ns newcap)

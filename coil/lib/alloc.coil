@@ -15,6 +15,14 @@
 
 (extern malloc  :cc c [:i64] (-> (ptr i8)))            ; void* malloc(size_t)
 (extern realloc :cc c [(ptr i8) :i64] (-> (ptr i8)))   ; void* realloc(void*, size_t)
+(extern abort   :cc c [] (-> :i64))                    ; void abort() — unrecoverable hard-fail
+
+; Hard-abort the process on an unrecoverable allocation failure. Exposed as a defn
+; (not the bare extern) so callers share ONE `abort` declaration: Coil doesn't dedup
+; identical externs across modules, and defns ARE shared via `:use *` while extern
+; decls are not — so collections route OOM through `oom` instead of each declaring
+; their own `abort` (which would collide when two such libs are imported together).
+(defn oom [] (-> :i64) (abort) 0)
 
 (defstruct Allocator
   [(alloc  (fnptr c [(ptr i8) :i64 :i64] (Option (ptr i8))))

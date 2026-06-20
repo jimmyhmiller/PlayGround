@@ -72,6 +72,27 @@ fn get_absent_on_empty_map_is_none() {
 }
 
 #[test]
+fn arraylist_and_hashmap_compose() {
+    // Regression: both libs once declared their own `abort` extern, which collided
+    // when imported together (Coil doesn't dedup externs). OOM now routes through
+    // alloc's shared `oom` defn, so the two collections are co-importable.
+    let src = r#"(module app)
+(import "lib/arraylist.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+(import "lib/alloc.coil" :use *)
+(import "lib/result.coil" :use *)
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator)
+        (mut xs) (al-new [i64] a)
+        (mut m) (hm-new-scalar [i64 i64] a)]
+    (al-push! (mut xs) 5)
+    (hm-put! (mut m) 1 37)
+    (iadd (al-get xs 0)
+          (match (hm-get [i64 i64] m 1) (None [] 0) (Some [v] v)))))"#; // 5 + 37 = 42
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
 fn string_keys_via_explicit_content_keyops() {
     // The explicit-capability design handles string (content) keys today: supply a
     // KeyOps whose hash/eq deref the stored char* and hash/compare its bytes.
