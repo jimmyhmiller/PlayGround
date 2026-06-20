@@ -210,8 +210,9 @@ pub enum Expr {
     /// it. The loop's value is the value carried by the `break` that fires
     /// (unified across all break sites); a loop with no reachable `break` is
     /// divergent. `label` (optional) names the loop so a nested `break`/`continue`
-    /// can target it. This is the one structured-control-flow PRIMITIVE; `while`,
-    /// `for`, `loop`/`recur`, and `defer` are macros over it.
+    /// can target it. This is the one structured-control-flow PRIMITIVE: `while`,
+    /// `for`, `block`/`return-from` are implemented as macros over it (see
+    /// `lib/control.coil`); `loop`/`recur` and `defer` are planned macros.
     Loop {
         label: Option<String>,
         body: Vec<Expr>,

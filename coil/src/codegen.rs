@@ -2068,48 +2068,60 @@ impl<'ctx> Cg<'ctx> {
 
         let then_bb = self.ctx.append_basic_block(function, "then");
         let else_bb = self.ctx.append_basic_block(function, "else");
-        let merge_bb = self.ctx.append_basic_block(function, "ifcont");
 
         self.builder
             .build_conditional_branch(cmp, then_bb, else_bb)
             .map_err(le)?;
 
-        // Each arm may diverge (e.g. end in a `break`/`continue`): only an arm
-        // that falls through branches to the merge and feeds the result phi.
+        // Each arm may diverge (e.g. end in a `break`/`continue`). The merge block
+        // is created lazily so the one-arm-diverges cases don't leave an empty
+        // passthrough block: when only one arm falls through, execution simply
+        // continues on that arm's end block.
         self.builder.position_at_end(then_bb);
         let (tv, tt) = self.emit_expr(then, scope)?;
         let then_end = self.builder.get_insert_block().unwrap();
         let then_div = then_end.get_terminator().is_some();
-        if !then_div {
-            self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
-        }
 
         self.builder.position_at_end(else_bb);
         let (ev, et) = self.emit_expr(els, scope)?;
         let else_end = self.builder.get_insert_block().unwrap();
         let else_div = else_end.get_terminator().is_some();
-        if !else_div {
-            self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
-        }
 
-        self.builder.position_at_end(merge_bb);
         match (then_div, else_div) {
-            // Both arms diverged: the merge is unreachable.
-            (true, true) => {
-                self.builder.build_unreachable().map_err(le)?;
-                Ok((self.ctx.i64_type().const_zero().into(), tt))
-            }
-            // Exactly one arm reaches the merge — its value dominates it; no phi.
-            (false, true) => Ok((tv, tt)),
-            (true, false) => Ok((ev, et)),
-            // Both reach: reconcile with a phi (the checker unified the types).
+            // Both reach: a merge block with a phi reconciling the (unified) types.
             (false, false) => {
+                let merge_bb = self.ctx.append_basic_block(function, "ifcont");
+                self.builder.position_at_end(then_end);
+                self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+                self.builder.position_at_end(else_end);
+                self.builder.build_unconditional_branch(merge_bb).map_err(le)?;
+                self.builder.position_at_end(merge_bb);
                 let phi = self.builder.build_phi(self.basic_ty(&tt), "ifval").map_err(le)?;
                 phi.add_incoming(&[
                     (&tv as &dyn BasicValue, then_end),
                     (&ev as &dyn BasicValue, else_end),
                 ]);
                 Ok((phi.as_basic_value(), tt))
+            }
+            // Exactly one arm falls through: continue on it; its value dominates
+            // the continuation, so no merge block and no phi are needed. (Position
+            // the builder back onto the live arm — emission left it on the other.)
+            (false, true) => {
+                self.builder.position_at_end(then_end);
+                Ok((tv, tt))
+            }
+            (true, false) => {
+                self.builder.position_at_end(else_end);
+                Ok((ev, et))
+            }
+            // Both arms diverged: the continuation is unreachable. Land on a fresh
+            // block with `unreachable` so any (dead) trailing code has an insert
+            // point; callers check `block_terminated` and skip it.
+            (true, true) => {
+                let dead_bb = self.ctx.append_basic_block(function, "ifcont.dead");
+                self.builder.position_at_end(dead_bb);
+                self.builder.build_unreachable().map_err(le)?;
+                Ok((self.ctx.i64_type().const_zero().into(), tt))
             }
         }
     }
