@@ -1,0 +1,186 @@
+; DOGFOOD: a tiny expression-language interpreter — the Phase-1 capstone. Exercises
+; ArrayList (tokens), a recursive AST sum + match, HashMap (variable env), explicit
+; allocator, loops/break, and fmt — all together.
+;
+; Language: `;`-separated statements; a statement is `v=EXPR` (assign single-letter
+; var) or an EXPR. EXPR = +,-,*,/ with precedence and parens; operands are integer
+; literals and variables. The program prints each statement's value.
+;   coil run examples/calc.coil   =>  3 / 13 / 26 / 27
+(module app)
+(import "lib/alloc.coil"     :use *)
+(import "lib/result.coil"    :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/hashmap.coil"   :use *)
+(import "lib/fmt.coil"       :use *)
+(import "lib/io.coil"        :use *)
+
+(extern strlen :cc c [(ptr i8)] (-> :i64))   ; dedups with io.coil's identical decl
+
+; ---- tokens ----------------------------------------------------------------
+(defsum Tok
+  (TNum [(v i64)])
+  (TVar [(nm i64)])
+  (TOp  [(op i64)])      ; op = char code of + - * /
+  (TLP) (TRP) (TEq) (TSemi) (TEnd))
+
+(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+(defn alpha? [(c i64)] (-> bool) (and (icmp-ge c 97) (icmp-le c 122)))
+
+; ---- lexer: source C-string -> ArrayList<Tok> ------------------------------
+(defn lex [(a (ptr Allocator)) (s (ptr i8))] (-> (ArrayList Tok))
+  (let [(mut toks) (al-new [Tok] a)
+        (mut i) 0
+        n (strlen s)]
+    (loop
+      (if (icmp-ge (load i) n)
+          (do (al-push! (mut toks) (TEnd)) (break))
+          (let [c (cast :i64 (load (index s (load i))))]
+            (if (icmp-eq c 32)
+                (store! i (iadd (load i) 1))                       ; skip space
+                (if (digit? c)
+                    (let [(mut v) 0]
+                      (loop
+                        (if (icmp-ge (load i) n)
+                            (break)
+                            (let [d (cast :i64 (load (index s (load i))))]
+                              (if (digit? d)
+                                  (do (store! v (iadd (imul (load v) 10) (isub d 48)))
+                                      (store! i (iadd (load i) 1)))
+                                  (break)))))
+                      (al-push! (mut toks) (TNum (load v))))
+                    (if (alpha? c)
+                        (do (al-push! (mut toks) (TVar c)) (store! i (iadd (load i) 1)))
+                        (do
+                          (al-push! (mut toks)
+                            (if (icmp-eq c 40) (TLP)
+                              (if (icmp-eq c 41) (TRP)
+                                (if (icmp-eq c 61) (TEq)
+                                  (if (icmp-eq c 59) (TSemi) (TOp c))))))
+                          (store! i (iadd (load i) 1)))))))))
+    (load toks)))
+
+; ---- AST (recursive sum via (ptr Ast)) -------------------------------------
+(defsum Ast
+  (Num [(v i64)])
+  (Var [(nm i64)])
+  (Bin [(op i64) (l (ptr Ast)) (r (ptr Ast))])
+  (Set [(nm i64) (e (ptr Ast))]))
+
+(defn ast [(a (ptr Allocator)) (x Ast)] (-> (ptr Ast))
+  (let [p (unwrap-ptr [Ast] (create [Ast] a))]
+    (store! p x)
+    p))
+
+; ---- parser: a cursor over the token array ---------------------------------
+(defstruct P [(t (ptr Tok)) (pos i64) (a (ptr Allocator))])
+(defn peek [(p (ptr P))] (-> Tok) (load (index (load (field p t)) (load (field p pos)))))
+(defn adv  [(p (ptr P))] (-> i64) (store! (field p pos) (iadd (load (field p pos)) 1)) 0)
+
+; primary = NUM | VAR | '(' expr ')'
+(defn parse-primary [(p (ptr P))] (-> (ptr Ast))
+  (match (peek p)
+    (TNum [v]  (do (adv p) (ast (load (field p a)) (Num v))))
+    (TVar [nm] (do (adv p) (ast (load (field p a)) (Var nm))))
+    (TLP []    (do (adv p)
+                   (let [e (parse-expr p)]
+                     (adv p)                ; consume ')'
+                     e)))
+    (TOp  [_]  (ast (load (field p a)) (Num 0)))   ; malformed; degrade to 0
+    (TRP  []   (ast (load (field p a)) (Num 0)))
+    (TEq  []   (ast (load (field p a)) (Num 0)))
+    (TSemi []  (ast (load (field p a)) (Num 0)))
+    (TEnd []   (ast (load (field p a)) (Num 0)))))
+
+; term = primary (('*'|'/') primary)*
+(defn parse-term [(p (ptr P))] (-> (ptr Ast))
+  (let [(mut acc) (parse-primary p)]
+    (loop
+      (match (peek p)
+        (TOp [op]
+          (if (or (icmp-eq op 42) (icmp-eq op 47))
+              (do (adv p)
+                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-primary p))))
+                  0)                      ; both branches i64 (break types as i64)
+              (break)))
+        (TNum [_] (break)) (TVar [_] (break)) (TLP [] (break)) (TRP [] (break))
+        (TEq [] (break)) (TSemi [] (break)) (TEnd [] (break))))
+    (load acc)))
+
+; expr = term (('+'|'-') term)*
+(defn parse-expr [(p (ptr P))] (-> (ptr Ast))
+  (let [(mut acc) (parse-term p)]
+    (loop
+      (match (peek p)
+        (TOp [op]
+          (if (or (icmp-eq op 43) (icmp-eq op 45))
+              (do (adv p)
+                  (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-term p))))
+                  0)
+              (break)))
+        (TNum [_] (break)) (TVar [_] (break)) (TLP [] (break)) (TRP [] (break))
+        (TEq [] (break)) (TSemi [] (break)) (TEnd [] (break))))
+    (load acc)))
+
+; stmt = VAR '=' expr | expr   (lookahead: a TVar immediately followed by TEq)
+(defn parse-stmt [(p (ptr P))] (-> (ptr Ast))
+  (match (peek p)
+    (TVar [nm]
+      (if (is-eq (load (index (load (field p t)) (iadd (load (field p pos)) 1))))
+          (do (adv p) (adv p)        ; consume VAR and '='
+              (ast (load (field p a)) (Set nm (parse-expr p))))
+          (parse-expr p)))
+    (TNum [_] (parse-expr p)) (TOp [_] (parse-expr p)) (TLP [] (parse-expr p))
+    (TRP [] (parse-expr p)) (TEq [] (parse-expr p)) (TSemi [] (parse-expr p))
+    (TEnd [] (parse-expr p))))
+
+(defn is-eq [(t Tok)] (-> bool) (match t (TEq [] true)
+  (TNum [_] false) (TVar [_] false) (TOp [_] false) (TLP [] false) (TRP [] false)
+  (TSemi [] false) (TEnd [] false)))
+
+; ---- eval ------------------------------------------------------------------
+(defn ev [(n (ptr Ast)) (env (mut (HashMap i64 i64)))] (-> i64)
+  (match (load n)
+    (Num [v] v)
+    (Var [nm] (match (hm-get [i64 i64] env nm) (None [] 0) (Some [v] v)))
+    (Bin [op l r]
+      (let [x (ev l (mut env)) y (ev r (mut env))]
+        (if (icmp-eq op 43) (iadd x y)
+          (if (icmp-eq op 45) (isub x y)
+            (if (icmp-eq op 42) (imul x y) (idiv x y))))))
+    (Set [nm e]
+      (let [v (ev e (mut env))]
+        (hm-put! (mut env) nm v)
+        v))))
+
+; ---- driver: lex, then parse+eval each ';'-separated statement, printing each --
+(defn at-end [(p (ptr P))] (-> bool) (match (peek p) (TEnd [] true)
+  (TNum [_] false) (TVar [_] false) (TOp [_] false) (TLP [] false) (TRP [] false)
+  (TEq [] false) (TSemi [] false)))
+
+(defn run [(a (ptr Allocator)) (w (ptr Writer)) (src (ptr i8))] (-> i64)
+  (let [(mut toks) (lex a src)
+        pstate (alloc-stack P)]        ; a real (ptr P) the parser cursor shares
+    (store! (field pstate t) (al-slice-data (mut toks)))
+    (store! (field pstate pos) 0)
+    (store! (field pstate a) a)
+    (let [(mut env) (hm-new-scalar [i64 i64] a)
+          (mut last) 0]
+      (loop
+        (if (at-end pstate)
+            (break)
+            (do (store! last (ev (parse-stmt pstate) (mut env)))
+                (fmt w "{d}\n" (load last))
+                (match (peek pstate)              ; consume a trailing ';' if present
+                  (TSemi [] (adv pstate))
+                  (TNum [_] 0) (TVar [_] 0) (TOp [_] 0) (TLP [] 0) (TRP [] 0)
+                  (TEq [] 0) (TEnd [] 0)))))
+      (load last))))
+
+; expose the ArrayList's element pointer for the parser cursor.
+(defn al-slice-data [(l (mut (ArrayList Tok)))] (-> (ptr Tok)) (load (field l data)))
+
+(defn main [] (-> i64)
+  (let [a (malloc-allocator)
+        w (stdout)]
+    (run a w "1+2; 3+2*5; (3+10)*2; x=27; x")
+    0))
