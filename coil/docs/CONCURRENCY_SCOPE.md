@@ -43,8 +43,14 @@ contrast is shown/explained, not asserted (honest-labeling).
 - **Dogfood** (`examples/threads.coil` or similar): N worker threads each doing M
   atomic increments on a shared counter → asserts N·M (race-free). Hosted (links libc/
   pthread — concurrency is a hosted concern; bare-metal concurrency is a separate axis).
-  Possibly a second stage: a lock-free stack via `atomic-cas` (stresses CAS + the
-  harder concurrency) if the counter alone is too thin.
+  Second stage: a genuinely lock-free stack via `atomic-cas` (stresses CAS + a real
+  lock-free structure), with **ABA handled honestly** (the mandate's "don't fake
+  lock-free"): a CAS push/pop hits the classic ABA hazard if a node is freed + reused.
+  PLAN: a bounded / no-free dogfood-stack (pre-allocated nodes, never freed) — which
+  SIDESTEPS ABA by construction — and a clear NOTE that a production lock-free stack
+  needs tagged-pointers / hazard-pointers / epoch reclamation. NO hidden mutex; do not
+  overclaim "production lock-free" without ABA mitigation. The bar checks: genuinely
+  lock-free (CAS only) + ABA-handled-or-honestly-noted.
 
 ## The cardinal (for the eventual bar)
 Atomics are a PURE LIBRARY (`lib/atomic.coil` over `llvm-ir`), ZERO core change —
