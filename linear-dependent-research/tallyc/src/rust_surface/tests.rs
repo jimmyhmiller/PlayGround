@@ -311,6 +311,30 @@ fn let_linearity_rejects_double_free_and_leak() {
 }
 
 #[test]
+fn linear_param_defaults_to_one_no_double_free() {
+    // SOUNDNESS (found by RED-TEAMING the let-fix boundary, not asserted): a function
+    // PARAMETER of a linear type defaults to multiplicity 1, not ω — otherwise
+    // `fn f(x : Own Nat) { free(x); free(x) }` (param ω, used twice ⇒ ω ≤ ω) is a
+    // double-free, ACCEPTED. Same fail-toward-linearity rule as the `let` binder; an
+    // explicit `(1 x : …)` was already 1, and an abstract `{0 a}`-typed param stays ω
+    // (the §13 polymorphism case — a leak, not a double-free; needs real surface linear
+    // params in Phase A).
+    const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    let dbl = format!(
+        "{NB}f : Own Nat -> Unit\nfn f(x) {{ let u = free(x); free(x) }}\n\
+         main : Unit\nfn main() {{ U }}\n"
+    );
+    let err = match check_program(&dbl) {
+        Err(d) => format!("{d:?}"),
+        Ok(_) => panic!("a linear (Own) parameter freed twice must be REJECTED"),
+    };
+    assert!(err.contains("⋢") || err.contains("multiplicity"), "must be a linearity error, got: {err}");
+    // single free still accepted (no over-rejection).
+    let one = format!("{NB}f : Own Nat -> Unit\nfn f(x) {{ free(x) }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&one).is_ok(), "single free must be ACCEPTED: {:?}", check_program(&one).err());
+}
+
+#[test]
 fn linear_fields_rejected_at_declaration() {
     // SOUNDNESS (reviewer finding on the let-fix boundary): a struct/enum storing an
     // `Own`/`Σ[1]` field would let a double-free/leak hide behind the type's name —

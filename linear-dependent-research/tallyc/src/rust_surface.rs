@@ -783,7 +783,18 @@ impl Elab {
                 let mut s2 = scope.to_vec();
                 s2.push(name.clone().unwrap_or_else(|| "_".into()));
                 let tb = self.elab_ty(b, &s2)?;
-                Ok(Term::Pi(*m, Box::new(ta), Box::new(tb)))
+                // A binder of a LINEAR type (`Own`/`Σ[1]`) defaults to multiplicity 1,
+                // not ω — the SAME fail-toward-linearity rule as the `let` binder. An ω
+                // linear parameter would launder a double-free: `fn f(x : Own Nat) {
+                // free(x); free(x) }` (param ω, used twice = ω ≤ ω) is otherwise
+                // ACCEPTED. An EXPLICIT `(1 x : …)` is already 1; an abstract type
+                // parameter (`a` for `{0 a : Type}`) stays ω — that is the §13
+                // polymorphism case (a linear value flowing through an abstract-typed ω
+                // param leaks, not double-frees; it needs real surface linear params,
+                // Phase A). A bare `->` and an explicit `(ω …)` are indistinguishable in
+                // the surface, but an ω linear binder is never legitimately wanted.
+                let m = if *m == Mult::Omega && contains_linear(&ta) { Mult::One } else { *m };
+                Ok(Term::Pi(m, Box::new(ta), Box::new(tb)))
             }
             Ty::Var(_) | Ty::App(_, _) => {
                 let (head, args) = flatten_ty(t);
