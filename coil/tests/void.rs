@@ -75,6 +75,53 @@ fn void_rejected_in_type_discarding_synth_paths() {
 }
 
 #[test]
+fn void_rejected_as_a_type_argument() {
+    // The THIRD hole (found by the same synth-and-discard hunt): a void value passed
+    // to a generic function/constructor unified its type parameter to void → coerce
+    // (void,void) accepted → mono instantiated a void value/param → codegen panic.
+    // Fixed at the unification boundary (void can never be a type argument).
+    // generic function:
+    assert!(coil::check_source(
+        "(defn id [T] [(x T)] (-> T) x)\n\
+         (defn p [(x (ptr i64))] (-> void) (store! x 1))\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (id (p a)) 0))"
+    )
+    .unwrap_err()
+    .contains("cannot be used as a type argument"));
+    // generic constructor (a local generic sum variant — hermetic, no import):
+    assert!(coil::check_source(
+        "(defsum Opt [T] (Som [(v T)]) (Non []))\n\
+         (defn p [(x (ptr i64))] (-> void) (store! x 1))\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (Som (p a)) 0))"
+    )
+    .unwrap_err()
+    .contains("cannot be used as a type argument"));
+}
+
+#[test]
+fn void_rejected_in_every_value_position() {
+    // A full red-team sweep: a void value must be rejected EVERYWHERE a value is
+    // read — none of these may compile (and none may panic the compiler).
+    let p = "(defn p [(x (ptr i64))] (-> void) (store! x 1))\n";
+    let positions = [
+        // (description, main body)
+        "(defn main [] (-> i64) (let [a (alloc-stack i64)] (store! a (p a)) 0))", // store! value
+        "(defn main [] (-> i64) (let [a (alloc-stack i64)] (if (p a) 1 2)))",      // if condition
+        "(defn main [] (-> i64) (let [a (alloc-stack i64)] (iadd 1 (if true (p a) 0))))", // if branch
+        "(defn main [] (-> i64) (let [a (alloc-stack i64)] (cast i32 (p a))))",    // cast operand
+        "(defstruct S [(x i64)])\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (load (field (p a) x))))", // field target
+        "(defn main [] (-> i64) (let [a (alloc-stack i64) arr (alloc-stack (array i64 4))] (load (index arr (p a)))))", // index
+        "(defsum E (A []) (B []))\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (match (p a) (A [] 0) (B [] 1))))", // match scrutinee
+    ];
+    for body in positions {
+        let src = format!("{p}{body}");
+        assert!(coil::check_source(&src).is_err(), "void must be rejected: {body}");
+    }
+}
+
+#[test]
 fn void_return_with_by_value_struct_param_does_not_panic() {
     // A (-> void) fn that also takes a by-value struct → needs_c_abi → c_signature,
     // which used to hit basic_ty(Void) → unreachable!(). Must compile cleanly.

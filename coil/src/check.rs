@@ -1504,6 +1504,17 @@ fn unify(
     subst: &mut HashMap<String, Type>,
     fname: &str,
 ) -> Result<(), String> {
+    // forbid-use: `void` is return-position-only, so it can NEVER be a type
+    // argument — inferring a type parameter to void would make a field/parameter
+    // void (a no-silent-wrong hole, and a codegen panic on basic_ty(Void)). This is
+    // the inference-path analogue of the coerce/synth void-checks: reject a void
+    // value where a real type is required, here at the unification boundary.
+    if *decl == Type::Void || *actual == Type::Void {
+        return Err(format!(
+            "in '{fname}': a void value cannot be used as a type argument \
+             (a (-> void) call yields nothing)"
+        ));
+    }
     if let Type::Struct(p) = decl {
         if tpset.contains(p) {
             match subst.get(p) {
