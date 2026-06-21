@@ -937,12 +937,26 @@ impl<'ctx> Cg<'ctx> {
                             idx += 1;
                         }
                     }
-                    scope.insert(p.name.clone(), (slot.into(), p.ty.clone()));
+                    // A by-value struct param reaches this path ONLY for a
+                    // generic function instantiated with a struct type-arg (a
+                    // non-generic struct param is by-reference per the reference
+                    // model, so its `p.ty` is already a pointer and it takes the
+                    // scalar arm below). The generic body was elaborated treating
+                    // the param as a VALUE of type `p.ty`, so bind the loaded
+                    // struct value — not the reconstruction pointer (binding the
+                    // pointer silently corrupts every use of the param).
+                    let val = self.builder.build_load(sa.llvm_ty, slot, &p.name).map_err(le)?;
+                    scope.insert(p.name.clone(), (val, p.ty.clone()));
                 }
-                Some(ArgAbi::Indirect(_)) => {
-                    let v = function.get_nth_param(idx).ok_or("codegen: missing param")?;
-                    v.set_name(&p.name);
-                    scope.insert(p.name.clone(), (v, p.ty.clone()));
+                Some(ArgAbi::Indirect(sa)) => {
+                    // Same as Direct: the `byval` pointer is the caller's copy;
+                    // the generic body wants the value, so load it.
+                    let ptr = function
+                        .get_nth_param(idx)
+                        .ok_or("codegen: missing param")?
+                        .into_pointer_value();
+                    let val = self.builder.build_load(sa.llvm_ty, ptr, &p.name).map_err(le)?;
+                    scope.insert(p.name.clone(), (val, p.ty.clone()));
                     idx += 1;
                 }
                 _ => {

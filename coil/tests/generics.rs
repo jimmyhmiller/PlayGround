@@ -149,3 +149,22 @@ fn nested_generic_call_still_rejects_genuinely_ambiguous() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("cannot infer type argument"), "got: {err}");
 }
+
+#[test]
+fn generic_passes_a_struct_type_arg_by_value_correctly() {
+    // Regression: a generic function instantiated with a struct type-arg passes
+    // the struct BY VALUE (param_ref_type leaves a type param unwrapped, so unlike
+    // a non-generic struct param it isn't by-ref). Codegen bound that by-value
+    // struct param as a pointer-typed-as-struct, silently corrupting every use;
+    // it must reconstruct + bind the actual struct value.
+    let code = build_and_run(
+        r#"(defstruct Point [(x i64) (y i64)])
+           (defn store-read [K] [(slot (ptr K)) (k K)] (-> i64) (store! slot k) 0)
+           (defn main [] (-> i64)
+             (let [(mut p) (zeroed Point) dst (alloc-stack Point)]
+               (store! (field p x) 17) (store! (field p y) 25)
+               (store-read [Point] dst (load p))
+               (iadd (load (field dst x)) (load (field dst y)))))"#,
+    );
+    assert_eq!(code, 42);
+}
