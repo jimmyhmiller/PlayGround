@@ -166,9 +166,21 @@ prerequisite for the whole model — without it, ownership is unsound through `l
 
 ## 7. Build roadmap (refines FUTURE_WORK §12 A–D)
 
-0. **§5 `let`-linearity fix + red-team** (prerequisite; small; do first).
+0. **§5 `let`-linearity fix + red-team** (prerequisite; small; DONE — commit
+   `bbbb26974`). v1 `contains_linear` catches concrete `Own`/`Σ[1]` in the type
+   expression; the field-hidden-Own and abstract-param cases are deferred (§13) and
+   GATED below.
 1. **Phase A — explicit allocation:** `Own T` as the `Σ[1]` pair, `box`/`free`, `Opt`
-   null-niche, recursion via `Opt (Own T)`; the malloc allocator. IR-trace tests.
+   null-niche, recursion via `Opt (Own T)`; the malloc allocator.
+   **TWO DAY-ONE GATING INVARIANTS (not follow-ups):**
+   (a) the per-primitive erasure **IR-trace test** (§4.4); AND
+   (b) the **field-aware `contains_linear`** — Phase A introduces structs with `Own`
+   FIELDS (`struct Node { left : Opt (Own Node) }`), so `contains_linear` MUST be
+   upgraded to recurse into a datatype's constructor-field definitions (resolving
+   type parameters by substitution) BEFORE/WITH that feature. Adding `Own`-in-a-field
+   without the field-aware check REOPENS the exact `let`-laundering double-free behind
+   a struct name. This is a hard gate: structs-with-`Own` and field-aware linearity
+   land together or not at all.
 2. **Phase B — value layouts:** real size/align/offsets, by-value vs by-pointer,
    niche opts (the representation rewrite from "everything is a tagged i64").
 3. **Phase C — views & borrows:** `p↦v`, `⊗`, `&`/`&mut` (read-back), init typestate,

@@ -173,6 +173,31 @@ fn fin_to_nat_called_with_inferred_implicit() {
 }
 
 #[test]
+fn phase_1b_acc_indexed_higher_order_family_eliminates() {
+    // PHASE 1b (Acc foundation): the well-founded `Acc` family is an INDEXED
+    // higher-order recursive family — `accN x` carries an accessibility FUNCTION
+    // `(y:Nat) -> Lt y x -> AccN y`. This confirms the 1b foundation handles the
+    // indexed higher-order shape (beyond the non-indexed W-type): a monomorphized
+    // `AccN : Nat -> Type` over a relation `Lt` declares (strict positivity ✓), and
+    // a function eliminating an `Acc` proof type-checks and is certified total.
+    //
+    // What this does NOT yet do — and is the documented next chunk (PHASE_1B_PLAN.md):
+    // a wf-RECURSIVE body needs a proof `Lt y x` to justify the recursive call
+    // `f(y, h(y, prf))`, which requires an accessibility lemma `natWf` (and an
+    // inductive `Lt` whose proofs can be eliminated). Hence the recursion + the
+    // value-correctness guard land with that infrastructure.
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               postulate Lt : Nat -> Nat -> Type\n\
+               enum AccN : Nat -> Type {\n\
+                 accN : (x : Nat) -> ((y : Nat) -> Lt y x -> AccN y) -> AccN x,\n\
+               }\n\
+               depth : (x : Nat) -> AccN x -> Nat\n\
+               fn depth(x, a) { match a { accN(xx, h) => Zero } }\n";
+    let prog = check_program(src).unwrap_or_else(|e| panic!("Acc family/elimination must type-check: {e:?}"));
+    assert!(is_total(&prog, "depth"), "the Acc eliminator must be certified total");
+}
+
+#[test]
 fn phase_1b_wtype_higher_order_recursive_fold() {
     // PHASE 1b: a W-type `Tree` with a HIGHER-ORDER recursive field
     // `node2 : (Bool -> Tree) -> Tree`. The surface match-compiler now recognizes
