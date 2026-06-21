@@ -184,10 +184,12 @@ pub fn compile_to_object_for(
     let module = reported(build_module_for(&ctx, src, triple), src)?;
     let triple = module.get_triple();
     // Bare-metal aarch64 (the freestanding `-none` target) runs with the MMU off, so
-    // RAM is Device memory — unaligned + SIMD accesses fault. `+strict-align` makes the
-    // backend emit only aligned scalar accesses (the optimizer otherwise uses 16-byte
-    // SIMD for struct/array init, which faults on Device memory). Correct for bare
-    // metal; hosted targets (MMU on → Normal memory) don't need it and aren't changed.
+    // RAM is Device memory — UNALIGNED accesses fault. `+strict-align` stops the backend
+    // emitting unaligned wide accesses (the optimizer otherwise uses an unaligned
+    // 16-byte SIMD store for struct/array init, e.g. `stur q0,[x8,#8]`, which faults on
+    // Device memory); aligned accesses (incl. an aligned vector copy) are fine. The
+    // standard bare-metal approach (matches the Linux arm64 kernel). Hosted targets
+    // (MMU on → Normal memory) don't need it and aren't changed.
     let triple_s = triple.as_str().to_string_lossy();
     let features = if triple_s.contains("aarch64") && triple_s.contains("none") {
         "+strict-align"

@@ -1,0 +1,44 @@
+; Atomic operations on `(ptr i64)` — a PURE LIBRARY over the `llvm-ir` escape hatch
+; (atomicrmw / cmpxchg / atomic load+store), sequentially consistent. ZERO core
+; feature, like lib/mmio.coil: the concurrency axis grows by library, not a core hack.
+; (seq_cst to start; weaker orderings — relaxed/acquire/release — are a friction-driven
+; follow-up, only if a real program needs the perf.)
+(module atomic)
+
+; fetch-and-add: atomically `*p += v`, returns the PREVIOUS value.
+(defn atomic-add [(p (ptr i64)) (v i64)] (-> i64)
+  (llvm-ir i64 [p v]
+"%old = atomicrmw add ptr $0, i64 $1 seq_cst
+ret i64 %old"))
+
+; fetch-and-sub: atomically `*p -= v`, returns the PREVIOUS value.
+(defn atomic-sub [(p (ptr i64)) (v i64)] (-> i64)
+  (llvm-ir i64 [p v]
+"%old = atomicrmw sub ptr $0, i64 $1 seq_cst
+ret i64 %old"))
+
+; atomic load.
+(defn atomic-load [(p (ptr i64))] (-> i64)
+  (llvm-ir i64 [p]
+"%v = load atomic i64, ptr $0 seq_cst, align 8
+ret i64 %v"))
+
+; atomic store.
+(defn atomic-store [(p (ptr i64)) (v i64)] (-> i64)
+  (llvm-ir i64 [p v]
+"store atomic i64 $1, ptr $0 seq_cst, align 8
+ret i64 0"))
+
+; atomic exchange: set `*p = v`, returns the PREVIOUS value.
+(defn atomic-xchg [(p (ptr i64)) (v i64)] (-> i64)
+  (llvm-ir i64 [p v]
+"%old = atomicrmw xchg ptr $0, i64 $1 seq_cst
+ret i64 %old"))
+
+; compare-and-swap: if `*p == expected`, set `*p = desired`. Returns the OBSERVED value
+; (== expected exactly when the swap happened — the caller compares to detect success).
+(defn atomic-cas [(p (ptr i64)) (expected i64) (desired i64)] (-> i64)
+  (llvm-ir i64 [p expected desired]
+"%r = cmpxchg ptr $0, i64 $1, i64 $2 seq_cst seq_cst
+%v = extractvalue { i64, i1 } %r, 0
+ret i64 %v"))

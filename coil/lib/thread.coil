@@ -1,0 +1,23 @@
+; Threads — a thin capability-as-value wrapper over the POSIX `pthread` externs (the
+; same C-interop callback pattern cinterop proved with qsort: a Coil function handed to
+; C as a function pointer). PURE LIBRARY, no core feature. Hosted (links libpthread/
+; libc) — concurrency is a hosted concern; bare-metal concurrency is a separate axis.
+(module thread)
+
+; int pthread_create(pthread_t*, const pthread_attr_t*, void*(*)(void*), void*)
+(extern pthread_create :cc c [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)] (-> i32))
+; int pthread_join(pthread_t, void**)
+(extern pthread_join   :cc c [(ptr i8) (ptr i8)] (-> i32))
+
+; A handle to a spawned thread. `pthread_t` is an opaque pointer-sized value; we keep it
+; in a struct so a thread is an ordinary value you pass around.
+(defstruct Thread [(handle (ptr i8))])
+
+; spawn: run `body(arg)` on a new thread, recording the handle into `th`. Returns the
+; pthread_create status (0 = ok).
+(defn thread-spawn [(th (ptr Thread)) (body (fnptr c [(ptr i8)] (ptr i8))) (arg (ptr i8))] (-> i32)
+  (pthread_create (cast (ptr i8) (field th handle)) (cast (ptr i8) 0) body arg))
+
+; join: block until the thread finishes (discarding its return value). Returns status.
+(defn thread-join [(th (ptr Thread))] (-> i32)
+  (pthread_join (load (field th handle)) (cast (ptr i8) 0)))

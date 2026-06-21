@@ -99,7 +99,8 @@ minimal (emit an object); freestanding composes on top.
    faults on unaligned/SIMD access (the SIMD struct-init at a non-16-aligned `.bss`
    global → Alignment fault, DFSC `0x21`). Fix: emit the bare-metal object with
    `+strict-align` (derived from the `-none` triple in `compile_to_object_for`), so the
-   backend uses only aligned scalar accesses — far cheaper than bringing up the MMU.
+   backend emits no UNALIGNED wide accesses (an aligned vector copy may survive,
+   harmless) — far cheaper than bringing up the MMU, and the standard bare-metal choice.
    The crt0 also zeroes `.bss` (the stdlib's `alloc-static` globals start zeroed).
    `hello.coil` worked before any of this only by luck (it doesn't spill / use SIMD);
    the crt0 + `+strict-align` make EVERY bare-metal program (incl. the stdlib) robust.
