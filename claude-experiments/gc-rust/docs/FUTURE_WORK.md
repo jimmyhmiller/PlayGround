@@ -98,13 +98,23 @@ already have strong substrates — make them an actual toolchain.
   assignment), tests in `gc/tests.rs` (incl. the ASan resize-stress concurrent
   test) + `tests/alloc_profile.rs`; gate `scripts/asan_dump_race.sh`.
 
-- **Live heap explorer.** The JSON snapshot is already a clean substrate; drive
-  it from a safepoint *during* execution (not just at program end) into an
-  interactive viewer (e.g. a jim widget) — navigate the object graph, retained
-  sizes, dominators, leak/growth deltas across collections.
+- **Live heap explorer — P1 DATA CORE DONE** (design: docs/HEAP_EXPLORER_DESIGN.md).
+  - `Heap::visit_roots` — read-only visitor over the REAL GC root set (globals +
+    parked thread frames + permanent extras), STW-only, mirroring `collect_inner`.
+  - `dump_heap_json` reachability + dominators/retained now rooted at the REAL
+    roots (replacing the wrong in-degree-0 proxy); each object carries a
+    `reachable` flag; versioned header (`version`, `gc_seq`, `snapshot_pause_ns` —
+    the measured STW pause). The pre-existing dumps are STW-gated.
+  - `gcr heap-diff <a.json> <b.json>` — per-type byte/count growth (NEW/GREW/
+    GONE) + summary delta: the leak-hunting workflow.
+  REMAINING (P2+): drive a snapshot *during* execution on demand (signal/FFI/
+  intrinsic → own `pause_world` snapshot + `GCR_HEAP_SNAPSHOT_DIR` sink); an
+  interactive `gcr_heap.ft` widget; opt-in per-object alloc-site provenance
+  (`GCR_TRACK_ALLOC_SITE=1`, header `site_id` preserved across evacuation).
 
-- **Automatic leak/growth detection.** Diff live-set composition across
-  collections and surface types whose retained size grows monotonically.
+- **Automatic leak/growth detection.** `gcr heap-diff` does pairwise growth
+  today; over a *series* of snapshots, flag types whose retained size grows
+  monotonically (needs the on-demand/periodic snapshot trigger, P2).
 
 - **Beyond the JVM (stretch).** Deterministic record-replay / time-travel of an
   execution (the moving GC + precise roots make a consistent heap snapshot cheap),
