@@ -105,6 +105,27 @@ remaining problems:
   is forced by the expected indices. natWf builds many `Lt` proofs; without this it is
   workable but verbose (explicit indices everywhere). Fixing it = extend `solve_ctor`
   to unify a constructor's implicit args against the EXPECTED type's index spine.
+- **gap (i) FIXED** (commit lands implicit-from-result-index inference): `solve`
+  reconciles the packed `VNatLit` literal with the `Succ`-spine, so relation-ctor
+  implicits solve from the expected indices (`ltZ : Lt 0 1`, `ltS(ltZ) : Lt 1 2` need
+  no explicit indices). Exact, decidable, kernel-backstopped.
+- **partial application WORKS** (verified): `add(Succ Zero) : Nat -> Nat` as a value and
+  as a higher-order argument — so the accessibility function `(y) -> Lt y x -> Acc y`
+  can be provided as `accStep(x)` (partial app of a named helper). The no-lambda
+  concern is resolved for natWf.
+- **GAP (next blocker, BIGGER than a quick win): absurd discharge is SINGLE-INDEX
+  only.** `match (pf : Lt y Zero) { }` fails because `try_absurd_match` returns `None`
+  for any family with `indices.len() != 1` (rust_surface.rs:1533) — `Lt` is two-index.
+  natWf's base case (`Lt y Zero` empty) needs multi-index absurd discharge. Extending
+  it is SOUNDNESS-SENSITIVE: the code's own BACKSTOP CAVEAT warns the current Nat
+  sentinel makes the kernel-rejection backstop T-dependent (silently accepts a
+  mis-classified-reachable case when the result type is `Nat`), so a for-all-T sentinel
+  (a fresh uninhabited `Void` + `elim Void`) must land BEFORE extending to multi-index /
+  per-constructor discharge. So this is a real coverage-checker investment, not a
+  one-liner.
+- **GAP: natWf-by-strong-induction needs a bound/transitivity lemma** (`Lt z y -> Lt y
+  (Succ k) -> Lt z k`) plus assembly — multi-lemma dependent-type proof engineering on
+  top of the above.
 - **GAP: the no-lambda surface blocks the inline accessibility function.** natWf's
   `acc(n, λ y prf. …)` needs a function `(y:Nat) -> Lt y n -> Acc y` that recurses;
   with no surface lambdas it must be a NAMED top-level helper that threads the
