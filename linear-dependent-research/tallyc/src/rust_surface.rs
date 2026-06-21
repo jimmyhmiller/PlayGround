@@ -1150,8 +1150,19 @@ impl Elab {
         // lower to `(λx. body : (x:E) → BODY) e` — the lambda is ANNOTATED so the
         // kernel can check the β-redex (a bare lambda is not inferrable). The
         // codomain doesn't depend on x, so it is the (shifted) expected type.
+        //
+        // The binder's QUANTITY is the load-bearing soundness bit: a `let` binding a
+        // LINEAR value (one whose type carries an `Own`/`Σ[1]` component) must bind at
+        // `1`, so using it twice is `ω ⋢ 1` (a double-free) and dropping it is `0 ⋢ 1`
+        // (a leak). An ω-binder here LAUNDERS linearity — it would accept
+        // `let o = alloc(Zero); free(o); free(o)`. A copyable value (no linear
+        // component) binds at `ω` so ordinary `let x = e; … x … x …` still works.
+        // FAIL-SAFE toward linearity: `contains_linear` flags any reachable concrete
+        // `Own`/`Σ[1]`; the abstract-type-parameter and field-hidden cases are the
+        // §13 polymorphism corner, tightened when generic linear collections land.
         let exp_tm = dep::quote_at(n, expected);
-        let pi_ty = Term::Pi(Mult::Omega, Box::new(e_ty_tm), Box::new(dep::shift_term(1, &exp_tm)));
+        let binder_mult = if contains_linear(&e_ty_tm) { Mult::One } else { Mult::Omega };
+        let pi_ty = Term::Pi(binder_mult, Box::new(e_ty_tm), Box::new(dep::shift_term(1, &exp_tm)));
         let lam = Term::Ann(Box::new(Term::Lam(Box::new(body_term))), Box::new(pi_ty));
         Ok(Term::App(Box::new(lam), Box::new(e_term)))
     }
@@ -2316,6 +2327,36 @@ fn ctor_head(t: &Term) -> Option<String> {
 /// call graph: a `Call(name, args)` becomes `TCall { callee: name, args }`.
 /// Constructor applications are included too — harmless, since they are not in
 /// the user-function set and so are treated as total leaves by the analyzer.
+/// Does this TYPE carry a LINEAR component — a concrete `Own` pointer or a linear
+/// `Σ[1]` pair — anywhere structurally reachable (through applications, pairs, Σ, and
+/// a datatype's type ARGUMENTS)? Drives the `let`-binder quantity: a linear value
+/// must bind at `1` (so use-twice = `ω ⋢ 1`, drop = `0 ⋢ 1`); a copyable one at `ω`.
+///
+/// SCOPE (v1): catches `Own T`, `Opt (Own T)`, `Vec (Own T) n`, a `Σ[1]` — every
+/// case where `Own`/`Σ[1]` appears in the type EXPRESSION (the way linear values are
+/// written today via `alloc`/`free`). It does NOT (yet) recurse into a datatype's
+/// constructor-field DEFINITIONS (a struct that hides an `Own` behind its name) nor
+/// resolve an abstract type parameter that might be instantiated linear — both are
+/// the FUTURE_WORK §13 linearity×polymorphism corner, deferred until generic linear
+/// collections exist (no such type exists in the surface today). Value/index
+/// sub-terms carry no linearity, so they are not flagged.
+fn contains_linear(ty: &Term) -> bool {
+    match ty {
+        Term::Const(n) => n == "Own",
+        Term::Sigma(crate::mult::Mult::One, _, _) => true,
+        Term::Sigma(_, a, b) | Term::Pi(_, a, b) | Term::App(a, b) | Term::Pair(a, b) | Term::Add(a, b) => {
+            contains_linear(a) || contains_linear(b)
+        }
+        Term::Eq(a, b, c) => contains_linear(a) || contains_linear(b) || contains_linear(c),
+        Term::Ann(e, _) => contains_linear(e),
+        Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => contains_linear(x),
+        Term::Data(_, args) | Term::Constr(_, args) => args.iter().any(contains_linear),
+        // Var / Type / Nat / NatLit / Zero / Lam / Fix / NatElim / NatCase / Elim:
+        // no syntactic linear component (an abstract `Var` is the deferred §13 case).
+        _ => false,
+    }
+}
+
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     match t {
         Tm::Call(n, args) => {

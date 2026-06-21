@@ -199,6 +199,52 @@ fn phase_1b_wtype_higher_order_recursive_fold() {
 }
 
 #[test]
+fn let_linearity_rejects_double_free_and_leak() {
+    // SOUNDNESS FIX (memory-model §5 finding): a `let`-bound LINEAR value binds at 1,
+    // so the rig catches misuse. Before the fix the `let` ω-binder LAUNDERED linearity
+    // and both of these were wrongly ACCEPTED (a live double-free / leak).
+    const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+
+    // double-free: the let-bound Own `o` is consumed twice ⇒ ω ⋢ 1.
+    let dbl = format!(
+        "{NB}\ndbl : Unit\nfn dbl() {{ let o = alloc(Zero); let u = free(o); free(o) }}\n\
+         main : Unit\nfn main() {{ dbl }}\n"
+    );
+    let err = match check_program(&dbl) {
+        Err(d) => format!("{d:?}"),
+        Ok(_) => panic!("double-free through `let` must be REJECTED"),
+    };
+    assert!(err.contains("⋢") || err.contains("multiplicity"), "must be a linearity error, got: {err}");
+
+    // leak: the let-bound Own is never consumed ⇒ 0 ⋢ 1.
+    let leak = format!(
+        "{NB}\nlk : Unit\nfn lk() {{ let o = alloc(Zero); U }}\n\
+         main : Unit\nfn main() {{ lk }}\n"
+    );
+    assert!(check_program(&leak).is_err(), "dropping a let-bound linear Own must be REJECTED (leak)");
+
+    // single use: the linear value is consumed exactly once ⇒ ACCEPTED.
+    let ok = format!(
+        "{NB}\none : Unit\nfn one() {{ let o = alloc(Zero); free(o) }}\n\
+         main : Unit\nfn main() {{ one }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "single free must be ACCEPTED: {:?}", check_program(&ok).err());
+}
+
+#[test]
+fn let_copyable_value_still_usable_many_times() {
+    // NO REGRESSION: a COPYABLE let-bound value (a `Nat` — no linear component) still
+    // binds at ω and may be used multiple times. `let n = 2; add(n, n) = 4`.
+    let src = format!(
+        "{NATB}\nadd : Nat -> Nat -> Nat\n\
+         fn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
+         main : Nat\nfn main() {{ let n = Succ(Succ(Zero)); add(n, n) }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(4)), "let n=2; add(n,n) must run to 4");
+}
+
+#[test]
 fn structs_with_implicit_param() {
     let src = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
