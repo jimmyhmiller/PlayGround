@@ -50,16 +50,18 @@ yet; the front-end is fast.**
 2. **Recursive-sum + heap-collection dance is verbose.** A `JArr`/`JObj` holds a
    `(ptr (ArrayList Json))` for recursion, built with
    `(unwrap-ptr (create [(ArrayList Json)] a))` + `store!` + the pointer. Correct,
-   but a `heap-init`-style helper (`(box a expr)` → allocate + store + ptr) would
-   remove the ceremony. Library macro candidate.
+   — **FIXED (library macro `box`, lib/alloc.coil):** `(box A T VAL)` allocates +
+   stores + yields the ptr. json.coil's JArr/JObj use it.
 
 3. **No HashMap iteration.** There's `hm-get`/`hm-len` but no `hm-for`/entries, so
-   an object can be QUERIED but not serialized/walked. Stdlib gap — an `hm-for`
-   over occupied slots (like `al-for`) is straightforward library.
+   an object can be QUERIED but not serialized/walked.
+   — **FIXED (library macro `hm-for`, lib/hashmap.coil):** `(hm-for [k v map-ptr] …)`
+   iterates occupied entries (a macro over `for` + the slot array).
 
 4. **`and`/`or` are 2-ary only.** Multi-way conditions nest:
-   `(or a (or b (or c d)))` (e.g. the whitespace test). A variadic `and`/`or`
-   macro (folding to the 2-ary core form) would read better. Small macro.
+   `(or a (or b (or c d)))` (e.g. the whitespace test).
+   — **FIXED (library macros `all`/`any`, lib/control.coil):** variadic AND/OR
+   folding to the 2-ary core forms.
 
 ## What worked well (don't regress)
 
