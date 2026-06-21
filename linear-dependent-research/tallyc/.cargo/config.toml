@@ -3,6 +3,10 @@
 # `cargo build` / `cargo test` works in any worktree with no flags and no manual env.
 # Requires Homebrew `llvm@18` (`brew install llvm@18`); `/opt/homebrew/opt/llvm@18` is the
 # stable symlink (survives patch bumps). If LLVM 18 lives elsewhere, override by exporting
-# LLVM_SYS_181_PREFIX before invoking cargo.
+# LLVM_SYS_180_PREFIX before invoking cargo.
+#
+# The var is LLVM_SYS_**180**_PREFIX, not 181: llvm-sys is crate version 180.x (for LLVM
+# 18), and llvm-sys reads `LLVM_SYS_<its-major>_PREFIX` = `LLVM_SYS_180_PREFIX`. With the
+# wrong name the config is INERT and the build silently links whatever LLVM is on PATH.
 [env]
-LLVM_SYS_181_PREFIX = "/opt/homebrew/opt/llvm@18"
+LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"

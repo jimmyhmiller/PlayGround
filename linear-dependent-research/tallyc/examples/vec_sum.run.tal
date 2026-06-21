@@ -1,5 +1,5 @@
 // END TO END: a length-indexed Vec built, then summed to a Nat, compiled to
-// NATIVE code and run.  `tally run examples/vec_sum.run.tal`  (needs --features llvm)
+// NATIVE code and run.  `tally run examples/vec_sum.run.tal`
 //
 // Vec lowers to a boxed linked stack of cons cells (the length index is ERASED,
 // never materialised). `vsum` is the dependent eliminator over Vec, lowered to a

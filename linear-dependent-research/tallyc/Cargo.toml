@@ -14,6 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 # LLVM is Tally's native backend — ALWAYS on (no optional feature). The build needs a
-# system LLVM 18; `.cargo/config.toml` points `LLVM_SYS_181_PREFIX` at the Homebrew
+# system LLVM 18; `.cargo/config.toml` points `LLVM_SYS_180_PREFIX` at the Homebrew
 # `llvm@18` so a plain `cargo build` / `cargo test` finds it with no flags or manual env.
 inkwell = { version = "0.5", features = ["llvm18-0"] }

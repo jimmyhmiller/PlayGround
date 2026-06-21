@@ -7,7 +7,7 @@
 #   bench/run.sh
 #
 # Requires a tally built with the LLVM backend:
-#   LLVM_SYS_181_PREFIX=/opt/homebrew/Cellar/llvm@18/18.1.8 \
+#   LLVM_SYS_180_PREFIX=/opt/homebrew/Cellar/llvm@18/18.1.8 \
 #     cargo build --release
 set -euo pipefail
 

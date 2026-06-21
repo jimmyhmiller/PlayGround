@@ -1,5 +1,5 @@
 // END TO END: dependent source -> QTT type-check -> NATIVE code -> run.
-//   tally run examples/nat.run.tal      (needs --features llvm)
+//   tally run examples/nat.run.tal
 //
 // `add` and `mul` are total functions defined by `match` (which compiles to the
 // dependent eliminator). The eliminator is lowered to a real native LOOP — the

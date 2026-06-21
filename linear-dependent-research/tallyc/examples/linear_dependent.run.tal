@@ -1,5 +1,5 @@
 // Linear AND dependent types in one program, compiled to native code.
-//   tally run examples/linear_dependent.run.tal      (needs --features llvm)
+//   tally run examples/linear_dependent.run.tal
 //
 // Dependent: a length-indexed Vec (the length index `n` is ERASED at runtime).
 // Linear:    an Own cell, alloc'd and freed exactly once (multiplicity 1).

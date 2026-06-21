@@ -556,14 +556,14 @@ cargo run -- build <file.tal>   # type-check + AOT-compile to a native executabl
 ### LLVM prerequisite
 
 Needs **LLVM 18** (inkwell is pinned to `llvm18-0`). `.cargo/config.toml` points
-`LLVM_SYS_181_PREFIX` at the Homebrew `llvm@18` (`/opt/homebrew/opt/llvm@18`), so on the
+`LLVM_SYS_180_PREFIX` at the Homebrew `llvm@18` (`/opt/homebrew/opt/llvm@18`), so on the
 dev machine `cargo build` / `cargo test` Just Works with no flags and no manual env.
 
 - **macOS:** `brew install llvm@18` (the config's stable symlink path resolves to it).
 - **Elsewhere** (e.g. a Linux CI/sandbox): install LLVM 18 dev libs and export the prefix
-  — an externally-set `LLVM_SYS_181_PREFIX` OVERRIDES the config (it is non-forcing), e.g.
+  — an externally-set `LLVM_SYS_180_PREFIX` OVERRIDES the config (it is non-forcing), e.g.
 
   ```
   apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
-  export LLVM_SYS_181_PREFIX=$(llvm-config-18 --prefix)
+  export LLVM_SYS_180_PREFIX=$(llvm-config-18 --prefix)
   ```
