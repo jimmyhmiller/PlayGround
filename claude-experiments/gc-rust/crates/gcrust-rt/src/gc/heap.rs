@@ -184,6 +184,15 @@ pub struct Heap {
     /// `record_alloc`), summed alongside the live threads in
     /// [`alloc_site_profile`](Self::alloc_site_profile). Indexed by `site_id`.
     retired_alloc_counters: Mutex<Vec<SiteCounter>>,
+    /// Set if any collection was ever passed a non-empty per-call `extra_roots`.
+    /// `visit_roots` (the snapshot root scan) covers only the PERSISTENT root
+    /// sources (globals + thread frames + permanent extras), NOT transient
+    /// per-call extra_roots — so if an embedder ever supplies roots ONLY via
+    /// `collect(extra_roots)` (not `register_permanent_extra`), a heap snapshot
+    /// would under-report reachability (a false leak). No production caller does
+    /// this today, but we record it and WARN at snapshot time so the footgun
+    /// fails loud instead of silently-wrong.
+    saw_extra_roots: AtomicBool,
     collections: AtomicUsize,
 
     /// Cold-path GC event log: one [`GcEvent`] per collection, for the
@@ -269,6 +278,7 @@ impl Heap {
             value_meta: OnceLock::new(),
             alloc_sites: OnceLock::new(),
             retired_alloc_counters: Mutex::new(Vec::new()),
+            saw_extra_roots: AtomicBool::new(false),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
@@ -313,6 +323,7 @@ impl Heap {
             value_meta: OnceLock::new(),
             alloc_sites: OnceLock::new(),
             retired_alloc_counters: Mutex::new(Vec::new()),
+            saw_extra_roots: AtomicBool::new(false),
             collections: AtomicUsize::new(0),
             gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
@@ -412,6 +423,16 @@ impl Heap {
             let src: &dyn RootSource = unsafe { &*ptr };
             src.scan_roots(&mut do_slot);
         }
+    }
+
+    /// Whether any collection was ever passed non-empty per-call `extra_roots`.
+    /// A heap snapshot uses [`visit_roots`](Self::visit_roots), which covers only
+    /// the PERSISTENT root sources — so if this is true the snapshot may
+    /// under-report reachability for objects held only via transient extra_roots.
+    /// `dump_heap_json` warns on it. (No production caller supplies extra_roots
+    /// today; this guards a future embedder footgun.)
+    pub fn saw_extra_roots(&self) -> bool {
+        self.saw_extra_roots.load(Ordering::Relaxed)
     }
 
     /// Enable or disable GC-on-every-allocation (stress testing mode).
@@ -1198,7 +1219,11 @@ impl Heap {
             }
         }
 
-        // Extra roots (caller-provided)
+        // Extra roots (caller-provided). Record their use so a later snapshot can
+        // warn it doesn't cover transient per-call roots (see `saw_extra_roots`).
+        if !extra_roots.is_empty() {
+            self.saw_extra_roots.store(true, Ordering::Relaxed);
+        }
         for source in extra_roots.iter() {
             source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };
@@ -1480,6 +1505,9 @@ impl Heap {
 
         // Caller-provided extra roots (e.g. JIT-frame stack-map roots,
         // module-level literal pools, host-side scoped frame chains).
+        if !extra_roots.is_empty() {
+            self.saw_extra_roots.store(true, Ordering::Relaxed);
+        }
         for source in extra_roots.iter() {
             source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };

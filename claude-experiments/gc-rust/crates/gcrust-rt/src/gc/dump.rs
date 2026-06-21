@@ -356,8 +356,21 @@ pub unsafe fn dump_heap_json(heap: &Heap) -> String {
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(10);
 
+    // Loud guard (heap-explorer P1 nit): visit_roots covers only PERSISTENT
+    // roots; if a collection ever used transient per-call extra_roots, a snapshot
+    // could under-report reachability. Warn rather than silently mislead.
+    if heap.saw_extra_roots() {
+        eprintln!(
+            "gc-rust: WARNING: heap snapshot reachability may under-report — a \
+             collection used per-call extra_roots, which visit_roots does not \
+             cover. Register such roots via register_permanent_extra to include them."
+        );
+    }
+
     let reachable_count = reachable.iter().filter(|&&r| r).count();
-    let gc_seq = heap.minor_collections() + heap.collections();
+    // Total collections so far — a COARSE heap-age tag (not a unique monotonic GC
+    // index); fine for ordering/diffing snapshots, don't read it as a serial id.
+    let gc_collections = heap.minor_collections() + heap.collections();
     let pause_ns = t0.elapsed().as_nanos();
 
     // ---- Emit JSON (hand-built; gcrust-rt has no serde) -------------------
@@ -365,8 +378,8 @@ pub unsafe fn dump_heap_json(heap: &Heap) -> String {
     out.push_str("{\n  \"summary\": {");
     let _ = write!(
         out,
-        "\"version\": 1, \"gc_seq\": {}, \"snapshot_pause_ns\": {}, ",
-        gc_seq, pause_ns
+        "\"version\": 1, \"gc_collections\": {}, \"snapshot_pause_ns\": {}, ",
+        gc_collections, pause_ns
     );
     let _ = write!(
         out,
