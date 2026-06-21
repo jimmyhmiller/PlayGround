@@ -111,7 +111,10 @@ library — consistent with the macros/library-first thesis.
   NUL-terminated (`[N+1 x i8]`), is the FFI story. `(slice u8)` strings are NOT
   NUL-terminated (`[N x i8]`, length-carried). No `to-cstr` copy needed for the
   common case (string literals you control are spelled `c"…"` directly at the FFI
-  site).
+  site). A by-value slice (or vec) crossing a C extern — directly or as a struct
+  field — is a HARD ERROR on every target (a `#5` follow-up: the first cut only
+  rejected the x86-SysV struct-field path; now a pre-classification guard on
+  externs rejects it on AArch64 too). Pass `c"…"`/`(ptr i8)` + a length for FFI.
 - **Migration of `"…"`.** Chose **(a)**: `"…"`→`(slice u8)`, `c"…"` for cstrings.
   The breaking surface was small and mechanical — printf/snprintf format strings
   and `%s` args → `c"…"`; everything.coil's `(ptr i8)` demo → `c"coil"`; fmt/io's

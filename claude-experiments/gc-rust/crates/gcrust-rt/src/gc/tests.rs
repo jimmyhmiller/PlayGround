@@ -1516,6 +1516,67 @@ fn alloc_site_profile_dump_concurrent_with_live_worker_no_hang() {
 }
 
 #[test]
+fn alloc_site_profile_dump_concurrent_resize_stress_asan() {
+    // ASan-oriented variant: the worker records at STRICTLY INCREASING site ids,
+    // so its per-thread counter Vec keeps GROWING (Vec::resize → realloc → frees
+    // the old buffer) while the main thread repeatedly dumps (alloc_site_profile
+    // clones that Vec). This is EXACTLY the heap-use-after-free the pre-fix
+    // reviewer reproduced under AddressSanitizer: a read of a buffer the writer
+    // just realloc'd away. With the STW fix the worker is parked during every
+    // read, so there is no concurrent realloc and ASan stays clean; WITHOUT the
+    // fix this surfaces as an ASan UAF. Run in CI under
+    // `RUSTFLAGS=-Zsanitizer=address cargo +nightly test --target <host>`.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+
+    let n_allocs = 2000u64;
+    let bytes_each = 16u64;
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+
+    let worker = {
+        let h = heap.clone();
+        let stop = stop.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+            for i in 0..n_allocs {
+                // Increasing site id → the counter Vec grows (reallocs).
+                unsafe { mt.state().record_alloc(i as u32, bytes_each) };
+                done.fetch_add(1, Ordering::Relaxed);
+                mt.safepoint();
+            }
+            while !stop.load(Ordering::Relaxed) {
+                mt.safepoint();
+                std::thread::yield_now();
+            }
+        })
+    };
+
+    // Dump hard while the worker is growing its Vec. A residual race = ASan UAF.
+    for _ in 0..200 {
+        let prof = heap.alloc_site_profile();
+        let total: u64 = prof.iter().map(|s| s.count).sum();
+        assert!(total <= n_allocs, "torn/garbage read: total {total} > {n_allocs}");
+    }
+
+    while done.load(Ordering::Relaxed) < n_allocs {
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+
+    let prof = heap.alloc_site_profile();
+    let total_count: u64 = prof.iter().map(|s| s.count).sum();
+    let total_bytes: u64 = prof.iter().map(|s| s.bytes).sum();
+    assert_eq!(total_count, n_allocs);
+    assert_eq!(total_bytes, n_allocs * bytes_each);
+}
+
+#[test]
 fn alloc_site_profile_unlabelled_sites_not_dropped() {
     // Counters with no matching site-table entry (e.g. table not installed) are
     // surfaced under a synthetic label, never silently dropped.

@@ -80,12 +80,19 @@ a place to `(ptr T)` where unambiguous). — **Delivered by Phase-2 #4** (A5 asi
     derive/interface story (or comptime reflection) would cut real boilerplate.
 11. **No unsigned div/rem readily** (`idiv`/`irem` are signed) — hex/uint printing
     assumes non-negative.
+    — **Fixed (Phase-2 #6):** `idiv`/`irem` already dispatch unsigned by operand TYPE;
+    added `udiv`/`urem` that force unsigned on any operand (for hashing / a "negative"
+    i64), and `print-uhex` (full-range unsigned hex) over them.
 
 ## E. Inference
 
 12. **Nested generic-call inference gap.** `(subslice (slice-of a 5) 1 4)` fails to infer
     `T`; bind the base first. Generic `T` doesn't flow through a nested generic call's
     result type.
+    — **Fixed (Phase-2 #6):** a generic-call argument that can't self-infer is DEFERRED,
+    the substitution solved from the rest, then the deferred arg re-synthesized with its
+    now-concrete parameter type pushed in (bidirectional). Still rejects the genuinely
+    ambiguous (no silent default).
 
 ## F. What worked well (so we don't regress it)
 

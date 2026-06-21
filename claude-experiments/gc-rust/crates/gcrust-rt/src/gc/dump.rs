@@ -267,12 +267,18 @@ fn retained_sizes(nodes: &[Node]) -> Vec<usize> {
 ///
 /// "Reachable bytes" for a root is the transitive closure size from that
 /// object; roots are objects with no in-edges within the snapshot (the top-level
-/// structures). This is a program-end snapshot — there is no live stack root set
-/// — so it reflects all currently-allocated objects.
+/// structures — an in-degree-0 PROXY for the real GC root set; the heap-explorer
+/// P1 replaces this with the true roots). This reflects all currently-allocated
+/// objects.
+///
+/// Quiescence is ENFORCED via a [`Heap::pause_world`] STW pause (see
+/// [`dump_heap_text`]); not safe to call while holding `gc_lock`.
 ///
 /// # Safety
-/// The heap must be quiescent; all objects valid.
+/// All allocated objects must be valid (headers + varlen counts written).
 pub unsafe fn dump_heap_json(heap: &Heap) -> String {
+    // Read the live heap under STW (see dump_heap_text).
+    let _pause = heap.pause_world();
     let nodes = unsafe { collect_graph(heap) };
     let id_of: HashMap<usize, usize> =
         nodes.iter().enumerate().map(|(i, n)| (n.obj as usize, i)).collect();
