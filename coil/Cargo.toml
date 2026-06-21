@@ -6,6 +6,7 @@ description = "Low-level Lisp where calling convention and allocation are types.
 
 [dependencies]
 inkwell = { version = "0.5", features = ["llvm18-0"] }
+serde_json = "1"   # parse clang's `-ast-dump=json` output for `coil cimport`
 
 [[bin]]
 name = "coil"

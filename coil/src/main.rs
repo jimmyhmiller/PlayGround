@@ -5,6 +5,10 @@
 //!   coil emit-obj <file> [-o o]  emit a native object file (default: ./<stem>.o)
 //!   coil emit-ir  <file>         print the generated LLVM IR
 //!   coil expand   <file>         print the program after macro expansion
+//!   coil cimport  <header.h>     generate Coil FFI bindings from a C header (via clang)
+//!
+//! `build`/`run` accept `--link-flag <arg>` (repeatable) or `-l<lib>` to pass arguments
+//! to the `cc` link line — link C libraries / objects (C-interop §6).
 //!
 //! Any command accepts `--target <triple>` to cross-compile for a non-host
 //! target (e.g. `--target x86_64-apple-macosx11.0.0` to produce the System V
@@ -43,10 +47,8 @@ fn main() -> ExitCode {
     match cmd {
         "build" => {
             let out = opts.out.unwrap_or_else(|| default_out(file, ""));
-            let r = match triple {
-                Some(t) => coil::build_executable_for(&src, &out, t),
-                None => coil::build_executable(&src, &out),
-            };
+            let t = triple.unwrap_or_else(coil::codegen::target_triple);
+            let r = coil::build_executable_linked(&src, &out, t, &opts.link_flags);
             report(r.map(|_| format!("wrote {}", out.display())), file)
         }
         "emit-obj" => {
@@ -65,7 +67,17 @@ fn main() -> ExitCode {
             file,
         ),
         "expand" => report(coil::expand_to_string(&src), file),
-        "run" => run_aot(&src, file, opts.target.as_deref()),
+        "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags),
+        // cimport <header.h> [-o out.coil]: generate Coil FFI bindings from a C header
+        // via clang's AST. (`file` is the header path; `src` above just read it.)
+        "cimport" => {
+            let out = opts.out.unwrap_or_else(|| default_out(file, "coil"));
+            let r = coil::cimport::cimport_header(file).and_then(|b| {
+                std::fs::write(&out, b).map_err(|e| format!("writing {}: {e}", out.display()))?;
+                Ok(format!("wrote {}", out.display()))
+            });
+            report(r, file)
+        }
         _ => usage(),
     }
 }
@@ -80,12 +92,10 @@ fn print_error(body: &str, file: &str) {
 
 /// Build to a temp executable, run it, and propagate its exit code. With a cross
 /// `--target` the binary is run via `arch -<arch>` (Rosetta on macOS).
-fn run_aot(src: &str, file: &str, triple: Option<&str>) -> ExitCode {
+fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String]) -> ExitCode {
     let exe = std::env::temp_dir().join(format!("coil_run_{}", std::process::id()));
-    let build = match triple {
-        Some(t) => coil::build_executable_for(src, &exe, TargetTriple::create(t)),
-        None => coil::build_executable(src, &exe),
-    };
+    let t = triple.map(TargetTriple::create).unwrap_or_else(coil::codegen::target_triple);
+    let build = coil::build_executable_linked(src, &exe, t, link_flags);
     if let Err(e) = build {
         print_error(&e, file);
         return ExitCode::FAILURE;
@@ -127,12 +137,14 @@ fn run_arch(triple: Option<&str>) -> Option<&'static str> {
 struct Opts {
     out: Option<PathBuf>,
     target: Option<String>,
+    link_flags: Vec<String>,
 }
 
 impl Opts {
     fn parse(rest: &[String]) -> Result<Opts, String> {
         let mut out = None;
         let mut target = None;
+        let mut link_flags = Vec::new();
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -146,10 +158,22 @@ impl Opts {
                     target = Some(t.clone());
                     i += 2;
                 }
+                // pass an argument through to the `cc` link line (e.g. `-lm`, a C object
+                // path) — the C-interop §6 linking half.
+                "--link-flag" => {
+                    let f = rest.get(i + 1).ok_or("--link-flag needs an argument")?;
+                    link_flags.push(f.clone());
+                    i += 2;
+                }
+                // shorthand: `-lfoo` is passed straight through.
+                other if other.starts_with("-l") && other.len() > 2 => {
+                    link_flags.push(other.to_string());
+                    i += 1;
+                }
                 other => return Err(format!("unknown argument '{other}'")),
             }
         }
-        Ok(Opts { out, target })
+        Ok(Opts { out, target, link_flags })
     }
 }
 
@@ -180,7 +204,10 @@ fn default_out(file: &str, ext: &str) -> PathBuf {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out] [--target <triple>]"
+        "usage:\n  \
+         coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out] [--target <triple>] \
+         [--link-flag <arg> | -l<lib>]…\n  \
+         coil cimport <header.h> [-o out.coil]   generate C FFI bindings via clang"
     );
     ExitCode::from(2)
 }

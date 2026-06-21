@@ -7,6 +7,7 @@
 pub mod abi;
 pub mod ast;
 pub mod check;
+pub mod cimport;
 pub mod codegen;
 pub mod convention;
 pub mod macros;
@@ -245,6 +246,19 @@ pub fn build_executable_for(
     out_path: &Path,
     triple: inkwell::targets::TargetTriple,
 ) -> Result<(), String> {
+    build_executable_linked(src, out_path, triple, &[])
+}
+
+/// `build_executable_for` plus extra arguments passed through to the `cc` link line —
+/// e.g. `-lm`, `-lfoo`, or a C object file path — so a Coil program can link against C
+/// libraries / objects (the C-interop §6 linking half). A generic passthrough, NOT a
+/// baked-in "C-lib mode": the compiler emits the object; how it's linked is the caller's.
+pub fn build_executable_linked(
+    src: &str,
+    out_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+    link_flags: &[String],
+) -> Result<(), String> {
     let triple_str = triple.as_str().to_string_lossy().into_owned();
     let obj_path = out_path.with_extension("o");
     compile_to_object_for(src, &obj_path, triple)?;
@@ -252,10 +266,11 @@ pub fn build_executable_for(
     if let Some(arch) = link_arch_flag(&triple_str) {
         cc.arg("-arch").arg(arch);
     }
+    cc.arg(&obj_path).arg("-o").arg(out_path);
+    for f in link_flags {
+        cc.arg(f);
+    }
     let status = cc
-        .arg(&obj_path)
-        .arg("-o")
-        .arg(out_path)
         .status()
         .map_err(|e| format!("failed to invoke linker (cc): {e}"))?;
     let _ = std::fs::remove_file(&obj_path);
