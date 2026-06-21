@@ -311,6 +311,35 @@ fn let_linearity_rejects_double_free_and_leak() {
 }
 
 #[test]
+fn linear_fields_rejected_at_declaration() {
+    // SOUNDNESS (reviewer finding on the let-fix boundary): a struct/enum storing an
+    // `Own`/`Σ[1]` field would let a double-free/leak hide behind the type's name —
+    // fields are stored at ω, AND such a type reads non-linear to `contains_linear`
+    // (which doesn't see through field defs). Repro that motivated this:
+    //   struct Box { p : Own Nat }
+    //   fn dbl() { let b = Box(alloc(Zero)); let u = freebox(b); freebox(b) }  // double-free
+    // Fix: forbid linear FIELDS at DECLARATION — closing the let channel, the no-let
+    // `match` channel, AND enum variants at once — until memory-model Phase A's
+    // field-aware linearity. Legit non-linear structs/enums still declare.
+    const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    let box_ = format!("{NB}struct Box {{ p : Own Nat }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&box_).is_err(), "struct with an Own field must be REJECTED at declaration");
+    let envar = format!("{NB}enum Boxe {{ mk : Own Nat -> Boxe }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&envar).is_err(), "enum variant with an Own field must be REJECTED");
+    let opt = format!(
+        "{NB}enum Opt (a : Type) {{ none : Opt a, some : a -> Opt a }}\n\
+         struct Node {{ next : Opt (Own Nat) }}\nmain : Unit\nfn main() {{ U }}\n"
+    );
+    assert!(check_program(&opt).is_err(), "a struct hiding Own via Opt(Own) must be REJECTED (until Phase A)");
+    // no over-rejection: legit non-linear declarations still work.
+    let ok = format!(
+        "{NB}struct Pair {{ a : Nat, b : Nat }}\n\
+         enum Tree {{ leaf : Tree, node : Tree -> Nat -> Tree -> Tree }}\nmain : Unit\nfn main() {{ U }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "legit non-linear struct/enum must still work: {:?}", check_program(&ok).err());
+}
+
+#[test]
 fn let_copyable_value_still_usable_many_times() {
     // NO REGRESSION: a COPYABLE let-bound value (a `Nat` — no linear component) still
     // binds at ω and may be used multiple times. `let n = 2; add(n, n) = 4`.

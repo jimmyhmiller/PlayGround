@@ -2379,6 +2379,34 @@ fn contains_linear(ty: &Term) -> bool {
     }
 }
 
+/// Reject a struct/enum constructor that stores a LINEAR (`Own`/`Σ[1]`) field, as a
+/// hard error AT DECLARATION. Storing a linear value in a field is unsound in the
+/// current surface on TWO independent channels: (1) struct/enum fields are stored at
+/// `Mult::Omega`, so `match Box(alloc(Zero)) { Box(q) => free(q); free(q) }` launders
+/// a double-free with no `let`; and (2) such a type reads as non-linear to
+/// `contains_linear` (which doesn't see through field definitions), so a `let`-bound
+/// value of it also launders. Forbidding the FIELD at declaration closes BOTH channels
+/// AND makes `contains_linear` transitively sufficient — no datatype can carry a
+/// hidden `Own`, so a value of any datatype type is genuinely non-linear. This is the
+/// conservative, fail-toward-safety stopgap until memory-model Phase A lands the
+/// field-aware linearity check (fields stored at their declared multiplicity +
+/// `contains_linear` seeing through field defs), which lifts this restriction.
+fn reject_linear_fields(args: &[(crate::mult::Mult, Term)], owner: &str) -> Result<(), String> {
+    for (_, fty) in args {
+        if contains_linear(fty) {
+            return Err(format!(
+                "{owner} has a field of a LINEAR type (`Own` / a `Σ[1]` pair). Linear \
+                 fields in a struct/enum are not yet supported — a stored `Own` would let \
+                 a double-free or leak hide behind the type's name (the field-aware \
+                 linearity check lands in memory-model Phase A). Until then, hold linear \
+                 ownership at the value level (thread the `Own` through function \
+                 parameters / `let`), not as a stored field."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     match t {
         Tm::Call(n, args) => {
@@ -2576,6 +2604,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     let arg_names: Vec<Option<String>> = arrows.iter().map(|(_, _, n, _)| n.clone()).collect();
                     let ct = elab.elab_ty(cty, &scope)?;
                     let (args, idxs) = decompose_ctor(ct, name, np)?;
+                    reject_linear_fields(&args, &format!("constructor `{cn}` of `{name}`"))?;
                     elab.ctor_info.insert(cn.clone(), CtorInfo {
                         data: name.clone(),
                         param_implicit: param_implicit.clone(),
@@ -2616,6 +2645,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     arg_names.push(Some(fname.clone()));
                     fscope.push(fname.clone());
                 }
+                reject_linear_fields(&args, &format!("struct `{name}`"))?;
                 elab.ctor_info.insert(name.clone(), CtorInfo {
                     data: name.clone(),
                     param_implicit,
