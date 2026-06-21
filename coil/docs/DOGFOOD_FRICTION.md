@@ -78,6 +78,11 @@ a place to `(ptr T)` where unambiguous). — **Delivered by Phase-2 #4** (A5 asi
 10. **No generic `==` / hashing / ordering** as language facilities — every generic
     container needs explicit ops (the `KeyOps` pattern). Philosophically fine, but a
     derive/interface story (or comptime reflection) would cut real boilerplate.
+    — **Fixed (comptime reflection):** macros can now introspect a type's fields
+    (`struct-fields`/`sum-variants`/`type-kind`), so `lib/derive.coil` provides
+    `derive-eq`/`derive-hash`/`derive-keyops` as a PURE LIBRARY — a struct is a
+    content `KeyOps` HashMap key with three macro calls, no hand-written boilerplate
+    and no compiler `derive` keyword. (See docs/COMPTIME_REFLECTION_DESIGN.md.)
 11. **No unsigned div/rem readily** (`idiv`/`irem` are signed) — hex/uint printing
     assumes non-negative.
     — **Fixed (Phase-2 #6):** `idiv`/`irem` already dispatch unsigned by operand TYPE;

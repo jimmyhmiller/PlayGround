@@ -1,5 +1,17 @@
 # Design: comptime type reflection for macros
 
+> **SHIPPED + approved.** Four syntactic-only builtins (`struct-fields`,
+> `sum-variants`, `type-kind`, `type-params`) over a type-shape table on
+> `MacroCtx` (populated in pass 1 from the raw forms via `parse_defstruct`/
+> `parse_defsum`, grown in pass 2 so macro-generated types are reflectable). All
+> six decision-leans were blessed and implemented as-designed. `lib/derive.coil`
+> (`derive-eq`/`derive-hash`/`derive-keyops`) is a PURE LIBRARY over them — a
+> struct becomes a content-keyed HashMap key with three macro calls (closes
+> friction D10). NO layout/size leak (sizeof/alignof stay separate); hard-error on
+> non-struct/unknown. Surfaced + fixed a separate bug: a generic-instantiated
+> struct param was passed by value and bound as a pointer-typed-as-struct (silent
+> corruption). 287 tests green.
+
 DESIGN ONLY — for Leader + jimmyhmiller review before any implementation.
 
 ## The goal (why this is THE goal-critical work)
