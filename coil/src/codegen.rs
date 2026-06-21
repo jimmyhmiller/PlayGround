@@ -629,6 +629,11 @@ impl<'ctx> Cg<'ctx> {
                 llvm_ret = Some(rt);
                 ret_direct = Some(sa);
             }
+        } else if matches!(ret, Type::Void) {
+            // A `(-> void)` function that ALSO needs the C ABI (e.g. a by-value
+            // struct parameter): leave `llvm_ret = None` → an LLVM void return,
+            // exactly like the sret case. (`basic_ty` can't lower void.)
+            llvm_ret = None;
         } else {
             llvm_ret = Some(self.basic_ty(ret));
         }
@@ -893,6 +898,11 @@ impl<'ctx> Cg<'ctx> {
             self.builder.build_store(slot, coerced).map_err(le)?;
             let v = self.builder.build_load(sa.llvm_ty, slot, "abi.ret.val").map_err(le)?;
             return Ok((v, ret_ty));
+        }
+        // A `(-> void)` function that needed the C ABI (e.g. it only *takes* a
+        // struct by value): no value to read; the checker forbids using the result.
+        if matches!(ret_ty, Type::Void) {
+            return Ok((self.ctx.i64_type().const_zero().into(), Type::Void));
         }
         // A scalar return (e.g. a function that only *takes* a struct by value).
         let v = cs

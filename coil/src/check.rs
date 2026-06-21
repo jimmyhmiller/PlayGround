@@ -450,7 +450,19 @@ fn synth(
                 .map_err(|e| format!("in '{fname}': llvm-ir result type: {e}"))?;
             let eargs = args
                 .iter()
-                .map(|a| synth(a, None, env, cx, tps, fname).map(|(e, _)| e))
+                .map(|a| {
+                    let (e, t) = synth(a, None, env, cx, tps, fname)?;
+                    // forbid-use: a void value can't be an llvm-ir operand. This
+                    // path discards the type, bypassing the coerce gate — enforce
+                    // the void-check on the synthesized operand type directly.
+                    if t == Type::Void {
+                        return Err(format!(
+                            "in '{fname}': llvm-ir operand uses a void value \
+                             (a (-> void) call yields nothing)"
+                        ));
+                    }
+                    Ok(e)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((
                 Expr::LlvmIr { result: result.clone(), args: eargs, body: body.clone() },
@@ -809,7 +821,16 @@ fn synth(
                     // Variadic extra arguments have no declared parameter type:
                     // synthesize and pass them through (C default-promotion rules).
                     if i >= sig.params.len() {
-                        let (ae, _) = synth(a, None, env, cx, tps, fname)?;
+                        let (ae, at) = synth(a, None, env, cx, tps, fname)?;
+                        // forbid-use: a void value can't fill a variadic slot. This
+                        // path discards the type, so it bypasses the coerce gate —
+                        // the void-check must be enforced on the synthesized type too.
+                        if at == Type::Void {
+                            return Err(format!(
+                                "in '{fname}': variadic argument uses a void value \
+                                 (a (-> void) call yields nothing)"
+                            ));
+                        }
                         new_args.push(ae);
                         continue;
                     }

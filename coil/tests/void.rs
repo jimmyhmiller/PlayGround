@@ -53,6 +53,40 @@ fn using_a_void_result_is_a_hard_error() {
 }
 
 #[test]
+fn void_rejected_in_type_discarding_synth_paths() {
+    // Red-team regressions: the forbid-use check must cover EVERY use position,
+    // including the paths that synthesize an operand and discard its type (so they
+    // bypass the coerce gate). These both silently leaked a void placeholder before.
+    // (1) variadic argument slot — was: compiles + printf(..., i64 0) garbage.
+    assert!(coil::check_source(
+        "(extern printf :cc c [(ptr i8) ...] (-> i32))\n\
+         (defn p [(x (ptr i64))] (-> void) (store! x 1))\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (printf c\"%d\" (p a)) 0))"
+    )
+    .unwrap_err()
+    .contains("variadic argument uses a void value"));
+    // (2) llvm-ir operand — was: the placeholder zero substitutes for $0.
+    assert!(coil::check_source(
+        "(defn p [(x (ptr i64))] (-> void) (store! x 1))\n\
+         (defn main [] (-> i64) (let [a (alloc-stack i64)] (llvm-ir i64 [(p a)] \"ret i64 0\")))"
+    )
+    .unwrap_err()
+    .contains("llvm-ir operand uses a void value"));
+}
+
+#[test]
+fn void_return_with_by_value_struct_param_does_not_panic() {
+    // A (-> void) fn that also takes a by-value struct → needs_c_abi → c_signature,
+    // which used to hit basic_ty(Void) → unreachable!(). Must compile cleanly.
+    let src = "(defstruct Big [(a i64) (b i64) (c i64)])\n\
+               (extern sink :cc c [Big] (-> void))\n\
+               (defn main [] (-> i64) 0)";
+    assert!(coil::check_source(src).is_ok());
+    // and it must reach codegen without panicking (the unreachable! was in codegen).
+    assert!(coil::emit_ir(src).is_ok());
+}
+
+#[test]
 fn void_is_rejected_outside_return_position() {
     // parameter
     assert!(coil::check_source(
