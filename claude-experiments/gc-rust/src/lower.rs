@@ -82,11 +82,21 @@ struct Mono {
     /// Fully-formed lifted closure functions, keyed by their FuncId, to be
     /// installed into `prog.funcs` by the driver.
     closures: Vec<(FuncId, CoreFn)>,
+    /// Interned source spans (span-threading). Accumulated across all lowered
+    /// functions; moved into `CoreProgram::spans` at the end. A returned id `k`
+    /// means `spans[k-1]`; `NO_SPAN` (0) is never returned here.
+    spans: Vec<Span>,
 }
 
 impl Mono {
     fn new() -> Self {
-        Mono { ids: HashMap::new(), worklist: Vec::new(), closures: Vec::new() }
+        Mono { ids: HashMap::new(), worklist: Vec::new(), closures: Vec::new(), spans: Vec::new() }
+    }
+    /// Intern a source span, returning its 1-based `SpanId` (so `NO_SPAN`=0 stays
+    /// reserved). Threaded onto construction/alloc Core nodes for file:line:col.
+    fn intern_span(&mut self, s: Span) -> crate::core::SpanId {
+        self.spans.push(s);
+        self.spans.len() as crate::core::SpanId
     }
     /// Allocate a fresh FuncId for a lifted closure function (not name-keyed).
     fn fresh_closure_id(&mut self, count: &mut u32) -> FuncId {
@@ -152,6 +162,7 @@ pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgr
 
     prog.layouts = reg.layouts;
     prog.values = reg.values;
+    prog.spans = std::mem::take(&mut mono.spans);
     // GC-safety normalization: let-bind every GC temporary so the collector can
     // find it (no live pointer is ever stranded in a register across a safepoint).
     crate::anf::anf_program(&mut prog);
@@ -730,7 +741,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             ExprKind::Str(s) => {
                 let repr = self.repr_of(&Ty::Prim(Prim::Str), e.span)?;
                 let Repr::Ref(lid) = repr else { return err("String repr is not a reference", e.span) };
-                Ok((CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)), Ty::Prim(Prim::Str)))
+                let sid = self.mono.intern_span(e.span);
+                Ok((CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)).at(sid), Ty::Prim(Prim::Str)))
             }
             ExprKind::Unit => Ok((CoreExpr::new(CoreExprKind::Unit, Repr::Unit), Ty::unit())),
 
@@ -1061,7 +1073,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             Repr::Value(vid) => CoreExprKind::MakeValue { value: vid, fields: cfields },
             _ => return err("struct must be a ref or value type", span),
         };
-        Ok((CoreExpr::new(kind, repr), ty))
+        let sid = self.mono.intern_span(span);
+        Ok((CoreExpr::new(kind, repr).at(sid), ty))
     }
 
     /// Construct an enum variant. `path` is `Enum::Variant`; `args` are payload
@@ -1117,8 +1130,9 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
         let ty = Ty::Named { name: enum_name.clone(), args: enum_args };
         let repr = self.repr_of(&ty, span)?;
+        let sid = self.mono.intern_span(span);
         match repr {
-            Repr::Ref(lid) => Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr), ty)),
+            Repr::Ref(lid) => Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr).at(sid), ty)),
             Repr::Value(vid) => {
                 Ok((CoreExpr::new(CoreExprKind::MakeValueVariant { value: vid, tag, fields: cargs }, repr), ty))
             }
@@ -1617,7 +1631,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let (clen, lt) = self.expr(len, Some(&Ty::i64()))?;
         check_assignable(&lt, &Ty::i64(), len.span)?;
         let ty = Ty::Named { name: "Array".into(), args: vec![elem_ty] };
-        Ok((CoreExpr::new(CoreExprKind::ArrayNew { layout: lid, len: Box::new(clen), elem }, Repr::Ref(lid)), ty))
+        let sid = self.mono.intern_span(span);
+        Ok((CoreExpr::new(CoreExprKind::ArrayNew { layout: lid, len: Box::new(clen), elem }, Repr::Ref(lid)).at(sid), ty))
     }
 
     fn array_len_op(&mut self, arr: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -1987,11 +2002,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         self.mono.closures.push((code_id, lifted));
 
         let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
+        let sid = self.mono.intern_span(span);
         Ok((
             CoreExpr::new(
                 CoreExprKind::MakeClosure { code: code_id, env: env_lid, captures: capture_exprs },
                 Repr::Ref(env_lid),
-            ),
+            )
+            .at(sid),
             fn_ty,
         ))
     }

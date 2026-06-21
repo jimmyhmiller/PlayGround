@@ -47,6 +47,10 @@ pub struct AllocSite {
     /// The `type_id` (= `LayoutId`) of the object allocated here. Pairs with
     /// [`TypeMeta`] to recover the source type name in a profile.
     pub type_id: u16,
+    /// Source location `file:line:col` (debugger P1 span-threading), or empty if
+    /// no span/source was available. Two same-(function,type) allocations at
+    /// different lines are distinct sites once this is populated.
+    pub location: String,
 }
 
 /// The shape category of a type, with the nominal detail the GC shape lacks.
@@ -331,6 +335,7 @@ pub fn encode(
     for s in alloc_sites {
         put_str(&mut out, &s.function);
         out.extend_from_slice(&s.type_id.to_le_bytes());
+        put_str(&mut out, &s.location);
     }
     out
 }
@@ -435,7 +440,8 @@ pub fn decode(bytes: &[u8]) -> (Vec<TypeMeta>, Vec<ValueMeta>, Vec<Vec<u16>>, Ve
     for _ in 0..scount {
         let function = r.string();
         let type_id = r.u16();
-        alloc_sites.push(AllocSite { function, type_id });
+        let location = r.string();
+        alloc_sites.push(AllocSite { function, type_id, location });
     }
     (types, values, interior, alloc_sites)
 }
@@ -519,10 +525,10 @@ mod tests {
 
     fn sample_alloc_sites() -> Vec<AllocSite> {
         vec![
-            AllocSite { function: "main".into(), type_id: 1 },
-            AllocSite { function: "build_list".into(), type_id: 2 },
+            AllocSite { function: "main".into(), type_id: 1, location: "a.gcr:3:9".into() },
+            AllocSite { function: "build_list".into(), type_id: 2, location: "a.gcr:7:5".into() },
             // Same type allocated in a different function => distinct site.
-            AllocSite { function: "helper".into(), type_id: 1 },
+            AllocSite { function: "helper".into(), type_id: 1, location: String::new() },
         ]
     }
 

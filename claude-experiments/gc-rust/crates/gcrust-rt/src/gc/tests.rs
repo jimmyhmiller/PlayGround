@@ -1350,9 +1350,9 @@ fn alloc_site_profile_merges_threads_and_salvages_retired() {
     // Three distinct sites: same type (Point) in two different functions is two
     // sites — the honest function+type granularity.
     heap.set_alloc_sites(vec![
-        AllocSite { function: "main".into(), type_id: 0 },   // site 0
-        AllocSite { function: "worker".into(), type_id: 1 }, // site 1
-        AllocSite { function: "worker".into(), type_id: 0 }, // site 2
+        AllocSite { function: "main".into(), type_id: 0, location: String::new() },   // site 0
+        AllocSite { function: "worker".into(), type_id: 1, location: String::new() }, // site 1
+        AllocSite { function: "worker".into(), type_id: 0, location: String::new() }, // site 2
     ]);
 
     let (main_ts, _) = heap.register_thread();
@@ -1414,7 +1414,7 @@ fn alloc_site_profile_real_threads_join_then_profile() {
 
     static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
     let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
-    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0 }]);
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0, location: String::new() }]);
 
     let n_threads = 4u64;
     let per_thread = 1000u64;
@@ -1464,7 +1464,7 @@ fn alloc_site_profile_dump_concurrent_with_live_worker_no_hang() {
 
     static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
     let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
-    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0 }]);
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0, location: String::new() }]);
 
     let n_allocs = 5000u64;
     let bytes_each = 16u64;

@@ -103,7 +103,7 @@ struct Codegen<'ctx, 'p> {
     /// Dedup index: `(function symbol, type_id) -> site_id`, so a repeated
     /// `(function, type)` pair reuses its id instead of minting a distinct id
     /// we couldn't label distinctly.
-    alloc_site_ids: HashMap<(String, u16), u32>,
+    alloc_site_ids: HashMap<(String, u16, String), u32>,
 }
 
 impl<'ctx, 'p> Codegen<'ctx, 'p> {
@@ -577,7 +577,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             CoreExprKind::ConstChar(c) => {
                 Ok(Some(self.ctx.i32_type().const_int(*c as u64, false).into()))
             }
-            CoreExprKind::ConstStr(s) => self.gen_const_str(fcx, s, &e.repr),
+            CoreExprKind::ConstStr(s) => self.gen_const_str(fcx, s, &e.repr, e.span),
             CoreExprKind::ConstZero(repr) => {
                 // Zero/null of the repr: scalars → 0, refs → null pointer.
                 match self.llvm_ty(repr) {
@@ -971,9 +971,9 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 self.gen_make_value_variant(fcx, *value, *tag, fields)
             }
             CoreExprKind::ValueMatch { scrutinee, arms } => self.gen_value_match(fcx, scrutinee, arms, &e.repr),
-            CoreExprKind::New { layout, fields } => self.gen_alloc(fcx, *layout, None, fields),
+            CoreExprKind::New { layout, fields } => self.gen_alloc(fcx, *layout, None, fields, e.span),
             CoreExprKind::MakeVariant { layout, tag, fields } => {
-                self.gen_alloc(fcx, *layout, Some(*tag), fields)
+                self.gen_alloc(fcx, *layout, Some(*tag), fields, e.span)
             }
             CoreExprKind::Field { base, loc } => self.gen_field(fcx, base, loc),
             CoreExprKind::SetField { base, loc, value } => {
@@ -1051,11 +1051,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 let val = self.load_enum_payload(obj, tag_off, *field as usize, repr, payload_reprs);
                 Ok(Some(val))
             }
-            CoreExprKind::ArrayNew { layout, len, elem } => self.gen_array_new(fcx, *layout, len, elem),
+            CoreExprKind::ArrayNew { layout, len, elem } => self.gen_array_new(fcx, *layout, len, elem, e.span),
             CoreExprKind::ArrayLen(arr) => self.gen_array_len(fcx, arr),
             CoreExprKind::ArrayGet { array, index, elem } => self.gen_array_get(fcx, array, index, elem),
             CoreExprKind::ArraySet { array, index, value, elem } => self.gen_array_set(fcx, array, index, value, elem),
-            CoreExprKind::MakeClosure { code, env, captures } => self.gen_make_closure(fcx, *code, *env, captures),
+            CoreExprKind::MakeClosure { code, env, captures } => self.gen_make_closure(fcx, *code, *env, captures, e.span),
             CoreExprKind::CallClosure { callee, args } => self.gen_call_closure(fcx, callee, args, &e.repr),
             other => Err(CodegenError(format!("codegen unsupported in v0 slice: {:?}", core_disc(other)))),
         }
@@ -1066,8 +1066,14 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     /// pair so the v1 function+type granularity stays honest: every emitted id
     /// maps to exactly one labelable `(function, type)`, never a distinct id we
     /// couldn't tell apart at profile time.
-    fn alloc_site_id(&mut self, function: &str, type_id: u16) -> u32 {
-        let key = (function.to_string(), type_id);
+    fn alloc_site_id(&mut self, function: &str, type_id: u16, span: crate::core::SpanId) -> u32 {
+        // Resolve the construction node's span to `file:line:col` if source is
+        // available (debugger P1 span-threading); empty otherwise. The location
+        // is part of the dedup key, so two allocations of the same type in the
+        // same function at DIFFERENT lines become DISTINCT sites — the precise
+        // upgrade over the old (function, type)-only key.
+        let location = self.prog.span_label(span).unwrap_or_default();
+        let key = (function.to_string(), type_id, location.clone());
         if let Some(&id) = self.alloc_site_ids.get(&key) {
             return id;
         }
@@ -1075,6 +1081,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         self.alloc_sites.push(crate::gc::AllocSite {
             function: function.to_string(),
             type_id,
+            location,
         });
         self.alloc_site_ids.insert(key, id);
         id
@@ -1393,6 +1400,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         layout: LayoutId,
         tag: Option<u32>,
         fields: &[CoreExpr],
+        span: crate::core::SpanId,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let ptr = self.ctx.ptr_type(AddressSpace::default());
         let i32t = self.ctx.i32_type();
@@ -1411,7 +1419,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             vals.push((self.gen_expr(fcx, fe)?, fe.repr.clone()));
         }
 
-        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16);
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16, span);
         let alloc = self.module.get_function("ai_gc_alloc_fixed").unwrap();
         let obj = call_result(
             self.builder.build_call(
@@ -1660,13 +1668,14 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         fcx: &mut FnCtx<'ctx>,
         s: &str,
         repr: &Repr,
+        span: crate::core::SpanId,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i32t = self.ctx.i32_type();
         let i64t = self.ctx.i64_type();
         let lid = match repr { Repr::Ref(l) => *l, _ => return Err(CodegenError("string repr".into())) };
         let bytes = s.as_bytes();
         let n = bytes.len() as u64;
-        let site = self.alloc_site_id(&Self::current_fn_name(fcx), lid as u16);
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), lid as u16, span);
         let alloc = self.module.get_function("ai_gc_alloc_varlen").unwrap();
         let obj = call_result(self.builder.build_call(
             alloc,
@@ -1694,6 +1703,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         layout: LayoutId,
         len: &CoreExpr,
         elem: &Repr,
+        span: crate::core::SpanId,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i32t = self.ctx.i32_type();
         let i64t = self.ctx.i64_type();
@@ -1707,7 +1717,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let varlen_len = if traced { n64 } else {
             self.builder.build_int_mul(n64, i64t.const_int(stride, false), "blen").unwrap()
         };
-        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16);
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), layout as u16, span);
         let alloc = self.module.get_function("ai_gc_alloc_varlen").unwrap();
         let obj = call_result(self.builder.build_call(
             alloc,
@@ -1790,6 +1800,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         code: FuncId,
         env: LayoutId,
         captures: &[CoreExpr],
+        span: crate::core::SpanId,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i32t = self.ctx.i32_type();
         // Evaluate captures first. The env allocation below is a SAFEPOINT, so any
@@ -1801,7 +1812,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         for c in captures {
             vals.push((self.gen_expr(fcx, c)?, c.repr.clone()));
         }
-        let site = self.alloc_site_id(&Self::current_fn_name(fcx), env as u16);
+        let site = self.alloc_site_id(&Self::current_fn_name(fcx), env as u16, span);
         let alloc = self.module.get_function("ai_gc_alloc_fixed").unwrap();
         let obj = call_result(
             self.builder.build_call(

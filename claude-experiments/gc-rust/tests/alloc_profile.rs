@@ -117,6 +117,41 @@ fn aot_alloc_profile_reports_sites() {
 }
 
 #[test]
+fn alloc_profile_line_col_distinguishes_same_type_same_function() {
+    // Debugger P1 span-threading proof: two allocations of the SAME type in the
+    // SAME function at DIFFERENT lines must be DISTINCT sites with file:line:col
+    // locations (before span-threading they collapsed to one (function,type) site).
+    let dir = std::env::temp_dir().join(format!("gcr_loc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let srcp = dir.join("loc.gcr");
+    std::fs::write(
+        &srcp,
+        "struct P { a: i64, b: i64 }\nfn main() -> i64 {\n  let x = P { a: 1, b: 2 };\n  let y = P { a: 3, b: 4 };\n  x.a + y.b\n}\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gcr"))
+        .args(["run", srcp.to_str().unwrap()])
+        .env("GCR_ALLOC_PROFILE", "1")
+        .output()
+        .expect("run gcr");
+    assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // The two P allocations are on source lines 3 and 4.
+    let p = srcp.to_string_lossy();
+    let line3 = format!("{p}:3:");
+    let line4 = format!("{p}:4:");
+    assert!(stderr.contains(&line3), "expected a site at line 3; stderr:\n{stderr}");
+    assert!(stderr.contains(&line4), "expected a site at line 4; stderr:\n{stderr}");
+    // Two distinct P sites (not one collapsed site): two profile rows naming P.
+    let p_rows = stderr.lines().filter(|l| l.contains("  P ") || l.contains(" P  ")).count();
+    assert!(p_rows >= 2, "expected >=2 distinct P sites; stderr:\n{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn aot_no_profile_without_env() {
     let lib = ensure_runtime_lib();
     let out = tmp("shapes_noenv");

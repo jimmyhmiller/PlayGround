@@ -250,6 +250,9 @@ pub struct AllocSiteStat {
     pub type_id: Option<u16>,
     /// The source type name (from reflection metadata), or a synthetic fallback.
     pub type_name: String,
+    /// Source location `file:line:col` from the site table (span-threading), or
+    /// empty if unavailable.
+    pub location: String,
     /// Objects allocated at this site, summed across all threads.
     pub count: u64,
     /// Bytes allocated at this site, summed across all threads.
@@ -644,9 +647,9 @@ impl Heap {
             if c.count == 0 {
                 continue;
             }
-            let (function, type_id) = match sites.get(id) {
-                Some(s) => (s.function.clone(), Some(s.type_id)),
-                None => (format!("<site {id}>"), None),
+            let (function, type_id, location) = match sites.get(id) {
+                Some(s) => (s.function.clone(), Some(s.type_id), s.location.clone()),
+                None => (format!("<site {id}>"), None, String::new()),
             };
             let type_name = match type_id {
                 Some(tid) => self
@@ -660,6 +663,7 @@ impl Heap {
                 function,
                 type_id,
                 type_name,
+                location,
                 count: c.count,
                 bytes: c.bytes,
             });
@@ -693,14 +697,15 @@ impl Heap {
         );
         let _ = writeln!(
             out,
-            "  {:>14}  {:>10}  {:<24}  {}",
-            "bytes", "count", "type", "function"
+            "  {:>14}  {:>10}  {:<22}  {:<22}  {}",
+            "bytes", "count", "type", "function", "location"
         );
         for s in &stats {
+            let loc = if s.location.is_empty() { "-" } else { s.location.as_str() };
             let _ = writeln!(
                 out,
-                "  {:>14}  {:>10}  {:<24}  {}",
-                s.bytes, s.count, s.type_name, s.function
+                "  {:>14}  {:>10}  {:<22}  {:<22}  {}",
+                s.bytes, s.count, s.type_name, s.function, loc
             );
         }
         let _ = writeln!(

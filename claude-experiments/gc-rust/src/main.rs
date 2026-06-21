@@ -160,13 +160,17 @@ fn main() -> ExitCode {
                 report_errors(path, &src, &errs);
                 return ExitCode::FAILURE;
             }
-            let prog = match lower_program(&resolved.globals) {
+            let mut prog = match lower_program(&resolved.globals) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
                     return ExitCode::FAILURE;
                 }
             };
+            // Attach the source so interned spans resolve to file:line:col (alloc
+            // sites, and later DWARF). Cheap; only the driver has src+path.
+            prog.src_path = path.to_string();
+            prog.src_text = src.clone();
             // `--gc-stress` forces a collection at every allocation — the
             // strongest test that the precise relocating GC keeps roots correct.
             let stress = args.iter().any(|a| a == "--gc-stress");
@@ -214,13 +218,16 @@ fn main() -> ExitCode {
                 report_errors(path, &src, &errs);
                 return ExitCode::FAILURE;
             }
-            let prog = match lower_program(&resolved.globals) {
+            let mut prog = match lower_program(&resolved.globals) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
                     return ExitCode::FAILURE;
                 }
             };
+            // Attach source for span→file:line:col resolution (see `run`).
+            prog.src_path = path.to_string();
+            prog.src_text = src.clone();
             match build_executable(&prog, &out, &link_args) {
                 Ok(()) => {
                     println!("gcr: wrote {}", out.display());
