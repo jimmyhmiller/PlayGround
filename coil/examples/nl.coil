@@ -1,0 +1,97 @@
+; `nl` — number lines. The Phase-2 alloc/IO-INTERFACE dogfood: it battle-tests the
+; capability-as-a-VALUE design (allocator + IO threaded explicitly, no ambient
+; state) by IMPLEMENTING custom backends and COMPOSING them:
+;   - a custom Reader backend over an in-memory (slice u8)  (Reader as a value)
+;   - a custom Writer backend that WRAPS another Writer + counts bytes  (composition)
+; plus the read-loop/EOF protocol, an allocator-backed StrBuf, and fmt over a Writer.
+;   coil run examples/nl.coil   => prints "1  alpha / 2  beta / 3  gamma", exit 3
+(module app)
+(import "lib/alloc.coil"   :use *)
+(import "lib/result.coil"  :use *)
+(import "lib/slice.coil"   :use *)
+(import "lib/str.coil"     :use *)
+(import "lib/io.coil"      :use *)
+(import "lib/fmt.coil"     :use *)
+(import "lib/control.coil" :use *)
+
+; ---- a CUSTOM Reader backend: reads from an in-memory (slice u8) ------------
+; Proves a user can add a Reader backend with no compiler/runtime support — the
+; ctx pointer is the cursor, the read-fn is an ordinary function pointer.
+(defstruct SliceReader [(data (ptr u8)) (len i64) (pos i64)])
+(defn sr-read [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
+  (let [sr    (cast (ptr SliceReader) ctx)
+        avail (isub (load (field sr len)) (load (field sr pos)))
+        k     (if (icmp-lt n avail) n avail)]
+    (if (icmp-le k 0)
+        (Ok 0)                                       ; EOF
+        (do (memcpy buf (cast (ptr i8) (index (load (field sr data)) (load (field sr pos)))) k)
+            (store! (field sr pos) (iadd (load (field sr pos)) k))
+            (Ok k)))))
+(defn slice-reader [(sr (ptr SliceReader))] (-> (ptr Reader))
+  (let [r (alloc-static Reader)]
+    (store! (field r read-fn) (fnptr-of sr-read))
+    (store! (field r ctx) (cast (ptr i8) sr))
+    r))
+
+; ---- a CUSTOM Writer backend: WRAP another Writer, tally bytes --------------
+; Proves the Writer capability COMPOSES — a decorator over any inner Writer.
+(defstruct CountWriter [(inner (ptr Writer)) (count i64)])
+(defn cw-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
+  (let [cw (cast (ptr CountWriter) ctx)]
+    (match (write-some (load (field cw inner)) buf n)
+      (Err [e] (Err e))
+      (Ok [k] (do (store! (field cw count) (iadd (load (field cw count)) k)) (Ok k))))))
+(defn count-writer [(cw (ptr CountWriter))] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]
+    (store! (field w write-fn) (fnptr-of cw-write))
+    (store! (field w ctx) (cast (ptr i8) cw))
+    w))
+
+; ---- read everything from a Reader into an allocator-backed StrBuf ----------
+(defn read-all [(a (ptr Allocator)) (r (ptr Reader))] (-> StrBuf)
+  (let [(mut sb) (sb-new a) chunk (alloc-stack (array u8 64))]
+    (loop
+      (match (read-some r (cast (ptr i8) (index chunk 0)) 64)
+        (Err [e] (break))
+        (Ok [k] (if (icmp-le k 0)
+                    (break)
+                    (sb-push-str! (mut sb) (slice-new (index chunk 0) k))))))
+    (load sb)))
+
+; ---- number the lines of a (slice u8) onto a Writer; returns the line count -
+(defn emit-line [(w (ptr Writer)) (no i64) (line (slice u8))] (-> i64)
+  (match (print-i w no)
+    (Err [e] 0)
+    (Ok [_] (do (print-str w "  ") (print-str w line) (write-byte w (cast u8 10)) 0))))
+
+(defn number-lines [(w (ptr Writer)) (text (slice u8))] (-> i64)
+  (let [n (slice-len text) (mut i) 0 (mut start) 0 (mut lineno) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do
+            (if (icmp-eq (cast i64 (slice-get text (load i))) 10)        ; '\n'
+                (do (store! lineno (iadd (load lineno) 1))
+                    (emit-line w (load lineno) (subslice text (load start) (load i)))
+                    (store! start (iadd (load i) 1)))
+                0)
+            (store! i (iadd (load i) 1)))))
+    (if (icmp-gt n (load start))                                          ; trailing line
+        (do (store! lineno (iadd (load lineno) 1))
+            (emit-line w (load lineno) (subslice text (load start) n)))
+        0)
+    (load lineno)))
+
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator)
+        (mut src) (zeroed SliceReader)
+        (mut cw)  (zeroed CountWriter)]
+    (let [doc "alpha\nbeta\ngamma"]                  ; the in-memory "input"
+      (store! (field src data) (slice-data doc))
+      (store! (field src len) (slice-len doc)))
+    (store! (field cw inner) (stdout))               ; wrap stdout, counting bytes
+    (let [r     (slice-reader (mut src))
+          w     (count-writer (mut cw))
+          text  (read-all a r)                        ; Reader -> allocator-backed buffer
+          lines (number-lines w (sb-str text))]       ; buffer -> numbered, via the Writer
+      lines)))                                         ; exit = line count (3)
