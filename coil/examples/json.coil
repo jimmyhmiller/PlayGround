@@ -1,0 +1,137 @@
+; A JSON parser + value model — the Phase-2 dogfood. Exercises, at scale:
+;   - (slice u8) strings (source, string values, object keys) + str-keyops
+;   - a RECURSIVE sum (Json) with collection pointers for arrays/objects
+;   - generic containers: ArrayList<Json>, HashMap<(slice u8), Json>
+;   - recursion, references/aggregates, the allocator value, control-flow macros
+; Integers only (no float/escape parsing) — a deliberate v1 scope.
+;   coil run examples/json.coil; echo $?   => 42
+(module app)
+(import "lib/alloc.coil"     :use *)
+(import "lib/result.coil"    :use *)
+(import "lib/slice.coil"     :use *)
+(import "lib/str.coil"       :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/hashmap.coil"   :use *)
+(import "lib/control.coil"   :use *)
+
+(defsum Json
+  (JNull [])
+  (JBool [(b i64)])                                  ; 0 / 1
+  (JNum  [(n i64)])
+  (JStr  [(s (slice u8))])
+  (JArr  [(a (ptr (ArrayList Json)))])               ; recursion via the heap
+  (JObj  [(o (ptr (HashMap (slice u8) Json)))]))
+
+; ---- the parser cursor over a (slice u8) source ----------------------------
+(defstruct P [(src (slice u8)) (pos i64) (alc (ptr Allocator))])
+
+(defn p-peek [(p (ptr P))] (-> i64)
+  (if (icmp-ge (load (field p pos)) (slice-len (load (field p src))))
+      -1
+      (cast i64 (slice-get (load (field p src)) (load (field p pos))))))
+(defn p-adv [(p (ptr P))] (-> i64)
+  (store! (field p pos) (iadd (load (field p pos)) 1)) 0)
+
+(defn ws? [(c i64)] (-> bool)
+  (or (icmp-eq c 32) (or (icmp-eq c 10) (or (icmp-eq c 9) (icmp-eq c 13)))))
+(defn skip-ws [(p (ptr P))] (-> i64)
+  (loop (if (ws? (p-peek p)) (p-adv p) (break))) 0)
+
+(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+
+; ---- scalars ---------------------------------------------------------------
+; advance over a known literal of `len` bytes
+(defn eat [(p (ptr P)) (len i64)] (-> i64)
+  (for [i 0 len] (p-adv p)) 0)
+
+(defn parse-number [(p (ptr P))] (-> Json)
+  (let [(mut neg) 0 (mut v) 0]
+    (if (icmp-eq (p-peek p) 45) (do (store! neg 1) (p-adv p)) 0)   ; '-'
+    (loop
+      (let [c (p-peek p)]
+        (if (digit? c)
+            (do (store! v (iadd (imul (load v) 10) (isub c 48))) (p-adv p))
+            (break))))
+    (JNum (if (icmp-eq (load neg) 1) (isub 0 (load v)) (load v)))))
+
+; parse a "..." string into a (slice u8) VIEW over the source (no escapes in v1)
+(defn parse-str-slice [(p (ptr P))] (-> (slice u8))
+  (p-adv p)                                           ; opening quote
+  (let [start (load (field p pos))]
+    (loop (if (icmp-eq (p-peek p) 34) (break) (p-adv p)))   ; until closing quote
+    (let [s (subslice (load (field p src)) start (load (field p pos)))]
+      (p-adv p)                                        ; closing quote
+      s)))
+
+; ---- recursive value -------------------------------------------------------
+(defn parse-value [(p (ptr P))] (-> Json)
+  (skip-ws p)
+  (let [c (p-peek p)]
+    (if (icmp-eq c 110) (do (eat p 4) (JNull))                ; 'n'ull
+    (if (icmp-eq c 116) (do (eat p 4) (JBool 1))              ; 't'rue
+    (if (icmp-eq c 102) (do (eat p 5) (JBool 0))              ; 'f'alse
+    (if (icmp-eq c 34)  (JStr (parse-str-slice p))            ; '"'
+    (if (icmp-eq c 91)  (parse-array p)                       ; '['
+    (if (icmp-eq c 123) (parse-object p)                      ; '{'
+        (parse-number p)))))))))
+
+(defn parse-array [(p (ptr P))] (-> Json)
+  (p-adv p)                                            ; '['
+  (let [arr (unwrap-ptr [(ArrayList Json)] (create [(ArrayList Json)] (load (field p alc))))]
+    (store! arr (al-new [Json] (load (field p alc))))
+    (skip-ws p)
+    (if (icmp-eq (p-peek p) 93)
+        (p-adv p)                                      ; empty []
+        (loop
+          (al-push! arr (parse-value p))
+          (skip-ws p)
+          (if (icmp-eq (p-peek p) 44) (p-adv p) (do (p-adv p) (break)))))  ; ',' or ']'
+    (JArr arr)))
+
+(defn parse-object [(p (ptr P))] (-> Json)
+  (p-adv p)                                            ; '{'
+  (let [obj (unwrap-ptr [(HashMap (slice u8) Json)]
+                        (create [(HashMap (slice u8) Json)] (load (field p alc))))]
+    (store! obj (hm-new [(slice u8) Json] (load (field p alc)) (str-keyops)))
+    (skip-ws p)
+    (if (icmp-eq (p-peek p) 125)
+        (p-adv p)                                      ; empty {}
+        (loop
+          (skip-ws p)
+          (let [key (parse-str-slice p)]
+            (skip-ws p) (p-adv p)                       ; ':'
+            (hm-put! obj key (parse-value p)))
+          (skip-ws p)
+          (if (icmp-eq (p-peek p) 44) (p-adv p) (do (p-adv p) (break)))))
+    (JObj obj)))
+
+(defn parse [(a (ptr Allocator)) (src (slice u8))] (-> Json)
+  (let [p (alloc-stack P)]
+    (store! (field p src) src)
+    (store! (field p pos) 0)
+    (store! (field p alc) a)
+    (parse-value p)))
+
+; ---- queries over the value model ------------------------------------------
+(defn as-num [(j Json)] (-> i64) (match j (JNum [n] n) (JNull [] 0) (JBool [b] b)
+                                          (JStr [s] 0) (JArr [a] 0) (JObj [o] 0)))
+(defn arr-get [(j Json) (i i64)] (-> Json)
+  (match j (JArr [a] (al-get (load a) i))
+           (JNull [] (JNull)) (JBool [b] (JNull)) (JNum [n] (JNull))
+           (JStr [s] (JNull)) (JObj [o] (JNull))))
+(defn obj-get [(j Json) (key (slice u8))] (-> Json)
+  (match j
+    (JObj [o] (match (hm-get [(slice u8) Json] (load o) key) (None [] (JNull)) (Some [v] v)))
+    (JNull [] (JNull)) (JBool [b] (JNull)) (JNum [n] (JNull))
+    (JStr [s] (JNull)) (JArr [a] (JNull))))
+
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator)
+        doc (parse a "{\"nums\": [10, 20, 12], \"meta\": {\"k\": 40}}")]
+    ; sum the array + a nested object field = 10 + 20 + 12 ... pick to total 42:
+    ; nums[0]+nums[2] = 10+12 = 22, meta.k = 40 -> 22 + 40 - 20 = 42
+    (let [nums (obj-get doc "nums")
+          meta (obj-get doc "meta")]
+      (isub (iadd (iadd (as-num (arr-get nums 0)) (as-num (arr-get nums 2)))
+                  (as-num (obj-get meta "k")))
+            (as-num (arr-get nums 1))))))
