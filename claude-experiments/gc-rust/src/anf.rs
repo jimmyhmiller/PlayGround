@@ -178,6 +178,10 @@ impl<'a> Anf<'a> {
     /// the caller's (`operand`) decision based on where `e` sits.
     fn expr(&mut self, e: CoreExpr, pending: &mut Vec<CoreStmt>) -> CoreExpr {
         let repr = e.repr.clone();
+        // Preserve the source location across the rebuild below — without this,
+        // span-threading would be lost at ANF (it reconstructs every node), and
+        // alloc sites / DWARF would have no location. Reapplied at the result.
+        let span = e.span;
         let kind: CoreExprKind = *e.kind;
         let k = match kind {
             // Atoms — no children.
@@ -371,6 +375,6 @@ impl<'a> Anf<'a> {
             CoreExprKind::Block(b) => CoreExprKind::Block(Box::new(self.block(*b))),
             CoreExprKind::Loop(b) => CoreExprKind::Loop(Box::new(self.block(*b))),
         };
-        CoreExpr::new(k, repr)
+        CoreExpr::new(k, repr).at(span)
     }
 }

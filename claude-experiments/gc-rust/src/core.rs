@@ -161,6 +161,14 @@ pub struct CoreProgram {
     pub layouts: Vec<Layout>,
     pub values: Vec<ValueLayout>,
     pub entry: Option<FuncId>,
+    /// Interned source spans (the span-threading side table). A `CoreExpr.span`
+    /// of `k` (≥1) refers to `spans[k-1]`; [`NO_SPAN`] (0) means no location.
+    pub spans: Vec<crate::lexer::Span>,
+    /// Source file path + text, set by the driver after lowering, used to resolve
+    /// interned spans to `file:line:col` (e.g. for alloc-site labels). Empty when
+    /// the source isn't available (e.g. unit tests building a program directly).
+    pub src_path: String,
+    pub src_text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -210,10 +218,24 @@ pub enum CoreStmt {
 // Expressions
 // ============================================================================
 
+/// A compact source-location handle: a 1-based index into [`CoreProgram::spans`]
+/// (0 = [`NO_SPAN`], no location). Keeps the Core IR lean — nodes carry a `u32`,
+/// not a full `Span` — while an interned side table holds the real spans
+/// (consulted only at DWARF emission / alloc-site labeling, not in hot passes).
+/// This is the debugger's span-threading foundation (docs/DEBUGGER_DESIGN.md).
+pub type SpanId = u32;
+
+/// Sentinel `SpanId` meaning "no source location attached".
+pub const NO_SPAN: SpanId = 0;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CoreExpr {
     pub kind: Box<CoreExprKind>,
     pub repr: Repr,
+    /// Source location (interned). [`NO_SPAN`] if unknown. Threaded from the AST
+    /// through lowering + ANF so codegen can label alloc sites with file:line:col
+    /// and (later) emit DWARF line tables.
+    pub span: SpanId,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -414,6 +436,34 @@ pub enum FloatIntrinsic { Sqrt, Abs, Floor, Ceil }
 
 impl CoreExpr {
     pub fn new(kind: CoreExprKind, repr: Repr) -> Self {
-        CoreExpr { kind: Box::new(kind), repr }
+        CoreExpr { kind: Box::new(kind), repr, span: NO_SPAN }
+    }
+
+    /// Attach a source location (builder form): `CoreExpr::new(k, r).at(span_id)`.
+    /// Used by lowering at construction/alloc sites and by ANF to preserve the
+    /// span when it rebuilds a node.
+    pub fn at(mut self, span: SpanId) -> Self {
+        self.span = span;
+        self
+    }
+}
+
+impl CoreProgram {
+    /// Resolve an interned [`SpanId`] to a 1-based `(line, col)` against
+    /// `src_text`. `None` if the id is [`NO_SPAN`], out of range, or no source is
+    /// available. Used to label alloc sites with `file:line:col`.
+    pub fn span_line_col(&self, span: SpanId) -> Option<(usize, usize)> {
+        if span == NO_SPAN || self.src_text.is_empty() {
+            return None;
+        }
+        let s = self.spans.get((span - 1) as usize)?;
+        Some(crate::diag::line_col(&self.src_text, s.start as usize))
+    }
+
+    /// `file:line:col` for an interned span, or `None` if unresolvable.
+    pub fn span_label(&self, span: SpanId) -> Option<String> {
+        let (line, col) = self.span_line_col(span)?;
+        let file = if self.src_path.is_empty() { "<unknown>" } else { self.src_path.as_str() };
+        Some(format!("{file}:{line}:{col}"))
     }
 }
