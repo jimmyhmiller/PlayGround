@@ -1,0 +1,56 @@
+; C-interop dogfood — battle-tests "as low as Zig/C: lives in the C ecosystem" by
+; calling REAL C library functions across the C ABI #5 built, AT SCALE:
+;   - qsort with a Coil COMPARATOR CALLBACK — C calls BACK into Coil (the headline:
+;     Coil functions are callable from C via fnptr-of + the c convention);
+;   - libm sqrt/pow — the FLOAT C ABI (f64 args + return);
+;   - libc div — a struct (div_t) returned BY VALUE across the ABI;
+;   - libc strtol — a (ptr i8)/c"…" argument.
+; All four independently compute/confirm 42; main returns 42 iff they all agree.
+;   coil run examples/cinterop.coil; echo $?   => 42
+(module app)
+(import "lib/control.coil" :use *)   ; `all` (variadic and)
+
+; ---- externs (real libc / libm) --------------------------------------------
+; void qsort(void* base, size_t n, size_t size, int(*cmp)(const void*,const void*))
+; (no void return type yet — declared i32 and ignored; the call sequence matches).
+(extern qsort  :cc c [(ptr i8) i64 i64 (fnptr c [(ptr i8) (ptr i8)] i32)] (-> i32))
+(extern sqrt   :cc c [f64] (-> f64))
+(extern pow    :cc c [f64 f64] (-> f64))
+(extern strtol :cc c [(ptr i8) (ptr i8) i32] (-> i64))
+(defstruct DivT [(quot i32) (rem i32)])
+(extern div    :cc c [i32 i32] (-> DivT))         ; div_t div(int, int), returned by value
+
+; ---- a Coil comparator that C's qsort calls back into ----------------------
+(defn i64-cmp [(a (ptr i8)) (b (ptr i8))] (-> i32)
+  (let [x (load (cast (ptr i64) a)) y (load (cast (ptr i64) b))]
+    (if (icmp-lt x y) (cast i32 -1) (if (icmp-gt x y) (cast i32 1) (cast i32 0)))))
+
+(defn sorted? [(arr (ptr i64)) (n i64)] (-> bool)
+  (let [(mut i) 1 (mut ok) 1]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (if (icmp-gt (load (index arr (isub (load i) 1))) (load (index arr (load i))))
+                  (store! ok 0) 0)
+              (store! i (iadd (load i) 1)))))
+    (icmp-eq (load ok) 1)))
+
+(defn main [] (-> :i64)
+  (let [arr (alloc-stack (array i64 6))]
+    (store! (index arr 0) 30) (store! (index arr 1) 10) (store! (index arr 2) 50)
+    (store! (index arr 3) 42) (store! (index arr 4) 20) (store! (index arr 5) 40)
+    ; C qsort, with our Coil comparator as the callback
+    (qsort (cast (ptr i8) (index arr 0)) 6 8 (fnptr-of i64-cmp))
+    (let [s   (cast i64 (sqrt 1764.0))                 ; libm: sqrt(1764) = 42.0
+          p   (cast i64 (pow 6.0 1.0))                 ; libm: pow(6,1)  = 6.0  -> *7 = 42
+          n   (strtol c"42" (cast (ptr i8) 0) 10)      ; libc: parse "42" = 42
+          d   (div 84 2)]                              ; libc: 84/2 = {quot 42, rem 0}
+      ; all four agree on 42, and qsort placed 42 at index 3 of the sorted array.
+      (if (all (sorted? (index arr 0) 6)
+               (icmp-eq (load (index arr 4)) 42)       ; sorted [10 20 30 40 42 50]: 42 at idx 4
+               (icmp-eq s 42)
+               (icmp-eq (imul p 7) 42)
+               (icmp-eq n 42)
+               (icmp-eq (cast i64 (load (field d quot))) 42))
+          42
+          0))))
