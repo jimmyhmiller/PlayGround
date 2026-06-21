@@ -135,6 +135,41 @@ pub fn compile_to_object(src: &str, obj_path: &Path) -> Result<(), String> {
     compile_to_object_for(src, obj_path, codegen::target_triple())
 }
 
+/// Place each DEFINED function in its own `.text.<name>` section
+/// (`-ffunction-sections`), so a linker invoked with `--gc-sections` (the
+/// freestanding recipe) can garbage-collect UNREFERENCED functions. Without this,
+/// importing the stdlib drags every defn's libc calls (`malloc`/`abort`/…) into the
+/// link even when unused — a freestanding program would link libc just for an
+/// `import`. Done in the OBJECT path only (not `emit_ir`), so the IR text the tests
+/// diff is unchanged; harmless for normal `cc` links (no `--gc-sections` → every
+/// section kept), so it needs no flag — a generic mechanism, not a "freestanding mode".
+/// Whether `triple` uses the ELF object format (so `.text.<name>` per-function
+/// sections are valid). Mach-O (apple/darwin) and COFF (windows/msvc) have a
+/// different section grammar and dead-strip differently, so they're excluded — and
+/// emitting an ELF section name on Mach-O is a hard LLVM error.
+fn target_uses_elf(triple: &str) -> bool {
+    !(triple.contains("apple")
+        || triple.contains("darwin")
+        || triple.contains("macho")
+        || triple.contains("windows")
+        || triple.contains("msvc")
+        || triple.contains("wasm"))
+}
+
+fn set_function_sections(module: &inkwell::module::Module) {
+    use inkwell::values::AsValueRef;
+    for f in module.get_functions() {
+        if f.count_basic_blocks() == 0 {
+            continue; // a declaration (extern) — no body to place in a section
+        }
+        if let Ok(name) = f.get_name().to_str() {
+            if let Ok(sec) = std::ffi::CString::new(format!(".text.{name}")) {
+                unsafe { inkwell::llvm_sys::core::LLVMSetSection(f.as_value_ref(), sec.as_ptr()) };
+            }
+        }
+    }
+}
+
 /// `compile_to_object` for an explicitly chosen target triple. Used to
 /// cross-compile (e.g. an x86-64 object on an arm64 host to exercise the SysV
 /// struct ABI under Rosetta); the IR and the emitted machine code share `triple`.
@@ -161,6 +196,13 @@ pub fn compile_to_object_for(
 
     module.set_triple(&triple);
     module.set_data_layout(&tm.get_target_data().get_data_layout());
+    // Per-function sections are an ELF concept (`.text.<name>`); Mach-O and COFF use a
+    // different section grammar (and dead-strip by symbol atom, not by section), so
+    // only emit them for ELF targets — the freestanding/bare-metal + Linux case where
+    // `--gc-sections` is used. Emitting `.text.foo` on Mach-O is a hard LLVM error.
+    if target_uses_elf(&triple.as_str().to_string_lossy()) {
+        set_function_sections(&module);
+    }
     // Run the full LLVM optimization pipeline (mem2reg, inlining, GVN, loop
     // opts, tail-call elimination, …) before lowering to machine code. Without
     // this the emitted object would be ~`-O0`: every `let`/field stays an

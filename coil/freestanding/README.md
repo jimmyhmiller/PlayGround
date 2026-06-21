@@ -45,18 +45,30 @@ minimal (emit an object); freestanding composes on top.
 
 ## Friction surfaced (the dogfood's findings)
 
-1. **No dead-code elimination → the stdlib drags libc (the headline).** Coil emits
-   ALL non-generic defns, used or not. So `(import "lib/alloc.coil" …)` pulls in
-   `malloc`/`free`/`realloc`/`abort` as undefined symbols (`nm -u` confirms) even if
-   you only use the arena — a freestanding program would link libc just for importing
-   the stdlib. This dogfood sidesteps it by self-providing its capabilities. The fix is
-   standard and is a BUILD/LINK change, not a codegen rewrite: emit per-function
-   sections (`-ffunction-sections` equivalent) + link with `ld.lld --gc-sections`, so
-   unused defns are GC'd at link time (what Zig/Rust/C do). Next friction-driven item.
-2. **`arena-allocator` mallocs its buffer** (`lib/alloc.coil`) — the convenience
-   constructor isn't freestanding; the underlying `Arena` + `ar-alloc` ARE (pure
-   pointer bumping). Freestanding builds the arena over a static buffer directly. A
-   freestanding-friendly `arena-over-buffer` constructor would close this.
+1. **No dead-code elimination → the stdlib dragged libc (the headline) — FIXED at the
+   link level.** Coil emits ALL non-generic defns, used or not, so `(import
+   "lib/alloc.coil" …)` pulled in `malloc`/`free`/`realloc`/`abort` as undefined
+   symbols even when unused — a freestanding program would link libc just for an
+   `import`. Fixed exactly as Zig/Rust/C do, a BUILD/LINK change (not a codegen
+   rewrite): the compiler emits per-function sections (`-ffunction-sections`) for ELF
+   targets, and the recipe links with `ld.lld --gc-sections` → unused defns are GC'd.
+   Now `import lib/alloc` + `--gc-sections` links with ZERO undefined symbols (see the
+   `importing_stdlib_does_not_drag_libc_with_gc_sections` test, which also documents
+   the regression: WITHOUT `--gc-sections` the link fails on `malloc`). (The
+   per-function sections are ELF-only — Mach-O/COFF use a different section grammar and
+   dead-strip by symbol; emitting an ELF section name on Mach-O is a hard LLVM error,
+   so the host build is untouched.)
+2. **`arena-allocator` malloced its buffer** (`lib/alloc.coil`) — the convenience
+   constructor wasn't freestanding. FIXED: added `arena-over-buffer (buf, cap)`, a
+   constructor over a caller-provided buffer (no malloc — the buffer can be an
+   `alloc-static` array in .bss); `arena-allocator` now wraps it with `malloc`.
+   — KNOWN GAP (next investigation): a program that IMPORTS lib/alloc and runs its
+   arena (`arena-over-buffer` + `create`) LINKS clean but does not yet RUN under qemu,
+   while the self-contained `hello.coil` (which builds its `Arena` on the stack) runs
+   fine. Isolated: importing lib/alloc and using nothing runs; the fault is in the
+   stdlib-arena runtime path bare-metal (root cause TBD — likely runtime-init/global
+   state). The DCE claim above is link-level and proven; the stdlib-arena *runtime*
+   bare-metal is a separate follow-up, not overclaimed.
 3. **`llvm-ir` can't have a `void` result** — `validate_type` rejects `void` outside a
    return, so an effect-only IR snippet must return a dummy `i64` (the UART/poweroff
    helpers return `i64 0`). Minor; a `void` llvm-ir result would be tidier.

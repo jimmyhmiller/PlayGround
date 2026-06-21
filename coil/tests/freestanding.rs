@@ -58,7 +58,7 @@ fn bare_metal_aarch64_runs_under_qemu() {
     // 2. link freestanding with ld.lld: no crt0, no libc, our linker script, entry =
     //    the Coil `start` function (`bare.start`).
     let link = Command::new(&lld)
-        .args(["-T", "freestanding/virt.ld", "-e", "bare.start"])
+        .args(["--gc-sections", "-T", "freestanding/virt.ld", "-e", "bare.start"])
         .arg(&obj)
         .arg("-o")
         .arg(&elf)
@@ -84,5 +84,61 @@ fn bare_metal_aarch64_runs_under_qemu() {
     assert!(
         text.contains("hi") && text.contains("from coil (bare metal)"),
         "unexpected UART output: {text:?}"
+    );
+}
+
+#[test]
+fn importing_stdlib_does_not_drag_libc_with_gc_sections() {
+    // The DCE friction the dogfood surfaced: Coil emits all defns, so importing
+    // lib/alloc pulled malloc/abort/free/realloc into the link even unused. Fix =
+    // per-function sections (compiler) + ld.lld --gc-sections (recipe): the unused
+    // stdlib functions are GC'd, so a freestanding program can IMPORT the stdlib
+    // without dragging libc. This locks that in (and documents the regression: link
+    // WITHOUT --gc-sections fails on `malloc`, WITH it is clean).
+    let lld = match find(
+        &["ld.lld"],
+        &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"],
+    ) {
+        Some(l) => l,
+        None => {
+            eprintln!("SKIP: ld.lld not found");
+            return;
+        }
+    };
+
+    // a freestanding program that IMPORTS lib/alloc but uses nothing from it.
+    let src = "(module bare)\n\
+        (import \"lib/alloc.coil\" :use *)\n\
+        (defn uart-byte [(c i64)] (-> i64)\n\
+          (llvm-ir i64 [c] \"%p = inttoptr i64 150994944 to ptr\\n\
+           %b = trunc i64 $0 to i8\\nstore volatile i8 %b, ptr %p\\nret i64 0\"))\n\
+        (defn start [] (-> i64) (uart-byte 75) (loop 0))";
+    let obj = std::env::temp_dir().join("coil-dce.o");
+    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
+    coil::compile_to_object_for(src, &obj, triple).expect("emit object");
+
+    let link = |gc: bool| {
+        let elf = std::env::temp_dir().join(if gc { "coil-dce-gc.elf" } else { "coil-dce-nogc.elf" });
+        let mut c = Command::new(&lld);
+        if gc {
+            c.arg("--gc-sections");
+        }
+        c.args(["-T", "freestanding/virt.ld", "-e", "bare.start"])
+            .arg(&obj)
+            .arg("-o")
+            .arg(&elf)
+            .output()
+            .expect("invoke ld.lld")
+    };
+
+    // WITHOUT --gc-sections: the unused stdlib drags malloc → link fails.
+    assert!(
+        !link(false).status.success(),
+        "expected the link WITHOUT --gc-sections to fail on a dragged libc symbol"
+    );
+    // WITH --gc-sections: the unused stdlib is GC'd → clean link.
+    assert!(
+        link(true).status.success(),
+        "expected the link WITH --gc-sections to succeed (stdlib GC'd)"
     );
 }
