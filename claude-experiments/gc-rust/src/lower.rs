@@ -212,7 +212,7 @@ fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
 }
 
 fn placeholder_fn() -> CoreFn {
-    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false }
+    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
 }
 
 /// Collect free variable names referenced in `e`: single-segment path uses that
@@ -428,6 +428,9 @@ fn lower_fn<'a>(
 ) -> LResult<CoreFn> {
     let f = &job.f;
     let subst = &job.subst;
+    // Intern the function's definition span (for DWARF: its DISubprogram file +
+    // line) before `mono` is borrowed by the lowerer. Carries the def's source.
+    let fn_span = mono.intern_span(f.span);
     let ret_ty = match &f.ret {
         Some(t) => ground_type(t, subst, ctx)?,
         None => Ty::unit(),
@@ -485,6 +488,7 @@ fn lower_fn<'a>(
             body: CoreBlock { stmts: vec![], tail: None },
             closure_captures: vec![],
             is_extern: true,
+            span: fn_span,
         });
     }
 
@@ -525,7 +529,7 @@ fn lower_fn<'a>(
     check_assignable(&body_ty, &ret_ty, body_err_span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![], is_extern: false })
+    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![], is_extern: false, span: fn_span })
 }
 
 /// Lower a surface type to a ground `Ty`, applying the instantiation subst.
@@ -672,6 +676,15 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                                 }
                                 (ce, at)
                             };
+                            // P2 (DWARF): give the statement a source line for
+                            // stepping, unless the value already carries a more
+                            // precise span (e.g. a construction/alloc node).
+                            let init_expr = if init_expr.span == NO_SPAN {
+                                let sid = self.mono.intern_span(e.span);
+                                init_expr.at(sid)
+                            } else {
+                                init_expr
+                            };
                             let repr = init_expr.repr.clone();
                             let id = self.fresh_local(repr, init_ty.clone());
                             self.bind_mut(&name, id, init_ty, is_mut);
@@ -701,6 +714,12 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 }
                 Stmt::Expr(e) => {
                     let (ce, _) = self.expr(e, None)?;
+                    let ce = if ce.span == NO_SPAN {
+                        let sid = self.mono.intern_span(e.span);
+                        ce.at(sid)
+                    } else {
+                        ce
+                    };
                     stmts.push(CoreStmt::Expr(ce));
                 }
                 Stmt::Item(_) => return err("nested items not supported in v0", b.span),
@@ -709,6 +728,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let (tail, ty) = match &b.tail {
             Some(e) => {
                 let (ce, t) = self.expr(e, expected)?;
+                // P2 (DWARF): the block's tail/result expression is steppable.
+                let ce = if ce.span == NO_SPAN {
+                    let sid = self.mono.intern_span(e.span);
+                    ce.at(sid)
+                } else {
+                    ce
+                };
                 (Some(ce), t)
             }
             None => (None, Ty::unit()),
@@ -826,7 +852,9 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                     None => None,
                 };
                 // `return` diverges — type never (assignable to any context).
-                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit), never_ty()))
+                // P2 (DWARF): span the return so stepping stops on it.
+                let sid = self.mono.intern_span(e.span);
+                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit).at(sid), never_ty()))
             }
 
             ExprKind::While { cond, body } => {
@@ -2036,6 +2064,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         code_id: FuncId,
         span: Span,
     ) -> LResult<(CoreFn, Ty)> {
+        // The closure literal's span = the lifted function's def location (DWARF).
+        let fn_span = self.mono.intern_span(span);
         // Swap in a fresh body-lowering context. The return type defaults to
         // the declared one if any (so `return` inside the body checks), else
         // unit until the body tail tells us otherwise.
@@ -2116,6 +2146,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             body: CoreBlock { stmts: body_block.stmts, tail: body_block.tail },
             closure_captures,
             is_extern: false,
+            span: fn_span,
         }, ret_ty))
     }
 

@@ -1,5 +1,20 @@
 # Debugger P2 — DWARF line tables (first-increment plan)
 
+> **STATUS: FIRST INCREMENT DONE + GREEN** (both parts implemented + verified).
+> `gcr build` AOT binaries emit DWARF line tables and **lldb does source-level
+> stepping of gc-rust code** — breakpoint `dw.gcr:4` halts at `frame #0 main at
+> dw.gcr:4:11`, program exits correctly. Per-source DIFiles work (prelude allocs →
+> `<std>`). Verified: dwarf 2/0, alloc_profile 6/0, lib 158/0, gcrust-rt 108/0,
+> all 11 integration suites green, gc-stress gate green. Two real bugs caught by
+> LLVM verify + fixed during the build: (1) the function debug location must be
+> set BEFORE the prologue (else prologue instrs inherit the previous function's
+> scope → "wrong subprogram"); (2) `CoreFn.span` was ADDED (the body-scan
+> derive-first was insufficient — prelude fns' spans nest in branches) so each
+> function's DISubprogram lands in its real source file. `dsymutil` runs in
+> `build_executable` (macOS) so the executable is debuggable. NEXT: P3 (full DWARF
+> — locals/params/lexical scopes under `--debug`; reflection pretty-printers).
+
+
 Builds on P1 (span-threading) + P1b (source-id-per-span, production-correct,
 double-gated SHIP @183e130d6). Goal: `gcr build` AOT binaries carry DWARF **line
 tables** so LLDB does source-level stepping (`break file:line`, `step`, `source

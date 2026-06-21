@@ -200,6 +200,12 @@ pub struct CoreFn {
     /// and `name` is the unmangled C symbol resolved at link/JIT time. Calls to
     /// it omit the `Thread*` argument. See `docs/ffi.md`.
     pub is_extern: bool,
+    /// The function's definition span (interned), for DWARF: it names the source
+    /// + line the function is DEFINED in — used to place its `DISubprogram` in the
+    /// right `DIFile` (a monomorphized prelude/`mod` function resolves to ITS
+    /// source, not the user file). [`NO_SPAN`] when unknown. See the debugger P2
+    /// plan; far more robust than scanning the body for a representative node.
+    pub span: SpanId,
 }
 
 /// How to initialize one capture local from the closure env object.
@@ -466,6 +472,17 @@ impl CoreProgram {
     /// user-file line. `None` if the id is [`NO_SPAN`], out of range, or no
     /// source is available (tests that build a program directly).
     pub fn span_location(&self, span: SpanId) -> Option<(String, usize, usize)> {
+        let (sid, line, col) = self.span_source_loc(span)?;
+        Some((self.sources[sid as usize].path.clone(), line, col))
+    }
+
+    /// Like [`span_location`](Self::span_location) but returns the resolved
+    /// [`crate::lexer::SourceId`] (not the path label) alongside `(line, col)` —
+    /// the form DWARF emission needs to pick the per-source `DIFile`.
+    pub fn span_source_loc(
+        &self,
+        span: SpanId,
+    ) -> Option<(crate::lexer::SourceId, usize, usize)> {
         if span == NO_SPAN {
             return None;
         }
@@ -475,7 +492,7 @@ impl CoreProgram {
             return None;
         }
         let (line, col) = crate::diag::line_col(&entry.text, s.start as usize);
-        Some((entry.path.clone(), line, col))
+        Some((s.source, line, col))
     }
 
     /// `file:line:col` for an interned span, or `None` if unresolvable.

@@ -13,11 +13,27 @@ use inkwell::OptimizationLevel;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::debug_info::{
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DISubprogram, DWARFEmissionKind,
+    DWARFSourceLanguage, DebugInfoBuilder,
+};
+use inkwell::module::{FlagBehavior, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
+
+/// DWARF line-table emission state (debugger P2). Present only for AOT builds
+/// (`gcr build`) — JIT-code DWARF needs the LLDB JIT-registration interface
+/// (deferred). One [`DIFile`] per [`crate::lexer::SourceId`] (keyed by the
+/// SourceMap index) so a span resolves to the RIGHT source file in the line
+/// table — the multi-source analog of the source-id alloc-site fix.
+struct DebugCx<'ctx> {
+    di: DebugInfoBuilder<'ctx>,
+    cu: DICompileUnit<'ctx>,
+    /// `DIFile` per `SourceId` (index = source id; same order as `prog.sources`).
+    files: Vec<DIFile<'ctx>>,
+}
 
 #[derive(Debug)]
 pub struct CodegenError(pub String);
@@ -32,12 +48,26 @@ pub struct Compiled<'ctx> {
     pub alloc_sites: Vec<crate::gc::AllocSite>,
 }
 
+/// Codegen without DWARF (JIT / `emit llvm`).
 pub fn codegen<'ctx>(
     ctx: &'ctx Context,
     prog: &CoreProgram,
 ) -> Result<Compiled<'ctx>, CodegenError> {
+    codegen_with_debug(ctx, prog, false)
+}
+
+/// Codegen, optionally emitting DWARF line tables (debugger P2). `debug_info`
+/// should be set ONLY for AOT builds — DWARF lands in the emitted object where
+/// `lldb`/`llvm-dwarfdump` read it; the JIT can't use it without the LLDB
+/// JIT-registration interface (deferred).
+pub fn codegen_with_debug<'ctx>(
+    ctx: &'ctx Context,
+    prog: &CoreProgram,
+    debug_info: bool,
+) -> Result<Compiled<'ctx>, CodegenError> {
     let module = ctx.create_module("gcr");
     let builder = ctx.create_builder();
+    let debug = if debug_info { build_debug_cx(ctx, &module, prog) } else { None };
     let mut cg = Codegen {
         ctx,
         module,
@@ -47,6 +77,7 @@ pub fn codegen<'ctx>(
         trampolines: HashMap::new(),
         alloc_sites: Vec::new(),
         alloc_site_ids: HashMap::new(),
+        debug,
     };
     cg.declare_runtime_externs();
 
@@ -60,6 +91,11 @@ pub fn codegen<'ctx>(
         cg.define_fn(i as FuncId, f)?;
     }
 
+    // Finalize DWARF before verify/optimize (resolves forward metadata refs).
+    if let Some(d) = &cg.debug {
+        d.di.finalize();
+    }
+
     let entry = prog.entry.ok_or_else(|| CodegenError("no entry".into()))?;
     let entry_name = prog.funcs[entry as usize].name.clone();
 
@@ -70,6 +106,84 @@ pub fn codegen<'ctx>(
         .verify()
         .map_err(|e| CodegenError(format!("LLVM module verify failed: {}", e.to_string())))?;
     Ok(Compiled { module: cg.module, entry_name, alloc_sites: cg.alloc_sites })
+}
+
+/// First node with a real span in a block (shallow: statement values + the tail
+/// expr). Used to locate a function for its `DISubprogram`.
+fn first_block_span(b: &CoreBlock) -> Option<SpanId> {
+    for s in &b.stmts {
+        let e = match s {
+            CoreStmt::Let(_, e) => e,
+            CoreStmt::Expr(e) => e,
+        };
+        if e.span != NO_SPAN {
+            return Some(e.span);
+        }
+    }
+    b.tail.as_ref().filter(|e| e.span != NO_SPAN).map(|e| e.span)
+}
+
+/// Split a source path into `(filename, directory)` for DWARF `DIFile`.
+fn split_path(path: &str) -> (String, String) {
+    match path.rfind('/') {
+        Some(i) => (path[i + 1..].to_string(), path[..i].to_string()),
+        None => (path.to_string(), ".".to_string()),
+    }
+}
+
+/// Build the DWARF emitter + a `DIFile` per source. Returns `None` if there is no
+/// source map (e.g. a program built directly in a test) — nothing to attribute.
+fn build_debug_cx<'ctx>(
+    ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    prog: &CoreProgram,
+) -> Option<DebugCx<'ctx>> {
+    if prog.sources.is_empty() {
+        return None;
+    }
+    let (filename, directory) = split_path(&prog.sources[0].path);
+    let (di, cu) = module.create_debug_info_builder(
+        /* allow_unresolved */ true,
+        DWARFSourceLanguage::C,
+        &filename,
+        &directory,
+        /* producer */ "gcr",
+        /* is_optimized */ false,
+        /* flags */ "",
+        /* runtime_ver */ 0,
+        /* split_name */ "",
+        DWARFEmissionKind::LineTablesOnly,
+        /* dwo_id */ 0,
+        /* split_debug_inlining */ false,
+        /* debug_info_for_profiling */ false,
+        /* sysroot */ "",
+        /* sdk */ "",
+    );
+    // The backend only emits DWARF if the module declares the debug-info version.
+    let i32t = ctx.i32_type();
+    module.add_basic_value_flag(
+        "Debug Info Version",
+        FlagBehavior::Warning,
+        i32t.const_int(inkwell::debug_info::debug_metadata_version() as u64, false),
+    );
+    if cfg!(target_os = "macos") {
+        module.add_basic_value_flag(
+            "Dwarf Version",
+            FlagBehavior::Warning,
+            i32t.const_int(4, false),
+        );
+    }
+    // One DIFile per source (index = SourceId), so a span resolves to the right
+    // file in the line table.
+    let files = prog
+        .sources
+        .iter()
+        .map(|s| {
+            let (f, d) = split_path(&s.path);
+            di.create_file(&f, &d)
+        })
+        .collect();
+    Some(DebugCx { di, cu, files })
 }
 
 /// Emit the LLVM IR text for a whole program — the `gcr emit llvm` tap that
@@ -104,6 +218,9 @@ struct Codegen<'ctx, 'p> {
     /// `(function, type)` pair reuses its id instead of minting a distinct id
     /// we couldn't label distinctly.
     alloc_site_ids: HashMap<(String, u16, String), u32>,
+    /// DWARF line-table state — `Some` only when codegen is asked to emit debug
+    /// info (AOT builds). `None` for JIT/`emit llvm` (no DWARF, zero overhead).
+    debug: Option<DebugCx<'ctx>>,
 }
 
 impl<'ctx, 'p> Codegen<'ctx, 'p> {
@@ -284,6 +401,52 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         tramp
     }
 
+    /// The function's representative source location — the first spanned node in
+    /// its body — as `(SourceId, line, col)`. Defaults to `(0, 1, 1)` (user
+    /// source, line 1) when the function has no spanned node, so it still gets a
+    /// DIFile + scope. Shallow scan (post-ANF the construction/statement nodes
+    /// are at statement position) — enough to locate the function.
+    fn fn_debug_loc(&self, f: &CoreFn) -> (crate::lexer::SourceId, u32, u32) {
+        // The function's own definition span (robust: names its source even for a
+        // monomorphized prelude/`mod` function). Fall back to the first spanned
+        // body node, then to (user, line 1).
+        if let Some((sid, line, col)) = self.prog.span_source_loc(f.span) {
+            return (sid, line as u32, col as u32);
+        }
+        if let Some(sp) = first_block_span(&f.body) {
+            if let Some((sid, line, col)) = self.prog.span_source_loc(sp) {
+                return (sid, line as u32, col as u32);
+            }
+        }
+        (0, 1, 1)
+    }
+
+    /// Create `f`'s DWARF `DISubprogram` (debugger P2) and attach it to `func`.
+    /// `None` when not emitting debug info. The subprogram's file is the source
+    /// the function body comes from (so its line table + any backtrace frame name
+    /// the right file — prelude/`mod`/user).
+    fn create_subprogram(&self, f: &CoreFn, func: FunctionValue<'ctx>) -> Option<DISubprogram<'ctx>> {
+        let d = self.debug.as_ref()?;
+        let (sid, line, _col) = self.fn_debug_loc(f);
+        let file = d.files.get(sid as usize).copied().unwrap_or(d.files[0]);
+        let sub_ty = d.di.create_subroutine_type(file, None, &[], DIFlags::ZERO);
+        let sp = d.di.create_function(
+            d.cu.as_debug_info_scope(),
+            &f.name,
+            Some(&f.name), // linkage name = the mangled symbol
+            file,
+            line,
+            sub_ty,
+            /* is_local_to_unit */ true,
+            /* is_definition */ true,
+            /* scope_line */ line,
+            DIFlags::ZERO,
+            /* is_optimized */ false,
+        );
+        func.set_subprogram(sp);
+        Some(sp)
+    }
+
     fn define_fn(&mut self, id: FuncId, f: &CoreFn) -> Result<(), CodegenError> {
         // Foreign `extern "C"` functions have no body — they're resolved at
         // link/JIT time, not defined here.
@@ -293,6 +456,20 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let func = self.funcs[&id];
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
+
+        // DWARF (P2): create this function's DISubprogram + set its default debug
+        // location BEFORE the prologue, so prologue/unspanned instructions carry
+        // THIS function's scope (not the previous function's leftover location —
+        // which would fail verify with "wrong subprogram"). Always reset the
+        // builder's location per function.
+        let subprogram = self.create_subprogram(f, func);
+        if let (Some(d), Some(sp)) = (&self.debug, subprogram) {
+            let (_, line, col) = self.fn_debug_loc(f);
+            let loc = d.di.create_debug_location(self.ctx, line, col, sp.as_debug_info_scope(), None);
+            self.builder.set_current_debug_location(loc);
+        } else {
+            self.builder.unset_current_debug_location();
+        }
 
         let ptr = self.ctx.ptr_type(AddressSpace::default());
 
@@ -476,6 +653,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             loop_headers: Vec::new(),
             unlink,
             pending_copy_outs: Vec::new(),
+            subprogram,
         };
         let val = self.gen_block(&mut fcx, &f.body)?;
 
@@ -562,6 +740,17 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         fcx: &mut FnCtx<'ctx>,
         e: &CoreExpr,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        // DWARF (P2): stamp this node's instructions with its source location.
+        // One function = one source, so the scope is the function's DISubprogram
+        // and the location's file stays consistent. Nodes without a span keep the
+        // last location (the function default at minimum) — no fabrication.
+        if let (Some(d), Some(sp)) = (&self.debug, fcx.subprogram) {
+            if let Some((_, line, col)) = self.prog.span_source_loc(e.span) {
+                let loc =
+                    d.di.create_debug_location(self.ctx, line as u32, col as u32, sp.as_debug_info_scope(), None);
+                self.builder.set_current_debug_location(loc);
+            }
+        }
         match &*e.kind {
             CoreExprKind::ConstInt(n, sr) => {
                 let t = self.scalar_ty(*sr).into_int_type();
@@ -2633,6 +2822,10 @@ struct FnCtx<'ctx> {
     /// byte length)`. Filled by an `AsCBytes { copy_out: true }` argument and
     /// drained by `gen_call` AFTER the extern call returns. See `docs/ffi.md`.
     pending_copy_outs: Vec<(PointerValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>)>,
+    /// This function's DWARF `DISubprogram` scope (debugger P2) — `Some` only when
+    /// emitting debug info. Debug locations for the function's nodes use it as
+    /// their scope (one function = one source, so scope/file stay consistent).
+    subprogram: Option<DISubprogram<'ctx>>,
 }
 
 fn align_up64(n: u64, a: u64) -> u64 {
@@ -3096,7 +3289,9 @@ pub fn codegen_aot_object(
     use inkwell::targets::FileType;
 
     let ctx = Context::create();
-    let compiled = codegen(&ctx, prog)?;
+    // AOT: emit DWARF line tables (debugger P2) — they land in the object where
+    // lldb / llvm-dwarfdump read them.
+    let compiled = codegen_with_debug(&ctx, prog, true)?;
     let module = &compiled.module;
 
     // ---- Rename the program entry to a stable symbol ----------------------
@@ -3259,6 +3454,23 @@ pub fn build_executable(
             "linker (cc) failed with status {}",
             status
         )));
+    }
+
+    // On macOS, DWARF stays in the `.o` (the linked executable only holds a debug
+    // MAP referencing it). Run `dsymutil` BEFORE we delete the `.o` to collect a
+    // `.dSYM` bundle next to the executable, so `lldb` resolves gc-rust source
+    // lines (debugger P2). Best-effort: if dsymutil is absent the binary still
+    // runs, just without source-level debug. On ELF, DWARF is in the executable
+    // already — no dSYM step.
+    #[cfg(target_os = "macos")]
+    {
+        let ran = std::process::Command::new("dsymutil").arg(out_path).status();
+        if ran.is_err() {
+            let _ = std::process::Command::new("xcrun")
+                .args(["dsymutil"])
+                .arg(out_path)
+                .status();
+        }
     }
 
     // Remove the intermediate object on success.
