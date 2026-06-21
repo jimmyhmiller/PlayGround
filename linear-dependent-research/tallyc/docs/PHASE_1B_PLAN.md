@@ -91,6 +91,27 @@ remaining problems:
    builds proofs by hand. Decide: prelude-provide `Acc` + `natWf`, or require users
    to declare them.
 
+## Findings (verified this session)
+
+- **The 1b foundation generalizes to the indexed higher-order `Acc` family** (not just
+  non-indexed W-types): `AccN : Nat -> Type` with the accessibility field declares
+  (strict positivity holds) and an `Acc`-eliminating function type-checks + is
+  certified total (`phase_1b_acc_indexed_higher_order_family_eliminates`).
+- **Inductive `Lt` machinery works with EXPLICIT indices**: `ltS(0,1,ltZ(0)) : Lt 1 2`
+  (`phase_1b_inductive_lt_constructs_with_explicit_indices`).
+- **GAP (named, prioritizable): implicit-from-result-index inference is missing for
+  inductive-relation constructors.** `ltZ : {0 n} -> Lt Zero (Succ n)` against expected
+  `Lt Zero (Succ Zero)` FAILS ("cannot infer implicit argument") even though `n=Zero`
+  is forced by the expected indices. natWf builds many `Lt` proofs; without this it is
+  workable but verbose (explicit indices everywhere). Fixing it = extend `solve_ctor`
+  to unify a constructor's implicit args against the EXPECTED type's index spine.
+- **GAP: the no-lambda surface blocks the inline accessibility function.** natWf's
+  `acc(n, λ y prf. …)` needs a function `(y:Nat) -> Lt y n -> Acc y` that recurses;
+  with no surface lambdas it must be a NAMED top-level helper that threads the
+  recursion explicitly (Jimmy's blessed direction: named fns, no implicit closures) —
+  workable but it shapes how natWf is written (a mutually-recursive helper, or a
+  worker taking the fuel/measure as a param). This is the linchpin chunk.
+
 ## Red-team (E1/1a′-class bar)
 
 - a wf-recursive fn whose recursive call does NOT descend through the accessibility
