@@ -31,6 +31,11 @@ loudly (stderr warning + a `; SKIPPED …` note in the output), rather than gues
 - A **union** is refused (overlapping layout — emitting it as a sequential `defstruct`
   would be the silent-wrong failure; caught by a test). A struct *containing* a union is
   refused too (its field is unmappable).
+- A struct with a **bitfield** is refused (`int a:3` packs into bit ranges — emitting a
+  full-width `(a i32)` would corrupt the layout; clang marks the field `isBitfield`).
+  This was a real silent-wrong binding the red-team test caught before it shipped.
+- **`_Bool`** maps to `u8` (a 1-byte C-ABI value), NOT Coil `bool` (i1, whose C-ABI
+  width would be a guess) — ABI-safe by construction.
 - Unknown/unsupported types (typedefs like `size_t`, enums, function-pointer params,
   `long double`, …) → the declaration is skipped with a clear reason, never mis-bound.
 - De-dup: clang lists builtin libc functions twice (`sqrt`/`labs`); cimport emits one.
