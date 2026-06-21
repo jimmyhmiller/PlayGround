@@ -146,7 +146,12 @@ fn record_defstruct(d: &Value) -> Result<Option<String>, String> {
     let mut fields = Vec::new();
     for f in d["inner"].as_array().unwrap_or(&empty) {
         if f["kind"].as_str() == Some("FieldDecl") {
-            let fname = f["name"].as_str().ok_or("an unnamed field (bitfield/anon)")?;
+            // A bitfield packs into sub-byte bit ranges — emitting it as a full-width
+            // field would corrupt the layout (silent-wrong). Refuse the whole struct.
+            if f.get("isBitfield").and_then(|b| b.as_bool()) == Some(true) {
+                return Err("contains a bitfield (packed layout — Phase 2)".to_string());
+            }
+            let fname = f["name"].as_str().ok_or("an unnamed field (anon struct/union)")?;
             let fty = f["type"]["qualType"].as_str().ok_or("a field has no type")?;
             fields.push(format!("({fname} {})", map_type(fty)?));
         }
@@ -190,7 +195,9 @@ fn map_type(c: &str) -> Result<String, String> {
         "unsigned long long" | "unsigned long long int" => "u64",
         "float" => "f32",
         "double" => "f64",
-        "_Bool" | "bool" => "bool",
+        // C `_Bool` is a 1-byte value at the ABI; map to `u8` (unambiguous) rather than
+        // Coil's `bool` (i1), whose C-ABI width would be a guess.
+        "_Bool" | "bool" => "u8",
         other if other.starts_with("struct ") => {
             return Ok(other.trim_start_matches("struct ").trim().to_string());
         }

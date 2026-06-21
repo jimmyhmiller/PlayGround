@@ -55,6 +55,32 @@ fn cimport_bindings_call_real_libc_abi_correct() {
 }
 
 #[test]
+fn cimport_red_team_refuses_silent_wrong_bindings() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // Red-team the exact ABI-corruption failure modes (the reviewer's concern):
+    let h = write_header(
+        "coil_ci_redteam.h",
+        "struct Flags { int a : 3; int b : 5; int c; };\n\
+         enum Color { RED, GREEN };\n\
+         int paint(enum Color c);\n\
+         long double precise(long double x);\n\
+         _Bool is_ready(int x);\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    // bitfields pack into bit ranges — emitting full-width fields would corrupt the
+    // layout. The struct must be REFUSED, not mis-bound.
+    assert!(!b.contains("(defstruct Flags"), "bitfield struct must be refused:\n{b}");
+    // enum param + long double → refused (no silent i32/f64 guess).
+    assert!(!b.contains("(extern paint"), "enum-param fn must be refused:\n{b}");
+    assert!(!b.contains("(extern precise"), "long-double fn must be refused:\n{b}");
+    // C `_Bool` is a 1-byte value at the ABI → u8, not Coil `bool` (i1, ambiguous width).
+    assert!(b.contains("(extern is_ready :cc c [i32] (-> u8))"), "_Bool must map to u8:\n{b}");
+}
+
+#[test]
 fn cimport_plus_link_flag_calls_a_custom_c_library() {
     if !have_clang() {
         eprintln!("SKIP: clang not found");
