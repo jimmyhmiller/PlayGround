@@ -9,7 +9,7 @@
 //!      dep         (NbE kernel: eval/quote/conv + bidirectional QTT checker)
 //!        │  erase types/indices/proofs (multiplicity 0)
 //!        ▼
-//!   dep_codegen   (LLVM lowering, behind the `llvm` feature)
+//!   dep_codegen   (LLVM lowering — Tally's native backend, always compiled in)
 //! ```
 //! Permissions, regions, indices, and proofs are ERASED, so the backend lowers an
 //! already-checked program with no runtime notion of them.
@@ -19,5 +19,4 @@ pub mod mult;
 pub mod rust_surface;
 pub(crate) mod totality;
 
-#[cfg(feature = "llvm")]
 pub mod dep_codegen;

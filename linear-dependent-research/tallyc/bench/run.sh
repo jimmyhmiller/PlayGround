@@ -8,7 +8,7 @@
 #
 # Requires a tally built with the LLVM backend:
 #   LLVM_SYS_181_PREFIX=/opt/homebrew/Cellar/llvm@18/18.1.8 \
-#     cargo build --release --features llvm
+#     cargo build --release
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,7 +17,7 @@ trap 'rm -rf "$OUT"' EXIT
 
 TALLY="$REPO/target/release/tally"
 [ -x "$TALLY" ] || TALLY="$REPO/target/debug/tally"
-[ -x "$TALLY" ] || { echo "build tally first (cargo build --release --features llvm)"; exit 1; }
+[ -x "$TALLY" ] || { echo "build tally first (cargo build --release)"; exit 1; }
 
 echo "==> tally build examples/bench.tal (normal program, -O2)"
 "$TALLY" build "$REPO/examples/bench.tal" -o "$OUT/bench_tally" -O2 >/dev/null

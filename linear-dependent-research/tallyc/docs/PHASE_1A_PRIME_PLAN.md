@@ -1,7 +1,7 @@
 # Phase 1a′ — accumulator-style `%total` (fold-into-function), implementation plan
 
 **Status: ✅ IMPLEMENTED (elaboration + native backend).** All three edits landed
-and proven (default suite + `--features llvm` suite both green). The verdict change
+and proven (the full suite green — LLVM is always on, one suite). The verdict change
 (`scrut_is_nat` gates the verbatim-args rejection), the routing (`is_acc_fold` →
 `elab_nat_match_acc`), and the function-typed-motive lowering are all in. Proof
 target met: `%total fuel-div` (composing accumulator folds `lt`, `sub`, and the

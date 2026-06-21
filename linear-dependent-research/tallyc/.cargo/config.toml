@@ -1,0 +1,8 @@
+# LLVM is Tally's native backend and is ALWAYS compiled in (no optional feature).
+# llvm-sys (via inkwell, pinned to LLVM 18) locates LLVM through this prefix, so a plain
+# `cargo build` / `cargo test` works in any worktree with no flags and no manual env.
+# Requires Homebrew `llvm@18` (`brew install llvm@18`); `/opt/homebrew/opt/llvm@18` is the
+# stable symlink (survives patch bumps). If LLVM 18 lives elsewhere, override by exporting
+# LLVM_SYS_181_PREFIX before invoking cargo.
+[env]
+LLVM_SYS_181_PREFIX = "/opt/homebrew/opt/llvm@18"

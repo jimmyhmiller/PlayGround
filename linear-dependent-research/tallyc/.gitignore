@@ -1,6 +1,9 @@
 /target
 Cargo.lock
-/.cargo
+# ignore local cargo state, but COMMIT config.toml (it pins LLVM_SYS_181_PREFIX so the
+# always-on LLVM backend builds in every worktree with no manual setup).
+/.cargo/*
+!/.cargo/config.toml
 # `tally build` artifacts (object + emitted IR dumps)
 *.o
 *.o.ll

@@ -126,7 +126,6 @@ fn run_cli() -> ExitCode {
     }
 }
 
-#[cfg(feature = "llvm")]
 fn run_native(src: &str, path: &str) -> ExitCode {
     let prog = match tally::rust_surface::check_program(src) {
         Ok(p) => p,
@@ -154,13 +153,6 @@ fn run_native(src: &str, path: &str) -> ExitCode {
     }
 }
 
-#[cfg(not(feature = "llvm"))]
-fn run_native(_src: &str, _path: &str) -> ExitCode {
-    eprintln!("`tally run` needs the native backend; rebuild with `--features llvm`");
-    ExitCode::FAILURE
-}
-
-#[cfg(feature = "llvm")]
 fn build_native(src: &str, path: &str, out: &str, opt: u32) -> ExitCode {
     use inkwell::OptimizationLevel;
     let prog = match tally::rust_surface::check_program(src) {
@@ -209,10 +201,4 @@ fn build_native(src: &str, path: &str, out: &str, opt: u32) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-#[cfg(not(feature = "llvm"))]
-fn build_native(_src: &str, _path: &str, _out: &str, _opt: u32) -> ExitCode {
-    eprintln!("`tally build` needs the native backend; rebuild with `--features llvm`");
-    ExitCode::FAILURE
 }

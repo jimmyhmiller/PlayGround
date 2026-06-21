@@ -17,7 +17,7 @@ rust_surface   lex → parse → elaborate            (the surface language)
    dep          NbE kernel: eval / quote / conv + bidirectional QTT checker
      │  erase types / indices / proofs (multiplicity 0)
      ▼
-dep_codegen     LLVM lowering (inkwell, behind `--features llvm`)
+dep_codegen     LLVM lowering (inkwell — Tally's native backend, always on)
 ```
 
 CLI: `tally check <f>` (type-check), `tally run <f>` (check + JIT-run `main`),
@@ -98,14 +98,14 @@ nullary constructors (`Leaf`/`Nil`) used to `malloc` a cell each, doubling the
 allocations on a tree; they are now shared module-level constants (zero allocation),
 matching C's NULL-for-leaf (see `bench/README.md`).
 
-`cargo test --features llvm`: **53 tests**, including `%builtin Nat` (literals,
+`cargo test`: **53 tests**, including `%builtin Nat` (literals,
 `+`, `match`→native loop, no overflow at `mul(1000,1000)`), general recursion
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
 ## Status (v1.4 — GENERAL boxed datatypes run natively; the memory layer is real libc; erasure proven in the IR)
 
-The native backend (`src/dep_codegen.rs`, behind `--features llvm`) is no longer
+The native backend (`src/dep_codegen.rs`) is no longer
 limited to `Nat`. **Every checked datatype now compiles and runs end to end:**
 
 - **`Nat`-like families stay UNBOXED `i64`** (one nullary + one single-recursive
@@ -151,7 +151,7 @@ generated IR and assert:
   two frees (the removed node, then the freed list). The only heap traffic is the
   actual data.
 
-`cargo test --features llvm`: **59 tests** (the 50 v1.3 tests plus boxed
+`cargo test`: **59 tests** (the 50 v1.3 tests plus boxed
 `dependent_vec_sum_runs`/`dependent_vec_length_runs`/`dependent_vec_head_runs`/
 `fin_to_nat_runs`/`fin_zero_runs`, the linear `linear_alloc_free_runs`/
 `dependent_dll_remove_runs`, and the two IR zero-overhead tests).
@@ -171,13 +171,13 @@ generated IR and assert:
   `fn push_zero(0 n: Nat, v: Vec<n>) -> Vec<n+1> { vpush(v, 0) }` — `n` is
   inferred per call; using an erased index at runtime is a type error.
 - Backend: vectors lower to a linked stack; the length is never materialised
-  (erased). `cargo test --features llvm`: 8 tests incl. `dependent_vec_runs`.
+  (erased). `cargo test`: 8 tests incl. `dependent_vec_runs`.
   Example: `examples/vec.tal`. (Matches `../agda/Dependent.agda`.)
 
 ## Status (v1.3 — END TO END: dependent source → native code → run)
 
 The dependent front end and the native backend are now connected. `tally run
-<file>` (with `--features llvm`) type-checks a program through the QTT kernel and
+<file>` type-checks a program through the QTT kernel and
 **compiles `main` to native code via LLVM, then JIT-executes it** — no
 intermediate normalization, so the recursion runs in machine code:
 
@@ -195,7 +195,7 @@ computed by generated machine code, not by the type checker's evaluator.
 
 Scope at v1.3 (first slice): `Nat`-like datatypes as `i64`. **General (boxed)
 datatypes and linking the memory postulates to libc are now done — see v1.4
-above.** `cargo test --features llvm`: 50 tests at v1.3 (incl.
+above.** `cargo test`: 50 tests at v1.3 (incl.
 `nat_add_runs_natively`, `nat_mul_runs_natively`).
 
 ## Status (v1.2 — proofs-as-capabilities, and the intrusive DLL, in the core)
@@ -480,7 +480,7 @@ The headline application, **sound and native**. A `Cursor<'L>` is a LINEAR token
   use-after-remove are type errors**; the tag stops **cross-list** removal; an
   un-removed cursor (= a node) **leaks** ⇒ nothing is forgotten.
 - Native: lowers to a real **circular sentinel doubly-linked list**, so
-  insert/remove are branch-free pointer surgery. `cargo test --features llvm`:
+  insert/remove are branch-free pointer surgery. `cargo test`:
   10 tests incl. `linear_cursor_dll_runs` (insert 3, remove the middle → 20).
   Example: `examples/dll.tal`. (Background: `../docs/08-prior-art-vale.md`.)
 
@@ -542,29 +542,28 @@ discipline for the intrusive doubly-linked list with O(1) remove.
 
 ## Build & test
 
-Frontend only (no LLVM needed):
+LLVM is Tally's native backend and is **always compiled in** — there is no LLVM-free
+mode and no feature flag. A plain `cargo` invocation builds the whole compiler and runs
+the whole suite (frontend + native backend together):
 
 ```
-cargo test          # lexer/parser/checker tests
-cargo run -- check <file.tal>
+cargo test                  # the ONE suite — frontend + native backend (118 tests)
+cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
+cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
+cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable
 ```
 
-With the LLVM backend:
+### LLVM prerequisite
 
-```
-cargo test --features llvm
-```
+Needs **LLVM 18** (inkwell is pinned to `llvm18-0`). `.cargo/config.toml` points
+`LLVM_SYS_181_PREFIX` at the Homebrew `llvm@18` (`/opt/homebrew/opt/llvm@18`), so on the
+dev machine `cargo build` / `cargo test` Just Works with no flags and no manual env.
 
-### LLVM backend prerequisites
+- **macOS:** `brew install llvm@18` (the config's stable symlink path resolves to it).
+- **Elsewhere** (e.g. a Linux CI/sandbox): install LLVM 18 dev libs and export the prefix
+  — an externally-set `LLVM_SYS_181_PREFIX` OVERRIDES the config (it is non-forcing), e.g.
 
-Needs **LLVM 18** dev libraries. On this Ubuntu sandbox they are installed with:
-
-```
-apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
-export LLVM_SYS_181_PREFIX=$(llvm-config-18 --prefix)
-```
-
-The cloud sandbox ships `libLLVM.so` + `llvm-config-18` but not the `-dev`
-headers/static libs, so add the three `apt` packages above (e.g. in a repo
-setup script) before `cargo build --features llvm`. `inkwell` is pinned to the
-`llvm18-0` feature.
+  ```
+  apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+  export LLVM_SYS_181_PREFIX=$(llvm-config-18 --prefix)
+  ```
