@@ -187,3 +187,54 @@ big-value P3 (language-value inspection) is where "≥ JVM inspection" is realiz
 Builds on span-threading (the shared prereq with line-precise 1b profiling),
 inkwell `debug_info` (DWARF), and the existing reflection table (language-value
 rendering).*
+
+---
+
+## Appendix: P1 status + P2 implementation scope
+
+**P1 — DONE** (committed `68daae9e5`, in adversarial review): SpanId side-table
+threaded AST→lower→ANF→codegen; the file:line:col alloc-site upgrade proves it
+(two same-(function,type) allocs at different lines → distinct sites). Verified
+green incl. the gc-stress gate. (Details in the commit / the alloc-profile test.)
+
+**P2 — DWARF line tables (scoped; build after P1 sign-off).** Two parts:
+
+1. **Broaden span coverage to statement level (lower).** P1 attaches spans to the
+   5 construction/alloc nodes only — enough for alloc-sites, but a *sparse* line
+   table makes stepping jumpy. Reusing the P1 mechanism (`Mono::intern_span` +
+   `CoreExpr::at`; `CoreStmt::{Let,Expr}` already wrap a `CoreExpr` that has the
+   `.span` field; ANF already preserves it), attach spans at statement-position
+   exprs (each `CoreStmt`'s expr + block tails) and the key steppable exprs
+   (calls, returns, assigns) so every source line maps to instructions. No new IR
+   shape — just more `.at()` call sites in `lower`.
+
+2. **Emit DWARF via inkwell `debug_info` (codegen).** API confirmed present in
+   inkwell 0.5:
+   - `codegen()`: `module.create_debug_info_builder(...)` → `(DebugInfoBuilder,
+     DICompileUnit)` (producer "gcr", file = `prog.src_path`, `optimized` = true
+     on the O2 paths). Add module flags: `"Debug Info Version" = 3` (+ a Dwarf
+     Version flag on macOS) so the backend emits DWARF into the object.
+   - `define_fn()`: `di.create_function(...)` → a `DISubprogram` (with a minimal
+     `create_subroutine_type`); `fv.set_subprogram(sp)`.
+   - `gen_expr`/`gen_stmt`: for a node with a real span, resolve via
+     `prog.span_line_col` → `di.create_debug_location(ctx, line, col, scope, None)`
+     → `builder.set_current_debug_location(loc)` before emitting that node's
+     instructions. Scope = the function's `DISubprogram` (lexical blocks later).
+   - `di.finalize()` after all functions, before `module.verify()`/optimize.
+
+3. **3-tier (per the approved decisions):** P2 emits **line tables always**
+   (best-effort even on O2 — LLVM preserves debug locations through the pipeline);
+   **full DWARF (locals/params/lexical scopes) is P3** under `gcr build --debug`
+   (-O0 / opt-preserving for faithful stepping).
+
+4. **Scope boundary:** P2 targets **AOT binaries** (`gcr build`) — DWARF lands in
+   the emitted object naturally and `lldb`/`llvm-dwarfdump` read it. JIT-code
+   DWARF needs the GDB/LLDB JIT debug-registration interface — deferred (P3+).
+
+5. **Verify:** `llvm-dwarfdump --debug-line` on a `gcr build` object shows the
+   source file + line rows; an `lldb` smoke (set a line breakpoint, `source
+   list`, step) follows source. A test greps the dwarfdump output for the file +
+   expected lines.
+
+*P2 is scoped, not built — it stacks on P1, so it lands only after P1 is
+signed off (the foundation must be verified before DWARF is built on it).*
