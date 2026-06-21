@@ -1,8 +1,21 @@
 # Phase #1 — arbitrary-length recursion/iteration over LINEAR structures
 
-**STATUS: PLAN — verify-before-building turned up that this is BIGGER than "thread the
-accumulator's multiplicity." Three sub-issues; the headline one is a soundness-sensitive
-totality extension. Bringing the design for the Leader's steer before building.**
+**STATUS: (A) DONE + RUNS — at the maximal-bar review.** Arbitrary-length recursion over a
+LINEAR OWNED structure now builds/traverses/FREES + runs natively (%partial), via the new
+kernel `Term::Case` (non-recursive general case-split) + `compile_case` + `elab_fix`/`in_fix`
++ context-var-call inference. Tests: `owned_list_traversal_runs_natively` (=3),
+`heap_general_recursion_runs_natively` (=3), `positivity_sees_through_case_hiding_a_negative_occurrence`
+(E3), `partial_heap_recursion_still_enforces_linearity` (leak/double-free REJECTED). The
+three cardinals hold: linearity enforced (NOT relaxed), kernel-opaque `Fix`, E3 positivity
+traverses `Case`. Discipline: the recursive result must be `let`-sequenced (CBV-`let`) to
+sequence a linear consumption into an `ω` position. **(B)** structural-unbox-descent (→ the
+`%total` subset) is the friction-driven follow-up, when a real `%total` need appears.
+
+---
+
+**Original plan (kept for record): verify-before-building turned up that this is BIGGER than
+"thread the accumulator's multiplicity." Three sub-issues; the headline one became the kernel
+`Term::Case`. (A) Fix-on-heap was built first per the Leader's steer.**
 
 ## Goal
 
