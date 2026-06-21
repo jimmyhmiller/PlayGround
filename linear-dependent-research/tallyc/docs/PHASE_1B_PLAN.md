@@ -1,5 +1,20 @@
 # Phase 1b — well-founded recursion (`Acc`) surface exposure, plan + status
 
+**STATUS: the wf-recursion MACHINERY is DONE + tested; the `natWf` LIBRARY LEMMA is a
+documented finish-later (Leader decision: pivot to Phase A — the memory model is the
+goal — and revisit natWf after).** Done + tested: higher-order/`Acc` recursive-field
+elimination, the value-correctness guard (1a′-bar, closes the dropped-arg wrong-value
+hole), the totality relax (varying args only under higher-order descent), gap-(i)
+implicit inference, partial application confirmed, the `Acc` family declared + an
+`Acc`-eliminating fn certified total. So the CAPABILITY exists. FINISH-LATER (a
+substantial type-theory investment, deprioritized vs the memory-model goal): the
+`natWf : (n:Nat) → Acc Nat Lt n` accessibility lemma so user code gets `Acc` proofs for
+free — blocked on (1) MULTI-INDEX absurd discharge + the for-all-T sentinel [a
+soundness-sensitive coverage-checker extension — see Findings], and (2) a
+bound/transitivity lemma + assembly [proof engineering]. NO current soundness hole is
+left open (single-index Fin discharge stays sound; the for-all-T sentinel is a FORWARD
+prerequisite, not a current bug).
+
 **Goal:** let the surface write functions whose termination is justified by an
 `Acc`-style accessibility proof on a well-founded relation (gcd, quicksort, log/div
 by a measure) and certify them `%total`. The kernel side landed in E3 (the generic
