@@ -20,6 +20,17 @@ design, the alternatives, and the decisions that need a ruling.
 > rvalues), and the C ABI for by-value aggregate FFI is untouched (externs never
 > route through `param_ref_type` — verified in IR). Decisions resolved below.
 > **Open:** A5 (re-passing a `(mut)` param bare) — deferred as a character call.
+>
+> **KNOWN DIVERGENCE (deferred, not a bug).** A *non-generic* aggregate param is
+> by-reference (above); a *generic* param instantiated to an aggregate stays
+> by-VALUE — `param_ref_type` runs pre-mono when the type parameter is opaque, so
+> it isn't wrapped, and mono substitutes the concrete aggregate into a by-value
+> param. This is CORRECT (commit b751d9a9c fixed codegen to reconstruct + bind the
+> loaded struct value; regression-tested both targets) and rides the well-tested
+> C-ABI struct path. Unifying it onto the by-ref path would need a coordinated
+> mono refactor (callee param→ptr + body load-wrap + every call site passing a
+> pointer, across independently-specialized functions) — ABI-sensitive, for a
+> marginal win (LLVM usually elides the copy). Deferred deliberately.
 
 ### The friction (from the dogfood)
 The rule "a by-value aggregate param is really an immutable reference" leaks, and
