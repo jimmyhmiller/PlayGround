@@ -1,0 +1,47 @@
+// The dogfood, MVP-0: an interpreter for an arithmetic expression language, written in
+// surface Tally — a real program with tricky ownership.  `tally run examples/interpreter.tal`
+// builds the AST on the heap, evaluates it (freeing each node as it walks), and prints 7.
+//
+// The AST is an OWNED tree: each child is an `Own Expr` (a heap pointer), recursion through
+// the variance-aware strict positivity.  `eval` is %partial recursion over the owned tree
+// (general recursion on a heap structure — the kernel `Term::Case` dispatch + `Fix` self-call):
+// it `unbox`-CONSUMES each node (freeing it), recurses on the owned children, and combines.
+// The recursive results are `let`-sequenced so the linear consumption is counted once.
+// Memory-safe, ZERO-GC, fully manual reclamation — the differentiator on a complicated program.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Expr {
+  lit : Nat -> Expr,
+  add : Own Expr -> Own Expr -> Expr,
+  mul : Own Expr -> Own Expr -> Expr,
+}
+
+plus : Nat -> Nat -> Nat
+fn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }
+
+times : Nat -> Nat -> Nat
+fn times(m, n) { match m { Zero => Zero, Succ(k) => plus(n, times(k, n)) } }
+
+// eval CONSUMES the owned tree, freeing each node as it evaluates it.
+eval : Own Expr -> Nat
+fn eval(e) {
+  match unbox(e) {
+    lit(n)    => n,
+    add(a, b) => let va = eval(a); let vb = eval(b); plus(va, vb),
+    mul(a, b) => let va = eval(a); let vb = eval(b); times(va, vb),
+  }
+}
+
+// 1 + (2 * 3)
+mkexpr : Own Expr
+fn mkexpr() {
+  alloc(add(
+    alloc(lit(Succ(Zero))),
+    alloc(mul(alloc(lit(Succ(Succ(Zero)))), alloc(lit(Succ(Succ(Succ(Zero))))))),
+  ))
+}
+
+main : Nat
+fn main() { eval(mkexpr) }   // => 7

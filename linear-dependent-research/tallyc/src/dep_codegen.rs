@@ -1767,6 +1767,27 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
     }
 
     #[test]
+    fn interpreter_mvp_arithmetic_runs_natively() {
+        // THE DOGFOOD, MVP-0: a real program — an interpreter for an arithmetic expression
+        // language — written in surface Tally. The AST is an OWNED tree (`Own Expr`
+        // children, the (a)-positivity shape); `eval` is `%partial` heap recursion (the (A)
+        // capability) that UNBOX-CONSUMES the tree — freeing each node as it evaluates —
+        // with the recursive results `let`-sequenced. Evaluating `1 + (2 * 3)` builds the
+        // tree on the heap, walks + frees it, and returns 7. Memory-safe, zero-GC, the
+        // differentiator applied to a genuinely complicated program.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Expr { lit : Nat -> Expr, add : Own Expr -> Own Expr -> Expr, mul : Own Expr -> Own Expr -> Expr }\n\
+            plus : Nat -> Nat -> Nat\nfn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }\n\
+            times : Nat -> Nat -> Nat\nfn times(m, n) { match m { Zero => Zero, Succ(k) => plus(n, times(k, n)) } }\n\
+            eval : Own Expr -> Nat\n\
+            fn eval(e) { match unbox(e) { lit(n) => n, add(a, b) => let va = eval(a); let vb = eval(b); plus(va, vb), mul(a, b) => let va = eval(a); let vb = eval(b); times(va, vb) } }\n\
+            mkexpr : Own Expr\n\
+            fn mkexpr() { alloc(add(alloc(lit(Succ(Zero))), alloc(mul(alloc(lit(Succ(Succ(Zero)))), alloc(lit(Succ(Succ(Succ(Zero))))))))) }\n\
+            main : Nat\nfn main() { eval(mkexpr) }\n";
+        assert_eq!(run(src), 7);
+    }
+
+    #[test]
     fn owned_list_traversal_runs_natively() {
         // (A) the full interpreter-relevant shape: arbitrary-length recursion over a
         // LINEAR OWNED heap structure, BUILDING + TRAVERSING + FREEING it. `sumFree`
