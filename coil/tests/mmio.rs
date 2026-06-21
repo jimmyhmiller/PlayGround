@@ -27,6 +27,27 @@ fn defmmio_reg_expands_to_reader_writer_and_field_getters() {
 }
 
 #[test]
+fn defmmio_reg_is_general_not_pl011_specific() {
+    // The capability is GENERAL — it works on ANY register spec, with multi-bit
+    // fields (mask != 1), not just the PL011 flag register. A made-up GPIO control
+    // register at a different address with fields of width 1, 2, and 3.
+    let src = "(module app)\n\
+        (import \"lib/mmio.coil\" :use *)\n\
+        (defmmio-reg GPIOCTL 268435456 [(enable 0 1) (mode 1 2) (speed 4 3)])\n\
+        (defn main [] (-> i64) (cast i64 (GPIOCTL-mode)))";
+    let expanded = coil::expand_to_string(src).expect("expand");
+    // each field shifts by its own offset and masks by (1<<width)-1 (1, 3, 7):
+    assert!(expanded.contains("(ishr (GPIOCTL-read) 0)") && expanded.contains("(isub (ishl 1 1) 1)"),
+        "enable: shift 0, mask (1<<1)-1:\n{expanded}");
+    assert!(expanded.contains("(ishr (GPIOCTL-read) 1)") && expanded.contains("(isub (ishl 1 2) 1)"),
+        "mode: shift 1, mask (1<<2)-1 = 3:\n{expanded}");
+    assert!(expanded.contains("(ishr (GPIOCTL-read) 4)") && expanded.contains("(isub (ishl 1 3) 1)"),
+        "speed: shift 4, mask (1<<3)-1 = 7:\n{expanded}");
+    // and the whole thing type-checks + compiles for this different spec.
+    assert!(coil::emit_ir(src).is_ok(), "GPIO spec must compile too");
+}
+
+#[test]
 fn defmmio_reg_output_typechecks_and_compiles() {
     // The generated accessors are real, valid Coil — they type-check and lower to LLVM
     // (a volatile load from a fixed address + shift/mask), with no core support.
