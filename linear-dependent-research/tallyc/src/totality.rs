@@ -238,6 +238,10 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             // field `f` (a W-type child-function / `Acc`'s accessibility fn) — an
             // application `f(args…)` of it, which is the genuine sub-derivation the
             // kernel's functional IH eliminates (Phase 1b / well-founded recursion).
+            // is this call's descent HIGHER-ORDER (`f(args…)` of a higher-order
+            // recursive field — well-founded recursion) rather than first-order?
+            let ho_descent =
+                matches!(&c.args[sp], Tm::Call(g, _) if arm.ho_smaller.contains(g));
             match &c.args[sp] {
                 Tm::Var(v) if arm.smaller.contains(v) => {}
                 Tm::Call(g, _) if arm.ho_smaller.contains(g) => {}
@@ -254,11 +258,15 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             // For a `%builtin Nat` scrutinee, varying a non-scrutinee argument is
             // FINE: the call descends on the scrutinee, and the fold lowers to a
             // function-typed-motive `NatElim` (Phase 1a′ accumulator fold) that the
-            // kernel re-checks total-by-construction. For a BOXED datatype that
-            // lowering isn't available yet, so every other argument must still be
-            // passed verbatim — an accumulator there is terminating but not yet
-            // certifiable, so it is honestly declined.
-            if !f.scrut_is_nat {
+            // kernel re-checks total-by-construction. Likewise, under HIGHER-ORDER
+            // descent (well-founded recursion — `f(y, h(y, prf))`), the non-scrutinee
+            // args legitimately VARY (the new `y`): they are part of the descent and
+            // are certified by the functional IH; the elaborator's VALUE-CORRECTNESS
+            // guard (in `ih_for`) ensures the varying arg matches the field-application
+            // argument, so a wrong-value lowering is rejected. For a first-order BOXED
+            // descent the accumulator lowering isn't available, so verbatim is still
+            // required (honest decline).
+            if !f.scrut_is_nat && !ho_descent {
                 for (i, a) in c.args.iter().enumerate() {
                     if i == sp {
                         continue;

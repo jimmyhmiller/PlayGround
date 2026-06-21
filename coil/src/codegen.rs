@@ -370,6 +370,7 @@ pub fn compile_for<'ctx>(
             .native_id()
             .ok_or_else(|| format!("codegen: extern '{}' needs a native convention", e.name))?;
         let native_c = matches!(&conv.lowering, Lowering::Native(crate::convention::NativeCc::C));
+        cg.check_c_abi_types(&format!("extern '{}'", e.name), &e.params, &e.ret)?;
         let fv = if cg.needs_c_abi(&e.params, &e.ret) {
             // A by-value struct in the signature: lower via the C struct ABI
             // (coerced register slots, `byval`/`sret`) instead of the naive types.
@@ -658,6 +659,50 @@ impl<'ctx> Cg<'ctx> {
     /// a parameter or the return). Scalar-only signatures keep the simple path.
     fn needs_c_abi(&self, params: &[Type], ret: &Type) -> bool {
         self.abi_struct(ret).is_some() || params.iter().any(|t| self.abi_struct(t).is_some())
+    }
+
+    /// Reject a by-value slice or SIMD vector crossing the C boundary — as a
+    /// direct parameter/return, or nested inside a by-value struct field. These
+    /// are Coil view/SIMD types with no defined C representation; without this a
+    /// slice would silently cross a C extern as a raw `{ptr,len}`. Runs BEFORE
+    /// (and independent of) the per-target struct classification, so it holds on
+    /// EVERY target — not just the field-walking x86 SysV path (AArch64
+    /// classifies a struct by size and never reaches the field-level check).
+    fn check_c_abi_types(&self, who: &str, params: &[Type], ret: &Type) -> Result<(), String> {
+        self.reject_view_at_c_abi(ret, who)?;
+        for p in params {
+            self.reject_view_at_c_abi(p, who)?;
+        }
+        Ok(())
+    }
+
+    fn reject_view_at_c_abi(&self, t: &Type, who: &str) -> Result<(), String> {
+        match t {
+            Type::Slice(_) => Err(format!(
+                "{who}: a slice cannot cross the C ABI by value (it is a Coil view type); \
+                 for FFI pass a c\"…\"/(ptr i8) and a length"
+            )),
+            Type::Vec(..) => Err(format!(
+                "{who}: a vec cannot cross the C ABI by value; pass a pointer to it"
+            )),
+            // A by-value struct (not a `:bits` integer): a slice/vec FIELD is
+            // forbidden too — recurse, since size-based classification (AArch64)
+            // would otherwise wave it through.
+            Type::Struct(name) => {
+                if let Some(info) = self.structs.get(name) {
+                    if !matches!(info.layout, Layout::Bits(_)) {
+                        for (_, ft) in &info.fields {
+                            self.reject_view_at_c_abi(ft, who)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Type::Array(e, _) => self.reject_view_at_c_abi(e, who),
+            // Pointers (incl. `(ptr (slice T))`) cross fine — only BY-VALUE
+            // slices/vecs are rejected.
+            _ => Ok(()),
+        }
     }
 
     /// The (location, attribute) pairs a `CSig` requires: `sret(T) align N` on a
@@ -1317,6 +1362,9 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Div => self.builder.build_int_unsigned_div(l, r, "div"),
                     BinOp::Rem if signed => self.builder.build_int_signed_rem(l, r, "rem"),
                     BinOp::Rem => self.builder.build_int_unsigned_rem(l, r, "rem"),
+                    // udiv/urem: always unsigned, whatever the operand types.
+                    BinOp::UDiv => self.builder.build_int_unsigned_div(l, r, "udiv"),
+                    BinOp::URem => self.builder.build_int_unsigned_rem(l, r, "urem"),
                     BinOp::And => self.builder.build_and(l, r, "and"),
                     BinOp::Or => self.builder.build_or(l, r, "or"),
                     BinOp::Xor => self.builder.build_xor(l, r, "xor"),
@@ -1972,6 +2020,9 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Shr => l.wrapping_shr(r as u32),
                     BinOp::Div if r != 0 => l / r,
                     BinOp::Rem if r != 0 => l % r,
+                    // udiv/urem fold over the unsigned interpretation of the bits.
+                    BinOp::UDiv if r != 0 => ((l as u64) / (r as u64)) as i64,
+                    BinOp::URem if r != 0 => ((l as u64) % (r as u64)) as i64,
                     _ => return Err("static-assert: divide/mod by zero".to_string()),
                 })
             }

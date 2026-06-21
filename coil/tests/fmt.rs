@@ -82,3 +82,16 @@ fn lines_and_newline() {
     );
     assert_eq!(s, "a\nb\n");
 }
+
+#[test]
+fn print_uhex_covers_the_full_unsigned_range() {
+    // print-uhex (over udiv/urem) prints the unsigned hex of any i64, including
+    // values with the high bit set — unlike print-hex, which assumes non-negative.
+    let (_, out) = build_and_capture(&format!(
+        "{IMPORT}(defn main [] (-> :i64)\n\
+           (do (print-uhex (stdout) -1) (print-char (stdout) 32)\n\
+               (print-uhex (stdout) 0) (print-char (stdout) 32)\n\
+               (print-uhex (stdout) 255) 0))"
+    ));
+    assert_eq!(out, "ffffffffffffffff 0 ff");
+}

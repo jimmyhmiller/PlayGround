@@ -123,3 +123,28 @@ fn out_of_range_literal_is_rejected() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("does not fit in u8"), "got: {err}");
 }
+
+#[test]
+fn udiv_urem_force_unsigned_on_signed_operands() {
+    // idiv/irem dispatch by operand type; udiv/urem ALWAYS interpret the bits as
+    // unsigned, so a signed i64 with the high bit set divides as the large
+    // positive value. -1 (0xFFFFFFFFFFFFFFFF) / 2^56 = 255 unsigned (idiv = 0).
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (udiv -1 72057594037927936))"), 255);
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (idiv -1 72057594037927936))"), 0);
+    assert_eq!(build_and_run("(defn main [] (-> :i64) (urem -1 100))"), 15); // 0xFFFF…FFFF % 100 (signed: -1)
+}
+
+#[test]
+fn idiv_on_unsigned_operands_is_unsigned() {
+    // The existing type-dispatch path: idiv on u64 operands is unsigned.
+    let src = "(defn main [] (-> :i64) (cast :i64 (idiv (cast u64 -1) (cast u64 72057594037927936))))";
+    assert_eq!(build_and_run(src), 255);
+}
+
+#[test]
+fn udiv_urem_static_assert_folds_unsigned() {
+    // const-eval (static-assert) folds udiv/urem over the unsigned interpretation.
+    let src = "(static-assert (icmp-eq (udiv -1 72057594037927936) 255) \"udiv folds unsigned\")\n\
+               (defn main [] (-> :i64) 0)";
+    assert_eq!(build_and_run(src), 0);
+}

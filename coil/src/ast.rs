@@ -82,8 +82,17 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// Division: `idiv` (signed) / `fdiv` (float), dispatched by operand type for
+    /// integers (a `uN` operand divides unsigned).
     Div,
+    /// Remainder: `irem` / `frem`, dispatched by operand type like `Div`.
     Rem,
+    /// Forced UNSIGNED division (`udiv`) — interprets the operand bits as
+    /// unsigned regardless of their type, so an `i64` with the high bit set
+    /// divides as the large positive value (for hex/uint printing, hashing, …).
+    UDiv,
+    /// Forced unsigned remainder (`urem`) — the `UDiv` counterpart.
+    URem,
     And,
     Or,
     Xor,

@@ -585,6 +585,8 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
         "imul" => bin(BinOp::Mul),
         "idiv" => bin(BinOp::Div),
         "irem" => bin(BinOp::Rem),
+        "udiv" => bin(BinOp::UDiv),
+        "urem" => bin(BinOp::URem),
         "iand" => bin(BinOp::And),
         "ior" => bin(BinOp::Or),
         "ixor" => bin(BinOp::Xor),

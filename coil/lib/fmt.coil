@@ -31,6 +31,22 @@
           (let [d (irem n 16)]
             (write-byte w (cast :u8 (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))))))))
 
+; UNSIGNED lowercase hex over the FULL range (udiv/urem interpret the bits as
+; unsigned, so a "negative" i64 / a u64 with the high bit set prints correctly —
+; unlike print-hex, which assumes non-negative). Recurses MSB-first.
+(defn uhex-digits [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-eq n 0)
+      (Ok 0)
+      (match (uhex-digits w (udiv n 16))
+        (Err [e] (Err e))
+        (Ok [_]
+          (let [d (urem n 16)]
+            (write-byte w (cast :u8 (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))))))))
+(defn print-uhex [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-eq n 0)
+      (write-byte w (cast :u8 48))   ; "0"
+      (uhex-digits w n)))
+
 (defn print-bool [(w (ptr Writer)) (b bool)] (-> (Result :i64 IoError))
   (print-str w (if b "true" "false")))
 

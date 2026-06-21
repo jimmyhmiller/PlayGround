@@ -16,7 +16,7 @@
 
 (import "alloc.coil"  :use *)   ; Allocator, raw-*, alloc-slice, malloc-allocator
 (import "result.coil" :use *)   ; Option/Some/None for the allocator's results
-(import "slice.coil"  :use *)   ; Slice / slice-new, for al-slice + al-for
+(import "slice.coil"  :use *)   ; (slice T) / slice-new, for al-slice + al-for
 ; OOM hard-fail routes through alloc's `oom` (a shared defn) rather than a local
 ; `abort` extern, so ArrayList + HashMap can be imported together (Coil doesn't
 ; dedup identical extern decls across modules).

@@ -23,11 +23,20 @@ use crate::gc::type_info::{TypeInfo, VarLenKind};
 /// line, a per-type histogram, and one line per object showing its decoded
 /// fields. Pointers are shown as `#N` referring to the object's line.
 ///
+/// Quiescence is ENFORCED, not assumed: the whole walk runs under a
+/// [`Heap::pause_world`] stop-the-world pause, so no other mutator is allocating
+/// or relocating while we read object memory (a live unjoined thread would
+/// otherwise make this a data race / use-after-free — the same hazard fixed for
+/// the allocation-site profiler). Do not call while already holding `gc_lock`
+/// (e.g. from inside a GC callback): `pause_world` re-takes it and would
+/// deadlock.
+///
 /// # Safety
-/// The heap must be quiescent (no collection in progress and no mutator
-/// mid-allocation); call at a safepoint or at program end. All allocated
-/// objects must be valid.
+/// All allocated objects must be valid (initialized headers, written varlen
+/// counts) — true for any object the mutator has finished allocating.
 pub unsafe fn dump_heap_text(heap: &Heap) -> String {
+    // Read the live heap under STW so no mutator mutates/relocates mid-walk.
+    let _pause = heap.pause_world();
     // Pass 1: collect object pointers in walk order and assign stable ids.
     let mut objs: Vec<(*mut u8, u16)> = Vec::new();
     let mut id_of: HashMap<usize, usize> = HashMap::new();

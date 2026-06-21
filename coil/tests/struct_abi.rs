@@ -218,3 +218,53 @@ fn unsupported_shape_is_a_clear_error_not_a_silent_pointer() {
         "error should explain the missing C ABI, got: {err}"
     );
 }
+
+#[test]
+fn rejects_by_value_slice_at_c_extern_on_all_targets() {
+    // A slice is a Coil view type with no C representation: passing one BY VALUE
+    // to/from a C extern must be REJECTED, not silently crossed as {ptr,len}. The
+    // guard is target-independent — verify the host (arm64) AND x86 SysV.
+    let param = r#"(module app)
+        (extern takes_slice :cc c [(slice u8)] (-> :i64))
+        (defn main [] (-> :i64) 0)"#;
+    let ret = r#"(module app)
+        (extern makes_slice :cc c [] (-> (slice u8)))
+        (defn main [] (-> :i64) 0)"#;
+    for src in [param, ret] {
+        let host = coil::emit_ir(src).expect_err("host must reject a by-value slice at a C extern");
+        assert!(host.contains("slice cannot cross the C ABI"), "host: {host}");
+        let x86 = coil::emit_ir_for(src, "x86_64-apple-macosx11.0.0")
+            .expect_err("x86 must reject a by-value slice at a C extern");
+        assert!(x86.contains("slice cannot cross the C ABI"), "x86: {x86}");
+    }
+}
+
+#[test]
+fn rejects_slice_field_of_byvalue_struct_at_c_extern_on_aarch64() {
+    // A slice nested in a by-value struct field would be waved through by AArch64's
+    // size-based classification; the pre-classification guard catches it on the host.
+    let src = r#"(module app)
+        (defstruct Wrap [(s (slice u8)) (n i64)])
+        (extern takes_wrap :cc c [Wrap] (-> :i64))
+        (defn main [] (-> :i64) 0)"#;
+    let err = coil::emit_ir(src).expect_err("a slice field must be rejected at the C boundary");
+    assert!(err.contains("slice cannot cross the C ABI"), "got: {err}");
+}
+
+#[test]
+fn rejects_by_value_vec_at_c_extern() {
+    let src = r#"(module app)
+        (extern takes_vec :cc c [(vec f32 4)] (-> :i64))
+        (defn main [] (-> :i64) 0)"#;
+    let err = coil::emit_ir(src).expect_err("a by-value vec must be rejected at the C boundary");
+    assert!(err.contains("vec cannot cross the C ABI"), "got: {err}");
+}
+
+#[test]
+fn pointer_to_slice_crosses_c_extern_fine() {
+    // Only BY-VALUE views are rejected; a pointer to a slice is a plain pointer.
+    let src = r#"(module app)
+        (extern takes_slice_ptr :cc c [(ptr (slice u8)) i64] (-> :i64))
+        (defn main [] (-> :i64) 0)"#;
+    assert!(coil::emit_ir(src).is_ok(), "a pointer to a slice must be allowed across C");
+}
