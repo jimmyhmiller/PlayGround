@@ -42,3 +42,20 @@ ret i64 %old"))
 "%r = cmpxchg ptr $0, i64 $1, i64 $2 seq_cst seq_cst
 %v = extractvalue { i64, i1 } %r, 0
 ret i64 %v"))
+
+; ---- pointer atomics: generic over T (one llvm-ir each, type-agnostic thanks to LLVM
+; opaque pointers). These are the atomics lock-free POINTER structures actually want —
+; no int<->ptr round-trip — closing the (ptr i64)-only + pointer-CAS friction.
+(defn atomic-load-ptr [T] [(p (ptr (ptr T)))] (-> (ptr T))
+  (llvm-ir (ptr T) [p]
+"%v = load atomic ptr, ptr $0 seq_cst, align 8
+ret ptr %v"))
+(defn atomic-store-ptr [T] [(p (ptr (ptr T))) (v (ptr T))] (-> i64)
+  (llvm-ir i64 [p v]
+"store atomic ptr $1, ptr $0 seq_cst, align 8
+ret i64 0"))
+(defn atomic-cas-ptr [T] [(p (ptr (ptr T))) (expected (ptr T)) (desired (ptr T))] (-> (ptr T))
+  (llvm-ir (ptr T) [p expected desired]
+"%r = cmpxchg ptr $0, ptr $1, ptr $2 seq_cst seq_cst
+%v = extractvalue { ptr, i1 } %r, 0
+ret ptr %v"))

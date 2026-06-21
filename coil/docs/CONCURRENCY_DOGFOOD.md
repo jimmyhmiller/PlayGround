@@ -40,12 +40,16 @@ reclamation — explicitly out of scope; this is a bounded demonstration, not th
 
 ## Friction surfaced (minor, no core change needed)
 
-- **Pointer-CAS via int↔ptr.** `atomic-cas` is on `(ptr i64)`, so the lock-free stack
-  treats node addresses as `i64` (`(cast i64 (cast (ptr i8) (index pool k)))`). Works,
-  but a generic `atomic-cas` over `(ptr (ptr T))` would be tidier — a friction-driven
-  library addition later, not a core change.
-- **Atomics are `(ptr i64)`-only** (not generic over width / `(ptr T)`). Sufficient
-  here; a generic/over-widths version is a later library lean-in if a program needs it.
+- **Pointer-CAS via int↔ptr / atomics beyond `(ptr i64)`** — ADDRESSED (consolidation
+  polish): added generic POINTER atomics `atomic-load-ptr` / `atomic-store-ptr` /
+  `atomic-cas-ptr [T]` over `(ptr (ptr T))` (one `llvm-ir` each, type-agnostic via LLVM
+  opaque pointers) — the atomics lock-free pointer structures actually want, with a
+  real-pointer data model (no address-as-`i64`). Unit-tested. The i64 `lockfree.coil`
+  is left as-is (signed off, the i64 atomics' demonstration). REMAINING tiny gap: Coil's
+  `icmp` is integer-only, so pointer equality goes via `(cast i64 p)` — a direct
+  pointer `icmp` is a small ergonomic primitive, deferred (the cast works today).
+- Width-generic INT atomics (`i32` etc.) remain a friction-driven follow-up (best as a
+  `defatomic` macro generating per-type ops, like `defmmio-reg`) — no current consumer.
 - The reference / `(mut)` place model needed NOTHING special for shared memory: a shared
   counter is just a `(ptr i64)` passed to each thread; threading didn't perturb it.
 

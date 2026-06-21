@@ -17,6 +17,26 @@ fn n_threads_atomic_increment_is_race_free() {
 }
 
 #[test]
+fn generic_pointer_atomics_load_store_cas() {
+    // lib/atomic.coil's pointer atomics (generic over T via LLVM opaque pointers) — the
+    // atomics lock-free POINTER structures want, with a real-pointer data model (no
+    // address-as-i64). Comparison still goes via cast-to-i64 (Coil's icmp is integer-
+    // only — a tiny separate ergonomic gap, not a missing capability).
+    let src = "(module app)\n\
+        (import \"lib/atomic.coil\" :use *)\n\
+        (defstruct Node [(val i64) (next (ptr Node))])\n\
+        (defn main [] (-> i64)\n\
+          (let [cell (alloc-stack (ptr Node)) n (alloc-stack Node)]\n\
+            (store! cell (cast (ptr Node) 0))\n\
+            (store! (field n val) 7)\n\
+            (let [old (atomic-cas-ptr [Node] cell (cast (ptr Node) 0) n)]\n\
+              (if (icmp-eq (cast i64 old) 0)                       ; cas succeeded (was null)\n\
+                  (load (field (atomic-load-ptr [Node] cell) val)) ; head now n -> 7\n\
+                  99))))";
+    assert_eq!(build_and_run(src), 7);
+}
+
+#[test]
 fn lock_free_stack_loses_no_pushes_under_contention() {
     // Stage 2: a genuinely lock-free (Treiber) stack via atomic-cas — NO mutex. 4
     // threads concurrently push 1000 disjoint pre-allocated nodes each (contending on
