@@ -173,11 +173,10 @@ fn fin_to_nat_called_with_inferred_implicit() {
 }
 
 #[test]
-fn phase_1b_inductive_lt_constructs_with_explicit_indices() {
+fn phase_1b_inductive_lt_constructs_explicit_and_implicit() {
     // PHASE 1b (Acc step 1): an INDUCTIVE `Lt` whose proofs can be constructed and
-    // ELIMINATED is the natWf prerequisite (a postulated `Lt` can't be analyzed). The
-    // inductive-relation MACHINERY works — with EXPLICIT indices: `ltS(0,1,ltZ(0))`
-    // builds `Lt 1 2`.
+    // ELIMINATED is the natWf prerequisite (a postulated `Lt` can't be analyzed).
+    // EXPLICIT indices: `ltS(0,1,ltZ(0))` builds `Lt 1 2`.
     let explicit = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
         enum Lt : Nat -> Nat -> Type {\n\
           ltZ : (n : Nat) -> Lt Zero (Succ n),\n\
@@ -186,19 +185,19 @@ fn phase_1b_inductive_lt_constructs_with_explicit_indices() {
         p12 : Lt (Succ Zero) (Succ (Succ Zero))\nfn p12() { ltS(Zero, Succ(Zero), ltZ(Zero)) }\n";
     assert!(check_program(explicit).is_ok(), "explicit Lt construction must work: {:?}", check_program(explicit).err());
 
-    // KNOWN GAP (documented in PHASE_1B_PLAN.md): IMPLICIT inference for an inductive-
-    // relation constructor does NOT yet solve the implicits from the EXPECTED type's
-    // indices — even `ltZ : {0 n} -> Lt Zero (Succ n)` against `Lt Zero (Succ Zero)`
-    // fails ("cannot infer implicit argument"). This makes natWf verbose (every proof
-    // needs explicit indices) until implicit-from-result-index inference lands. We
-    // PIN the current behavior so the gap is visible and we notice when it's fixed.
+    // gap (i) NOW FIXED — IMPLICIT inference solves a relation constructor's implicits
+    // from the EXPECTED type's index spine (reconciling the packed `VNatLit` literal
+    // with the `Succ`-spine in `solve`). `ltZ : {0 n} -> Lt Zero (Succ n)` against
+    // `Lt Zero (Succ Zero)` solves `n = Zero`; `ltS(ltZ) : Lt 1 2` solves both. So
+    // proofs read clean (no explicit indices) — natWf no longer needs them everywhere.
     let implicit = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
         enum Lt : Nat -> Nat -> Type {\n\
           ltZ : {0 n : Nat} -> Lt Zero (Succ n),\n\
           ltS : {0 m : Nat} -> {0 n : Nat} -> Lt m n -> Lt (Succ m) (Succ n),\n\
         }\n\
-        p01 : Lt Zero (Succ Zero)\nfn p01() { ltZ }\n";
-    assert!(check_program(implicit).is_err(), "implicit-from-result-index inference is a KNOWN GAP (should still fail until fixed)");
+        p01 : Lt Zero (Succ Zero)\nfn p01() { ltZ }\n\
+        p12 : Lt (Succ Zero) (Succ (Succ Zero))\nfn p12() { ltS(ltZ) }\n";
+    assert!(check_program(implicit).is_ok(), "implicit-from-result-index inference must now work: {:?}", check_program(implicit).err());
 }
 
 #[test]

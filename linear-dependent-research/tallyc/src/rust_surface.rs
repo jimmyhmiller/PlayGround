@@ -1369,6 +1369,14 @@ fn solve(holes: &mut Vec<Option<Value>>, pat: &Value, target: &Value) {
             }
         }
         (Value::VSuc(a), Value::VSuc(b)) => solve(holes, a, b),
+        // reconcile the two `Nat` representations: a constructor's result index
+        // `Succ n` (with `n` a hole) evaluates to `VSuc(hole)`, but a literal like
+        // `Succ Zero` is PACKED by the evaluator into `VNatLit(1)`. Unify `Succ`-spine
+        // against the packed literal so implicit indices solve from the expected type
+        // (e.g. `ltZ : {0 n} -> Lt Zero (Succ n)` against `Lt Zero (Succ Zero)` ⇒
+        // `n = Zero`). Exact (peels one `Succ` per step); never over-infers.
+        (Value::VSuc(a), Value::VNatLit(k)) if *k > 0 => solve(holes, a, &Value::VNatLit(k - 1)),
+        (Value::VNatLit(k), Value::VSuc(b)) if *k > 0 => solve(holes, &Value::VNatLit(k - 1), b),
         (Value::VNeu(n1), Value::VNeu(n2)) => solve_neu(holes, n1, n2),
         _ => {}
     }
