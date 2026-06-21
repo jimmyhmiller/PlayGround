@@ -385,7 +385,7 @@ pub fn compile_for<'ctx>(
         } else {
             let p: Vec<BasicMetadataTypeEnum> =
                 e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
-            let fn_ty = cg.basic_ty(&e.ret).fn_type(&p, e.variadic);
+            let fn_ty = cg.fn_type_with_ret(&e.ret, &p, e.variadic);
             let fv = cg.module.add_function(&e.name, fn_ty, None);
             fv.set_call_conventions(cc_id);
             fv
@@ -524,6 +524,10 @@ impl<'ctx> Cg<'ctx> {
             },
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Ref(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
+            // `void` has no value representation — it appears only as a return
+            // type, handled directly in `fn_type_types`/the return/call paths; the
+            // checker forbids it as a parameter/field/value, so it never lands here.
+            Type::Void => unreachable!("void is a return type only; not a value type"),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
         }
     }
@@ -535,7 +539,22 @@ impl<'ctx> Cg<'ctx> {
 
     fn fn_type_types(&self, params: &[Type], ret: &Type) -> FunctionType<'ctx> {
         let p: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| self.basic_ty(t).into()).collect();
-        self.basic_ty(ret).fn_type(&p, false)
+        self.fn_type_with_ret(ret, &p, false)
+    }
+
+    /// Build a function type, lowering a `void` return to the LLVM `void` type
+    /// (which `basic_ty` deliberately can't produce — void isn't a value type).
+    fn fn_type_with_ret(
+        &self,
+        ret: &Type,
+        params: &[BasicMetadataTypeEnum<'ctx>],
+        variadic: bool,
+    ) -> FunctionType<'ctx> {
+        if matches!(ret, Type::Void) {
+            self.ctx.void_type().fn_type(params, variadic)
+        } else {
+            self.basic_ty(ret).fn_type(params, variadic)
+        }
     }
 
     /// If `t` is a real (C-layout) struct passed by value across the C boundary —
@@ -980,7 +999,7 @@ impl<'ctx> Cg<'ctx> {
 
         // If the body diverged, the block already has a terminator — no `ret`.
         if !self.block_terminated() {
-            self.emit_c_return(function, sig, last)?;
+            self.emit_c_return(function, sig, &f.ret, last)?;
         }
         Ok(())
     }
@@ -993,8 +1012,16 @@ impl<'ctx> Cg<'ctx> {
         &self,
         function: FunctionValue<'ctx>,
         sig: Option<&CSig<'ctx>>,
+        ret: &Type,
         last: Tv<'ctx>,
     ) -> Result<(), String> {
+        // A `(-> void)` function: the body ran for effect; discard its last value
+        // and return void. (Checked on the COIL return type — an `sret` struct
+        // return is ALSO an LLVM void function, but must NOT take this path.)
+        if matches!(ret, Type::Void) {
+            self.builder.build_return(None).map_err(le)?;
+            return Ok(());
+        }
         let sig = match sig {
             Some(s) if s.sret.is_some() || s.ret_direct.is_some() => s,
             _ => {
@@ -1496,6 +1523,11 @@ impl<'ctx> Cg<'ctx> {
                 let meta: Vec<_> = argtv.iter().map(|(v, _)| (*v).into()).collect();
                 let cs = self.builder.build_call(callee, &meta, "call").map_err(le)?;
                 cs.set_call_convention(callee.get_call_conventions());
+                // A `(-> void)` call yields no value; the checker forbids using its
+                // result, so a placeholder labels the (statement-position) slot.
+                if matches!(ret_ty, Type::Void) {
+                    return Ok((self.ctx.i64_type().const_zero().into(), Type::Void));
+                }
                 let v = cs
                     .try_as_basic_value()
                     .left()
@@ -2339,6 +2371,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
         Type::Never => unreachable!("Never type has no size"),
+        Type::Void => unreachable!("void has no size (return type only)"),
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
         Type::Float(bits) => (*bits as u64) / 8,
         Type::Bool => 1,

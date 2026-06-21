@@ -227,8 +227,11 @@ pub fn check(program: &Program) -> Result<Program, String> {
             validate_type(&p.ty, &cx, &tps)
                 .map_err(|e| format!("function '{}' param '{}': {e}", f.name, p.name))?;
         }
-        validate_type(&f.ret, &cx, &tps)
-            .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
+        // `void` is a valid return type (validate_type rejects it elsewhere).
+        if f.ret != Type::Void {
+            validate_type(&f.ret, &cx, &tps)
+                .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
+        }
 
         // Inside the body, a struct parameter is an (immutable) reference and a
         // `(mut T)` parameter a mutable one; scalars/sums/pointers are unchanged.
@@ -260,7 +263,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 body.push(ee);
             }
         }
-        if n == 0 && f.ret != Type::Int(64, true) {
+        if n == 0 && f.ret != Type::Int(64, true) && f.ret != Type::Void {
             return Err(format!(
                 "function '{}': body has type i64 but the declared return type is {}",
                 f.name,
@@ -321,6 +324,9 @@ pub fn check(program: &Program) -> Result<Program, String> {
 fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String> {
     match t {
         Type::Never => Ok(()),   // synthesized only; not user-writable
+        // `void` is ONLY a return type — never a parameter, field, or component
+        // type. Return positions validate it separately (skipping this).
+        Type::Void => Err("'void' is only valid as a return type".to_string()),
         Type::Int(..) => Ok(()),
         Type::Float(..) | Type::Bool => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
@@ -675,6 +681,13 @@ fn synth(
             let mut new_binds = Vec::with_capacity(binds.len());
             for (name, mutable, val) in binds {
                 let (ve, vt) = synth(val, None, env, cx, tps, fname)?;
+                // A `(-> void)` call yields no value to bind (no-silent-wrong).
+                if vt == Type::Void {
+                    return Err(format!(
+                        "in '{fname}': cannot bind '{name}' to a void value (a (-> void) \
+                         call yields nothing)"
+                    ));
+                }
                 match &vt {
                     // binding to an existing place is an *alias* (no new storage);
                     // it's immutable unless asked for `(mut name)`, and you can't
@@ -1694,7 +1707,7 @@ fn replace_pointee(place: &Type, new: Type) -> Type {
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
         Type::Never => Type::Never,
-        Type::Int(..) | Type::Float(..) | Type::Bool => t.clone(),
+        Type::Int(..) | Type::Float(..) | Type::Bool | Type::Void => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
         Type::Array(e, n) => Type::Array(Box::new(subst_apply(e, subst)), *n),
@@ -1893,6 +1906,19 @@ fn coerce(
     if &et == target {
         return Ok(e);
     }
+    // A `void`-returning function's body runs for effect: any expression is
+    // accepted in the return position (its value, if any, is discarded). This is
+    // the ONLY place `target == Void` (params/fields can't be void).
+    if target == &Type::Void {
+        return Ok(e);
+    }
+    // Forbid USING a void value where a value is needed — a call to a
+    // `(-> void)` function yields nothing (no-silent-wrong).
+    if et == Type::Void {
+        return Err(format!(
+            "in '{fname}': {what} uses a void value (a (-> void) call yields nothing)"
+        ));
+    }
     // A divergent (Never-typed) expression — break/continue/return-from, or a
     // break-less loop — has no value and stands in for any type.
     if et == Type::Never {
@@ -2002,6 +2028,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 fn ty_str(t: &Type) -> String {
     match t {
         Type::Never => "!".to_string(),
+        Type::Void => "void".to_string(),
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),
         Type::Bool => "bool".to_string(),

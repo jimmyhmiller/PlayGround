@@ -343,6 +343,7 @@ fn type_to_sexp(t: &Type) -> Sexp {
         Type::Int(bits, signed) => Sexp::sym(format!("{}{bits}", if *signed { "i" } else { "u" })),
         Type::Float(bits) => Sexp::sym(format!("f{bits}")),
         Type::Bool => Sexp::sym("bool"),
+        Type::Void => Sexp::sym("void"),
         Type::Ptr(p) => list(vec![Sexp::sym("ptr"), type_to_sexp(p)]),
         Type::Ref(true, p) => list(vec![Sexp::sym("mut"), type_to_sexp(p)]),
         Type::Ref(false, p) => list(vec![Sexp::sym("ref"), type_to_sexp(p)]),

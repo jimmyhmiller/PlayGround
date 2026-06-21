@@ -516,6 +516,7 @@ pub fn prim_type(name: &str) -> Result<Type, String> {
         "f32" => Ok(Type::Float(32)),
         "f64" => Ok(Type::Float(64)),
         "bool" => Ok(Type::Bool),
+        "void" => Ok(Type::Void),   // valid only as a return type (checked later)
         _ => int_type(name),
     }
 }

@@ -12,8 +12,7 @@
 
 ; ---- externs (real libc / libm) --------------------------------------------
 ; void qsort(void* base, size_t n, size_t size, int(*cmp)(const void*,const void*))
-; (no void return type yet — declared i32 and ignored; the call sequence matches).
-(extern qsort  :cc c [(ptr i8) i64 i64 (fnptr c [(ptr i8) (ptr i8)] i32)] (-> i32))
+(extern qsort  :cc c [(ptr i8) i64 i64 (fnptr c [(ptr i8) (ptr i8)] i32)] (-> void))
 (extern sqrt   :cc c [f64] (-> f64))
 (extern pow    :cc c [f64 f64] (-> f64))
 (extern strtol :cc c [(ptr i8) (ptr i8) i32] (-> i64))

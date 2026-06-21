@@ -14,6 +14,12 @@ pub enum Type {
     Float(u32),
     /// A boolean (`i1`). The result of comparisons; the condition of `if`.
     Bool,
+    /// The unit/`void` return type: a function that yields NO value (an LLVM
+    /// `void` return). Only valid as a return type; a call to a `(-> void)`
+    /// function produces a void value that CANNOT be used where a value is needed
+    /// (the checker hard-errors on use). For void C functions (e.g. `qsort`) and
+    /// Coil procedures run for effect.
+    Void,
     /// A pointer to a value of the pointee type. Pointers are region-less (a
     /// pointer is a pointer, à la Zig/C); where the memory came from is the
     /// `alloc` operation's concern, not the type's.

@@ -209,6 +209,7 @@ impl<'a> Mono<'a> {
     fn resolve_ty(&mut self, t: &Type, map: &Subst) -> Result<Type, String> {
         Ok(match t {
             Type::Never => Type::Never,
+            Type::Void => Type::Void,
             Type::Int(b, s) => Type::Int(*b, *s),
             Type::Float(b) => Type::Float(*b),
             Type::Bool => Type::Bool,
@@ -480,6 +481,7 @@ fn mangle(name: &str, args: &[Type]) -> String {
 fn type_key(t: &Type) -> String {
     match t {
         Type::Never => "never".to_string(),
+        Type::Void => "void".to_string(),
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),
         Type::Bool => "bool".to_string(),

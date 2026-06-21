@@ -220,7 +220,7 @@ fn qualify_type(
             }
             qualify_type(ret, m, imps, table, tps, exports)?;
         }
-        Type::Int(..) | Type::Float(..) | Type::Bool => {}
+        Type::Int(..) | Type::Float(..) | Type::Bool | Type::Void => {}
     }
     Ok(())
 }

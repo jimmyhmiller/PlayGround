@@ -29,14 +29,17 @@ correctly *and* sqrt/pow/strtol/div all agree on 42):
 
 ## Friction surfaced
 
-1. **No `void` return type for externs.** `qsort` returns `void`; Coil has no void/unit
-   return, so it's declared `(-> i32)` and the (garbage) result ignored. The CALL
-   sequence is identical (args passed correctly, qsort runs), so this is harmless in
-   practice — but it's imprecise and a real gap: a true `void`/unit return type (or a
-   `(-> )`/`(-> void)` spelling that emits an LLVM `void` return and forbids using the
-   result) would make void C functions first-class. Small, core-appropriate (it's a
-   type-system primitive, not a macro-able feature) — the next candidate if C-interop
-   ergonomics matter.
+1. **No `void` return type for externs.** `qsort` returns `void`; Coil had no
+   void/unit return, so it was first declared `(-> i32)` with the garbage result
+   ignored — harmless by ABI-luck but imprecise.
+   — **FIXED (Type::Void, a justified minimal CORE primitive — it's a type-system
+   concept, inherently non-macro-able, like the loop primitives / Type::Slice):
+   `(-> void)` emits an LLVM `void` return; using a void result is a HARD ERROR
+   (arithmetic operand, let-binding, value return — no-silent-wrong); `void` is
+   rejected outside the return position (param/field/component). cinterop's qsort is
+   now `(-> void)`. Caught a real regression building it — the sret struct-return path
+   is ALSO an LLVM void function, so the void check keys on the COIL return type, not
+   the LLVM one (verify-before-claim: the full suite flagged 22 struct-return breaks).
 
 (No other friction — `extern` with a `fnptr` param, `fnptr-of` a Coil fn for a C
 callback, float/struct/cstring marshalling all worked.)
