@@ -1443,14 +1443,22 @@ fn own_spine(t: &Term) -> Option<&Term> {
     None
 }
 
+/// The probe datatype name standing in for a parameter when computing its variance.
+/// It contains SPACES, so it is UN-LEXABLE as a single identifier — no user/library
+/// datatype can ever be named this, so the variance check is soundness-by-construction
+/// (not relying on a user-unreachable-by-convention `__`-sentinel that a user could in
+/// fact declare). The name appears only inside `param_covariant`'s probe substitution +
+/// the `strictly_positive` it drives; it is never looked up in the signature.
+const SP_PROBE: &str = "<positivity probe>";
+
 /// Substitute the datatype-parameter at de Bruijn `base` (at depth 0) with a fresh
-/// probe datatype `__sp_probe__`, tracking binder depth. Used to compute a parameter's
+/// probe datatype `SP_PROBE`, tracking binder depth. Used to compute a parameter's
 /// variance by reusing `strictly_positive`: a datatype is strictly-positive in a
 /// parameter iff the probe (standing in for that parameter) occurs only positively.
 fn subst_param_with_probe(t: &Term, base: usize) -> Term {
     map_vars(t, 0, &|i, depth| {
         if i == base + depth {
-            Term::Data("__sp_probe__".to_string(), vec![])
+            Term::Data(SP_PROBE.to_string(), vec![])
         } else {
             Term::Var(i)
         }
@@ -1492,7 +1500,7 @@ fn param_covariant(
             // `k + (np-1-i)` from this field's base.
             let base = k + (np - 1 - i);
             let probed = subst_param_with_probe(fty, base);
-            if !strictly_positive_seen("__sp_probe__", &probed, sig, seen) {
+            if !strictly_positive_seen(SP_PROBE, &probed, sig, seen) {
                 covariant = false;
                 break 'ctors;
             }

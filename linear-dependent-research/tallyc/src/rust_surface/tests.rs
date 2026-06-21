@@ -354,6 +354,22 @@ fn phase_a_eliminator_joins_branch_usages() {
 }
 
 #[test]
+fn phase_a_positivity_probe_is_unforgeable() {
+    // DEFENSE-IN-DEPTH (soundness-by-construction): the variance check's probe datatype
+    // is the UN-LEXABLE name "<positivity probe>" (contains spaces), so no user/library
+    // datatype can ever collide with it. A user even declaring `__sp_probe__` (the old
+    // convention-only sentinel) has NO effect on the variance check: recursive Own still
+    // accepts, and a contravariant nesting is still rejected.
+    const P: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+        enum __sp_probe__ { mk : __sp_probe__ }\n";
+    let ok = format!("{P}struct Node {{ next : Opt (Own Node) }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&ok).is_ok(), "a user `__sp_probe__` must not break recursive-Own: {:?}", check_program(&ok).err());
+    let bad = format!("{P}enum Weird (a:Type) {{ w : (a -> Nat) -> Weird a }}\nstruct Node {{ x : Weird Node }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&bad).is_err(), "a user `__sp_probe__` must not let contravariant nesting through");
+}
+
+#[test]
 fn phase_a_variance_aware_nested_positivity() {
     // PHASE A (a): strict positivity is now VARIANCE-AWARE + NESTED, with `Own` as a
     // positivity-transparent pointer wrapper — so recursive `Own` structures (linked
