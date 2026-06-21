@@ -1415,6 +1415,9 @@ fn value_has_hole(v: &Value) -> bool {
             Neutral::NElim(_, m, ms, sc) => {
                 value_has_hole(m) || ms.iter().any(value_has_hole) || neu(sc)
             }
+            Neutral::NCase(_, m, ms, sc) => {
+                value_has_hole(m) || ms.iter().any(value_has_hole) || neu(sc)
+            }
             Neutral::NNatCase(p, z, s, sc) => {
                 value_has_hole(p) || value_has_hole(z) || value_has_hole(s) || neu(sc)
             }

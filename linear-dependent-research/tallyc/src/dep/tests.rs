@@ -302,6 +302,38 @@ fn cbv_let_supports_dependent_body_type() {
 }
 
 #[test]
+fn positivity_sees_through_case_hiding_a_negative_occurrence() {
+    // E3 RED-TEAM for the new non-recursive `Term::Case`: a NEGATIVE occurrence
+    // (`Bad → Bad`) hidden in a `Case`'s method, scrutinee, OR motive must be REJECTED.
+    // `Case` carries subterms and REDUCES on a concrete constructor (`vcase`), so a
+    // family hidden in it can surface as a negative occurrence after reduction — exactly
+    // the NatCase/Let class. If `occurs` failed to traverse `Case`, the hidden `Bad→Bad`
+    // would slip past strict positivity ⇒ Curry's paradox. (`occurs` is exhaustive with
+    // no `_ =>`, so a future subterm-bearing variant is a COMPILE ERROR until handled.)
+    let bad = Data("Bad".into(), vec![]);
+    let neg = Pi(Omega, b(bad.clone()), b(bad.clone())); // Bad → Bad (a negative occurrence)
+    let motive0 = Lam(b(Type(0))); // λ_. Type 0
+    // (1) hidden in a Case METHOD ⇒ field `(Case … [Bad→Bad,…] …) → Bad` has Bad negative.
+    let in_method = Case("Nat".into(), b(motive0.clone()), vec![neg.clone(), neg.clone()], b(NatLit(0)));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(in_method), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Case method must be rejected"
+    );
+    // (2) hidden in the Case SCRUTINEE.
+    let in_scrut = Case("Nat".into(), b(motive0.clone()), vec![NatLit(0), NatLit(0)], b(neg.clone()));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(in_scrut), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Case scrutinee must be rejected"
+    );
+    // (3) hidden in the Case MOTIVE.
+    let in_motive = Case("Nat".into(), b(neg.clone()), vec![NatLit(0), NatLit(0)], b(NatLit(0)));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(in_motive), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Case motive must be rejected"
+    );
+}
+
+#[test]
 fn occurs_finds_a_negative_occurrence_through_every_reducing_construct() {
     // PERMANENT REGRESSION (ported from the kernel reviewer's sibling-hunt): a
     // negative `Bad → Bad` hidden behind ANY subterm-bearing construct must be

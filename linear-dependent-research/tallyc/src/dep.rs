@@ -83,6 +83,17 @@ pub enum Term {
     /// `methods` is one per constructor, in declaration order. The parameters
     /// and indices are recovered from the scrutinee's type.
     Elim(String, Box<Term>, Vec<Term>, Box<Term>),
+    /// `Case(D, motive, methods, scrutinee)` — a NON-RECURSIVE general case-split
+    /// (the general-datatype analog of `NatCase`): dispatch on the scrutinee's
+    /// constructor and bind its fields into the matched method, with NO induction
+    /// hypothesis and NO recursion. A method's telescope is the constructor's ARGS
+    /// only (`λargs. body`), never the args-then-IHs of `Elim`. Used as the body of
+    /// a `Fix` (general recursion on a boxed/heap structure), where recursion is
+    /// explicit via the `Fix` self-binder — so dispatch (`Case`) and recursion
+    /// (`Fix`) are cleanly separated, avoiding `Elim`'s implicit-IH exponential
+    /// blow-up. `Case` REDUCES on a concrete constructor (terminating); a `%partial`
+    /// `Fix` wrapping it stays opaque to the checker.
+    Case(String, Box<Term>, Vec<Term>, Box<Term>),
     /// an opaque POSTULATE (a typed constant with no reduction rule), looked up
     /// in the Signature. Used to embed the memory primitives (`Own`, `alloc`, …)
     /// in the calculus so they are checked by the QTT core.
@@ -143,6 +154,8 @@ pub enum Neutral {
     NFix(Box<Term>, Box<Term>),
     /// elim stuck on a neutral scrutinee: data name, motive, methods, scrutinee.
     NElim(String, Box<Value>, Vec<Value>, Box<Neutral>),
+    /// a `Case` (non-recursive general case-split) stuck on a neutral scrutinee.
+    NCase(String, Box<Value>, Vec<Value>, Box<Neutral>),
     /// an opaque postulate constant.
     NConst(String),
 }
@@ -293,6 +306,11 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             let vm = eval(sig, env, motive);
             let vmeth: Vec<Value> = methods.iter().map(|m| eval(sig, env, m)).collect();
             velim(sig, data, &vm, &vmeth, eval(sig, env, scrut))
+        }
+        Term::Case(data, motive, methods, scrut) => {
+            let vm = eval(sig, env, motive);
+            let vmeth: Vec<Value> = methods.iter().map(|m| eval(sig, env, m)).collect();
+            vcase(sig, data, &vm, &vmeth, eval(sig, env, scrut))
         }
         Term::Const(c) => Value::VNeu(Neutral::NConst(c.clone())),
         Term::Ann(e, _) => eval(sig, env, e),
@@ -494,6 +512,46 @@ fn velim(
     }
 }
 
+/// Reduce a NON-RECURSIVE case-split (`Case`): dispatch on the scrutinee's
+/// constructor and apply the matched method to the constructor's ARGS only — NO
+/// induction hypotheses, NO recursion (the `Elim`/`velim` IH loop is absent). This is
+/// what makes `Case` the clean dispatch primitive inside a `Fix`: recursion is
+/// explicit via the `Fix` self-binder, never the implicit structural IH. Reduces on a
+/// concrete constructor (terminating); stays stuck (`NCase`) on a neutral scrutinee.
+fn vcase(
+    sig: &Rc<Signature>,
+    data: &str,
+    motive: &Value,
+    methods: &[Value],
+    scrut: Value,
+) -> Value {
+    match scrut {
+        Value::VConstr(cname, vargs) => {
+            let decl = sig.data(data).expect("case on an undeclared family");
+            let (cidx, ctor) = decl
+                .ctors
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.name == cname)
+                .expect("constructor not in this family");
+            let p = decl.params.len();
+            let mut result = methods[cidx].clone();
+            // apply the constructor's arguments — and NOTHING else (no IHs).
+            for (i, _) in ctor.args.iter().enumerate() {
+                result = vapp(result, vargs[p + i].clone());
+            }
+            result
+        }
+        Value::VNeu(nu) => Value::VNeu(Neutral::NCase(
+            data.to_string(),
+            Box::new(motive.clone()),
+            methods.to_vec(),
+            Box::new(nu),
+        )),
+        _ => unreachable!("case on a non-data value (ill-typed term reached eval)"),
+    }
+}
+
 fn quote(lvl: usize, v: &Value) -> Term {
     match v {
         Value::VType(i) => Term::Type(*i),
@@ -559,6 +617,12 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
         // a `Fix` is closed and opaque — re-emit it verbatim.
         Neutral::NFix(ty, body) => Term::Fix(ty.clone(), body.clone()),
         Neutral::NElim(data, m, methods, scrut) => Term::Elim(
+            data.clone(),
+            Box::new(quote(lvl, m)),
+            methods.iter().map(|x| quote(lvl, x)).collect(),
+            Box::new(quote_neu(lvl, scrut)),
+        ),
+        Neutral::NCase(data, m, methods, scrut) => Term::Case(
             data.clone(),
             Box::new(quote(lvl, m)),
             methods.iter().map(|x| quote(lvl, x)).collect(),
@@ -636,6 +700,14 @@ fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
         Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(|a| go(a)).collect()),
         Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(|a| go(a)).collect()),
         Term::Elim(data, m, methods, sc) => Term::Elim(
+            data.clone(),
+            Box::new(go(m)),
+            methods.iter().map(|x| go(x)).collect(),
+            Box::new(go(sc)),
+        ),
+        // `Case` mirrors `Elim`: motive/methods/scrutinee at the same depth (each
+        // method is a `λargs.…`, whose binders are handled by the `Lam` case).
+        Term::Case(data, m, methods, sc) => Term::Case(
             data.clone(),
             Box::new(go(m)),
             methods.iter().map(|x| go(x)).collect(),
@@ -778,7 +850,18 @@ fn ih_type(
 
 /// The method type for one constructor:
 ///   Π(args). Π(IH for each recursive arg). motive result-idxs (c params args)
-fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive_tm: &Term) -> Term {
+/// The method type for one constructor. With `with_ih = true` it is the ELIM method
+/// telescope `Π(args). Π(IHs). motive idxs (c args)` (an induction hypothesis per
+/// recursive arg). With `with_ih = false` it is the CASE method telescope
+/// `Π(args). motive idxs (c args)` — the constructor's args only, NO IHs (for the
+/// non-recursive `Case`).
+fn method_ty_tm(
+    decl: &DataDecl,
+    ctor: &Constructor,
+    sparam_tms: &[Term],
+    motive_tm: &Term,
+    with_ih: bool,
+) -> Term {
     let p = decl.params.len();
     let data = &decl.name;
     let rec_args: Vec<usize> = ctor
@@ -849,22 +932,26 @@ fn method_ty_tm(decl: &DataDecl, ctor: &Constructor, sparam_tms: &[Term], motive
         i: usize,
         bd: &mut Vec<usize>,
         cur: usize,
+        with_ih: bool,
     ) -> Term {
         let p = decl.params.len();
         if i < ctor.args.len() {
             let (mult, aty) = &ctor.args[i];
             let dom = map_decl(aty, p, sparam_tms, bd, cur);
             bd.push(cur);
-            let body = args(decl, ctor, sparam_tms, motive_tm, rec_args, i + 1, bd, cur + 1);
+            let body = args(decl, ctor, sparam_tms, motive_tm, rec_args, i + 1, bd, cur + 1, with_ih);
             bd.pop();
             Term::Pi(*mult, Box::new(dom), Box::new(body))
-        } else {
+        } else if with_ih {
             ihs(decl, ctor, sparam_tms, motive_tm, rec_args, 0, bd, cur)
+        } else {
+            // CASE method: no induction hypotheses — straight to the result.
+            result(decl, ctor, sparam_tms, motive_tm, bd, cur)
         }
     }
 
     let _ = (p, data);
-    args(decl, ctor, sparam_tms, motive_tm, &rec_args, 0, &mut Vec::new(), 0)
+    args(decl, ctor, sparam_tms, motive_tm, &rec_args, 0, &mut Vec::new(), 0, with_ih)
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,7 +1330,7 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             // no usage).
             let mut umeth: Option<Usage> = None;
             for (ci, ctor) in decl.ctors.iter().enumerate() {
-                let meth_ty_tm = method_ty_tm(&decl, ctor, &sparam_tms, &motive_tm);
+                let meth_ty_tm = method_ty_tm(&decl, ctor, &sparam_tms, &motive_tm, true);
                 let meth_ty = eval(&ctx.sig, &ctx.env(), &meth_ty_tm);
                 let um = check(ctx, &methods[ci], &meth_ty)?;
                 umeth = Some(match umeth {
@@ -1269,6 +1356,84 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             });
             let mscale = if recursive { Mult::Omega } else { Mult::One };
             let u = uadd(&uscale(mscale, &umeth), &u_scrut);
+            Ok((res, u))
+        }
+        Term::Case(data, motive, methods, scrut) => {
+            // a NON-RECURSIVE case-split: same type discipline as `Elim` EXCEPT (1) the
+            // method telescope has NO induction hypotheses (`method_ty_tm(.., false)`),
+            // and (2) exactly ONE method fires ONCE — so the usage scale is `1`, never
+            // `ω`. Recursion, if any, is the enclosing `Fix`'s self-call, not `Case`.
+            let decl = ctx
+                .sig
+                .data(data)
+                .ok_or_else(|| format!("unknown datatype `{data}`"))?
+                .clone();
+            let p = decl.params.len();
+            let ni = decl.indices.len();
+
+            let (scrut_ty, u_scrut) = infer(ctx, scrut)?;
+            let sargs = match scrut_ty {
+                Value::VData(ref sn, ref a) if *sn == *data => a.clone(),
+                other => {
+                    return Err(format!(
+                        "case[{data}] on a scrutinee of type {:?} (not `{data}`)",
+                        quote(n, &other)
+                    ))
+                }
+            };
+            let sparams: Vec<Value> = sargs[0..p].to_vec();
+            let sindices: Vec<Value> = sargs[p..p + ni].to_vec();
+            let sparam_tms: Vec<Term> = sparams.iter().map(|v| quote(n, v)).collect();
+
+            // motive : Π[ω](indices). D params indices → Type ℓ (validated; large
+            // elimination allowed — identical to `Elim`).
+            let mut idx_doms: Vec<Value> = Vec::new();
+            let mut idx_neus: Vec<Value> = Vec::new();
+            for i in 0..ni {
+                let mut env: Vec<Value> = sparams.clone();
+                env.extend(idx_neus.iter().cloned());
+                idx_doms.push(eval(&ctx.sig, &env, &decl.indices[i].1));
+                idx_neus.push(Value::VNeu(Neutral::NVar(n + i)));
+            }
+            let mut d_args: Vec<Value> = sparams.clone();
+            d_args.extend(idx_neus.iter().cloned());
+            let mut doms = idx_doms;
+            doms.push(Value::VData(data.clone(), d_args));
+            motive_level(ctx, motive, &doms)?;
+            let vmotive = eval(&ctx.sig, &ctx.env(), motive);
+            let motive_tm = quote(n, &vmotive);
+
+            if methods.len() != decl.ctors.len() {
+                return Err(format!(
+                    "case[{data}]: expected {} method(s), got {}",
+                    decl.ctors.len(),
+                    methods.len()
+                ));
+            }
+            // JOIN (not SUM) the per-method usages — one arm runs (same branch rule as
+            // `Elim`/`NatCase`): freed-once-per-arm = once; inconsistent use ⇒ ω⋢1.
+            let mut umeth: Option<Usage> = None;
+            for (ci, ctor) in decl.ctors.iter().enumerate() {
+                let meth_ty_tm = method_ty_tm(&decl, ctor, &sparam_tms, &motive_tm, false);
+                let meth_ty = eval(&ctx.sig, &ctx.env(), &meth_ty_tm);
+                let um = check(ctx, &methods[ci], &meth_ty)?;
+                umeth = Some(match umeth {
+                    None => um,
+                    Some(acc) => ujoin(&acc, &um),
+                });
+            }
+            let umeth = umeth.unwrap_or_else(|| uzero(n));
+
+            // result: motive indices scrutinee
+            let vscrut = eval(&ctx.sig, &ctx.env(), scrut);
+            let mut res = vmotive;
+            for si in sindices {
+                res = vapp(res, si);
+            }
+            res = vapp(res, vscrut);
+            // a `Case` fires exactly ONE method ONCE — scale `1` (NEVER `ω`); the
+            // scrutinee is consumed once.
+            let u = uadd(&umeth, &u_scrut);
             Ok((res, u))
         }
         Term::Const(c) => {
@@ -1385,6 +1550,19 @@ fn occurs(data: &str, t: &Term) -> bool {
                 }
             }
             Term::Elim(_, m, methods, sc) => {
+                go(data, m, found);
+                for s in methods {
+                    go(data, s, found);
+                }
+                go(data, sc, found);
+            }
+            // `Case` (non-recursive case-split) carries subterms (motive/methods/
+            // scrutinee) and REDUCES on a concrete constructor (`vcase`), so — exactly
+            // like `NatCase`/`Elim` — a family hidden in a method can surface as a
+            // (possibly NEGATIVE) occurrence after reduction. It MUST be traversed; a
+            // missed subterm-bearing variant here is a positivity bypass ⇒ Curry's
+            // paradox (the load-bearing E3 invariant).
+            Term::Case(_, m, methods, sc) => {
                 go(data, m, found);
                 for s in methods {
                     go(data, s, found);
@@ -1767,7 +1945,7 @@ pub(crate) fn elim_method_telescope(
         .iter()
         .filter(|(_, a)| rec_spine(data, a).is_some())
         .count();
-    let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm);
+    let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm, true);
     let mut binders = Vec::new();
     for _ in 0..(ctor.args.len() + nrec) {
         match t {
