@@ -41,6 +41,21 @@ full design.
 | **Building type** | A prop on each house — forge anvil, library signpost, barracks banner, harbor stall | the session's dominant tool (Bash/Read/Task/Web…) |
 | **Monuments** | A trophy shelf of icons in front of the city | unlocked achievements |
 
+### A simulated world
+
+The cities sit on a real, generated landscape (`src/game/terrain.rs`) — built once at
+startup, then sampled cheaply:
+
+- A **heightfield** from domain-warped noise, with an **edge falloff** so the world is a
+  **continent ringed by ocean**.
+- **Thermal erosion** carves ridgelines; **rivers traced downhill** by gradient descent
+  carve valleys and merge into the sea.
+- **Hillshade** relief, smoothly **blended** terrain colours, **animated water** with
+  shoreline foam, **mountain ranges** with snow caps, **roads** that **bridge** rivers and
+  lakes, plus a **day/night cycle** and **weather**.
+
+See [`DESIGN.md`](DESIGN.md) for the full picture and what's still on the list.
+
 ### Achievements for a codebase
 
 34 achievements, evaluated from **real** metrics only (never faked — if a signal is

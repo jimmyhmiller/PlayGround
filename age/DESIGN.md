@@ -184,4 +184,26 @@ missing the achievement simply can't unlock (it never silently passes).
   metrics; unlocked ones become a trophy shelf in front of the city and a badge
   wall in the inspector.
 - ✅ **Resources readout** — food/wood/gold/stone in the inspector.
+- ✅ **A simulated world**, not a flat plain — see below.
 - 🧊 Later: subagent squads/expeditions, fire-on-error events, festivals, minimap, sound.
+
+## The world (generated, not just sampled)
+
+Cities sit far apart on a real landscape, built once at startup and sampled cheaply
+after (`src/game/terrain.rs`):
+
+- **Heightfield** from domain-warped fractal noise, contrast-stretched for bold relief.
+- **Edge falloff** → a continent ringed by ocean (the world is a *place*, not infinite tiling).
+- **Thermal erosion** passes relax slopes into ridgelines and talus.
+- **Rivers traced by gradient descent** from the highlands, carving their beds downhill
+  until they reach the sea; tributaries merge into valleys; width grows with drainage.
+- **Hillshade** (sun-relief) so the land looks 3-D.
+
+Rendering on top (`src/render/mod.rs`):
+
+- Smoothly **blended** terrain colours (no hard bands) × hillshade × drifting **cloud shadows**.
+- **Animated water** with depth shading, ripple sheen and shoreline **foam**; tapered rivers.
+- **Mountain ranges** as layered, snow-capped peak silhouettes.
+- A **road network** (each city to its nearest neighbours) with **bridge decks** over any
+  river or lake crossing.
+- A **day/night cycle** (colour-graded, with stars) and **weather** (rain / snow).

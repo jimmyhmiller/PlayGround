@@ -26,8 +26,6 @@ const MAX_VILLAGERS: usize = 8;
 /// A road linking two cities: a curved dirt ribbon. `water[i]` marks points that
 /// cross a river or lake, so the renderer can lay a bridge deck over those spans.
 pub struct Road {
-    pub a: usize,
-    pub b: usize,
     pub points: Vec<Vector2>,
     pub water: Vec<bool>,
 }
@@ -436,7 +434,7 @@ fn make_road(a: usize, b: usize, pa: Vector2, pb: Vector2, terrain: &Terrain) ->
         points.push(p);
         water.push(over_water);
     }
-    Road { a, b, points, water }
+    Road { points, water }
 }
 
 /// Rebuild a city's stats, buildings and villager population from fresh info,
