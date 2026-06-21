@@ -138,10 +138,13 @@ fn dom_intersect(mut a: usize, mut b: usize, idom: &[usize], rpo_num: &[usize]) 
 /// Exclusive **retained size** per object: the total bytes that become
 /// unreachable if that object is removed — i.e. the size of the subtree it
 /// dominates. Computed over the snapshot graph with a virtual super-root
-/// connected to the proxy roots (in-degree-0 objects, plus an entry into any
-/// pure cycle so every node is reachable). Uses the Cooper-Harvey-Kennedy
-/// iterative dominator algorithm — simple and fine for exploration-scale heaps.
-fn retained_sizes(nodes: &[Node]) -> Vec<usize> {
+/// connected to `seed_roots` (the REAL GC roots — see [`Heap::visit_roots`]),
+/// plus any node still unreachable from them (dead cycles / uncollected garbage)
+/// so every node is covered and retained sizes are defined for all objects. Uses
+/// the Cooper-Harvey-Kennedy iterative dominator algorithm — simple and fine for
+/// exploration-scale heaps. (Previously seeded from an in-degree-0 *proxy*, which
+/// mis-handles cycles and root-held-yet-referenced objects.)
+fn retained_sizes(nodes: &[Node], seed_roots: &[usize]) -> Vec<usize> {
     let n = nodes.len();
     if n == 0 {
         return vec![];
@@ -149,15 +152,11 @@ fn retained_sizes(nodes: &[Node]) -> Vec<usize> {
     let r = n; // virtual root
     let total = n + 1;
 
-    // Proxy roots: in-degree-0 objects, then add any still-unreachable node (a
-    // pure cycle has no in-degree-0 entry) until the whole graph is covered.
-    let mut indeg = vec![0usize; n];
-    for node in nodes {
-        for &t in &node.refs {
-            indeg[t] += 1;
-        }
-    }
-    let mut roots: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    // Seed with the real GC roots, then add any node still unreachable from them
+    // (garbage not held by a root, e.g. a dead cycle) until the graph is covered.
+    let mut roots: Vec<usize> = seed_roots.to_vec();
+    roots.sort_unstable();
+    roots.dedup();
     loop {
         let mut seen = vec![false; n];
         let mut stack = roots.clone();
@@ -277,12 +276,13 @@ fn retained_sizes(nodes: &[Node]) -> Vec<usize> {
 /// # Safety
 /// All allocated objects must be valid (headers + varlen counts written).
 pub unsafe fn dump_heap_json(heap: &Heap) -> String {
-    // Read the live heap under STW (see dump_heap_text).
+    // Read the live heap under STW (see dump_heap_text). Time the whole snapshot
+    // so the STW pause is reported, never hidden (`snapshot_pause_ns`).
+    let t0 = Instant::now();
     let _pause = heap.pause_world();
     let nodes = unsafe { collect_graph(heap) };
     let id_of: HashMap<usize, usize> =
         nodes.iter().enumerate().map(|(i, n)| (n.obj as usize, i)).collect();
-    let _ = &id_of;
 
     let total_bytes: usize = nodes.iter().map(|n| n.bytes).sum();
 
@@ -297,17 +297,41 @@ pub unsafe fn dump_heap_json(heap: &Heap) -> String {
         hist.into_iter().map(|(k, (c, b))| (k, c, b)).collect();
     by_type.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
 
-    // In-degree to find roots (objects nothing else points at).
-    let mut indeg = vec![0usize; nodes.len()];
-    for n in &nodes {
-        for &t in &n.refs {
-            indeg[t] += 1;
+    // The REAL GC root set (not the in-degree-0 proxy): the objects directly held
+    // by a root slot (globals + parked thread frames + permanent extras).
+    let mut root_ids: Vec<usize> = Vec::new();
+    unsafe {
+        heap.visit_roots(&mut |obj| {
+            if let Some(&id) = id_of.get(&(obj as usize)) {
+                root_ids.push(id);
+            }
+        });
+    }
+    root_ids.sort_unstable();
+    root_ids.dedup();
+
+    // Reachability from the real roots — distinguishes live objects from
+    // uncollected garbage (e.g. at program end most of the heap is unreachable).
+    let mut reachable = vec![false; nodes.len()];
+    {
+        let mut stack: Vec<usize> = root_ids.clone();
+        for &r in &root_ids {
+            reachable[r] = true;
+        }
+        while let Some(v) = stack.pop() {
+            for &t in &nodes[v].refs {
+                if !reachable[t] {
+                    reachable[t] = true;
+                    stack.push(t);
+                }
+            }
         }
     }
-    // Reachable bytes per root (transitive closure).
-    let mut roots: Vec<(usize, usize)> = Vec::new(); // (id, reachable_bytes)
-    for (i, n) in nodes.iter().enumerate() {
-        if indeg[i] == 0 {
+
+    // Reachable bytes per root (transitive closure from that root).
+    let mut roots: Vec<(usize, usize)> = root_ids
+        .iter()
+        .map(|&i| {
             let mut seen = vec![false; nodes.len()];
             let mut stack = vec![i];
             let mut bytes = 0usize;
@@ -319,23 +343,37 @@ pub unsafe fn dump_heap_json(heap: &Heap) -> String {
                 bytes += nodes[v].bytes;
                 stack.extend(nodes[v].refs.iter().copied());
             }
-            let _ = n;
-            roots.push((i, bytes));
-        }
-    }
+            (i, bytes)
+        })
+        .collect();
     roots.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Exclusive retained size per object (dominator subtree), and the top
-    // retainers — the "what's actually holding memory" view.
-    let retained = retained_sizes(&nodes);
+    // Exclusive retained size per object (dominator subtree, rooted at the REAL
+    // roots), and the top retainers — the "what's actually holding memory" view.
+    let retained = retained_sizes(&nodes, &root_ids);
     let mut top: Vec<(usize, usize)> = retained.iter().copied().enumerate().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(10);
 
+    let reachable_count = reachable.iter().filter(|&&r| r).count();
+    let gc_seq = heap.minor_collections() + heap.collections();
+    let pause_ns = t0.elapsed().as_nanos();
+
     // ---- Emit JSON (hand-built; gcrust-rt has no serde) -------------------
     let mut out = String::new();
     out.push_str("{\n  \"summary\": {");
-    let _ = write!(out, "\"objects\": {}, \"bytes\": {}, ", nodes.len(), total_bytes);
+    let _ = write!(
+        out,
+        "\"version\": 1, \"gc_seq\": {}, \"snapshot_pause_ns\": {}, ",
+        gc_seq, pause_ns
+    );
+    let _ = write!(
+        out,
+        "\"objects\": {}, \"bytes\": {}, \"reachable_objects\": {}, ",
+        nodes.len(),
+        total_bytes,
+        reachable_count
+    );
     out.push_str("\"by_type\": [");
     for (i, (name, count, bytes)) in by_type.iter().enumerate() {
         if i > 0 {
