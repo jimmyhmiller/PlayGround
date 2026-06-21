@@ -76,16 +76,27 @@ already have strong substrates — make them an actual toolchain.
   from the LLVM backend is the natural substrate; pair it with the reflection
   table so a debugger renders *language* values, not raw words.
 
-- **Allocation-site profiling (NEXT).** Which call sites allocate the most, by
-  count and bytes, with type breakdown. The runtime already routes every
-  allocation through `ai_gc_alloc_*`; thread an allocation-site id and aggregate
-  per-thread (non-atomic counters on `ThreadState`, merged at dump — no hot-path
-  cross-thread traffic), with a baked side-table mapping site-id → (function,
-  type). v1 keys sites at **function + allocated-type** granularity, NOT
-  `file:line:col` — Core IR carries no source span. Source-precise sites need
-  span-threading through lower→core→codegen, scoped as the **shared prerequisite
-  for the debugger** below (it needs real source locations anyway), which also
-  upgrades alloc-profiling to line-precise.
+- **Allocation-site profiling — DONE + SIGNED OFF (Target-1b).** `GCR_ALLOC_PROFILE=1`
+  prints per-site count+bytes (JIT + AOT). NON-ATOMIC per-thread `SiteCounter`
+  vector on `ThreadState` (owner-only writes, zero atomics/locks on the alloc hot
+  path), merged at dump across live threads + a `retired_alloc_counters`
+  accumulator (folded at deregister so joined workers aren't lost). `ai_gc_alloc_*`
+  carries a `site_id`; baked side-table `site_id → (function, type_id)` via the
+  reflect blob (AOT) / `set_alloc_sites` (JIT). v1 granularity = **function +
+  allocated-type** (one site id per pair; no faked `file:line:col` — Core IR has no
+  span; line-precise sites await span-threading, the shared debugger prereq below).
+  The dump-time read of the non-atomic counters is done under a `pause_world` STW
+  pause (a live unjoined thread would otherwise make it a data race — confirmed a
+  real heap-UAF under ASan in review, fixed STW-correctly, ASan-proven +
+  independently approved). The pre-existing `dump_heap_text`/`dump_heap_json` were
+  folded into the same STW discipline.
+  *Code-state pointer (sweeps scramble per-commit attribution):* signed-off state
+  is tagged `gcr-target-1b`; key files: `runtime.rs` (ai_gc_alloc_* ABI +
+  gcr_runtime_main install), `gc/thread.rs` (SiteCounter/record_alloc), `gc/heap.rs`
+  (alloc_sites table + `alloc_site_profile` STW merge + retired fold), `gc/reflect.rs`
+  (AllocSite + blob §4), `gc/dump.rs` (STW-gated dumps), `src/codegen.rs` (site-id
+  assignment), tests in `gc/tests.rs` (incl. the ASan resize-stress concurrent
+  test) + `tests/alloc_profile.rs`; gate `scripts/asan_dump_race.sh`.
 
 - **Live heap explorer.** The JSON snapshot is already a clean substrate; drive
   it from a safepoint *during* execution (not just at program end) into an
