@@ -1935,6 +1935,12 @@ impl Elab {
         // motive = λscrut'. (T₁ → … → T_K → R). The Pi chain (and R) are closed, so
         // they sit unshifted under the motive's binder; the binder itself is unused
         // (the result is non-dependent on the scrutinee).
+        // NOTE (Phase #1 arbitrary-length, see docs/PHASE_ARBITRARY_LENGTH_PLAN.md): a
+        // LINEAR accumulator needs `Mult::One` here (threading `ω` scales its usage to
+        // `ω` ⇒ `ω⋢1`). That one-line change is necessary but NOT sufficient — clean
+        // arbitrary-length LINEAR traversal needs structural-unbox descent (recurse on
+        // the unbox'd tail), not a fuel fold (whose base case can't free the remaining
+        // linear list). Landing the mult change + the descent + the routing together.
         let mut pi_chain = r_term.clone();
         for t in acc_ty_terms.iter().rev() {
             pi_chain = Term::Pi(Mult::Omega, Box::new(t.clone()), Box::new(pi_chain));
