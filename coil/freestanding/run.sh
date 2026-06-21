@@ -4,15 +4,17 @@
 # composed on top of the compiler's generic mechanism (emit-obj). The compiler bakes
 # in NO "freestanding mode": it just emits an object; this recipe links + runs it.
 #
-#   ./freestanding/run.sh            # build + run under qemu (prints, then poweroffs)
-#   ./freestanding/run.sh build      # build only (emit .elf)
+#   ./freestanding/run.sh             # build + run hello.coil under qemu
+#   ./freestanding/run.sh uart        # the typed-register PL011 driver (lib/mmio.coil)
+#   ./freestanding/run.sh hello build # build only (emit .elf)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export PATH="/opt/homebrew/Cellar/llvm@18/18.1.8/bin:$PATH"
 export LLVM_SYS_180_PREFIX="/opt/homebrew/Cellar/llvm@18/18.1.8"
 
-SRC=freestanding/hello.coil
+PROG="${1:-hello}"          # hello | uart
+SRC=freestanding/$PROG.coil
 OBJ=/tmp/coil-bare.o
 ELF=/tmp/coil-bare.elf
 
@@ -33,7 +35,7 @@ if nm -u "$ELF" 2>/dev/null | grep -q .; then
   exit 1
 fi
 
-[ "${1:-run}" = build ] && { echo "built $ELF"; exit 0; }
+[ "${2:-run}" = build ] && { echo "built $ELF"; exit 0; }
 
 # 3. run under full-system qemu: no OS, the ELF IS the kernel. PL011 UART -> stdout.
 #    The program PSCI-poweroffs, so qemu exits on its own (timeout is a safety net).

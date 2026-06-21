@@ -6,10 +6,30 @@ poweroffs. This is the strongest "as low as Zig/C" statement there is — Zig an
 bare-metal; now Coil does too.
 
 ```
-./freestanding/run.sh          # build + run under qemu  ->  hi / from coil (bare metal)
-./freestanding/run.sh build    # build the .elf only
+./freestanding/run.sh          # build + run hello.coil  ->  hi / from coil (bare metal)
+./freestanding/run.sh uart     # the typed-register PL011 driver -> PL011 via typed registers
+./freestanding/run.sh hello build   # build the .elf only
 cargo test --test freestanding # the same, gated on ld.lld + qemu being installed
 ```
+
+## The capstone: device registers as a typed bitfield — a PURE MACRO
+
+`uart.coil` drives the PL011 UART the RIGHT way (poll the flag register's TXFF bit,
+then write the data register), with the device registers expressed as typed bitfields
+via the `defmmio-reg` macro (`lib/mmio.coil`):
+
+```
+(defmmio-reg UARTFR 150994968 [(txff 5 1)])   ; 0x09000018, TXFF = bit 5
+;; generates: UARTFR-read (volatile load), UARTFR-write (volatile store),
+;;            UARTFR-txff  ((read >> 5) & 1)
+```
+
+This is "expressiveness through macros" at its hardest domain — a hardware
+device-register interface as a 41-line LIBRARY, with **zero core feature**: `grep -ri
+mmio|defmmio|device.reg src/` in the compiler is empty. The macro generates ordinary
+defns over the existing `llvm-ir` (volatile load/store) + `iand`/`ishr`/`ishl`
+primitives; the mask `(1<<width)-1` is emitted as const-foldable code. The moat (grow
+the language by macro, never hack a feature into the core) demonstrated at the extreme.
 
 ## How it's built (no baked-in "freestanding mode")
 

@@ -1,0 +1,41 @@
+; Memory-mapped I/O device registers as a typed bitfield — a PURE MACRO. The §7
+; capstone: "expressiveness through macros" at its hardest domain (hardware device
+; registers), with ZERO core feature. `defmmio-reg` takes a register spec (name,
+; MMIO address, and named bit-fields) and GENERATES — entirely via the macro system —
+; a volatile-load reader, a volatile-store writer, and a shift+mask getter per field,
+; over the existing `llvm-ir` (volatile load/store) + `iand`/`ishr`/`ishl` primitives.
+; No core MMIO/register/bitfield support exists; it's all library.
+;
+;   (defmmio-reg UARTFR 150994968        ; 0x09000018 — PL011 flag register
+;     [(rxfe 4 1) (txff 5 1)])           ; (field, bit-offset, width)
+; expands to:
+;   UARTFR-read  []        -> i32        ; volatile load the 32-bit register
+;   UARTFR-write [(v i32)] -> i64        ; volatile store
+;   UARTFR-rxfe  []        -> i32        ; (read >> 4) & 1
+;   UARTFR-txff  []        -> i32        ; (read >> 5) & 1
+(module mmio)
+
+(defmacro defmmio-reg [name addr fields]
+  `(do
+     ; volatile 32-bit load from the fixed MMIO address (address spliced into the IR).
+     (defn ~(symbol name "-read") [] (-> i32)
+       (llvm-ir i32 []
+         ~(str "%p = inttoptr i64 " addr " to ptr\n"
+               "%v = load volatile i32, ptr %p\n"
+               "ret i32 %v")))
+     ; volatile 32-bit store.
+     (defn ~(symbol name "-write") [(v i32)] (-> i64)
+       (llvm-ir i64 [v]
+         ~(str "%p = inttoptr i64 " addr " to ptr\n"
+               "store volatile i32 $0, ptr %p\n"
+               "ret i64 0")))
+     ; one shift+mask getter per field. The mask `(1 << width) - 1` is emitted as
+     ; ordinary code (LLVM const-folds it), so no macro-time bit ops are needed.
+     ~@(map (lambda [f]
+              (let [fname  (first f)
+                    offset (first (rest f))
+                    width  (first (rest (rest f)))]
+                `(defn ~(symbol name "-" fname) [] (-> i32)
+                   (iand (ishr (~(symbol name "-read")) ~offset)
+                         (isub (ishl 1 ~width) 1)))))
+            fields)))

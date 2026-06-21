@@ -88,6 +88,57 @@ fn bare_metal_aarch64_runs_under_qemu() {
 }
 
 #[test]
+fn bare_metal_typed_register_uart_driver_runs_under_qemu() {
+    // The :bits capstone: a polled PL011 UART driver whose device registers are typed
+    // bitfields from the `defmmio-reg` PURE MACRO (lib/mmio.coil) — no core feature.
+    // It polls the flag register's TXFF bit, then writes the data register.
+    let lld = find(
+        &["ld.lld"],
+        &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"],
+    );
+    let qemu = find(&["qemu-system-aarch64"], &["/opt/homebrew/bin"]);
+    let (lld, qemu) = match (lld, qemu) {
+        (Some(l), Some(q)) => (l, q),
+        _ => {
+            eprintln!("SKIP: bare-metal toolchain (ld.lld + qemu-system-aarch64) not found");
+            return;
+        }
+    };
+
+    let src = std::fs::read_to_string("freestanding/uart.coil").expect("read uart.coil");
+    let obj = std::env::temp_dir().join("coil-uart-test.o");
+    let elf = std::env::temp_dir().join("coil-uart-test.elf");
+    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
+    coil::compile_to_object_for(&src, &obj, triple).expect("emit bare-metal object");
+
+    let link = Command::new(&lld)
+        .args(["--gc-sections", "-T", "freestanding/virt.ld", "-e", "bare.start"])
+        .arg(&obj)
+        .arg("-o")
+        .arg(&elf)
+        .status()
+        .expect("invoke ld.lld");
+    assert!(link.success(), "ld.lld failed");
+
+    let nm = Command::new("nm").arg("-u").arg(&elf).output().expect("nm");
+    assert!(
+        String::from_utf8_lossy(&nm.stdout).trim().is_empty(),
+        "freestanding image has undefined symbols"
+    );
+
+    let out = Command::new(&qemu)
+        .args(["-M", "virt", "-cpu", "cortex-a72", "-nographic", "-kernel"])
+        .arg(&elf)
+        .output()
+        .expect("run qemu");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("PL011 via typed registers"),
+        "unexpected UART output: {text:?}"
+    );
+}
+
+#[test]
 fn importing_stdlib_does_not_drag_libc_with_gc_sections() {
     // The DCE friction the dogfood surfaced: Coil emits all defns, so importing
     // lib/alloc pulled malloc/abort/free/realloc into the link even unused. Fix =
