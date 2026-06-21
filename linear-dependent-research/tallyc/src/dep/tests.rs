@@ -287,6 +287,21 @@ fn positivity_sees_through_let_hiding_a_negative_occurrence() {
 }
 
 #[test]
+fn cbv_let_supports_dependent_body_type() {
+    // A DEPENDENT let — the body's TYPE mentions the bound variable — yields the body
+    // type with the variable SUBSTITUTED by `e` (`let u = e; body : body_ty[u := e]`).
+    // `let u = 2 in (refl u : Eq Nat u u)` has type `Eq Nat 2 2`. (Previously the infer
+    // arm returned the body type with the bound var still free, de-Bruijn-underflowing in
+    // `quote` — a cryptic panic; substitution handles it correctly and clearly.)
+    let dep_let = Let(Omega, b(Nat), b(NatLit(2)), b(Refl(b(Var(0)))));
+    assert_eq!(
+        infer_closed(&dep_let),
+        Ok(Eq(b(Nat), b(NatLit(2)), b(NatLit(2)))),
+        "a dependent let's result type must substitute the bound variable by `e`"
+    );
+}
+
+#[test]
 fn occurs_finds_a_negative_occurrence_through_every_reducing_construct() {
     // PERMANENT REGRESSION (ported from the kernel reviewer's sibling-hunt): a
     // negative `Bad → Bad` hidden behind ANY subterm-bearing construct must be

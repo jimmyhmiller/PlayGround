@@ -1286,10 +1286,22 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
                      time(s) ({sigma_u} ⋢ {sigma})"
                 ));
             }
-            // result type = body's type. v1 is a NON-dependent let (the body's type does
-            // not mention the bound variable), so `rty` is already valid in the outer
-            // context — return it directly.
-            Ok((rty, uadd(&u_e, &u_body)))
+            // result type = the body's type with the bound variable SUBSTITUTED by `e`
+            // (CBV let `let u = e; body : body_ty[u := e]`). `rty` lives in `ctx2` (with
+            // the bound var at level `n`); quoting it at `n+1` and re-evaluating in
+            // `ctx.env()` extended by `eval(e)` substitutes `u := e` and re-grounds the
+            // type in the OUTER context. This SUPPORTS a dependent body type — and, for
+            // the common non-dependent case, simply returns the body's type unchanged
+            // (no `eval(e)` trace). (Previously this returned `rty` directly, which
+            // de-Bruijn-underflowed in `quote` on a dependent body — a cryptic panic;
+            // this hardens it per the hard-error-clearly discipline by handling the
+            // case correctly instead.)
+            let ve = eval(&ctx.sig, &ctx.env(), e);
+            let rty_tm = quote(n + 1, &rty);
+            let mut env2 = ctx.env();
+            env2.push(ve);
+            let result_ty = eval(&ctx.sig, &env2, &rty_tm);
+            Ok((result_ty, uadd(&u_e, &u_body)))
         }
         Term::Lam(_) => Err("cannot infer a bare lambda; annotate it `(e : T)`".to_string()),
     }
