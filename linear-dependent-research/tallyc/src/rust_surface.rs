@@ -2516,6 +2516,7 @@ enum Unit { U : Unit }
 postulate Own   : Type -> Type
 postulate alloc : {0 a : Type} -> a -> Own a
 postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
+postulate unbox : {0 a : Type} -> (1 o : Own a) -> a
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).

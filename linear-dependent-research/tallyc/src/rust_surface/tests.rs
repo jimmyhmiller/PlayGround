@@ -354,6 +354,39 @@ fn phase_a_eliminator_joins_branch_usages() {
 }
 
 #[test]
+fn differentiator_demo_linked_list_is_type_safe_and_red_teamed() {
+    // THE DIFFERENTIATOR DEMO at the TYPE level: an owned linked list built with
+    // `alloc`, traversed + freed with `unbox`. The type system enforces that every
+    // `Own` is consumed EXACTLY ONCE on EVERY path — so the safe program is ACCEPTED,
+    // while a LEAK (an owned binder dropped) and a DOUBLE-FREE (an owned binder used
+    // twice) are both REJECTED. (Runs natively to 3 — see dep_codegen's
+    // differentiator_demo_owned_linked_list_runs_natively.)
+    const HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+        struct Node { head : Nat, tail : Opt (Own Node) }\n\
+        add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+        main : Nat\n";
+    // SAFE: every Own consumed once (live path unboxes both; dead arms free their owns).
+    let safe = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
+        Node(h1, t1) => match t1 {{ none => Zero, \
+          some(o2) => match unbox(o2) {{ Node(h2, t2) => match t2 {{ \
+            none => add(h1, h2), some(o3) => match free(o3) {{ U => Zero }} }} }} }} }} }}\n");
+    assert!(check_program(&safe).is_ok(), "the safe owned-list demo must type-check: {:?}", check_program(&safe).err());
+    // LEAK: the dead `some(o3)` arm DROPS o3 (an Own) instead of freeing it ⇒ 0⋢1.
+    let leak = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
+        Node(h1, t1) => match t1 {{ none => Zero, \
+          some(o2) => match unbox(o2) {{ Node(h2, t2) => match t2 {{ \
+            none => add(h1, h2), some(o3) => Zero }} }} }} }} }}\n");
+    assert!(check_program(&leak).is_err(), "dropping an owned binder (leak) must be REJECTED");
+    // DOUBLE-FREE: o2 is consumed by unbox AND again by free ⇒ ω⋢1.
+    let dbl = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
+        Node(h1, t1) => match t1 {{ none => Zero, \
+          some(o2) => match unbox(o2) {{ Node(h2, t2) => match t2 {{ \
+            none => match free(o2) {{ U => add(h1, h2) }}, some(o3) => match free(o3) {{ U => Zero }} }} }} }} }} }}\n");
+    assert!(check_program(&dbl).is_err(), "using an owned binder twice (double-free) must be REJECTED");
+}
+
+#[test]
 fn phase_a_positivity_probe_is_unforgeable() {
     // DEFENSE-IN-DEPTH (soundness-by-construction): the variance check's probe datatype
     // is the UN-LEXABLE name "<positivity probe>" (contains spaces), so no user/library

@@ -498,6 +498,24 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*ptr);
                 Ok(self.i64t.const_zero())
             }
+            // unbox : {0 a} -> (1 o : Own a) -> a  — deref-and-CONSUME: load the
+            // pointee from the cell, FREE the cell, return the pointee (moved out). The
+            // linear `o` is consumed exactly once; its linear fields (e.g. a `tail`
+            // Own) are moved to the caller (threaded onward by the eliminator). This is
+            // the sound primitive for a consuming free-traversal of a linked structure.
+            "unbox" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [ptr] = rt.as_slice() else {
+                    return Err(format!(
+                        "unbox: expected 1 runtime argument (the owned pointer), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.toptr(*ptr, "ownp");
+                let payload = self.load(cell, 0, "unboxed");
+                self.free_int(*ptr); // free the Own cell; the payload was moved out
+                Ok(payload)
+            }
             // new : {0 r} -> List r  — create an empty circular sentinel list.
             "new" => {
                 let s = self.malloc_cell(3, "sentinel");
@@ -1648,6 +1666,44 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             let src = format!("{G}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
             assert_eq!(run(&src), expect, "depth {d}");
         }
+    }
+
+    #[test]
+    fn differentiator_demo_owned_linked_list_runs_natively() {
+        // THE DIFFERENTIATOR DEMO — the first safe manual-memory linked structure in
+        // surface Tally. A 2-node OWNED linked list `[1, 2]` (`struct Node { head : Nat,
+        // tail : Opt (Own Node) }`, recursion through the (a)-verified positivity):
+        //   • BUILT on the heap with `alloc` (box) — `Node(1, some(alloc(Node(2, none))))`,
+        //   • TRAVERSED + FREED with `unbox` (deref-and-consume: load the pointee, free
+        //     the cell, move the contents out), summing the heads,
+        //   • TYPE-CHECKED memory-safe: every `Own` is consumed EXACTLY ONCE on EVERY
+        //     path — including the dead match arms, which must still `free` their owned
+        //     binders (that obligation IS the safety guarantee; omitting it is a leak,
+        //     `0⋢1`; reusing one is a double-free, `ω⋢1` — both rejected, see the
+        //     rust_surface red-team tests),
+        //   • RUNS natively to `1 + 2 = 3`, ZERO GC, fully manual reclamation.
+        // This proves the thesis: the linear-dependent TYPE SYSTEM enforces manual-memory
+        // obligations soundly, end-to-end, running. (Byte-level zero-leak of the inner
+        // boxed struct-cells awaits Phase B's inline value-layout — the all-boxed codegen
+        // double-boxes `Own`-of-struct today; the TYPE-LEVEL safety + correct run is the
+        // milestone proven here.)
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+            struct Node { head : Nat, tail : Opt (Own Node) }\n\
+            add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+            main : Nat\n\
+            fn main() { \
+              match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) { \
+                Node(h1, t1) => match t1 { \
+                  none => Zero, \
+                  some(o2) => match unbox(o2) { Node(h2, t2) => match t2 { \
+                    none => add(h1, h2), \
+                    some(o3) => match free(o3) { U => Zero } \
+                  } } \
+                } \
+              } \
+            }\n";
+        assert_eq!(run(src), 3);
     }
 
     #[test]
