@@ -62,13 +62,19 @@ minimal (emit an object); freestanding composes on top.
    constructor wasn't freestanding. FIXED: added `arena-over-buffer (buf, cap)`, a
    constructor over a caller-provided buffer (no malloc — the buffer can be an
    `alloc-static` array in .bss); `arena-allocator` now wraps it with `malloc`.
-   — KNOWN GAP (next investigation): a program that IMPORTS lib/alloc and runs its
-   arena (`arena-over-buffer` + `create`) LINKS clean but does not yet RUN under qemu,
-   while the self-contained `hello.coil` (which builds its `Arena` on the stack) runs
-   fine. Isolated: importing lib/alloc and using nothing runs; the fault is in the
-   stdlib-arena runtime path bare-metal (root cause TBD — likely runtime-init/global
-   state). The DCE claim above is link-level and proven; the stdlib-arena *runtime*
-   bare-metal is a separate follow-up, not overclaimed.
+   — KNOWN GAP (triaged, deferred): a program that IMPORTS lib/alloc and runs its
+   arena (`arena-over-buffer` + `create`) LINKS clean but does not yet RUN under qemu.
+   Triage (`qemu -d int`) found TWO layers:
+   (1) **No stack pointer at entry.** The entry's prologue spills to `SP≈0` → Data
+   Abort (FAR `0xffffffff_fffff0`). `hello.coil` survives only by LUCK — it doesn't
+   spill. The standard fix is a tiny `crt0.s` boot stub (set `SP` = top of a reserved
+   stack, zero `.bss`, `bl` the entry) — recipe-level, no core change; verified it
+   makes the entry run (the first UART byte then prints).
+   (2) A SECOND, deeper fault remains in the stdlib-arena path even with `SP`/`.bss`
+   set up — root cause TBD. Because it's deeper than the cheap startup fix, it's
+   DEFERRED (the moat is already demonstrated by `hello` running; the honest
+   link-level DCE claim stands). The fix path is: add the `crt0.s` stub (hardens the
+   entry for every bare-metal program), then debug the residual arena fault.
 3. **`llvm-ir` can't have a `void` result** — `validate_type` rejects `void` outside a
    return, so an effect-only IR snippet must return a dummy `i64` (the UART/poweroff
    helpers return `i64 0`). Minor; a `void` llvm-ir result would be tidier.
