@@ -164,11 +164,20 @@ pub struct CoreProgram {
     /// Interned source spans (the span-threading side table). A `CoreExpr.span`
     /// of `k` (≥1) refers to `spans[k-1]`; [`NO_SPAN`] (0) means no location.
     pub spans: Vec<crate::lexer::Span>,
-    /// Source file path + text, set by the driver after lowering, used to resolve
-    /// interned spans to `file:line:col` (e.g. for alloc-site labels). Empty when
-    /// the source isn't available (e.g. unit tests building a program directly).
-    pub src_path: String,
-    pub src_text: String,
+    /// The SourceMap: one entry per [`crate::lexer::SourceId`] (0 = user, 1 =
+    /// prelude, 2+ = `mod` files). A span resolves against `sources[span.source]`
+    /// so prelude/module spans (lexed in their own offset spaces) get their REAL
+    /// `file:line:col`, never a fabricated user-file line. Set by the driver after
+    /// lowering; empty when source isn't available (unit tests build programs
+    /// directly → spans resolve to `None`).
+    pub sources: Vec<SourceEntry>,
+}
+
+/// One source in the [`CoreProgram`] SourceMap: its display path + full text.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SourceEntry {
+    pub path: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -450,17 +459,22 @@ impl CoreExpr {
 
 impl CoreProgram {
     /// Resolve an interned [`SpanId`] to `(source-label, 1-based line, col)`,
-    /// MULTI-SOURCE-AWARE: a span originating in the injected prelude (lexed in
-    /// its own offset space) resolves against the prelude, not the user file.
-    /// `None` if the id is [`NO_SPAN`], out of range, or no source is available
-    /// (e.g. tests that build a program directly) — an honest "no location"
-    /// rather than a fabricated one. See [`crate::diag::resolve_location`].
+    /// MULTI-SOURCE-AWARE: each span carries its [`crate::lexer::SourceId`], so a
+    /// prelude/module span (lexed in its own offset space) resolves against the
+    /// RIGHT source text in `sources` — its real location, never a fabricated
+    /// user-file line. `None` if the id is [`NO_SPAN`], out of range, or no
+    /// source is available (tests that build a program directly).
     pub fn span_location(&self, span: SpanId) -> Option<(String, usize, usize)> {
-        if span == NO_SPAN || self.src_text.is_empty() {
+        if span == NO_SPAN {
             return None;
         }
         let s = self.spans.get((span - 1) as usize)?;
-        crate::diag::resolve_location(&self.src_path, &self.src_text, s.start as usize)
+        let entry = self.sources.get(s.source as usize)?;
+        if entry.text.is_empty() {
+            return None;
+        }
+        let (line, col) = crate::diag::line_col(&entry.text, s.start as usize);
+        Some((entry.path.clone(), line, col))
     }
 
     /// `file:line:col` for an interned span, or `None` if unresolvable.

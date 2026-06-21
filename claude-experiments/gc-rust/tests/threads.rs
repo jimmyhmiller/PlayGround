@@ -14,7 +14,7 @@ use gcrust::lower::lower_program;
 use gcrust::resolve::resolve_module;
 
 fn prog_of(src: &str) -> gcrust::core::CoreProgram {
-    let module = parse_with_prelude(src).unwrap();
+    let (module, _) = parse_with_prelude(src).unwrap();
     let resolved = resolve_module(module).unwrap();
     lower_program(&resolved.globals).unwrap()
 }

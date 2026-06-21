@@ -7,11 +7,25 @@
 //! keep working — the user's declaration shadows the prelude's.
 
 use crate::ast::{Item, ItemKind, Module};
-use crate::lexer::lex;
+use crate::core::SourceEntry;
+use crate::lexer::{lex, lex_with_source, SourceId};
 use crate::parser::{ParseError, parse_module};
 use std::path::{Path, PathBuf};
 
 const PRELUDE_SRC: &str = include_str!("prelude.gcr");
+
+/// The SourceMap built during prelude/module merging: one [`SourceEntry`] per
+/// [`SourceId`] (0 = user, then `mod` files, then the prelude). Returned by the
+/// parse entries and attached to `CoreProgram.sources` so spans resolve against
+/// their real source (multi-source span resolution — debugger foundation).
+pub type SourceMap = Vec<SourceEntry>;
+
+/// Register a source, returning its [`SourceId`] (= its index in the map).
+fn add_source(sources: &mut SourceMap, path: String, text: String) -> SourceId {
+    let id = sources.len() as SourceId;
+    sources.push(SourceEntry { path, text });
+    id
+}
 
 /// Resolve a `mod foo;` declaration to its file. Following modern Rust, a module
 /// `foo` declared in a file living in `dir` is loaded from either `dir/foo.gcr`
@@ -40,24 +54,27 @@ fn module_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf), ParseError>
 /// sibling files and replacing each declaration with an inline module holding the
 /// loaded items. `dir` is the directory that this set of items' file modules
 /// resolve against.
-fn load_file_modules(items: &mut Vec<Item>, dir: &Path) -> Result<(), ParseError> {
+fn load_file_modules(items: &mut Vec<Item>, dir: &Path, sources: &mut SourceMap) -> Result<(), ParseError> {
     for item in items.iter_mut() {
         if let ItemKind::Mod(m) = &mut item.kind {
             if m.inline {
                 // Inline module: its own nested file mods resolve against
                 // `dir/<modname>/` (matching the nested-directory convention).
                 let sub = dir.join(&m.name);
-                load_file_modules(&mut m.items, &sub)?;
+                load_file_modules(&mut m.items, &sub, sources)?;
             } else {
                 let (file, subdir) = module_file(dir, &m.name)?;
                 let src = std::fs::read_to_string(&file).map_err(|e| ParseError {
                     msg: format!("cannot read module file `{}`: {}", file.display(), e),
                     span: m.span,
                 })?;
-                let toks = lex(&src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
+                // Each module is its own source: register it + lex with its id so
+                // its spans resolve against its own text, not the user file.
+                let sid = add_source(sources, file.display().to_string(), src.clone());
+                let toks = lex_with_source(&src, sid).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
                 let mut parsed = parse_module(&toks)?;
                 // Recurse into this file's own `mod foo;` declarations.
-                load_file_modules(&mut parsed.items, &subdir)?;
+                load_file_modules(&mut parsed.items, &subdir, sources)?;
                 m.items = parsed.items;
                 m.inline = true;
             }
@@ -82,14 +99,17 @@ fn item_name(item: &Item) -> Option<&str> {
 
 /// Prepend the prelude to a user module's items (dropping prelude items the user
 /// redeclares), producing the final module.
-fn inject_prelude(user: Module) -> Module {
+fn inject_prelude(user: Module, sources: &mut SourceMap) -> Module {
     let user_names: std::collections::HashSet<String> = user
         .items
         .iter()
         .filter_map(|i| item_name(i).map(|s| s.to_string()))
         .collect();
 
-    let prelude_tokens = lex(PRELUDE_SRC).expect("prelude must lex");
+    // The prelude is its own source ("<std>"): register it + lex with its id so
+    // prelude spans resolve against PRELUDE_SRC, never a fabricated user line.
+    let sid = add_source(sources, "<std>".to_string(), PRELUDE_SRC.to_string());
+    let prelude_tokens = lex_with_source(PRELUDE_SRC, sid).expect("prelude must lex");
     let prelude = parse_module(&prelude_tokens).expect("prelude must parse");
 
     let mut items: Vec<Item> = prelude
@@ -106,25 +126,31 @@ fn inject_prelude(user: Module) -> Module {
 
 /// Parse a user program (a single source string, no file modules) and inject the
 /// prelude. Used for tests and the in-memory REPL-style path.
-pub fn parse_with_prelude(user_src: &str) -> Result<Module, ParseError> {
+pub fn parse_with_prelude(user_src: &str) -> Result<(Module, SourceMap), ParseError> {
+    let mut sources: SourceMap = Vec::new();
+    add_source(&mut sources, "<input>".to_string(), user_src.to_string()); // user = id 0
     let user_tokens = lex(user_src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
     let user = parse_module(&user_tokens)?;
-    Ok(inject_prelude(user))
+    let module = inject_prelude(user, &mut sources);
+    Ok((module, sources))
 }
 
 /// Parse a user program from a file, recursively loading any `mod foo;` file
 /// modules relative to the file's directory, then inject the prelude. This is the
 /// driver entry point for multi-file projects.
-pub fn parse_file_with_prelude(path: &Path) -> Result<Module, ParseError> {
+pub fn parse_file_with_prelude(path: &Path) -> Result<(Module, SourceMap), ParseError> {
     let src = std::fs::read_to_string(path).map_err(|e| ParseError {
         msg: format!("cannot read `{}`: {}", path.display(), e),
         span: crate::lexer::Span::new(0, 0),
     })?;
+    let mut sources: SourceMap = Vec::new();
+    add_source(&mut sources, path.display().to_string(), src.clone()); // user = id 0
     let tokens = lex(&src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
     let mut user = parse_module(&tokens)?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    load_file_modules(&mut user.items, dir)?;
-    Ok(inject_prelude(user))
+    load_file_modules(&mut user.items, dir, &mut sources)?; // mods get ids 1..
+    let module = inject_prelude(user, &mut sources); // prelude gets the next id
+    Ok((module, sources))
 }
 
 #[cfg(test)]
@@ -135,7 +161,7 @@ mod tests {
     use crate::codegen::jit_run_i64_gc;
 
     fn run(src: &str) -> i64 {
-        let m = parse_with_prelude(src).unwrap();
+        let (m, _) = parse_with_prelude(src).unwrap();
         let r = resolve_module(m).unwrap();
         let prog = lower_program(&r.globals).unwrap();
         jit_run_i64_gc(&prog, false).unwrap()

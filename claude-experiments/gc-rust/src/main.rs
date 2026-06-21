@@ -75,7 +75,10 @@ fn main() -> ExitCode {
     // The `parse` subcommand shows only the user's own items; every other path
     // injects the prelude so Option/Result/helpers are in scope without the user
     // declaring them.
-    let module = if cmd == "parse" {
+    // `module` + the SourceMap (one entry per source: user / mod files / prelude),
+    // attached to the lowered program (run/build) so spans resolve to their real
+    // file:line:col.
+    let (module, sources) = if cmd == "parse" {
         let tokens = match lex(&src) {
             Ok(t) => t,
             Err(e) => {
@@ -84,7 +87,7 @@ fn main() -> ExitCode {
             }
         };
         match parse_module(&tokens) {
-            Ok(m) => m,
+            Ok(m) => (m, vec![gcrust::core::SourceEntry { path: path.to_string(), text: src.clone() }]),
             Err(e) => {
                 eprintln!("gcr: parse error at {:?}: {}", e.span, e.msg);
                 return ExitCode::FAILURE;
@@ -93,7 +96,7 @@ fn main() -> ExitCode {
     } else {
         // Load the file (plus any `mod foo;` sibling files) and inject the prelude.
         match gcrust::compile::parse_file_with_prelude(std::path::Path::new(path)) {
-            Ok(m) => m,
+            Ok(ms) => ms,
             Err(e) => {
                 eprintln!("{}", gcrust::diag::render(path, &src, e.span, &e.msg));
                 return ExitCode::FAILURE;
@@ -169,8 +172,7 @@ fn main() -> ExitCode {
             };
             // Attach the source so interned spans resolve to file:line:col (alloc
             // sites, and later DWARF). Cheap; only the driver has src+path.
-            prog.src_path = path.to_string();
-            prog.src_text = src.clone();
+            prog.sources = sources;
             // `--gc-stress` forces a collection at every allocation — the
             // strongest test that the precise relocating GC keeps roots correct.
             let stress = args.iter().any(|a| a == "--gc-stress");
@@ -226,8 +228,7 @@ fn main() -> ExitCode {
                 }
             };
             // Attach source for span→file:line:col resolution (see `run`).
-            prog.src_path = path.to_string();
-            prog.src_text = src.clone();
+            prog.sources = sources;
             match build_executable(&prog, &out, &link_args) {
                 Ok(()) => {
                     println!("gcr: wrote {}", out.display());
@@ -422,8 +423,8 @@ fn run_emit(args: &[String]) -> ExitCode {
         // Monomorphic Core IR, its curated layout/mono views, and the LLVM IR.
         // These need the full front end with the prelude injected.
         "core" | "layout" | "reflect" | "mono" | "llvm" => {
-            let module = match gcrust::compile::parse_file_with_prelude(std::path::Path::new(&path)) {
-                Ok(m) => m,
+            let (module, _) = match gcrust::compile::parse_file_with_prelude(std::path::Path::new(&path)) {
+                Ok(ms) => ms,
                 Err(e) => {
                     eprintln!("{}", gcrust::diag::render(&path, &src, e.span, &e.msg));
                     return ExitCode::FAILURE;
@@ -584,7 +585,7 @@ fn eval_source(src: &str, stress: bool) -> serde_json::Value {
     let (program_src, wrapped, result_ty) = match gcrust::compile::parse_with_prelude(src) {
         // Parses as a whole module: run `main` if present, else it's a
         // definitions-only buffer with nothing to evaluate yet.
-        Ok(module) => match main_ret_type(&module) {
+        Ok((module, _)) => match main_ret_type(&module) {
             Some(ty) => (src.to_string(), false, ty),
             None => {
                 return json!({
@@ -635,7 +636,7 @@ fn wrap_expr(head: &str, expr: &str) -> String {
 /// pipeline stage that failed and a concise message (no source rendering — the
 /// scratchpad shows this in a one-line strip).
 fn compile_and_run(src: &str, stress: bool) -> Result<i64, (String, String)> {
-    let module = gcrust::compile::parse_with_prelude(src).map_err(|e| ("parse".into(), e.msg))?;
+    let (module, _) = gcrust::compile::parse_with_prelude(src).map_err(|e| ("parse".into(), e.msg))?;
     let resolved = resolve_module(module).map_err(|e| ("resolve".into(), e.msg))?;
     if let Err(errs) = gcrust::lower::check_program(&resolved.globals) {
         let msg = errs.iter().map(|e| e.msg.clone()).collect::<Vec<_>>().join("; ");

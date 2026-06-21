@@ -11,7 +11,7 @@ use gcrust::resolve::resolve_module;
 
 /// Compile `src` (with the prelude) and JIT-run it, returning `main`'s i64.
 fn run(src: &str) -> i64 {
-    let module = parse_with_prelude(src).expect("parse");
+    let (module, _) = parse_with_prelude(src).expect("parse");
     let resolved = resolve_module(module).expect("resolve");
     let prog = lower_program(&resolved.globals).expect("lower");
     // `true` = collect on every allocation, so the new generic heap shapes

@@ -10,7 +10,7 @@ use gcrust::lower::lower_program;
 use gcrust::resolve::resolve_module;
 
 fn lower(src: &str) -> gcrust::core::CoreProgram {
-    let module = parse_with_prelude(src).expect("parse");
+    let (module, _) = parse_with_prelude(src).expect("parse");
     let resolved = resolve_module(module).expect("resolve");
     lower_program(&resolved.globals).expect("lower")
 }
