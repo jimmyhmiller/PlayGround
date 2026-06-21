@@ -302,6 +302,31 @@ fn cbv_let_supports_dependent_body_type() {
 }
 
 #[test]
+fn fix_and_case_stay_opaque_on_a_neutral() {
+    // OPACITY (cardinal 2, direct at the dep level — defense-in-depth): a `Fix` NEVER
+    // unfolds during normalization (so the checker can't loop on a divergent `%partial`
+    // fn), and a `Case` stuck on a NEUTRAL scrutinee stays a `Case`/`NCase` (it reduces
+    // only on a concrete constructor). Both directions of the partial/total boundary.
+    // (1) a DIVERGENT Fix applied — if it unfolded, `normalize_closed` would loop forever;
+    //     opacity keeps it a Fix-headed neutral (and the test terminates).
+    let fix = Fix(
+        b(Pi(Omega, b(Nat), b(Nat))),
+        b(Lam(b(App(b(Var(1)), b(Var(0)))))), // fix self. λx. self x
+    );
+    let div = App(b(fix), b(NatLit(0)));
+    assert!(
+        matches!(normalize_closed(&div), App(f, _) if matches!(&*f, Fix(_, _))),
+        "a Fix must stay OPAQUE under normalization (never unfold — else the checker loops)"
+    );
+    // (2) a `Case` on a NEUTRAL scrutinee (the λ binder) stays a `Case` (does NOT reduce).
+    let case = Lam(b(Case("Foo".into(), b(Lam(b(Nat))), vec![NatLit(0)], b(Var(0)))));
+    assert!(
+        matches!(normalize_closed(&case), Lam(b2) if matches!(&*b2, Case(_, _, _, _))),
+        "a Case on a neutral scrutinee must stay a Case (NCase) — reduce only on a concrete ctor"
+    );
+}
+
+#[test]
 fn positivity_sees_through_case_hiding_a_negative_occurrence() {
     // E3 RED-TEAM for the new non-recursive `Term::Case`: a NEGATIVE occurrence
     // (`Bad → Bad`) hidden in a `Case`'s method, scrutinee, OR motive must be REJECTED.
