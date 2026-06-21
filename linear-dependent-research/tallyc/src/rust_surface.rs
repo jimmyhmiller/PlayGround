@@ -1015,6 +1015,32 @@ impl Elab {
                     ))
                 }
             }
+            // a call to a CONTEXT VARIABLE — most importantly the `Fix` self-binder inside
+            // a `%partial` recursive body (`let s = self(x); …`). Infer it as a curried
+            // application: peel one `Π` domain per argument, check the argument, and
+            // instantiate the codomain with the argument value (so a dependent self-type
+            // stays correct). The kernel re-checks the produced application (incl. its
+            // linearity); this only ELABORATES it. (Self-binders carry no implicits.)
+            Tm::Call(name, args) if cx.var_type(name).is_some() => {
+                let idx = cx.debruijn(name).unwrap();
+                let mut head = Term::Var(idx);
+                let mut head_ty = cx.var_type(name).unwrap();
+                for arg in args {
+                    let (dom, cod) = match head_ty {
+                        Value::VPi(_, dom, cod) => (dom, cod),
+                        _ => {
+                            return Err(format!(
+                                "`{name}` is applied to more arguments than its type allows"
+                            ))
+                        }
+                    };
+                    let arg_tm = self.check(arg, &dom, cx, rec)?;
+                    let arg_v = self.eval(cx.len(), &arg_tm);
+                    head = Term::App(Box::new(head), Box::new(arg_tm));
+                    head_ty = cod.apply(arg_v);
+                }
+                Ok((head, head_ty))
+            }
             _ => Err("cannot infer the type of this argument (Phase 2)".into()),
         }
     }

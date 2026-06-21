@@ -168,7 +168,7 @@ pub struct Closure {
 }
 
 impl Closure {
-    fn apply(&self, arg: Value) -> Value {
+    pub(crate) fn apply(&self, arg: Value) -> Value {
         let mut env = self.env.clone();
         env.push(arg);
         eval(&self.sig, &env, &self.body)

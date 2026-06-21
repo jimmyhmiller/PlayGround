@@ -1767,6 +1767,29 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
     }
 
     #[test]
+    fn owned_list_traversal_runs_natively() {
+        // (A) the full interpreter-relevant shape: arbitrary-length recursion over a
+        // LINEAR OWNED heap structure, BUILDING + TRAVERSING + FREEING it. `sumFree`
+        // recurses on the unbox'd tail (a `%partial` `Fix` whose boxed matches are
+        // `Term::Case`), freeing each node via `unbox` and summing the heads. The
+        // recursive result is `let`-SEQUENCED (`let s = sumFree(t); add(h, s)`): passing
+        // `sumFree(t)` directly to `add`'s `ω` Nat argument would `ω`-scale the linear
+        // `t`'s consumption (`ω⋢1`) — the CBV-`let` counts `e` once, the correct
+        // discipline for sequencing a linear consumption into an unrestricted position.
+        // Builds [1,2], frees both nodes, sums → 3. Memory-safe, zero-GC, `%partial`.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+            struct Node { head : Nat, tail : Opt (Own Node) }\n\
+            add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+            sumFree : Opt (Own Node) -> Nat\n\
+            fn sumFree(l) { match l { none => Zero, some(o) => match unbox(o) { Node(h, t) => let s = sumFree(t); add(h, s) } } }\n\
+            mklist : Opt (Own Node)\n\
+            fn mklist() { some(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) }\n\
+            main : Nat\nfn main() { sumFree(mklist) }\n";
+        assert_eq!(run(src), 3);
+    }
+
+    #[test]
     fn heap_general_recursion_runs_natively() {
         // (A) HEAP RECURSION: a `%partial` fn recursing on a BOXED/heap structure — here a
         // boxed accumulator fold (the accumulator VARIES, so it is general recursion, not a
