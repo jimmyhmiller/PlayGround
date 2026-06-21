@@ -41,6 +41,21 @@ impl Mult {
     pub fn leq(self, budget: Mult) -> bool {
         matches!((self, budget), (_, Omega) | (One, One) | (Zero, Zero))
     }
+
+    /// least upper bound in the usage order `⊑` (everything ⊑ ω; 0,1 incomparable).
+    /// `lub(x,x)=x`, and any two DISTINCT values join to `ω` (their only upper bound:
+    /// `0⊔1=ω`). This is the BRANCH rule for a `match`/eliminator: only ONE arm runs,
+    /// so a variable used the SAME amount in every arm contributes that amount
+    /// (`1⊔1=1` — not `1+1=ω`, which is the over-counting bug of summing branches),
+    /// while a variable used INCONSISTENTLY across arms (`0⊔1=ω`) fails a linear
+    /// budget — correctly, since some arm would leak/duplicate it.
+    pub fn lub(self, o: Mult) -> Mult {
+        if self == o {
+            self
+        } else {
+            Omega
+        }
+    }
 }
 
 impl fmt::Display for Mult {

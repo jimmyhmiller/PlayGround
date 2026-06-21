@@ -665,6 +665,13 @@ fn uadd(a: &Usage, b: &Usage) -> Usage {
 fn uscale(p: Mult, a: &Usage) -> Usage {
     a.iter().map(|x| p.mul(*x)).collect()
 }
+/// per-variable LEAST UPPER BOUND — the BRANCH combinator for a `match`/eliminator:
+/// only ONE arm runs, so a variable's usage across the arms is their `lub`, NOT their
+/// sum. `lub(1,1)=1` (used once in each mutually-exclusive arm = once), while
+/// `lub(0,1)=ω` fails a linear budget (used inconsistently ⇒ some arm leaks/dups it).
+fn ujoin(a: &Usage, b: &Usage) -> Usage {
+    a.iter().zip(b).map(|(x, y)| x.lub(*y)).collect()
+}
 
 // ---------------------------------------------------------------------------
 // building eliminator types (motive + per-constructor methods) from a decl
@@ -1227,13 +1234,24 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
                     methods.len()
                 ));
             }
-            let mut umeth = uzero(n);
+            // JOIN (not SUM) the per-method usages: a `match`/eliminator runs exactly
+            // ONE arm, so a captured variable used the same amount in every arm is used
+            // that amount (e.g. freed once-per-arm = freed once), while an inconsistent
+            // use (`0⊔1=ω`) fails a linear budget. (Summing branches over-rejected the
+            // freed-once-per-arm pattern — the dual of the CBV-let over-counting fix.)
+            // `lub`'s identity is not `0`, so fold from the FIRST method (empty family ⇒
+            // no usage).
+            let mut umeth: Option<Usage> = None;
             for (ci, ctor) in decl.ctors.iter().enumerate() {
                 let meth_ty_tm = method_ty_tm(&decl, ctor, &sparam_tms, &motive_tm);
                 let meth_ty = eval(&ctx.sig, &ctx.env(), &meth_ty_tm);
                 let um = check(ctx, &methods[ci], &meth_ty)?;
-                umeth = uadd(&umeth, &um);
+                umeth = Some(match umeth {
+                    None => um,
+                    Some(acc) => ujoin(&acc, &um),
+                });
             }
+            let umeth = umeth.unwrap_or_else(|| uzero(n));
 
             // result: motive indices scrutinee
             let vscrut = eval(&ctx.sig, &ctx.env(), scrut);

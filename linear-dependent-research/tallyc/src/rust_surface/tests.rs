@@ -334,6 +334,26 @@ fn linear_param_defaults_to_one_no_double_free() {
 }
 
 #[test]
+fn phase_a_eliminator_joins_branch_usages() {
+    // PHASE A (b): a `match`/eliminator runs exactly ONE arm, so a captured linear
+    // value's usage across the arms is their JOIN (lub), not their SUM. Freeing an
+    // owned value once-per-arm is now ACCEPTED (lub(1,1)=1, was sum=ω over-rejected);
+    // the dual of the CBV-let over-counting fix. Soundness preserved: a per-path leak
+    // (freed in one arm only ⇒ lub(0,1)=ω) and a within-arm double-free are REJECTED.
+    const P: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Bool { btrue : Bool, bfalse : Bool }\n";
+    // ACCEPT: linear `o` freed once in EVERY arm.
+    let ok = format!("{P}g : Own Nat -> Bool -> Unit\nfn g(o, b) {{ match b {{ btrue => free(o), bfalse => free(o) }} }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&ok).is_ok(), "freed once per arm must be ACCEPTED (join): {:?}", check_program(&ok).err());
+    // REJECT: freed in one arm only → the other arm leaks it (lub(0,1)=ω).
+    let leak = format!("{P}g : Own Nat -> Bool -> Unit\nfn g(o, b) {{ match b {{ btrue => free(o), bfalse => U }} }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&leak).is_err(), "freeing in only one arm leaks on the other path — must be REJECTED");
+    // REJECT: double-free WITHIN one arm (the branch's own usage is ω).
+    let dbl = format!("{P}g : Own Nat -> Bool -> Unit\nfn g(o, b) {{ match b {{ btrue => let u = free(o); free(o), bfalse => free(o) }} }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&dbl).is_err(), "double-free within an arm must be REJECTED");
+}
+
+#[test]
 fn phase_a_variance_aware_nested_positivity() {
     // PHASE A (a): strict positivity is now VARIANCE-AWARE + NESTED, with `Own` as a
     // positivity-transparent pointer wrapper — so recursive `Own` structures (linked
