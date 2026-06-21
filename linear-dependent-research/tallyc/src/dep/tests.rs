@@ -258,6 +258,35 @@ fn bad_with_field(field: Term) -> Signature {
 }
 
 #[test]
+fn positivity_sees_through_let_hiding_a_negative_occurrence() {
+    // E3-class RED-TEAM for the new CBV `Term::Let`: a NEGATIVE occurrence (`Bad → Bad`)
+    // hidden inside a `Let` must NOT pass strict positivity. A new kernel term former
+    // the positivity checker fails to traverse reopens the Curry's-paradox hole (the
+    // same class as the NatCase/Fix bypass), inhabiting `False` in the total fragment.
+    // `occurs` must recurse EVERY `Let` subterm — ty, the bound expr `e`, AND the body.
+    let bad = Data("Bad".into(), vec![]);
+    // (1) negative occurrence in the Let BODY: `Let(_, Type, 0, Bad → Bad)` in the
+    //     domain of the field's arrow ⇒ `(Bad→Bad) → Bad`, obfuscated via Let.
+    let h_body = Let(Omega, b(Type(0)), b(NatLit(0)), b(Pi(Omega, b(bad.clone()), b(bad.clone()))));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(h_body), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Let's body must be rejected"
+    );
+    // (2) negative occurrence in the Let's BOUND EXPR `e` (which substitutes into the body).
+    let h_e = Let(Omega, b(Type(0)), b(Pi(Omega, b(bad.clone()), b(bad.clone()))), b(Var(0)));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(h_e), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Let's bound-expr must be rejected"
+    );
+    // (3) negative occurrence in the Let's TYPE annotation `ty`.
+    let h_ty = Let(Omega, b(Pi(Omega, b(bad.clone()), b(bad.clone()))), b(NatLit(0)), b(Type(0)));
+    assert!(
+        check_signature(&bad_with_field(Pi(Omega, b(h_ty), b(bad.clone())))).is_err(),
+        "a negative occurrence in a Let's type must be rejected"
+    );
+}
+
+#[test]
 fn occurs_finds_a_negative_occurrence_through_every_reducing_construct() {
     // PERMANENT REGRESSION (ported from the kernel reviewer's sibling-hunt): a
     // negative `Bad → Bad` hidden behind ANY subterm-bearing construct must be

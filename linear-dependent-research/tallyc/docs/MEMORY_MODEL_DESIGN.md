@@ -180,21 +180,40 @@ reachable channels (let / field / concrete param) are all closed.
 
 ## 7. Build roadmap (refines FUTURE_WORK §12 A–D)
 
-0. **§5 `let`-linearity fix + red-team** (prerequisite; small; DONE — commit
-   `bbbb26974`). v1 `contains_linear` catches concrete `Own`/`Σ[1]` in the type
-   expression; the field-hidden-Own and abstract-param cases are deferred (§13) and
-   GATED below.
+0. **The LINEARITY FOUNDATION — DONE (gate-2 SIGNED OFF; CBV-let under its own review).**
+   The whole field-hidden double-free/UAF/leak CLASS is closed by ONE convergent
+   mechanism (replacing the earlier whack-a-mole forbids):
+   - **Use-site instantiation-aware linearity** (gate-2, SIGNED OFF — reviewer ran 32
+     red-team programs, no 5th instance): `type_is_linear` is field-aware (recurses
+     ctor field defs, seen-guarded) AND instantiation-aware (types substituted by
+     `elim_method_telescope`); every binding site (let / param / match-field via
+     `rebind_linear_fields`) binds an instantiated-linear value at `1`, so the
+     unchanged kernel enforces `ω⋢1`/`0⋢1`. The forbid is LIFTED. The §13 abstract-param
+     corner is confirmed LEAK-only (a concrete `Own` is always bound at 1, so feeding it
+     to an ω-param is rejected `ω⋢1`).
+   - **CBV `let`** (`Term::Let`, under review; positivity-of-`Let` red-team passes —
+     `occurs` recurses ty/e/body): usage `U_e ⊕ U_body` (e counted once), enabling
+     multi-owner sequencing without over-counting.
 1. **Phase A — explicit allocation:** `Own T` as the `Σ[1]` pair, `box`/`free`, `Opt`
    null-niche, recursion via `Opt (Own T)`; the malloc allocator.
-   **TWO DAY-ONE GATING INVARIANTS (not follow-ups):**
-   (a) the per-primitive erasure **IR-trace test** (§4.4); AND
-   (b) the **field-aware `contains_linear`** — Phase A introduces structs with `Own`
-   FIELDS (`struct Node { left : Opt (Own Node) }`), so `contains_linear` MUST be
-   upgraded to recurse into a datatype's constructor-field definitions (resolving
-   type parameters by substitution) BEFORE/WITH that feature. Adding `Own`-in-a-field
-   without the field-aware check REOPENS the exact `let`-laundering double-free behind
-   a struct name. This is a hard gate: structs-with-`Own` and field-aware linearity
-   land together or not at all.
+   **DAY-ONE GATING INVARIANT:** the per-primitive erasure **IR-trace test** (§4.4).
+   **TWO PREREQUISITES for recursive-`Own` structures** (linked list / tree — the
+   bread-and-butter; surfaced by the gate-2 reviewer, both SAFE-direction over-rejections
+   today, both BLOCK box/free on linked structures):
+   (a) **POSITIVITY must recognize `Own`/`↦` as a POSITIVE type former.** Today
+   `struct Node { next : Opt (Own Node) }` is rejected by STRICT-POSITIVITY (`Node`
+   under `Own`), not linearity — `strictly_positive` treats `Own Node`'s `Node` like any
+   occurrence. But `Own T` is a POINTER: a pointer to `T` is a POSITIVE occurrence (like
+   a constructor field, NOT a function-arrow domain). So `strictly_positive`/`occurs`
+   must treat `Own`/`↦` as a positive (transparent) wrapper — else linked structures
+   can't be declared. (Corrects the earlier doc claim "enables `Opt(Own Node)`
+   recursion" — gate-2 lifted the LINEARITY forbid, but POSITIVITY still blocks it.)
+   (b) **The ELIMINATOR must JOIN (max) branch usages, not SUM them.** A linear value
+   freed exactly-once-per-arm of a `match` is over-rejected `ω⋢1` because the eliminator
+   SUMS method-branch uses; only ONE branch runs, so once-per-branch = once → the join
+   (max) of branch usages is correct. Same family as the CBV-let fix (usage accounting
+   too conservative); its DUAL (let = sequencing/sum-fix; match = branching/join-fix).
+   Real box/free code (match a linked structure, free per-branch) hits this.
 2. **Phase B — value layouts:** real size/align/offsets, by-value vs by-pointer,
    niche opts (the representation rewrite from "everything is a tagged i64").
 3. **Phase C — views & borrows:** `p↦v`, `⊗`, `&`/`&mut` (read-back), init typestate,
