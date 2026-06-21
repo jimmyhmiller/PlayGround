@@ -11,9 +11,7 @@
 //! All deterministic from a fixed seed, computed once at startup (~tens of ms),
 //! then sampled with cheap bilinear lookups — so per-frame rendering is fast.
 
-use crate::util::Rng;
 use raylib::prelude::Vector2;
-use std::collections::HashSet;
 
 const GW: usize = 256;
 const GH: usize = 220;
@@ -33,16 +31,9 @@ pub enum Land {
     Snow,
 }
 
-pub struct River {
-    pub points: Vec<Vector2>,
-    /// Width per point — rivers taper from a narrow source to a wide mouth.
-    pub widths: Vec<f32>,
-}
-
 pub struct Terrain {
     height: Vec<f32>,
     shade: Vec<f32>,
-    rivers: Vec<River>,
 }
 
 #[inline]
@@ -54,9 +45,11 @@ impl Terrain {
     pub fn new(seed: u64) -> Terrain {
         let mut height = base_field(seed);
         thermal_erode(&mut height, 16);
-        let rivers = trace_rivers(&mut height, seed);
+        // Rivers are carved *into* the heightfield below sea level, so they render
+        // as real water (same depth shading + foam as the sea), not painted lines.
+        carve_rivers(&mut height);
         let shade = hillshade(&height);
-        Terrain { height, shade, rivers }
+        Terrain { height, shade }
     }
 
     /// Bilinear height in [0, 1] at a world point (edges clamp to the grid).
@@ -73,23 +66,10 @@ impl Terrain {
         classify(self.height(x, y))
     }
 
-    pub fn rivers(&self) -> &[River] {
-        &self.rivers
-    }
-
-    pub fn river_dist(&self, p: Vector2) -> f32 {
-        let mut best = f32::INFINITY;
-        for r in &self.rivers {
-            for w in r.points.windows(2) {
-                best = best.min(pt_seg_dist(p, w[0], w[1]));
-            }
-        }
-        best
-    }
-
+    /// True where a settlement can stand: dry land (rivers are now Sea cells, so
+    /// this also keeps towns out of the water).
     pub fn is_buildable(&self, p: Vector2) -> bool {
         matches!(self.land_at(p.x, p.y), Land::Grass | Land::Hill | Land::Sand)
-            && self.river_dist(p) > 60.0
     }
 }
 
@@ -196,103 +176,181 @@ fn thermal_erode(h: &mut [f32], passes: usize) {
 const NEIGH: [(i32, i32); 8] =
     [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
 
-fn lowest_neighbour(h: &[f32], i: usize, j: usize) -> (usize, f32) {
-    let mut best = idx(i, j);
-    let mut bh = f32::INFINITY;
-    for (di, dj) in NEIGH {
+// ---- hydrology: fill depressions -> flow accumulation -> river network -------
+
+/// f32 with a total order, for the priority queue.
+#[derive(PartialEq)]
+struct OrdF(f32);
+impl Eq for OrdF {}
+impl Ord for OrdF {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&o.0)
+    }
+}
+impl PartialOrd for OrdF {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+/// Priority-flood depression filling (Barnes et al.): flood inward from the map
+/// border so every cell gets a monotonic downhill path off the map. Pits fill to
+/// their spill level (becoming lakes) — so flow never gets stuck.
+fn priority_flood(height: &[f32]) -> Vec<f32> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut filled = height.to_vec();
+    let mut visited = vec![false; GW * GH];
+    let mut heap: BinaryHeap<Reverse<(OrdF, usize)>> = BinaryHeap::new();
+    for j in 0..GH {
+        for i in 0..GW {
+            if i == 0 || j == 0 || i == GW - 1 || j == GH - 1 {
+                let c = idx(i, j);
+                visited[c] = true;
+                heap.push(Reverse((OrdF(filled[c]), c)));
+            }
+        }
+    }
+    const EPS: f32 = 1e-5;
+    while let Some(Reverse((OrdF(h), c))) = heap.pop() {
+        let (i, j) = (c % GW, c / GW);
+        for (di, dj) in NEIGH {
+            let ni = i as i32 + di;
+            let nj = j as i32 + dj;
+            if ni < 0 || nj < 0 || ni >= GW as i32 || nj >= GH as i32 {
+                continue;
+            }
+            let n = idx(ni as usize, nj as usize);
+            if visited[n] {
+                continue;
+            }
+            visited[n] = true;
+            if filled[n] < h + EPS {
+                filled[n] = h + EPS;
+            }
+            heap.push(Reverse((OrdF(filled[n]), n)));
+        }
+    }
+    filled
+}
+
+/// D8 steepest-descent receiver for each cell (-1 = drains off the map / sea).
+fn flow_receivers(filled: &[f32]) -> Vec<i32> {
+    let mut recv = vec![-1i32; GW * GH];
+    for j in 1..GH - 1 {
+        for i in 1..GW - 1 {
+            let c = idx(i, j);
+            let mut best = -1i32;
+            let mut bh = filled[c];
+            for (di, dj) in NEIGH {
+                let n = idx((i as i32 + di) as usize, (j as i32 + dj) as usize);
+                if filled[n] < bh {
+                    bh = filled[n];
+                    best = n as i32;
+                }
+            }
+            recv[c] = best;
+        }
+    }
+    recv
+}
+
+/// Flow accumulation: drainage area through each cell (process high cells first,
+/// pushing their area downstream). Trunks near the sea accumulate the most.
+fn flow_accumulation(filled: &[f32], recv: &[i32]) -> Vec<f32> {
+    let n = GW * GH;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| filled[b].total_cmp(&filled[a]));
+    let mut acc = vec![1.0f32; n];
+    for &c in &order {
+        let r = recv[c];
+        if r >= 0 {
+            acc[r as usize] += acc[c];
+        }
+    }
+    acc
+}
+
+/// Carve a small brush at a river cell so a visible valley forms.
+fn carve(h: &mut [f32], i: usize, j: usize, depth: f32) {
+    for (di, dj) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
         let ni = i as i32 + di;
         let nj = j as i32 + dj;
-        if ni < 0 || nj < 0 || ni >= GW as i32 || nj >= GH as i32 {
+        if ni < 1 || nj < 1 || ni >= GW as i32 - 1 || nj >= GH as i32 - 1 {
             continue;
         }
         let n = idx(ni as usize, nj as usize);
-        if h[n] < bh {
-            bh = h[n];
-            best = n;
-        }
+        let amt = if di == 0 && dj == 0 { depth } else { depth * 0.5 };
+        h[n] = (h[n] - amt).max(0.0);
     }
-    (best, bh)
 }
 
-/// Trace rivers downhill from highland sources, carving their beds so later
-/// tributaries fall into the same valleys. Width grows with drainage (how many
-/// source paths share a cell), so trunks downstream are wide.
-fn trace_rivers(h: &mut [f32], seed: u64) -> Vec<River> {
-    // Candidate sources: random-ish highland cells, processed highest first.
-    let mut rng = Rng(seed ^ 0xC0FFEE | 1);
-    let mut sources: Vec<usize> = Vec::new();
-    for _ in 0..520 {
-        let i = 4 + (rng.next_u64() as usize % (GW - 8));
-        let j = 4 + (rng.next_u64() as usize % (GH - 8));
-        if h[idx(i, j)] > 0.6 {
-            sources.push(idx(i, j));
-        }
-    }
-    sources.sort_by(|&a, &b| h[b].partial_cmp(&h[a]).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut visits = vec![0u32; GW * GH];
-    let mut paths: Vec<Vec<usize>> = Vec::new();
-    for &src in &sources {
-        let mut cur = src;
-        let mut path = vec![cur];
-        let mut seen: HashSet<usize> = HashSet::new();
-        seen.insert(cur);
-        for _ in 0..600 {
-            if h[cur] < SEA_LEVEL {
-                break;
+/// The full river pipeline: fill -> receivers -> accumulation -> carve valleys ->
+/// extract the high-drainage cells as a merging, downstream-widening network.
+fn carve_rivers(height: &mut [f32]) {
+    // Iterative hydraulic carving: each pass concentrates flow into valleys, so
+    // parallel rivulets converge into branching trunks (a real drainage network).
+    for _ in 0..4 {
+        let filled = priority_flood(height);
+        let recv = flow_receivers(&filled);
+        let acc = flow_accumulation(&filled, &recv);
+        for c in 0..GW * GH {
+            if acc[c] > 10.0 && height[c] > SEA_LEVEL {
+                let depth = (0.005 + 0.004 * acc[c].ln()).min(0.03);
+                carve(height, c % GW, c / GW, depth);
             }
-            let (i, j) = (cur % GW, cur / GW);
-            let (nb, nh) = lowest_neighbour(h, i, j);
-            if nh >= h[cur] || !seen.insert(nb) {
-                break; // fell into a basin (lake) or a loop
-            }
-            cur = nb;
-            path.push(cur);
-        }
-        if path.len() >= 12 {
-            for &c in &path {
-                visits[c] += 1;
-                // Carve the channel a touch so a valley forms around it.
-                h[c] = (h[c] - 0.012).max(0.0);
-            }
-            paths.push(path);
         }
     }
 
-    // Keep the longest few as the visible rivers.
-    paths.sort_by_key(|p| std::cmp::Reverse(p.len()));
-    paths.truncate(9);
-    paths
-        .into_iter()
-        .map(|path| {
-            let mut points: Vec<Vector2> = path
-                .iter()
-                .map(|&c| {
-                    let (wx, wy) = cell_world(c % GW, c / GW);
-                    Vector2::new(wx, wy)
-                })
-                .collect();
-            let widths: Vec<f32> = path
-                .iter()
-                .map(|&c| (12.0 + (visits[c] as f32).sqrt() * 4.5).min(52.0))
-                .collect();
-            smooth(&mut points);
-            River { points, widths }
-        })
-        .collect()
+    // Final drainage, then stamp each channel down BELOW sea level (width + depth
+    // scaled by how much water it carries) so it becomes real water in the terrain.
+    let filled = priority_flood(height);
+    let recv = flow_receivers(&filled);
+    let acc = flow_accumulation(&filled, &recv);
+
+    const RIVER_T: f32 = 22.0;
+    let mut depth = vec![0.0f32; GW * GH]; // target depth below sea, max-accumulated
+    for c in 0..GW * GH {
+        let _ = recv;
+        if acc[c] <= RIVER_T {
+            continue;
+        }
+        let s = acc[c].sqrt();
+        let d = (0.045 + s * 0.0045).min(0.15); // deeper trunks read darker
+        let radius = (0.7 + s * 0.06).clamp(0.7, 3.0); // cells
+        stamp_channel(&mut depth, c % GW, c / GW, d, radius);
+    }
+    for c in 0..GW * GH {
+        if depth[c] > 0.0 {
+            let target = (SEA_LEVEL - depth[c]).max(0.0);
+            if target < height[c] {
+                height[c] = target;
+            }
+        }
+    }
 }
 
-/// One light smoothing pass so river polylines aren't blocky.
-fn smooth(pts: &mut [Vector2]) {
-    if pts.len() < 3 {
-        return;
-    }
-    let orig = pts.to_vec();
-    for i in 1..pts.len() - 1 {
-        pts[i] = Vector2::new(
-            (orig[i - 1].x + orig[i].x * 2.0 + orig[i + 1].x) * 0.25,
-            (orig[i - 1].y + orig[i].y * 2.0 + orig[i + 1].y) * 0.25,
-        );
+/// Stamp a tapered channel into the depth field: deepest at the centre, fading to
+/// the banks, so rendering gives a smooth water edge (and the shoreline foam).
+fn stamp_channel(depth: &mut [f32], ci: usize, cj: usize, d: f32, radius: f32) {
+    let r = radius.ceil() as i32;
+    for dj in -r..=r {
+        for di in -r..=r {
+            let ni = ci as i32 + di;
+            let nj = cj as i32 + dj;
+            if ni < 1 || nj < 1 || ni >= GW as i32 - 1 || nj >= GH as i32 - 1 {
+                continue;
+            }
+            let dist = ((di * di + dj * dj) as f32).sqrt();
+            if dist > radius {
+                continue;
+            }
+            let v = d * (1.0 - dist / radius);
+            let n = idx(ni as usize, nj as usize);
+            if v > depth[n] {
+                depth[n] = v;
+            }
+        }
     }
 }
 
@@ -367,15 +425,3 @@ fn fbm(x: f32, y: f32, seed: u64) -> f32 {
     sum / norm
 }
 
-fn pt_seg_dist(p: Vector2, a: Vector2, b: Vector2) -> f32 {
-    let ab = b - a;
-    let ap = p - a;
-    let len2 = ab.x * ab.x + ab.y * ab.y;
-    let t = if len2 > 0.0 {
-        ((ap.x * ab.x + ap.y * ab.y) / len2).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let proj = Vector2::new(a.x + ab.x * t, a.y + ab.y * t);
-    p.distance_to(proj)
-}

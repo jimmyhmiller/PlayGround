@@ -6,7 +6,7 @@ pub mod assets;
 
 use crate::achievements::Cat;
 use crate::data::Tool;
-use crate::game::terrain::{self, Land, River};
+use crate::game::terrain::{self, Land};
 use crate::game::{Biome, Building, City, Road, Season, Villager, World, LIVE_WINDOW};
 use assets::{src, Assets};
 use raylib::prelude::*;
@@ -218,7 +218,7 @@ fn draw_villager<D: RaylibDraw>(d: &mut D, tex: &Texture2D, v: &Villager, season
     let x = v.pos.x - s / 2.0;
     let y = v.pos.y - s - bob;
     d.draw_ellipse(v.pos.x as i32, v.pos.y as i32, s * 0.32, s * 0.12, Color::new(0, 0, 0, 70));
-    let base = if v.on_trip { Color::new(255, 240, 210, 255) } else { Color::WHITE };
+    let base = if v.travelling() { Color::new(255, 240, 210, 255) } else { Color::WHITE };
     draw_tile(d, tex, v.sprite, x, y, VILLAGER_SCALE, mul_color(base, season));
 }
 
@@ -333,40 +333,6 @@ fn draw_peak<D: RaylibDraw>(d: &mut D, cx: f32, base: f32, size: f32, snow: bool
     }
 }
 
-fn draw_river<D: RaylibDraw>(d: &mut D, r: &River, tl: Vector2, br: Vector2, water_t: f32) {
-    let deep = Color::new(56, 114, 168, 255);
-    // Subtle flow shimmer along the river.
-    let lite = Color::new(96, 158, 206, 255);
-    let n = r.points.len();
-    for (col, scale) in [(deep, 1.0_f32), (lite, 0.5)] {
-        for k in 0..n.saturating_sub(1) {
-            let (a, b) = (r.points[k], r.points[k + 1]);
-            let w = (r.widths[k] + r.widths[k + 1]) * 0.5 * scale;
-            if seg_visible(a, b, tl, br, w * 2.0) {
-                d.draw_line_ex(a, b, w, col);
-            }
-        }
-        for k in 0..n {
-            let p = r.points[k];
-            let w = r.widths[k] * scale * 0.5;
-            if rect_visible(p, tl, br, w * 2.0) {
-                d.draw_circle_v(p, w, col);
-            }
-        }
-    }
-    // Glints drifting downstream.
-    for k in (0..n).step_by(3) {
-        let phase = (water_t * 0.6 + k as f32 * 0.5).fract();
-        if phase < 0.5 {
-            let p = r.points[k];
-            if rect_visible(p, tl, br, 30.0) {
-                let a = (60.0 * (1.0 - phase * 2.0)) as u8;
-                d.draw_circle_v(p, r.widths[k] * 0.22, Color::new(220, 240, 255, a));
-            }
-        }
-    }
-}
-
 fn ribbon<D: RaylibDraw>(d: &mut D, pts: &[Vector2], width: f32, col: Color, tl: Vector2, br: Vector2) {
     for seg in pts.windows(2) {
         if seg_visible(seg[0], seg[1], tl, br, width * 2.0) {
@@ -449,33 +415,44 @@ pub fn draw_world_space<D: RaylibDraw>(
         }
     }
 
-    // --- mountain peaks: sparse, large, varied so ranges read as ridgelines ---
-    let ms = 108.0_f32.max(13.0 / cam.zoom);
+    // --- mountain peaks: only at ridge tops (local maxima) so they rise as
+    //     distinct summits from the rocky ground, not a carpet of triangles -----
+    let ms = 92.0_f32.max(13.0 / cam.zoom);
     let px0 = (tl.x / ms).floor() as i32 - 1;
     let px1 = (br.x / ms).ceil() as i32 + 1;
     let py0 = (tl.y / ms).floor() as i32 - 1;
     let py1 = (br.y / ms).ceil() as i32 + 1;
     for my in py0..py1 {
         for mx in px0..px1 {
-            let hh = crate::util::hash64(&(mx, my, 31u8));
-            // Thin the field out so peaks overlap into a ridge, not a tile carpet.
-            if hh % 10 < 4 {
+            let cx = mx as f32 * ms;
+            let cy = my as f32 * ms;
+            let h = terrain.height(cx, cy);
+            if h <= 0.66 {
                 continue;
             }
-            let wx = mx as f32 * ms + (hh % 90) as f32 - 24.0;
-            let wy = my as f32 * ms + ((hh >> 8) % 90) as f32 - 24.0;
-            let h = terrain.height(wx, wy);
-            if h > 0.66 {
-                let size = 36.0 + (h - 0.66) * 360.0 + (hh % 34) as f32;
-                draw_peak(d, wx, wy, size, h > 0.82);
+            // Keep only summits that top their coarse neighbourhood.
+            let mut is_summit = true;
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0)] {
+                if terrain.height(cx + dx * ms, cy + dy * ms) > h {
+                    is_summit = false;
+                    break;
+                }
             }
+            if !is_summit {
+                continue;
+            }
+            let hh = crate::util::hash64(&(mx, my, 31u8));
+            let jx = (hh % 44) as f32 - 22.0;
+            let jy = ((hh >> 8) % 44) as f32 - 22.0;
+            let size = 50.0 + (h - 0.66) * 440.0 + (hh % 36) as f32;
+            draw_peak(d, cx + jx, cy + jy, size, h > 0.80);
         }
     }
 
-    // --- rivers, then roads + bridges -----------------------------------------
-    for r in terrain.rivers() {
-        draw_river(d, r, tl, br, time);
-    }
+    // Rivers are now carved into the terrain (drawn as water in the ground pass).
+    let _ = time;
+
+    // --- roads + bridges ------------------------------------------------------
     for road in &world.roads {
         draw_road(d, road, tl, br);
     }
@@ -502,7 +479,7 @@ pub fn draw_world_space<D: RaylibDraw>(
             if chance == 0 || h % chance != 0 {
                 continue;
             }
-            if world.cities.iter().any(|c| c.pos.distance_to(p) < 150.0) || terrain.river_dist(p) < 40.0 {
+            if world.cities.iter().any(|c| c.pos.distance_to(p) < 150.0) {
                 continue;
             }
             let (deco, sc) = if land == Land::Mountain {
@@ -892,72 +869,62 @@ pub fn clear_bg<D: RaylibDraw>(d: &mut D) {
     d.clear_background(SKY);
 }
 
-/// Which weather is active at `time` (slowly changing; mostly clear).
-fn weather_at(time: f32) -> u8 {
-    let window = (time / 95.0) as u64;
-    match crate::util::hash64(&(window, 0x5757u64)) % 6 {
-        0 => 1, // rain
-        1 => 2, // snow
-        _ => 0, // clear
-    }
+/// (daylight 0..1, dusk-warmth 0..1) at `time`. A top-down map has no sky, so
+/// "night" is conveyed by dimming + cooling the ground (and towns lighting up).
+fn sky_factors(time: f32) -> (f32, f32) {
+    use std::f32::consts::TAU;
+    const DAY: f32 = 300.0; // seconds per full day/night cycle (unhurried)
+    let phase = (time / DAY).rem_euclid(1.0);
+    let elev = -(phase * TAU).cos(); // -1 midnight, +1 noon
+    let day = ((elev + 0.2) / 0.4).clamp(0.0, 1.0);
+    let dusk = (1.0 - (elev.abs() / 0.3)).clamp(0.0, 1.0);
+    (day, dusk)
 }
 
-/// Full-screen day/night colour grade + stars + weather, drawn over the finished
-/// world (but under the HUD). `time` is seconds elapsed.
+/// Full-screen day/night colour grade over the finished world (under the HUD).
+/// Night stays readable — a cool dusk, not a blackout — because the towns supply
+/// the warm light (see [`draw_lights`]). No precipitation particles: on a top-down
+/// map they read as random noise rather than weather.
 pub fn draw_sky<D: RaylibDraw>(d: &mut D, time: f32, screen: (i32, i32)) {
-    use std::f32::consts::TAU;
-    const DAY: f32 = 220.0; // seconds per full day/night cycle
-    let phase = (time / DAY).rem_euclid(1.0); // 0 = midnight
-    let elev = -(phase * TAU).cos(); // -1 at midnight, +1 at noon
-    let day = ((elev + 0.18) / 0.38).clamp(0.0, 1.0); // 0 night .. 1 day
-    let dusk = (1.0 - (elev.abs() / 0.28)).clamp(0.0, 1.0); // peaks at the horizon
+    let (day, dusk) = sky_factors(time);
 
-    // Multiply grade: night -> deep blue, dawn/dusk -> warm, day -> neutral.
-    let mut gr = lu(64, 255, day);
-    let mut gg = lu(78, 255, day);
-    let mut gb = lu(138, 255, day);
-    gr = lu(gr, 255, dusk * 0.55);
-    gg = lu(gg, 206, dusk * 0.55);
-    gb = lu(gb, 162, dusk * 0.55);
-    let weather = weather_at(time);
-    if weather == 1 {
-        // Rain mutes and cools everything.
-        gr = (gr as f32 * 0.82) as i32;
-        gg = (gg as f32 * 0.86) as i32;
-        gb = (gb as f32 * 0.92) as i32;
-    }
-    {
-        let mut m = d.begin_blend_mode(BlendMode::BLEND_MULTIPLIED);
-        m.draw_rectangle(0, 0, screen.0, screen.1, Color::new(cu(gr), cu(gg), cu(gb), 255));
-    }
+    // Multiply grade: night -> cool dusk-blue (floor kept high), dusk -> warm.
+    let mut gr = lu(120, 255, day);
+    let mut gg = lu(130, 255, day);
+    let mut gb = lu(166, 255, day);
+    gr = lu(gr, 255, dusk * 0.5);
+    gg = lu(gg, 200, dusk * 0.5);
+    gb = lu(gb, 158, dusk * 0.5);
+    let mut m = d.begin_blend_mode(BlendMode::BLEND_MULTIPLIED);
+    m.draw_rectangle(0, 0, screen.0, screen.1, Color::new(cu(gr), cu(gg), cu(gb), 255));
+}
 
-    // Stars come out at night.
-    if day < 0.35 {
-        let base = ((0.35 - day) / 0.35 * 220.0) as u8;
-        for k in 0..80u64 {
-            let h = crate::util::hash64(&(k, 0x57u8));
-            let x = (h % screen.0.max(1) as u64) as i32;
-            let y = ((h >> 18) % (screen.1.max(80) as u64 - 60)) as i32 + 34;
-            let tw = (time * 1.7 + k as f32).sin() * 0.5 + 0.5;
-            d.draw_circle(x, y, 0.8 + tw, Color::new(255, 255, 236, (base as f32 * tw) as u8));
+/// Warm light spilling from the towns at night — additive, so it shines through
+/// the darkened world. Active (live) projects burn brightest, like campfires.
+pub fn draw_lights<D: RaylibDraw>(d: &mut D, world: &World, cam: &Camera2D, time: f32, screen: (i32, i32)) {
+    let (day, _) = sky_factors(time);
+    let night = (1.0 - day).clamp(0.0, 1.0);
+    if night < 0.04 {
+        return;
+    }
+    let mut m = d.begin_blend_mode(BlendMode::BLEND_ADDITIVE);
+    for c in &world.cities {
+        let s = world_to_screen(Vector2::new(c.pos.x, c.pos.y + 44.0), cam);
+        if s.x < -200.0 || s.x > screen.0 as f32 + 200.0 || s.y < -200.0 || s.y > screen.1 as f32 + 200.0 {
+            continue;
         }
-    }
-
-    // Precipitation.
-    if weather == 1 {
-        for k in 0..260u64 {
-            let h = crate::util::hash64(&(k, 0x11u8));
-            let x = (((h % 1600) as f32 - time * 90.0).rem_euclid(screen.0 as f32 + 40.0)) - 20.0;
-            let y = (((h >> 16) % 1600) as f32 + time * 900.0).rem_euclid(screen.1 as f32 + 40.0) - 20.0;
-            d.draw_line_ex(Vector2::new(x, y), Vector2::new(x - 4.0, y + 14.0), 1.4, Color::new(150, 180, 220, 150));
+        let live = c.live > 0;
+        let flick = if live { 0.85 + 0.15 * (time * 6.0 + c.pos.x).sin() } else { 1.0 };
+        let strength = night * if live { 1.0 } else { 0.42 } * flick;
+        let radius = (38.0 + (c.buildings.len() as f32).sqrt() * 16.0) * cam.zoom.max(0.12);
+        // Layered warm glow (additive accumulates to a bright hearth).
+        for (rscale, a) in [(1.0_f32, 26.0_f32), (0.6, 40.0), (0.32, 70.0)] {
+            let col = Color::new(255, 188, 104, (a * strength) as u8);
+            m.draw_circle_v(s, radius * rscale, col);
         }
-    } else if weather == 2 {
-        for k in 0..200u64 {
-            let h = crate::util::hash64(&(k, 0x22u8));
-            let drift = (time * 0.8 + k as f32).sin() * 18.0;
-            let x = (((h % 1600) as f32 + drift).rem_euclid(screen.0 as f32 + 40.0)) - 20.0;
-            let y = (((h >> 16) % 1600) as f32 + time * 90.0).rem_euclid(screen.1 as f32 + 40.0) - 20.0;
-            d.draw_circle(x as i32, y as i32, 1.6, Color::new(245, 248, 255, 200));
+        if live {
+            // A hotter core for projects being worked on right now.
+            m.draw_circle_v(s, radius * 0.16, Color::new(255, 226, 170, (150.0 * strength) as u8));
         }
     }
 }

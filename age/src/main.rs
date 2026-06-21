@@ -202,6 +202,7 @@ fn main() {
             render::draw_world_space(&mut m, &world, &assets, &cam, (sw, sh), sel, elapsed);
         }
         render::draw_sky(&mut d, elapsed, (sw, sh));
+        render::draw_lights(&mut d, &world, &cam, elapsed, (sw, sh));
         render::draw_labels(&mut d, &world, &cam, (sw, sh), sel);
         render::draw_hud(&mut d, &world, &source_name, loading, fps, (sw, sh));
         if let Some(i) = sel {
@@ -281,6 +282,7 @@ fn run_screenshot(
             render::draw_world_space(&mut m, world, assets, cam, (sw, sh), selected, shot_time);
         }
         render::draw_sky(&mut d, shot_time, (sw, sh));
+        render::draw_lights(&mut d, world, cam, shot_time, (sw, sh));
         render::draw_labels(&mut d, world, cam, (sw, sh), selected);
         render::draw_hud(&mut d, world, source_name, false, 60, (sw, sh));
         if let Some(i) = selected {

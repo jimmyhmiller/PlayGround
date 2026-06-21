@@ -23,9 +23,11 @@ const GRID_COLS: i32 = 8;
 const CELL: f32 = 1080.0;
 const MAX_VILLAGERS: usize = 8;
 
-/// A road linking two cities: a curved dirt ribbon. `water[i]` marks points that
-/// cross a river or lake, so the renderer can lay a bridge deck over those spans.
+/// A road linking cities `a` and `b`: a curved dirt ribbon. `water[i]` marks
+/// points crossing a river or lake (the renderer lays a bridge deck there).
 pub struct Road {
+    pub a: usize,
+    pub b: usize,
     pub points: Vec<Vector2>,
     pub water: Vec<bool>,
 }
@@ -179,6 +181,8 @@ pub struct World {
     pub terrain: Terrain,
     /// Roads linking nearby cities.
     pub roads: Vec<Road>,
+    /// city index -> list of (neighbour city, road index) for caravan routing.
+    adjacency: Vec<Vec<(usize, usize)>>,
 }
 
 pub struct City {
@@ -226,8 +230,16 @@ pub struct Villager {
     pub sprite: i32,
     pub wander_radius: f32,
     pub anim_t: f32,
-    pub on_trip: bool,
+    /// When non-empty, the caravan is following this road polyline (there + back).
+    pub route: Vec<Vector2>,
+    route_i: usize,
     rng: Rng,
+}
+
+impl Villager {
+    pub fn travelling(&self) -> bool {
+        !self.route.is_empty()
+    }
 }
 
 impl World {
@@ -240,6 +252,7 @@ impl World {
             extent: (Vector2::new(0.0, 0.0), Vector2::new(CELL, CELL)),
             terrain: Terrain::new(WORLD_SEED),
             roads: Vec::new(),
+            adjacency: Vec::new(),
         }
     }
 
@@ -297,18 +310,34 @@ impl World {
         self.build_roads();
     }
 
-    /// Advance villager motion and building animations by `dt` seconds.
+    /// Advance villager motion and building animations by `dt` seconds. Caravans
+    /// follow the road network (so they cross bridges instead of floating on water).
     pub fn update(&mut self, dt: f32) {
-        // Snapshot city centers so villagers can pick travel destinations.
-        let centers: Vec<Vector2> = self.cities.iter().map(|c| c.pos).collect();
-        for (ci, city) in self.cities.iter_mut().enumerate() {
+        let World { cities, roads, adjacency, .. } = self;
+        for (ci, city) in cities.iter_mut().enumerate() {
             for b in &mut city.buildings {
                 if b.live {
                     b.smoke_t += dt;
                 }
             }
+            let adj = adjacency.get(ci).map(|a| a.as_slice()).unwrap_or(&[]);
             for v in &mut city.villagers {
-                v.step(dt, ci, &centers);
+                // Occasionally set off on a caravan to a road-connected neighbour.
+                if v.route.is_empty() && !adj.is_empty() && v.rng.next_f32() < 0.010 {
+                    let (_nb, rid) = adj[v.rng.below(adj.len())];
+                    let road = &roads[rid];
+                    // Orient the road away from this city, then add the return leg.
+                    let mut route: Vec<Vector2> = if road.a == ci {
+                        road.points.clone()
+                    } else {
+                        road.points.iter().rev().copied().collect()
+                    };
+                    let mut back = route.clone();
+                    back.reverse();
+                    route.extend(back);
+                    v.start_route(route);
+                }
+                v.step(dt);
             }
         }
     }
@@ -401,6 +430,13 @@ impl World {
         for (a, b) in edges {
             self.roads.push(make_road(a, b, pts[a], pts[b], &self.terrain));
         }
+
+        // Adjacency for caravan routing.
+        self.adjacency = vec![Vec::new(); n];
+        for (ri, road) in self.roads.iter().enumerate() {
+            self.adjacency[road.a].push((road.b, ri));
+            self.adjacency[road.b].push((road.a, ri));
+        }
     }
 }
 
@@ -423,18 +459,19 @@ fn make_road(a: usize, b: usize, pa: Vector2, pb: Vector2, terrain: &Terrain) ->
     let mid = Vector2::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
     let ctrl = Vector2::new(mid.x + perp.x * bow, mid.y + perp.y * bow);
 
-    let steps = 28;
+    // Sample densely enough (~1 point per 30 world units) to catch narrow river
+    // crossings, which are now Sea cells in the terrain.
+    let steps = ((len / 30.0).round() as usize).clamp(24, 90);
     let mut points = Vec::with_capacity(steps + 1);
     let mut water = Vec::with_capacity(steps + 1);
     for s in 0..=steps {
         let t = s as f32 / steps as f32;
         let p = quad_bezier(pa, ctrl, pb, t);
-        let over_water =
-            terrain.river_dist(p) < 30.0 || terrain.land_at(p.x, p.y) == terrain::Land::Sea;
+        let over_water = terrain.land_at(p.x, p.y) == terrain::Land::Sea;
         points.push(p);
         water.push(over_water);
     }
-    Road { points, water }
+    Road { a, b, points, water }
 }
 
 /// Rebuild a city's stats, buildings and villager population from fresh info,
@@ -534,7 +571,8 @@ fn update_city(city: &mut City, info: &CityInfo, center: Vector2, now: f64) {
             sprite,
             wander_radius: 70.0 + rng.range(0.0, 50.0),
             anim_t: rng.range(0.0, 6.28),
-            on_trip: false,
+            route: Vec::new(),
+            route_i: 0,
             rng,
         });
     }
@@ -548,40 +586,38 @@ fn update_city(city: &mut City, info: &CityInfo, center: Vector2, now: f64) {
 }
 
 impl Villager {
-    fn step(&mut self, dt: f32, my_city: usize, centers: &[Vector2]) {
+    fn start_route(&mut self, route: Vec<Vector2>) {
+        self.route_i = 0;
+        self.target = route.first().copied().unwrap_or(self.home);
+        self.route = route;
+    }
+
+    fn step(&mut self, dt: f32) {
         self.anim_t += dt * (2.0 + self.speed * 0.05);
         let to = self.target - self.pos;
         let dist = to.length();
-        if dist < 4.0 {
-            self.pick_target(my_city, centers);
+        if dist < 5.0 {
+            if !self.route.is_empty() {
+                self.route_i += 1;
+                if self.route_i < self.route.len() {
+                    self.target = self.route[self.route_i];
+                } else {
+                    self.route.clear();
+                    self.route_i = 0;
+                    self.pick_wander();
+                }
+            } else {
+                self.pick_wander();
+            }
         } else {
-            // Trips are long countryside caravans — move much faster while travelling.
-            let speed = if self.on_trip { self.speed * 4.0 } else { self.speed };
+            // Caravans on the road move briskly; locals amble.
+            let speed = if self.route.is_empty() { self.speed } else { self.speed * 3.4 };
             let dir = Vector2::new(to.x / dist, to.y / dist);
             self.pos = self.pos + dir * (speed * dt);
         }
     }
 
-    fn pick_target(&mut self, my_city: usize, centers: &[Vector2]) {
-        // Returning from a trip → head home.
-        if self.on_trip {
-            self.on_trip = false;
-            self.target = self.home;
-            return;
-        }
-        // Occasionally set off on a trade caravan to another project (rarer now
-        // that cities are far apart).
-        let roll = self.rng.next_f32();
-        if roll < 0.02 && centers.len() > 1 {
-            let mut dest = self.rng.below(centers.len());
-            if dest == my_city {
-                dest = (dest + 1) % centers.len();
-            }
-            self.on_trip = true;
-            self.target = Vector2::new(centers[dest].x, centers[dest].y + 50.0);
-            return;
-        }
-        // Otherwise wander near home.
+    fn pick_wander(&mut self) {
         let a = self.rng.range(0.0, 6.2831);
         let r = self.rng.range(10.0, self.wander_radius);
         self.target = Vector2::new(self.home.x + a.cos() * r, self.home.y + a.sin() * r * 0.6);
