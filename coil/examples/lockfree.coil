@@ -1,0 +1,93 @@
+; Concurrency dogfood, stage 2: a genuinely LOCK-FREE stack (Treiber stack) via
+; compare-and-swap — NO mutex, only `atomic-cas` (lib/atomic.coil, pure llvm-ir). N
+; threads concurrently PUSH M distinct pre-allocated nodes onto a shared stack
+; (contending on the head pointer via CAS); then a single thread drains it and counts
+; → exactly N·M, proving no push was lost under contention.
+;
+; ABA — handled honestly (not faked): the classic ABA hazard needs a node to be freed
+; and REUSED while another thread holds a stale pointer to it. This dogfood SIDESTEPS
+; ABA by construction — nodes are pre-allocated once, never freed, and each thread
+; pushes a DISJOINT range (no reuse, no concurrent pop during the push phase). A
+; PRODUCTION lock-free stack with concurrent push/pop + reclamation needs tagged
+; pointers / hazard pointers / epoch reclamation; this is a bounded demonstration, not
+; that. It IS genuinely lock-free (CAS only, no hidden lock).
+;   coil run examples/lockfree.coil; echo $?   => 0   (all 4*1000 pushes survived)
+(module app)
+(import "lib/atomic.coil" :use *)
+(import "lib/thread.coil" :use *)
+
+(extern malloc :cc c [i64] (-> (ptr i8)))
+
+(defstruct Node  [(val i64) (next i64)])               ; next = node address as i64 (0 = null)
+(defstruct WArgs [(head (ptr i64)) (pool (ptr Node)) (start i64) (count i64)])
+
+; push node at address `na` onto the stack whose head-cell is `head` (CAS retry loop).
+(defn lf-push [(head (ptr i64)) (na i64)] (-> i64)
+  (let [node (cast (ptr Node) na)]
+    (loop
+      (let [old (atomic-load head)]
+        (store! (field node next) old)                 ; node.next = current head
+        (if (icmp-eq (atomic-cas head old na) old)     ; CAS head: old -> na
+            (break)
+            0))))
+  0)
+
+; pop the top node (returns its address, or 0 if empty).
+(defn lf-pop [(head (ptr i64))] (-> i64)
+  (let [result (alloc-stack i64)]
+    (loop
+      (let [old (atomic-load head)]
+        (if (icmp-eq old 0)
+            (do (store! result 0) (break))
+            (let [nxt (load (field (cast (ptr Node) old) next))]
+              (if (icmp-eq (atomic-cas head old nxt) old)
+                  (do (store! result old) (break))
+                  0)))))
+    (load result)))
+
+(defn worker [(arg (ptr i8))] (-> (ptr i8))
+  (let [w (cast (ptr WArgs) arg) (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) (load (field w count)))
+          (break)
+          (do
+            (let [k  (iadd (load (field w start)) (load i))
+                  na (cast i64 (cast (ptr i8) (index (load (field w pool)) k)))]
+              (store! (field (cast (ptr Node) na) val) k)   ; tag the node with its index
+              (lf-push (load (field w head)) na))
+            (store! i (iadd (load i) 1))))))
+  (cast (ptr i8) 0))
+
+(defn main [] (-> :i64)
+  (let [head    (alloc-stack i64)
+        pool    (cast (ptr Node) (malloc (imul 4000 16)))   ; 4000 pre-allocated nodes
+        wargs   (alloc-stack (array WArgs 4))
+        threads (alloc-stack (array Thread 4))
+        (mut i) 0]
+    (store! head 0)
+    ; spawn 4 workers, each pushing its disjoint 1000-node range onto the shared stack
+    (loop
+      (if (icmp-ge (load i) 4)
+          (break)
+          (do (store! (field (index wargs (load i)) head)  head)
+              (store! (field (index wargs (load i)) pool)  pool)
+              (store! (field (index wargs (load i)) start) (imul (load i) 1000))
+              (store! (field (index wargs (load i)) count) 1000)
+              (thread-spawn (index threads (load i)) (fnptr-of worker)
+                            (cast (ptr i8) (index wargs (load i))))
+              (store! i (iadd (load i) 1)))))
+    ; join all
+    (store! i 0)
+    (loop
+      (if (icmp-ge (load i) 4)
+          (break)
+          (do (thread-join (index threads (load i)))
+              (store! i (iadd (load i) 1)))))
+    ; drain the stack single-threaded and count — must be exactly 4000.
+    (let [(mut count) 0 (mut na) (lf-pop head)]
+      (loop
+        (if (icmp-eq (load na) 0)
+            (break)
+            (do (store! count (iadd (load count) 1))
+                (store! na (lf-pop head)))))
+      (isub (load count) 4000))))   ; 0 iff every concurrent CAS-push survived

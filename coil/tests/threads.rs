@@ -15,3 +15,13 @@ fn n_threads_atomic_increment_is_race_free() {
     // thread contention — the atomic library genuinely synchronizes.
     assert_eq!(build_and_run(&src), 0);
 }
+
+#[test]
+fn lock_free_stack_loses_no_pushes_under_contention() {
+    // Stage 2: a genuinely lock-free (Treiber) stack via atomic-cas — NO mutex. 4
+    // threads concurrently push 1000 disjoint pre-allocated nodes each (contending on
+    // the head via CAS); draining must find all 4000. ABA is sidestepped by
+    // construction (nodes never freed/reused; push-only-then-drain) — see the example.
+    let src = std::fs::read_to_string("examples/lockfree.coil").expect("read lockfree.coil");
+    assert_eq!(build_and_run(&src), 0);
+}
