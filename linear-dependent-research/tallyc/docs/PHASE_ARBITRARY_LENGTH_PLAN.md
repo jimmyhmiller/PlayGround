@@ -112,6 +112,43 @@ RECOMMENDATION: build (A) heap-recursion codegen FIRST (the interpreter runs as 
 then layer (B) unbox-descent totality (→ `%total`). (A) is the actual "arbitrary-length"
 unblock; (B) is the total-subset refinement.
 
+## (A) IMPLEMENTATION SCOPE — the crux is a new kernel `Term::Case` (boxed case-split)
+
+Scoping (A) to the bottom: a `%partial` heap-recursive fn lowers to `Fix(ty, λparams.
+<body>)` where recursion is via the `Fix` self-binder (self-calls) and the body's matches
+are CASE-SPLITS. The body's boxed match CANNOT reuse `Term::Elim`: `Elim` always computes
+the induction hypotheses (it recurses the structure), so with the self-calls ALSO recursing
+the result is **EXPONENTIAL** (every node's subtree is elim'd once per enclosing self-call).
+Verified by reasoning through `eval(Add(a,b)) = elim(unbox(e))` — the discarded IHs re-walk
+each subtree. So a `Fix` body needs a NON-recursive boxed case-split, which the kernel does
+not have (`NatCase` is exactly this, but only for `%builtin Nat`).
+
+**The crux: add `Term::Case(D, motive, methods, scrut)`** — the general-datatype analog of
+`NatCase`: switch on the constructor, bind its fields into the matched method, NO IH, NO
+recursion. Touch points (the full kernel-term surface — same as the CBV-let change):
+- `dep.rs`: the `Term::Case` variant; `eval`/`vcase` (reduce on a constructor, substitute
+  fields — like `velim` but drop the IH args); `quote`; `map_vars`/shift (Case binds fields
+  in each method — cross the right binder counts); `Neutral::NCase` (stuck on a neutral);
+  `infer` (type-check like `Elim` but methods have NO IH binders).
+- **POSITIVITY (E3-CRITICAL — the CBV-let lesson):** `occurs` and `strictly_positive` MUST
+  traverse `Term::Case`'s subterms (motive, methods, scrut). A subterm-bearing variant the
+  positivity checker doesn't descend = a reopened Curry hole. The `occurs` match is
+  EXHAUSTIVE (no `_ =>`), so adding the variant forces handling it — verify + regression-test
+  a negative occurrence hidden in a `Case`, exactly like the `Let` test.
+- `dep_codegen.rs`: `compile_case` (switch on the tag, bind fields, run the method — the
+  per-constructor branch of the eliminator WITHOUT the recursive helper call); the
+  `Fix`-on-boxed lowering uses it.
+- `rust_surface.rs`: a Partial fn whose body recurses on a BOXED/heap scrutinee (directly,
+  or via `let v = unbox(o); match v`) lowers to `Fix` with `Case` bodies (generalize
+  `elab_fix_nat` → `elab_fix` using `Case` not `NatCase`; route boxed scrutinees here
+  instead of the hard error).
+
+THE TWO CARDINALS for the review (Leader): (1) `%partial` relaxes TERMINATION not LINEARITY —
+the `Fix` body is still fully linearity-checked by the kernel (each `Own` once on every path;
+a leaking/double-freeing `%partial` is REJECTED); (2) the kernel treats `Fix` OPAQUELY (never
+unfolds it in type-level reduction) — `Case` only reduces on a concrete constructor at
+runtime, and a `Fix` never reduces in the checker. Plus the E3 positivity-traversal of `Case`.
+
 Open question for the Leader: structural-unbox descent (recommended — it's the natural
 shape + the acyclicity argument is exactly the linearity guarantee) vs. finishing 1b
 well-founded recursion (`natWf`, deferred) vs. a dependent fuel/length index. I lean
