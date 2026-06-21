@@ -76,6 +76,42 @@ does it stay rejecting for a non-linear / ω value (where acyclicity isn't guara
 3. Acc-fold routing for complex varying accumulators (#3) — only if a real program needs
    the builder shape (let the interpreter's friction decide).
 
+## UPDATE — the real blocker is a CODEGEN gap (Fix is Nat-only), under BOTH totality verdicts
+
+Probing the structural (no-fuel) `sumFree` directly surfaced the actual wall:
+
+```
+[plain] `fn sumFree` is partial (… `t` … not a sub-structure of `l`) BUT CANNOT BE LOWERED:
+        general/mutual recursion is only supported on a `%builtin Nat` scrutinee so far.
+```
+
+So a function that recurses on a HEAP structure (`Opt (Own Node)`, `Own Expr`) cannot be
+lowered AT ALL today — neither as `%total` (no eliminator path for heap-tail recursion) nor
+as `%partial` (`Fix`/general recursion is `%builtin Nat`-scrutinee-only). The native backend
+has no "recurse on a boxed/heap value" path beyond the structural boxed ELIMINATOR (a fold
+with verbatim args), which this is not.
+
+This means the headline #1 unblock is a **CODEGEN extension — native recursion on a heap
+structure** — and it's needed under BOTH verdicts:
+- **(A) `Fix` on a heap scrutinee** → a heap-recursive fn RUNS as `%partial` general recursion
+  (the interpreter's `eval` need not be total). The DIRECT unblock for "write real programs."
+- **(B) structural-unbox descent** → certifies `%total` (the opt-in total subset), then lowers
+  via the same heap-recursion codegen. The refinement on top of (A).
+
+`match unbox(o)` desugars to `let v = unbox(o); match v { … }`, and the recursive fields are
+`Own T` / `Opt (Own T)` (Own-wrapped — `rec_field_arity` doesn't see them), so BOTH the
+codegen (recurse through the unbox'd cell) and the totality analysis (sub-term provenance
+through `let v = unbox(o)` + the match) must look through the unbox.
+
+SOUNDNESS for (A): a `%partial Fix` makes NO termination claim and the kernel treats it
+opaquely — so it carries no soundness risk beyond the linearity the kernel already checks
+(each `Own` consumed once). (B) is where the maximal-bar termination argument lives
+(acyclicity-from-linearity), layered after (A) RUNS.
+
+RECOMMENDATION: build (A) heap-recursion codegen FIRST (the interpreter runs as `%partial`),
+then layer (B) unbox-descent totality (→ `%total`). (A) is the actual "arbitrary-length"
+unblock; (B) is the total-subset refinement.
+
 Open question for the Leader: structural-unbox descent (recommended — it's the natural
 shape + the acyclicity argument is exactly the linearity guarantee) vs. finishing 1b
 well-founded recursion (`natWf`, deferred) vs. a dependent fuel/length index. I lean
