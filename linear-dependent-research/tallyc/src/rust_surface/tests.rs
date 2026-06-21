@@ -202,6 +202,31 @@ fn phase_1b_inductive_lt_constructs_with_explicit_indices() {
 }
 
 #[test]
+fn phase_1b_value_correctness_guard_rejects_dropped_arg() {
+    // VALUE-CORRECTNESS (the 1a′-class subtlety for higher-order / well-founded
+    // recursion): the IH for a higher-order recursive field is a function OF the
+    // field-application arguments, so a recursive call lowers to `ih(callargs…)` and
+    // does NOT thread other arguments. `g(f(btrue), Succ(acc))` would lower to
+    // `ih(btrue)`, silently DROPPING `Succ(acc)` ⇒ a well-typed WRONG value the
+    // (non-dependent) kernel re-check can't catch (`g(node2(kids), 0)` would compute 0,
+    // not 1). The guard REJECTS the mismatch. (For the valid `Acc` shape
+    // `f(y, h(y, prf))` the new `y` matches `h`'s `y`, so it is accepted.)
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Bool { btrue : Bool, bfalse : Bool }\n\
+        enum Tree { leaf : Tree, node2 : (Bool -> Tree) -> Tree }\n\
+        g : Tree -> Nat -> Nat\n\
+        fn g(t, acc) { match t { leaf => acc, node2(f) => g(f(btrue), Succ(acc)) } }\n";
+    let err = match check_program(src) {
+        Err(d) => format!("{d:?}"),
+        Ok(_) => panic!("a recursive call that drops a varying arg through a higher-order IH must be REJECTED"),
+    };
+    assert!(
+        err.contains("well-founded") && err.contains("silently dropped"),
+        "must reject for value-correctness (silently-dropped arg), got: {err}"
+    );
+}
+
+#[test]
 fn phase_1b_acc_indexed_higher_order_family_eliminates() {
     // PHASE 1b (Acc foundation): the well-founded `Acc` family is an INDEXED
     // higher-order recursive family — `accN x` carries an accessibility FUNCTION

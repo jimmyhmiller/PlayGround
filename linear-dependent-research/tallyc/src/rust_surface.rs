@@ -160,7 +160,7 @@ enum Ty {
     Arrow(Mult, bool, Option<String>, Box<Ty>, Box<Ty>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Tm {
     Var(String),
     Call(String, Vec<Tm>),
@@ -175,7 +175,7 @@ pub(crate) enum Tm {
     Let(String, Box<Tm>, Box<Tm>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Arm {
     pub(crate) ctor: String,
     pub(crate) binders: Vec<String>,
@@ -869,10 +869,32 @@ impl Elab {
             // matched-position argument is `f(callargs…)` where `f` is a higher-order
             // recursive field (a W-type child-function / `Acc`'s accessibility fn). The
             // kernel's IH for such a field is itself a function `λz…. elim (f z…)`, so a
-            // recursive call `g(f(callargs…))` lowers to `App(…App(ih, c₁)…, cₙ)`. Any
-            // OTHER arguments of the recursive call are determined by `f`'s application
-            // and are reconciled by the kernel re-check (not re-threaded here).
+            // recursive call `g(f(callargs…))` lowers to `App(…App(ih, c₁)…, cₙ)`.
             Tm::Call(f, callargs) if r.fields.contains_key(f) => {
+                // VALUE-CORRECTNESS GUARD: the IH is a function OF the field-application
+                // arguments, so the lowering computes `ih(callargs…)` — it does NOT
+                // thread the recursive call's OTHER arguments. Each non-scrutinee
+                // argument must therefore MATCH the field-application argument it
+                // descends through; otherwise the written value is silently dropped, a
+                // well-typed WRONG-VALUE term the (non-dependent) kernel re-check can't
+                // catch. (For `f(y, h(y, prf))` the new `y` must equal `h`'s `y`; an
+                // accumulator that varies independently is correctly REJECTED — a
+                // higher-order fold's IH carries no extra accumulator.)
+                let other: Vec<&Tm> =
+                    args.iter().enumerate().filter(|(i, _)| *i != r.scrut_pos).map(|(_, a)| a).collect();
+                for (i, oa) in other.iter().enumerate() {
+                    if callargs.get(i) != Some(*oa) {
+                        let pos = if i < r.scrut_pos { i } else { i + 1 };
+                        return Err(format!(
+                            "well-founded recursion in `{}`: argument #{pos} of the recursive \
+                             call must match the accessibility-function argument it descends \
+                             through (the induction hypothesis is a function of those \
+                             arguments) — a different value there is silently dropped and \
+                             would compute the wrong result",
+                            r.fnname
+                        ));
+                    }
+                }
                 let mut t = Term::Var(cx.debruijn(&r.fields[f]).expect("ih var in scope"));
                 for a in callargs {
                     let ea = self.elab_tm(a, cx, Some(r))?;
