@@ -78,8 +78,7 @@
 
 (defn parse-array [(p (ptr P))] (-> Json)
   (p-adv p)                                            ; '['
-  (let [arr (unwrap-ptr [(ArrayList Json)] (create [(ArrayList Json)] (load (field p alc))))]
-    (store! arr (al-new [Json] (load (field p alc))))
+  (let [arr (box (load (field p alc)) (ArrayList Json) (al-new [Json] (load (field p alc))))]
     (skip-ws p)
     (if (icmp-eq (p-peek p) 93)
         (p-adv p)                                      ; empty []
@@ -91,9 +90,8 @@
 
 (defn parse-object [(p (ptr P))] (-> Json)
   (p-adv p)                                            ; '{'
-  (let [obj (unwrap-ptr [(HashMap (slice u8) Json)]
-                        (create [(HashMap (slice u8) Json)] (load (field p alc))))]
-    (store! obj (hm-new [(slice u8) Json] (load (field p alc)) (str-keyops)))
+  (let [obj (box (load (field p alc)) (HashMap (slice u8) Json)
+                 (hm-new [(slice u8) Json] (load (field p alc)) (str-keyops)))]
     (skip-ws p)
     (if (icmp-eq (p-peek p) 125)
         (p-adv p)                                      ; empty {}

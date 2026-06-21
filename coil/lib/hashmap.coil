@@ -17,9 +17,10 @@
 ;   (import "lib/hashmap.coil" :use *) (import "lib/alloc.coil" :use *)
 ;   (import "lib/result.coil" :use *)   ; for the (Option V) hm-get returns
 
-(import "alloc.coil"  :use *)
-(import "result.coil" :use *)
-(import "mem.coil"    :use *)
+(import "alloc.coil"   :use *)
+(import "result.coil"  :use *)
+(import "mem.coil"     :use *)
+(import "control.coil" :use *)   ; `for` — used by the hm-for iteration macro
 
 ; The key capability: hash a key, compare two keys; `size` is sizeof K (handed to
 ; the byte-wise helpers; a custom hash/eq may ignore it). Type-erased over (ptr i8)
@@ -227,3 +228,21 @@
   (store! (field m len) 0)
   (store! (field m tombs) 0)
   0)
+
+; `(hm-for [k v map-ptr] body…)` — iterate the OCCUPIED entries of a map, binding
+; `k`/`v` to each key/value. `map-ptr` is a `(ptr (HashMap K V))` (K V inferred);
+; order is unspecified (slot order). A macro over `for` + the slot array — the map
+; iteration the JSON dogfood wanted (you could query a map but not walk it).
+(defmacro hm-for [binding & body]
+  (if (not (= (count binding) 3))
+      (error "hm-for: binding must be [key val map-ptr]")
+      (let [k  (first binding)
+            v  (first (rest binding))
+            mp (first (rest (rest binding)))
+            m  (gensym "hm") i (gensym "hi") e (gensym "he")]
+        `(let [~m ~mp]
+           (for [~i 0 (hm-cap (load ~m))]
+             (let [~e (index (load (field ~m slots)) ~i)]
+               (if (icmp-eq (load (field ~e state)) 1)
+                   (let [~k (load (field ~e key)) ~v (load (field ~e val))] ~@body)
+                   0)))))))

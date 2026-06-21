@@ -266,3 +266,16 @@
             0
             (cons (quote do)
                   (map (lambda [v] `(let [~i ~v] ~@body)) vals))))))
+
+; `(all a b c …)` / `(any a b c …)` — variadic boolean AND / OR, folding to the
+; 2-ary core `and`/`or` (short-circuit). `(all)` = true, `(any)` = false; a single
+; argument is returned as-is. (The core `and`/`or` stay 2-ary; these are the
+; n-ary convenience over them.)
+(defmacro all [& xs]
+  (if (empty? xs)
+      (quote true)                       ; emit the `true` FORM, not the macro bool
+      (if (empty? (rest xs)) (first xs) `(and ~(first xs) (all ~@(rest xs))))))
+(defmacro any [& xs]
+  (if (empty? xs)
+      (quote false)
+      (if (empty? (rest xs)) (first xs) `(or ~(first xs) (any ~@(rest xs))))))

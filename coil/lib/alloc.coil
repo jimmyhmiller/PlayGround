@@ -60,6 +60,15 @@
 (defn unwrap-ptr [T] [(o (Option (ptr T)))] (-> (ptr T))
   (match o (None [] (cast (ptr T) 0)) (Some [p] p)))
 
+; `(box A T VAL)` — heap-allocate a T from allocator A, store VAL into it, and
+; yield the `(ptr T)`. Removes the create + unwrap-ptr + store! dance for the
+; common "put one value on the heap" case (e.g. a recursive sum's child node).
+; Returns a null pointer on OOM (via unwrap-ptr — descriptive, not safe).
+(defmacro box [a ty val]
+  `(let [bp# (unwrap-ptr [~ty] (create [~ty] ~a))]
+     (store! bp# ~val)
+     bp#))
+
 ; ---- a malloc-backed general-purpose allocator ----
 ; malloc/realloc guarantee alignment up to max_align_t (16 on x86-64), which
 ; covers every scalar and pointer; over-aligned requests aren't honored here.
