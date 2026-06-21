@@ -420,6 +420,18 @@ fn heap_dump_renders_object_graph() {
     let boxed = unsafe { runtime::ai_gc_alloc_fixed(thread, 1, 0) };
     unsafe { (boxed.add(16) as *mut *mut u8).write(point) };
 
+    // Root `boxed` for real — the snapshot uses the REAL GC root set (not an
+    // in-degree-0 proxy), so an object must be held by an actual root to count as
+    // reachable. A permanent-extra RootSource is the simplest GC root here.
+    struct Root(std::cell::Cell<u64>);
+    impl gcrust::gc::RootSource for Root {
+        fn scan_roots(&self, v: &mut dyn FnMut(*mut u64)) {
+            v(self.0.as_ptr());
+        }
+    }
+    let root = Root(std::cell::Cell::new(boxed as u64));
+    unsafe { ctx.heap().register_permanent_extra(&root as *const dyn gcrust::gc::RootSource) };
+
     let dump = unsafe { gcrust::gc::dump_heap_text(ctx.heap()) };
     // Point with decoded scalar fields.
     assert!(dump.contains("Point { x: 3, y: 4 }"), "dump was:\n{dump}");
@@ -433,6 +445,10 @@ fn heap_dump_renders_object_graph() {
     assert!(json.contains("\"Point\""), "json was:\n{json}");
     // Boxed (id 1) references Point (id 0): an edge "refs": [0].
     assert!(json.contains("\"refs\": [0]"), "json was:\n{json}");
-    // Boxed is the in-degree-0 root and reaches both objects.
+    // Real-rooted reachability: rooted Boxed reaches the Point → both reachable.
+    assert!(json.contains("\"reachable_objects\": 2"), "json was:\n{json}");
     assert!(json.contains("\"reachable_bytes\""), "json was:\n{json}");
+    assert!(json.contains("\"reachable\": true"), "json was:\n{json}");
+    // Versioned snapshot header with the measured STW pause.
+    assert!(json.contains("\"snapshot_pause_ns\""), "json was:\n{json}");
 }

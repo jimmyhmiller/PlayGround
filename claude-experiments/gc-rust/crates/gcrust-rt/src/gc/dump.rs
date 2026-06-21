@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::time::Instant;
 
 use crate::gc::field::{read_varlen_bytes, read_varlen_count};
 use crate::gc::heap::Heap;
@@ -401,11 +402,12 @@ pub unsafe fn dump_heap_json(heap: &Heap) -> String {
         let refs: Vec<String> = n.refs.iter().map(|r| r.to_string()).collect();
         let _ = write!(
             out,
-            "    {{\"id\": {}, \"type\": {}, \"bytes\": {}, \"retained_bytes\": {}, \"render\": {}, \"refs\": [{}]}}",
+            "    {{\"id\": {}, \"type\": {}, \"bytes\": {}, \"retained_bytes\": {}, \"reachable\": {}, \"render\": {}, \"refs\": [{}]}}",
             id,
             json_str(&type_name(heap, n.type_id)),
             n.bytes,
             retained[id],
+            reachable[id],
             json_str(&render),
             refs.join(", "),
         );
@@ -629,7 +631,7 @@ mod tests {
             node(40, vec![1]),      // 3 -> 1
             node(32, vec![2, 3]),   // 4 root -> 2,3
         ];
-        let r = retained_sizes(&nodes);
+        let r = retained_sizes(&nodes, &[4]); // node 4 is the real root
         assert_eq!(r[4], 192, "root retains the whole graph");
         assert_eq!(r[1], 80, "shared node retains itself + its exclusive child");
         assert_eq!(r[2], 40, "does not retain the shared node");
@@ -640,21 +642,22 @@ mod tests {
     #[test]
     fn retained_chain_is_cumulative() {
         let nodes = vec![node(10, vec![1]), node(20, vec![2]), node(30, vec![])];
-        let r = retained_sizes(&nodes);
+        let r = retained_sizes(&nodes, &[0]); // node 0 is the real root
         assert_eq!(r, vec![60, 50, 30]);
     }
 
     #[test]
     fn retained_pure_cycle_does_not_panic() {
-        // 0 <-> 1 with no in-degree-0 entry: a proxy root is injected.
+        // 0 <-> 1 dead cycle, NO real root: the fallback injects a root so the
+        // cycle is still covered (every node gets a defined retained size).
         let nodes = vec![node(10, vec![1]), node(20, vec![0])];
-        let r = retained_sizes(&nodes);
-        assert_eq!(r[0], 30, "the injected root dominates the whole cycle");
+        let r = retained_sizes(&nodes, &[]);
+        assert_eq!(r[0], 30, "the injected fallback root dominates the whole cycle");
         assert_eq!(r[1], 20);
     }
 
     #[test]
     fn retained_empty() {
-        assert_eq!(retained_sizes(&[]), Vec::<usize>::new());
+        assert_eq!(retained_sizes(&[], &[]), Vec::<usize>::new());
     }
 }
