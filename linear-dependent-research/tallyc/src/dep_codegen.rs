@@ -1811,6 +1811,25 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
     }
 
     #[test]
+    fn dependent_partial_recursion_with_implicit_runs_natively() {
+        // (A)-extension (piece 2 of the running dependent eval): a %partial recursive
+        // function over a LENGTH-INDEXED Vec, with an INFERRABLE implicit `{0 n}` and a
+        // SELF-CALL. `vlast` recurses on the tail (varying the accumulator) ⇒ %partial ⇒
+        // lowers to a Fix; the self-call `vlast(t, h)` has the implicit `n` (inferred from
+        // `t : Vec Nat k`) and lands in CHECK position — previously it hit
+        // def_has_implicits → solve_fn_call → panic (the Fix self-binder isn't in `defs`).
+        // Now solve_fn_call resolves a not-in-defs callee as the in-scope (Fix self) binder
+        // and infers the implicit. `vlast v3 0` = the last element = 3.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            vlast : {0 n : Nat} -> Vec Nat n -> Nat -> Nat\n\
+            fn vlast(v, acc) { match v { Nil => acc, Cons(h, t) => vlast(t, h) } }\n\
+            v3 : Vec Nat (Succ (Succ (Succ Zero)))\nfn v3() { Cons(Succ(Zero), Cons(Succ(Succ(Zero)), Cons(Succ(Succ(Succ(Zero))), Nil))) }\n\
+            main : Nat\nfn main() { vlast(v3, Zero) }\n";
+        assert_eq!(run(src), 3);
+    }
+
+    #[test]
     fn heap_general_recursion_runs_natively() {
         // (A) HEAP RECURSION: a `%partial` fn recursing on a BOXED/heap structure — here a
         // boxed accumulator fold (the accumulator VARIES, so it is general recursion, not a

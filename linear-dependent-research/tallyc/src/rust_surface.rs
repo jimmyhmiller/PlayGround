@@ -1109,22 +1109,25 @@ impl Elab {
     /// Solve a function's implicit arguments from the explicit arguments' types
     /// (and the expected result type, if known). Returns `(term, result_type)`.
     fn solve_fn_call(&self, fname: &str, user_args: &[Tm], expected: Option<&Value>, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
-        // `fname` has implicits (the caller checked `def_has_implicits`) but may not be in
-        // `defs` yet — e.g. a recursive SELF-call with implicits that the structural-
-        // recursion path (`rec`/`ih_for`) did NOT capture (it only fires when the call
-        // descends structurally on the matched scrutinee). Rather than panic, report it
-        // clearly: this is the surface limit that a dependent self-recursion whose
-        // descent is not the (single) matched scrutinee — e.g. needing INDEX REFINEMENT
-        // across a nested match — is not yet elaborable.
-        let (body, fty) = self.defs.get(fname).cloned().ok_or_else(|| {
-            format!(
-                "cannot resolve the call `{fname}(…)`: it is the function being defined and \
-                 this recursive call is not on the structurally-decreasing matched argument \
-                 (a dependent self-recursion needing index refinement across nested matches \
-                 is not yet supported). Restructure so the recursion descends on the matched \
-                 scrutinee, or wait for the index-refinement extension."
-            )
-        })?;
+        // `fname` has implicits (the caller checked `def_has_implicits`). It is either a
+        // top-level def, OR — inside a `%partial` `Fix` body — the recursive SELF-binder,
+        // which is in `cx` but NOT in `defs` (the function being defined). For the self,
+        // the "body" is the self VARIABLE (`Var`) and the type is its context type; the
+        // implicit-solving below is identical (it reads `def_implicit[fname]`, which is
+        // registered for the function regardless). This makes a recursive self-call WITH
+        // IMPLICITS in a `Fix` body elaborate (the `(A)` heap-recursion self-call extended
+        // to implicits + check-position). The kernel re-checks the resulting application,
+        // so a wrong self-resolution / mis-inferred implicit is caught.
+        let (body, fty) = match self.defs.get(fname) {
+            Some(bf) => bf.clone(),
+            None => {
+                let idx = cx.debruijn(fname).ok_or_else(|| {
+                    format!("cannot resolve the call `{fname}(…)`: not a defined function or in-scope binder")
+                })?;
+                let fty_tm = dep::quote_at(cx.len(), &cx.var_type(fname).unwrap());
+                (Term::Var(idx), fty_tm)
+            }
+        };
         let flags = self.def_implicit[fname].clone();
         let total = flags.len();
         let nexplicit = flags.iter().filter(|b| !**b).count();
