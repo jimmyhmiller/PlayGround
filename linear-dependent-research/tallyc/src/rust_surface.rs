@@ -681,6 +681,12 @@ struct Elab {
     nat_types: std::collections::HashSet<String>,
     /// constructor name → its `Nat` role, for the `%builtin Nat` types.
     nat_ctor: HashMap<String, NatRole>,
+    /// set while elaborating the body of a `%partial` `Fix` (general recursion). In
+    /// this mode a boxed `match` lowers to a NON-recursive `Term::Case` (recursion is
+    /// the `Fix` self-call), not the recursive `Term::Elim` (whose implicit IHs would
+    /// blow up exponentially with the self-calls). Interior mutability so the
+    /// `&self` elaboration methods can scope it around a `Fix` body.
+    in_fix: std::cell::Cell<bool>,
 }
 
 fn neutral_env(n: usize) -> Vec<Value> {
@@ -1285,6 +1291,9 @@ impl Elab {
         }
         let motive_tm = motive.clone();
 
+        // In a `Fix` body (`in_fix`) the match lowers to a NON-recursive `Case` (no IH,
+        // recursion via the `Fix` self-call); otherwise the recursive `Elim`.
+        let as_case = self.in_fix.get();
         let mut methods = Vec::with_capacity(decl.ctors.len());
         for ctor in &decl.ctors {
             let info = &self.ctor_info[&ctor.name];
@@ -1318,11 +1327,22 @@ impl Elab {
                     next_pat += 1;
                 }
             }
-            for kk in 0..rec_fields.len() {
-                binder_names.push(format!("$ih{kk}"));
+            // In a `Fix` body the methods bind ONLY the constructor's args (no IHs);
+            // for an `Elim` they also bind one IH per recursive field.
+            if !as_case {
+                for kk in 0..rec_fields.len() {
+                    binder_names.push(format!("$ih{kk}"));
+                }
             }
-            let (binder_tys, _) =
+            let (binder_tys_full, _) =
                 dep::elim_method_telescope(&self.rc, dname, &sparam_tms, &motive_tm, &ctor.name)?;
+            // for a `Case`, keep only the ARG binder types (the first `nargs`); the
+            // remaining entries are the IH types, which a `Case` method does not bind.
+            let binder_tys: Vec<(crate::mult::Mult, Term)> = if as_case {
+                binder_tys_full[..nargs].to_vec()
+            } else {
+                binder_tys_full
+            };
             let mut arm_cx = cx.clone();
             for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
                 let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
@@ -1333,12 +1353,17 @@ impl Elab {
             // can't be used twice in a nested/expression `match` either.
             let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
             let mut body = self.check(&arm_body, expected, &arm_cx, rec)?;
-            for _ in 0..(nargs + rec_fields.len()) {
+            let nlam = if as_case { nargs } else { nargs + rec_fields.len() };
+            for _ in 0..nlam {
                 body = Term::Lam(Box::new(body));
             }
             methods.push(body);
         }
-        Ok(Term::Elim(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
+        if as_case {
+            Ok(Term::Case(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
+        } else {
+            Ok(Term::Elim(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
+        }
     }
 }
 
@@ -2071,6 +2096,46 @@ impl Elab {
         Ok(Term::Fix(Box::new(ty_term.clone()), Box::new(body)))
     }
 
+    /// GENERAL `%partial` recursion on a HEAP/boxed structure: compile the WHOLE body to
+    /// `Fix(ty, λparams. <body>)` in FIX MODE (`in_fix`), so every boxed `match` lowers
+    /// to a NON-recursive `Term::Case` and a recursive call resolves to the `Fix`
+    /// self-binder (`fnname` is in scope). This is what lets a function recurse on an
+    /// owned linked list / tree / AST (the interpreter) — dispatch is `Case`, recursion
+    /// is the self-call, no implicit-IH blow-up. Used when the structural verdict is
+    /// `Partial` and the scrutinee is NOT a `%builtin Nat` (which keeps `elab_fix_nat`).
+    fn elab_fix(
+        &self,
+        fnname: &str,
+        ty_term: &Term,
+        full_names: &[String],
+        full_tys: &[Ty],
+        ret: &Ty,
+        body: &Tm,
+    ) -> Result<Term, String> {
+        let vty = dep::eval_rc(&self.rc, &[], ty_term);
+        let mut cx = Cx::default();
+        cx.push(fnname.to_string(), vty);
+        let mut scope: Vec<String> = vec![fnname.to_string()];
+        for (pn, pty) in full_names.iter().zip(full_tys) {
+            let kty = self.elab_ty(pty, &scope)?;
+            let v = dep::eval_rc(&self.rc, &neutral_env(cx.len()), &kty);
+            cx.push(pn.clone(), v);
+            scope.push(pn.clone());
+        }
+        let ret_tm = self.elab_ty(ret, &scope)?;
+        let expected = dep::eval_rc(&self.rc, &neutral_env(cx.len()), &ret_tm);
+        // FIX MODE: boxed matches → `Case` (no IH); recursion is the self-call (rec=None,
+        // `fnname` resolves to the self-binder). Restore the flag even on error.
+        let prev = self.in_fix.replace(true);
+        let checked = self.check(body, &expected, &cx, None);
+        self.in_fix.set(prev);
+        let mut body_term = checked?;
+        for _ in 0..full_names.len() {
+            body_term = Term::Lam(Box::new(body_term));
+        }
+        Ok(Term::Fix(Box::new(ty_term.clone()), Box::new(body_term)))
+    }
+
     /// Build `NatCase(motive, z, λk. s, scrut)` for a `match` on a `Nat`, in a
     /// context `cx` that already binds `self` and the params. Recursion is by
     /// explicit self-call (no `Rec`/IH), so the successor branch has no IH binder.
@@ -2567,6 +2632,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         def_implicit: HashMap::new(),
         nat_types: std::collections::HashSet::new(),
         nat_ctor: HashMap::new(),
+        in_fix: std::cell::Cell::new(false),
     };
 
     // pass A: `%builtin Nat T` pragmas. Validate each names a Nat-shaped enum (one
@@ -2819,26 +2885,24 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             // lowering; a partial recursion on any other shape is an honest hard
             // error (NOT silently accepted), pending the Phase E2 machinery.
             if !structural.is_total() {
-                if let Tm::Match(scrut, arms) = body {
-                    if let Some(sp) = full_names.iter().position(|p| p == scrut) {
-                        let scrut_is_nat = matches!(
-                            flatten_ty(&full_tys[sp]).0,
-                            Ty::Var(n) if elab.nat_types.contains(n)
-                        );
-                        if scrut_is_nat {
-                            let term = elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?;
-                            elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
-                            out_defs.push((name.clone(), ty_term, term));
-                            continue;
-                        }
-                    }
-                }
-                return Err(format!(
-                    "`fn {name}` is partial ({}) but cannot be lowered: general/mutual \
-                     recursion is only supported on a `%builtin Nat` scrutinee so far \
-                     (Phase E2). Restructure as a structural fold, or wait for E2.",
-                    structural.reason().unwrap_or("not total")
-                ));
+                // A `%builtin Nat`-scrutinee match keeps the proven `NatCase` `Fix`
+                // lowering. ANY other partial recursion — on a boxed/heap structure, or a
+                // body that is not a direct param-match (e.g. `match unbox(e)`) — lowers
+                // via the GENERAL `Case`-based `Fix` (`in_fix` mode): heap recursion RUNS
+                // as `%partial`. (`%partial` relaxes TERMINATION, not LINEARITY: the `Fix`
+                // body is still fully linearity-checked by the kernel; and the kernel
+                // treats `Fix` OPAQUELY, so no `%partial` term reduces during type-checking.)
+                let nat_scrut_match = matches!(body, Tm::Match(scrut, _)
+                    if full_names.iter().position(|p| p == scrut).is_some_and(|sp| matches!(
+                        flatten_ty(&full_tys[sp]).0, Ty::Var(n) if elab.nat_types.contains(n))));
+                let term = if let (true, Tm::Match(scrut, arms)) = (nat_scrut_match, body) {
+                    elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?
+                } else {
+                    elab.elab_fix(name, &ty_term, &full_names, &full_tys, &ret, body)?
+                };
+                elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
+                out_defs.push((name.clone(), ty_term, term));
+                continue;
             }
 
             // TOTAL ⇒ lower to a kernel eliminator (or a non-recursive body).

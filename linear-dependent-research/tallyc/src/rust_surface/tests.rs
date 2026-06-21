@@ -529,12 +529,22 @@ fn non_exhaustive_match_is_rejected() {
 }
 
 #[test]
-fn non_structural_recursion_is_rejected() {
+fn non_structural_recursion_lowers_to_partial_fix() {
+    // A non-structural recursion (`loop(Succ(k))` — the measure INCREASES) is NO LONGER
+    // rejected: with general/heap recursion now supported (a `%partial` `Fix` over a
+    // boxed/heap scrutinee, dispatched by `Term::Case`), an UNANNOTATED fn lowers to an
+    // opaque `Fix`. `%partial` relaxes TERMINATION (it may diverge — fine), NOT soundness:
+    // the kernel treats the `Fix` opaquely so it never reduces during type-checking, and
+    // it is reported PARTIAL (not total). A `%total` annotation on it is STILL a hard
+    // error (see the `%total`-on-`loop` test in the totality section). Previously this was
+    // rejected only because general recursion on a non-`%builtin Nat` scrutinee had no
+    // lowering — that limitation is gone.
     let src = format!(
-        "{}\nloop : Nat -> Nat\nfn loop(m) {{ match m {{ Zero => Zero, Succ(k) => loop(Succ(k)) }} }}\n",
+        "{}\nloop : Nat -> Nat\nfn loop(m) {{ match m {{ Zero => Zero, Succ(k) => loop(Succ(k)) }} }}\nmain : Nat\nfn main() {{ Zero }}\n",
         r#"enum Nat { Zero : Nat, Succ : Nat -> Nat }"#
     );
-    assert!(check_program(&src).is_err());
+    let prog = check_program(&src).expect("non-structural recursion now lowers as %partial");
+    assert!(!is_total(&prog, "loop"), "loop must be reported PARTIAL, not total");
 }
 
 // ---- Phase 3: the memory layer as postulates in the dependent+linear core ----

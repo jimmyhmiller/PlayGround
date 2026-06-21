@@ -233,6 +233,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Elim(data, _motive, methods, scrut) => {
                 self.compile_elim(f, env, data, methods, scrut)
             }
+            Term::Case(data, _motive, methods, scrut) => {
+                self.compile_case(f, env, data, methods, scrut)
+            }
             Term::App(_, _) => {
                 // β-reduce a fully-applied spine: (λ…λ. body) a₁ … aₙ
                 let (head, args) = flatten_app(t);
@@ -856,6 +859,101 @@ impl<'c, 'a> DepCg<'c, 'a> {
             self.builder.build_return(Some(&result)).unwrap();
         }
         Ok(())
+    }
+
+    /// Compile `Case` (non-recursive general case-split) IN PLACE: switch on the boxed
+    /// scrutinee's tag, bind each constructor's runtime fields, β-reduce + compile the
+    /// matched method (its args ONLY — NO induction hypotheses, NO recursive helper, NO
+    /// recursion), and phi-join the arm results. Recursion, if any, is the enclosing
+    /// `Fix`'s self-call — never here. The general-datatype counterpart of
+    /// `compile_natcase`, and what makes a `Fix` body dispatch on a heap structure
+    /// WITHOUT the eliminator's implicit-IH exponential blow-up.
+    fn compile_case(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        data: &str,
+        methods: &[Term],
+        scrut: &Term,
+    ) -> Result<IntValue<'c>, String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("case on unknown datatype `{data}`"))?;
+        if methods.len() != decl.ctors.len() {
+            return Err(format!(
+                "case[{data}]: expected {} method(s), got {}",
+                decl.ctors.len(),
+                methods.len()
+            ));
+        }
+        let scrut_val = self.compile(f, env, scrut)?;
+        let scrut_ptr = self
+            .builder
+            .build_int_to_ptr(scrut_val, self.ptr, "case.scrut")
+            .unwrap();
+        let tag = self.load(scrut_ptr, 0, "case.tag");
+
+        let default = self.ctx.append_basic_block(f, "case.default");
+        let join = self.ctx.append_basic_block(f, "case.join");
+        let arm_blocks: Vec<_> = decl
+            .ctors
+            .iter()
+            .map(|c| self.ctx.append_basic_block(f, &format!("case.{}", c.name)))
+            .collect();
+        let cases: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> = decl
+            .ctors
+            .iter()
+            .enumerate()
+            .map(|(ci, _)| (self.i64t.const_int(ci as u64, false), arm_blocks[ci]))
+            .collect();
+        self.builder.build_switch(tag, default, &cases).unwrap();
+
+        self.builder.position_at_end(default);
+        self.builder.build_unreachable().unwrap();
+
+        // each arm binds the ctor's fields, compiles the method, branches to `join`.
+        let mut incoming: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> =
+            Vec::with_capacity(decl.ctors.len());
+        for (ci, ctor) in decl.ctors.iter().enumerate() {
+            self.builder.position_at_end(arm_blocks[ci]);
+            let lay = ctor_layout(self.sig, data, &ctor.name)?;
+            let mut menv = env.to_vec();
+            for ai in 0..ctor.args.len() {
+                let arg_val: Slot<'c> = match lay.arg_slot[ai] {
+                    Some(s) => Some(self.load(scrut_ptr, s, "field")),
+                    None => None, // erased argument: no runtime witness.
+                };
+                menv.push(arg_val);
+            }
+            // β-reduce the method: strip exactly `#args` lambdas — NO IH binders.
+            let mut body = strip_ann(&methods[ci]);
+            for _ in 0..ctor.args.len() {
+                match body {
+                    Term::Lam(inner) => body = strip_ann(inner),
+                    _ => {
+                        return Err(format!(
+                            "case[{data}] method for `{}` is not a {}-argument function",
+                            ctor.name,
+                            ctor.args.len()
+                        ))
+                    }
+                }
+            }
+            let result = self.compile(f, &menv, body)?;
+            // the method body may have emitted its own control flow, so the phi's
+            // predecessor is the CURRENT block, not necessarily `arm_blocks[ci]`.
+            let pred = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(join).unwrap();
+            incoming.push((result, pred));
+        }
+
+        self.builder.position_at_end(join);
+        let phi = self.builder.build_phi(self.i64t, "case.result").unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn inkwell::values::BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// `elim z s n` (Nat-like) as a native loop:
@@ -1666,6 +1764,26 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             let src = format!("{G}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
             assert_eq!(run(&src), expect, "depth {d}");
         }
+    }
+
+    #[test]
+    fn heap_general_recursion_runs_natively() {
+        // (A) HEAP RECURSION: a `%partial` fn recursing on a BOXED/heap structure — here a
+        // boxed accumulator fold (the accumulator VARIES, so it is general recursion, not a
+        // structural fold) — now lowers (previously "general recursion only on a %builtin
+        // Nat scrutinee" hard-errored). It compiles to an opaque `Fix` whose `match`
+        // dispatches via the NON-recursive `Term::Case` (NOT the eliminator, whose implicit
+        // IHs would be exponential), with recursion as the `Fix` self-call. Runs natively:
+        // sumAcc [1,2] 0 = 3. This is the unblock that lets the interpreter (eval over an
+        // AST) run as `%partial`.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum List { nil : List, cons : Nat -> List -> List }\n\
+            add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+            sumAcc : List -> Nat -> Nat\n\
+            fn sumAcc(l, acc) { match l { nil => acc, cons(h, t) => sumAcc(t, add(acc, h)) } }\n\
+            mk : List\nfn mk() { cons(Succ(Zero), cons(Succ(Succ(Zero)), nil)) }\n\
+            main : Nat\nfn main() { sumAcc(mk, Zero) }\n";
+        assert_eq!(run(src), 3);
     }
 
     #[test]
