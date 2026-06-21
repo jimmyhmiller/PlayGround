@@ -1,8 +1,28 @@
-# Heap Explorer — design proposal (DRAFT, for review)
+# Heap Explorer — design (APPROVED; design-first, build gated on 1b sign-off)
 
 The next JVM-grade tooling rung after Target-1a (GC log/histograms) and Target-1b
-(allocation-site profiling). Status: **design only — nothing built yet.** This is
-the proposal to review before any code, in the spirit of design-first.
+(allocation-site profiling). Status: **design APPROVED by Leader review
+(2026-06-20); no code yet — P1 build starts once the Target-1b verdict clears**
+(the explorer builds on 1b's `pause_world` STW + `AllocSite` foundation).
+
+> **Resolved decisions (Leader, 2026-06-20)** — folded into the sections below:
+> 1. **STW pause cost** is fine for v1 (this is how JVM heap dumps work — opt-in
+>    profiling, not steady-state latency). v1 **must MEASURE + report** the pause;
+>    incremental/concurrent snapshot is a future optimization, not a v1 gate.
+> 2. **Own-pause (on-demand) is primary** — a tool needs a snapshot *when asked*.
+>    Piggyback-on-collection is a later cheap periodic-sampling mode.
+> 3. **Per-object provenance is OPT-IN** (`GCR_TRACK_ALLOC_SITE=1`); default to the
+>    free type-level join. The +4–8 B/object + evacuator touch must NOT be a
+>    default cost. Last phase, isolated, same adversarial review 1b got — the
+>    reviewer specifically checks the `site_id` word is **preserved across
+>    evacuation** (the moving-GC hazard).
+> 4. **Real roots everywhere** — the in-degree-0 proxy is simply *wrong* (mishandles
+>    cycles + root-held objects). Real roots (parked frames + permanent_extras) is
+>    a strict correctness upgrade, not optional; backport to the program-end dump
+>    too (at end, roots = globals/permanent_extras — the proxy is wrong even there).
+> 5. **CLI + heap-diff first.** The snapshot API + snapshot-to-snapshot diff is the
+>    data layer AND the leak-hunting killer app; the interactive widget renders
+>    that data afterward.
 
 The honest framing: a large fraction of a heap explorer *already exists* in
 `gc::dump`. This document is mostly about the **delta** — the few new mechanisms
@@ -85,35 +105,41 @@ Implementation = the 1b profiler discipline applied to the heap walk:
    every header/varlen-count/pointer is valid and stable. This is the strict,
    enforced version of the "heap must be quiescent" precondition `dump_heap_*`
    documents but does not enforce.
-3. **Real roots (G3):** while parked, every thread's roots are reachable exactly
-   as the collector sees them — each parked thread published `parked_jit_fp`, and
-   `walk_gc_frames` + `permanent_extras` enumerate the true root slots. Mark the
-   snapshot's root set from these instead of the in-degree-0 proxy. Result:
-   accurate reachability (cycles handled, root-held objects correctly rooted) and
-   dominators rooted at a virtual super-root over the *real* roots — a strict
-   correctness upgrade that the program-end dump literally cannot do (no stack
-   roots at program end).
-4. Drop the pause; serialize/format outside it (owned data) to minimize STW time.
+3. **Real roots (G3) — not optional, everywhere.** While parked, every thread's
+   roots are reachable exactly as the collector sees them — each parked thread
+   published `parked_jit_fp`, and `walk_gc_frames` + `permanent_extras` enumerate
+   the true root slots. The snapshot's root set comes from these, never the
+   in-degree-0 proxy (which is *wrong*: it mishandles cycles and root-held objects
+   that also have an in-edge). Reachability and the dominator super-root use the
+   real roots. **Backport to the program-end dump too:** at end there are no stack
+   roots, but globals/`permanent_extras` are still the real roots and the proxy is
+   wrong even there — replace it. (Proxy remains only as a last-ditch fallback if
+   no root source is available at all.)
+4. **Measure + report the pause (v1 requirement).** Record the STW snapshot
+   duration (reuse the 1b/`record_gc_event` timing style) and emit it with the
+   snapshot (`pause_ns` in the header) + the log. STW is fine for v1 (JVM heap
+   dumps work this way); we just never hide its cost. Incremental/concurrent
+   snapshot is a future optimization, not a v1 gate.
+5. Drop the pause; serialize/format outside it (owned data) to minimize STW time.
 
 The snapshot critical section is **read-only and allocation-free on the GC heap**
 (it only reads object memory + builds host-side `Vec`s), so it cannot re-enter
 `gc_lock` — same contract the 1b profiler honors. STW duration is O(live objects)
-(one walk + one dominators pass); for large heaps this is a real pause and is the
-cost knob to watch (see Open Questions).
+(one walk + one dominators pass).
 
-**Triggers for G1 (request a snapshot while the program runs):**
-- `GCR_HEAP_SNAPSHOT_EVERY=<n>` — capture after every *n*th collection
-  (piggyback on the existing `record_gc_event` cold path; the world is already
-  stopped during a STW collection, so a snapshot there is nearly free — no extra
-  pause).
-- A signal handler (e.g. `SIGUSR1`) or a tiny control FFI (`ai_heap_snapshot`)
-  that requests "snapshot now" → next safepoint takes it. Lets an external viewer
-  pull a snapshot from a running program.
-- In-language intrinsic `heap_snapshot()` for programs that want to checkpoint at
-  a known point.
+**Triggers for G1 — on-demand own-pause is PRIMARY:**
+- **Primary (on-demand):** a control trigger — a signal handler (e.g. `SIGUSR1`)
+  / a tiny control FFI (`ai_heap_snapshot`) / an in-language intrinsic
+  `heap_snapshot()` — requests "snapshot now"; the next safepoint takes its own
+  `pause_world` snapshot. A tool needs a snapshot *when asked*, not whenever GC
+  happens to fire.
+- **Later (periodic sampling):** `GCR_HEAP_SNAPSHOT_EVERY=<n>` piggybacks the
+  existing STW collection (world already stopped during a collection → nearly free,
+  no extra pause). A cheap sampling mode, secondary to on-demand.
 Each writes the snapshot to a sink (`GCR_HEAP_SNAPSHOT_DIR=<path>` → one JSON file
-per snapshot, monotonically numbered) that the viewer tails. No silent capping —
-if snapshots are dropped (sink full / rate-limited), say so in the log.
+per snapshot, monotonically numbered) that the viewer/diff tooling reads. No
+silent capping — if snapshots are dropped (sink full / rate-limited), say so in
+the log.
 
 ---
 
@@ -168,13 +194,14 @@ beyond G1 (being able to take more than one snapshot).
 
 ## 6. Surface (G6)
 
-Three layers, cheapest first:
+Three layers — **data core (CLI + heap-diff) first**, interactive after:
 
-1. **CLI / env (scriptable, headless):** the snapshot JSON (extend the existing
-   `dump_heap_json` shape with `roots` = real roots, optional `site` per object,
-   and a `snapshot_seq`/`gc_seq` header). `gcr heap-diff a.json b.json` for
-   offline leak diffing. Works for JIT (`gcr run`) and AOT binaries identically,
-   since both already share the dump path.
+1. **CLI / env (scriptable, headless) — the data core, built first.** The snapshot
+   JSON (extend the existing `dump_heap_json` shape with `roots` = real roots,
+   `pause_ns` + `snapshot_seq`/`gc_seq` header, optional `site` per object) **plus
+   `gcr heap-diff a.json b.json`** — the snapshot-to-snapshot diff that is both the
+   reviewable data layer and the highest-value use case (leak hunting). Works for
+   JIT (`gcr run`) and AOT binaries identically (shared dump path). This is P1.
 2. **Interactive jim widget — `gcr_heap.ft`** (the headline): modeled on
    `gcr_xray.ft`'s proc-bridge pattern, but a heap view:
    - left: type histogram / top-retainers / roots list (sortable by retained
@@ -190,46 +217,54 @@ Three layers, cheapest first:
 
 ---
 
-## 7. Proposed phasing (each slice independently reviewable + shippable)
+## 7. Phasing (re-ordered per Leader review — data core first)
 
-- **P1 — Consistent snapshot API.** `heap_snapshot()` under `pause_world`; real
-  roots (G3); versioned JSON (snapshot_seq, gc_seq). Reuses `collect_graph` /
-  `retained_sizes` unchanged. *No hot-path change.* (The safe, high-value core.)
-- **P2 — Triggers (G1).** `GCR_HEAP_SNAPSHOT_EVERY` (free, piggybacks STW
-  collection) + `GCR_HEAP_SNAPSHOT_DIR` sink + a control trigger (signal or FFI).
-- **P3 — Widget `gcr_heap.ft` (G6).** Interactive navigation over P1/P2 output.
-- **P4 — Growth/leak diff (G5).** `gcr heap-diff` + the widget "growth" tab.
-- **P5 — Per-object alloc-site (G4, opt-in).** Header-width change behind
-  `GCR_TRACK_ALLOC_SITE=1`, evacuator preserves it. Adversarial review of the
-  hot-path/evacuator change (like 1b).
+- **P1 — Snapshot data core + heap-diff (FIRST; no hot-path change).**
+  `heap_snapshot()` under `pause_world` (own-pause); **real roots (G3) everywhere,
+  incl. backporting the program-end dump off the proxy**; versioned JSON header
+  (`snapshot_seq`, `gc_seq`, `pause_ns`); reuses `collect_graph` / `retained_sizes`
+  unchanged. Plus **`gcr heap-diff a.json b.json` (G5)** — per-type / per-site /
+  per-retainer growth across snapshots: the leak-hunting killer app. This is the
+  reviewable data layer; the safe, high-value core.
+- **P2 — On-demand trigger (G1).** Primary control trigger (signal / FFI
+  `ai_heap_snapshot` / in-language `heap_snapshot()`) → own-pause snapshot at the
+  next safepoint + `GCR_HEAP_SNAPSHOT_DIR` sink. (Periodic
+  `GCR_HEAP_SNAPSHOT_EVERY` piggyback-on-collection is a secondary sampling mode.)
+- **P3 — Widget `gcr_heap.ft` (G6).** Interactive navigation + a "growth" tab,
+  *rendering* the P1/P2 data, modeled on the `gcr_xray.ft` proc-bridge pattern.
+- **P4 — Per-object alloc-site provenance (G4; opt-in; last + isolated).**
+  `site_id` word in the header behind `GCR_TRACK_ALLOC_SITE=1`, written at alloc,
+  **preserved across evacuation**; default stays the free type-level join.
+  Adversarial review of the hot-path/evacuator change like 1b — the reviewer
+  specifically verifies the `site_id` survives a relocation.
 
-P1 alone is a meaningful upgrade (consistent, real-rooted, mid-execution
-snapshots) and carries no hot-path risk; the riskier work (P5) is last and
-isolated.
-
----
-
-## 8. Open questions for review
-
-1. **STW pause duration on large heaps.** The snapshot is O(live objects) under
-   STW. Acceptable for a debugging/tooling pause? Or do we need an incremental /
-   concurrent snapshot later (much harder; probably not for v1 — tooling pauses
-   are expected)?
-2. **Snapshot at an existing STW collection vs. its own pause.** Piggybacking
-   `GCR_HEAP_SNAPSHOT_EVERY` on a collection is free (world already stopped) but
-   only fires when GC runs; an on-demand snapshot needs its own pause. Offer both?
-3. **Per-object alloc-site (P5): header growth vs. value.** Is exact per-instance
-   provenance worth +4–8 bytes/object behind a flag, or is the free type-level
-   join (B) enough for v1?
-4. **Real roots vs. proxy roots** for the *program-end* dump too — should P1's
-   real-root reachability replace the in-degree-0 proxy everywhere, or only for
-   mid-execution snapshots (program end has no stack roots, so the proxy is the
-   only option there)? Likely: real roots when a live root set exists, proxy as
-   fallback.
-5. **Widget vs. CLI priority.** Is the interactive widget the headline (P3 early),
-   or is the scriptable JSON + `heap-diff` the more valuable first deliverable?
+P1 alone is a meaningful upgrade (consistent, real-rooted, mid-execution snapshots
++ leak diffing) and carries no hot-path risk; the riskier work (P4) is last,
+isolated, and off by default.
 
 ---
 
-*Prepared by Rust-gc for Leader review. Design-first; no implementation started.
-Reuses Target-1b's `pause_world` snapshot discipline and `AllocSite` table.*
+## 8. Decisions (resolved at Leader review, 2026-06-20)
+
+All five originally-open questions are now decided — see the **Resolved decisions**
+box at the top, folded into §§3–7:
+
+1. STW pause cost → fine for v1; **measure + report** it (`pause_ns`). Incremental
+   snapshot is future, not a gate.
+2. Trigger → **own-pause on-demand primary**; piggyback-on-collection is a later
+   periodic-sampling mode.
+3. Per-object provenance → **opt-in `GCR_TRACK_ALLOC_SITE=1`**, default to the free
+   type-level join; last phase (P4), isolated; reviewer verifies `site_id`
+   survives evacuation.
+4. Roots → **real roots everywhere** (proxy is wrong even at program end);
+   backport the program-end dump off the proxy.
+5. Surface → **CLI + heap-diff first** (data core + leak killer app); widget after.
+
+**Build gate:** P1 starts once the Target-1b verdict clears (the explorer builds
+on 1b's STW + `AllocSite` foundation).
+
+---
+
+*Prepared by Rust-gc; design APPROVED at Leader review 2026-06-20. No
+implementation started (gated on 1b sign-off). Reuses Target-1b's `pause_world`
+snapshot discipline and `AllocSite` table.*
