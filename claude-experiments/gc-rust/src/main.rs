@@ -34,6 +34,11 @@ fn main() -> ExitCode {
     if cmd == "eval" {
         return run_eval(&args);
     }
+    // `heap-diff` consumes two JSON heap snapshots (from `GCR_HEAP_DUMP=json`),
+    // not a `.gcr` source — dispatch it before the source-file path resolution.
+    if cmd == "heap-diff" {
+        return run_heap_diff(&args);
+    }
 
     let arg_path = &args[2];
 
@@ -247,6 +252,102 @@ fn report_errors(path: &str, src: &str, errs: &[gcrust::lower::LowerError]) {
 /// `gcr emit <stage> <file>` — dump a single pipeline stage as JSON (the
 /// compiler "X-ray"). `tokens`/`ast` need only lex+parse; `core`/`layout`/`mono`
 /// run the full front end (resolve + typecheck + monomorphize) to a Core IR.
+/// `gcr heap-diff <before.json> <after.json>` — diff two heap snapshots
+/// (`GCR_HEAP_DUMP=json`) to surface growth, the leak-hunting workflow. Reports
+/// per-type byte/count deltas (sorted by Δbytes) plus the summary delta. A type
+/// whose retained bytes climb across snapshots is the classic leak signature;
+/// with two snapshots this shows the delta, and over a series (run repeatedly)
+/// a monotonically-growing type is the suspect.
+fn run_heap_diff(args: &[String]) -> ExitCode {
+    use std::collections::BTreeMap;
+    if args.len() < 4 {
+        eprintln!("usage: gcr heap-diff <before.json> <after.json>");
+        return ExitCode::FAILURE;
+    }
+    let read = |p: &str| -> Result<serde_json::Value, String> {
+        let s = std::fs::read_to_string(p).map_err(|e| format!("cannot read {p}: {e}"))?;
+        serde_json::from_str(&s).map_err(|e| format!("invalid snapshot JSON in {p}: {e}"))
+    };
+    let (a, b) = match (read(&args[2]), read(&args[3])) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("gcr: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // (count, bytes) per type name.
+    let by_type = |v: &serde_json::Value| -> BTreeMap<String, (i64, i64)> {
+        let mut m = BTreeMap::new();
+        if let Some(arr) = v["summary"]["by_type"].as_array() {
+            for e in arr {
+                let name = e["name"].as_str().unwrap_or("?").to_string();
+                let count = e["count"].as_i64().unwrap_or(0);
+                let bytes = e["bytes"].as_i64().unwrap_or(0);
+                m.insert(name, (count, bytes));
+            }
+        }
+        m
+    };
+    let am = by_type(&a);
+    let bm = by_type(&b);
+
+    let mut names: Vec<String> = am.keys().chain(bm.keys()).cloned().collect();
+    names.sort();
+    names.dedup();
+    // (name, dcount, dbytes, a_bytes, b_bytes)
+    let mut rows: Vec<(String, i64, i64, i64, i64)> = names
+        .into_iter()
+        .map(|n| {
+            let (ac, ab) = am.get(&n).copied().unwrap_or((0, 0));
+            let (bc, bb) = bm.get(&n).copied().unwrap_or((0, 0));
+            (n, bc - ac, bb - ab, ab, bb)
+        })
+        .collect();
+    rows.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
+
+    let field = |v: &serde_json::Value, k: &str| v["summary"][k].as_i64().unwrap_or(0);
+    println!("gc-rust heap-diff: {} -> {}", args[2], args[3]);
+    println!(
+        "  objects {} -> {} (Δ{:+})   bytes {} -> {} (Δ{:+})   reachable {} -> {}",
+        field(&a, "objects"),
+        field(&b, "objects"),
+        field(&b, "objects") - field(&a, "objects"),
+        field(&a, "bytes"),
+        field(&b, "bytes"),
+        field(&b, "bytes") - field(&a, "bytes"),
+        field(&a, "reachable_objects"),
+        field(&b, "reachable_objects"),
+    );
+    println!("  by type (Δbytes desc):");
+    println!("  {:>14}  {:>10}  {:<24}  {}", "Δbytes", "Δcount", "type", "a_bytes -> b_bytes");
+    for (name, dcount, dbytes, ab, bb) in &rows {
+        if *dbytes == 0 && *dcount == 0 {
+            continue; // unchanged
+        }
+        let tag = if *ab == 0 {
+            "NEW"
+        } else if *bb == 0 {
+            "GONE"
+        } else if *dbytes > 0 {
+            "GREW"
+        } else {
+            "shrank"
+        };
+        println!(
+            "  {:>+14}  {:>+10}  {:<24}  {} -> {}   [{}]",
+            dbytes, dcount, name, ab, bb, tag
+        );
+    }
+    let grown: i64 = rows.iter().filter(|r| r.2 > 0).map(|r| r.2).sum();
+    println!(
+        "  net growth across {} changed types: {:+} bytes",
+        rows.iter().filter(|r| r.1 != 0 || r.2 != 0).count(),
+        grown + rows.iter().filter(|r| r.2 < 0).map(|r| r.2).sum::<i64>()
+    );
+    ExitCode::SUCCESS
+}
+
 fn run_emit(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: gcr emit <tokens|ast|core|layout|reflect|mono|llvm> <file.gcr> [--no-opt (llvm)]";
     let stage = match args.get(2) {
