@@ -17,6 +17,12 @@
 (def me--butlast (lambda [xs] (if (empty? (rest xs)) (list) (cons (first xs) (me--butlast (rest xs))))))
 (def me--member  (lambda [xs x] (if (empty? xs) false (if (= (first xs) x) true (me--member (rest xs) x)))))
 (def me--covered (lambda [arms] (if (empty? arms) (list) (cons (first (first arms)) (me--covered (rest arms))))))
+; first name in `names` not in `valid`, else false (for a clear cross-sum error)
+(def me--first-bad
+  (lambda [names valid]
+    (if (empty? names)
+        false
+        (if (me--member valid (first names)) (me--first-bad (rest names) valid) (first names)))))
 
 ; the `_` arm's body: (_ b) -> b ; (_ b1 b2 …) -> (do b1 b2 …)
 (def me--wild-body
@@ -43,7 +49,16 @@
         (error "match-else: the last arm must be (_ default)")
         (if (empty? explicit)
             (error "match-else: needs at least one explicit variant arm (to infer the sum)")
-            (let [default (me--wild-body wild)
-                  sum     (variant-sum (first (first explicit)))
-                  gen     (me--uncovered (sum-variants sum) (me--covered explicit) default)]
-              (cons (quote match) (cons scrut (concat explicit gen))))))))
+            (let [default  (me--wild-body wild)
+                  sum      (variant-sum (first (first explicit)))
+                  variants (sum-variants sum)
+                  covered  (me--covered explicit)
+                  bad      (me--first-bad covered (map first variants))]
+              (if bad
+                  ; an explicit arm whose variant isn't in the inferred sum (the sum
+                  ; is taken from the FIRST arm) — clearer than the core checker's
+                  ; later per-arm rejection.
+                  (error (str "match-else: arm '" (name bad)
+                              "' is not a variant of the sum inferred from the first arm"))
+                  (cons (quote match)
+                        (cons scrut (concat explicit (me--uncovered variants covered default))))))))))
