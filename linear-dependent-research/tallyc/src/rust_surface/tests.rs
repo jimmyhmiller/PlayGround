@@ -529,6 +529,28 @@ fn non_exhaustive_match_is_rejected() {
 }
 
 #[test]
+fn dependent_ast_makes_out_of_scope_variables_impossible_by_typing() {
+    // THE DEPENDENT HALF on the dogfood (the "powers of Idris" cardinal): index the AST by
+    // SCOPE DEPTH so an out-of-scope variable is IMPOSSIBLE BY TYPING — REJECTED AT
+    // TYPE-CHECK, not at runtime. `var : Fin d -> Expr d` makes a variable a BOUNDED index
+    // into the scope: in a scope of 1 (`Expr (Succ Zero)`), `var FZ` (index 0) type-checks,
+    // but `var (FS FZ)` (index 1) does NOT — `FS FZ : Fin (Succ (Succ _))` cannot be
+    // `Fin (Succ Zero)`. A non-dependent language must catch the out-of-scope var at
+    // RUNTIME; the dependent type ELIMINATES it by construction. (The `Own (Expr d)`
+    // children declare via the (a)-positivity — `Own` of the indexed recursive family.)
+    const HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+        enum Expr : Nat -> Type { lit : {0 d : Nat} -> Nat -> Expr d, var : {0 d : Nat} -> Fin d -> Expr d, add : {0 d : Nat} -> Own (Expr d) -> Own (Expr d) -> Expr d }\n\
+        main : Nat\nfn main() { Zero }\n";
+    // IN scope (depth 1, variable 0) — type-checks.
+    let in_scope = format!("{HDR}e0 : Expr (Succ Zero)\nfn e0() {{ var(FZ) }}\n");
+    assert!(check_program(&in_scope).is_ok(), "an in-scope variable must type-check: {:?}", check_program(&in_scope).err());
+    // OUT of scope (depth 1, variable 1) — REJECTED at type-check (impossible by typing).
+    let out_scope = format!("{HDR}eb : Expr (Succ Zero)\nfn eb() {{ var(FS(FZ)) }}\n");
+    assert!(check_program(&out_scope).is_err(), "an OUT-OF-SCOPE variable must be REJECTED at type-check");
+}
+
+#[test]
 fn partial_heap_recursion_still_enforces_linearity() {
     // CARDINAL for (A): `%partial` relaxes TERMINATION, NOT LINEARITY. A heap-recursive
     // `%partial` `Fix` body is STILL fully linearity-checked — a leak or double-free is
