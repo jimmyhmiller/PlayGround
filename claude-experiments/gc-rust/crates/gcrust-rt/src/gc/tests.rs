@@ -1449,6 +1449,73 @@ fn alloc_site_profile_real_threads_join_then_profile() {
 }
 
 #[test]
+fn alloc_site_profile_dump_concurrent_with_live_worker_no_hang() {
+    // Proves the dump-race fix: the main thread hammers alloc_site_profile (which
+    // STW-pauses every other mutator via pause_world) WHILE a worker is a live,
+    // registered, actively-allocating mutator. The pause must (a) never hang —
+    // the worker polls a safepoint each iteration so it parks promptly, same
+    // discipline as a collection — and (b) never observe a torn/garbage count
+    // (monotonic, bounded by the total), because the worker is parked during the
+    // read. Finally, after the worker joins, its counts survive via the retired
+    // fold and the total is exact.
+    use crate::gc::reflect::AllocSite;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0 }]);
+
+    let n_allocs = 5000u64;
+    let bytes_each = 16u64;
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+
+    let worker = {
+        let h = heap.clone();
+        let stop = stop.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+            for _ in 0..n_allocs {
+                unsafe { mt.state().record_alloc(0, bytes_each) };
+                done.fetch_add(1, Ordering::Relaxed);
+                mt.safepoint(); // park here if a dump is pausing the world
+            }
+            // Stay a live, safepoint-responsive mutator (no more allocs) so the
+            // main thread can dump while we're still registered.
+            while !stop.load(Ordering::Relaxed) {
+                mt.safepoint();
+                std::thread::yield_now();
+            }
+            // mt drops -> deregister -> fold counts into retired.
+        })
+    };
+
+    // Hammer the dump while the worker is live + allocating.
+    let mut last = 0u64;
+    for _ in 0..200 {
+        let prof = heap.alloc_site_profile();
+        let c = prof.iter().find(|s| s.site_id == 0).map(|s| s.count).unwrap_or(0);
+        assert!(c <= n_allocs, "torn/garbage read: count {c} > total {n_allocs}");
+        assert!(c >= last, "count went backwards {last} -> {c}");
+        last = c;
+    }
+
+    // Let the worker finish, then stop + join (no pause active during join).
+    while done.load(Ordering::Relaxed) < n_allocs {
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].count, n_allocs);
+    assert_eq!(prof[0].bytes, n_allocs * bytes_each);
+}
+
+#[test]
 fn alloc_site_profile_unlabelled_sites_not_dropped() {
     // Counters with no matching site-table entry (e.g. table not installed) are
     // surfaced under a synthetic label, never silently dropped.
