@@ -72,7 +72,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     })
 }
 
-fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, Diag> {
+pub fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, Diag> {
     let name = sym(rest.first().ok_or("defsum: missing name")?, "sum name")?;
     let mut i = 1;
     let mut type_params = vec![];
@@ -105,7 +105,7 @@ fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, Diag> {
     })
 }
 
-fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, Diag> {
+pub fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, Diag> {
     let name = sym(rest.first().ok_or("defstruct: missing name")?, "struct name")?;
     let mut i = 1;
     // struct-level options: :layout c|packed|explicit|(align N), :size N, :align N.

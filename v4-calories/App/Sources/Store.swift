@@ -15,6 +15,43 @@ struct AppState: Codable {
     var aiKey: String = ""
 }
 
+/// Decodes one element but never throws — failures become `nil` so a single bad element
+/// can't fail the whole array.
+private struct LossyElement<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+}
+
+private extension KeyedDecodingContainer {
+    /// Decode `[T]`, dropping any elements that fail. Returns nil only if the key is absent.
+    func lossyArray<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T]? {
+        guard let raw = try? decode([LossyElement<T>].self, forKey: key) else { return nil }
+        return raw.compactMap(\.value)
+    }
+}
+
+// Tolerant decoding for the persisted blob: a missing or unreadable field falls back to its
+// default instead of throwing, so old saved data always survives adding new fields. Defined in
+// an extension so the memberwise initializer is preserved; encoding stays synthesized.
+extension AppState {
+    enum CodingKeys: String, CodingKey {
+        case entries, weighIns, shortcuts, goal, startDate, healthKitEnabled, hasOnboarded, aiKey
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var s = AppState()
+        s.entries = c.lossyArray(CalorieEntry.self, forKey: .entries) ?? s.entries
+        s.weighIns = c.lossyArray(WeighIn.self, forKey: .weighIns) ?? s.weighIns
+        s.shortcuts = c.lossyArray(Shortcut.self, forKey: .shortcuts) ?? s.shortcuts
+        s.goal = (try? c.decode(Goal.self, forKey: .goal)) ?? s.goal
+        s.startDate = try? c.decode(Date.self, forKey: .startDate)
+        s.healthKitEnabled = (try? c.decode(Bool.self, forKey: .healthKitEnabled)) ?? s.healthKitEnabled
+        s.hasOnboarded = (try? c.decode(Bool.self, forKey: .hasOnboarded)) ?? s.hasOnboarded
+        s.aiKey = (try? c.decode(String.self, forKey: .aiKey)) ?? s.aiKey
+        self = s
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published private(set) var state: AppState
@@ -48,9 +85,19 @@ final class AppStore: ObservableObject {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         storeURL = dir.appendingPathComponent("cumulative-tracker.json")
-        if let data = try? Data(contentsOf: storeURL),
-           let loaded = try? JSONDecoder().decode(AppState.self, from: data) {
-            state = loaded
+        if let data = try? Data(contentsOf: storeURL) {
+            do {
+                state = try JSONDecoder().decode(AppState.self, from: data)
+            } catch {
+                // Never destroy data we couldn't read: keep a copy so it stays recoverable
+                // instead of being silently overwritten on the next save.
+                let stamp = ISO8601DateFormatter().string(from: Date())
+                    .replacingOccurrences(of: ":", with: "-")
+                let backup = dir.appendingPathComponent("cumulative-tracker.unreadable-\(stamp).json")
+                try? data.write(to: backup, options: .atomic)
+                print("⚠️ Could not decode saved data (\(error)); backed up raw file to \(backup.lastPathComponent)")
+                state = AppState()
+            }
         } else {
             state = AppState()
         }
@@ -169,7 +216,9 @@ final class AppStore: ObservableObject {
     // MARK: - Mutations
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(state) { try? data.write(to: storeURL) }
+        if let data = try? JSONEncoder().encode(state) {
+            try? data.write(to: storeURL, options: .atomic)
+        }
         recompute()
     }
 

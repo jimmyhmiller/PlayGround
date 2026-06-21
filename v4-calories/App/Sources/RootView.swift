@@ -84,13 +84,15 @@ struct RootView: View {
     private func tabButton(_ t: Tab, system: String, label: String) -> some View {
         let active = tab == t
         return Button {
-            withAnimation(.easeInOut(duration: 0.15)) { tab = t }
+            // Switch content instantly (no cross-fade flash); only the tint animates.
+            tab = t
         } label: {
             VStack(spacing: 5) {
                 Image(systemName: system).font(.system(size: 18, weight: .medium))
                 Text(label).font(.system(size: 10, weight: .semibold))
             }
             .foregroundStyle(active ? Theme.green : Theme.textDim(0.4))
+            .animation(.easeInOut(duration: 0.15), value: tab)
             .frame(maxWidth: .infinity)
         }
     }

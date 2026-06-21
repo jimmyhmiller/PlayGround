@@ -26,7 +26,21 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::ast::{StructDef, SumDef, Type};
 use crate::reader::{Sexp, SexpKind};
+
+// ---- compile-time type reflection ---------------------------------------
+
+/// The syntactic shape of a `defstruct`/`defsum`, captured at expansion time so
+/// macros can introspect it (fields, variants) WITHOUT any layout/size info —
+/// that stays the orthogonal `sizeof`/`alignof` value-builtins. Keyed by
+/// qualified name (`module.Name`) in the macro context's `types` table.
+#[derive(Clone)]
+enum TypeShape {
+    Struct(StructDef),
+    Sum(SumDef),
+}
+type TypeTable = HashMap<String, TypeShape>;
 
 // ---- compile-time values ------------------------------------------------
 
@@ -150,13 +164,19 @@ struct MacroCtx {
     defs: DefNames,
     imports: ImportMap,
     exports: ExportMap,
+    /// Type shapes for comptime reflection (`struct-fields` etc.), keyed by
+    /// qualified `module.Name`. Populated in pass 1 and grown by `macro_note_defs`
+    /// so macro-generated types are reflectable too.
+    types: TypeTable,
 }
 thread_local! {
     static MACRO_CTX: RefCell<Option<MacroCtx>> = const { RefCell::new(None) };
 }
-fn macro_ctx_init(defs: DefNames, imports: ImportMap, exports: ExportMap) {
-    MACRO_CTX
-        .with(|c| *c.borrow_mut() = Some(MacroCtx { stack: Vec::new(), defs, imports, exports }));
+fn macro_ctx_init(defs: DefNames, imports: ImportMap, exports: ExportMap, types: TypeTable) {
+    MACRO_CTX.with(|c| {
+        *c.borrow_mut() =
+            Some(MacroCtx { stack: Vec::new(), defs, imports, exports, types })
+    });
 }
 fn macro_ctx_clear() {
     MACRO_CTX.with(|c| *c.borrow_mut() = None);
@@ -181,6 +201,7 @@ fn macro_note_defs(form: &Sexp, module: &str) {
     MACRO_CTX.with(|c| {
         if let Some(ctx) = c.borrow_mut().as_mut() {
             scan_defs(form, module, &mut ctx.defs);
+            scan_type_shape(form, module, &mut ctx.types); // macro-generated types reflectable
         }
     });
 }
@@ -265,6 +286,86 @@ fn scan_defs(form: &Sexp, module: &str, defs: &mut DefNames) {
     }
 }
 
+/// Capture a `defstruct`/`defsum`'s syntactic shape into the reflection table,
+/// keyed by qualified name. Reuses the real parser (one source of truth); a
+/// malformed definition is skipped here and reported later by `resolve`.
+fn scan_type_shape(form: &Sexp, module: &str, types: &mut TypeTable) {
+    let items = match &form.kind {
+        SexpKind::List(i) => i,
+        _ => return,
+    };
+    match items.first().and_then(sym_name) {
+        Some("defstruct") => {
+            if let Ok(sd) = crate::parse::parse_defstruct(&items[1..]) {
+                types.insert(format!("{module}.{}", sd.name), TypeShape::Struct(sd));
+            }
+        }
+        Some("defsum") => {
+            if let Ok(sm) = crate::parse::parse_defsum(&items[1..]) {
+                types.insert(format!("{module}.{}", sm.name), TypeShape::Sum(sm));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a type name for a reflection builtin: an exact qualified key, else a
+/// unique simple-name match across modules. Unknown or ambiguous is a hard error
+/// (no silent empty — per the no-silent-wrong rule).
+fn reflect_lookup(name: &str) -> Result<TypeShape, String> {
+    MACRO_CTX.with(|c| {
+        let c = c.borrow();
+        let ctx = c.as_ref().ok_or("reflection: no macro context")?;
+        if let Some(shape) = ctx.types.get(name) {
+            return Ok(shape.clone());
+        }
+        let suffix = format!(".{name}");
+        let matches: Vec<&String> = ctx.types.keys().filter(|k| k.ends_with(&suffix)).collect();
+        match matches.len() {
+            1 => Ok(ctx.types[matches[0]].clone()),
+            0 => Err(format!("reflection: unknown type '{name}' (not a defstruct/defsum)")),
+            _ => Err(format!("reflection: type '{name}' is ambiguous across modules; qualify it")),
+        }
+    })
+}
+
+/// `(name field-type-sexp)` for one field, as a macro list value.
+fn field_value(fname: &str, fty: &Type) -> Value {
+    Value::List(vec![Value::Sym(fname.to_string()), sexp_to_value(&type_to_sexp(fty))])
+}
+
+/// Render a checked `Type` back to its source `Sexp`, so a reflected field type
+/// can be spliced into macro-generated code. Purely structural — no layout/size
+/// (those never appear in a `Type`), preserving the syntactic-only invariant.
+fn type_to_sexp(t: &Type) -> Sexp {
+    let list = |parts: Vec<Sexp>| Sexp::new(SexpKind::List(parts), crate::span::Span::DUMMY);
+    match t {
+        Type::Int(bits, signed) => Sexp::sym(format!("{}{bits}", if *signed { "i" } else { "u" })),
+        Type::Float(bits) => Sexp::sym(format!("f{bits}")),
+        Type::Bool => Sexp::sym("bool"),
+        Type::Ptr(p) => list(vec![Sexp::sym("ptr"), type_to_sexp(p)]),
+        Type::Ref(true, p) => list(vec![Sexp::sym("mut"), type_to_sexp(p)]),
+        Type::Ref(false, p) => list(vec![Sexp::sym("ref"), type_to_sexp(p)]),
+        Type::Struct(name) => Sexp::sym(name.clone()),
+        Type::Array(e, n) => list(vec![Sexp::sym("array"), type_to_sexp(e), Sexp::int(*n as i64)]),
+        Type::Slice(e) => list(vec![Sexp::sym("slice"), type_to_sexp(e)]),
+        Type::Vec(e, n) => list(vec![Sexp::sym("vec"), type_to_sexp(e), Sexp::int(*n as i64)]),
+        Type::Fn(cc, params, ret) => {
+            let pv = Sexp::new(
+                SexpKind::Vector(params.iter().map(type_to_sexp).collect()),
+                crate::span::Span::DUMMY,
+            );
+            list(vec![Sexp::sym("fnptr"), Sexp::sym(cc.clone()), pv, type_to_sexp(ret)])
+        }
+        Type::App(name, args) => {
+            let mut parts = vec![Sexp::sym(name.clone())];
+            parts.extend(args.iter().map(type_to_sexp));
+            list(parts)
+        }
+        Type::Never => Sexp::sym("!"),
+    }
+}
+
 /// Read + load the module graph (pass 1), then macro-expand (pass 2). Returns
 /// the macro-free top-level forms (each tagged with its module) plus the import
 /// table. AST-level name resolution (the qualify pass) happens later in
@@ -284,8 +385,17 @@ pub fn expand_program(
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Pass 1 — load: collect raw forms, build the def table, register macros + defs.
     process_forms(forms, &genv, &mut macros, &mut raw, &base, &mut visited, None, &mut imports, &mut defs, &mut exports)?;
+    // Capture every source-written type's shape for comptime reflection (the
+    // `raw` list already includes imported modules' forms, each tagged with its
+    // module). Macro-generated types are added incrementally in pass 2.
+    let mut types: TypeTable = HashMap::new();
+    for (form, module) in &raw {
+        if let Some(m) = module {
+            scan_type_shape(form, m, &mut types);
+        }
+    }
     // Pass 2 — expand, with macro-template hygiene resolved against each macro's module.
-    macro_ctx_init(defs, imports.clone(), exports.clone());
+    macro_ctx_init(defs, imports.clone(), exports.clone(), types);
     let result: Result<Vec<TaggedForm>, String> = (|| {
         let mut out: Vec<TaggedForm> = Vec::new();
         for (form, module) in &raw {
@@ -806,6 +916,7 @@ fn global_env(target: &TargetInfo) -> Env {
         "nth", "count", "empty?", "concat", "not", "symbol", "name", "str", "gensym", "map",
         "list?", "vector?", "symbol?", "number?", "keyword?", "error",
         "str-bytes", "bytes->str",
+        "struct-fields", "sum-variants", "type-kind", "type-params",
     ] {
         env_define(&env, name, Value::Builtin(name));
     }
@@ -932,6 +1043,59 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             let s = String::from_utf8(bytes)
                 .map_err(|_| "bytes->str: bytes are not valid UTF-8".to_string())?;
             Ok(Value::Str(s))
+        }
+        // ---- comptime TYPE REFLECTION (syntactic only — fields/variants, never
+        //      layout/size; those stay the orthogonal sizeof/alignof builtins) ----
+        // `(struct-fields T)` -> ((name type) …) for a struct's fields.
+        "struct-fields" => {
+            let name = text_of(args.first().ok_or("struct-fields: needs a type name")?)?;
+            match reflect_lookup(&name)? {
+                TypeShape::Struct(sd) => Ok(Value::List(
+                    sd.fields.iter().map(|(n, t)| field_value(n, t)).collect(),
+                )),
+                TypeShape::Sum(_) => Err(format!("struct-fields: '{name}' is a sum, not a struct")),
+            }
+        }
+        // `(sum-variants T)` -> ((variant ((name type) …)) …) for a sum's variants.
+        "sum-variants" => {
+            let name = text_of(args.first().ok_or("sum-variants: needs a type name")?)?;
+            match reflect_lookup(&name)? {
+                TypeShape::Sum(sm) => Ok(Value::List(
+                    sm.variants
+                        .iter()
+                        .map(|v| {
+                            let fields =
+                                Value::List(v.fields.iter().map(|(n, t)| field_value(n, t)).collect());
+                            Value::List(vec![Value::Sym(v.name.clone()), fields])
+                        })
+                        .collect(),
+                )),
+                TypeShape::Struct(_) => {
+                    Err(format!("sum-variants: '{name}' is a struct, not a sum"))
+                }
+            }
+        }
+        // `(type-kind T)` -> :struct | :sum | :scalar — the safe probe (no error;
+        // a macro branches on it before calling struct-fields/sum-variants).
+        "type-kind" => {
+            let name = text_of(args.first().ok_or("type-kind: needs a type name")?)?;
+            Ok(Value::Keyword(
+                match reflect_lookup(&name) {
+                    Ok(TypeShape::Struct(_)) => "struct",
+                    Ok(TypeShape::Sum(_)) => "sum",
+                    Err(_) => "scalar",
+                }
+                .to_string(),
+            ))
+        }
+        // `(type-params T)` -> (T …) generic parameter names ( () if none).
+        "type-params" => {
+            let name = text_of(args.first().ok_or("type-params: needs a type name")?)?;
+            let params = match reflect_lookup(&name)? {
+                TypeShape::Struct(sd) => sd.type_params,
+                TypeShape::Sum(sm) => sm.type_params,
+            };
+            Ok(Value::List(params.into_iter().map(Value::Sym).collect()))
         }
         other => Err(format!("compile-time: unknown builtin '{other}'")),
     }

@@ -1,6 +1,44 @@
 import XCTest
 @testable import CalorieModel
 
+/// Persisted-data must survive new fields being added to the models. Auto-synthesized
+/// Decodable throws on a missing key even with a default; these prove our hand-written
+/// decoders tolerate older JSON (the bug that wiped real data once).
+final class BackwardCompatCodingTests: XCTestCase {
+
+    private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
+        try JSONDecoder().decode(T.self, from: Data(json.utf8))
+    }
+
+    func testCalorieEntryMissingLabel() throws {
+        // Oldest format: no `label`, no `id`.
+        let e = try decode(CalorieEntry.self, #"{"date": 0, "kcal": 540}"#)
+        XCTAssertEqual(e.kcal, 540)
+        XCTAssertNil(e.label)
+    }
+
+    func testWeighInMissingFromHealthKit() throws {
+        // `fromHealthKit` was added later; old rows omit it.
+        let w = try decode(WeighIn.self, #"{"id": "5B7C0E2A-0000-0000-0000-000000000001", "date": 0, "weightLb": 183.4}"#)
+        XCTAssertEqual(w.weightLb, 183.4, accuracy: 0.0001)
+        XCTAssertFalse(w.fromHealthKit)
+    }
+
+    func testGoalMissingProfileFields() throws {
+        let g = try decode(Goal.self, #"{"targetWeightLb": 178, "ratePerWeek": 1.0}"#)
+        XCTAssertEqual(g.targetWeightLb, 178)
+        XCTAssertNil(g.sex)
+        XCTAssertNil(g.heightCm)
+    }
+
+    func testRoundTripStillWorks() throws {
+        let e = CalorieEntry(date: Date(timeIntervalSince1970: 100), kcal: 321, label: "Lunch")
+        let data = try JSONEncoder().encode(e)
+        let back = try JSONDecoder().decode(CalorieEntry.self, from: data)
+        XCTAssertEqual(back, e)
+    }
+}
+
 final class TrendFilterTests: XCTestCase {
 
     func testEmptyAndNoWeighInsAreSafe() {

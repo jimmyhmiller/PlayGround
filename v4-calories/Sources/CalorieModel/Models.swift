@@ -96,6 +96,61 @@ public struct Goal: Sendable, Equatable, Codable {
     }
 }
 
+// MARK: - Tolerant decoding
+//
+// Auto-synthesized `Decodable` throws on a missing key even when the property has a
+// default. That means adding ANY new stored field silently breaks decoding of older
+// saved data. These hand-written decoders use defaults for missing/!decodable fields
+// so persisted data survives across app versions. Encoding stays synthesized.
+
+public extension WeighIn {
+    enum CodingKeys: String, CodingKey { case id, date, weightLb, fromHealthKit }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: (try? c.decode(UUID.self, forKey: .id)) ?? UUID(),
+            date: try c.decode(Date.self, forKey: .date),
+            weightLb: try c.decode(Double.self, forKey: .weightLb),
+            fromHealthKit: (try? c.decode(Bool.self, forKey: .fromHealthKit)) ?? false)
+    }
+}
+
+public extension CalorieEntry {
+    enum CodingKeys: String, CodingKey { case id, date, kcal, label }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: (try? c.decode(UUID.self, forKey: .id)) ?? UUID(),
+            date: try c.decode(Date.self, forKey: .date),
+            kcal: try c.decode(Double.self, forKey: .kcal),
+            label: try? c.decode(String.self, forKey: .label))
+    }
+}
+
+public extension Shortcut {
+    enum CodingKeys: String, CodingKey { case id, label, kcal }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: (try? c.decode(UUID.self, forKey: .id)) ?? UUID(),
+            label: (try? c.decode(String.self, forKey: .label)) ?? "Shortcut",
+            kcal: try c.decode(Double.self, forKey: .kcal))
+    }
+}
+
+public extension Goal {
+    enum CodingKeys: String, CodingKey { case targetWeightLb, ratePerWeek, sex, ageYears, heightCm }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            targetWeightLb: (try? c.decode(Double.self, forKey: .targetWeightLb)) ?? 178,
+            ratePerWeek: (try? c.decode(Double.self, forKey: .ratePerWeek)) ?? 0.85,
+            sex: try? c.decode(Sex.self, forKey: .sex),
+            ageYears: try? c.decode(Double.self, forKey: .ageYears),
+            heightCm: try? c.decode(Double.self, forKey: .heightCm))
+    }
+}
+
 public extension DailyRecord {
     /// Expand sparse weigh-ins + calorie entries + HealthKit samples into a contiguous
     /// per-day array spanning `[start, end]`. Days with no data become all-`nil` records,
