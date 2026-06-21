@@ -41,7 +41,37 @@ Fix = **EX FALSO**, which is T-INDEPENDENT and self-checking:
   derivable → the discharge FAILS TO TYPE-CHECK (the kernel re-check is the backstop, now
   T-independent). That is exactly the Leader's cardinal made structural.
 
-## The three pieces
+## UPDATE — verify-before-building DE-RISKED this: NO J, NO general partial-discharge needed
+
+Probing a J-free path: derive the `Void` from the EXISTING all-absurd discharge instead of
+no-confusion/J. `fzv : Fin Zero -> Void` via `match i {}` (Fin Zero is empty — all ctors absurd
+at index Zero) TYPE-CHECKS today (the all-absurd discharge, with `T = Void`). Then lookup is:
+
+```
+fn lookup(i, env) {
+  match env {
+    Nil           => exfalso(fzv(i)),                 -- env=Nil ⇒ n=Zero ⇒ i : Fin Zero ⇒ Void
+    Cons(v, rest) => match i { FZ => v, FS(j) => lookup(j, rest) },  -- env=Cons ⇒ n=Succ k ⇒ i : Fin (Succ k)
+  }
+}
+```
+
+This needs NEITHER a `J`/`Eq`-eliminator (the kernel has `Eq`/`Refl` but NO eliminator —
+confirmed) NOR a general partial-discharge: the `Void` is built from `fzv` (existing
+all-absurd discharge) + `exfalso` (validated). **The ONLY missing piece is INDEX REFINEMENT:**
+matching `env = Nil` must refine `n := Zero` in that arm so `i : Fin n` becomes `i : Fin Zero`
+(making `fzv(i)` type-check), and `env = Cons(...)` must refine `n := Succ k` so `i : Fin
+(Succ k)` (a normal `match i`). Today the elaborator does NOT refine the sibling's index and
+PANICS on `lookup` (a bug — must become a clean error or, better, type-check via refinement).
+
+So the build collapses to ONE substantive piece (plus a panic→clean-error fix): **index
+refinement** — unify the scrutinee's index with each constructor's result index and substitute
+into the arm context's types. That is the standard dependent-pattern-matching mechanism, far
+smaller than the J + no-confusion + general-partial-discharge chain. (J / general partial
+discharge remain future general capabilities, but the dogfood's dependent eval does NOT need
+them — exactly the friction-driven minimalism.)
+
+## The three pieces (original general plan — superseded for the dogfood by index-refinement)
 
 1. **`Void` + `exfalso` + no-confusion** (`disjoint : C₁ … = C₂ … → Void` for distinct-head
    constructor indices) — the T-independent discharge primitive. Prelude-level.
