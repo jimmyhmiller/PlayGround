@@ -1596,6 +1596,35 @@ fn alloc_site_profile_unlabelled_sites_not_dropped() {
 }
 
 #[test]
+fn visit_roots_reports_real_roots_only() {
+    // Heap-explorer P1 primitive: visit_roots reports the REAL GC root set, not
+    // the in-degree-0 proxy. A rooted object is visited; an unrooted (orphan)
+    // object is not — even though both are live in the heap.
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Heap::new::<Full>(4096, vec![INFO]);
+
+    let rooted = heap.alloc_obj::<Full>(&INFO, 0);
+    let orphan = heap.alloc_obj::<Full>(&INFO, 0);
+    assert!(!rooted.is_null() && !orphan.is_null());
+
+    // Root only `rooted` via a permanent extra.
+    let root = SingleRoot(Cell::new(rooted as u64));
+    unsafe { heap.register_permanent_extra(&root as *const dyn RootSource) };
+
+    let mut seen: Vec<*mut u8> = Vec::new();
+    {
+        // Honor the STW contract (no other mutators here → parks nobody).
+        let _pause = heap.pause_world();
+        unsafe { heap.visit_roots(&mut |obj| seen.push(obj)) };
+    }
+    assert!(seen.contains(&rooted), "visit_roots must report the rooted object");
+    assert!(
+        !seen.contains(&orphan),
+        "visit_roots must NOT report the unrooted (orphan) object"
+    );
+}
+
+#[test]
 fn mutator_thread_deregisters_on_drop() {
     use std::sync::Arc;
     let heap = Arc::new(Heap::new::<Compact>(4096, vec![]));

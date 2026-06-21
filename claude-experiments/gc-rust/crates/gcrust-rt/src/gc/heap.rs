@@ -366,6 +366,54 @@ impl Heap {
         unsafe { walker(jit_fp, visitor) };
     }
 
+    /// Visit every GC root — exactly the set the collector scans in
+    /// `collect_inner` Phase 1 (the global root set, each registered thread's
+    /// host roots + its parked JIT frame, and the permanent extras) — calling
+    /// `visit(obj)` with each non-null object a root slot points at. READ-ONLY:
+    /// it reads root slots and reports the pointed-at objects; it never relocates
+    /// (unlike the collector's `process_slot`).
+    ///
+    /// This is the *real* GC root set — the correct basis for snapshot
+    /// reachability / dominators. (The heap dump's in-degree-0 "roots" are a
+    /// structural proxy, not the true roots.) At a mid-execution snapshot the
+    /// parked threads' frames are rich live roots; at program end (threads
+    /// deregistered, the entry frame returned) the roots are just the globals +
+    /// permanent extras — which honestly reflects that most of the heap is, by
+    /// then, uncollected garbage.
+    ///
+    /// # Safety
+    /// Must be called with the world quiescent — under a [`pause_world`] STW
+    /// pause — because it reads each thread's frame chain and `parked_jit_fp`,
+    /// stable only while that thread is parked. Objects must be valid (as for the
+    /// heap dump). Do not call while holding `gc_lock` other than via the pause.
+    pub unsafe fn visit_roots(&self, visit: &mut dyn FnMut(*mut u8)) {
+        let mut do_slot = |slot: *mut u64| {
+            let p = unsafe { (slot as *const *mut u8).read() };
+            if !p.is_null() {
+                visit(p);
+            }
+        };
+        // Global root set.
+        self.globals.scan_roots(&mut do_slot);
+        // Per-thread host roots + parked JIT frame roots (threads parked → stable).
+        {
+            let threads = self.threads.lock().unwrap();
+            for ts in threads.iter() {
+                ts.scan_roots(&mut do_slot);
+                let jit_fp = ts.parked_jit_fp();
+                if !jit_fp.is_null() {
+                    self.walk_jit_frame(jit_fp, &mut do_slot);
+                }
+            }
+        }
+        // Permanent extras (heap-lifetime RootSource registrations).
+        let perm = self.permanent_extras.lock().unwrap();
+        for &ptr in perm.iter() {
+            let src: &dyn RootSource = unsafe { &*ptr };
+            src.scan_roots(&mut do_slot);
+        }
+    }
+
     /// Enable or disable GC-on-every-allocation (stress testing mode).
     pub fn set_gc_every_alloc(&self, enabled: bool) {
         self.gc_every_alloc.store(enabled, Ordering::Release);
