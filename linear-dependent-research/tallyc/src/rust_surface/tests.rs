@@ -529,6 +529,27 @@ fn non_exhaustive_match_is_rejected() {
 }
 
 #[test]
+fn partial_heap_recursion_still_enforces_linearity() {
+    // CARDINAL for (A): `%partial` relaxes TERMINATION, NOT LINEARITY. A heap-recursive
+    // `%partial` `Fix` body is STILL fully linearity-checked — a leak or double-free is
+    // REJECTED. `%partial` is "may diverge", never "may leak / double-free".
+    const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+        struct Node { head : Nat, tail : Opt (Own Node) }\n\
+        add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    // OK: the correct traversal (recursive result let-sequenced) is accepted.
+    let ok = format!("{H}sumFree : Opt (Own Node) -> Nat\nfn sumFree(l) {{ match l {{ none => Zero, some(o) => match unbox(o) {{ Node(h, t) => let s = sumFree(t); add(h, s) }} }} }}\n");
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+    // LEAK: the some-arm drops the tail `t` instead of recursing/freeing ⇒ 0⋢1.
+    let leak = format!("{H}sumFree : Opt (Own Node) -> Nat\nfn sumFree(l) {{ match l {{ none => Zero, some(o) => match unbox(o) {{ Node(h, t) => h }} }} }}\n");
+    assert!(check_program(&leak).is_err(), "a %partial heap-recursive fn that LEAKS must be REJECTED");
+    // DOUBLE-FREE: `o` used twice (unbox AND free) ⇒ ω⋢1.
+    let dbl = format!("{H}sumFree : Opt (Own Node) -> Nat\nfn sumFree(l) {{ match l {{ none => Zero, some(o) => match unbox(o) {{ Node(h, t) => let s = sumFree(t); match free(o) {{ U => add(h, s) }} }} }} }}\n");
+    assert!(check_program(&dbl).is_err(), "a %partial heap-recursive fn that DOUBLE-FREES must be REJECTED");
+}
+
+#[test]
 fn non_structural_recursion_lowers_to_partial_fix() {
     // A non-structural recursion (`loop(Succ(k))` — the measure INCREASES) is NO LONGER
     // rejected: with general/heap recursion now supported (a `%partial` `Fix` over a
