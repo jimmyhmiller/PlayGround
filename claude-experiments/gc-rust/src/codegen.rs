@@ -1224,6 +1224,12 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             ptr.fn_type(&[ptr.into(), i32t.into(), ptr.into()], false),
             Some(inkwell::module::Linkage::External),
         );
+        // void ai_heap_snapshot(ptr thread) — heap-explorer P2 on-demand snapshot.
+        self.module.add_function(
+            "ai_heap_snapshot",
+            self.ctx.void_type().fn_type(&[ptr.into()], false),
+            Some(inkwell::module::Linkage::External),
+        );
         // In-language field reflection (all thread-first; RuntimeCall-dispatched).
         // i64 ai_reflect_field_count(ptr thread, ptr obj)
         self.module.add_function(
@@ -2908,6 +2914,7 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
         ("ai_str_from_float", runtime::ai_str_from_float as *const () as usize),
         ("ai_char_to_str", runtime::ai_char_to_str as *const () as usize),
         ("ai_type_name", runtime::ai_type_name as *const () as usize),
+        ("ai_heap_snapshot", runtime::ai_heap_snapshot as *const () as usize),
         ("ai_reflect_field_count", runtime::ai_reflect_field_count as *const () as usize),
         ("ai_reflect_field_kind", runtime::ai_reflect_field_kind as *const () as usize),
         ("ai_reflect_field_i64", runtime::ai_reflect_field_i64 as *const () as usize),

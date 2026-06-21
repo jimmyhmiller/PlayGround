@@ -2608,6 +2608,24 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 | "field_i64" => {
                     return self.reflect_intrinsic(name, args, span);
                 }
+                // Heap-explorer P2: on-demand mid-execution heap snapshot. Called
+                // from managed code → at a safepoint by construction (signal-safe).
+                "heap_snapshot" => {
+                    if !args.is_empty() {
+                        return err("heap_snapshot() takes no arguments", span);
+                    }
+                    return Ok((
+                        CoreExpr::new(
+                            CoreExprKind::RuntimeCall {
+                                func: "ai_heap_snapshot",
+                                args: vec![],
+                                ret: Repr::Unit,
+                            },
+                            Repr::Unit,
+                        ),
+                        Ty::unit(),
+                    ));
+                }
                 _ => {}
             }
         }

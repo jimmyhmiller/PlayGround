@@ -1102,6 +1102,46 @@ pub unsafe extern "C" fn ai_closure_code_ptr(thread: *mut Thread, env: *const u8
     }
 }
 
+/// On-demand mid-execution heap snapshot (heap-explorer P2). The in-language
+/// `heap_snapshot()` builtin lowers to this. Called from COMPILED CODE, so the
+/// calling thread is at a safepoint by construction — this is the signal-SAFE
+/// trigger (no `pause_world` from arbitrary signal context). Writes a JSON
+/// snapshot (same schema as `GCR_HEAP_DUMP=json`) to
+/// `GCR_HEAP_SNAPSHOT_DIR/snapshot-NNNN.json` (a numbered series for
+/// `gcr heap-diff` leak-hunting), or to stderr if the dir is unset.
+///
+/// We publish this thread's own frame (`parked_jit_fp`) first so the snapshot's
+/// real-roots scan (`visit_roots`) sees this thread's LIVE roots — `dump_heap_json`
+/// pauses every *other* mutator but excludes the requester (us), so without this
+/// our own live objects would be mis-reported as unreachable. This is the whole
+/// point of a mid-execution snapshot: rich live roots, unlike the program-end dump.
+///
+/// # Safety
+/// `thread` valid (a live compiled-code thread with `heap`/`dyna_thread` set).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_heap_snapshot(thread: *mut Thread) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SNAPSHOT_SEQ: AtomicUsize = AtomicUsize::new(0);
+    unsafe {
+        let t = &*thread;
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        // Publish our frame so visit_roots sees this thread's live roots.
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        let json = crate::gc::dump::dump_heap_json(heap);
+        dyna.clear_parked_jit_fp();
+        let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        if let Some(dir) = std::env::var_os("GCR_HEAP_SNAPSHOT_DIR") {
+            let path = std::path::Path::new(&dir).join(format!("snapshot-{seq:04}.json"));
+            if let Err(e) = std::fs::write(&path, &json) {
+                eprintln!("gc-rust: heap_snapshot: cannot write {}: {e}", path.display());
+            }
+        } else {
+            eprint!("{json}");
+        }
+    }
+}
+
 /// Allocate a variable-length heap object (array / string / bytes shape) with
 /// `varlen_len` trailing elements, per the `TypeInfo` at `type_id`.
 ///
