@@ -85,11 +85,19 @@ Finalize:
 
 ## Risks / watch
 
-- **Location↔scope file consistency:** LLVM asserts a debug location's scope
-  subprogram file matches the location's file unless marked inlined. Safe here:
-  one function = one source = one DIFile = one DISubprogram (no IR inlining). If
-  inlining is ever added, locations need `inlined_at`.
+- **Location↔scope file consistency (rests on NO IR inlining):** LLVM asserts a
+  debug location's scope subprogram file matches the location's file unless the
+  location is marked inlined. Safe for the debug build: one function = one source =
+  one DIFile = one DISubprogram, no IR inlining → the invariant holds faithfully.
+  CAVEAT (per Leader): if **O2 inlines** a callee's instructions (ANOTHER source —
+  e.g. a prelude fn inlined into a user fn) into the caller's DISubprogram, the
+  callee's locations then point at a different file than their scope → the
+  one-function-one-source insight breaks. Proper handling = emit a
+  `DW_TAG_inlined_subroutine` and set the inlined locations' `inlined_at` — a LATER
+  refinement, NOT the first increment. For now this is the explicit best-effort
+  caveat of "line-tables always (even on O2)": the debug build (no/low inlining) is
+  faithful; O2-inlined frames may mis-scope until the inlined_at refinement lands.
 - **O2 + line-tables:** verify locations survive the O2 pipeline (they should;
-  test on an O2 build, not just -O0).
+  test on an O2 build, not just -O0) — and watch for the O2-inlining caveat above.
 - **macOS dSYM:** `llvm-dwarfdump` may need the `.o` directly (DWARF can live in
   the object pre-link, or a `.dSYM` post-link). Test against the object.
