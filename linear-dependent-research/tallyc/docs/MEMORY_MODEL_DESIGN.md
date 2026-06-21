@@ -139,27 +139,41 @@ Steel's automatic frame inference for decidability: non-trivial framing must be
    identity on the address). This is the existing "erasure proven in IR" discipline
    extended to each new primitive — non-negotiable and checkable.
 
-## 5. ⚠ VERIFIED soundness finding (the design process caught a real bug)
+## 5. ⚠ VERIFIED soundness findings — three reachable double-free channels, all CLOSED
 
-The current surface `let x = e; body` lowers to an **`ω`-binder** β-redex
-(`rust_surface.rs` ~1150). For a *linear* `e`, that LAUNDERS linearity. Verified
-repro (run today): `fn dbl() { let o = alloc(Zero); let u = free(o); free(o) }` is
-**ACCEPTED** — a double-free the rig should reject. (Single-free is correctly
-accepted; the hole is specifically the `let`-bound linear value getting `ω`.)
+The design+review process found (and red-teamed, not asserted) THREE reachable ways a
+linear-typed BINDER defaulting to `ω` laundered a double-free. Root cause is uniform: a
+binder of a linear type must default to `1`, not `ω`. All three are now fixed
+(fail-toward-linearity), each red-teamed to the 1a′ bar (double-free `ω⋢1` REJECTED,
+leak `0⋢1` REJECTED, single-use ACCEPTED); both suites stay green.
 
-**Fix (Layer C, mandated):** a `let` binding a value of a linear type (`Own`/any
-linear postulate) must lower to a `(1 x : E)` binder, so the kernel's `σ.leq(1)`
-fires on the body. Decidable, local, untrusted (kernel backstops). **Red-team it to
-the 1a′ bar:** the double-free above must become REJECTED (`ω ⋢ 1`); a dropped
-let-bound `Own` must be REJECTED (`0 ⋢ 1`); single-use must stay ACCEPTED. This is a
-prerequisite for the whole model — without it, ownership is unsound through `let`.
+1. **`let`-bound linear value** (`rust_surface.rs` `elab_let`). `let o = alloc(Zero);
+   free(o); free(o)` was ACCEPTED. FIX: a `let` whose bound type `contains_linear`
+   binds at `1` (commit `bbbb26974`). Test: `let_linearity_rejects_double_free_and_leak`.
+2. **`Own` struct/enum FIELD** (`reject_linear_fields`). `struct Box { p : Own Nat }`
+   parses today; a field-hidden `Own` laundered a double-free on TWO channels — `let`
+   (a struct with an Own field reads non-linear to `contains_linear`) and no-`let`
+   `match` (fields stored at `Mult::Omega`). FIX: reject linear fields AT DECLARATION
+   (closes both + enum variants; makes `contains_linear` transitively sufficient).
+   Test: `linear_fields_rejected_at_declaration`. **Lifted in Phase A** (field-aware
+   linearity — §7).
+3. **`Own` function PARAMETER** (`elab_ty` arrow). `fn f(x : Own Nat) { free(x);
+   free(x) }` (param defaulted `ω`) was ACCEPTED. FIX: a linear-domain arrow binder at
+   the default `ω` elaborates at `1`. Test: `linear_param_defaults_to_one_no_double_free`.
+
+**Remaining (documented, NOT a double-free):** a linear value passed to an
+ABSTRACT-typed param (`{0 a} -> a -> …`) stays `ω` (`a` is a `Var` — can't be seen as
+linear), so it can LEAK (drop without free), not double-free. This is the §13
+linearity×polymorphism corner; the sound fix is real surface linear params + linearity
+polymorphism (Phase A). It is NOT papered over by weakening linearity. The CONCRETE
+reachable channels (let / field / concrete param) are all closed.
 
 ## 6. Non-negotiables — consolidated judgment
 
 | Non-negotiable | Verdict | How |
 |---|---|---|
 | No GC, no refcount, no temp leak | ✅ | reclamation = the `1`-consume obligation; no refcount slot, no tracing pass |
-| rig `0/1/ω` preserved (`ω⋢1` use-twice, `0⋢1` leak) | ✅ *after §5 fix* | exact accounting holds; the `let` hole is the one gap, with a fix + red-team |
+| rig `0/1/ω` preserved (`ω⋢1` use-twice, `0⋢1` leak) | ✅ | exact accounting holds; the three §5 linear-binder-defaulting-to-ω channels (let / field / param) are all closed + red-teamed; only the §13 abstract-param leak remains (documented, Phase A) |
 | erasure leaves ZERO IR trace, checkable | ✅ (target) | only `Ptr` (an `i64`) + real data survive; all views/regions/proofs vanish — per-primitive IR tests (§4.4) |
 | C/Zig-low-level, `box` the only alloc | ✅ | constructors don't allocate; arena `box` = one add; tree compiles to its C twin |
 | small kernel, decidable, no SMT | ✅ | primitives audited `unsafe` + kernel re-check; entailment = rig + ctor-disjointness + region-unification |
