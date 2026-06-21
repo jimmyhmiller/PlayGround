@@ -1130,9 +1130,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
         let ty = Ty::Named { name: enum_name.clone(), args: enum_args };
         let repr = self.repr_of(&ty, span)?;
-        let sid = self.mono.intern_span(span);
         match repr {
-            Repr::Ref(lid) => Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr).at(sid), ty)),
+            // Only the Ref (heap-allocating) variant is an alloc site → intern a
+            // span only here, not for the inline MakeValueVariant.
+            Repr::Ref(lid) => {
+                let sid = self.mono.intern_span(span);
+                Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr).at(sid), ty))
+            }
             Repr::Value(vid) => {
                 Ok((CoreExpr::new(CoreExprKind::MakeValueVariant { value: vid, tag, fields: cargs }, repr), ty))
             }
@@ -1614,7 +1618,10 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             LitPattern::Str(s) => {
                 if !matches!(sty, Ty::Prim(Prim::Str)) { return err("string literal pattern against a non-string scrutinee", span); }
                 let lid = match self.repr_of(&Ty::Prim(Prim::Str), span)? { Repr::Ref(l) => l, _ => return err("internal: String repr", span) };
-                let k = CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid));
+                // This ConstStr is a real varlen heap alloc at codegen — span it so
+                // string-literal match patterns get file:line:col like every other.
+                let sid = self.mono.intern_span(span);
+                let k = CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)).at(sid);
                 Ok(CoreExpr::new(CoreExprKind::StrEq(Box::new(scrut.clone()), Box::new(k)), bool_repr))
             }
         }
@@ -2336,11 +2343,15 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             (vec![elocal], vec![CoreExpr::new(CoreExprKind::Local(elocal), erepr)])
         };
         // Build the return value: MakeVariant of the fn's return enum, err_tag.
+        // This is a real heap alloc (gen_alloc) — span it with the `?` location so
+        // `?`-induced allocations carry a file:line:col (best available for desugar).
         let _ = rargs;
+        let sid = self.mono.intern_span(span);
         let rebuilt = CoreExpr::new(
             CoreExprKind::MakeVariant { layout: ret_lid, tag: err_tag, fields: err_fields },
             Repr::Ref(ret_lid),
-        );
+        )
+        .at(sid);
         let err_body = CoreExpr::new(CoreExprKind::Return(Some(Box::new(rebuilt))), Repr::Unit);
 
         let arms = vec![

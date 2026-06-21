@@ -449,21 +449,23 @@ impl CoreExpr {
 }
 
 impl CoreProgram {
-    /// Resolve an interned [`SpanId`] to a 1-based `(line, col)` against
-    /// `src_text`. `None` if the id is [`NO_SPAN`], out of range, or no source is
-    /// available. Used to label alloc sites with `file:line:col`.
-    pub fn span_line_col(&self, span: SpanId) -> Option<(usize, usize)> {
+    /// Resolve an interned [`SpanId`] to `(source-label, 1-based line, col)`,
+    /// MULTI-SOURCE-AWARE: a span originating in the injected prelude (lexed in
+    /// its own offset space) resolves against the prelude, not the user file.
+    /// `None` if the id is [`NO_SPAN`], out of range, or no source is available
+    /// (e.g. tests that build a program directly) — an honest "no location"
+    /// rather than a fabricated one. See [`crate::diag::resolve_location`].
+    pub fn span_location(&self, span: SpanId) -> Option<(String, usize, usize)> {
         if span == NO_SPAN || self.src_text.is_empty() {
             return None;
         }
         let s = self.spans.get((span - 1) as usize)?;
-        Some(crate::diag::line_col(&self.src_text, s.start as usize))
+        crate::diag::resolve_location(&self.src_path, &self.src_text, s.start as usize)
     }
 
     /// `file:line:col` for an interned span, or `None` if unresolvable.
     pub fn span_label(&self, span: SpanId) -> Option<String> {
-        let (line, col) = self.span_line_col(span)?;
-        let file = if self.src_path.is_empty() { "<unknown>" } else { self.src_path.as_str() };
+        let (file, line, col) = self.span_location(span)?;
         Some(format!("{file}:{line}:{col}"))
     }
 }

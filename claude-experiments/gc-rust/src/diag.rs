@@ -47,6 +47,32 @@ fn line_text(src: &str, offset: usize) -> (usize, &str) {
 /// outside the user source.
 const PRELUDE_SRC: &str = include_str!("prelude.gcr");
 
+/// Resolve a byte offset to `(source-label, 1-based line, col)`, choosing which
+/// source it belongs to: the user `src`/`file` when the offset is inside it, else
+/// the injected prelude (lexed in its OWN offset space, so prelude spans index
+/// `PRELUDE_SRC`, not the user file). `None` if it indexes neither — an HONEST
+/// "no location" rather than a fabricated one (the bug this fixes: clamping an
+/// out-of-range prelude offset to the end of a small user file gave a confidently
+/// WRONG `user.gcr:11:1`).
+///
+/// This is the user+prelude model diagnostics already use. USER code is always
+/// resolved correctly (user spans are always `< src.len()`). LIMITATION: a
+/// prelude span whose offset happens to be `< src.len()` (only possible with a
+/// large user file) is still attributed to the user file, and per-`mod` file
+/// sources aren't distinguished — both need a full offset-disjoint SourceMap
+/// (the production multi-source fix; see docs/DEBUGGER_DESIGN.md P2).
+pub fn resolve_location(file: &str, src: &str, off: usize) -> Option<(String, usize, usize)> {
+    if !src.is_empty() && off < src.len() {
+        let (l, c) = line_col(src, off);
+        return Some((file.to_string(), l, c));
+    }
+    if off < PRELUDE_SRC.len() {
+        let (l, c) = line_col(PRELUDE_SRC, off);
+        return Some(("<std>".to_string(), l, c));
+    }
+    None
+}
+
 /// Render a diagnostic for `span` in `src` (named `file`) with `msg`. The span's
 /// `start..end` is underlined with carets (clamped to a single line).
 pub fn render(file: &str, src: &str, span: Span, msg: &str) -> String {

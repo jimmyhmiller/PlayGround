@@ -62,7 +62,13 @@ fn ensure_runtime_lib() -> PathBuf {
     lib
 }
 
+// Serialize AOT builds: `GCRUST_RUNTIME_LIB` is a process-global env var and the
+// staticlib rebuild is shared, so concurrent build() calls (tests run in threads)
+// race. The feature is fine; this keeps the suite green in parallel.
+static AOT_BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn build(src: &str, out: &Path, runtime_lib: &Path) {
+    let _guard = AOT_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         std::env::set_var("GCRUST_RUNTIME_LIB", runtime_lib);
     }
@@ -144,9 +150,59 @@ fn alloc_profile_line_col_distinguishes_same_type_same_function() {
     let line4 = format!("{p}:4:");
     assert!(stderr.contains(&line3), "expected a site at line 3; stderr:\n{stderr}");
     assert!(stderr.contains(&line4), "expected a site at line 4; stderr:\n{stderr}");
-    // Two distinct P sites (not one collapsed site): two profile rows naming P.
-    let p_rows = stderr.lines().filter(|l| l.contains("  P ") || l.contains(" P  ")).count();
+    // Two distinct P sites (not one collapsed site): two profile rows whose TYPE
+    // column (3rd whitespace field: bytes, count, type, ...) is exactly "P".
+    let p_rows = stderr
+        .lines()
+        .filter(|l| l.split_whitespace().nth(2) == Some("P"))
+        .count();
     assert!(p_rows >= 2, "expected >=2 distinct P sites; stderr:\n{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alloc_profile_prelude_allocs_are_not_fabricated_locations() {
+    // Regression guard for the multi-source span misattribution: allocations that
+    // happen INSIDE prelude functions (Vec/array_new) must NOT be labeled with a
+    // fabricated user-file line (the bug clamped an out-of-range prelude offset to
+    // the end of the small user file → e.g. user.gcr:11:1 in a 10-line file).
+    // They must resolve to the real prelude (<std>) location or honest empty (-).
+    let dir = std::env::temp_dir().join(format!("gcr_pre_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let srcp = dir.join("pre.gcr");
+    let src = "fn main() -> i64 {\n  let v: Vec<i64> = vec_new();\n  let v2 = vec_push(v, 7);\n  vec_len(v2)\n}\n";
+    std::fs::write(&srcp, src).unwrap();
+    let user_lines = src.lines().count(); // 5
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gcr"))
+        .args(["run", srcp.to_str().unwrap()])
+        .env("GCR_ALLOC_PROFILE", "1")
+        .output()
+        .expect("run gcr");
+    assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // The user file must NEVER be cited at a line beyond its length (the bug).
+    let p = srcp.to_string_lossy();
+    for line in stderr.lines() {
+        if let Some(idx) = line.find(&*p) {
+            let rest = &line[idx + p.len()..]; // ":<line>:<col>..."
+            if let Some(num) = rest.strip_prefix(':') {
+                let lineno: usize = num.split(':').next().unwrap_or("0").parse().unwrap_or(0);
+                assert!(
+                    lineno <= user_lines,
+                    "FABRICATED location: {p}:{lineno} but the file has {user_lines} lines; stderr:\n{stderr}"
+                );
+            }
+        }
+    }
+    // And there IS at least one prelude (<std>) location — proving prelude allocs
+    // resolve to the real prelude source, not the user file or a bogus line.
+    assert!(
+        stderr.contains("<std>:"),
+        "expected prelude allocs labeled <std>:line:col; stderr:\n{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
