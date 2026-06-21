@@ -373,6 +373,28 @@ fn phase_a_use_site_linearity_closes_the_whole_double_free_class() {
 }
 
 #[test]
+fn cbv_let_sequences_linear_ops_without_over_counting() {
+    // NIT 1 FIXED via the CALL-BY-VALUE `let` (replaces the β-redex `(λx.body) e`,
+    // which SCALED `e`'s usage by the binder mult — over-counting the linear resources
+    // an effectful `e` consumes). The CBV let counts `e` exactly ONCE, so SEQUENCING
+    // effectful linear-consuming ops works: you can free TWO owned values. Soundness is
+    // preserved — double-free and leak are still rejected.
+    const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // two owners, each freed exactly once via let-sequencing → ACCEPTED (was REJECTED).
+    let two = format!(
+        "{NB}g : Own Nat -> Own Nat -> Unit\nfn g(x, y) {{ let u = free(x); free(y) }}\n\
+         main : Unit\nfn main() {{ U }}\n"
+    );
+    assert!(check_program(&two).is_ok(), "freeing two owners (sequenced) must be ACCEPTED: {:?}", check_program(&two).err());
+    // double-free of the SAME owner via let → still REJECTED (ω ⋢ 1).
+    let dbl = format!("{NB}g : Own Nat -> Unit\nfn g(x) {{ let u = free(x); free(x) }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&dbl).is_err(), "double-free via let must still be REJECTED");
+    // dropping an owner → still REJECTED (0 ⋢ 1, leak).
+    let leak = format!("{NB}g : Own Nat -> Unit\nfn g(x) {{ U }}\nmain : Unit\nfn main() {{ U }}\n");
+    assert!(check_program(&leak).is_err(), "dropping an owner must still be REJECTED (leak)");
+}
+
+#[test]
 fn let_copyable_value_still_usable_many_times() {
     // NO REGRESSION: a COPYABLE let-bound value (a `Nat` — no linear component) still
     // binds at ω and may be used multiple times. `let n = 2; add(n, n) = 4`.

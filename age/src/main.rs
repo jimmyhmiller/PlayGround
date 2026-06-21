@@ -91,6 +91,7 @@ fn main() {
     };
     let mut selected: Option<usize> = None;
     let mut framed_once = false;
+    let mut elapsed = 0.0f32; // drives day/night, water and weather
 
     // Left-drag pans; a click without much movement selects.
     let mut press_pos = Vector2::zero();
@@ -190,6 +191,7 @@ fn main() {
         };
 
         // ---- render ---------------------------------------------------------
+        elapsed += dt;
         let fps = rl.get_fps();
         let loading = runner.is_loading();
         let sel = selected.filter(|&i| i < world.cities.len());
@@ -197,8 +199,9 @@ fn main() {
         render::clear_bg(&mut d);
         {
             let mut m = d.begin_mode2D(cam);
-            render::draw_world_space(&mut m, &world, &assets, &cam, (sw, sh), sel);
+            render::draw_world_space(&mut m, &world, &assets, &cam, (sw, sh), sel, elapsed);
         }
+        render::draw_sky(&mut d, elapsed, (sw, sh));
         render::draw_labels(&mut d, &world, &cam, (sw, sh), sel);
         render::draw_hud(&mut d, &world, &source_name, loading, fps, (sw, sh));
         if let Some(i) = sel {
@@ -267,14 +270,17 @@ fn run_screenshot(
     let selected = if world.cities.is_empty() { None } else { Some(0) };
     // Draw several identical frames so both swap buffers hold the image before
     // raylib reads the framebuffer (a single frame screenshots as black).
+    // Mid-morning by default; override with AOM_TIME=<seconds> to see dusk/night/weather.
+    let shot_time: f32 = std::env::var("AOM_TIME").ok().and_then(|s| s.parse().ok()).unwrap_or(84.0);
     for _ in 0..4 {
         world.update(1.0 / 60.0);
         let mut d = rl.begin_drawing(thread);
         render::clear_bg(&mut d);
         {
             let mut m = d.begin_mode2D(*cam);
-            render::draw_world_space(&mut m, world, assets, cam, (sw, sh), selected);
+            render::draw_world_space(&mut m, world, assets, cam, (sw, sh), selected, shot_time);
         }
+        render::draw_sky(&mut d, shot_time, (sw, sh));
         render::draw_labels(&mut d, world, cam, (sw, sh), selected);
         render::draw_hud(&mut d, world, source_name, false, 60, (sw, sh));
         if let Some(i) = selected {

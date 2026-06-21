@@ -231,29 +231,77 @@ fn cu(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// Flat ground colour for a land type at height `h`, with a small per-cell jitter.
-fn land_color(land: Land, h: f32, jit: i32) -> Color {
-    let (r, g, b) = match land {
-        Land::Sea => {
-            let t = 1.0 - ((0.33 - h) / 0.33).clamp(0.0, 1.0); // shallower -> lighter
-            (lu(28, 62, t), lu(68, 124, t), lu(114, 172, t))
+/// Smoothly-blended land colour across the elevation gradient (no hard bands).
+fn smooth_land(h: f32) -> (i32, i32, i32) {
+    // (height, r, g, b) anchors from coast to peak.
+    const STOPS: [(f32, i32, i32, i32); 7] = [
+        (0.33, 228, 212, 156), // sand
+        (0.40, 96, 150, 74),   // lush lowland grass
+        (0.57, 134, 162, 92),  // dry upland grass
+        (0.69, 150, 140, 86),  // hill
+        (0.83, 138, 130, 118), // mountain rock
+        (0.90, 120, 114, 108), // high rock
+        (0.97, 240, 244, 250), // snow
+    ];
+    let mut k = 0;
+    while k + 1 < STOPS.len() && h > STOPS[k + 1].0 {
+        k += 1;
+    }
+    let (h0, r0, g0, b0) = STOPS[k];
+    let (h1, r1, g1, b1) = STOPS[(k + 1).min(STOPS.len() - 1)];
+    let t = if h1 > h0 { ((h - h0) / (h1 - h0)).clamp(0.0, 1.0) } else { 0.0 };
+    (lu(r0, r1, t), lu(g0, g1, t), lu(b0, b1, t))
+}
+
+/// Soft drifting cloud-shadow factor (1.0 in sun, dips under a cloud).
+fn cloud_shadow(wx: f32, wy: f32, time: f32) -> f32 {
+    let a = (wx * 0.00125 + time * 0.018).sin() * 0.5 + 0.5;
+    let b = (wy * 0.00104 - time * 0.012 + 2.1).sin() * 0.5 + 0.5;
+    let c = a * b;
+    if c > 0.60 {
+        1.0 - ((c - 0.60) / 0.40) * 0.22
+    } else {
+        1.0
+    }
+}
+
+/// Final ground colour for a world point: water (animated, with foam) or land
+/// (smoothly blended + hillshaded), then cloud shadow and per-cell jitter.
+fn ground_color(terrain: &crate::game::terrain::Terrain, wx: f32, wy: f32, jit: i32, time: f32) -> Color {
+    let h = terrain.height(wx, wy);
+    let cloud = cloud_shadow(wx, wy, time);
+    let (mut r, mut g, mut b);
+    if h < terrain::SEA_LEVEL {
+        let depth = ((terrain::SEA_LEVEL - h) / terrain::SEA_LEVEL).clamp(0.0, 1.0);
+        let t = 1.0 - depth; // shallower -> lighter
+        r = lu(34, 86, t);
+        g = lu(74, 150, t);
+        b = lu(122, 186, t);
+        // Animated ripple sheen.
+        let ripple = ((wx * 0.02 + time * 1.3).sin() + (wy * 0.024 - time * 1.05).sin()) * 0.5;
+        let s = (ripple * 10.0) as i32;
+        r += s;
+        g += s;
+        b += s;
+        // Shoreline foam.
+        if depth < 0.10 {
+            let f = (1.0 - depth / 0.10) * (0.55 + 0.45 * ripple);
+            r = lu(r, 226, f);
+            g = lu(g, 240, f);
+            b = lu(b, 250, f);
         }
-        Land::Sand => (226, 208, 152),
-        Land::Grass => {
-            let t = (h - 0.37) / 0.21;
-            (lu(104, 150, t), lu(158, 168, t), lu(76, 98, t))
-        }
-        Land::Hill => {
-            let t = (h - 0.58) / 0.12;
-            (lu(120, 150, t), lu(150, 132, t), lu(80, 84, t))
-        }
-        Land::Mountain => {
-            let t = (h - 0.70) / 0.14;
-            (lu(144, 118, t), lu(140, 116, t), lu(132, 112, t))
-        }
-        Land::Snow => (236, 240, 248),
-    };
-    Color::new(cu(r + jit), cu(g + jit), cu(b + jit), 255)
+    } else {
+        let (lr, lg, lb) = smooth_land(h);
+        let shade = (terrain.shade(wx, wy) * cloud).clamp(0.0, 1.4);
+        r = (lr as f32 * shade) as i32 + jit;
+        g = (lg as f32 * shade) as i32 + jit;
+        b = (lb as f32 * shade) as i32 + jit;
+        return Color::new(cu(r), cu(g), cu(b), 255);
+    }
+    let r = (r as f32 * cloud) as i32;
+    let g = (g as f32 * cloud) as i32;
+    let b = (b as f32 * cloud) as i32;
+    Color::new(cu(r), cu(g), cu(b), 255)
 }
 
 fn rect_visible(p: Vector2, tl: Vector2, br: Vector2, pad: f32) -> bool {
@@ -285,19 +333,35 @@ fn draw_peak<D: RaylibDraw>(d: &mut D, cx: f32, base: f32, size: f32, snow: bool
     }
 }
 
-fn draw_river<D: RaylibDraw>(d: &mut D, r: &River, tl: Vector2, br: Vector2) {
-    let pad = r.width * 2.0;
+fn draw_river<D: RaylibDraw>(d: &mut D, r: &River, tl: Vector2, br: Vector2, water_t: f32) {
     let deep = Color::new(56, 114, 168, 255);
-    let lite = Color::new(98, 160, 208, 255);
-    for (col, scale) in [(deep, 1.0_f32), (lite, 0.52)] {
-        for w in r.points.windows(2) {
-            if seg_visible(w[0], w[1], tl, br, pad) {
-                d.draw_line_ex(w[0], w[1], r.width * scale, col);
+    // Subtle flow shimmer along the river.
+    let lite = Color::new(96, 158, 206, 255);
+    let n = r.points.len();
+    for (col, scale) in [(deep, 1.0_f32), (lite, 0.5)] {
+        for k in 0..n.saturating_sub(1) {
+            let (a, b) = (r.points[k], r.points[k + 1]);
+            let w = (r.widths[k] + r.widths[k + 1]) * 0.5 * scale;
+            if seg_visible(a, b, tl, br, w * 2.0) {
+                d.draw_line_ex(a, b, w, col);
             }
         }
-        for &p in &r.points {
-            if rect_visible(p, tl, br, pad) {
-                d.draw_circle_v(p, r.width * scale * 0.5, col);
+        for k in 0..n {
+            let p = r.points[k];
+            let w = r.widths[k] * scale * 0.5;
+            if rect_visible(p, tl, br, w * 2.0) {
+                d.draw_circle_v(p, w, col);
+            }
+        }
+    }
+    // Glints drifting downstream.
+    for k in (0..n).step_by(3) {
+        let phase = (water_t * 0.6 + k as f32 * 0.5).fract();
+        if phase < 0.5 {
+            let p = r.points[k];
+            if rect_visible(p, tl, br, 30.0) {
+                let a = (60.0 * (1.0 - phase * 2.0)) as u8;
+                d.draw_circle_v(p, r.widths[k] * 0.22, Color::new(220, 240, 255, a));
             }
         }
     }
@@ -353,6 +417,7 @@ pub fn draw_world_space<D: RaylibDraw>(
     cam: &Camera2D,
     screen: (i32, i32),
     selected: Option<usize>,
+    time: f32,
 ) {
     // Visible world rectangle (with margin) so we only draw what's on screen.
     let inv = 1.0 / cam.zoom;
@@ -378,15 +443,14 @@ pub fn draw_world_space<D: RaylibDraw>(
         for gx in gx0..gx1 {
             let wx = gx as f32 * step;
             let wy = gy as f32 * step;
-            let h = terrain.height(wx + step * 0.5, wy + step * 0.5);
-            let land = terrain::classify(h);
-            let jit = (crate::util::hash64(&(gx, gy)) % 13) as i32 - 6;
-            d.draw_rectangle(wx.floor() as i32, wy.floor() as i32, cell, cell, land_color(land, h, jit));
+            let jit = (crate::util::hash64(&(gx, gy)) % 11) as i32 - 5;
+            let col = ground_color(terrain, wx + step * 0.5, wy + step * 0.5, jit, time);
+            d.draw_rectangle(wx.floor() as i32, wy.floor() as i32, cell, cell, col);
         }
     }
 
-    // --- mountain peaks (coarse grid over high ground) ------------------------
-    let ms = 70.0_f32.max(9.0 / cam.zoom);
+    // --- mountain peaks: sparse, large, varied so ranges read as ridgelines ---
+    let ms = 108.0_f32.max(13.0 / cam.zoom);
     let px0 = (tl.x / ms).floor() as i32 - 1;
     let px1 = (br.x / ms).ceil() as i32 + 1;
     let py0 = (tl.y / ms).floor() as i32 - 1;
@@ -394,19 +458,23 @@ pub fn draw_world_space<D: RaylibDraw>(
     for my in py0..py1 {
         for mx in px0..px1 {
             let hh = crate::util::hash64(&(mx, my, 31u8));
-            let wx = mx as f32 * ms + (hh % 37) as f32;
-            let wy = my as f32 * ms + ((hh >> 8) % 37) as f32;
+            // Thin the field out so peaks overlap into a ridge, not a tile carpet.
+            if hh % 10 < 4 {
+                continue;
+            }
+            let wx = mx as f32 * ms + (hh % 90) as f32 - 24.0;
+            let wy = my as f32 * ms + ((hh >> 8) % 90) as f32 - 24.0;
             let h = terrain.height(wx, wy);
-            if h > 0.70 {
-                let size = 22.0 + (h - 0.70) * 230.0 + (hh % 11) as f32;
-                draw_peak(d, wx, wy, size, h > 0.84);
+            if h > 0.66 {
+                let size = 36.0 + (h - 0.66) * 360.0 + (hh % 34) as f32;
+                draw_peak(d, wx, wy, size, h > 0.82);
             }
         }
     }
 
     // --- rivers, then roads + bridges -----------------------------------------
     for r in terrain.rivers() {
-        draw_river(d, r, tl, br);
+        draw_river(d, r, tl, br, time);
     }
     for road in &world.roads {
         draw_road(d, road, tl, br);
@@ -822,6 +890,76 @@ fn ago(secs: f64) -> String {
 
 pub fn clear_bg<D: RaylibDraw>(d: &mut D) {
     d.clear_background(SKY);
+}
+
+/// Which weather is active at `time` (slowly changing; mostly clear).
+fn weather_at(time: f32) -> u8 {
+    let window = (time / 95.0) as u64;
+    match crate::util::hash64(&(window, 0x5757u64)) % 6 {
+        0 => 1, // rain
+        1 => 2, // snow
+        _ => 0, // clear
+    }
+}
+
+/// Full-screen day/night colour grade + stars + weather, drawn over the finished
+/// world (but under the HUD). `time` is seconds elapsed.
+pub fn draw_sky<D: RaylibDraw>(d: &mut D, time: f32, screen: (i32, i32)) {
+    use std::f32::consts::TAU;
+    const DAY: f32 = 220.0; // seconds per full day/night cycle
+    let phase = (time / DAY).rem_euclid(1.0); // 0 = midnight
+    let elev = -(phase * TAU).cos(); // -1 at midnight, +1 at noon
+    let day = ((elev + 0.18) / 0.38).clamp(0.0, 1.0); // 0 night .. 1 day
+    let dusk = (1.0 - (elev.abs() / 0.28)).clamp(0.0, 1.0); // peaks at the horizon
+
+    // Multiply grade: night -> deep blue, dawn/dusk -> warm, day -> neutral.
+    let mut gr = lu(64, 255, day);
+    let mut gg = lu(78, 255, day);
+    let mut gb = lu(138, 255, day);
+    gr = lu(gr, 255, dusk * 0.55);
+    gg = lu(gg, 206, dusk * 0.55);
+    gb = lu(gb, 162, dusk * 0.55);
+    let weather = weather_at(time);
+    if weather == 1 {
+        // Rain mutes and cools everything.
+        gr = (gr as f32 * 0.82) as i32;
+        gg = (gg as f32 * 0.86) as i32;
+        gb = (gb as f32 * 0.92) as i32;
+    }
+    {
+        let mut m = d.begin_blend_mode(BlendMode::BLEND_MULTIPLIED);
+        m.draw_rectangle(0, 0, screen.0, screen.1, Color::new(cu(gr), cu(gg), cu(gb), 255));
+    }
+
+    // Stars come out at night.
+    if day < 0.35 {
+        let base = ((0.35 - day) / 0.35 * 220.0) as u8;
+        for k in 0..80u64 {
+            let h = crate::util::hash64(&(k, 0x57u8));
+            let x = (h % screen.0.max(1) as u64) as i32;
+            let y = ((h >> 18) % (screen.1.max(80) as u64 - 60)) as i32 + 34;
+            let tw = (time * 1.7 + k as f32).sin() * 0.5 + 0.5;
+            d.draw_circle(x, y, 0.8 + tw, Color::new(255, 255, 236, (base as f32 * tw) as u8));
+        }
+    }
+
+    // Precipitation.
+    if weather == 1 {
+        for k in 0..260u64 {
+            let h = crate::util::hash64(&(k, 0x11u8));
+            let x = (((h % 1600) as f32 - time * 90.0).rem_euclid(screen.0 as f32 + 40.0)) - 20.0;
+            let y = (((h >> 16) % 1600) as f32 + time * 900.0).rem_euclid(screen.1 as f32 + 40.0) - 20.0;
+            d.draw_line_ex(Vector2::new(x, y), Vector2::new(x - 4.0, y + 14.0), 1.4, Color::new(150, 180, 220, 150));
+        }
+    } else if weather == 2 {
+        for k in 0..200u64 {
+            let h = crate::util::hash64(&(k, 0x22u8));
+            let drift = (time * 0.8 + k as f32).sin() * 18.0;
+            let x = (((h % 1600) as f32 + drift).rem_euclid(screen.0 as f32 + 40.0)) - 20.0;
+            let y = (((h >> 16) % 1600) as f32 + time * 90.0).rem_euclid(screen.1 as f32 + 40.0) - 20.0;
+            d.draw_circle(x as i32, y as i32, 1.6, Color::new(245, 248, 255, 200));
+        }
+    }
 }
 
 // ---- building hover tooltip --------------------------------------------------

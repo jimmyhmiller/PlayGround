@@ -216,6 +216,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
             Term::Var(i) => self.read_var(env, *i),
             Term::Ann(e, _) => self.compile(f, env, e),
+            // CALL-BY-VALUE let: compile `e` ONCE (so its effects — e.g. `free` — run
+            // exactly once), bind it, compile the body. (`ty` is 0-erased.)
+            Term::Let(_sigma, _ty, e, body) => {
+                let ev = self.compile(f, env, e)?;
+                let mut env2 = env.to_vec();
+                env2.push(Some(ev));
+                self.compile(f, &env2, body)
+            }
             Term::NatElim(_p, z, s, scrut) => self.compile_fold(f, env, z, s, scrut),
             Term::NatCase(_p, z, s, scrut) => self.compile_natcase(f, env, z, s, scrut),
             // a fully-applied `Fix` is handled in the `App` spine below; a bare one
@@ -1640,6 +1648,19 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             let src = format!("{G}\nmain : Nat\nfn main() {{ tsum(build({d}, 1)) }}\n");
             assert_eq!(run(&src), expect, "depth {d}");
         }
+    }
+
+    #[test]
+    fn cbv_let_multi_owner_free_runs_natively() {
+        // The CALL-BY-VALUE `let` compiles to the LLVM backend: `e` runs ONCE (its
+        // effects happen exactly once), then the body. Multi-owner sequencing — free
+        // TWO heap cells, then return 5 — runs natively (proves `free` actually fires
+        // once per owner and the sequencing is real, not just kernel-evaluator typing).
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            g : Own Nat -> Own Nat -> Nat\n\
+            fn g(x, y) { let u = free(x); let v = free(y); Succ(Succ(Succ(Succ(Succ(Zero))))) }\n\
+            main : Nat\nfn main() { g(alloc(Zero), alloc(Zero)) }\n";
+        assert_eq!(run(src), 5);
     }
 
     #[test]

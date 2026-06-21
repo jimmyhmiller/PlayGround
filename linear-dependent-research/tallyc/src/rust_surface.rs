@@ -1180,24 +1180,18 @@ impl Elab {
         let mut body_cx = cx.clone();
         body_cx.push(name.to_string(), e_ty);
         let body_term = self.check(body, expected, &body_cx, rec)?;
-        // lower to `(λx. body : (x:E) → BODY) e` — the lambda is ANNOTATED so the
-        // kernel can check the β-redex (a bare lambda is not inferrable). The
-        // codomain doesn't depend on x, so it is the (shifted) expected type.
+        // Lower to the kernel's CALL-BY-VALUE `Let` (NOT the β-redex `(λx.body) e`):
+        // the β-redex SCALES `e`'s usage by the binder multiplicity, which over-counts
+        // the linear resources an effectful `e` consumes — e.g. `let u = free(x);
+        // free(y)` (u : Unit, ω) would scale `free(x)` by ω and wrongly reject `x`.
+        // The CBV `Let` counts `e` exactly once (`U_e ⊕ U_body`).
         //
         // The binder's QUANTITY is the load-bearing soundness bit: a `let` binding a
-        // LINEAR value (one whose type carries an `Own`/`Σ[1]` component) must bind at
-        // `1`, so using it twice is `ω ⋢ 1` (a double-free) and dropping it is `0 ⋢ 1`
-        // (a leak). An ω-binder here LAUNDERS linearity — it would accept
-        // `let o = alloc(Zero); free(o); free(o)`. A copyable value (no linear
-        // component) binds at `ω` so ordinary `let x = e; … x … x …` still works.
-        // FAIL-SAFE toward linearity: `contains_linear` flags any reachable concrete
-        // `Own`/`Σ[1]`; the abstract-type-parameter and field-hidden cases are the
-        // §13 polymorphism corner, tightened when generic linear collections land.
-        let exp_tm = dep::quote_at(n, expected);
+        // LINEAR value (whose type carries an `Own`/`Σ[1]`) binds at `1`, so using it
+        // twice is `ω ⋢ 1` (double-free) and dropping it is `0 ⋢ 1` (leak); a copyable
+        // value binds at `ω` so ordinary `let x = e; … x … x …` works.
         let binder_mult = if type_is_linear(&e_ty_tm, &self.rc) { Mult::One } else { Mult::Omega };
-        let pi_ty = Term::Pi(binder_mult, Box::new(e_ty_tm), Box::new(dep::shift_term(1, &exp_tm)));
-        let lam = Term::Ann(Box::new(Term::Lam(Box::new(body_term))), Box::new(pi_ty));
-        Ok(Term::App(Box::new(lam), Box::new(e_term)))
+        Ok(Term::Let(binder_mult, Box::new(e_ty_tm), Box::new(e_term), Box::new(body_term)))
     }
 
     /// A `match <scrut> { … }` in CHECK position — a NON-recursive case split on

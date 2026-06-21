@@ -88,6 +88,14 @@ pub enum Term {
     /// in the calculus so they are checked by the QTT core.
     Const(String),
     Ann(Box<Term>, Box<Term>),
+    /// `Let(σ, ty, e, body)` — a CALL-BY-VALUE let: bind `e : ty` to a variable
+    /// usable at multiplicity `σ` in `body`. UNLIKE the β-redex `(λ[σ]u.body) e`
+    /// (which SCALES `e`'s usage by `σ`), the let counts `e` EXACTLY ONCE: its usage
+    /// is `U_e ⊕ U_body`, with the bound variable's usage limited to `σ` separately.
+    /// This is the correct rule for sequencing an effectful / linear-consuming `e`
+    /// whose (copyable) result is then used `σ` times — e.g. `let _ = free(x); free(y)`
+    /// frees x and y exactly once (the β-redex wrongly scaled `free(x)` by ω).
+    Let(Mult, Box<Term>, Box<Term>, Box<Term>),
 }
 
 #[derive(Clone)]
@@ -219,6 +227,13 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
     match t {
         Term::Var(i) => env[env.len() - 1 - i].clone(),
         Term::Type(i) => Value::VType(*i),
+        // CALL-BY-VALUE let: evaluate `e` ONCE, bind it, evaluate the body.
+        Term::Let(_sigma, _ty, e, body) => {
+            let ve = eval(sig, env, e);
+            let mut env2 = env.to_vec();
+            env2.push(ve);
+            eval(sig, &env2, body)
+        }
         Term::Pi(pi, a, b) => Value::VPi(
             *pi,
             Box::new(eval(sig, env, a)),
@@ -592,6 +607,10 @@ fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
         Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Lam(b) => Term::Lam(Box::new(go1(b))),
+        // `Let(σ, ty, e, body)` binds the let variable (de Bruijn 0) in `body` only.
+        Term::Let(m, ty, e, body) => {
+            Term::Let(*m, Box::new(go(ty)), Box::new(go(e)), Box::new(go1(body)))
+        }
         Term::App(f0, a) => Term::App(Box::new(go(f0)), Box::new(go(a))),
         Term::Pair(a, b) => Term::Pair(Box::new(go(a)), Box::new(go(b))),
         Term::Fst(p) => Term::Fst(Box::new(go(p))),
@@ -1248,6 +1267,30 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let u = check(ctx, e, &vty)?;
             Ok((vty, u))
         }
+        Term::Let(sigma, ty, e, body) => {
+            // CALL-BY-VALUE let. `ty` is a type; `e : ty` is counted EXACTLY ONCE; the
+            // bound variable is usable at multiplicity `σ` in `body`. The usage is
+            // `U_e ⊕ U_body` — `e` is NOT scaled by `σ` (the correction over the β-redex
+            // `(λ[σ]u.body) e`, which would `uscale(σ, U_e)` and wrongly multiply the
+            // linear resources `e` consumes). The bound variable's own usage is checked
+            // against `σ` separately, exactly as a Π/λ binder is.
+            check_type(ctx, ty)?;
+            let vty = eval(&ctx.sig, &ctx.env(), ty);
+            let u_e = check(ctx, e, &vty)?;
+            let ctx2 = ctx.extend(vty.clone());
+            let (rty, mut u_body) = infer(&ctx2, body)?;
+            let sigma_u = u_body.pop().expect("let body sees the bound variable");
+            if !sigma_u.leq(*sigma) {
+                return Err(format!(
+                    "the let-bound variable at multiplicity {sigma} is used {sigma_u} \
+                     time(s) ({sigma_u} ⋢ {sigma})"
+                ));
+            }
+            // result type = body's type. v1 is a NON-dependent let (the body's type does
+            // not mention the bound variable), so `rty` is already valid in the outer
+            // context — return it directly.
+            Ok((rty, uadd(&u_e, &u_body)))
+        }
         Term::Lam(_) => Err("cannot infer a bare lambda; annotate it `(e : T)`".to_string()),
     }
 }
@@ -1292,6 +1335,13 @@ fn occurs(data: &str, t: &Term) -> bool {
                 for s in [a, b, c, d] {
                     go(data, s, found);
                 }
+            }
+            // a `Let` can mention the family in its type, bound expr, or body — a
+            // positivity search must see through all three (like `Fix`).
+            Term::Let(_, ty, e, body) => {
+                go(data, ty, found);
+                go(data, e, found);
+                go(data, body, found);
             }
             // `Fix` is opaque to the checker, but it can still mention the family
             // in its type or body; a positivity search must see through it.

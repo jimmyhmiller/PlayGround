@@ -511,7 +511,7 @@ fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, Diag> {
 }
 
 /// A primitive scalar type name: `f32`/`f64`, or an integer `iN`/`uN`.
-fn prim_type(name: &str) -> Result<Type, String> {
+pub fn prim_type(name: &str) -> Result<Type, String> {
     match name {
         "f32" => Ok(Type::Float(32)),
         "f64" => Ok(Type::Float(64)),

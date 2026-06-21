@@ -1367,6 +1367,8 @@ impl<'ctx> Cg<'ctx> {
                 }
                 let l = lv.into_int_value();
                 let r = rv.into_int_value();
+                // The checker unifies both operands to one type, so the left
+                // operand's signedness IS the operation's signedness (div/rem/shr).
                 let signed = matches!(lt, Type::Int(_, true));
                 let v = match op {
                     BinOp::Add => self.builder.build_int_add(l, r, "add"),
@@ -1413,6 +1415,8 @@ impl<'ctx> Cg<'ctx> {
                         .map_err(le)?;
                     return Ok((b.into(), Type::Bool));
                 }
+                // Operands share a type (the checker unifies them), so the left
+                // operand's signedness selects signed vs unsigned comparison.
                 let signed = matches!(lt, Type::Int(_, true));
                 let pred = match op {
                     CmpOp::Lt if signed => IntPredicate::SLT,
@@ -2005,25 +2009,41 @@ impl<'ctx> Cg<'ctx> {
 
     /// Evaluate a compile-time constant expression (for `static-assert`).
     fn const_eval(&self, e: &Expr) -> Result<i64, String> {
-        match e {
-            Expr::Int(n) => Ok(*n),
-            Expr::Bool(b) => Ok(*b as i64),
+        Ok(self.const_eval_t(e)?.0)
+    }
+
+    /// Constant-fold to `(value, is_unsigned)`. `is_unsigned` tracks operand
+    /// signedness — set by a `(cast uN …)` — so division, remainder, shift, and
+    /// comparison fold with the SAME signedness the runtime codegen uses (which
+    /// dispatches by operand type). A signed-only fold silently diverges from the
+    /// runtime for unsigned operands (e.g. `(idiv (cast u64 -1) …)` in a
+    /// static-assert) — a const/runtime mismatch this avoids.
+    fn const_eval_t(&self, e: &Expr) -> Result<(i64, bool), String> {
+        Ok(match e {
+            Expr::Int(n) => (*n, false),
+            Expr::Bool(b) => (*b as i64, false),
             Expr::If { cond, then, els } => {
                 // covers `and`/`or`/`not`, which desugar to `if`.
-                if self.const_eval(cond)? != 0 {
-                    self.const_eval(then)
+                if self.const_eval_t(cond)?.0 != 0 {
+                    self.const_eval_t(then)?
                 } else {
-                    self.const_eval(els)
+                    self.const_eval_t(els)?
                 }
             }
-            Expr::SizeOf(t) => Ok(self.target_data.get_abi_size(&self.basic_ty(t)) as i64),
-            Expr::AlignOf(t) => Ok(self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64),
-            Expr::OffsetOf(t, f) => Ok(self.offset_of(t, f)? as i64),
-            Expr::Cast { expr, .. } => self.const_eval(expr),
+            Expr::SizeOf(t) => (self.target_data.get_abi_size(&self.basic_ty(t)) as i64, false),
+            Expr::AlignOf(t) => (self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64, false),
+            Expr::OffsetOf(t, f) => (self.offset_of(t, f)? as i64, false),
+            // A cast to a `uN` type makes the value unsigned for later div/cmp/shr.
+            Expr::Cast { ty, expr } => {
+                let v = self.const_eval_t(expr)?.0;
+                (v, matches!(ty, Type::Int(_, false)))
+            }
             Expr::Bin { op, lhs, rhs } => {
-                let l = self.const_eval(lhs)?;
-                let r = self.const_eval(rhs)?;
-                Ok(match op {
+                let (l, lu) = self.const_eval_t(lhs)?;
+                let (r, ru) = self.const_eval_t(rhs)?;
+                let uns = lu || ru; // operands share a type, so either flag implies both
+                let zero = "static-assert: divide/mod by zero".to_string();
+                let v = match op {
                     BinOp::Add => l.wrapping_add(r),
                     BinOp::Sub => l.wrapping_sub(r),
                     BinOp::Mul => l.wrapping_mul(r),
@@ -2031,33 +2051,55 @@ impl<'ctx> Cg<'ctx> {
                     BinOp::Or => l | r,
                     BinOp::Xor => l ^ r,
                     BinOp::Shl => l.wrapping_shl(r as u32),
+                    // unsigned >> is logical, signed >> is arithmetic.
+                    BinOp::Shr if uns => ((l as u64).wrapping_shr(r as u32)) as i64,
                     BinOp::Shr => l.wrapping_shr(r as u32),
-                    BinOp::Div if r != 0 => l / r,
-                    BinOp::Rem if r != 0 => l % r,
-                    // udiv/urem fold over the unsigned interpretation of the bits.
-                    BinOp::UDiv if r != 0 => ((l as u64) / (r as u64)) as i64,
-                    BinOp::URem if r != 0 => ((l as u64) % (r as u64)) as i64,
-                    _ => return Err("static-assert: divide/mod by zero".to_string()),
-                })
+                    BinOp::Div if r == 0 => return Err(zero),
+                    BinOp::Div if uns => ((l as u64) / (r as u64)) as i64,
+                    BinOp::Div => l.wrapping_div(r),
+                    BinOp::Rem if r == 0 => return Err(zero),
+                    BinOp::Rem if uns => ((l as u64) % (r as u64)) as i64,
+                    BinOp::Rem => l.wrapping_rem(r),
+                    BinOp::UDiv if r == 0 => return Err(zero),
+                    BinOp::UDiv => ((l as u64) / (r as u64)) as i64,
+                    BinOp::URem if r == 0 => return Err(zero),
+                    BinOp::URem => ((l as u64) % (r as u64)) as i64,
+                };
+                (v, uns)
             }
             Expr::Cmp { op, lhs, rhs } => {
-                let l = self.const_eval(lhs)?;
-                let r = self.const_eval(rhs)?;
-                Ok(i64::from(match op {
-                    CmpOp::Eq => l == r,
-                    CmpOp::Ne => l != r,
-                    CmpOp::Lt => l < r,
-                    CmpOp::Le => l <= r,
-                    CmpOp::Gt => l > r,
-                    CmpOp::Ge => l >= r,
-                }))
+                let (l, lu) = self.const_eval_t(lhs)?;
+                let (r, ru) = self.const_eval_t(rhs)?;
+                let b = if lu || ru {
+                    let (l, r) = (l as u64, r as u64);
+                    match op {
+                        CmpOp::Eq => l == r,
+                        CmpOp::Ne => l != r,
+                        CmpOp::Lt => l < r,
+                        CmpOp::Le => l <= r,
+                        CmpOp::Gt => l > r,
+                        CmpOp::Ge => l >= r,
+                    }
+                } else {
+                    match op {
+                        CmpOp::Eq => l == r,
+                        CmpOp::Ne => l != r,
+                        CmpOp::Lt => l < r,
+                        CmpOp::Le => l <= r,
+                        CmpOp::Gt => l > r,
+                        CmpOp::Ge => l >= r,
+                    }
+                };
+                (i64::from(b), false)
             }
-            _ => Err(
-                "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic \
-                 and comparisons are allowed"
-                    .to_string(),
-            ),
-        }
+            _ => {
+                return Err(
+                    "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic \
+                     and comparisons are allowed"
+                        .to_string(),
+                )
+            }
+        })
     }
 
     /// True if the block the builder currently sits on already ends with a

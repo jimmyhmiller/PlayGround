@@ -1075,15 +1075,20 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 }
             }
         }
-        // `(type-kind T)` -> :struct | :sum | :scalar — the safe probe (no error;
-        // a macro branches on it before calling struct-fields/sum-variants).
+        // `(type-kind T)` -> :struct | :sum | :scalar | :unknown — the safe probe
+        // (no error; a macro branches on it before calling struct-fields/…). A name
+        // that is a primitive (iN/uN/fN/bool) is :scalar; an unrecognized name (a
+        // typo, or a not-yet-defined type) is :unknown — NOT collapsed into :scalar,
+        // so a macro branching purely on type-kind can't silently treat a typo as a
+        // scalar.
         "type-kind" => {
             let name = text_of(args.first().ok_or("type-kind: needs a type name")?)?;
             Ok(Value::Keyword(
                 match reflect_lookup(&name) {
                     Ok(TypeShape::Struct(_)) => "struct",
                     Ok(TypeShape::Sum(_)) => "sum",
-                    Err(_) => "scalar",
+                    Err(_) if crate::parse::prim_type(&name).is_ok() => "scalar",
+                    Err(_) => "unknown",
                 }
                 .to_string(),
             ))

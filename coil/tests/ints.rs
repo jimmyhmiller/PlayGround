@@ -148,3 +148,27 @@ fn udiv_urem_static_assert_folds_unsigned() {
                (defn main [] (-> :i64) 0)";
     assert_eq!(build_and_run(src), 0);
 }
+
+#[test]
+fn const_eval_dispatches_div_and_cmp_by_operand_signedness() {
+    // const_eval (static-assert) must fold idiv/irem/comparison with the SAME
+    // signedness the runtime uses (by operand type), not signed-only — else a
+    // const context silently diverges from runtime. (cast u64 -1) is the large
+    // unsigned value: /2^56 = 255 unsigned (0 signed), and > 5 unsigned (not signed).
+    let src = "(static-assert (icmp-eq (idiv (cast u64 -1) (cast u64 72057594037927936)) 255) \"udiv\")\n\
+               (static-assert (icmp-gt (cast u64 -1) (cast u64 5)) \"ucmp\")\n\
+               (defn main [] (-> :i64) 0)";
+    assert_eq!(build_and_run(src), 0); // both asserts hold -> compiles + runs
+}
+
+#[test]
+fn const_eval_false_unsigned_assert_still_fails() {
+    // The unsigned fold must not silently pass a FALSE assertion. (static-asserts
+    // are evaluated in codegen, so this needs emit_ir, not check_source.)
+    let err = coil::emit_ir(
+        "(static-assert (icmp-eq (idiv (cast u64 -1) (cast u64 72057594037927936)) 0) \"no\")\n\
+         (defn main [] (-> :i64) 0)",
+    )
+    .unwrap_err();
+    assert!(err.contains("static assertion failed"), "got: {err}");
+}
