@@ -1,4 +1,37 @@
-# Perf: gc-rust vs Rust — first measured baseline
+# Perf: gc-rust vs Rust
+
+## Current (after the AOT/JIT nursery-consistency fix)
+
+The first baseline (below) exposed the AOT runtime using a **1 MB** nursery while
+the JIT used **16 MB** — a consistency bug. With both now sharing
+`configured_heap_sizes()` (16 MB default, `GCR_NURSERY_MB`-overridable), a
+5.24 MB tree lives-and-dies in the nursery instead of being promoted wholesale:
+
+| benchmark | kind | gcr/rust | note |
+|-----------|------|---------:|------|
+| fib | compute | ~1.0–1.4× | parity |
+| nbody | compute | ~0.8–1.2× | parity |
+| mandelbrot | compute | ~0.8–1.0× | parity |
+| small_alloc | alloc-small | **~0.9×** | was ~5× — now competitive with malloc/free |
+| binary_trees | alloc-large | **~5.5×** | was ~27–48× |
+
+`binary_trees` GC after the fix: **12** minor collections (was 200), **reclaimed
+114 MB** (was 0), promoted 87 MB, **p99 pause 12.8 ms** (was ~300–400 ms).
+
+**Impact:** the alarming large-object cliff is gone (~48× → ~5.5×), pauses
+dropped ~25×, and dead trees are now reclaimed by cheap minor GCs instead of
+accumulating in tenured. The remaining ~5.5× on large alloc (and the residual on
+small alloc) is the **out-of-line `ai_gc_alloc_*` call** — the inline-bump target.
+All benches are now within "a bit slower than Rust is fine."
+
+Safety (verified): a 120-tree run promotes ~630 MB > the 256 MB tenured
+threshold → **2 major GCs fire and reclaim 524 MB**. So tenured retention is a
+LAZY THRESHOLD, not an unbounded leak — the moving GC reclaims dead tenured
+objects under pressure.
+
+---
+
+## First measured baseline (before the nursery fix)
 
 Run: `python3 bench/perf_vs_rust.py` (gc-rust AOT via `gcr build` vs `rustc -O`,
 best of 9, min wall time). This converts the "perf OK (slower-than-Rust is fine)"

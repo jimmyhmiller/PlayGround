@@ -2956,7 +2956,12 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
             rt
         }
         GcRunMode::SemiSpace(size) => RuntimeContext::new(size, tis),
-        GcRunMode::Generational => RuntimeContext::new_generational(16 << 20, 256 << 20, tis),
+        GcRunMode::Generational => {
+            // Shared with the AOT runtime so JIT and AOT agree (was 16 MB here vs
+            // 1 MB in gcr_runtime_main — same program, different GC by run mode).
+            let (nursery, tenured) = runtime::configured_heap_sizes();
+            RuntimeContext::new_generational(nursery, tenured, tis)
+        }
     };
     // Install reflection metadata so heap-exploration tooling and in-language
     // reflection can recover type/field names (the GC type table is nameless).

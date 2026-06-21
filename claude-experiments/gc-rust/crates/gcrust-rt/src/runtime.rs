@@ -757,6 +757,32 @@ pub struct AotLayout {
     pub _pad: [u8; 3],
 }
 
+/// Default + env-overridable generational heap sizes `(nursery_bytes,
+/// tenured_bytes)`. BOTH the AOT runtime ([`gcr_runtime_main`]) and the JIT
+/// driver use this so a program gets the SAME GC behavior regardless of run mode
+/// (they previously disagreed — AOT 1 MB vs JIT 16 MB nursery — so the same
+/// program had different perf/GC by run mode). Defaults: 16 MB nursery / 256 MB
+/// tenured (per space). Override with `GCR_NURSERY_MB` / `GCR_TENURED_MB`
+/// (decimal megabytes).
+///
+/// The nursery is sized so ordinary workloads DO collect (not sized past the
+/// workload to dodge GC), while being large enough that a moderately-sized object
+/// graph can live and die in the nursery — reclaimed by a cheap minor GC —
+/// instead of being promoted wholesale to tenured. A too-small nursery (e.g. 1 MB
+/// vs a 5 MB object graph) forces wholesale promotion with no reclaim until a
+/// major GC fires, which is the AOT large-object cliff this fixes.
+pub fn configured_heap_sizes() -> (usize, usize) {
+    fn mb_env(key: &str, default_mb: usize) -> usize {
+        let mb = std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&m| m > 0)
+            .unwrap_or(default_mb);
+        mb << 20
+    }
+    (mb_env("GCR_NURSERY_MB", 16), mb_env("GCR_TENURED_MB", 256))
+}
+
 /// AOT program entry, called from the native `main` emitted into the object
 /// file. Builds a [`RuntimeContext`] over the program's layout table (passed as
 /// a `[AotLayout; ti_count]` blob in the binary), then invokes the compiled
@@ -831,24 +857,16 @@ pub unsafe extern "C" fn gcr_runtime_main(
         })
         .collect();
 
-    // Generational heap: a small nursery (collected cheaply and often) over a
-    // large tenured generation. Most objects die young, so minor GCs reclaim the
-    // bulk of garbage without touching tenured space.
-    //
-    // The nursery is intentionally SMALL (1 MB) so real minor collections happen
-    // during ordinary workloads — including the self-compile — rather than being
-    // sized past the workload to avoid collecting. The old 256 MB nursery was an
-    // AVOIDANCE of a (since-disproven) "int-or-pointer mis-move" concern: on this
-    // moving path the monomorphizing front end is precise (every scalar lives in
-    // the untraced raw region; unused enum pointer-slots are zeroed), so a traced
-    // slot only ever holds a pointer-or-null and an int can never be mis-moved.
-    // See docs/FUTURE_WORK.md (P0 int/pointer entry) — that residual unsoundness
-    // is DORMANT here and only becomes live if the self-hosted toolchain ever
-    // links this moving GC instead of the non-moving gcr_rt.c (the M-RT split).
-    // The collector arms a precise-layout detector under debug / --gc-stress and
-    // under GCR_GC_VERIFY=1 (see gc::heap::gc_verify_armed).
-    let nursery = 1 << 20;     // 1 MB young generation — collect for real
-    let tenured = 256 << 20;  // 256 MB old generation (per space)
+    // Generational heap: a nursery (collected cheaply and often) over a large
+    // tenured generation. Most objects die young, so minor GCs reclaim the bulk
+    // of garbage without touching tenured space. Sizes come from
+    // `configured_heap_sizes()` so the AOT runtime and the JIT driver agree (they
+    // previously disagreed — AOT 1 MB vs JIT 16 MB — giving the same program
+    // different GC behavior/perf by run mode). The moving path is precise (every
+    // scalar in the untraced raw region; unused enum ptr-slots zeroed), so a
+    // traced slot only ever holds a pointer-or-null; the collector arms a
+    // precise-layout detector under debug / --gc-stress / GCR_GC_VERIFY=1.
+    let (nursery, tenured) = configured_heap_sizes();
     let mut rt = RuntimeContext::new_generational(nursery, tenured, type_table);
     // Install the reflection metadata decoded above (type/field names + types)
     // so heap-exploration tooling and in-language reflection have nominal info.
