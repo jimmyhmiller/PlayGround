@@ -13,6 +13,7 @@
 (import "lib/arraylist.coil" :use *)
 (import "lib/hashmap.coil"   :use *)
 (import "lib/control.coil"   :use *)
+(import "lib/match.coil"     :use *)   ; match-else: a catch-all arm (pure macro)
 
 (defsum Json
   (JNull [])
@@ -113,17 +114,16 @@
     (parse-value p)))
 
 ; ---- queries over the value model ------------------------------------------
-(defn as-num [(j Json)] (-> i64) (match j (JNum [n] n) (JNull [] 0) (JBool [b] b)
-                                          (JStr [s] 0) (JArr [a] 0) (JObj [o] 0)))
+; The catch-all arm (match-else) collapses the 5 not-of-interest variants into one
+; default — no longer spelling out all 6 of Json's variants in every query.
+(defn as-num [(j Json)] (-> i64)
+  (match-else j (JNum [n] n) (JBool [b] b) (_ 0)))
 (defn arr-get [(j Json) (i i64)] (-> Json)
-  (match j (JArr [a] (al-get (load a) i))
-           (JNull [] (JNull)) (JBool [b] (JNull)) (JNum [n] (JNull))
-           (JStr [s] (JNull)) (JObj [o] (JNull))))
+  (match-else j (JArr [a] (al-get (load a) i)) (_ (JNull))))
 (defn obj-get [(j Json) (key (slice u8))] (-> Json)
-  (match j
+  (match-else j
     (JObj [o] (match (hm-get [(slice u8) Json] (load o) key) (None [] (JNull)) (Some [v] v)))
-    (JNull [] (JNull)) (JBool [b] (JNull)) (JNum [n] (JNull))
-    (JStr [s] (JNull)) (JArr [a] (JNull))))
+    (_ (JNull))))
 
 (defn main [] (-> :i64)
   (let [a (malloc-allocator)

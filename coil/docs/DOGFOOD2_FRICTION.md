@@ -34,9 +34,18 @@ yet; the front-end is fast.**
    variant. The `Json` sum has 6 variants, so every query (`as-num`, `arr-get`,
    `obj-get`) spells out all 6 even when 5 return the same default — and `(_ [] …)`
    is rejected (`_` is read as a variant name). For sum-heavy code (interpreters,
-   ASTs, JSON) this is pervasive boilerplate. A `_`/`else` catch-all arm (covering
-   the remaining variants; the switch `default` block instead of `unreachable`) is
-   the highest-leverage next item. Small, checker + parser + codegen.
+   ASTs, JSON) this is pervasive boilerplate.
+   — **FIXED as a pure-library MACRO** (`lib/match.coil`, `match-else`) — NOT a core
+   change. The prime-directive question was "macro or core?" and the macro WINS:
+   `(match-else j (JNum [n] n) (_ 0))` reflects the sum *from the explicit arm's
+   variant name* (`variant-sum` → its sum, then `sum-variants`), and expands `_`
+   into an explicit arm for each uncovered variant (gensym'd field binds the default
+   ignores). The Leader's flagged blocker — a macro runs before type-checking so it
+   can't know the *scrutinee's* type — is sidestepped: the macro infers the sum from
+   the **variant names**, which ARE present at expansion. So no core `_` support was
+   needed; this also VALIDATES the reflection bridge ("macros powerful enough" — it
+   can add a pattern-matching feature). Two small general builtins added
+   (`variant-sum`, `to-vector`); `json.coil`'s queries now use it.
 
 2. **Recursive-sum + heap-collection dance is verbose.** A `JArr`/`JObj` holds a
    `(ptr (ArrayList Json))` for recursion, built with

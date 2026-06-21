@@ -1,0 +1,49 @@
+(module match)
+; `(match-else scrut (V1 [..] body) … (_ default))` — a `match` with a CATCH-ALL
+; arm, as a pure-LIBRARY MACRO over the comptime reflection bridge (no compiler
+; `_` support). It reflects the sum (from the first explicit arm's variant name,
+; via `variant-sum`), enumerates its variants (`sum-variants`), and EXPANDS `_`
+; into an explicit arm for each NOT-yet-covered variant (with gensym'd field binds
+; the default ignores). So the boilerplate of spelling every variant when most map
+; to one default — the JSON-dogfood friction — is removed without a core change.
+;
+; The macro infers the sum from the arms' VARIANT NAMES (present at expansion),
+; NOT the scrutinee's type (which isn't known until type-checking) — that's why a
+; macro can do this at all.
+;
+;   (match-else j (JNum [n] n) (_ 0))   ; the other Json variants -> 0
+
+(def me--last    (lambda [xs] (if (empty? (rest xs)) (first xs) (me--last (rest xs)))))
+(def me--butlast (lambda [xs] (if (empty? (rest xs)) (list) (cons (first xs) (me--butlast (rest xs))))))
+(def me--member  (lambda [xs x] (if (empty? xs) false (if (= (first xs) x) true (me--member (rest xs) x)))))
+(def me--covered (lambda [arms] (if (empty? arms) (list) (cons (first (first arms)) (me--covered (rest arms))))))
+
+; the `_` arm's body: (_ b) -> b ; (_ b1 b2 …) -> (do b1 b2 …)
+(def me--wild-body
+  (lambda [wild] (let [b (rest wild)] (if (empty? (rest b)) (first b) (cons (quote do) b)))))
+
+; one fresh bind name per field, as a `[…]` vector (the default ignores them)
+(def me--genlist (lambda [fs] (if (empty? fs) (list) (cons (gensym "_m") (me--genlist (rest fs))))))
+
+; an arm `(Vname [binds] default)` for each variant not in `covered`
+(def me--uncovered
+  (lambda [variants covered default]
+    (if (empty? variants)
+        (list)
+        (let [v (first variants) vname (first v) vfields (first (rest v))]
+          (if (me--member covered vname)
+              (me--uncovered (rest variants) covered default)
+              (cons (list vname (to-vector (me--genlist vfields)) default)
+                    (me--uncovered (rest variants) covered default)))))))
+
+(defmacro match-else [scrut & arms]
+  (let [wild     (me--last arms)
+        explicit (me--butlast arms)]
+    (if (not (= (first wild) (quote _)))
+        (error "match-else: the last arm must be (_ default)")
+        (if (empty? explicit)
+            (error "match-else: needs at least one explicit variant arm (to infer the sum)")
+            (let [default (me--wild-body wild)
+                  sum     (variant-sum (first (first explicit)))
+                  gen     (me--uncovered (sum-variants sum) (me--covered explicit) default)]
+              (cons (quote match) (cons scrut (concat explicit gen))))))))

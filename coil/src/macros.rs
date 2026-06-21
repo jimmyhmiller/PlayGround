@@ -915,8 +915,8 @@ fn global_env(target: &TargetInfo) -> Env {
         "+", "-", "*", "mod", "=", "<", ">", "<=", ">=", "list", "vector", "cons", "first", "rest",
         "nth", "count", "empty?", "concat", "not", "symbol", "name", "str", "gensym", "map",
         "list?", "vector?", "symbol?", "number?", "keyword?", "error",
-        "str-bytes", "bytes->str",
-        "struct-fields", "sum-variants", "type-kind", "type-params",
+        "str-bytes", "bytes->str", "to-vector",
+        "struct-fields", "sum-variants", "type-kind", "type-params", "variant-sum",
     ] {
         env_define(&env, name, Value::Builtin(name));
     }
@@ -982,6 +982,9 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             Ok(Value::List(out))
         }
         "not" => Ok(Value::Bool(!truthy(&args[0]))),
+        // Turn a list into a vector value — lets a macro build a `[…]` bind vector
+        // of a computed arity (e.g. one gensym per variant field).
+        "to-vector" => Ok(Value::Vector(seq_items(args.first().ok_or("to-vector: needs a list")?)?)),
         "symbol" => {
             let mut s = String::new();
             for a in &args {
@@ -1092,6 +1095,34 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 }
                 .to_string(),
             ))
+        }
+        // `(variant-sum V)` -> the sum type a variant belongs to (so a macro can
+        // reflect a sum from an arm's variant name, without the scrutinee's type).
+        // Unknown or ambiguous (a variant name in two sums) is a hard error.
+        "variant-sum" => {
+            let vname = text_of(args.first().ok_or("variant-sum: needs a variant name")?)?;
+            let hits = MACRO_CTX.with(|c| {
+                let c = c.borrow();
+                c.as_ref().map(|ctx| {
+                    ctx.types
+                        .iter()
+                        .filter_map(|(k, shape)| match shape {
+                            TypeShape::Sum(sm) if sm.variants.iter().any(|v| v.name == vname) => {
+                                Some(k.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
+            match hits {
+                Some(h) if h.len() == 1 => Ok(Value::Sym(h.into_iter().next().unwrap())),
+                Some(h) if h.is_empty() => {
+                    Err(format!("variant-sum: no sum has a variant '{vname}'"))
+                }
+                Some(_) => Err(format!("variant-sum: variant '{vname}' is in more than one sum")),
+                None => Err("variant-sum: no macro context".to_string()),
+            }
         }
         // `(type-params T)` -> (T …) generic parameter names ( () if none).
         "type-params" => {
