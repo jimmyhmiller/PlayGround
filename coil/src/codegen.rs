@@ -524,10 +524,20 @@ impl<'ctx> Cg<'ctx> {
             },
             Type::Fn(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
             Type::Ref(..) => self.ctx.ptr_type(AddressSpace::default()).into(),
-            // `void` has no value representation — it appears only as a return
-            // type, handled directly in `fn_type_types`/the return/call paths; the
-            // checker forbids it as a parameter/field/value, so it never lands here.
-            Type::Void => unreachable!("void is a return type only; not a value type"),
+            // `void` has no value representation — it appears only as a return type
+            // (handled in `fn_type_with_ret`/`c_signature`/the return/call paths). The
+            // CHECKER is the primary gate: it must reject void in every value/param/
+            // field/type-arg position before codegen. This is the DEFENSIVE BACKSTOP:
+            // two reviews each found a checker hole that let void slip through here
+            // (variadic→silent-i64-0; type-arg→panic), so the invariant is fragile.
+            // A clear, loud diagnostic (never a silent-wrong placeholder) means any
+            // FUTURE void-path that slips the checker is immediately legible here.
+            Type::Void => panic!(
+                "codegen: void reached `basic_ty` as a value type — this is a CHECKER \
+                 HOLE: void is return-position-only and must be rejected before \
+                 codegen (every value/param/field/type-argument position). Please \
+                 report the source that produced it."
+            ),
             Type::App(..) => unreachable!("generic type survived monomorphization"),
         }
     }
