@@ -334,6 +334,34 @@ fn linear_param_defaults_to_one_no_double_free() {
 }
 
 #[test]
+fn phase_a_variance_aware_nested_positivity() {
+    // PHASE A (a): strict positivity is now VARIANCE-AWARE + NESTED, with `Own` as a
+    // positivity-transparent pointer wrapper — so recursive `Own` structures (linked
+    // lists, trees via `Opt (Own T)`) compile, while every negative/contravariant
+    // occurrence is still REJECTED (no Curry/non-termination). A recursive occurrence
+    // may nest through datatype D's argument iff D is COVARIANT in that parameter; a
+    // pointer `Own T` recurses into T PRESERVING polarity (so `Own (A→B)` keeps A
+    // negative).
+    const P: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n";
+    let ok = |s: &str| assert!(check_program(s).is_ok(), "must be ACCEPTED: {:?}", check_program(s).err());
+    let no = |s: &str| assert!(check_program(s).is_err(), "must be REJECTED (positivity): {s}");
+
+    // ACCEPT — covariant nesting / pointer recursion (the memory model's shapes):
+    ok(&format!("{P}struct Node {{ next : Own Node }}\nmain : Unit\nfn main() {{ U }}\n"));
+    ok(&format!("{P}struct Node {{ next : Opt (Own Node) }}\nmain : Unit\nfn main() {{ U }}\n"));
+    ok(&format!("{P}struct Node {{ next : Opt Node }}\nmain : Unit\nfn main() {{ U }}\n"));
+    ok(&format!("{P}struct Tree {{ l : Opt (Own Tree), v : Nat, r : Opt (Own Tree) }}\nmain : Unit\nfn main() {{ U }}\n"));
+
+    // REJECT — negative / contravariant occurrences (soundness):
+    no(&format!("{P}struct Node {{ f : Own (Node -> Nat) }}\nmain : Unit\nfn main() {{ U }}\n"));      // negative inside Own
+    no(&format!("{P}struct Node {{ f : (Node -> Nat) -> Nat }}\nmain : Unit\nfn main() {{ U }}\n"));   // direct negative (unchanged)
+    no(&format!("{P}enum Weird (a:Type) {{ mk : (a -> Nat) -> Weird a }}\nstruct Node {{ w : Weird Node }}\nmain : Unit\nfn main() {{ U }}\n")); // contravariant param
+    // mutual-recursion cycle whose contravariance is only visible THROUGH the cycle:
+    no(&format!("{P}enum D2 (a:Type) {{ d2 : (a -> Nat) -> D2 a }}\nenum D1 (a:Type) {{ d1 : D2 a -> D1 a }}\nstruct Node {{ n : D1 Node }}\nmain : Unit\nfn main() {{ U }}\n"));
+}
+
+#[test]
 fn phase_a_use_site_linearity_closes_the_whole_double_free_class() {
     // PHASE A gate 2 — the CONVERGENT, whack-a-mole-proof fix (replaces the per-
     // hiding-spot forbids). Linearity is checked at the USE SITE on the field's ACTUAL

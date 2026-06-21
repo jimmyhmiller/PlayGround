@@ -831,7 +831,7 @@ fn strict_positivity_and_universe_checks_are_independent() {
     // though it is perfectly strictly-positive — the two guards are distinct.
     let sig = universe_storing_sig(0);
     // it IS strictly positive (no self-occurrence to the left of an arrow):
-    assert!(strictly_positive("U", &Type(0)));
+    assert!(strictly_positive("U", &Type(0), &std::rc::Rc::new(sig.clone())));
     // yet check_signature still rejects it — on universe grounds.
     assert!(check_signature(&sig).is_err());
 }

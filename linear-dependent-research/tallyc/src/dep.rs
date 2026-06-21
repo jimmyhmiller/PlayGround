@@ -1405,20 +1405,124 @@ fn occurs(data: &str, t: &Term) -> bool {
 /// admits higher-order recursive fields like `Acc`'s `acc`/a W-type's `sup`
 /// (family only in the codomain head) while still rejecting `(Bad→A)→Bad` and the
 /// double-negative `((Bad→A)→A)→Bad`. (Phase E3.)
-fn strictly_positive(data: &str, t: &Term) -> bool {
-    let mut cur = t;
-    // every Pi DOMAIN crossed must be free of the family (no negative occurrence).
-    while let Term::Pi(_, dom, cod) = cur {
-        if occurs(data, dom) {
-            return false;
+/// If `t` is the owned-pointer wrapper `Own T` (the postulate `Own` applied to one
+/// argument), return the pointee `T`. A pointer is a POSITIVE, polarity-PRESERVING
+/// occurrence of its pointee: `data` may recurse through `Own data` (like a ctor
+/// field), but `Own (data → B)` still has `data` in a NEGATIVE position (the arrow
+/// domain) — so positivity recurses into `T` via `strictly_positive`, which re-applies
+/// the Pi-domain discipline. (`↦` will be added the same way in Phase C.)
+fn own_spine(t: &Term) -> Option<&Term> {
+    if let Term::App(f, arg) = t {
+        let mut head: &Term = f;
+        loop {
+            match head {
+                Term::Ann(e, _) => head = e,
+                Term::Const(n) if n == "Own" => return Some(arg),
+                _ => return None,
+            }
         }
-        cur = cod;
     }
-    match cur {
-        // the head may be the family itself, but not recurring in its own indices.
+    None
+}
+
+/// Substitute the datatype-parameter at de Bruijn `base` (at depth 0) with a fresh
+/// probe datatype `__sp_probe__`, tracking binder depth. Used to compute a parameter's
+/// variance by reusing `strictly_positive`: a datatype is strictly-positive in a
+/// parameter iff the probe (standing in for that parameter) occurs only positively.
+fn subst_param_with_probe(t: &Term, base: usize) -> Term {
+    map_vars(t, 0, &|i, depth| {
+        if i == base + depth {
+            Term::Data("__sp_probe__".to_string(), vec![])
+        } else {
+            Term::Var(i)
+        }
+    })
+}
+
+/// Is datatype `dname` STRICTLY-POSITIVE in its `i`-th parameter — i.e. may a recursive
+/// occurrence nest through `D …Aᵢ…` at that argument? Computed by substituting a probe
+/// for the parameter in every constructor field and checking the probe occurs only
+/// positively (`strictly_positive`). `seen` breaks cycles CONSERVATIVELY: a parameter
+/// reached through a (mutual-)recursion cycle returns `false` (not provably covariant ⇒
+/// reject nesting) — SOUND (never wrongly accepts a negative occurrence hidden through a
+/// cycle), at the cost of over-rejecting nesting through a recursive covariant container
+/// (e.g. `Vec`/`List` of the family) until a full variance fixpoint lands. (The memory
+/// model's `Opt` is non-recursive, so `Opt (Own Node)` is accepted.)
+fn param_covariant(
+    sig: &Rc<Signature>,
+    dname: &str,
+    i: usize,
+    seen: &mut std::collections::HashSet<(String, usize)>,
+) -> bool {
+    let key = (dname.to_string(), i);
+    if seen.contains(&key) {
+        return false; // cycle ⇒ conservatively NOT provably covariant
+    }
+    let decl = match sig.data(dname) {
+        Some(d) => d,
+        None => return false, // unknown / postulate datatype ⇒ conservative reject
+    };
+    let np = decl.params.len();
+    if i >= np {
+        return false; // an INDEX argument (not a covariant parameter) ⇒ reject nesting
+    }
+    seen.insert(key.clone());
+    let mut covariant = true;
+    'ctors: for ctor in &decl.ctors {
+        for (k, (_, fty)) in ctor.args.iter().enumerate() {
+            // field k is in scope [params, args[0..k]]: param i sits at de Bruijn
+            // `k + (np-1-i)` from this field's base.
+            let base = k + (np - 1 - i);
+            let probed = subst_param_with_probe(fty, base);
+            if !strictly_positive_seen("__sp_probe__", &probed, sig, seen) {
+                covariant = false;
+                break 'ctors;
+            }
+        }
+    }
+    seen.remove(&key);
+    covariant
+}
+
+fn strictly_positive(data: &str, t: &Term, sig: &Rc<Signature>) -> bool {
+    strictly_positive_seen(data, t, sig, &mut std::collections::HashSet::new())
+}
+
+/// Strict positivity with NESTED-positivity (variance-aware) and the `Own` pointer
+/// wrapper. `data` may occur: in a Pi CODOMAIN (positive) but never a Pi DOMAIN
+/// (negative); as the head `Data(data, idxs)` (direct recursion, not in its own
+/// indices); inside `D …Aᵢ…` at argument `i` IFF `D` is strictly-positive in parameter
+/// `i` (and then recursively positive within `Aᵢ`); and inside `Own T` (a pointer —
+/// recurse into `T`, polarity-preserving). `seen` threads the variance cycle-guard.
+fn strictly_positive_seen(
+    data: &str,
+    t: &Term,
+    sig: &Rc<Signature>,
+    seen: &mut std::collections::HashSet<(String, usize)>,
+) -> bool {
+    if let Term::Pi(_, dom, cod) = t {
+        // a Pi DOMAIN is a negative position — `data` must not occur there at all.
+        return !occurs(data, dom) && strictly_positive_seen(data, cod, sig, seen);
+    }
+    if !occurs(data, t) {
+        return true; // `data` absent ⇒ trivially positive
+    }
+    // a pointer wrapper is transparent + polarity-preserving: recurse into the pointee.
+    if let Some(pointee) = own_spine(t) {
+        return strictly_positive_seen(data, pointee, sig, seen);
+    }
+    match t {
+        Term::Ann(e, _) => strictly_positive_seen(data, e, sig, seen),
+        // direct recursive occurrence: the family applied — but not recurring in its
+        // own indices (a non-strictly-positive index is the canonical unsoundness).
         Term::Data(name, args) if name == data => args.iter().all(|a| !occurs(data, a)),
-        // otherwise the family must not occur at all.
-        other => !occurs(data, other),
+        // NESTED occurrence: `data` may appear in `D`'s argument `i` only if `D` is
+        // strictly-positive in parameter `i`, and then must itself be positive there.
+        Term::Data(name, args) => args.iter().enumerate().all(|(i, a)| {
+            !occurs(data, a) || (param_covariant(sig, name, i, seen) && strictly_positive_seen(data, a, sig, seen))
+        }),
+        // `data` occurs in some other (non-positive) position ⇒ reject.
+        _ => false,
     }
 }
 
@@ -1482,7 +1586,7 @@ pub fn check_signature(sig: &Signature) -> Result<(), String> {
             };
             let mut cctx = params_ctx.extend_clone();
             for (_, aty) in &ctor.args {
-                if !strictly_positive(&decl.name, aty) {
+                if !strictly_positive(&decl.name, aty, &rc) {
                     return Err(format!(
                         "{owner}: argument is not strictly positive in `{}`",
                         decl.name
