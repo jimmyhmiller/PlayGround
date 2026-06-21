@@ -83,10 +83,19 @@ layer speculatively.
 - `eval` is `%partial` (an interpreter SHOULD diverge on a divergent object program — totality
   on `eval` would be WRONG). Linearity STILL enforced: every `Own Expr` node freed exactly
   once on every path (incl. the unused `if` branch); a leak/double-free in `eval` is REJECTED.
-- The view layer, when forced, gets its OWN maximal-bar review — non-consuming reads are
-  where aliasing / use-after-free / a borrow outliving its source hide (the Leader's flag).
-  The read-back TOKEN threading is the soundness crux (the borrow must be returned; no two
-  live mutable views).
+- The view layer, when forced, gets its OWN maximal-bar review (Phase C, the research-risk
+  layer). THREE load-bearing cardinals (the build-to spec — make each provable, not assumed):
+  (a) **borrow CANNOT outlive its source** — the `Own` being read is not freed/moved while a
+      borrow into it is live (borrow-outlives-source = use-after-free);
+  (b) **NO ALIASING** — no two live borrows that could mutate, and the borrow does not escape
+      its scope;
+  (c) **reading a LINEAR FIELD through the borrow must NOT DUPLICATE it** — the read yields a
+      BORROW, not a move/copy of the linear field; the field stays owned by the source (the
+      exact "read-back of a linear-field struct duplicates the linear field" hazard flagged
+      when we chose `unbox` over read-back for the demo).
+  THE CRUX: the borrow's lifetime TOKEN must provably bound it WITHIN the source's lifetime
+  (the read-back token threads linearly, like the DLL `Cursor r`). Bring it for the maximal
+  bar exactly like the kernel terms.
 
 ## Path: (A) sign-off → MVP-0 (eval arithmetic owned AST, runs) → MVP-1 (var + env) →
 ## first re-evaluation construct → the MINIMAL read-back view (Phase C, friction-driven).
