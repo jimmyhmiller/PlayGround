@@ -529,6 +529,22 @@ fn non_exhaustive_match_is_rejected() {
 }
 
 #[test]
+fn void_and_exfalso_are_the_for_all_t_sentinel() {
+    // The for-all-T sentinel foundation for the absurd-case discharge: a genuinely
+    // uninhabited `enum Void {}` (no constructors) + `exfalso : {0 a} -> Void -> a` (the
+    // empty match on Void). Type-checks out of the box — the empty match on a no-constructor
+    // type IS the all-absurd discharge. `exfalso` yields ANY result type T (T-INDEPENDENT —
+    // no Nat/Unit sentinel backstop hole), which is what makes a PARTIAL absurd discharge
+    // (real cases beside impossible ones) sound: an impossible case discharges via
+    // `exfalso(<genuine contradiction>)`, type-checking ONLY if the contradiction is real.
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Void { }\n\
+        exfalso : {0 a : Type} -> Void -> a\nfn exfalso(v) { match v { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    assert!(check_program(src).is_ok(), "Void + exfalso (the for-all-T sentinel) must type-check: {:?}", check_program(src).err());
+}
+
+#[test]
 fn dependent_ast_makes_out_of_scope_variables_impossible_by_typing() {
     // THE DEPENDENT HALF on the dogfood (the "powers of Idris" cardinal): index the AST by
     // SCOPE DEPTH so an out-of-scope variable is IMPOSSIBLE BY TYPING — REJECTED AT
