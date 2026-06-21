@@ -164,8 +164,9 @@ pub struct CoreProgram {
     /// Interned source spans (the span-threading side table). A `CoreExpr.span`
     /// of `k` (≥1) refers to `spans[k-1]`; [`NO_SPAN`] (0) means no location.
     pub spans: Vec<crate::lexer::Span>,
-    /// The SourceMap: one entry per [`crate::lexer::SourceId`] (0 = user, 1 =
-    /// prelude, 2+ = `mod` files). A span resolves against `sources[span.source]`
+    /// The SourceMap: one entry per [`crate::lexer::SourceId`] (0 = user, then
+    /// `mod` files in load order, then the prelude assigned last). A span resolves
+    /// against `sources[span.source]`
     /// so prelude/module spans (lexed in their own offset spaces) get their REAL
     /// `file:line:col`, never a fabricated user-file line. Set by the driver after
     /// lowering; empty when source isn't available (unit tests build programs

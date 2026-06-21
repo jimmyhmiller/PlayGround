@@ -211,7 +211,9 @@ green incl. the gc-stress gate. (Details in the commit / the alloc-profile test.
 2. **Emit DWARF via inkwell `debug_info` (codegen).** API confirmed present in
    inkwell 0.5:
    - `codegen()`: `module.create_debug_info_builder(...)` → `(DebugInfoBuilder,
-     DICompileUnit)` (producer "gcr", file = `prog.src_path`, `optimized` = true
+     DICompileUnit)` (producer "gcr", file = `prog.sources[0].path` — the user
+     source; each prelude/`mod` source needs its own `DIFile`, keyed by `SourceId`
+     via the SourceMap, so spans resolve to the right DWARF file — `optimized` = true
      on the O2 paths). Add module flags: `"Debug Info Version" = 3` (+ a Dwarf
      Version flag on macOS) so the backend emits DWARF into the object.
    - `define_fn()`: `di.create_function(...)` → a `DISubprogram` (with a minimal

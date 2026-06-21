@@ -233,15 +233,17 @@ fn alloc_profile_module_alloc_resolves_to_module_file() {
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // The struct alloc inside the module (`T { a: 42 }` at thing.gcr line 3) must
-    // resolve to the module's OWN source file — not main.gcr or <std>.
+    // The `thing::T` alloc row (`T { a: 42 }` at thing.gcr line 3) must resolve to
+    // the module's OWN source file — dispositively, not main.gcr or <std>. Locate
+    // the row by its type column (module-qualified `thing::T`) and check its
+    // location, rather than a brittle substring over the whole output.
+    let t_row = stderr
+        .lines()
+        .find(|l| l.split_whitespace().nth(2) == Some("thing::T"))
+        .unwrap_or_else(|| panic!("no thing::T alloc row; stderr:\n{stderr}"));
     assert!(
-        stderr.contains("thing.gcr:3:"),
-        "module alloc must resolve to thing.gcr:3 (the module source); stderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("main.gcr:") || !stderr.lines().any(|l| l.contains("T ") && l.contains("main.gcr:")),
-        "module alloc must NOT be misattributed to main.gcr; stderr:\n{stderr}"
+        t_row.contains("thing.gcr:3:") && !t_row.contains("main.gcr") && !t_row.contains("<std>"),
+        "module struct alloc must resolve to thing.gcr (its own source), not main/std; row:\n{t_row}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

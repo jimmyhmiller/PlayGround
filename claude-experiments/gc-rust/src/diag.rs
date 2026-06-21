@@ -47,7 +47,6 @@ fn line_text(src: &str, offset: usize) -> (usize, &str) {
 /// outside the user source.
 const PRELUDE_SRC: &str = include_str!("prelude.gcr");
 
-/// Resolve a byte offset to `(source-label, 1-based line, col)`, choosing which
 /// Render a diagnostic for `span` in `src` (named `file`) with `msg`. The span's
 /// `start..end` is underlined with carets (clamped to a single line).
 pub fn render(file: &str, src: &str, span: Span, msg: &str) -> String {

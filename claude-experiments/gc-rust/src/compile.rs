@@ -20,9 +20,12 @@ const PRELUDE_SRC: &str = include_str!("prelude.gcr");
 /// their real source (multi-source span resolution — debugger foundation).
 pub type SourceMap = Vec<SourceEntry>;
 
-/// Register a source, returning its [`SourceId`] (= its index in the map).
+/// Register a source, returning its [`SourceId`] (= its index in the map). Fails
+/// loudly rather than silently wrapping if a program somehow exceeds the
+/// `SourceId` (u16) capacity — the `id == map index` invariant must hold.
 fn add_source(sources: &mut SourceMap, path: String, text: String) -> SourceId {
-    let id = sources.len() as SourceId;
+    let id = SourceId::try_from(sources.len())
+        .expect("source count exceeds SourceId (u16) capacity");
     sources.push(SourceEntry { path, text });
     id
 }
