@@ -123,3 +123,29 @@ fn rejects_wrong_type_arg_count() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("expects 2 type arguments"), "got: {err}");
 }
+
+#[test]
+fn infers_through_nested_generic_call_arg() {
+    // E12: a generic-call argument that can't infer its own T in isolation is
+    // deferred and re-inferred once a sibling argument fixes T. Here `pick`'s T
+    // is i64 (from `42`), which must flow into the `(empty-slice)` argument.
+    let src = r#"
+        (import "lib/slice.coil" :use *)
+        (defn empty-slice [T] [] (-> (slice T)) (slice-new (cast (ptr T) 0) 0))
+        (defn pick [T] [(s (slice T)) (m T)] (-> T) m)
+        (defn main [] (-> :i64) (pick (empty-slice) 42))
+    "#;
+    assert_eq!(build_and_run(&format!("(module app)\n{src}")), 42);
+}
+
+#[test]
+fn nested_generic_call_still_rejects_genuinely_ambiguous() {
+    // The deferral must NOT over-infer: when nothing constrains the element type,
+    // it remains a hard error (no silent wrong default).
+    let src = r#"(module app)
+        (import "lib/slice.coil" :use *)
+        (defn empty-slice [T] [] (-> (slice T)) (slice-new (cast (ptr T) 0) 0))
+        (defn main [] (-> :i64) (slice-len (subslice (empty-slice) 0 0)))"#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("cannot infer type argument"), "got: {err}");
+}

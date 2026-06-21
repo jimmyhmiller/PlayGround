@@ -42,12 +42,12 @@ fn slice_get_and_len() {
 
 #[test]
 fn subslice_is_a_subrange() {
-    // Bind the base slice first: generic inference doesn't yet flow T through a
-    // nested generic call like `(subslice (slice-of …) …)` — bind-first is the idiom.
+    // Nested generic call `(subslice (slice-of …) …)` infers T directly now (the
+    // inner call self-infers its element type); no bind-first workaround needed.
     let code = run_with(&format!(
         r#"(defn main [] (-> :i64)
              {FILL5}
-               (let [s (slice-of arr 5) mid (subslice s 1 4) (mut acc) 0]
+               (let [mid (subslice (slice-of arr 5) 1 4) (mut acc) 0]
                  (slice-for [x mid] (store! acc (iadd (load acc) x)))
                  (iadd (load acc) (slice-len mid)))))"#
     ));

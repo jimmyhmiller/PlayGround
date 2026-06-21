@@ -834,9 +834,26 @@ fn synth(
 
             // generic: synthesize the arguments, then infer the type parameters
             // from them — and from the expected return type, if there is one.
-            let mut arglist: Vec<(Expr, Type)> = Vec::with_capacity(args.len());
-            for a in args {
-                arglist.push(synth(a, None, env, cx, tps, fname)?);
+            //
+            // An argument that is ITSELF a generic call may be unable to infer its
+            // own type parameters in isolation — e.g. `(pick (empty-slice) 42)`,
+            // where `pick`'s `T` is fixed by the sibling `42`, not by the
+            // `(empty-slice)` argument. Such an argument is DEFERRED: synthesize
+            // the rest, solve the substitution, then re-synthesize the deferred
+            // ones with the now-known parameter type pushed in as the expected
+            // type (bidirectional inference through a nested generic call).
+            let mut arglist: Vec<Option<(Expr, Type)>> = Vec::with_capacity(args.len());
+            let mut deferred: Vec<(usize, String)> = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                let saved = env.clone();
+                match synth(a, None, env, cx, tps, fname) {
+                    Ok(pair) => arglist.push(Some(pair)),
+                    Err(e) => {
+                        *env = saved; // a failed synth may have left the env dirty
+                        arglist.push(None);
+                        deferred.push((i, e));
+                    }
+                }
             }
             let subst = solve_type_args(
                 &sig.type_params,
@@ -850,8 +867,18 @@ fn synth(
                 fname,
                 func,
             )?;
+            // Re-synthesize each deferred argument now that the parameter type is
+            // concrete; if it STILL can't be inferred, the substitution didn't
+            // fix it, so report the argument's original inference error.
+            for (i, orig_err) in deferred {
+                let want = subst_apply(&sig.params[i], &subst);
+                let pair = synth(&args[i], Some(&want), env, cx, tps, fname)
+                    .map_err(|_| orig_err)?;
+                arglist[i] = Some(pair);
+            }
             let mut new_args = Vec::with_capacity(args.len());
-            for (i, ((ae, at), a)) in arglist.into_iter().zip(args.iter()).enumerate() {
+            for (i, a) in args.iter().enumerate() {
+                let (ae, at) = arglist[i].take().expect("every argument synthesized");
                 let want = subst_apply(&sig.params[i], &subst);
                 let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
                 let ae = coerce_arg(
@@ -1388,7 +1415,7 @@ fn solve_type_args(
     type_params: &[String],
     declared: &[Type],
     type_args: &[Type],
-    arglist: &[(Expr, Type)],
+    arglist: &[Option<(Expr, Type)>],
     ret_tmpl: &Type,
     expected: Option<&Type>,
     cx: &Cx,
@@ -1414,8 +1441,13 @@ fn solve_type_args(
     if let Some(exp) = expected {
         unify(ret_tmpl, exp, &tpset, &mut subst, fname)?; // seed from context
     }
-    for (decl, (_, at)) in declared.iter().zip(arglist) {
-        unify(decl, at, &tpset, &mut subst, fname)?;
+    // A `None` slot is a DEFERRED argument (one that couldn't infer its own type
+    // parameters in isolation); it contributes nothing here and is re-synthesized
+    // by the caller once the substitution is known.
+    for (decl, slot) in declared.iter().zip(arglist) {
+        if let Some((_, at)) = slot {
+            unify(decl, at, &tpset, &mut subst, fname)?;
+        }
     }
     for p in type_params {
         if !subst.contains_key(p) {
