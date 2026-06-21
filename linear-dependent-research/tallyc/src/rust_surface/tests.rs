@@ -334,32 +334,42 @@ fn linear_param_defaults_to_one_no_double_free() {
 }
 
 #[test]
-fn linear_fields_rejected_at_declaration() {
-    // SOUNDNESS (reviewer finding on the let-fix boundary): a struct/enum storing an
-    // `Own`/`Σ[1]` field would let a double-free/leak hide behind the type's name —
-    // fields are stored at ω, AND such a type reads non-linear to `contains_linear`
-    // (which doesn't see through field defs). Repro that motivated this:
-    //   struct Box { p : Own Nat }
-    //   fn dbl() { let b = Box(alloc(Zero)); let u = freebox(b); freebox(b) }  // double-free
-    // Fix: forbid linear FIELDS at DECLARATION — closing the let channel, the no-let
-    // `match` channel, AND enum variants at once — until memory-model Phase A's
-    // field-aware linearity. Legit non-linear structs/enums still declare.
-    const NB: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
-    let box_ = format!("{NB}struct Box {{ p : Own Nat }}\nmain : Unit\nfn main() {{ U }}\n");
-    assert!(check_program(&box_).is_err(), "struct with an Own field must be REJECTED at declaration");
-    let envar = format!("{NB}enum Boxe {{ mk : Own Nat -> Boxe }}\nmain : Unit\nfn main() {{ U }}\n");
-    assert!(check_program(&envar).is_err(), "enum variant with an Own field must be REJECTED");
-    let opt = format!(
-        "{NB}enum Opt (a : Type) {{ none : Opt a, some : a -> Opt a }}\n\
-         struct Node {{ next : Opt (Own Nat) }}\nmain : Unit\nfn main() {{ U }}\n"
-    );
-    assert!(check_program(&opt).is_err(), "a struct hiding Own via Opt(Own) must be REJECTED (until Phase A)");
-    // no over-rejection: legit non-linear declarations still work.
-    let ok = format!(
-        "{NB}struct Pair {{ a : Nat, b : Nat }}\n\
-         enum Tree {{ leaf : Tree, node : Tree -> Nat -> Tree -> Tree }}\nmain : Unit\nfn main() {{ U }}\n"
-    );
-    assert!(check_program(&ok).is_ok(), "legit non-linear struct/enum must still work: {:?}", check_program(&ok).err());
+fn phase_a_use_site_linearity_closes_the_whole_double_free_class() {
+    // PHASE A gate 2 — the CONVERGENT, whack-a-mole-proof fix (replaces the per-
+    // hiding-spot forbids). Linearity is checked at the USE SITE on the field's ACTUAL
+    // (instantiated, field-aware) type: at a `match`, each field whose instantiated type
+    // `is_linear` is re-bound at 1, so the kernel enforces exactly-once use through it —
+    // catching a hidden `Own` HOWEVER it is hidden. Struct/enum `Own` fields are now
+    // ALLOWED to declare (the forbid is lifted); misuse is caught where the value is USED.
+    // Each instance: double-free REJECTED, leak REJECTED, single-use ACCEPTED.
+    const P: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
+        enum Pair (a : Type) (b : Type) { MkPair : a -> b -> Pair a b }\n\
+        struct Box { p : Own Nat }\n";
+    let dbl = |s: &str| assert!(check_program(s).is_err(), "double-free/leak must be REJECTED: {s}");
+    let ok = |s: &str| assert!(check_program(s).is_ok(), "single-use must be ACCEPTED: {:?}", check_program(s).err());
+
+    // 1. MONOMORPHIC struct field (Own hidden behind the type name — `struct Box` now
+    //    DECLARES; the forbid is gone).
+    ok(&format!("{P}mk : Box\nfn mk() {{ Box(alloc(Zero)) }}\nf : Unit\nfn f() {{ let b = mk; match b {{ Box(q) => free(q) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+    dbl(&format!("{P}mk : Box\nfn mk() {{ Box(alloc(Zero)) }}\nf : Unit\nfn f() {{ let b = mk; match b {{ Box(q) => let u = free(q); free(q) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+    dbl(&format!("{P}mk : Box\nfn mk() {{ Box(alloc(Zero)) }}\nf : Unit\nfn f() {{ let b = mk; match b {{ Box(q) => U }} }}\nmain : Unit\nfn main() {{ f }}\n")); // leak
+
+    // 2. PARAMETRIC container instantiated at Own (the reviewer's `Pair (Own Nat)` case).
+    ok(&format!("{P}mk : Pair (Own Nat) Unit\nfn mk() {{ MkPair(alloc(Zero), U) }}\nf : Unit\nfn f() {{ let p = mk; match p {{ MkPair(x, y) => free(x) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+    dbl(&format!("{P}mk : Pair (Own Nat) Unit\nfn mk() {{ MkPair(alloc(Zero), U) }}\nf : Unit\nfn f() {{ let p = mk; match p {{ MkPair(x, y) => let u = free(x); free(x) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+
+    // 3. Opt(Own) via the eliminator (the 4th instance I found by red-teaming).
+    ok(&format!("{P}mk : Opt (Own Nat)\nfn mk() {{ some(alloc(Zero)) }}\nf : Unit\nfn f() {{ let m = mk; match m {{ none => U, some(o) => free(o) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+    dbl(&format!("{P}mk : Opt (Own Nat)\nfn mk() {{ some(alloc(Zero)) }}\nf : Unit\nfn f() {{ let m = mk; match m {{ none => U, some(o) => let u = free(o); free(o) }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+    dbl(&format!("{P}mk : Opt (Own Nat)\nfn mk() {{ some(alloc(Zero)) }}\nf : Unit\nfn f() {{ let m = mk; match m {{ none => U, some(o) => U }} }}\nmain : Unit\nfn main() {{ f }}\n")); // leak (some-arm drops o)
+
+    // 4. DEEPLY-NESTED generic: `Pair (Pair (Own Nat) Unit) Unit` — the inner linear
+    //    pair, once bound, can't be used twice.
+    dbl(&format!("{P}mk : Pair (Pair (Own Nat) Unit) Unit\nfn mk() {{ MkPair(MkPair(alloc(Zero), U), U) }}\nf : Unit\nfn f() {{ let p = mk; match p {{ MkPair(inner, y) => let u = inner; inner }} }}\nmain : Unit\nfn main() {{ f }}\n"));
+
+    // 5. NO OVER-REJECTION: a non-linear struct/enum still declares and is freely usable.
+    ok(&format!("{P}struct PP {{ a : Nat, b : Nat }}\nmain : Unit\nfn main() {{ U }}\n"));
 }
 
 #[test]

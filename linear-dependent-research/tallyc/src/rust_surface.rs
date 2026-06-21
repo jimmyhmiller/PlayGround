@@ -793,7 +793,7 @@ impl Elab {
                 // param leaks, not double-frees; it needs real surface linear params,
                 // Phase A). A bare `->` and an explicit `(ω …)` are indistinguishable in
                 // the surface, but an ω linear binder is never legitimately wanted.
-                let m = if *m == Mult::Omega && contains_linear(&ta) { Mult::One } else { *m };
+                let m = if *m == Mult::Omega && type_is_linear(&ta, &self.rc) { Mult::One } else { *m };
                 Ok(Term::Pi(m, Box::new(ta), Box::new(tb)))
             }
             Ty::Var(_) | Ty::App(_, _) => {
@@ -1194,7 +1194,7 @@ impl Elab {
         // `Own`/`Σ[1]`; the abstract-type-parameter and field-hidden cases are the
         // §13 polymorphism corner, tightened when generic linear collections land.
         let exp_tm = dep::quote_at(n, expected);
-        let binder_mult = if contains_linear(&e_ty_tm) { Mult::One } else { Mult::Omega };
+        let binder_mult = if type_is_linear(&e_ty_tm, &self.rc) { Mult::One } else { Mult::Omega };
         let pi_ty = Term::Pi(binder_mult, Box::new(e_ty_tm), Box::new(dep::shift_term(1, &exp_tm)));
         let lam = Term::Ann(Box::new(Term::Lam(Box::new(body_term))), Box::new(pi_ty));
         Ok(Term::App(Box::new(lam), Box::new(e_term)))
@@ -1334,7 +1334,11 @@ impl Elab {
                 let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
                 arm_cx.push(bn.clone(), v);
             }
-            let mut body = self.check(&arm.body, expected, &arm_cx, rec)?;
+            // USE-SITE LINEARITY (see `rebind_linear_fields`): re-bind each linear
+            // field at 1 so a hidden `Own` (incl. a generic instantiated at `Own`)
+            // can't be used twice in a nested/expression `match` either.
+            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
+            let mut body = self.check(&arm_body, expected, &arm_cx, rec)?;
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
             }
@@ -2292,7 +2296,16 @@ impl Elab {
             let expected = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &ret_ty_tm);
 
             let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None };
-            let mut body = self.check(&arm.body, &expected, &arm_cx, Some(&r))?;
+            // USE-SITE LINEARITY (the convergent, whack-a-mole-proof check): re-bind
+            // each EXPLICIT field whose INSTANTIATED type is linear via `let f = f`, so
+            // the let-binder rule binds it at `1` and the kernel enforces exactly-once
+            // use through it. Because it checks the field's ACTUAL (post-substitution)
+            // type at the USE SITE, it catches a hidden `Own` no matter HOW it is hidden
+            // — a generic container instantiated at `Own` (`Pair (Own Nat) Unit`), a
+            // nested generic, an alias — not just a syntactic field. (Non-linear fields
+            // are untouched, so copyable fields stay ω/multi-usable.)
+            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
+            let mut body = self.check(&arm_body, &expected, &arm_cx, Some(&r))?;
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
             }
@@ -2368,62 +2381,95 @@ fn ctor_head(t: &Term) -> Option<String> {
 /// call graph: a `Call(name, args)` becomes `TCall { callee: name, args }`.
 /// Constructor applications are included too — harmless, since they are not in
 /// the user-function set and so are treated as total leaves by the analyzer.
-/// Does this TYPE carry a LINEAR component — a concrete `Own` pointer or a linear
-/// `Σ[1]` pair — anywhere structurally reachable (through applications, pairs, Σ, and
-/// a datatype's type ARGUMENTS)? Drives the `let`-binder quantity: a linear value
-/// must bind at `1` (so use-twice = `ω ⋢ 1`, drop = `0 ⋢ 1`); a copyable one at `ω`.
-///
-/// SCOPE (v1): catches `Own T`, `Opt (Own T)`, `Vec (Own T) n`, a `Σ[1]` — every
-/// case where `Own`/`Σ[1]` appears in the type EXPRESSION (the way linear values are
-/// written today via `alloc`/`free`). It does NOT (yet) recurse into a datatype's
-/// constructor-field DEFINITIONS (a struct that hides an `Own` behind its name) nor
-/// resolve an abstract type parameter that might be instantiated linear — both are
-/// the FUTURE_WORK §13 linearity×polymorphism corner, deferred until generic linear
-/// collections exist (no such type exists in the surface today). Value/index
-/// sub-terms carry no linearity, so they are not flagged.
-fn contains_linear(ty: &Term) -> bool {
+/// Is this fully-instantiated TYPE LINEAR — does it carry an `Own` pointer or a linear
+/// `Σ[1]` pair anywhere reachable? This is the ONE convergent linearity test, used at
+/// every binding site (`let`, function parameter, `match` field) to decide whether the
+/// binder is linear (bind at `1`: use-twice = `ω ⋢ 1`, drop = `0 ⋢ 1`) or copyable
+/// (bind at `ω`). It is FIELD-AWARE and INSTANTIATION-aware, so it catches a hidden
+/// `Own` HOWEVER it is hidden — directly (`Own T`), in a type ARGUMENT (`Vec (Own T) n`),
+/// behind a datatype's FIELD definitions (`struct Box { p : Own Nat }`, recursively),
+/// or via a generic container instantiated at `Own` (`Pair (Own Nat) Unit`). This
+/// replaces the earlier whack-a-mole forbid-per-hiding-spot: there is no syntactic
+/// hiding-spot to miss, because we check the actual resolved type. An abstract type
+/// VARIABLE (a `Var`, e.g. an un-instantiated `{0 a}`) reads non-linear — that is the
+/// FUTURE_WORK §13 polymorphism corner (a leak through an abstract-typed ω param, NOT a
+/// double-free), handled when real surface linear params land.
+fn type_is_linear(ty: &Term, rc: &Rc<Signature>) -> bool {
+    contains_linear(ty, rc, &mut std::collections::HashSet::new())
+}
+
+fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::HashSet<String>) -> bool {
     match ty {
         Term::Const(n) => n == "Own",
         Term::Sigma(crate::mult::Mult::One, _, _) => true,
         Term::Sigma(_, a, b) | Term::Pi(_, a, b) | Term::App(a, b) | Term::Pair(a, b) | Term::Add(a, b) => {
-            contains_linear(a) || contains_linear(b)
+            contains_linear(a, rc, seen) || contains_linear(b, rc, seen)
         }
-        Term::Eq(a, b, c) => contains_linear(a) || contains_linear(b) || contains_linear(c),
-        Term::Ann(e, _) => contains_linear(e),
-        Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => contains_linear(x),
-        Term::Data(_, args) | Term::Constr(_, args) => args.iter().any(contains_linear),
+        Term::Eq(a, b, c) => {
+            contains_linear(a, rc, seen) || contains_linear(b, rc, seen) || contains_linear(c, rc, seen)
+        }
+        Term::Ann(e, _) => contains_linear(e, rc, seen),
+        Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => contains_linear(x, rc, seen),
+        Term::Data(name, args) => {
+            if name == "Own" {
+                return true;
+            }
+            // a linear type ARGUMENT (e.g. `Vec (Own T) n`, `Pair (Own Nat) Unit`).
+            if args.iter().any(|a| contains_linear(a, rc, seen)) {
+                return true;
+            }
+            // a linear FIELD hidden behind the datatype's name — recurse into the
+            // constructor field DEFINITIONS (the `seen` guard handles recursive types).
+            if seen.insert(name.clone()) {
+                if let Some(decl) = rc.data(name) {
+                    for ctor in &decl.ctors {
+                        for (_, fty) in &ctor.args {
+                            if contains_linear(fty, rc, seen) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Term::Constr(_, args) => args.iter().any(|a| contains_linear(a, rc, seen)),
         // Var / Type / Nat / NatLit / Zero / Lam / Fix / NatElim / NatCase / Elim:
-        // no syntactic linear component (an abstract `Var` is the deferred §13 case).
+        // no linear component (an abstract `Var` is the deferred §13 polymorphism case).
         _ => false,
     }
 }
 
-/// Reject a struct/enum constructor that stores a LINEAR (`Own`/`Σ[1]`) field, as a
-/// hard error AT DECLARATION. Storing a linear value in a field is unsound in the
-/// current surface on TWO independent channels: (1) struct/enum fields are stored at
-/// `Mult::Omega`, so `match Box(alloc(Zero)) { Box(q) => free(q); free(q) }` launders
-/// a double-free with no `let`; and (2) such a type reads as non-linear to
-/// `contains_linear` (which doesn't see through field definitions), so a `let`-bound
-/// value of it also launders. Forbidding the FIELD at declaration closes BOTH channels
-/// AND makes `contains_linear` transitively sufficient — no datatype can carry a
-/// hidden `Own`, so a value of any datatype type is genuinely non-linear. This is the
-/// conservative, fail-toward-safety stopgap until memory-model Phase A lands the
-/// field-aware linearity check (fields stored at their declared multiplicity +
-/// `contains_linear` seeing through field defs), which lifts this restriction.
-fn reject_linear_fields(args: &[(crate::mult::Mult, Term)], owner: &str) -> Result<(), String> {
-    for (_, fty) in args {
-        if contains_linear(fty) {
-            return Err(format!(
-                "{owner} has a field of a LINEAR type (`Own` / a `Σ[1]` pair). Linear \
-                 fields in a struct/enum are not yet supported — a stored `Own` would let \
-                 a double-free or leak hide behind the type's name (the field-aware \
-                 linearity check lands in memory-model Phase A). Until then, hold linear \
-                 ownership at the value level (thread the `Own` through function \
-                 parameters / `let`), not as a stored field."
-            ));
+/// USE-SITE LINEARITY for a `match` arm: re-bind each EXPLICIT field whose INSTANTIATED
+/// type `is_linear` via `let f = f`, so the let-binder rule binds it at `1` and the
+/// kernel enforces exactly-once use through it. This is the convergent, whack-a-mole-
+/// proof check — it inspects the field's ACTUAL (post-substitution) type at the USE
+/// SITE, so a hidden `Own` is caught however it is hidden (generic instantiated at
+/// `Own`, nested, behind a struct name). Non-linear fields are untouched (copyable
+/// fields stay ω, freely multi-usable). `binder_tys` is parallel to `binder_names`
+/// (ctor args, then IHs), the args' types INSTANTIATED by `elim_method_telescope`.
+fn rebind_linear_fields(
+    body: &Tm,
+    binder_names: &[String],
+    arg_implicit: &[bool],
+    binder_tys: &[(crate::mult::Mult, Term)],
+    nargs: usize,
+    rc: &Rc<Signature>,
+) -> Tm {
+    let mut wrapped = body.clone();
+    for j in (0..nargs).rev() {
+        let explicit = !arg_implicit.get(j).copied().unwrap_or(false);
+        // A 0-ERASED field (a `{0}` proof/index, even of a linear type) stays 0 — it
+        // has no runtime representation and so no double-free risk; forcing it to 1
+        // would OVER-reject. Only an ω/1 field of an instantiated-linear type is bound
+        // at 1.
+        let erased = binder_tys[j].0 == crate::mult::Mult::Zero;
+        if explicit && !erased && type_is_linear(&binder_tys[j].1, rc) {
+            let nm = binder_names[j].clone();
+            wrapped = Tm::Let(nm.clone(), Box::new(Tm::Var(nm)), Box::new(wrapped));
         }
     }
-    Ok(())
+    wrapped
 }
 
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
@@ -2623,7 +2669,11 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     let arg_names: Vec<Option<String>> = arrows.iter().map(|(_, _, n, _)| n.clone()).collect();
                     let ct = elab.elab_ty(cty, &scope)?;
                     let (args, idxs) = decompose_ctor(ct, name, np)?;
-                    reject_linear_fields(&args, &format!("constructor `{cn}` of `{name}`"))?;
+                    // (Phase A) LINEAR FIELDS ARE ALLOWED: the use-site linearity check
+                    // (`type_is_linear` field-aware + `rebind_linear_fields` at every
+                    // match) enforces exactly-once use through a stored `Own`, so a
+                    // hidden-field double-free/leak is caught where the value is USED —
+                    // no declaration-time forbid needed (it was whack-a-mole).
                     elab.ctor_info.insert(cn.clone(), CtorInfo {
                         data: name.clone(),
                         param_implicit: param_implicit.clone(),
@@ -2664,7 +2714,8 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     arg_names.push(Some(fname.clone()));
                     fscope.push(fname.clone());
                 }
-                reject_linear_fields(&args, &format!("struct `{name}`"))?;
+                // (Phase A) linear struct fields are ALLOWED — see the enum note above:
+                // the use-site linearity check enforces exactly-once use through them.
                 elab.ctor_info.insert(name.clone(), CtorInfo {
                     data: name.clone(),
                     param_implicit,
