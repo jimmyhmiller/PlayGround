@@ -18,13 +18,15 @@
 (defmacro defmmio-reg [name addr fields]
   `(do
      ; volatile 32-bit load from the fixed MMIO address (address spliced into the IR).
-     (defn ~(symbol name "-read") [] (-> i32)
-       (llvm-ir i32 []
+     ; Registers are UNSIGNED (u32) — so field extraction uses a LOGICAL shift (lshr),
+     ; the conventional + correct choice for register fields. (LLVM i32 == u32's repr.)
+     (defn ~(symbol name "-read") [] (-> u32)
+       (llvm-ir u32 []
          ~(str "%p = inttoptr i64 " addr " to ptr\n"
                "%v = load volatile i32, ptr %p\n"
                "ret i32 %v")))
      ; volatile 32-bit store.
-     (defn ~(symbol name "-write") [(v i32)] (-> i64)
+     (defn ~(symbol name "-write") [(v u32)] (-> i64)
        (llvm-ir i64 [v]
          ~(str "%p = inttoptr i64 " addr " to ptr\n"
                "store volatile i32 $0, ptr %p\n"
@@ -35,7 +37,7 @@
               (let [fname  (first f)
                     offset (first (rest f))
                     width  (first (rest (rest f)))]
-                `(defn ~(symbol name "-" fname) [] (-> i32)
+                `(defn ~(symbol name "-" fname) [] (-> u32)
                    (iand (ishr (~(symbol name "-read")) ~offset)
                          (isub (ishl 1 ~width) 1)))))
             fields)))

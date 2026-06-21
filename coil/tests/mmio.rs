@@ -48,6 +48,24 @@ fn defmmio_reg_is_general_not_pl011_specific() {
 }
 
 #[test]
+fn defmmio_reg_with_no_fields_is_read_write_only() {
+    // An empty field list (a plain data register like UARTDR) generates EXACTLY a
+    // reader + writer and no getters — and compiles.
+    let src = "(module app)\n\
+        (import \"lib/mmio.coil\" :use *)\n\
+        (defmmio-reg UARTDR 150994944 [])\n\
+        (defn main [] (-> i64) (do (UARTDR-write (cast u32 65)) (cast i64 (UARTDR-read))))";
+    let expanded = coil::expand_to_string(src).expect("expand");
+    assert!(expanded.contains("(defn UARTDR-read") && expanded.contains("(defn UARTDR-write"));
+    assert_eq!(
+        expanded.matches("(defn UARTDR-").count(),
+        2,
+        "empty field list must generate exactly read + write (no getters):\n{expanded}"
+    );
+    assert!(coil::emit_ir(src).is_ok());
+}
+
+#[test]
 fn defmmio_reg_output_typechecks_and_compiles() {
     // The generated accessors are real, valid Coil — they type-check and lower to LLVM
     // (a volatile load from a fixed address + shift/mask), with no core support.
