@@ -1,0 +1,97 @@
+(module derive)
+; Type-directed code as a LIBRARY — `(derive-eq T)` / `(derive-hash T)` /
+; `(derive-keyops T)` generate a structural `T-eq` / `T-hash` and a HashMap
+; `T-keyops` for a struct by reflecting its fields at macro expansion
+; (struct-fields / type-kind). This is the prime directive made true for the
+; type-directed half of the language: NO compiler `derive` keyword, NO
+; hand-written per-type boilerplate — just macros over the reflection builtins.
+;
+;   (import "lib/derive.coil" :use *)
+;   (defstruct Point [(x i64) (y i64)])
+;   (derive-eq Point) (derive-hash Point) (derive-keyops Point)
+;   ; => Point-eq / Point-hash / Point-keyops, usable as a real HashMap key
+;
+
+(import "hashmap.coil" :use *)   ; KeyOps — for (derive-keyops T)
+; v1 field-type support (a HARD ERROR otherwise — never silently wrong):
+;   derive-eq:   integers/bools/floats + nested structs (recurse — derive first).
+;   derive-hash: integers/bools + nested structs (floats rejected — bit-hashing is
+;                lossy; write hash by hand).
+; sum/slice/pointer/compound fields are rejected by both — write the op by hand.
+
+; ---- derive-eq -------------------------------------------------------------
+; The per-field equality expression: (field a f) vs (field b f).
+(def derive--field-eq
+  (lambda [fname ftype a b]
+    (let [pa `(field ~a ~fname) pb `(field ~b ~fname)]
+      (if (not (symbol? ftype))
+          (error "derive-eq: unsupported field type (only scalars + nested structs)")
+          (if (= (type-kind ftype) :struct)
+              `(~(symbol ftype "-eq") ~pa ~pb)               ; nested struct: recurse
+              (if (= (type-kind ftype) :sum)
+                  (error "derive-eq: sum fields unsupported in v1; write eq by hand")
+                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
+                      `(fcmp-eq (load ~pa) (load ~pb))       ; float
+                      `(icmp-eq (load ~pa) (load ~pb)))))))))  ; int/bool
+
+; Fold the fields into a short-circuiting (and …); no fields => true.
+(def derive--eq-and
+  (lambda [fields a b]
+    (if (empty? fields)
+        true
+        (let [f (first fields)
+              this (derive--field-eq (first f) (first (rest f)) a b)]
+          (if (empty? (rest fields))
+              this
+              `(and ~this ~(derive--eq-and (rest fields) a b)))))))
+
+(defmacro derive-eq [tname]
+  `(defn ~(symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
+     ~(derive--eq-and (struct-fields tname) (quote a) (quote b))))
+
+; ---- derive-hash (FNV-1a over the fields) ----------------------------------
+(def derive--field-hash
+  (lambda [fname ftype x]
+    (let [p `(field ~x ~fname)]
+      (if (not (symbol? ftype))
+          (error "derive-hash: unsupported field type (only integers + nested structs)")
+          (if (= (type-kind ftype) :struct)
+              `(~(symbol ftype "-hash") ~p)                  ; nested struct: recurse
+              (if (= (type-kind ftype) :sum)
+                  (error "derive-hash: sum fields unsupported in v1; write hash by hand")
+                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
+                      (error "derive-hash: float fields unsupported (bit-hashing is lossy); write hash by hand")
+                      `(load ~p))))))))                       ; int/bool
+
+; One FNV step per field, mixing the field's hash into the accumulator h.
+(def derive--hash-steps
+  (lambda [fields x h]
+    (if (empty? fields)
+        (list)
+        (let [f (first fields)
+              fh (derive--field-hash (first f) (first (rest f)) x)]
+          (cons `(store! ~h (imul (ixor (load ~h) ~fh) 1099511628211))
+                (derive--hash-steps (rest fields) x h))))))
+
+(defmacro derive-hash [tname]
+  `(defn ~(symbol tname "-hash") [(x ~tname)] (-> :i64)
+     (let [(mut h) -3750763034362895579]                     ; FNV-1a offset basis
+       ~@(derive--hash-steps (struct-fields tname) (quote x) (quote h))
+       (load h))))
+
+; ---- derive-keyops (a HashMap key from derived eq + hash) -------------------
+; Wraps `T-eq`/`T-hash` in the type-erased (ptr i8) KeyOps signatures the map
+; uses (the stored slot holds the struct value; cast it back to (ptr T)). Derive
+; `eq` and `hash` for T first. Closes the hand-written-KeyOps friction (D10).
+(defmacro derive-keyops [tname]
+  `(do
+     (defn ~(symbol tname "-keyhash") [(slot (ptr i8)) (n :i64)] (-> :i64)
+       (~(symbol tname "-hash") (cast (ptr ~tname) slot)))
+     (defn ~(symbol tname "-keyeq") [(ka (ptr i8)) (kb (ptr i8)) (n :i64)] (-> bool)
+       (~(symbol tname "-eq") (cast (ptr ~tname) ka) (cast (ptr ~tname) kb)))
+     (defn ~(symbol tname "-keyops") [] (-> (ptr KeyOps))
+       (let [o (alloc-static KeyOps)]
+         (store! (field o hash) (fnptr-of ~(symbol tname "-keyhash")))
+         (store! (field o eq)   (fnptr-of ~(symbol tname "-keyeq")))
+         (store! (field o size) (sizeof ~tname))
+         o))))
