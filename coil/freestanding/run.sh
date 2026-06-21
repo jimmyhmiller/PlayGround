@@ -16,17 +16,21 @@ export LLVM_SYS_180_PREFIX="/opt/homebrew/Cellar/llvm@18/18.1.8"
 PROG="${1:-hello}"          # hello | uart
 SRC=freestanding/$PROG.coil
 OBJ=/tmp/coil-bare.o
+BOOT=/tmp/coil-boot.o
 ELF=/tmp/coil-bare.elf
 
 # 1. compiler: emit a bare-metal aarch64 object (the generic mechanism — no link).
 cargo run -q emit-obj "$SRC" --target aarch64-unknown-none -o "$OBJ"
 
-# 2. recipe: link freestanding with ld.lld — no crt0, no libc, our linker script,
-#    entry = the Coil `start` function (module-mangled `bare.start`). `--gc-sections`
-#    garbage-collects unreferenced functions (the compiler emits per-function
+# 1b. assemble the crt0 boot stub (sets SP, zeroes .bss, calls the Coil entry).
+clang -target aarch64-unknown-none -c freestanding/start.s -o "$BOOT"
+
+# 2. recipe: link freestanding with ld.lld — no crt0/libc from a toolchain (start.s
+#    IS the runtime), our linker script, entry = _start (from the script's ENTRY).
+#    `--gc-sections` GCs unreferenced functions (the compiler emits per-function
 #    sections), so importing the stdlib does NOT drag its unused libc calls into the
 #    link — `-ffunction-sections -Wl,--gc-sections`, exactly as Zig/Rust/C do.
-ld.lld --gc-sections -T freestanding/virt.ld -e bare.start "$OBJ" -o "$ELF"
+ld.lld --gc-sections -T freestanding/virt.ld "$BOOT" "$OBJ" -o "$ELF"
 
 # verify: a freestanding image has NO undefined symbols (no libc dependency).
 if nm -u "$ELF" 2>/dev/null | grep -q .; then

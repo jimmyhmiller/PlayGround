@@ -8,8 +8,9 @@ bare-metal; now Coil does too.
 ```
 ./freestanding/run.sh          # build + run hello.coil  ->  hi / from coil (bare metal)
 ./freestanding/run.sh uart     # the typed-register PL011 driver -> PL011 via typed registers
+./freestanding/run.sh arena    # the stdlib arena, RUN bare-metal -> stdlib arena on bare metal: 42
 ./freestanding/run.sh hello build   # build the .elf only
-cargo test --test freestanding # the same, gated on ld.lld + qemu being installed
+cargo test --test freestanding # the same, gated on the bare-metal toolchain being installed
 ```
 
 ## The capstone: device registers as a typed bitfield — a PURE MACRO
@@ -37,10 +38,13 @@ The compiler bakes in NOTHING freestanding-specific. It exposes the generic mech
 — `coil emit-obj <src> --target aarch64-unknown-none` emits an object — and the
 freestanding-ness lives entirely in this **recipe** (`run.sh`) + the **program**:
 
-1. `coil emit-obj … --target aarch64-unknown-none` → a bare-metal aarch64 object.
-2. `ld.lld -T virt.ld -e bare.start obj -o elf` → link with no crt0/libc, our linker
-   script, entry = the Coil `start` function.
-3. `qemu-system-aarch64 -M virt -nographic -kernel elf` → the ELF *is* the kernel.
+1. `coil emit-obj … --target aarch64-unknown-none` → a bare-metal aarch64 object
+   (`+strict-align`, see below).
+2. assemble `start.s` (the crt0 boot stub: set SP, enable FP/SIMD, zero .bss, call the
+   entry) → `boot.o`.
+3. `ld.lld --gc-sections -T virt.ld boot.o obj -o elf` → link with no crt0/libc from a
+   toolchain (`start.s` IS the runtime), our linker script, entry = `_start`.
+4. `qemu-system-aarch64 -M virt -nographic -kernel elf` → the ELF *is* the kernel.
 
 Same principle as "expressiveness through macros, not core hacks": the core stays
 minimal (emit an object); freestanding composes on top.
@@ -82,24 +86,30 @@ minimal (emit an object); freestanding composes on top.
    constructor wasn't freestanding. FIXED: added `arena-over-buffer (buf, cap)`, a
    constructor over a caller-provided buffer (no malloc — the buffer can be an
    `alloc-static` array in .bss); `arena-allocator` now wraps it with `malloc`.
-   — KNOWN GAP (triaged, deferred): a program that IMPORTS lib/alloc and runs its
-   arena (`arena-over-buffer` + `create`) LINKS clean but does not yet RUN under qemu.
-   Triage (`qemu -d int`) found TWO layers:
-   (1) **No stack pointer at entry.** The entry's prologue spills to `SP≈0` → Data
-   Abort (FAR `0xffffffff_fffff0`). `hello.coil` survives only by LUCK — it doesn't
-   spill. The standard fix is a tiny `crt0.s` boot stub (set `SP` = top of a reserved
-   stack, zero `.bss`, `bl` the entry) — recipe-level, no core change; verified it
-   makes the entry run (the first UART byte then prints).
-   (2) A SECOND, deeper fault remains in the stdlib-arena path even with `SP`/`.bss`
-   set up — root cause TBD. Because it's deeper than the cheap startup fix, it's
-   DEFERRED (the moat is already demonstrated by `hello` running; the honest
-   link-level DCE claim stands). The fix path is: add the `crt0.s` stub (hardens the
-   entry for every bare-metal program), then debug the residual arena fault.
+   — CLOSED: a program that IMPORTS lib/alloc and RUNS its arena (`arena-over-buffer`
+   + `create`) now genuinely executes bare-metal (`arena.coil` → "stdlib arena on bare
+   metal: 42"). Getting there meant fixing the bare-metal startup, triaged with `qemu
+   -d int` in three layers — all in the recipe/build, NO core change:
+   (1) **No stack pointer.** The entry prologue spilled to `SP≈0` → Data Abort (FAR
+   `0xff..f0`). Fix: the `start.s` crt0 sets `SP` = top of a reserved stack.
+   (2) **FP/SIMD trapped.** The optimizer emits SIMD for struct/array init; FP/SIMD is
+   trapped at EL1 by reset → Undefined Instruction (ESR EC `0x7`). Fix: crt0 sets
+   `CPACR_EL1.FPEN`.
+   (3) **MMU off → Device memory.** With no page tables, RAM is Device memory, which
+   faults on unaligned/SIMD access (the SIMD struct-init at a non-16-aligned `.bss`
+   global → Alignment fault, DFSC `0x21`). Fix: emit the bare-metal object with
+   `+strict-align` (derived from the `-none` triple in `compile_to_object_for`), so the
+   backend uses only aligned scalar accesses — far cheaper than bringing up the MMU.
+   The crt0 also zeroes `.bss` (the stdlib's `alloc-static` globals start zeroed).
+   `hello.coil` worked before any of this only by luck (it doesn't spill / use SIMD);
+   the crt0 + `+strict-align` make EVERY bare-metal program (incl. the stdlib) robust.
 3. **`llvm-ir` can't have a `void` result** — `validate_type` rejects `void` outside a
    return, so an effect-only IR snippet must return a dummy `i64` (the UART/poweroff
    helpers return `i64 0`). Minor; a `void` llvm-ir result would be tidier.
 
 ## Verdict
-Coil runs bare-metal, no OS — the moat demonstrated at the extreme. The explicit
-alloc/IO design holds where it's mandatory. The one real friction (no DCE → stdlib
-drags libc) has a standard build/link fix (function-sections + `--gc-sections`).
+Coil runs bare-metal, no OS — LINK *and* RUN, including the stdlib's arena. The moat
+demonstrated at the extreme; the explicit alloc/IO design holds where it's mandatory.
+All the freestanding machinery (crt0 boot stub, linker script, `--gc-sections`, the
+`+strict-align` bare-metal codegen) lives in the recipe + a 3-line target-feature
+derivation — NO core feature; freestanding composes on top, the way the goal demands.

@@ -1,18 +1,19 @@
 //! Freestanding bare-metal dogfood (§7): Coil running with NO runtime — no libc, no
-//! OS, no crt0 — on aarch64 under qemu-system. Builds freestanding/hello.coil for a
-//! bare-metal target, links it with ld.lld (no libc) + a linker script, and runs it
-//! under qemu-system-aarch64, checking the UART output. The strongest "as low as
-//! Zig/C" test: Coil runs bare-metal, exactly where C/Zig run.
+//! OS — on aarch64 under qemu-system. The whole pipeline: compile a bare-metal object
+//! (`+strict-align` for the MMU-off Device-memory target), assemble the crt0 boot stub
+//! (set SP, enable FP/SIMD, zero .bss, call the entry), link with ld.lld (no libc) +
+//! `--gc-sections` (so importing the stdlib drops its unused libc calls), and run under
+//! qemu-system-aarch64. The strongest "as low as Zig/C" test — Coil runs where C/Zig do.
 //!
-//! GATED on `ld.lld` + `qemu-system-aarch64` being present (they are the bare-metal
-//! toolchain); the test SKIPS (does not fail) when they're absent, so CI on a machine
-//! without the cross toolchain still passes.
+//! GATED on the bare-metal toolchain (ld.lld + clang-as-assembler + qemu-system-aarch64);
+//! the tests SKIP (don't fail) when it's absent, so CI without it still passes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const LLVM_DIRS: &[&str] = &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"];
+
 fn find(names: &[&str], extra_dirs: &[&str]) -> Option<PathBuf> {
-    // PATH first, then known Homebrew LLVM/qemu locations.
     for n in names {
         if let Ok(o) = Command::new("sh").arg("-c").arg(format!("command -v {n}")).output() {
             if o.status.success() {
@@ -32,132 +33,116 @@ fn find(names: &[&str], extra_dirs: &[&str]) -> Option<PathBuf> {
     None
 }
 
-#[test]
-fn bare_metal_aarch64_runs_under_qemu() {
-    let lld = find(
-        &["ld.lld"],
-        &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"],
+/// (ld.lld, clang, qemu-system-aarch64) or None if the bare-metal toolchain is absent.
+fn tools() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    Some((
+        find(&["ld.lld"], LLVM_DIRS)?,
+        find(&["clang", "cc"], LLVM_DIRS)?,
+        find(&["qemu-system-aarch64"], &["/opt/homebrew/bin"])?,
+    ))
+}
+
+/// Compile a `.coil` source string to a bare-metal aarch64 object.
+fn emit_obj(src: &str, obj: &Path) {
+    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
+    coil::compile_to_object_for(src, obj, triple).expect("emit bare-metal object");
+}
+
+/// Assemble the crt0 stub + link it with the Coil object. Returns the linker's success.
+fn link(clang: &Path, lld: &Path, coil_obj: &Path, elf: &Path, gc: bool) -> bool {
+    let boot = std::env::temp_dir().join("coil-boot.o");
+    assert!(
+        Command::new(clang)
+            .args(["-target", "aarch64-unknown-none", "-c", "freestanding/start.s", "-o"])
+            .arg(&boot)
+            .status()
+            .expect("assemble start.s")
+            .success(),
+        "crt0 assembly failed"
     );
-    let qemu = find(&["qemu-system-aarch64"], &["/opt/homebrew/bin"]);
-    let (lld, qemu) = match (lld, qemu) {
-        (Some(l), Some(q)) => (l, q),
-        _ => {
-            eprintln!("SKIP: ld.lld and/or qemu-system-aarch64 not found (bare-metal toolchain)");
+    let mut c = Command::new(lld);
+    if gc {
+        c.arg("--gc-sections");
+    }
+    c.args(["-T", "freestanding/virt.ld"])
+        .arg(&boot)
+        .arg(coil_obj)
+        .arg("-o")
+        .arg(elf)
+        .status()
+        .expect("invoke ld.lld")
+        .success()
+}
+
+fn no_undefined(elf: &Path) -> bool {
+    let nm = Command::new("nm").arg("-u").arg(elf).output().expect("nm");
+    String::from_utf8_lossy(&nm.stdout).trim().is_empty()
+}
+
+fn run_qemu(qemu: &Path, elf: &Path) -> String {
+    let out = Command::new(qemu)
+        .args(["-M", "virt", "-cpu", "cortex-a72", "-nographic", "-kernel"])
+        .arg(elf)
+        .output()
+        .expect("run qemu");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Build `freestanding/<name>.coil`, link it freestanding, run it, return qemu's stdout
+/// — and assert the image has zero undefined symbols (the no-runtime moat).
+fn build_run(name: &str, want: &str) {
+    let (lld, clang, qemu) = match tools() {
+        Some(t) => t,
+        None => {
+            eprintln!("SKIP: bare-metal toolchain (ld.lld + clang + qemu-system-aarch64) not found");
             return;
         }
     };
+    let src = std::fs::read_to_string(format!("freestanding/{name}.coil")).expect("read .coil");
+    let obj = std::env::temp_dir().join(format!("coil-{name}.o"));
+    let elf = std::env::temp_dir().join(format!("coil-{name}.elf"));
+    emit_obj(&src, &obj);
+    assert!(link(&clang, &lld, &obj, &elf, true), "ld.lld failed for {name}");
+    assert!(no_undefined(&elf), "{name}: freestanding image has undefined symbols (libc leak)");
+    let out = run_qemu(&qemu, &elf);
+    assert!(out.contains(want), "{name}: unexpected UART output: {out:?}");
+}
 
-    let src = std::fs::read_to_string("freestanding/hello.coil").expect("read hello.coil");
-    let obj = std::env::temp_dir().join("coil-bare-test.o");
-    let elf = std::env::temp_dir().join("coil-bare-test.elf");
-
-    // 1. compiler: emit a bare-metal aarch64 object (no link).
-    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
-    coil::compile_to_object_for(&src, &obj, triple).expect("emit bare-metal object");
-
-    // 2. link freestanding with ld.lld: no crt0, no libc, our linker script, entry =
-    //    the Coil `start` function (`bare.start`).
-    let link = Command::new(&lld)
-        .args(["--gc-sections", "-T", "freestanding/virt.ld", "-e", "bare.start"])
-        .arg(&obj)
-        .arg("-o")
-        .arg(&elf)
-        .status()
-        .expect("invoke ld.lld");
-    assert!(link.success(), "ld.lld failed");
-
-    // a freestanding image must have NO undefined symbols (no libc dependency).
-    let nm = Command::new("nm").arg("-u").arg(&elf).output().expect("nm");
-    let undef = String::from_utf8_lossy(&nm.stdout);
-    assert!(
-        undef.trim().is_empty(),
-        "freestanding image has undefined symbols (libc leak):\n{undef}"
-    );
-
-    // 3. run under full-system qemu (the ELF is the kernel). The program PSCI-poweroffs.
-    let out = Command::new(&qemu)
-        .args(["-M", "virt", "-cpu", "cortex-a72", "-nographic", "-kernel"])
-        .arg(&elf)
-        .output()
-        .expect("run qemu");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("hi") && text.contains("from coil (bare metal)"),
-        "unexpected UART output: {text:?}"
-    );
+#[test]
+fn bare_metal_hello_runs_under_qemu() {
+    build_run("hello", "from coil (bare metal)");
 }
 
 #[test]
 fn bare_metal_typed_register_uart_driver_runs_under_qemu() {
-    // The :bits capstone: a polled PL011 UART driver whose device registers are typed
-    // bitfields from the `defmmio-reg` PURE MACRO (lib/mmio.coil) — no core feature.
-    // It polls the flag register's TXFF bit, then writes the data register.
-    let lld = find(
-        &["ld.lld"],
-        &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"],
-    );
-    let qemu = find(&["qemu-system-aarch64"], &["/opt/homebrew/bin"]);
-    let (lld, qemu) = match (lld, qemu) {
-        (Some(l), Some(q)) => (l, q),
-        _ => {
-            eprintln!("SKIP: bare-metal toolchain (ld.lld + qemu-system-aarch64) not found");
-            return;
-        }
-    };
+    // The :bits capstone: device registers as typed bitfields (defmmio-reg pure macro);
+    // a polled PL011 driver (poll TXFF, then write the data register).
+    build_run("uart", "PL011 via typed registers");
+}
 
-    let src = std::fs::read_to_string("freestanding/uart.coil").expect("read uart.coil");
-    let obj = std::env::temp_dir().join("coil-uart-test.o");
-    let elf = std::env::temp_dir().join("coil-uart-test.elf");
-    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
-    coil::compile_to_object_for(&src, &obj, triple).expect("emit bare-metal object");
-
-    let link = Command::new(&lld)
-        .args(["--gc-sections", "-T", "freestanding/virt.ld", "-e", "bare.start"])
-        .arg(&obj)
-        .arg("-o")
-        .arg(&elf)
-        .status()
-        .expect("invoke ld.lld");
-    assert!(link.success(), "ld.lld failed");
-
-    let nm = Command::new("nm").arg("-u").arg(&elf).output().expect("nm");
-    assert!(
-        String::from_utf8_lossy(&nm.stdout).trim().is_empty(),
-        "freestanding image has undefined symbols"
-    );
-
-    let out = Command::new(&qemu)
-        .args(["-M", "virt", "-cpu", "cortex-a72", "-nographic", "-kernel"])
-        .arg(&elf)
-        .output()
-        .expect("run qemu");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("PL011 via typed registers"),
-        "unexpected UART output: {text:?}"
-    );
+#[test]
+fn bare_metal_stdlib_arena_runs_under_qemu() {
+    // The cardinal: a program that IMPORTS lib/alloc and RUNS its arena (arena-over-
+    // buffer + create) genuinely executes bare-metal — not just links. Proves the
+    // stdlib's capability-as-value design works with NO runtime (crt0 sets SP +
+    // FP/SIMD + zeroes .bss; +strict-align suits the MMU-off Device-memory target).
+    build_run("arena", "stdlib arena on bare metal: 42");
 }
 
 #[test]
 fn importing_stdlib_does_not_drag_libc_with_gc_sections() {
     // The DCE friction the dogfood surfaced: Coil emits all defns, so importing
     // lib/alloc pulled malloc/abort/free/realloc into the link even unused. Fix =
-    // per-function sections (compiler) + ld.lld --gc-sections (recipe): the unused
-    // stdlib functions are GC'd, so a freestanding program can IMPORT the stdlib
-    // without dragging libc. This locks that in (and documents the regression: link
-    // WITHOUT --gc-sections fails on `malloc`, WITH it is clean).
-    let lld = match find(
-        &["ld.lld"],
-        &["/opt/homebrew/opt/llvm@18/bin", "/opt/homebrew/opt/llvm@17/bin"],
-    ) {
-        Some(l) => l,
+    // per-function sections (compiler) + ld.lld --gc-sections: unused stdlib functions
+    // are GC'd. Documents BOTH directions (without --gc-sections the link fails on a
+    // dragged libc symbol; with it, clean).
+    let (lld, clang, _qemu) = match tools() {
+        Some(t) => t,
         None => {
-            eprintln!("SKIP: ld.lld not found");
+            eprintln!("SKIP: bare-metal toolchain not found");
             return;
         }
     };
-
-    // a freestanding program that IMPORTS lib/alloc but uses nothing from it.
     let src = "(module bare)\n\
         (import \"lib/alloc.coil\" :use *)\n\
         (defn uart-byte [(c i64)] (-> i64)\n\
@@ -165,31 +150,8 @@ fn importing_stdlib_does_not_drag_libc_with_gc_sections() {
            %b = trunc i64 $0 to i8\\nstore volatile i8 %b, ptr %p\\nret i64 0\"))\n\
         (defn start [] (-> i64) (uart-byte 75) (loop 0))";
     let obj = std::env::temp_dir().join("coil-dce.o");
-    let triple = inkwell::targets::TargetTriple::create("aarch64-unknown-none");
-    coil::compile_to_object_for(src, &obj, triple).expect("emit object");
-
-    let link = |gc: bool| {
-        let elf = std::env::temp_dir().join(if gc { "coil-dce-gc.elf" } else { "coil-dce-nogc.elf" });
-        let mut c = Command::new(&lld);
-        if gc {
-            c.arg("--gc-sections");
-        }
-        c.args(["-T", "freestanding/virt.ld", "-e", "bare.start"])
-            .arg(&obj)
-            .arg("-o")
-            .arg(&elf)
-            .output()
-            .expect("invoke ld.lld")
-    };
-
-    // WITHOUT --gc-sections: the unused stdlib drags malloc → link fails.
-    assert!(
-        !link(false).status.success(),
-        "expected the link WITHOUT --gc-sections to fail on a dragged libc symbol"
-    );
-    // WITH --gc-sections: the unused stdlib is GC'd → clean link.
-    assert!(
-        link(true).status.success(),
-        "expected the link WITH --gc-sections to succeed (stdlib GC'd)"
-    );
+    emit_obj(src, &obj);
+    let elf = std::env::temp_dir().join("coil-dce.elf");
+    assert!(!link(&clang, &lld, &obj, &elf, false), "expected the no-gc link to fail on a dragged libc symbol");
+    assert!(link(&clang, &lld, &obj, &elf, true), "expected --gc-sections to drop the unused stdlib (clean link)");
 }

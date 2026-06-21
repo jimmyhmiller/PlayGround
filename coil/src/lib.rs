@@ -183,11 +183,22 @@ pub fn compile_to_object_for(
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     let module = reported(build_module_for(&ctx, src, triple), src)?;
     let triple = module.get_triple();
+    // Bare-metal aarch64 (the freestanding `-none` target) runs with the MMU off, so
+    // RAM is Device memory — unaligned + SIMD accesses fault. `+strict-align` makes the
+    // backend emit only aligned scalar accesses (the optimizer otherwise uses 16-byte
+    // SIMD for struct/array init, which faults on Device memory). Correct for bare
+    // metal; hosted targets (MMU on → Normal memory) don't need it and aren't changed.
+    let triple_s = triple.as_str().to_string_lossy();
+    let features = if triple_s.contains("aarch64") && triple_s.contains("none") {
+        "+strict-align"
+    } else {
+        ""
+    };
     let tm = target
         .create_target_machine(
             &triple,
             "generic",
-            "",
+            features,
             OptimizationLevel::Aggressive,
             RelocMode::PIC,
             CodeModel::Default,

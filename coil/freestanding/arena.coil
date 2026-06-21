@@ -1,0 +1,36 @@
+; Freestanding stdlib-arena showcase: IMPORTS lib/alloc and RUNS its arena bare-metal
+; (not just links). Proves the stdlib's capability-as-value design — an arena over a
+; static buffer (arena-over-buffer, no malloc) + create — works with NO runtime, given
+; the crt0 boot stub (SP + FP/SIMD-enable + .bss-zero) and +strict-align codegen for
+; the MMU-off (Device-memory) bare-metal target. The DCE (--gc-sections) drops the
+; unused malloc-backed parts of lib/alloc so nothing libc leaks in.
+(module bare)
+(import "lib/alloc.coil" :use *)
+
+(defn uart-byte [(c i64)] (-> i64)
+  (llvm-ir i64 [c]
+"%p = inttoptr i64 150994944 to ptr
+%b = trunc i64 $0 to i8
+store volatile i8 %b, ptr %p
+ret i64 0"))
+(defn uart-str [(s (ptr i8)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+              (do (uart-byte (cast i64 (load (index s (load i))))) (store! i (iadd (load i) 1))))))
+  0)
+(defn poweroff [] (-> i64)
+  (llvm-ir i64 []
+"call void asm sideeffect \"movz x0, #0x8400, lsl #16 ; movk x0, #8 ; hvc #0\", \"~{x0}\"()
+ret i64 0"))
+
+(defn start [] (-> i64)
+  (let [buf (alloc-static (array u8 4096))
+        a   (arena-over-buffer (cast (ptr i8) (index buf 0)) 4096)   ; stdlib arena, no malloc
+        p   (unwrap-ptr [i64] (create [i64] a))]                      ; allocate an i64 from it
+    (store! p 42)
+    (uart-str c"stdlib arena on bare metal: " 28)
+    (uart-byte (iadd 48 (idiv (load p) 10)))      ; '4'
+    (uart-byte (iadd 48 (irem (load p) 10)))      ; '2'
+    (uart-byte 10))
+  (poweroff)
+  (loop 0))
