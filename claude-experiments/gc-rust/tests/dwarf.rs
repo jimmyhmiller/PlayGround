@@ -115,6 +115,26 @@ fn full_debug_emits_named_local_and_param_dies() {
         "Point struct DIE should have ≥2 members (x, y):\n{sinfo}"
     );
 
+    // A heap enum must produce a DWARF enumeration type for its tag (variant
+    // value → name), so lldb shows the active variant.
+    let en = dir.join("enum.o");
+    let eprog = lower_named(
+        "enum Shape { Circle(i64), Rect(i64, i64), Empty }\nfn main() -> i64 {\n  let s = Shape::Rect(3, 4);\n  let probe = 0;\n  probe\n}\n",
+        "prog.gcr",
+    );
+    codegen_aot_object_level(&eprog, &en, DebugLevel::Full).expect("enum aot object");
+    let einfo = dwarfdump(&en, "--debug-info");
+    assert!(
+        einfo.contains("DW_TAG_enumeration_type"),
+        "full-debug build missing the enum tag enumeration DIE:\n{einfo}"
+    );
+    for v in ["(\"Circle\")", "(\"Rect\")", "(\"Empty\")"] {
+        assert!(
+            einfo.contains(v),
+            "enum DIE missing variant enumerator {v}:\n{einfo}"
+        );
+    }
+
     // Line-tables-only default: NONE of the gc-rust source variable DIEs. (The
     // runtime staticlib's own Rust DWARF is not in this object — only gc-rust
     // code is — so a clean object has zero variable DIEs.)

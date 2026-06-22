@@ -9,6 +9,9 @@
 > - `let p = Point{x:3,y:4}` → `(Point) p = { x = 3, y = 4 }` *directly* (gc-rust
 >   reference semantics: the local IS the struct); nested structs expand with
 >   `-P2` (`Line` → `a = { x=1, y=2 }`, …).
+> - `let s = Shape::Rect(3,4)` → `(Shape) s = (tag = Rect)` — heap enums show
+>   their active variant (the u32 tag as a DWARF enumeration). Payload not yet
+>   rendered.
 > - **§5 moving-GC check PASSES**: after ~millions of allocations relocate `p`
 >   (its address changes `0x…e6000000` → `0x…c6000168`), `frame variable p` still
 >   reads `{ x = 42, y = 7 }` — because the DWARF location *derefs the live GC
@@ -95,9 +98,12 @@ value-aggregate fields are left unmodeled → rendered as an address.
 
 ## Scope boundary / open work
 
-- **Enums** (heap tagged unions): not modeled yet — a `Ref`-to-enum local shows
-  an address. DWARF `DW_TAG_variant_part` or a reflection-driven synthetic
-  provider (read `tag_offset` → active `VariantMeta`) is the next slice.
+- **Enum payloads.** The active variant NAME shows (`tag` enumeration member),
+  but not its fields — `Rect(3,4)` reads as `(tag = Rect)`, not `Rect(3, 4)`.
+  The C API has no `DW_TAG_variant_part` (checked llvm-sys 211 / inkwell), so the
+  payload needs a reflection-driven synthetic provider: read the tag → active
+  `VariantMeta` → its fields at their absolute offsets (the Python pretty-printer
+  the design §3 envisioned, reusing `gc::dump::render_object`'s logic).
 - **Inline nested-Ref rendering.** A struct member that is a `Ref` shows as a
   pointer/address (lldb won't auto-deref aggregate members; DWARF members can't
   carry the `deref` a local can). One-line inline rendering needs a
@@ -124,5 +130,6 @@ value-aggregate fields are left unmodeled → rendered as an address.
   `--debug` executables and drives `xcrun lldb`:
   - `lldb_frame_variable_shows_correct_scalar_locals` — scalar values.
   - `lldb_frame_variable_renders_heap_struct_by_field` — `(Point) p = { x=3, y=4 }`.
+  - `lldb_frame_variable_shows_enum_variant` — `(Shape) s = (tag = Rect)`.
   - `lldb_heap_struct_survives_moving_gc` — `p` reads correctly after a
     relocating GC (the §5 property).

@@ -133,6 +133,37 @@ fn lldb_frame_variable_renders_heap_struct_by_field() {
 }
 
 #[test]
+fn lldb_frame_variable_shows_enum_variant() {
+    if !lldb_available() {
+        eprintln!("skipping: xcrun lldb unavailable");
+        return;
+    }
+    let lib = ensure_runtime_lib();
+    let dir = std::env::temp_dir().join(format!("gcr_lldb_enum_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("enumprog");
+
+    // A heap enum local shows its active variant via the `tag` enumeration member.
+    let src = "enum Shape { Circle(i64), Rect(i64, i64), Empty }\n\
+fn main() -> i64 {\n  let s = Shape::Rect(3, 4);\n  let t = Shape::Empty;\n  let probe = 0;\n  probe\n}\n";
+    build_debug(src, &bin, &lib);
+
+    let out = lldb_run(
+        &bin,
+        "breakpoint set --file prog.gcr --line 5\nrun\nframe variable s t\nquit\n",
+    );
+    // `s` is the Rect variant, `t` is Empty — the tag names must appear.
+    for needle in ["(Shape)", "tag = Rect", "tag = Empty"] {
+        assert!(
+            out.contains(needle),
+            "lldb `frame variable` missing `{needle}`:\n{out}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lldb_heap_struct_survives_moving_gc() {
     // The §5 moving-GC check: a heap struct local's DWARF location derefs its GC
     // frame ROOT slot (the collector keeps it current on relocation), NOT a

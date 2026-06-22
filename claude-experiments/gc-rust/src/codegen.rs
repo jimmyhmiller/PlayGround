@@ -192,15 +192,17 @@ fn scalar_kind_di(s: crate::gc::ScalarKind) -> Option<(&'static str, u32, u64)> 
 }
 
 /// Builds native DWARF composite types from the reflection metadata (debugger
-/// P3), so lldb renders heap structs by field name with no Python printer. One
-/// memoized struct DIE per heap `type_id`; member offsets are absolute (header
-/// included), so dereferencing the `Ref` pointer reads the right bytes.
-/// Recursion (a `List` whose tail points back at itself) is broken by an
-/// in-progress guard: a still-being-built layout reached through a pointer
-/// degrades to a raw address. Enum, opaque, and varlen (Array/String) layouts
-/// are left `None` (rendered as an address). Value-typed fields are skipped (no
-/// per-value offset metadata here yet) — other members keep their explicit
-/// offsets, so the struct still renders correctly minus that field.
+/// P3), so lldb renders heap structs/enums by field name with no Python printer.
+/// One memoized struct DIE per heap `type_id`; member offsets are absolute
+/// (header included), so dereferencing the `Ref` pointer reads the right bytes.
+/// An enum becomes a struct with one `tag` member typed as a DWARF enumeration
+/// (tag value → variant name) — the active variant shows, the payload doesn't
+/// (needs variant parts, absent from the C API). Recursion (a `List` whose tail
+/// points back at itself) is broken by an in-progress guard: a still-being-built
+/// layout reached through a pointer degrades to a raw address. Opaque and varlen
+/// (Array/String) layouts are `None` (rendered as an address). Value-typed
+/// fields are skipped (no per-value offset metadata here yet) — other members
+/// keep their explicit offsets, so the struct still renders minus that field.
 struct DiTypeBuilder<'a, 'ctx> {
     di: &'a DebugInfoBuilder<'ctx>,
     scope: DIScope<'ctx>,
@@ -286,38 +288,93 @@ impl<'a, 'ctx> DiTypeBuilder<'a, 'ctx> {
             return None; // cycle: caller (a pointer) falls back to an address
         }
         let layout = &self.prog.layouts[i];
-        // Only fixed (non-varlen) structs are modeled natively for now.
-        let fields = match &layout.meta.kind {
-            crate::gc::TypeKind::Struct { fields } if matches!(layout.varlen, VarLen::None) => {
-                fields.clone()
-            }
-            _ => return None,
-        };
-        self.layout_inprog[i] = true;
+        // Varlen (Array/String) → opaque (address). Extract owned kind data so we
+        // can take `&mut self` for the recursive member builds below (`layout`
+        // borrows `prog`, not `self`, but cloning keeps it simple).
+        if !matches!(layout.varlen, VarLen::None) {
+            return None;
+        }
         let total_bytes = 16u64 + layout.ptr_fields as u64 * 8 + layout.raw_bytes as u64;
         let name = layout.meta.name.clone();
-        let members: Vec<DIType<'ctx>> = fields
-            .iter()
-            .filter_map(|f| {
-                let fty = self.field_ty(f.ty)?;
-                let size_bits = di_field_size_bits(self.prog, f.ty);
-                Some(
-                    self.di
-                        .create_member_type(
-                            self.scope,
-                            &f.name,
-                            self.file,
-                            0,
-                            size_bits,
-                            0,
-                            f.offset as u64 * 8,
-                            DIFlags::ZERO,
-                            fty,
-                        )
-                        .as_type(),
-                )
-            })
-            .collect();
+        enum Kind {
+            Struct(Vec<crate::gc::FieldMeta>),
+            Enum(u16, Vec<crate::gc::VariantMeta>),
+        }
+        let kind = match &layout.meta.kind {
+            crate::gc::TypeKind::Struct { fields } => Kind::Struct(fields.clone()),
+            crate::gc::TypeKind::Enum { tag_offset, variants } => {
+                Kind::Enum(*tag_offset, variants.clone())
+            }
+            crate::gc::TypeKind::Opaque => return None,
+        };
+        self.layout_inprog[i] = true;
+        let members: Vec<DIType<'ctx>> = match kind {
+            Kind::Struct(fields) => fields
+                .iter()
+                .filter_map(|f| {
+                    let fty = self.field_ty(f.ty)?;
+                    let size_bits = di_field_size_bits(self.prog, f.ty);
+                    Some(
+                        self.di
+                            .create_member_type(
+                                self.scope,
+                                &f.name,
+                                self.file,
+                                0,
+                                size_bits,
+                                0,
+                                f.offset as u64 * 8,
+                                DIFlags::ZERO,
+                                fty,
+                            )
+                            .as_type(),
+                    )
+                })
+                .collect(),
+            // A heap enum: model the u32 discriminant at `tag_offset` as a DWARF
+            // enumeration type (tag value → variant name), so `frame variable e`
+            // shows `{ tag = Node }` — the active variant. Per-variant PAYLOAD
+            // isn't rendered (needs DWARF variant parts, absent from the C API,
+            // or a reflection synthetic provider — see DEBUGGER_P3_PLAN.md).
+            Kind::Enum(tag_offset, variants) => {
+                let enumerators: Vec<_> = variants
+                    .iter()
+                    .map(|v| self.di.create_enumerator(&v.name, v.tag as i64, true))
+                    .collect();
+                match self.di.create_basic_type("u32", 32, 7, DIFlags::ZERO) {
+                    Ok(u32t) => {
+                        let enum_ty = self
+                            .di
+                            .create_enumeration_type(
+                                self.scope,
+                                &format!("{}::tag", name),
+                                self.file,
+                                0,
+                                32,
+                                0,
+                                &enumerators,
+                                u32t.as_type(),
+                            )
+                            .as_type();
+                        vec![self
+                            .di
+                            .create_member_type(
+                                self.scope,
+                                "tag",
+                                self.file,
+                                0,
+                                32,
+                                0,
+                                tag_offset as u64 * 8,
+                                DIFlags::ZERO,
+                                enum_ty,
+                            )
+                            .as_type()]
+                    }
+                    Err(_) => vec![],
+                }
+            }
+        };
         let st = self
             .di
             .create_struct_type(
