@@ -111,8 +111,10 @@ value-aggregate fields are left unmodeled → rendered as an address.
   envisioned, reusing `gc::dump::render_object`.
 - **Value aggregates** (`#[value]` fields/locals) skipped — no per-value offset
   metadata wired into the DWARF builder yet.
-- **Subroutine types** still `(None, &[])` — backtraces don't show param types
-  yet. Cheap follow-up (build from `f.ret`/`f.params` via `di_type_for_repr`).
+- **Subroutine types** DONE — full-debug `DISubprogram`s carry a real prototype
+  (return + param types via `di_signature_type`; `Ref` → pointer-to-struct,
+  `Value` → opaque address, `Unit` → omitted). `add`'s DIE now has
+  `DW_AT_type "i64"`.
 - **Variable lines** use the function's def line (no per-local span yet) — fine
   for scope membership; refine when statement-level spans land.
 - **Moving-GC re-inspect** (design §5): DONE/VERIFIED — see the status block and

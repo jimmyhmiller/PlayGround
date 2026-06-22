@@ -725,7 +725,17 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let d = self.debug.as_ref()?;
         let (sid, line, _col) = self.fn_debug_loc(f);
         let file = d.files.get(sid as usize).copied().unwrap_or(d.files[0]);
-        let sub_ty = d.di.create_subroutine_type(file, None, &[], DIFlags::ZERO);
+        // Full debug: give the subprogram a real signature (return + param types)
+        // so backtraces show typed prototypes. Line-tables-only keeps the empty
+        // `(void)` type (no type DIEs are built there anyway).
+        let sub_ty = if d.full {
+            let ret_ty = self.di_signature_type(&f.ret);
+            let param_tys: Vec<DIType<'ctx>> =
+                f.params.iter().filter_map(|p| self.di_signature_type(p)).collect();
+            d.di.create_subroutine_type(file, ret_ty, &param_tys, DIFlags::ZERO)
+        } else {
+            d.di.create_subroutine_type(file, None, &[], DIFlags::ZERO)
+        };
         let sp = d.di.create_function(
             d.cu.as_debug_info_scope(),
             &f.name,
@@ -779,6 +789,28 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             Ptr => return None,
         };
         Some(d.di.create_basic_type(name, bits, encoding, DIFlags::ZERO).ok()?.as_type())
+    }
+
+    /// The DWARF type for a value in a function SIGNATURE (return/param), used to
+    /// give the `DISubprogram` a real prototype. Unlike a local, a `Ref` here is a
+    /// plain pointer to the struct (the passed value is the object pointer);
+    /// `Value` is an opaque address; `Unit` is `None` (omitted / void).
+    fn di_signature_type(&self, r: &Repr) -> Option<DIType<'ctx>> {
+        let d = self.debug.as_ref()?;
+        let opaque = |d: &DebugCx<'ctx>| {
+            d.di.create_basic_type("ptr", 64, 1, DIFlags::ZERO).ok().map(|t| t.as_type())
+        };
+        match r {
+            Repr::Unit => None,
+            Repr::Scalar(_) => self.di_type_for_repr(r),
+            Repr::Ref(lid) => match d.layout_types.get(*lid as usize).copied().flatten() {
+                Some(st) => Some(
+                    d.di.create_pointer_type("", st, 64, 64, AddressSpace::default()).as_type(),
+                ),
+                None => opaque(d),
+            },
+            Repr::Value(_) => opaque(d),
+        }
     }
 
     fn define_fn(&mut self, id: FuncId, f: &CoreFn) -> Result<(), CodegenError> {
