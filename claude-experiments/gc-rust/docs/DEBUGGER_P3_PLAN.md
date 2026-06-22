@@ -1,17 +1,27 @@
 # Debugger P3 — DWARF locals + reflection pretty-printers
 
-> **STATUS: FIRST INCREMENT DONE + GREEN** — scalar locals/params inspectable.
+> **STATUS: SCALARS + HEAP STRUCTS DONE + GREEN (incl. the moving-GC check).**
 > `gcr build --debug` produces an unoptimized executable carrying DWARF
-> local-variable + formal-parameter DIEs, and **lldb's `frame variable` shows
-> gc-rust locals by their source names with correct values**: breaking at
-> `prog.gcr:4` in `add(7, 35)` prints `x = 7`, `y = 35`, `sum = 42`,
-> `doubled = 84`. All scalar reprs decode (`i8..i64`, `u8..u64`, `f32/f64`,
-> `bool`, `char`). Verified: dwarf 3/0 (new `full_debug_emits_named_local_and_param_dies`),
-> debugger_lldb 1/0 (new end-to-end lldb `frame variable` value check), lib
-> 158/0, aot/ffi/threads/reflect/modules/generational/heap_* all green, default
-> (non-`--debug`) builds unchanged. **NEXT:** non-scalar locals (structs/enums)
-> via reflection-paired lldb pretty-printers (`Point { x: 3, y: 4 }`), real
-> subroutine types, the §5 moving-GC re-inspect check.
+> local/param variable DIEs, and **lldb's `frame variable` shows gc-rust locals
+> by source name with correct values** — for scalars *and heap structs*:
+> - `add(7,35)` at line 4 → `x = 7`, `y = 35`, `sum = 42`, `doubled = 84`
+>   (all scalar reprs: `i8..i64`, `u8..u64`, `f32/f64`, `bool`, `char`).
+> - `let p = Point{x:3,y:4}` → `(Point) p = { x = 3, y = 4 }` *directly* (gc-rust
+>   reference semantics: the local IS the struct); nested structs expand with
+>   `-P2` (`Line` → `a = { x=1, y=2 }`, …).
+> - **§5 moving-GC check PASSES**: after ~millions of allocations relocate `p`
+>   (its address changes `0x…e6000000` → `0x…c6000168`), `frame variable p` still
+>   reads `{ x = 42, y = 7 }` — because the DWARF location *derefs the live GC
+>   frame slot* the collector updates, never a cached object address.
+>
+> Verified: dwarf 3/0 (variable + struct DIEs present in Full, absent in
+> LineTables), debugger_lldb 3/0 (scalar values, struct-by-field, moving-GC),
+> lib 158/0, aot/ffi/threads/reflect/modules/generational green, examples
+> (binary_trees/shapes/calculator/fib) build+run under `--debug`, default
+> (non-`--debug`) builds unchanged. **NEXT:** enums (tagged unions, variant
+> parts or reflection printer), value-aggregate fields, inline rendering of
+> nested *Ref* fields (needs a synthetic-children/pretty-printer — DWARF members
+> can't carry a deref), real subroutine types.
 
 Builds on P2 (DWARF line tables, `DWARFEmissionKind::LineTablesOnly` + per-source
 DIFiles). Goal: `gcr build --debug` carries **full** DWARF — local/parameter
@@ -67,20 +77,40 @@ return** — we only need the side effect (the record attached to the entry bloc
 The record API requires the *new* format, which is LLVM 21's default, so no flag
 change is needed. No edit to the shared inkwell fork.
 
+## Heap structs (native DWARF composite types)
+
+Rather than lldb Python pretty-printers, heap structs use **native DWARF struct
+types** built from the reflection metadata (`DiTypeBuilder` in `codegen.rs`,
+driven off each `Layout.meta`): one memoized `DW_TAG_structure_type` per
+`type_id` with members at their absolute (header-included) offsets. A `Ref` local
+is then typed as that struct (not a pointer) with location
+`DW_OP_plus_uconst <slot-off>, DW_OP_deref` — i.e. *the struct living at the
+address the GC frame slot points to*. lldb formats it natively (no script), and
+the `deref` re-reads the slot on every stop, which is exactly what makes the
+moving-GC check pass. Field types: scalars → basic types, `Ref` fields → pointer
+to the referent's struct DIE (lldb shows the address; `-P2` expands it).
+Recursion (`List` → `List`) is broken by an in-progress guard → degrades that
+pointer to a raw address. Enum / opaque / varlen (String/Array) layouts and
+value-aggregate fields are left unmodeled → rendered as an address.
+
 ## Scope boundary / open work
 
-- **Scalars only.** Struct/enum (Ref/Value) locals are skipped. Next slice:
-  lldb Python pretty-printers that read an object's header `type_id` → `TypeMeta`
-  and render `Point { x: 3, y: 4 }`, reusing `gc::dump::render_object` — the
-  JVM-grade piece (design §3).
+- **Enums** (heap tagged unions): not modeled yet — a `Ref`-to-enum local shows
+  an address. DWARF `DW_TAG_variant_part` or a reflection-driven synthetic
+  provider (read `tag_offset` → active `VariantMeta`) is the next slice.
+- **Inline nested-Ref rendering.** A struct member that is a `Ref` shows as a
+  pointer/address (lldb won't auto-deref aggregate members; DWARF members can't
+  carry the `deref` a local can). One-line inline rendering needs a
+  synthetic-children / summary provider — the Python pretty-printer the design
+  envisioned, reusing `gc::dump::render_object`.
+- **Value aggregates** (`#[value]` fields/locals) skipped — no per-value offset
+  metadata wired into the DWARF builder yet.
 - **Subroutine types** still `(None, &[])` — backtraces don't show param types
   yet. Cheap follow-up (build from `f.ret`/`f.params` via `di_type_for_repr`).
 - **Variable lines** use the function's def line (no per-local span yet) — fine
   for scope membership; refine when statement-level spans land.
-- **Moving-GC re-inspect** (design §5): break → `frame variable` a heap local →
-  force GC → continue → re-inspect. To verify when Ref locals are inspectable
-  (their DWARF location must point at the *frame root slot* the collector
-  updates, not a cached pointer).
+- **Moving-GC re-inspect** (design §5): DONE/VERIFIED — see the status block and
+  the `lldb_heap_struct_survives_moving_gc` test.
 - **AOT only** (inherited from P2): JIT DWARF needs the LLDB JIT-registration
   interface.
 
@@ -88,7 +118,11 @@ change is needed. No edit to the shared inkwell fork.
 
 - `cargo test --test dwarf` — `full_debug_emits_named_local_and_param_dies`
   dwarfdumps a `Full` object and asserts named variable/parameter DIEs + base
-  type are present, and that a `LineTables` object has none.
-- `cargo test --test debugger_lldb` (macOS) — builds a `--debug` executable,
-  drives `xcrun lldb` to break at a body line and `frame variable`, asserts the
-  decoded values (`x = 7`, `sum = 42`, …). Skips if lldb is unavailable.
+  type are present (and a `Point` struct DIE with ≥2 members), and that a
+  `LineTables` object has none.
+- `cargo test --test debugger_lldb` (macOS, skips if lldb absent) — builds
+  `--debug` executables and drives `xcrun lldb`:
+  - `lldb_frame_variable_shows_correct_scalar_locals` — scalar values.
+  - `lldb_frame_variable_renders_heap_struct_by_field` — `(Point) p = { x=3, y=4 }`.
+  - `lldb_heap_struct_survives_moving_gc` — `p` reads correctly after a
+    relocating GC (the §5 property).

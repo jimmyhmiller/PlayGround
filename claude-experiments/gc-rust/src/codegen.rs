@@ -14,7 +14,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DISubprogram, DIType,
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DIScope, DISubprogram, DIType,
     DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
 };
 use inkwell::module::{FlagBehavior, Module};
@@ -38,6 +38,13 @@ struct DebugCx<'ctx> {
     /// line-tables-only (P2): stepping + breakpoints only. Full debug also
     /// implies the AOT path skips optimization (so allocas/locals survive).
     full: bool,
+    /// Native DWARF composite type per heap layout (`type_id` → struct DIE), so
+    /// a `Ref` local renders as `*p = (Point) { x = 3, y = 4 }` natively in lldb
+    /// — no Python pretty-printer. `None` for enum/opaque/varlen layouts (those
+    /// fall back to an address). Empty unless `full`. Members sit at their
+    /// absolute, header-included offsets (see `gc::reflect`), so dereferencing
+    /// the pointer reads the right bytes.
+    layout_types: Vec<Option<DIType<'ctx>>>,
 }
 
 /// How much DWARF a build emits. `None` for JIT / `emit llvm` (no debug info);
@@ -161,6 +168,193 @@ fn split_path(path: &str) -> (String, String) {
     }
 }
 
+/// A scalar reflection kind → its DWARF `(name, DW_ATE encoding, bit width)`.
+/// Mirrors [`Codegen::di_type_for_repr`]'s scalar arm but keyed on the runtime
+/// reflection `ScalarKind` (what field metadata carries). `None` for the FFI raw
+/// pointer (no pointee type yet).
+fn scalar_kind_di(s: crate::gc::ScalarKind) -> Option<(&'static str, u32, u64)> {
+    use crate::gc::ScalarKind::*;
+    Some(match s {
+        I8 => ("i8", 5, 8),
+        I16 => ("i16", 5, 16),
+        I32 => ("i32", 5, 32),
+        I64 => ("i64", 5, 64),
+        U8 => ("u8", 7, 8),
+        U16 => ("u16", 7, 16),
+        U32 => ("u32", 7, 32),
+        U64 => ("u64", 7, 64),
+        F32 => ("f32", 4, 32),
+        F64 => ("f64", 4, 64),
+        Bool => ("bool", 2, 8),
+        Char => ("char", 7, 32),
+        Ptr => return None,
+    })
+}
+
+/// Builds native DWARF composite types from the reflection metadata (debugger
+/// P3), so lldb renders heap structs by field name with no Python printer. One
+/// memoized struct DIE per heap `type_id`; member offsets are absolute (header
+/// included), so dereferencing the `Ref` pointer reads the right bytes.
+/// Recursion (a `List` whose tail points back at itself) is broken by an
+/// in-progress guard: a still-being-built layout reached through a pointer
+/// degrades to a raw address. Enum, opaque, and varlen (Array/String) layouts
+/// are left `None` (rendered as an address). Value-typed fields are skipped (no
+/// per-value offset metadata here yet) — other members keep their explicit
+/// offsets, so the struct still renders correctly minus that field.
+struct DiTypeBuilder<'a, 'ctx> {
+    di: &'a DebugInfoBuilder<'ctx>,
+    scope: DIScope<'ctx>,
+    file: DIFile<'ctx>,
+    prog: &'a CoreProgram,
+    layout: Vec<Option<DIType<'ctx>>>,
+    layout_inprog: Vec<bool>,
+}
+
+impl<'a, 'ctx> DiTypeBuilder<'a, 'ctx> {
+    fn new(
+        di: &'a DebugInfoBuilder<'ctx>,
+        scope: DIScope<'ctx>,
+        file: DIFile<'ctx>,
+        prog: &'a CoreProgram,
+    ) -> Self {
+        let nl = prog.layouts.len();
+        DiTypeBuilder {
+            di,
+            scope,
+            file,
+            prog,
+            layout: vec![None; nl],
+            layout_inprog: vec![false; nl],
+        }
+    }
+
+    /// Run the builder over every layout, returning the `type_id`→struct cache.
+    fn build_all(mut self) -> Vec<Option<DIType<'ctx>>> {
+        for tid in 0..self.prog.layouts.len() {
+            self.layout_type(tid as u16);
+        }
+        self.layout
+    }
+
+    fn scalar(&self, s: crate::gc::ScalarKind) -> Option<DIType<'ctx>> {
+        let (name, enc, bits) = scalar_kind_di(s)?;
+        Some(self.di.create_basic_type(name, bits, enc, DIFlags::ZERO).ok()?.as_type())
+    }
+
+    /// A `DW_ATE_address` basic type — an opaque pointer shown as a hex address
+    /// (used when a field/local points at a type we don't model yet).
+    fn opaque_addr(&self) -> Option<DIType<'ctx>> {
+        Some(self.di.create_basic_type("ptr", 64, 1, DIFlags::ZERO).ok()?.as_type())
+    }
+
+    /// The DWARF type for a reference to heap layout `tid`: a pointer to its
+    /// struct DIE, or an opaque address if that layout isn't modeled / is still
+    /// being built (cycle).
+    fn ref_ptr(&mut self, tid: u16) -> Option<DIType<'ctx>> {
+        match self.layout_type(tid) {
+            Some(p) => Some(
+                self.di
+                    .create_pointer_type("", p, 64, 64, AddressSpace::default())
+                    .as_type(),
+            ),
+            None => self.opaque_addr(),
+        }
+    }
+
+    fn field_ty(&mut self, ft: crate::gc::FieldTy) -> Option<DIType<'ctx>> {
+        use crate::gc::FieldTy;
+        match ft {
+            FieldTy::Scalar(s) => self.scalar(s),
+            FieldTy::Ref(tid) => self.ref_ptr(tid),
+            // Value-typed fields are not modeled yet (no per-value offsets here);
+            // skip the member — siblings keep their explicit offsets.
+            FieldTy::Value(_) => None,
+        }
+    }
+
+    /// Memoized DWARF struct DIE for heap layout `tid`. `None` for enum / opaque
+    /// / varlen layouts and during in-progress recursion.
+    fn layout_type(&mut self, tid: u16) -> Option<DIType<'ctx>> {
+        let i = tid as usize;
+        if i >= self.prog.layouts.len() {
+            return None;
+        }
+        if let Some(t) = self.layout[i] {
+            return Some(t);
+        }
+        if self.layout_inprog[i] {
+            return None; // cycle: caller (a pointer) falls back to an address
+        }
+        let layout = &self.prog.layouts[i];
+        // Only fixed (non-varlen) structs are modeled natively for now.
+        let fields = match &layout.meta.kind {
+            crate::gc::TypeKind::Struct { fields } if matches!(layout.varlen, VarLen::None) => {
+                fields.clone()
+            }
+            _ => return None,
+        };
+        self.layout_inprog[i] = true;
+        let total_bytes = 16u64 + layout.ptr_fields as u64 * 8 + layout.raw_bytes as u64;
+        let name = layout.meta.name.clone();
+        let members: Vec<DIType<'ctx>> = fields
+            .iter()
+            .filter_map(|f| {
+                let fty = self.field_ty(f.ty)?;
+                let size_bits = di_field_size_bits(self.prog, f.ty);
+                Some(
+                    self.di
+                        .create_member_type(
+                            self.scope,
+                            &f.name,
+                            self.file,
+                            0,
+                            size_bits,
+                            0,
+                            f.offset as u64 * 8,
+                            DIFlags::ZERO,
+                            fty,
+                        )
+                        .as_type(),
+                )
+            })
+            .collect();
+        let st = self
+            .di
+            .create_struct_type(
+                self.scope,
+                &name,
+                self.file,
+                0,
+                total_bytes * 8,
+                0,
+                DIFlags::ZERO,
+                None,
+                &members,
+                0,
+                None,
+                "",
+            )
+            .as_type();
+        self.layout_inprog[i] = false;
+        self.layout[i] = Some(st);
+        Some(st)
+    }
+}
+
+/// Size in bits of a field's value (the storage the member occupies).
+fn di_field_size_bits(prog: &CoreProgram, ft: crate::gc::FieldTy) -> u64 {
+    use crate::gc::FieldTy;
+    match ft {
+        FieldTy::Scalar(s) => scalar_kind_di(s).map(|(_, _, b)| b).unwrap_or(64),
+        FieldTy::Ref(_) => 64,
+        FieldTy::Value(vid) => prog
+            .values
+            .get(vid as usize)
+            .map(|v| v.size as u64 * 8)
+            .unwrap_or(0),
+    }
+}
+
 /// Build the DWARF emitter + a `DIFile` per source. Returns `None` if there is no
 /// source map (e.g. a program built directly in a test) — nothing to attribute.
 fn build_debug_cx<'ctx>(
@@ -211,7 +405,7 @@ fn build_debug_cx<'ctx>(
     }
     // One DIFile per source (index = SourceId), so a span resolves to the right
     // file in the line table.
-    let files = prog
+    let files: Vec<DIFile<'ctx>> = prog
         .sources
         .iter()
         .map(|s| {
@@ -219,7 +413,16 @@ fn build_debug_cx<'ctx>(
             di.create_file(&f, &d)
         })
         .collect();
-    Some(DebugCx { di, cu, files, full })
+    // Full debug: pre-build a native DWARF struct DIE per heap layout so `Ref`
+    // locals render by field name in lldb. Built before `di` is moved into the
+    // DebugCx (the builder only borrows it; `DIType` is `'ctx`-scoped, not tied
+    // to the borrow).
+    let layout_types = if full {
+        DiTypeBuilder::new(&di, cu.as_debug_info_scope(), files[0], prog).build_all()
+    } else {
+        Vec::new()
+    };
+    Some(DebugCx { di, cu, files, full, layout_types })
 }
 
 /// Emit the LLVM IR text for a whole program — the `gcr emit llvm` tap that
@@ -483,13 +686,16 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         Some(sp)
     }
 
-    /// The DWARF `DIType` for a scalar local (debugger P3), so a variable DIE
-    /// carries a real type and `frame variable` decodes the bytes. `None` for
-    /// non-scalar reprs (Ref/Value/Unit) and the FFI raw pointer — those need
-    /// the reflection-paired pretty-printers, a later P3 slice. Returns `None`
-    /// when not emitting debug info.
+    /// The DWARF `DIType` for a local (debugger P3), so a variable DIE carries a
+    /// real type and `frame variable` decodes the bytes. Scalars → a basic type;
+    /// `Ref` → a pointer to that layout's native struct DIE (lldb renders the
+    /// fields), or a raw address for unmodeled (enum/opaque/varlen) layouts.
+    /// `None` for `Value`/`Unit` and the FFI raw pointer, and when not emitting
+    /// debug info.
     fn di_type_for_repr(&self, r: &Repr) -> Option<DIType<'ctx>> {
         let d = self.debug.as_ref()?;
+        // `Ref` locals are handled by the caller (it needs the GC-frame slot +
+        // deref expression to render the struct in place); this returns scalars.
         let s = match r {
             Repr::Scalar(s) => *s,
             _ => return None,
@@ -711,14 +917,20 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
         }
 
-        // DWARF local-variable DIEs (debugger P3). For each named scalar local,
-        // emit a `dbg.declare` pointing at its alloca slot, so lldb's `frame
-        // variable` shows the source name + value. Only in full-debug builds —
-        // the AOT path leaves those unoptimized, so the allocas survive (an
-        // optimized build would coalesce them away and the declares with them).
-        // Params get a parameter DIE (so lldb lists them as arguments); other
-        // named locals get an auto-variable DIE. Non-scalar locals (Ref/Value)
-        // are skipped here — they await the reflection pretty-printers.
+        // DWARF local-variable DIEs (debugger P3). For each named local with a
+        // DWARF type, emit a `dbg.declare` describing where it lives, so lldb's
+        // `frame variable` shows the source name + value. Only in full-debug
+        // builds — the AOT path leaves those unoptimized, so the allocas survive
+        // (an optimized build would coalesce them away and the declares too).
+        // Params get a parameter DIE (lldb lists them as arguments); other named
+        // locals get an auto-variable DIE.
+        //
+        // Location: a plain alloca local points at the alloca (empty expr). A
+        // `Ref` local lives in a GC frame ROOT slot — a `gep` into the `gcframe`
+        // alloca, which has NO simple DWARF location — so we instead point at the
+        // gcframe alloca and append `DW_OP_plus_uconst <slot-offset>`, giving a
+        // real `fbreg+offset` location the collector also keeps current (it
+        // updates the slot in place on relocation — the §5 moving-GC property).
         if let (Some(d), Some(sp)) = (&self.debug, subprogram) {
             if d.full {
                 let (sid, fline, _) = self.fn_debug_loc(f);
@@ -730,13 +942,43 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                         Some(n) => n,
                         None => continue,
                     };
-                    let slot = match slots[i] {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let dty = match self.di_type_for_repr(repr) {
-                        Some(t) => t,
-                        None => continue,
+                    if slots[i].is_none() {
+                        continue;
+                    }
+                    // Compute (DWARF type, storage, location expression):
+                    // `gcframe` = `{ ptr parent, ptr origin, [roots], [ind] }`, so
+                    // root `ri` is at byte offset 16 + ri*8.
+                    const DW_OP_PLUS_UCONST: i64 = 0x23;
+                    const DW_OP_DEREF: i64 = 0x06;
+                    let (dty, storage, expr) = if let Repr::Ref(lid) = repr {
+                        let frame_ptr = frame.expect("Ref local implies a gcframe").0;
+                        let ri = root_index[i].expect("Ref local implies a root slot");
+                        let off = 16i64 + ri as i64 * 8;
+                        match d.layout_types.get(*lid as usize).copied().flatten() {
+                            // Modeled struct: the variable IS the struct living at
+                            // `*(frame+off)` (the slot holds the object pointer the
+                            // collector keeps current) — `+off` then `deref`. lldb
+                            // renders `p = (Point) { x = 3, y = 4 }` directly.
+                            Some(st) => (
+                                st,
+                                frame_ptr,
+                                d.di.create_expression(vec![DW_OP_PLUS_UCONST, off, DW_OP_DEREF]),
+                            ),
+                            // Unmodeled (enum/opaque/varlen): show the slot's
+                            // pointer value as a raw address (no deref).
+                            None => {
+                                let addr = match d.di.create_basic_type("ptr", 64, 1, DIFlags::ZERO) {
+                                    Ok(t) => t.as_type(),
+                                    Err(_) => continue,
+                                };
+                                (addr, frame_ptr, d.di.create_expression(vec![DW_OP_PLUS_UCONST, off]))
+                            }
+                        }
+                    } else {
+                        match self.di_type_for_repr(repr) {
+                            Some(t) => (t, slots[i].unwrap(), d.di.create_expression(vec![])),
+                            None => continue,
+                        }
                     };
                     let is_param = i >= param_local_base && i < param_local_base + nparams;
                     let var = if is_param {
@@ -758,11 +1000,10 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     // instruction — UB that panics nondeterministically. We only
                     // need the side effect (the record attached to `entry`), so
                     // we call the C function and discard its return.
-                    let expr = d.di.create_expression(vec![]);
                     unsafe {
                         inkwell::llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
                             d.di.as_mut_ptr(),
-                            slot.as_value_ref(),
+                            storage.as_value_ref(),
                             var.as_mut_ptr(),
                             expr.as_mut_ptr(),
                             dloc.as_mut_ptr(),

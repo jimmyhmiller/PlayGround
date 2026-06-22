@@ -96,6 +96,25 @@ fn full_debug_emits_named_local_and_param_dies() {
         );
     }
 
+    // A `Ref` local must also produce a native DWARF struct type so lldb renders
+    // it by field. Build a program with a heap struct and check the struct DIE +
+    // its members are emitted.
+    let st = dir.join("struct.o");
+    let sprog = lower_named(
+        "struct Point { x: i64, y: i64 }\nfn main() -> i64 {\n  let p = Point { x: 3, y: 4 };\n  p.x + p.y\n}\n",
+        "prog.gcr",
+    );
+    codegen_aot_object_level(&sprog, &st, DebugLevel::Full).expect("struct aot object");
+    let sinfo = dwarfdump(&st, "--debug-info");
+    assert!(
+        sinfo.contains("DW_TAG_structure_type") && sinfo.contains("(\"Point\")"),
+        "full-debug build missing the Point struct DIE:\n{sinfo}"
+    );
+    assert!(
+        sinfo.matches("DW_TAG_member").count() >= 2,
+        "Point struct DIE should have ≥2 members (x, y):\n{sinfo}"
+    );
+
     // Line-tables-only default: NONE of the gc-rust source variable DIEs. (The
     // runtime staticlib's own Rust DWARF is not in this object — only gc-rust
     // code is — so a clean object has zero variable DIEs.)
