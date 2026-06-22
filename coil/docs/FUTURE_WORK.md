@@ -44,6 +44,8 @@ The roadmap below is in two halves: **table stakes** (the unglamorous work that 
 Today a type error says `in 'main': arithmetic on different types (f64 vs i64)` with **no line, column, or source snippet**: the tokenizer tracks no positions. Everything else is more painful until this exists.
 
 - **Source spans** end to end: byte offsets in the tokenizer → spans on `Sexp` → spans on the AST → spans in errors. Macro-generated nodes carry the expansion's provenance (the macro call site + the template location).
+
+  **DONE** (the core): every `Expr` carries a source span (`struct Expr { kind: ExprKind, span }`; parser attaches real spans, check/mono preserve them through elaboration). **Type-checker errors now render with `file:line:col` + a caret**, pointing at the innermost offending sub-expression (the `synth` recursion attaches each frame's span; innermost wins). Reader + parser errors already did. Remaining: macro-expansion *provenance* (spans across `include`/`import` are `DUMMY` today — needs multi-source span ids), and multi-error reporting/recovery (still stops at the first error).
 - **Rich rendering**: `file:line:col`, the offending source line, a caret/underline, and the existing context-frame "stack trace" (function → argument → macro expansion → import) with a location per frame.
 - **Multi-error reporting** (don't stop at the first) and basic recovery.
 - This also unlocks the LSP (§5) nearly for free.
