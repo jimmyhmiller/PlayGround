@@ -14,12 +14,12 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DISubprogram, DWARFEmissionKind,
-    DWARFSourceLanguage, DebugInfoBuilder,
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DISubprogram, DIType,
+    DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
 };
 use inkwell::module::{FlagBehavior, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{AsValueRef, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
@@ -33,6 +33,31 @@ struct DebugCx<'ctx> {
     cu: DICompileUnit<'ctx>,
     /// `DIFile` per `SourceId` (index = source id; same order as `prog.sources`).
     files: Vec<DIFile<'ctx>>,
+    /// `true` for **full** DWARF (debugger P3): emit local/parameter variable
+    /// DIEs so `frame variable` shows source names + values. `false` =
+    /// line-tables-only (P2): stepping + breakpoints only. Full debug also
+    /// implies the AOT path skips optimization (so allocas/locals survive).
+    full: bool,
+}
+
+/// How much DWARF a build emits. `None` for JIT / `emit llvm` (no debug info);
+/// `LineTables` is the default `gcr build` (P2 — stepping + breakpoints, kept
+/// even under O2); `Full` is `gcr build --debug` (P3 — local-variable
+/// inspection, requires unoptimized codegen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugLevel {
+    None,
+    LineTables,
+    Full,
+}
+
+impl DebugLevel {
+    fn emits_dwarf(self) -> bool {
+        !matches!(self, DebugLevel::None)
+    }
+    fn is_full(self) -> bool {
+        matches!(self, DebugLevel::Full)
+    }
 }
 
 #[derive(Debug)]
@@ -53,21 +78,26 @@ pub fn codegen<'ctx>(
     ctx: &'ctx Context,
     prog: &CoreProgram,
 ) -> Result<Compiled<'ctx>, CodegenError> {
-    codegen_with_debug(ctx, prog, false)
+    codegen_with_debug(ctx, prog, DebugLevel::None)
 }
 
-/// Codegen, optionally emitting DWARF line tables (debugger P2). `debug_info`
-/// should be set ONLY for AOT builds — DWARF lands in the emitted object where
-/// `lldb`/`llvm-dwarfdump` read it; the JIT can't use it without the LLDB
-/// JIT-registration interface (deferred).
+/// Codegen, optionally emitting DWARF (debugger P2/P3). DWARF should be emitted
+/// ONLY for AOT builds — it lands in the emitted object where `lldb`/
+/// `llvm-dwarfdump` read it; the JIT can't use it without the LLDB
+/// JIT-registration interface (deferred). [`DebugLevel::Full`] also emits
+/// local-variable DIEs (P3) and must be paired with unoptimized codegen.
 pub fn codegen_with_debug<'ctx>(
     ctx: &'ctx Context,
     prog: &CoreProgram,
-    debug_info: bool,
+    level: DebugLevel,
 ) -> Result<Compiled<'ctx>, CodegenError> {
     let module = ctx.create_module("gcr");
     let builder = ctx.create_builder();
-    let debug = if debug_info { build_debug_cx(ctx, &module, prog) } else { None };
+    let debug = if level.emits_dwarf() {
+        build_debug_cx(ctx, &module, prog, level.is_full())
+    } else {
+        None
+    };
     let mut cg = Codegen {
         ctx,
         module,
@@ -137,10 +167,16 @@ fn build_debug_cx<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     prog: &CoreProgram,
+    full: bool,
 ) -> Option<DebugCx<'ctx>> {
     if prog.sources.is_empty() {
         return None;
     }
+    let emission = if full {
+        DWARFEmissionKind::Full
+    } else {
+        DWARFEmissionKind::LineTablesOnly
+    };
     let (filename, directory) = split_path(&prog.sources[0].path);
     let (di, cu) = module.create_debug_info_builder(
         /* allow_unresolved */ true,
@@ -152,7 +188,7 @@ fn build_debug_cx<'ctx>(
         /* flags */ "",
         /* runtime_ver */ 0,
         /* split_name */ "",
-        DWARFEmissionKind::LineTablesOnly,
+        emission,
         /* dwo_id */ 0,
         /* split_debug_inlining */ false,
         /* debug_info_for_profiling */ false,
@@ -183,7 +219,7 @@ fn build_debug_cx<'ctx>(
             di.create_file(&f, &d)
         })
         .collect();
-    Some(DebugCx { di, cu, files })
+    Some(DebugCx { di, cu, files, full })
 }
 
 /// Emit the LLVM IR text for a whole program — the `gcr emit llvm` tap that
@@ -447,6 +483,41 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         Some(sp)
     }
 
+    /// The DWARF `DIType` for a scalar local (debugger P3), so a variable DIE
+    /// carries a real type and `frame variable` decodes the bytes. `None` for
+    /// non-scalar reprs (Ref/Value/Unit) and the FFI raw pointer — those need
+    /// the reflection-paired pretty-printers, a later P3 slice. Returns `None`
+    /// when not emitting debug info.
+    fn di_type_for_repr(&self, r: &Repr) -> Option<DIType<'ctx>> {
+        let d = self.debug.as_ref()?;
+        let s = match r {
+            Repr::Scalar(s) => *s,
+            _ => return None,
+        };
+        use crate::core::ScalarRepr::*;
+        // DWARF `DW_ATE_*` encodings: boolean=2, float=4, signed=5, unsigned=7.
+        let (name, encoding, bits): (&str, u32, u64) = match s {
+            I8 => ("i8", 5, 8),
+            I16 => ("i16", 5, 16),
+            I32 => ("i32", 5, 32),
+            I64 => ("i64", 5, 64),
+            U8 => ("u8", 7, 8),
+            U16 => ("u16", 7, 16),
+            U32 => ("u32", 7, 32),
+            U64 => ("u64", 7, 64),
+            F32 => ("f32", 4, 32),
+            F64 => ("f64", 4, 64),
+            // `bool` lowers to `i1` but occupies a byte in its alloca; describe it
+            // as an 8-bit boolean so lldb reads the byte.
+            Bool => ("bool", 2, 8),
+            // `char` is a 32-bit Unicode scalar.
+            Char => ("char", 7, 32),
+            // Raw FFI pointer — skip for now (no pointee type yet).
+            Ptr => return None,
+        };
+        Some(d.di.create_basic_type(name, bits, encoding, DIFlags::ZERO).ok()?.as_type())
+    }
+
     fn define_fn(&mut self, id: FuncId, f: &CoreFn) -> Result<(), CodegenError> {
         // Foreign `extern "C"` functions have no body — they're resolved at
         // link/JIT time, not defined here.
@@ -637,6 +708,68 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     self.builder.build_store(slot, arg).unwrap();
                 }
                 llvm_idx += 1;
+            }
+        }
+
+        // DWARF local-variable DIEs (debugger P3). For each named scalar local,
+        // emit a `dbg.declare` pointing at its alloca slot, so lldb's `frame
+        // variable` shows the source name + value. Only in full-debug builds —
+        // the AOT path leaves those unoptimized, so the allocas survive (an
+        // optimized build would coalesce them away and the declares with them).
+        // Params get a parameter DIE (so lldb lists them as arguments); other
+        // named locals get an auto-variable DIE. Non-scalar locals (Ref/Value)
+        // are skipped here — they await the reflection pretty-printers.
+        if let (Some(d), Some(sp)) = (&self.debug, subprogram) {
+            if d.full {
+                let (sid, fline, _) = self.fn_debug_loc(f);
+                let file = d.files.get(sid as usize).copied().unwrap_or(d.files[0]);
+                let scope = sp.as_debug_info_scope();
+                let dloc = d.di.create_debug_location(self.ctx, fline, 0, scope, None);
+                for (i, repr) in f.locals.iter().enumerate() {
+                    let name = match f.local_names.get(i).and_then(|n| n.as_deref()) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let slot = match slots[i] {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let dty = match self.di_type_for_repr(repr) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    let is_param = i >= param_local_base && i < param_local_base + nparams;
+                    let var = if is_param {
+                        let arg_no = (i - param_local_base + 1) as u32;
+                        d.di.create_parameter_variable(
+                            scope, name, arg_no, file, fline, dty,
+                            /* always_preserve */ true, DIFlags::ZERO,
+                        )
+                    } else {
+                        d.di.create_auto_variable(
+                            scope, name, file, fline, dty,
+                            /* always_preserve */ true, DIFlags::ZERO, /* align */ 0,
+                        )
+                    };
+                    // Emit the `dbg.declare` record directly via llvm-sys,
+                    // bypassing inkwell's `insert_declare_at_end`: under LLVM 21
+                    // that wrapper calls the record API but then casts the
+                    // returned `DbgRecord` to a value and asserts it is an
+                    // instruction — UB that panics nondeterministically. We only
+                    // need the side effect (the record attached to `entry`), so
+                    // we call the C function and discard its return.
+                    let expr = d.di.create_expression(vec![]);
+                    unsafe {
+                        inkwell::llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
+                            d.di.as_mut_ptr(),
+                            slot.as_value_ref(),
+                            var.as_mut_ptr(),
+                            expr.as_mut_ptr(),
+                            dloc.as_mut_ptr(),
+                            entry.as_mut_ptr(),
+                        );
+                    }
+                }
             }
         }
 
@@ -3253,6 +3386,17 @@ fn layouts_to_aot_records(prog: &CoreProgram) -> Vec<(u16, u16, u8)> {
 /// Build a `TargetMachine` configured for the host (mirrors `optimize_module`'s
 /// setup) for object emission.
 fn host_target_machine() -> Result<inkwell::targets::TargetMachine, CodegenError> {
+    host_target_machine_opt(OptimizationLevel::Aggressive)
+}
+
+/// Build the host [`TargetMachine`] at a given backend optimization level. The
+/// level matters for debug builds: even with the IR-level `optimize_module`
+/// skipped, an `Aggressive` backend promotes allocas into registers and the
+/// `dbg.declare` frame-slot locations go stale. Full-debug (P3) passes `None`
+/// so locals stay in their stack slots and `frame variable` reads them.
+fn host_target_machine_opt(
+    opt: OptimizationLevel,
+) -> Result<inkwell::targets::TargetMachine, CodegenError> {
     use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|e| CodegenError(format!("target init failed: {}", e)))?;
@@ -3266,7 +3410,7 @@ fn host_target_machine() -> Result<inkwell::targets::TargetMachine, CodegenError
             &triple,
             &TargetMachine::get_host_cpu_name().to_string(),
             &TargetMachine::get_host_cpu_features().to_string(),
-            OptimizationLevel::Aggressive,
+            opt,
             RelocMode::PIC,
             CodeModel::Default,
         )
@@ -3286,12 +3430,25 @@ pub fn codegen_aot_object(
     prog: &CoreProgram,
     obj_path: &std::path::Path,
 ) -> Result<(), CodegenError> {
+    codegen_aot_object_level(prog, obj_path, DebugLevel::LineTables)
+}
+
+/// Like [`codegen_aot_object`] but with an explicit [`DebugLevel`].
+/// [`DebugLevel::Full`] (debugger P3) emits local-variable DIEs **and skips
+/// optimization** — locals/allocas must survive for `frame variable` to read
+/// them. The default ([`DebugLevel::LineTables`], P2) keeps the O2 pipeline;
+/// LLVM preserves line debug-locations through it, so stepping still works.
+pub fn codegen_aot_object_level(
+    prog: &CoreProgram,
+    obj_path: &std::path::Path,
+    level: DebugLevel,
+) -> Result<(), CodegenError> {
     use inkwell::targets::FileType;
 
     let ctx = Context::create();
-    // AOT: emit DWARF line tables (debugger P2) — they land in the object where
-    // lldb / llvm-dwarfdump read them.
-    let compiled = codegen_with_debug(&ctx, prog, true)?;
+    // AOT: emit DWARF (debugger P2/P3) — it lands in the object where
+    // lldb / llvm-dwarfdump read it.
+    let compiled = codegen_with_debug(&ctx, prog, level)?;
     let module = &compiled.module;
 
     // ---- Rename the program entry to a stable symbol ----------------------
@@ -3410,8 +3567,18 @@ pub fn codegen_aot_object(
         .map_err(|e| CodegenError(format!("AOT module verify failed: {}", e.to_string())))?;
 
     // ---- Optimize then emit the object ------------------------------------
-    optimize_module(module);
-    let machine = host_target_machine()?;
+    // Full-debug builds (P3) skip optimization so locals/allocas survive for
+    // `frame variable`. Line-table builds (P2) optimize as usual — debug
+    // locations survive the O2 pipeline, so stepping is unaffected.
+    // Full-debug builds (P3) keep the backend at `None` too: an optimizing
+    // backend promotes the (still-present) allocas into registers, leaving the
+    // `dbg.declare` frame-slot locations stale.
+    let machine = if level.is_full() {
+        host_target_machine_opt(OptimizationLevel::None)?
+    } else {
+        optimize_module(module);
+        host_target_machine()?
+    };
     machine
         .write_to_file(module, FileType::Object, obj_path)
         .map_err(|e| CodegenError(format!("object emission failed: {}", e.to_string())))?;
@@ -3429,9 +3596,21 @@ pub fn build_executable(
     out_path: &std::path::Path,
     extra_link_args: &[String],
 ) -> Result<(), CodegenError> {
+    build_executable_level(prog, out_path, extra_link_args, DebugLevel::LineTables)
+}
+
+/// Like [`build_executable`] but with an explicit [`DebugLevel`].
+/// [`DebugLevel::Full`] is `gcr build --debug` (debugger P3: unoptimized +
+/// local-variable DIEs so `lldb`'s `frame variable` shows source names/values).
+pub fn build_executable_level(
+    prog: &CoreProgram,
+    out_path: &std::path::Path,
+    extra_link_args: &[String],
+    level: DebugLevel,
+) -> Result<(), CodegenError> {
     // Emit the object next to the output so cleanup is easy and paths are stable.
     let obj_path = out_path.with_extension("o");
-    codegen_aot_object(prog, &obj_path)?;
+    codegen_aot_object_level(prog, &obj_path, level)?;
 
     let staticlib = locate_runtime_staticlib()?;
 

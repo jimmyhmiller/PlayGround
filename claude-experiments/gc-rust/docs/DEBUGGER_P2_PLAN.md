@@ -13,6 +13,9 @@
 > function's DISubprogram lands in its real source file. `dsymutil` runs in
 > `build_executable` (macOS) so the executable is debuggable. NEXT: P3 (full DWARF
 > — locals/params/lexical scopes under `--debug`; reflection pretty-printers).
+> **P3 first increment is now DONE** — `gcr build --debug` emits scalar
+> local/param variable DIEs and lldb `frame variable` shows them with correct
+> values. See `docs/DEBUGGER_P3_PLAN.md`.
 
 
 Builds on P1 (span-threading) + P1b (source-id-per-span, production-correct,

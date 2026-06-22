@@ -9,7 +9,7 @@
 use std::process::ExitCode;
 
 use gcrust::ast::ItemKind;
-use gcrust::codegen::{build_executable, jit_run_i64, jit_run_i64_gc};
+use gcrust::codegen::{build_executable_level, jit_run_i64, jit_run_i64_gc};
 use gcrust::lexer::lex;
 use gcrust::lower::lower_program;
 use gcrust::parser::parse_module;
@@ -229,7 +229,15 @@ fn main() -> ExitCode {
             };
             // Attach source for span→file:line:col resolution (see `run`).
             prog.sources = sources;
-            match build_executable(&prog, &out, &link_args) {
+            // `--debug` → full DWARF (debugger P3): unoptimized + local-variable
+            // DIEs, so `lldb`'s `frame variable` shows source names/values.
+            // Default stays line-tables-only (P2: stepping/breakpoints under O2).
+            let level = if args.iter().any(|a| a == "--debug") {
+                gcrust::codegen::DebugLevel::Full
+            } else {
+                gcrust::codegen::DebugLevel::LineTables
+            };
+            match build_executable_level(&prog, &out, &link_args, level) {
                 Ok(()) => {
                     println!("gcr: wrote {}", out.display());
                     ExitCode::SUCCESS

@@ -4,7 +4,7 @@
 //! macOS keeps DWARF in the `.o` via a debug map) and read it with
 //! `llvm-dwarfdump --debug-line`.
 
-use gcrust::codegen::codegen_aot_object;
+use gcrust::codegen::{codegen_aot_object, codegen_aot_object_level, DebugLevel};
 use gcrust::compile::parse_with_prelude;
 use gcrust::lower::lower_program;
 use gcrust::resolve::resolve_module;
@@ -58,6 +58,54 @@ fn aot_object_has_line_table_for_user_source() {
     assert!(
         line.contains(" 3 ") || line.contains("\t3\t") || line.contains("line 3"),
         "expected a line-3 row in the line table:\n{line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn full_debug_emits_named_local_and_param_dies() {
+    // Debugger P3: a `--debug` (full) build must emit DWARF local-variable and
+    // formal-parameter DIEs with their SOURCE names + a base type, so lldb's
+    // `frame variable` shows `x`, `sum`, … (not `l7`). We dwarfdump the object's
+    // `.debug_info` and check the variable DIEs are present and named. (The
+    // line-tables-only default emits NONE of these — asserted below.)
+    let dir = std::env::temp_dir().join(format!("gcr_dwarf_p3_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "fn add(x: i64, y: i64) -> i64 {\n  let sum = x + y;\n  let doubled = sum + sum;\n  doubled\n}\nfn main() -> i64 {\n  let a = 7;\n  add(a, 35)\n}\n";
+
+    // Full-debug object: variable + parameter DIEs present.
+    let full = dir.join("full.o");
+    let prog = lower_named(src, "prog.gcr");
+    codegen_aot_object_level(&prog, &full, DebugLevel::Full).expect("full aot object");
+    let info = dwarfdump(&full, "--debug-info");
+    for needle in [
+        "DW_TAG_formal_parameter",
+        "DW_TAG_variable",
+        "DW_AT_location",
+        "(\"x\")",
+        "(\"y\")",
+        "(\"sum\")",
+        "(\"doubled\")",
+        "(\"a\")",
+        "(\"i64\")", // the base type
+    ] {
+        assert!(
+            info.contains(needle),
+            "full-debug .debug_info missing `{needle}`:\n{info}"
+        );
+    }
+
+    // Line-tables-only default: NONE of the gc-rust source variable DIEs. (The
+    // runtime staticlib's own Rust DWARF is not in this object — only gc-rust
+    // code is — so a clean object has zero variable DIEs.)
+    let lines_only = dir.join("lines.o");
+    let prog2 = lower_named(src, "prog.gcr");
+    codegen_aot_object(&prog2, &lines_only).expect("line-table aot object");
+    let info2 = dwarfdump(&lines_only, "--debug-info");
+    assert!(
+        !info2.contains("DW_TAG_variable") && !info2.contains("DW_TAG_formal_parameter"),
+        "line-tables-only build must not emit variable DIEs:\n{info2}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

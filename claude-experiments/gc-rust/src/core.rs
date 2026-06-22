@@ -189,6 +189,12 @@ pub struct CoreFn {
     pub ret: Repr,
     /// Total local slots (params first, then `let`/temp locals).
     pub locals: Vec<Repr>,
+    /// Parallel to `locals`: each local's source-level name, when it has one
+    /// (`let x`, a parameter, a closure capture). `None` for compiler temps.
+    /// Drives DWARF local-variable DIEs (debugger P3) so `frame variable` shows
+    /// `x`, not `l7`. Empty for functions lowered before this was threaded
+    /// (treated as all-`None`).
+    pub local_names: Vec<Option<String>>,
     pub body: CoreBlock,
     /// If this is a lifted closure function, it takes an extra *leading* `env`
     /// pointer parameter (before `params`), and its first `closure_captures.len()`

@@ -152,7 +152,9 @@ all leveraging what we have:
 - **P3 — DWARF locals + reflection pretty-printers.** Inspect locals as language
   values (`Point { x: 3, y: 4 }`) via LLDB formatters reusing `render_object`.
   Verify: break, `frame variable`, confirm decoded values; break→GC→continue→
-  re-inspect (the §5 moving-GC check).
+  re-inspect (the §5 moving-GC check). **First increment DONE** — `gcr build
+  --debug` + scalar locals/params show in lldb `frame variable` with correct
+  values. See `docs/DEBUGGER_P3_PLAN.md`. Remaining: struct/enum pretty-printers.
 - **P4 — richer debugging.** Conditional breakpoints / watchpoints (LLDB-native),
   and heap navigation at a stop (reuse the heap explorer's snapshot + heap-diff,
   and `visit_roots` for the live root set at the breakpoint).

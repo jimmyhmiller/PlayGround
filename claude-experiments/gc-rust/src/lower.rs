@@ -212,7 +212,7 @@ fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
 }
 
 fn placeholder_fn() -> CoreFn {
-    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
+    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], local_names: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
 }
 
 /// Collect free variable names referenced in `e`: single-segment path uses that
@@ -414,6 +414,10 @@ struct FnLowerer<'a, 'r, 'm> {
     scope: Vec<HashMap<String, (LocalId, Ty, bool)>>,
     /// All locals' reprs, indexed by LocalId.
     locals: Vec<Repr>,
+    /// Parallel to `locals`: each local's source name, when it has one (set by
+    /// `bind_mut`). `None` for compiler temps. Carried onto `CoreFn.local_names`
+    /// for DWARF locals (debugger P3).
+    local_names: Vec<Option<String>>,
     /// Parallel: each local's semantic Ty (for checking).
     local_tys: Vec<Ty>,
     ret_ty: Ty,
@@ -446,6 +450,7 @@ fn lower_fn<'a>(
             subst: subst.clone(),
             scope: vec![HashMap::new()],
             locals: vec![],
+            local_names: vec![],
             local_tys: vec![],
             ret_ty: ret_ty.clone(),
         };
@@ -485,6 +490,7 @@ fn lower_fn<'a>(
             params,
             ret,
             locals: vec![],
+            local_names: vec![],
             body: CoreBlock { stmts: vec![], tail: None },
             closure_captures: vec![],
             is_extern: true,
@@ -500,6 +506,7 @@ fn lower_fn<'a>(
         subst: subst.clone(),
         scope: vec![HashMap::new()],
         locals: vec![],
+        local_names: vec![],
         local_tys: vec![],
         ret_ty: ret_ty.clone(),
     };
@@ -529,7 +536,7 @@ fn lower_fn<'a>(
     check_assignable(&body_ty, &ret_ty, body_err_span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![], is_extern: false, span: fn_span })
+    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, local_names: lo.local_names, body, closure_captures: vec![], is_extern: false, span: fn_span })
 }
 
 /// Lower a surface type to a ground `Ty`, applying the instantiation subst.
@@ -574,6 +581,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
     fn fresh_local(&mut self, repr: Repr, ty: Ty) -> LocalId {
         let id = self.locals.len() as LocalId;
         self.locals.push(repr);
+        self.local_names.push(None);
         self.local_tys.push(ty);
         id
     }
@@ -583,6 +591,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         self.bind_mut(name, id, ty, false);
     }
     fn bind_mut(&mut self, name: &str, id: LocalId, ty: Ty, is_mut: bool) {
+        // Record the source name for this local (DWARF locals, debugger P3). The
+        // FIRST binding of a slot names it; later rebindings of the same name get
+        // their own fresh slots, so we never clobber a name with a shadow.
+        if let Some(slot) = self.local_names.get_mut(id as usize) {
+            if slot.is_none() {
+                *slot = Some(name.to_string());
+            }
+        }
         self.scope.last_mut().unwrap().insert(name.to_string(), (id, ty, is_mut));
     }
     fn lookup(&self, name: &str) -> Option<(LocalId, Ty)> {
@@ -2071,6 +2087,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         // unit until the body tail tells us otherwise.
         let saved_scope = std::mem::replace(&mut self.scope, vec![HashMap::new()]);
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_local_names = std::mem::take(&mut self.local_names);
         let saved_local_tys = std::mem::take(&mut self.local_tys);
         let saved_ret = std::mem::replace(&mut self.ret_ty, declared_ret.clone().unwrap_or_else(Ty::unit));
 
@@ -2099,6 +2116,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let ret_repr = self.repr_of(&ret_ty, span)?;
 
         let locals = std::mem::replace(&mut self.locals, saved_locals);
+        let local_names = std::mem::replace(&mut self.local_names, saved_local_names);
         self.scope = saved_scope;
         self.local_tys = saved_local_tys;
         self.ret_ty = saved_ret;
@@ -2143,6 +2161,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             params: param_reprs,
             ret: ret_repr,
             locals,
+            local_names,
             body: CoreBlock { stmts: body_block.stmts, tail: body_block.tail },
             closure_captures,
             is_extern: false,
