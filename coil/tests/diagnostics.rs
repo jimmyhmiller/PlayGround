@@ -1,7 +1,7 @@
-//! Source-span diagnostics: reader/parser errors render `file:line:col`, the
-//! offending source line, and a caret. (Checker-level errors don't carry spans
-//! yet — that's the next slice — so they stay bare messages, asserted here so the
-//! staged boundary is explicit.)
+//! Source-span diagnostics: reader, parser, AND type-checker errors render
+//! `file:line:col`, the offending source line, and a caret. Checker errors carry
+//! spans now too (every `Expr` carries its source span; the `synth` recursion
+//! attaches the innermost offending expression's span to the error).
 
 /// A parse-level arity error points at the offending form with a caret.
 #[test]
@@ -34,13 +34,26 @@ fn bad_type_is_located() {
     assert!(err.contains(":2:"), "should point at line 2:\n{err}");
 }
 
-/// Checker errors stay bare (no span) for now — they must still surface their
-/// message and must NOT crash the renderer.
+/// An unbound-variable checker error now points at the offending sub-expression
+/// with a caret (not a bare message).
 #[test]
-fn checker_error_is_bare_message_for_now() {
+fn checker_unbound_var_is_located() {
     let src = "(defn main [] (-> :i64)\n  (iadd x 1))\n";
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("unbound variable 'x'"), "got:\n{err}");
-    // No span ⇒ no caret/location frame.
-    assert!(!err.contains("-->"), "checker errors shouldn't fabricate a span yet:\n{err}");
+    assert!(err.contains("-->"), "checker error should be located:\n{err}");
+    assert!(err.contains(":2:"), "should point at line 2:\n{err}");
+    assert!(err.contains('^'), "missing caret:\n{err}");
+    assert!(err.contains("(iadd x 1))"), "missing source line:\n{err}");
+}
+
+/// A type-mismatch checker error is located at the offending expression — the
+/// innermost span wins (the `(iadd …)` form, on line 2), not the whole function.
+#[test]
+fn checker_type_mismatch_is_located() {
+    let src = "(defn main [] (-> i64)\n  (iadd 1 2.0))\n";
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("different types"), "got:\n{err}");
+    assert!(err.contains("-->") && err.contains(":2:"), "should be located at line 2:\n{err}");
+    assert!(err.contains('^'), "missing caret:\n{err}");
 }

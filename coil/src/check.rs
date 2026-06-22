@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::span::Span;
+use crate::span::{Diag, Span};
 
 struct Sig {
     /// Generic type parameters (empty for an ordinary function/extern).
@@ -89,7 +89,7 @@ struct LoopFrame {
     expected: Option<Type>,
 }
 
-pub fn check(program: &Program) -> Result<Program, String> {
+pub fn check(program: &Program) -> Result<Program, Diag> {
     // ---- type tables --------------------------------------------------------
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
     for sd in &program.structs {
@@ -99,7 +99,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
             is_bits: matches!(sd.layout, Layout::Bits(_)),
         };
         if structs.insert(sd.name.clone(), info).is_some() {
-            return Err(format!("struct '{}' defined twice", sd.name));
+            return Err(format!("struct '{}' defined twice", sd.name).into());
         }
     }
     let mut sums: HashMap<String, SumInfo> = HashMap::new();
@@ -110,11 +110,11 @@ pub fn check(program: &Program) -> Result<Program, String> {
             variants: sd.variants.clone(),
         };
         if sums.insert(sd.name.clone(), info).is_some() {
-            return Err(format!("sum '{}' defined twice", sd.name));
+            return Err(format!("sum '{}' defined twice", sd.name).into());
         }
         for v in &sd.variants {
             if variant_to_sum.insert(v.name.clone(), sd.name.clone()).is_some() {
-                return Err(format!("variant '{}' is declared in two sum types", v.name));
+                return Err(format!("variant '{}' is declared in two sum types", v.name).into());
             }
         }
     }
@@ -143,7 +143,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
     }
     for e in &program.externs {
         if sigs.contains_key(&e.name) {
-            return Err(format!("'{}' is declared more than once", e.name));
+            return Err(format!("'{}' is declared more than once", e.name).into());
         }
         let conv = program
             .conventions
@@ -153,7 +153,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
             return Err(format!(
                 "extern '{}': shim conventions for externs are not supported yet",
                 e.name
-            ));
+            ).into());
         }
         sigs.insert(
             e.name.clone(),
@@ -176,7 +176,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
     let mut consts: HashMap<String, (Expr, Type)> = HashMap::new();
     for c in &program.consts {
         if cx_sig_or_const(&sigs, &consts, &c.name) {
-            return Err(format!("'{}' is declared more than once", c.name));
+            return Err(format!("'{}' is declared more than once", c.name).into());
         }
         let entry = const_entry(c)?;
         consts.insert(c.name.clone(), entry);
@@ -206,7 +206,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
         let mut seen = HashSet::new();
         for (fname, fty) in &sd.fields {
             if !seen.insert(fname) {
-                return Err(format!("struct '{}': duplicate field '{fname}'", sd.name));
+                return Err(format!("struct '{}': duplicate field '{fname}'", sd.name).into());
             }
             validate_type(fty, &cx, &tps)
                 .map_err(|e| format!("struct '{}' field '{fname}': {e}", sd.name))?;
@@ -238,7 +238,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 return Err(format!(
                     "function '{}': shim convention '{}' needs a :ret register",
                     f.name, f.cc
-                ));
+                ).into());
             }
             if conv.params.len() < f.params.len() {
                 return Err(format!(
@@ -248,7 +248,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                     f.cc,
                     conv.params.len(),
                     f.params.len()
-                ));
+                ).into());
             }
         }
 
@@ -297,7 +297,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
                 "function '{}': body has type i64 but the declared return type is {}",
                 f.name,
                 ty_str(&f.ret)
-            ));
+            ).into());
         }
 
         // Codegen sees only pointers: erase the reference tier in the output
@@ -331,7 +331,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
             return Err(format!(
                 "static-assert: condition must be a bool or integer, got {}",
                 ty_str(&t)
-            ));
+            ).into());
         }
         asserts.push(StaticAssert {
             cond,
@@ -354,12 +354,12 @@ pub fn check(program: &Program) -> Result<Program, String> {
 
 /// Validate that a type is well-formed: every named type exists (or is an
 /// in-scope type parameter), and every generic application has the right arity.
-fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String> {
+fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), Diag> {
     match t {
         Type::Never => Ok(()),   // synthesized only; not user-writable
         // `void` is ONLY a return type — never a parameter, field, or component
         // type. Return positions validate it separately (skipping this).
-        Type::Void => Err("'void' is only valid as a return type".to_string()),
+        Type::Void => Err("'void' is only valid as a return type".to_string().into()),
         Type::Int(..) => Ok(()),
         Type::Float(..) | Type::Bool => Ok(()),
         Type::Ptr(p) => validate_type(p, cx, tps),
@@ -368,12 +368,12 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
         Type::Slice(e) => validate_type(e, cx, tps),
         Type::Vec(e, n) => {
             if *n == 0 {
-                return Err("vec must have a positive lane count".to_string());
+                return Err("vec must have a positive lane count".to_string().into());
             }
             match &**e {
                 Type::Int(..) | Type::Float(..) => Ok(()),
                 Type::Struct(p) if tps.contains(p) => Ok(()), // opaque param; checked at mono
-                other => Err(format!("vec element must be a scalar int/float, got {}", ty_str(other))),
+                other => Err(format!("vec element must be a scalar int/float, got {}", ty_str(other)).into()),
             }
         }
         Type::Struct(name) => {
@@ -386,7 +386,7 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
                     Err(format!(
                         "generic type '{name}' expects {} type arguments, got 0",
                         si.type_params.len()
-                    ))
+                    ).into())
                 }
             } else if let Some(si) = cx.sums.get(name) {
                 if si.type_params.is_empty() {
@@ -395,10 +395,10 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
                     Err(format!(
                         "generic type '{name}' expects {} type arguments, got 0",
                         si.type_params.len()
-                    ))
+                    ).into())
                 }
             } else {
-                Err(format!("unknown type '{name}'"))
+                Err(format!("unknown type '{name}'").into())
             }
         }
         Type::Fn(_, params, ret) => {
@@ -421,7 +421,7 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
                 return Err(format!(
                     "generic type '{name}' expects {arity} type arguments, got {}",
                     args.len()
-                ));
+                ).into());
             }
             Ok(())
         }
@@ -431,6 +431,12 @@ fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), String>
 /// Synthesize the type of `e` and return an elaborated copy with literal
 /// coercions and inferred type arguments inserted. `tps` is the set of type
 /// parameters in scope (opaque types) for the function being checked.
+///
+/// Thin wrapper over [`synth_inner`] that attaches `e`'s source span to any
+/// error this frame raises. Because `with_span` only fills a *spanless* diag,
+/// and recursion goes through `synth` (so each child error already carries the
+/// child's span), the innermost offending expression's span wins as the error
+/// bubbles up — and every error a frame raises itself gets that frame's span.
 fn synth(
     e: &Expr,
     expected: Option<&Type>,
@@ -438,7 +444,18 @@ fn synth(
     cx: &Cx,
     tps: &HashSet<String>,
     fname: &str,
-) -> Result<(Expr, Type), String> {
+) -> Result<(Expr, Type), Diag> {
+    synth_inner(e, expected, env, cx, tps, fname).map_err(|d| d.with_span(e.span))
+}
+
+fn synth_inner(
+    e: &Expr,
+    expected: Option<&Type>,
+    env: &mut HashMap<String, Type>,
+    cx: &Cx,
+    tps: &HashSet<String>,
+    fname: &str,
+) -> Result<(Expr, Type), Diag> {
     match &e.kind {
         ExprKind::Int(n) => Ok((Expr::new(ExprKind::Int(*n), e.span), Type::Int(64, true))),
         ExprKind::Float(x) => Ok((Expr::new(ExprKind::Float(*x), e.span), Type::Float(64))),
@@ -464,7 +481,7 @@ fn synth(
                 return Err(format!(
                     "in '{fname}': cannot take a mutable borrow of immutable '{}'",
                     ty_str(&pt)
-                ));
+                ).into());
             }
             Ok((pe, Type::Ref(*mutable, Box::new(pointee))))
         }
@@ -479,7 +496,7 @@ fn synth(
             if let Some((lit, ty)) = cx.consts.get(name) {
                 return Ok((lit.clone(), ty.clone()));
             }
-            Err(format!("in '{fname}': unbound variable '{name}'"))
+            Err(format!("in '{fname}': unbound variable '{name}'").into())
         }
         ExprKind::LlvmIr { result, args, body } => {
             // The raw-IR escape hatch: the form's type *is* the declared result
@@ -498,11 +515,11 @@ fn synth(
                         return Err(format!(
                             "in '{fname}': llvm-ir operand uses a void value \
                              (a (-> void) call yields nothing)"
-                        ));
+                        ).into());
                     }
                     Ok(e)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, Diag>>()?;
             Ok((
                 Expr::new(ExprKind::LlvmIr { result: result.clone(), args: eargs, body: body.clone() }, e.span),
                 result.clone(),
@@ -517,7 +534,7 @@ fn synth(
                 return Err(format!(
                     "in '{fname}': arithmetic requires integers, got {}",
                     ty_str(&t)
-                ));
+                ).into());
             }
             let rhs = sides.pop().unwrap();
             let lhs = sides.pop().unwrap();
@@ -536,7 +553,7 @@ fn synth(
                 return Err(format!(
                     "in '{fname}': inot requires an integer, got {}",
                     ty_str(&xt)
-                ));
+                ).into());
             }
             Ok((Expr::new(ExprKind::Not(Box::new(xe)), e.span), xt))
         }
@@ -549,7 +566,7 @@ fn synth(
                 return Err(format!(
                     "in '{fname}': comparison requires integers, got {}",
                     ty_str(&t)
-                ));
+                ).into());
             }
             let rhs = sides.pop().unwrap();
             let lhs = sides.pop().unwrap();
@@ -570,7 +587,7 @@ fn synth(
                 if cx.loops.borrow().iter().any(|f| f.label.as_deref() == Some(l)) {
                     return Err(format!(
                         "in '{fname}': loop label ':{l}' shadows an enclosing loop with the same label"
-                    ));
+                    ).into());
                 }
             }
             cx.loops.borrow_mut().push(LoopFrame {
@@ -603,7 +620,7 @@ fn synth(
             let (idx, target_expected) = {
                 let loops = cx.loops.borrow();
                 if loops.is_empty() {
-                    return Err(format!("in '{fname}': break outside of a loop"));
+                    return Err(format!("in '{fname}': break outside of a loop").into());
                 }
                 let idx = match label {
                     Some(l) => loops.iter().rposition(|f| f.label.as_deref() == Some(l)).ok_or_else(
@@ -642,7 +659,7 @@ fn synth(
                             "in '{fname}': loop breaks with different value types ({} vs {})",
                             ty_str(prev),
                             ty_str(&vty)
-                        ));
+                        ).into());
                     }
                     Some(_) => {}
                 }
@@ -652,11 +669,11 @@ fn synth(
         ExprKind::Continue { label } => {
             let loops = cx.loops.borrow();
             if loops.is_empty() {
-                return Err(format!("in '{fname}': continue outside of a loop"));
+                return Err(format!("in '{fname}': continue outside of a loop").into());
             }
             if let Some(l) = label {
                 if !loops.iter().any(|f| f.label.as_deref() == Some(l)) {
-                    return Err(format!("in '{fname}': continue to unknown loop label ':{l}'"));
+                    return Err(format!("in '{fname}': continue to unknown loop label ':{l}'").into());
                 }
             }
             Ok((Expr::new(ExprKind::Continue { label: label.clone() }, e.span), Type::Never))
@@ -667,7 +684,7 @@ fn synth(
                 return Err(format!(
                     "in '{fname}': if condition must be a bool or integer, got {}",
                     ty_str(&ct)
-                ));
+                ).into());
             }
             match expected {
                 // checking mode: push the expected type into both branches, so a
@@ -737,7 +754,7 @@ fn synth(
                     return Err(format!(
                         "in '{fname}': cannot bind '{name}' to a void value (a (-> void) \
                          call yields nothing)"
-                    ));
+                    ).into());
                 }
                 match &vt {
                     // binding to an existing place is an *alias* (no new storage);
@@ -748,7 +765,7 @@ fn synth(
                             return Err(format!(
                                 "in '{fname}': cannot make a mutable alias '{name}' of an \
                                  immutable reference"
-                            ));
+                            ).into());
                         }
                         env.insert(name.clone(), Type::Ref(*mutable, pointee.clone()));
                         new_binds.push((name.clone(), false, ve));
@@ -845,7 +862,7 @@ fn synth(
                     if sig.variadic { "at least " } else { "" },
                     sig.params.len(),
                     args.len()
-                ));
+                ).into());
             }
             if sig.type_params.is_empty() {
                 // non-generic: each parameter type is known up front, so check the
@@ -853,7 +870,7 @@ fn synth(
                 if !type_args.is_empty() {
                     return Err(format!(
                         "in '{fname}': '{func}' is not generic but got type arguments"
-                    ));
+                    ).into());
                 }
                 let mut new_args = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
@@ -868,7 +885,7 @@ fn synth(
                             return Err(format!(
                                 "in '{fname}': variadic argument uses a void value \
                                  (a (-> void) call yields nothing)"
-                            ));
+                            ).into());
                         }
                         new_args.push(ae);
                         continue;
@@ -916,7 +933,7 @@ fn synth(
             // ones with the now-known parameter type pushed in as the expected
             // type (bidirectional inference through a nested generic call).
             let mut arglist: Vec<Option<(Expr, Type)>> = Vec::with_capacity(args.len());
-            let mut deferred: Vec<(usize, String)> = Vec::new();
+            let mut deferred: Vec<(usize, Diag)> = Vec::new();
             for (i, a) in args.iter().enumerate() {
                 let saved = env.clone();
                 match synth(a, None, env, cx, tps, fname) {
@@ -1037,7 +1054,7 @@ fn synth(
             if cx.structs.get(sname).is_some_and(|s| s.is_bits) {
                 return Err(format!(
                     "in '{fname}': '{sname}' is a :layout bits struct; use (get p {field}) / (set! p {field} v)"
-                ));
+                ).into());
             }
             let fields = struct_fields(&pointee, cx)
                 .map_err(|e| format!("in '{fname}': {e}"))?;
@@ -1062,7 +1079,7 @@ fn synth(
                 None => Err(format!(
                     "in '{fname}': load expects a pointer or reference, got {}",
                     ty_str(&pt)
-                )),
+                ).into()),
             }
         }
         ExprKind::Store { ptr, val } => {
@@ -1073,7 +1090,7 @@ fn synth(
                     return Err(format!(
                         "in '{fname}': store! expects a pointer or reference, got {}",
                         ty_str(&pt)
-                    ))
+                    ).into())
                 }
             };
             if !is_writable(&pt) {
@@ -1081,7 +1098,7 @@ fn synth(
                     "in '{fname}': cannot store! through immutable reference of type {} \
                      (declare it `(mut …)` to make it writable)",
                     ty_str(&pt)
-                ));
+                ).into());
             }
             let (ve, vt) = synth(val, Some(&pointee), env, cx, tps, fname)?;
             let ve = coerce(ve, vt, &pointee, false, fname, "store! value")?;
@@ -1116,7 +1133,7 @@ fn synth(
                 None => Err(format!(
                     "in '{fname}': index expects a pointer or reference, got {}",
                     ty_str(&pt)
-                )),
+                ).into()),
             }
         }
         ExprKind::Cast { ty, expr } => {
@@ -1142,7 +1159,7 @@ fn synth(
                     "in '{fname}': cast only converts among int, float, and ptr (got {} to {})",
                     ty_str(&et),
                     ty_str(ty)
-                )),
+                ).into()),
             }
         }
         ExprKind::SizeOf(ty) => {
@@ -1161,7 +1178,7 @@ fn synth(
                 let name = struct_name(ty).unwrap_or("?");
                 return Err(format!(
                     "in '{fname}': offsetof: struct '{name}' has no field '{field}'"
-                ));
+                ).into());
             }
             Ok((Expr::new(ExprKind::OffsetOf(ty.clone(), field.clone()), e.span), Type::Int(64, true)))
         }
@@ -1172,7 +1189,7 @@ fn synth(
                 other => Err(format!(
                     "in '{fname}': free expects a pointer, got {}",
                     ty_str(&other)
-                )),
+                ).into()),
             }
         }
         ExprKind::Construct { sum, variant, args } => {
@@ -1196,7 +1213,7 @@ fn synth(
                 format!("in '{fname}': match expects a sum value, got {}", ty_str(&st))
             })?;
             if arms.is_empty() {
-                return Err(format!("in '{fname}': empty match"));
+                return Err(format!("in '{fname}': empty match").into());
             }
             let mut covered: HashSet<&str> = HashSet::new();
             // In checking mode each arm body is checked against `expected`; in
@@ -1209,7 +1226,7 @@ fn synth(
                     format!("in '{fname}': sum '{sumname}' has no variant '{}'", arm.variant)
                 })?;
                 if !covered.insert(arm.variant.as_str()) {
-                    return Err(format!("in '{fname}': duplicate match arm for '{}'", arm.variant));
+                    return Err(format!("in '{fname}': duplicate match arm for '{}'", arm.variant).into());
                 }
                 if arm.binds.len() != v.fields.len() {
                     return Err(format!(
@@ -1217,7 +1234,7 @@ fn synth(
                         arm.variant,
                         arm.binds.len(),
                         v.fields.len()
-                    ));
+                    ).into());
                 }
                 let saved = env.clone();
                 for (b, (_, fty)) in arm.binds.iter().zip(&v.fields) {
@@ -1245,7 +1262,7 @@ fn synth(
                     "in '{fname}': non-exhaustive match on '{sumname}' ({} of {} variants)",
                     covered.len(),
                     variants.len()
-                ));
+                ).into());
             }
             match expected {
                 Some(exp) => Ok((
@@ -1280,13 +1297,13 @@ fn synth(
             if !sig.type_params.is_empty() {
                 return Err(format!(
                     "in '{fname}': cannot take a function pointer to generic function '{name}'"
-                ));
+                ).into());
             }
             if !sig.fnptr_ok {
                 return Err(format!(
                     "in '{fname}': cannot take a function pointer to '{name}' \
                      (shim-convention functions are not supported yet)"
-                ));
+                ).into());
             }
             Ok((
                 Expr::new(ExprKind::FnPtrOf(name.clone()), e.span),
@@ -1302,7 +1319,7 @@ fn synth(
                             "in '{fname}': function pointer expects {} args, got {}",
                             params.len(),
                             args.len()
-                        ));
+                        ).into());
                     }
                     let mut new_args = Vec::with_capacity(args.len());
                     for (i, a) in args.iter().enumerate() {
@@ -1328,7 +1345,7 @@ fn synth(
                 other => Err(format!(
                     "in '{fname}': call-ptr expects a function pointer, got {}",
                     ty_str(&other)
-                )),
+                ).into()),
             }
         }
         // Produced by `coerce_arg` as part of elaboration; never an input to
@@ -1358,7 +1375,7 @@ fn synth_construct(
     tps: &HashSet<String>,
     fname: &str,
     span: Span,
-) -> Result<(Expr, Type), String> {
+) -> Result<(Expr, Type), Diag> {
     let sumname = cx.variant_to_sum[variant].clone();
     let si = &cx.sums[&sumname];
     let v = si
@@ -1371,7 +1388,7 @@ fn synth_construct(
             "in '{fname}': variant '{variant}' takes {} field(s), got {}",
             v.fields.len(),
             args.len()
-        ));
+        ).into());
     }
     let tparams = &si.type_params;
     let tpset: HashSet<String> = tparams.iter().cloned().collect();
@@ -1386,7 +1403,7 @@ fn synth_construct(
                 "in '{fname}': '{variant}' expects {} type arguments, got {}",
                 tparams.len(),
                 type_args.len()
-            ));
+            ).into());
         }
         for ta in type_args {
             validate_type(ta, cx, tps).map_err(|e| format!("in '{fname}': type argument: {e}"))?;
@@ -1420,7 +1437,7 @@ fn synth_construct(
                 return Err(format!(
                     "in '{fname}': cannot infer type argument '{p}' for '{variant}'; \
                      provide it explicitly: ({variant} [<types>] ...)"
-                ));
+                ).into());
             }
         }
         let mut out = Vec::with_capacity(args.len());
@@ -1481,7 +1498,7 @@ fn check_to(
     tps: &HashSet<String>,
     fname: &str,
     what: &str,
-) -> Result<Expr, String> {
+) -> Result<Expr, Diag> {
     let (ee, et) = synth(e, Some(want), env, cx, tps, fname)?;
     coerce(ee, et, want, false, fname, what)
 }
@@ -1503,14 +1520,14 @@ fn solve_type_args(
     tps: &HashSet<String>,
     fname: &str,
     what: &str,
-) -> Result<HashMap<String, Type>, String> {
+) -> Result<HashMap<String, Type>, Diag> {
     if !type_args.is_empty() {
         if type_args.len() != type_params.len() {
             return Err(format!(
                 "in '{fname}': '{what}' expects {} type arguments, got {}",
                 type_params.len(),
                 type_args.len()
-            ));
+            ).into());
         }
         for ta in type_args {
             validate_type(ta, cx, tps).map_err(|e| format!("in '{fname}': type argument: {e}"))?;
@@ -1535,7 +1552,7 @@ fn solve_type_args(
             return Err(format!(
                 "in '{fname}': cannot infer type argument '{p}' for '{what}'; \
                  provide it explicitly: ({what} [<types>] ...)"
-            ));
+            ).into());
         }
     }
     Ok(subst)
@@ -1550,7 +1567,7 @@ fn unify(
     tpset: &HashSet<String>,
     subst: &mut HashMap<String, Type>,
     fname: &str,
-) -> Result<(), String> {
+) -> Result<(), Diag> {
     // forbid-use: `void` is return-position-only, so it can NEVER be a type
     // argument — inferring a type parameter to void would make a field/parameter
     // void (a no-silent-wrong hole, and a codegen panic on basic_ty(Void)). This is
@@ -1560,7 +1577,7 @@ fn unify(
         return Err(format!(
             "in '{fname}': a void value cannot be used as a type argument \
              (a (-> void) call yields nothing)"
-        ));
+        ).into());
     }
     if let Type::Struct(p) = decl {
         if tpset.contains(p) {
@@ -1570,7 +1587,7 @@ fn unify(
                         "in '{fname}': conflicting types for parameter '{p}' ({} vs {})",
                         ty_str(prev),
                         ty_str(actual)
-                    ));
+                    ).into());
                 }
                 Some(_) => {}
                 None => {
@@ -1660,7 +1677,7 @@ fn coerce_arg(
     is_extern: bool,
     fname: &str,
     what: &str,
-) -> Result<Expr, String> {
+) -> Result<Expr, Diag> {
     match want {
         Type::Ref(want_mut, wp) => {
             // A place argument is borrowed directly; an rvalue of the pointee
@@ -1673,14 +1690,14 @@ fn coerce_arg(
                         return Err(format!(
                             "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place as (mut …)",
                             ty_str(wp)
-                        ));
+                        ).into());
                     }
                     if &at != &**wp {
                         return Err(format!(
                             "in '{fname}': {what} expects a reference to {}, got {}",
                             ty_str(wp),
                             ty_str(&at)
-                        ));
+                        ).into());
                     }
                     // Spill the temporary and pass a pointer to it.
                     let sp = ae.span;
@@ -1692,7 +1709,7 @@ fn coerce_arg(
                     "in '{fname}': {what} has type {} but expected a reference to {}",
                     ty_str(&at),
                     ty_str(wp)
-                ));
+                ).into());
             }
             if *want_mut {
                 let explicitly_mut = is_mut_borrow || matches!(at, Type::Ptr(_));
@@ -1700,12 +1717,12 @@ fn coerce_arg(
                     return Err(format!(
                         "in '{fname}': {what} is a (mut {}) parameter; pass a mutable place as (mut …)",
                         ty_str(wp)
-                    ));
+                    ).into());
                 }
                 if !is_writable(&at) {
                     return Err(format!(
                         "in '{fname}': {what} cannot be mutably borrowed (it is immutable)"
-                    ));
+                    ).into());
                 }
             }
             Ok(ae) // the borrow was already erased to the underlying pointer
@@ -1879,7 +1896,7 @@ fn bit_field_type(
     cx: &Cx,
     tps: &HashSet<String>,
     fname: &str,
-) -> Result<(Expr, Type), String> {
+) -> Result<(Expr, Type), Diag> {
     let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
     let pointee = match pt {
         Type::Ptr(p) => *p,
@@ -1887,7 +1904,7 @@ fn bit_field_type(
             return Err(format!(
                 "in '{fname}': get/set! needs a pointer, got {}",
                 ty_str(&other)
-            ))
+            ).into())
         }
     };
     match struct_name(&pointee) {
@@ -1901,7 +1918,7 @@ fn bit_field_type(
         _ => Err(format!(
             "in '{fname}': get/set! needs a pointer to a :layout bits struct, got (ptr {})",
             ty_str(&pointee)
-        )),
+        ).into()),
     }
 }
 
@@ -1970,7 +1987,7 @@ fn cx_sig_or_const(
 /// reports the literal default (so it re-infers like an inline literal); a typed
 /// const pins the type, requiring the value's kind to match and (for integers)
 /// to fit.
-fn const_entry(c: &Const) -> Result<(Expr, Type), String> {
+fn const_entry(c: &Const) -> Result<(Expr, Type), Diag> {
     let bad = |ty: &Type, kind: &str| {
         format!("const '{}': {kind} value cannot have type {}", c.name, ty_str(ty))
     };
@@ -1983,31 +2000,31 @@ fn const_entry(c: &Const) -> Result<(Expr, Type), String> {
                         "const '{}': literal {n} does not fit in {}",
                         c.name,
                         ty_str(c.ty.as_ref().unwrap())
-                    ));
+                    ).into());
                 }
                 Ok((Expr::dummy(ExprKind::Int(n)), Type::Int(*bits, *signed)))
             }
-            Some(other) => Err(bad(other, "integer")),
+            Some(other) => Err(bad(other, "integer").into()),
         },
         ConstLit::Float(x) => match &c.ty {
             None => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(64))),
             Some(Type::Float(b)) => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(*b))),
-            Some(other) => Err(bad(other, "float")),
+            Some(other) => Err(bad(other, "float").into()),
         },
         ConstLit::Bool(b) => match &c.ty {
             None | Some(Type::Bool) => Ok((Expr::dummy(ExprKind::Bool(b)), Type::Bool)),
-            Some(other) => Err(bad(other, "boolean")),
+            Some(other) => Err(bad(other, "boolean").into()),
         },
     }
 }
 
-fn coerce_lit(e: Expr, target: &Type, fname: &str) -> Result<Expr, String> {
+fn coerce_lit(e: Expr, target: &Type, fname: &str) -> Result<Expr, Diag> {
     if let (ExprKind::Int(n), Type::Int(bits, signed)) = (&e.kind, target) {
         if !fits(*n, *bits, *signed) {
             return Err(format!(
                 "in '{fname}': literal {n} does not fit in {}",
                 ty_str(target)
-            ));
+            ).into());
         }
     }
     let sp = e.span;
@@ -2027,7 +2044,7 @@ fn coerce(
     is_extern: bool,
     fname: &str,
     what: &str,
-) -> Result<Expr, String> {
+) -> Result<Expr, Diag> {
     if &et == target {
         return Ok(e);
     }
@@ -2042,7 +2059,7 @@ fn coerce(
     if et == Type::Void {
         return Err(format!(
             "in '{fname}': {what} uses a void value (a (-> void) call yields nothing)"
-        ));
+        ).into());
     }
     // A divergent (Never-typed) expression — break/continue/return-from, or a
     // break-less loop — has no value and stands in for any type.
@@ -2071,7 +2088,7 @@ fn coerce(
         "in '{fname}': {what} has type {} but expected {}",
         ty_str(&et),
         ty_str(target)
-    ))
+    ).into())
 }
 
 /// Reconcile a set of sibling expressions to one common type: a literal sibling
@@ -2081,7 +2098,7 @@ fn unify_branches(
     branches: Vec<(Expr, Type)>,
     fname: &str,
     what: &str,
-) -> Result<(Vec<Expr>, Type), String> {
+) -> Result<(Vec<Expr>, Type), Diag> {
     let mut concrete: Option<Type> = None;
     for (e, t) in &branches {
         // A Never-typed branch (one that diverges) is non-constraining — like a
@@ -2090,7 +2107,7 @@ fn unify_branches(
         if !is_literal(e) && t != &Type::Never {
             match &concrete {
                 None => concrete = Some(t.clone()),
-                Some(c) if c != t => return Err(mismatch_msg(c, t, fname, what)),
+                Some(c) if c != t => return Err(mismatch_msg(c, t, fname, what).into()),
                 _ => {}
             }
         }
@@ -2114,7 +2131,7 @@ fn unify_branches(
         } else if same_number_kind(&t, &target) && is_literal(&e) {
             out.push(coerce_lit(e, &target, fname)?);
         } else {
-            return Err(mismatch_msg(&t, &target, fname, what));
+            return Err(mismatch_msg(&t, &target, fname, what).into());
         }
     }
     Ok((out, target))
