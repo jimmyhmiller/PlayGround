@@ -80,10 +80,21 @@ Note: pure-arithmetic statements over constants still produce no instructions
 ## Deferred (honest — increment 3+)
 
 - **Local-variable / parameter DI** (`DILocalVariable` + `llvm.dbg.declare` /
-  `dbg.value`), so `frame variable` / `p x` work. Coil binds immutable `let`s and
-  scalar params as SSA values (not `alloca`s), so this wants either `dbg.value`
-  intrinsics or a `-g`-only spill of locals to debug slots, plus a Coil-`Type` →
-  `DIType` mapping (scalars are easy; structs/sums need member info).
+  `dbg.value`), so `frame variable` / `p x` work. The codegen side was prototyped
+  (a `Type` → `DIType` map for scalars/pointers + a `-g`-only spill of each scalar
+  param to a debug `alloca`), but it is **BLOCKED by a toolchain mismatch in this
+  environment**: inkwell 0.5's `insert_declare_at_end`/`insert_dbg_value_before`
+  call the C symbols `LLVMDIBuilderInsertDeclareAtEnd` / `…InsertDbgValueBefore`,
+  which were **removed in LLVM 19+** (the "debug records" migration renamed them
+  to `…InsertDeclareRecordAtEnd`, etc.). The build links Homebrew LLVM **21** libs
+  (despite the `llvm18-0` feature — most symbols still match, so increments 1–2
+  link fine; these two do not), so the link fails with an undefined symbol.
+  Unblock by one of: building against real LLVM ≤18 libs (set
+  `LLVM_SYS_181_PREFIX=/opt/homebrew/opt/llvm@18` and rebuild `llvm-sys`); an
+  inkwell version exposing the `InsertDeclareRecord*` API; or emitting the
+  `@llvm.dbg.declare` intrinsic call by hand. (Coil also binds immutable `let`s /
+  scalar params as SSA values, not `alloca`s, so a `-g`-only spill or `dbg.value`
+  is needed regardless — but the symbol mismatch is the immediate blocker.)
 - **Typed `DISubroutineType`** (parameter/return DWARF types); currently one
   shared opaque `() -> ?` signature.
 - A **debug-info path for included/imported functions** (multi-source spans), once
