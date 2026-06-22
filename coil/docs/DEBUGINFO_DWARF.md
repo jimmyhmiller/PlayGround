@@ -49,19 +49,41 @@ it. A `-g` build therefore runs **`dsymutil`** to gather a `<exe>.dSYM` next to
 the executable (best-effort — skipped if absent, e.g. ELF hosts where DWARF lands
 in the binary), then removes the `.o`.
 
-## Deferred (honest — increment 2+)
+# Increment 2 — per-statement line tables (DONE)
 
-- **Per-statement / per-expression line tables** — the headline of "step through
-  code line by line." This needs a source **span on every `Expr`**, which the AST
-  does not carry today (spans live only on `Sexp`; 220 `Expr::` match sites, and
-  several checker invariants — `is_literal`, place detection, tail analysis —
-  inspect raw `Expr` shapes, so a naïve `{kind, span}` wrapper would disturb them).
-  This is its own deliberate slice, and it also unblocks **checker-level
-  diagnostics carrying spans** (today they're bare messages) — the same
-  foundation serves both.
-- **Local-variable / parameter DI** (`DILocalVariable` + `llvm.dbg.declare`), so
-  `frame variable` / `p x` work. Needs the variable→alloca mapping threaded with
-  types into DWARF type entries.
+Now that every `Expr` carries a source span (the per-Expr span foundation),
+codegen sets a **per-statement debug location**: `emit_expr` calls `set_dbg_loc`
+from each expression's span (scoped to the function's `DISubprogram`, threaded on
+`Cg.cur_sp`), so each statement's instructions map to its own source line. In
+lldb, `next` walks the body line by line (verified — tests/debuginfo.rs
+`lldb_steps_line_by_line`), and a function breakpoint now lands on the first body
+statement rather than the `defn` line.
+
+## The pipeline, again — `-g` goes almost-empty
+
+Per-statement stepping is destroyed by optimization (constant folding collapses
+`(iadd 1 2)` to a constant; mem2reg promotes locals out of memory). So a `-g`
+build now runs only **`function(tailcallelim),always-inline`**:
+
+- `tailcallelim` is non-negotiable — Coil's only loop is self-tail-recursion, so
+  without TRE a recursive program overflows the stack (verified: 100M-deep tail
+  recursion exits cleanly under `-g`).
+- `always-inline` keeps the `(llvm-ir …)` zero-overhead helpers inlined (a
+  different pass from the cost-based inliner, which stays off).
+- Everything else (mem2reg, instcombine, GVN, the inliner) is OFF, so statements
+  survive as steppable instructions and `alloca`-backed locals stay in memory.
+
+Note: pure-arithmetic statements over constants still produce no instructions
+(immutable `let`s are SSA values, not stores), so there is nothing to step
+*onto* for them — stepping is most useful across calls / effects / control flow.
+
+## Deferred (honest — increment 3+)
+
+- **Local-variable / parameter DI** (`DILocalVariable` + `llvm.dbg.declare` /
+  `dbg.value`), so `frame variable` / `p x` work. Coil binds immutable `let`s and
+  scalar params as SSA values (not `alloca`s), so this wants either `dbg.value`
+  intrinsics or a `-g`-only spill of locals to debug slots, plus a Coil-`Type` →
+  `DIType` mapping (scalars are easy; structs/sums need member info).
 - **Typed `DISubroutineType`** (parameter/return DWARF types); currently one
   shared opaque `() -> ?` signature.
 - A **debug-info path for included/imported functions** (multi-source spans), once

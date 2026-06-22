@@ -16,8 +16,8 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DIFile, DISubroutineType, DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
-    DIFlagsConstants,
+    AsDIScope, DIFile, DISubprogram, DISubroutineType, DWARFEmissionKind, DWARFSourceLanguage,
+    DebugInfoBuilder, DIFlagsConstants,
 };
 use inkwell::module::{FlagBehavior, Module};
 use inkwell::targets::{
@@ -206,6 +206,10 @@ struct Cg<'ctx> {
     builder: Builder<'ctx>,
     /// DWARF emission state, when building with debug info (`-g`).
     di: Option<DebugCtx<'ctx>>,
+    /// The DISubprogram of the function whose body is currently being emitted —
+    /// the scope for per-statement debug locations set in `emit_expr`. `None`
+    /// outside a `-g` body or for a dummy-span function.
+    cur_sp: std::cell::RefCell<Option<DISubprogram<'ctx>>>,
     funcs: HashMap<String, FunctionValue<'ctx>>,
     shims: HashMap<String, ShimInfo<'ctx>>,
     structs: HashMap<String, StructInfo<'ctx>>,
@@ -357,6 +361,7 @@ pub fn compile_for_dbg<'ctx>(
         module,
         builder: ctx.create_builder(),
         di,
+        cur_sp: std::cell::RefCell::new(None),
         funcs: HashMap::new(),
         shims: HashMap::new(),
         structs: HashMap::new(),
@@ -1080,6 +1085,9 @@ impl<'ctx> Cg<'ctx> {
                     None,
                 );
                 self.builder.set_current_debug_location(loc);
+                // Make the subprogram the active scope so `emit_expr` can set a
+                // per-statement location for each body expression (line tables).
+                *self.cur_sp.borrow_mut() = Some(sp);
             }
         }
 
@@ -1169,6 +1177,7 @@ impl<'ctx> Cg<'ctx> {
         // not inherit a scope from this one (a verifier error).
         if self.di.is_some() {
             self.builder.unset_current_debug_location();
+            *self.cur_sp.borrow_mut() = None;
         }
         Ok(())
     }
@@ -1485,7 +1494,27 @@ impl<'ctx> Cg<'ctx> {
         Ok((v, result.clone()))
     }
 
+    /// Set the builder's current debug location from a source span, scoped to the
+    /// function being emitted. A no-op without `-g` or for a dummy/synthesized
+    /// span (which keeps the enclosing statement's location — never a wrong one).
+    fn set_dbg_loc(&self, span: crate::span::Span) {
+        if let Some(di) = &self.di {
+            if let Some(sp) = *self.cur_sp.borrow() {
+                let (line, col) = di.line_col(span.lo);
+                if line != 0 {
+                    let loc = di
+                        .builder
+                        .create_debug_location(self.ctx, line, col, sp.as_debug_info_scope(), None);
+                    self.builder.set_current_debug_location(loc);
+                }
+            }
+        }
+    }
+
     fn emit_expr(&self, e: &Expr, scope: &HashMap<String, Tv<'ctx>>) -> Result<Tv<'ctx>, String> {
+        // Per-statement line info: map the instructions this expression emits to
+        // its source line (drives line-by-line stepping in lldb/gdb).
+        self.set_dbg_loc(e.span);
         let i64t = self.ctx.i64_type();
         match &e.kind {
             ExprKind::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),

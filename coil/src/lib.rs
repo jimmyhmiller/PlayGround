@@ -267,13 +267,19 @@ pub fn compile_to_object_dbg(
     // `alloca`, nothing inlines, and self-tail-recursion (Coil's only loop) is
     // never turned into a loop (it would overflow the stack).
     //
-    // A `-g` (debug) build steps down to `O1`: it still runs mem2reg and
-    // tail-call elimination (both correctness-critical — Coil's loops are
-    // self-tail-recursion, and the `alwaysinline` `(llvm-ir …)` helpers still
-    // inline), but it does far less function inlining, so breakpoints on user
-    // functions reliably resolve and backtraces stay legible. Heavy `-O3`
-    // inlining otherwise makes most functions vanish from the debugger.
-    let pipeline = if src_path.is_some() { "default<O1>" } else { OPT_PIPELINE };
+    // A `-g` (debug) build runs an almost-empty pipeline so the code stays
+    // faithful to the source for line-by-line stepping and variable inspection:
+    // `alwaysinline` (the `(llvm-ir …)` zero-overhead helpers MUST still inline)
+    // and `tailcallelim` (Coil's only loop is self-tail-recursion — without TRE a
+    // recursive program overflows the stack). Everything else is left OFF —
+    // notably mem2reg/instcombine/GVN, which would fold statements away (e.g.
+    // `(iadd 1 2)` → a constant) and leave nothing to step through; keeping the
+    // `alloca`s also means locals live in memory where the debugger can read them.
+    let pipeline = if src_path.is_some() {
+        "function(tailcallelim),always-inline"
+    } else {
+        OPT_PIPELINE
+    };
     module
         .run_passes(pipeline, &tm, PassBuilderOptions::create())
         .map_err(|e| format!("optimization passes failed: {e}"))?;

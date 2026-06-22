@@ -98,9 +98,50 @@ fn lldb_resolves_breakpoint_to_source() {
         .unwrap();
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // The breakpoint must resolve to our source file (proves lldb read the DWARF).
-    assert!(text.contains(".coil:3"), "breakpoint did not resolve to source:\n{text}");
+    // With per-statement line info it lands on the first body statement —
+    // `(imul x x)` on line 4 — not the `defn` line.
+    assert!(text.contains("app.square at") && text.contains(".coil:4"), "breakpoint did not resolve to source:\n{text}");
     // And it must actually stop there (proves the function survived optimization).
     assert!(text.contains("stop reason = breakpoint"), "breakpoint never hit:\n{text}");
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
+/// Per-statement line tables: `next` in lldb walks the body line by line (each
+/// statement maps to its own source line via the per-Expr span). Uses calls
+/// with side effects so each statement is a real, steppable instruction.
+#[test]
+fn lldb_steps_line_by_line() {
+    if !have("lldb") {
+        eprintln!("SKIP: lldb not found");
+        return;
+    }
+    // putchar so each statement is a real instruction (arithmetic on constants
+    // would fold away with nothing to step through).
+    let prog = "(extern putchar :cc c [i32] (-> i32))\n\
+                (defn main [] (-> i64)\n  (putchar 65)\n  (putchar 66)\n  (putchar 10)\n  0)\n";
+    let src_path = unique_path("stepg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("stepexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build");
+
+    let out = Command::new("lldb")
+        .arg(&exe)
+        .args([
+            "-b", "-o", "breakpoint set --name main", "-o", "run",
+            "-o", "next", "-o", "next", "-o", "next", "-o", "quit",
+        ])
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // Stepping must visit successive source lines (the three putchar statements
+    // are on lines 3, 4, 5). Proves per-statement line info, not just function-level.
+    for line in [":3", ":4", ":5"] {
+        assert!(text.contains(line), "stepping did not reach line {line}:\n{text}");
+    }
 
     let _ = std::fs::remove_file(&exe);
     let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
