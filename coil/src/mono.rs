@@ -283,6 +283,7 @@ impl<'a> Mono<'a> {
             params,
             ret,
             body,
+            span: f.span,
         })
     }
 

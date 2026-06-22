@@ -316,6 +316,7 @@ pub fn check(program: &Program) -> Result<Program, String> {
             params: out_params,
             ret: erase_refs(&f.ret),
             body,
+            span: f.span,
         });
     }
 

@@ -288,6 +288,10 @@ cargo run -- run   examples/simd.coil; echo $?                             # => 
 cargo run -- run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
 cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
+# Debug info: -g emits DWARF (function-granularity line tables + a .dSYM on macOS)
+# so lldb/gdb can set breakpoints by function and show file:line in backtraces.
+cargo run -- build examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib        # see docs/DEBUGINFO_DWARF.md
+
 # Benchmark the optimized output against C (clang -O3) on matched programs
 bench/run.sh                                              # => bench/RESULTS.md (≈ cc -O3)
 

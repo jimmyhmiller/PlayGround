@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::convention::Convention;
+use crate::span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -298,6 +299,10 @@ pub struct Func {
     pub params: Vec<Param>,
     pub ret: Type,
     pub body: Vec<Expr>,
+    /// Source location of the `(defn …)` form, for debug info (DWARF line). A
+    /// function read from an included/imported file (whose offsets are in another
+    /// source) carries `Span::DUMMY` — it just gets no line info, never wrong info.
+    pub span: Span,
 }
 
 /// A foreign function declaration: a name, a calling convention, and a typed

@@ -52,6 +52,8 @@ Today a type error says `in 'main': arithmetic on different types (f64 vs i64)` 
 
 Emit line tables + variable/type info via inkwell's `DIBuilder`, so `lldb`/`gdb`, breakpoints, stepping, and crash backtraces work. Coil already emits native objects; this is the missing metadata. Big multiplier for real debugging.
 
+**Increment 1 DONE** (`coil build/run -g`): a compile unit + a `DISubprogram` per function at its real source line, with the module flags `-O3`-surviving DWARF needs; `-g` steps to `O1` + marks user functions `noinline` so breakpoints reliably resolve and hit; a `.dSYM` is gathered on macOS. lldb sets breakpoints by function, hits them, and shows `file:line` in backtraces (verified, tests/debuginfo.rs). See [DEBUGINFO_DWARF.md](DEBUGINFO_DWARF.md). Remaining: **per-statement line tables** (needs spans on every `Expr` — the same foundation that gives checker diagnostics real locations) and **local-variable / typed-parameter DI** (`DILocalVariable`, typed `DISubroutineType`).
+
 ### 3.3 Core control flow & error ergonomics
 
 TCO already turns self-tail-recursion into a loop, so most of this is library/macro work:

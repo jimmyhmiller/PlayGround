@@ -48,7 +48,8 @@ fn main() -> ExitCode {
         "build" => {
             let out = opts.out.unwrap_or_else(|| default_out(file, ""));
             let t = triple.unwrap_or_else(coil::codegen::target_triple);
-            let r = coil::build_executable_linked(&src, &out, t, &opts.link_flags);
+            let src_path = opts.debug.then(|| Path::new(file));
+            let r = coil::build_executable_linked_dbg(&src, &out, t, &opts.link_flags, src_path);
             report(r.map(|_| format!("wrote {}", out.display())), file)
         }
         "emit-obj" => {
@@ -67,7 +68,7 @@ fn main() -> ExitCode {
             file,
         ),
         "expand" => report(coil::expand_to_string(&src), file),
-        "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags),
+        "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags, opts.debug),
         // cimport <header.h> [-o out.coil]: generate Coil FFI bindings from a C header
         // via clang's AST. (`file` is the header path; `src` above just read it.)
         "cimport" => {
@@ -92,10 +93,11 @@ fn print_error(body: &str, file: &str) {
 
 /// Build to a temp executable, run it, and propagate its exit code. With a cross
 /// `--target` the binary is run via `arch -<arch>` (Rosetta on macOS).
-fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String]) -> ExitCode {
+fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], debug: bool) -> ExitCode {
     let exe = std::env::temp_dir().join(format!("coil_run_{}", std::process::id()));
     let t = triple.map(TargetTriple::create).unwrap_or_else(coil::codegen::target_triple);
-    let build = coil::build_executable_linked(src, &exe, t, link_flags);
+    let src_path = debug.then(|| Path::new(file));
+    let build = coil::build_executable_linked_dbg(src, &exe, t, link_flags, src_path);
     if let Err(e) = build {
         print_error(&e, file);
         return ExitCode::FAILURE;
@@ -138,6 +140,8 @@ struct Opts {
     out: Option<PathBuf>,
     target: Option<String>,
     link_flags: Vec<String>,
+    /// Emit DWARF debug info (`-g`) — function-level source mapping for lldb/gdb.
+    debug: bool,
 }
 
 impl Opts {
@@ -145,6 +149,7 @@ impl Opts {
         let mut out = None;
         let mut target = None;
         let mut link_flags = Vec::new();
+        let mut debug = false;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -165,6 +170,10 @@ impl Opts {
                     link_flags.push(f.clone());
                     i += 2;
                 }
+                "-g" | "--debug" => {
+                    debug = true;
+                    i += 1;
+                }
                 // shorthand: `-lfoo` is passed straight through.
                 other if other.starts_with("-l") && other.len() > 2 => {
                     link_flags.push(other.to_string());
@@ -173,7 +182,7 @@ impl Opts {
                 other => return Err(format!("unknown argument '{other}'")),
             }
         }
-        Ok(Opts { out, target, link_flags })
+        Ok(Opts { out, target, link_flags, debug })
     }
 }
 
@@ -206,8 +215,9 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
          coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out] [--target <triple>] \
-         [--link-flag <arg> | -l<lib>]…\n  \
-         coil cimport <header.h> [-o out.coil]   generate C FFI bindings via clang"
+         [--link-flag <arg> | -l<lib>]… [-g]\n  \
+         coil cimport <header.h> [-o out.coil]   generate C FFI bindings via clang\n  \
+         -g / --debug   emit DWARF debug info (build/run) for lldb/gdb"
     );
     ExitCode::from(2)
 }

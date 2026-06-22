@@ -91,10 +91,42 @@ fn build_module_for<'ctx>(
     src: &str,
     triple: inkwell::targets::TargetTriple,
 ) -> Result<Module<'ctx>, Diag> {
+    build_module_dbg(ctx, src, triple, None)
+}
+
+/// `build_module_for`, optionally emitting DWARF debug info (`-g`).
+fn build_module_dbg<'ctx>(
+    ctx: &'ctx Context,
+    src: &str,
+    triple: inkwell::targets::TargetTriple,
+    dbg: Option<codegen::DebugInput>,
+) -> Result<Module<'ctx>, Diag> {
     let program = read_expand_resolve(src)?;
     let program = check::check(&program)?;
     let program = mono::monomorphize(program)?;
-    Ok(codegen::compile_for(ctx, &program, triple)?)
+    Ok(codegen::compile_for_dbg(ctx, &program, triple, dbg)?)
+}
+
+/// Build the `DebugInput` (source text + file identity for the `DIFile`) from a
+/// source path. `<source>` stands in when there is no real file (the library/test
+/// entry points compile from a string).
+fn debug_input<'a>(src: &'a str, src_path: Option<&Path>) -> codegen::DebugInput<'a> {
+    let (file_name, directory) = match src_path {
+        Some(p) => {
+            let dir = p
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".to_string());
+            let name = p.file_name().map_or_else(
+                || p.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            (name, dir)
+        }
+        None => ("<source>".to_string(), ".".to_string()),
+    };
+    codegen::DebugInput { source: src, file_name, directory }
 }
 
 /// Macro-expand and pretty-print the resulting forms (for `--expand`). Shows the
@@ -179,10 +211,22 @@ pub fn compile_to_object_for(
     obj_path: &Path,
     triple: inkwell::targets::TargetTriple,
 ) -> Result<(), String> {
+    compile_to_object_dbg(src, obj_path, triple, None)
+}
+
+/// `compile_to_object_for`, optionally emitting DWARF (`src_path` = `Some` ⇒ `-g`,
+/// using that path for the `DIFile`).
+pub fn compile_to_object_dbg(
+    src: &str,
+    obj_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+    src_path: Option<&Path>,
+) -> Result<(), String> {
     Target::initialize_all(&InitializationConfig::default());
     let ctx = Context::create();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let module = reported(build_module_for(&ctx, src, triple), src)?;
+    let dbg = src_path.map(|_| debug_input(src, src_path));
+    let module = reported(build_module_dbg(&ctx, src, triple, dbg), src)?;
     let triple = module.get_triple();
     // Bare-metal aarch64 (the freestanding `-none` target) runs with the MMU off, so
     // RAM is Device memory — UNALIGNED accesses fault. `+strict-align` stops the backend
@@ -222,8 +266,16 @@ pub fn compile_to_object_for(
     // this the emitted object would be ~`-O0`: every `let`/field stays an
     // `alloca`, nothing inlines, and self-tail-recursion (Coil's only loop) is
     // never turned into a loop (it would overflow the stack).
+    //
+    // A `-g` (debug) build steps down to `O1`: it still runs mem2reg and
+    // tail-call elimination (both correctness-critical — Coil's loops are
+    // self-tail-recursion, and the `alwaysinline` `(llvm-ir …)` helpers still
+    // inline), but it does far less function inlining, so breakpoints on user
+    // functions reliably resolve and backtraces stay legible. Heavy `-O3`
+    // inlining otherwise makes most functions vanish from the debugger.
+    let pipeline = if src_path.is_some() { "default<O1>" } else { OPT_PIPELINE };
     module
-        .run_passes(OPT_PIPELINE, &tm, PassBuilderOptions::create())
+        .run_passes(pipeline, &tm, PassBuilderOptions::create())
         .map_err(|e| format!("optimization passes failed: {e}"))?;
     tm.write_to_file(&module, FileType::Object, obj_path)
         .map_err(|e| e.to_string())
@@ -259,9 +311,24 @@ pub fn build_executable_linked(
     triple: inkwell::targets::TargetTriple,
     link_flags: &[String],
 ) -> Result<(), String> {
+    build_executable_linked_dbg(src, out_path, triple, link_flags, None)
+}
+
+/// `build_executable_linked`, optionally emitting DWARF. `src_path = Some` turns
+/// on debug info (`-g`) and names the `DIFile`. On macOS the DWARF stays in the
+/// `.o` (the linker records a debug map that points at it), so a debug build
+/// keeps the object file and runs `dsymutil` to gather a `.dSYM` next to the
+/// executable; a release build deletes the `.o` as before.
+pub fn build_executable_linked_dbg(
+    src: &str,
+    out_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+    link_flags: &[String],
+    src_path: Option<&Path>,
+) -> Result<(), String> {
     let triple_str = triple.as_str().to_string_lossy().into_owned();
     let obj_path = out_path.with_extension("o");
-    compile_to_object_for(src, &obj_path, triple)?;
+    compile_to_object_dbg(src, &obj_path, triple, src_path)?;
     let mut cc = Command::new("cc");
     if let Some(arch) = link_arch_flag(&triple_str) {
         cc.arg("-arch").arg(arch);
@@ -273,9 +340,18 @@ pub fn build_executable_linked(
     let status = cc
         .status()
         .map_err(|e| format!("failed to invoke linker (cc): {e}"))?;
-    let _ = std::fs::remove_file(&obj_path);
     if !status.success() {
+        let _ = std::fs::remove_file(&obj_path);
         return Err(format!("linker (cc) failed with {status}"));
+    }
+    if src_path.is_some() {
+        // macOS keeps DWARF in the `.o`; collect it into a `.dSYM` so the
+        // debugger finds it even after the `.o` is gone. Best-effort (skip if
+        // dsymutil isn't present, e.g. non-Apple hosts where DWARF is in the exe).
+        let _ = Command::new("dsymutil").arg(out_path).status();
+        let _ = std::fs::remove_file(&obj_path);
+    } else {
+        let _ = std::fs::remove_file(&obj_path);
     }
     Ok(())
 }

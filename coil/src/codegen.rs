@@ -15,7 +15,11 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::debug_info::{
+    AsDIScope, DIFile, DISubroutineType, DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
+    DIFlagsConstants,
+};
+use inkwell::module::{FlagBehavior, Module};
 use inkwell::targets::{
     CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
@@ -161,10 +165,47 @@ struct SumInfo<'ctx> {
     variant_structs: Vec<StructType<'ctx>>,
 }
 
+/// What the caller supplies to turn on DWARF emission: the source text (to map a
+/// byte span to a line/column) and the file identity for the `DIFile`.
+pub struct DebugInput<'a> {
+    pub source: &'a str,
+    pub file_name: String,
+    pub directory: String,
+}
+
+/// Live DWARF-emission state held on `Cg` while a module is built. Function
+/// granularity for now (a CU + a `DISubprogram` per function with its source
+/// line); per-statement line tables and local-variable info are a later slice.
+struct DebugCtx<'ctx> {
+    builder: DebugInfoBuilder<'ctx>,
+    file: DIFile<'ctx>,
+    /// Reused subroutine type — line info needs a type, but typed parameters are
+    /// a later increment, so every function shares one opaque `() -> ?` signature.
+    subroutine_ty: DISubroutineType<'ctx>,
+    /// Byte offset of the start of each source line, for offset → (line, col).
+    line_starts: Vec<u32>,
+}
+
+impl<'ctx> DebugCtx<'ctx> {
+    /// 1-based (line, column) for a byte offset; `(0, 0)` for a dummy/out-of-range
+    /// span (a synthesized or included-file node — no line, never a wrong one).
+    fn line_col(&self, off: u32) -> (u32, u32) {
+        if off == u32::MAX {
+            return (0, 0);
+        }
+        // Last line whose start is <= off.
+        let line = self.line_starts.partition_point(|&s| s <= off);
+        let line_start = self.line_starts.get(line.saturating_sub(1)).copied().unwrap_or(0);
+        (line as u32, off - line_start + 1)
+    }
+}
+
 struct Cg<'ctx> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
+    /// DWARF emission state, when building with debug info (`-g`).
+    di: Option<DebugCtx<'ctx>>,
     funcs: HashMap<String, FunctionValue<'ctx>>,
     shims: HashMap<String, ShimInfo<'ctx>>,
     structs: HashMap<String, StructInfo<'ctx>>,
@@ -230,6 +271,18 @@ pub fn compile_for<'ctx>(
     program: &Program,
     triple: inkwell::targets::TargetTriple,
 ) -> Result<Module<'ctx>, String> {
+    compile_for_dbg(ctx, program, triple, None)
+}
+
+/// `compile_for`, optionally emitting DWARF debug info (`Some(DebugInput)` ⇒ a
+/// compile unit + per-function line info, so `lldb`/`gdb` can map functions to
+/// source and show file:line in backtraces).
+pub fn compile_for_dbg<'ctx>(
+    ctx: &'ctx Context,
+    program: &Program,
+    triple: inkwell::targets::TargetTriple,
+    dbg: Option<DebugInput>,
+) -> Result<Module<'ctx>, String> {
     // Initialize all targets so an arbitrary (possibly non-host) triple resolves.
     Target::initialize_all(&InitializationConfig::default());
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
@@ -253,10 +306,57 @@ pub fn compile_for<'ctx>(
     module.set_triple(&triple);
     module.set_data_layout(&target_data.get_data_layout());
 
+    // DWARF setup (when building with `-g`): a compile unit + the module flags the
+    // verifier and the optimizer require for debug info to survive `-O3`.
+    let di = dbg.map(|d| {
+        // LLVM requires these module flags; inkwell's builder doesn't add them.
+        module.add_basic_value_flag(
+            "Debug Info Version",
+            FlagBehavior::Warning,
+            ctx.i32_type().const_int(3, false), // LLVMDebugMetadataVersion
+        );
+        module.add_basic_value_flag(
+            "Dwarf Version",
+            FlagBehavior::Warning,
+            ctx.i32_type().const_int(4, false),
+        );
+        let (dib, cu) = module.create_debug_info_builder(
+            true, // allow unresolved (finalized later)
+            DWARFSourceLanguage::C, // Coil isn't C, but C is the honest closest
+            &d.file_name,
+            &d.directory,
+            "coil",
+            true, // we run the -O3 pipeline
+            "",   // flags
+            0,    // runtime version
+            "",   // split name
+            DWARFEmissionKind::Full,
+            0,     // DWO id
+            false, // split debug inlining
+            false, // debug info for profiling
+            "",    // sysroot
+            "",    // SDK
+        );
+        let file = cu.get_file();
+        let subroutine_ty =
+            dib.create_subroutine_type(file, None, &[], inkwell::debug_info::DIFlags::ZERO);
+        // Precompute line starts (offset 0, then each byte after a '\n').
+        let mut line_starts = vec![0u32];
+        line_starts.extend(
+            d.source
+                .bytes()
+                .enumerate()
+                .filter(|&(_, b)| b == b'\n')
+                .map(|(i, _)| i as u32 + 1),
+        );
+        DebugCtx { builder: dib, file, subroutine_ty, line_starts }
+    });
+
     let mut cg = Cg {
         ctx,
         module,
         builder: ctx.create_builder(),
+        di,
         funcs: HashMap::new(),
         shims: HashMap::new(),
         structs: HashMap::new(),
@@ -471,6 +571,11 @@ pub fn compile_for<'ctx>(
             let fv = cg.funcs[&f.name];
             cg.emit_func(f, fv)?;
         }
+    }
+
+    // Finalize debug info (resolve forward refs) before verifying / optimizing.
+    if let Some(di) = &cg.di {
+        di.builder.finalize();
     }
 
     cg.module
@@ -939,6 +1044,45 @@ impl<'ctx> Cg<'ctx> {
         let entry = self.ctx.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
+        // DWARF: attach a DISubprogram (function-granularity line info) and set the
+        // builder's debug location so every instruction in the body carries `!dbg`
+        // — required once a function has a subprogram. A function from an
+        // included/imported file (dummy span) gets none, never a wrong line.
+        if let Some(di) = &self.di {
+            let (line, col) = di.line_col(f.span.lo);
+            if line != 0 {
+                let sp = di.builder.create_function(
+                    di.file.as_debug_info_scope(),
+                    &f.name,
+                    Some(&f.name), // linkage name = the symbol
+                    di.file,
+                    line,
+                    di.subroutine_ty,
+                    false, // not local to unit
+                    true,  // is a definition
+                    line,  // scope line
+                    inkwell::debug_info::DIFlags::ZERO,
+                    true, // optimized (-O3)
+                );
+                function.set_subprogram(sp);
+                // Keep user functions out of the inliner so their breakpoints
+                // reliably resolve and backtraces stay legible; `alwaysinline`
+                // `(llvm-ir …)` helpers are driven by a different pass and still
+                // inline, so zero-overhead intrinsics are unaffected.
+                let noinline =
+                    self.ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("noinline"), 0);
+                function.add_attribute(AttributeLoc::Function, noinline);
+                let loc = di.builder.create_debug_location(
+                    self.ctx,
+                    line,
+                    col,
+                    sp.as_debug_info_scope(),
+                    None,
+                );
+                self.builder.set_current_debug_location(loc);
+            }
+        }
+
         // A C-ABI'd function (one returning a struct by value, or — in principle —
         // taking one) has its signature reshaped: a leading `sret` pointer and/or
         // struct parameters split into coerced register slots. Map the user's
@@ -1020,6 +1164,11 @@ impl<'ctx> Cg<'ctx> {
         // If the body diverged, the block already has a terminator — no `ret`.
         if !self.block_terminated() {
             self.emit_c_return(function, sig, &f.ret, last)?;
+        }
+        // Clear the debug location so the next function (which may have none) does
+        // not inherit a scope from this one (a verifier error).
+        if self.di.is_some() {
+            self.builder.unset_current_debug_location();
         }
         Ok(())
     }

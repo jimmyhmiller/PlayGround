@@ -40,7 +40,8 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
                 "defstruct" => structs.push(parse_defstruct(&items[1..])?),
                 "defsum" => sums.push(parse_defsum(&items[1..])?),
                 "defn" => {
-                    let f = parse_defn(&items[1..])?;
+                    let mut f = parse_defn(&items[1..])?;
+                    f.span = form.span; // the (defn …) form's location, for DWARF
                     if funcs.iter().any(|g: &Func| g.name == f.name) {
                         return Err(Diag::new(format!("function '{}' defined twice", f.name)));
                     }
@@ -450,6 +451,9 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
         params,
         ret,
         body,
+        // The caller (parse_program) stamps the real `(defn …)` form span; a Func
+        // built in isolation has none.
+        span: Span::DUMMY,
     })
 }
 
