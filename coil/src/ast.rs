@@ -388,6 +388,30 @@ pub struct StaticAssert {
     pub msg: String,
 }
 
+/// A named compile-time constant — `(const NAME VALUE)` or `(const NAME TYPE
+/// VALUE)`. A reference to it elaborates to the literal `value` inline (zero
+/// runtime overhead): so an *untyped* const behaves exactly like writing the
+/// literal at the use site, re-entering integer-width inference; an explicit
+/// `ty` pins the reported type and fit-checks the value at definition. Consts
+/// live in a flat global namespace (referenced bare, never module-renamed — the
+/// same rule `extern` uses), matching C enum constants and `#define`s.
+#[derive(Debug, Clone)]
+pub struct Const {
+    pub name: String,
+    pub ty: Option<Type>,
+    pub value: ConstLit,
+}
+
+/// The literal value of a `const`. Restricted to scalars that have both a
+/// compile-time and a runtime representation (the overlap between the two
+/// value universes — see the macro/runtime split).
+#[derive(Debug, Clone, Copy)]
+pub enum ConstLit {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub conventions: HashMap<String, Convention>,
@@ -396,6 +420,7 @@ pub struct Program {
     pub externs: Vec<Extern>,
     pub funcs: Vec<Func>,
     pub asserts: Vec<StaticAssert>,
+    pub consts: Vec<Const>,
 }
 
 impl Program {

@@ -100,6 +100,8 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         sums: m.out_sums.into_values().collect(),
         funcs: m.out_funcs.into_values().collect(),
         asserts,
+        // Consts were erased to literals during checking; nothing to monomorphize.
+        consts: program.consts,
     })
 }
 

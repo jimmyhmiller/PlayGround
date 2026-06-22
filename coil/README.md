@@ -95,6 +95,15 @@ template substitution.
   AMD64** and **AArch64 AAPCS64** (see "Struct-by-value C ABI" below). So
   programs can do I/O — e.g. `putchar`/`write`/`printf` — and call libc
   functions that take or return structs by value (e.g. `div`/`ldiv`).
+  `coil cimport <header.h>` auto-generates these bindings from a real C header
+  by walking **clang's JSON AST** (clang does the parse — Coil never hand-rolls a
+  C grammar): functions, scalars, pointers, simple structs, **typedefs**
+  (resolved through clang's desugaring — `size_t`→`u64`, typedef'd structs),
+  **enums** (the type → its integer width; the constants → `const` defs), and
+  object-like **`#define`** constants (a `clang -dM` pass). The cardinal rule:
+  unmappable constructs (unions, bitfields, `long double`, function-pointer
+  params) are **refused with a clear note**, never emitted as a silent-wrong
+  binding. `--link-flag`/`-l` on `build`/`run` links any C library or object.
 - Scalars: **floats** `f32`/`f64` (literals `3.14`/`1e9`, `fadd`/`fsub`/`fmul`/
   `fdiv`/`frem`, ordered compares `fcmp-lt…`, and `cast` among int↔float and
   f32↔f64); a real **`bool`** (comparisons return it; `true`/`false`; short-
@@ -118,6 +127,14 @@ template substitution.
   private NUL-terminated `[N x i8]` and have type `(ptr i8)` (C-string
   compatible). `main` may take `(argc :i32) (argv (ptr (ptr i8)))`, so programs
   read their command line.
+- Constants: `(const NAME VALUE)` / `(const NAME TYPE VALUE)` — a named scalar
+  constant (int/float/bool). A reference elaborates to the literal **inline**
+  (resolved during checking, zero runtime cost): an *untyped* const re-enters
+  width inference exactly like writing the literal (so it slots into any
+  `iN`/`uN` context), a *typed* const pins the width and fit-checks at
+  definition. Distinct from `def` (the compile-time macro binding); consts live
+  in a flat global namespace and are shadowed by locals. C enum constants and
+  object-like `#define`s lower to these (see C interop).
 - Structs & arrays: `(defstruct Name [(field :type) ...])` and `(array T N)`.
   A field/element is reached as a pointer via `(field p name)` / `(index p i)`,
   then `load`/`store!`. Structs nest by value (or self-reference by pointer);

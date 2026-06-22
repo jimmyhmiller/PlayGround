@@ -73,11 +73,74 @@ fn cimport_red_team_refuses_silent_wrong_bindings() {
     // bitfields pack into bit ranges — emitting full-width fields would corrupt the
     // layout. The struct must be REFUSED, not mis-bound.
     assert!(!b.contains("(defstruct Flags"), "bitfield struct must be refused:\n{b}");
-    // enum param + long double → refused (no silent i32/f64 guess).
-    assert!(!b.contains("(extern paint"), "enum-param fn must be refused:\n{b}");
+    // long double has no Coil type → refused (no silent f64 guess).
     assert!(!b.contains("(extern precise"), "long-double fn must be refused:\n{b}");
     // C `_Bool` is a 1-byte value at the ABI → u8, not Coil `bool` (i1, ambiguous width).
     assert!(b.contains("(extern is_ready :cc c [i32] (-> u8))"), "_Bool must map to u8:\n{b}");
+    // Phase 2: an enum is no longer refused — it lowers to its integer width (`int`
+    // → i32, the real C ABI), and its constants become `const` defs.
+    assert!(b.contains("(extern paint :cc c [i32] (-> i32))"), "enum param → i32:\n{b}");
+    assert!(b.contains("(const RED 0)"), "enum constant RED:\n{b}");
+    assert!(b.contains("(const GREEN 1)"), "enum constant GREEN:\n{b}");
+}
+
+#[test]
+fn cimport_resolves_typedefs_abi_faithfully() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // typedefs (incl. typedef-of-typedef and typedef'd struct) resolve through
+    // clang's desugaring to their real ABI width — not refused, not guessed.
+    let h = write_header(
+        "coil_ci_typedef.h",
+        "typedef unsigned long size_t;\n\
+         typedef size_t mysize;\n\
+         typedef struct Point Point;\n\
+         struct Point { int x; int y; };\n\
+         mysize span(Point *p, size_t n);\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    // struct Point still emitted once (the forward decl from the typedef must not
+    // dedup it away).
+    assert!(b.contains("(defstruct Point [(x i32) (y i32)])"), "struct:\n{b}");
+    // size_t→u64, mysize→size_t→u64, Point*→(ptr Point).
+    assert!(
+        b.contains("(extern span :cc c [(ptr Point) u64] (-> u64))"),
+        "typedef resolution:\n{b}"
+    );
+}
+
+#[test]
+fn cimport_enum_constants_and_defines_are_usable() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // enum constants and object-like #define constants become `const` defs that a
+    // Coil program can USE as bare names. Function-like / string macros are skipped.
+    let h = write_header(
+        "coil_ci_consts.h",
+        "enum E { A, B = 10, C };\n\
+         #define WIDTH 4\n\
+         #define NAME \"coil\"\n\
+         #define DOUBLE(x) ((x)+(x))\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    assert!(b.contains("(const A 0)") && b.contains("(const B 10)") && b.contains("(const C 11)"), "enum:\n{b}");
+    assert!(b.contains("(const WIDTH 4)"), "object-like #define:\n{b}");
+    assert!(!b.contains("NAME"), "string macro must be skipped:\n{b}");
+    assert!(!b.contains("DOUBLE"), "function-like macro must be skipped:\n{b}");
+
+    // Use them end-to-end: C + WIDTH = 11 + 4 = 15, *? keep to exit code. B+C+WIDTH=10+11+4=25.
+    let bpath = std::env::temp_dir().join("coil_ci_consts_bindings.coil");
+    std::fs::write(&bpath, &b).unwrap();
+    let prog = format!(
+        "(module app)\n(import \"{}\" :use *)\n\
+         (defn main [] (-> i64) (iadd (iadd B C) WIDTH))",
+        bpath.display()
+    );
+    assert_eq!(build_and_run(&prog), 25, "cimported consts usable as values");
 }
 
 #[test]

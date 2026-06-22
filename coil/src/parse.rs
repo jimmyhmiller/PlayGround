@@ -22,6 +22,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     let mut structs = Vec::new();
     let mut sums = Vec::new();
     let mut asserts = Vec::new();
+    let mut consts = Vec::new();
 
     for form in forms {
         // Any error from a top-level form gets that form's span as a fallback
@@ -55,6 +56,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
                     };
                     asserts.push(StaticAssert { cond, msg });
                 }
+                "const" => consts.push(parse_const(&items[1..])?),
                 other => return Err(Diag::new(format!("unknown top-level form '{other}'"))),
             }
             Ok(())
@@ -69,7 +71,38 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
         externs,
         funcs,
         asserts,
+        consts,
     })
+}
+
+/// `(const NAME VALUE)` or `(const NAME TYPE VALUE)` — a named scalar constant.
+/// The value must be a literal (int / float / `true` / `false`), possibly with a
+/// leading type to pin its width; anything else is refused (no const-expression
+/// evaluation here — keep it minimal).
+fn parse_const(rest: &[Sexp]) -> Result<Const, Diag> {
+    let name = sym(rest.first().ok_or("const: missing name")?, "const name")?;
+    let (ty, val_sexp) = match rest.len() {
+        2 => (None, &rest[1]),
+        3 => (Some(parse_type(&rest[1])?), &rest[2]),
+        _ => {
+            return Err(Diag::new(
+                "const: expected (const NAME VALUE) or (const NAME TYPE VALUE)",
+            ))
+        }
+    };
+    let value = match &val_sexp.kind {
+        SexpKind::Int(n) => ConstLit::Int(*n),
+        SexpKind::Float(x) => ConstLit::Float(*x),
+        SexpKind::Sym(s) if s == "true" => ConstLit::Bool(true),
+        SexpKind::Sym(s) if s == "false" => ConstLit::Bool(false),
+        _ => {
+            return Err(Diag::at(
+                val_sexp.span,
+                "const value must be an integer, float, or boolean literal",
+            ))
+        }
+    };
+    Ok(Const { name, ty, value })
 }
 
 pub fn parse_defsum(rest: &[Sexp]) -> Result<SumDef, Diag> {

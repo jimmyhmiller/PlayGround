@@ -78,6 +78,7 @@ pub fn resolve_program(
         externs: vec![],
         funcs: vec![],
         asserts: vec![],
+        consts: vec![],
     };
     for (mut p, module) in parsed {
         if let Some(m) = &module {
@@ -119,6 +120,18 @@ fn merge(out: &mut Program, p: Program) -> Result<(), crate::span::Diag> {
     }
     out.funcs.extend(p.funcs);
     out.asserts.extend(p.asserts);
+    // Consts share one flat global namespace (like externs / C constants), so a
+    // re-import of the same bindings is fine but two distinct definitions of the
+    // same name collide loudly.
+    for c in p.consts {
+        if out.consts.iter().any(|x| x.name == c.name) {
+            return Err(crate::span::Diag::new(format!(
+                "const '{}' defined more than once",
+                c.name
+            )));
+        }
+        out.consts.push(c);
+    }
     Ok(())
 }
 

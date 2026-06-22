@@ -64,6 +64,11 @@ struct Cx {
     sums: HashMap<String, SumInfo>,
     /// Variant name -> its sum type's name (variant construction routes here).
     variant_to_sum: HashMap<String, String>,
+    /// Named scalar constants, consulted when a `Var` misses the local env. The
+    /// stored `Expr` is the literal a reference elaborates to; the `Type` is its
+    /// reported type (the declared one, or the literal default for an untyped
+    /// const).
+    consts: HashMap<String, (Expr, Type)>,
     /// Stack of enclosing loops (innermost last), for typing `break`/`continue`:
     /// scoping, label resolution, and unifying the value type across break sites.
     loops: std::cell::RefCell<Vec<LoopFrame>>,
@@ -163,13 +168,36 @@ pub fn check(program: &Program) -> Result<Program, String> {
         );
     }
 
+    // ---- named constants ----------------------------------------------------
+    // Each const becomes a (literal Expr, reported Type) entry. An untyped const
+    // reports the literal's default type and stays freely re-inferable at the use
+    // site (it IS the literal); a typed const pins the type and fit-checks now.
+    let mut consts: HashMap<String, (Expr, Type)> = HashMap::new();
+    for c in &program.consts {
+        if cx_sig_or_const(&sigs, &consts, &c.name) {
+            return Err(format!("'{}' is declared more than once", c.name));
+        }
+        let entry = const_entry(c)?;
+        consts.insert(c.name.clone(), entry);
+    }
+
     let cx = Cx {
         sigs,
         structs,
         sums,
         variant_to_sum,
+        consts,
         loops: std::cell::RefCell::new(Vec::new()),
     };
+
+    // Validate each declared const type against the type tables (must be a real,
+    // concrete type — no type parameters at top level).
+    for c in &program.consts {
+        if let Some(ty) = &c.ty {
+            validate_type(ty, &cx, &HashSet::new())
+                .map_err(|e| format!("const '{}': {e}", c.name))?;
+        }
+    }
 
     // ---- validate struct/sum field types (each with its own params in scope)
     for sd in &program.structs {
@@ -316,6 +344,9 @@ pub fn check(program: &Program) -> Result<Program, String> {
         externs: program.externs.clone(),
         funcs,
         asserts,
+        // Consts are fully erased into the elaborated bodies above; carried
+        // through inert so the Program stays round-trippable.
+        consts: program.consts.clone(),
     })
 }
 
@@ -436,11 +467,17 @@ fn synth(
             Ok((pe, Type::Ref(*mutable, Box::new(pointee))))
         }
         Expr::Var(name) => {
-            let t = env
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("in '{fname}': unbound variable '{name}'"))?;
-            Ok((Expr::Var(name.clone()), t))
+            // Locals shadow consts (locals are checked first), so a parameter or
+            // `let` named the same as a const is unaffected. A const reference
+            // elaborates to its literal inline — zero runtime cost, and an untyped
+            // const re-enters width inference exactly like the literal would.
+            if let Some(t) = env.get(name) {
+                return Ok((Expr::Var(name.clone()), t.clone()));
+            }
+            if let Some((lit, ty)) = cx.consts.get(name) {
+                return Ok((lit.clone(), ty.clone()));
+            }
+            Err(format!("in '{fname}': unbound variable '{name}'"))
         }
         Expr::LlvmIr { result, args, body } => {
             // The raw-IR escape hatch: the form's type *is* the declared result
@@ -1909,6 +1946,50 @@ fn fits(n: i64, bits: u32, signed: bool) -> bool {
 
 /// Wrap a literal expression in an explicit cast to `target`. A bare `Int(n)` is
 /// range-checked so an out-of-range literal is rejected, not silently truncated.
+/// Is `name` already taken by a function/extern signature or another const?
+fn cx_sig_or_const(
+    sigs: &HashMap<String, Sig>,
+    consts: &HashMap<String, (Expr, Type)>,
+    name: &str,
+) -> bool {
+    sigs.contains_key(name) || consts.contains_key(name)
+}
+
+/// Build a const's (literal expression, reported type) entry. An untyped const
+/// reports the literal default (so it re-infers like an inline literal); a typed
+/// const pins the type, requiring the value's kind to match and (for integers)
+/// to fit.
+fn const_entry(c: &Const) -> Result<(Expr, Type), String> {
+    let bad = |ty: &Type, kind: &str| {
+        format!("const '{}': {kind} value cannot have type {}", c.name, ty_str(ty))
+    };
+    match c.value {
+        ConstLit::Int(n) => match &c.ty {
+            None => Ok((Expr::Int(n), Type::Int(64, true))),
+            Some(Type::Int(bits, signed)) => {
+                if !fits(n, *bits, *signed) {
+                    return Err(format!(
+                        "const '{}': literal {n} does not fit in {}",
+                        c.name,
+                        ty_str(c.ty.as_ref().unwrap())
+                    ));
+                }
+                Ok((Expr::Int(n), Type::Int(*bits, *signed)))
+            }
+            Some(other) => Err(bad(other, "integer")),
+        },
+        ConstLit::Float(x) => match &c.ty {
+            None => Ok((Expr::Float(x), Type::Float(64))),
+            Some(Type::Float(b)) => Ok((Expr::Float(x), Type::Float(*b))),
+            Some(other) => Err(bad(other, "float")),
+        },
+        ConstLit::Bool(b) => match &c.ty {
+            None | Some(Type::Bool) => Ok((Expr::Bool(b), Type::Bool)),
+            Some(other) => Err(bad(other, "boolean")),
+        },
+    }
+}
+
 fn coerce_lit(e: Expr, target: &Type, fname: &str) -> Result<Expr, String> {
     if let (Expr::Int(n), Type::Int(bits, signed)) = (&e, target) {
         if !fits(*n, *bits, *signed) {
