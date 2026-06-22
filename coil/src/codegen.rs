@@ -1487,11 +1487,11 @@ impl<'ctx> Cg<'ctx> {
 
     fn emit_expr(&self, e: &Expr, scope: &HashMap<String, Tv<'ctx>>) -> Result<Tv<'ctx>, String> {
         let i64t = self.ctx.i64_type();
-        match e {
-            Expr::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
-            Expr::Float(x) => Ok((self.ctx.f64_type().const_float(*x).into(), Type::Float(64))),
-            Expr::Bool(b) => Ok((self.ctx.bool_type().const_int(*b as u64, false).into(), Type::Bool)),
-            Expr::LlvmIr { result, args, body } => {
+        match &e.kind {
+            ExprKind::Int(n) => Ok((i64t.const_int(*n as u64, true).into(), Type::Int(64, true))),
+            ExprKind::Float(x) => Ok((self.ctx.f64_type().const_float(*x).into(), Type::Float(64))),
+            ExprKind::Bool(b) => Ok((self.ctx.bool_type().const_int(*b as u64, false).into(), Type::Bool)),
+            ExprKind::LlvmIr { result, args, body } => {
                 let argtv: Vec<Tv<'ctx>> = args
                     .iter()
                     .map(|a| self.emit_expr(a, scope))
@@ -1499,20 +1499,20 @@ impl<'ctx> Cg<'ctx> {
                 self.emit_llvm_ir(result, &argtv, body)
             }
             // The zero value of a type (used to initialize a fresh local).
-            Expr::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
+            ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
             // erases these, but a place used directly lowers to its pointer).
-            Expr::Borrow { place, .. } => self.emit_expr(place, scope),
+            ExprKind::Borrow { place, .. } => self.emit_expr(place, scope),
             // Spill an rvalue to a fresh stack slot and yield a pointer to it —
             // the same `alloca` + `store` the match scrutinee uses — so a
             // temporary can be passed to a by-immutable-reference parameter.
-            Expr::SpillRef(inner) => {
+            ExprKind::SpillRef(inner) => {
                 let (v, t) = self.emit_expr(inner, scope)?;
                 let slot = self.builder.build_alloca(self.basic_ty(&t), "spill").map_err(le)?;
                 self.builder.build_store(slot, v).map_err(le)?;
                 Ok((slot.into(), Type::Ptr(Box::new(t))))
             }
-            Expr::Str(s) => {
+            ExprKind::Str(s) => {
                 // "…" is a (slice u8) VIEW: a private [N x i8] global (no NUL —
                 // the length carries the extent) plus a {ptr, len} fat-pointer
                 // constant. No allocation, no copy.
@@ -1529,7 +1529,7 @@ impl<'ctx> Cg<'ctx> {
                     .const_struct(&[g.as_pointer_value().into(), len.into()], false);
                 Ok((slice.into(), Type::Slice(Box::new(Type::Int(8, false)))))
             }
-            Expr::CStr(s) => {
+            ExprKind::CStr(s) => {
                 // c"…" is a (ptr i8) to a private, NUL-terminated [N+1 x i8]
                 // global — the distinct FFI spelling.
                 let bytes = self.ctx.const_string(s.as_bytes(), true);
@@ -1541,11 +1541,11 @@ impl<'ctx> Cg<'ctx> {
                 g.set_linkage(inkwell::module::Linkage::Private);
                 Ok((g.as_pointer_value().into(), Type::Ptr(Box::new(Type::Int(8, true)))))
             }
-            Expr::Var(name) => scope
+            ExprKind::Var(name) => scope
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("codegen: unbound '{name}'")),
-            Expr::Bin { op, lhs, rhs } => {
+            ExprKind::Bin { op, lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(lhs, scope)?;
                 let (rv, _) = self.emit_expr(rhs, scope)?;
                 if matches!(lt, Type::Float(_)) {
@@ -1586,12 +1586,12 @@ impl<'ctx> Cg<'ctx> {
                 };
                 Ok((v.map_err(le)?.into(), lt))
             }
-            Expr::Not(x) => {
+            ExprKind::Not(x) => {
                 let (xv, xt) = self.emit_expr(x, scope)?;
                 let v = self.builder.build_not(xv.into_int_value(), "not").map_err(le)?;
                 Ok((v.into(), xt))
             }
-            Expr::Cmp { op, lhs, rhs } => {
+            ExprKind::Cmp { op, lhs, rhs } => {
                 let (lv, lt) = self.emit_expr(lhs, scope)?;
                 let (rv, _) = self.emit_expr(rhs, scope)?;
                 if matches!(lt, Type::Float(_)) {
@@ -1632,7 +1632,7 @@ impl<'ctx> Cg<'ctx> {
                     .map_err(le)?;
                 Ok((b.into(), Type::Bool))
             }
-            Expr::Do(es) => {
+            ExprKind::Do(es) => {
                 let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));
                 for e in es {
                     if self.block_terminated() {
@@ -1642,7 +1642,7 @@ impl<'ctx> Cg<'ctx> {
                 }
                 Ok(last)
             }
-            Expr::Let { binds, body } => {
+            ExprKind::Let { binds, body } => {
                 let mut child = scope.clone();
                 for (name, _mutable, val) in binds {
                     // The checker erases mutable `let` places to an alloca plus a
@@ -1659,13 +1659,13 @@ impl<'ctx> Cg<'ctx> {
                 }
                 Ok(last)
             }
-            Expr::If { cond, then, els } => self.emit_if(cond, then, els, scope),
-            Expr::Loop { label, body } => self.emit_loop(label.as_deref(), body, scope),
-            Expr::Break { label, value } => {
+            ExprKind::If { cond, then, els } => self.emit_if(cond, then, els, scope),
+            ExprKind::Loop { label, body } => self.emit_loop(label.as_deref(), body, scope),
+            ExprKind::Break { label, value } => {
                 self.emit_break(label.as_deref(), value.as_deref(), scope)
             }
-            Expr::Continue { label } => self.emit_continue(label.as_deref()),
-            Expr::Call { func, args, .. } => {
+            ExprKind::Continue { label } => self.emit_continue(label.as_deref()),
+            ExprKind::Call { func, args, .. } => {
                 let argtv: Vec<Tv<'ctx>> = args
                     .iter()
                     .map(|a| self.emit_expr(a, scope))
@@ -1703,8 +1703,8 @@ impl<'ctx> Cg<'ctx> {
                     .ok_or_else(|| "codegen: call returned void".to_string())?;
                 Ok((v, ret_ty))
             }
-            Expr::Alloc { storage, ty } => self.emit_alloc(*storage, ty),
-            Expr::Field { ptr, field } => {
+            ExprKind::Alloc { storage, ty } => self.emit_alloc(*storage, ty),
+            ExprKind::Field { ptr, field } => {
                 let (pv, pt) = self.emit_expr(ptr, scope)?;
                 let sname = match pt {
                     Type::Ptr(pointee) => match *pointee {
@@ -1740,7 +1740,7 @@ impl<'ctx> Cg<'ctx> {
                 };
                 Ok((gep.into(), Type::Ptr(Box::new(fty))))
             }
-            Expr::BitGet { ptr, field } => {
+            ExprKind::BitGet { ptr, field } => {
                 let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
                 let backing_ty = self.ctx.custom_width_int_type(backing);
                 let loaded = self
@@ -1763,7 +1763,7 @@ impl<'ctx> Cg<'ctx> {
                 };
                 Ok((res.into(), Type::Int(width, false)))
             }
-            Expr::BitSet { ptr, field, val } => {
+            ExprKind::BitSet { ptr, field, val } => {
                 let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
                 let (vv, _) = self.emit_expr(val, scope)?;
                 let backing_ty = self.ctx.custom_width_int_type(backing);
@@ -1793,7 +1793,7 @@ impl<'ctx> Cg<'ctx> {
                 self.builder.build_store(pv, newval).map_err(le)?;
                 Ok((vv, Type::Int(width, false)))
             }
-            Expr::Load(p) => {
+            ExprKind::Load(p) => {
                 let (pv, pt) = self.emit_expr(p, scope)?;
                 let pointee = match pt {
                     Type::Ptr(pointee) => *pointee,
@@ -1805,7 +1805,7 @@ impl<'ctx> Cg<'ctx> {
                     .map_err(le)?;
                 Ok((v, pointee))
             }
-            Expr::Store { ptr, val } => {
+            ExprKind::Store { ptr, val } => {
                 let (pv, _) = self.emit_expr(ptr, scope)?;
                 let (vv, vt) = self.emit_expr(val, scope)?;
                 self.builder
@@ -1813,7 +1813,7 @@ impl<'ctx> Cg<'ctx> {
                     .map_err(le)?;
                 Ok((vv, vt))
             }
-            Expr::Index { ptr, idx } => {
+            ExprKind::Index { ptr, idx } => {
                 let (pv, pt) = self.emit_expr(ptr, scope)?;
                 let (iv, _) = self.emit_expr(idx, scope)?;
                 let pointee = match pt {
@@ -1844,7 +1844,7 @@ impl<'ctx> Cg<'ctx> {
                     }
                 }
             }
-            Expr::Cast { ty, expr } => {
+            ExprKind::Cast { ty, expr } => {
                 let (v, vt) = self.emit_expr(expr, scope)?;
                 match ty {
                     // pointer -> integer (address of): ptrtoint.
@@ -1927,26 +1927,26 @@ impl<'ctx> Cg<'ctx> {
                     other => Err(format!("codegen: cannot cast to {other:?}")),
                 }
             }
-            Expr::SizeOf(ty) => {
+            ExprKind::SizeOf(ty) => {
                 let n = self.target_data.get_abi_size(&self.basic_ty(ty));
                 Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
             }
-            Expr::AlignOf(ty) => {
+            ExprKind::AlignOf(ty) => {
                 let n = self.target_data.get_abi_alignment(&self.basic_ty(ty)) as u64;
                 Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
             }
-            Expr::OffsetOf(ty, field) => {
+            ExprKind::OffsetOf(ty, field) => {
                 let n = self.offset_of(ty, field)?;
                 Ok((i64t.const_int(n, false).into(), Type::Int(64, true)))
             }
-            Expr::Free(p) => {
+            ExprKind::Free(p) => {
                 let (pv, _) = self.emit_expr(p, scope)?;
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;
                 Ok((i64t.const_zero().into(), Type::Int(64, true)))
             }
-            Expr::Construct { sum, variant, args } => self.emit_construct(sum, variant, args, scope),
-            Expr::Match { scrut, arms } => self.emit_match(scrut, arms, scope),
-            Expr::FnPtrOf(name) => {
+            ExprKind::Construct { sum, variant, args } => self.emit_construct(sum, variant, args, scope),
+            ExprKind::Match { scrut, arms } => self.emit_match(scrut, arms, scope),
+            ExprKind::FnPtrOf(name) => {
                 let fv = *self
                     .funcs
                     .get(name)
@@ -1959,7 +1959,7 @@ impl<'ctx> Cg<'ctx> {
                 let ptr = fv.as_global_value().as_pointer_value();
                 Ok((ptr.into(), Type::Fn(cc, params, Box::new(ret))))
             }
-            Expr::CallPtr { fp, args } => {
+            ExprKind::CallPtr { fp, args } => {
                 let (fpv, fpt) = self.emit_expr(fp, scope)?;
                 let (cc, params, ret) = match fpt {
                     Type::Fn(cc, params, ret) => (cc, params, *ret),
@@ -2220,10 +2220,10 @@ impl<'ctx> Cg<'ctx> {
     /// runtime for unsigned operands (e.g. `(idiv (cast u64 -1) …)` in a
     /// static-assert) — a const/runtime mismatch this avoids.
     fn const_eval_t(&self, e: &Expr) -> Result<(i64, bool), String> {
-        Ok(match e {
-            Expr::Int(n) => (*n, false),
-            Expr::Bool(b) => (*b as i64, false),
-            Expr::If { cond, then, els } => {
+        Ok(match &e.kind {
+            ExprKind::Int(n) => (*n, false),
+            ExprKind::Bool(b) => (*b as i64, false),
+            ExprKind::If { cond, then, els } => {
                 // covers `and`/`or`/`not`, which desugar to `if`.
                 if self.const_eval_t(cond)?.0 != 0 {
                     self.const_eval_t(then)?
@@ -2231,15 +2231,15 @@ impl<'ctx> Cg<'ctx> {
                     self.const_eval_t(els)?
                 }
             }
-            Expr::SizeOf(t) => (self.target_data.get_abi_size(&self.basic_ty(t)) as i64, false),
-            Expr::AlignOf(t) => (self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64, false),
-            Expr::OffsetOf(t, f) => (self.offset_of(t, f)? as i64, false),
+            ExprKind::SizeOf(t) => (self.target_data.get_abi_size(&self.basic_ty(t)) as i64, false),
+            ExprKind::AlignOf(t) => (self.target_data.get_abi_alignment(&self.basic_ty(t)) as i64, false),
+            ExprKind::OffsetOf(t, f) => (self.offset_of(t, f)? as i64, false),
             // A cast to a `uN` type makes the value unsigned for later div/cmp/shr.
-            Expr::Cast { ty, expr } => {
+            ExprKind::Cast { ty, expr } => {
                 let v = self.const_eval_t(expr)?.0;
                 (v, matches!(ty, Type::Int(_, false)))
             }
-            Expr::Bin { op, lhs, rhs } => {
+            ExprKind::Bin { op, lhs, rhs } => {
                 let (l, lu) = self.const_eval_t(lhs)?;
                 let (r, ru) = self.const_eval_t(rhs)?;
                 let uns = lu || ru; // operands share a type, so either flag implies both
@@ -2268,7 +2268,7 @@ impl<'ctx> Cg<'ctx> {
                 };
                 (v, uns)
             }
-            Expr::Cmp { op, lhs, rhs } => {
+            ExprKind::Cmp { op, lhs, rhs } => {
                 let (l, lu) = self.const_eval_t(lhs)?;
                 let (r, ru) = self.const_eval_t(rhs)?;
                 let b = if lu || ru {

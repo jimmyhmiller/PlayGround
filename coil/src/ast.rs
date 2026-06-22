@@ -117,8 +117,31 @@ pub enum CmpOp {
     Ne,
 }
 
+/// An expression node: its shape (`ExprKind`) plus the source `Span` it was read
+/// from. The span drives checker diagnostics (file:line/caret) and DWARF line
+/// info; a synthesized node (inserted by elaboration/monomorphization) carries
+/// the span of the source node it stands for, or `Span::DUMMY` when there is none.
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl Expr {
+    /// An expression node located at `span`.
+    pub fn new(kind: ExprKind, span: Span) -> Expr {
+        Expr { kind, span }
+    }
+
+    /// A synthesized node with no source location (rendered as a bare message /
+    /// no line info — the pre-spans behavior).
+    pub fn dummy(kind: ExprKind) -> Expr {
+        Expr { kind, span: Span::DUMMY }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExprKind {
     Int(i64),
     /// A string literal `"…"` — a `(slice u8)` VIEW over a private `[N x i8]`
     /// global (length known at compile time). No allocator, no copy: it borrows

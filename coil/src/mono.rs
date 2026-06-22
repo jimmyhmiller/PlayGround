@@ -289,56 +289,56 @@ impl<'a> Mono<'a> {
 
     fn resolve_expr(&mut self, e: &Expr, map: &Subst) -> Result<Expr, String> {
         let go = |m: &mut Self, e: &Expr| m.resolve_expr(e, map);
-        Ok(match e {
-            Expr::Int(n) => Expr::Int(*n),
-            Expr::Float(x) => Expr::Float(*x),
-            Expr::Bool(b) => Expr::Bool(*b),
-            Expr::Str(s) => Expr::Str(s.clone()),
-            Expr::CStr(s) => Expr::CStr(s.clone()),
-            Expr::Var(s) => Expr::Var(s.clone()),
-            Expr::Zeroed(t) => Expr::Zeroed(self.resolve_ty(t, map)?),
-            Expr::Borrow { mutable, place } => Expr::Borrow {
+        Ok(Expr::new(match &e.kind {
+            ExprKind::Int(n) => ExprKind::Int(*n),
+            ExprKind::Float(x) => ExprKind::Float(*x),
+            ExprKind::Bool(b) => ExprKind::Bool(*b),
+            ExprKind::Str(s) => ExprKind::Str(s.clone()),
+            ExprKind::CStr(s) => ExprKind::CStr(s.clone()),
+            ExprKind::Var(s) => ExprKind::Var(s.clone()),
+            ExprKind::Zeroed(t) => ExprKind::Zeroed(self.resolve_ty(t, map)?),
+            ExprKind::Borrow { mutable, place } => ExprKind::Borrow {
                 mutable: *mutable,
                 place: Box::new(go(self, place)?),
             },
-            Expr::SpillRef(inner) => Expr::SpillRef(Box::new(go(self, inner)?)),
-            Expr::Bin { op, lhs, rhs } => Expr::Bin {
+            ExprKind::SpillRef(inner) => ExprKind::SpillRef(Box::new(go(self, inner)?)),
+            ExprKind::Bin { op, lhs, rhs } => ExprKind::Bin {
                 op: *op,
                 lhs: Box::new(go(self, lhs)?),
                 rhs: Box::new(go(self, rhs)?),
             },
-            Expr::Not(x) => Expr::Not(Box::new(go(self, x)?)),
-            Expr::Cmp { op, lhs, rhs } => Expr::Cmp {
+            ExprKind::Not(x) => ExprKind::Not(Box::new(go(self, x)?)),
+            ExprKind::Cmp { op, lhs, rhs } => ExprKind::Cmp {
                 op: *op,
                 lhs: Box::new(go(self, lhs)?),
                 rhs: Box::new(go(self, rhs)?),
             },
-            Expr::If { cond, then, els } => Expr::If {
+            ExprKind::If { cond, then, els } => ExprKind::If {
                 cond: Box::new(go(self, cond)?),
                 then: Box::new(go(self, then)?),
                 els: Box::new(go(self, els)?),
             },
-            Expr::Do(es) => Expr::Do(es.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?),
-            Expr::Loop { label, body } => Expr::Loop {
+            ExprKind::Do(es) => ExprKind::Do(es.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?),
+            ExprKind::Loop { label, body } => ExprKind::Loop {
                 label: label.clone(),
                 body: body.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?,
             },
-            Expr::Break { label, value } => Expr::Break {
+            ExprKind::Break { label, value } => ExprKind::Break {
                 label: label.clone(),
                 value: match value {
                     Some(v) => Some(Box::new(go(self, v)?)),
                     None => None,
                 },
             },
-            Expr::Continue { label } => Expr::Continue { label: label.clone() },
-            Expr::Let { binds, body } => Expr::Let {
+            ExprKind::Continue { label } => ExprKind::Continue { label: label.clone() },
+            ExprKind::Let { binds, body } => ExprKind::Let {
                 binds: binds
                     .iter()
                     .map(|(n, m, e)| Ok((n.clone(), *m, go(self, e)?)))
                     .collect::<Result<_, String>>()?,
                 body: body.iter().map(|e| go(self, e)).collect::<Result<_, _>>()?,
             },
-            Expr::Call { func, type_args, args } => {
+            ExprKind::Call { func, type_args, args } => {
                 let args = args.iter().map(|a| go(self, a)).collect::<Result<Vec<_>, _>>()?;
                 if let Some(sum_name) = self.variant_to_sum.get(func).cloned() {
                     // variant construction
@@ -365,7 +365,7 @@ impl<'a> Mono<'a> {
                     } else {
                         sum_name.clone()
                     };
-                    Expr::Construct {
+                    ExprKind::Construct {
                         sum: concrete_sum,
                         variant: func.clone(),
                         args,
@@ -389,56 +389,56 @@ impl<'a> Mono<'a> {
                     }
                     let mangled = mangle(func, &rtargs);
                     self.queue_func(func.clone(), rtargs);
-                    Expr::Call { func: mangled, type_args: vec![], args }
+                    ExprKind::Call { func: mangled, type_args: vec![], args }
                 } else {
-                    Expr::Call { func: func.clone(), type_args: vec![], args }
+                    ExprKind::Call { func: func.clone(), type_args: vec![], args }
                 }
             }
-            Expr::Alloc { storage, ty } => Expr::Alloc {
+            ExprKind::Alloc { storage, ty } => ExprKind::Alloc {
                 storage: *storage,
                 ty: self.resolve_ty(ty, map)?,
             },
-            Expr::Field { ptr, field } => Expr::Field {
+            ExprKind::Field { ptr, field } => ExprKind::Field {
                 ptr: Box::new(go(self, ptr)?),
                 field: field.clone(),
             },
-            Expr::BitGet { ptr, field } => Expr::BitGet {
+            ExprKind::BitGet { ptr, field } => ExprKind::BitGet {
                 ptr: Box::new(go(self, ptr)?),
                 field: field.clone(),
             },
-            Expr::BitSet { ptr, field, val } => Expr::BitSet {
+            ExprKind::BitSet { ptr, field, val } => ExprKind::BitSet {
                 ptr: Box::new(go(self, ptr)?),
                 field: field.clone(),
                 val: Box::new(go(self, val)?),
             },
-            Expr::LlvmIr { result, args, body } => Expr::LlvmIr {
+            ExprKind::LlvmIr { result, args, body } => ExprKind::LlvmIr {
                 result: self.resolve_ty(result, map)?,
                 args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
                 body: body.clone(),
             },
-            Expr::Load(p) => Expr::Load(Box::new(go(self, p)?)),
-            Expr::Store { ptr, val } => Expr::Store {
+            ExprKind::Load(p) => ExprKind::Load(Box::new(go(self, p)?)),
+            ExprKind::Store { ptr, val } => ExprKind::Store {
                 ptr: Box::new(go(self, ptr)?),
                 val: Box::new(go(self, val)?),
             },
-            Expr::Index { ptr, idx } => Expr::Index {
+            ExprKind::Index { ptr, idx } => ExprKind::Index {
                 ptr: Box::new(go(self, ptr)?),
                 idx: Box::new(go(self, idx)?),
             },
-            Expr::Cast { ty, expr } => Expr::Cast {
+            ExprKind::Cast { ty, expr } => ExprKind::Cast {
                 ty: self.resolve_ty(ty, map)?,
                 expr: Box::new(go(self, expr)?),
             },
-            Expr::SizeOf(ty) => Expr::SizeOf(self.resolve_ty(ty, map)?),
-            Expr::AlignOf(ty) => Expr::AlignOf(self.resolve_ty(ty, map)?),
-            Expr::OffsetOf(ty, f) => Expr::OffsetOf(self.resolve_ty(ty, map)?, f.clone()),
-            Expr::Free(p) => Expr::Free(Box::new(go(self, p)?)),
-            Expr::Construct { sum, variant, args } => Expr::Construct {
+            ExprKind::SizeOf(ty) => ExprKind::SizeOf(self.resolve_ty(ty, map)?),
+            ExprKind::AlignOf(ty) => ExprKind::AlignOf(self.resolve_ty(ty, map)?),
+            ExprKind::OffsetOf(ty, f) => ExprKind::OffsetOf(self.resolve_ty(ty, map)?, f.clone()),
+            ExprKind::Free(p) => ExprKind::Free(Box::new(go(self, p)?)),
+            ExprKind::Construct { sum, variant, args } => ExprKind::Construct {
                 sum: sum.clone(),
                 variant: variant.clone(),
                 args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
             },
-            Expr::Match { scrut, arms } => Expr::Match {
+            ExprKind::Match { scrut, arms } => ExprKind::Match {
                 scrut: Box::new(go(self, scrut)?),
                 arms: arms
                     .iter()
@@ -451,19 +451,19 @@ impl<'a> Mono<'a> {
                     })
                     .collect::<Result<_, String>>()?,
             },
-            Expr::FnPtrOf(name) => {
+            ExprKind::FnPtrOf(name) => {
                 if self.gfuncs.contains_key(name) {
                     return Err(format!(
                         "fnptr-of '{name}': cannot take a function pointer to a generic function"
                     ));
                 }
-                Expr::FnPtrOf(name.clone())
+                ExprKind::FnPtrOf(name.clone())
             }
-            Expr::CallPtr { fp, args } => Expr::CallPtr {
+            ExprKind::CallPtr { fp, args } => ExprKind::CallPtr {
                 fp: Box::new(go(self, fp)?),
                 args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
             },
-        })
+        }, e.span))
     }
 }
 

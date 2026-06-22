@@ -248,14 +248,14 @@ fn qualify_expr(
 ) -> Result<(), String> {
     let ty = |ty: &mut Type| qualify_type(ty, m, imps, table, tps, exports);
     let call = |name: &str, pick: Pick| resolve(name, m, imps, table, exports, pick);
-    match e {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::CStr(_) | Expr::Var(_) => {}
-        Expr::Zeroed(t) | Expr::SizeOf(t) | Expr::AlignOf(t) | Expr::OffsetOf(t, _) => ty(t)?,
-        Expr::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports)?,
+    match &mut e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::CStr(_) | ExprKind::Var(_) => {}
+        ExprKind::Zeroed(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) | ExprKind::OffsetOf(t, _) => ty(t)?,
+        ExprKind::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports)?,
         // `SpillRef` is inserted by the checker, which runs after name
         // resolution; the resolver never encounters one.
-        Expr::SpillRef(_) => unreachable!("SpillRef is produced after name resolution"),
-        Expr::Let { binds, body } => {
+        ExprKind::SpillRef(_) => unreachable!("SpillRef is produced after name resolution"),
+        ExprKind::Let { binds, body } => {
             for (_, _, v) in binds {
                 qualify_expr(v, m, imps, table, tps, exports)?;
             }
@@ -263,37 +263,37 @@ fn qualify_expr(
                 qualify_expr(e, m, imps, table, tps, exports)?;
             }
         }
-        Expr::Bin { lhs, rhs, .. } | Expr::Cmp { lhs, rhs, .. } => {
+        ExprKind::Bin { lhs, rhs, .. } | ExprKind::Cmp { lhs, rhs, .. } => {
             qualify_expr(lhs, m, imps, table, tps, exports)?;
             qualify_expr(rhs, m, imps, table, tps, exports)?;
         }
-        Expr::Not(x) | Expr::Load(x) | Expr::Free(x) => {
+        ExprKind::Not(x) | ExprKind::Load(x) | ExprKind::Free(x) => {
             qualify_expr(x, m, imps, table, tps, exports)?
         }
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             qualify_expr(cond, m, imps, table, tps, exports)?;
             qualify_expr(then, m, imps, table, tps, exports)?;
             qualify_expr(els, m, imps, table, tps, exports)?;
         }
-        Expr::Do(es) => {
+        ExprKind::Do(es) => {
             for e in es {
                 qualify_expr(e, m, imps, table, tps, exports)?;
             }
         }
         // Loop bodies and break values are ordinary expressions; labels are not
         // names to resolve.
-        Expr::Loop { body, .. } => {
+        ExprKind::Loop { body, .. } => {
             for e in body {
                 qualify_expr(e, m, imps, table, tps, exports)?;
             }
         }
-        Expr::Break { value, .. } => {
+        ExprKind::Break { value, .. } => {
             if let Some(v) = value {
                 qualify_expr(v, m, imps, table, tps, exports)?;
             }
         }
-        Expr::Continue { .. } => {}
-        Expr::Call { func, type_args, args } => {
+        ExprKind::Continue { .. } => {}
+        ExprKind::Call { func, type_args, args } => {
             *func = call(func, |d| &d.callables)?;
             for t in type_args {
                 qualify_type(t, m, imps, table, tps, exports)?;
@@ -302,48 +302,48 @@ fn qualify_expr(
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }
         }
-        Expr::Alloc { ty: t, .. } => ty(t)?,
-        Expr::Field { ptr, .. } | Expr::BitGet { ptr, .. } => {
+        ExprKind::Alloc { ty: t, .. } => ty(t)?,
+        ExprKind::Field { ptr, .. } | ExprKind::BitGet { ptr, .. } => {
             qualify_expr(ptr, m, imps, table, tps, exports)?
         }
-        Expr::Store { ptr, val } => {
+        ExprKind::Store { ptr, val } => {
             qualify_expr(ptr, m, imps, table, tps, exports)?;
             qualify_expr(val, m, imps, table, tps, exports)?;
         }
-        Expr::Index { ptr, idx } => {
+        ExprKind::Index { ptr, idx } => {
             qualify_expr(ptr, m, imps, table, tps, exports)?;
             qualify_expr(idx, m, imps, table, tps, exports)?;
         }
-        Expr::Cast { ty: t, expr } => {
+        ExprKind::Cast { ty: t, expr } => {
             ty(t)?;
             qualify_expr(expr, m, imps, table, tps, exports)?;
         }
-        Expr::BitSet { ptr, val, .. } => {
+        ExprKind::BitSet { ptr, val, .. } => {
             qualify_expr(ptr, m, imps, table, tps, exports)?;
             qualify_expr(val, m, imps, table, tps, exports)?;
         }
-        Expr::Construct { sum, variant, args } => {
+        ExprKind::Construct { sum, variant, args } => {
             *sum = call(sum, |d| &d.types)?;
             *variant = call(variant, |d| &d.callables)?;
             for a in args {
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }
         }
-        Expr::Match { scrut, arms } => {
+        ExprKind::Match { scrut, arms } => {
             qualify_expr(scrut, m, imps, table, tps, exports)?;
             for arm in arms {
                 arm.variant = call(&arm.variant, |d| &d.callables)?;
                 qualify_expr(&mut arm.body, m, imps, table, tps, exports)?;
             }
         }
-        Expr::FnPtrOf(name) => *name = call(name, |d| &d.callables)?,
-        Expr::CallPtr { fp, args } => {
+        ExprKind::FnPtrOf(name) => *name = call(name, |d| &d.callables)?,
+        ExprKind::CallPtr { fp, args } => {
             qualify_expr(fp, m, imps, table, tps, exports)?;
             for a in args {
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }
         }
-        Expr::LlvmIr { result, args, .. } => {
+        ExprKind::LlvmIr { result, args, .. } => {
             ty(result)?;
             for a in args {
                 qualify_expr(a, m, imps, table, tps, exports)?;

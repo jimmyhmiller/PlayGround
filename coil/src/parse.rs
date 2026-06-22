@@ -539,12 +539,12 @@ fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
     }
 }
 
-fn alloc_form(args: &[Sexp], storage: Storage) -> Result<Expr, Diag> {
+fn alloc_form(args: &[Sexp], storage: Storage) -> Result<ExprKind, Diag> {
     let ty = match args.first() {
         Some(t) => parse_type(t)?,
         None => Type::Int(64, true),
     };
-    Ok(Expr::Alloc { storage, ty })
+    Ok(ExprKind::Alloc { storage, ty })
 }
 
 /// A primitive scalar type name: `f32`/`f64`, or an integer `iN`/`uN`.
@@ -580,38 +580,39 @@ fn int_type(name: &str) -> Result<Type, String> {
 /// Parse an expression, attaching the form's span to any spanless error from
 /// within (so the diagnostic points at the most specific offending sub-form).
 fn parse_expr(s: &Sexp) -> Result<Expr, Diag> {
-    parse_expr_inner(s).map_err(|d| d.with_span(s.span))
+    let kind = parse_expr_inner(s).map_err(|d| d.with_span(s.span))?;
+    Ok(Expr::new(kind, s.span))
 }
 
-fn parse_expr_inner(s: &Sexp) -> Result<Expr, Diag> {
+fn parse_expr_inner(s: &Sexp) -> Result<ExprKind, Diag> {
     match &s.kind {
-        SexpKind::Int(n) => Ok(Expr::Int(*n)),
-        SexpKind::Float(x) => Ok(Expr::Float(*x)),
-        SexpKind::Sym(name) if name == "true" => Ok(Expr::Bool(true)),
-        SexpKind::Sym(name) if name == "false" => Ok(Expr::Bool(false)),
-        SexpKind::Sym(name) => Ok(Expr::Var(name.clone())),
+        SexpKind::Int(n) => Ok(ExprKind::Int(*n)),
+        SexpKind::Float(x) => Ok(ExprKind::Float(*x)),
+        SexpKind::Sym(name) if name == "true" => Ok(ExprKind::Bool(true)),
+        SexpKind::Sym(name) if name == "false" => Ok(ExprKind::Bool(false)),
+        SexpKind::Sym(name) => Ok(ExprKind::Var(name.clone())),
         SexpKind::Keyword(k) => Err(Diag::at(s.span, format!("unexpected keyword :{k} in expression"))),
-        SexpKind::Str(s) => Ok(Expr::Str(s.clone())),
-        SexpKind::CStr(s) => Ok(Expr::CStr(s.clone())),
+        SexpKind::Str(s) => Ok(ExprKind::Str(s.clone())),
+        SexpKind::CStr(s) => Ok(ExprKind::CStr(s.clone())),
         SexpKind::Vector(_) => Err(Diag::at(s.span, "unexpected vector in expression")),
         SexpKind::List(items) => parse_list_expr(items, s.span),
     }
 }
 
-fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
+fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
     let head = head_sym(items)?;
     let args = &items[1..];
-    let bin = |op: BinOp| -> Result<Expr, Diag> {
+    let bin = |op: BinOp| -> Result<ExprKind, Diag> {
         let (l, r) = two(args, &head)?;
-        Ok(Expr::Bin {
+        Ok(ExprKind::Bin {
             op,
             lhs: Box::new(parse_expr(l)?),
             rhs: Box::new(parse_expr(r)?),
         })
     };
-    let cmp = |op: CmpOp| -> Result<Expr, Diag> {
+    let cmp = |op: CmpOp| -> Result<ExprKind, Diag> {
         let (l, r) = two(args, &head)?;
-        Ok(Expr::Cmp {
+        Ok(ExprKind::Cmp {
             op,
             lhs: Box::new(parse_expr(l)?),
             rhs: Box::new(parse_expr(r)?),
@@ -646,7 +647,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "inot: expects (inot x)"));
             }
-            Ok(Expr::Not(Box::new(parse_expr(&args[0])?)))
+            Ok(ExprKind::Not(Box::new(parse_expr(&args[0])?)))
         }
         "icmp-lt" => cmp(CmpOp::Lt),
         "icmp-le" => cmp(CmpOp::Le),
@@ -657,17 +658,17 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
         // short-circuiting logical operators desugar to `if` over booleans.
         "and" => {
             let (a, b) = two(args, "and")?;
-            Ok(Expr::If {
+            Ok(ExprKind::If {
                 cond: Box::new(parse_expr(a)?),
                 then: Box::new(parse_expr(b)?),
-                els: Box::new(Expr::Bool(false)),
+                els: Box::new(Expr::new(ExprKind::Bool(false), span)),
             })
         }
         "or" => {
             let (a, b) = two(args, "or")?;
-            Ok(Expr::If {
+            Ok(ExprKind::If {
                 cond: Box::new(parse_expr(a)?),
-                then: Box::new(Expr::Bool(true)),
+                then: Box::new(Expr::new(ExprKind::Bool(true), span)),
                 els: Box::new(parse_expr(b)?),
             })
         }
@@ -675,23 +676,23 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "not: expects (not x)"));
             }
-            Ok(Expr::If {
+            Ok(ExprKind::If {
                 cond: Box::new(parse_expr(&args[0])?),
-                then: Box::new(Expr::Bool(false)),
-                els: Box::new(Expr::Bool(true)),
+                then: Box::new(Expr::new(ExprKind::Bool(false), span)),
+                els: Box::new(Expr::new(ExprKind::Bool(true), span)),
             })
         }
         "if" => {
             if args.len() != 3 {
                 return Err(Diag::at(span, "if: expects (if cond then else)"));
             }
-            Ok(Expr::If {
+            Ok(ExprKind::If {
                 cond: Box::new(parse_expr(&args[0])?),
                 then: Box::new(parse_expr(&args[1])?),
                 els: Box::new(parse_expr(&args[2])?),
             })
         }
-        "do" => Ok(Expr::Do(
+        "do" => Ok(ExprKind::Do(
             args.iter().map(parse_expr).collect::<Result<_, _>>()?,
         )),
         "let" => {
@@ -729,7 +730,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if body.is_empty() {
                 return Err(Diag::at(span, "let: empty body"));
             }
-            Ok(Expr::Let { binds, body })
+            Ok(ExprKind::Let { binds, body })
         }
         "call" => {
             let f = sym(args.first().ok_or("call: missing function")?, "call target")?;
@@ -737,7 +738,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                 .iter()
                 .map(parse_expr)
                 .collect::<Result<_, _>>()?;
-            Ok(Expr::Call {
+            Ok(ExprKind::Call {
                 func: f,
                 type_args: vec![],
                 args: cargs,
@@ -748,7 +749,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "zeroed: expects (zeroed TYPE)"));
             }
-            Ok(Expr::Zeroed(parse_type(&args[0])?))
+            Ok(ExprKind::Zeroed(parse_type(&args[0])?))
         }
         // `(mut x)` — borrow a place mutably (e.g. a call argument that may be
         // written through).
@@ -756,7 +757,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "mut: expects (mut PLACE)"));
             }
-            Ok(Expr::Borrow {
+            Ok(ExprKind::Borrow {
                 mutable: true,
                 place: Box::new(parse_expr(&args[0])?),
             })
@@ -767,7 +768,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
         "field" => {
             let p = parse_expr(args.first().ok_or("field: missing pointer")?)?;
             let name = sym(args.get(1).ok_or("field: missing field name")?, "field name")?;
-            Ok(Expr::Field {
+            Ok(ExprKind::Field {
                 ptr: Box::new(p),
                 field: name,
             })
@@ -775,7 +776,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
         "get" => {
             let p = parse_expr(args.first().ok_or("get: missing pointer")?)?;
             let name = sym(args.get(1).ok_or("get: missing field name")?, "field name")?;
-            Ok(Expr::BitGet {
+            Ok(ExprKind::BitGet {
                 ptr: Box::new(p),
                 field: name,
             })
@@ -784,7 +785,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             let p = parse_expr(args.first().ok_or("set!: missing pointer")?)?;
             let name = sym(args.get(1).ok_or("set!: missing field name")?, "field name")?;
             let v = parse_expr(args.get(2).ok_or("set!: missing value")?)?;
-            Ok(Expr::BitSet {
+            Ok(ExprKind::BitSet {
                 ptr: Box::new(p),
                 field: name,
                 val: Box::new(v),
@@ -794,12 +795,12 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "fnptr-of: expects (fnptr-of name)"));
             }
-            Ok(Expr::FnPtrOf(sym(&args[0], "function name")?))
+            Ok(ExprKind::FnPtrOf(sym(&args[0], "function name")?))
         }
         "call-ptr" => {
             let fp = parse_expr(args.first().ok_or("call-ptr: missing function pointer")?)?;
             let cargs = args[1..].iter().map(parse_expr).collect::<Result<_, _>>()?;
-            Ok(Expr::CallPtr {
+            Ok(ExprKind::CallPtr {
                 fp: Box::new(fp),
                 args: cargs,
             })
@@ -808,11 +809,11 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "load: expects (load ptr)"));
             }
-            Ok(Expr::Load(Box::new(parse_expr(&args[0])?)))
+            Ok(ExprKind::Load(Box::new(parse_expr(&args[0])?)))
         }
         "store!" => {
             let (p, v) = two(args, "store!")?;
-            Ok(Expr::Store {
+            Ok(ExprKind::Store {
                 ptr: Box::new(parse_expr(p)?),
                 val: Box::new(parse_expr(v)?),
             })
@@ -821,11 +822,11 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "free: expects (free ptr)"));
             }
-            Ok(Expr::Free(Box::new(parse_expr(&args[0])?)))
+            Ok(ExprKind::Free(Box::new(parse_expr(&args[0])?)))
         }
         "index" => {
             let (p, i) = two(args, "index")?;
-            Ok(Expr::Index {
+            Ok(ExprKind::Index {
                 ptr: Box::new(parse_expr(p)?),
                 idx: Box::new(parse_expr(i)?),
             })
@@ -834,7 +835,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 2 {
                 return Err(Diag::at(span, "cast: expects (cast :type expr)"));
             }
-            Ok(Expr::Cast {
+            Ok(ExprKind::Cast {
                 ty: parse_type(&args[0])?,
                 expr: Box::new(parse_expr(&args[1])?),
             })
@@ -863,11 +864,11 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                     // above ensures al[1] is the binds, so al[2..] is the body).
                     0 => return Err(Diag::at(a.span, format!("arm '{variant}': missing body"))),
                     1 => body_forms.into_iter().next().unwrap(),
-                    _ => Expr::Do(body_forms),
+                    _ => Expr::new(ExprKind::Do(body_forms), a.span),
                 };
                 arms.push(Arm { variant, binds, body });
             }
-            Ok(Expr::Match {
+            Ok(ExprKind::Match {
                 scrut: Box::new(scrut),
                 arms,
             })
@@ -876,19 +877,19 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if args.len() != 1 {
                 return Err(Diag::at(span, "sizeof: expects (sizeof TYPE)"));
             }
-            Ok(Expr::SizeOf(parse_type(&args[0])?))
+            Ok(ExprKind::SizeOf(parse_type(&args[0])?))
         }
         "alignof" => {
             if args.len() != 1 {
                 return Err(Diag::at(span, "alignof: expects (alignof TYPE)"));
             }
-            Ok(Expr::AlignOf(parse_type(&args[0])?))
+            Ok(ExprKind::AlignOf(parse_type(&args[0])?))
         }
         "offsetof" => {
             if args.len() != 2 {
                 return Err(Diag::at(span, "offsetof: expects (offsetof TYPE field)"));
             }
-            Ok(Expr::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
+            Ok(ExprKind::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
         }
         // (loop [:label] body...) — the structured-loop primitive.
         "loop" => {
@@ -897,7 +898,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if body.is_empty() {
                 return Err(Diag::at(span, "loop: expects (loop [:label] body...)"));
             }
-            Ok(Expr::Loop { label, body })
+            Ok(ExprKind::Loop { label, body })
         }
         // (break [:label] [value]) — exit the (named) loop, optionally with a value.
         "break" => {
@@ -909,7 +910,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                 Some(e) => Some(Box::new(parse_expr(e)?)),
                 None => None,
             };
-            Ok(Expr::Break { label, value })
+            Ok(ExprKind::Break { label, value })
         }
         // (continue [:label]) — restart the (named) loop's body.
         "continue" => {
@@ -917,7 +918,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
             if !rest.is_empty() {
                 return Err(Diag::at(span, "continue: expects (continue [:label])"));
             }
-            Ok(Expr::Continue { label })
+            Ok(ExprKind::Continue { label })
         }
         // (llvm-ir RESULT-TYPE [operand...] "BODY") — raw LLVM IR escape hatch.
         "llvm-ir" => {
@@ -933,7 +934,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                 SexpKind::Str(s) => s.clone(),
                 _ => return Err(Diag::at(args[2].span, "llvm-ir: body must be a string literal")),
             };
-            Ok(Expr::LlvmIr { result, args: operands, body })
+            Ok(ExprKind::LlvmIr { result, args: operands, body })
         }
         // direct application: (fib n) == (call fib n). A leading vector is an
         // explicit type-argument list for a generic call: (id [i64] 5).
@@ -945,7 +946,7 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<Expr, Diag> {
                 _ => (vec![], args),
             };
             let cargs = value_args.iter().map(parse_expr).collect::<Result<_, _>>()?;
-            Ok(Expr::Call {
+            Ok(ExprKind::Call {
                 func: other.to_string(),
                 type_args,
                 args: cargs,

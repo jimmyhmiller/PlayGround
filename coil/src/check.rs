@@ -29,6 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::span::Span;
 
 struct Sig {
     /// Generic type parameters (empty for an ordinary function/extern).
@@ -438,19 +439,19 @@ fn synth(
     tps: &HashSet<String>,
     fname: &str,
 ) -> Result<(Expr, Type), String> {
-    match e {
-        Expr::Int(n) => Ok((Expr::Int(*n), Type::Int(64, true))),
-        Expr::Float(x) => Ok((Expr::Float(*x), Type::Float(64))),
-        Expr::Bool(b) => Ok((Expr::Bool(*b), Type::Bool)),
+    match &e.kind {
+        ExprKind::Int(n) => Ok((Expr::new(ExprKind::Int(*n), e.span), Type::Int(64, true))),
+        ExprKind::Float(x) => Ok((Expr::new(ExprKind::Float(*x), e.span), Type::Float(64))),
+        ExprKind::Bool(b) => Ok((Expr::new(ExprKind::Bool(*b), e.span), Type::Bool)),
         // "…" is a (slice u8) view over a static byte global (length known now).
-        Expr::Str(s) => Ok((Expr::Str(s.clone()), Type::Slice(Box::new(Type::Int(8, false))))),
+        ExprKind::Str(s) => Ok((Expr::new(ExprKind::Str(s.clone()), e.span), Type::Slice(Box::new(Type::Int(8, false))))),
         // c"…" is a (ptr i8) to a NUL-terminated global, for FFI.
-        Expr::CStr(s) => Ok((Expr::CStr(s.clone()), Type::Ptr(Box::new(Type::Int(8, true))))),
-        Expr::Zeroed(ty) => {
+        ExprKind::CStr(s) => Ok((Expr::new(ExprKind::CStr(s.clone()), e.span), Type::Ptr(Box::new(Type::Int(8, true))))),
+        ExprKind::Zeroed(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': zeroed: {e}"))?;
-            Ok((Expr::Zeroed(ty.clone()), ty.clone()))
+            Ok((Expr::new(ExprKind::Zeroed(ty.clone()), e.span), ty.clone()))
         }
-        Expr::Borrow { mutable, place } => {
+        ExprKind::Borrow { mutable, place } => {
             // Borrow a place as a reference. The place must be an lvalue (a
             // variable/field/index whose type is a ref or pointer); a mutable
             // borrow additionally requires the place itself be writable. The
@@ -467,20 +468,20 @@ fn synth(
             }
             Ok((pe, Type::Ref(*mutable, Box::new(pointee))))
         }
-        Expr::Var(name) => {
+        ExprKind::Var(name) => {
             // Locals shadow consts (locals are checked first), so a parameter or
             // `let` named the same as a const is unaffected. A const reference
             // elaborates to its literal inline — zero runtime cost, and an untyped
             // const re-enters width inference exactly like the literal would.
             if let Some(t) = env.get(name) {
-                return Ok((Expr::Var(name.clone()), t.clone()));
+                return Ok((Expr::new(ExprKind::Var(name.clone()), e.span), t.clone()));
             }
             if let Some((lit, ty)) = cx.consts.get(name) {
                 return Ok((lit.clone(), ty.clone()));
             }
             Err(format!("in '{fname}': unbound variable '{name}'"))
         }
-        Expr::LlvmIr { result, args, body } => {
+        ExprKind::LlvmIr { result, args, body } => {
             // The raw-IR escape hatch: the form's type *is* the declared result
             // (the checker trusts the annotation; the LLVM verifier checks the
             // body). Operands are synthesized so they compose like any value.
@@ -503,11 +504,11 @@ fn synth(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((
-                Expr::LlvmIr { result: result.clone(), args: eargs, body: body.clone() },
+                Expr::new(ExprKind::LlvmIr { result: result.clone(), args: eargs, body: body.clone() }, e.span),
                 result.clone(),
             ))
         }
-        Expr::Bin { op, lhs, rhs } => {
+        ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
             let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;
             let (mut sides, t) =
@@ -521,15 +522,15 @@ fn synth(
             let rhs = sides.pop().unwrap();
             let lhs = sides.pop().unwrap();
             Ok((
-                Expr::Bin {
+                Expr::new(ExprKind::Bin {
                     op: *op,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
-                },
+                }, e.span),
                 t,
             ))
         }
-        Expr::Not(x) => {
+        ExprKind::Not(x) => {
             let (xe, xt) = synth(x, None, env, cx, tps, fname)?;
             if !numeric(&xt, tps) {
                 return Err(format!(
@@ -537,9 +538,9 @@ fn synth(
                     ty_str(&xt)
                 ));
             }
-            Ok((Expr::Not(Box::new(xe)), xt))
+            Ok((Expr::new(ExprKind::Not(Box::new(xe)), e.span), xt))
         }
-        Expr::Cmp { op, lhs, rhs } => {
+        ExprKind::Cmp { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
             let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;
             let (mut sides, t) =
@@ -553,18 +554,18 @@ fn synth(
             let rhs = sides.pop().unwrap();
             let lhs = sides.pop().unwrap();
             Ok((
-                Expr::Cmp {
+                Expr::new(ExprKind::Cmp {
                     op: *op,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
-                },
+                }, e.span),
                 Type::Bool,
             ))
         }
         // The structured-loop primitive. The body is typed as statements (its
         // value is unused — a loop only yields a value by `break`ing). The loop's
         // type is the value type unified across its break sites, or i64.
-        Expr::Loop { label, body } => {
+        ExprKind::Loop { label, body } => {
             if let Some(l) = label {
                 if cx.loops.borrow().iter().any(|f| f.label.as_deref() == Some(l)) {
                     return Err(format!(
@@ -592,11 +593,11 @@ fn synth(
             // (every break was checked/coerced to it). Otherwise it's the unified
             // break-value type, or Never if there is no break.
             let loop_ty = expected.cloned().or(frame.break_ty).unwrap_or(Type::Never);
-            Ok((Expr::Loop { label: label.clone(), body: body_e }, loop_ty))
+            Ok((Expr::new(ExprKind::Loop { label: label.clone(), body: body_e }, e.span), loop_ty))
         }
         // Exit a loop with an optional value; the value type is unified into the
         // target loop's frame. `break` itself diverges (type i64, never used).
-        Expr::Break { label, value } => {
+        ExprKind::Break { label, value } => {
             // Resolve the target loop and read its contextual expected type (used
             // to bidirectionally check the break value).
             let (idx, target_expected) = {
@@ -646,9 +647,9 @@ fn synth(
                     Some(_) => {}
                 }
             }
-            Ok((Expr::Break { label: label.clone(), value: val_e }, Type::Never))
+            Ok((Expr::new(ExprKind::Break { label: label.clone(), value: val_e }, e.span), Type::Never))
         }
-        Expr::Continue { label } => {
+        ExprKind::Continue { label } => {
             let loops = cx.loops.borrow();
             if loops.is_empty() {
                 return Err(format!("in '{fname}': continue outside of a loop"));
@@ -658,9 +659,9 @@ fn synth(
                     return Err(format!("in '{fname}': continue to unknown loop label ':{l}'"));
                 }
             }
-            Ok((Expr::Continue { label: label.clone() }, Type::Never))
+            Ok((Expr::new(ExprKind::Continue { label: label.clone() }, e.span), Type::Never))
         }
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             let (ce, ct) = synth(cond, None, env, cx, tps, fname)?;
             if !is_cond(&ct) {
                 return Err(format!(
@@ -675,11 +676,11 @@ fn synth(
                     let then_e = check_to(then, exp, env, cx, tps, fname, "if branch")?;
                     let els_e = check_to(els, exp, env, cx, tps, fname, "if branch")?;
                     Ok((
-                        Expr::If {
+                        Expr::new(ExprKind::If {
                             cond: Box::new(ce),
                             then: Box::new(then_e),
                             els: Box::new(els_e),
-                        },
+                        }, e.span),
                         exp.clone(),
                     ))
                 }
@@ -692,17 +693,17 @@ fn synth(
                     let els = branches.pop().unwrap();
                     let then = branches.pop().unwrap();
                     Ok((
-                        Expr::If {
+                        Expr::new(ExprKind::If {
                             cond: Box::new(ce),
                             then: Box::new(then),
                             els: Box::new(els),
-                        },
+                        }, e.span),
                         t,
                     ))
                 }
             }
         }
-        Expr::Do(es) => {
+        ExprKind::Do(es) => {
             let mut out = Vec::with_capacity(es.len());
             let mut last = Type::Int(64, true);
             let n = es.len();
@@ -724,9 +725,9 @@ fn synth(
                     out.push(ee);
                 }
             }
-            Ok((Expr::Do(out), last))
+            Ok((Expr::new(ExprKind::Do(out), e.span), last))
         }
-        Expr::Let { binds, body } => {
+        ExprKind::Let { binds, body } => {
             let saved = env.clone();
             let mut new_binds = Vec::with_capacity(binds.len());
             for (name, mutable, val) in binds {
@@ -763,22 +764,22 @@ fn synth(
                     _ if *mutable || is_place_value_type(&vt, cx) => {
                         env.insert(name.clone(), Type::Ref(*mutable, Box::new(vt.clone())));
                         let slot = format!("{name}.slot");
-                        let init = Expr::Do(vec![
-                            Expr::Store {
-                                ptr: Box::new(Expr::Var(slot.clone())),
+                        let init = Expr::new(ExprKind::Do(vec![
+                            Expr::new(ExprKind::Store {
+                                ptr: Box::new(Expr::new(ExprKind::Var(slot.clone()), e.span)),
                                 val: Box::new(ve),
-                            },
-                            Expr::Var(slot.clone()),
-                        ]);
+                            }, e.span),
+                            Expr::new(ExprKind::Var(slot.clone()), e.span),
+                        ]), e.span);
                         // Inner alias binding holds the alloc; the outer name is the
                         // slot pointer after the store. Both lower trivially.
                         new_binds.push((
                             slot.clone(),
                             false,
-                            Expr::Alloc {
+                            Expr::new(ExprKind::Alloc {
                                 storage: Storage::Stack,
                                 ty: erase_refs(&vt),
-                            },
+                            }, e.span),
                         ));
                         new_binds.push((name.clone(), false, init));
                     }
@@ -812,14 +813,14 @@ fn synth(
             }
             *env = saved; // bindings are lexical
             Ok((
-                Expr::Let {
+                Expr::new(ExprKind::Let {
                     binds: new_binds,
                     body: out,
-                },
+                }, e.span),
                 last,
             ))
         }
-        Expr::Call {
+        ExprKind::Call {
             func,
             type_args,
             args,
@@ -827,7 +828,7 @@ fn synth(
             // Variant construction (the parser emits it as a call to the variant
             // name) routes here so we can type and infer its sum's type args.
             if cx.variant_to_sum.contains_key(func) {
-                return synth_construct(func, type_args, args, expected, env, cx, tps, fname);
+                return synth_construct(func, type_args, args, expected, env, cx, tps, fname, e.span);
             }
             let sig = cx
                 .sigs
@@ -873,7 +874,7 @@ fn synth(
                         continue;
                     }
                     let want = sig.params[i].clone();
-                    let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
+                    let is_mut_borrow = matches!(&a.kind, ExprKind::Borrow { mutable: true, .. });
                     // A by-reference parameter takes a value (or place) of its
                     // pointee type — impose the pointee as the expected type so a
                     // literal or bare constructor argument adopts it (it is then
@@ -895,11 +896,11 @@ fn synth(
                     new_args.push(ae);
                 }
                 return Ok((
-                    Expr::Call {
+                    Expr::new(ExprKind::Call {
                         func: func.clone(),
                         type_args: vec![],
                         args: new_args,
-                    },
+                    }, e.span),
                     sig.ret.clone(),
                 ));
             }
@@ -952,7 +953,7 @@ fn synth(
             for (i, a) in args.iter().enumerate() {
                 let (ae, at) = arglist[i].take().expect("every argument synthesized");
                 let want = subst_apply(&sig.params[i], &subst);
-                let is_mut_borrow = matches!(a, Expr::Borrow { mutable: true, .. });
+                let is_mut_borrow = matches!(&a.kind, ExprKind::Borrow { mutable: true, .. });
                 let ae = coerce_arg(
                     is_mut_borrow,
                     ae,
@@ -971,35 +972,35 @@ fn synth(
                 .collect();
             let ret = subst_apply(&sig.ret, &subst);
             Ok((
-                Expr::Call {
+                Expr::new(ExprKind::Call {
                     func: func.clone(),
                     type_args: out_type_args,
                     args: new_args,
-                },
+                }, e.span),
                 ret,
             ))
         }
-        Expr::Alloc { storage, ty } => {
+        ExprKind::Alloc { storage, ty } => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': alloc: {e}"))?;
             Ok((
-                Expr::Alloc {
+                Expr::new(ExprKind::Alloc {
                     storage: *storage,
                     ty: ty.clone(),
-                },
+                }, e.span),
                 Type::Ptr(Box::new(ty.clone())),
             ))
         }
-        Expr::BitGet { ptr, field } => {
+        ExprKind::BitGet { ptr, field } => {
             let (pe, fty) = bit_field_type(ptr, field, env, cx, tps, fname)?;
             Ok((
-                Expr::BitGet {
+                Expr::new(ExprKind::BitGet {
                     ptr: Box::new(pe),
                     field: field.clone(),
-                },
+                }, e.span),
                 fty,
             ))
         }
-        Expr::BitSet { ptr, field, val } => {
+        ExprKind::BitSet { ptr, field, val } => {
             let (pe, fty) = bit_field_type(ptr, field, env, cx, tps, fname)?;
             let (ve, vt) = synth(val, Some(&fty), env, cx, tps, fname)?;
             let ve = coerce(
@@ -1011,15 +1012,15 @@ fn synth(
                 &format!("set! into bitfield '{field}'"),
             )?;
             Ok((
-                Expr::BitSet {
+                Expr::new(ExprKind::BitSet {
                     ptr: Box::new(pe),
                     field: field.clone(),
                     val: Box::new(ve),
-                },
+                }, e.span),
                 fty,
             ))
         }
-        Expr::Field { ptr, field } => {
+        ExprKind::Field { ptr, field } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             let pointee = place_pointee(&pt).cloned().ok_or_else(|| {
                 format!(
@@ -1047,24 +1048,24 @@ fn synth(
                 .ok_or_else(|| format!("in '{fname}': struct '{sname}' has no field '{field}'"))?;
             // a field of a place is itself a place, inheriting its mutability.
             Ok((
-                Expr::Field {
+                Expr::new(ExprKind::Field {
                     ptr: Box::new(pe),
                     field: field.clone(),
-                },
+                }, e.span),
                 replace_pointee(&pt, fty),
             ))
         }
-        Expr::Load(p) => {
+        ExprKind::Load(p) => {
             let (pe, pt) = synth(p, None, env, cx, tps, fname)?;
             match place_pointee(&pt) {
-                Some(pointee) => Ok((Expr::Load(Box::new(pe)), pointee.clone())),
+                Some(pointee) => Ok((Expr::new(ExprKind::Load(Box::new(pe)), e.span), pointee.clone())),
                 None => Err(format!(
                     "in '{fname}': load expects a pointer or reference, got {}",
                     ty_str(&pt)
                 )),
             }
         }
-        Expr::Store { ptr, val } => {
+        ExprKind::Store { ptr, val } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             let pointee = match place_pointee(&pt) {
                 Some(p) => p.clone(),
@@ -1085,14 +1086,14 @@ fn synth(
             let (ve, vt) = synth(val, Some(&pointee), env, cx, tps, fname)?;
             let ve = coerce(ve, vt, &pointee, false, fname, "store! value")?;
             Ok((
-                Expr::Store {
+                Expr::new(ExprKind::Store {
                     ptr: Box::new(pe),
                     val: Box::new(ve),
-                },
+                }, e.span),
                 pointee,
             ))
         }
-        Expr::Index { ptr, idx } => {
+        ExprKind::Index { ptr, idx } => {
             let (pe, pt) = synth(ptr, None, env, cx, tps, fname)?;
             let (ie, it) = synth(idx, None, env, cx, tps, fname)?;
             let ie = coerce(ie, it, &Type::Int(64, true), false, fname, "index")
@@ -1105,10 +1106,10 @@ fn synth(
                     };
                     // an element of a place is a place, inheriting its mutability.
                     Ok((
-                        Expr::Index {
+                        Expr::new(ExprKind::Index {
                             ptr: Box::new(pe),
                             idx: Box::new(ie),
-                        },
+                        }, e.span),
                         replace_pointee(&pt, elem),
                     ))
                 }
@@ -1118,7 +1119,7 @@ fn synth(
                 )),
             }
         }
-        Expr::Cast { ty, expr } => {
+        ExprKind::Cast { ty, expr } => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': cast target: {e}"))?;
             let (ee, et) = synth(expr, None, env, cx, tps, fname)?;
             match (ty, &et) {
@@ -1131,10 +1132,10 @@ fn synth(
                 | (Type::Float(..), Type::Float(..))
                 | (Type::Float(..), Type::Int(..))
                 | (Type::Int(..), Type::Float(..)) => Ok((
-                    Expr::Cast {
+                    Expr::new(ExprKind::Cast {
                         ty: ty.clone(),
                         expr: Box::new(ee),
-                    },
+                    }, e.span),
                     ty.clone(),
                 )),
                 _ => Err(format!(
@@ -1144,15 +1145,15 @@ fn synth(
                 )),
             }
         }
-        Expr::SizeOf(ty) => {
+        ExprKind::SizeOf(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': sizeof: {e}"))?;
-            Ok((Expr::SizeOf(ty.clone()), Type::Int(64, true)))
+            Ok((Expr::new(ExprKind::SizeOf(ty.clone()), e.span), Type::Int(64, true)))
         }
-        Expr::AlignOf(ty) => {
+        ExprKind::AlignOf(ty) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': alignof: {e}"))?;
-            Ok((Expr::AlignOf(ty.clone()), Type::Int(64, true)))
+            Ok((Expr::new(ExprKind::AlignOf(ty.clone()), e.span), Type::Int(64, true)))
         }
-        Expr::OffsetOf(ty, field) => {
+        ExprKind::OffsetOf(ty, field) => {
             validate_type(ty, cx, tps).map_err(|e| format!("in '{fname}': offsetof: {e}"))?;
             let fields = struct_fields(ty, cx)
                 .map_err(|_| format!("in '{fname}': offsetof needs a struct type, got {}", ty_str(ty)))?;
@@ -1162,31 +1163,31 @@ fn synth(
                     "in '{fname}': offsetof: struct '{name}' has no field '{field}'"
                 ));
             }
-            Ok((Expr::OffsetOf(ty.clone(), field.clone()), Type::Int(64, true)))
+            Ok((Expr::new(ExprKind::OffsetOf(ty.clone(), field.clone()), e.span), Type::Int(64, true)))
         }
-        Expr::Free(p) => {
+        ExprKind::Free(p) => {
             let (pe, pt) = synth(p, None, env, cx, tps, fname)?;
             match pt {
-                Type::Ptr(_) => Ok((Expr::Free(Box::new(pe)), Type::Int(64, true))),
+                Type::Ptr(_) => Ok((Expr::new(ExprKind::Free(Box::new(pe)), e.span), Type::Int(64, true))),
                 other => Err(format!(
                     "in '{fname}': free expects a pointer, got {}",
                     ty_str(&other)
                 )),
             }
         }
-        Expr::Construct { sum, variant, args } => {
+        ExprKind::Construct { sum, variant, args } => {
             // The parser never emits Construct (it uses Call); kept for safety.
-            synth_construct(variant, &[], args, None, env, cx, tps, fname)
+            synth_construct(variant, &[], args, None, env, cx, tps, fname, e.span)
                 .map(|(e, _)| (e, Type::Struct(sum.clone())))
         }
-        Expr::Match { scrut, arms } => {
+        ExprKind::Match { scrut, arms } => {
             let (mut se, st0) = synth(scrut, None, env, cx, tps, fname)?;
             // A by-reference sum (e.g. a sum parameter, now passed by immutable
             // reference) reads as its value here: load it so the match sees a
             // value scrutinee, exactly as `coerce` reads a ref as its value.
             let st = match &st0 {
                 Type::Ref(_, inner) if sum_variants(inner, cx).is_some() => {
-                    se = Expr::Load(Box::new(se));
+                    se = Expr::new(ExprKind::Load(Box::new(se)), e.span);
                     (**inner).clone()
                 }
                 _ => st0,
@@ -1248,10 +1249,10 @@ fn synth(
             }
             match expected {
                 Some(exp) => Ok((
-                    Expr::Match {
+                    Expr::new(ExprKind::Match {
                         scrut: Box::new(se),
                         arms: checked_arms,
-                    },
+                    }, e.span),
                     exp.clone(),
                 )),
                 None => {
@@ -1262,16 +1263,16 @@ fn synth(
                         .map(|((variant, binds), body)| Arm { variant, binds, body })
                         .collect();
                     Ok((
-                        Expr::Match {
+                        Expr::new(ExprKind::Match {
                             scrut: Box::new(se),
                             arms: new_arms,
-                        },
+                        }, e.span),
                         t,
                     ))
                 }
             }
         }
-        Expr::FnPtrOf(name) => {
+        ExprKind::FnPtrOf(name) => {
             let sig = cx
                 .sigs
                 .get(name)
@@ -1288,11 +1289,11 @@ fn synth(
                 ));
             }
             Ok((
-                Expr::FnPtrOf(name.clone()),
+                Expr::new(ExprKind::FnPtrOf(name.clone()), e.span),
                 Type::Fn(sig.cc.clone(), sig.params.clone(), Box::new(sig.ret.clone())),
             ))
         }
-        Expr::CallPtr { fp, args } => {
+        ExprKind::CallPtr { fp, args } => {
             let (fe, ft) = synth(fp, None, env, cx, tps, fname)?;
             match ft {
                 Type::Fn(_, params, ret) => {
@@ -1317,10 +1318,10 @@ fn synth(
                         new_args.push(ae);
                     }
                     Ok((
-                        Expr::CallPtr {
+                        Expr::new(ExprKind::CallPtr {
                             fp: Box::new(fe),
                             args: new_args,
-                        },
+                        }, e.span),
                         *ret,
                     ))
                 }
@@ -1333,7 +1334,7 @@ fn synth(
         // Produced by `coerce_arg` as part of elaboration; never an input to
         // synthesis (the checker runs once and `SpillRef` only appears in its
         // output).
-        Expr::SpillRef(_) => {
+        ExprKind::SpillRef(_) => {
             unreachable!("SpillRef is checker-produced and is never re-synthesized")
         }
     }
@@ -1346,6 +1347,7 @@ fn synth(
 /// specialize it. When the type arguments are known *before* the arguments
 /// (explicit or from context), each argument is itself checked in checking mode,
 /// so nested constructors and literals get their expected type too.
+#[allow(clippy::too_many_arguments)]
 fn synth_construct(
     variant: &str,
     type_args: &[Type],
@@ -1355,6 +1357,7 @@ fn synth_construct(
     cx: &Cx,
     tps: &HashSet<String>,
     fname: &str,
+    span: Span,
 ) -> Result<(Expr, Type), String> {
     let sumname = cx.variant_to_sum[variant].clone();
     let si = &cx.sums[&sumname];
@@ -1431,21 +1434,27 @@ fn synth_construct(
     if tparams.is_empty() {
         // concrete sum: leave type_args empty, result is the plain sum type.
         Ok((
-            Expr::Call {
-                func: variant.to_string(),
-                type_args: vec![],
-                args: new_args,
-            },
+            Expr::new(
+                ExprKind::Call {
+                    func: variant.to_string(),
+                    type_args: vec![],
+                    args: new_args,
+                },
+                span,
+            ),
             Type::Struct(sumname),
         ))
     } else {
         let out_targs: Vec<Type> = tparams.iter().map(|p| subst[p].clone()).collect();
         Ok((
-            Expr::Call {
-                func: variant.to_string(),
-                type_args: out_targs.clone(),
-                args: new_args,
-            },
+            Expr::new(
+                ExprKind::Call {
+                    func: variant.to_string(),
+                    type_args: out_targs.clone(),
+                    args: new_args,
+                },
+                span,
+            ),
             Type::App(sumname, out_targs),
         ))
     }
@@ -1674,7 +1683,8 @@ fn coerce_arg(
                         ));
                     }
                     // Spill the temporary and pass a pointer to it.
-                    return Ok(Expr::SpillRef(Box::new(ae)));
+                    let sp = ae.span;
+                    return Ok(Expr::new(ExprKind::SpillRef(Box::new(ae)), sp));
                 }
             };
             if ap != &**wp {
@@ -1898,12 +1908,12 @@ fn bit_field_type(
 /// True if `e` is an integer *literal* — a value whose type isn't yet pinned and
 /// can adopt a concrete `iN`/`uN` from context.
 fn is_literal(e: &Expr) -> bool {
-    match e {
-        Expr::Int(_) | Expr::Float(_) => true,
-        Expr::Bin { lhs, rhs, .. } => is_literal(lhs) && is_literal(rhs),
-        Expr::If { then, els, .. } => is_literal(then) && is_literal(els),
-        Expr::Do(es) => es.last().is_some_and(is_literal),
-        Expr::Let { body, .. } => body.last().is_some_and(is_literal),
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) => true,
+        ExprKind::Bin { lhs, rhs, .. } => is_literal(lhs) && is_literal(rhs),
+        ExprKind::If { then, els, .. } => is_literal(then) && is_literal(els),
+        ExprKind::Do(es) => es.last().is_some_and(is_literal),
+        ExprKind::Let { body, .. } => body.last().is_some_and(is_literal),
         _ => false,
     }
 }
@@ -1966,7 +1976,7 @@ fn const_entry(c: &Const) -> Result<(Expr, Type), String> {
     };
     match c.value {
         ConstLit::Int(n) => match &c.ty {
-            None => Ok((Expr::Int(n), Type::Int(64, true))),
+            None => Ok((Expr::dummy(ExprKind::Int(n)), Type::Int(64, true))),
             Some(Type::Int(bits, signed)) => {
                 if !fits(n, *bits, *signed) {
                     return Err(format!(
@@ -1975,24 +1985,24 @@ fn const_entry(c: &Const) -> Result<(Expr, Type), String> {
                         ty_str(c.ty.as_ref().unwrap())
                     ));
                 }
-                Ok((Expr::Int(n), Type::Int(*bits, *signed)))
+                Ok((Expr::dummy(ExprKind::Int(n)), Type::Int(*bits, *signed)))
             }
             Some(other) => Err(bad(other, "integer")),
         },
         ConstLit::Float(x) => match &c.ty {
-            None => Ok((Expr::Float(x), Type::Float(64))),
-            Some(Type::Float(b)) => Ok((Expr::Float(x), Type::Float(*b))),
+            None => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(64))),
+            Some(Type::Float(b)) => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(*b))),
             Some(other) => Err(bad(other, "float")),
         },
         ConstLit::Bool(b) => match &c.ty {
-            None | Some(Type::Bool) => Ok((Expr::Bool(b), Type::Bool)),
+            None | Some(Type::Bool) => Ok((Expr::dummy(ExprKind::Bool(b)), Type::Bool)),
             Some(other) => Err(bad(other, "boolean")),
         },
     }
 }
 
 fn coerce_lit(e: Expr, target: &Type, fname: &str) -> Result<Expr, String> {
-    if let (Expr::Int(n), Type::Int(bits, signed)) = (&e, target) {
+    if let (ExprKind::Int(n), Type::Int(bits, signed)) = (&e.kind, target) {
         if !fits(*n, *bits, *signed) {
             return Err(format!(
                 "in '{fname}': literal {n} does not fit in {}",
@@ -2000,10 +2010,11 @@ fn coerce_lit(e: Expr, target: &Type, fname: &str) -> Result<Expr, String> {
             ));
         }
     }
-    Ok(Expr::Cast {
+    let sp = e.span;
+    Ok(Expr::new(ExprKind::Cast {
         ty: target.clone(),
         expr: Box::new(e),
-    })
+    }, sp))
 }
 
 /// Coerce an elaborated expression of type `et` to the expected `target` at a
@@ -2052,7 +2063,8 @@ fn coerce(
     // `is_writable` check, so const-correctness is unaffected.
     if let Type::Ref(_, inner) = &et {
         if &**inner == target {
-            return Ok(Expr::Load(Box::new(e)));
+            let sp = e.span;
+            return Ok(Expr::new(ExprKind::Load(Box::new(e)), sp));
         }
     }
     Err(format!(
