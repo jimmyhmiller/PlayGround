@@ -77,24 +77,57 @@ Note: pure-arithmetic statements over constants still produce no instructions
 (immutable `let`s are SSA values, not stores), so there is nothing to step
 *onto* for them — stepping is most useful across calls / effects / control flow.
 
-## Deferred (honest — increment 3+)
+# Increment 3 — scalar-parameter locals (DONE)
 
-- **Local-variable / parameter DI** (`DILocalVariable` + `llvm.dbg.declare` /
-  `dbg.value`), so `frame variable` / `p x` work. The codegen side was prototyped
-  (a `Type` → `DIType` map for scalars/pointers + a `-g`-only spill of each scalar
-  param to a debug `alloca`), but it is **BLOCKED by a toolchain mismatch in this
-  environment**: inkwell 0.5's `insert_declare_at_end`/`insert_dbg_value_before`
-  call the C symbols `LLVMDIBuilderInsertDeclareAtEnd` / `…InsertDbgValueBefore`,
-  which were **removed in LLVM 19+** (the "debug records" migration renamed them
-  to `…InsertDeclareRecordAtEnd`, etc.). The build links Homebrew LLVM **21** libs
-  (despite the `llvm18-0` feature — most symbols still match, so increments 1–2
-  link fine; these two do not), so the link fails with an undefined symbol.
-  Unblock by one of: building against real LLVM ≤18 libs (set
-  `LLVM_SYS_181_PREFIX=/opt/homebrew/opt/llvm@18` and rebuild `llvm-sys`); an
-  inkwell version exposing the `InsertDeclareRecord*` API; or emitting the
-  `@llvm.dbg.declare` intrinsic call by hand. (Coil also binds immutable `let`s /
-  scalar params as SSA values, not `alloca`s, so a `-g`-only spill or `dbg.value`
-  is needed regardless — but the symbol mismatch is the immediate blocker.)
+`frame variable` / `p a` now show a function's **scalar/pointer parameters**.
+Each is given a `DILocalVariable` (`create_parameter_variable`) over a `-g`-only
+debug `alloca` it is spilled into (the minimal `-g` pipeline keeps the `alloca` in
+memory), with a `Coil-Type → DIType` map for the scalar/pointer cases
+(`di_type`); aggregates (struct/sum/slice/array/fnptr) are skipped — no entry
+rather than a wrong type. The `DISubprogram`/CU are marked **not optimized** under
+`-g` so lldb trusts the DWARF instead of heuristically skipping the prologue.
+
+This required **moving the whole build to the latest LLVM**: the `llvm.dbg.declare`
+inserter (`LLVMDIBuilderInsertDeclareAtEnd`) was removed in LLVM 19+ (the
+"debug-records" migration). Bumping `inkwell 0.5`/`llvm18-0` → `inkwell 0.9`/
+`llvm21-1` (matching the Homebrew LLVM 21.1 actually linked) maps it to the new
+`…InsertDeclareRecordAtEnd` symbol. See "LLVM 21 / inkwell 0.9" notes below.
+
+**Caveat (AArch64):** a breakpoint set on a *function name* lands just after the
+frame setup but *before* the parameter spill stores, so it shows stale stack
+bytes for one instruction; a **line** breakpoint inside the body (the common
+case), or one `next`/`step`, shows the correct values. Verified at a line
+breakpoint (`tests/debuginfo.rs::lldb_frame_variable_shows_params`).
+
+## Deferred (increment 4+)
+
+- **`let`-binding locals** (`create_auto_variable`) — same mechanism, but the
+  bindings are scattered through `emit_expr`'s Let arm rather than collected at
+  function entry.
+- **Aggregate `DIType`s** (struct members, sum/enum variants, slice/array element
+  types), so `frame variable` can print structs/slices, not just scalars.
+- **Typed `DISubroutineType`** (parameter/return DWARF types); currently one
+  shared opaque `() -> ?` signature.
+- A **debug-info path for included/imported functions** (multi-source spans), once
+  the reader stamps real (source-id, offset) spans across files rather than DUMMY.
+
+---
+
+# Toolchain — LLVM 21 / inkwell 0.9
+
+The project targets the latest LLVM (21.1, the Homebrew default `llvm`) via
+`inkwell = { version = "0.9", features = ["llvm21-1"] }`. Migrating from
+`inkwell 0.5`/`llvm18-0` (which "mostly worked" against LLVM 21 libs but broke on
+removed/renamed symbols) needed three API adjustments:
+
+- `Context::custom_width_int_type` now takes a `NonZeroU32` and returns a
+  `Result` — wrapped in `codegen::int_width(ctx, bits)` (Coil widths are
+  parse-validated nonzero, so it can't fail).
+- `CallSiteValue::try_as_basic_value()` returns a `ValueKind` enum, not `Either`:
+  `.left()` → `.basic()` (both `Option<BasicValueEnum>`).
+- `MemoryBuffer::create_from_memory_range[_copy]` now *asserts* the input slice
+  ends in a NUL byte (and decrements length past it), so the `(llvm-ir …)` helper
+  text is handed an explicitly NUL-terminated copy.
 - **Typed `DISubroutineType`** (parameter/return DWARF types); currently one
   shared opaque `() -> ?` signature.
 - A **debug-info path for included/imported functions** (multi-source spans), once

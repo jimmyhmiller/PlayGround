@@ -165,6 +165,14 @@ struct SumInfo<'ctx> {
     variant_structs: Vec<StructType<'ctx>>,
 }
 
+/// An LLVM integer type of arbitrary bit width. inkwell ≥0.7 takes a `NonZeroU32`
+/// and returns a `Result` (rejecting a zero width); Coil widths are validated
+/// nonzero at parse, so neither failure mode is reachable here.
+pub(crate) fn int_width(ctx: &Context, bits: u32) -> inkwell::types::IntType<'_> {
+    ctx.custom_width_int_type(std::num::NonZeroU32::new(bits).expect("int width is nonzero"))
+        .expect("valid int width")
+}
+
 /// What the caller supplies to turn on DWARF emission: the source text (to map a
 /// byte span to a line/column) and the file identity for the `DIFile`.
 pub struct DebugInput<'a> {
@@ -330,7 +338,11 @@ pub fn compile_for_dbg<'ctx>(
             &d.file_name,
             &d.directory,
             "coil",
-            true, // we run the -O3 pipeline
+            // NOT optimized: a `-g` build runs an almost-empty pipeline, so lldb
+            // can trust the DWARF (prologue_end, variable locations) instead of
+            // heuristically skipping the prologue — which otherwise lands a
+            // breakpoint before the parameter stores and shows stale values.
+            false,
             "",   // flags
             0,    // runtime version
             "",   // split name
@@ -436,7 +448,7 @@ pub fn compile_for_dbg<'ctx>(
             }
             // bit structs are an integer; give the placeholder type a body anyway.
             Layout::Bits(b) => {
-                ty.set_body(&[ctx.custom_width_int_type(b.backing).into()], false);
+                ty.set_body(&[int_width(ctx, b.backing).into()], false);
             }
             other => {
                 let field_types: Vec<BasicTypeEnum> =
@@ -595,7 +607,7 @@ impl<'ctx> Cg<'ctx> {
             // A Never value is never materialized (the expression diverges first);
             // this placeholder only labels slots/phis on dead, unreachable paths.
             Type::Never => self.ctx.i64_type().into(),
-            Type::Int(bits, _) => self.ctx.custom_width_int_type(*bits).into(),
+            Type::Int(bits, _) => int_width(self.ctx, *bits).into(),
             Type::Float(32) => self.ctx.f32_type().into(),
             Type::Float(_) => self.ctx.f64_type().into(),
             Type::Bool => self.ctx.bool_type().into(),
@@ -604,7 +616,7 @@ impl<'ctx> Cg<'ctx> {
                 if let Some(s) = self.structs.get(name) {
                     // a :layout bits struct is represented by its backing integer.
                     if let Layout::Bits(b) = &s.layout {
-                        return self.ctx.custom_width_int_type(b.backing).into();
+                        return int_width(self.ctx, b.backing).into();
                     }
                     s.ty.into()
                 } else if let Some(s) = self.sums.get(name) {
@@ -1012,7 +1024,7 @@ impl<'ctx> Cg<'ctx> {
             // reload the struct value.
             let coerced = cs
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| "codegen: C-ABI direct return produced void".to_string())?;
             let slot = self.struct_slot(sa, "abi.ret")?;
             self.builder.build_store(slot, coerced).map_err(le)?;
@@ -1027,7 +1039,7 @@ impl<'ctx> Cg<'ctx> {
         // A scalar return (e.g. a function that only *takes* a struct by value).
         let v = cs
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "codegen: C-ABI call returned void".to_string())?;
         Ok((v, ret_ty))
     }
@@ -1067,7 +1079,7 @@ impl<'ctx> Cg<'ctx> {
                     true,  // is a definition
                     line,  // scope line
                     inkwell::debug_info::DIFlags::ZERO,
-                    true, // optimized (-O3)
+                    false, // not optimized (the -g pipeline is ~-O0; see the CU)
                 );
                 function.set_subprogram(sp);
                 // Keep user functions out of the inliner so their breakpoints
@@ -1158,6 +1170,11 @@ impl<'ctx> Cg<'ctx> {
                 }
             }
         }
+
+        // Parameter debug info (-g): describe each scalar/pointer arg so the
+        // debugger can show them. Done after binding (values are in `scope`) and
+        // before the body, so the dbg.declares sit in the entry block.
+        self.emit_param_debug(f, entry, &scope);
 
         let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
         for e in &f.body {
@@ -1412,7 +1429,7 @@ impl<'ctx> Cg<'ctx> {
             .build_indirect_call(fn_ty, asm_ptr, &argvals, "shimcall")
             .map_err(le)?;
         cs.try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "codegen: shim call returned void".to_string())
     }
 
@@ -1465,7 +1482,12 @@ impl<'ctx> Cg<'ctx> {
             params.join(", ")
         );
 
-        let buf = MemoryBuffer::create_from_memory_range(module_text.as_bytes(), "coil_llvm_ir");
+        // inkwell ≥0.9 *asserts* the input slice ends in a NUL (both the copy and
+        // non-copy `create_from_memory_range*` decrement len past it), so hand it
+        // an explicitly NUL-terminated copy of the IR text.
+        let mut ir_bytes = module_text.clone().into_bytes();
+        ir_bytes.push(0);
+        let buf = MemoryBuffer::create_from_memory_range_copy(&ir_bytes, "coil_llvm_ir");
         let helper = self.ctx.create_module_from_ir(buf).map_err(|e| {
             format!("llvm-ir: could not parse IR: {e}\n--- generated module ---\n{module_text}")
         })?;
@@ -1489,7 +1511,7 @@ impl<'ctx> Cg<'ctx> {
         let cs = self.builder.build_call(callee, &meta, "llvmir").map_err(le)?;
         let v = cs
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or("llvm-ir: helper returned void (the body must `ret` a value)")?;
         Ok((v, result.clone()))
     }
@@ -1508,6 +1530,73 @@ impl<'ctx> Cg<'ctx> {
                     self.builder.set_current_debug_location(loc);
                 }
             }
+        }
+    }
+
+    /// A DWARF type for a Coil type, for local-variable debug info. Scalars and
+    /// pointers map to DWARF basic/pointer types; aggregates (struct/sum/slice/
+    /// array/fnptr) return `None` for now — those locals are simply not described
+    /// (no wrong type, just no `frame variable` entry).
+    fn di_type(&self, di: &DebugCtx<'ctx>, t: &Type) -> Option<inkwell::debug_info::DIType<'ctx>> {
+        use inkwell::debug_info::DIFlags;
+        // DW_ATE encodings: boolean=0x02, float=0x04, signed=0x05, unsigned=0x07.
+        let basic = |name: String, bits: u64, enc: u32| {
+            di.builder.create_basic_type(&name, bits, enc, DIFlags::ZERO).ok().map(|b| b.as_type())
+        };
+        match t {
+            Type::Int(b, signed) => basic(format!("i{b}"), *b as u64, if *signed { 0x05 } else { 0x07 }),
+            Type::Float(32) => basic("f32".into(), 32, 0x04),
+            Type::Float(_) => basic("f64".into(), 64, 0x04),
+            Type::Bool => basic("bool".into(), 8, 0x02),
+            Type::Ptr(_) => {
+                let byte = basic("i8".into(), 8, 0x05)?;
+                Some(
+                    di.builder
+                        .create_pointer_type("ptr", byte, 64, 0, AddressSpace::default())
+                        .as_type(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// Describe a function's scalar parameters for the debugger: spill each into a
+    /// `-g`-only alloca (the minimal `-g` pipeline keeps it in memory) and attach
+    /// a `DILocalVariable` via `llvm.dbg.declare`, so `frame variable` / `p x`
+    /// show the arguments. Aggregates (no `di_type`) are skipped.
+    fn emit_param_debug(&self, f: &Func, entry: BasicBlock<'ctx>, scope: &HashMap<String, Tv<'ctx>>) {
+        let (di, sp) = match (&self.di, *self.cur_sp.borrow()) {
+            (Some(di), Some(sp)) => (di, sp),
+            _ => return,
+        };
+        let (line, _) = di.line_col(f.span.lo);
+        if line == 0 {
+            return;
+        }
+        let loc = di.builder.create_debug_location(self.ctx, line, 1, sp.as_debug_info_scope(), None);
+        // The spill stores are prologue, not a steppable statement: emit them with
+        // NO line so LLVM puts `prologue_end` on the first *body* instruction. A
+        // function breakpoint then lands after the stores (params already set),
+        // instead of before them (showing stale stack bytes).
+        self.builder.unset_current_debug_location();
+        for (i, p) in f.params.iter().enumerate() {
+            let Some((val, ty)) = scope.get(&p.name) else { continue };
+            let Some(dty) = self.di_type(di, ty) else { continue };
+            let Ok(slot) = self.builder.build_alloca(val.get_type(), &format!("{}.dbg", p.name)) else {
+                continue;
+            };
+            let _ = self.builder.build_store(slot, *val);
+            let var = di.builder.create_parameter_variable(
+                sp.as_debug_info_scope(),
+                &p.name,
+                i as u32 + 1,
+                di.file,
+                line,
+                dty,
+                true,
+                inkwell::debug_info::DIFlags::ZERO,
+            );
+            di.builder.insert_declare_at_end(slot, Some(var), None, loc, entry);
         }
     }
 
@@ -1728,7 +1817,7 @@ impl<'ctx> Cg<'ctx> {
                 }
                 let v = cs
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| "codegen: call returned void".to_string())?;
                 Ok((v, ret_ty))
             }
@@ -1771,7 +1860,7 @@ impl<'ctx> Cg<'ctx> {
             }
             ExprKind::BitGet { ptr, field } => {
                 let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
-                let backing_ty = self.ctx.custom_width_int_type(backing);
+                let backing_ty = int_width(self.ctx, backing);
                 let loaded = self
                     .builder
                     .build_load(backing_ty, pv, "bits")
@@ -1784,7 +1873,7 @@ impl<'ctx> Cg<'ctx> {
                 } else {
                     loaded
                 };
-                let field_ty = self.ctx.custom_width_int_type(width);
+                let field_ty = int_width(self.ctx, width);
                 let res = if width < backing {
                     self.builder.build_int_truncate(shifted, field_ty, "bget").map_err(le)?
                 } else {
@@ -1795,7 +1884,7 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::BitSet { ptr, field, val } => {
                 let (pv, off, width, backing) = self.bit_access(ptr, field, scope)?;
                 let (vv, _) = self.emit_expr(val, scope)?;
-                let backing_ty = self.ctx.custom_width_int_type(backing);
+                let backing_ty = int_width(self.ctx, backing);
                 let loaded = self
                     .builder
                     .build_load(backing_ty, pv, "bits")
@@ -1878,7 +1967,7 @@ impl<'ctx> Cg<'ctx> {
                 match ty {
                     // pointer -> integer (address of): ptrtoint.
                     Type::Int(to, _) if matches!(vt, Type::Ptr(..)) => {
-                        let target = self.ctx.custom_width_int_type(*to);
+                        let target = int_width(self.ctx, *to);
                         let out = self
                             .builder
                             .build_ptr_to_int(v.into_pointer_value(), target, "ptrtoint")
@@ -1887,7 +1976,7 @@ impl<'ctx> Cg<'ctx> {
                     }
                     // float -> integer: fptosi / fptoui.
                     Type::Int(to, signed) if matches!(vt, Type::Float(_)) => {
-                        let target = self.ctx.custom_width_int_type(*to);
+                        let target = int_width(self.ctx, *to);
                         let fv = v.into_float_value();
                         let out = if *signed {
                             self.builder.build_float_to_signed_int(fv, target, "fptosi").map_err(le)?
@@ -1900,7 +1989,7 @@ impl<'ctx> Cg<'ctx> {
                         let iv = v.into_int_value();
                         let from = iv.get_type().get_bit_width();
                         let src_signed = matches!(vt, Type::Int(_, true));
-                        let target = self.ctx.custom_width_int_type(*to);
+                        let target = int_width(self.ctx, *to);
                         let out = if *to > from {
                             // widen: sign-extend a signed source, zero-extend unsigned.
                             if src_signed {
@@ -2009,7 +2098,7 @@ impl<'ctx> Cg<'ctx> {
                 }
                 let v = cs
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| "codegen: call-ptr returned void".to_string())?;
                 Ok((v, ret))
             }

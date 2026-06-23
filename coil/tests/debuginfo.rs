@@ -1,18 +1,21 @@
-//! DWARF debug info (`-g`): function-granularity line tables — a compile unit
-//! plus a `DISubprogram` per function carrying its source line, so `lldb`/`gdb`
-//! can map functions to source and show file:line in backtraces. Verified by
-//! emitting an object, linking a debug executable, and reading the DWARF back
-//! with `dwarfdump` (gated on the tool). Per-statement stepping and local-var
-//! info are a later increment (they need spans on every AST node).
+//! DWARF debug info (`-g`): a compile unit + a `DISubprogram` per function, a
+//! per-statement line table (line-by-line stepping), and scalar-parameter
+//! locals (`frame variable`). Verified by reading the DWARF back with `dwarfdump`
+//! and by driving `lldb` (both gated on the tools).
 
 mod common;
 use common::unique_path;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
+
+/// Serializes the lldb-driven tests: several `lldb` + `dsymutil` processes
+/// running concurrently contend and intermittently mis-resolve breakpoints.
+static LLDB: Mutex<()> = Mutex::new(());
 
 const PROG: &str = "(module app)\n\n\
                     (defn square [(x i64)] (-> i64)\n  (imul x x))\n\n\
@@ -85,6 +88,7 @@ fn lldb_resolves_breakpoint_to_source() {
         eprintln!("SKIP: lldb not found");
         return;
     }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
     let src_path = unique_path("lldbg").with_extension("coil");
     std::fs::write(&src_path, PROG).unwrap();
     let exe = unique_path("lldbexe");
@@ -99,10 +103,50 @@ fn lldb_resolves_breakpoint_to_source() {
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // The breakpoint must resolve to our source file (proves lldb read the DWARF).
     // With per-statement line info it lands on the first body statement —
-    // `(imul x x)` on line 4 — not the `defn` line.
-    assert!(text.contains("app.square at") && text.contains(".coil:4"), "breakpoint did not resolve to source:\n{text}");
+    // `(imul x x)` on line 4 — not the `defn` line. (lldb may print an address
+    // offset, e.g. `app.square + 8 at …`.)
+    assert!(text.contains("app.square") && text.contains(".coil:4"), "breakpoint did not resolve to source:\n{text}");
     // And it must actually stop there (proves the function survived optimization).
     assert!(text.contains("stop reason = breakpoint"), "breakpoint never hit:\n{text}");
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
+/// Local-variable DI: at a line breakpoint inside a function, `frame variable`
+/// shows the scalar parameters with their correct names and values (via
+/// `DILocalVariable` + `llvm.dbg.declare` over `-g`-spilled debug slots).
+#[test]
+fn lldb_frame_variable_shows_params() {
+    if !have("lldb") {
+        eprintln!("SKIP: lldb not found");
+        return;
+    }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
+    let prog = "(extern putchar :cc c [i32] (-> i32))\n\
+                (defn show [(a i64) (b i64)] (-> i64)\n  (putchar 65)\n  (iadd a b))\n\
+                (defn main [] (-> i64)\n  (show 30 12))\n";
+    let src_path = unique_path("varsg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("varsexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build");
+
+    // Break on the `(iadd a b)` line (line 4) — inside the body, past the
+    // prologue, so the spilled params hold their real values.
+    let file = src_path.file_name().unwrap().to_str().unwrap();
+    let out = Command::new("lldb")
+        .arg(&exe)
+        .args([
+            "-b", "-o", &format!("breakpoint set --file {file} --line 4"),
+            "-o", "run", "-o", "frame variable", "-o", "quit",
+        ])
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("a = 30"), "param a not shown with value 30:\n{text}");
+    assert!(text.contains("b = 12"), "param b not shown with value 12:\n{text}");
 
     let _ = std::fs::remove_file(&exe);
     let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
@@ -118,6 +162,7 @@ fn lldb_steps_line_by_line() {
         eprintln!("SKIP: lldb not found");
         return;
     }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
     // putchar so each statement is a real instruction (arithmetic on constants
     // would fold away with nothing to step through).
     let prog = "(extern putchar :cc c [i32] (-> i32))\n\

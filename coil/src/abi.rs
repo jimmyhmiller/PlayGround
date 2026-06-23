@@ -11,6 +11,7 @@
 //! `clang -arch <a> -S -emit-llvm` over the equivalent C is the oracle these
 //! rules were derived against.
 
+use crate::codegen::int_width;
 use inkwell::context::Context;
 use inkwell::targets::TargetData;
 use inkwell::types::{BasicType, BasicTypeEnum, StructType};
@@ -213,7 +214,7 @@ fn classify_sysv<'ctx>(
             // An INTEGER (or padding-only) eightbyte coerces to the smallest
             // power-of-two integer covering its data bytes.
             ByteClass::Integer | ByteClass::None => {
-                ctx.custom_width_int_type(int_bits_for_bytes(used)).into()
+                int_width(ctx, int_bits_for_bytes(used)).into()
             }
         };
         slots.push(slot);
@@ -363,9 +364,7 @@ fn classify_aapcs64<'ctx>(
         Class::Direct(vec![ctx.i64_type().array_type(2).into()])
     };
     let ret = if size <= 8 {
-        Class::Direct(vec![ctx
-            .custom_width_int_type(int_bits_for_bytes(size as u32))
-            .into()])
+        Class::Direct(vec![int_width(ctx, int_bits_for_bytes(size as u32)).into()])
     } else {
         Class::Direct(vec![ctx.i64_type().array_type(2).into()])
     };
