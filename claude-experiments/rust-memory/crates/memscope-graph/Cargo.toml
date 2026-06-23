@@ -1,0 +1,10 @@
+[package]
+name = "memscope-graph"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Reconstructs the heap reference graph (edges, retained sizes, dominators) from the live set + DWARF type layouts."
+
+[dependencies]
+memscope-proto = { path = "../memscope-proto" }
+memscope-symbols = { path = "../memscope-symbols" }
