@@ -178,6 +178,7 @@ name = "memscope-agent"
 version = "0.1.0"
 dependencies = [
  "memscope-core",
+ "memscope-graph",
  "memscope-proto",
  "memscope-symbols",
  "serde",
@@ -199,6 +200,14 @@ version = "0.1.0"
 dependencies = [
  "backtrace",
  "memscope-proto",
+]
+
+[[package]]
+name = "memscope-graph"
+version = "0.1.0"
+dependencies = [
+ "memscope-proto",
+ "memscope-symbols",
 ]
 
 [[package]]

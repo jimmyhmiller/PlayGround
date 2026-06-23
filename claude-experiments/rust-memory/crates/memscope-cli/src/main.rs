@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use memscope_proto::{ClientMsg, ServerMsg, Snapshot};
+use memscope_proto::{ClientMsg, HeapGraph, ServerMsg, Snapshot};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,6 +28,8 @@ fn main() {
         "events" => cmd_events(rest),
         "mode" => cmd_mode(rest),
         "show" => cmd_show(rest),
+        "graph" => cmd_graph(rest),
+        "paths" => cmd_paths(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -52,7 +54,9 @@ fn print_help() {
          memscope dump    [--sock P] [--out FILE]       one type-resolved heap dump\n  \
          memscope events  [--sock P]                    raw allocation event stream\n  \
          memscope mode    <off|full|sampled> [--rate N] switch recording mode\n  \
-         memscope show    <FILE>                        explore a saved dump posthoc\n"
+         memscope show    <FILE>                        explore a saved dump posthoc\n  \
+         memscope graph   [--sock P] [--limit N]        heap reference graph: top retainers\n  \
+         memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n"
     );
 }
 
@@ -149,6 +153,17 @@ impl Client {
         loop {
             match self.recv()? {
                 ServerMsg::Stats(s) => return Ok(s),
+                ServerMsg::Error(e) => eprintln!("[agent] {e}"),
+                _ => continue,
+            }
+        }
+    }
+
+    fn graph(&mut self) -> std::io::Result<HeapGraph> {
+        self.send(&ClientMsg::GetGraph)?;
+        loop {
+            match self.recv()? {
+                ServerMsg::Graph(g) => return Ok(*g),
                 ServerMsg::Error(e) => eprintln!("[agent] {e}"),
                 _ => continue,
             }
@@ -381,6 +396,138 @@ fn cmd_events(args: &[String]) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+}
+
+fn node_label(n: &memscope_proto::GraphNode) -> String {
+    match (n.shape, n.ty.as_deref()) {
+        (Some(shape), Some(ty)) => format!("{shape:?}<{ty}>"),
+        (Some(shape), None) => format!("{shape:?}<?>"),
+        (None, Some(ty)) => ty.to_string(),
+        (None, None) => "<unknown>".to_string(),
+    }
+}
+
+fn cmd_graph(args: &[String]) -> Result<(), String> {
+    let sock = resolve_sock(args)?;
+    let limit: usize = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(25);
+    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let g = client.graph().map_err(|e| e.to_string())?;
+    render_graph(&g, limit);
+    Ok(())
+}
+
+fn render_graph(g: &HeapGraph, limit: usize) {
+    let n_roots = g.roots.len();
+    println!("== heap reference graph ==");
+    println!(
+        "nodes: {}   edges: {}   roots: {}   opaque(unwalked): {}   total: {}\n",
+        g.nodes.len(),
+        g.edges.len(),
+        n_roots,
+        g.opaque_nodes,
+        human_bytes(g.total_bytes),
+    );
+
+    // Top retainers: nodes whose subtree (dominated set) is largest. These are
+    // the "if this died, N bytes would be freed" candidates — the leak suspects.
+    let mut idx: Vec<usize> = (0..g.nodes.len()).collect();
+    idx.sort_by_key(|&i| std::cmp::Reverse(g.nodes[i].retained_size));
+    println!("TOP RETAINERS (retained = bytes freed if this allocation died):");
+    println!(
+        "  {:>12}  {:>10}  {:>4}  {:>10}  {}",
+        "retained", "self", "out", "addr", "type"
+    );
+    println!("  {}", "─".repeat(78));
+    for &i in idx.iter().take(limit) {
+        let nd = &g.nodes[i];
+        println!(
+            "  {:>12}  {:>10}  {:>4}  {:#012x}  {}",
+            human_bytes(nd.retained_size),
+            human_bytes(nd.size),
+            nd.out_degree,
+            nd.addr,
+            node_label(nd),
+        );
+    }
+
+    // Aggregate retained by type for a "dominator-by-type" summary, counting
+    // only top-level (root) retainers to avoid double counting nested subtrees.
+    let mut by_type: HashMap<String, (u64, u64)> = HashMap::new();
+    for &r in &g.roots {
+        let nd = &g.nodes[r as usize];
+        let e = by_type.entry(node_label(nd)).or_default();
+        e.0 += 1;
+        e.1 += nd.retained_size;
+    }
+    let mut rows: Vec<_> = by_type.into_iter().collect();
+    rows.sort_by_key(|(_, (_, b))| std::cmp::Reverse(*b));
+    println!("\nRETAINED BY ROOT TYPE (top-level owners):");
+    println!("  {:>8}  {:>12}  {}", "count", "retained", "type");
+    for (label, (count, bytes)) in rows.iter().take(15) {
+        println!("  {count:>8}  {:>12}  {label}", human_bytes(*bytes));
+    }
+    println!("\n(use `memscope paths <hexaddr>` to see what retains a specific allocation)");
+}
+
+fn cmd_paths(args: &[String]) -> Result<(), String> {
+    let addr_s = positional(args).ok_or("usage: memscope paths <hexaddr>")?;
+    let addr = parse_hex(addr_s).ok_or_else(|| format!("bad address '{addr_s}' (use hex, e.g. 0x10abc)"))?;
+    let sock = resolve_sock(args)?;
+    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let g = client.graph().map_err(|e| e.to_string())?;
+
+    let Some(i) = g.nodes.iter().position(|nd| nd.addr == addr) else {
+        return Err(format!("{addr:#x} is not a tracked live allocation"));
+    };
+    let nd = &g.nodes[i];
+    println!("{:#012x}  {}", nd.addr, node_label(nd));
+    println!(
+        "  self {}   retained {}   in-degree {}   out-degree {}",
+        human_bytes(nd.size),
+        human_bytes(nd.retained_size),
+        nd.in_degree,
+        nd.out_degree,
+    );
+
+    // Dominator chain upward: the unique ownership path that, if broken, frees
+    // this allocation.
+    println!("\nDOMINATOR CHAIN (who exclusively keeps it alive, nearest first):");
+    let mut cur = nd.idom;
+    let mut steps = 0;
+    while cur >= 0 && steps < 64 {
+        let p = &g.nodes[cur as usize];
+        println!("  ← {:#012x}  {}", p.addr, node_label(p));
+        cur = p.idom;
+        steps += 1;
+    }
+    if nd.idom < 0 {
+        println!("  (this allocation is itself a root — referenced by no tracked allocation)");
+    } else {
+        println!("  ← <roots>");
+    }
+
+    // Direct referrers (all in-edges), which may exceed the single dominator.
+    let referrers: Vec<&memscope_proto::GraphEdge> =
+        g.edges.iter().filter(|e| e.to as usize == i).collect();
+    println!("\nDIRECT REFERRERS ({}):", referrers.len());
+    for e in referrers.iter().take(20) {
+        let from = &g.nodes[e.from as usize];
+        println!(
+            "  {:#012x} +{:#x}  {}",
+            from.addr,
+            e.offset,
+            node_label(from)
+        );
+    }
+    if referrers.len() > 20 {
+        println!("  … and {} more", referrers.len() - 20);
+    }
+    Ok(())
+}
+
+fn parse_hex(s: &str) -> Option<u64> {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u64::from_str_radix(s, 16).ok()
 }
 
 fn cmd_mode(args: &[String]) -> Result<(), String> {

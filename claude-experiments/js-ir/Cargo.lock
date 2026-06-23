@@ -475,6 +475,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -545,8 +547,10 @@ dependencies = [
 name = "jsir-jslir"
 version = "0.0.0"
 dependencies = [
+ "indexmap",
  "jsir-ir",
  "jsir-swc",
+ "react_compiler_hir",
 ]
 
 [[package]]
@@ -1243,6 +1247,23 @@ name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+
+[[package]]
+name = "react_compiler_diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "react_compiler_hir"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "react_compiler_diagnostics",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "redox_syscall"

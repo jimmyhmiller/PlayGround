@@ -192,6 +192,37 @@ fn handle_msg(msg: ClientMsg, shared: &Arc<Shared>, w: &mut UnixStream) -> std::
             send(w, &ServerMsg::Types(types))?;
             send(w, &ServerMsg::Sites(sites))
         }
+        ClientMsg::GetGraph => {
+            let mut snap = mem::snapshot();
+            let built = shared.with_oracle(|o| {
+                o.resolve_snapshot(&mut snap);
+                let type_name: std::collections::HashMap<u32, String> =
+                    snap.types.iter().map(|t| (t.id, t.name.clone())).collect();
+                let site: std::collections::HashMap<u32, &memscope_proto::SiteInfo> =
+                    snap.sites.iter().map(|s| (s.id, s)).collect();
+                let nodes: Vec<memscope_graph::NodeInput> = snap
+                    .live
+                    .iter()
+                    .map(|l| {
+                        let (ty, shape) = site
+                            .get(&l.site.0)
+                            .map(|s| (type_name.get(&s.ty.0).cloned(), s.shape))
+                            .unwrap_or((None, None));
+                        memscope_graph::NodeInput {
+                            addr: l.addr,
+                            size: l.size,
+                            type_name: ty,
+                            shape,
+                        }
+                    })
+                    .collect();
+                memscope_graph::build(&nodes, o.layout(), &memscope_graph::InProcessReader)
+            });
+            match built {
+                Ok(g) => send(w, &ServerMsg::Graph(Box::new(g))),
+                Err(e) => send(w, &ServerMsg::Error(format!("graph unavailable: {e}"))),
+            }
+        }
     }
 }
 

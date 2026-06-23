@@ -424,6 +424,30 @@ pub fn build(obj_data: &[u8]) -> Result<(DwarfIndex, LayoutIndex), DynErr> {
             .or_insert(info);
     }
 
+    if std::env::var("MEMSCOPE_DWARF_DEBUG").is_ok() {
+        let with_params = by_linkage
+            .values()
+            .filter(|v| !v.template_params.is_empty())
+            .count();
+        eprintln!(
+            "[dwarf-debug] linkage entries: {}, with params: {}, id_to_name: {}",
+            by_linkage.len(),
+            with_params,
+            id_to_name.len()
+        );
+        for (k, v) in by_linkage
+            .iter()
+            .filter(|(_, v)| v.template_params.iter().any(|(_, t)| t.contains("Particle")))
+            .take(6)
+        {
+            eprintln!("[dwarf-debug] Particle-carrying: {k} -> {:?}", v.template_params);
+        }
+        let any_particle = by_linkage
+            .values()
+            .any(|v| v.template_params.iter().any(|(_, t)| t.contains("Particle")));
+        eprintln!("[dwarf-debug] any Particle param: {any_particle}");
+    }
+
     Ok((
         DwarfIndex { by_linkage },
         LayoutIndex {

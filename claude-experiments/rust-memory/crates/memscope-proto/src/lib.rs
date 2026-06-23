@@ -183,6 +183,52 @@ pub struct Snapshot {
     pub dropped_events: u64,
 }
 
+// --- heap reference graph ----------------------------------------------------
+
+/// A node in the heap reference graph: one live allocation.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct GraphNode {
+    pub addr: u64,
+    pub size: u64,
+    pub ty: Option<String>,
+    pub shape: Option<AllocShape>,
+    /// Bytes that would be freed if this node became unreachable — i.e. the
+    /// total size of everything it dominates (itself included).
+    pub retained_size: u64,
+    /// Index of this node's immediate dominator, or -1 for a root / the virtual
+    /// super-root's children.
+    pub idom: i64,
+    pub in_degree: u32,
+    pub out_degree: u32,
+}
+
+/// A directed reference edge: `from` holds a pointer (at byte `offset` within it)
+/// into `to`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct GraphEdge {
+    pub from: u32,
+    pub to: u32,
+    pub offset: u64,
+}
+
+/// The reconstructed heap reference graph with retained sizes + dominators.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct HeapGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    /// Indices of nodes referenced by no other tracked allocation (approximate
+    /// GC roots — real roots on the stack/statics aren't tracked).
+    pub roots: Vec<u32>,
+    /// Sum of all node sizes (the live bytes the graph covers).
+    pub total_bytes: u64,
+    /// Allocations whose type/layout we couldn't walk (enums-in-variant skipped,
+    /// HashMap interiors, unknown types) — edges out of these are incomplete.
+    pub opaque_nodes: u32,
+}
+
 // --- transport messages ------------------------------------------------------
 
 /// Serializable view of the agent's aggregate counters.
@@ -216,6 +262,8 @@ pub enum ClientMsg {
     /// Resolve the given site ids to typed labels/frames (incremental table for
     /// the live view).
     ResolveSites { ids: Vec<u32> },
+    /// Reconstruct the heap reference graph (edges, retained sizes, dominators).
+    GetGraph,
 }
 
 /// A reply from the agent. One JSON object per line.
@@ -231,5 +279,7 @@ pub enum ServerMsg {
     Sites(Vec<SiteInfo>),
     /// Type table referenced by resolved sites.
     Types(Vec<TypeInfo>),
+    /// The reconstructed heap reference graph.
+    Graph(Box<HeapGraph>),
     Error(String),
 }
