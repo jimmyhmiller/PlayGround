@@ -1,0 +1,73 @@
+// Headless-ish screenshot harness: runs the dodge simulation for a fixed number
+// of frames (deterministic), captures a PNG with raylib's TakeScreenshot, and
+// exits. Used to visually verify the gc-rust→raylib FFI render pipeline.
+
+extern "C" fn InitWindow(w: i32, h: i32, title: RawPtr);
+extern "C" fn SetTargetFPS(fps: i32);
+extern "C" fn BeginDrawing();
+extern "C" fn EndDrawing();
+extern "C" fn CloseWindow();
+extern "C" fn rs_clear(r: i32, g: i32, b: i32);
+extern "C" fn rs_circle(x: f64, y: f64, rad: f64, r: i32, g: i32, b: i32, a: i32);
+extern "C" fn rs_rect(x: f64, y: f64, w: f64, h: f64, r: i32, g: i32, b: i32, a: i32);
+extern "C" fn rs_text(s: RawPtr, x: i32, y: i32, size: i32, r: i32, g: i32, b: i32);
+extern "C" fn rs_screenshot(path: RawPtr);
+
+struct Block { x: f64, y: f64, w: f64, speed: f64 }
+
+fn rand_next(s: i64) -> i64 { (s * 1103515245 + 12345) % 2147483648 }
+
+fn main() -> i64 {
+  InitWindow(800, 640, as_c_bytes("gc-rust + raylib — screenshot"));
+  SetTargetFPS(60);
+
+  let mut blocks: Vec<Block> = vec_new();
+  let mut rng = 424242;
+  let mut spawn_timer = 0;
+  let mut score = 7;
+  let px = 380.0;
+
+  let mut frame = 0;
+  while frame < 80 {
+    spawn_timer = spawn_timer + 1;
+    if spawn_timer >= 8 {
+      spawn_timer = 0;
+      rng = rand_next(rng);
+      let bx = (rng % 760) as f64;
+      rng = rand_next(rng);
+      let spd = 3.0 + ((rng % 400) as f64) / 100.0;
+      blocks = vec_push(blocks, Block { x: bx, y: 0.0 - 40.0, w: 40.0, speed: spd });
+    }
+
+    let mut next: Vec<Block> = vec_new();
+    let n = vec_len(blocks);
+    let mut i = 0;
+    while i < n {
+      let mut b = vec_get(blocks, i);
+      b.y = b.y + b.speed;
+      if b.y < 640.0 { next = vec_push(next, b); }
+      i = i + 1;
+    }
+    blocks = next;
+
+    BeginDrawing();
+    rs_clear(18, 18, 28);
+    let n2 = vec_len(blocks);
+    let mut j = 0;
+    while j < n2 {
+      let b = vec_get(blocks, j);
+      rs_rect(b.x, b.y, b.w, b.w, 90, 170, 240, 255);
+      j = j + 1;
+    }
+    rs_circle(px, 600.0, 18.0, 245, 205, 80, 255);
+    rs_text(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, 235, 235, 235);
+    rs_text(as_c_bytes("gc-rust + raylib FFI"), 12, 44, 20, 150, 150, 160);
+    EndDrawing();
+
+    frame = frame + 1;
+  }
+
+  rs_screenshot(as_c_bytes("dodge_shot.png"));
+  CloseWindow();
+  vec_len(blocks)
+}

@@ -1,0 +1,145 @@
+// Falling-Blocks Dodge — a real raylib game written in gc-rust, proving the FFI.
+//
+// What this demonstrates:
+//   * gc-rust calls a real third-party C library (raylib) DIRECTLY for every
+//     scalar-clean function (InitWindow with a `RawPtr` string, the frame loop,
+//     mouse input). See the `extern "C"` block.
+//   * A thin C shim (rayshim.c) wraps only the calls raylib passes a `Color`
+//     BY VALUE (gc-rust crosses value-structs by pointer — an ABI mismatch) or
+//     that return `bool`. gc-rust calls the shim with pure scalars.
+//   * The game state lives on the GC HEAP (a `Vec<Block>` of heap structs,
+//     rebuilt every frame), so a moving generational GC runs continuously while
+//     native rendering happens through FFI. They coexist because only scalars
+//     ever cross the boundary — GC pointers never do.
+//
+// Build + run: examples/raylib/build.sh
+
+// ---- raylib, called directly (scalar-clean C ABI) -------------------------
+extern "C" fn InitWindow(w: i32, h: i32, title: RawPtr);
+extern "C" fn SetTargetFPS(fps: i32);
+extern "C" fn BeginDrawing();
+extern "C" fn EndDrawing();
+extern "C" fn CloseWindow();
+extern "C" fn GetMouseX() -> i32;
+
+// ---- rayshim.c, for Color-by-value draws + bool returns -------------------
+extern "C" fn rs_clear(r: i32, g: i32, b: i32);
+extern "C" fn rs_circle(x: f64, y: f64, rad: f64, r: i32, g: i32, b: i32, a: i32);
+extern "C" fn rs_rect(x: f64, y: f64, w: f64, h: f64, r: i32, g: i32, b: i32, a: i32);
+extern "C" fn rs_text(s: RawPtr, x: i32, y: i32, size: i32, r: i32, g: i32, b: i32);
+extern "C" fn rs_should_close() -> i32;
+extern "C" fn rs_key_down(key: i32) -> i32;
+
+// A GC-heap game object: one falling block.
+struct Block { x: f64, y: f64, w: f64, speed: f64 }
+
+// Overflow-safe LCG (state stays < 2^31, so state*1103515245 < 2^61 < i64::MAX —
+// no checked-overflow trap). Returns the next state; values via `state % range`.
+fn rand_next(s: i64) -> i64 { (s * 1103515245 + 12345) % 2147483648 }
+
+fn clampf(v: f64, lo: f64, hi: f64) -> f64 { max_f64(lo, min_f64(v, hi)) }
+
+// Circle (cx,cy,r) vs axis-aligned rect (bx,by,bw,bh).
+fn hits(cx: f64, cy: f64, r: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
+  let nx = clampf(cx, bx, bx + bw);
+  let ny = clampf(cy, by, by + bh);
+  let dx = cx - nx;
+  let dy = cy - ny;
+  dx * dx + dy * dy < r * r
+}
+
+fn main() -> i64 {
+  let width = 800;
+  let height = 640;
+  InitWindow(width as i32, height as i32, as_c_bytes("gc-rust + raylib — Falling Blocks Dodge"));
+  SetTargetFPS(60);
+
+  let player_y = 600.0;
+  let player_r = 18.0;
+
+  let mut blocks: Vec<Block> = vec_new();
+  let mut score = 0;
+  let mut best = 0;
+  let mut rng = 987654321;
+  let mut spawn_timer = 0;
+  let mut alive = true;
+  let mut px = 400.0;
+
+  while rs_should_close() == 0 {
+    px = clampf(GetMouseX() as f64, 0.0, width as f64);
+
+    if alive {
+      // Spawn a new block every ~22 frames at a random x with a random speed.
+      spawn_timer = spawn_timer + 1;
+      if spawn_timer >= 22 {
+        spawn_timer = 0;
+        rng = rand_next(rng);
+        let bx = (rng % 760) as f64;
+        rng = rand_next(rng);
+        let spd = 3.0 + ((rng % 400) as f64) / 100.0;
+        blocks = vec_push(blocks, Block { x: bx, y: 0.0 - 40.0, w: 40.0, speed: spd });
+      }
+
+      // Advance every block; keep the on-screen ones (rebuilding the Vec each
+      // frame — the off-screen blocks become GC garbage). Score a point per
+      // block successfully dodged off the bottom.
+      let mut next: Vec<Block> = vec_new();
+      let n = vec_len(blocks);
+      let mut i = 0;
+      let mut hit = false;
+      while i < n {
+        let mut b = vec_get(blocks, i);
+        b.y = b.y + b.speed;
+        if hits(px, player_y, player_r, b.x, b.y, b.w, b.w) {
+          hit = true;
+        }
+        if b.y < height as f64 {
+          next = vec_push(next, b);
+        } else {
+          score = score + 1;
+        }
+        i = i + 1;
+      }
+      blocks = next;
+      if hit {
+        alive = false;
+        if score > best { best = score; }
+      }
+    } else {
+      // Game over: press R to restart.
+      if rs_key_down(82) == 1 {
+        blocks = vec_new();
+        score = 0;
+        spawn_timer = 0;
+        alive = true;
+      }
+    }
+
+    // ---- draw ----
+    BeginDrawing();
+    rs_clear(18, 18, 28);
+
+    let n2 = vec_len(blocks);
+    let mut j = 0;
+    while j < n2 {
+      let b = vec_get(blocks, j);
+      rs_rect(b.x, b.y, b.w, b.w, 90, 170, 240, 255);
+      j = j + 1;
+    }
+
+    rs_circle(px, player_y, player_r, 245, 205, 80, 255);
+
+    rs_text(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, 235, 235, 235);
+    rs_text(as_c_bytes(str_concat("Best: ", to_string(best))), 12, 44, 20, 150, 150, 160);
+
+    if alive == false {
+      rs_text(as_c_bytes("GAME OVER"), 300, 280, 44, 245, 90, 90);
+      rs_text(as_c_bytes("press R to restart"), 300, 336, 24, 220, 220, 220);
+    }
+
+    EndDrawing();
+  }
+
+  CloseWindow();
+  best
+}
