@@ -86,6 +86,90 @@ fn main() {
         );
     }
 
+    // --- DWARF type recovery: the payoff ---
+    // Symbolication allocates heavily; do it with tracking off so we don't
+    // pollute the table we just snapshotted.
+    mem::set_mode(Mode::Off);
+    println!("\n[Types] building DWARF type oracle for this binary...");
+    match memscope_symbols::TypeOracle::for_current_process() {
+        Ok(oracle) => {
+            println!("  indexed {} monomorphized functions", oracle.indexed_functions());
+            let mut typed = dump.clone();
+            oracle.resolve_snapshot(&mut typed);
+
+            // Aggregate live bytes by recovered type.
+            use std::collections::HashMap;
+            let site_type: HashMap<u32, memscope_proto::TypeId> =
+                typed.sites.iter().map(|s| (s.id, s.ty)).collect();
+            let mut by_type: HashMap<u32, (u64, u64)> = HashMap::new();
+            for l in &typed.live {
+                if let Some(ty) = site_type.get(&l.site.0) {
+                    if ty.is_known() {
+                        let e = by_type.entry(ty.0).or_default();
+                        e.0 += 1;
+                        e.1 += l.size;
+                    }
+                }
+            }
+            let type_name: HashMap<u32, &str> =
+                typed.types.iter().map(|t| (t.id, t.name.as_str())).collect();
+            let mut ranked: Vec<_> = by_type.into_iter().collect();
+            ranked.sort_by_key(|(_, (_, b))| std::cmp::Reverse(*b));
+            println!("\n  LIVE HEAP BY RECOVERED TYPE:");
+            println!("    {:>6}  {:>10}  {}", "count", "bytes", "type");
+            for (tid, (count, bytes)) in &ranked {
+                println!(
+                    "    {count:>6}  {bytes:>10}  {}",
+                    type_name.get(tid).copied().unwrap_or("?")
+                );
+            }
+
+            println!("\n  PER-SITE (shape<type> : count, bytes, top frame):");
+            let mut site_rank: Vec<_> = typed
+                .sites
+                .iter()
+                .map(|s| {
+                    let (c, b) = typed
+                        .live
+                        .iter()
+                        .filter(|l| l.site.0 == s.id)
+                        .fold((0u64, 0u64), |(c, b), l| (c + 1, b + l.size));
+                    (s, c, b)
+                })
+                .collect();
+            site_rank.sort_by_key(|(_, _, b)| std::cmp::Reverse(*b));
+            for (s, c, b) in site_rank.iter().take(6) {
+                let label = match (s.shape, type_name.get(&s.ty.0)) {
+                    (Some(shape), Some(ty)) => format!("{shape:?}<{ty}>"),
+                    (Some(shape), None) => format!("{shape:?}<?>"),
+                    (None, Some(ty)) => ty.to_string(),
+                    (None, None) => "<unknown>".to_string(),
+                };
+                // First user-ish frame for context.
+                let top = s
+                    .frames
+                    .iter()
+                    .find(|f| {
+                        f.function
+                            .as_deref()
+                            .map(|n| n.contains("demo"))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| s.frames.first());
+                let where_ = top
+                    .and_then(|f| f.function.clone())
+                    .unwrap_or_else(|| "?".into());
+                println!("    {label:<28} : {c:>5} allocs, {b:>8} bytes  @ {where_}");
+            }
+            // Re-arm for the next phase.
+            mem::set_mode(Mode::Full);
+        }
+        Err(e) => {
+            println!("  type recovery unavailable: {e}");
+            mem::set_mode(Mode::Full);
+        }
+    }
+
     // Free everything; live set should collapse.
     retained.clear();
     let dump2 = mem::snapshot();

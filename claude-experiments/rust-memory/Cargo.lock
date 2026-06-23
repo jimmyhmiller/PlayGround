@@ -77,6 +77,8 @@ name = "demo"
 version = "0.1.0"
 dependencies = [
  "memscope-core",
+ "memscope-proto",
+ "memscope-symbols",
 ]
 
 [[package]]
@@ -182,6 +184,7 @@ name = "memscope-symbols"
 version = "0.1.0"
 dependencies = [
  "addr2line 0.24.2",
+ "backtrace",
  "gimli 0.31.1",
  "memscope-proto",
  "object 0.36.7",
