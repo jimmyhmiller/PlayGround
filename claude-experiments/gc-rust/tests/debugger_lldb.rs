@@ -67,6 +67,49 @@ fn lldb_run(bin: &Path, script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Absolute path to the reflection pretty-printer script.
+fn pretty_printer_path() -> String {
+    format!("{}/tools/gcr_lldb.py", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn lldb_reflection_printer_renders_enum_payload_and_nested() {
+    // The reflection pretty-printer (design §3) decodes the baked `gcrust_type_meta`
+    // blob and renders enum PAYLOADS + nested refs inline — what native DWARF
+    // can't express. Importing `gcr_lldb.py` registers type summaries.
+    if !lldb_available() {
+        eprintln!("skipping: xcrun lldb unavailable");
+        return;
+    }
+    let lib = ensure_runtime_lib();
+    let dir = std::env::temp_dir().join(format!("gcr_lldb_refl_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("refl");
+
+    let src = "struct Point { x: i64, y: i64 }\n\
+struct Line { a: Point, b: Point }\n\
+enum Shape { Circle(i64), Rect(i64, i64), Empty }\n\
+fn main() -> i64 {\n  let s = Shape::Rect(3, 4);\n  let p = Point { x: 1, y: 2 };\n  let q = Point { x: 5, y: 6 };\n  let ln = Line { a: p, b: q };\n  let probe = 0;\n  probe\n}\n";
+    build_debug(src, &bin, &lib);
+
+    let script = format!(
+        "command script import {}\n\
+breakpoint set --file prog.gcr --line 9\nrun\nframe variable s ln\nquit\n",
+        pretty_printer_path()
+    );
+    let out = lldb_run(&bin, &script);
+
+    // Enum payload rendered, plus nested structs inline.
+    for needle in ["Shape::Rect(3, 4)", "Line { a: Point { x: 1, y: 2 }"] {
+        assert!(
+            out.contains(needle),
+            "reflection printer missing `{needle}`:\n{out}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn lldb_frame_variable_shows_correct_scalar_locals() {
     if !lldb_available() {

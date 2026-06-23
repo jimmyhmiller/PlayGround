@@ -1,30 +1,31 @@
 # Debugger P3 — DWARF locals + reflection pretty-printers
 
-> **STATUS: SCALARS + HEAP STRUCTS DONE + GREEN (incl. the moving-GC check).**
-> `gcr build --debug` produces an unoptimized executable carrying DWARF
-> local/param variable DIEs, and **lldb's `frame variable` shows gc-rust locals
-> by source name with correct values** — for scalars *and heap structs*:
-> - `add(7,35)` at line 4 → `x = 7`, `y = 35`, `sum = 42`, `doubled = 84`
->   (all scalar reprs: `i8..i64`, `u8..u64`, `f32/f64`, `bool`, `char`).
-> - `let p = Point{x:3,y:4}` → `(Point) p = { x = 3, y = 4 }` *directly* (gc-rust
->   reference semantics: the local IS the struct); nested structs expand with
->   `-P2` (`Line` → `a = { x=1, y=2 }`, …).
-> - `let s = Shape::Rect(3,4)` → `(Shape) s = (tag = Rect)` — heap enums show
->   their active variant (the u32 tag as a DWARF enumeration). Payload not yet
->   rendered.
-> - **§5 moving-GC check PASSES**: after ~millions of allocations relocate `p`
->   (its address changes `0x…e6000000` → `0x…c6000168`), `frame variable p` still
->   reads `{ x = 42, y = 7 }` — because the DWARF location *derefs the live GC
->   frame slot* the collector updates, never a cached object address.
+> **STATUS: DONE + GREEN — scalars, heap structs, enums (incl. payloads),
+> nested refs, the moving-GC check, and typed signatures.** Two layers:
+> **(1) native DWARF** (`gcr build --debug`, no extra tooling) renders scalars
+> and structs and shows the active enum variant; **(2) the reflection
+> pretty-printer** (`tools/gcr_lldb.py`, `command script import …`) adds enum
+> PAYLOADS and inline nested refs by decoding the baked `gcrust_type_meta` blob.
+> - `add(7,35)` → `x = 7`, `y = 35`, `sum = 42`, `doubled = 84` (all scalar
+>   reprs: `i8..i64`, `u8..u64`, `f32/f64`, `bool`, `char`).
+> - `Point{x:3,y:4}` → `(Point) p = { x = 3, y = 4 }` natively; with the printer
+>   `Point { x: 3, y: 4 }` and nested inline:
+>   `Line { a: Point { x: 1, y: 2 }, b: Point { x: 5, y: 6 } }`.
+> - `Shape::Rect(3,4)` → `(tag = Rect)` natively; **with the printer the full
+>   payload**: `Shape::Rect(3, 4)`, and recursively `Tree::Node(5, Tree::Leaf,
+>   Tree::Leaf)`.
+> - **§5 moving-GC check PASSES** (both layers): after ~millions of allocations
+>   relocate `p` (address `0x…e6000000` → `0x…c6000168`), it still reads
+>   `{ x = 42, y = 7 }` — the location *derefs the live GC frame slot* the
+>   collector updates, and the printer reads object memory fresh at the stop.
+> - Full-debug `DISubprogram`s carry typed prototypes (return + param types).
 >
-> Verified: dwarf 3/0 (variable + struct DIEs present in Full, absent in
-> LineTables), debugger_lldb 3/0 (scalar values, struct-by-field, moving-GC),
+> Verified: dwarf 3/0 (variable + struct + enum DIEs), debugger_lldb 5/0 (scalar,
+> struct-by-field, enum-variant, reflection enum-payload+nested, moving-GC),
 > lib 158/0, aot/ffi/threads/reflect/modules/generational green, examples
-> (binary_trees/shapes/calculator/fib) build+run under `--debug`, default
-> (non-`--debug`) builds unchanged. **NEXT:** enums (tagged unions, variant
-> parts or reflection printer), value-aggregate fields, inline rendering of
-> nested *Ref* fields (needs a synthetic-children/pretty-printer — DWARF members
-> can't carry a deref), real subroutine types.
+> build+run under `--debug`, default builds unchanged. **Remaining:**
+> value-aggregate (`#[value]`) fields (printer shows `…`); auto-loading the
+> printer without a manual `command script import`.
 
 Builds on P2 (DWARF line tables, `DWARFEmissionKind::LineTablesOnly` + per-source
 DIFiles). Goal: `gcr build --debug` carries **full** DWARF — local/parameter
@@ -96,21 +97,39 @@ Recursion (`List` → `List`) is broken by an in-progress guard → degrades tha
 pointer to a raw address. Enum / opaque / varlen (String/Array) layouts and
 value-aggregate fields are left unmodeled → rendered as an address.
 
+## The reflection pretty-printer (`tools/gcr_lldb.py`, design §3)
+
+What native DWARF can't express (enum payloads — no `DW_TAG_variant_part` in the
+C API; inline nested-Ref rendering — DWARF members can't carry a `deref`) is
+delivered by an lldb Python script that mirrors `gc::dump::render_object`:
+
+1. **Decode the blob.** The compiler bakes the reflection table into every binary
+   as the `gcrust_type_meta` data symbol (LE, self-describing — format in
+   `gc/reflect.rs`). The script reads it via the *symbol table* + `target.ReadMemory`
+   (NOT `FindFirstGlobalVariable` — the blob has no debug-info DIE), pre-`run`,
+   and decodes it to `{type_id → struct/enum/opaque}`.
+2. **Register summaries.** For every struct/enum type name it does
+   `type summary add -F gcr_lldb.gcr_summary "<Name>"`.
+3. **Render at a stop.** The summary takes the value's load address (= object
+   base, since a Ref local's location derefs the live slot), reads `type_id` at
+   `base+8`, and renders: struct → `Name { f: v, … }` (tuple structs →
+   `Name(v, …)`); enum → read u32 tag at `base+tag_offset` → active variant →
+   `Name::Variant(payload…)`; `Ref` fields recurse (depth-limited, so cyclic
+   types degrade to an address). Moving-GC-safe: it re-reads object memory each
+   stop. There is also a `gcrv <expr>` command.
+
+Import with `command script import tools/gcr_lldb.py`.
+
 ## Scope boundary / open work
 
-- **Enum payloads.** The active variant NAME shows (`tag` enumeration member),
-  but not its fields — `Rect(3,4)` reads as `(tag = Rect)`, not `Rect(3, 4)`.
-  The C API has no `DW_TAG_variant_part` (checked llvm-sys 211 / inkwell), so the
-  payload needs a reflection-driven synthetic provider: read the tag → active
-  `VariantMeta` → its fields at their absolute offsets (the Python pretty-printer
-  the design §3 envisioned, reusing `gc::dump::render_object`'s logic).
-- **Inline nested-Ref rendering.** A struct member that is a `Ref` shows as a
-  pointer/address (lldb won't auto-deref aggregate members; DWARF members can't
-  carry the `deref` a local can). One-line inline rendering needs a
-  synthetic-children / summary provider — the Python pretty-printer the design
-  envisioned, reusing `gc::dump::render_object`.
-- **Value aggregates** (`#[value]` fields/locals) skipped — no per-value offset
-  metadata wired into the DWARF builder yet.
+- **Value aggregates** (`#[value]` fields/locals): native DWARF skips them (no
+  per-value offsets wired in); the printer renders them as `…`. Decode the value
+  table (already in the blob) to finish.
+- **Auto-load the printer** without a manual `command script import` (e.g. a
+  `<binary>.py` next to the dSYM, or `target.load-script-from-symbol-file`).
+- **Type-name collisions**: the summary attaches by DWARF type name; a non-gc
+  type sharing a gc-rust type's name would be mis-rendered (unlikely in practice;
+  the summary returns "" when the name isn't in the reflection table).
 - **Subroutine types** DONE — full-debug `DISubprogram`s carry a real prototype
   (return + param types via `di_signature_type`; `Ref` → pointer-to-struct,
   `Value` → opaque address, `Unit` → omitted). `add`'s DIE now has
@@ -133,5 +152,7 @@ value-aggregate fields are left unmodeled → rendered as an address.
   - `lldb_frame_variable_shows_correct_scalar_locals` — scalar values.
   - `lldb_frame_variable_renders_heap_struct_by_field` — `(Point) p = { x=3, y=4 }`.
   - `lldb_frame_variable_shows_enum_variant` — `(Shape) s = (tag = Rect)`.
+  - `lldb_reflection_printer_renders_enum_payload_and_nested` — imports
+    `gcr_lldb.py`; asserts `Shape::Rect(3, 4)` and inline nested structs.
   - `lldb_heap_struct_survives_moving_gc` — `p` reads correctly after a
     relocating GC (the §5 property).
