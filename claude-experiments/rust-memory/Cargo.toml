@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/memscope-proto",
+    "crates/memscope-core",
+    "crates/memscope-symbols",
+    "spike",
+    "crates/demo",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jimmyhmiller/rust-memory"
+
+[workspace.dependencies]
+gimli = "0.31"
+object = "0.36"
+addr2line = "0.24"
+rustc-demangle = "0.1"
+backtrace = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = true
