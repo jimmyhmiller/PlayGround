@@ -29,6 +29,21 @@ pub use load::{dwarf_bytes_for, dwarf_bytes_for_current_exe};
 
 type DynErr = Box<dyn Error + Send + Sync>;
 
+/// Frames that belong to our own allocation-capture path (the global allocator
+/// hook + the unwinder), which prefix every captured site and carry no signal.
+fn is_capture_noise(name: &str) -> bool {
+    name.starts_with("backtrace::")
+        || name.contains("memscope_core::unwind")
+        || name.contains("memscope_core::recorder")
+        || name.contains("memscope_core::capture")
+        || name.contains("as memscope_core::unwind::Unwind")
+        || name.contains("as core::alloc::global::GlobalAlloc>::alloc")
+        // Innermost-first ordering guarantees the leading run is capture
+        // internals, so trimming a leading bare call_once (the capture closure
+        // bridge) never eats a user frame (those are outermost = last).
+        || name.contains("core::ops::function::FnOnce::call_once")
+}
+
 /// Resolves allocation sites to concrete types using a binary's DWARF.
 pub struct TypeOracle {
     index: DwarfIndex,
@@ -131,7 +146,20 @@ impl TypeOracle {
             .collect();
         let recognized = recognizer::recognize(&rframes);
 
-        let display: Vec<Frame> = sym_frames
+        // Drop the leading capture-machinery frames (our own allocator hook +
+        // the backtrace crate) so a site reads as "where the program allocated",
+        // not "how we observed it".
+        let start = sym_frames
+            .iter()
+            .position(|f| {
+                f.demangled
+                    .as_deref()
+                    .map(|n| !is_capture_noise(n))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(0);
+
+        let display: Vec<Frame> = sym_frames[start..]
             .iter()
             .map(|f| Frame {
                 ip: f.ip,

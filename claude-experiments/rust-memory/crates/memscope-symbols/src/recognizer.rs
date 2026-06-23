@@ -133,3 +133,93 @@ pub fn recognize(frames: &[ResolvedFrame]) -> Recognized {
         element_type,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(name: &str, elem: Option<&str>) -> (String, Option<FnTypeInfo>) {
+        let info = elem.map(|t| FnTypeInfo {
+            concrete_name: None,
+            template_params: vec![("T".to_string(), t.to_string())],
+        });
+        (name.to_string(), info)
+    }
+
+    fn run(frames: &[(String, Option<FnTypeInfo>)]) -> Recognized {
+        let rframes: Vec<ResolvedFrame> = frames
+            .iter()
+            .map(|(n, i)| ResolvedFrame {
+                fn_name: Some(n.as_str()),
+                info: i.as_ref(),
+            })
+            .collect();
+        recognize(&rframes)
+    }
+
+    #[test]
+    fn box_of_widget() {
+        let f = vec![
+            frame("__rust_alloc", None),
+            frame("alloc::alloc::alloc", None),
+            frame("alloc::boxed::Box<demo::Widget>::new", Some("demo::Widget")),
+            frame("demo::main", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Boxed));
+        assert_eq!(r.element_type.as_deref(), Some("demo::Widget"));
+    }
+
+    #[test]
+    fn vec_of_u64() {
+        let f = vec![
+            frame("alloc::raw_vec::RawVec<u64>::with_capacity_in", Some("u64")),
+            frame("alloc::vec::Vec<u64>::with_capacity", Some("u64")),
+            frame("app::run", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Vec));
+        assert_eq!(r.element_type.as_deref(), Some("u64"));
+    }
+
+    #[test]
+    fn rc_wins_over_inner_box() {
+        // Rc<T> allocates through Box internally; the semantic shape is Rc, but
+        // the element type is still T.
+        let f = vec![
+            frame("alloc::boxed::Box<T>::new", Some("app::Node")),
+            frame("alloc::rc::Rc<app::Node>::new", Some("app::Node")),
+            frame("app::build", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Rc));
+        assert_eq!(r.element_type.as_deref(), Some("app::Node"));
+    }
+
+    #[test]
+    fn string_is_stringbuf_u8() {
+        let f = vec![
+            frame("alloc::raw_vec::RawVec<u8>::with_capacity_in", Some("u8")),
+            frame("alloc::vec::Vec<u8>::with_capacity", Some("u8")),
+            frame("alloc::string::String::with_capacity", None),
+            frame("app::format_thing", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::StringBuf));
+        assert_eq!(r.element_type.as_deref(), Some("u8"));
+    }
+
+    #[test]
+    fn unrelated_outer_container_does_not_hijack() {
+        // After the container run ends at user code, a later (caller's) Vec frame
+        // must not steal the shape.
+        let f = vec![
+            frame("alloc::boxed::Box<app::Leaf>::new", Some("app::Leaf")),
+            frame("app::make_leaf", None),
+            frame("alloc::vec::Vec<app::Leaf>::push", Some("app::Leaf")),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Boxed));
+        assert_eq!(r.element_type.as_deref(), Some("app::Leaf"));
+    }
+}

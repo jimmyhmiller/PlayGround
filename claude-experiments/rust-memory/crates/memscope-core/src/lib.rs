@@ -222,3 +222,11 @@ pub fn site_frames(site: SiteId) -> Option<Vec<u64>> {
     let _g = HookScope::enter();
     recorder().site_frames(site)
 }
+
+/// Permanently exclude the *calling thread* from allocation tracking. Intended
+/// for the agent/transport thread so its own serialization and symbolication
+/// allocations never enter the table or the event stream. Irreversible for that
+/// thread (by design).
+pub fn exclude_current_thread() {
+    IN_HOOK.with(|x| x.set(true));
+}

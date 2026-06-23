@@ -182,3 +182,54 @@ pub struct Snapshot {
     /// stream (the live table is still exact in Full mode).
     pub dropped_events: u64,
 }
+
+// --- transport messages ------------------------------------------------------
+
+/// Serializable view of the agent's aggregate counters.
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct StatsView {
+    pub live_bytes: u64,
+    pub total_allocs: u64,
+    pub total_alloc_bytes: u64,
+    pub dropped_events: u64,
+    /// 0 = Off, 1 = Full, 2 = Sampled.
+    pub mode: u8,
+    pub sample_rate: u32,
+}
+
+/// A request from a consumer (CLI / UI) to the in-process agent. One JSON
+/// object per line.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ClientMsg {
+    /// Switch mode (0=Off, 1=Full, 2=Sampled).
+    SetMode(u8),
+    SetSampleRate(u32),
+    SetCaptureSites(bool),
+    /// Request current aggregate counters.
+    GetStats,
+    /// Request a full, type-resolved heap dump.
+    GetSnapshot,
+    /// Drain up to `max` queued raw events (live stream).
+    PollEvents { max: usize },
+    /// Resolve the given site ids to typed labels/frames (incremental table for
+    /// the live view).
+    ResolveSites { ids: Vec<u32> },
+}
+
+/// A reply from the agent. One JSON object per line.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ServerMsg {
+    /// Sent once on connect.
+    Hello { pid: u32, agent_version: String },
+    Stats(StatsView),
+    Snapshot(Box<Snapshot>),
+    Events(Vec<RawEvent>),
+    /// Resolved site table (answer to `ResolveSites`, or pushed with a snapshot).
+    Sites(Vec<SiteInfo>),
+    /// Type table referenced by resolved sites.
+    Types(Vec<TypeInfo>),
+    Error(String),
+}
