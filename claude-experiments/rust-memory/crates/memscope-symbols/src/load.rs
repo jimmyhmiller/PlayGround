@@ -31,6 +31,17 @@ pub fn dwarf_bytes_for(exe: &Path) -> Result<Vec<u8>, DynErr> {
     }
 }
 
+/// True if `dsym` is older than `exe` (so it predates the current build).
+#[cfg(target_os = "macos")]
+fn is_stale(dsym: &Path, exe: &Path) -> bool {
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (mtime(dsym), mtime(exe)) {
+        (Some(d), Some(e)) => d < e,
+        // If we can't tell, assume stale and regenerate (correctness over speed).
+        _ => true,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
     let name = exe.file_name()?;
@@ -48,7 +59,10 @@ fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
 fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
     let path = dsym_dwarf_path(exe)
         .ok_or_else(|| -> DynErr { "could not derive dSYM path from executable".into() })?;
-    if path.exists() {
+    // Reuse an existing dSYM only if it's at least as new as the binary.
+    // Monomorphization hashes change on every rebuild, so a stale dSYM would
+    // mismatch the running binary's symbols and silently break type recovery.
+    if path.exists() && !is_stale(&path, exe) {
         return Ok(path);
     }
     // Generate it: `dsymutil <exe>` writes `<exe>.dSYM` alongside the binary.

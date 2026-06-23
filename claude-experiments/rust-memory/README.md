@@ -24,9 +24,26 @@ cargo run -p demo --release --bin serve
 # Terminal 2 — attach the CLI
 cargo run -p memscope-cli --release -- monitor          # live heap-by-type, refreshes each second
 cargo run -p memscope-cli --release -- dump --out /tmp/heap.json   # one full type-resolved dump
+cargo run -p memscope-cli --release -- graph            # reference graph: top retainers (retained size)
+cargo run -p memscope-cli --release -- paths 0x<addr>   # who keeps an allocation alive
 cargo run -p memscope-cli --release -- events           # raw allocation event stream
 cargo run -p memscope-cli --release -- mode sampled --rate 100     # switch to low-overhead sampling
 ```
+
+`graph` is the heap-analyzer view (MAT-style). It reconstructs the **object
+reference graph** by reading each allocation's pointer fields (via DWARF type
+layout) and computes **retained size** + the **dominator tree**:
+
+```
+nodes: 22750   edges: 16735   roots: 6015
+   retained      self   out  type
+    1.3 MiB    256 KiB  16600  Vec<Box<Particle>>      ← if this died, 1.3 MiB frees
+  520.0 KiB    520 KiB      0  HashTable<(u64, Session)>
+   55.6 KiB    1.5 KiB     50  Vec<Vec<u8>>
+```
+
+`paths <addr>` answers "who keeps this alive": the dominator chain up to the
+roots plus every direct referrer (with the byte offset of the pointer).
 
 `monitor` shows, live:
 
@@ -76,7 +93,8 @@ allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
 | crate | role |
 |-------|------|
 | `memscope-core` | the tracking `GlobalAlloc`: reentrancy-guarded hot path, sharded live table, site interner, event ring, runtime **Full / Sampled / Off** modes, `snapshot()` |
-| `memscope-symbols` | **DWARF type recovery**: builds a linkage-name → concrete-type index, symbolicates frames, recognizes container shapes (Box/Vec/Rc/Arc/String/HashMap) and element types |
+| `memscope-symbols` | **DWARF type recovery**: builds a linkage-name → concrete-type index + a per-type **layout index** (field offsets, pointer fields), symbolicates frames, recognizes container shapes (Box/Vec/Rc/Arc/String/HashMap) and element types |
+| `memscope-graph` | **heap reference graph**: walks each allocation's pointer fields → edges → roots → dominator tree → retained sizes |
 | `memscope-proto` | the wire vocabulary: hot-path `RawEvent` POD + serializable `Snapshot` / `SiteInfo` / `TypeInfo` + client/server messages |
 | `memscope-agent` | in-process transport server (Unix socket, newline-JSON). Owns the type oracle and ships already-typed snapshots |
 | `memscope` | thin facade: `MemScope`, mode controls, `start_agent()` |
@@ -111,7 +129,13 @@ agent resolves types in-process, so the UI just renders. See
 ## Status
 
 Working end-to-end: tracking allocator, DWARF type recovery, runtime mode
-switching, live monitor, type-resolved + posthoc heap dumps. See
-`docs/` notes inline in each crate. Next candidates: per-type retained-size
-graphs, allocation-age histograms, flamegraph export, and frame-pointer
-unwinding for a cheaper hot path.
+switching, live monitor, type-resolved + posthoc heap dumps, and the **heap
+reference graph** (edges, retained sizes, dominators, paths-to-roots).
+
+Graph v1 walks `Box`/`Rc`/`Arc`/`Vec`/`String`/structs and nested inline
+fields. Known gaps (honest): **HashMap/HashSet interiors are opaque** (hashbrown
+bucket layout not decoded yet — counted as `opaque_nodes`), and pointer fields
+inside **enum variants** are read without checking the active discriminant (the
+live-set filter makes false edges rare). Next: decode hashbrown buckets,
+discriminant-aware enum walking, allocation-age histograms, flamegraph export,
+and frame-pointer unwinding for a cheaper hot path.

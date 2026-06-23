@@ -1,16 +1,17 @@
-//! Reads the binary's DWARF into two indexes via a single flat DFS:
+//! Reads the binary's DWARF into two indexes, using `entries_tree` recursion
+//! (the traversal proven to visit every DIE):
 //!
 //! 1. [`DwarfIndex`] — mangled linkage name -> concrete monomorphized type info
 //!    (the M2 join: `DW_AT_linkage_name` + `DW_TAG_template_type_parameter`).
 //! 2. [`LayoutIndex`] — every type's byte size + the byte offsets of its
-//!    pointer-typed fields, found by recursively flattening inline members
-//!    (struct / array / `RawVec` / `Unique` / `NonNull`) down to the underlying
-//!    `DW_TAG_pointer_type`. This is what lets the heap-graph walker turn an
-//!    allocation's bytes into outgoing reference edges.
+//!    pointer-typed fields, found by recursively flattening inline members down
+//!    to the underlying `DW_TAG_pointer_type`.
 //!
-//! Types are keyed by their global `.debug_info` offset; named types also get a
-//! name -> offset entry so a recovered type name (`serve::Session`) resolves to
-//! its layout.
+//! Template-parameter type names are resolved inline (follow `DW_AT_type` ->
+//! `DW_AT_name`). Layout member/pointer targets are stored as global
+//! `.debug_info` offsets and resolved after the whole binary is indexed (they
+//! may be forward references), with a parallel name -> offset map so a recovered
+//! type name (`serve::Session`) finds its layout.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ use gimli::{AttributeValue, EndianSlice, RunTimeEndian};
 use object::{Object, ObjectSection};
 
 type DynErr = Box<dyn Error + Send + Sync>;
+type Reader<'a> = EndianSlice<'a, RunTimeEndian>;
+type Die<'a, 'u> = gimli::DebuggingInformationEntry<'a, 'u, Reader<'a>>;
 
 /// Concrete type facts for one monomorphized function.
 #[derive(Clone, Debug, Default)]
@@ -77,7 +80,6 @@ impl DwarfIndex {
 
 // --- type layout index -------------------------------------------------------
 
-/// A raw type DIE, keyed by `.debug_info` offset.
 #[derive(Clone, Debug)]
 struct RawType {
     byte_size: u64,
@@ -86,12 +88,9 @@ struct RawType {
 
 #[derive(Clone, Debug)]
 enum RawKind {
-    /// `DW_TAG_pointer_type` / reference — an outgoing edge candidate.
     Pointer { pointee: Option<usize> },
-    /// struct / union (Rust data enums are structs with a `variant_part`).
     Aggregate { members: Vec<RawMember> },
     Array { elem: Option<usize>, count: u64 },
-    /// Base types, C-like enums — no pointers inside.
     Scalar,
 }
 
@@ -99,13 +98,11 @@ enum RawKind {
 struct RawMember {
     offset: u64,
     type_id: Option<usize>,
-    /// True if the member lives inside a `variant_part` (an enum variant), so a
-    /// pointer there is only valid when that variant is active.
     in_variant: bool,
 }
 
-/// A flattened pointer-typed field: a byte offset within an instance of the
-/// owning type at which a pointer lives, plus the (best-effort) pointee type.
+/// A flattened pointer-typed field of a type: a byte offset at which a pointer
+/// lives, plus the (best-effort) pointee type name.
 #[derive(Clone, Debug)]
 pub struct PtrField {
     pub offset: u64,
@@ -113,7 +110,7 @@ pub struct PtrField {
     pub in_variant: bool,
 }
 
-/// Per-type layout information for the heap-graph walker.
+/// Per-type layout info for the heap-graph walker.
 pub struct LayoutIndex {
     by_id: HashMap<usize, RawType>,
     id_to_name: HashMap<usize, String>,
@@ -125,15 +122,13 @@ impl LayoutIndex {
         self.by_id.len()
     }
 
-    /// Byte size of a named type, if known.
     pub fn size_of(&self, name: &str) -> Option<u64> {
         let id = *self.name_to_id.get(name)?;
         self.by_id.get(&id).map(|t| t.byte_size)
     }
 
     /// All pointer fields (relative byte offsets) of a named type, found by
-    /// recursively flattening inline members. Returns an empty vec for leaf /
-    /// pointerless types, and `None` if the type isn't in the index.
+    /// recursively flattening inline members.
     pub fn pointer_fields(&self, name: &str) -> Option<Vec<PtrField>> {
         let id = *self.name_to_id.get(name)?;
         let mut acc = Vec::new();
@@ -153,13 +148,11 @@ impl LayoutIndex {
             return;
         };
         match &rt.kind {
-            RawKind::Pointer { pointee } => {
-                acc.push(PtrField {
-                    offset: base,
-                    pointee: pointee.and_then(|p| self.id_to_name.get(&p).cloned()),
-                    in_variant,
-                });
-            }
+            RawKind::Pointer { pointee } => acc.push(PtrField {
+                offset: base,
+                pointee: pointee.and_then(|p| self.id_to_name.get(&p).cloned()),
+                in_variant,
+            }),
             RawKind::Aggregate { members } => {
                 for m in members {
                     if let Some(t) = m.type_id {
@@ -171,9 +164,7 @@ impl LayoutIndex {
                 if let Some(e) = elem {
                     let esz = self.size_of_id(*e);
                     if esz > 0 {
-                        // Cap inline-array expansion so a giant `[T; N]` can't blow up.
-                        let n = (*count).min(4096);
-                        for i in 0..n {
+                        for i in 0..(*count).min(4096) {
                             self.flatten(*e, base + i * esz, in_variant, depth + 1, acc);
                         }
                     }
@@ -184,17 +175,16 @@ impl LayoutIndex {
     }
 }
 
-/// A currently-open DIE while walking (paired with its depth on the stack).
-#[derive(Clone, Copy)]
-enum Role {
-    Type(usize), // global offset key into by_id
-    Sub(usize),  // index into the pending-subs vec
-    VariantPart, // marks an enum-variant subtree
-    Other,
+/// Mutable indexes threaded through the recursive walk.
+struct Idx {
+    by_linkage: HashMap<String, FnTypeInfo>,
+    by_id: HashMap<usize, RawType>,
+    id_to_name: HashMap<usize, String>,
+    name_to_id: HashMap<String, usize>,
 }
 
 /// Parse `obj_data` (an ELF with embedded DWARF, or a dSYM Mach-O) and build
-/// both the linkage index and the layout index in one pass.
+/// both indexes.
 pub fn build(obj_data: &[u8]) -> Result<(DwarfIndex, LayoutIndex), DynErr> {
     let object = object::File::parse(obj_data)?;
     let endian = if object.is_little_endian() {
@@ -214,207 +204,181 @@ pub fn build(obj_data: &[u8]) -> Result<(DwarfIndex, LayoutIndex), DynErr> {
     let dwarf_sections = gimli::DwarfSections::load(&load_section)?;
     let dwarf = dwarf_sections.borrow(|section| EndianSlice::new(&section[..], endian));
 
-    // Subprograms collected with template params as (name, type_id); resolved to
-    // names after the full pass (forward references).
-    struct PendingSub {
-        linkage: Option<String>,
-        concrete_name: Option<String>,
-        params: Vec<(String, Option<usize>)>,
-    }
-    let mut subs: Vec<PendingSub> = Vec::new();
+    let mut idx = Idx {
+        by_linkage: HashMap::new(),
+        by_id: HashMap::new(),
+        id_to_name: HashMap::new(),
+        name_to_id: HashMap::new(),
+    };
 
-    let mut by_id: HashMap<usize, RawType> = HashMap::new();
-    let mut id_to_name: HashMap<usize, String> = HashMap::new();
-    let mut name_to_id: HashMap<String, usize> = HashMap::new();
-
-    // Stack of currently-open DIEs while walking (depth, role) — see `Role`.
     let mut units = dwarf.units();
     while let Some(header) = units.next()? {
         let unit = dwarf.unit(header)?;
-        let mut stack: Vec<(isize, Role)> = Vec::new();
-        let mut depth: isize = 0;
-        let mut entries = unit.entries();
-        while let Some((delta, entry)) = entries.next_dfs()? {
-            depth += delta;
-            // Close DIEs that have ended.
-            while let Some(&(d, _)) = stack.last() {
-                if d >= depth {
-                    stack.pop();
-                } else {
-                    break;
-                }
+        let mut tree = unit.entries_tree(None)?;
+        let root = tree.root()?;
+        walk(&dwarf, &unit, root, &mut idx)?;
+    }
+
+    Ok((
+        DwarfIndex {
+            by_linkage: idx.by_linkage,
+        },
+        LayoutIndex {
+            by_id: idx.by_id,
+            id_to_name: idx.id_to_name,
+            name_to_id: idx.name_to_id,
+        },
+    ))
+}
+
+fn global_offset(entry: &Die, unit: &gimli::Unit<Reader>) -> Option<usize> {
+    entry.offset().to_debug_info_offset(&unit.header).map(|o| o.0)
+}
+
+fn walk<'a>(
+    dwarf: &gimli::Dwarf<Reader<'a>>,
+    unit: &gimli::Unit<Reader<'a>>,
+    node: gimli::EntriesTreeNode<'a, '_, '_, Reader<'a>>,
+    idx: &mut Idx,
+) -> Result<(), DynErr> {
+    let entry = node.entry();
+    let tag = entry.tag();
+    let global = global_offset(entry, unit);
+    let name = attr_string(dwarf, unit, entry, gimli::DW_AT_name);
+    let linkage = if tag == gimli::DW_TAG_subprogram {
+        attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)
+    } else {
+        None
+    };
+    let byte_size = attr_udata(entry, gimli::DW_AT_byte_size);
+    let elem_ref = if tag == gimli::DW_TAG_array_type {
+        attr_ref_global(entry, gimli::DW_AT_type, unit)
+    } else {
+        None
+    };
+    let pointee = if matches!(
+        tag,
+        gimli::DW_TAG_pointer_type | gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type
+    ) {
+        attr_ref_global(entry, gimli::DW_AT_type, unit)
+    } else {
+        None
+    };
+    // entry borrow ends here.
+
+    // Register the type skeleton + names.
+    if let Some(off) = global {
+        match tag {
+            gimli::DW_TAG_pointer_type
+            | gimli::DW_TAG_reference_type
+            | gimli::DW_TAG_rvalue_reference_type => {
+                idx.by_id.insert(
+                    off,
+                    RawType {
+                        byte_size: byte_size.unwrap_or(8),
+                        kind: RawKind::Pointer { pointee },
+                    },
+                );
+                register_name(idx, off, &name);
             }
-
-            let global = entry
-                .offset()
-                .to_debug_info_offset(&unit.header)
-                .map(|o| o.0);
-
-            let tag = entry.tag();
-            match tag {
-                gimli::DW_TAG_subprogram => {
-                    let linkage = attr_string(&dwarf, &unit, entry, gimli::DW_AT_linkage_name);
-                    let concrete_name = attr_string(&dwarf, &unit, entry, gimli::DW_AT_name);
-                    subs.push(PendingSub {
-                        linkage,
-                        concrete_name,
-                        params: Vec::new(),
-                    });
-                    stack.push((depth, Role::Sub(subs.len() - 1)));
-                }
-
-                gimli::DW_TAG_template_type_parameter => {
-                    if let Some(name) = attr_string(&dwarf, &unit, entry, gimli::DW_AT_name) {
-                        let tid = attr_ref_global(entry, gimli::DW_AT_type, &unit);
-                        if let Some(i) = nearest_sub(&stack) {
-                            subs[i].params.push((name, tid));
-                        }
-                    }
-                    stack.push((depth, Role::Other));
-                }
-
-                gimli::DW_TAG_pointer_type
-                | gimli::DW_TAG_reference_type
-                | gimli::DW_TAG_rvalue_reference_type => {
-                    if let Some(off) = global {
-                        let pointee = attr_ref_global(entry, gimli::DW_AT_type, &unit);
-                        by_id.insert(
-                            off,
-                            RawType {
-                                byte_size: attr_udata(entry, gimli::DW_AT_byte_size).unwrap_or(8),
-                                kind: RawKind::Pointer { pointee },
-                            },
-                        );
-                        if let Some(name) = attr_string(&dwarf, &unit, entry, gimli::DW_AT_name) {
-                            id_to_name.insert(off, name.clone());
-                            name_to_id.entry(name).or_insert(off);
-                        }
-                        stack.push((depth, Role::Type(off)));
-                    } else {
-                        stack.push((depth, Role::Other));
-                    }
-                }
-
-                gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type => {
-                    if let Some(off) = global {
-                        by_id.insert(
-                            off,
-                            RawType {
-                                byte_size: attr_udata(entry, gimli::DW_AT_byte_size).unwrap_or(0),
-                                kind: RawKind::Aggregate {
-                                    members: Vec::new(),
-                                },
-                            },
-                        );
-                        if let Some(name) = attr_string(&dwarf, &unit, entry, gimli::DW_AT_name) {
-                            id_to_name.insert(off, name.clone());
-                            name_to_id.entry(name).or_insert(off);
-                        }
-                        stack.push((depth, Role::Type(off)));
-                    } else {
-                        stack.push((depth, Role::Other));
-                    }
-                }
-
-                gimli::DW_TAG_array_type => {
-                    if let Some(off) = global {
-                        let elem = attr_ref_global(entry, gimli::DW_AT_type, &unit);
-                        by_id.insert(
-                            off,
-                            RawType {
-                                byte_size: attr_udata(entry, gimli::DW_AT_byte_size).unwrap_or(0),
-                                kind: RawKind::Array { elem, count: 0 },
-                            },
-                        );
-                        stack.push((depth, Role::Type(off)));
-                    } else {
-                        stack.push((depth, Role::Other));
-                    }
-                }
-
-                gimli::DW_TAG_base_type | gimli::DW_TAG_enumeration_type => {
-                    if let Some(off) = global {
-                        by_id.insert(
-                            off,
-                            RawType {
-                                byte_size: attr_udata(entry, gimli::DW_AT_byte_size).unwrap_or(0),
-                                kind: RawKind::Scalar,
-                            },
-                        );
-                        if let Some(name) = attr_string(&dwarf, &unit, entry, gimli::DW_AT_name) {
-                            id_to_name.insert(off, name.clone());
-                            name_to_id.entry(name).or_insert(off);
-                        }
-                        stack.push((depth, Role::Type(off)));
-                    } else {
-                        stack.push((depth, Role::Other));
-                    }
-                }
-
-                gimli::DW_TAG_member => {
-                    // Attach to the nearest enclosing aggregate type.
-                    let (type_off, in_variant) = nearest_type(&stack);
-                    if let Some(off) = type_off {
-                        let m = RawMember {
-                            offset: attr_udata(entry, gimli::DW_AT_data_member_location)
-                                .unwrap_or(0),
-                            type_id: attr_ref_global(entry, gimli::DW_AT_type, &unit),
-                            in_variant,
-                        };
-                        if let Some(rt) = by_id.get_mut(&off) {
-                            if let RawKind::Aggregate { members } = &mut rt.kind {
-                                members.push(m);
-                            }
-                        }
-                    }
-                    stack.push((depth, Role::Other));
-                }
-
-                gimli::DW_TAG_subrange_type => {
-                    // Array length: count, or upper_bound + 1.
-                    let count = attr_udata(entry, gimli::DW_AT_count).or_else(|| {
-                        attr_udata(entry, gimli::DW_AT_upper_bound).map(|u| u + 1)
-                    });
-                    if let (Some(c), Some(Role::Type(off))) = (count, nearest_type_role(&stack)) {
-                        if let Some(rt) = by_id.get_mut(&off) {
-                            if let RawKind::Array { count: c0, .. } = &mut rt.kind {
-                                *c0 = c;
-                            }
-                        }
-                    }
-                    stack.push((depth, Role::Other));
-                }
-
-                gimli::DW_TAG_variant_part | gimli::DW_TAG_variant => {
-                    stack.push((depth, Role::VariantPart));
-                }
-
-                _ => {
-                    stack.push((depth, Role::Other));
-                }
+            gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type => {
+                idx.by_id.insert(
+                    off,
+                    RawType {
+                        byte_size: byte_size.unwrap_or(0),
+                        kind: RawKind::Aggregate {
+                            members: Vec::new(),
+                        },
+                    },
+                );
+                register_name(idx, off, &name);
             }
+            gimli::DW_TAG_array_type => {
+                idx.by_id.insert(
+                    off,
+                    RawType {
+                        byte_size: byte_size.unwrap_or(0),
+                        kind: RawKind::Array {
+                            elem: elem_ref,
+                            count: 0,
+                        },
+                    },
+                );
+            }
+            gimli::DW_TAG_base_type | gimli::DW_TAG_enumeration_type => {
+                idx.by_id.insert(
+                    off,
+                    RawType {
+                        byte_size: byte_size.unwrap_or(0),
+                        kind: RawKind::Scalar,
+                    },
+                );
+                register_name(idx, off, &name);
+            }
+            _ => {}
         }
     }
 
-    // Finalize the linkage index, resolving template-param type ids to names.
-    let mut by_linkage = HashMap::new();
-    for s in subs {
-        let Some(linkage) = s.linkage else { continue };
-        let template_params = s
-            .params
-            .into_iter()
-            .map(|(pname, tid)| {
-                let tname = tid
-                    .and_then(|i| id_to_name.get(&i).cloned())
-                    .unwrap_or_else(|| "?".to_string());
-                (pname, tname)
-            })
-            .collect();
+    let is_struct = matches!(
+        tag,
+        gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type
+    );
+    let is_array = tag == gimli::DW_TAG_array_type;
+    let is_subprogram = tag == gimli::DW_TAG_subprogram;
+
+    let mut template_params: Vec<(String, String)> = Vec::new();
+
+    let mut children = node.children();
+    while let Some(child) = children.next()? {
+        // Pull out what we need from the child before recursing (which moves it).
+        let ctag = child.entry().tag();
+
+        if is_subprogram && ctag == gimli::DW_TAG_template_type_parameter {
+            let ce = child.entry();
+            if let Some(pn) = attr_string(dwarf, unit, ce, gimli::DW_AT_name) {
+                if let Some(tn) = attr_type_name(dwarf, unit, ce) {
+                    template_params.push((pn, tn));
+                }
+            }
+        } else if is_struct && ctag == gimli::DW_TAG_member {
+            if let Some(off) = global {
+                let ce = child.entry();
+                let m = RawMember {
+                    offset: attr_udata(ce, gimli::DW_AT_data_member_location).unwrap_or(0),
+                    type_id: attr_ref_global(ce, gimli::DW_AT_type, unit),
+                    in_variant: false,
+                };
+                push_member(idx, off, m);
+            }
+        } else if is_struct && ctag == gimli::DW_TAG_variant_part {
+            if let Some(off) = global {
+                collect_variant_members(unit, &child, off, idx);
+            }
+            // also recurse so nested types inside variants get indexed
+        } else if is_array && ctag == gimli::DW_TAG_subrange_type {
+            if let Some(off) = global {
+                let ce = child.entry();
+                let count = attr_udata(ce, gimli::DW_AT_count)
+                    .or_else(|| attr_udata(ce, gimli::DW_AT_upper_bound).map(|u| u + 1));
+                if let Some(c) = count {
+                    if let Some(rt) = idx.by_id.get_mut(&off) {
+                        if let RawKind::Array { count: c0, .. } = &mut rt.kind {
+                            *c0 = c;
+                        }
+                    }
+                }
+            }
+        }
+
+        walk(dwarf, unit, child, idx)?;
+    }
+
+    if let Some(linkage) = linkage {
         let info = FnTypeInfo {
-            concrete_name: s.concrete_name,
+            concrete_name: name,
             template_params,
         };
-        by_linkage
+        idx.by_linkage
             .entry(linkage)
             .and_modify(|e: &mut FnTypeInfo| {
                 if e.template_params.is_empty() && !info.template_params.is_empty() {
@@ -424,76 +388,72 @@ pub fn build(obj_data: &[u8]) -> Result<(DwarfIndex, LayoutIndex), DynErr> {
             .or_insert(info);
     }
 
-    if std::env::var("MEMSCOPE_DWARF_DEBUG").is_ok() {
-        let with_params = by_linkage
-            .values()
-            .filter(|v| !v.template_params.is_empty())
-            .count();
-        eprintln!(
-            "[dwarf-debug] linkage entries: {}, with params: {}, id_to_name: {}",
-            by_linkage.len(),
-            with_params,
-            id_to_name.len()
-        );
-        for (k, v) in by_linkage
-            .iter()
-            .filter(|(_, v)| v.template_params.iter().any(|(_, t)| t.contains("Particle")))
-            .take(6)
-        {
-            eprintln!("[dwarf-debug] Particle-carrying: {k} -> {:?}", v.template_params);
-        }
-        let any_particle = by_linkage
-            .values()
-            .any(|v| v.template_params.iter().any(|(_, t)| t.contains("Particle")));
-        eprintln!("[dwarf-debug] any Particle param: {any_particle}");
+    Ok(())
+}
+
+fn register_name(idx: &mut Idx, off: usize, name: &Option<String>) {
+    if let Some(n) = name {
+        idx.id_to_name.insert(off, n.clone());
+        idx.name_to_id.entry(n.clone()).or_insert(off);
     }
-
-    Ok((
-        DwarfIndex { by_linkage },
-        LayoutIndex {
-            by_id,
-            id_to_name,
-            name_to_id,
-        },
-    ))
 }
 
-// --- stack helpers -----------------------------------------------------------
-
-/// Index (into the pending-subs vec) of the nearest enclosing subprogram.
-fn nearest_sub(stack: &[(isize, Role)]) -> Option<usize> {
-    stack.iter().rev().find_map(|(_, r)| match r {
-        Role::Sub(i) => Some(*i),
-        _ => None,
-    })
-}
-
-/// Nearest enclosing aggregate type offset + whether we're inside a variant.
-fn nearest_type(stack: &[(isize, Role)]) -> (Option<usize>, bool) {
-    let mut in_variant = false;
-    for (_, r) in stack.iter().rev() {
-        match r {
-            Role::VariantPart => in_variant = true,
-            Role::Type(off) => return (Some(*off), in_variant),
-            _ => {}
+fn push_member(idx: &mut Idx, struct_off: usize, m: RawMember) {
+    if let Some(rt) = idx.by_id.get_mut(&struct_off) {
+        if let RawKind::Aggregate { members } = &mut rt.kind {
+            members.push(m);
         }
     }
-    (None, in_variant)
 }
 
-fn nearest_type_role(stack: &[(isize, Role)]) -> Option<Role> {
-    stack
-        .iter()
-        .rev()
-        .find_map(|(_, r)| matches!(r, Role::Type(_)).then_some(*r))
+/// Collect members of an enum `variant_part` subtree, attaching each to the
+/// enclosing struct with `in_variant = true`. Reads the subtree via a fresh
+/// `entries_tree` rooted at the variant_part (so we don't disturb the caller's
+/// child cursor).
+fn collect_variant_members(
+    unit: &gimli::Unit<Reader>,
+    vp_node: &gimli::EntriesTreeNode<Reader>,
+    struct_off: usize,
+    idx: &mut Idx,
+) {
+    // Re-open a tree at the variant_part's offset to iterate its descendants.
+    let vp_off = vp_node.entry().offset();
+    let Ok(mut tree) = unit.entries_tree(Some(vp_off)) else {
+        return;
+    };
+    let Ok(root) = tree.root() else { return };
+    collect_variant_node(unit, root, struct_off, idx);
+}
+
+fn collect_variant_node(
+    unit: &gimli::Unit<Reader>,
+    node: gimli::EntriesTreeNode<Reader>,
+    struct_off: usize,
+    idx: &mut Idx,
+) {
+    let mut children = node.children();
+    while let Ok(Some(child)) = children.next() {
+        let ctag = child.entry().tag();
+        if ctag == gimli::DW_TAG_member {
+            let ce = child.entry();
+            let m = RawMember {
+                offset: attr_udata(ce, gimli::DW_AT_data_member_location).unwrap_or(0),
+                type_id: attr_ref_global(ce, gimli::DW_AT_type, unit),
+                in_variant: true,
+            };
+            push_member(idx, struct_off, m);
+        } else if ctag == gimli::DW_TAG_variant || ctag == gimli::DW_TAG_variant_part {
+            collect_variant_node(unit, child, struct_off, idx);
+        }
+    }
 }
 
 // --- attribute helpers -------------------------------------------------------
 
 fn attr_string<'a>(
-    dwarf: &gimli::Dwarf<EndianSlice<'a, RunTimeEndian>>,
-    unit: &gimli::Unit<EndianSlice<'a, RunTimeEndian>>,
-    entry: &gimli::DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<Reader<'a>>,
+    unit: &gimli::Unit<Reader<'a>>,
+    entry: &Die<'a, '_>,
     attr: gimli::DwAt,
 ) -> Option<String> {
     let value = entry.attr_value(attr).ok().flatten()?;
@@ -501,10 +461,7 @@ fn attr_string<'a>(
     Some(reader.to_string_lossy().into_owned())
 }
 
-fn attr_udata<'a>(
-    entry: &gimli::DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>>,
-    attr: gimli::DwAt,
-) -> Option<u64> {
+fn attr_udata(entry: &Die, attr: gimli::DwAt) -> Option<u64> {
     match entry.attr_value(attr).ok().flatten()? {
         AttributeValue::Udata(u) => Some(u),
         AttributeValue::Data1(u) => Some(u as u64),
@@ -516,14 +473,55 @@ fn attr_udata<'a>(
     }
 }
 
-fn attr_ref_global<'a>(
-    entry: &gimli::DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>>,
-    attr: gimli::DwAt,
-    unit: &gimli::Unit<EndianSlice<'a, RunTimeEndian>>,
-) -> Option<usize> {
+fn attr_ref_global(entry: &Die, attr: gimli::DwAt, unit: &gimli::Unit<Reader>) -> Option<usize> {
     match entry.attr_value(attr).ok().flatten()? {
         AttributeValue::UnitRef(uoff) => uoff.to_debug_info_offset(&unit.header).map(|o| o.0),
         AttributeValue::DebugInfoRef(o) => Some(o.0),
+        _ => None,
+    }
+}
+
+/// Resolve `DW_AT_type` on `entry` to a human type name (the referenced DIE's
+/// `DW_AT_name`), reconstructing pointer/ref/array shapes that have no name.
+fn attr_type_name<'a>(
+    dwarf: &gimli::Dwarf<Reader<'a>>,
+    unit: &gimli::Unit<Reader<'a>>,
+    entry: &Die<'a, '_>,
+) -> Option<String> {
+    let value = entry.attr_value(gimli::DW_AT_type).ok().flatten()?;
+    let offset = match value {
+        AttributeValue::UnitRef(o) => o,
+        _ => return None,
+    };
+    type_name_at(dwarf, unit, offset, 0)
+}
+
+fn type_name_at<'a>(
+    dwarf: &gimli::Dwarf<Reader<'a>>,
+    unit: &gimli::Unit<Reader<'a>>,
+    offset: gimli::UnitOffset,
+    depth: u32,
+) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    let die = unit.entry(offset).ok()?;
+    if let Some(name) = attr_string(dwarf, unit, &die, gimli::DW_AT_name) {
+        return Some(name);
+    }
+    let inner = || -> Option<String> {
+        let v = die.attr_value(gimli::DW_AT_type).ok().flatten()?;
+        let o = match v {
+            AttributeValue::UnitRef(o) => o,
+            _ => return None,
+        };
+        type_name_at(dwarf, unit, o, depth + 1)
+    };
+    match die.tag() {
+        gimli::DW_TAG_pointer_type => Some(format!("*{}", inner().unwrap_or_else(|| "?".into()))),
+        gimli::DW_TAG_reference_type => Some(format!("&{}", inner().unwrap_or_else(|| "?".into()))),
+        gimli::DW_TAG_array_type => Some(format!("[{}]", inner().unwrap_or_else(|| "?".into()))),
+        gimli::DW_TAG_const_type => inner(),
         _ => None,
     }
 }
