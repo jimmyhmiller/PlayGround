@@ -24,7 +24,7 @@ use std::os::raw::c_void;
 
 use memscope_proto::{Frame, SiteInfo, Snapshot, TypeId, TypeInfo};
 
-pub use dwarf::{DwarfIndex, FnTypeInfo};
+pub use dwarf::{DwarfIndex, FnTypeInfo, LayoutIndex, PtrField};
 pub use load::{dwarf_bytes_for, dwarf_bytes_for_current_exe};
 
 type DynErr = Box<dyn Error + Send + Sync>;
@@ -47,6 +47,7 @@ fn is_capture_noise(name: &str) -> bool {
 /// Resolves allocation sites to concrete types using a binary's DWARF.
 pub struct TypeOracle {
     index: DwarfIndex,
+    layout: LayoutIndex,
 }
 
 /// A symbolicated sub-frame (one IP can expand into several inlined frames).
@@ -63,21 +64,27 @@ impl TypeOracle {
     /// Build an oracle from the current process's binary + DWARF.
     pub fn for_current_process() -> Result<Self, DynErr> {
         let bytes = load::dwarf_bytes_for_current_exe()?;
-        let index = dwarf::build_index(&bytes)?;
-        Ok(TypeOracle { index })
+        let (index, layout) = dwarf::build(&bytes)?;
+        Ok(TypeOracle { index, layout })
     }
 
     /// Build an oracle from a specific binary path (for posthoc exploration of a
     /// heap dump produced by another process).
     pub fn from_binary(path: &std::path::Path) -> Result<Self, DynErr> {
         let bytes = load::dwarf_bytes_for(path)?;
-        let index = dwarf::build_index(&bytes)?;
-        Ok(TypeOracle { index })
+        let (index, layout) = dwarf::build(&bytes)?;
+        Ok(TypeOracle { index, layout })
     }
 
     /// Number of monomorphized functions indexed (diagnostic).
     pub fn indexed_functions(&self) -> usize {
         self.index.len()
+    }
+
+    /// The type-layout index (field offsets, pointer fields) for heap-graph
+    /// reconstruction.
+    pub fn layout(&self) -> &LayoutIndex {
+        &self.layout
     }
 
     /// Symbolicate one return address into its (possibly inlined) sub-frames.
