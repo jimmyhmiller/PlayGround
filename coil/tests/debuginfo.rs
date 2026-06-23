@@ -17,6 +17,24 @@ fn have(tool: &str) -> bool {
 /// running concurrently contend and intermittently mis-resolve breakpoints.
 static LLDB: Mutex<()> = Mutex::new(());
 
+/// Run `lldb` in batch mode over `exe` with the given commands, returning its
+/// combined stdout+stderr. Loads the `.dSYM` *explicitly* (`add-dsym`) rather
+/// than via Spotlight, which doesn't reliably index a freshly-built temp dSYM.
+fn run_lldb(exe: &Path, cmds: &[&str]) -> String {
+    let dsym = exe.with_extension("dSYM");
+    let mut args: Vec<String> = vec!["-b".into()];
+    if dsym.exists() {
+        args.push("-o".into());
+        args.push(format!("add-dsym {}", dsym.display()));
+    }
+    for c in cmds {
+        args.push("-o".into());
+        args.push((*c).into());
+    }
+    let out = Command::new("lldb").arg(exe).args(&args).output().unwrap();
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
 const PROG: &str = "(module app)\n\n\
                     (defn square [(x i64)] (-> i64)\n  (imul x x))\n\n\
                     (defn main [] (-> i64)\n  (let [a 6] (square a)))\n";
@@ -95,12 +113,7 @@ fn lldb_resolves_breakpoint_to_source() {
     coil::build_executable_linked_dbg(PROG, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
         .expect("debug build");
 
-    let out = Command::new("lldb")
-        .arg(&exe)
-        .args(["-b", "-o", "breakpoint set --name app.square", "-o", "run", "-o", "bt", "-o", "quit"])
-        .output()
-        .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = run_lldb(&exe, &["breakpoint set --name app.square", "run", "bt", "quit"]);
     // The breakpoint must resolve to our source file (proves lldb read the DWARF).
     // With per-statement line info it lands on the first body statement —
     // `(imul x x)` on line 4 — not the `defn` line. (lldb may print an address
@@ -136,17 +149,46 @@ fn lldb_frame_variable_shows_params() {
     // Break on the `(iadd a b)` line (line 4) — inside the body, past the
     // prologue, so the spilled params hold their real values.
     let file = src_path.file_name().unwrap().to_str().unwrap();
-    let out = Command::new("lldb")
-        .arg(&exe)
-        .args([
-            "-b", "-o", &format!("breakpoint set --file {file} --line 4"),
-            "-o", "run", "-o", "frame variable", "-o", "quit",
-        ])
-        .output()
-        .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = run_lldb(
+        &exe,
+        &[&format!("breakpoint set --file {file} --line 4"), "run", "frame variable", "quit"],
+    );
     assert!(text.contains("a = 30"), "param a not shown with value 30:\n{text}");
     assert!(text.contains("b = 12"), "param b not shown with value 12:\n{text}");
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
+/// Local-variable DI for `let` bindings: at a line breakpoint, `frame variable`
+/// shows the in-scope locals with their correct values (via `create_auto_variable`
+/// + a debug spill; the `-g` backend runs at -O0 so the spill stores aren't
+/// reordered/merged away from their statement).
+#[test]
+fn lldb_frame_variable_shows_let_locals() {
+    if !have("lldb") {
+        eprintln!("SKIP: lldb not found");
+        return;
+    }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
+    let prog = "(extern putchar :cc c [i32] (-> i32))\n\
+                (defn main [] (-> i64)\n  (let [x 10]\n    (let [y 20]\n      \
+                (let [z (iadd x y)]\n        (putchar 65)\n        (cast i64 z)))))\n";
+    let src_path = unique_path("letg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("letexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build");
+
+    let file = src_path.file_name().unwrap().to_str().unwrap();
+    let text = run_lldb(
+        &exe,
+        &[&format!("breakpoint set --file {file} --line 6"), "run", "frame variable", "quit"],
+    );
+    assert!(text.contains("x = 10"), "x not shown as 10:\n{text}");
+    assert!(text.contains("y = 20"), "y not shown as 20:\n{text}");
+    assert!(text.contains("z = 30"), "z not shown as 30:\n{text}");
 
     let _ = std::fs::remove_file(&exe);
     let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
@@ -173,15 +215,10 @@ fn lldb_steps_line_by_line() {
     coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
         .expect("debug build");
 
-    let out = Command::new("lldb")
-        .arg(&exe)
-        .args([
-            "-b", "-o", "breakpoint set --name main", "-o", "run",
-            "-o", "next", "-o", "next", "-o", "next", "-o", "quit",
-        ])
-        .output()
-        .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = run_lldb(
+        &exe,
+        &["breakpoint set --name main", "run", "next", "next", "next", "quit"],
+    );
     // Stepping must visit successive source lines (the three putchar statements
     // are on lines 3, 4, 5). Proves per-statement line info, not just function-level.
     for line in [":3", ":4", ":5"] {

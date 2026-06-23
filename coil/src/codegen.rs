@@ -1596,7 +1596,94 @@ impl<'ctx> Cg<'ctx> {
                 true,
                 inkwell::debug_info::DIFlags::ZERO,
             );
-            di.builder.insert_declare_at_end(slot, Some(var), None, loc, entry);
+            self.dbg_declare_at_end(di, slot, var, loc, entry);
+        }
+    }
+
+    /// Allocate a slot in the *entry* block (regardless of the current insert
+    /// point), so a debug spill for a `let` inside a loop doesn't grow the stack
+    /// each iteration. The builder is restored to where it was.
+    fn entry_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let cur = self.builder.get_insert_block().ok_or("codegen: no insert block")?;
+        let func = cur.get_parent().ok_or("codegen: block has no parent function")?;
+        let entry = func.get_first_basic_block().ok_or("codegen: function has no entry block")?;
+        // The alloca is prologue, not a statement: emit it with NO line so it does
+        // not pollute the line table (a body-line alloca at the front of `entry`
+        // would mis-place line breakpoints). Save/restore the caller's location.
+        let saved = self.builder.get_current_debug_location();
+        match entry.get_first_instruction() {
+            Some(first) => self.builder.position_before(&first),
+            None => self.builder.position_at_end(entry),
+        }
+        self.builder.unset_current_debug_location();
+        let slot = self.builder.build_alloca(ty, name).map_err(le)?;
+        self.builder.position_at_end(cur);
+        match saved {
+            Some(loc) => self.builder.set_current_debug_location(loc),
+            None => self.builder.unset_current_debug_location(),
+        }
+        Ok(slot)
+    }
+
+    /// Insert an `llvm.dbg.declare` for `var` at `slot`, at the end of `block`.
+    /// Calls the LLVM-C API directly: inkwell 0.9's `insert_declare_at_end` wraps
+    /// the LLVM-19+ *DbgRecord* return as an `InstructionValue` and trips a
+    /// `debug_assert!(is_instruction())` (intermittently, a hard panic in dev/test
+    /// builds). We don't use the return, so bypass the wrapper.
+    fn dbg_declare_at_end(
+        &self,
+        di: &DebugCtx<'ctx>,
+        slot: inkwell::values::PointerValue<'ctx>,
+        var: inkwell::debug_info::DILocalVariable<'ctx>,
+        loc: inkwell::debug_info::DILocation<'ctx>,
+        block: BasicBlock<'ctx>,
+    ) {
+        use inkwell::values::AsValueRef;
+        let empty_expr = di.builder.create_expression(vec![]);
+        unsafe {
+            inkwell::llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
+                di.builder.as_mut_ptr(),
+                slot.as_value_ref(),
+                var.as_mut_ptr(),
+                empty_expr.as_mut_ptr(),
+                loc.as_mut_ptr(),
+                block.as_mut_ptr(),
+            );
+        }
+    }
+
+    /// Describe a `let` binding for the debugger (`-g`): spill its value to an
+    /// entry-block debug slot and attach a `DILocalVariable` (auto variable), so
+    /// `frame variable` shows it. Scalars/pointers only (aggregates skipped).
+    fn declare_let_local(&self, name: &str, val: BasicValueEnum<'ctx>, ty: &Type, span: crate::span::Span) {
+        let (di, sp) = match (&self.di, *self.cur_sp.borrow()) {
+            (Some(di), Some(sp)) => (di, sp),
+            _ => return,
+        };
+        let Some(dty) = self.di_type(di, ty) else { return };
+        let (line, _) = di.line_col(span.lo);
+        if line == 0 {
+            return;
+        }
+        let Ok(slot) = self.entry_alloca(val.get_type(), &format!("{name}.dbg")) else { return };
+        let _ = self.builder.build_store(slot, val);
+        let var = di.builder.create_auto_variable(
+            sp.as_debug_info_scope(),
+            name,
+            di.file,
+            line,
+            dty,
+            true,
+            inkwell::debug_info::DIFlags::ZERO,
+            0,
+        );
+        let loc = di.builder.create_debug_location(self.ctx, line, 1, sp.as_debug_info_scope(), None);
+        if let Some(block) = self.builder.get_insert_block() {
+            self.dbg_declare_at_end(di, slot, var, loc, block);
         }
     }
 
@@ -1766,6 +1853,8 @@ impl<'ctx> Cg<'ctx> {
                     // The checker erases mutable `let` places to an alloca plus a
                     // store, so by codegen every binding is an ordinary value.
                     let v = self.emit_expr(val, &child)?;
+                    // Debug info (-g): make the local visible to `frame variable`.
+                    self.declare_let_local(name, v.0, &v.1, val.span);
                     child.insert(name.clone(), v);
                 }
                 let mut last: Tv = (i64t.const_zero().into(), Type::Int(64, true));

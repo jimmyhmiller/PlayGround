@@ -241,12 +241,21 @@ pub fn compile_to_object_dbg(
     } else {
         ""
     };
+    // A `-g` build also needs the *backend* (instruction selection, scheduling,
+    // store-merging) at -O0: otherwise it reorders/merges the debug-spill stores
+    // away from the statement they belong to, so a local reads as stale at a line
+    // breakpoint. A release build keeps Aggressive for `cc -O3` parity.
+    let backend_opt = if src_path.is_some() {
+        OptimizationLevel::None
+    } else {
+        OptimizationLevel::Aggressive
+    };
     let tm = target
         .create_target_machine(
             &triple,
             "generic",
             features,
-            OptimizationLevel::Aggressive,
+            backend_opt,
             RelocMode::PIC,
             CodeModel::Default,
         )
@@ -351,11 +360,18 @@ pub fn build_executable_linked_dbg(
         return Err(format!("linker (cc) failed with {status}"));
     }
     if src_path.is_some() {
-        // macOS keeps DWARF in the `.o`; collect it into a `.dSYM` so the
-        // debugger finds it even after the `.o` is gone. Best-effort (skip if
-        // dsymutil isn't present, e.g. non-Apple hosts where DWARF is in the exe).
-        let _ = Command::new("dsymutil").arg(out_path).status();
-        let _ = std::fs::remove_file(&obj_path);
+        // macOS keeps DWARF in the `.o`; collect it into a `.dSYM` so the debugger
+        // finds it even after the `.o` is gone. Only remove the `.o` if dsymutil
+        // actually succeeded — otherwise keep it as the debug-map fallback (losing
+        // both would silently strip all debug info).
+        let dsym_ok = Command::new("dsymutil")
+            .arg(out_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if dsym_ok {
+            let _ = std::fs::remove_file(&obj_path);
+        }
     } else {
         let _ = std::fs::remove_file(&obj_path);
     }

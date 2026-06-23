@@ -99,11 +99,34 @@ bytes for one instruction; a **line** breakpoint inside the body (the common
 case), or one `next`/`step`, shows the correct values. Verified at a line
 breakpoint (`tests/debuginfo.rs::lldb_frame_variable_shows_params`).
 
-## Deferred (increment 4+)
+# Increment 4 — `let`-binding locals (DONE)
 
-- **`let`-binding locals** (`create_auto_variable`) — same mechanism, but the
-  bindings are scattered through `emit_expr`'s Let arm rather than collected at
-  function entry.
+`frame variable` also shows scalar/pointer `let` bindings now (`create_auto_variable`
++ a debug spill in `emit_expr`'s Let arm). Three things had to line up:
+
+- **Spill slot in the entry block** (`entry_alloca`) — a `let` inside a loop would
+  otherwise re-`alloca` each iteration and grow the stack. The alloca is emitted
+  with *no* line (save/unset/restore the debug location) so it doesn't pollute the
+  line table and mis-place line breakpoints.
+- **Backend at `-O0` for `-g`** (`OptimizationLevel::None` on the target machine,
+  not just a minimal IR pipeline) — at `Aggressive` the *backend* still merges and
+  reschedules the otherwise-dead debug-spill stores away from their statement, so a
+  local read as stale at a line breakpoint. The IR pipeline being empty wasn't
+  enough; the codegen opt level matters too.
+- **A raw-FFI `dbg.declare`** (`dbg_declare_at_end`) — inkwell 0.9's
+  `insert_declare_at_end` wraps the LLVM-19+ *DbgRecord* return value as an
+  `InstructionValue` and trips `debug_assert!(is_instruction())`, an *intermittent*
+  hard panic in dev/test builds (it reads whatever the record ref classifies as).
+  We don't use the return, so we call
+  `LLVMDIBuilderInsertDeclareRecordAtEnd` directly via `inkwell::llvm_sys` and
+  ignore it. (This also de-flaked the parameter path from increment 3.)
+
+Verified at a line breakpoint (`tests/debuginfo.rs::lldb_frame_variable_shows_let_locals`).
+The lldb tests are serialized (a `Mutex`) and load the `.dSYM` explicitly
+(`add-dsym`, since Spotlight doesn't reliably index a freshly-built temp dSYM).
+
+## Deferred (increment 5+)
+
 - **Aggregate `DIType`s** (struct members, sum/enum variants, slice/array element
   types), so `frame variable` can print structs/slices, not just scalars.
 - **Typed `DISubroutineType`** (parameter/return DWARF types); currently one
