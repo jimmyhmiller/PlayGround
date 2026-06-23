@@ -152,12 +152,12 @@ all leveraging what we have:
 - **P3 — DWARF locals + reflection pretty-printers.** Inspect locals as language
   values (`Point { x: 3, y: 4 }`) via LLDB formatters reusing `render_object`.
   Verify: break, `frame variable`, confirm decoded values; break→GC→continue→
-  re-inspect (the §5 moving-GC check). **DONE for scalars + heap structs** —
-  `gcr build --debug` + lldb `frame variable` shows scalar locals/params and
-  renders heap structs by field (`(Point) p = { x = 3, y = 4 }`, native DWARF
-  composite types from reflection metadata); the §5 moving-GC re-inspect is
-  VERIFIED (a relocated struct still reads correctly). See
-  `docs/DEBUGGER_P3_PLAN.md`. Remaining: enums + inline nested-Ref rendering.
+  re-inspect (the §5 moving-GC check). **DONE** — `gcr build --debug` + lldb
+  shows scalars and structs natively; `tools/gcr_lldb.py` (the reflection
+  pretty-printer) adds enum PAYLOADS (`Shape::Rect(3, 4)`), inline nested refs,
+  and `#[value]` fields; the §5 moving-GC re-inspect is VERIFIED. Typed
+  `DISubprogram` signatures too. See `docs/DEBUGGER_P3_PLAN.md`. Remaining
+  (minor): auto-loading the printer.
 - **P4 — richer debugging.** Conditional breakpoints / watchpoints (LLDB-native),
   and heap navigation at a stop (reuse the heap explorer's snapshot + heap-diff,
   and `visit_roots` for the live root set at the breakpoint).
