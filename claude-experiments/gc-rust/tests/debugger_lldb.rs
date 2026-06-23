@@ -89,18 +89,26 @@ fn lldb_reflection_printer_renders_enum_payload_and_nested() {
     let src = "struct Point { x: i64, y: i64 }\n\
 struct Line { a: Point, b: Point }\n\
 enum Shape { Circle(i64), Rect(i64, i64), Empty }\n\
-fn main() -> i64 {\n  let s = Shape::Rect(3, 4);\n  let p = Point { x: 1, y: 2 };\n  let q = Point { x: 5, y: 6 };\n  let ln = Line { a: p, b: q };\n  let probe = 0;\n  probe\n}\n";
+#[value]\n\
+struct Pair { lo: i64, hi: i64 }\n\
+struct Box2 { p: Pair }\n\
+fn main() -> i64 {\n  let s = Shape::Rect(3, 4);\n  let p = Point { x: 1, y: 2 };\n  let q = Point { x: 5, y: 6 };\n  let ln = Line { a: p, b: q };\n  let bx = Box2 { p: Pair { lo: 8, hi: 9 } };\n  let probe = 0;\n  probe\n}\n";
     build_debug(src, &bin, &lib);
 
+    // Line 13 is `let probe = 0;` — after s, ln, bx are all assigned.
     let script = format!(
         "command script import {}\n\
-breakpoint set --file prog.gcr --line 9\nrun\nframe variable s ln\nquit\n",
+breakpoint set --file prog.gcr --line 13\nrun\nframe variable s ln bx\nquit\n",
         pretty_printer_path()
     );
     let out = lldb_run(&bin, &script);
 
-    // Enum payload rendered, plus nested structs inline.
-    for needle in ["Shape::Rect(3, 4)", "Line { a: Point { x: 1, y: 2 }"] {
+    // Enum payload + nested structs inline + a flattened #[value] aggregate field.
+    for needle in [
+        "Shape::Rect(3, 4)",
+        "Line { a: Point { x: 1, y: 2 }",
+        "Box2 { p: Pair { lo: 8, hi: 9 } }",
+    ] {
         assert!(
             out.contains(needle),
             "reflection printer missing `{needle}`:\n{out}"

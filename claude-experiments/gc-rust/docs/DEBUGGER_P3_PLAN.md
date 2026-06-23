@@ -18,14 +18,16 @@
 >   relocate `p` (address `0x…e6000000` → `0x…c6000168`), it still reads
 >   `{ x = 42, y = 7 }` — the location *derefs the live GC frame slot* the
 >   collector updates, and the printer reads object memory fresh at the stop.
+> - Flattened `#[value]` aggregate fields render inline too:
+>   `Holder { s: Slot { b: Box { val: 9 }, tag: 7 } }`.
 > - Full-debug `DISubprogram`s carry typed prototypes (return + param types).
 >
 > Verified: dwarf 3/0 (variable + struct + enum DIEs), debugger_lldb 5/0 (scalar,
-> struct-by-field, enum-variant, reflection enum-payload+nested, moving-GC),
+> struct-by-field, enum-variant, reflection enum-payload+nested+value, moving-GC),
 > lib 158/0, aot/ffi/threads/reflect/modules/generational green, examples
-> build+run under `--debug`, default builds unchanged. **Remaining:**
-> value-aggregate (`#[value]`) fields (printer shows `…`); auto-loading the
-> printer without a manual `command script import`.
+> build+run under `--debug`, default builds unchanged. **Remaining (minor):**
+> auto-loading the printer without a manual `command script import`; generic
+> type-name matching for the summary registration.
 
 Builds on P2 (DWARF line tables, `DWARFEmissionKind::LineTablesOnly` + per-source
 DIFiles). Goal: `gcr build --debug` carries **full** DWARF — local/parameter
@@ -122,9 +124,6 @@ Import with `command script import tools/gcr_lldb.py`.
 
 ## Scope boundary / open work
 
-- **Value aggregates** (`#[value]` fields/locals): native DWARF skips them (no
-  per-value offsets wired in); the printer renders them as `…`. Decode the value
-  table (already in the blob) to finish.
 - **Auto-load the printer** without a manual `command script import` (e.g. a
   `<binary>.py` next to the dSYM, or `target.load-script-from-symbol-file`).
 - **Type-name collisions**: the summary attaches by DWARF type name; a non-gc

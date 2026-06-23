@@ -161,8 +161,12 @@ def _render_fields(process, base, fields, table, depth):
             ptr = _read_mem(process, base + off, 8)
             child = int.from_bytes(ptr, "little") if ptr else 0
             out.append(_render_ref(process, child, table, depth - 1))
-        else:  # value aggregate (inline) — not decoded yet
-            out.append("…")
+        else:  # value aggregate (inline) — render in place at base+off
+            entry = table["values"].get(arg)
+            if entry is None:
+                out.append("…")
+            else:
+                out.append(_render_entry(process, base + off, entry, table, depth - 1))
     return out
 
 
@@ -182,6 +186,13 @@ def _render_type(process, base, tid, table, depth):
     entry = table["types"].get(tid)
     if entry is None:
         return "<type %d @ 0x%x>" % (tid, base)
+    return _render_entry(process, base, entry, table, depth)
+
+
+def _render_entry(process, base, entry, table, depth):
+    """Render a struct/enum entry whose fields sit at `base + field.off`. Shared
+    by heap objects (offsets header-absolute) and inline value aggregates
+    (offsets value-relative) — same shape, same code."""
     name = entry["name"]
     if entry["kind"] == "struct":
         fields = entry["fields"]
