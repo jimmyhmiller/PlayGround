@@ -1,0 +1,12 @@
+[package]
+name = "dodge"
+version = "0.1.0"
+entry = "dodge.gcr"
+
+# Native libraries to link. With this, `gcr run` (or `gcr build`) needs no
+# `--link-arg` on the CLI — it just works. Adjust lib-paths if your raylib lives
+# elsewhere (e.g. Linux: lib-paths = ["/usr/local/lib"], drop the frameworks).
+[link]
+libs = ["raylib"]
+lib-paths = ["/opt/homebrew/lib"]
+frameworks = ["CoreVideo", "IOKit", "Cocoa", "GLUT", "OpenGL"]

@@ -6,6 +6,23 @@ dodge the blue blocks; **R** restarts after a hit.
 
 ![screenshot](screenshot.png)
 
+## Run it
+
+This is a gc-rust project (`gcr.toml`), so — like cargo — it's one command from
+this directory:
+
+```sh
+gcr run        # builds (linking raylib from gcr.toml [link]) and launches
+```
+
+No `--link-arg` flags: the `[link]` section of `gcr.toml` declares
+`libs = ["raylib"]` + the macOS frameworks, and `gcr` passes them to the linker.
+`gcr build` just builds (to `target/dodge`). Requires `raylib`
+(`brew install raylib`) and a built compiler (`cargo build --bin gcr`).
+
+To regenerate the screenshot: `gcr build shot.gcr && ./shot` (a bare-file build
+inside the project still picks up the `[link]` config).
+
 ## What it proves
 
 - **gc-rust calls raylib's C API directly — including `Color`-by-value.** There
@@ -24,23 +41,10 @@ dodge the blue blocks; **R** restarts after a hit.
   because only scalars / by-value PODs cross the boundary — GC pointers never do,
   so the collector is free to relocate objects between frames.
 
-## Build & run
-
-Requires `raylib` (`brew install raylib`) and a built compiler
-(`cargo build --bin gcr` from the repo root).
-
-```sh
-./build.sh      # gcr build dodge.gcr, linking libraylib (no shim to compile)
-./dodge         # play it
-```
-
-`shot.gcr` is a deterministic screenshot harness (renders fixed frames →
-`TakeScreenshot` → exits) used to produce `screenshot.png`.
-
 ## Files
 
 | file | what |
 |------|------|
+| `gcr.toml` | project manifest — package + the `[link]` raylib config |
 | `dodge.gcr` | the game (gc-rust) — declares raylib's C functions and calls them directly |
 | `shot.gcr` | deterministic screenshot harness |
-| `build.sh` | `gcr build` with raylib link flags |
