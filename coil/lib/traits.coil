@@ -1,0 +1,18 @@
+(module traits)
+; Standard traits, so `(derive Eq T)` / `(derive Hash T)` (lib/derive.coil) have
+; something to implement. Trait names are a flat global namespace (v1), so these
+; are usable anywhere they're imported. `Self` is passed by value.
+;
+;   (import "lib/traits.coil" :use *)
+;   (import "lib/derive.coil" :use *)
+;   (defstruct Point [(x i64) (y i64)])
+;   (derive Eq Point)               ; => (impl Eq Point (eq …))
+;   (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))
+
+; structural equality
+(deftrait Eq [Self]
+  (eq [(a Self) (b Self)] (-> bool)))
+
+; a hash of the value (FNV-1a over fields, when derived)
+(deftrait Hash [Self]
+  (hash [(x Self)] (-> i64)))

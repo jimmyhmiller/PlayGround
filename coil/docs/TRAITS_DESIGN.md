@@ -76,9 +76,14 @@ into a normal call of `impls[(Tr, C)].m`. The impl functions are already ordinar
 - **Phase 1 (DONE):** `deftrait`/`impl`, bound list per param `(T A B)`,
   definition-time bound checking, concrete + deferred resolution, monomorphized
   static dispatch, impl↔trait signature conformance, all-methods-implemented
-  check. Tests in `tests/traits.rs`; full suite 370 green.
-- Later: `derive Trait Type` integration, supertraits, multiple-Self / associated
-  types, generic impls (`impl Eq for (Pair T T)`), and `dyn Trait` (vtables).
+  check. By-value aggregate `Self` works (codegen ABI reconciliation).
+- **`derive` (DONE):** `(derive Eq T)` / `(derive Hash T)` are macros
+  (`lib/derive.coil`) that reflect T's fields and expand to an `(impl …)`; standard
+  `Eq`/`Hash` traits live in `lib/traits.coil`. Nested-struct fields dispatch
+  through the trait method (so they must derive/impl it too). Tests in
+  `tests/traits.rs`.
+- Later: supertraits, multiple-Self / associated types, generic impls
+  (`impl Eq for (Pair T T)`), and `dyn Trait` (vtables); `derive` for `Ord`/`Show`.
 
 ## Aggregate `Self` by value: codegen ABI reconciliation
 

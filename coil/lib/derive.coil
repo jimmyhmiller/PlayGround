@@ -79,6 +79,74 @@
        ~@(derive--hash-steps (struct-fields tname) (quote x) (quote h))
        (load h))))
 
+; ---- derive (generate a TRAIT impl) ----------------------------------------
+; `(derive Eq T)` / `(derive Hash T)` reflect T's fields and expand to an
+; `(impl Trait T …)` — the trait version of derive-eq/derive-hash. Unlike the
+; standalone `T-eq`/`T-hash` functions above, nested-struct fields dispatch
+; through the TRAIT method (so nested types must themselves impl/derive the
+; trait). Requires the trait to be in scope (see lib/traits.coil). Scalars
+; (int/bool/float) + nested structs only; other field types are a hard error.
+
+; trait-aware per-field equality (nested structs -> the `eq` trait method)
+(def derive--teq-field
+  (lambda [fname ftype a b]
+    (let [pa `(field ~a ~fname) pb `(field ~b ~fname)]
+      (if (not (symbol? ftype))
+          (error "derive Eq: unsupported field type (scalars + nested structs only)")
+          (if (= (type-kind ftype) :struct)
+              `(eq ~pa ~pb)                                  ; nested: trait dispatch
+              (if (= (type-kind ftype) :sum)
+                  (error "derive Eq: sum fields unsupported; impl by hand")
+                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
+                      `(fcmp-eq (load ~pa) (load ~pb))
+                      `(icmp-eq (load ~pa) (load ~pb)))))))))
+
+(def derive--teq-and
+  (lambda [fields a b]
+    (if (empty? fields)
+        true
+        (let [f (first fields)
+              this (derive--teq-field (first f) (first (rest f)) a b)]
+          (if (empty? (rest fields))
+              this
+              `(and ~this ~(derive--teq-and (rest fields) a b)))))))
+
+; trait-aware per-field hash (nested structs -> the `hash` trait method)
+(def derive--thash-field
+  (lambda [fname ftype x]
+    (let [p `(field ~x ~fname)]
+      (if (not (symbol? ftype))
+          (error "derive Hash: unsupported field type (integers + nested structs only)")
+          (if (= (type-kind ftype) :struct)
+              `(hash ~p)                                     ; nested: trait dispatch
+              (if (= (type-kind ftype) :sum)
+                  (error "derive Hash: sum fields unsupported; impl by hand")
+                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
+                      (error "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
+                      `(load ~p))))))))
+
+(def derive--thash-steps
+  (lambda [fields x h]
+    (if (empty? fields)
+        (list)
+        (let [f (first fields)
+              fh (derive--thash-field (first f) (first (rest f)) x)]
+          (cons `(store! ~h (imul (ixor (load ~h) ~fh) 1099511628211))
+                (derive--thash-steps (rest fields) x h))))))
+
+(defmacro derive [trait-name tname]
+  (if (= (name trait-name) "Eq")
+      `(impl Eq ~tname
+         (eq [(a ~tname) (b ~tname)] (-> bool)
+           ~(derive--teq-and (struct-fields tname) (quote a) (quote b))))
+      (if (= (name trait-name) "Hash")
+          `(impl Hash ~tname
+             (hash [(x ~tname)] (-> i64)
+               (let [(mut h) -3750763034362895579]            ; FNV-1a offset basis
+                 ~@(derive--thash-steps (struct-fields tname) (quote x) (quote h))
+                 (load h))))
+          (error "derive: only Eq and Hash are supported (impl other traits by hand)"))))
+
 ; ---- derive-keyops (a HashMap key from derived eq + hash) -------------------
 ; Wraps `T-eq`/`T-hash` in the type-erased (ptr i8) KeyOps signatures the map
 ; uses (the stored slot holds the struct value; cast it back to (ptr T)). Derive

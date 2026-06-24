@@ -97,6 +97,80 @@ fn calling_an_unimplemented_method_is_rejected() {
 }
 
 #[test]
+fn derive_generates_a_working_eq_impl() {
+    // (derive Eq T) reflects the fields and expands to the impl — no hand-written
+    // method. A bounded generic then dispatches to it.
+    let code = build_and_run(
+        "(module app)\n\
+         (import \"lib/traits.coil\" :use *)\n\
+         (import \"lib/derive.coil\" :use *)\n\
+         (defstruct Point [(x i64) (y i64)])\n\
+         (derive Eq Point)\n\
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (defn mkpt [(x i64) (y i64)] (-> Point)\n\
+           (let [(mut p) (zeroed Point)] (store! (field (mut p) x) x) (store! (field (mut p) y) y) (load p)))\n\
+         (defn main [] (-> i64)\n\
+           (iadd (if (same (mkpt 3 4) (mkpt 3 4)) 10 0) (if (same (mkpt 3 4) (mkpt 3 9)) 100 1)))", // 10 + 1
+    );
+    assert_eq!(code, 11);
+}
+
+#[test]
+fn derive_eq_recurses_through_nested_structs() {
+    // A nested struct field uses the nested type's Eq impl (also derived).
+    let code = build_and_run(
+        "(module app)\n\
+         (import \"lib/traits.coil\" :use *)\n\
+         (import \"lib/derive.coil\" :use *)\n\
+         (defstruct Point [(x i64) (y i64)])\n\
+         (derive Eq Point)\n\
+         (defstruct Line [(a Point) (b Point)])\n\
+         (derive Eq Line)\n\
+         (defn mkpt [(x i64) (y i64)] (-> Point)\n\
+           (let [(mut p) (zeroed Point)] (store! (field (mut p) x) x) (store! (field (mut p) y) y) (load p)))\n\
+         (defn mkl [(x i64)] (-> Line)\n\
+           (let [(mut l) (zeroed Line)] (store! (field (mut l) a) (mkpt x 2)) (store! (field (mut l) b) (mkpt 3 4)) (load l)))\n\
+         (defn main [] (-> i64)\n\
+           (iadd (if (eq (mkl 1) (mkl 1)) 10 0) (if (eq (mkl 1) (mkl 9)) 100 1)))", // 10 + 1
+    );
+    assert_eq!(code, 11);
+}
+
+#[test]
+fn derive_hash_agrees_for_equal_values() {
+    // Derived Hash is deterministic: equal structs hash equal, and (here) two
+    // distinct values differ. Returns 11 when both checks hold.
+    let code = build_and_run(
+        "(module app)\n\
+         (import \"lib/traits.coil\" :use *)\n\
+         (import \"lib/derive.coil\" :use *)\n\
+         (defstruct Point [(x i64) (y i64)])\n\
+         (derive Hash Point)\n\
+         (defn h [(T Hash)] [(v T)] (-> i64) (hash v))\n\
+         (defn mkpt [(x i64) (y i64)] (-> Point)\n\
+           (let [(mut p) (zeroed Point)] (store! (field (mut p) x) x) (store! (field (mut p) y) y) (load p)))\n\
+         (defn main [] (-> i64)\n\
+           (iadd (if (icmp-eq (h (mkpt 3 4)) (h (mkpt 3 4))) 10 0)\n\
+                 (if (icmp-eq (h (mkpt 3 4)) (h (mkpt 3 9))) 100 1)))", // 10 + 1
+    );
+    assert_eq!(code, 11);
+}
+
+#[test]
+fn derive_unknown_trait_is_rejected() {
+    let err = coil::emit_ir(
+        "(module app)\n\
+         (import \"lib/traits.coil\" :use *)\n\
+         (import \"lib/derive.coil\" :use *)\n\
+         (defstruct P [(x i64)])\n\
+         (derive Ord P)\n\
+         (defn main [] (-> i64) 0)",
+    )
+    .unwrap_err();
+    assert!(err.contains("only Eq and Hash"), "got:\n{err}");
+}
+
+#[test]
 fn two_impls_dispatch_independently() {
     // Eq for two types; a bounded generic resolves each to the right impl.
     let code = build_and_run(
