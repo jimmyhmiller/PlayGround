@@ -1,17 +1,24 @@
-// Headless-ish screenshot harness: runs the dodge simulation for a fixed number
-// of frames (deterministic), captures a PNG with raylib's TakeScreenshot, and
-// exits. Used to visually verify the gc-rust→raylib FFI render pipeline.
+// Deterministic screenshot harness: runs the dodge simulation for a fixed number
+// of frames, captures a PNG via raylib's TakeScreenshot, and exits. Used to
+// visually verify the gc-rust→raylib FFI render pipeline. No C shim — all raylib
+// calls are direct, including the `Color`-by-value draws.
 
-extern "C" fn InitWindow(w: i32, h: i32, title: RawPtr);
+#[value] struct Color { r: u8, g: u8, b: u8, a: u8 }
+
+extern "C" fn InitWindow(width: i32, height: i32, title: RawPtr);
 extern "C" fn SetTargetFPS(fps: i32);
 extern "C" fn BeginDrawing();
 extern "C" fn EndDrawing();
 extern "C" fn CloseWindow();
-extern "C" fn rs_clear(r: i32, g: i32, b: i32);
-extern "C" fn rs_circle(x: f64, y: f64, rad: f64, r: i32, g: i32, b: i32, a: i32);
-extern "C" fn rs_rect(x: f64, y: f64, w: f64, h: f64, r: i32, g: i32, b: i32, a: i32);
-extern "C" fn rs_text(s: RawPtr, x: i32, y: i32, size: i32, r: i32, g: i32, b: i32);
-extern "C" fn rs_screenshot(path: RawPtr);
+extern "C" fn ClearBackground(color: Color);
+extern "C" fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color: Color);
+extern "C" fn DrawRectangle(posX: i32, posY: i32, width: i32, height: i32, color: Color);
+extern "C" fn DrawText(text: RawPtr, posX: i32, posY: i32, fontSize: i32, color: Color);
+extern "C" fn TakeScreenshot(fileName: RawPtr);
+
+fn rgb(r: i64, g: i64, b: i64) -> Color {
+  Color { r: r as u8, g: g as u8, b: b as u8, a: 255 as u8 }
+}
 
 struct Block { x: f64, y: f64, w: f64, speed: f64 }
 
@@ -24,7 +31,7 @@ fn main() -> i64 {
   let mut blocks: Vec<Block> = vec_new();
   let mut rng = 424242;
   let mut spawn_timer = 0;
-  let mut score = 7;
+  let score = 7;
   let px = 380.0;
 
   let mut frame = 0;
@@ -51,23 +58,23 @@ fn main() -> i64 {
     blocks = next;
 
     BeginDrawing();
-    rs_clear(18, 18, 28);
+    ClearBackground(rgb(18, 18, 28));
     let n2 = vec_len(blocks);
     let mut j = 0;
     while j < n2 {
       let b = vec_get(blocks, j);
-      rs_rect(b.x, b.y, b.w, b.w, 90, 170, 240, 255);
+      DrawRectangle(b.x as i32, b.y as i32, b.w as i32, b.w as i32, rgb(90, 170, 240));
       j = j + 1;
     }
-    rs_circle(px, 600.0, 18.0, 245, 205, 80, 255);
-    rs_text(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, 235, 235, 235);
-    rs_text(as_c_bytes("gc-rust + raylib FFI"), 12, 44, 20, 150, 150, 160);
+    DrawCircle(px as i32, 600, 18.0, rgb(245, 205, 80));
+    DrawText(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, rgb(235, 235, 235));
+    DrawText(as_c_bytes("gc-rust + raylib FFI (no shim)"), 12, 44, 20, rgb(150, 150, 160));
     EndDrawing();
 
     frame = frame + 1;
   }
 
-  rs_screenshot(as_c_bytes("dodge_shot.png"));
+  TakeScreenshot(as_c_bytes("dodge_shot.png"));
   CloseWindow();
   vec_len(blocks)
 }

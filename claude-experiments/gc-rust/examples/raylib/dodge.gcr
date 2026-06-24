@@ -1,40 +1,42 @@
 // Falling-Blocks Dodge — a real raylib game written in gc-rust, proving the FFI.
 //
-// What this demonstrates:
-//   * gc-rust calls a real third-party C library (raylib) DIRECTLY for every
-//     scalar-clean function (InitWindow with a `RawPtr` string, the frame loop,
-//     mouse input). See the `extern "C"` block.
-//   * A thin C shim (rayshim.c) wraps only the calls raylib passes a `Color`
-//     BY VALUE (gc-rust crosses value-structs by pointer — an ABI mismatch) or
-//     that return `bool`. gc-rust calls the shim with pure scalars.
-//   * The game state lives on the GC HEAP (a `Vec<Block>` of heap structs,
-//     rebuilt every frame), so a moving generational GC runs continuously while
-//     native rendering happens through FFI. They coexist because only scalars
-//     ever cross the boundary — GC pointers never do.
+// NO C SHIM. gc-rust calls raylib's actual C API directly, including the
+// functions that take a `Color` struct BY VALUE — `ClearBackground(Color)`,
+// `DrawCircle(int,int,float,Color)`, etc. gc-rust's FFI implements the platform
+// C ABI (AAPCS64): a 4-byte `Color` is coerced into a general register, an HFA
+// like `Vector2 {f32,f32}` into SIMD registers, matching exactly what clang
+// emits. See docs/ffi.md and src/codegen.rs (`abi_coerce`).
+//
+// The game state is a `Vec<Block>` of GC-heap structs rebuilt every frame, so a
+// moving generational GC runs continuously alongside native rendering. Safe
+// because only scalars / by-value PODs cross the boundary — GC pointers never do.
 //
 // Build + run: examples/raylib/build.sh
 
-// ---- raylib, called directly (scalar-clean C ABI) -------------------------
-extern "C" fn InitWindow(w: i32, h: i32, title: RawPtr);
+// raylib's Color: { unsigned char r, g, b, a } — 4 bytes, passed by value.
+#[value] struct Color { r: u8, g: u8, b: u8, a: u8 }
+
+extern "C" fn InitWindow(width: i32, height: i32, title: RawPtr);
 extern "C" fn SetTargetFPS(fps: i32);
 extern "C" fn BeginDrawing();
 extern "C" fn EndDrawing();
 extern "C" fn CloseWindow();
+extern "C" fn ClearBackground(color: Color);
+extern "C" fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color: Color);
+extern "C" fn DrawRectangle(posX: i32, posY: i32, width: i32, height: i32, color: Color);
+extern "C" fn DrawText(text: RawPtr, posX: i32, posY: i32, fontSize: i32, color: Color);
+extern "C" fn WindowShouldClose() -> bool;
+extern "C" fn IsKeyDown(key: i32) -> bool;
 extern "C" fn GetMouseX() -> i32;
 
-// ---- rayshim.c, for Color-by-value draws + bool returns -------------------
-extern "C" fn rs_clear(r: i32, g: i32, b: i32);
-extern "C" fn rs_circle(x: f64, y: f64, rad: f64, r: i32, g: i32, b: i32, a: i32);
-extern "C" fn rs_rect(x: f64, y: f64, w: f64, h: f64, r: i32, g: i32, b: i32, a: i32);
-extern "C" fn rs_text(s: RawPtr, x: i32, y: i32, size: i32, r: i32, g: i32, b: i32);
-extern "C" fn rs_should_close() -> i32;
-extern "C" fn rs_key_down(key: i32) -> i32;
+fn rgb(r: i64, g: i64, b: i64) -> Color {
+  Color { r: r as u8, g: g as u8, b: b as u8, a: 255 as u8 }
+}
 
 // A GC-heap game object: one falling block.
 struct Block { x: f64, y: f64, w: f64, speed: f64 }
 
-// Overflow-safe LCG (state stays < 2^31, so state*1103515245 < 2^61 < i64::MAX —
-// no checked-overflow trap). Returns the next state; values via `state % range`.
+// Overflow-safe LCG (state stays < 2^31, so state*1103515245 < 2^61 < i64::MAX).
 fn rand_next(s: i64) -> i64 { (s * 1103515245 + 12345) % 2147483648 }
 
 fn clampf(v: f64, lo: f64, hi: f64) -> f64 { max_f64(lo, min_f64(v, hi)) }
@@ -65,7 +67,7 @@ fn main() -> i64 {
   let mut alive = true;
   let mut px = 400.0;
 
-  while rs_should_close() == 0 {
+  while WindowShouldClose() == false {
     px = clampf(GetMouseX() as f64, 0.0, width as f64);
 
     if alive {
@@ -80,9 +82,8 @@ fn main() -> i64 {
         blocks = vec_push(blocks, Block { x: bx, y: 0.0 - 40.0, w: 40.0, speed: spd });
       }
 
-      // Advance every block; keep the on-screen ones (rebuilding the Vec each
-      // frame — the off-screen blocks become GC garbage). Score a point per
-      // block successfully dodged off the bottom.
+      // Advance every block; keep on-screen ones (rebuild the Vec — off-screen
+      // blocks become GC garbage). Score a point per block dodged off the bottom.
       let mut next: Vec<Block> = vec_new();
       let n = vec_len(blocks);
       let mut i = 0;
@@ -106,8 +107,8 @@ fn main() -> i64 {
         if score > best { best = score; }
       }
     } else {
-      // Game over: press R to restart.
-      if rs_key_down(82) == 1 {
+      // Game over: press R (key 82) to restart.
+      if IsKeyDown(82) {
         blocks = vec_new();
         score = 0;
         spawn_timer = 0;
@@ -115,26 +116,26 @@ fn main() -> i64 {
       }
     }
 
-    // ---- draw ----
+    // ---- draw (all direct raylib calls; Color crosses by value) ----
     BeginDrawing();
-    rs_clear(18, 18, 28);
+    ClearBackground(rgb(18, 18, 28));
 
     let n2 = vec_len(blocks);
     let mut j = 0;
     while j < n2 {
       let b = vec_get(blocks, j);
-      rs_rect(b.x, b.y, b.w, b.w, 90, 170, 240, 255);
+      DrawRectangle(b.x as i32, b.y as i32, b.w as i32, b.w as i32, rgb(90, 170, 240));
       j = j + 1;
     }
 
-    rs_circle(px, player_y, player_r, 245, 205, 80, 255);
+    DrawCircle(px as i32, player_y as i32, player_r as f32, rgb(245, 205, 80));
 
-    rs_text(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, 235, 235, 235);
-    rs_text(as_c_bytes(str_concat("Best: ", to_string(best))), 12, 44, 20, 150, 150, 160);
+    DrawText(as_c_bytes(str_concat("Score: ", to_string(score))), 12, 12, 26, rgb(235, 235, 235));
+    DrawText(as_c_bytes(str_concat("Best: ", to_string(best))), 12, 44, 20, rgb(150, 150, 160));
 
     if alive == false {
-      rs_text(as_c_bytes("GAME OVER"), 300, 280, 44, 245, 90, 90);
-      rs_text(as_c_bytes("press R to restart"), 300, 336, 24, 220, 220, 220);
+      DrawText(as_c_bytes("GAME OVER"), 300, 280, 44, rgb(245, 90, 90));
+      DrawText(as_c_bytes("press R to restart"), 300, 336, 24, rgb(220, 220, 220));
     }
 
     EndDrawing();
