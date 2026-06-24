@@ -83,6 +83,7 @@ impl DwarfIndex {
 #[derive(Clone, Debug)]
 struct RawType {
     byte_size: u64,
+    byte_align: Option<u64>,
     kind: RawKind,
 }
 
@@ -90,8 +91,27 @@ struct RawType {
 enum RawKind {
     Pointer { pointee: Option<usize> },
     Aggregate { members: Vec<RawMember> },
+    /// A Rust data enum (a struct with a `DW_TAG_variant_part`). Walked
+    /// discriminant-aware so only the live variant's fields are followed.
+    Enum {
+        /// Byte offset of the discriminant within the enum.
+        discr_offset: u64,
+        /// Type id of the discriminant (for its byte size).
+        discr_type_id: Option<usize>,
+        /// Members common to all variants (outside the variant_part) — rare.
+        common: Vec<RawMember>,
+        variants: Vec<RawVariant>,
+    },
     Array { elem: Option<usize>, count: u64 },
     Scalar,
+}
+
+#[derive(Clone, Debug)]
+struct RawVariant {
+    /// The discriminant value selecting this variant; `None` marks the default
+    /// (untagged) variant used when no explicit value matches (niche `Some`).
+    discr_value: Option<u64>,
+    members: Vec<RawMember>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +119,13 @@ struct RawMember {
     offset: u64,
     type_id: Option<usize>,
     in_variant: bool,
+}
+
+/// Reads `size` (1/2/4/8) bytes of unsigned integer / pointer from process
+/// memory at `addr`. The layout walker only asks for addresses provably inside a
+/// live allocation, so an in-process reader can dereference directly.
+pub trait MemReader {
+    fn read_uint(&self, addr: u64, size: u64) -> Option<u64>;
 }
 
 /// A flattened pointer-typed field of a type: a byte offset at which a pointer
@@ -127,8 +154,16 @@ impl LayoutIndex {
         self.by_id.get(&id).map(|t| t.byte_size)
     }
 
+    /// `DW_AT_alignment` of a named type, if recorded.
+    pub fn align_of(&self, name: &str) -> Option<u64> {
+        let id = *self.name_to_id.get(name)?;
+        self.by_id.get(&id).and_then(|t| t.byte_align)
+    }
+
     /// All pointer fields (relative byte offsets) of a named type, found by
-    /// recursively flattening inline members.
+    /// statically flattening inline members. Over-approximates enums (includes
+    /// every variant's pointers). For sound, discriminant-aware walking use
+    /// [`LayoutIndex::collect_pointer_offsets`].
     pub fn pointer_fields(&self, name: &str) -> Option<Vec<PtrField>> {
         let id = *self.name_to_id.get(name)?;
         let mut acc = Vec::new();
@@ -136,8 +171,88 @@ impl LayoutIndex {
         Some(acc)
     }
 
+    /// Sound, reader-aware pointer collection for an instance of `name` located
+    /// at `inst_addr`: reads enum discriminants from memory and follows only the
+    /// live variant's fields. Returns offsets relative to `inst_addr`.
+    pub fn collect_pointer_offsets(
+        &self,
+        name: &str,
+        inst_addr: u64,
+        reader: &dyn MemReader,
+    ) -> Vec<u64> {
+        let mut acc = Vec::new();
+        if let Some(&id) = self.name_to_id.get(name) {
+            self.collect(id, 0, inst_addr, reader, 0, &mut acc);
+        }
+        acc
+    }
+
     fn size_of_id(&self, id: usize) -> u64 {
         self.by_id.get(&id).map(|t| t.byte_size).unwrap_or(0)
+    }
+
+    fn collect(
+        &self,
+        id: usize,
+        base: u64,
+        inst_addr: u64,
+        reader: &dyn MemReader,
+        depth: u32,
+        acc: &mut Vec<u64>,
+    ) {
+        if depth > 32 {
+            return;
+        }
+        let Some(rt) = self.by_id.get(&id) else {
+            return;
+        };
+        match &rt.kind {
+            RawKind::Pointer { .. } => acc.push(base),
+            RawKind::Aggregate { members } => {
+                for m in members {
+                    if let Some(t) = m.type_id {
+                        self.collect(t, base + m.offset, inst_addr, reader, depth + 1, acc);
+                    }
+                }
+            }
+            RawKind::Enum {
+                discr_offset,
+                discr_type_id,
+                common,
+                variants,
+            } => {
+                for m in common {
+                    if let Some(t) = m.type_id {
+                        self.collect(t, base + m.offset, inst_addr, reader, depth + 1, acc);
+                    }
+                }
+                let dsize = discr_type_id.map(|d| self.size_of_id(d)).unwrap_or(8).clamp(1, 8);
+                let discr = reader.read_uint(inst_addr + base + discr_offset, dsize);
+                // Pick the variant whose discr_value matches; else the default
+                // (no discr_value) variant. If neither, walk nothing (sound).
+                let active = discr
+                    .and_then(|d| variants.iter().find(|v| v.discr_value == Some(d)))
+                    .or_else(|| variants.iter().find(|v| v.discr_value.is_none()));
+                if let Some(v) = active {
+                    for m in &v.members {
+                        if let Some(t) = m.type_id {
+                            self.collect(t, base + m.offset, inst_addr, reader, depth + 1, acc);
+                        }
+                    }
+                }
+            }
+            RawKind::Array { elem, count } => {
+                if let Some(e) = elem {
+                    let esz = self.size_of_id(*e);
+                    if esz > 0 {
+                        for i in 0..(*count).min(4096) {
+                            self.collect(*e, base + i * esz, inst_addr, reader, depth + 1, acc);
+                        }
+                    }
+                }
+            }
+            RawKind::Scalar => {}
+        }
     }
 
     fn flatten(&self, id: usize, base: u64, in_variant: bool, depth: u32, acc: &mut Vec<PtrField>) {
@@ -157,6 +272,22 @@ impl LayoutIndex {
                 for m in members {
                     if let Some(t) = m.type_id {
                         self.flatten(t, base + m.offset, in_variant || m.in_variant, depth + 1, acc);
+                    }
+                }
+            }
+            RawKind::Enum {
+                common, variants, ..
+            } => {
+                for m in common {
+                    if let Some(t) = m.type_id {
+                        self.flatten(t, base + m.offset, in_variant, depth + 1, acc);
+                    }
+                }
+                for v in variants {
+                    for m in &v.members {
+                        if let Some(t) = m.type_id {
+                            self.flatten(t, base + m.offset, true, depth + 1, acc);
+                        }
                     }
                 }
             }
@@ -251,6 +382,7 @@ fn walk<'a>(
         None
     };
     let byte_size = attr_udata(entry, gimli::DW_AT_byte_size);
+    let byte_align = attr_udata(entry, gimli::DW_AT_alignment);
     let elem_ref = if tag == gimli::DW_TAG_array_type {
         attr_ref_global(entry, gimli::DW_AT_type, unit)
     } else {
@@ -276,6 +408,7 @@ fn walk<'a>(
                     off,
                     RawType {
                         byte_size: byte_size.unwrap_or(8),
+                        byte_align,
                         kind: RawKind::Pointer { pointee },
                     },
                 );
@@ -286,6 +419,7 @@ fn walk<'a>(
                     off,
                     RawType {
                         byte_size: byte_size.unwrap_or(0),
+                        byte_align,
                         kind: RawKind::Aggregate {
                             members: Vec::new(),
                         },
@@ -298,6 +432,7 @@ fn walk<'a>(
                     off,
                     RawType {
                         byte_size: byte_size.unwrap_or(0),
+                        byte_align,
                         kind: RawKind::Array {
                             elem: elem_ref,
                             count: 0,
@@ -310,6 +445,7 @@ fn walk<'a>(
                     off,
                     RawType {
                         byte_size: byte_size.unwrap_or(0),
+                        byte_align,
                         kind: RawKind::Scalar,
                     },
                 );
@@ -352,7 +488,25 @@ fn walk<'a>(
             }
         } else if is_struct && ctag == gimli::DW_TAG_variant_part {
             if let Some(off) = global {
-                collect_variant_members(unit, &child, off, idx);
+                if let Some((discr_offset, discr_type_id, variants)) =
+                    parse_variant_part(unit, &child)
+                {
+                    // Convert this aggregate into an enum, preserving any
+                    // members declared outside the variant_part as `common`.
+                    let common = match idx.by_id.get(&off).map(|t| &t.kind) {
+                        Some(RawKind::Aggregate { members }) => members.clone(),
+                        Some(RawKind::Enum { common, .. }) => common.clone(),
+                        _ => Vec::new(),
+                    };
+                    if let Some(rt) = idx.by_id.get_mut(&off) {
+                        rt.kind = RawKind::Enum {
+                            discr_offset,
+                            discr_type_id,
+                            common,
+                            variants,
+                        };
+                    }
+                }
             }
             // also recurse so nested types inside variants get indexed
         } else if is_array && ctag == gimli::DW_TAG_subrange_type {
@@ -406,46 +560,70 @@ fn push_member(idx: &mut Idx, struct_off: usize, m: RawMember) {
     }
 }
 
-/// Collect members of an enum `variant_part` subtree, attaching each to the
-/// enclosing struct with `in_variant = true`. Reads the subtree via a fresh
-/// `entries_tree` rooted at the variant_part (so we don't disturb the caller's
-/// child cursor).
-fn collect_variant_members(
+/// Parse an enum `variant_part` subtree into its discriminant location + the
+/// per-variant member sets. Reads via a fresh `entries_tree` rooted at the
+/// variant_part so the caller's child cursor is undisturbed.
+///
+/// Structure (Rust): the variant_part has `DW_AT_discr` -> a member (the tag,
+/// at some offset, of some int type). Each `DW_TAG_variant` child carries an
+/// optional `DW_AT_discr_value` and the variant's payload member(s). A variant
+/// with no `DW_AT_discr_value` is the default (niche `Some`).
+fn parse_variant_part(
     unit: &gimli::Unit<Reader>,
     vp_node: &gimli::EntriesTreeNode<Reader>,
-    struct_off: usize,
-    idx: &mut Idx,
-) {
-    // Re-open a tree at the variant_part's offset to iterate its descendants.
-    let vp_off = vp_node.entry().offset();
-    let Ok(mut tree) = unit.entries_tree(Some(vp_off)) else {
-        return;
-    };
-    let Ok(root) = tree.root() else { return };
-    collect_variant_node(unit, root, struct_off, idx);
-}
+) -> Option<(u64, Option<usize>, Vec<RawVariant>)> {
+    let discr_ref = attr_ref_global(vp_node.entry(), gimli::DW_AT_discr, unit);
 
-fn collect_variant_node(
-    unit: &gimli::Unit<Reader>,
-    node: gimli::EntriesTreeNode<Reader>,
-    struct_off: usize,
-    idx: &mut Idx,
-) {
-    let mut children = node.children();
+    let vp_off = vp_node.entry().offset();
+    let mut tree = unit.entries_tree(Some(vp_off)).ok()?;
+    let root = tree.root().ok()?;
+
+    let mut discr_offset: u64 = 0;
+    let mut discr_type_id: Option<usize> = None;
+    let mut variants: Vec<RawVariant> = Vec::new();
+
+    let mut children = root.children();
     while let Ok(Some(child)) = children.next() {
         let ctag = child.entry().tag();
         if ctag == gimli::DW_TAG_member {
+            // The discriminant member (matched by DW_AT_discr; fall back to the
+            // first member seen).
             let ce = child.entry();
-            let m = RawMember {
-                offset: attr_udata(ce, gimli::DW_AT_data_member_location).unwrap_or(0),
-                type_id: attr_ref_global(ce, gimli::DW_AT_type, unit),
-                in_variant: true,
-            };
-            push_member(idx, struct_off, m);
-        } else if ctag == gimli::DW_TAG_variant || ctag == gimli::DW_TAG_variant_part {
-            collect_variant_node(unit, child, struct_off, idx);
+            let g = global_offset(ce, unit);
+            let off = attr_udata(ce, gimli::DW_AT_data_member_location).unwrap_or(0);
+            let ty = attr_ref_global(ce, gimli::DW_AT_type, unit);
+            if discr_ref.is_some() && g == discr_ref {
+                discr_offset = off;
+                discr_type_id = ty;
+            } else if discr_ref.is_none() && discr_type_id.is_none() {
+                discr_offset = off;
+                discr_type_id = ty;
+            }
+        } else if ctag == gimli::DW_TAG_variant {
+            let discr_value = attr_udata(child.entry(), gimli::DW_AT_discr_value);
+            let mut members = Vec::new();
+            let mut vc = child.children();
+            while let Ok(Some(m)) = vc.next() {
+                if m.entry().tag() == gimli::DW_TAG_member {
+                    let me = m.entry();
+                    members.push(RawMember {
+                        offset: attr_udata(me, gimli::DW_AT_data_member_location).unwrap_or(0),
+                        type_id: attr_ref_global(me, gimli::DW_AT_type, unit),
+                        in_variant: true,
+                    });
+                }
+            }
+            variants.push(RawVariant {
+                discr_value,
+                members,
+            });
         }
     }
+
+    if variants.is_empty() {
+        return None;
+    }
+    Some((discr_offset, discr_type_id, variants))
 }
 
 // --- attribute helpers -------------------------------------------------------

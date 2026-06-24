@@ -9,19 +9,20 @@
 //! From the edge set we derive approximate roots, the dominator tree, and each
 //! node's retained size.
 //!
-//! ## What is and isn't walked (v1, honest about limits)
+//! ## What is walked
 //! * `Box<T>` — one `T` at offset 0.
 //! * `Rc<T>` / `Arc<T>` — one `T` after two `usize` ref counts (offset 16).
 //! * `Vec<T>` / slices — `size/size_of::<T>()` elements (the backing buffer;
 //!   the uninitialized tail past `len` is read but only yields an edge if it
 //!   happens to hold a live address, which is filtered out almost always).
 //! * `String` / `Vec<u8>` — leaf (no interior pointers).
-//! * **HashMap / HashSet** — *opaque* in v1: the hashbrown control-byte + bucket
-//!   layout isn't decoded, so edges out of entries are missed. Counted in
-//!   `opaque_nodes`.
-//! * **Enum variants** — pointer fields inside a `variant_part` are read without
-//!   checking the active discriminant; a stale read only produces an edge if it
-//!   lands exactly on a live allocation, so false edges are rare but possible.
+//! * **HashMap / HashSet** — the hashbrown allocation is decoded: bucket count is
+//!   recovered from the allocation size (`solve_hashbrown_buckets`), control
+//!   bytes are read to find FULL buckets, and each entry `(K, V)` is walked.
+//! * **Enums** — walked **discriminant-aware**: the active variant is read from
+//!   memory (`LayoutIndex::collect_pointer_offsets`) and only its fields are
+//!   followed, so inactive variants never produce false edges. Niche-optimized
+//!   `Option<ptr>` works (None vs Some by the niche value).
 //!
 //! Roots are "not referenced by any tracked allocation" — a heap-only
 //! approximation (true roots live on the stack/in statics, which we don't
@@ -30,7 +31,7 @@
 use std::collections::HashMap;
 
 use memscope_proto::{AllocShape, GraphEdge, GraphNode, HeapGraph};
-use memscope_symbols::{LayoutIndex, PtrField};
+use memscope_symbols::LayoutIndex;
 
 /// One live allocation to place in the graph.
 pub struct NodeInput {
@@ -40,12 +41,7 @@ pub struct NodeInput {
     pub shape: Option<AllocShape>,
 }
 
-/// Reads `8` bytes of process memory at `addr`. The graph builder only ever asks
-/// for addresses provably inside a live allocation, so an in-process reader can
-/// simply dereference. Returns `None` if the read can't be served.
-pub trait MemReader {
-    fn read_u64(&self, addr: u64) -> Option<u64>;
-}
+pub use memscope_symbols::MemReader;
 
 /// An in-process reader: reads our own address space directly. Safe given the
 /// builder's bounds guarantee, but still uses unaligned reads.
@@ -53,15 +49,28 @@ pub struct InProcessReader;
 
 impl MemReader for InProcessReader {
     #[inline]
-    fn read_u64(&self, addr: u64) -> Option<u64> {
+    fn read_uint(&self, addr: u64, size: u64) -> Option<u64> {
         if addr == 0 {
             return None;
         }
-        // SAFETY: the builder only requests offsets strictly within a live
-        // allocation's bounds; that memory is mapped and owned by this process
-        // for the duration of the (point-in-time) walk.
-        unsafe { Some((addr as *const u8).cast::<u64>().read_unaligned()) }
+        // SAFETY: the builder only requests addresses provably inside a live
+        // allocation; that memory is mapped and owned by this process for the
+        // duration of the (point-in-time) walk.
+        unsafe {
+            let p = addr as *const u8;
+            Some(match size {
+                1 => p.read_unaligned() as u64,
+                2 => p.cast::<u16>().read_unaligned() as u64,
+                4 => p.cast::<u32>().read_unaligned() as u64,
+                _ => p.cast::<u64>().read_unaligned(),
+            })
+        }
     }
+}
+
+#[inline]
+fn read_ptr(mem: &dyn MemReader, addr: u64) -> Option<u64> {
+    mem.read_uint(addr, 8)
 }
 
 /// Maximum element slots walked per `Vec`-shaped allocation (backstop against a
@@ -99,10 +108,7 @@ pub fn build(nodes: &[NodeInput], layout: &LayoutIndex, mem: &dyn MemReader) -> 
         }
     };
 
-    // Cache flattened pointer fields per type name.
-    let mut field_cache: HashMap<String, Vec<PtrField>> = HashMap::new();
     let mut opaque_nodes = 0u32;
-
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut out_degree = vec![0u32; n];
     let mut in_degree = vec![0u32; n];
@@ -113,31 +119,28 @@ pub fn build(nodes: &[NodeInput], layout: &LayoutIndex, mem: &dyn MemReader) -> 
             continue;
         };
 
-        // How many element instances live in this allocation, and where.
-        let (base, stride, count) = instance_params(node.shape, layout, ty, node.size);
-        if count == 0 {
-            // Leaf (String/u8) or opaque (HashMap) — no walkable interior.
-            if matches!(node.shape, Some(AllocShape::HashTable)) {
+        // The byte offsets (relative to node.addr) at which an element instance
+        // begins. Most shapes have one or a contiguous array of these; a
+        // HashMap reads its control bytes to find the live buckets.
+        let inst_bases: Vec<u64> = match instance_bases(node, layout, ty, mem) {
+            InstanceBases::List(v) => v,
+            InstanceBases::Opaque => {
                 opaque_nodes += 1;
+                continue;
             }
-            continue;
-        }
+            InstanceBases::Leaf => continue,
+        };
 
-        let fields = field_cache.entry(ty.to_string()).or_insert_with(|| {
-            layout.pointer_fields(ty).unwrap_or_default()
-        });
-        if fields.is_empty() {
-            continue;
-        }
-
-        for inst in 0..count {
-            let inst_base = base + inst.saturating_mul(stride);
-            for f in fields.iter() {
-                let off = inst_base + f.offset;
+        for inst_base in inst_bases {
+            // Reader-aware: resolves enum discriminants so only live variants
+            // contribute pointer fields.
+            let offsets = layout.collect_pointer_offsets(ty, node.addr + inst_base, mem);
+            for rel in offsets {
+                let off = inst_base + rel;
                 if off + 8 > node.size {
                     continue;
                 }
-                let Some(p) = mem.read_u64(node.addr + off) else {
+                let Some(p) = read_ptr(mem, node.addr + off) else {
                     continue;
                 };
                 if p == 0 {
@@ -207,32 +210,112 @@ pub fn build(nodes: &[NodeInput], layout: &LayoutIndex, mem: &dyn MemReader) -> 
     }
 }
 
-/// (base offset, stride, instance count) for walking an allocation's elements,
-/// derived from the container shape and element size.
-fn instance_params(
-    shape: Option<AllocShape>,
+/// Candidate hashbrown control-group widths: 16 (x86_64 SSE2 / aarch64 NEON) and
+/// 8 (the generic `u64` group std uses on some builds). We try each and keep the
+/// one whose computed layout matches the recorded allocation size exactly.
+const HASHBROWN_GROUP_WIDTHS: [u64; 2] = [16, 8];
+
+enum InstanceBases {
+    /// Element instances begin at these byte offsets (relative to alloc start).
+    List(Vec<u64>),
+    /// A leaf buffer with no walkable interior (e.g. `String`/`Vec<u8>`).
+    Leaf,
+    /// Couldn't decode the interior — count this node as opaque.
+    Opaque,
+}
+
+/// Where each element instance begins inside `node`, given its container shape.
+fn instance_bases(
+    node: &NodeInput,
     layout: &LayoutIndex,
     ty: &str,
-    alloc_size: u64,
-) -> (u64, u64, u64) {
+    mem: &dyn MemReader,
+) -> InstanceBases {
     let esz = layout.size_of(ty).unwrap_or(0);
-    match shape {
+    match node.shape {
         Some(AllocShape::Vec) => {
             if esz == 0 {
-                (0, 0, 0)
+                InstanceBases::Opaque
             } else {
-                ((0), esz, (alloc_size / esz).min(MAX_VEC_SLOTS))
+                let count = (node.size / esz).min(MAX_VEC_SLOTS);
+                InstanceBases::List((0..count).map(|i| i * esz).collect())
             }
         }
         // Rc/Arc inner = { strong: usize, weak: usize, value: T }.
-        Some(AllocShape::Rc) | Some(AllocShape::Arc) => (16, esz, 1),
+        Some(AllocShape::Rc) | Some(AllocShape::Arc) => InstanceBases::List(vec![16]),
         // u8 buffers have no interior pointers.
-        Some(AllocShape::StringBuf) => (0, 0, 0),
-        // hashbrown layout not decoded in v1.
-        Some(AllocShape::HashTable) => (0, 0, 0),
+        Some(AllocShape::StringBuf) => InstanceBases::Leaf,
+        Some(AllocShape::HashTable) => match hashbrown_entry_bases(node, layout, ty, esz, mem) {
+            Some(bases) => InstanceBases::List(bases),
+            None => InstanceBases::Opaque,
+        },
         // Box and everything else: a single instance at offset 0.
-        _ => (0, esz, 1),
+        _ => InstanceBases::List(vec![0]),
     }
+}
+
+/// Decode a hashbrown table allocation: recover the bucket count from the
+/// allocation size via hashbrown's layout formula, read the control bytes, and
+/// return the byte offset of every FULL bucket's entry.
+///
+/// hashbrown lays the allocation out as `[entries..][padding][ctrl..]` where the
+/// ctrl pointer (`= data_end`) sits at `align_up(entry_size * buckets,
+/// ctrl_align)`, and bucket `i` lives at `data_end - (i+1)*entry_size` (entries
+/// grow *down* from ctrl). Total size = `data_end + buckets + GROUP_WIDTH`.
+fn hashbrown_entry_bases(
+    node: &NodeInput,
+    layout: &LayoutIndex,
+    ty: &str,
+    entry_size: u64,
+    mem: &dyn MemReader,
+) -> Option<Vec<u64>> {
+    if entry_size == 0 {
+        return None;
+    }
+    let entry_align = layout.align_of(ty).unwrap_or(entry_size.next_power_of_two().max(1));
+    let (buckets, data_end) = solve_hashbrown_buckets(node.size, entry_size, entry_align)?;
+
+    // Read control bytes; a bucket is FULL when the ctrl byte's top bit is 0.
+    let mut bases = Vec::new();
+    for i in 0..buckets {
+        let ctrl = mem.read_uint(node.addr + data_end + i, 1)?;
+        if ctrl & 0x80 == 0 {
+            bases.push(data_end - (i + 1) * entry_size);
+        }
+    }
+    Some(bases)
+}
+
+/// Solve hashbrown's `(group_width, power-of-two bucket count)` from the recorded
+/// allocation size: `data_end = align_up(entry_size*buckets, max(align, gw))`,
+/// `total = data_end + buckets + gw`. Returns `(buckets, data_end)` for the
+/// group width whose layout matches `alloc_size` exactly.
+fn solve_hashbrown_buckets(alloc_size: u64, entry_size: u64, entry_align: u64) -> Option<(u64, u64)> {
+    if entry_size == 0 {
+        return None;
+    }
+    for &gw in &HASHBROWN_GROUP_WIDTHS {
+        let ctrl_align = entry_align.max(gw);
+        let mut nb = 1u64;
+        while nb <= (1u64 << 31) {
+            let de = align_up(entry_size * nb, ctrl_align);
+            let total = de + nb + gw;
+            if total == alloc_size {
+                return Some((nb, de));
+            }
+            if total > alloc_size {
+                break;
+            }
+            nb <<= 1;
+        }
+    }
+    None
+}
+
+#[inline]
+fn align_up(x: u64, align: u64) -> u64 {
+    debug_assert!(align.is_power_of_two());
+    (x + align - 1) & !(align - 1)
 }
 
 /// Iterative dominators (Cooper–Harvey–Kennedy). A virtual super-root (node id
@@ -439,5 +522,26 @@ mod tests {
         assert_eq!(r[3], 10); // shared join retains only itself
         assert_eq!(r[1], 10);
         assert_eq!(r[2], 10);
+    }
+
+    #[test]
+    fn hashbrown_bucket_solve_real_case() {
+        // The live serve HashMap<u64, Session>: entry (u64, Session) = 64 bytes,
+        // align 8, allocation 532488 bytes -> 8192 buckets, data_end 524288,
+        // using the 8-byte generic group (the +8 tail, not +16).
+        assert_eq!(solve_hashbrown_buckets(532488, 64, 8), Some((8192, 524288)));
+    }
+
+    #[test]
+    fn hashbrown_bucket_solve_group16() {
+        // A table whose size only matches with the 16-byte SIMD group.
+        // entry_size=8, align=8, buckets=4 -> data_end=align_up(32,16)=32,
+        // total = 32 + 4 + 16 = 52.
+        assert_eq!(solve_hashbrown_buckets(52, 8, 8), Some((4, 32)));
+    }
+
+    #[test]
+    fn hashbrown_bucket_solve_no_match() {
+        assert_eq!(solve_hashbrown_buckets(999, 64, 8), None);
     }
 }

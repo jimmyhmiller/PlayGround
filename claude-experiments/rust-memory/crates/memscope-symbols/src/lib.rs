@@ -24,7 +24,7 @@ use std::os::raw::c_void;
 
 use memscope_proto::{Frame, SiteInfo, Snapshot, TypeId, TypeInfo};
 
-pub use dwarf::{DwarfIndex, FnTypeInfo, LayoutIndex, PtrField};
+pub use dwarf::{DwarfIndex, FnTypeInfo, LayoutIndex, MemReader, PtrField};
 pub use load::{dwarf_bytes_for, dwarf_bytes_for_current_exe};
 
 type DynErr = Box<dyn Error + Send + Sync>;

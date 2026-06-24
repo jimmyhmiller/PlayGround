@@ -132,10 +132,9 @@ Working end-to-end: tracking allocator, DWARF type recovery, runtime mode
 switching, live monitor, type-resolved + posthoc heap dumps, and the **heap
 reference graph** (edges, retained sizes, dominators, paths-to-roots).
 
-Graph v1 walks `Box`/`Rc`/`Arc`/`Vec`/`String`/structs and nested inline
-fields. Known gaps (honest): **HashMap/HashSet interiors are opaque** (hashbrown
-bucket layout not decoded yet — counted as `opaque_nodes`), and pointer fields
-inside **enum variants** are read without checking the active discriminant (the
-live-set filter makes false edges rare). Next: decode hashbrown buckets,
-discriminant-aware enum walking, allocation-age histograms, flamegraph export,
-and frame-pointer unwinding for a cheaper hot path.
+The graph walks `Box`/`Rc`/`Arc`/`Vec`/`String`/structs/nested fields, **enums
+discriminant-aware** (only the live variant's pointers become edges — verified
+edge-exact on a mixed-variant workload), and **HashMap/HashSet** (the hashbrown
+bucket layout is decoded — bucket count recovered from the allocation size,
+control bytes read to find live entries). Next: allocation-age histograms,
+flamegraph export, and frame-pointer unwinding for a cheaper hot path.
