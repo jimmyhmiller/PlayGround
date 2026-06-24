@@ -943,6 +943,35 @@ impl<'ctx> Cg<'ctx> {
         Ok(slot)
     }
 
+    /// Build the call-argument list, reconciling each value to the callee's actual
+    /// LLVM parameter type. The one case that needs help: a monomorphized generic
+    /// may hold an aggregate type-argument *by value* and pass it where the callee
+    /// declares a by-reference (pointer) parameter — e.g. a trait method over a
+    /// struct, reached from a generic bounded on that trait. Spill the value to a
+    /// stack slot and pass its address; an immutable-ref parameter receives a copy,
+    /// which is exactly by-value semantics. (Opaque pointers already unify, so only
+    /// the aggregate-value → pointer direction needs fixing up.)
+    fn reconcile_args(
+        &self,
+        callee: FunctionValue<'ctx>,
+        argtv: &[Tv<'ctx>],
+    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>, String> {
+        let param_tys = callee.get_type().get_param_types();
+        let mut meta = Vec::with_capacity(argtv.len());
+        for (i, (v, _)) in argtv.iter().enumerate() {
+            let mut av = *v;
+            if let Some(pt) = param_tys.get(i) {
+                if pt.is_pointer_type() && (av.is_struct_value() || av.is_array_value()) {
+                    let slot = self.builder.build_alloca(av.get_type(), "arg.spill").map_err(le)?;
+                    self.builder.build_store(slot, av).map_err(le)?;
+                    av = slot.into();
+                }
+            }
+            meta.push(av.into());
+        }
+        Ok(meta)
+    }
+
     /// Lower a call to a callable whose signature passes/returns a struct by value
     /// (per its precomputed `CSig`). Marshals each argument into the coerced
     /// register slots / `byval` pointers the C ABI requires, and reconstructs a
@@ -2167,7 +2196,7 @@ impl<'ctx> Cg<'ctx> {
                     let sig = &self.csigs[func];
                     return self.emit_c_call(callee, sig, &argtv, ret_ty);
                 }
-                let meta: Vec<_> = argtv.iter().map(|(v, _)| (*v).into()).collect();
+                let meta = self.reconcile_args(callee, &argtv)?;
                 let cs = self.builder.build_call(callee, &meta, "call").map_err(le)?;
                 cs.set_call_convention(callee.get_call_conventions());
                 // A `(-> void)` call yields no value; the checker forbids using its

@@ -1,31 +1,30 @@
 //! Structured, definition-checked traits: `deftrait` / `impl` / bounded generics
 //! (`(T Trait)`), with static (monomorphized) dispatch — concrete calls resolve
 //! to the impl, generic bodies are checked against their bounds at the definition,
-//! and the type-arg's impl is verified at the call site. v1 passes `Self` by
-//! pointer (uniform ABI); see docs/TRAITS_DESIGN.md.
+//! and the type-arg's impl is verified at the call site. `Self` is passed by value
+//! (`(a Self)`); codegen reconciles the aggregate-by-value→by-ref ABI at the
+//! generic call site. See docs/TRAITS_DESIGN.md.
 
 mod common;
 use common::build_and_run;
 
 const PRELUDE: &str = "(module app)\n\
-    (import \"lib/alloc.coil\" :use *)\n\
-    (import \"lib/result.coil\" :use *)\n\
-    (deftrait Eq [Self] (eq [(a (ptr Self)) (b (ptr Self))] (-> bool)))\n\
+    (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
     (defstruct Point [(x i64) (y i64)])\n\
     (impl Eq Point\n\
-      (eq [(a (ptr Point)) (b (ptr Point))] (-> bool)\n\
+      (eq [(a Point) (b Point)] (-> bool)\n\
         (and (icmp-eq (load (field a x)) (load (field b x)))\n\
              (icmp-eq (load (field a y)) (load (field b y))))))\n\
-    (defn mkpt [(al (ptr Allocator)) (x i64) (y i64)] (-> (ptr Point))\n\
-      (let [p (unwrap-ptr [Point] (create [Point] al))]\n\
-        (store! (field p x) x) (store! (field p y) y) p))\n";
+    (defn mkpt [(x i64) (y i64)] (-> Point)\n\
+      (let [(mut p) (zeroed Point)]\n\
+        (store! (field (mut p) x) x) (store! (field (mut p) y) y) (load p)))\n";
 
 #[test]
 fn concrete_trait_dispatch() {
     // `eq` on a concrete Point resolves directly to the impl method.
     let code = build_and_run(&format!(
         "{PRELUDE}(defn main [] (-> i64)\n\
-           (let [al (malloc-allocator) p1 (mkpt al 3 4) p2 (mkpt al 3 4) p3 (mkpt al 3 9)]\n\
+           (let [p1 (mkpt 3 4) p2 (mkpt 3 4) p3 (mkpt 3 9)]\n\
              (iadd (if (eq p1 p2) 10 0) (if (eq p1 p3) 100 1))))" // 10 + 1
     ));
     assert_eq!(code, 11);
@@ -33,11 +32,13 @@ fn concrete_trait_dispatch() {
 
 #[test]
 fn bounded_generic_deferred_dispatch() {
-    // A generic bounded `(T Eq)` calls `eq` on T; mono resolves it per instantiation.
+    // A generic bounded `(T Eq)` calls `eq` on T; mono resolves it per
+    // instantiation. The aggregate flows by value through the generic — codegen
+    // reconciles it to the impl's by-ref parameter.
     let code = build_and_run(&format!(
-        "{PRELUDE}(defn same [(T Eq)] [(a (ptr T)) (b (ptr T))] (-> bool) (eq a b))\n\
+        "{PRELUDE}(defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
          (defn main [] (-> i64)\n\
-           (let [al (malloc-allocator) p1 (mkpt al 3 4) p2 (mkpt al 3 4) p3 (mkpt al 3 9)]\n\
+           (let [p1 (mkpt 3 4) p2 (mkpt 3 4) p3 (mkpt 3 9)]\n\
              (iadd (if (same p1 p2) 10 0) (if (same p1 p3) 100 1))))"
     ));
     assert_eq!(code, 11);
@@ -48,7 +49,7 @@ fn definition_time_bound_check_rejects_unbounded_call() {
     // Calling a trait method on an UNBOUNDED type parameter errors at the
     // definition of the generic — not at some later instantiation.
     let err = coil::emit_ir(&format!(
-        "{PRELUDE}(defn bad [T] [(a (ptr T)) (b (ptr T))] (-> bool) (eq a b))\n\
+        "{PRELUDE}(defn bad [T] [(a T) (b T)] (-> bool) (eq a b))\n\
          (defn main [] (-> i64) 0)"
     ))
     .unwrap_err();
@@ -61,8 +62,8 @@ fn instantiation_site_requires_an_impl() {
     // errors at the call site.
     let err = coil::emit_ir(&format!(
         "{PRELUDE}(defstruct Q [(v i64)])\n\
-         (defn same [(T Eq)] [(a (ptr T)) (b (ptr T))] (-> bool) (eq a b))\n\
-         (defn main [] (-> i64) (let [q (alloc-stack Q)] (if (same q q) 1 0)))"
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (defn main [] (-> i64) (let [(mut q) (zeroed Q)] (if (same (load q) (load q)) 1 0)))"
     ))
     .unwrap_err();
     assert!(err.contains("does not implement 'Eq'"), "got:\n{err}");
@@ -72,9 +73,9 @@ fn instantiation_site_requires_an_impl() {
 fn impl_must_match_trait_signature() {
     let err = coil::emit_ir(
         "(module app)\n\
-         (deftrait Eq [Self] (eq [(a (ptr Self)) (b (ptr Self))] (-> bool)))\n\
+         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct P [(x i64)])\n\
-         (impl Eq P (eq [(a (ptr P))] (-> bool) true))\n\
+         (impl Eq P (eq [(a P)] (-> bool) true))\n\
          (defn main [] (-> i64) 0)",
     )
     .unwrap_err();
@@ -86,7 +87,7 @@ fn calling_an_unimplemented_method_is_rejected() {
     // The trait declares `eq` but no impl provides it.
     let err = coil::emit_ir(
         "(module app)\n\
-         (deftrait Eq [Self] (eq [(a (ptr Self)) (b (ptr Self))] (-> bool)))\n\
+         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct P [(x i64)])\n\
          (impl Eq P)\n\
          (defn main [] (-> i64) 0)",
@@ -100,21 +101,17 @@ fn two_impls_dispatch_independently() {
     // Eq for two types; a bounded generic resolves each to the right impl.
     let code = build_and_run(
         "(module app)\n\
-         (import \"lib/alloc.coil\" :use *)\n\
-         (import \"lib/result.coil\" :use *)\n\
-         (deftrait Eq [Self] (eq [(a (ptr Self)) (b (ptr Self))] (-> bool)))\n\
+         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct A [(v i64)])\n\
          (defstruct B [(v i64)])\n\
-         (impl Eq A (eq [(a (ptr A)) (b (ptr A))] (-> bool) (icmp-eq (load (field a v)) (load (field b v)))))\n\
-         (impl Eq B (eq [(a (ptr B)) (b (ptr B))] (-> bool) false))\n\
-         (defn same [(T Eq)] [(a (ptr T)) (b (ptr T))] (-> bool) (eq a b))\n\
+         (impl Eq A (eq [(a A) (b A)] (-> bool) (icmp-eq (load (field a v)) (load (field b v)))))\n\
+         (impl Eq B (eq [(a B) (b B)] (-> bool) false))\n\
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (defn mk [(v i64)] (-> A) (let [(mut a) (zeroed A)] (store! (field (mut a) v) v) (load a)))\n\
+         (defn mkb [(v i64)] (-> B) (let [(mut b) (zeroed B)] (store! (field (mut b) v) v) (load b)))\n\
          (defn main [] (-> i64)\n\
-           (let [al (malloc-allocator)\n\
-                 a1 (unwrap-ptr [A] (create [A] al)) a2 (unwrap-ptr [A] (create [A] al))\n\
-                 b1 (unwrap-ptr [B] (create [B] al)) b2 (unwrap-ptr [B] (create [B] al))]\n\
-             (store! (field a1 v) 5) (store! (field a2 v) 5)\n\
-             (iadd (if (same a1 a2) 10 0)       ; A: equal -> 10\n\
-                   (if (same b1 b2) 100 1))))   ; B: always false -> 1   => 11",
+           (iadd (if (same (mk 5) (mk 5)) 10 0)       ; A: equal -> 10\n\
+                 (if (same (mkb 1) (mkb 1)) 100 1)))  ; B: always false -> 1   => 11",
     );
     assert_eq!(code, 11);
 }
