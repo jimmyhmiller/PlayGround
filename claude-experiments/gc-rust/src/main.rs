@@ -17,12 +17,16 @@ use gcrust::resolve::resolve_module;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: gcr <check|parse|run|build> <file.gcr> [-o <out>]");
+    if args.len() < 2 {
+        eprintln!("usage: gcr <new|check|parse|run|build|emit> [file.gcr | project-dir]");
         return ExitCode::FAILURE;
     }
     let cmd = &args[1];
 
+    // `new` scaffolds a fresh project directory (`gcr.toml` + `src/main.gcr`).
+    if cmd == "new" {
+        return run_new(&args);
+    }
     // `emit` has its own argument shape (`gcr emit <stage> <file>`), so it is
     // dispatched before the generic `<cmd> <file>` path resolution below.
     if cmd == "emit" {
@@ -40,18 +44,28 @@ fn main() -> ExitCode {
         return run_heap_diff(&args);
     }
 
-    let arg_path = &args[2];
-
-    // Resolve the entry file. If the argument is a directory (or a `gcr.toml`),
-    // read the manifest and use its `entry`; otherwise it's a source file path.
-    let path: String = {
+    // Resolve the entry file and (when in a project) its manifest. The first
+    // non-flag token after the subcommand is the path: a `.gcr` file, a project
+    // directory, or a `gcr.toml`. With NO path, discover a `gcr.toml` upward from
+    // the current directory (cargo-style `gcr build` / `gcr run`).
+    let arg_path = args.get(2).filter(|a| !a.starts_with('-'));
+    let manifest: Option<gcrust::manifest::Manifest>;
+    // `project_mode` = the build is driven BY the manifest (entry + output name +
+    // banner come from it). A bare-file build still *discovers* a manifest for its
+    // `[link]` config, but keeps the file as the entry and the file stem as the
+    // output — so `gcr build other.gcr` in a project links the same libraries.
+    let project_mode: bool;
+    let path: String = match arg_path {
+        Some(arg_path) => {
         let p = std::path::Path::new(arg_path);
         if p.is_dir() || p.file_name().map(|n| n == "gcr.toml").unwrap_or(false) {
             let dir = if p.is_dir() { p } else { p.parent().unwrap_or(std::path::Path::new(".")) };
             match gcrust::manifest::Manifest::load(dir) {
                 Ok(m) => {
-                    println!("gcr: building `{}` v{}", m.name, m.version);
-                    m.entry_path().to_string_lossy().into_owned()
+                    let entry = m.entry_path().to_string_lossy().into_owned();
+                    manifest = Some(m);
+                    project_mode = true;
+                    entry
                 }
                 Err(e) => {
                     eprintln!("gcr: {}", e.0);
@@ -59,7 +73,31 @@ fn main() -> ExitCode {
                 }
             }
         } else {
+            // Bare source file — discover a project manifest (link config only).
+            manifest = gcrust::manifest::Manifest::discover(p);
+            project_mode = false;
             arg_path.clone()
+        }
+        }
+        None => {
+            // No path argument — discover a project `gcr.toml` from the cwd.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match gcrust::manifest::Manifest::discover(&cwd) {
+                Some(m) => {
+                    let entry = m.entry_path().to_string_lossy().into_owned();
+                    manifest = Some(m);
+                    project_mode = true;
+                    entry
+                }
+                None => {
+                    eprintln!(
+                        "gcr: no file given and no `gcr.toml` found in {} — \
+                         pass a `.gcr` file or run inside a project (try `gcr new <name>`)",
+                        cwd.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
     let path = &path;
@@ -173,28 +211,62 @@ fn main() -> ExitCode {
             // Attach the source so interned spans resolve to file:line:col (alloc
             // sites, and later DWARF). Cheap; only the driver has src+path.
             prog.sources = sources;
-            // `--gc-stress` forces a collection at every allocation — the
-            // strongest test that the precise relocating GC keeps roots correct.
-            let stress = args.iter().any(|a| a == "--gc-stress");
-            let result = if stress { jit_run_i64_gc(&prog, true) } else { jit_run_i64(&prog) };
-            match result {
-                Ok(v) => {
-                    println!("{}", v);
-                    ExitCode::SUCCESS
+
+            // Project mode (a `gcr.toml` was found): build a native executable —
+            // linking the manifest's `[link]` libraries — and run it, forwarding
+            // its exit code. This is the only way native FFI deps (raylib, …)
+            // resolve; the JIT can't link them. Mirrors `cargo run`.
+            if let Some(m) = &manifest {
+                let mut link_args = parse_link_args(&args);
+                link_args.extend(m.link_args());
+                let out = default_output(path, Some(m), project_mode);
+                if let Err(e) = build_executable_level(
+                    &prog,
+                    &out,
+                    &link_args,
+                    gcrust::codegen::DebugLevel::LineTables,
+                ) {
+                    eprintln!("gcr: build error: {}", e.0);
+                    return ExitCode::FAILURE;
                 }
-                Err(e) => {
-                    eprintln!("gcr: codegen error: {}", e.0);
-                    ExitCode::FAILURE
+                match std::process::Command::new(&out).status() {
+                    Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+                    Err(e) => {
+                        eprintln!("gcr: failed to run {}: {}", out.display(), e);
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                // Bare-file run: JIT execute and print the result.
+                // `--gc-stress` forces a collection at every allocation — the
+                // strongest test that the precise relocating GC keeps roots correct.
+                let stress = args.iter().any(|a| a == "--gc-stress");
+                let result = if stress { jit_run_i64_gc(&prog, true) } else { jit_run_i64(&prog) };
+                match result {
+                    Ok(v) => {
+                        println!("{}", v);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("gcr: codegen error: {}", e.0);
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }
         "build" => {
-            // Extra linker args: `--link-arg <arg>` (repeatable) are passed
-            // straight to `cc`. FFI programs use this to link native libs — the
-            // self-hosting compiler links libLLVM this way.
-            let link_args = parse_link_args(&args);
-            // Output path: `gcr build foo.gcr -o foo`. Defaults to the source
-            // stem with no extension if `-o` is omitted.
+            // Linker args: the project manifest's `[link]` section (libs / paths
+            // / frameworks), plus any `--link-arg <arg>` (repeatable) from the CLI.
+            // A project build needs no CLI link flags at all.
+            let mut link_args = parse_link_args(&args);
+            if let Some(m) = &manifest {
+                if project_mode {
+                    println!("gcr: building `{}` v{}", m.name, m.version);
+                }
+                link_args.extend(m.link_args());
+            }
+            // Output path: `gcr build foo.gcr -o foo`. In a project it defaults to
+            // `target/<name>`; for a bare file, the source stem.
             let out = match parse_output_flag(&args) {
                 Ok(o) => o,
                 Err(msg) => {
@@ -202,12 +274,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let out = out.unwrap_or_else(|| {
-                std::path::Path::new(path)
-                    .file_stem()
-                    .map(|s| std::path::PathBuf::from(s))
-                    .unwrap_or_else(|| std::path::PathBuf::from("a.out"))
-            });
+            let out = out.unwrap_or_else(|| default_output(path, manifest.as_ref(), project_mode));
 
             let resolved = match resolve_module(module) {
                 Ok(r) => r,
@@ -754,6 +821,70 @@ fn parse_link_args(args: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// The default output path for `build`/`run` when `-o` is not given. In project
+/// mode it is `<manifest-dir>/target/<name>` (the directory is created); for a
+/// bare-file build (even one inside a project) it is the source stem.
+fn default_output(
+    path: &str,
+    manifest: Option<&gcrust::manifest::Manifest>,
+    project_mode: bool,
+) -> std::path::PathBuf {
+    if project_mode {
+        if let Some(m) = manifest {
+            let target = m.dir.join("target");
+            let _ = std::fs::create_dir_all(&target);
+            return target.join(&m.name);
+        }
+    }
+    std::path::Path::new(path)
+        .file_stem()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("a.out"))
+}
+
+/// `gcr new <name>` — scaffold a project: `<name>/gcr.toml` + `<name>/src/main.gcr`.
+fn run_new(args: &[String]) -> ExitCode {
+    let name = match args.get(2) {
+        Some(n) if !n.starts_with('-') => n.clone(),
+        _ => {
+            eprintln!("usage: gcr new <name>");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dir = std::path::PathBuf::from(&name);
+    if dir.exists() {
+        eprintln!("gcr: `{}` already exists", name);
+        return ExitCode::FAILURE;
+    }
+    let src_dir = dir.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src_dir) {
+        eprintln!("gcr: cannot create {}: {}", src_dir.display(), e);
+        return ExitCode::FAILURE;
+    }
+    let toml = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.gcr\"\n\n\
+         # Link native libraries (uncomment + edit as needed):\n\
+         # [link]\n\
+         # libs = [\"raylib\"]\n\
+         # lib-paths = [\"/opt/homebrew/lib\"]\n\
+         # frameworks = [\"Cocoa\", \"OpenGL\"]\n"
+    );
+    let main_src = format!(
+        "fn main() -> i64 {{\n  print_line(\"hello from {name}\");\n  0\n}}\n"
+    );
+    if let Err(e) = std::fs::write(dir.join("gcr.toml"), toml) {
+        eprintln!("gcr: {}", e);
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::write(src_dir.join("main.gcr"), main_src) {
+        eprintln!("gcr: {}", e);
+        return ExitCode::FAILURE;
+    }
+    println!("gcr: created project `{name}`");
+    println!("     cd {name} && gcr run");
+    ExitCode::SUCCESS
 }
 
 /// Parse an optional `-o <path>` (or `--output <path>`) flag from the argument
