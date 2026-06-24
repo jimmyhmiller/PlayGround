@@ -101,13 +101,27 @@ allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
 | `memscope-cli` | terminal consumer: `monitor` / `dump` / `events` / `mode` / `show` |
 | `spike` | the original proof that DWARF (not demangling) is what recovers types |
 
-## Capture modes
+## Capture modes & overhead
 
-* **Full** — every allocation tracked. Exact live set and heap dumps. Heavier.
-* **Sampled** — record ~1/N allocations; aggregates scale by N. Low overhead,
-  statistically accurate (the demo estimates 86,200 live from a 1/100 sample vs.
-  85,700 true). Switch at runtime: `memscope mode sampled --rate 100`.
+Measured on arm64 macOS, 1,000,000 live allocations:
+
+| mode | time / alloc | space / live alloc |
+|------|-------------|--------------------|
+| Off | ~10 ns | ~0 |
+| **Sampled 1/100** | **~12 ns** | ~11 B |
+| **Full** | **~270 ns** | ~97 B |
+
+* **Full** — every allocation tracked. Exact live set and heap dumps.
+* **Sampled** — record ~1/N allocations; aggregates scale by N. Statistically
+  accurate (the demo estimates 86,200 live from a 1/100 sample vs. 85,700 true)
+  and nearly free. Switch at runtime: `memscope mode sampled --rate 100`.
 * **Off** — passthrough.
+
+The hot path uses **frame-pointer unwinding** (two memory reads per frame),
+~17× cheaper than libunwind/DWARF-CFI; reliable on aarch64-apple-darwin (frame
+pointers are ABI-mandated) and on x86-64 builds that keep frame pointers. Call
+`set_frame_pointer_unwinding(false)` to fall back to the always-correct
+`backtrace` path on builds that omit them.
 
 ## Wiring up a UI
 

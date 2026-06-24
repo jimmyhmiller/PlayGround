@@ -71,13 +71,34 @@ impl Drop for HookScope {
     }
 }
 
-/// The default stack unwinder. Behind a function so the strategy can be swapped
-/// later without touching the hot path call sites.
-static UNWIND: DefaultUnwind = DefaultUnwind;
+/// Selects the stack-capture strategy at runtime. Defaults to frame-pointer
+/// unwinding on supported architectures (≈10–20× cheaper than libunwind), and
+/// can be flipped to the always-correct backtrace path if a build omits frame
+/// pointers.
+static USE_FRAME_POINTER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(unwind::FRAME_POINTER_SUPPORTED);
+
+static FP_UNWIND: unwind::FramePointerUnwind = unwind::FramePointerUnwind;
+static BT_UNWIND: DefaultUnwind = DefaultUnwind;
 
 #[inline]
 fn capture(buf: &mut [usize], skip: usize) -> usize {
-    UNWIND.capture(buf, skip)
+    if USE_FRAME_POINTER.load(std::sync::atomic::Ordering::Relaxed) {
+        FP_UNWIND.capture(buf, skip)
+    } else {
+        BT_UNWIND.capture(buf, skip)
+    }
+}
+
+/// Choose the stack-capture strategy: `true` = frame-pointer unwinding (fast,
+/// needs frame pointers), `false` = libunwind via the `backtrace` crate (slow,
+/// always correct). No effect on architectures without frame-pointer support.
+pub fn set_frame_pointer_unwinding(on: bool) {
+    let _g = HookScope::enter();
+    USE_FRAME_POINTER.store(
+        on && unwind::FRAME_POINTER_SUPPORTED,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// A tracking global allocator wrapping an inner [`GlobalAlloc`] (default

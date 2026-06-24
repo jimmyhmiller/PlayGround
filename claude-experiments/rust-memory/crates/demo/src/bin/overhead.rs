@@ -39,6 +39,10 @@ fn main() {
         "sampled" => Mode::Sampled,
         _ => Mode::Full,
     };
+    // MEMSCOPE_FP=0 forces the libunwind/backtrace path for comparison.
+    if std::env::var("MEMSCOPE_FP").as_deref() == Ok("0") {
+        memscope::set_frame_pointer_unwinding(false);
+    }
     memscope::set_mode(mode);
     if matches!(mode, Mode::Sampled) {
         memscope::set_sample_rate(rate);

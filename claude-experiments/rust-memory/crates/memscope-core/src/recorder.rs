@@ -42,12 +42,15 @@ impl Mode {
     }
 }
 
+/// Per-live-allocation bookkeeping. Packed to 24 bytes (from 32): the timestamp
+/// is coarsened to milliseconds and the alignment to its log2, since neither
+/// needs full precision in the live table (events carry exact values).
 struct Entry {
     size: u64,
-    align: u32,
+    ts_ms: u32,
     site: SiteId,
-    ts_nanos: u64,
     thread: u32,
+    align_log2: u8,
 }
 
 pub struct Recorder {
@@ -95,7 +98,7 @@ impl SiteInterner {
     }
 
     fn intern(&mut self, frames: &[usize]) -> SiteId {
-        let h = fnv1a(frames);
+        let h = hash_frames(frames);
         let bucket = self.buckets.entry(h).or_default();
         for &id in bucket.iter() {
             if self.frames[id as usize].as_ref() == frames {
@@ -109,13 +112,14 @@ impl SiteInterner {
     }
 }
 
-fn fnv1a(frames: &[usize]) -> u64 {
+/// Hash a captured stack trace. Mixes one *word* per frame (an FNV-style
+/// multiply) instead of one byte, so a 64-frame trace costs ~64 multiplies
+/// rather than ~512 byte-steps — material on the (now backtrace-free) hot path.
+#[inline]
+fn hash_frames(frames: &[usize]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &f in frames {
-        for b in (f as u64).to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
+        h = (h ^ f as u64).wrapping_mul(0x100000001b3);
     }
     h
 }
@@ -230,10 +234,10 @@ impl Recorder {
                 addr,
                 Entry {
                     size,
-                    align,
+                    ts_ms: (ts / 1_000_000) as u32,
                     site,
-                    ts_nanos: ts,
                     thread,
+                    align_log2: align.max(1).trailing_zeros() as u8,
                 },
             );
         }
@@ -277,7 +281,7 @@ impl Recorder {
             ts_nanos: ts,
             addr,
             size: entry.size,
-            align: entry.align,
+            align: 1u32 << entry.align_log2,
             site: entry.site,
             thread: entry.thread,
         });
@@ -333,9 +337,9 @@ impl Recorder {
                 live.push(LiveAlloc {
                     addr,
                     size: e.size,
-                    align: e.align,
+                    align: 1u32 << e.align_log2,
                     site: e.site,
-                    ts_nanos: e.ts_nanos,
+                    ts_nanos: e.ts_ms as u64 * 1_000_000,
                     thread: e.thread,
                 });
             }
