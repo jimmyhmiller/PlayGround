@@ -40,3 +40,9 @@ pub fn start_agent() -> std::io::Result<String> {
 pub fn start_agent_at(path: &str) -> std::io::Result<()> {
     memscope_agent::start_at(path)
 }
+
+/// Stream the full allocation event stream to a self-contained file (resolved
+/// types + stacks, newline-JSON). Switches the ring to Reliable mode so nothing
+/// is dropped. Read it back posthoc with `memscope replay <file>` or your own
+/// viewer. Requires `set_mode(Full)` for a complete trace.
+pub use memscope_agent::record_to_file;

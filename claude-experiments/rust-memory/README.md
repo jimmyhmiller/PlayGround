@@ -74,19 +74,47 @@ cargo run -p memscope-cli --release -- show /tmp/heap.json
 debug = true
 ```
 
+Two lines to get a live agent:
+
 ```rust
 #[global_allocator]
 static GLOBAL: memscope::MemScope = memscope::MemScope::system();
 
 fn main() {
     memscope::set_mode(memscope::Mode::Full);   // or Mode::Sampled
-    memscope::start_agent().unwrap();           // prints the socket path
+    memscope::start_agent().unwrap();           // live: attach the CLI/UI over a socket
     // ... your program ...
 }
 ```
 
-Then point the CLI (or your UI) at the socket it prints. Wrap a different inner
-allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
+…or record the whole allocation stream to a file to explore later / build a viewer:
+
+```rust
+    memscope::set_mode(memscope::Mode::Full);
+    memscope::record_to_file("allocs.jsonl").unwrap();   // self-contained recording
+```
+
+Then: `memscope replay allocs.jsonl` (reference reader), or parse it yourself.
+Wrap a different inner allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
+
+### The recording file format
+
+Newline-delimited JSON, **self-contained** (resolved types + stacks embedded, so
+a reader needs no DWARF/binary). One object per line:
+
+```jsonc
+{"v":1,"pid":1234,"exe":"/path/to/bin"}                       // header
+{"site":37,"ty":"Particle","shape":"Boxed","frames":[["serve::main","serve.rs",53,false], ...]}
+{"k":"A","ts":2434000000,"a":41923141376,"sz":64,"al":8,"s":37,"t":2}   // alloc
+{"k":"D","ts":2440000000,"a":41923141376,"sz":64,"al":8,"t":2}          // free
+```
+
+A `site` record is emitted once, the first time a stack is seen; events reference
+it by `s` (site id). `k` = A(lloc)/D(ealloc)/R(ealloc); `a` addr, `sz` size, `al`
+align, `t` thread, `ts` ns. Replay the events to reconstruct the live set at any
+point — that's all the reference reader and the in-process reconstructor do.
+(Recording uses Reliable mode so nothing is dropped; for very high allocation
+volume use `Mode::Sampled` to keep the file small.)
 
 ## How it fits together
 

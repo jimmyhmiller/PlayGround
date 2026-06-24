@@ -20,6 +20,9 @@ use memscope_core as mem;
 use memscope_proto::{ClientMsg, ServerMsg, SiteInfo, StatsView, TypeId, TypeInfo};
 use memscope_symbols::TypeOracle;
 
+mod record;
+pub use record::{record_to_file, FileRecorder};
+
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Lazily-built type oracle, shared across connections.

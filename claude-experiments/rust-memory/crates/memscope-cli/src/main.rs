@@ -30,6 +30,7 @@ fn main() {
         "show" => cmd_show(rest),
         "graph" => cmd_graph(rest),
         "paths" => cmd_paths(rest),
+        "replay" => cmd_replay(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -56,7 +57,8 @@ fn print_help() {
          memscope mode    <off|full|sampled> [--rate N] switch recording mode\n  \
          memscope show    <FILE>                        explore a saved dump posthoc\n  \
          memscope graph   [--sock P] [--limit N]        heap reference graph: top retainers\n  \
-         memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n"
+         memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n  \
+         memscope replay  <FILE>                        read a record_to_file recording\n"
     );
 }
 
@@ -521,6 +523,94 @@ fn cmd_paths(args: &[String]) -> Result<(), String> {
     }
     if referrers.len() > 20 {
         println!("  … and {} more", referrers.len() - 20);
+    }
+    Ok(())
+}
+
+/// Reference reader for a `record_to_file` recording: replays the newline-JSON
+/// event stream, reconstructs the live set, and summarizes it. A starting point
+/// for building richer viewers — the format is documented in memscope-agent.
+fn cmd_replay(args: &[String]) -> Result<(), String> {
+    use std::io::BufRead;
+    let file = positional(args).ok_or("usage: memscope replay <FILE>")?;
+    let f = std::fs::File::open(file).map_err(|e| e.to_string())?;
+    let rdr = std::io::BufReader::new(f);
+
+    let mut site_label: HashMap<u64, String> = HashMap::new();
+    // addr -> (size, site)
+    let mut live: HashMap<u64, (u64, u64)> = HashMap::new();
+    let (mut allocs, mut frees, mut peak_bytes, mut cur_bytes) = (0u64, 0u64, 0u64, 0u64);
+    let mut header = String::new();
+
+    for line in rdr.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("v").is_some() {
+            header = line.clone();
+            continue;
+        }
+        if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
+            let ty = v.get("ty").and_then(|x| x.as_str()).unwrap_or("?");
+            let shape = v.get("shape").and_then(|x| x.as_str());
+            let label = match shape {
+                Some(sh) => format!("{sh}<{ty}>"),
+                None => ty.to_string(),
+            };
+            site_label.insert(site, label);
+            continue;
+        }
+        match v.get("k").and_then(|x| x.as_str()) {
+            Some("A") | Some("R") => {
+                let a = v["a"].as_u64().unwrap_or(0);
+                let sz = v["sz"].as_u64().unwrap_or(0);
+                let s = v.get("s").and_then(|x| x.as_u64()).unwrap_or(u64::MAX);
+                live.insert(a, (sz, s));
+                allocs += 1;
+                cur_bytes += sz;
+                peak_bytes = peak_bytes.max(cur_bytes);
+            }
+            Some("D") => {
+                let a = v["a"].as_u64().unwrap_or(0);
+                if let Some((sz, _)) = live.remove(&a) {
+                    cur_bytes = cur_bytes.saturating_sub(sz);
+                }
+                frees += 1;
+            }
+            _ => {}
+        }
+    }
+
+    println!("== memscope recording: {file} ==");
+    println!("  {header}");
+    println!(
+        "  events: {} alloc, {} free   peak live: {}   final live: {} allocations, {}",
+        allocs,
+        frees,
+        human_bytes(peak_bytes),
+        live.len(),
+        human_bytes(cur_bytes),
+    );
+
+    // Final live set aggregated by recovered type.
+    let mut by_type: HashMap<String, (u64, u64)> = HashMap::new();
+    for (_, (sz, site)) in &live {
+        let label = site_label
+            .get(site)
+            .cloned()
+            .unwrap_or_else(|| "<no site>".to_string());
+        let e = by_type.entry(label).or_default();
+        e.0 += 1;
+        e.1 += sz;
+    }
+    let mut rows: Vec<_> = by_type.into_iter().collect();
+    rows.sort_by_key(|(_, (_, b))| std::cmp::Reverse(*b));
+    println!("\n  FINAL LIVE HEAP BY TYPE:");
+    println!("  {:>8}  {:>12}  {}", "count", "bytes", "type");
+    for (label, (count, bytes)) in rows.iter().take(20) {
+        println!("  {count:>8}  {:>12}  {label}", human_bytes(*bytes));
     }
     Ok(())
 }

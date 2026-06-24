@@ -33,6 +33,10 @@ struct Session {
 
 fn main() {
     memscope::set_mode(Mode::Full);
+    // MEMSCOPE_RECORD=<path> streams every allocation to a self-contained file.
+    if let Ok(path) = std::env::var("MEMSCOPE_RECORD") {
+        memscope::record_to_file(&path).expect("failed to start recording");
+    }
     let sock = memscope::start_agent().expect("agent failed to start");
     println!("serve: workload running. Attach with:");
     println!("    cargo run -p memscope-cli --release -- monitor --sock {sock}");
