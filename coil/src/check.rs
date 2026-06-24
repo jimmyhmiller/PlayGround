@@ -1581,6 +1581,15 @@ fn unify(
     }
     if let Type::Struct(p) = decl {
         if tpset.contains(p) {
+            // A type parameter is a VALUE type. An aggregate argument passed by
+            // reference has type `(ref T)`, but value-semantically it IS a `T`
+            // (the reference is erased) — peel a top-level ref so `p` binds to
+            // `T`, not `(ref T)` (which would conflict with a concrete `T`
+            // inferred from another argument, e.g. a generic map's element type).
+            let actual = match actual {
+                Type::Ref(_, inner) => inner.as_ref(),
+                other => other,
+            };
             match subst.get(p) {
                 Some(prev) if prev != actual => {
                     return Err(format!(
