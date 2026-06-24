@@ -20,8 +20,8 @@
 //! snapshot. No nightly, no toolchain changes.
 
 pub use memscope_core::{
-    drain_events, set_backtrace_depth, set_capture_sites, set_frame_pointer_unwinding, set_mode,
-    set_sample_rate, snapshot, stats, MemScope, Mode, Stats,
+    drain_events, set_backtrace_depth, set_capture_sites, set_event_streaming,
+    set_frame_pointer_unwinding, set_mode, set_sample_rate, snapshot, stats, MemScope, Mode, Stats,
 };
 pub use memscope_proto::{
     AllocShape, Frame, LiveAlloc, RawEvent, SiteInfo, Snapshot, TypeId, TypeInfo,

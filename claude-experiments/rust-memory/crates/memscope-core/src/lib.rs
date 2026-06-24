@@ -220,6 +220,14 @@ pub fn set_capture_sites(on: bool) {
     recorder().set_capture_sites(on);
 }
 
+/// Enable/disable the live event stream. Off by default: the event ring is a
+/// contended global, so it is only written when a consumer is draining events.
+/// The live table (and thus snapshots / the heap graph) is unaffected.
+pub fn set_event_streaming(on: bool) {
+    let _g = HookScope::enter();
+    recorder().set_event_streaming(on);
+}
+
 /// Take a self-contained heap dump of the current live set.
 pub fn snapshot() -> Snapshot {
     let _g = HookScope::enter();

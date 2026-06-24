@@ -123,6 +123,19 @@ pointers are ABI-mandated) and on x86-64 builds that keep frame pointers. Call
 `set_frame_pointer_unwinding(false)` to fall back to the always-correct
 `backtrace` path on builds that omit them.
 
+**Multi-thread scaling.** The hot path holds no globally-contended state: stats
+counters live inside per-address shards (bumped under a lock already held, not
+global atomics), the site interner is sharded, a per-thread site cache makes a
+hot allocation site lock-free, and the event ring is opt-in (only written when a
+consumer is streaming). Full-mode alloc+free churn on a 12-core machine:
+
+| threads | 1 | 2 | 4 | 8 |
+|---------|---|---|---|---|
+| Mops/s | 10.7 | 9.7 | 10.8 | 8.0 |
+
+(Earlier, with global atomics + a single interner lock, this *regressed* to
+~1.9 Mops/s at 8 threads — slower in aggregate than one thread.)
+
 ## Wiring up a UI
 
 The protocol is newline-delimited JSON over a Unix socket — language-agnostic.

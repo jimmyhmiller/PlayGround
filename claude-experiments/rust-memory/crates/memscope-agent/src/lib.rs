@@ -146,6 +146,8 @@ fn handle_msg(msg: ClientMsg, shared: &Arc<Shared>, w: &mut UnixStream) -> std::
         }
         ClientMsg::GetStats => send(w, &ServerMsg::Stats(stats_view())),
         ClientMsg::PollEvents { max } => {
+            // Turn on the (otherwise-skipped) event stream on first poll.
+            mem::set_event_streaming(true);
             let mut evs = Vec::new();
             mem::drain_events(&mut evs, max);
             send(w, &ServerMsg::Events(evs))

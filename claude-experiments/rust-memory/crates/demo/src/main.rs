@@ -35,6 +35,7 @@ fn main() {
 
     // --- Full mode: exact tracking ---
     mem::set_mode(Mode::Full);
+    mem::set_event_streaming(true); // this demo also shows the event stream
     let mut retained: Vec<Box<Widget>> = Vec::new();
     workload(&mut retained);
 
