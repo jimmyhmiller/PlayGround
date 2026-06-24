@@ -63,7 +63,7 @@ a Coil-level library is the in-spirit "grow via libraries" answer.)
 it, Clojure-style (flat `key body` pairs, lone trailing = default):
 
 ```
-(case (sexp-sym head)
+(case head sexp-sym-is
   "+" (VNum (iadd …))
   "-" (VNum (isub …))
   …
@@ -72,8 +72,9 @@ it, Clojure-style (flat `key body` pairs, lone trailing = default):
 
 Coil has **no universal runtime `=`** — equality is type-specific (`icmp-eq` for
 ints, `str-eq` for slices, per-type structural for aggregates) because values are
-unboxed with no RTTI, and there's no trait/typeclass resolution. So `case` (a
-macro, running at expansion time) **picks the comparison from the key literals'
-kind**: integer keys → `icmp-eq`, string keys → `str-eq`; other kinds are an error
-(use `cond`). That keeps the call site clean *and* honest — no silent wrong-type
-compare. (Added a `string?` predicate to the macro language for the key-kind test.)
+unboxed with no RTTI, and there's no trait/typeclass resolution. So `case` takes
+the **equality explicitly** as its second argument — `icmp-eq`, `str-eq`, or a
+domain predicate like the Lisp's `sexp-sym-is`. (That predicate-as-argument form
+is the right call precisely because the matched thing here is a `(ptr Sexp)`, not
+a plain int/slice — auto-picking a comparison from the key literals couldn't know
+to use `sexp-sym-is`.) Honest and zero-magic.

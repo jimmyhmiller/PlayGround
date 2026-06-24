@@ -50,9 +50,9 @@
   (if (sexp-num? x) (VNum (sexp-num x))
     (if (sexp-sym? x) (env-lookup env (sexp-sym x))
       (let [head (sexp-nth x 0)]                       ; a list: special form or call
-        ; dispatch on the head symbol's name ("" for a non-symbol head, which
-        ; falls through to apply-fn — e.g. ((lambda …) …)).
-        (case (sexp-sym head)
+        ; dispatch on the head symbol (sexp-sym-is is false for a non-symbol head,
+        ; which falls through to apply-fn — e.g. ((lambda …) …)).
+        (case head sexp-sym-is
           "if"     (if (icmp-eq (num-of (eval-sexp (sexp-nth x 1) env a)) 0)
                        (eval-sexp (sexp-nth x 3) env a)
                        (eval-sexp (sexp-nth x 2) env a))
@@ -73,7 +73,7 @@
   (num-of (eval-sexp (sexp-nth x i) env a)))
 
 (defn apply-fn [(head (ptr Sexp)) (x (ptr Sexp)) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
-  (case (sexp-sym head)
+  (case head sexp-sym-is
     "+" (VNum (iadd (arg x 1 env a) (arg x 2 env a)))
     "-" (VNum (isub (arg x 1 env a) (arg x 2 env a)))
     "*" (VNum (imul (arg x 1 env a) (arg x 2 env a)))

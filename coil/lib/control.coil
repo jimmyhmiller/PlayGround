@@ -53,17 +53,13 @@
                ~(first (rest cs))
                (cond ~@(rest (rest cs)))))))
 
-; `(case x k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first `ei`
-; whose key matches; a lone trailing clause is the default (0 if none). Flat
-; `key body` pairs, Clojure-style. Coil has no universal `=`, so the comparison is
-; chosen from the KEY literals at expansion time: integer keys → `icmp-eq`, string
-; keys → `str-eq` (so `(import "str.coil")` for string cases). Other key kinds are
-; an error — use `cond` with an explicit test for those.
-(def case-eq-for
-  (lambda [k]
-    (if (number? k) (quote icmp-eq)
-        (if (string? k) (quote str-eq)
-            (error "case: keys must be int or string literals; use cond for other tests")))))
+; `(case x eq? k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first
+; `ei` whose `(eq? x ki)` holds; a lone trailing clause is the default (0 if none).
+; Flat `key body` pairs, Clojure-style — no parens around each clause. `eq?` is the
+; 2-arg equality to use: Coil has no universal `=` (values are unboxed — no RTTI or
+; typeclass dispatch), so you name the right one — `icmp-eq` for ints, `str-eq` for
+; `(slice u8)`, or a domain predicate like `sexp-sym-is`. Turns a tall
+; `(if (eq? x k1) … (if (eq? x k2) …))` ladder into a flat table.
 (def case-arms
   (lambda [v eq clauses]
     (if (empty? clauses)
@@ -73,11 +69,9 @@
             `(if (~eq ~v ~(first clauses))
                  ~(first (rest clauses))
                  ~(case-arms v eq (rest (rest clauses))))))))
-(defmacro case [x & clauses]
-  (if (empty? clauses)
-      0
-      (let [v (gensym "case-x") eq (case-eq-for (first clauses))]
-        `(let [~v ~x] ~(case-arms v eq clauses)))))
+(defmacro case [x eq & clauses]
+  (let [v (gensym "case-x")]
+    `(let [~v ~x] ~(case-arms v eq clauses))))
 
 ; NOTE on `->`/`->>` (thread macros): deliberately NOT provided. `->` collides
 ; with Coil's reserved `(-> :type)` return-type marker — the macro expander runs
