@@ -1183,19 +1183,24 @@ impl<'ctx> Cg<'ctx> {
         // before the body, so the dbg.declares sit in the entry block.
         self.emit_param_debug(f, entry, &scope);
 
-        let mut last: Tv = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
-        for e in &f.body {
-            // A diverging statement (an unbroken loop, or a `break`/`continue`
-            // in a tail position) terminates the block; the rest is dead.
-            if self.block_terminated() {
-                break;
+        // Emit the body's statements, with the final expression in TAIL position
+        // so a self-recursive tail call becomes an explicit `musttail` (a real
+        // jump that reuses the frame — Coil's only loop, guaranteed at any opt
+        // level instead of relying on `-O3`'s tail-call-elimination).
+        if let Some((tail, stmts)) = f.body.split_last() {
+            for e in stmts {
+                if self.block_terminated() {
+                    break;
+                }
+                self.emit_expr(e, &scope)?;
             }
-            last = self.emit_expr(e, &scope)?;
-        }
-
-        // If the body diverged, the block already has a terminator — no `ret`.
-        if !self.block_terminated() {
-            self.emit_c_return(function, sig, &f.ret, last)?;
+            if !self.block_terminated() {
+                self.emit_tail(tail, function, sig, &f.ret, &scope)?;
+            }
+        } else if !self.block_terminated() {
+            // No body (shouldn't happen; the parser rejects an empty body).
+            let zero = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
+            self.emit_c_return(function, sig, &f.ret, zero)?;
         }
         // Clear the debug location so the next function (which may have none) does
         // not inherit a scope from this one (a verifier error).
@@ -1204,6 +1209,120 @@ impl<'ctx> Cg<'ctx> {
             *self.cur_sp.borrow_mut() = None;
         }
         Ok(())
+    }
+
+    /// Emit `e` in TAIL position: every path ends in a `ret` (or a divergent
+    /// terminator). A direct self-recursive call here becomes a `musttail call`
+    /// immediately followed by `ret` — the LLVM backend turns it into a frame-
+    /// reusing jump (a loop) at *any* optimization level. Descends through the
+    /// structural tail forms (`do`, `let`, `if`) so the tail call really is the
+    /// last thing each branch does; anything else falls back to the normal
+    /// "compute a value, then return it" path.
+    fn emit_tail(
+        &self,
+        e: &Expr,
+        function: FunctionValue<'ctx>,
+        sig: Option<&CSig<'ctx>>,
+        ret: &Type,
+        scope: &HashMap<String, Tv<'ctx>>,
+    ) -> Result<(), String> {
+        self.set_dbg_loc(e.span);
+        match &e.kind {
+            // The last statement of a `do`/`let` body is the one in tail position.
+            ExprKind::Do(es) => {
+                let Some((tail, stmts)) = es.split_last() else {
+                    let zero = (self.ctx.i64_type().const_zero().into(), Type::Int(64, true));
+                    return self.emit_c_return(function, sig, ret, zero);
+                };
+                for s in stmts {
+                    if self.block_terminated() {
+                        return Ok(());
+                    }
+                    self.emit_expr(s, scope)?;
+                }
+                if !self.block_terminated() {
+                    self.emit_tail(tail, function, sig, ret, scope)?;
+                }
+                Ok(())
+            }
+            ExprKind::Let { binds, body } => {
+                let mut child = scope.clone();
+                for (name, _mutable, val) in binds {
+                    let v = self.emit_expr(val, &child)?;
+                    self.declare_let_local(name, v.0, &v.1, val.span);
+                    child.insert(name.clone(), v);
+                }
+                let Some((tail, stmts)) = body.split_last() else { return Ok(()) };
+                for s in stmts {
+                    if self.block_terminated() {
+                        return Ok(());
+                    }
+                    self.emit_expr(s, &child)?;
+                }
+                if !self.block_terminated() {
+                    self.emit_tail(tail, function, sig, ret, &child)?;
+                }
+                Ok(())
+            }
+            // Both arms are in tail position — each `ret`s directly, so the
+            // recursive arm's call is immediately followed by `ret` (no phi).
+            ExprKind::If { cond, then, els } => {
+                let (cv, _) = self.emit_expr(cond, scope)?;
+                let c = cv.into_int_value();
+                let cmp = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, c, c.get_type().const_zero(), "ifc")
+                    .map_err(le)?;
+                let then_bb = self.ctx.append_basic_block(function, "then");
+                let else_bb = self.ctx.append_basic_block(function, "else");
+                self.builder.build_conditional_branch(cmp, then_bb, else_bb).map_err(le)?;
+                self.builder.position_at_end(then_bb);
+                self.emit_tail(then, function, sig, ret, scope)?;
+                self.builder.position_at_end(else_bb);
+                self.emit_tail(els, function, sig, ret, scope)?;
+                Ok(())
+            }
+            // A direct self-recursive call: `musttail` + `ret`.
+            ExprKind::Call { func, args, .. } if self.tail_call_ok(func, function) => {
+                let argtv: Vec<Tv<'ctx>> =
+                    args.iter().map(|a| self.emit_expr(a, scope)).collect::<Result<_, _>>()?;
+                let callee = self.funcs[func];
+                let meta: Vec<_> = argtv.iter().map(|(v, _)| (*v).into()).collect();
+                let cs = self.builder.build_call(callee, &meta, "tailcall").map_err(le)?;
+                cs.set_call_convention(callee.get_call_conventions());
+                cs.set_tail_call_kind(inkwell::values::LLVMTailCallKind::LLVMTailCallKindMustTail);
+                if matches!(ret, Type::Void) {
+                    self.builder.build_return(None).map_err(le)?;
+                } else {
+                    let v = cs
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| "codegen: tail call returned void".to_string())?;
+                    self.builder.build_return(Some(&v)).map_err(le)?;
+                }
+                Ok(())
+            }
+            // Not a structural tail form (or an ineligible call): compute the value
+            // and return it the normal way.
+            _ => {
+                let v = self.emit_expr(e, scope)?;
+                if !self.block_terminated() {
+                    self.emit_c_return(function, sig, ret, v)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Is `func` a direct self-recursive call we can mark `musttail`? Only the
+    /// current function calling *itself*, with no struct-by-value ABI (`csig`)
+    /// and not a `:shim` — so the signature/convention match exactly and the
+    /// return is a plain scalar/pointer (`musttail` needs the call immediately
+    /// followed by `ret`, which the struct-return path violates).
+    fn tail_call_ok(&self, func: &str, function: FunctionValue<'ctx>) -> bool {
+        self.funcs.get(func) == Some(&function)
+            && !self.csigs.contains_key(func)
+            && !self.shims.contains_key(func)
     }
 
     /// Emit the function's return, applying the C-ABI return lowering when the
