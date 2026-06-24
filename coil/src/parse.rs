@@ -23,6 +23,8 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     let mut sums = Vec::new();
     let mut asserts = Vec::new();
     let mut consts = Vec::new();
+    let mut traits = Vec::new();
+    let mut impls = Vec::new();
 
     for form in forms {
         // Any error from a top-level form gets that form's span as a fallback
@@ -58,6 +60,8 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
                     asserts.push(StaticAssert { cond, msg });
                 }
                 "const" => consts.push(parse_const(&items[1..])?),
+                "deftrait" => traits.push(parse_deftrait(&items[1..])?),
+                "impl" => impls.push(parse_impl(&items[1..], form.span)?),
                 other => return Err(Diag::new(format!("unknown top-level form '{other}'"))),
             }
             Ok(())
@@ -73,7 +77,59 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
         funcs,
         asserts,
         consts,
+        traits,
+        impls,
     })
+}
+
+/// `(deftrait Name [Self] (method [(a Self) …] (-> ret)) …)` — a trait: the
+/// implementing-type parameter `Self`, then one signature per method.
+fn parse_deftrait(rest: &[Sexp]) -> Result<TraitDef, Diag> {
+    let name = sym(rest.first().ok_or("deftrait: missing name")?, "trait name")?;
+    let self_param = match rest.get(1).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) if v.len() == 1 => sym(&v[0], "Self parameter")?,
+        _ => return Err(Diag::new("deftrait: expected [Self] after the name")),
+    };
+    let mut methods = Vec::new();
+    for m in &rest[2..] {
+        let ml = as_list(m, "trait method must be (name [params] (-> ret))")?;
+        let mname = sym(ml.first().ok_or("trait method: missing name")?, "method name")?;
+        let params_v = match ml.get(1).map(|s| &s.kind) {
+            Some(SexpKind::Vector(v)) => v,
+            _ => return Err(Diag::at(m.span, format!("trait method '{mname}': expected a param vector"))),
+        };
+        let mut params = Vec::new();
+        for p in params_v {
+            let pl = as_list(p, "method param must be (name :type)")?;
+            params.push(Param {
+                name: sym(&pl[0], "param name")?,
+                ty: parse_type(pl.get(1).ok_or("method param missing type")?)?,
+            });
+        }
+        let ret_l = as_list(ml.get(2).ok_or("trait method: missing (-> ret)")?, "expected (-> ret)")?;
+        if head_sym(ret_l)? != "->" {
+            return Err(Diag::at(m.span, format!("trait method '{mname}': expected (-> ret)")));
+        }
+        let ret = parse_type(ret_l.get(1).ok_or("(-> ) missing type")?)?;
+        methods.push(TraitMethod { name: mname, params, ret });
+    }
+    Ok(TraitDef { name, self_param, methods })
+}
+
+/// `(impl Trait Type (method [params] (-> ret) body…) …)` — implement `Trait`
+/// for `Type`. Each method is parsed as a `defn` (concrete `Type`/`Self` types in
+/// its signature); naming/`Self`-checking happens in the checker.
+fn parse_impl(rest: &[Sexp], span: Span) -> Result<ImplDef, Diag> {
+    let trait_name = sym(rest.first().ok_or("impl: missing trait name")?, "trait name")?;
+    let for_type = sym(rest.get(1).ok_or("impl: missing type name")?, "impl type")?;
+    let mut methods = Vec::new();
+    for m in &rest[2..] {
+        let ml = as_list(m, "impl method must be (name [params] (-> ret) body…)")?;
+        let mut f = parse_defn(ml)?; // (name [params] (-> ret) body…) parses like a defn body
+        f.span = span;
+        methods.push(f);
+    }
+    Ok(ImplDef { trait_name, for_type, methods })
 }
 
 /// `(const NAME VALUE)` or `(const NAME TYPE VALUE)` — a named scalar constant.
@@ -174,7 +230,8 @@ pub fn parse_defstruct(rest: &[Sexp]) -> Result<StructDef, Diag> {
         i += 2;
     }
 
-    let type_params = parse_type_params(rest, &mut i)?;
+    // structs don't carry trait bounds (v1) — take the names, ignore any bounds.
+    let (type_params, _bounds) = parse_type_params(rest, &mut i)?;
     let fields_v = match rest.get(i).map(|s| &s.kind) {
         Some(SexpKind::Vector(v)) => v,
         _ => return Err(Diag::new(format!("defstruct '{name}': expected a field vector"))),
@@ -276,15 +333,42 @@ fn pow2(s: Option<&Sexp>) -> Result<u32, Diag> {
 
 /// If `rest[i]` is a vector immediately followed by another vector, the first is
 /// a generic type-parameter list (bare symbols); consume it and advance `i`.
-fn parse_type_params(rest: &[Sexp], i: &mut usize) -> Result<Vec<String>, Diag> {
+/// Parse the optional generic type-parameter vector. Each entry is either a bare
+/// symbol `T` (unbounded) or a list `(T Trait1 Trait2 …)` (T bounded by those
+/// traits). Returns the param names and the non-empty bounds.
+fn parse_type_params(
+    rest: &[Sexp],
+    i: &mut usize,
+) -> Result<(Vec<String>, Vec<(String, Vec<String>)>), Diag> {
     if let (Some(SexpKind::Vector(tp)), Some(SexpKind::Vector(_))) =
         (rest.get(*i).map(|s| &s.kind), rest.get(*i + 1).map(|s| &s.kind))
     {
-        let params = tp.iter().map(|s| sym(s, "type parameter")).collect::<Result<_, _>>()?;
+        let mut params = Vec::new();
+        let mut bounds = Vec::new();
+        for entry in tp {
+            match &entry.kind {
+                SexpKind::Sym(name) => params.push(name.clone()),
+                SexpKind::List(items) => {
+                    let pname = sym(
+                        items.first().ok_or("type parameter: empty () bound")?,
+                        "type parameter",
+                    )?;
+                    let traits = items[1..]
+                        .iter()
+                        .map(|s| sym(s, "bound trait"))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !traits.is_empty() {
+                        bounds.push((pname.clone(), traits));
+                    }
+                    params.push(pname);
+                }
+                _ => return Err(Diag::at(entry.span, "type parameter must be a name or (name Trait…)")),
+            }
+        }
         *i += 1;
-        Ok(params)
+        Ok((params, bounds))
     } else {
-        Ok(vec![])
+        Ok((vec![], vec![]))
     }
 }
 
@@ -408,7 +492,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
     }
 
     // optional generic params: a vector immediately followed by the param vector.
-    let type_params = parse_type_params(rest, &mut i)?;
+    let (type_params, bounds) = parse_type_params(rest, &mut i)?;
 
     // params vector
     let params_v = match rest.get(i).map(|s| &s.kind) {
@@ -447,6 +531,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
     Ok(Func {
         name,
         type_params,
+        bounds,
         cc,
         params,
         ret,

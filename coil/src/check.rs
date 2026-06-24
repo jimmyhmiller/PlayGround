@@ -34,6 +34,8 @@ use crate::span::{Diag, Span};
 struct Sig {
     /// Generic type parameters (empty for an ordinary function/extern).
     type_params: Vec<String>,
+    /// Trait bounds on the type params (type param -> required traits).
+    bounds: Vec<(String, Vec<String>)>,
     params: Vec<Type>,
     ret: Type,
     /// Calls to externs erase pointer regions at the boundary (see `arg_ok`).
@@ -70,6 +72,16 @@ struct Cx {
     /// reported type (the declared one, or the literal default for an untyped
     /// const).
     consts: HashMap<String, (Expr, Type)>,
+    /// Trait declarations by name.
+    trait_defs: HashMap<String, TraitDef>,
+    /// Trait-method name -> (trait name, index of the `Self`-typed parameter).
+    /// v1 requires method names be globally unique across traits.
+    methods: HashMap<String, (String, usize)>,
+    /// Which `(trait, type)` pairs have an impl (for resolution + bound checks).
+    impls: std::collections::HashSet<(String, String)>,
+    /// Bounds of the function whose body is currently being checked: type param ->
+    /// required traits. Drives the definition-time "is this method allowed?" check.
+    cur_bounds: std::cell::RefCell<HashMap<String, Vec<String>>>,
     /// Stack of enclosing loops (innermost last), for typing `break`/`continue`:
     /// scoping, label resolution, and unifying the value type across break sites.
     loops: std::cell::RefCell<Vec<LoopFrame>>,
@@ -118,15 +130,76 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
             }
         }
     }
+
+    // ---- traits + impls ----------------------------------------------------
+    // Trait declarations, a method->trait index (v1: method names are globally
+    // unique), and the set of (trait,type) pairs that have an impl. Impl methods
+    // are lowered to ordinary functions named `Trait$Type$method`, appended to the
+    // function list so they get signatures and are type-checked like any defn.
+    let mut trait_defs: HashMap<String, TraitDef> = HashMap::new();
+    let mut methods: HashMap<String, (String, usize)> = HashMap::new();
+    for t in &program.traits {
+        for m in &t.methods {
+            let self_idx = m
+                .params
+                .iter()
+                .position(|p| type_mentions(&p.ty, &t.self_param))
+                .ok_or_else(|| {
+                    format!("trait '{}' method '{}': needs a {} (Self) parameter", t.name, m.name, t.self_param)
+                })?;
+            if methods.insert(m.name.clone(), (t.name.clone(), self_idx)).is_some() {
+                return Err(format!(
+                    "trait method '{}' is declared in more than one trait (method names must be unique)",
+                    m.name
+                ).into());
+            }
+        }
+        if trait_defs.insert(t.name.clone(), t.clone()).is_some() {
+            return Err(format!("trait '{}' defined twice", t.name).into());
+        }
+    }
+    let mut impl_set: HashSet<(String, String)> = HashSet::new();
+    let mut all_funcs: Vec<Func> = program.funcs.clone();
+    for im in &program.impls {
+        let td = trait_defs
+            .get(&im.trait_name)
+            .ok_or_else(|| format!("impl: unknown trait '{}'", im.trait_name))?;
+        if !impl_set.insert((im.trait_name.clone(), im.for_type.clone())) {
+            return Err(format!("duplicate impl of '{}' for '{}'", im.trait_name, im.for_type).into());
+        }
+        // Every trait method must be implemented, with a matching signature
+        // (Self := the implementing type) — the impl conforms to the trait.
+        for tm in &td.methods {
+            let m = im.methods.iter().find(|m| m.name == tm.name).ok_or_else(|| {
+                format!("impl {} for {}: missing method '{}'", im.trait_name, im.for_type, tm.name)
+            })?;
+            let want: Vec<Type> =
+                tm.params.iter().map(|p| subst_self(&p.ty, &td.self_param, &im.for_type)).collect();
+            let got: Vec<Type> = m.params.iter().map(|p| p.ty.clone()).collect();
+            if want != got || subst_self(&tm.ret, &td.self_param, &im.for_type) != m.ret {
+                return Err(format!(
+                    "impl {} for {}: method '{}' signature doesn't match the trait",
+                    im.trait_name, im.for_type, tm.name
+                ).into());
+            }
+        }
+        for m in &im.methods {
+            let mut lf = m.clone();
+            lf.name = trait_method_fn(&im.trait_name, &im.for_type, &m.name);
+            all_funcs.push(lf);
+        }
+    }
+
     // ---- signatures (functions + externs) ----------------------------------
     let mut sigs: HashMap<String, Sig> = HashMap::new();
-    for f in &program.funcs {
+    for f in &all_funcs {
         let native = program.conventions.get(&f.cc).is_some_and(|c| !c.is_shim());
         let ftps: HashSet<String> = f.type_params.iter().cloned().collect();
         sigs.insert(
             f.name.clone(),
             Sig {
                 type_params: f.type_params.clone(),
+                bounds: f.bounds.clone(),
                 params: f
                     .params
                     .iter()
@@ -159,6 +232,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
             e.name.clone(),
             Sig {
                 type_params: vec![],
+                bounds: vec![],
                 params: e.params.clone(),
                 ret: e.ret.clone(),
                 is_extern: true,
@@ -188,6 +262,10 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         sums,
         variant_to_sum,
         consts,
+        trait_defs,
+        methods,
+        impls: impl_set,
+        cur_bounds: std::cell::RefCell::new(HashMap::new()),
         loops: std::cell::RefCell::new(Vec::new()),
     };
 
@@ -224,9 +302,12 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
     }
 
     // ---- elaborate every function body -------------------------------------
-    let mut funcs: Vec<Func> = Vec::with_capacity(program.funcs.len());
-    for f in &program.funcs {
+    let mut funcs: Vec<Func> = Vec::with_capacity(all_funcs.len());
+    for f in &all_funcs {
         let tps: HashSet<String> = f.type_params.iter().cloned().collect();
+        // Make this function's trait bounds visible to `synth` (definition-time
+        // trait-method resolution checks calls against the declared bounds).
+        *cx.cur_bounds.borrow_mut() = f.bounds.iter().cloned().collect();
 
         // convention well-formedness
         let conv = program
@@ -313,6 +394,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         funcs.push(Func {
             name: f.name.clone(),
             type_params: f.type_params.clone(),
+            bounds: f.bounds.clone(),
             cc: f.cc.clone(),
             params: out_params,
             ret: erase_refs(&f.ret),
@@ -349,6 +431,10 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         // Consts are fully erased into the elaborated bodies above; carried
         // through inert so the Program stays round-trippable.
         consts: program.consts.clone(),
+        // Impl methods are now ordinary funcs and trait calls are elaborated;
+        // mono erases these, so carry them inert.
+        traits: program.traits.clone(),
+        impls: program.impls.clone(),
     })
 }
 
@@ -524,6 +610,12 @@ fn synth_inner(
                 Expr::new(ExprKind::LlvmIr { result: result.clone(), args: eargs, body: body.clone() }, e.span),
                 result.clone(),
             ))
+        }
+        // The parser never produces a TraitCall — the checker creates it as
+        // *output* when resolving a deferred trait method. It never reaches synth
+        // as input, so this is unreachable in practice.
+        ExprKind::TraitCall { method, .. } => {
+            Err(format!("in '{fname}': internal: unresolved trait call '{method}' in input").into())
         }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
@@ -847,9 +939,90 @@ fn synth_inner(
             if cx.variant_to_sum.contains_key(func) {
                 return synth_construct(func, type_args, args, expected, env, cx, tps, fname, e.span);
             }
+            // Trait-method call: resolve the implementing function from the `Self`
+            // argument. A concrete Self dispatches to the lowered impl function
+            // (below, via `call_func`); a type-parameter Self defers to mono (and
+            // is checked against the current function's declared bounds here).
+            let mut call_func = func.clone();
+            if let Some((trait_name, self_idx)) = cx.methods.get(func).cloned() {
+                let td = cx.trait_defs.get(&trait_name).expect("trait of a known method");
+                let tm = td.methods.iter().find(|m| &m.name == func).expect("trait has method").clone();
+                let self_pname = td.self_param.clone();
+                if args.len() != tm.params.len() {
+                    return Err(format!(
+                        "in '{fname}': '{func}' expects {} args, got {}",
+                        tm.params.len(),
+                        args.len()
+                    ).into());
+                }
+                let (_, self_at) = synth(&args[self_idx], None, env, cx, tps, fname)?;
+                // Peel reference/pointer layers to the nominal Self type (so both
+                // `(a Self)` and `(a (ptr Self))` method shapes resolve).
+                let mut self_ty = self_at;
+                while let Type::Ref(_, inner) | Type::Ptr(inner) = self_ty {
+                    self_ty = *inner;
+                }
+                let self_name = match &self_ty {
+                    Type::Struct(n) | Type::App(n, _) => n.clone(),
+                    other => {
+                        return Err(format!(
+                            "in '{fname}': trait method '{func}' called on non-nominal type {}",
+                            ty_str(other)
+                        ).into())
+                    }
+                };
+                if tps.contains(&self_name) {
+                    // Deferred: definition-time bound check, then emit a TraitCall.
+                    let bounded = cx
+                        .cur_bounds
+                        .borrow()
+                        .get(&self_name)
+                        .is_some_and(|ts| ts.contains(&trait_name));
+                    if !bounded {
+                        return Err(format!(
+                            "in '{fname}': type parameter '{self_name}' is not bounded by '{trait_name}' \
+                             (required to call '{func}')"
+                        ).into());
+                    }
+                    let mut new_args = Vec::with_capacity(args.len());
+                    for (i, a) in args.iter().enumerate() {
+                        let want = subst_self(&tm.params[i].ty, &self_pname, &self_name);
+                        let is_mut = matches!(&a.kind, ExprKind::Borrow { mutable: true, .. });
+                        let exp = match &want {
+                            Type::Ref(_, inner) => (**inner).clone(),
+                            _ => want.clone(),
+                        };
+                        let (ae, at) = synth(a, Some(&exp), env, cx, tps, fname)?;
+                        new_args.push(coerce_arg(
+                            is_mut, ae, at, &want, false, fname,
+                            &format!("argument {} to '{func}'", i + 1),
+                        )?);
+                    }
+                    let ret = subst_self(&tm.ret, &self_pname, &self_name);
+                    return Ok((
+                        Expr::new(
+                            ExprKind::TraitCall {
+                                trait_name,
+                                method: func.clone(),
+                                self_tp: self_name,
+                                args: new_args,
+                            },
+                            e.span,
+                        ),
+                        ret,
+                    ));
+                }
+                // Concrete Self: require an impl, then dispatch to the lowered fn.
+                if !cx.impls.contains(&(trait_name.clone(), self_name.clone())) {
+                    return Err(format!(
+                        "in '{fname}': '{self_name}' does not implement '{trait_name}'"
+                    ).into());
+                }
+                call_func = trait_method_fn(&trait_name, &self_name, func);
+            }
             let sig = cx
                 .sigs
-                .get(func)
+                .get(&call_func)
                 .ok_or_else(|| format!("in '{fname}': call to undefined function '{func}'"))?;
             let arity_ok = if sig.variadic {
                 args.len() >= sig.params.len()
@@ -914,7 +1087,7 @@ fn synth_inner(
                 }
                 return Ok((
                     Expr::new(ExprKind::Call {
-                        func: func.clone(),
+                        func: call_func.clone(),
                         type_args: vec![],
                         args: new_args,
                     }, e.span),
@@ -957,6 +1130,28 @@ fn synth_inner(
                 fname,
                 func,
             )?;
+            // Instantiation-site bound check: each bounded type parameter's chosen
+            // type must implement the required traits (the body was already checked
+            // against the bounds at its definition).
+            for (param, req_traits) in &sig.bounds {
+                if let Some(ty) = subst.get(param) {
+                    let tyname = match ty {
+                        Type::Struct(n) | Type::App(n, _) => Some(n.clone()),
+                        _ => None,
+                    };
+                    for tr in req_traits {
+                        let ok = tyname
+                            .as_ref()
+                            .is_some_and(|n| cx.impls.contains(&(tr.clone(), n.clone())));
+                        if !ok {
+                            return Err(format!(
+                                "in '{fname}': '{}' does not implement '{tr}' (required by '{func}' bound on '{param}')",
+                                ty_str(ty)
+                            ).into());
+                        }
+                    }
+                }
+            }
             // Re-synthesize each deferred argument now that the parameter type is
             // concrete; if it STILL can't be inferred, the substitution didn't
             // fix it, so report the argument's original inference error.
@@ -1638,6 +1833,38 @@ fn unify(
 /// Erase the reference tier to plain pointers: a `Ref` is represented as a
 /// `Ptr` at the machine level, so once the const-correctness check has run the
 /// elaborated program codegen sees carries only `Ptr`.
+/// Does `t` mention the type-parameter / Self name `name` anywhere?
+fn type_mentions(t: &Type, name: &str) -> bool {
+    match t {
+        Type::Struct(n) => n == name,
+        Type::Ref(_, p) | Type::Ptr(p) | Type::Slice(p) | Type::Array(p, _) => type_mentions(p, name),
+        Type::App(_, args) => args.iter().any(|a| type_mentions(a, name)),
+        Type::Fn(_, ps, r) => ps.iter().any(|a| type_mentions(a, name)) || type_mentions(r, name),
+        _ => false,
+    }
+}
+
+/// Replace the Self parameter `self_param` with the concrete type `concrete`
+/// throughout `t` (used to specialize a trait method signature for an impl).
+fn subst_self(t: &Type, self_param: &str, concrete: &str) -> Type {
+    match t {
+        Type::Struct(n) if n == self_param => Type::Struct(concrete.to_string()),
+        Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_self(p, self_param, concrete))),
+        Type::Ptr(p) => Type::Ptr(Box::new(subst_self(p, self_param, concrete))),
+        Type::Slice(p) => Type::Slice(Box::new(subst_self(p, self_param, concrete))),
+        Type::Array(p, n) => Type::Array(Box::new(subst_self(p, self_param, concrete)), *n),
+        Type::App(n, args) => {
+            Type::App(n.clone(), args.iter().map(|a| subst_self(a, self_param, concrete)).collect())
+        }
+        Type::Fn(cc, ps, r) => Type::Fn(
+            cc.clone(),
+            ps.iter().map(|a| subst_self(a, self_param, concrete)).collect(),
+            Box::new(subst_self(r, self_param, concrete)),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn erase_refs(t: &Type) -> Type {
     match t {
         Type::Ref(_, p) | Type::Ptr(p) => Type::Ptr(Box::new(erase_refs(p))),

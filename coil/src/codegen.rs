@@ -1969,6 +1969,11 @@ impl<'ctx> Cg<'ctx> {
                     .collect::<Result<_, _>>()?;
                 self.emit_llvm_ir(result, &argtv, body)
             }
+            // Monomorphization resolves every TraitCall to a concrete Call, so one
+            // reaching codegen is an internal error (not user-reachable).
+            ExprKind::TraitCall { trait_name, method, .. } => {
+                Err(format!("codegen: unresolved trait call {trait_name}.{method} (compiler bug)"))
+            }
             // The zero value of a type (used to initialize a fresh local).
             ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally

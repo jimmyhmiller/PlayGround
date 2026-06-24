@@ -79,6 +79,8 @@ pub fn resolve_program(
         funcs: vec![],
         asserts: vec![],
         consts: vec![],
+        traits: vec![],
+        impls: vec![],
     };
     for (mut p, module) in parsed {
         if let Some(m) = &module {
@@ -120,6 +122,9 @@ fn merge(out: &mut Program, p: Program) -> Result<(), crate::span::Diag> {
     }
     out.funcs.extend(p.funcs);
     out.asserts.extend(p.asserts);
+    // Traits + impls share one flat global namespace (v1): collected as-is.
+    out.traits.extend(p.traits);
+    out.impls.extend(p.impls);
     // Consts share one flat global namespace (like externs / C constants), so a
     // re-import of the same bindings is fine but two distinct definitions of the
     // same name collide loudly.
@@ -196,6 +201,38 @@ fn qualify_program(
     }
     for a in &mut p.asserts {
         qualify_expr(&mut a.cond, m, imps, table, &empty, exports)?;
+    }
+    // Traits: qualify the types in each method signature (Self stays unqualified,
+    // treated as an in-scope type parameter). Trait names are a flat global
+    // namespace in v1, so the name itself isn't renamed.
+    for t in &mut p.traits {
+        let tps: HashSet<String> = std::iter::once(t.self_param.clone()).collect();
+        for meth in &mut t.methods {
+            for param in &mut meth.params {
+                qualify_type(&mut param.ty, m, imps, table, &tps, exports)?;
+            }
+            qualify_type(&mut meth.ret, m, imps, table, &tps, exports)?;
+        }
+    }
+    // Impls: resolve the implementing type to its qualified name, and qualify each
+    // method's signature + body like an ordinary function (the method name is left
+    // bare — the checker mangles it to <Trait>$<Type>$<method>).
+    for im in &mut p.impls {
+        let mut for_ty = Type::Struct(im.for_type.clone());
+        qualify_type(&mut for_ty, m, imps, table, &empty, exports)?;
+        if let Type::Struct(n) = for_ty {
+            im.for_type = n;
+        }
+        for meth in &mut im.methods {
+            let tps: HashSet<String> = meth.type_params.iter().cloned().collect();
+            for param in &mut meth.params {
+                qualify_type(&mut param.ty, m, imps, table, &tps, exports)?;
+            }
+            qualify_type(&mut meth.ret, m, imps, table, &tps, exports)?;
+            for e in &mut meth.body {
+                qualify_expr(e, m, imps, table, &tps, exports)?;
+            }
+        }
     }
     Ok(())
 }
@@ -345,6 +382,13 @@ fn qualify_expr(
         }
         ExprKind::LlvmIr { result, args, .. } => {
             ty(result)?;
+            for a in args {
+                qualify_expr(a, m, imps, table, tps, exports)?;
+            }
+        }
+        // The parser never produces a TraitCall (the checker does, post-resolve);
+        // recurse into args for completeness.
+        ExprKind::TraitCall { args, .. } => {
             for a in args {
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }

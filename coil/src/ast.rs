@@ -304,6 +304,16 @@ pub enum ExprKind {
         args: Vec<Expr>,
         body: String,
     },
+    /// A trait-method call deferred because its `Self` is a type parameter
+    /// (`self_tp`) bounded by `trait_name`. The checker emits this inside a
+    /// bounded generic; monomorphization resolves it to a concrete call of the
+    /// implementing function once `self_tp` is known. Codegen never sees it.
+    TraitCall {
+        trait_name: String,
+        method: String,
+        self_tp: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +327,10 @@ pub struct Func {
     pub name: String,
     /// Generic type parameters (empty for an ordinary function).
     pub type_params: Vec<String>,
+    /// Trait bounds on type parameters: `(name, required-trait-names)`. A param
+    /// with no entry is unbounded. Drives definition-time trait-method resolution
+    /// and the instantiation-site "does C implement Tr" check.
+    pub bounds: Vec<(String, Vec<String>)>,
     /// Name of the calling convention this function uses.
     pub cc: String,
     pub params: Vec<Param>,
@@ -326,6 +340,40 @@ pub struct Func {
     /// function read from an included/imported file (whose offsets are in another
     /// source) carries `Span::DUMMY` — it just gets no line info, never wrong info.
     pub span: Span,
+}
+
+/// A trait declaration: a named set of method signatures over an implementing
+/// type `self_param` (conventionally `Self`). Method param/return types may
+/// mention `self_param`.
+#[derive(Debug, Clone)]
+pub struct TraitDef {
+    pub name: String,
+    pub self_param: String,
+    pub methods: Vec<TraitMethod>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Type,
+}
+
+/// The mangled function name an impl method lowers to / a trait call resolves to.
+/// Deterministic, so the checker (which lowers impl methods) and the monomorphizer
+/// (which resolves deferred trait calls) agree without sharing a table.
+pub fn trait_method_fn(trait_name: &str, type_name: &str, method: &str) -> String {
+    format!("{trait_name}${type_name}${method}")
+}
+
+/// An implementation of `trait_name` for the concrete type `for_type`. Each
+/// method is lowered to an ordinary `Func` named `<Trait>$<Type>$<method>` with
+/// `Self` substituted to `for_type`, so codegen/mono see plain functions.
+#[derive(Debug, Clone)]
+pub struct ImplDef {
+    pub trait_name: String,
+    pub for_type: String,
+    pub methods: Vec<Func>,
 }
 
 /// A foreign function declaration: a name, a calling convention, and a typed
@@ -449,6 +497,8 @@ pub struct Program {
     pub funcs: Vec<Func>,
     pub asserts: Vec<StaticAssert>,
     pub consts: Vec<Const>,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplDef>,
 }
 
 impl Program {

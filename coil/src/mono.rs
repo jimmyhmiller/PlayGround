@@ -102,6 +102,10 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         asserts,
         // Consts were erased to literals during checking; nothing to monomorphize.
         consts: program.consts,
+        // Traits/impls are erased by mono: impl methods are already ordinary funcs
+        // (lowered in check), and trait calls have been resolved to direct calls.
+        traits: vec![],
+        impls: vec![],
     })
 }
 
@@ -279,6 +283,7 @@ impl<'a> Mono<'a> {
         Ok(Func {
             name,
             type_params: vec![],
+            bounds: vec![], // concrete after mono — no type params, no bounds
             cc: f.cc.clone(),
             params,
             ret,
@@ -463,6 +468,26 @@ impl<'a> Mono<'a> {
                 fp: Box::new(go(self, fp)?),
                 args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
             },
+            // Resolve a deferred trait call: substitute the Self type parameter to
+            // its concrete type, then call the implementing function directly. The
+            // checker verified an impl exists at the instantiation site.
+            ExprKind::TraitCall { trait_name, method, self_tp, args } => {
+                let self_ty = self.resolve_ty(&Type::Struct(self_tp.clone()), map)?;
+                let type_name = match &self_ty {
+                    Type::Struct(n) => n.clone(),
+                    Type::App(n, targs) => mangle(n, targs),
+                    other => {
+                        return Err(format!(
+                            "trait call '{trait_name}.{method}': Self resolved to a non-nominal type {other:?}"
+                        ))
+                    }
+                };
+                ExprKind::Call {
+                    func: trait_method_fn(trait_name, &type_name, method),
+                    type_args: vec![],
+                    args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
+                }
+            }
         }, e.span))
     }
 }
