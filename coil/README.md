@@ -16,13 +16,16 @@ executable with the system `cc` — no runtime dependency on LLVM, and the exoti
 Macros run during compilation in a tree-walking interpreter (no JIT, no LLVM);
 `coil build` fully expands every macro before emitting any code.
 
-The compiled output is **fully optimized**: every object runs LLVM's `-O3`
-pipeline (mem2reg, inlining, GVN, loop optimizations, tail-call elimination — so
-Coil's only loop, self-tail-recursion, becomes an actual loop). On matched
-compute benchmarks this lands Coil at **parity with `cc -O3`** (within
-measurement noise, same LLVM backend and opt tier) — see
-[`bench/`](bench/README.md). (`emit-ir` deliberately shows the *un*optimized IR
-Coil generates, which is what the struct-ABI tests diff against clang.)
+Coil's only loop is **self-tail-recursion**, and it is emitted as an explicit
+LLVM `musttail` call — a frame-reusing jump guaranteed by the backend at *any*
+optimization level, so stack-safety does not depend on the optimizer (a
+100M-deep recursion runs in constant stack even at `-O0`). The compiled output
+is then **fully optimized**: every object runs LLVM's `-O3` pipeline (mem2reg,
+inlining, GVN, loop optimizations, tail-call elimination). On matched compute
+benchmarks this lands Coil at **parity with `cc -O3`** (within measurement
+noise, same LLVM backend and opt tier) — see [`bench/`](bench/README.md).
+(`emit-ir` deliberately shows the *un*optimized IR Coil generates, which is what
+the struct-ABI tests diff against clang.)
 
 - Full design: [`docs/DESIGN.md`](docs/DESIGN.md)
 
