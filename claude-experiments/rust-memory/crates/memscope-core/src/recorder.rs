@@ -6,7 +6,7 @@
 //! `lib.rs`), so the bookkeeping is free to use ordinary `std` collections:
 //! their own allocations bypass recording rather than recursing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -15,9 +15,6 @@ use memscope_proto::{EventKind, Frame, LiveAlloc, RawEvent, SiteId, SiteInfo, Sn
 
 /// Max stack depth captured per allocation site.
 pub const MAX_FRAMES: usize = 64;
-/// Number of live-table shards (power of two). High enough that concurrent
-/// threads rarely collide on the same shard lock.
-const SHARDS: usize = 64;
 /// Number of site-interner shards (power of two); ids embed the shard index.
 const SITE_SHARDS: usize = 64;
 const SITE_SHARD_BITS: u32 = 6; // log2(SITE_SHARDS)
@@ -47,17 +44,6 @@ impl Mode {
     }
 }
 
-/// Per-live-allocation bookkeeping. Packed to 24 bytes (from 32): the timestamp
-/// is coarsened to milliseconds and the alignment to its log2, since neither
-/// needs full precision in the live table (events carry exact values).
-struct Entry {
-    size: u64,
-    ts_ms: u32,
-    site: SiteId,
-    thread: u32,
-    align_log2: u8,
-}
-
 pub struct Recorder {
     start: Instant,
 
@@ -66,45 +52,27 @@ pub struct Recorder {
     sample_rate: AtomicU32, // record 1 in N (Sampled mode)
     bt_depth: AtomicUsize,
     capture_sites: std::sync::atomic::AtomicBool,
-    /// Event streaming is opt-in: the ring (a contended global mutex) is only
-    /// written when a consumer is actually draining events. Off by default, so
-    /// the common snapshot/graph workflow never pays for it.
-    events_enabled: std::sync::atomic::AtomicBool,
-
-    // --- live allocation table, sharded by address ---
-    shards: [Mutex<Shard>; SHARDS],
 
     // --- allocation-site interner, sharded to avoid a global lock ---
     site_shards: [Mutex<SiteShard>; SITE_SHARDS],
 
-    // --- event ring (only written when events_enabled) ---
-    ring: crate::ring::Ring,
+    // --- the hot-path event sink: per-thread sharded rings ---
+    ring: crate::tls_ring::ShardedRing,
 
-    // --- aggregate stats ---
-    seq: AtomicU64,
-    sample_counter: AtomicU64,
-}
+    // --- consumer side (off the hot path), fed by the single pump thread ---
+    /// The in-process reconstructed live set; backs `snapshot()` / `stats()`.
+    reconstruct: Mutex<crate::sink::LiveSet>,
+    /// Recent raw events buffered for the agent's PollEvents stream.
+    recent: Mutex<VecDeque<RawEvent>>,
+    /// Extra user-registered sinks (file / socket / custom) fed by the pump.
+    user_sinks: Mutex<Vec<Box<dyn crate::sink::EventSink>>>,
+    /// Highest event timestamp the pump has *applied* to `reconstruct` (snapshot
+    /// waits on this so it reflects all events up to call time).
+    applied_tsc: AtomicU64,
+    /// Calibrated timestamp frequency (ticks/sec), set by the pump on start.
+    tsc_hz: AtomicU64,
+    pump_started: std::sync::Once,
 
-/// One shard of the live table, with its own stats counters. Keeping the
-/// counters *inside* the shard means they're bumped under the lock we already
-/// hold — no globally-contended atomics on the hot path (the bottleneck that
-/// otherwise serializes every thread on the same few cache lines).
-struct Shard {
-    map: HashMap<u64, Entry>,
-    live_bytes: u64,
-    total_allocs: u64,
-    total_alloc_bytes: u64,
-}
-
-impl Shard {
-    fn new() -> Self {
-        Shard {
-            map: HashMap::new(),
-            live_bytes: 0,
-            total_allocs: 0,
-            total_alloc_bytes: 0,
-        }
-    }
 }
 
 /// One shard of the allocation-site interner. Site ids embed their shard in the
@@ -154,12 +122,6 @@ fn hash_frames(frames: &[usize]) -> u64 {
     h
 }
 
-#[inline]
-fn shard_for(addr: u64) -> usize {
-    // Spread out the (often 16-byte-aligned) low bits.
-    ((addr >> 6) ^ (addr >> 18)) as usize & (SHARDS - 1)
-}
-
 impl Recorder {
     fn new() -> Self {
         Recorder {
@@ -168,12 +130,17 @@ impl Recorder {
             sample_rate: AtomicU32::new(1),
             bt_depth: AtomicUsize::new(MAX_FRAMES),
             capture_sites: std::sync::atomic::AtomicBool::new(true),
-            events_enabled: std::sync::atomic::AtomicBool::new(false),
-            shards: std::array::from_fn(|_| Mutex::new(Shard::new())),
             site_shards: std::array::from_fn(|_| Mutex::new(SiteShard::new())),
-            ring: crate::ring::Ring::new(DEFAULT_RING_CAP, crate::ring::RingMode::Overwrite),
-            seq: AtomicU64::new(0),
-            sample_counter: AtomicU64::new(0),
+            ring: crate::tls_ring::ShardedRing::new(
+                DEFAULT_RING_CAP,
+                crate::tls_ring::RingMode::Overwrite,
+            ),
+            reconstruct: Mutex::new(crate::sink::LiveSet::new()),
+            recent: Mutex::new(VecDeque::new()),
+            user_sinks: Mutex::new(Vec::new()),
+            applied_tsc: AtomicU64::new(0),
+            tsc_hz: AtomicU64::new(0),
+            pump_started: std::sync::Once::new(),
         }
     }
 
@@ -186,22 +153,28 @@ impl Recorder {
     /// read across many allocations per thread (the table only keeps ms anyway).
     #[inline]
     fn now_ms(&self) -> u32 {
-        CLOCK_CACHE.with(|c| {
-            let (ms, countdown) = c.get();
-            if countdown == 0 {
-                let now = self.start.elapsed().as_millis() as u32;
-                c.set((now, 255));
-                now
-            } else {
-                c.set((ms, countdown - 1));
-                ms
-            }
-        })
+        CLOCK_CACHE
+            .try_with(|c| {
+                let (ms, countdown) = c.get();
+                if countdown == 0 {
+                    let now = self.start.elapsed().as_millis() as u32;
+                    c.set((now, 255));
+                    now
+                } else {
+                    c.set((ms, countdown - 1));
+                    ms
+                }
+            })
+            .unwrap_or(0)
     }
 
+    /// Kept for API compatibility: the event ring is now the core mechanism, so
+    /// streaming is always on while recording. Turning it "on" just ensures the
+    /// reconstructor pump is running.
     pub fn set_event_streaming(&self, on: bool) {
-        self.events_enabled
-            .store(on, std::sync::atomic::Ordering::Relaxed);
+        if on {
+            self.ensure_pump();
+        }
     }
 
     /// Intern a captured stack trace into a [`SiteId`]. A per-thread cache of the
@@ -211,12 +184,16 @@ impl Recorder {
     #[inline]
     fn intern_site(&self, frames: &[usize]) -> SiteId {
         let h = hash_frames(frames);
-        if let Some(id) = SITE_CACHE.with(|c| c.borrow().lookup(h, frames)) {
+        if let Some(id) = SITE_CACHE
+            .try_with(|c| c.borrow().lookup(h, frames))
+            .ok()
+            .flatten()
+        {
             return id;
         }
         let s = (h as usize) & (SITE_SHARDS - 1);
         let id = self.site_shards[s].lock().unwrap().intern(s, h, frames);
-        SITE_CACHE.with(|c| c.borrow_mut().insert(h, frames, id));
+        let _ = SITE_CACHE.try_with(|c| c.borrow_mut().insert(h, frames, id));
         id
     }
 
@@ -227,6 +204,12 @@ impl Recorder {
 
     pub fn set_mode(&self, mode: Mode) {
         self.mode.store(mode as u8, Ordering::Relaxed);
+        // Tracking implies the reconstructor must run from now on, so it sees
+        // every event (long-lived allocations included) — not just whatever is
+        // still in the ring when the first snapshot is taken.
+        if mode != Mode::Off && std::env::var_os("MEMSCOPE_NOPUMP").is_none() {
+            self.ensure_pump();
+        }
     }
 
     pub fn set_sample_rate(&self, rate: u32) {
@@ -251,7 +234,15 @@ impl Recorder {
             Mode::Full => Some(1.0),
             Mode::Sampled => {
                 let n = self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
-                let c = self.sample_counter.fetch_add(1, Ordering::Relaxed);
+                // Per-thread counter — no globally-contended atomic. Each thread
+                // independently samples 1/n of its own allocations.
+                let c = SAMPLE_COUNTER
+                    .try_with(|c| {
+                        let v = c.get();
+                        c.set(v.wrapping_add(1));
+                        v
+                    })
+                    .unwrap_or(0);
                 if c % n == 0 {
                     Some(n as f64)
                 } else {
@@ -290,82 +281,121 @@ impl Recorder {
             SiteId::NONE
         };
 
-        {
-            let mut shard = self.shards[shard_for(addr)].lock().unwrap();
-            shard.map.insert(
-                addr,
-                Entry {
-                    size,
-                    ts_ms,
-                    site,
-                    thread,
-                    align_log2: align.max(1).trailing_zeros() as u8,
-                },
-            );
-            // Stats updated under the shard lock we already hold — no globally
-            // contended atomics.
-            shard.live_bytes += size;
-            shard.total_allocs += 1;
-            shard.total_alloc_bytes += size;
-        }
-
-        // Event streaming is opt-in: skip the contended ring (and the sequence
-        // counter + precise clock read) unless a consumer is draining.
-        if self.events_enabled.load(Ordering::Relaxed) {
-            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            self.push_event(RawEvent {
-                kind,
-                seq,
-                ts_nanos: self.now_nanos(),
-                addr,
-                size,
-                align,
-                site,
-                thread,
-            });
-        }
-    }
-
-    /// Record a deallocation. No-op if the address was never tracked (e.g. it
-    /// wasn't sampled). Returns nothing; emits a Dealloc event if it was live.
-    pub fn on_dealloc(&self, addr: u64) {
-        if self.mode() == Mode::Off {
-            return;
-        }
-        let entry = {
-            let mut shard = self.shards[shard_for(addr)].lock().unwrap();
-            let entry = shard.map.remove(&addr);
-            if let Some(e) = &entry {
-                shard.live_bytes = shard.live_bytes.saturating_sub(e.size);
-            }
-            entry
-        };
-        let Some(entry) = entry else { return };
-
-        if !self.events_enabled.load(Ordering::Relaxed) {
-            return;
-        }
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let ts = self.now_nanos();
-        self.push_event(RawEvent {
-            kind: EventKind::Dealloc,
-            seq,
-            ts_nanos: ts,
+        // The whole hot path: append a flat record to this thread's own ring.
+        // `seq` is a hardware timestamp — the global causal order key the
+        // consumer merges on (see tls_ring).
+        self.ring.push(RawEvent {
+            kind,
+            seq: crate::tls_ring::tsc(),
+            ts_nanos: ts_ms as u64 * 1_000_000,
             addr,
-            size: entry.size,
-            align: 1u32 << entry.align_log2,
-            site: entry.site,
-            thread: entry.thread,
+            size,
+            align,
+            site,
+            thread,
         });
     }
 
-    #[inline]
-    fn push_event(&self, ev: RawEvent) {
-        self.ring.push(ev);
+    /// Record a deallocation. The size/align come straight from the caller's
+    /// `Layout`, so no table lookup is needed — just append a free record.
+    pub fn on_dealloc(&self, addr: u64, size: u64, align: u32) {
+        if self.mode() == Mode::Off {
+            return;
+        }
+        self.ring.push(RawEvent {
+            kind: EventKind::Dealloc,
+            seq: crate::tls_ring::tsc(),
+            ts_nanos: self.now_ms() as u64 * 1_000_000,
+            addr,
+            size,
+            align,
+            site: SiteId::NONE,
+            thread: thread_id(),
+        });
+    }
+
+    /// The single consumer: drain every per-thread ring, merge by timestamp
+    /// behind a small watermark (so a lagging ring can't deliver an out-of-order
+    /// event after we've applied past it), and apply to the reconstructor, the
+    /// recent-events buffer, and any user sinks. Started once, lazily.
+    fn ensure_pump(&self) {
+        self.pump_started.call_once(|| {
+            std::thread::Builder::new()
+                .name("memscope-reconstruct".into())
+                .spawn(|| {
+                    crate::exclude_current_thread();
+                    use crate::sink::EventSink;
+                    let r = recorder();
+                    let hz = crate::tls_ring::calibrate_tsc_hz();
+                    r.tsc_hz.store(hz, Ordering::Release);
+                    // Reorder window: events newer than this (in ticks) are held
+                    // until peers can't undercut them. ~1ms.
+                    let window = (hz / 1000).max(1);
+
+                    let mut pending: Vec<RawEvent> = Vec::with_capacity(16384);
+                    loop {
+                        let drained = r.ring.drain_all(&mut pending);
+                        if drained == 0 && pending.is_empty() {
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                            continue;
+                        }
+                        // Stable order by timestamp.
+                        pending.sort_by_key(|e| e.seq);
+                        let watermark = crate::tls_ring::tsc().saturating_sub(window);
+                        // Apply the prefix older than the watermark.
+                        let split = pending.partition_point(|e| e.seq <= watermark);
+                        if split > 0 {
+                            let batch = &pending[..split];
+                            r.reconstruct.lock().unwrap().consume(batch);
+                            {
+                                let mut recent = r.recent.lock().unwrap();
+                                for e in batch {
+                                    if recent.len() >= DEFAULT_RING_CAP {
+                                        recent.pop_front();
+                                    }
+                                    recent.push_back(*e);
+                                }
+                            }
+                            {
+                                let mut sinks = r.user_sinks.lock().unwrap();
+                                for s in sinks.iter_mut() {
+                                    s.consume(batch);
+                                }
+                            }
+                            pending.drain(..split);
+                        }
+                        // Everything up to the watermark is now applied.
+                        r.applied_tsc.store(watermark, Ordering::Release);
+                        if split == 0 {
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                        }
+                    }
+                })
+                .expect("failed to spawn memscope reconstructor thread");
+        });
+    }
+
+    /// Wait until the reconstructor has applied every event up to this instant
+    /// (bounded, so a dead pump can't hang the caller).
+    fn flush(&self) {
+        let target = crate::tls_ring::tsc();
+        let start = Instant::now();
+        while self.applied_tsc.load(Ordering::Acquire) < target {
+            if start.elapsed() > std::time::Duration::from_millis(500) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Register an extra sink (file / socket / custom). Fed by the pump.
+    pub fn add_sink(&self, sink: Box<dyn crate::sink::EventSink>) {
+        self.ensure_pump();
+        self.user_sinks.lock().unwrap().push(sink);
     }
 
     /// Switch the event ring between overwrite and reliable (backpressure) modes.
-    pub fn set_ring_mode(&self, mode: crate::ring::RingMode) {
+    pub fn set_ring_mode(&self, mode: crate::tls_ring::RingMode) {
         self.ring.set_mode(mode);
     }
 
@@ -374,36 +404,25 @@ impl Recorder {
         self.ring.dropped()
     }
 
-    /// Drain all currently-available events into `out` (sequence order). Must be
-    /// called by a single consumer (the pump, or `drain_events`). Returns the
-    /// number drained.
-    pub fn drain_ring(&self, out: &mut Vec<RawEvent>) -> usize {
-        self.ring.drain(out)
-    }
-
-    /// Backwards-compatible drain used by the agent's PollEvents. `max` caps the
-    /// returned batch; any beyond it stay for the next call.
+    /// Pop up to `max` buffered events (oldest first) for the agent's live
+    /// stream. These come from the pump's recent-events buffer, not the ring
+    /// directly (the pump is the ring's single consumer).
     pub fn drain_events(&self, out: &mut Vec<RawEvent>, max: usize) -> usize {
-        let before = out.len();
-        self.ring.drain(out);
-        if out.len() - before > max {
-            out.truncate(before + max);
-        }
-        out.len() - before
+        self.ensure_pump();
+        let mut recent = self.recent.lock().unwrap();
+        let take = max.min(recent.len());
+        out.extend(recent.drain(..take));
+        take
     }
 
     pub fn stats(&self) -> Stats {
-        let (mut live_bytes, mut total_allocs, mut total_alloc_bytes) = (0u64, 0u64, 0u64);
-        for sh in &self.shards {
-            let s = sh.lock().unwrap();
-            live_bytes += s.live_bytes;
-            total_allocs += s.total_allocs;
-            total_alloc_bytes += s.total_alloc_bytes;
-        }
+        self.ensure_pump();
+        self.flush();
+        let rec = self.reconstruct.lock().unwrap();
         Stats {
-            live_bytes,
-            total_allocs,
-            total_alloc_bytes,
+            live_bytes: rec.live_bytes(),
+            total_allocs: rec.total_allocs(),
+            total_alloc_bytes: rec.total_alloc_bytes(),
             dropped_events: self.ring.dropped(),
             mode: self.mode(),
             sample_rate: self.sample_rate.load(Ordering::Relaxed),
@@ -419,26 +438,30 @@ impl Recorder {
             _ => 1.0,
         };
 
+        self.ensure_pump();
+        self.flush();
+
         let mut live = Vec::new();
         let mut used_sites: HashMap<u32, ()> = HashMap::new();
-        for sh in &self.shards {
-            let g = sh.lock().unwrap();
-            for (&addr, e) in g.map.iter() {
+        let total_live_bytes;
+        {
+            let rec = self.reconstruct.lock().unwrap();
+            live.reserve(rec.live_count());
+            for (addr, e) in rec.iter() {
                 if e.site.is_some() {
                     used_sites.insert(e.site.0, ());
                 }
                 live.push(LiveAlloc {
                     addr,
                     size: e.size,
-                    align: 1u32 << e.align_log2,
+                    align: e.align,
                     site: e.site,
-                    ts_nanos: e.ts_ms as u64 * 1_000_000,
+                    ts_nanos: e.ts_nanos,
                     thread: e.thread,
                 });
             }
+            total_live_bytes = rec.live_bytes();
         }
-
-        let total_live_bytes: u64 = live.iter().map(|l| l.size).sum();
 
         let sites = used_sites
             .keys()
@@ -516,6 +539,8 @@ thread_local! {
     /// Per-thread recently-interned sites, so a hot site needs no shared lock.
     static SITE_CACHE: std::cell::RefCell<SiteCache> =
         const { std::cell::RefCell::new(SiteCache::new()) };
+    /// Per-thread sampling counter (avoids a globally-contended atomic).
+    static SAMPLE_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// A tiny per-thread LRU of recently-interned sites. Holds a few entries so a
@@ -565,5 +590,5 @@ impl SiteCache {
 
 #[inline]
 fn thread_id() -> u32 {
-    THREAD_ID.with(|&id| id)
+    THREAD_ID.try_with(|&id| id).unwrap_or(0)
 }

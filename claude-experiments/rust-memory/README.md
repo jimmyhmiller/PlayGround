@@ -123,18 +123,38 @@ pointers are ABI-mandated) and on x86-64 builds that keep frame pointers. Call
 `set_frame_pointer_unwinding(false)` to fall back to the always-correct
 `backtrace` path on builds that omit them.
 
-**Multi-thread scaling.** The hot path holds no globally-contended state: stats
-counters live inside per-address shards (bumped under a lock already held, not
-global atomics), the site interner is sharded, a per-thread site cache makes a
-hot allocation site lock-free, and the event ring is opt-in (only written when a
-consumer is streaming). Full-mode alloc+free churn on a 12-core machine:
+## Architecture: flat hot path, off-thread reconstruction
 
-| threads | 1 | 2 | 4 | 8 |
-|---------|---|---|---|---|
-| Mops/s | 10.7 | 9.7 | 10.8 | 8.0 |
+The hot path does **no shared-state bookkeeping** — it stamps a record with a
+cheap hardware timestamp and appends it to a **per-thread lock-free ring**
+(`tls_ring`). No live table, no mutex, no globally-contended atomic. The live set
+is rebuilt *off the allocating threads* by a single pump that drains every
+thread's ring and merges them by timestamp (`sink::LiveSet`), so `snapshot()` /
+the graph read reconstructed state. The consumer is **pluggable** (`EventSink`):
+reconstruct in memory, stream to a file/socket/network, or fan out — see
+`spawn_consumer`.
 
-(Earlier, with global atomics + a single interner lock, this *regressed* to
-~1.9 Mops/s at 8 threads — slower in aggregate than one thread.)
+Two ring modes: **Overwrite** (wait-free; drops oldest under pressure, consumer
+detects the gap) and **Reliable** (`set_ring_mode`; bounded backpressure so the
+consumer doesn't lose events).
+
+## Overhead & multi-thread scaling
+
+Slowdown vs. the same program with no memscope (pure alloc+free churn, 12-core
+machine, × = ratio to baseline):
+
+| threads | baseline | Off | Sampled 1/100 | Full |
+|---------|---------:|----:|--------------:|-----:|
+| 1 | 17.9 ns | 1.1× | 1.6× | 2.8× |
+| 2 |  8.8 ns | 1.1× | 2.0× | 3.5× |
+| 4 |  5.5 ns | 1.1× | 1.6× | 4.5× |
+| 8 |  3.5 ns | 1.0× | 1.7× | 5.2× |
+
+Per-thread rings mean Full *scales with the cores* (absolute cost ~18 ns/op at 8
+threads, down from ~50 at 1). Sampling uses a per-thread counter, so it's ~1.7×
+— effectively free — across all thread counts. (The ratios look modest because
+the baseline is a pure-allocation loop that parallelizes near-perfectly; real
+programs allocate a fraction of the time, so end-to-end overhead is far smaller.)
 
 ## Wiring up a UI
 

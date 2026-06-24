@@ -31,13 +31,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 mod recorder;
-mod ring;
 mod sink;
+mod tls_ring;
 mod unwind;
 
 pub use memscope_proto::{EventKind, RawEvent, SiteId, Snapshot};
 pub use recorder::{Mode, Stats, MAX_FRAMES};
-pub use ring::RingMode;
+pub use tls_ring::RingMode;
 pub use sink::{spawn_consumer, Consumer, EventSink, FanOut, FnSink, LiveRec, LiveSet};
 use recorder::recorder;
 use unwind::{DefaultUnwind, Unwind};
@@ -57,7 +57,9 @@ struct HookScope {
 impl HookScope {
     #[inline]
     fn enter() -> Self {
-        let prev = IN_HOOK.with(|x| x.replace(true));
+        // `try_with`: during thread teardown the TLS is gone — treat that as
+        // "already active" so we bypass recording rather than panic.
+        let prev = IN_HOOK.try_with(|x| x.replace(true)).unwrap_or(true);
         HookScope { prev }
     }
     /// Were we already inside the recorder when this scope was entered?
@@ -71,7 +73,7 @@ impl Drop for HookScope {
     #[inline]
     fn drop(&mut self) {
         let p = self.prev;
-        IN_HOOK.with(|x| x.set(p));
+        let _ = IN_HOOK.try_with(|x| x.set(p));
     }
 }
 
@@ -170,7 +172,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for MemScope<A> {
         {
             let scope = HookScope::enter();
             if !scope.was_active() {
-                recorder().on_dealloc(ptr as u64);
+                recorder().on_dealloc(ptr as u64, layout.size() as u64, layout.align() as u32);
             }
         }
         self.inner.dealloc(ptr, layout);
@@ -185,7 +187,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for MemScope<A> {
         let scope = HookScope::enter();
         if !scope.was_active() {
             let r = recorder();
-            r.on_dealloc(ptr as u64);
+            r.on_dealloc(ptr as u64, layout.size() as u64, layout.align() as u32);
             r.on_alloc(
                 new as u64,
                 new_size as u64,

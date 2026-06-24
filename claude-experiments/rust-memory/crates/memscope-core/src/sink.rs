@@ -1,7 +1,7 @@
 //! Pluggable consumers for the event stream.
 //!
-//! The hot path only appends [`RawEvent`]s to the lock-free [`crate::ring::Ring`].
-//! A single *pump* thread drains that ring and feeds the batches to an
+//! The hot path only appends [`RawEvent`]s to the lock-free per-thread rings.
+//! A single *pump* thread drains them and feeds the merged batches to an
 //! [`EventSink`] — which is where pluggability lives. A sink can:
 //! * reconstruct the live set in memory (so `snapshot()` works) — [`LiveSet`];
 //! * write raw events to a file / socket / network for posthoc replay;
@@ -12,9 +12,7 @@
 //! to feed multiple destinations.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use memscope_proto::{EventKind, RawEvent};
@@ -80,6 +78,7 @@ pub struct LiveSet {
 #[derive(Clone, Copy, Debug)]
 pub struct LiveRec {
     pub size: u64,
+    pub align: u32,
     pub site: memscope_proto::SiteId,
     pub thread: u32,
     pub ts_nanos: u64,
@@ -118,6 +117,7 @@ impl LiveSet {
                     e.addr,
                     LiveRec {
                         size: e.size,
+                        align: e.align,
                         site: e.site,
                         thread: e.thread,
                         ts_nanos: e.ts_nanos,
@@ -161,73 +161,19 @@ impl EventSink for Arc<std::sync::Mutex<LiveSet>> {
     }
 }
 
-/// Handle to a running pump. Drop or call [`Consumer::stop`] to wind it down.
+/// Handle representing a registered consumer. The sink is owned by the single
+/// recorder-side pump for the life of the process; dropping the handle does not
+/// remove the sink (use a shared sink, e.g. `Arc<Mutex<LiveSet>>`, to read its
+/// state).
 pub struct Consumer {
-    stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<Box<dyn EventSink>>>,
+    _private: (),
 }
 
-impl Consumer {
-    /// Stop the pump and return the sink (final state, e.g. a populated
-    /// [`LiveSet`]). Performs a final drain first.
-    pub fn stop(mut self) -> Box<dyn EventSink> {
-        self.stop.store(true, Ordering::Release);
-        self.join.take().unwrap().join().unwrap()
-    }
-}
-
-impl Drop for Consumer {
-    fn drop(&mut self) {
-        if let Some(join) = self.join.take() {
-            self.stop.store(true, Ordering::Release);
-            let _ = join.join();
-        }
-    }
-}
-
-/// Spawn the single pump thread that drains the global ring and feeds `sink`.
-/// The pump thread excludes itself from allocation tracking.
-pub fn spawn_consumer(mut sink: Box<dyn EventSink>, poll: Duration) -> Consumer {
-    // The ring is only fed while streaming is on; a consumer implies it.
-    recorder().set_event_streaming(true);
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_thread = stop.clone();
-    let join = std::thread::Builder::new()
-        .name("memscope-consumer".into())
-        .spawn(move || {
-            crate::exclude_current_thread();
-            let mut buf: Vec<RawEvent> = Vec::with_capacity(8192);
-            let mut last_dropped = 0u64;
-            loop {
-                buf.clear();
-                let n = recorder().drain_ring(&mut buf);
-                if n > 0 {
-                    sink.consume(&buf);
-                }
-                let d = recorder().ring_dropped();
-                if d != last_dropped {
-                    sink.on_drops(d);
-                    last_dropped = d;
-                }
-                if n == 0 {
-                    if stop_thread.load(Ordering::Acquire) {
-                        // One last drain to catch anything published during shutdown.
-                        buf.clear();
-                        if recorder().drain_ring(&mut buf) > 0 {
-                            sink.consume(&buf);
-                        }
-                        sink.flush();
-                        break;
-                    }
-                    std::thread::sleep(poll);
-                }
-            }
-            sink
-        })
-        .expect("failed to spawn memscope consumer thread");
-
-    Consumer {
-        stop,
-        join: Some(join),
-    }
+/// Register `sink` with the single reconstructor pump (starting it if needed).
+/// The pump drains the lock-free ring and feeds every registered sink in
+/// sequence order. `poll` is accepted for API compatibility; the pump's cadence
+/// is internal.
+pub fn spawn_consumer(sink: Box<dyn EventSink>, _poll: Duration) -> Consumer {
+    recorder().add_sink(sink);
+    Consumer { _private: () }
 }
