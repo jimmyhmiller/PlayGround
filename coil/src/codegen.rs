@@ -1302,6 +1302,59 @@ impl<'ctx> Cg<'ctx> {
                 }
                 Ok(())
             }
+            // Each match arm is in tail position — bind its fields, then tail the
+            // arm body (so a self-recursive call in an arm becomes `musttail`).
+            // Mirrors `emit_match`'s scrutinee/switch/field setup, minus the phi.
+            ExprKind::Match { scrut, arms } => {
+                let (sumval, st) = self.emit_expr(scrut, scope)?;
+                let sumname = match st {
+                    Type::Struct(s) => s,
+                    other => return Err(format!("codegen: match on non-sum {other:?}")),
+                };
+                let info = self
+                    .sums
+                    .get(&sumname)
+                    .ok_or_else(|| format!("codegen: match on non-sum '{sumname}'"))?;
+                let sum_ty = info.ty;
+                let tmp = self.builder.build_alloca(sum_ty, "match.tmp").map_err(le)?;
+                self.builder.build_store(tmp, sumval).map_err(le)?;
+                let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
+                let tag = self
+                    .builder
+                    .build_load(self.ctx.i32_type(), tagptr, "tag")
+                    .map_err(le)?
+                    .into_int_value();
+                let payload = self.builder.build_struct_gep(sum_ty, tmp, 1, "payload").map_err(le)?;
+                let arm_blocks: Vec<BasicBlock> =
+                    arms.iter().map(|_| self.ctx.append_basic_block(function, "arm")).collect();
+                let default = self.ctx.append_basic_block(function, "match.default");
+                let cases: Vec<(inkwell::values::IntValue, BasicBlock)> = arms
+                    .iter()
+                    .enumerate()
+                    .map(|(k, arm)| {
+                        let vidx = info.variants.iter().position(|(n, _)| n == &arm.variant).unwrap();
+                        (self.ctx.i32_type().const_int(vidx as u64, false), arm_blocks[k])
+                    })
+                    .collect();
+                self.builder.build_switch(tag, default, &cases).map_err(le)?;
+                self.builder.position_at_end(default);
+                self.builder.build_unreachable().map_err(le)?;
+                for (k, arm) in arms.iter().enumerate() {
+                    self.builder.position_at_end(arm_blocks[k]);
+                    let vidx = info.variants.iter().position(|(n, _)| n == &arm.variant).unwrap();
+                    let var_struct = info.variant_structs[vidx];
+                    let mut child = scope.clone();
+                    for (i, b) in arm.binds.iter().enumerate() {
+                        let fptr =
+                            self.builder.build_struct_gep(var_struct, payload, i as u32, "vf").map_err(le)?;
+                        let fty = info.variants[vidx].1[i].1.clone();
+                        let fval = self.builder.build_load(self.basic_ty(&fty), fptr, b).map_err(le)?;
+                        child.insert(b.clone(), (fval, fty));
+                    }
+                    self.emit_tail(&arm.body, function, sig, ret, &child)?;
+                }
+                Ok(())
+            }
             // Not a structural tail form (or an ineligible call): compute the value
             // and return it the normal way.
             _ => {
