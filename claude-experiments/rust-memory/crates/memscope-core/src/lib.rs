@@ -31,10 +31,14 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 mod recorder;
+mod ring;
+mod sink;
 mod unwind;
 
 pub use memscope_proto::{EventKind, RawEvent, SiteId, Snapshot};
 pub use recorder::{Mode, Stats, MAX_FRAMES};
+pub use ring::RingMode;
+pub use sink::{spawn_consumer, Consumer, EventSink, FanOut, FnSink, LiveRec, LiveSet};
 use recorder::recorder;
 use unwind::{DefaultUnwind, Unwind};
 
@@ -220,12 +224,26 @@ pub fn set_capture_sites(on: bool) {
     recorder().set_capture_sites(on);
 }
 
-/// Enable/disable the live event stream. Off by default: the event ring is a
-/// contended global, so it is only written when a consumer is draining events.
-/// The live table (and thus snapshots / the heap graph) is unaffected.
+/// Enable/disable the live event stream. Off by default: the event ring is only
+/// written when a consumer is draining events. (Installing a consumer via
+/// [`spawn_consumer`] enables it automatically.)
 pub fn set_event_streaming(on: bool) {
     let _g = HookScope::enter();
     recorder().set_event_streaming(on);
+}
+
+/// Switch the event ring between [`RingMode::Overwrite`] (never block; lose
+/// oldest under pressure) and [`RingMode::Reliable`] (bounded backpressure so the
+/// consumer doesn't lose events).
+pub fn set_ring_mode(mode: RingMode) {
+    let _g = HookScope::enter();
+    recorder().set_ring_mode(mode);
+}
+
+/// Total events the ring has dropped because the consumer fell behind (the
+/// reconstruction is lossy from that point).
+pub fn ring_dropped() -> u64 {
+    recorder().ring_dropped()
 }
 
 /// Take a self-contained heap dump of the current live set.

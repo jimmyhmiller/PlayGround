@@ -27,6 +27,15 @@ fn main() {
         "sampled" => Mode::Sampled,
         _ => Mode::Full,
     };
+    // Decomposition knobs: isolate the cost of each hot-path layer.
+    if std::env::var("MEMSCOPE_NOSITES").is_ok() {
+        memscope::set_capture_sites(false); // skip stack capture + interning
+    }
+    if let Ok(d) = std::env::var("MEMSCOPE_DEPTH") {
+        if let Ok(d) = d.parse::<usize>() {
+            memscope::set_backtrace_depth(d); // cap captured stack depth
+        }
+    }
     memscope::set_mode(mode);
     if matches!(mode, Mode::Sampled) {
         memscope::set_sample_rate(rate);

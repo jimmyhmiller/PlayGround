@@ -6,7 +6,7 @@
 //! `lib.rs`), so the bookkeeping is free to use ordinary `std` collections:
 //! their own allocations bypass recording rather than recursing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -78,13 +78,11 @@ pub struct Recorder {
     site_shards: [Mutex<SiteShard>; SITE_SHARDS],
 
     // --- event ring (only written when events_enabled) ---
-    ring: Mutex<VecDeque<RawEvent>>,
-    ring_cap: usize,
+    ring: crate::ring::Ring,
 
     // --- aggregate stats ---
     seq: AtomicU64,
     sample_counter: AtomicU64,
-    dropped_events: AtomicU64,
 }
 
 /// One shard of the live table, with its own stats counters. Keeping the
@@ -173,11 +171,9 @@ impl Recorder {
             events_enabled: std::sync::atomic::AtomicBool::new(false),
             shards: std::array::from_fn(|_| Mutex::new(Shard::new())),
             site_shards: std::array::from_fn(|_| Mutex::new(SiteShard::new())),
-            ring: Mutex::new(VecDeque::with_capacity(1024)),
-            ring_cap: DEFAULT_RING_CAP,
+            ring: crate::ring::Ring::new(DEFAULT_RING_CAP, crate::ring::RingMode::Overwrite),
             seq: AtomicU64::new(0),
             sample_counter: AtomicU64::new(0),
-            dropped_events: AtomicU64::new(0),
         }
     }
 
@@ -365,21 +361,35 @@ impl Recorder {
 
     #[inline]
     fn push_event(&self, ev: RawEvent) {
-        let mut ring = self.ring.lock().unwrap();
-        if ring.len() >= self.ring_cap {
-            ring.pop_front();
-            self.dropped_events.fetch_add(1, Ordering::Relaxed);
-        }
-        ring.push_back(ev);
+        self.ring.push(ev);
     }
 
-    /// Drain up to `max` queued events into `out` (oldest first). Returns the
-    /// number drained. Consumers poll this to follow the live stream.
+    /// Switch the event ring between overwrite and reliable (backpressure) modes.
+    pub fn set_ring_mode(&self, mode: crate::ring::RingMode) {
+        self.ring.set_mode(mode);
+    }
+
+    /// Total events dropped by the ring (consumer fell behind).
+    pub fn ring_dropped(&self) -> u64 {
+        self.ring.dropped()
+    }
+
+    /// Drain all currently-available events into `out` (sequence order). Must be
+    /// called by a single consumer (the pump, or `drain_events`). Returns the
+    /// number drained.
+    pub fn drain_ring(&self, out: &mut Vec<RawEvent>) -> usize {
+        self.ring.drain(out)
+    }
+
+    /// Backwards-compatible drain used by the agent's PollEvents. `max` caps the
+    /// returned batch; any beyond it stay for the next call.
     pub fn drain_events(&self, out: &mut Vec<RawEvent>, max: usize) -> usize {
-        let mut ring = self.ring.lock().unwrap();
-        let take = max.min(ring.len());
-        out.extend(ring.drain(..take));
-        take
+        let before = out.len();
+        self.ring.drain(out);
+        if out.len() - before > max {
+            out.truncate(before + max);
+        }
+        out.len() - before
     }
 
     pub fn stats(&self) -> Stats {
@@ -394,7 +404,7 @@ impl Recorder {
             live_bytes,
             total_allocs,
             total_alloc_bytes,
-            dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            dropped_events: self.ring.dropped(),
             mode: self.mode(),
             sample_rate: self.sample_rate.load(Ordering::Relaxed),
         }
@@ -455,7 +465,7 @@ impl Recorder {
             sites,
             types: Vec::new(),
             total_live_bytes,
-            dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            dropped_events: self.ring.dropped(),
         }
     }
 
