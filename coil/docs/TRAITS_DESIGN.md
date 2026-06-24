@@ -80,21 +80,24 @@ into a normal call of `impls[(Tr, C)].m`. The impl functions are already ordinar
 - Later: `derive Trait Type` integration, supertraits, multiple-Self / associated
   types, generic impls (`impl Eq for (Pair T T)`), and `dyn Trait` (vtables).
 
-## v1 idiom: pass `Self` by pointer
+## Aggregate `Self` by value: codegen ABI reconciliation
 
-A trait method should take `Self` **by pointer** — `(eq [(a (ptr Self)) …] …)` —
-not by value. Reason: a monomorphized generic with an aggregate type-arg passes
-that aggregate *by value* (the type param was unconstrained at the generic's
-definition, so the reference model didn't ref it), but an impl method over a
-struct takes it *by reference* (the reference model refs concrete aggregate
-params). A by-value `(a Self)` therefore mismatches the impl's `(ptr Point)` at a
-deferred (generic) call site — an LLVM-verifier error. Passing `(ptr Self)` makes
-every argument a pointer (a scalar), so the ABI is uniform across concrete and
-generic calls. (Concrete by-value `(a Self)` calls *do* work — `coerce_arg` loads
-a place to a value — but the generic case does not, so prefer `(ptr Self)`.)
-Scalar `Self` (e.g. an `Ord` over `i64`) also works by value. Making by-value
-aggregate `Self` work in generics needs the deeper fix: monomorphized generics
-re-deriving by-reference ABI for aggregate type-args (a known follow-up).
+`Self` is passed **by value** — `(eq [(a Self) (b Self)] …)`. The subtlety: a
+monomorphized generic holds an aggregate type-arg *by value* (the type param was
+unconstrained at the generic's definition, so the reference model didn't ref it),
+but an impl method over a struct takes it *by reference* (the reference model refs
+concrete aggregate params). So a deferred call inside a generic flows a struct
+*value* into the impl's `(ptr Point)` parameter.
+
+Rather than re-deriving by-reference ABI per instantiation (a deep mono change),
+this is reconciled at the metal in codegen: `reconcile_args` compares each
+argument's LLVM type to the callee's actual parameter type, and when the callee
+wants a pointer but the argument is an aggregate *value*, spills it to a stack
+slot and passes the address. An immutable-reference parameter receives a copy —
+exactly by-value semantics — so it's sound. Opaque pointers already unify, so only
+the aggregate-value → pointer direction needs the fixup. This makes by-value
+aggregate `Self` work uniformly across concrete and generic calls; scalar `Self`
+(e.g. `Ord` over `i64`) was always fine.
 
 ## Implementation map
 
@@ -106,4 +109,6 @@ re-deriving by-reference ABI for aggregate type-args (a known follow-up).
   funcs; conformance check; trait-call resolution (concrete → direct, type-param →
   `TraitCall` after the bound check); instantiation-site bound check.
 - `mono.rs`: resolves `TraitCall` to a direct call of the implementing function.
-- `codegen.rs`: never sees `TraitCall` (a guard errors if one slips through).
+- `codegen.rs`: never sees `TraitCall` (a guard errors if one slips through);
+  `reconcile_args` spills an aggregate-value argument to a pointer when the callee
+  wants one (the by-value aggregate `Self` ABI fixup).
