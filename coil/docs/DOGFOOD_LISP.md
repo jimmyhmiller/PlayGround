@@ -27,18 +27,21 @@ Fix (`src/check.rs` `unify`): a type parameter is a *value* type, so peel a
 top-level `ref` from the actual argument before binding it — references are erased
 value-semantically. (356 tests still green.)
 
-**2. Forwarding a by-ref aggregate into a generic by-value slot — ABI gap, worked around.**
-With (1) fixed, `(hm-put! … v)` then hit an LLVM-verifier error: the monomorphized
+**2. Forwarding a by-ref aggregate into a generic by-value slot — ABI gap, FIXED.**
+With (1) fixed, `(hm-put! … v)` hit an LLVM-verifier error: the monomorphized
 `hm-put!` takes `Value` by value, but `env-define`'s `v` is a `(ref Value)`
 (pointer), so codegen passed a pointer where a by-value aggregate was expected.
-`coerce_arg`'s `Type::Struct` branch passes the place pointer expecting codegen to
-load+coerce it — which the `extern`/C-ABI call path does, but the ordinary
-monomorphized-generic call path does not. This is a real gap in the generics ×
-reference-model × ABI interaction (a follow-up fix: make the generic call path
-load an aggregate place when the substituted parameter is by-value, or lower the
-monomorphized aggregate parameter by-ref consistently).
+`coerce_arg`'s `Type::Struct` branch passed the place pointer for *every* caller,
+expecting codegen to load+coerce — which the `extern`/C-ABI call path does, but the
+ordinary monomorphized-generic call path does not.
 
-**Workaround in the dogfood:** the environment stores `(ptr Value)` (heap-allocated
-values) rather than `Value` by value. That passes a scalar pointer into the
-generic slot (no aggregate-ABI question), and is arguably the better design anyway
-— it lets multiple frames/closures share a binding.
+Fix (`src/check.rs` `coerce_arg`): pass the place pointer **only** for an `extern`
+(C-ABI) call; for an ordinary Coil call whose parameter is a by-value aggregate
+(the only non-extern way a parameter is a bare `Type::Struct` is a generic
+instantiated with an aggregate — concrete aggregate params are by-reference), fall
+through to `coerce`, which loads a `(ref T)`/place to a value so the by-value
+callee matches. Verified: a by-ref aggregate param now stores into a generic
+`HashMap`/container directly; 356 tests green.
+
+The dogfood still stores `(ptr Value)` in the env — now a *choice* (it lets frames
+and closures share a binding), not a necessity.

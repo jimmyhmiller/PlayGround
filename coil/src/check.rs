@@ -1747,11 +1747,20 @@ fn coerce_arg(
             if &at == want {
                 return Ok(ae); // a bare aggregate value
             }
-            if let Some(pointee) = place_pointee(&at) {
-                if struct_name(pointee) == Some(sname.as_str()) {
-                    return Ok(ae); // pass the place pointer; codegen loads + coerces
+            // An `extern`/`c`-cc function takes the aggregate by value via the C
+            // ABI: pass the *place pointer* and let codegen read + ABI-coerce it.
+            if is_extern {
+                if let Some(pointee) = place_pointee(&at) {
+                    if struct_name(pointee) == Some(sname.as_str()) {
+                        return Ok(ae);
+                    }
                 }
             }
+            // An ordinary Coil call whose parameter is a by-value aggregate — i.e.
+            // a generic instantiated with this aggregate type (the only non-extern
+            // way a parameter is a bare `Type::Struct`; concrete aggregate params
+            // are by-reference). `coerce` loads a `(ref T)`/place to a value so the
+            // monomorphized callee, which receives the aggregate BY VALUE, matches.
             coerce(ae, at, want, is_extern, fname, what)
         }
         // A WRITABLE place — a `(mut T)`/`(ptr T)` place, or an explicit `(mut x)`

@@ -87,11 +87,10 @@
   (VClosure [(params (ptr (ArrayList (slice u8)))) (body (ptr Sexp)) (env (ptr Env))])
   (VNil))
 
-; The env maps names to HEAP `(ptr Value)` (not `Value` by value): a scalar
-; pointer slot, which also lets closures share bindings. (Storing the sum `Value`
-; by value would route an aggregate-by-ref param into a generic by-value slot —
-; an ABI gap in the current generics/reference-model interaction; see the dogfood
-; notes. Pointers sidestep it cleanly.)
+; The env maps names to HEAP `(ptr Value)` — a scalar pointer slot, so closures
+; can share bindings. (Storing the sum `Value` by value also works now; the
+; aggregate-by-ref-into-generic-by-value-slot ABI gap the first cut of this hit
+; was fixed in coerce_arg. Pointers are still the nicer design here.)
 (defstruct Env [(vars (HashMap (slice u8) (ptr Value))) (parent (ptr Env)) (a (ptr Allocator))])
 
 (defn env-new [(a (ptr Allocator)) (parent (ptr Env))] (-> (ptr Env))
