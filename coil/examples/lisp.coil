@@ -1,7 +1,7 @@
-; DOGFOOD: a mini-Lisp interpreter — reader + tree-walking evaluator with
-; closures, `define`, and recursion. Pushes past calc/json into first-class
-; functions and recursion-in-the-interpreted-language (which leans on the
-; musttail self-recursion the compiler now emits).
+; DOGFOOD: a mini-Lisp interpreter — a tree-walking evaluator with closures,
+; `define`, and recursion. The s-expression READER is gone: it's now a one-line
+; `read-all` from lib/sexp.coil (the friction the first cut of this surfaced —
+; "Coil should expose a reader" — fixed as a library). What's left is just eval.
 ;
 ;   (define fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1)))))) (fact 10)
 ;
@@ -15,71 +15,8 @@
 (import "lib/hashmap.coil"   :use *)
 (import "lib/io.coil"        :use *)
 (import "lib/fmt.coil"       :use *)
-
-; ---- s-expressions (the reader's output) -----------------------------------
-(defsum Sexp
-  (SNum [(v i64)])
-  (SSym [(s (slice u8))])
-  (SList [(items (ptr (ArrayList (ptr Sexp))))]))
-
-(defn sexp [(a (ptr Allocator)) (x Sexp)] (-> (ptr Sexp))
-  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p x) p))
-
-; ---- reader: (slice u8) -> (ptr Sexp) --------------------------------------
-(defstruct R [(src (slice u8)) (pos i64) (a (ptr Allocator))])
-
-(defn r-at-end [(r (ptr R))] (-> bool) (icmp-ge (load (field r pos)) (slice-len (load (field r src)))))
-(defn r-peek [(r (ptr R))] (-> i64)
-  (if (r-at-end r) -1 (cast i64 (slice-get (load (field r src)) (load (field r pos))))))
-(defn r-adv [(r (ptr R))] (-> i64) (store! (field r pos) (iadd (load (field r pos)) 1)) 0)
-
-(defn ws? [(c i64)] (-> bool)
-  (or (icmp-eq c 32) (or (icmp-eq c 10) (or (icmp-eq c 9) (icmp-eq c 13)))))
-(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
-(defn delim? [(c i64)] (-> bool)
-  (or (icmp-eq c -1) (or (ws? c) (or (icmp-eq c 40) (icmp-eq c 41)))))
-
-(defn r-skip-ws [(r (ptr R))] (-> i64)
-  (loop (if (ws? (r-peek r)) (r-adv r) (break))) 0)
-
-; read a run of non-delimiter bytes as a (slice u8) view into the source
-(defn r-token [(r (ptr R))] (-> (slice u8))
-  (let [start (load (field r pos))]
-    (loop (if (delim? (r-peek r)) (break) (r-adv r)))
-    (subslice (load (field r src)) start (load (field r pos)))))
-
-(defn neg? [(c i64)] (-> bool) (icmp-eq c 45))   ; '-'
-
-(defn r-read [(r (ptr R))] (-> (ptr Sexp))
-  (r-skip-ws r)
-  (let [c (r-peek r)]
-    (if (icmp-eq c 40)                                  ; '(' -> list
-        (do (r-adv r)
-            (let [(mut items) (al-new [(ptr Sexp)] (load (field r a)))]
-              (loop
-                (do (r-skip-ws r)
-                    (if (icmp-eq (r-peek r) 41) (do (r-adv r) (break))
-                      (if (icmp-eq (r-peek r) -1) (break)
-                        (al-push! (mut items) (r-read r))))))
-              (let [boxed (unwrap-ptr [(ArrayList (ptr Sexp))] (create [(ArrayList (ptr Sexp))] (load (field r a))))]
-                (store! boxed (load items))
-                (sexp (load (field r a)) (SList boxed)))))
-        (let [tok (r-token r)]
-          (if (and (icmp-gt (slice-len tok) 0)
-                   (or (digit? (cast i64 (slice-get tok 0)))
-                       (and (neg? (cast i64 (slice-get tok 0))) (icmp-gt (slice-len tok) 1))))
-              (sexp (load (field r a)) (SNum (parse-int tok)))
-              (sexp (load (field r a)) (SSym tok)))))))
-
-(defn parse-int [(s (slice u8))] (-> i64)
-  (let [(mut i) 0 n (slice-len s) (mut acc) 0 (mut sign) 1]
-    (if (and (icmp-gt n 0) (neg? (cast i64 (slice-get s 0))))
-        (do (store! sign -1) (store! i 1)) 0)
-    (loop
-      (if (icmp-ge (load i) n) (break)
-        (do (store! acc (iadd (imul (load acc) 10) (isub (cast i64 (slice-get s (load i))) 48)))
-            (store! i (iadd (load i) 1)))))
-    (imul (load sign) (load acc))))
+(import "lib/control.coil"   :use *)   ; <- `case`: flat dispatch instead of an if-ladder
+(import "lib/sexp.coil"      :use *)   ; <- the reader: Sexp + read-all + accessors
 
 ; ---- values & environment --------------------------------------------------
 (defsum Value
@@ -87,122 +24,93 @@
   (VClosure [(params (ptr (ArrayList (slice u8)))) (body (ptr Sexp)) (env (ptr Env))])
   (VNil))
 
-; The env maps names to HEAP `(ptr Value)` — a scalar pointer slot, so closures
-; can share bindings. (Storing the sum `Value` by value also works now; the
-; aggregate-by-ref-into-generic-by-value-slot ABI gap the first cut of this hit
-; was fixed in coerce_arg. Pointers are still the nicer design here.)
-(defstruct Env [(vars (HashMap (slice u8) (ptr Value))) (parent (ptr Env)) (a (ptr Allocator))])
+(defstruct Env [(vars (HashMap (slice u8) Value)) (parent (ptr Env))])
 
 (defn env-new [(a (ptr Allocator)) (parent (ptr Env))] (-> (ptr Env))
   (let [e (unwrap-ptr [Env] (create [Env] a))]
-    (store! (field e vars) (hm-new [(slice u8) (ptr Value)] a (str-keyops)))
+    (store! (field e vars) (hm-new [(slice u8) Value] a (str-keyops)))
     (store! (field e parent) parent)
-    (store! (field e a) a)
     e))
 
 (defn env-lookup [(e (ptr Env)) (name (slice u8))] (-> Value)
   (if (icmp-eq (cast i64 e) 0) (VNil)
-    (match (hm-get [(slice u8) (ptr Value)] (load (field e vars)) name)
-      (Some [p] (load p))
+    (match (hm-get [(slice u8) Value] (load (field e vars)) name)
+      (Some [v] v)
       (None [] (env-lookup (load (field e parent)) name)))))
 
+; storing a sum `Value` straight into a generic HashMap now works (the
+; aggregate-by-ref-into-generic-by-value-slot ABI gap was fixed in coerce_arg).
 (defn env-define [(e (ptr Env)) (name (slice u8)) (v Value)] (-> i64)
-  (let [p (unwrap-ptr [Value] (create [Value] (load (field e a))))]
-    (store! p v)
-    (hm-put! (field e vars) name p))
-  0)
+  (hm-put! (field e vars) name v) 0)
 
 ; ---- eval ------------------------------------------------------------------
 (defn num-of [(v Value)] (-> i64) (match v (VNum [n] n) (VClosure [_ _ _] 0) (VNil [] 0)))
 
-(defn sym-is [(x (ptr Sexp)) (lit (slice u8))] (-> bool)
-  (match (load x) (SSym [s] (str-eq s lit)) (SNum [_] false) (SList [_] false)))
-
-(defn list-items [(x (ptr Sexp))] (-> (ptr (ArrayList (ptr Sexp))))
-  (match (load x) (SList [items] items) (SNum [_] (cast (ptr (ArrayList (ptr Sexp))) 0)) (SSym [_] (cast (ptr (ArrayList (ptr Sexp))) 0))))
-
-(defn al-ref [T] [(l (ptr (ArrayList T))) (i i64)] (-> T) (load (index (load (field l data)) i)))
-(defn al-count [T] [(l (ptr (ArrayList T)))] (-> i64) (load (field l len)))
-
 (defn eval-sexp [(x (ptr Sexp)) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
-  (match (load x)
-    (SNum [v] (VNum v))
-    (SSym [s] (env-lookup env s))
-    (SList [items]
-      (let [head (al-ref [(ptr Sexp)] items 0)]
-        (if (sym-is head "if")
-            (let [c (eval-sexp (al-ref [(ptr Sexp)] items 1) env a)]
-              (if (icmp-eq (num-of c) 0)
-                  (eval-sexp (al-ref [(ptr Sexp)] items 3) env a)
-                  (eval-sexp (al-ref [(ptr Sexp)] items 2) env a)))
-          (if (sym-is head "lambda")
-              (make-closure (al-ref [(ptr Sexp)] items 1) (al-ref [(ptr Sexp)] items 2) env a)
-            (if (sym-is head "define")
-                (do (env-define env (sym-name (al-ref [(ptr Sexp)] items 1))
-                                 (eval-sexp (al-ref [(ptr Sexp)] items 2) env a))
-                    (VNil))
-              (apply-fn head items env a))))))))
-
-(defn sym-name [(x (ptr Sexp))] (-> (slice u8))
-  (match (load x) (SSym [s] s) (SNum [_] "") (SList [_] "")))
+  (if (sexp-num? x) (VNum (sexp-num x))
+    (if (sexp-sym? x) (env-lookup env (sexp-sym x))
+      (let [head (sexp-nth x 0)]                       ; a list: special form or call
+        ; dispatch on the head symbol's name ("" for a non-symbol head, which
+        ; falls through to apply-fn — e.g. ((lambda …) …)).
+        (case (sexp-sym head)
+          "if"     (if (icmp-eq (num-of (eval-sexp (sexp-nth x 1) env a)) 0)
+                       (eval-sexp (sexp-nth x 3) env a)
+                       (eval-sexp (sexp-nth x 2) env a))
+          "lambda" (make-closure (sexp-nth x 1) (sexp-nth x 2) env a)
+          "define" (do (env-define env (sexp-sym (sexp-nth x 1)) (eval-sexp (sexp-nth x 2) env a)) (VNil))
+          (apply-fn head x env a))))))
 
 (defn make-closure [(params (ptr Sexp)) (body (ptr Sexp)) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
-  (let [(mut names) (al-new [(slice u8)] a)
-        ps (list-items params)]
-    (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) (al-count [(ptr Sexp)] ps)) (break)
-              (do (al-push! (mut names) (sym-name (al-ref [(ptr Sexp)] ps (load i))))
-                  (store! i (iadd (load i) 1))))))
+  (let [(mut names) (al-new [(slice u8)] a) (mut i) 0 n (sexp-count params)]
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (al-push! (mut names) (sexp-sym (sexp-nth params (load i))))
+                (store! i (iadd (load i) 1)))))
     (let [boxed (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
       (store! boxed (load names))
       (VClosure boxed body env))))
 
-(defn apply-fn [(head (ptr Sexp)) (items (ptr (ArrayList (ptr Sexp)))) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
-  ; builtins first
-  (if (sym-is head "+") (VNum (iadd (arg items 1 env a) (arg items 2 env a)))
-    (if (sym-is head "-") (VNum (isub (arg items 1 env a) (arg items 2 env a)))
-      (if (sym-is head "*") (VNum (imul (arg items 1 env a) (arg items 2 env a)))
-        (if (sym-is head "/") (VNum (idiv (arg items 1 env a) (arg items 2 env a)))
-          (if (sym-is head "=") (VNum (if (icmp-eq (arg items 1 env a) (arg items 2 env a)) 1 0))
-            (if (sym-is head "<") (VNum (if (icmp-lt (arg items 1 env a) (arg items 2 env a)) 1 0))
-              (call-closure (eval-sexp head env a) items env a))))))))
+(defn arg [(x (ptr Sexp)) (i i64) (env (ptr Env)) (a (ptr Allocator))] (-> i64)
+  (num-of (eval-sexp (sexp-nth x i) env a)))
 
-(defn arg [(items (ptr (ArrayList (ptr Sexp)))) (i i64) (env (ptr Env)) (a (ptr Allocator))] (-> i64)
-  (num-of (eval-sexp (al-ref [(ptr Sexp)] items i) env a)))
+(defn apply-fn [(head (ptr Sexp)) (x (ptr Sexp)) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
+  (case (sexp-sym head)
+    "+" (VNum (iadd (arg x 1 env a) (arg x 2 env a)))
+    "-" (VNum (isub (arg x 1 env a) (arg x 2 env a)))
+    "*" (VNum (imul (arg x 1 env a) (arg x 2 env a)))
+    "/" (VNum (idiv (arg x 1 env a) (arg x 2 env a)))
+    "=" (VNum (if (icmp-eq (arg x 1 env a) (arg x 2 env a)) 1 0))
+    "<" (VNum (if (icmp-lt (arg x 1 env a) (arg x 2 env a)) 1 0))
+    (call-closure (eval-sexp head env a) x env a)))
 
-(defn call-closure [(f Value) (items (ptr (ArrayList (ptr Sexp)))) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
+(defn call-closure [(f Value) (x (ptr Sexp)) (env (ptr Env)) (a (ptr Allocator))] (-> Value)
   (match f
     (VClosure [params body cenv]
-      (let [call-env (env-new a cenv) (mut i) 0]
-        (loop (if (icmp-ge (load i) (al-count [(slice u8)] params)) (break)
-                (do (env-define call-env (al-ref [(slice u8)] params (load i))
-                                (eval-sexp (al-ref [(ptr Sexp)] items (iadd (load i) 1)) env a))
+      (let [call-env (env-new a cenv) (mut i) 0 n (al-len [(slice u8)] (load params))]
+        (loop (if (icmp-ge (load i) n) (break)
+                (do (env-define call-env (al-get [(slice u8)] (load params) (load i))
+                                (eval-sexp (sexp-nth x (iadd (load i) 1)) env a))
                     (store! i (iadd (load i) 1)))))
         (eval-sexp body call-env a)))
     (VNum [_] (VNil))
     (VNil [] (VNil))))
 
-; ---- driver: run a program string, returning its last expression's value ----
+; ---- driver: read all top-level forms, eval each, return the last value -----
 (defn run-program [(src (slice u8)) (a (ptr Allocator))] (-> i64)
-  (let [rstate (alloc-stack R) genv (env-new a (cast (ptr Env) 0)) (mut result) 0]
-    (store! (field rstate src) src)
-    (store! (field rstate pos) 0)
-    (store! (field rstate a) a)
-    (loop
-      (do (r-skip-ws rstate)
-          (if (r-at-end rstate) (break)
-            (store! result (num-of (eval-sexp (r-read rstate) genv a))))))
+  (let [forms (read-all a src) genv (env-new a (cast (ptr Env) 0)) (mut result) 0 (mut i) 0
+        n (al-len [(ptr Sexp)] (load forms))]
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (store! result (num-of (eval-sexp (al-get [(ptr Sexp)] (load forms) (load i)) genv a)))
+                (store! i (iadd (load i) 1)))))
     (load result)))
 
 (defn main [] (-> i64)
   (let [a (malloc-allocator) w (stdout)]
-    ; recursive factorial and (tree-recursive) fibonacci, defined and run in Lisp
     (let [fact10 (run-program
                    "(define fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1)))))) (fact 10)" a)
           fib15  (run-program
                    "(define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 15)" a)
-          let-test (run-program "((lambda (x) (* x x)) 9)" a)]
+          sq9    (run-program "((lambda (x) (* x x)) 9)" a)]
       (fmt w "fact 10 = {d}\n" fact10)         ; 3628800
       (fmt w "fib 15  = {d}\n" fib15)          ; 610
-      (fmt w "sq 9    = {d}\n" let-test)       ; 81
+      (fmt w "sq 9    = {d}\n" sq9)            ; 81
       0)))

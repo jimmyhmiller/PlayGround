@@ -915,7 +915,7 @@ fn global_env(target: &TargetInfo) -> Env {
     for name in [
         "+", "-", "*", "mod", "=", "<", ">", "<=", ">=", "list", "vector", "cons", "first", "rest",
         "nth", "count", "empty?", "concat", "not", "symbol", "name", "str", "gensym", "map",
-        "list?", "vector?", "symbol?", "number?", "keyword?", "error",
+        "list?", "vector?", "symbol?", "number?", "string?", "keyword?", "error",
         "str-bytes", "bytes->str", "to-vector",
         "struct-fields", "sum-variants", "type-kind", "type-params", "variant-sum",
     ] {
@@ -1019,6 +1019,7 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "vector?" => Ok(Value::Bool(matches!(args[0], Value::Vector(_)))),
         "symbol?" => Ok(Value::Bool(matches!(args[0], Value::Sym(_)))),
         "number?" => Ok(Value::Bool(matches!(args[0], Value::Int(_)))),
+        "string?" => Ok(Value::Bool(matches!(args[0], Value::Str(_)))),
         "keyword?" => Ok(Value::Bool(matches!(args[0], Value::Keyword(_)))),
         // Abort macro expansion with a message. Lets a macro validate its
         // arguments and hard-error (instead of silently emitting wrong code) —

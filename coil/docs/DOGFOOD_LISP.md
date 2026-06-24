@@ -43,5 +43,37 @@ through to `coerce`, which loads a `(ref T)`/place to a value so the by-value
 callee matches. Verified: a by-ref aggregate param now stores into a generic
 `HashMap`/container directly; 356 tests green.
 
-The dogfood still stores `(ptr Value)` in the env — now a *choice* (it lets frames
-and closures share a binding), not a necessity.
+The dogfood still stores `Value` straight in the env now (by value) — the fix
+makes the natural idiom work. (`examples/lisp.coil` keeps it by value to exercise
+the fix; `(ptr Value)` would also be fine and lets frames share a binding.)
+
+## Two ergonomics the dogfood drove out
+
+**A runtime reader, as a library — `lib/sexp.coil`.** The first cut hand-rolled
+~50 lines of tokenizing/parsing. That's the part *every* Lisp/config/serialization
+format rewrites, so it's now a library: `read-all a "(…) (…)"` → an
+`ArrayList<(ptr Sexp)>`, plus accessors (`sexp-num`/`sexp-sym`/`sexp-count`/
+`sexp-nth`/`sexp-sym-is`) so a consumer never matches the representation. The Lisp
+dropped its whole reader for one import + `read-all`. (Coil's *compiler* reader is
+in Rust and can't be a zero-cost runtime primitive without a runtime lib + FFI;
+a Coil-level library is the in-spirit "grow via libraries" answer.)
+
+**A `case` macro — `lib/control.coil`.** The builtin dispatch was a tall
+`(if (sexp-sym-is head "+") … (if (sexp-sym-is head "-") …))` ladder. `case` flattens
+it, Clojure-style (flat `key body` pairs, lone trailing = default):
+
+```
+(case (sexp-sym head)
+  "+" (VNum (iadd …))
+  "-" (VNum (isub …))
+  …
+  (call-closure …))            ; default
+```
+
+Coil has **no universal runtime `=`** — equality is type-specific (`icmp-eq` for
+ints, `str-eq` for slices, per-type structural for aggregates) because values are
+unboxed with no RTTI, and there's no trait/typeclass resolution. So `case` (a
+macro, running at expansion time) **picks the comparison from the key literals'
+kind**: integer keys → `icmp-eq`, string keys → `str-eq`; other kinds are an error
+(use `cond`). That keeps the call site clean *and* honest — no silent wrong-type
+compare. (Added a `string?` predicate to the macro language for the key-kind test.)
