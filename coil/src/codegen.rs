@@ -218,6 +218,11 @@ struct Cg<'ctx> {
     /// the scope for per-statement debug locations set in `emit_expr`. `None`
     /// outside a `-g` body or for a dummy-span function.
     cur_sp: std::cell::RefCell<Option<DISubprogram<'ctx>>>,
+    /// Cache of built struct `DICompositeType`s by name (so each struct's DWARF
+    /// type is emitted once), and the set of structs currently mid-build (to break
+    /// recursion on a struct that points at itself).
+    di_structs: std::cell::RefCell<HashMap<String, inkwell::debug_info::DIType<'ctx>>>,
+    di_building: std::cell::RefCell<HashSet<String>>,
     funcs: HashMap<String, FunctionValue<'ctx>>,
     shims: HashMap<String, ShimInfo<'ctx>>,
     structs: HashMap<String, StructInfo<'ctx>>,
@@ -374,6 +379,8 @@ pub fn compile_for_dbg<'ctx>(
         builder: ctx.create_builder(),
         di,
         cur_sp: std::cell::RefCell::new(None),
+        di_structs: std::cell::RefCell::new(HashMap::new()),
+        di_building: std::cell::RefCell::new(HashSet::new()),
         funcs: HashMap::new(),
         shims: HashMap::new(),
         structs: HashMap::new(),
@@ -1548,16 +1555,103 @@ impl<'ctx> Cg<'ctx> {
             Type::Float(32) => basic("f32".into(), 32, 0x04),
             Type::Float(_) => basic("f64".into(), 64, 0x04),
             Type::Bool => basic("bool".into(), 8, 0x02),
-            Type::Ptr(_) => {
-                let byte = basic("i8".into(), 8, 0x05)?;
+            Type::Ptr(inner) => {
+                // Point at the real pointee type when we can describe it (so a
+                // `(ptr Point)` shows as `Point *` and derefs to the fields); fall
+                // back to a byte pointer otherwise (incl. the self-referential
+                // struct cycle, where `di_struct` returns None mid-build).
+                let pointee = self
+                    .di_type(di, inner)
+                    .or_else(|| basic("i8".into(), 8, 0x05))?;
+                Some(di.builder.create_pointer_type("", pointee, 64, 0, AddressSpace::default()).as_type())
+            }
+            Type::Struct(name) => self.di_struct(di, name),
+            Type::Array(elem, n) => {
+                let inner = self.di_type(di, elem)?;
+                let size = self.target_data.get_abi_size(&self.basic_ty(t)) * 8;
+                let align = self.target_data.get_abi_alignment(&self.basic_ty(t)) * 8;
+                Some(di.builder.create_array_type(inner, size, align, &[0..(*n as i64)]).as_type())
+            }
+            // A slice is a fat pointer `{ ptr: *elem, len: i64 }` (16 bytes); show
+            // it as a 2-field record so the debugger prints the pointer and length.
+            Type::Slice(elem) => {
+                let ptr_ty = self.di_type(di, &Type::Ptr(elem.clone()))?;
+                let i64_ty = basic("i64".into(), 64, 0x05)?;
+                let scope = di.file.as_debug_info_scope();
+                let member = |nm: &str, ty, off| {
+                    di.builder
+                        .create_member_type(scope, nm, di.file, 0, 64, 64, off, DIFlags::ZERO, ty)
+                        .as_type()
+                };
+                let members = [member("ptr", ptr_ty, 0), member("len", i64_ty, 64)];
                 Some(
                     di.builder
-                        .create_pointer_type("ptr", byte, 64, 0, AddressSpace::default())
+                        .create_struct_type(scope, "slice", di.file, 0, 128, 64, DIFlags::ZERO, None, &members, 0, None, "slice")
                         .as_type(),
                 )
             }
             _ => None,
         }
+    }
+
+    /// Build (and cache) a `DICompositeType` for a struct — its fields as DWARF
+    /// members at their real byte offsets — so `frame variable` prints the struct.
+    /// Returns `None` for a non-struct nominal (e.g. a sum, deferred), a `:bits`/
+    /// `:explicit` layout (not a plain field sequence), or a struct already
+    /// mid-build (a self-reference reached via a pointer — the pointer falls back
+    /// to a byte pointer, breaking the cycle).
+    fn di_struct(&self, di: &DebugCtx<'ctx>, name: &str) -> Option<inkwell::debug_info::DIType<'ctx>> {
+        if let Some(t) = self.di_structs.borrow().get(name) {
+            return Some(*t);
+        }
+        let info = self.structs.get(name)?;
+        if !matches!(info.layout, Layout::C | Layout::Packed) {
+            return None; // bits/explicit/aligned — not a plain field sequence (later)
+        }
+        if !self.di_building.borrow_mut().insert(name.to_string()) {
+            return None; // cycle: this struct is mid-build (reached via a pointer)
+        }
+        let struct_ty = info.ty;
+        let scope = di.file.as_debug_info_scope();
+        let mut members = Vec::with_capacity(info.fields.len());
+        for (i, (fname, fty)) in info.fields.iter().enumerate() {
+            let Some(fdty) = self.di_type(di, fty) else { continue };
+            let off_bits = self.target_data.offset_of_element(&struct_ty, i as u32).unwrap_or(0) * 8;
+            let sz_bits = self.target_data.get_abi_size(&self.basic_ty(fty)) * 8;
+            let align_bits = self.target_data.get_abi_alignment(&self.basic_ty(fty)) * 8;
+            let m = di.builder.create_member_type(
+                scope,
+                fname,
+                di.file,
+                0,
+                sz_bits,
+                align_bits,
+                off_bits,
+                inkwell::debug_info::DIFlags::ZERO,
+                fdty,
+            );
+            members.push(m.as_type());
+        }
+        let size_bits = self.target_data.get_abi_size(&struct_ty) * 8;
+        let align_bits = self.target_data.get_abi_alignment(&struct_ty) * 8;
+        let composite = di.builder.create_struct_type(
+            scope,
+            name,
+            di.file,
+            0,
+            size_bits,
+            align_bits,
+            inkwell::debug_info::DIFlags::ZERO,
+            None,
+            &members,
+            0,
+            None,
+            name,
+        );
+        self.di_building.borrow_mut().remove(name);
+        let ty = composite.as_type();
+        self.di_structs.borrow_mut().insert(name.to_string(), ty);
+        Some(ty)
     }
 
     /// Describe a function's scalar parameters for the debugger: spill each into a

@@ -195,6 +195,87 @@ fn lldb_frame_variable_shows_let_locals() {
     let _ = std::fs::remove_file(&src_path);
 }
 
+/// Aggregate DI: a struct parameter prints with its fields (a `DICompositeType`
+/// with members at their byte offsets; the by-ref param shows as `Struct *`,
+/// dereferencing to the field values).
+#[test]
+fn lldb_frame_variable_shows_struct_fields() {
+    if !have("lldb") {
+        eprintln!("SKIP: lldb not found");
+        return;
+    }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
+    let prog = "(defstruct Point [(x i64) (y i64)])\n\
+                (defn sumpt [(p Point)] (-> i64)\n  (iadd (load (field p x)) (load (field p y))))\n\
+                (defn main [] (-> i64)\n  (let [(mut p) (zeroed Point)]\n    \
+                (store! (field (mut p) x) 30)\n    (store! (field (mut p) y) 12)\n    (sumpt (mut p))))\n";
+    let src_path = unique_path("stg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("stexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build");
+
+    // Break inside sumpt (line 3); `p` is a `Point *`, deref shows the fields.
+    let file = src_path.file_name().unwrap().to_str().unwrap();
+    let text = run_lldb(
+        &exe,
+        &[&format!("breakpoint set --file {file} --line 3"), "run", "p *p", "quit"],
+    );
+    assert!(text.contains("(Point)"), "deref should show a Point:\n{text}");
+    assert!(text.contains("x = 30") && text.contains("y = 12"), "struct fields not shown:\n{text}");
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
+/// Aggregate DI for a slice: a `(slice u8)` string local prints as a fat-pointer
+/// record `{ ptr, len }` (len = 2 for "Hi").
+#[test]
+fn lldb_frame_variable_shows_slice() {
+    if !have("lldb") {
+        eprintln!("SKIP: lldb not found");
+        return;
+    }
+    let _g = LLDB.lock().unwrap_or_else(|e| e.into_inner());
+    let prog = "(extern putchar :cc c [i32] (-> i32))\n\
+                (defn main [] (-> i64)\n  (let [msg \"Hi\"]\n    (putchar 65)\n    0))\n";
+    let src_path = unique_path("slg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("slexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build");
+
+    let file = src_path.file_name().unwrap().to_str().unwrap();
+    let text = run_lldb(
+        &exe,
+        &[&format!("breakpoint set --file {file} --line 4"), "run", "frame variable msg", "quit"],
+    );
+    assert!(text.contains("len = 2"), "slice length not shown:\n{text}");
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
+/// A self-referential struct (`next: (ptr Node)`) must build without the DIType
+/// builder recursing forever — the pointer-to-self breaks the cycle.
+#[test]
+fn self_referential_struct_debug_builds() {
+    let prog = "(defstruct Node [(val i64) (next (ptr Node))])\n\
+                (defn main [] (-> i64)\n  (let [(mut n) (zeroed Node)]\n    \
+                (store! (field (mut n) val) 7)\n    (load (field (mut n) val))))\n";
+    let src_path = unique_path("cycg").with_extension("coil");
+    std::fs::write(&src_path, prog).unwrap();
+    let exe = unique_path("cycexe");
+    coil::build_executable_linked_dbg(prog, &exe, coil::codegen::target_triple(), &[], Some(&src_path))
+        .expect("debug build must terminate (cycle guard)");
+    assert_eq!(Command::new(&exe).status().unwrap().code().unwrap(), 7);
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
+    let _ = std::fs::remove_file(&src_path);
+}
+
 /// Per-statement line tables: `next` in lldb walks the body line by line (each
 /// statement maps to its own source line via the per-Expr span). Uses calls
 /// with side effects so each statement is a real, steppable instruction.
