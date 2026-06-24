@@ -359,6 +359,30 @@ pub struct TraitMethod {
     pub ret: Type,
 }
 
+/// The canonical name a type uses as an impl's `for_type` / in trait resolution —
+/// nominal types by name, scalars by their spelling (`i64`, `u32`, `bool`, `f64`),
+/// so `(impl Eq i64 …)` and a `(eq 1 2)` call agree. `None` for types that can't
+/// (yet) carry an impl (pointers, slices, arrays, …).
+pub fn type_impl_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Struct(n) | Type::App(n, _) => Some(n.clone()),
+        Type::Int(b, true) => Some(format!("i{b}")),
+        Type::Int(b, false) => Some(format!("u{b}")),
+        Type::Bool => Some("bool".to_string()),
+        Type::Float(w) => Some(format!("f{w}")),
+        _ => None,
+    }
+}
+
+/// Is `s` the spelling of a builtin scalar type (`i64`, `u8`, `bool`, `f32`)?
+/// Used to keep a scalar `impl` target from being qualified like a struct name.
+pub fn is_scalar_typename(s: &str) -> bool {
+    s == "bool"
+        || s == "f32"
+        || s == "f64"
+        || ((s.starts_with('i') || s.starts_with('u')) && s[1..].parse::<u32>().is_ok())
+}
+
 /// The mangled function name an impl method lowers to / a trait call resolves to.
 /// Deterministic, so the checker (which lowers impl methods) and the monomorphizer
 /// (which resolves deferred trait calls) agree without sharing a table.

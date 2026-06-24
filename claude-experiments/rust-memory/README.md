@@ -99,8 +99,19 @@ Wrap a different inner allocator (jemalloc, mimalloc) with `MemScope::new(inner)
 
 ### The recording file format
 
-Newline-delimited JSON, **self-contained** (resolved types + stacks embedded, so
-a reader needs no DWARF/binary). One object per line:
+`record_to_file` writes a **compact binary** format (`.mscope`) by default, or
+newline-JSON if the path ends in `.json`/`.jsonl`. Both are **self-contained**
+(resolved types + stacks embedded; a reader needs no DWARF/binary), and both are
+read by `memscope replay <file>` (it auto-detects).
+
+Binary is the one to use for real apps: a fixed **34-byte** record per event,
+batch-written — ~10× smaller and much faster than JSON, written in real time.
+(Measured on heapster analyzing a 576 MB heap: 1.35M events / full mode → 50 MB
+binary, no stall.) Site definitions are written once each (interned), so
+resolution never dominates. Layout is documented in
+`crates/memscope-proto/src/recfmt.rs`.
+
+The JSON variant (one object per line) is handy for eyeballing:
 
 ```jsonc
 {"v":1,"pid":1234,"exe":"/path/to/bin"}                       // header

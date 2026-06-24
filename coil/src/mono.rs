@@ -473,15 +473,11 @@ impl<'a> Mono<'a> {
             // checker verified an impl exists at the instantiation site.
             ExprKind::TraitCall { trait_name, method, self_tp, args } => {
                 let self_ty = self.resolve_ty(&Type::Struct(self_tp.clone()), map)?;
-                let type_name = match &self_ty {
-                    Type::Struct(n) => n.clone(),
-                    Type::App(n, targs) => mangle(n, targs),
-                    other => {
-                        return Err(format!(
-                            "trait call '{trait_name}.{method}': Self resolved to a non-nominal type {other:?}"
-                        ))
-                    }
-                };
+                let type_name = type_impl_name(&self_ty).ok_or_else(|| {
+                    format!(
+                        "trait call '{trait_name}.{method}': Self resolved to a type that can't carry an impl: {self_ty:?}"
+                    )
+                })?;
                 ExprKind::Call {
                     func: trait_method_fn(trait_name, &type_name, method),
                     type_args: vec![],

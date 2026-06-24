@@ -169,14 +169,15 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         }
         // Every trait method must be implemented, with a matching signature
         // (Self := the implementing type) — the impl conforms to the trait.
+        let cty = typename_to_type(&im.for_type);
         for tm in &td.methods {
             let m = im.methods.iter().find(|m| m.name == tm.name).ok_or_else(|| {
                 format!("impl {} for {}: missing method '{}'", im.trait_name, im.for_type, tm.name)
             })?;
             let want: Vec<Type> =
-                tm.params.iter().map(|p| subst_self(&p.ty, &td.self_param, &im.for_type)).collect();
+                tm.params.iter().map(|p| subst_self(&p.ty, &td.self_param, &cty)).collect();
             let got: Vec<Type> = m.params.iter().map(|p| p.ty.clone()).collect();
-            if want != got || subst_self(&tm.ret, &td.self_param, &im.for_type) != m.ret {
+            if want != got || subst_self(&tm.ret, &td.self_param, &cty) != m.ret {
                 return Err(format!(
                     "impl {} for {}: method '{}' signature doesn't match the trait",
                     im.trait_name, im.for_type, tm.name
@@ -962,15 +963,12 @@ fn synth_inner(
                 while let Type::Ref(_, inner) | Type::Ptr(inner) = self_ty {
                     self_ty = *inner;
                 }
-                let self_name = match &self_ty {
-                    Type::Struct(n) | Type::App(n, _) => n.clone(),
-                    other => {
-                        return Err(format!(
-                            "in '{fname}': trait method '{func}' called on non-nominal type {}",
-                            ty_str(other)
-                        ).into())
-                    }
-                };
+                let self_name = type_impl_name(&self_ty).ok_or_else(|| {
+                    format!(
+                        "in '{fname}': trait method '{func}' called on a type that can't carry an impl: {}",
+                        ty_str(&self_ty)
+                    )
+                })?;
                 if tps.contains(&self_name) {
                     // Deferred: definition-time bound check, then emit a TraitCall.
                     let bounded = cx
@@ -984,9 +982,11 @@ fn synth_inner(
                              (required to call '{func}')"
                         ).into());
                     }
+                    // Self is the type parameter itself (a nominal type here).
+                    let self_as_ty = Type::Struct(self_name.clone());
                     let mut new_args = Vec::with_capacity(args.len());
                     for (i, a) in args.iter().enumerate() {
-                        let want = subst_self(&tm.params[i].ty, &self_pname, &self_name);
+                        let want = subst_self(&tm.params[i].ty, &self_pname, &self_as_ty);
                         let is_mut = matches!(&a.kind, ExprKind::Borrow { mutable: true, .. });
                         let exp = match &want {
                             Type::Ref(_, inner) => (**inner).clone(),
@@ -998,7 +998,7 @@ fn synth_inner(
                             &format!("argument {} to '{func}'", i + 1),
                         )?);
                     }
-                    let ret = subst_self(&tm.ret, &self_pname, &self_name);
+                    let ret = subst_self(&tm.ret, &self_pname, &self_as_ty);
                     return Ok((
                         Expr::new(
                             ExprKind::TraitCall {
@@ -1135,10 +1135,7 @@ fn synth_inner(
             // against the bounds at its definition).
             for (param, req_traits) in &sig.bounds {
                 if let Some(ty) = subst.get(param) {
-                    let tyname = match ty {
-                        Type::Struct(n) | Type::App(n, _) => Some(n.clone()),
-                        _ => None,
-                    };
+                    let tyname = type_impl_name(ty);
                     for tr in req_traits {
                         let ok = tyname
                             .as_ref()
@@ -1844,11 +1841,35 @@ fn type_mentions(t: &Type, name: &str) -> bool {
     }
 }
 
+/// Parse a type-name string (an impl's `for_type`) back to a `Type`: builtin
+/// scalars to their real type (`"i64"` -> `Int(64,true)`), everything else a
+/// nominal `Struct`. The inverse of `type_impl_name` for the cases that round-trip.
+fn typename_to_type(name: &str) -> Type {
+    match name {
+        "bool" => Type::Bool,
+        "f32" => Type::Float(32),
+        "f64" => Type::Float(64),
+        _ => {
+            if let Some(rest) = name.strip_prefix('i') {
+                if let Ok(b) = rest.parse::<u32>() {
+                    return Type::Int(b, true);
+                }
+            }
+            if let Some(rest) = name.strip_prefix('u') {
+                if let Ok(b) = rest.parse::<u32>() {
+                    return Type::Int(b, false);
+                }
+            }
+            Type::Struct(name.to_string())
+        }
+    }
+}
+
 /// Replace the Self parameter `self_param` with the concrete type `concrete`
 /// throughout `t` (used to specialize a trait method signature for an impl).
-fn subst_self(t: &Type, self_param: &str, concrete: &str) -> Type {
+fn subst_self(t: &Type, self_param: &str, concrete: &Type) -> Type {
     match t {
-        Type::Struct(n) if n == self_param => Type::Struct(concrete.to_string()),
+        Type::Struct(n) if n == self_param => concrete.clone(),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_self(p, self_param, concrete))),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_self(p, self_param, concrete))),
         Type::Slice(p) => Type::Slice(Box::new(subst_self(p, self_param, concrete))),

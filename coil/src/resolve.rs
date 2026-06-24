@@ -218,10 +218,14 @@ fn qualify_program(
     // method's signature + body like an ordinary function (the method name is left
     // bare — the checker mangles it to <Trait>$<Type>$<method>).
     for im in &mut p.impls {
-        let mut for_ty = Type::Struct(im.for_type.clone());
-        qualify_type(&mut for_ty, m, imps, table, &empty, exports)?;
-        if let Type::Struct(n) = for_ty {
-            im.for_type = n;
+        // A scalar impl target (`(impl Eq i64 …)`) keeps its spelling; a nominal
+        // one resolves to its qualified type name.
+        if !crate::ast::is_scalar_typename(&im.for_type) {
+            let mut for_ty = Type::Struct(im.for_type.clone());
+            qualify_type(&mut for_ty, m, imps, table, &empty, exports)?;
+            if let Type::Struct(n) = for_ty {
+                im.for_type = n;
+            }
         }
         for meth in &mut im.methods {
             let tps: HashSet<String> = meth.type_params.iter().cloned().collect();

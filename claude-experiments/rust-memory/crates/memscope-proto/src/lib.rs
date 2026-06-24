@@ -14,6 +14,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod recfmt;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

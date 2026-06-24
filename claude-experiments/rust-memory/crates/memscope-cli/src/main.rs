@@ -527,12 +527,153 @@ fn cmd_paths(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Reference reader for a `record_to_file` recording: replays the newline-JSON
-/// event stream, reconstructs the live set, and summarizes it. A starting point
-/// for building richer viewers — the format is documented in memscope-agent.
+/// Reference reader for a `record_to_file` recording. Detects the format
+/// (compact binary `.mscope` vs newline-JSON), replays the event stream,
+/// reconstructs the live set, and summarizes it — a starting point for viewers.
 fn cmd_replay(args: &[String]) -> Result<(), String> {
-    use std::io::BufRead;
+    use std::io::Read;
     let file = positional(args).ok_or("usage: memscope replay <FILE>")?;
+    let mut magic = [0u8; 4];
+    {
+        let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
+        let _ = f.read(&mut magic);
+    }
+    if memscope_proto::recfmt::is_binary(&magic) {
+        replay_binary(file)
+    } else {
+        replay_json(file)
+    }
+}
+
+/// Replay a compact binary `.mscope` recording (streaming).
+fn replay_binary(file: &str) -> Result<(), String> {
+    use memscope_proto::recfmt;
+    use std::io::Read;
+    let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
+
+    // Streaming primitives.
+    let mut b1 = [0u8; 1];
+    let mut b2 = [0u8; 2];
+    let mut b4 = [0u8; 4];
+    macro_rules! rd {
+        ($buf:expr) => {
+            f.read_exact(&mut $buf).is_ok()
+        };
+    }
+    let rd_str = |f: &mut std::io::BufReader<std::fs::File>| -> Option<String> {
+        let mut l = [0u8; 2];
+        f.read_exact(&mut l).ok()?;
+        let n = u16::from_le_bytes(l) as usize;
+        let mut s = vec![0u8; n];
+        f.read_exact(&mut s).ok()?;
+        Some(String::from_utf8_lossy(&s).into_owned())
+    };
+
+    // Header.
+    if !rd!(b4) || b4 != recfmt::MAGIC {
+        return Err("not a memscope binary recording".into());
+    }
+    let _ = rd!(b2); // version
+    let _ = rd!(b2); // flags
+    let _ = rd!(b4); // pid
+    let pid = u32::from_le_bytes(b4);
+    let exe = rd_str(&mut f).unwrap_or_default();
+
+    let mut site_label: HashMap<u32, String> = HashMap::new();
+    let mut live: HashMap<u64, (u64, u32)> = HashMap::new();
+    let (mut allocs, mut frees, mut peak, mut cur) = (0u64, 0u64, 0u64, 0u64);
+
+    while rd!(b1) {
+        match b1[0] {
+            recfmt::TAG_SITE => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let site = u32::from_le_bytes(b4);
+                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                let ty = if b1[0] == 1 {
+                    rd_str(&mut f)
+                } else {
+                    None
+                };
+                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                let shape = recfmt::shape_from_code(b1[0]);
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                let nframes = u16::from_le_bytes(b2);
+                for _ in 0..nframes {
+                    let _ = rd_str(&mut f); // function
+                    let _ = rd_str(&mut f); // file
+                    f.read_exact(&mut b4).ok(); // line
+                    f.read_exact(&mut b1).ok(); // inlined
+                }
+                let label = match (shape, ty) {
+                    (Some(sh), Some(t)) => format!("{sh:?}<{t}>"),
+                    (Some(sh), None) => format!("{sh:?}<?>"),
+                    (None, Some(t)) => t,
+                    (None, None) => "<no type>".into(),
+                };
+                site_label.insert(site, label);
+            }
+            recfmt::TAG_EVENTS => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let count = u32::from_le_bytes(b4);
+                let mut rec = vec![0u8; recfmt::EVENT_BYTES * count as usize];
+                f.read_exact(&mut rec).map_err(|e| e.to_string())?;
+                let mut r = recfmt::Reader::new(&rec);
+                for _ in 0..count {
+                    let Some(e) = r.decode_event() else { break };
+                    match e.kind {
+                        memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
+                            live.insert(e.addr, (e.size, e.site.0));
+                            allocs += 1;
+                            cur += e.size;
+                            peak = peak.max(cur);
+                        }
+                        memscope_proto::EventKind::Dealloc => {
+                            if let Some((sz, _)) = live.remove(&e.addr) {
+                                cur = cur.saturating_sub(sz);
+                            }
+                            frees += 1;
+                        }
+                    }
+                }
+            }
+            other => return Err(format!("corrupt recording: unknown tag {other}")),
+        }
+    }
+
+    println!("== memscope binary recording: {file} ==");
+    println!("  pid {pid}   exe {exe}");
+    println!(
+        "  events: {allocs} alloc, {frees} free   peak live: {}   final live: {} allocations, {}",
+        human_bytes(peak),
+        live.len(),
+        human_bytes(cur)
+    );
+    print_live_by_type(&live, &site_label);
+    Ok(())
+}
+
+fn print_live_by_type(live: &HashMap<u64, (u64, u32)>, site_label: &HashMap<u32, String>) {
+    let mut by_type: HashMap<String, (u64, u64)> = HashMap::new();
+    for (sz, site) in live.values() {
+        let label = site_label
+            .get(site)
+            .cloned()
+            .unwrap_or_else(|| "<no site>".to_string());
+        let e = by_type.entry(label).or_default();
+        e.0 += 1;
+        e.1 += sz;
+    }
+    let mut rows: Vec<_> = by_type.into_iter().collect();
+    rows.sort_by_key(|(_, (_, b))| std::cmp::Reverse(*b));
+    println!("\n  FINAL LIVE HEAP BY TYPE:");
+    println!("  {:>8}  {:>12}  {}", "count", "bytes", "type");
+    for (label, (count, bytes)) in rows.iter().take(25) {
+        println!("  {count:>8}  {:>12}  {label}", human_bytes(*bytes));
+    }
+}
+
+fn replay_json(file: &str) -> Result<(), String> {
+    use std::io::BufRead;
     let f = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let rdr = std::io::BufReader::new(f);
 

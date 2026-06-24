@@ -16,3 +16,9 @@
 ; a hash of the value (FNV-1a over fields, when derived)
 (deftrait Hash [Self]
   (hash [(x Self)] (-> i64)))
+
+; ---- standard impls for primitives -----------------------------------------
+; So `eq` (and `case`, which defaults to it) works on the common scalar key: i64.
+; (Other widths / bool can be impl'd the same way as needed.)
+(impl Eq i64 (eq [(a i64) (b i64)] (-> bool) (icmp-eq a b)))
+(impl Hash i64 (hash [(x i64)] (-> i64) x))

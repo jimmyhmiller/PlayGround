@@ -1,62 +1,78 @@
-//! Streams the full allocation event stream to a self-contained file.
+//! Streams the full allocation event stream to a file — compact binary
+//! (`.mscope`, default) or newline-JSON (`.json`/`.jsonl`, human-readable).
 //!
-//! This is an [`EventSink`](memscope_core::EventSink) that runs on the recorder's
-//! pump (off the hot path). It writes newline-delimited JSON so the result is
-//! trivially parseable in any language — open it, read it line by line, build
-//! whatever viewer you like.
+//! Either way it's an [`EventSink`](memscope_core::EventSink) on the recorder's
+//! pump (off the hot path). Both formats are **self-contained**: the first time
+//! a site is seen it's resolved (frames + recovered type + shape) via the
+//! binary's DWARF and written once; events reference it by id, so a reader needs
+//! no binary or debug info.
 //!
-//! The file is **self-contained**: the first time an allocation site is seen it
-//! resolves the site (stack frames + recovered Rust type + container shape) via
-//! the binary's DWARF and writes a one-off `site` record. Every allocation /
-//! free is then a compact `event` record referencing that site id. A reader
-//! never needs the original binary or its debug info.
-//!
-//! Format (one JSON object per line):
-//! ```text
-//! {"v":1,"pid":1234,"exe":"/path/to/bin"}                         // header (first line)
-//! {"site":37,"ty":"Particle","shape":"Boxed","frames":[["serve::main","serve.rs",53,false], ...]}
-//! {"k":"A","ts":2434000000,"a":41923141376,"sz":64,"al":8,"s":37,"t":2}   // alloc
-//! {"k":"D","ts":2440000000,"a":41923141376,"sz":64,"al":8,"t":2}          // free
-//! ```
-//! `k` = A(lloc) / D(ealloc) / R(ealloc-grow); `a` addr, `sz` size, `al` align,
-//! `s` site id, `t` thread, `ts` ns since start.
+//! Per-event cost is the point: the binary writer encodes a fixed 34-byte record
+//! into a reused buffer and flushes a whole batch in one write — ~10× smaller and
+//! much faster than JSON, suitable for allocation-heavy programs. Site
+//! resolution is per-site (interned — only a handful even in a billion-alloc
+//! run), so it never dominates.
 
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 
 use memscope_core::{self as mem, EventKind, EventSink, RawEvent};
-use memscope_proto::SiteId;
+use memscope_proto::{recfmt, SiteId};
 use memscope_symbols::TypeOracle;
 
-/// An [`EventSink`] that appends the resolved event stream to a file.
+enum Format {
+    Binary,
+    Json,
+}
+
+/// An [`EventSink`] that appends the event stream to a file.
 pub struct FileRecorder {
     w: BufWriter<std::fs::File>,
     oracle: Option<TypeOracle>,
     seen_sites: HashSet<u32>,
-    /// JSON-escaped scratch reused across writes.
+    format: Format,
+    scratch: Vec<u8>,
     written: u64,
 }
 
 impl FileRecorder {
-    /// Create a recorder writing to `path`. Builds the DWARF oracle once so the
-    /// file can carry resolved types + stacks.
+    /// Create a recorder for `path`. Binary unless the path ends in `.json` or
+    /// `.jsonl`. Builds the DWARF oracle once so sites resolve to types + stacks.
     pub fn create(path: &str) -> std::io::Result<Self> {
+        let format = if path.ends_with(".json") || path.ends_with(".jsonl") {
+            Format::Json
+        } else {
+            Format::Binary
+        };
         let f = std::fs::File::create(path)?;
         let mut w = BufWriter::new(f);
         let exe = std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        writeln!(
-            w,
-            "{{\"v\":1,\"pid\":{},\"exe\":{}}}",
-            std::process::id(),
-            json_str(&exe)
-        )?;
+
+        match format {
+            Format::Binary => {
+                let mut hdr = Vec::new();
+                recfmt::encode_header(&mut hdr, std::process::id(), &exe);
+                w.write_all(&hdr)?;
+            }
+            Format::Json => {
+                writeln!(
+                    w,
+                    "{{\"v\":1,\"pid\":{},\"exe\":{}}}",
+                    std::process::id(),
+                    json_str(&exe)
+                )?;
+            }
+        }
+
         let oracle = TypeOracle::for_current_process().ok();
         Ok(FileRecorder {
             w,
             oracle,
             seen_sites: HashSet::new(),
+            format,
+            scratch: Vec::with_capacity(64 * 1024),
             written: 0,
         })
     }
@@ -65,74 +81,116 @@ impl FileRecorder {
         self.written
     }
 
-    fn write_site(&mut self, site: u32) -> std::io::Result<()> {
-        if !self.seen_sites.insert(site) {
-            return Ok(());
-        }
+    /// Resolve a site's frames + type the first time we see it.
+    fn resolve_site(
+        &self,
+        site: u32,
+    ) -> (
+        Option<String>,
+        Option<memscope_proto::AllocShape>,
+        Vec<memscope_proto::Frame>,
+    ) {
         let ips = mem::site_frames(SiteId(site)).unwrap_or_default();
-        let (frames, ty, shape) = match &self.oracle {
-            Some(o) => o.resolve_site_ips(&ips),
-            None => (Vec::new(), None, None),
-        };
-        write!(self.w, "{{\"site\":{site}")?;
-        if let Some(t) = &ty {
-            write!(self.w, ",\"ty\":{}", json_str(t))?;
-        }
-        if let Some(s) = shape {
-            write!(self.w, ",\"shape\":\"{s:?}\"")?;
-        }
-        write!(self.w, ",\"frames\":[")?;
-        for (i, fr) in frames.iter().enumerate() {
-            if i > 0 {
-                write!(self.w, ",")?;
+        match &self.oracle {
+            Some(o) => {
+                let (frames, ty, shape) = o.resolve_site_ips(&ips);
+                (ty, shape, frames)
             }
-            write!(
-                self.w,
-                "[{},{},{},{}]",
-                json_str(fr.function.as_deref().unwrap_or("")),
-                json_str(fr.file.as_deref().unwrap_or("")),
-                fr.line.unwrap_or(0),
-                fr.inlined
-            )?;
+            None => (None, None, Vec::new()),
         }
-        writeln!(self.w, "]}}")?;
+    }
+
+    fn consume_binary(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        // Emit any new site definitions first (so events can reference them).
+        for e in events {
+            if e.kind != EventKind::Dealloc && e.site.is_some() && !self.seen_sites.contains(&e.site.0)
+            {
+                self.seen_sites.insert(e.site.0);
+                let (ty, shape, frames) = self.resolve_site(e.site.0);
+                let frecs: Vec<recfmt::FrameRec> = frames
+                    .iter()
+                    .map(|f| recfmt::FrameRec {
+                        function: f.function.as_deref().unwrap_or(""),
+                        file: f.file.as_deref().unwrap_or(""),
+                        line: f.line.unwrap_or(0),
+                        inlined: f.inlined,
+                    })
+                    .collect();
+                self.scratch.clear();
+                recfmt::encode_site(&mut self.scratch, e.site.0, ty.as_deref(), shape, &frecs);
+                self.w.write_all(&self.scratch)?;
+            }
+        }
+        // One event batch: header + fixed records, a single write.
+        self.scratch.clear();
+        recfmt::encode_events_header(&mut self.scratch, events.len() as u32);
+        for e in events {
+            recfmt::encode_event(&mut self.scratch, e);
+        }
+        self.w.write_all(&self.scratch)?;
         Ok(())
     }
 
-    fn write_event(&mut self, e: &RawEvent) -> std::io::Result<()> {
-        let k = match e.kind {
-            EventKind::Alloc => 'A',
-            EventKind::Dealloc => 'D',
-            EventKind::ReallocGrow => 'R',
-        };
-        if e.kind == EventKind::Dealloc {
-            writeln!(
-                self.w,
-                "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"t\":{}}}",
-                e.ts_nanos, e.addr, e.size, e.align, e.thread
-            )
-        } else {
-            if e.site.is_some() {
-                self.write_site(e.site.0)?;
+    fn consume_json(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        for e in events {
+            if e.kind != EventKind::Dealloc && e.site.is_some() && self.seen_sites.insert(e.site.0) {
+                let (ty, shape, frames) = self.resolve_site(e.site.0);
+                write!(self.w, "{{\"site\":{}", e.site.0)?;
+                if let Some(t) = &ty {
+                    write!(self.w, ",\"ty\":{}", json_str(t))?;
+                }
+                if let Some(s) = shape {
+                    write!(self.w, ",\"shape\":\"{s:?}\"")?;
+                }
+                write!(self.w, ",\"frames\":[")?;
+                for (i, fr) in frames.iter().enumerate() {
+                    if i > 0 {
+                        write!(self.w, ",")?;
+                    }
+                    write!(
+                        self.w,
+                        "[{},{},{},{}]",
+                        json_str(fr.function.as_deref().unwrap_or("")),
+                        json_str(fr.file.as_deref().unwrap_or("")),
+                        fr.line.unwrap_or(0),
+                        fr.inlined
+                    )?;
+                }
+                writeln!(self.w, "]}}")?;
             }
-            writeln!(
-                self.w,
-                "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"s\":{},\"t\":{}}}",
-                e.ts_nanos, e.addr, e.size, e.align, e.site.0, e.thread
-            )
+            let k = match e.kind {
+                EventKind::Alloc => 'A',
+                EventKind::Dealloc => 'D',
+                EventKind::ReallocGrow => 'R',
+            };
+            if e.kind == EventKind::Dealloc {
+                writeln!(
+                    self.w,
+                    "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"t\":{}}}",
+                    e.ts_nanos, e.addr, e.size, e.align, e.thread
+                )?;
+            } else {
+                writeln!(
+                    self.w,
+                    "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"s\":{},\"t\":{}}}",
+                    e.ts_nanos, e.addr, e.size, e.align, e.site.0, e.thread
+                )?;
+            }
         }
+        Ok(())
     }
 }
 
 impl EventSink for FileRecorder {
     fn consume(&mut self, events: &[RawEvent]) {
-        for e in events {
-            // Best-effort: a write error (disk full, closed) just stops output.
-            if self.write_event(e).is_err() {
-                return;
-            }
-            self.written += 1;
+        let r = match self.format {
+            Format::Binary => self.consume_binary(events),
+            Format::Json => self.consume_json(events),
+        };
+        if r.is_err() {
+            return;
         }
+        self.written += events.len() as u64;
         let _ = self.w.flush();
     }
 
@@ -141,7 +199,6 @@ impl EventSink for FileRecorder {
     }
 }
 
-/// Minimal JSON string escaping (paths/symbols rarely need more than this).
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -159,13 +216,11 @@ fn json_str(s: &str) -> String {
     out
 }
 
-/// Start recording the allocation stream to `path`. Switches the ring to
-/// Reliable mode (so nothing is dropped) and installs the file recorder on the
-/// pump. Returns the number of recorded events is tracked on the sink; the
-/// recording runs until the process exits.
+/// Start recording the allocation stream to `path` (compact binary `.mscope` by
+/// default; `.json`/`.jsonl` for human-readable). Switches the ring to Reliable
+/// so nothing is dropped. Read it back with `memscope replay <file>`.
 pub fn record_to_file(path: &str) -> std::io::Result<()> {
     let rec = FileRecorder::create(path)?;
-    // Don't lose events while recording a complete trace.
     mem::set_ring_mode(mem::RingMode::Reliable);
     mem::spawn_consumer(Box::new(rec), std::time::Duration::from_millis(1));
     eprintln!("[memscope] recording allocations to {path}");
