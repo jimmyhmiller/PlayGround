@@ -212,7 +212,7 @@ fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
 }
 
 fn placeholder_fn() -> CoreFn {
-    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], local_names: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
+    CoreFn { name: String::new(), params: vec![], extern_by_ref: vec![], ret: Repr::Unit, locals: vec![], local_names: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
 }
 
 /// Collect free variable names referenced in `e`: single-segment path uses that
@@ -455,11 +455,13 @@ fn lower_fn<'a>(
             ret_ty: ret_ty.clone(),
         };
         let mut params = Vec::new();
+        let mut extern_by_ref = Vec::new();
         for p in &f.params {
             let ty = ground_type(&p.ty, subst, ctx)?;
             let repr = reg_lo.repr_of(&ty, p.span)?;
             // Scalars cross by value; `#[repr(C)]` value structs of transitively
-            // blittable fields cross by pointer (caller passes a stack alloca).
+            // blittable fields cross either by value (non-`mut`, per the C ABI) or
+            // by pointer (a `mut` out-param — `gettimeofday(struct timeval*)`).
             // A managed heap (`Ref`) type never crosses. See `docs/ffi.md`.
             if !repr_is_blittable(&repr, &reg_lo.reg.values) {
                 return err(
@@ -472,14 +474,29 @@ fn lower_fn<'a>(
                     p.span,
                 );
             }
+            // A value-struct parameter is by-pointer iff declared `mut`; scalars
+            // are always by value (`false`).
+            extern_by_ref.push(matches!(repr, Repr::Value(_)) && p.is_mut);
             params.push(repr);
         }
         let ret = reg_lo.repr_of(&ret_ty, f.span)?;
-        if !matches!(ret, Repr::Scalar(_) | Repr::Unit) {
+        // A return may be a scalar, nothing, or a blittable value struct that the
+        // C ABI returns in registers (≤ 16 bytes — larger needs sret, not yet
+        // supported). The codegen coerces it per AAPCS64.
+        let ret_ok = match &ret {
+            Repr::Scalar(_) | Repr::Unit => true,
+            Repr::Value(vid) => {
+                repr_is_blittable(&ret, &reg_lo.reg.values)
+                    && reg_lo.reg.values[*vid as usize].size <= 16
+            }
+            _ => false,
+        };
+        if !ret_ok {
             return err(
                 format!(
-                    "extern function `{}` returns `{}`, but only scalar types (or no return) \
-                     may cross the FFI boundary (see docs/ffi.md)",
+                    "extern function `{}` returns `{}`, but only scalar types, nothing, or a \
+                     value struct of scalar fields ≤ 16 bytes may cross the FFI boundary \
+                     (see docs/ffi.md)",
                     f.name, ty_display(&ret_ty),
                 ),
                 f.span,
@@ -488,6 +505,7 @@ fn lower_fn<'a>(
         return Ok(CoreFn {
             name: f.name.clone(),
             params,
+            extern_by_ref,
             ret,
             locals: vec![],
             local_names: vec![],
@@ -536,7 +554,7 @@ fn lower_fn<'a>(
     check_assignable(&body_ty, &ret_ty, body_err_span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, local_names: lo.local_names, body, closure_captures: vec![], is_extern: false, span: fn_span })
+    Ok(CoreFn { name: job.mangled.clone(), params, extern_by_ref: vec![], ret, locals: lo.locals, local_names: lo.local_names, body, closure_captures: vec![], is_extern: false, span: fn_span })
 }
 
 /// Lower a surface type to a ground `Ty`, applying the instantiation subst.
@@ -2159,6 +2177,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         Ok((CoreFn {
             name: format!("__closure_{}", env_lid),
             params: param_reprs,
+            extern_by_ref: vec![],
             ret: ret_repr,
             locals,
             local_names,

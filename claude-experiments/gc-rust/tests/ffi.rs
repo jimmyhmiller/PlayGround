@@ -284,6 +284,68 @@ fn aot_passes_value_struct_by_pointer() {
 }
 
 #[test]
+fn aot_passes_value_struct_by_value() {
+    // Pass value structs BY VALUE per the C ABI (AAPCS64), with NO shim: a 4-byte
+    // `Color` coerced into a GPR, an HFA `Vector2 {f32,f32}` into SIMD registers,
+    // both directions (args + returns). Links a small C helper compiled by `cc`,
+    // so the system ABI is the oracle.
+    let lib = ensure_runtime_lib();
+    unsafe { std::env::set_var("GCRUST_RUNTIME_LIB", &lib); }
+    let dir = std::env::temp_dir().join(format!("gcrust_ffi_byval_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let cpath = dir.join("abi.c");
+    std::fs::write(
+        &cpath,
+        "#include <stdint.h>\n\
+         typedef struct { uint8_t r,g,b,a; } Color;\n\
+         typedef struct { float x,y; } Vector2;\n\
+         int color_sum(Color c){ return c.r+c.g+c.b+c.a; }\n\
+         int vec_sum(Vector2 v){ return (int)(v.x+v.y); }\n\
+         Vector2 mk_vec(float x,float y){ Vector2 v; v.x=x; v.y=y; return v; }\n\
+         Color mk_color(int r,int g,int b){ Color c; c.r=r;c.g=g;c.b=b;c.a=255; return c; }\n",
+    )
+    .unwrap();
+    let obj = dir.join("abi.o");
+    let ok = Command::new("cc")
+        .args(["-c"])
+        .arg(&cpath)
+        .arg("-o")
+        .arg(&obj)
+        .status()
+        .expect("run cc")
+        .success();
+    assert!(ok, "compiling the C ABI helper failed");
+
+    let src = "\
+#[value] struct Color { r: u8, g: u8, b: u8, a: u8 }\n\
+#[value] struct Vector2 { x: f32, y: f32 }\n\
+extern \"C\" fn color_sum(c: Color) -> i32;\n\
+extern \"C\" fn vec_sum(v: Vector2) -> i32;\n\
+extern \"C\" fn mk_vec(x: f32, y: f32) -> Vector2;\n\
+extern \"C\" fn mk_color(r: i32, g: i32, b: i32) -> Color;\n\
+fn main() -> i64 {\n\
+  let s1 = color_sum(Color { r: 10, g: 20, b: 30, a: 255 });\n\
+  let s2 = vec_sum(Vector2 { x: 3.0, y: 4.0 });\n\
+  let v = mk_vec(1.5, 2.5);\n\
+  let s3 = (v.x + v.y) as i32;\n\
+  let c = mk_color(1, 2, 3);\n\
+  let s4 = (c.r as i32) + (c.g as i32) + (c.b as i32) + (c.a as i32);\n\
+  (s1 as i64) + (s2 as i64) + (s3 as i64) + (s4 as i64)\n\
+}\n";
+    let module = parse_module(&lex(src).unwrap()).unwrap();
+    let resolved = resolve_module(module).unwrap();
+    let prog = lower_program(&resolved.globals).unwrap();
+    let out = dir.join("byval");
+    build_executable(&prog, &out, &[obj.to_string_lossy().into_owned()])
+        .expect("build_executable failed");
+
+    // 315 (color_sum) + 7 (vec_sum) + 4 (mk_vec) + 261 (mk_color) = 587; &0xFF = 75.
+    assert_eq!(run_exit_code(&out), 587 & 0xFF);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn aot_passes_string_bytes() {
     let lib = ensure_runtime_lib();
     unsafe { std::env::set_var("GCRUST_RUNTIME_LIB", &lib); }

@@ -186,6 +186,13 @@ pub struct CoreFn {
     /// Mangled, globally-unique name.
     pub name: String,
     pub params: Vec<Repr>,
+    /// For an `extern "C"` function only: parallel to `params`, marks each
+    /// value-struct parameter that crosses **by pointer** (a `mut` param — the C
+    /// side reads/writes through it, e.g. `gettimeofday(struct timeval*)`). A
+    /// non-`mut` value-struct param is `false` here and crosses **by value** per
+    /// the platform C ABI (AAPCS64 coercion). Empty / all-`false` for scalars and
+    /// non-extern functions. See `docs/ffi.md`.
+    pub extern_by_ref: Vec<bool>,
     pub ret: Repr,
     /// Total local slots (params first, then `let`/temp locals).
     pub locals: Vec<Repr>,

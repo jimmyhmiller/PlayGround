@@ -569,6 +569,79 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         self.ctx.struct_type(&fields, false)
     }
 
+    /// If value layout `vid` is a homogeneous floating-point aggregate (AAPCS64
+    /// HFA: 1–4 members, all the same float type, recursing into nested value
+    /// structs), returns `(is_f64, count)`. Such an aggregate is passed/returned
+    /// in consecutive SIMD registers as `[count x float|double]`. `None` for
+    /// anything else (mixed/int fields, value enums, > 4 elements).
+    fn value_hfa(&self, vid: ValueId) -> Option<(bool, u32)> {
+        fn walk(
+            values: &[crate::core::ValueLayout],
+            vid: u32,
+            kind: &mut Option<bool>,
+            count: &mut u32,
+        ) -> bool {
+            let vl = &values[vid as usize];
+            if vl.variants.is_some() {
+                return false; // a value enum is never an HFA
+            }
+            for f in &vl.fields {
+                match f {
+                    Repr::Scalar(ScalarRepr::F32) => {
+                        if *kind == Some(true) { return false; }
+                        *kind = Some(false);
+                        *count += 1;
+                    }
+                    Repr::Scalar(ScalarRepr::F64) => {
+                        if *kind == Some(false) { return false; }
+                        *kind = Some(true);
+                        *count += 1;
+                    }
+                    Repr::Value(v2) => {
+                        if !walk(values, *v2, kind, count) { return false; }
+                    }
+                    _ => return false,
+                }
+                if *count > 4 { return false; }
+            }
+            true
+        }
+        let mut kind = None;
+        let mut count = 0;
+        if walk(&self.prog.values, vid, &mut kind, &mut count) && count >= 1 && count <= 4 {
+            Some((kind.unwrap(), count))
+        } else {
+            None
+        }
+    }
+
+    /// AAPCS64 classification of a blittable value struct crossing the FFI **by
+    /// value** (non-`mut` extern param, or a return). Returns the LLVM type the
+    /// struct is COERCED to for the call/return, or `None` when it must go
+    /// indirect (> 16 bytes → a pointer to a caller-allocated copy). `is_return`
+    /// picks the tighter integer coercion the C ABI uses for small returns
+    /// (a 4-byte struct returns as `i32`, but an argument occupies a full `i64`
+    /// register slot). Matches `clang --target=arm64-apple-macos`.
+    fn abi_coerce(&self, vid: ValueId, is_return: bool) -> Option<BasicTypeEnum<'ctx>> {
+        if let Some((is_f64, n)) = self.value_hfa(vid) {
+            let elem = if is_f64 { self.ctx.f64_type() } else { self.ctx.f32_type() };
+            return Some(elem.array_type(n).as_basic_type_enum());
+        }
+        let size = self.prog.values[vid as usize].size;
+        let i64t = self.ctx.i64_type();
+        if size <= 8 {
+            if is_return && size <= 4 {
+                Some(self.ctx.i32_type().as_basic_type_enum())
+            } else {
+                Some(i64t.as_basic_type_enum())
+            }
+        } else if size <= 16 {
+            Some(i64t.array_type(2).as_basic_type_enum())
+        } else {
+            None // indirect (by pointer)
+        }
+    }
+
     fn scalar_ty(&self, s: ScalarRepr) -> BasicTypeEnum<'ctx> {
         match s {
             ScalarRepr::I8 | ScalarRepr::U8 => self.ctx.i8_type().as_basic_type_enum(),
@@ -592,12 +665,19 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         // it. See `docs/ffi.md`.
         if f.is_extern {
             let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
-            for p in &f.params {
+            for (i, p) in f.params.iter().enumerate() {
                 match p {
-                    // A `#[repr(C)]` value struct crosses by POINTER: the caller
-                    // spills it to a stack alloca and passes its address (C reads
-                    // / writes through the pointer). See `docs/ffi.md`.
-                    Repr::Value(_) => params.push(ptr.into()),
+                    // A `#[repr(C)]` value struct crosses either BY VALUE (the
+                    // common case — coerced per the C ABI into register-shaped
+                    // types) or BY POINTER (a `mut` out-param, or > 16 bytes which
+                    // the ABI passes indirectly). See `docs/ffi.md`.
+                    Repr::Value(vid) => {
+                        let by_ref = f.extern_by_ref.get(i).copied().unwrap_or(false);
+                        match if by_ref { None } else { self.abi_coerce(*vid, false) } {
+                            Some(coerced) => params.push(coerced.into()),
+                            None => params.push(ptr.into()),
+                        }
+                    }
                     _ => {
                         if let Some(t) = self.llvm_ty(p) {
                             params.push(t.into());
@@ -605,9 +685,17 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                     }
                 }
             }
-            let fn_ty = match self.llvm_ty(&f.ret) {
-                Some(rt) => rt.fn_type(&params, false),
-                None => self.ctx.void_type().fn_type(&params, false),
+            // A value-struct return is coerced too (≤ 16 bytes — `lower` rejects
+            // larger). Scalars/unit use their natural LLVM type.
+            let fn_ty = match &f.ret {
+                Repr::Value(vid) => match self.abi_coerce(*vid, true) {
+                    Some(coerced) => coerced.fn_type(&params, false),
+                    None => self.ctx.void_type().fn_type(&params, false),
+                },
+                _ => match self.llvm_ty(&f.ret) {
+                    Some(rt) => rt.fn_type(&params, false),
+                    None => self.ctx.void_type().fn_type(&params, false),
+                },
             };
             return self.module.add_function(
                 &f.name,
@@ -3078,6 +3166,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let mut cargs: Vec<inkwell::values::BasicMetadataValueEnum> =
             if is_extern { vec![] } else { vec![fcx.thread.into()] };
         let param_reprs = self.prog.funcs[fid as usize].params.clone();
+        let extern_by_ref = self.prog.funcs[fid as usize].extern_by_ref.clone();
         // Any FFI copy-out buffers queued while evaluating THIS call's arguments
         // are drained after the call; snapshot the queue depth to isolate them.
         let copy_out_base = fcx.pending_copy_outs.len();
@@ -3092,27 +3181,51 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         // `cargs` is built positionally; `deferred` holds (cargs-index, local-id).
         let mut deferred: Vec<(usize, u32)> = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            // For an extern callee, a value-struct argument crosses by POINTER.
-            // The struct lives on the native stack — never a GC heap object — so
-            // its address is stable for the call and needs no pinning.
-            //   * If the argument is a value-struct LOCAL, pass the address of
-            //     the local's own alloca, so writes by C (the `mut ts` out-param
-            //     case) land back in the caller's variable.
-            //   * Otherwise spill the temporary to a fresh alloca and pass that.
-            // See `docs/ffi.md`.
-            if is_extern && matches!(param_reprs.get(i), Some(Repr::Value(_))) {
-                if let CoreExprKind::Local(id) = a.kind.as_ref() {
-                    if let Some(slot) = fcx.slots[*id as usize] {
-                        cargs.push(slot.into());
-                        continue;
+            // For an extern callee, a value-struct argument crosses either BY
+            // VALUE (coerced into register-shaped types per the C ABI) or BY
+            // POINTER (a `mut` out-param, or > 16 bytes passed indirectly). The
+            // struct lives on the native stack — never a GC heap object — so its
+            // address is stable for the call and needs no pinning. See docs/ffi.md.
+            if is_extern {
+                if let Some(Repr::Value(vid)) = param_reprs.get(i) {
+                    let by_ref = extern_by_ref.get(i).copied().unwrap_or(false);
+                    let coerce = if by_ref { None } else { self.abi_coerce(*vid, false) };
+                    match coerce {
+                        // By value (≤ 16B): materialize the struct, reinterpret it
+                        // into the coercion type through a stack slot (the upper
+                        // bytes of a partly-filled register slot are don't-care, as
+                        // in clang's lowering), and pass the coerced value.
+                        Some(coerce_ty) => {
+                            if let Some(v) = self.gen_expr(fcx, a)? {
+                                let slot =
+                                    self.builder.build_alloca(coerce_ty, "ffi.coerce").unwrap();
+                                self.builder.build_store(slot, v).unwrap();
+                                let loaded =
+                                    self.builder.build_load(coerce_ty, slot, "ffi.arg").unwrap();
+                                cargs.push(loaded.into());
+                            }
+                            continue;
+                        }
+                        // By pointer: a value-struct LOCAL passes its own alloca
+                        // (so a `mut` out-param's writes land back in the caller's
+                        // variable); a temporary spills to a fresh alloca.
+                        None => {
+                            if let CoreExprKind::Local(id) = a.kind.as_ref() {
+                                if let Some(slot) = fcx.slots[*id as usize] {
+                                    cargs.push(slot.into());
+                                    continue;
+                                }
+                            }
+                            if let Some(v) = self.gen_expr(fcx, a)? {
+                                let slot =
+                                    self.builder.build_alloca(v.get_type(), "ffi.arg").unwrap();
+                                self.builder.build_store(slot, v).unwrap();
+                                cargs.push(slot.into());
+                            }
+                            continue;
+                        }
                     }
                 }
-                if let Some(v) = self.gen_expr(fcx, a)? {
-                    let slot = self.builder.build_alloca(v.get_type(), "ffi.arg").unwrap();
-                    self.builder.build_store(slot, v).unwrap();
-                    cargs.push(slot.into());
-                }
-                continue;
             }
             // Defer a `Ref` argument that is a plain `Local` (reload from its slot
             // after all args are evaluated — see GC-SAFETY note above).
@@ -3161,10 +3274,28 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 ).unwrap();
             }
         }
-        Ok(match cs.try_as_basic_value() {
+        let ret_val = match cs.try_as_basic_value() {
             inkwell::values::ValueKind::Basic(v) => Some(v),
             inkwell::values::ValueKind::Instruction(_) => None,
-        })
+        };
+        // Decode a by-value value-struct return: the call yielded the ABI
+        // coercion type (an `iN` / `[N x i64]` / `[N x float]`); reinterpret it
+        // back into the value struct through a stack slot.
+        if is_extern {
+            if let Repr::Value(vid) = self.prog.funcs[fid as usize].ret {
+                if let (Some(coerce_ty), Some(coerced)) =
+                    (self.abi_coerce(vid, true), ret_val)
+                {
+                    let struct_ty = self.value_struct_ty(vid);
+                    let slot = self.builder.build_alloca(coerce_ty, "ffi.ret").unwrap();
+                    self.builder.build_store(slot, coerced).unwrap();
+                    let sval =
+                        self.builder.build_load(struct_ty, slot, "ffi.retval").unwrap();
+                    return Ok(Some(sval));
+                }
+            }
+        }
+        Ok(ret_val)
     }
 
     /// Emit a GC safepoint poll: `if (thread.state != 0) ai_gc_pollcheck_slow(thread)`.
