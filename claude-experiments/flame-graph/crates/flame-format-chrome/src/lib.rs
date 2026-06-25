@@ -102,15 +102,34 @@ impl TraceSource for ChromeSource {
             TraceFile::Object { trace_events } => trace_events,
         };
 
-        // Per-(pid, tid) state: track id, plus a stack of currently-open `X`
-        // (complete) events' end timestamps. B/E nesting is handled by the
-        // builder's own open-stack; X events have explicit durations and don't
-        // touch that stack, so we compute their depth from time containment
-        // here. Assumes X events on a track arrive in start-time order with
-        // parent before child, which the Chrome spec requires.
+        // Per-(pid, tid) state: track id, plus a *buffer* of this track's `X`
+        // (complete) and instant events. B/E nesting is handled by the builder's
+        // own open-stack; X events carry explicit durations and don't touch that
+        // stack, so their depth is purely a function of time containment.
+        //
+        // We cannot compute that depth in a single streaming pass: the Chrome
+        // spec recommends, but does not require, that parents are emitted before
+        // children. Real producers (e.g. memscope's allocation timeline) walk the
+        // tree in post-order, so a wide parent interval arrives *after* the
+        // narrower child intervals it contains. A forward-only "pop ends <= start"
+        // stack then buries the parent underneath its own children at too great a
+        // depth, which renders as staircases, overlaps, and gaps.
+        //
+        // Instead we collect every X/instant event per track, then in `flush`
+        // sort by (start asc, end desc) and assign depth with a containment stack.
+        // That is order-independent and correct for any properly-nested input.
+        // `base_depth` captures the open B/E depth at read time so X events still
+        // nest under any enclosing B/E slice.
+        struct XEvent {
+            start_ns: u64,
+            dur_ns: u64,
+            name: flame_core::StringId,
+            category: flame_core::CategoryId,
+            base_depth: u16,
+        }
         struct ThreadState {
             track: TrackId,
-            open_x_end_ns: Vec<u64>,
+            x_events: Vec<XEvent>,
         }
         let mut state: AHashMap<(i64, i64), ThreadState> = AHashMap::new();
         let mut process_ids: AHashMap<i64, ProcessId> = AHashMap::new();
@@ -153,7 +172,7 @@ impl TraceSource for ChromeSource {
                 let thread = builder.add_thread(Some(proc_id), tid, "");
                 let label = format!("PID {pid} TID {tid}");
                 let track = builder.add_track(TrackKind::Thread(thread), &label, None);
-                ThreadState { track, open_x_end_ns: Vec::new() }
+                ThreadState { track, x_events: Vec::new() }
             });
             let track = st.track;
 
@@ -174,28 +193,20 @@ impl TraceSource for ChromeSource {
                     builder.end_slice(track, ts_ns);
                 }
                 "X" => {
-                    let dur_ns = ev.dur.unwrap_or(0.0).max(0.0) * 1000.0;
-                    let dur_ns = dur_ns as u64;
-                    let end_ns = ts_ns + dur_ns;
+                    let dur_ns = (ev.dur.unwrap_or(0.0).max(0.0) * 1000.0) as u64;
                     let name = builder.intern_string(&ev.name);
-                    // Pop any open X parents that ended at or before this event's
-                    // start, then nest under whatever's still open.
-                    while st.open_x_end_ns.last().map_or(false, |&e| e <= ts_ns) {
-                        st.open_x_end_ns.pop();
-                    }
-                    let depth = builder.open_stack_depth(track) + st.open_x_end_ns.len() as u16;
-                    builder.add_complete_slice(track, depth, ts_ns, dur_ns, name, category, None);
-                    st.open_x_end_ns.push(end_ns);
+                    let base_depth = builder.open_stack_depth(track);
+                    // Defer depth assignment to flush — see ThreadState docs. We
+                    // cannot nest correctly until every X event on this track is
+                    // known, because parents may arrive after their children.
+                    st.x_events.push(XEvent { start_ns: ts_ns, dur_ns, name, category, base_depth });
                 }
                 "i" | "I" => {
                     let name = builder.intern_string(&ev.name);
-                    while st.open_x_end_ns.last().map_or(false, |&e| e <= ts_ns) {
-                        st.open_x_end_ns.pop();
-                    }
-                    let depth = builder.open_stack_depth(track) + st.open_x_end_ns.len() as u16;
+                    let base_depth = builder.open_stack_depth(track);
                     // Zero-width slice as instant marker. Renderer can decide to draw
                     // these specially in v2; v1 just shows them as a 1px line.
-                    builder.add_complete_slice(track, depth, ts_ns, 0, name, category, None);
+                    st.x_events.push(XEvent { start_ns: ts_ns, dur_ns: 0, name, category, base_depth });
                 }
                 "b" | "e" | "n" => {
                     if !warned_async {
@@ -221,6 +232,33 @@ impl TraceSource for ChromeSource {
                         warned_unknown = true;
                     }
                 }
+            }
+        }
+
+        // Flush each track's buffered X/instant events. Sort by (start asc, end
+        // desc) so any interval that *contains* another sorts before it, then
+        // assign depth with a containment stack: pop every open interval that
+        // ends at or before this one's start, and this event's containment depth
+        // is whatever remains open. This is independent of the order events were
+        // emitted, so post-order (child-before-parent) producers nest correctly.
+        for st in state.values_mut() {
+            let evs = &st.x_events;
+            let mut order: Vec<u32> = (0..evs.len() as u32).collect();
+            order.sort_by_key(|&i| {
+                let e = &evs[i as usize];
+                (e.start_ns, std::cmp::Reverse(e.start_ns + e.dur_ns))
+            });
+            let mut open_end: Vec<u64> = Vec::new();
+            for &i in &order {
+                let e = &evs[i as usize];
+                while open_end.last().map_or(false, |&end| end <= e.start_ns) {
+                    open_end.pop();
+                }
+                let depth = e.base_depth + open_end.len() as u16;
+                builder.add_complete_slice(
+                    st.track, depth, e.start_ns, e.dur_ns, e.name, e.category, None,
+                );
+                open_end.push(e.start_ns + e.dur_ns);
             }
         }
 
@@ -277,6 +315,32 @@ mod tests {
             .collect();
         by_start.sort_by_key(|&(s, _)| s);
         assert_eq!(by_start, vec![(0, 0), (10_000, 1), (200_000, 0)]);
+    }
+
+    #[test]
+    fn x_events_nest_when_parent_emitted_after_children() {
+        // Post-order producer (memscope allocation timeline): the wide parent
+        // interval [0,100] is emitted AFTER the two child intervals it contains.
+        // A forward-only stack would bury the parent below its children; the
+        // containment-sort flush must place it at depth 0 with children at 1.
+        let input = br#"{"traceEvents":[
+            {"name":"childA","ph":"X","ts":0,"dur":40,"pid":1,"tid":1},
+            {"name":"childB","ph":"X","ts":40,"dur":60,"pid":1,"tid":1},
+            {"name":"parent","ph":"X","ts":0,"dur":100,"pid":1,"tid":1}
+        ]}"#;
+        let mut b = ProfileBuilder::new();
+        ChromeSource.load(input, &mut b).unwrap();
+        let p = b.finish();
+        let depth_of = |name: &str| -> u16 {
+            let sid = p.strings.lookup(name).expect("name interned");
+            (0..p.slices.len())
+                .find(|&i| p.slices.name[i] == sid)
+                .map(|i| p.slices.depth[i])
+                .expect("slice present")
+        };
+        assert_eq!(depth_of("parent"), 0, "parent must be the containing frame");
+        assert_eq!(depth_of("childA"), 1);
+        assert_eq!(depth_of("childB"), 1);
     }
 
     #[test]

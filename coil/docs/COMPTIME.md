@@ -41,12 +41,15 @@ runs by interpretation — it is literally the same `=` as runtime.
   **across function calls** (by reference). Modelled with reference-counted cells;
   aggregate values are references into them, deep-copied where the language copies.
 
-The **result of a `comptime` form must still be a scalar** (returning a struct/
-array is the next increment — it needs the literal-back builder synthesis).
+**Aggregate results (1c):** a `comptime` form may return a **struct** (incl.
+nested) or a **sum** — the value-builder synthesizes the elaborated expression that
+reconstructs it (`(let [t (alloc-stack S)] (store! (field t f) v)… (load t))` for a
+struct; a variant call for a sum). Returning an **array** isn't supported yet (no
+element type is recorded on the value) and errors clearly.
 
 Not supported *yet* — each raises a clear error rather than miscompiling:
 
-- a `comptime` form whose result is an aggregate (scalar results only, for now).
+- a `comptime` form whose result is an array.
 - generic calls, FFI/`extern`, `llvm-ir`, function pointers, strings,
   `sizeof`/`alignof`/`offsetof`.
 
@@ -54,8 +57,7 @@ A fuel budget bounds runaway loops/recursion.
 
 ## Roadmap
 
-- **1c** — aggregate *results*: a `comptime` form returning a struct/array
-  (synthesize a builder expression), and let `const` take a `comptime` expression.
+- **1d** — array results; let `const` take a `comptime` expression.
 - **2** — comptime reflection as first-class values (the type tables you can
   already read syntactically become values).
 - **3** — staged macros: run code generation in the runtime language too (the big

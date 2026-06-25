@@ -82,16 +82,6 @@ fn comptime_rejects_unsupported_clearly() {
     assert!(err.contains("comptime:"), "expected a comptime error, got:\n{err}");
 }
 
-#[test]
-fn comptime_rejects_non_scalar_result() {
-    let err = coil::emit_ir(
-        "(module app)\n\
-         (defsum Opt (Some [(v i64)]) (Non []))\n\
-         (defn main [] (-> i64) (do (comptime (Some 5)) 0))",
-    )
-    .unwrap_err();
-    assert!(err.contains("must produce a scalar"), "got:\n{err}");
-}
 
 // ---- Stage 1b: memory model (mutable locals, loops, aggregates, by-ref args) ---
 
@@ -148,6 +138,61 @@ fn comptime_struct_field_mutation() {
                        (iadd (load (field p x)) (load (field p y))))))", // 42
     );
     assert_eq!(code, 42);
+}
+
+// ---- Stage 1c: aggregate results (a comptime form returning a struct/sum) ------
+
+#[test]
+fn comptime_returns_a_struct() {
+    let code = build_and_run(
+        "(module app)\n\
+         (defstruct P [(x i64) (y i64)])\n\
+         (defn mkp [(a i64) (b i64)] (-> P)\n\
+           (let [(mut p) (zeroed P)] (store! (field (mut p) x) a) (store! (field (mut p) y) b) (load p)))\n\
+         (defn main [] (-> i64)\n\
+           (let [p (comptime (mkp 30 12))] (iadd (load (field p x)) (load (field p y)))))", // 42
+    );
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn comptime_returns_a_nested_struct() {
+    let code = build_and_run(
+        "(module app)\n\
+         (defstruct P [(x i64) (y i64)])\n\
+         (defstruct Line [(a P) (b P)])\n\
+         (defn mkp [(a i64) (b i64)] (-> P) (let [(mut p) (zeroed P)] (store! (field (mut p) x) a) (store! (field (mut p) y) b) (load p)))\n\
+         (defn mkline [(x1 i64) (y1 i64) (x2 i64) (y2 i64)] (-> Line)\n\
+           (let [(mut l) (zeroed Line)] (store! (field (mut l) a) (mkp x1 y1)) (store! (field (mut l) b) (mkp x2 y2)) (load l)))\n\
+         (defn main [] (-> i64)\n\
+           (let [l (comptime (mkline 1 2 30 9))]\n\
+             (iadd (load (field (field l a) y)) (load (field (field l b) x)))))", // 2 + 30 = 32
+    );
+    assert_eq!(code, 32);
+}
+
+#[test]
+fn comptime_returns_a_sum() {
+    let code = build_and_run(
+        "(module app)\n\
+         (defsum Opt (Some [(v i64)]) (Non []))\n\
+         (defn main [] (-> i64)\n\
+           (let [o (comptime (Some 42))] (match o (Some [v] v) (Non [] 0))))", // 42
+    );
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn comptime_array_result_errors_clearly() {
+    // Arrays-as-results aren't supported yet (no element type recorded). Bind it
+    // (a valid use) so we reach the value-builder rather than a type error.
+    let err = coil::emit_ir(
+        "(module app)\n\
+         (defn mk [] (-> (array i64 2)) (let [(mut a) (zeroed (array i64 2))] (store! (index (mut a) 0) 7) (load a)))\n\
+         (defn main [] (-> i64) (let [a (comptime (mk))] 0))",
+    )
+    .unwrap_err();
+    assert!(err.contains("returning an array"), "got:\n{err}");
 }
 
 #[test]

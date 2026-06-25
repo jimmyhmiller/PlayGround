@@ -13,6 +13,7 @@
 //! `llvm-ir`/function pointers/generic calls remain unsupported and error clearly.
 
 use crate::ast::*;
+use crate::span::Span;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -57,6 +58,7 @@ struct Ctx<'a> {
     structs: &'a HashMap<String, StructDef>,
     variants: &'a HashSet<String>,
     fuel: std::cell::Cell<u64>,
+    gensym: std::cell::Cell<u64>,
 }
 
 const FUEL: u64 = 50_000_000;
@@ -71,7 +73,13 @@ pub fn fold_program(
     let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let variants: HashSet<String> =
         sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
-    let ctx = Ctx { fns: &table, structs: &smap, variants: &variants, fuel: std::cell::Cell::new(FUEL) };
+    let ctx = Ctx {
+        fns: &table,
+        structs: &smap,
+        variants: &variants,
+        fuel: std::cell::Cell::new(FUEL),
+        gensym: std::cell::Cell::new(0),
+    };
     for f in funcs.iter_mut() {
         let body = std::mem::take(&mut f.body);
         f.body = body.iter().map(|e| fold_expr(e, &ctx)).collect::<Result<_, _>>()?;
@@ -91,7 +99,7 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray break/continue at top level".to_string()),
             };
-            return Ok(Expr::new(literal(v)?, e.span));
+            return build_value(&v, e.span, ctx);
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
@@ -161,14 +169,68 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
     Ok(Expr::new(kind, e.span))
 }
 
-fn literal(v: CtVal) -> Result<ExprKind, String> {
-    match v {
-        CtVal::Int(n) => Ok(ExprKind::Int(n)),
-        CtVal::Bool(b) => Ok(ExprKind::Bool(b)),
-        CtVal::Float(x) => Ok(ExprKind::Float(x)),
-        _ => Err("comptime: a (comptime …) form must produce a scalar (int/bool/float); \
-                  returning an aggregate isn't supported yet"
-            .to_string()),
+/// Synthesize an (already-elaborated) expression that *reconstructs* a comptime
+/// value — the "literal-back". Scalars are literals; a sum is a variant call; a
+/// struct is built imperatively (`let (mut t) (zeroed S)` + a `store!` per field +
+/// `(load t)`), recursing for nested aggregates. Arrays aren't supported yet
+/// (no element type recorded on the value).
+fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
+    let e = |k| Expr::new(k, span);
+    Ok(match v {
+        CtVal::Int(n) => e(ExprKind::Int(*n)),
+        CtVal::Bool(b) => e(ExprKind::Bool(*b)),
+        CtVal::Float(x) => e(ExprKind::Float(*x)),
+        CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx)?,
+        CtVal::Struct { .. } | CtVal::Array(_) | CtVal::Sum { .. } => {
+            // aggregates only appear behind a Ref as values
+            build_content(v, span, ctx)?
+        }
+    })
+}
+
+fn build_content(c: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
+    let e = |k| Expr::new(k, span);
+    match c {
+        CtVal::Int(_) | CtVal::Bool(_) | CtVal::Float(_) => build_value(c, span, ctx),
+        CtVal::Sum { variant, fields } => {
+            // pre-mono, sum construction is a call to the variant name
+            let args = fields
+                .iter()
+                .map(|f| build_value(&cell_value(f), span, ctx))
+                .collect::<Result<_, _>>()?;
+            Ok(e(ExprKind::Call { func: variant.clone(), type_args: vec![], args }))
+        }
+        CtVal::Struct { name, fields } => {
+            // `(let [t (alloc-stack S)]  (store! (field t f) v)…  (load t))`.
+            // `t` is an immutable binding holding a real `(ptr S)`, so `field`/
+            // `load` see a pointer (a mutable local would bind the struct *value*).
+            let sd = ctx.structs.get(name).ok_or_else(|| format!("comptime: unknown struct '{name}'"))?;
+            let n = ctx.gensym.get();
+            ctx.gensym.set(n + 1);
+            let t = format!("$ct{n}");
+            let var = || Expr::new(ExprKind::Var(t.clone()), span);
+            let mut body = Vec::with_capacity(sd.fields.len() + 1);
+            for ((fname, _), fcell) in sd.fields.iter().zip(fields) {
+                let val = build_value(&cell_value(fcell), span, ctx)?;
+                body.push(e(ExprKind::Store {
+                    ptr: Box::new(e(ExprKind::Field { ptr: Box::new(var()), field: fname.clone() })),
+                    val: Box::new(val),
+                }));
+            }
+            body.push(e(ExprKind::Load(Box::new(var()))));
+            Ok(e(ExprKind::Let {
+                binds: vec![(
+                    t.clone(),
+                    false,
+                    e(ExprKind::Alloc { storage: Storage::Stack, ty: Type::Struct(name.clone()) }),
+                )],
+                body,
+            }))
+        }
+        CtVal::Array(_) => Err(
+            "comptime: returning an array from (comptime …) isn't supported yet".to_string(),
+        ),
+        CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx),
     }
 }
 
