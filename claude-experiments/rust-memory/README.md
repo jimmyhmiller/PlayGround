@@ -123,9 +123,12 @@ memscope flamechart allocs.mscope --out fc.json      # TIMELINE (not aggregated)
 memscope flamechart allocs.mscope --no-std           # …same, application frames only
 ```
 
-`--no-std` removes `std`/`core`/`alloc`, the lang-start + panic machinery, the
-`FnOnce`/`Fn` shims, and pthread/libc entry — leaving your application (and
-dependency) frames plus the recovered type leaf. It's a *frame* filter, not a
+`--no-std` removes `std`/`core`/`alloc` *plumbing*, the lang-start + panic
+machinery, the `FnOnce`/`Fn` shims, and pthread/libc entry — but **keeps the
+boundary frame**: the first std call made from your code, which is what tells you
+*how* it allocated (`Box::new`, `Vec::with_capacity`, `from_elem`, `collect`,
+`format!`, `Vec::push`, `Cow::into_owned`, …). So a stack reads
+`serve::main → alloc::vec::from_elem → [Vec<u8>]`. It's a *frame* filter, not a
 sample one: every allocation and thread is still present, but the boilerplate is
 gone, which also shrinks the output dramatically (heapster flamechart: 346 MB →
 23 MB, same 836,879 allocations).

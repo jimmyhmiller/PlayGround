@@ -1060,16 +1060,33 @@ fn is_std_frame(name: &str) -> bool {
         || name == "[unknown]"
 }
 
-/// Build a site's root→leaf path: cleaned frames (innermost recorded first, so
-/// reversed), optionally with stdlib frames removed, then the recovered type as
-/// the leaf.
+/// Build a site's root→leaf path: cleaned frames (recorded innermost-first, so
+/// reversed to put the outermost/app frame at the root), then the recovered type
+/// as the leaf.
+///
+/// With `no_std`, drop stdlib/runtime plumbing but **keep the boundary frame** —
+/// the first std frame entered directly from application code (e.g.
+/// `Vec::with_capacity`, `<str as ToOwned>::to_owned`, `HashMap::insert`), which
+/// is what tells you *how* the allocation happened. Deeper std plumbing
+/// (`RawVec`, `Global::alloc_impl`, `__rust_alloc`) and the root runtime
+/// (`lang_start`, `_main`) are removed.
 fn site_to_path(frames: &[String], label: &str, no_std: bool) -> Vec<String> {
-    let mut p: Vec<String> = frames
-        .iter()
-        .rev()
-        .map(|f| clean_frame(f))
-        .filter(|f| !no_std || !is_std_frame(f))
-        .collect();
+    let cleaned: Vec<String> = frames.iter().rev().map(|f| clean_frame(f)).collect();
+    let mut p: Vec<String> = Vec::with_capacity(cleaned.len() + 1);
+    for (i, f) in cleaned.iter().enumerate() {
+        let keep = if !no_std {
+            true
+        } else if !is_std_frame(f) {
+            true // application / dependency frame
+        } else {
+            // A std frame: keep it only at an app -> std boundary (its caller,
+            // the frame below it toward the root, is application code).
+            i > 0 && !is_std_frame(&cleaned[i - 1])
+        };
+        if keep {
+            p.push(f.clone());
+        }
+    }
     p.push(format!("[{label}]"));
     p
 }
