@@ -65,7 +65,7 @@ fn print_help() {
          memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
          memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live]\n  \
          \x20                                            allocation flame graph by call stack (aggregated)\n  \
-         memscope flamechart <FILE> [--thread T]        allocation flame CHART (timeline, not aggregated)\n"
+         memscope flamechart <FILE>                     allocation flame CHART (full timeline, every allocation)\n"
     );
 }
 
@@ -938,9 +938,8 @@ fn label_for(shape: Option<memscope_proto::AllocShape>, ty: Option<String>) -> S
 /// lifetime (alloc -> free), named by recovered type. Open it at
 /// https://ui.perfetto.dev.
 fn cmd_perfetto(args: &[String]) -> Result<(), String> {
-    let file = positional(args).ok_or("usage: memscope perfetto <FILE> [--out trace.json] [--max N]")?;
+    let file = positional(args).ok_or("usage: memscope perfetto <FILE> [--out trace.json]")?;
     let out = flag(args, "--out").unwrap_or("trace.json").to_string();
-    let max_slices: usize = flag(args, "--max").and_then(|s| s.parse().ok()).unwrap_or(300_000);
 
     let (labels, events) = read_recording(file)?;
 
@@ -982,23 +981,19 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
                 let id = slice_id;
                 slice_id += 1;
                 live.insert(e.addr, (e.size, id, e.ts_nanos));
-                if slices_emitted < max_slices {
-                    slices_emitted += 1;
-                    te.push(format!(
-                        "{{\"ph\":\"b\",\"cat\":\"alloc\",\"name\":\"{}\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{},\"args\":{{\"size\":{},\"addr\":\"{:#x}\"}}}}",
-                        esc(&label), id, us(e.ts_nanos), e.thread, e.size, e.addr
-                    ));
-                }
+                slices_emitted += 1;
+                te.push(format!(
+                    "{{\"ph\":\"b\",\"cat\":\"alloc\",\"name\":\"{}\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{},\"args\":{{\"size\":{},\"addr\":\"{:#x}\"}}}}",
+                    esc(&label), id, us(e.ts_nanos), e.thread, e.size, e.addr
+                ));
             }
             memscope_proto::EventKind::Dealloc => {
                 if let Some((size, id, _)) = live.remove(&e.addr) {
                     total = total.saturating_sub(size);
-                    if id < max_slices as u64 {
-                        te.push(format!(
-                            "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
-                            id, us(e.ts_nanos), e.thread
-                        ));
-                    }
+                    te.push(format!(
+                        "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
+                        id, us(e.ts_nanos), e.thread
+                    ));
                 }
             }
         }
@@ -1015,12 +1010,10 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     // Close out still-live allocations at the end of the trace.
     let end = us(last_ts + 1_000_000);
     for (_addr, (_size, id, _ts)) in &live {
-        if *id < max_slices as u64 {
-            te.push(format!(
-                "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":0}}",
-                id, end
-            ));
-        }
+        te.push(format!(
+            "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":0}}",
+            id, end
+        ));
     }
 
     let json = format!("{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n{}\n]}}", te.join(",\n"));
@@ -1028,14 +1021,11 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
 
     println!("wrote Perfetto trace: {out}");
     println!(
-        "  {} events  ->  {} async slices + live_bytes counter  ({} threads)",
+        "  {} events  ->  {} async slices (every allocation) + live_bytes counter  ({} threads)",
         events.len(),
         slices_emitted,
         threads.len()
     );
-    if slices_emitted < live.len() + slices_emitted && events.iter().filter(|e| matches!(e.kind, memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow)).count() > max_slices {
-        println!("  (slices capped at --max {max_slices}; counter covers all events)");
-    }
     println!("  open it at https://ui.perfetto.dev  (Open trace file)");
     Ok(())
 }
@@ -1198,25 +1188,10 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
 /// see what was allocating when. Emitted as nested synchronous `X` events.
 fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     let file = positional(args)
-        .ok_or("usage: memscope flamechart <FILE> [--out F] [--thread T] [--max N]")?;
+        .ok_or("usage: memscope flamechart <FILE> [--out F]")?;
     let out = flag(args, "--out").unwrap_or("alloc-flamechart.json").to_string();
-    let only_thread: Option<u32> = flag(args, "--thread").and_then(|s| s.parse().ok());
-    let max_samples: usize = flag(args, "--max").and_then(|s| s.parse().ok()).unwrap_or(150_000);
 
     let (sites, events) = read_recording(file)?;
-
-    // Uniform downsample so the trace stays openable: keep every `stride`-th
-    // allocation across the whole run (preserves the timeline shape).
-    let total_allocs = events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
-            ) && only_thread.map(|t| t == e.thread).unwrap_or(true)
-        })
-        .count();
-    let stride = (total_allocs / max_samples.max(1)).max(1);
 
     // Cleaned root->leaf path per site (reversed frames + the type as the leaf).
     let mut site_path: HashMap<u32, Vec<String>> = HashMap::new();
@@ -1226,24 +1201,17 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
         site_path.insert(*site, p);
     }
 
-    // Allocations in order, grouped per thread, with a strictly-increasing virtual
-    // timestamp (tracks the ms clock but sub-orders within a ms).
+    // Every allocation, in order, grouped per thread — no sampling, no caps.
     let mut per_thread: std::collections::BTreeMap<u32, Vec<(u64, u32)>> =
         std::collections::BTreeMap::new();
     let mut vt: u64 = 0;
-    let mut seen = 0usize;
     for e in &events {
         vt = (vt + 1).max(e.ts_nanos);
         if matches!(
             e.kind,
             memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
-        ) && only_thread.map(|t| t == e.thread).unwrap_or(true)
-        {
-            let keep = seen % stride == 0;
-            seen += 1;
-            if keep {
-                per_thread.entry(e.thread).or_default().push((vt, e.site));
-            }
+        ) {
+            per_thread.entry(e.thread).or_default().push((vt, e.site));
         }
     }
 
@@ -1301,16 +1269,11 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     std::fs::write(&out, json).map_err(|e| e.to_string())?;
     println!("wrote allocation flame chart (timeline): {out}");
     println!(
-        "  {} allocation samples across {} threads -> {} slices (adjacent identical stacks merged)",
+        "  {} allocations across {} threads -> {} slices (every allocation, adjacent identical stacks merged)",
         total_samples,
         per_thread.len(),
         te.iter().filter(|s| s.contains("\"ph\":\"X\"")).count()
     );
-    if stride > 1 {
-        println!(
-            "  (downsampled 1/{stride} of {total_allocs} allocations to stay openable; raise with --max, or focus one thread with --thread)"
-        );
-    }
     println!("  open in your flame-graph viewer (Chrome trace) — x-axis is time, scrub to explore");
     Ok(())
 }

@@ -105,11 +105,10 @@ memscope perfetto allocs.mscope --out trace.json   # convert a recording
 ```
 
 Produces a Chrome/Perfetto trace: a **`live_bytes` counter** over time plus an
-**async slice per allocation lifetime** (alloc → free), named by recovered type
-and grouped by thread — so you can scrub the timeline, see the heap grow/shrink,
-and inspect when each typed object was alive. Allocation slices are capped with
-`--max` (default 300k) so the UI stays responsive; the counter always covers
-everything.
+**async slice for every allocation's lifetime** (alloc → free), named by
+recovered type and grouped by thread — so you can scrub the timeline, see the
+heap grow/shrink, and inspect when each typed object was alive. Every allocation
+is emitted (no caps).
 
 ### Flame graph & flame chart (by call stack)
 
@@ -126,10 +125,12 @@ memscope flamechart allocs.mscope --out fc.json      # TIMELINE (not aggregated)
   (or `--by count`), the recovered type is the leaf. "Where do allocations come
   from." Emitted as nested synchronous `X` events, so any Chrome-trace flame
   importer (or speedscope, via `--format folded`) renders it.
-* **`flamechart`** — *not* aggregated: each allocation is a stack sample placed
-  at its time, per thread; runs of the same stack merge into one slice. Scrub the
-  x-axis to see *what was allocating, when*. Long-lived call paths span wide;
-  bursts show up as towers. Same `X`-event format.
+* **`flamechart`** — *not* aggregated: **every** allocation is a stack sample
+  placed at its time, on **every** thread; runs of the same stack merge into one
+  slice (lossless — a merged slice still represents each allocation in that run).
+  Scrub the x-axis to see *what was allocating, when*. Long-lived call paths span
+  wide; bursts show up as towers. Same `X`-event format. These traces are large
+  (full heapster run = 346 MB / 3M slices) — that's the complete data, by design.
 
 ### The recording file format
 
