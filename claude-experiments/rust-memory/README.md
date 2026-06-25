@@ -118,8 +118,17 @@ Allocations carry their full call stack, so you get both classic views:
 memscope flamegraph allocs.mscope --out fg.json      # AGGREGATED by stack, width = bytes
 memscope flamegraph allocs.mscope --format folded    # folded stacks (inferno / speedscope)
 memscope flamegraph allocs.mscope --live             # only un-freed allocations = leak flame
+memscope flamegraph allocs.mscope --no-std           # strip std/core/alloc/runtime frames
 memscope flamechart allocs.mscope --out fc.json      # TIMELINE (not aggregated), x-axis = time
+memscope flamechart allocs.mscope --no-std           # …same, application frames only
 ```
+
+`--no-std` removes `std`/`core`/`alloc`, the lang-start + panic machinery, the
+`FnOnce`/`Fn` shims, and pthread/libc entry — leaving your application (and
+dependency) frames plus the recovered type leaf. It's a *frame* filter, not a
+sample one: every allocation and thread is still present, but the boilerplate is
+gone, which also shrinks the output dramatically (heapster flamechart: 346 MB →
+23 MB, same 836,879 allocations).
 
 * **`flamegraph`** — merges every allocation by call stack; width = total bytes
   (or `--by count`), the recovered type is the leaf. "Where do allocations come

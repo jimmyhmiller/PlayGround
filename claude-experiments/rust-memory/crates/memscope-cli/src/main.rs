@@ -63,9 +63,10 @@ fn print_help() {
          memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n  \
          memscope replay  <FILE>                        read a record_to_file recording\n  \
          memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
-         memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live]\n  \
+         memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live] [--no-std]\n  \
          \x20                                            allocation flame graph by call stack (aggregated)\n  \
-         memscope flamechart <FILE>                     allocation flame CHART (full timeline, every allocation)\n"
+         memscope flamechart <FILE> [--no-std]          allocation flame CHART (full timeline, every allocation)\n  \
+         \x20                                            (--no-std strips std/core/alloc/runtime frames)\n"
     );
 }
 
@@ -1030,6 +1031,49 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Is this a Rust stdlib / language-runtime frame (std/core/alloc, the lang-start
+/// + panic machinery, `FnOnce`/`Fn` shims, pthread/libc/C entry)? Used by
+/// `--no-std` to collapse the boilerplate and leave only application frames.
+fn is_std_frame(name: &str) -> bool {
+    let n = name.trim_start_matches(['<', '&', ' ']);
+    const PREFIXES: &[&str] = &[
+        "std::", "core::", "alloc::", "proc_macro::", "test::", "backtrace::",
+        "__rust", "_rust", "rustc", "__pthread", "_pthread", "pthread", "__libc",
+        "libc::", "_main", "dyld", "start_",
+    ];
+    if PREFIXES.iter().any(|p| n.starts_with(p)) {
+        return true;
+    }
+    // Trait impls written `<T as std::…>` / `… as core::…` and the runtime shims.
+    name.contains(" as std::")
+        || name.contains(" as core::")
+        || name.contains(" as alloc::")
+        || name.contains("rust_begin_short_backtrace")
+        || name.contains("lang_start")
+        || name.contains("catch_unwind")
+        || name.contains("::panicking::")
+        || name.contains("ops::function::Fn")
+        || name.contains("call_once")
+        || name == "_main"
+        || name == "main"
+        || name == "start"
+        || name == "[unknown]"
+}
+
+/// Build a site's root→leaf path: cleaned frames (innermost recorded first, so
+/// reversed), optionally with stdlib frames removed, then the recovered type as
+/// the leaf.
+fn site_to_path(frames: &[String], label: &str, no_std: bool) -> Vec<String> {
+    let mut p: Vec<String> = frames
+        .iter()
+        .rev()
+        .map(|f| clean_frame(f))
+        .filter(|f| !no_std || !is_std_frame(f))
+        .collect();
+    p.push(format!("[{label}]"));
+    p
+}
+
 /// Strip a trailing rustc hash (`::h0123abcd…`) and crate disambiguators from a
 /// frame name for readable flame labels.
 fn clean_frame(f: &str) -> String {
@@ -1083,10 +1127,11 @@ struct Flame {
 /// duration events (`--format chrome`, default — width = bytes), which standard
 /// flame-graph importers render directly.
 fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
-    let file = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live]")?;
+    let file = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live] [--no-std]")?;
     let format = flag(args, "--format").unwrap_or("chrome");
     let by_count = flag(args, "--by") == Some("count");
     let live_only = args.iter().any(|a| a == "--live");
+    let no_std = args.iter().any(|a| a == "--no-std" || a == "--exclude-std");
     let default_out = if format == "folded" {
         "alloc.folded"
     } else {
@@ -1138,10 +1183,7 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
         root.bytes += w;
         root.samples += 1;
         let mut node = &mut root;
-        // Recorded frames are innermost-first; reverse for root-at-bottom. Append
-        // the recovered type as the final (leaf) frame for readability.
-        let mut path: Vec<String> = info.frames.iter().rev().map(|f| clean_frame(f)).collect();
-        path.push(format!("[{}]", info.label));
+        let path = site_to_path(&info.frames, &info.label, no_std);
         for name in path {
             node = node.children.entry(name).or_default();
             node.bytes += w;
@@ -1188,17 +1230,16 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
 /// see what was allocating when. Emitted as nested synchronous `X` events.
 fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     let file = positional(args)
-        .ok_or("usage: memscope flamechart <FILE> [--out F]")?;
+        .ok_or("usage: memscope flamechart <FILE> [--out F] [--no-std]")?;
     let out = flag(args, "--out").unwrap_or("alloc-flamechart.json").to_string();
+    let no_std = args.iter().any(|a| a == "--no-std" || a == "--exclude-std");
 
     let (sites, events) = read_recording(file)?;
 
     // Cleaned root->leaf path per site (reversed frames + the type as the leaf).
     let mut site_path: HashMap<u32, Vec<String>> = HashMap::new();
     for (site, info) in &sites {
-        let mut p: Vec<String> = info.frames.iter().rev().map(|f| clean_frame(f)).collect();
-        p.push(format!("[{}]", info.label));
-        site_path.insert(*site, p);
+        site_path.insert(*site, site_to_path(&info.frames, &info.label, no_std));
     }
 
     // Every allocation, in order, grouped per thread — no sampling, no caps.
