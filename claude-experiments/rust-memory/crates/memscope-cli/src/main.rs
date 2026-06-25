@@ -1038,6 +1038,9 @@ fn is_std_frame(name: &str) -> bool {
     let n = name.trim_start_matches(['<', '&', ' ']);
     const PREFIXES: &[&str] = &[
         "std::", "core::", "alloc::", "proc_macro::", "test::", "backtrace::",
+        // hashbrown / allocator_api2 are std's own HashMap + allocator shim —
+        // separate crates, but pure stdlib plumbing for our purposes.
+        "hashbrown::", "allocator_api2::",
         "__rust", "_rust", "rustc", "__pthread", "_pthread", "pthread", "__libc",
         "libc::", "_main", "dyld", "start_",
     ];
