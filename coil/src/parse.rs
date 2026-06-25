@@ -974,6 +974,24 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             }
             Ok(ExprKind::OffsetOf(parse_type(&args[0])?, sym(&args[1], "field")?))
         }
+        // compile-time type reflection (evaluated by the comptime interpreter)
+        "field-count" | "variant-count" | "struct?" | "sum?" | "int?" | "float?"
+        | "ptr?" | "array?" => {
+            if args.len() != 1 {
+                return Err(Diag::at(span, format!("{head}: expects ({head} TYPE)")));
+            }
+            let q = match head.as_str() {
+                "field-count" => TypeQuery::FieldCount,
+                "variant-count" => TypeQuery::VariantCount,
+                "struct?" => TypeQuery::IsStruct,
+                "sum?" => TypeQuery::IsSum,
+                "int?" => TypeQuery::IsInt,
+                "float?" => TypeQuery::IsFloat,
+                "ptr?" => TypeQuery::IsPtr,
+                _ => TypeQuery::IsArray,
+            };
+            Ok(ExprKind::TypeQuery { q, ty: parse_type(&args[0])? })
+        }
         // (loop [:label] body...) — the structured-loop primitive.
         "loop" => {
             let (label, rest) = parse_label(args);

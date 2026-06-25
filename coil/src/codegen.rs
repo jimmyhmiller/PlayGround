@@ -2051,6 +2051,9 @@ impl<'ctx> Cg<'ctx> {
                 // The reference erases to a pointer to the aggregate.
                 Ok(((*ptr).into(), Type::Ptr(Box::new(ty.clone()))))
             }
+            ExprKind::TypeQuery { .. } => {
+                Err("codegen: unresolved type-query (compiler bug)".to_string())
+            }
             // The zero value of a type (used to initialize a fresh local).
             ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally

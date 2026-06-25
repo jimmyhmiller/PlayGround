@@ -689,6 +689,17 @@ fn synth_inner(
         ExprKind::StaticRef(name) => {
             Err(format!("in '{fname}': internal: unexpected static-ref '{name}' in input").into())
         }
+        // Compile-time type reflection: well-formed type → an i64 count or a bool.
+        // Folded to a literal by the comptime pass.
+        ExprKind::TypeQuery { q, ty } => {
+            validate_type(ty, cx, tps)
+                .map_err(|e| format!("in '{fname}': type reflection: {e}"))?;
+            let rty = match q {
+                TypeQuery::FieldCount | TypeQuery::VariantCount => Type::Int(64, true),
+                _ => Type::Bool,
+            };
+            Ok((Expr::new(ExprKind::TypeQuery { q: *q, ty: ty.clone() }, e.span), rty))
+        }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
             let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;

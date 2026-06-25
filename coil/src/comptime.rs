@@ -58,6 +58,7 @@ macro_rules! val {
 struct Ctx<'a> {
     fns: &'a HashMap<String, Func>,
     structs: &'a HashMap<String, StructDef>,
+    sums: &'a HashMap<String, SumDef>,
     variants: &'a HashSet<String>,
     fuel: std::cell::Cell<u64>,
     gensym: std::cell::Cell<u64>,
@@ -74,11 +75,13 @@ pub fn fold_program(
 ) -> Result<(), String> {
     let table: HashMap<String, Func> = funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let smap_sums: HashMap<String, SumDef> = sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let variants: HashSet<String> =
         sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
         fns: &table,
         structs: &smap,
+        sums: &smap_sums,
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
@@ -105,11 +108,13 @@ pub fn eval_const(
 ) -> Result<ConstInit, String> {
     let table: HashMap<String, Func> = funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let smap_sums: HashMap<String, SumDef> = sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let variants: HashSet<String> =
         sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
         fns: &table,
         structs: &smap,
+        sums: &smap_sums,
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
@@ -152,6 +157,11 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray break/continue at top level".to_string()),
             };
+            return build_value(&v, e.span, ctx);
+        }
+        // Type-reflection queries fold to a literal everywhere (like sizeof).
+        ExprKind::TypeQuery { q, ty } => {
+            let v = type_query(*q, ty, ctx)?;
             return build_value(&v, e.span, ctx);
         }
         ExprKind::Int(_)
@@ -415,6 +425,7 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
         ExprKind::Bool(b) => CtVal::Bool(*b),
         ExprKind::Float(x) => CtVal::Float(*x),
         ExprKind::Comptime(inner) => return eval(inner, env, ctx),
+        ExprKind::TypeQuery { q, ty } => type_query(*q, ty, ctx)?,
         ExprKind::Var(name) => env
             .get(name)
             .cloned()
@@ -648,6 +659,34 @@ fn eval_seq(es: &[Expr], env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
         }
     }
     Ok(last)
+}
+
+/// Evaluate a compile-time type-reflection query against the type tables.
+fn type_query(q: TypeQuery, ty: &Type, ctx: &Ctx) -> Result<CtVal, String> {
+    let name = match ty {
+        Type::Struct(n) | Type::App(n, _) => Some(n.as_str()),
+        _ => None,
+    };
+    Ok(match q {
+        TypeQuery::FieldCount => {
+            let sd = name
+                .and_then(|n| ctx.structs.get(n))
+                .ok_or_else(|| format!("field-count: {ty:?} is not a struct"))?;
+            CtVal::Int(sd.fields.len() as i64)
+        }
+        TypeQuery::VariantCount => {
+            let sd = name
+                .and_then(|n| ctx.sums.get(n))
+                .ok_or_else(|| format!("variant-count: {ty:?} is not a sum"))?;
+            CtVal::Int(sd.variants.len() as i64)
+        }
+        TypeQuery::IsStruct => CtVal::Bool(name.is_some_and(|n| ctx.structs.contains_key(n))),
+        TypeQuery::IsSum => CtVal::Bool(name.is_some_and(|n| ctx.sums.contains_key(n))),
+        TypeQuery::IsInt => CtVal::Bool(matches!(ty, Type::Int(..))),
+        TypeQuery::IsFloat => CtVal::Bool(matches!(ty, Type::Float(_))),
+        TypeQuery::IsPtr => CtVal::Bool(matches!(ty, Type::Ptr(_) | Type::Ref(..))),
+        TypeQuery::IsArray => CtVal::Bool(matches!(ty, Type::Array(..))),
+    })
 }
 
 fn truthy(v: &CtVal) -> Result<bool, String> {

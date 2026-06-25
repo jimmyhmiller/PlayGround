@@ -75,9 +75,27 @@ pointer to it. So a compile-time lookup table is real static data:
 
 (Sums in statics aren't supported yet — a sum const is rebuilt at use sites.)
 
+## Compile-time reflection (Stage 2)
+
+Compile-time code can introspect a type's structure — so reflection isn't
+macro-only. These forms take a *type* and are evaluated by the comptime
+interpreter (folded to a literal, like `sizeof`), usable in `comptime`/`const`/
+`static-assert`/ordinary code:
+
+- `(field-count T)` → `i64` (struct fields)
+- `(variant-count T)` → `i64` (sum variants)
+- `(struct? T)` / `(sum? T)` / `(int? T)` / `(float? T)` / `(ptr? T)` / `(array? T)` → `bool`
+
+```lisp
+(const NF (field-count Point))                 ; a compile-time constant
+(static-assert (struct? Point) "must be a struct")
+(comptime (* (field-count Point) (variant-count Shape)))
+```
+
 ## Roadmap
 
-- **2** — comptime reflection as first-class values (the type tables you can
-  already read syntactically become values).
+- more reflection: field names/types as comptime values (needs comptime strings +
+  a `Type` value), and reflecting a generic type parameter (resolved at mono).
+- `sizeof`/`alignof`/`offsetof` at comptime (a layout module independent of LLVM).
 - **3** — staged macros: run code generation in the runtime language too (the big
   rearchitecture that unifies the macro language with the runtime).

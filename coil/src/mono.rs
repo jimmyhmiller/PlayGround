@@ -476,6 +476,9 @@ impl<'a> Mono<'a> {
                 return Err("mono: unresolved comptime node (compiler bug)".to_string())
             }
             ExprKind::StaticRef(name) => ExprKind::StaticRef(name.clone()),
+            ExprKind::TypeQuery { .. } => {
+                return Err("mono: unresolved type-query (compiler bug)".to_string())
+            }
             // Resolve a deferred trait call: substitute the Self type parameter to
             // its concrete type, then call the implementing function directly. The
             // checker verified an impl exists at the instantiation site.

@@ -308,6 +308,13 @@ pub enum ExprKind {
     /// it — which, in the reference model, *is* the aggregate value. Produced by
     /// the checker when a const has an aggregate type.
     StaticRef(String),
+    /// Compile-time type reflection: query a type's structure. Evaluated by the
+    /// comptime interpreter and folded to a literal (`i64` for counts, `bool` for
+    /// predicates), so it composes in `comptime`/`const`/`static-assert`.
+    TypeQuery {
+        q: TypeQuery,
+        ty: Type,
+    },
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
     /// post-check pass interprets it over the typed program, replacing this node
@@ -329,6 +336,21 @@ pub enum ExprKind {
 pub struct Param {
     pub name: String,
     pub ty: Type,
+}
+
+/// A compile-time type-reflection query. Counts return `i64`; predicates `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeQuery {
+    /// Number of fields of a struct.
+    FieldCount,
+    /// Number of variants of a sum.
+    VariantCount,
+    IsStruct,
+    IsSum,
+    IsInt,
+    IsFloat,
+    IsPtr,
+    IsArray,
 }
 
 #[derive(Debug, Clone)]
