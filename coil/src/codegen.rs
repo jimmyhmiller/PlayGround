@@ -2042,7 +2042,7 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::Comptime(_) => {
                 Err("codegen: unresolved comptime node (compiler bug)".to_string())
             }
-            ExprKind::Quote(_) | ExprKind::CodeOp { .. } => {
+            ExprKind::Quote(_) | ExprKind::CodeOp { .. } | ExprKind::Quasi(_) => {
                 Err("codegen: a Code value has no runtime representation (use it only at comptime)".to_string())
             }
             // A reference to an aggregate const yields a pointer to its global

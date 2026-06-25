@@ -39,3 +39,33 @@ fn code_value_cant_be_a_runtime_value() {
     let err = coil::emit_ir("(module a)\n(defn main [] (-> i64) (comptime (quote (a b))))").unwrap_err();
     assert!(err.contains("type code"), "got:\n{err}");
 }
+
+// ---- Stage 3, step 2: quasiquote (the build side) -----------------------------
+
+#[test]
+fn quasiquote_builds_and_splices() {
+    // `(iadd 10 ~x) builds (iadd 10 <x>); unquote splices a comptime value.
+    let code = build_and_run(
+        "(module a)\n(defn main [] (-> i64)\n\
+         (comptime (let [built `(iadd 10 ~(code-int (code-nth (quote (a 20)) 1)))]\n\
+           (iadd (code-count built) (code-int (code-nth built 2))))))", // count 3 + 20 = 23
+    );
+    assert_eq!(code, 23);
+}
+
+#[test]
+fn quasiquote_nested_lists() {
+    // a nested template with an unquote deep inside
+    let code = build_and_run(
+        "(module a)\n(defn main [] (-> i64)\n\
+         (comptime (let [c `(a (b ~(quote 7)) d)]\n\
+           (code-int (code-nth (code-nth c 1) 1)))))", // (b 7) → 7
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn unquote_outside_quasiquote_errors() {
+    let err = coil::emit_ir("(module a)\n(defn main [] (-> i64) (comptime (code-count ~x)))").unwrap_err();
+    assert!(err.contains("unquote"), "got:\n{err}");
+}

@@ -717,6 +717,11 @@ fn synth_inner(
         }
         // Quoted code is a comptime `Code` value.
         ExprKind::Quote(s) => Ok((Expr::new(ExprKind::Quote(s.clone()), e.span), Type::Code)),
+        // A quasiquote builds a `Code` value; elaborate its unquote holes.
+        ExprKind::Quasi(q) => {
+            let nq = check_quasi(q, env, cx, tps, fname)?;
+            Ok((Expr::new(ExprKind::Quasi(nq), e.span), Type::Code))
+        }
         // Operations on Code values (comptime). Type per op.
         ExprKind::CodeOp { op, args } => {
             let mut new_args = Vec::with_capacity(args.len());
@@ -2361,6 +2366,29 @@ fn fits(n: i64, bits: u32, signed: bool) -> bool {
     } else {
         n >= 0 && n < (1i64 << bits)
     }
+}
+
+/// Elaborate a quasiquote template's unquote holes (the literal syntax is data).
+fn check_quasi(
+    q: &Quasi,
+    env: &mut HashMap<String, Type>,
+    cx: &Cx,
+    tps: &HashSet<String>,
+    fname: &str,
+) -> Result<Quasi, Diag> {
+    Ok(match q {
+        Quasi::Lit(s) => Quasi::Lit(s.clone()),
+        Quasi::Unquote(e) => {
+            let (ee, _) = synth(e, None, env, cx, tps, fname)?;
+            Quasi::Unquote(Box::new(ee))
+        }
+        Quasi::List(items) => {
+            Quasi::List(items.iter().map(|i| check_quasi(i, env, cx, tps, fname)).collect::<Result<_, _>>()?)
+        }
+        Quasi::Vector(items) => {
+            Quasi::Vector(items.iter().map(|i| check_quasi(i, env, cx, tps, fname)).collect::<Result<_, _>>()?)
+        }
+    })
 }
 
 /// Is a const value a bare literal (inlined at use sites) rather than a

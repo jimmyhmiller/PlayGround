@@ -483,7 +483,7 @@ impl<'a> Mono<'a> {
             ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
                 return Err("mono: unresolved field-reflection (compiler bug)".to_string())
             }
-            ExprKind::Quote(_) | ExprKind::CodeOp { .. } => {
+            ExprKind::Quote(_) | ExprKind::CodeOp { .. } | ExprKind::Quasi(_) => {
                 return Err("mono: comptime-only code value reached mono (compiler bug)".to_string())
             }
             // Resolve a deferred trait call: substitute the Self type parameter to

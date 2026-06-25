@@ -364,6 +364,27 @@ fn parse_type_params(
     }
 }
 
+/// Build a quasiquote template: `(unquote E)` becomes a hole carrying the parsed
+/// expression `E`; everything else is literal syntax (recursing into lists/vectors).
+fn build_quasi(s: &Sexp) -> Result<Quasi, Diag> {
+    match &s.kind {
+        SexpKind::List(items) => {
+            if items.len() == 2 {
+                if let SexpKind::Sym(h) = &items[0].kind {
+                    if h == "unquote" {
+                        return Ok(Quasi::Unquote(Box::new(parse_expr(&items[1])?)));
+                    }
+                }
+            }
+            Ok(Quasi::List(items.iter().map(build_quasi).collect::<Result<_, _>>()?))
+        }
+        SexpKind::Vector(items) => {
+            Ok(Quasi::Vector(items.iter().map(build_quasi).collect::<Result<_, _>>()?))
+        }
+        _ => Ok(Quasi::Lit(s.clone())),
+    }
+}
+
 fn parse_extern(rest: &[Sexp]) -> Result<Extern, Diag> {
     let mut i = 0;
     let name = sym(rest.get(i).ok_or("extern: missing name")?, "extern name")?;
@@ -1015,6 +1036,14 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             }
             Ok(ExprKind::Quote(Box::new(args[0].clone())))
         }
+        // `template (quasiquote) — build Code, splicing ~E (unquote) holes.
+        "quasiquote" => {
+            if args.len() != 1 {
+                return Err(Diag::at(span, "quasiquote: expects one template"));
+            }
+            Ok(ExprKind::Quasi(build_quasi(&args[0])?))
+        }
+        "unquote" => Err(Diag::at(span, "unquote (~) is only valid inside a quasiquote (`)")),
         // operations on Code values
         "code-list?" | "code-sym?" | "code-int?" | "code-count" | "code-nth" | "code-sym"
         | "code-int" => {

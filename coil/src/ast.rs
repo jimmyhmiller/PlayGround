@@ -125,6 +125,21 @@ pub enum CodeOp {
     Int,
 }
 
+/// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an
+/// `~E` (unquote) hole carries the expression whose comptime value is spliced in.
+#[derive(Debug, Clone)]
+pub enum Quasi {
+    /// Literal syntax (no unquotes inside).
+    Lit(Sexp),
+    /// `~E` — splice the comptime value of `E` (a `Code` value, or a scalar/string
+    /// converted to a literal form).
+    Unquote(Box<Expr>),
+    /// A `( … )` list whose elements may be unquotes/nested.
+    List(Vec<Quasi>),
+    /// A `[ … ]` vector.
+    Vector(Vec<Quasi>),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CmpOp {
     Lt,
@@ -357,6 +372,9 @@ pub enum ExprKind {
         op: CodeOp,
         args: Vec<Expr>,
     },
+    /// Quasiquote: `` `template `` builds a `Code` value, with `~E` (unquote)
+    /// splicing the comptime value of `E`. (Stage 3, step 2.)
+    Quasi(Quasi),
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
     /// post-check pass interprets it over the typed program, replacing this node

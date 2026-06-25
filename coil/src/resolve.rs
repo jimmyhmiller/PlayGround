@@ -249,6 +249,26 @@ fn qualify_program(
     Ok(())
 }
 
+fn qualify_quasi(
+    q: &mut Quasi,
+    m: &str,
+    imps: Option<&ModImports>,
+    table: &DefTable,
+    tps: &HashSet<String>,
+    exports: &ExportMap,
+) -> Result<(), String> {
+    match q {
+        Quasi::Lit(_) => {}
+        Quasi::Unquote(e) => qualify_expr(e, m, imps, table, tps, exports)?,
+        Quasi::List(items) | Quasi::Vector(items) => {
+            for it in items {
+                qualify_quasi(it, m, imps, table, tps, exports)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn qualify_type(
     ty: &mut Type,
     m: &str,
@@ -424,6 +444,8 @@ fn qualify_expr(
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }
         }
+        // A quasiquote template is data; only its unquote holes are real exprs.
+        ExprKind::Quasi(q) => qualify_quasi(q, m, imps, table, tps, exports)?,
     }
     Ok(())
 }

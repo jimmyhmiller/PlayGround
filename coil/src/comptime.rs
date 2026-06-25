@@ -180,7 +180,8 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         ExprKind::FieldMeta { .. }
         | ExprKind::FieldIndex { .. }
         | ExprKind::Quote(_)
-        | ExprKind::CodeOp { .. } => {
+        | ExprKind::CodeOp { .. }
+        | ExprKind::Quasi(_) => {
             let v = match eval(e, &mut HashMap::new(), ctx)? {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray control flow in field reflection".to_string()),
@@ -475,6 +476,7 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
             find_field_index(ty, &want, ctx)?
         }
         ExprKind::Quote(s) => CtVal::Code((**s).clone()),
+        ExprKind::Quasi(q) => CtVal::Code(eval_quasi(q, env, ctx)?),
         ExprKind::CodeOp { op, args } => {
             let mut argv = Vec::with_capacity(args.len());
             for a in args {
@@ -773,6 +775,48 @@ fn find_field_index(ty: &Type, want: &str, ctx: &Ctx) -> Result<CtVal, String> {
     match sd.fields.iter().position(|(fname, _)| fname == want) {
         Some(i) => Ok(CtVal::Int(i as i64)),
         None => Err(format!("field-index: struct {name} has no field '{want}'")),
+    }
+}
+
+/// Build the `Sexp` of a quasiquote template, splicing unquote holes.
+fn eval_quasi(q: &Quasi, env: &mut Env, ctx: &Ctx) -> Result<crate::reader::Sexp, String> {
+    use crate::reader::{Sexp, SexpKind};
+    use crate::span::Span;
+    match q {
+        Quasi::Lit(s) => Ok(s.clone()),
+        Quasi::Unquote(e) => match eval(e, env, ctx)? {
+            Flow::Val(v) => ctval_to_sexp(&v),
+            _ => Err("comptime: control flow inside an unquote".to_string()),
+        },
+        Quasi::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(eval_quasi(it, env, ctx)?);
+            }
+            Ok(Sexp::new(SexpKind::List(out), Span::DUMMY))
+        }
+        Quasi::Vector(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(eval_quasi(it, env, ctx)?);
+            }
+            Ok(Sexp::new(SexpKind::Vector(out), Span::DUMMY))
+        }
+    }
+}
+
+/// Convert a comptime value to spliceable syntax (for an unquote).
+fn ctval_to_sexp(v: &CtVal) -> Result<crate::reader::Sexp, String> {
+    use crate::reader::{Sexp, SexpKind};
+    use crate::span::Span;
+    let s = |k| Sexp::new(k, Span::DUMMY);
+    match v {
+        CtVal::Code(c) => Ok(c.clone()),
+        CtVal::Int(n) => Ok(s(SexpKind::Int(*n))),
+        CtVal::Float(x) => Ok(s(SexpKind::Float(*x))),
+        CtVal::Bool(b) => Ok(s(SexpKind::Sym(if *b { "true" } else { "false" }.to_string()))),
+        CtVal::Str(st) => Ok(s(SexpKind::Str(st.clone()))),
+        _ => Err("comptime: can't unquote an aggregate value into code".to_string()),
     }
 }
 
