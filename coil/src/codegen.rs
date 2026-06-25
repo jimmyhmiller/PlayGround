@@ -647,6 +647,7 @@ impl<'ctx> Cg<'ctx> {
         match t {
             // A Never value is never materialized (the expression diverges first);
             // this placeholder only labels slots/phis on dead, unreachable paths.
+            Type::Code => unreachable!("comptime-only Code type reached codegen"),
             Type::Never => self.ctx.i64_type().into(),
             Type::Int(bits, _) => int_width(self.ctx, *bits).into(),
             Type::Float(32) => self.ctx.f32_type().into(),
@@ -2041,6 +2042,9 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::Comptime(_) => {
                 Err("codegen: unresolved comptime node (compiler bug)".to_string())
             }
+            ExprKind::Quote(_) | ExprKind::CodeOp { .. } => {
+                Err("codegen: a Code value has no runtime representation (use it only at comptime)".to_string())
+            }
             // A reference to an aggregate const yields a pointer to its global
             // (which, in the reference model, is the aggregate value).
             ExprKind::StaticRef(name) => {
@@ -3147,6 +3151,7 @@ fn sum_words(sd: &SumDef, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&s
 fn type_bytes(t: &Type, structs: &HashMap<&str, &StructDef>, sums: &HashMap<&str, &SumDef>) -> u64 {
     match t {
         Type::Never => unreachable!("Never type has no size"),
+        Type::Code => unreachable!("Code type has no size"),
         Type::Void => unreachable!("void has no size (return type only)"),
         Type::Int(bits, _) => (*bits as u64).div_ceil(8),
         Type::Float(bits) => (*bits as u64) / 8,

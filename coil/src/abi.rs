@@ -259,6 +259,7 @@ fn flatten_type<'ctx>(
 ) -> Result<(), String> {
     match ty {
         Type::Never => unreachable!("Never type has no ABI representation"),
+        Type::Code => unreachable!("Code type has no ABI representation"),
         Type::Void => unreachable!("void is a return type only; never a field/by-value param"),
         Type::Float(bits) => {
             out.push(Leaf {

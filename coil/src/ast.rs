@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::convention::Convention;
+use crate::reader::Sexp;
 use crate::span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,10 @@ pub enum Type {
     /// dummy value. It has no runtime representation (a `Never` value is never
     /// materialized — the expression diverges first).
     Never,
+    /// Quoted code as a value (`quote`/quasiquote). Comptime-only: manipulated by
+    /// the comptime interpreter / macros; it has no runtime representation, so a
+    /// `Code` value reaching codegen is an error. (Stage 3.)
+    Code,
 }
 
 impl Type {
@@ -105,6 +110,19 @@ pub enum BinOp {
     Xor,
     Shl,
     Shr,
+}
+
+/// An operation on `Code` values (Stage 3). Predicates → `bool`; `Count`/`Int`
+/// → `i64`; `Sym` → `(slice u8)`; `Nth` → `Code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeOp {
+    IsList,
+    IsSym,
+    IsInt,
+    Count,
+    Nth,
+    Sym,
+    Int,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +347,15 @@ pub enum ExprKind {
     FieldIndex {
         ty: Type,
         name: Box<Expr>,
+    },
+    /// `(quote FORM)` — quoted code as a comptime `Code` value (the raw syntax).
+    /// (Stage 3, step 1.)
+    Quote(Box<Sexp>),
+    /// An operation on `Code` values (inspect: count/nth/sym/int + predicates),
+    /// evaluated by the comptime interpreter. (Stage 3, step 1.)
+    CodeOp {
+        op: CodeOp,
+        args: Vec<Expr>,
     },
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a

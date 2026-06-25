@@ -340,6 +340,7 @@ fn field_value(fname: &str, fty: &Type) -> Value {
 fn type_to_sexp(t: &Type) -> Sexp {
     let list = |parts: Vec<Sexp>| Sexp::new(SexpKind::List(parts), crate::span::Span::DUMMY);
     match t {
+        Type::Code => Sexp::sym("code".to_string()),
         Type::Int(bits, signed) => Sexp::sym(format!("{}{bits}", if *signed { "i" } else { "u" })),
         Type::Float(bits) => Sexp::sym(format!("f{bits}")),
         Type::Bool => Sexp::sym("bool"),

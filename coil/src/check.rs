@@ -491,6 +491,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
 fn validate_type(t: &Type, cx: &Cx, tps: &HashSet<String>) -> Result<(), Diag> {
     match t {
         Type::Never => Ok(()),   // synthesized only; not user-writable
+        Type::Code => Ok(()),    // comptime-only; not user-writable
         // `void` is ONLY a return type — never a parameter, field, or component
         // type. Return positions validate it separately (skipping this).
         Type::Void => Err("'void' is only valid as a return type".to_string().into()),
@@ -713,6 +714,23 @@ fn synth_inner(
                 FieldMeta::TypeKind => Type::Int(64, true),
             };
             Ok((Expr::new(ExprKind::FieldMeta { meta: *meta, ty: ty.clone(), idx: Box::new(ie) }, e.span), rty))
+        }
+        // Quoted code is a comptime `Code` value.
+        ExprKind::Quote(s) => Ok((Expr::new(ExprKind::Quote(s.clone()), e.span), Type::Code)),
+        // Operations on Code values (comptime). Type per op.
+        ExprKind::CodeOp { op, args } => {
+            let mut new_args = Vec::with_capacity(args.len());
+            for a in args {
+                let (ae, _) = synth(a, None, env, cx, tps, fname)?;
+                new_args.push(ae);
+            }
+            let rty = match op {
+                CodeOp::Count | CodeOp::Int => Type::Int(64, true),
+                CodeOp::Sym => Type::Slice(Box::new(Type::Int(8, false))),
+                CodeOp::Nth => Type::Code,
+                CodeOp::IsList | CodeOp::IsSym | CodeOp::IsInt => Type::Bool,
+            };
+            Ok((Expr::new(ExprKind::CodeOp { op: *op, args: new_args }, e.span), rty))
         }
         // (field-index T name): struct type + a string name → i64.
         ExprKind::FieldIndex { ty, name } => {
@@ -2176,6 +2194,7 @@ fn replace_pointee(place: &Type, new: Type) -> Type {
 fn subst_apply(t: &Type, subst: &HashMap<String, Type>) -> Type {
     match t {
         Type::Never => Type::Never,
+        Type::Code => Type::Code,
         Type::Int(..) | Type::Float(..) | Type::Bool | Type::Void => t.clone(),
         Type::Ptr(p) => Type::Ptr(Box::new(subst_apply(p, subst))),
         Type::Ref(m, p) => Type::Ref(*m, Box::new(subst_apply(p, subst))),
@@ -2539,6 +2558,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
 fn ty_str(t: &Type) -> String {
     match t {
         Type::Never => "!".to_string(),
+        Type::Code => "code".to_string(),
         Type::Void => "void".to_string(),
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),

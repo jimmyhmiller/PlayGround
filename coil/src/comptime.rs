@@ -30,6 +30,9 @@ enum CtVal {
     /// A `(slice u8)` string value (e.g. a reflected field name). Treated as a
     /// scalar (immutable); lowers back to a string literal.
     Str(String),
+    /// Quoted code (Stage 3): raw syntax manipulated at comptime. Has no runtime
+    /// representation, so it can't be a `comptime` result.
+    Code(crate::reader::Sexp),
     /// A struct's fields, by declaration order, each in its own cell (so a `field`
     /// place is a real reference). `name` resolves field names to indices.
     Struct { name: String, fields: Vec<Cell> },
@@ -146,6 +149,7 @@ fn ctval_to_const_init(v: &CtVal) -> Result<ConstInit, String> {
             "comptime: a sum value can't initialize a static const yet (scalar/struct/array only)"
                 .to_string(),
         ),
+        CtVal::Code(_) => Err("comptime: a Code value can't initialize a const".to_string()),
     }
 }
 
@@ -173,7 +177,10 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         }
         // Per-field reflection folds when its index is a compile-time constant
         // (a literal, or evaluated inside a `comptime`); a runtime index errors.
-        ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
+        ExprKind::FieldMeta { .. }
+        | ExprKind::FieldIndex { .. }
+        | ExprKind::Quote(_)
+        | ExprKind::CodeOp { .. } => {
             let v = match eval(e, &mut HashMap::new(), ctx)? {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray control flow in field reflection".to_string()),
@@ -261,6 +268,11 @@ fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
         CtVal::Bool(b) => e(ExprKind::Bool(*b)),
         CtVal::Float(x) => e(ExprKind::Float(*x)),
         CtVal::Str(s) => e(ExprKind::Str(s.clone())),
+        CtVal::Code(_) => {
+            return Err("comptime: a Code value can't be used as a runtime value \
+                        (it's only meaningful at compile time)"
+                .to_string())
+        }
         CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx)?,
         CtVal::Struct { .. } | CtVal::Array { .. } | CtVal::Sum { .. } => {
             // aggregates only appear behind a Ref as values
@@ -272,7 +284,9 @@ fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
 fn build_content(c: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
     let e = |k| Expr::new(k, span);
     match c {
-        CtVal::Int(_) | CtVal::Bool(_) | CtVal::Float(_) | CtVal::Str(_) => build_value(c, span, ctx),
+        CtVal::Int(_) | CtVal::Bool(_) | CtVal::Float(_) | CtVal::Str(_) | CtVal::Code(_) => {
+            build_value(c, span, ctx)
+        }
         CtVal::Sum { variant, fields } => {
             // pre-mono, sum construction is a call to the variant name
             let args = fields
@@ -459,6 +473,14 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
                 _ => return Err("comptime: field-index name must be a string".to_string()),
             };
             find_field_index(ty, &want, ctx)?
+        }
+        ExprKind::Quote(s) => CtVal::Code((**s).clone()),
+        ExprKind::CodeOp { op, args } => {
+            let mut argv = Vec::with_capacity(args.len());
+            for a in args {
+                argv.push(val!(eval(a, env, ctx)?));
+            }
+            code_op(*op, &argv)?
         }
         ExprKind::Var(name) => env
             .get(name)
@@ -752,6 +774,45 @@ fn find_field_index(ty: &Type, want: &str, ctx: &Ctx) -> Result<CtVal, String> {
         Some(i) => Ok(CtVal::Int(i as i64)),
         None => Err(format!("field-index: struct {name} has no field '{want}'")),
     }
+}
+
+/// Evaluate a `Code` operation. `op`'s first argument is the `Code` value.
+fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
+    use crate::reader::SexpKind as K;
+    let code = match args.first() {
+        Some(CtVal::Code(s)) => s,
+        _ => return Err("comptime: code op expects a Code value".to_string()),
+    };
+    Ok(match op {
+        CodeOp::IsList => CtVal::Bool(matches!(code.kind, K::List(_))),
+        CodeOp::IsSym => CtVal::Bool(matches!(code.kind, K::Sym(_))),
+        CodeOp::IsInt => CtVal::Bool(matches!(code.kind, K::Int(_))),
+        CodeOp::Count => match &code.kind {
+            K::List(items) => CtVal::Int(items.len() as i64),
+            _ => return Err("comptime: code-count expects a list".to_string()),
+        },
+        CodeOp::Nth => {
+            let i = match args.get(1) {
+                Some(CtVal::Int(n)) => *n as usize,
+                _ => return Err("comptime: code-nth index must be an integer".to_string()),
+            };
+            match &code.kind {
+                K::List(items) => match items.get(i) {
+                    Some(s) => CtVal::Code(s.clone()),
+                    None => return Err(format!("comptime: code-nth index {i} out of range")),
+                },
+                _ => return Err("comptime: code-nth expects a list".to_string()),
+            }
+        }
+        CodeOp::Sym => match &code.kind {
+            K::Sym(s) => CtVal::Str(s.clone()),
+            _ => return Err("comptime: code-sym expects a symbol".to_string()),
+        },
+        CodeOp::Int => match &code.kind {
+            K::Int(n) => CtVal::Int(*n),
+            _ => return Err("comptime: code-int expects an integer".to_string()),
+        },
+    })
 }
 
 /// A type's display name (module prefix stripped): `i64`, `Point`, `ptr`, …

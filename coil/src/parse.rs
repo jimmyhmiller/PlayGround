@@ -1008,6 +1008,30 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
                 idx: Box::new(parse_expr(&args[1])?),
             })
         }
+        // (quote FORM) — quoted code as a comptime Code value (the raw syntax).
+        "quote" => {
+            if args.len() != 1 {
+                return Err(Diag::at(span, "quote: expects (quote FORM)"));
+            }
+            Ok(ExprKind::Quote(Box::new(args[0].clone())))
+        }
+        // operations on Code values
+        "code-list?" | "code-sym?" | "code-int?" | "code-count" | "code-nth" | "code-sym"
+        | "code-int" => {
+            let op = match head.as_str() {
+                "code-list?" => CodeOp::IsList,
+                "code-sym?" => CodeOp::IsSym,
+                "code-int?" => CodeOp::IsInt,
+                "code-count" => CodeOp::Count,
+                "code-nth" => CodeOp::Nth,
+                "code-sym" => CodeOp::Sym,
+                _ => CodeOp::Int,
+            };
+            Ok(ExprKind::CodeOp {
+                op,
+                args: args.iter().map(parse_expr).collect::<Result<_, _>>()?,
+            })
+        }
         // (field-index T name) — index of the field named `name`
         "field-index" => {
             if args.len() != 2 {

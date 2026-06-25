@@ -217,6 +217,7 @@ impl<'a> Mono<'a> {
     fn resolve_ty(&mut self, t: &Type, map: &Subst) -> Result<Type, String> {
         Ok(match t {
             Type::Never => Type::Never,
+            Type::Code => Type::Code,
             Type::Void => Type::Void,
             Type::Int(b, s) => Type::Int(*b, *s),
             Type::Float(b) => Type::Float(*b),
@@ -482,6 +483,9 @@ impl<'a> Mono<'a> {
             ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
                 return Err("mono: unresolved field-reflection (compiler bug)".to_string())
             }
+            ExprKind::Quote(_) | ExprKind::CodeOp { .. } => {
+                return Err("mono: comptime-only code value reached mono (compiler bug)".to_string())
+            }
             // Resolve a deferred trait call: substitute the Self type parameter to
             // its concrete type, then call the implementing function directly. The
             // checker verified an impl exists at the instantiation site.
@@ -519,6 +523,7 @@ fn mangle(name: &str, args: &[Type]) -> String {
 fn type_key(t: &Type) -> String {
     match t {
         Type::Never => "never".to_string(),
+        Type::Code => "code".to_string(),
         Type::Void => "void".to_string(),
         Type::Int(bits, signed) => format!("{}{bits}", if *signed { "i" } else { "u" }),
         Type::Float(bits) => format!("f{bits}"),

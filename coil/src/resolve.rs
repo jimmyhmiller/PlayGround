@@ -259,6 +259,7 @@ fn qualify_type(
 ) -> Result<(), String> {
     match ty {
         Type::Never => {}   // synthesized only; never appears in user-written types
+        Type::Code => {}    // comptime-only; no names to qualify
         Type::Struct(n) => {
             if !tps.contains(n) {
                 *n = resolve(n, m, imps, table, exports, |d| &d.types)?;
@@ -415,6 +416,13 @@ fn qualify_expr(
         ExprKind::FieldIndex { ty: t, name } => {
             ty(t)?;
             qualify_expr(name, m, imps, table, tps, exports)?;
+        }
+        // Quoted code is raw syntax — its names are data, not references.
+        ExprKind::Quote(_) => {}
+        ExprKind::CodeOp { args, .. } => {
+            for a in args {
+                qualify_expr(a, m, imps, table, tps, exports)?;
+            }
         }
     }
     Ok(())
