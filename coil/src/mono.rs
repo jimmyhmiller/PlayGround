@@ -468,6 +468,11 @@ impl<'a> Mono<'a> {
                 fp: Box::new(go(self, fp)?),
                 args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
             },
+            // The comptime fold (in check) replaces every Comptime with a literal,
+            // so one reaching mono is an internal error.
+            ExprKind::Comptime(_) => {
+                return Err("mono: unresolved comptime node (compiler bug)".to_string())
+            }
             // Resolve a deferred trait call: substitute the Self type parameter to
             // its concrete type, then call the implementing function directly. The
             // checker verified an impl exists at the instantiation site.

@@ -9,6 +9,7 @@ pub mod ast;
 pub mod check;
 pub mod cimport;
 pub mod codegen;
+pub mod comptime;
 pub mod convention;
 pub mod macros;
 pub mod mono;

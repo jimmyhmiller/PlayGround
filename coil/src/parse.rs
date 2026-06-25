@@ -780,6 +780,12 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
         "do" => Ok(ExprKind::Do(
             args.iter().map(parse_expr).collect::<Result<_, _>>()?,
         )),
+        "comptime" => {
+            if args.len() != 1 {
+                return Err(Diag::at(span, "comptime: expects (comptime expr)"));
+            }
+            Ok(ExprKind::Comptime(Box::new(parse_expr(&args[0])?)))
+        }
         "let" => {
             let binds_v = match args.first().map(|s| &s.kind) {
                 Some(SexpKind::Vector(v)) => v,

@@ -304,6 +304,11 @@ pub enum ExprKind {
         args: Vec<Expr>,
         body: String,
     },
+    /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
+    /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
+    /// post-check pass interprets it over the typed program, replacing this node
+    /// with a literal. Mono/codegen never see it.
+    Comptime(Box<Expr>),
     /// A trait-method call deferred because its `Self` is a type parameter
     /// (`self_tp`) bounded by `trait_name`. The checker emits this inside a
     /// bounded generic; monomorphization resolves it to a concrete call of the

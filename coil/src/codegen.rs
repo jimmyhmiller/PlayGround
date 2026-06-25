@@ -2003,6 +2003,10 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::TraitCall { trait_name, method, .. } => {
                 Err(format!("codegen: unresolved trait call {trait_name}.{method} (compiler bug)"))
             }
+            // The comptime fold (in check) replaces every Comptime with a literal.
+            ExprKind::Comptime(_) => {
+                Err("codegen: unresolved comptime node (compiler bug)".to_string())
+            }
             // The zero value of a type (used to initialize a fresh local).
             ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally

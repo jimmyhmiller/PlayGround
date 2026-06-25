@@ -397,6 +397,7 @@ fn qualify_expr(
                 qualify_expr(a, m, imps, table, tps, exports)?;
             }
         }
+        ExprKind::Comptime(inner) => qualify_expr(inner, m, imps, table, tps, exports)?,
     }
     Ok(())
 }

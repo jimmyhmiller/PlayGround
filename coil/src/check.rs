@@ -404,6 +404,11 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         });
     }
 
+    // ---- comptime: evaluate every (comptime …) to a literal -----------------
+    // Now that all functions are elaborated, run the compile-time interpreter so
+    // a `comptime` form can call any defn (incl. recursively).
+    crate::comptime::fold_program(&mut funcs, &program.sums)?;
+
     // ---- static-assert conditions ------------------------------------------
     let empty_tps = HashSet::new();
     let mut asserts: Vec<StaticAssert> = Vec::with_capacity(program.asserts.len());
@@ -617,6 +622,12 @@ fn synth_inner(
         // as input, so this is unreachable in practice.
         ExprKind::TraitCall { method, .. } => {
             Err(format!("in '{fname}': internal: unresolved trait call '{method}' in input").into())
+        }
+        // `(comptime E)` types as E's type; the value is filled in by the
+        // post-check comptime fold (which needs every defn elaborated first).
+        ExprKind::Comptime(inner) => {
+            let (ie, it) = synth(inner, expected, env, cx, tps, fname)?;
+            Ok((Expr::new(ExprKind::Comptime(Box::new(ie)), e.span), it))
         }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
