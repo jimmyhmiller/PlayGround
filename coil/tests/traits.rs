@@ -13,7 +13,7 @@ use common::build_and_run;
 const PRELUDE: &str = "(module app)\n\
     (defstruct Point [(x i64) (y i64)])\n\
     (impl Eq Point\n\
-      (eq [(a Point) (b Point)] (-> bool)\n\
+      (= [(a Point) (b Point)] (-> bool)\n\
         (and (icmp-eq (load (field a x)) (load (field b x)))\n\
              (icmp-eq (load (field a y)) (load (field b y))))))\n\
     (defn mkpt [(x i64) (y i64)] (-> Point)\n\
@@ -26,7 +26,7 @@ fn concrete_trait_dispatch() {
     let code = build_and_run(&format!(
         "{PRELUDE}(defn main [] (-> i64)\n\
            (let [p1 (mkpt 3 4) p2 (mkpt 3 4) p3 (mkpt 3 9)]\n\
-             (iadd (if (eq p1 p2) 10 0) (if (eq p1 p3) 100 1))))" // 10 + 1
+             (iadd (if (= p1 p2) 10 0) (if (= p1 p3) 100 1))))" // 10 + 1
     ));
     assert_eq!(code, 11);
 }
@@ -37,7 +37,7 @@ fn bounded_generic_deferred_dispatch() {
     // instantiation. The aggregate flows by value through the generic — codegen
     // reconciles it to the impl's by-ref parameter.
     let code = build_and_run(&format!(
-        "{PRELUDE}(defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+        "{PRELUDE}(defn same [(T Eq)] [(a T) (b T)] (-> bool) (= a b))\n\
          (defn main [] (-> i64)\n\
            (let [p1 (mkpt 3 4) p2 (mkpt 3 4) p3 (mkpt 3 9)]\n\
              (iadd (if (same p1 p2) 10 0) (if (same p1 p3) 100 1))))"
@@ -48,7 +48,7 @@ fn bounded_generic_deferred_dispatch() {
 #[test]
 fn prelude_eq_works_on_i64_with_no_imports() {
     // The prelude provides Eq + (impl Eq i64), so `eq` works bare.
-    let code = build_and_run("(module app)\n(defn main [] (-> i64) (if (eq 3 3) (if (eq 3 4) 0 7) 0))");
+    let code = build_and_run("(module app)\n(defn main [] (-> i64) (if (= 3 3) (if (= 3 4) 0 7) 0))");
     assert_eq!(code, 7);
 }
 
@@ -57,7 +57,7 @@ fn definition_time_bound_check_rejects_unbounded_call() {
     // Calling a trait method on an UNBOUNDED type parameter errors at the
     // definition of the generic — not at some later instantiation.
     let err = coil::emit_ir(&format!(
-        "{PRELUDE}(defn bad [T] [(a T) (b T)] (-> bool) (eq a b))\n\
+        "{PRELUDE}(defn bad [T] [(a T) (b T)] (-> bool) (= a b))\n\
          (defn main [] (-> i64) 0)"
     ))
     .unwrap_err();
@@ -70,7 +70,7 @@ fn instantiation_site_requires_an_impl() {
     // errors at the call site.
     let err = coil::emit_ir(&format!(
         "{PRELUDE}(defstruct Q [(v i64)])\n\
-         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (= a b))\n\
          (defn main [] (-> i64) (let [(mut q) (zeroed Q)] (if (same (load q) (load q)) 1 0)))"
     ))
     .unwrap_err();
@@ -83,7 +83,7 @@ fn impl_must_match_trait_signature() {
     let err = coil::emit_ir(
         "(module app)\n\
          (defstruct P [(x i64)])\n\
-         (impl Eq P (eq [(a P)] (-> bool) true))\n\
+         (impl Eq P (= [(a P)] (-> bool) true))\n\
          (defn main [] (-> i64) 0)",
     )
     .unwrap_err();
@@ -100,7 +100,7 @@ fn calling_an_unimplemented_method_is_rejected() {
          (defn main [] (-> i64) 0)",
     )
     .unwrap_err();
-    assert!(err.contains("missing method 'eq'"), "got:\n{err}");
+    assert!(err.contains("missing method '='"), "got:\n{err}");
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn derive_generates_a_working_eq_impl() {
          (import \"lib/derive.coil\" :use *)\n\
          (defstruct Point [(x i64) (y i64)])\n\
          (derive Eq Point)\n\
-         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (= a b))\n\
          (defn mkpt [(x i64) (y i64)] (-> Point)\n\
            (let [(mut p) (zeroed Point)] (store! (field (mut p) x) x) (store! (field (mut p) y) y) (load p)))\n\
          (defn main [] (-> i64)\n\
@@ -152,7 +152,7 @@ fn derive_eq_recurses_through_nested_structs() {
          (defn mkl [(x i64)] (-> Line)\n\
            (let [(mut l) (zeroed Line)] (store! (field (mut l) a) (mkpt x 2)) (store! (field (mut l) b) (mkpt 3 4)) (load l)))\n\
          (defn main [] (-> i64)\n\
-           (iadd (if (eq (mkl 1) (mkl 1)) 10 0) (if (eq (mkl 1) (mkl 9)) 100 1)))", // 10 + 1
+           (iadd (if (= (mkl 1) (mkl 1)) 10 0) (if (= (mkl 1) (mkl 9)) 100 1)))", // 10 + 1
     );
     assert_eq!(code, 11);
 }
@@ -227,9 +227,9 @@ fn two_impls_dispatch_independently() {
         "(module app)\n\
          (defstruct A [(v i64)])\n\
          (defstruct B [(v i64)])\n\
-         (impl Eq A (eq [(a A) (b A)] (-> bool) (icmp-eq (load (field a v)) (load (field b v)))))\n\
-         (impl Eq B (eq [(a B) (b B)] (-> bool) false))\n\
-         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (eq a b))\n\
+         (impl Eq A (= [(a A) (b A)] (-> bool) (icmp-eq (load (field a v)) (load (field b v)))))\n\
+         (impl Eq B (= [(a B) (b B)] (-> bool) false))\n\
+         (defn same [(T Eq)] [(a T) (b T)] (-> bool) (= a b))\n\
          (defn mk [(v i64)] (-> A) (let [(mut a) (zeroed A)] (store! (field (mut a) v) v) (load a)))\n\
          (defn mkb [(v i64)] (-> B) (let [(mut b) (zeroed B)] (store! (field (mut b) v) v) (load b)))\n\
          (defn main [] (-> i64)\n\

@@ -9,12 +9,16 @@ compilation: no coherence/orphan rules, no runtime dictionaries, no vtables
 
 ## Surface
 
+The `Eq`/`Hash` traits ship in the auto-loaded prelude (`src/prelude.coil`), so no
+import is needed. `Eq`'s method is `=`, so runtime equality is `(= a b)`.
+
 ```lisp
+; (from the prelude)
 (deftrait Eq [Self]
-  (eq [(a Self) (b Self)] (-> bool)))
+  (= [(a Self) (b Self)] (-> bool)))
 
 (impl Eq Point
-  (eq [(a Point) (b Point)] (-> bool)
+  (= [(a Point) (b Point)] (-> bool)
     (and (icmp-eq (load (field a x)) (load (field b x)))
          (icmp-eq (load (field a y)) (load (field b y))))))
 
@@ -22,7 +26,7 @@ compilation: no coherence/orphan rules, no runtime dictionaries, no vtables
 (defn all-eq [(T Eq)] [(xs (ptr (ArrayList T))) (x T)] (-> bool)
   (let [(mut i) 0 (mut ok) true n (al-len [T] (load xs))]
     (loop (if (icmp-ge (load i) n) (break)
-            (do (if (eq (al-get [T] (load xs) (load i)) x) 0 (store! ok false))
+            (do (if (= (al-get [T] (load xs) (load i)) x) 0 (store! ok false))
                 (store! i (iadd (load i) 1)))))
     (load ok)))
 ```

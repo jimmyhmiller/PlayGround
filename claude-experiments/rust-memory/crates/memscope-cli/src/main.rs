@@ -938,6 +938,7 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     let mut slice_id: u64 = 0;
     let mut slices_emitted = 0usize;
     let mut last_ts = 0u64;
+    let mut last_ctr_ts = u64::MAX; // dedup counter samples to one per (ms) timestamp
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
 
     for e in &events {
@@ -957,11 +958,6 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
                         esc(&label), id, us(e.ts_nanos), e.thread, e.size, e.addr
                     ));
                 }
-                // Total live-bytes counter sample.
-                te.push(format!(
-                    "{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
-                    us(e.ts_nanos), total
-                ));
             }
             memscope_proto::EventKind::Dealloc => {
                 if let Some((size, id, _)) = live.remove(&e.addr) {
@@ -972,12 +968,17 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
                             id, us(e.ts_nanos), e.thread
                         ));
                     }
-                    te.push(format!(
-                        "{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
-                        us(e.ts_nanos), total
-                    ));
                 }
             }
+        }
+        // One live_bytes counter sample per distinct timestamp (the clock is
+        // ms-granular, so this collapses the within-ms burst to one point).
+        if e.ts_nanos != last_ctr_ts {
+            te.push(format!(
+                "{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
+                us(e.ts_nanos), total
+            ));
+            last_ctr_ts = e.ts_nanos;
         }
     }
     // Close out still-live allocations at the end of the trace.

@@ -94,7 +94,7 @@
       (if (not (symbol? ftype))
           (error "derive Eq: unsupported field type (scalars + nested structs only)")
           (if (= (type-kind ftype) :struct)
-              `(eq ~pa ~pb)                                  ; nested: trait dispatch
+              `(= ~pa ~pb)                                   ; nested: trait dispatch (Eq method is `=`)
               (if (= (type-kind ftype) :sum)
                   (error "derive Eq: sum fields unsupported; impl by hand")
                   (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
@@ -137,7 +137,7 @@
 (defmacro derive [trait-name tname]
   (if (= (name trait-name) "Eq")
       `(impl Eq ~tname
-         (eq [(a ~tname) (b ~tname)] (-> bool)
+         (= [(a ~tname) (b ~tname)] (-> bool)
            ~(derive--teq-and (struct-fields tname) (quote a) (quote b))))
       (if (= (name trait-name) "Hash")
           `(impl Hash ~tname

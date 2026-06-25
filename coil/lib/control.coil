@@ -56,7 +56,7 @@
                (cond ~@(rest (rest cs)))))))
 
 ; `(case x k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first `ei`
-; whose `(eq x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing
+; whose `(= x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing
 ; clause is the default (0 if none). Flat `key body` pairs, Clojure-style. The keys'
 ; type must implement `Eq` — pass a non-`Eq` value and you get
 ; "'T' does not implement 'Eq'". Primitives (i64/bool) and any `(derive Eq …)`
@@ -73,7 +73,7 @@
                  ~(case-arms v eq (rest (rest clauses))))))))
 (defmacro case [x & clauses]
   (let [v (gensym "case-x")]
-    `(let [~v ~x] ~(case-arms v (quote eq) clauses))))
+    `(let [~v ~x] ~(case-arms v (quote =) clauses))))
 
 ; `(case-by x eq? k1 e1 … [default])` — like `case`, but with an explicit 2-arg
 ; equality `eq?` instead of the `Eq` trait. For keys whose type isn't `Eq`, or a
