@@ -774,12 +774,20 @@ struct RecEvent {
     thread: u32,
 }
 
+/// One resolved stack frame: function name + source location.
+#[derive(Default, Clone)]
+struct FrameMeta {
+    func: String,
+    file: String,
+    line: u32,
+}
+
 /// Resolved info for one allocation site: its type label and its call stack
-/// (frame function names, innermost first — as recorded).
+/// (innermost first — as recorded).
 #[derive(Default, Clone)]
 struct SiteInfo {
     label: String,
-    frames: Vec<String>,
+    frames: Vec<FrameMeta>,
 }
 
 /// Read a recording (binary `.mscope` or JSON) into per-site info + events.
@@ -835,10 +843,11 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecE
                 let mut frames = Vec::new();
                 for _ in 0..u16::from_le_bytes(b2) {
                     let func = rd_str(&mut f).unwrap_or_default();
-                    let _ = rd_str(&mut f); // file
-                    let _ = f.read_exact(&mut b4); // line
+                    let file = rd_str(&mut f).unwrap_or_default();
+                    f.read_exact(&mut b4).ok();
+                    let line = u32::from_le_bytes(b4);
                     let _ = f.read_exact(&mut b1); // inlined
-                    frames.push(func);
+                    frames.push(FrameMeta { func, file, line });
                 }
                 labels.insert(
                     site,
@@ -900,7 +909,14 @@ fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEve
                 .and_then(|f| f.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|fr| fr.as_array()?.first()?.as_str().map(String::from))
+                        .filter_map(|fr| {
+                            let a = fr.as_array()?;
+                            Some(FrameMeta {
+                                func: a.first()?.as_str()?.to_string(),
+                                file: a.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                line: a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1073,8 +1089,10 @@ fn is_std_frame(name: &str) -> bool {
 /// is what tells you *how* the allocation happened. Deeper std plumbing
 /// (`RawVec`, `Global::alloc_impl`, `__rust_alloc`) and the root runtime
 /// (`lang_start`, `_main`) are removed.
-fn site_to_path(frames: &[String], label: &str, no_std: bool) -> Vec<String> {
-    let cleaned: Vec<String> = frames.iter().rev().map(|f| clean_frame(f)).collect();
+fn site_to_path(frames: &[FrameMeta], label: &str, no_std: bool) -> Vec<String> {
+    // Recorded innermost-first; reverse so the outermost/app frame is the root.
+    let rev: Vec<&FrameMeta> = frames.iter().rev().collect();
+    let cleaned: Vec<String> = rev.iter().map(|f| clean_frame(&f.func)).collect();
     let mut p: Vec<String> = Vec::with_capacity(cleaned.len() + 1);
     for (i, f) in cleaned.iter().enumerate() {
         let keep = if !no_std {
@@ -1087,11 +1105,22 @@ fn site_to_path(frames: &[String], label: &str, no_std: bool) -> Vec<String> {
             i > 0 && !is_std_frame(&cleaned[i - 1])
         };
         if keep {
-            p.push(f.clone());
+            p.push(frame_label(f, &rev[i].file, rev[i].line));
         }
     }
     p.push(format!("[{label}]"));
     p
+}
+
+/// Display name for a frame: the (cleaned) function, with the source location
+/// appended when known — `heapster::scan_segment (segment.rs:142)`.
+fn frame_label(func: &str, file: &str, line: u32) -> String {
+    if line > 0 && !file.is_empty() {
+        let base = file.rsplit('/').next().unwrap_or(file);
+        format!("{func} ({base}:{line})")
+    } else {
+        func.to_string()
+    }
 }
 
 /// Strip a trailing rustc hash (`::h0123abcd…`) and crate disambiguators from a
@@ -1264,7 +1293,8 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     }
 
     // Every allocation, in order, grouped per thread — no sampling, no caps.
-    let mut per_thread: std::collections::BTreeMap<u32, Vec<(u64, u32)>> =
+    // Each sample carries (virtual time, site, allocation size).
+    let mut per_thread: std::collections::BTreeMap<u32, Vec<(u64, u32, u64)>> =
         std::collections::BTreeMap::new();
     let mut vt: u64 = 0;
     for e in &events {
@@ -1273,7 +1303,7 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
             e.kind,
             memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
         ) {
-            per_thread.entry(e.thread).or_default().push((vt, e.site));
+            per_thread.entry(e.thread).or_default().push((vt, e.site, e.size));
         }
     }
 
@@ -1292,8 +1322,10 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
         // linear chain otherwise produces identical [ts,dur] intervals that
         // importers can't nest (they fall back to alphabetical).
         let mut open: Vec<&str> = Vec::new();
+        // Bytes allocated through each open frame (its `args.bytes`, emitted on E).
+        let mut open_bytes: Vec<u64> = Vec::new();
         let empty: Vec<String> = Vec::new();
-        for (vt, site) in samples {
+        for (vt, site, size) in samples {
             total_samples += 1;
             let path = site_path.get(site).unwrap_or(&empty);
             // Common prefix with the currently-open stack.
@@ -1304,12 +1336,13 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
             {
                 common += 1;
             }
-            // Close diverged frames (deepest first).
+            // Close diverged frames (deepest first), reporting their total bytes.
             while open.len() > common {
                 let name = open.pop().unwrap();
+                let bytes = open_bytes.pop().unwrap();
                 te.push(format!(
-                    "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
-                    esc(name), us(*vt), tid
+                    "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{},\"args\":{{\"bytes\":{}}}}}",
+                    esc(name), us(*vt), tid, bytes
                 ));
             }
             // Open new frames (shallowest first).
@@ -1319,14 +1352,20 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
                     esc(name), us(*vt), tid
                 ));
                 open.push(name.as_str());
+                open_bytes.push(0);
+            }
+            // This allocation passes through every currently-open frame.
+            for b in open_bytes.iter_mut() {
+                *b += size;
             }
         }
         // Close whatever remains at the thread's last timestamp.
-        let end = samples.last().map(|(vt, _)| *vt + 1).unwrap_or(1);
+        let end = samples.last().map(|(vt, _, _)| *vt + 1).unwrap_or(1);
         while let Some(name) = open.pop() {
+            let bytes = open_bytes.pop().unwrap();
             te.push(format!(
-                "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
-                esc(name), us(end), tid
+                "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{},\"args\":{{\"bytes\":{}}}}}",
+                esc(name), us(end), tid, bytes
             ));
         }
     }

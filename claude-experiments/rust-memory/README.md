@@ -134,10 +134,15 @@ sample one: every allocation and thread is still present, but the boilerplate is
 gone, which also shrinks the output dramatically (heapster flamechart: 346 MB →
 23 MB, same 836,879 allocations).
 
+Frames carry their **source location** in the label (`heapster::scan_segment
+(segment.rs:142)`) and **allocation bytes** in `args` (flamegraph: per-node total
++ width = bytes; flamechart: bytes through each frame) — so the line number and
+size are visible in the viewer.
+
 * **`flamegraph`** — merges every allocation by call stack; width = total bytes
   (or `--by count`), the recovered type is the leaf. "Where do allocations come
-  from." Emitted as nested synchronous `X` events, so any Chrome-trace flame
-  importer (or speedscope, via `--format folded`) renders it.
+  from." Emitted as nested `B`/`E` events, so any Chrome-trace flame importer (or
+  speedscope, via `--format folded`) renders it in true call order.
 * **`flamechart`** — *not* aggregated: **every** allocation is a stack sample
   placed at its time, on **every** thread; runs of the same stack merge into one
   slice (lossless — a merged slice still represents each allocation in that run).
