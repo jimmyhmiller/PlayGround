@@ -86,16 +86,35 @@ interpreter (folded to a literal, like `sizeof`), usable in `comptime`/`const`/
 - `(variant-count T)` → `i64` (sum variants)
 - `(struct? T)` / `(sum? T)` / `(int? T)` / `(float? T)` / `(ptr? T)` / `(array? T)` → `bool`
 
+Per-field reflection (the index is a compile-time value — a literal or a
+`comptime`/loop variable):
+
+- `(field-name T i)` → the i-th field's name, as a comptime **string** (`(slice u8)`)
+- `(field-type-kind T i)` → its type's kind tag (`i64`: 0 int, 1 float, 2 bool,
+  3 struct, 4 sum, 5 ptr, 6 array, 7 slice, 8 other)
+
 ```lisp
 (const NF (field-count Point))                 ; a compile-time constant
 (static-assert (struct? Point) "must be a struct")
 (comptime (* (field-count Point) (variant-count Shape)))
+
+; THE PAYOFF — a runtime field-metadata table, generated at compile time:
+(defstruct FieldDesc [(name (slice u8)) (kind i64)])
+(const FIELDS
+  (comptime (let [(mut t) (zeroed (array FieldDesc 3)) (mut i) 0]
+    (loop (if (>= (load i) (field-count Mix)) (break)
+      (do (store! (field (index (mut t) (load i)) name) (field-name Mix (load i)))
+          (store! (field (index (mut t) (load i)) kind) (field-type-kind Mix (load i)))
+          (store! i (+ (load i) 1)))))
+    (load t))))
+; => @const.FIELDS = constant [3 x %FieldDesc] [ {{"a",1},0}, {{"b",1},1}, … ]
 ```
 
 ## Roadmap
 
-- more reflection: field names/types as comptime values (needs comptime strings +
-  a `Type` value), and reflecting a generic type parameter (resolved at mono).
+- field *types* as comptime `Type` values (recurse into a field's type), and
+  reflecting a generic type parameter (resolved at mono).
+- comptime string operations (compare/concat) — needs `=`/ops over `(slice u8)`.
 - `sizeof`/`alignof`/`offsetof` at comptime (a layout module independent of LLVM).
 - **3** — staged macros: run code generation in the runtime language too (the big
   rearchitecture that unifies the macro language with the runtime).

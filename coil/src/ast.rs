@@ -315,6 +315,15 @@ pub enum ExprKind {
         q: TypeQuery,
         ty: Type,
     },
+    /// Per-field reflection of struct `ty`: `(field-name T i)` → the i-th field's
+    /// name (a `(slice u8)`), `(field-type-kind T i)` → its type's kind tag (i64).
+    /// `idx` is a compile-time index (a literal, or a `comptime`/loop variable);
+    /// evaluated by the comptime interpreter.
+    FieldMeta {
+        meta: FieldMeta,
+        ty: Type,
+        idx: Box<Expr>,
+    },
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
     /// post-check pass interprets it over the typed program, replacing this node
@@ -351,6 +360,16 @@ pub enum TypeQuery {
     IsFloat,
     IsPtr,
     IsArray,
+}
+
+/// Per-field reflection query (see `ExprKind::FieldMeta`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldMeta {
+    /// The field's name, as a `(slice u8)`.
+    Name,
+    /// A tag for the field's type kind: 0 int, 1 float, 2 bool, 3 struct, 4 sum,
+    /// 5 pointer/ref, 6 array, 7 slice, 8 other.
+    TypeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -527,6 +546,9 @@ pub enum ConstInit {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A `(slice u8)` string value (e.g. a reflected field name in a metadata
+    /// table) — lowered to a byte global plus a `{ptr,len}` fat-pointer constant.
+    Str(String),
     Array(Vec<ConstInit>),
     Struct(Vec<ConstInit>),
 }

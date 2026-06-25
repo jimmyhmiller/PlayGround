@@ -72,3 +72,57 @@ fn field_count_of_non_struct_errors() {
     .unwrap_err();
     assert!(err.contains("not a struct"), "got:\n{err}");
 }
+
+// ---- per-field reflection: field-name (comptime string) + field-type-kind ------
+
+#[test]
+fn field_type_kind_counts_int_fields() {
+    // Count integer fields of a mixed struct at compile time (kind 0 = int).
+    let code = build_and_run(
+        "(module a)\n\
+         (defstruct Mix [(x i64) (y f64) (z i64) (b bool)])\n\
+         (const N (comptime (let [(mut i) 0 (mut n) 0]\n\
+           (loop (if (>= (load i) (field-count Mix)) (break)\n\
+                   (do (if (= (field-type-kind Mix (load i)) 0) (store! n (+ (load n) 1)) 0)\n\
+                       (store! i (+ (load i) 1)))))\n\
+           (load n))))\n\
+         (defn main [] (-> i64) N)", // x,z are i64 -> 2
+    );
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn field_name_is_a_comptime_string() {
+    let code = build_and_run(
+        "(module a)\n\
+         (import \"lib/slice.coil\" :use *)\n\
+         (defstruct Point [(xx i64) (yyy i64)])\n\
+         (defn main [] (-> i64)\n\
+           (+ (slice-len (comptime (field-name Point 0)))\n\
+              (slice-len (comptime (field-name Point 1)))))", // len("xx")=2 + len("yyy")=3 = 5
+    );
+    assert_eq!(code, 5);
+}
+
+#[test]
+fn compile_time_field_metadata_table() {
+    // The payoff: a runtime field-metadata table (names + kinds) generated at
+    // compile time and emitted as a constant global.
+    let code = build_and_run(
+        "(module a)\n\
+         (import \"lib/slice.coil\" :use *)\n\
+         (defstruct Mix [(a i64) (b f64) (c i64)])\n\
+         (defstruct FieldDesc [(name (slice u8)) (kind i64)])\n\
+         (const FIELDS\n\
+           (comptime (let [(mut t) (zeroed (array FieldDesc 3)) (mut i) 0]\n\
+             (loop (if (>= (load i) (field-count Mix)) (break)\n\
+                     (do (store! (field (index (mut t) (load i)) name) (field-name Mix (load i)))\n\
+                         (store! (field (index (mut t) (load i)) kind) (field-type-kind Mix (load i)))\n\
+                         (store! i (+ (load i) 1)))))\n\
+             (load t))))\n\
+         (defn main [] (-> i64)\n\
+           (+ (* (load (field (index FIELDS 1) kind)) 10)\n\
+              (slice-len (load (field (index FIELDS 1) name)))))", // b: kind 1, len 1 => 11
+    );
+    assert_eq!(code, 11);
+}

@@ -27,6 +27,9 @@ enum CtVal {
     Int(i64),
     Bool(bool),
     Float(f64),
+    /// A `(slice u8)` string value (e.g. a reflected field name). Treated as a
+    /// scalar (immutable); lowers back to a string literal.
+    Str(String),
     /// A struct's fields, by declaration order, each in its own cell (so a `field`
     /// place is a real reference). `name` resolves field names to indices.
     Struct { name: String, fields: Vec<Cell> },
@@ -131,6 +134,7 @@ fn ctval_to_const_init(v: &CtVal) -> Result<ConstInit, String> {
         CtVal::Int(n) => Ok(ConstInit::Int(*n)),
         CtVal::Bool(b) => Ok(ConstInit::Bool(*b)),
         CtVal::Float(x) => Ok(ConstInit::Float(*x)),
+        CtVal::Str(s) => Ok(ConstInit::Str(s.clone())),
         CtVal::Ref(cell) => ctval_to_const_init(&cell.borrow()),
         CtVal::Struct { fields, .. } => Ok(ConstInit::Struct(
             fields.iter().map(|c| ctval_to_const_init(&c.borrow())).collect::<Result<_, _>>()?,
@@ -152,8 +156,11 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
     let gb = |e: &Expr| -> Result<Box<Expr>, String> { Ok(Box::new(fold_expr(e, ctx)?)) };
     let kind = match &e.kind {
         ExprKind::Comptime(inner) => {
-            let inner = fold_expr(inner, ctx)?;
-            let v = match eval(&inner, &mut HashMap::new(), ctx)? {
+            // Evaluate directly — `eval` handles nested comptime/reflection with the
+            // proper environment. (Don't `fold_expr` into the inner: that would
+            // eagerly evaluate reflection nodes whose index is a loop variable not
+            // yet bound, with an empty environment.)
+            let v = match eval(inner, &mut HashMap::new(), ctx)? {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray break/continue at top level".to_string()),
             };
@@ -162,6 +169,15 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         // Type-reflection queries fold to a literal everywhere (like sizeof).
         ExprKind::TypeQuery { q, ty } => {
             let v = type_query(*q, ty, ctx)?;
+            return build_value(&v, e.span, ctx);
+        }
+        // Per-field reflection folds when its index is a compile-time constant
+        // (a literal, or evaluated inside a `comptime`); a runtime index errors.
+        ExprKind::FieldMeta { .. } => {
+            let v = match eval(e, &mut HashMap::new(), ctx)? {
+                Flow::Val(v) => v,
+                _ => return Err("comptime: stray control flow in field reflection".to_string()),
+            };
             return build_value(&v, e.span, ctx);
         }
         ExprKind::Int(_)
@@ -244,6 +260,7 @@ fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
         CtVal::Int(n) => e(ExprKind::Int(*n)),
         CtVal::Bool(b) => e(ExprKind::Bool(*b)),
         CtVal::Float(x) => e(ExprKind::Float(*x)),
+        CtVal::Str(s) => e(ExprKind::Str(s.clone())),
         CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx)?,
         CtVal::Struct { .. } | CtVal::Array { .. } | CtVal::Sum { .. } => {
             // aggregates only appear behind a Ref as values
@@ -255,7 +272,7 @@ fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
 fn build_content(c: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
     let e = |k| Expr::new(k, span);
     match c {
-        CtVal::Int(_) | CtVal::Bool(_) | CtVal::Float(_) => build_value(c, span, ctx),
+        CtVal::Int(_) | CtVal::Bool(_) | CtVal::Float(_) | CtVal::Str(_) => build_value(c, span, ctx),
         CtVal::Sum { variant, fields } => {
             // pre-mono, sum construction is a call to the variant name
             let args = fields
@@ -380,6 +397,8 @@ fn zeroed_content(ty: &Type, ctx: &Ctx) -> Result<CtVal, String> {
         Type::Int(..) => CtVal::Int(0),
         Type::Bool => CtVal::Bool(false),
         Type::Float(_) => CtVal::Float(0.0),
+        // a zeroed `(slice u8)` string (the empty string); usually overwritten.
+        Type::Slice(el) if matches!(**el, Type::Int(8, _)) => CtVal::Str(String::new()),
         Type::Struct(n) => {
             let sd = ctx.structs.get(n).ok_or_else(|| format!("comptime: unknown struct '{n}'"))?;
             let mut fields = Vec::with_capacity(sd.fields.len());
@@ -425,7 +444,15 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
         ExprKind::Bool(b) => CtVal::Bool(*b),
         ExprKind::Float(x) => CtVal::Float(*x),
         ExprKind::Comptime(inner) => return eval(inner, env, ctx),
+        ExprKind::Str(s) => CtVal::Str(s.clone()),
         ExprKind::TypeQuery { q, ty } => type_query(*q, ty, ctx)?,
+        ExprKind::FieldMeta { meta, ty, idx } => {
+            let i = match val!(eval(idx, env, ctx)?) {
+                CtVal::Int(n) => n,
+                _ => return Err("comptime: field index must be an integer".to_string()),
+            };
+            field_meta(*meta, ty, i, ctx)?
+        }
         ExprKind::Var(name) => env
             .get(name)
             .cloned()
@@ -687,6 +714,45 @@ fn type_query(q: TypeQuery, ty: &Type, ctx: &Ctx) -> Result<CtVal, String> {
         TypeQuery::IsPtr => CtVal::Bool(matches!(ty, Type::Ptr(_) | Type::Ref(..))),
         TypeQuery::IsArray => CtVal::Bool(matches!(ty, Type::Array(..))),
     })
+}
+
+/// Per-field reflection: the i-th field's name (a string) or its type's kind tag.
+fn field_meta(meta: FieldMeta, ty: &Type, i: i64, ctx: &Ctx) -> Result<CtVal, String> {
+    let name = match ty {
+        Type::Struct(n) | Type::App(n, _) => n.as_str(),
+        _ => return Err(format!("field reflection: {ty:?} is not a struct")),
+    };
+    let sd = ctx.structs.get(name).ok_or_else(|| format!("field reflection: {name} is not a struct"))?;
+    let (fname, fty) = sd
+        .fields
+        .get(i as usize)
+        .ok_or_else(|| format!("field reflection: index {i} out of range for {name} ({} fields)", sd.fields.len()))?;
+    Ok(match meta {
+        FieldMeta::Name => CtVal::Str(fname.clone()),
+        FieldMeta::TypeKind => CtVal::Int(type_kind_tag(fty, ctx)),
+    })
+}
+
+/// The kind tag of a type (see `ast::FieldMeta::TypeKind` for the scheme).
+fn type_kind_tag(ty: &Type, ctx: &Ctx) -> i64 {
+    match ty {
+        Type::Int(..) => 0,
+        Type::Float(_) => 1,
+        Type::Bool => 2,
+        Type::Struct(n) | Type::App(n, _) => {
+            if ctx.structs.contains_key(n) {
+                3
+            } else if ctx.sums.contains_key(n) {
+                4
+            } else {
+                8
+            }
+        }
+        Type::Ptr(_) | Type::Ref(..) => 5,
+        Type::Array(..) => 6,
+        Type::Slice(_) => 7,
+        _ => 8,
+    }
 }
 
 fn truthy(v: &CtVal) -> Result<bool, String> {

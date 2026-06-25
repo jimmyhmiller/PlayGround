@@ -2054,6 +2054,9 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::TypeQuery { .. } => {
                 Err("codegen: unresolved type-query (compiler bug)".to_string())
             }
+            ExprKind::FieldMeta { .. } => {
+                Err("codegen: unresolved field-reflection (compiler bug)".to_string())
+            }
             // The zero value of a type (used to initialize a fresh local).
             ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
@@ -2758,6 +2761,18 @@ impl<'ctx> Cg<'ctx> {
             }
             (ConstInit::Float(x), Type::Float(32)) => Ok(self.ctx.f32_type().const_float(*x).into()),
             (ConstInit::Float(x), Type::Float(_)) => Ok(self.ctx.f64_type().const_float(*x).into()),
+            (ConstInit::Str(s), Type::Slice(_)) => {
+                // a (slice u8): a private byte global + a {ptr,len} constant.
+                let bytes = self.ctx.const_string(s.as_bytes(), false);
+                let n = self.globals.get();
+                self.globals.set(n + 1);
+                let g = self.module.add_global(bytes.get_type(), None, &format!("str.{n}"));
+                g.set_initializer(&bytes);
+                g.set_constant(true);
+                g.set_linkage(inkwell::module::Linkage::Private);
+                let len = self.ctx.i64_type().const_int(s.len() as u64, false);
+                Ok(self.ctx.const_struct(&[g.as_pointer_value().into(), len.into()], false).into())
+            }
             (ConstInit::Array(es), Type::Array(el, _)) => {
                 let vals: Vec<_> = es.iter().map(|e| self.const_init_to_llvm(e, el)).collect::<Result<_, _>>()?;
                 Ok(const_array_of(self.basic_ty(el), &vals).into())

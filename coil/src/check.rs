@@ -700,6 +700,20 @@ fn synth_inner(
             };
             Ok((Expr::new(ExprKind::TypeQuery { q: *q, ty: ty.clone() }, e.span), rty))
         }
+        // Per-field reflection: the type must be a struct; the index an integer.
+        ExprKind::FieldMeta { meta, ty, idx } => {
+            validate_type(ty, cx, tps)
+                .map_err(|e| format!("in '{fname}': field reflection: {e}"))?;
+            let (ie, it) = synth(idx, Some(&Type::Int(64, true)), env, cx, tps, fname)?;
+            if !matches!(it, Type::Int(..)) {
+                return Err(format!("in '{fname}': field index must be an integer, got {}", ty_str(&it)).into());
+            }
+            let rty = match meta {
+                FieldMeta::Name => Type::Slice(Box::new(Type::Int(8, false))),
+                FieldMeta::TypeKind => Type::Int(64, true),
+            };
+            Ok((Expr::new(ExprKind::FieldMeta { meta: *meta, ty: ty.clone(), idx: Box::new(ie) }, e.span), rty))
+        }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;
             let (re, rt) = synth(rhs, None, env, cx, tps, fname)?;

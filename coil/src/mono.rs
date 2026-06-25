@@ -479,6 +479,9 @@ impl<'a> Mono<'a> {
             ExprKind::TypeQuery { .. } => {
                 return Err("mono: unresolved type-query (compiler bug)".to_string())
             }
+            ExprKind::FieldMeta { .. } => {
+                return Err("mono: unresolved field-reflection (compiler bug)".to_string())
+            }
             // Resolve a deferred trait call: substitute the Self type parameter to
             // its concrete type, then call the implementing function directly. The
             // checker verified an impl exists at the instantiation site.

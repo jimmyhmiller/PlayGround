@@ -408,6 +408,10 @@ fn qualify_expr(
         ExprKind::Comptime(inner) => qualify_expr(inner, m, imps, table, tps, exports)?,
         ExprKind::StaticRef(_) => {} // checker-produced; no names to qualify
         ExprKind::TypeQuery { ty: t, .. } => ty(t)?,
+        ExprKind::FieldMeta { ty: t, idx, .. } => {
+            ty(t)?;
+            qualify_expr(idx, m, imps, table, tps, exports)?;
+        }
     }
     Ok(())
 }

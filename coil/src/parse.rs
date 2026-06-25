@@ -992,6 +992,18 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             };
             Ok(ExprKind::TypeQuery { q, ty: parse_type(&args[0])? })
         }
+        // per-field reflection: (field-name T i) / (field-type-kind T i)
+        "field-name" | "field-type-kind" => {
+            if args.len() != 2 {
+                return Err(Diag::at(span, format!("{head}: expects ({head} TYPE index)")));
+            }
+            let meta = if head == "field-name" { FieldMeta::Name } else { FieldMeta::TypeKind };
+            Ok(ExprKind::FieldMeta {
+                meta,
+                ty: parse_type(&args[0])?,
+                idx: Box::new(parse_expr(&args[1])?),
+            })
+        }
         // (loop [:label] body...) — the structured-loop primitive.
         "loop" => {
             let (label, rest) = parse_label(args);
