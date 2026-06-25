@@ -79,6 +79,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
         consts,
         traits,
         impls,
+        statics: vec![], // produced by checking
     })
 }
 

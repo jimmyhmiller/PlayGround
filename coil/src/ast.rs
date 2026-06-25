@@ -304,6 +304,10 @@ pub enum ExprKind {
         args: Vec<Expr>,
         body: String,
     },
+    /// A reference to a static global (an aggregate `const`), yielding a pointer to
+    /// it — which, in the reference model, *is* the aggregate value. Produced by
+    /// the checker when a const has an aggregate type.
+    StaticRef(String),
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
     /// post-check pass interprets it over the typed program, replacing this node
@@ -493,6 +497,27 @@ pub struct StaticAssert {
     pub msg: String,
 }
 
+/// A constant initializer tree (computed at compile time by the comptime
+/// interpreter), used to lower an aggregate `const` to a static global with a
+/// constant initializer. Scalars + arrays + structs (no sums in statics yet).
+#[derive(Debug, Clone)]
+pub enum ConstInit {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Array(Vec<ConstInit>),
+    Struct(Vec<ConstInit>),
+}
+
+/// A static global: a named, compile-time-initialized aggregate. An aggregate
+/// `const` lowers to one of these; references to the const become a pointer to it.
+#[derive(Debug, Clone)]
+pub struct StaticDef {
+    pub name: String,
+    pub ty: Type,
+    pub init: ConstInit,
+}
+
 /// A named compile-time constant — `(const NAME VALUE)` or `(const NAME TYPE
 /// VALUE)`. A reference to it elaborates to the literal `value` inline (zero
 /// runtime overhead): so an *untyped* const behaves exactly like writing the
@@ -522,6 +547,9 @@ pub struct Program {
     pub consts: Vec<Const>,
     pub traits: Vec<TraitDef>,
     pub impls: Vec<ImplDef>,
+    /// Static globals (aggregate consts), produced by checking; codegen emits each
+    /// as an LLVM global with a constant initializer.
+    pub statics: Vec<StaticDef>,
 }
 
 impl Program {

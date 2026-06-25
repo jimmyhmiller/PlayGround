@@ -173,6 +173,26 @@ pub(crate) fn int_width(ctx: &Context, bits: u32) -> inkwell::types::IntType<'_>
         .expect("valid int width")
 }
 
+/// Build a constant array value of `elem_ty` from already-constant elements
+/// (inkwell's `const_array` lives on each concrete type, not on `BasicTypeEnum`).
+fn const_array_of<'ctx>(
+    elem_ty: inkwell::types::BasicTypeEnum<'ctx>,
+    vals: &[inkwell::values::BasicValueEnum<'ctx>],
+) -> inkwell::values::ArrayValue<'ctx> {
+    use inkwell::types::BasicTypeEnum as T;
+    match elem_ty {
+        T::IntType(t) => t.const_array(&vals.iter().map(|v| v.into_int_value()).collect::<Vec<_>>()),
+        T::FloatType(t) => t.const_array(&vals.iter().map(|v| v.into_float_value()).collect::<Vec<_>>()),
+        T::StructType(t) => t.const_array(&vals.iter().map(|v| v.into_struct_value()).collect::<Vec<_>>()),
+        T::ArrayType(t) => t.const_array(&vals.iter().map(|v| v.into_array_value()).collect::<Vec<_>>()),
+        T::PointerType(t) => t.const_array(&vals.iter().map(|v| v.into_pointer_value()).collect::<Vec<_>>()),
+        T::VectorType(t) => t.const_array(&vals.iter().map(|v| v.into_vector_value()).collect::<Vec<_>>()),
+        T::ScalableVectorType(t) => {
+            t.const_array(&vals.iter().map(|v| v.into_scalable_vector_value()).collect::<Vec<_>>())
+        }
+    }
+}
+
 /// What the caller supplies to turn on DWARF emission: the source text (to map a
 /// byte span to a line/column) and the file identity for the `DIFile`.
 pub struct DebugInput<'a> {
@@ -245,6 +265,8 @@ struct Cg<'ctx> {
     /// leading underscore that inline-asm symbol references must spell out.
     mach_o: bool,
     globals: Cell<u32>,
+    /// Static globals (aggregate consts): name -> (pointer to the global, type).
+    statics: HashMap<String, (inkwell::values::PointerValue<'ctx>, Type)>,
     /// Monotonic counter for naming `(llvm-ir ...)` inlined helper functions.
     llvm_seq: Cell<u32>,
     /// Stack of enclosing loops (innermost last) during body emission: their
@@ -395,6 +417,7 @@ pub fn compile_for_dbg<'ctx>(
         globals: Cell::new(0),
         llvm_seq: Cell::new(0),
         loops: RefCell::new(Vec::new()),
+        statics: HashMap::new(),
     };
 
     for (name, conv) in &program.conventions {
@@ -475,6 +498,17 @@ pub fn compile_for_dbg<'ctx>(
             })
             .collect();
         cg.sums.get_mut(&sd.name).unwrap().variant_structs = vss;
+    }
+
+    // 0d2. static globals (aggregate consts) — emit each as a constant global.
+    for s in &program.statics {
+        let llvm_ty = cg.basic_ty(&s.ty);
+        let init = cg.const_init_to_llvm(&s.init, &s.ty)?;
+        let g = cg.module.add_global(llvm_ty, None, &format!("const.{}", s.name));
+        g.set_initializer(&init);
+        g.set_constant(true);
+        g.set_linkage(inkwell::module::Linkage::Private);
+        cg.statics.insert(s.name.clone(), (g.as_pointer_value(), s.ty.clone()));
     }
 
     // 0e. static asserts — evaluate now that every layout is known.
@@ -2007,6 +2041,16 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::Comptime(_) => {
                 Err("codegen: unresolved comptime node (compiler bug)".to_string())
             }
+            // A reference to an aggregate const yields a pointer to its global
+            // (which, in the reference model, is the aggregate value).
+            ExprKind::StaticRef(name) => {
+                let (ptr, ty) = self
+                    .statics
+                    .get(name)
+                    .ok_or_else(|| format!("codegen: unknown static const '{name}'"))?;
+                // The reference erases to a pointer to the aggregate.
+                Ok(((*ptr).into(), Type::Ptr(Box::new(ty.clone()))))
+            }
             // The zero value of a type (used to initialize a fresh local).
             ExprKind::Zeroed(t) => Ok((self.basic_ty(t).const_zero(), t.clone())),
             // A borrow is the underlying place's pointer (the checker normally
@@ -2693,6 +2737,40 @@ impl<'ctx> Cg<'ctx> {
             _ => return Err("codegen: bitfield is not an integer".to_string()),
         };
         Ok((pv.into_pointer_value(), b.offsets[idx], width, b.backing))
+    }
+
+    /// Build an LLVM constant initializer for a static global from a comptime
+    /// `ConstInit` tree and its type.
+    fn const_init_to_llvm(
+        &self,
+        init: &ConstInit,
+        ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, String> {
+        match (init, ty) {
+            (ConstInit::Int(n), Type::Int(bits, signed)) => {
+                Ok(int_width(self.ctx, *bits).const_int(*n as u64, *signed).into())
+            }
+            (ConstInit::Bool(b), Type::Bool) => {
+                Ok(self.ctx.bool_type().const_int(*b as u64, false).into())
+            }
+            (ConstInit::Float(x), Type::Float(32)) => Ok(self.ctx.f32_type().const_float(*x).into()),
+            (ConstInit::Float(x), Type::Float(_)) => Ok(self.ctx.f64_type().const_float(*x).into()),
+            (ConstInit::Array(es), Type::Array(el, _)) => {
+                let vals: Vec<_> = es.iter().map(|e| self.const_init_to_llvm(e, el)).collect::<Result<_, _>>()?;
+                Ok(const_array_of(self.basic_ty(el), &vals).into())
+            }
+            (ConstInit::Struct(fs), Type::Struct(name)) => {
+                let info = self.structs.get(name).ok_or_else(|| format!("codegen: unknown struct '{name}'"))?;
+                let field_tys: Vec<Type> = info.fields.iter().map(|(_, t)| t.clone()).collect();
+                let vals: Vec<_> = fs
+                    .iter()
+                    .zip(&field_tys)
+                    .map(|(f, ft)| self.const_init_to_llvm(f, ft))
+                    .collect::<Result<_, _>>()?;
+                Ok(info.ty.const_named_struct(&vals).into())
+            }
+            _ => Err(format!("codegen: const initializer doesn't match type {ty:?}")),
+        }
     }
 
     fn offset_of(&self, ty: &Type, field: &str) -> Result<u64, String> {

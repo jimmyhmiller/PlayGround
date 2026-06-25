@@ -106,6 +106,8 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         // (lowered in check), and trait calls have been resolved to direct calls.
         traits: vec![],
         impls: vec![],
+        // Static globals are already concrete (built from comptime values).
+        statics: program.statics,
     })
 }
 
@@ -473,6 +475,7 @@ impl<'a> Mono<'a> {
             ExprKind::Comptime(_) => {
                 return Err("mono: unresolved comptime node (compiler bug)".to_string())
             }
+            ExprKind::StaticRef(name) => ExprKind::StaticRef(name.clone()),
             // Resolve a deferred trait call: substitute the Self type parameter to
             // its concrete type, then call the implementing function directly. The
             // checker verified an impl exists at the instantiation site.

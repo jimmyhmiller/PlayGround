@@ -74,6 +74,9 @@ struct Cx {
     /// Named constants: name -> (value Expr, type). Built incrementally (a later
     /// const's value may reference earlier ones), hence the cell.
     consts: std::cell::RefCell<HashMap<String, (Expr, Type)>>,
+    /// Const names whose type is an aggregate: they lower to a static global, so a
+    /// reference becomes a `StaticRef` (a pointer) rather than an inlined value.
+    static_consts: std::cell::RefCell<HashSet<String>>,
     /// Trait declarations by name.
     trait_defs: HashMap<String, TraitDef>,
     /// Trait-method name -> (trait name, index of the `Self`-typed parameter).
@@ -252,6 +255,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         sums,
         variant_to_sum,
         consts: std::cell::RefCell::new(HashMap::new()),
+        static_consts: std::cell::RefCell::new(HashSet::new()),
         trait_defs,
         methods,
         impls: impl_set,
@@ -287,6 +291,11 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
                 None => (ev, t),
             }
         };
+        // An aggregate-typed const lowers to a static global (referenced by
+        // pointer); a scalar/sum const is inlined / rebuilt at use sites.
+        if matches!(entry.1, Type::Struct(_) | Type::Array(_, _)) {
+            cx.static_consts.borrow_mut().insert(c.name.clone());
+        }
         cx.consts.borrow_mut().insert(c.name.clone(), entry);
     }
 
@@ -448,6 +457,17 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
     // static-assert conditions alike.
     crate::comptime::fold_program(&mut funcs, &mut asserts, &program.structs, &program.sums)?;
 
+    // ---- aggregate consts: evaluate to a static-global initializer ----------
+    let mut statics: Vec<StaticDef> = Vec::new();
+    for c in &program.consts {
+        if cx.static_consts.borrow().contains(&c.name) {
+            let (val, ty) = cx.consts.borrow().get(&c.name).cloned().unwrap();
+            let init = crate::comptime::eval_const(&val, &funcs, &program.structs, &program.sums)
+                .map_err(|e| format!("const '{}': {e}", c.name))?;
+            statics.push(StaticDef { name: c.name.clone(), ty, init });
+        }
+    }
+
     Ok(Program {
         conventions: program.conventions.clone(),
         structs: program.structs.clone(),
@@ -462,6 +482,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         // mono erases these, so carry them inert.
         traits: program.traits.clone(),
         impls: program.impls.clone(),
+        statics,
     })
 }
 
@@ -607,8 +628,15 @@ fn synth_inner(
                 return Ok((Expr::new(ExprKind::Var(name.clone()), e.span), t.clone()));
             }
             if let Some((val, ty)) = cx.consts.borrow().get(name).cloned() {
-                // A bare-literal const inlines (re-inferable); a computed const
-                // elaborates to `(comptime value)` for the fold pass to evaluate.
+                // An aggregate const is a static global → a pointer reference. A
+                // bare-literal const inlines (re-inferable); any other scalar/sum
+                // const elaborates to `(comptime value)` for the fold pass.
+                if cx.static_consts.borrow().contains(name) {
+                    // The global is a place; reference it (an immutable reference to
+                    // the aggregate), so `field`/`index` apply directly.
+                    let rty = Type::Ref(false, Box::new(ty));
+                    return Ok((Expr::new(ExprKind::StaticRef(name.clone()), e.span), rty));
+                }
                 let elaborated = if is_literal_value(&val) {
                     Expr::new(val.kind, e.span)
                 } else {
@@ -656,6 +684,10 @@ fn synth_inner(
         ExprKind::Comptime(inner) => {
             let (ie, it) = synth(inner, expected, env, cx, tps, fname)?;
             Ok((Expr::new(ExprKind::Comptime(Box::new(ie)), e.span), it))
+        }
+        // The checker produces StaticRef (for aggregate consts); never input.
+        ExprKind::StaticRef(name) => {
+            Err(format!("in '{fname}': internal: unexpected static-ref '{name}' in input").into())
         }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;

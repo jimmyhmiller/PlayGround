@@ -102,3 +102,42 @@ fn computed_const_folds_to_a_constant() {
     let body = &main[..main.find('}').unwrap_or(main.len())];
     assert!(body.contains("ret i64 120"), "const not folded:\n{body}");
 }
+
+// ---- aggregate consts become static globals (compile-time data tables) --------
+
+#[test]
+fn array_const_is_a_static_table() {
+    // A lookup table built at compile time, read at runtime from the global.
+    let src = "(module a)\n\
+        (defn squares [] (-> (array i64 8))\n\
+          (let [(mut t) (zeroed (array i64 8)) (mut i) 0]\n\
+            (loop (if (>= (load i) 8) (break)\n\
+                    (do (store! (index (mut t) (load i)) (* (load i) (load i)))\n\
+                        (store! i (+ (load i) 1)))))\n\
+            (load t)))\n\
+        (const SQUARES (squares))\n\
+        (defn main [] (-> i64) (+ (load (index SQUARES 5)) (load (index SQUARES 6))))"; // 25 + 36 = 61
+    assert_eq!(build_and_run(src), 61);
+}
+
+#[test]
+fn struct_const_is_a_static() {
+    let src = "(module a)\n\
+        (defstruct Cfg [(w i64) (h i64)])\n\
+        (defn mk [] (-> Cfg) (let [(mut c) (zeroed Cfg)] (store! (field (mut c) w) 80) (store! (field (mut c) h) 25) (load c)))\n\
+        (const CFG (mk))\n\
+        (defn main [] (-> i64) (+ (load (field CFG w)) (load (field CFG h))))"; // 105; %256=105
+    assert_eq!(build_and_run(src), 105);
+}
+
+#[test]
+fn array_const_emits_a_constant_global() {
+    let ir = coil::emit_ir(
+        "(module a)\n\
+         (defn t [] (-> (array i64 3)) (let [(mut a) (zeroed (array i64 3))] (store! (index (mut a) 0) 9) (load a)))\n\
+         (const T (t))\n\
+         (defn main [] (-> i64) (load (index T 0)))",
+    )
+    .unwrap();
+    assert!(ir.contains("const.a.T") || ir.contains("constant"), "no constant global:\n{ir}");
+}

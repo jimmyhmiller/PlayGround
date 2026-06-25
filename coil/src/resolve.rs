@@ -81,6 +81,7 @@ pub fn resolve_program(
         consts: vec![],
         traits: vec![],
         impls: vec![],
+        statics: vec![],
     };
     for (mut p, module) in parsed {
         if let Some(m) = &module {
@@ -405,6 +406,7 @@ fn qualify_expr(
             }
         }
         ExprKind::Comptime(inner) => qualify_expr(inner, m, imps, table, tps, exports)?,
+        ExprKind::StaticRef(_) => {} // checker-produced; no names to qualify
     }
     Ok(())
 }

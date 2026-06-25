@@ -95,6 +95,51 @@ pub fn fold_program(
     Ok(())
 }
 
+/// Evaluate a const's value expression to a constant-initializer tree, for an
+/// aggregate const lowered to a static global.
+pub fn eval_const(
+    value: &Expr,
+    funcs: &[Func],
+    structs: &[StructDef],
+    sums: &[SumDef],
+) -> Result<ConstInit, String> {
+    let table: HashMap<String, Func> = funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
+    let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let variants: HashSet<String> =
+        sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
+    let ctx = Ctx {
+        fns: &table,
+        structs: &smap,
+        variants: &variants,
+        fuel: std::cell::Cell::new(FUEL),
+        gensym: std::cell::Cell::new(0),
+    };
+    let v = match eval(value, &mut HashMap::new(), &ctx)? {
+        Flow::Val(v) => v,
+        _ => return Err("comptime: stray break/continue in const value".to_string()),
+    };
+    ctval_to_const_init(&v)
+}
+
+fn ctval_to_const_init(v: &CtVal) -> Result<ConstInit, String> {
+    match v {
+        CtVal::Int(n) => Ok(ConstInit::Int(*n)),
+        CtVal::Bool(b) => Ok(ConstInit::Bool(*b)),
+        CtVal::Float(x) => Ok(ConstInit::Float(*x)),
+        CtVal::Ref(cell) => ctval_to_const_init(&cell.borrow()),
+        CtVal::Struct { fields, .. } => Ok(ConstInit::Struct(
+            fields.iter().map(|c| ctval_to_const_init(&c.borrow())).collect::<Result<_, _>>()?,
+        )),
+        CtVal::Array { cells, .. } => Ok(ConstInit::Array(
+            cells.iter().map(|c| ctval_to_const_init(&c.borrow())).collect::<Result<_, _>>()?,
+        )),
+        CtVal::Sum { .. } => Err(
+            "comptime: a sum value can't initialize a static const yet (scalar/struct/array only)"
+                .to_string(),
+        ),
+    }
+}
+
 // ---- the comptime fold (find Comptime nodes, evaluate, splice literals) -------
 
 fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
@@ -120,6 +165,7 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         | ExprKind::AlignOf(_)
         | ExprKind::OffsetOf(_, _)
         | ExprKind::FnPtrOf(_)
+        | ExprKind::StaticRef(_)
         | ExprKind::Continue { .. } => e.kind.clone(),
         ExprKind::Borrow { mutable, place } => ExprKind::Borrow { mutable: *mutable, place: gb(place)? },
         ExprKind::SpillRef(x) => ExprKind::SpillRef(gb(x)?),
@@ -696,6 +742,7 @@ fn kind_name(k: &ExprKind) -> String {
         ExprKind::LlvmIr { .. } => "raw llvm-ir".to_string(),
         ExprKind::BitGet { .. } | ExprKind::BitSet { .. } => "a bitfield op".to_string(),
         ExprKind::TraitCall { .. } => "an unresolved trait call".to_string(),
+        ExprKind::StaticRef(_) => "a reference to an aggregate const (a static global)".to_string(),
         _ => "this expression".to_string(),
     }
 }

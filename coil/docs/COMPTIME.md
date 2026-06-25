@@ -61,9 +61,19 @@ Not supported *yet* — each raises a clear error rather than miscompiling:
 A fuel budget bounds runaway loops/recursion.
 
 **Computed `const`s:** a `const`'s value is any expression. A bare literal inlines
-as before; any richer value is evaluated at compile time — `(const FACT5 (fact 5))`,
-`(const DOUBLE (imul BASE 2))`. A computed-const reference elaborates to
-`(comptime value)`, which the fold pass replaces with the result.
+as before; a scalar/sum computation is evaluated at compile time —
+`(const FACT5 (fact 5))`, `(const DOUBLE (* BASE 2))`.
+
+**Aggregate consts = static data tables.** A `const` whose type is a struct or
+array is evaluated once and emitted as a **constant global**; references become a
+pointer to it. So a compile-time lookup table is real static data:
+
+```lisp
+(const SQUARES (squares))         ; => @const.SQUARES = private constant [8 x i64] [0,1,4,9,…]
+(load (index SQUARES 5))          ; reads 25 straight from the global, at runtime
+```
+
+(Sums in statics aren't supported yet — a sum const is rebuilt at use sites.)
 
 ## Roadmap
 
