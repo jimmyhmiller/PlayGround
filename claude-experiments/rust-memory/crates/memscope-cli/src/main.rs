@@ -31,6 +31,7 @@ fn main() {
         "graph" => cmd_graph(rest),
         "paths" => cmd_paths(rest),
         "replay" => cmd_replay(rest),
+        "perfetto" => cmd_perfetto(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -58,7 +59,8 @@ fn print_help() {
          memscope show    <FILE>                        explore a saved dump posthoc\n  \
          memscope graph   [--sock P] [--limit N]        heap reference graph: top retainers\n  \
          memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n  \
-         memscope replay  <FILE>                        read a record_to_file recording\n"
+         memscope replay  <FILE>                        read a record_to_file recording\n  \
+         memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n"
     );
 }
 
@@ -753,6 +755,256 @@ fn replay_json(file: &str) -> Result<(), String> {
     for (label, (count, bytes)) in rows.iter().take(20) {
         println!("  {count:>8}  {:>12}  {label}", human_bytes(*bytes));
     }
+    Ok(())
+}
+
+/// A decoded event from a recording (either format).
+struct RecEvent {
+    kind: memscope_proto::EventKind,
+    addr: u64,
+    size: u64,
+    ts_nanos: u64,
+    site: u32,
+    thread: u32,
+}
+
+/// Read a recording (binary `.mscope` or JSON) into site labels + events.
+fn read_recording(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    {
+        let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
+        let _ = f.read(&mut magic);
+    }
+    if memscope_proto::recfmt::is_binary(&magic) {
+        read_recording_binary(file)
+    } else {
+        read_recording_json(file)
+    }
+}
+
+fn read_recording_binary(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+    use memscope_proto::recfmt;
+    use std::io::Read;
+    let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
+    let mut b1 = [0u8; 1];
+    let mut b2 = [0u8; 2];
+    let mut b4 = [0u8; 4];
+    let rd_str = |f: &mut std::io::BufReader<std::fs::File>| -> Option<String> {
+        let mut l = [0u8; 2];
+        f.read_exact(&mut l).ok()?;
+        let n = u16::from_le_bytes(l) as usize;
+        let mut s = vec![0u8; n];
+        f.read_exact(&mut s).ok()?;
+        Some(String::from_utf8_lossy(&s).into_owned())
+    };
+    if f.read_exact(&mut b4).is_err() || b4 != recfmt::MAGIC {
+        return Err("not a memscope binary recording".into());
+    }
+    let _ = f.read_exact(&mut b2);
+    let _ = f.read_exact(&mut b2);
+    let _ = f.read_exact(&mut b4);
+    let _exe = rd_str(&mut f);
+
+    let mut labels: HashMap<u32, String> = HashMap::new();
+    let mut events: Vec<RecEvent> = Vec::new();
+    while f.read_exact(&mut b1).is_ok() {
+        match b1[0] {
+            recfmt::TAG_SITE => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let site = u32::from_le_bytes(b4);
+                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                let ty = if b1[0] == 1 { rd_str(&mut f) } else { None };
+                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                let shape = recfmt::shape_from_code(b1[0]);
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                for _ in 0..u16::from_le_bytes(b2) {
+                    let _ = rd_str(&mut f);
+                    let _ = rd_str(&mut f);
+                    let _ = f.read_exact(&mut b4);
+                    let _ = f.read_exact(&mut b1);
+                }
+                labels.insert(site, label_for(shape, ty));
+            }
+            recfmt::TAG_EVENTS => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let count = u32::from_le_bytes(b4);
+                let mut rec = vec![0u8; recfmt::EVENT_BYTES * count as usize];
+                f.read_exact(&mut rec).map_err(|e| e.to_string())?;
+                let mut r = recfmt::Reader::new(&rec);
+                for _ in 0..count {
+                    let Some(e) = r.decode_event() else { break };
+                    events.push(RecEvent {
+                        kind: e.kind,
+                        addr: e.addr,
+                        size: e.size,
+                        ts_nanos: e.ts_nanos,
+                        site: e.site.0,
+                        thread: e.thread,
+                    });
+                }
+            }
+            other => return Err(format!("corrupt recording: unknown tag {other}")),
+        }
+    }
+    Ok((labels, events))
+}
+
+fn read_recording_json(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+    use std::io::BufRead;
+    let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
+    let mut labels: HashMap<u32, String> = HashMap::new();
+    let mut events: Vec<RecEvent> = Vec::new();
+    for line in rdr.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("v").is_some() {
+            continue;
+        }
+        if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
+            let ty = v.get("ty").and_then(|x| x.as_str()).map(String::from);
+            let shape = v.get("shape").and_then(|x| x.as_str());
+            let label = match (shape, &ty) {
+                (Some(sh), Some(t)) => format!("{sh}<{t}>"),
+                (Some(sh), None) => format!("{sh}<?>"),
+                (None, Some(t)) => t.clone(),
+                (None, None) => "<no type>".into(),
+            };
+            labels.insert(site as u32, label);
+            continue;
+        }
+        let kind = match v.get("k").and_then(|x| x.as_str()) {
+            Some("A") => memscope_proto::EventKind::Alloc,
+            Some("R") => memscope_proto::EventKind::ReallocGrow,
+            Some("D") => memscope_proto::EventKind::Dealloc,
+            _ => continue,
+        };
+        events.push(RecEvent {
+            kind,
+            addr: v.get("a").and_then(|x| x.as_u64()).unwrap_or(0),
+            size: v.get("sz").and_then(|x| x.as_u64()).unwrap_or(0),
+            ts_nanos: v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0),
+            site: v.get("s").and_then(|x| x.as_u64()).unwrap_or(u32::MAX as u64) as u32,
+            thread: v.get("t").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        });
+    }
+    Ok((labels, events))
+}
+
+fn label_for(shape: Option<memscope_proto::AllocShape>, ty: Option<String>) -> String {
+    match (shape, ty) {
+        (Some(sh), Some(t)) => format!("{sh:?}<{t}>"),
+        (Some(sh), None) => format!("{sh:?}<?>"),
+        (None, Some(t)) => t,
+        (None, None) => "<no type>".into(),
+    }
+}
+
+/// Convert a recording into a Perfetto / Chrome JSON trace: a live-heap-bytes
+/// counter (overall + per type) over time, plus an async slice per allocation
+/// lifetime (alloc -> free), named by recovered type. Open it at
+/// https://ui.perfetto.dev.
+fn cmd_perfetto(args: &[String]) -> Result<(), String> {
+    let file = positional(args).ok_or("usage: memscope perfetto <FILE> [--out trace.json] [--max N]")?;
+    let out = flag(args, "--out").unwrap_or("trace.json").to_string();
+    let max_slices: usize = flag(args, "--max").and_then(|s| s.parse().ok()).unwrap_or(300_000);
+
+    let (labels, events) = read_recording(file)?;
+
+    // Build the trace incrementally.
+    let mut te: Vec<String> = Vec::new();
+    let label_of = |site: u32| -> &str { labels.get(&site).map(|s| s.as_str()).unwrap_or("<unknown>") };
+    let us = |ts: u64| (ts as f64) / 1000.0; // ns -> µs for Chrome format
+
+    // Process / thread metadata.
+    te.push(r#"{"name":"process_name","ph":"M","pid":1,"args":{"name":"heap"}}"#.to_string());
+    let mut threads: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for e in &events {
+        threads.insert(e.thread);
+    }
+    for t in &threads {
+        te.push(format!(
+            "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{t},\"args\":{{\"name\":\"thread {t}\"}}}}"
+        ));
+    }
+
+    // Live-bytes counters (total + per type) + async lifetime slices.
+    let mut live: HashMap<u64, (u64, u64, u64)> = HashMap::new(); // addr -> (size, slice_id, alloc_ts)
+    let mut total: u64 = 0;
+    let mut per_type: HashMap<String, u64> = HashMap::new();
+    let mut slice_id: u64 = 0;
+    let mut slices_emitted = 0usize;
+    let mut last_ts = 0u64;
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+
+    for e in &events {
+        last_ts = e.ts_nanos.max(last_ts);
+        match e.kind {
+            memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
+                let label = label_of(e.site).to_string();
+                total += e.size;
+                *per_type.entry(label.clone()).or_default() += e.size;
+                let id = slice_id;
+                slice_id += 1;
+                live.insert(e.addr, (e.size, id, e.ts_nanos));
+                if slices_emitted < max_slices {
+                    slices_emitted += 1;
+                    te.push(format!(
+                        "{{\"ph\":\"b\",\"cat\":\"alloc\",\"name\":\"{}\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{},\"args\":{{\"size\":{},\"addr\":\"{:#x}\"}}}}",
+                        esc(&label), id, us(e.ts_nanos), e.thread, e.size, e.addr
+                    ));
+                }
+                // Total live-bytes counter sample.
+                te.push(format!(
+                    "{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
+                    us(e.ts_nanos), total
+                ));
+            }
+            memscope_proto::EventKind::Dealloc => {
+                if let Some((size, id, _)) = live.remove(&e.addr) {
+                    total = total.saturating_sub(size);
+                    if id < max_slices as u64 {
+                        te.push(format!(
+                            "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
+                            id, us(e.ts_nanos), e.thread
+                        ));
+                    }
+                    te.push(format!(
+                        "{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
+                        us(e.ts_nanos), total
+                    ));
+                }
+            }
+        }
+    }
+    // Close out still-live allocations at the end of the trace.
+    let end = us(last_ts + 1_000_000);
+    for (_addr, (_size, id, _ts)) in &live {
+        if *id < max_slices as u64 {
+            te.push(format!(
+                "{{\"ph\":\"e\",\"cat\":\"alloc\",\"name\":\"\",\"id\":{},\"ts\":{:.3},\"pid\":1,\"tid\":0}}",
+                id, end
+            ));
+        }
+    }
+
+    let json = format!("{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n{}\n]}}", te.join(",\n"));
+    std::fs::write(&out, json).map_err(|e| e.to_string())?;
+
+    println!("wrote Perfetto trace: {out}");
+    println!(
+        "  {} events  ->  {} async slices + live_bytes counter  ({} threads)",
+        events.len(),
+        slices_emitted,
+        threads.len()
+    );
+    if slices_emitted < live.len() + slices_emitted && events.iter().filter(|e| matches!(e.kind, memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow)).count() > max_slices {
+        println!("  (slices capped at --max {max_slices}; counter covers all events)");
+    }
+    println!("  open it at https://ui.perfetto.dev  (Open trace file)");
     Ok(())
 }
 

@@ -94,8 +94,22 @@ fn main() {
     memscope::record_to_file("allocs.jsonl").unwrap();   // self-contained recording
 ```
 
-Then: `memscope replay allocs.jsonl` (reference reader), or parse it yourself.
+Then: `memscope replay allocs.mscope` (reference reader), or parse it yourself.
 Wrap a different inner allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
+
+### View it on a timeline (Perfetto)
+
+```sh
+memscope perfetto allocs.mscope --out trace.json   # convert a recording
+# then open trace.json at https://ui.perfetto.dev
+```
+
+Produces a Chrome/Perfetto trace: a **`live_bytes` counter** over time plus an
+**async slice per allocation lifetime** (alloc → free), named by recovered type
+and grouped by thread — so you can scrub the timeline, see the heap grow/shrink,
+and inspect when each typed object was alive. Allocation slices are capped with
+`--max` (default 300k) so the UI stays responsive; the counter always covers
+everything.
 
 ### The recording file format
 
