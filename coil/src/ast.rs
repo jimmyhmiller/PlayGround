@@ -504,17 +504,11 @@ pub struct StaticAssert {
 pub struct Const {
     pub name: String,
     pub ty: Option<Type>,
-    pub value: ConstLit,
-}
-
-/// The literal value of a `const`. Restricted to scalars that have both a
-/// compile-time and a runtime representation (the overlap between the two
-/// value universes — see the macro/runtime split).
-#[derive(Debug, Clone, Copy)]
-pub enum ConstLit {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
+    /// The value expression. A bare literal (`Int`/`Float`/`Bool`) is inlined at
+    /// use sites (re-inferable, like the literal itself); any other expression is
+    /// a compile-time computation — checked at definition and evaluated by the
+    /// comptime interpreter (so `(const N (next-pow2 100))` works).
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone)]

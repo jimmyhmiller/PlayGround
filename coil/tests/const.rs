@@ -67,3 +67,38 @@ fn const_value_kind_must_match_declared_type() {
         .unwrap_err();
     assert!(err.contains("cannot have type"), "got:\n{err}");
 }
+
+// ---- computed consts: a const value can be any compile-time expression --------
+
+#[test]
+fn const_computed_by_a_function_at_compile_time() {
+    // The value calls a real defn; it's evaluated by the comptime interpreter.
+    let src = "(module a)\n\
+        (defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))\n\
+        (const FACT5 (fact 5))\n\
+        (defn main [] (-> i64) (isub FACT5 78))"; // 120 - 78 = 42
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn const_can_reference_an_earlier_const() {
+    let src = "(module a)\n\
+        (const BASE (iadd 20 1))\n\
+        (const DOUBLE (imul BASE 2))\n\
+        (defn main [] (-> i64) DOUBLE)"; // 42
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn computed_const_folds_to_a_constant() {
+    let ir = coil::emit_ir(
+        "(module a)\n\
+         (defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))\n\
+         (const FACT5 (fact 5))\n\
+         (defn main [] (-> i64) FACT5)",
+    )
+    .unwrap();
+    let main = ir.split("@main").nth(1).unwrap_or("");
+    let body = &main[..main.find('}').unwrap_or(main.len())];
+    assert!(body.contains("ret i64 120"), "const not folded:\n{body}");
+}

@@ -71,7 +71,9 @@ struct Cx {
     /// stored `Expr` is the literal a reference elaborates to; the `Type` is its
     /// reported type (the declared one, or the literal default for an untyped
     /// const).
-    consts: HashMap<String, (Expr, Type)>,
+    /// Named constants: name -> (value Expr, type). Built incrementally (a later
+    /// const's value may reference earlier ones), hence the cell.
+    consts: std::cell::RefCell<HashMap<String, (Expr, Type)>>,
     /// Trait declarations by name.
     trait_defs: HashMap<String, TraitDef>,
     /// Trait-method name -> (trait name, index of the `Self`-typed parameter).
@@ -244,31 +246,49 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         );
     }
 
-    // ---- named constants ----------------------------------------------------
-    // Each const becomes a (literal Expr, reported Type) entry. An untyped const
-    // reports the literal's default type and stays freely re-inferable at the use
-    // site (it IS the literal); a typed const pins the type and fit-checks now.
-    let mut consts: HashMap<String, (Expr, Type)> = HashMap::new();
-    for c in &program.consts {
-        if cx_sig_or_const(&sigs, &consts, &c.name) {
-            return Err(format!("'{}' is declared more than once", c.name).into());
-        }
-        let entry = const_entry(c)?;
-        consts.insert(c.name.clone(), entry);
-    }
-
     let cx = Cx {
         sigs,
         structs,
         sums,
         variant_to_sum,
-        consts,
+        consts: std::cell::RefCell::new(HashMap::new()),
         trait_defs,
         methods,
         impls: impl_set,
         cur_bounds: std::cell::RefCell::new(HashMap::new()),
         loops: std::cell::RefCell::new(Vec::new()),
     };
+
+    // ---- named constants ----------------------------------------------------
+    // Each const becomes a (value Expr, reported Type) entry. A bare-literal value
+    // is inlined at use sites (untyped → freely re-inferable, like the literal);
+    // any richer value is a compile-time computation: type-checked here, then
+    // evaluated by the comptime interpreter (a const reference elaborates to a
+    // `(comptime value)` the fold pass replaces with the result). Processed after
+    // `cx` so a const value can call functions and reference earlier consts.
+    let const_tps = HashSet::new();
+    for c in &program.consts {
+        if cx.sigs.contains_key(&c.name) || cx.consts.borrow().contains_key(&c.name) {
+            return Err(format!("'{}' is declared more than once", c.name).into());
+        }
+        let entry = if is_literal_value(&c.value) {
+            const_entry(c)?
+        } else {
+            let mut env: HashMap<String, Type> = HashMap::new();
+            let (ev, t) = synth(&c.value, c.ty.as_ref(), &mut env, &cx, &const_tps, &format!("const {}", c.name))?;
+            match &c.ty {
+                Some(want) => {
+                    let tstr = ty_str(&t);
+                    let ev = coerce(ev, t, want, false, &c.name, "const value").map_err(|_| {
+                        format!("const '{}': value has type {} but declared {}", c.name, tstr, ty_str(want))
+                    })?;
+                    (ev, want.clone())
+                }
+                None => (ev, t),
+            }
+        };
+        cx.consts.borrow_mut().insert(c.name.clone(), entry);
+    }
 
     // Validate each declared const type against the type tables (must be a real,
     // concrete type — no type parameters at top level).
@@ -586,8 +606,15 @@ fn synth_inner(
             if let Some(t) = env.get(name) {
                 return Ok((Expr::new(ExprKind::Var(name.clone()), e.span), t.clone()));
             }
-            if let Some((lit, ty)) = cx.consts.get(name) {
-                return Ok((lit.clone(), ty.clone()));
+            if let Some((val, ty)) = cx.consts.borrow().get(name).cloned() {
+                // A bare-literal const inlines (re-inferable); a computed const
+                // elaborates to `(comptime value)` for the fold pass to evaluate.
+                let elaborated = if is_literal_value(&val) {
+                    Expr::new(val.kind, e.span)
+                } else {
+                    Expr::new(ExprKind::Comptime(Box::new(val)), e.span)
+                };
+                return Ok((elaborated, ty));
             }
             Err(format!("in '{fname}': unbound variable '{name}'").into())
         }
@@ -2250,49 +2277,45 @@ fn fits(n: i64, bits: u32, signed: bool) -> bool {
     }
 }
 
-/// Wrap a literal expression in an explicit cast to `target`. A bare `Int(n)` is
-/// range-checked so an out-of-range literal is rejected, not silently truncated.
-/// Is `name` already taken by a function/extern signature or another const?
-fn cx_sig_or_const(
-    sigs: &HashMap<String, Sig>,
-    consts: &HashMap<String, (Expr, Type)>,
-    name: &str,
-) -> bool {
-    sigs.contains_key(name) || consts.contains_key(name)
+/// Is a const value a bare literal (inlined at use sites) rather than a
+/// compile-time computation (deferred to the comptime interpreter)?
+fn is_literal_value(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
 }
 
-/// Build a const's (literal expression, reported type) entry. An untyped const
-/// reports the literal default (so it re-infers like an inline literal); a typed
-/// const pins the type, requiring the value's kind to match and (for integers)
-/// to fit.
+/// Build a bare-literal const's (literal expression, reported type) entry. An
+/// untyped const reports the literal default (so it re-infers like an inline
+/// literal); a typed const pins the type, requiring the value's kind to match and
+/// (for integers) to fit.
 fn const_entry(c: &Const) -> Result<(Expr, Type), Diag> {
     let bad = |ty: &Type, kind: &str| {
         format!("const '{}': {kind} value cannot have type {}", c.name, ty_str(ty))
     };
-    match c.value {
-        ConstLit::Int(n) => match &c.ty {
-            None => Ok((Expr::dummy(ExprKind::Int(n)), Type::Int(64, true))),
+    match &c.value.kind {
+        ExprKind::Int(n) => match &c.ty {
+            None => Ok((Expr::dummy(ExprKind::Int(*n)), Type::Int(64, true))),
             Some(Type::Int(bits, signed)) => {
-                if !fits(n, *bits, *signed) {
+                if !fits(*n, *bits, *signed) {
                     return Err(format!(
                         "const '{}': literal {n} does not fit in {}",
                         c.name,
                         ty_str(c.ty.as_ref().unwrap())
                     ).into());
                 }
-                Ok((Expr::dummy(ExprKind::Int(n)), Type::Int(*bits, *signed)))
+                Ok((Expr::dummy(ExprKind::Int(*n)), Type::Int(*bits, *signed)))
             }
             Some(other) => Err(bad(other, "integer").into()),
         },
-        ConstLit::Float(x) => match &c.ty {
-            None => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(64))),
-            Some(Type::Float(b)) => Ok((Expr::dummy(ExprKind::Float(x)), Type::Float(*b))),
+        ExprKind::Float(x) => match &c.ty {
+            None => Ok((Expr::dummy(ExprKind::Float(*x)), Type::Float(64))),
+            Some(Type::Float(b)) => Ok((Expr::dummy(ExprKind::Float(*x)), Type::Float(*b))),
             Some(other) => Err(bad(other, "float").into()),
         },
-        ConstLit::Bool(b) => match &c.ty {
-            None | Some(Type::Bool) => Ok((Expr::dummy(ExprKind::Bool(b)), Type::Bool)),
+        ExprKind::Bool(b) => match &c.ty {
+            None | Some(Type::Bool) => Ok((Expr::dummy(ExprKind::Bool(*b)), Type::Bool)),
             Some(other) => Err(bad(other, "boolean").into()),
         },
+        _ => unreachable!("const_entry is only called for bare-literal values"),
     }
 }
 

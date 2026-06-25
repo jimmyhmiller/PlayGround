@@ -202,6 +202,13 @@ fn qualify_program(
     for a in &mut p.asserts {
         qualify_expr(&mut a.cond, m, imps, table, &empty, exports)?;
     }
+    // Const values are now expressions (possibly calling functions / using types).
+    for c in &mut p.consts {
+        if let Some(t) = &mut c.ty {
+            qualify_type(t, m, imps, table, &empty, exports)?;
+        }
+        qualify_expr(&mut c.value, m, imps, table, &empty, exports)?;
+    }
     // Traits: qualify the types in each method signature (Self stays unqualified,
     // treated as an in-scope type parameter). Trait names are a flat global
     // namespace in v1, so the name itself isn't renamed.

@@ -147,18 +147,9 @@ fn parse_const(rest: &[Sexp]) -> Result<Const, Diag> {
             ))
         }
     };
-    let value = match &val_sexp.kind {
-        SexpKind::Int(n) => ConstLit::Int(*n),
-        SexpKind::Float(x) => ConstLit::Float(*x),
-        SexpKind::Sym(s) if s == "true" => ConstLit::Bool(true),
-        SexpKind::Sym(s) if s == "false" => ConstLit::Bool(false),
-        _ => {
-            return Err(Diag::at(
-                val_sexp.span,
-                "const value must be an integer, float, or boolean literal",
-            ))
-        }
-    };
+    // A const's value is any expression. A bare literal is inlined as before; a
+    // richer expression is evaluated at compile time (the comptime interpreter).
+    let value = parse_expr(val_sexp)?;
     Ok(Const { name, ty, value })
 }
 
