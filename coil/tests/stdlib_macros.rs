@@ -64,29 +64,30 @@ fn all_any_short_circuit_and_edge_counts() {
 }
 
 #[test]
-fn case_with_icmp_eq_evaluates_x_once() {
-    // Clojure-style flat `key body` pairs; pass the equality (icmp-eq for ints);
-    // a lone trailing clause is the default. No per-clause parens.
+fn case_defaults_to_eq_trait_on_ints() {
+    // `case` compares with the prelude `Eq` trait (Eq i64 is provided), so int
+    // keys work with no equality argument. Flat `key body` pairs, lone default.
     let code = build_and_run(
         r#"(module app)
            (import "lib/control.coil" :use *)
            (defn classify [(c i64)] (-> i64)
-             (case c icmp-eq 1 100 2 200 3 300 999))
+             (case c 1 100 2 200 3 300 999))
            (defn main [] (-> i64) (iadd (classify 2) (classify 7)))"#, // 200 + 999 = 1199; %256 = 175
     );
     assert_eq!(code, 175);
 }
 
 #[test]
-fn case_with_str_eq() {
-    // Coil has no universal `=`, so the equality is explicit — str-eq for slices.
+fn case_by_with_str_eq() {
+    // For keys whose type isn't Eq (slices/strings), `case-by` takes an explicit
+    // 2-arg equality — here str-eq.
     let code = build_and_run(
         r#"(module app)
            (import "lib/slice.coil" :use *)
            (import "lib/str.coil" :use *)
            (import "lib/control.coil" :use *)
            (defn op [(s (slice u8))] (-> i64)
-             (case s str-eq "add" 1 "sub" 2 "mul" 3 0))
+             (case-by s str-eq "add" 1 "sub" 2 "mul" 3 0))
            (defn main [] (-> i64) (iadd (imul (op "mul") 10) (op "nope")))"#, // 3*10 + 0 = 30
     );
     assert_eq!(code, 30);

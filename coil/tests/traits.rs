@@ -1,15 +1,16 @@
 //! Structured, definition-checked traits: `deftrait` / `impl` / bounded generics
 //! (`(T Trait)`), with static (monomorphized) dispatch — concrete calls resolve
 //! to the impl, generic bodies are checked against their bounds at the definition,
-//! and the type-arg's impl is verified at the call site. `Self` is passed by value
-//! (`(a Self)`); codegen reconciles the aggregate-by-value→by-ref ABI at the
-//! generic call site. See docs/TRAITS_DESIGN.md.
+//! and the type-arg's impl is verified at the call site. `Eq`/`Hash` live in the
+//! auto-loaded prelude (no import). `Self` is passed by value (codegen reconciles
+//! the aggregate-by-value→by-ref ABI at the generic call site). See
+//! docs/TRAITS_DESIGN.md.
 
 mod common;
 use common::build_and_run;
 
+// `Eq` is in the prelude — programs just `impl`/`derive` it. A point + an impl.
 const PRELUDE: &str = "(module app)\n\
-    (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
     (defstruct Point [(x i64) (y i64)])\n\
     (impl Eq Point\n\
       (eq [(a Point) (b Point)] (-> bool)\n\
@@ -45,6 +46,13 @@ fn bounded_generic_deferred_dispatch() {
 }
 
 #[test]
+fn prelude_eq_works_on_i64_with_no_imports() {
+    // The prelude provides Eq + (impl Eq i64), so `eq` works bare.
+    let code = build_and_run("(module app)\n(defn main [] (-> i64) (if (eq 3 3) (if (eq 3 4) 0 7) 0))");
+    assert_eq!(code, 7);
+}
+
+#[test]
 fn definition_time_bound_check_rejects_unbounded_call() {
     // Calling a trait method on an UNBOUNDED type parameter errors at the
     // definition of the generic — not at some later instantiation.
@@ -71,9 +79,9 @@ fn instantiation_site_requires_an_impl() {
 
 #[test]
 fn impl_must_match_trait_signature() {
+    // Conformance against the prelude's Eq (wrong arity).
     let err = coil::emit_ir(
         "(module app)\n\
-         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct P [(x i64)])\n\
          (impl Eq P (eq [(a P)] (-> bool) true))\n\
          (defn main [] (-> i64) 0)",
@@ -84,10 +92,9 @@ fn impl_must_match_trait_signature() {
 
 #[test]
 fn calling_an_unimplemented_method_is_rejected() {
-    // The trait declares `eq` but no impl provides it.
+    // The (prelude) Eq trait declares `eq` but this impl provides nothing.
     let err = coil::emit_ir(
         "(module app)\n\
-         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct P [(x i64)])\n\
          (impl Eq P)\n\
          (defn main [] (-> i64) 0)",
@@ -97,12 +104,27 @@ fn calling_an_unimplemented_method_is_rejected() {
 }
 
 #[test]
-fn derive_generates_a_working_eq_impl() {
-    // (derive Eq T) reflects the fields and expands to the impl — no hand-written
-    // method. A bounded generic then dispatches to it.
+fn user_defined_trait_with_deftrait() {
+    // A user trait (not in the prelude): deftrait + impl + bounded-generic use.
     let code = build_and_run(
         "(module app)\n\
-         (import \"lib/traits.coil\" :use *)\n\
+         (deftrait Show [Self] (mag [(x Self)] (-> i64)))\n\
+         (defstruct V [(x i64) (y i64)])\n\
+         (impl Show V (mag [(x V)] (-> i64) (iadd (load (field x x)) (load (field x y)))))\n\
+         (defn total [(T Show)] [(a T)] (-> i64) (mag a))\n\
+         (defn mkv [(x i64) (y i64)] (-> V)\n\
+           (let [(mut v) (zeroed V)] (store! (field (mut v) x) x) (store! (field (mut v) y) y) (load v)))\n\
+         (defn main [] (-> i64) (total (mkv 30 12)))", // 42
+    );
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn derive_generates_a_working_eq_impl() {
+    // (derive Eq T) reflects the fields and expands to the impl — no hand-written
+    // method, and Eq comes from the prelude (only derive.coil is imported).
+    let code = build_and_run(
+        "(module app)\n\
          (import \"lib/derive.coil\" :use *)\n\
          (defstruct Point [(x i64) (y i64)])\n\
          (derive Eq Point)\n\
@@ -120,7 +142,6 @@ fn derive_eq_recurses_through_nested_structs() {
     // A nested struct field uses the nested type's Eq impl (also derived).
     let code = build_and_run(
         "(module app)\n\
-         (import \"lib/traits.coil\" :use *)\n\
          (import \"lib/derive.coil\" :use *)\n\
          (defstruct Point [(x i64) (y i64)])\n\
          (derive Eq Point)\n\
@@ -138,11 +159,8 @@ fn derive_eq_recurses_through_nested_structs() {
 
 #[test]
 fn derive_hash_agrees_for_equal_values() {
-    // Derived Hash is deterministic: equal structs hash equal, and (here) two
-    // distinct values differ. Returns 11 when both checks hold.
     let code = build_and_run(
         "(module app)\n\
-         (import \"lib/traits.coil\" :use *)\n\
          (import \"lib/derive.coil\" :use *)\n\
          (defstruct Point [(x i64) (y i64)])\n\
          (derive Hash Point)\n\
@@ -160,7 +178,6 @@ fn derive_hash_agrees_for_equal_values() {
 fn derive_unknown_trait_is_rejected() {
     let err = coil::emit_ir(
         "(module app)\n\
-         (import \"lib/traits.coil\" :use *)\n\
          (import \"lib/derive.coil\" :use *)\n\
          (defstruct P [(x i64)])\n\
          (derive Ord P)\n\
@@ -171,11 +188,43 @@ fn derive_unknown_trait_is_rejected() {
 }
 
 #[test]
+fn case_defaults_to_eq_trait() {
+    // `case` (lib/control.coil) compares with the prelude Eq trait: works on i64
+    // keys and on a derived-Eq struct, with no trait import.
+    let code = build_and_run(
+        "(module app)\n\
+         (import \"lib/control.coil\" :use *)\n\
+         (import \"lib/derive.coil\" :use *)\n\
+         (defstruct P [(v i64)])\n\
+         (derive Eq P)\n\
+         (defn mkp [(v i64)] (-> P) (let [(mut p) (zeroed P)] (store! (field (mut p) v) v) (load p)))\n\
+         (defn classify [(n i64)] (-> i64) (case n 1 100 2 200 999))\n\
+         (defn pick [(p P)] (-> i64) (case p (mkp 7) 70 (mkp 8) 80 9))\n\
+         (defn main [] (-> i64) (iadd (classify 2) (pick (mkp 8))))", // 200 + 80 = 280; %256 = 24
+    );
+    assert_eq!(code, 24);
+}
+
+#[test]
+fn case_on_non_eq_type_is_rejected() {
+    // The whole point: a non-Eq key type gives a clear error.
+    let err = coil::emit_ir(
+        "(module app)\n\
+         (import \"lib/control.coil\" :use *)\n\
+         (defstruct NoEq [(v i64)])\n\
+         (defn mk [(v i64)] (-> NoEq) (let [(mut p) (zeroed NoEq)] (store! (field (mut p) v) v) (load p)))\n\
+         (defn f [(x NoEq)] (-> i64) (case x (mk 1) 10 (mk 2) 20 99))\n\
+         (defn main [] (-> i64) (f (mk 1)))",
+    )
+    .unwrap_err();
+    assert!(err.contains("does not implement 'Eq'"), "got:\n{err}");
+}
+
+#[test]
 fn two_impls_dispatch_independently() {
     // Eq for two types; a bounded generic resolves each to the right impl.
     let code = build_and_run(
         "(module app)\n\
-         (deftrait Eq [Self] (eq [(a Self) (b Self)] (-> bool)))\n\
          (defstruct A [(v i64)])\n\
          (defstruct B [(v i64)])\n\
          (impl Eq A (eq [(a A) (b A)] (-> bool) (icmp-eq (load (field a v)) (load (field b v)))))\n\

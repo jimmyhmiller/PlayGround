@@ -384,6 +384,12 @@ pub fn expand_program(
     let mut defs: DefNames = HashMap::new();
     let mut exports: ExportMap = HashMap::new();
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // The prelude (core traits + primitive impls) is compiled into the compiler and
+    // auto-loaded into every program — so `eq`/`hash`/`case` work with no import.
+    // Trait names/methods are global, so just loading its module suffices.
+    const PRELUDE: &str = include_str!("prelude.coil");
+    let prelude_forms = crate::reader::read_all_unspanned(PRELUDE)?;
+    process_forms(&prelude_forms, &genv, &mut macros, &mut raw, &base, &mut visited, None, &mut imports, &mut defs, &mut exports)?;
     // Pass 1 — load: collect raw forms, build the def table, register macros + defs.
     process_forms(forms, &genv, &mut macros, &mut raw, &base, &mut visited, None, &mut imports, &mut defs, &mut exports)?;
     // Capture every source-written type's shape for comptime reflection (the

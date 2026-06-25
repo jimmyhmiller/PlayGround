@@ -3,7 +3,8 @@
 ; it here means `for-in (iter …)` works without the user importing result too —
 ; macro hygiene qualifies the None/Some in the template to result's namespace.
 (import "result.coil" :use *)
-(import "traits.coil" :use *)   ; `case` defaults to the Eq trait (+ primitive impls)
+; `case` defaults to the `Eq` trait, which lives in the auto-loaded prelude — no
+; import needed for it.
 ; Control-flow sugar — written entirely in Coil macros. `(import "lib/control.coil")`
 ; then use `when`/`unless`/`cond`/`|>`/`inline-for`/`for-in`. Nothing in the compiler
 ; knows about any of these; they expand to `if`/`do`/`let` over the core.
@@ -55,7 +56,7 @@
                (cond ~@(rest (rest cs)))))))
 
 ; `(case x k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first `ei`
-; whose `(eq x ki)` holds, using the `Eq` TRAIT (lib/traits.coil); a lone trailing
+; whose `(eq x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing
 ; clause is the default (0 if none). Flat `key body` pairs, Clojure-style. The keys'
 ; type must implement `Eq` — pass a non-`Eq` value and you get
 ; "'T' does not implement 'Eq'". Primitives (i64/bool) and any `(derive Eq …)`

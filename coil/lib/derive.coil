@@ -84,7 +84,7 @@
 ; `(impl Trait T …)` — the trait version of derive-eq/derive-hash. Unlike the
 ; standalone `T-eq`/`T-hash` functions above, nested-struct fields dispatch
 ; through the TRAIT method (so nested types must themselves impl/derive the
-; trait). Requires the trait to be in scope (see lib/traits.coil). Scalars
+; trait). The Eq/Hash traits come from the auto-loaded prelude. Scalars
 ; (int/bool/float) + nested structs only; other field types are a hard error.
 
 ; trait-aware per-field equality (nested structs -> the `eq` trait method)

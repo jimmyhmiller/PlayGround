@@ -1,0 +1,18 @@
+(module prelude)
+; THE PRELUDE — compiled into the compiler (src/prelude.coil) and auto-loaded into
+; every program, so the core traits are always in scope with no import. Trait names
+; are a flat global namespace and trait methods resolve program-wide, so `eq` /
+; `hash` (and `case`, which defaults to `eq`) just work. Add a type to a trait by
+; `(impl Eq YourType …)` or `(derive Eq YourType)` (lib/derive.coil).
+
+; structural equality
+(deftrait Eq [Self]
+  (eq [(a Self) (b Self)] (-> bool)))
+
+; a hash of the value (FNV-1a over fields, when derived)
+(deftrait Hash [Self]
+  (hash [(x Self)] (-> i64)))
+
+; standard impls for the common scalar key, i64 (other widths: impl as needed).
+(impl Eq i64 (eq [(a i64) (b i64)] (-> bool) (icmp-eq a b)))
+(impl Hash i64 (hash [(x i64)] (-> i64) x))
