@@ -60,10 +60,13 @@ Not supported *yet* — each raises a clear error rather than miscompiling:
 
 A fuel budget bounds runaway loops/recursion.
 
+**Computed `const`s:** a `const`'s value is any expression. A bare literal inlines
+as before; any richer value is evaluated at compile time — `(const FACT5 (fact 5))`,
+`(const DOUBLE (imul BASE 2))`. A computed-const reference elaborates to
+`(comptime value)`, which the fold pass replaces with the result.
+
 ## Roadmap
 
-- let `const` take a `comptime` expression (a small ordering wrinkle: consts
-  resolve before the fold pass).
 - **2** — comptime reflection as first-class values (the type tables you can
   already read syntactically become values).
 - **3** — staged macros: run code generation in the runtime language too (the big

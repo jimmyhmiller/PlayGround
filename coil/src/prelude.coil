@@ -13,6 +13,42 @@
 (deftrait Hash [Self]
   (hash [(x Self)] (-> i64)))
 
+; ---- arithmetic + ordering, as traits (Rust-style) -------------------------
+; So `+ - * / %` and `< <= > >=` work and dispatch by type — and a generic can be
+; bounded `(T Add)` / `(T Ord)`. Each lowers to the core op in the impl, which the
+; optimizer inlines, so there's no overhead on primitives.
+(deftrait Add [Self] (+ [(a Self) (b Self)] (-> Self)))
+(deftrait Sub [Self] (- [(a Self) (b Self)] (-> Self)))
+(deftrait Mul [Self] (* [(a Self) (b Self)] (-> Self)))
+(deftrait Div [Self] (/ [(a Self) (b Self)] (-> Self)))
+(deftrait Rem [Self] (% [(a Self) (b Self)] (-> Self)))
+(deftrait Ord [Self]
+  (<  [(a Self) (b Self)] (-> bool))
+  (<= [(a Self) (b Self)] (-> bool))
+  (>  [(a Self) (b Self)] (-> bool))
+  (>= [(a Self) (b Self)] (-> bool)))
+
 ; standard impls for the common scalar key, i64 (other widths: impl as needed).
 (impl Eq i64 (= [(a i64) (b i64)] (-> bool) (icmp-eq a b)))
 (impl Hash i64 (hash [(x i64)] (-> i64) x))
+(impl Add i64 (+ [(a i64) (b i64)] (-> i64) (iadd a b)))
+(impl Sub i64 (- [(a i64) (b i64)] (-> i64) (isub a b)))
+(impl Mul i64 (* [(a i64) (b i64)] (-> i64) (imul a b)))
+(impl Div i64 (/ [(a i64) (b i64)] (-> i64) (idiv a b)))
+(impl Rem i64 (% [(a i64) (b i64)] (-> i64) (irem a b)))
+(impl Ord i64
+  (<  [(a i64) (b i64)] (-> bool) (icmp-lt a b))
+  (<= [(a i64) (b i64)] (-> bool) (icmp-le a b))
+  (>  [(a i64) (b i64)] (-> bool) (icmp-gt a b))
+  (>= [(a i64) (b i64)] (-> bool) (icmp-ge a b)))
+
+; f64 arithmetic + ordering
+(impl Add f64 (+ [(a f64) (b f64)] (-> f64) (fadd a b)))
+(impl Sub f64 (- [(a f64) (b f64)] (-> f64) (fsub a b)))
+(impl Mul f64 (* [(a f64) (b f64)] (-> f64) (fmul a b)))
+(impl Div f64 (/ [(a f64) (b f64)] (-> f64) (fdiv a b)))
+(impl Ord f64
+  (<  [(a f64) (b f64)] (-> bool) (fcmp-lt a b))
+  (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b))
+  (>  [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
+  (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
