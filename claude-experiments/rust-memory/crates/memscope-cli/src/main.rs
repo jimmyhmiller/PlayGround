@@ -33,6 +33,7 @@ fn main() {
         "replay" => cmd_replay(rest),
         "perfetto" => cmd_perfetto(rest),
         "flamegraph" => cmd_flamegraph(rest),
+        "flamechart" => cmd_flamechart(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -63,7 +64,8 @@ fn print_help() {
          memscope replay  <FILE>                        read a record_to_file recording\n  \
          memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
          memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live]\n  \
-         \x20                                            allocation flame graph by call stack\n"
+         \x20                                            allocation flame graph by call stack (aggregated)\n  \
+         memscope flamechart <FILE> [--thread T]        allocation flame CHART (timeline, not aggregated)\n"
     );
 }
 
@@ -1187,6 +1189,129 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
         if live_only { " (live only)" } else { "" }
     );
     println!("  open in your flame-graph viewer (Chrome trace importer), or ui.perfetto.dev");
+    Ok(())
+}
+
+/// Build a flame *chart* (timeline, NOT aggregated): each allocation is a stack
+/// sample placed at its time; per thread, consecutive samples are diffed so a run
+/// of identical stacks merges into one slice. The x-axis is time — you scrub it to
+/// see what was allocating when. Emitted as nested synchronous `X` events.
+fn cmd_flamechart(args: &[String]) -> Result<(), String> {
+    let file = positional(args)
+        .ok_or("usage: memscope flamechart <FILE> [--out F] [--thread T] [--max N]")?;
+    let out = flag(args, "--out").unwrap_or("alloc-flamechart.json").to_string();
+    let only_thread: Option<u32> = flag(args, "--thread").and_then(|s| s.parse().ok());
+    let max_samples: usize = flag(args, "--max").and_then(|s| s.parse().ok()).unwrap_or(150_000);
+
+    let (sites, events) = read_recording(file)?;
+
+    // Uniform downsample so the trace stays openable: keep every `stride`-th
+    // allocation across the whole run (preserves the timeline shape).
+    let total_allocs = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
+            ) && only_thread.map(|t| t == e.thread).unwrap_or(true)
+        })
+        .count();
+    let stride = (total_allocs / max_samples.max(1)).max(1);
+
+    // Cleaned root->leaf path per site (reversed frames + the type as the leaf).
+    let mut site_path: HashMap<u32, Vec<String>> = HashMap::new();
+    for (site, info) in &sites {
+        let mut p: Vec<String> = info.frames.iter().rev().map(|f| clean_frame(f)).collect();
+        p.push(format!("[{}]", info.label));
+        site_path.insert(*site, p);
+    }
+
+    // Allocations in order, grouped per thread, with a strictly-increasing virtual
+    // timestamp (tracks the ms clock but sub-orders within a ms).
+    let mut per_thread: std::collections::BTreeMap<u32, Vec<(u64, u32)>> =
+        std::collections::BTreeMap::new();
+    let mut vt: u64 = 0;
+    let mut seen = 0usize;
+    for e in &events {
+        vt = (vt + 1).max(e.ts_nanos);
+        if matches!(
+            e.kind,
+            memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
+        ) && only_thread.map(|t| t == e.thread).unwrap_or(true)
+        {
+            let keep = seen % stride == 0;
+            seen += 1;
+            if keep {
+                per_thread.entry(e.thread).or_default().push((vt, e.site));
+            }
+        }
+    }
+
+    let mut te: Vec<String> = Vec::new();
+    te.push(r#"{"name":"process_name","ph":"M","pid":1,"args":{"name":"allocation timeline"}}"#.into());
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let us = |t: u64| (t as f64) / 1000.0;
+    let mut total_samples = 0u64;
+
+    for (tid, samples) in &per_thread {
+        te.push(format!(
+            "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{tid},\"args\":{{\"name\":\"thread {tid}\"}}}}"
+        ));
+        // Open frames on the current stack: (name, open_vt).
+        let mut open: Vec<(&str, u64)> = Vec::new();
+        let empty: Vec<String> = Vec::new();
+        for (vt, site) in samples {
+            total_samples += 1;
+            let path = site_path.get(site).unwrap_or(&empty);
+            // Common prefix with the currently-open stack.
+            let mut common = 0;
+            while common < open.len()
+                && common < path.len()
+                && open[common].0 == path[common].as_str()
+            {
+                common += 1;
+            }
+            // Close diverged frames (deepest first) as X slices.
+            while open.len() > common {
+                let (name, ox) = open.pop().unwrap();
+                te.push(format!(
+                    "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"dur\":{:.3},\"pid\":1,\"tid\":{}}}",
+                    esc(name), us(ox), us(vt - ox).max(0.001), tid
+                ));
+            }
+            // Open new frames.
+            for name in &path[common..] {
+                open.push((name.as_str(), *vt));
+            }
+        }
+        // Close whatever remains at the thread's last timestamp.
+        let end = samples.last().map(|(vt, _)| *vt + 1).unwrap_or(1);
+        while let Some((name, ox)) = open.pop() {
+            te.push(format!(
+                "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"dur\":{:.3},\"pid\":1,\"tid\":{}}}",
+                esc(name), us(ox), us(end - ox).max(0.001), tid
+            ));
+        }
+    }
+
+    let json = format!(
+        "{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n{}\n]}}",
+        te.join(",\n")
+    );
+    std::fs::write(&out, json).map_err(|e| e.to_string())?;
+    println!("wrote allocation flame chart (timeline): {out}");
+    println!(
+        "  {} allocation samples across {} threads -> {} slices (adjacent identical stacks merged)",
+        total_samples,
+        per_thread.len(),
+        te.iter().filter(|s| s.contains("\"ph\":\"X\"")).count()
+    );
+    if stride > 1 {
+        println!(
+            "  (downsampled 1/{stride} of {total_allocs} allocations to stay openable; raise with --max, or focus one thread with --thread)"
+        );
+    }
+    println!("  open in your flame-graph viewer (Chrome trace) — x-axis is time, scrub to explore");
     Ok(())
 }
 

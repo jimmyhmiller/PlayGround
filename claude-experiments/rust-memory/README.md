@@ -111,6 +111,26 @@ and inspect when each typed object was alive. Allocation slices are capped with
 `--max` (default 300k) so the UI stays responsive; the counter always covers
 everything.
 
+### Flame graph & flame chart (by call stack)
+
+Allocations carry their full call stack, so you get both classic views:
+
+```sh
+memscope flamegraph allocs.mscope --out fg.json      # AGGREGATED by stack, width = bytes
+memscope flamegraph allocs.mscope --format folded    # folded stacks (inferno / speedscope)
+memscope flamegraph allocs.mscope --live             # only un-freed allocations = leak flame
+memscope flamechart allocs.mscope --out fc.json      # TIMELINE (not aggregated), x-axis = time
+```
+
+* **`flamegraph`** — merges every allocation by call stack; width = total bytes
+  (or `--by count`), the recovered type is the leaf. "Where do allocations come
+  from." Emitted as nested synchronous `X` events, so any Chrome-trace flame
+  importer (or speedscope, via `--format folded`) renders it.
+* **`flamechart`** — *not* aggregated: each allocation is a stack sample placed
+  at its time, per thread; runs of the same stack merge into one slice. Scrub the
+  x-axis to see *what was allocating, when*. Long-lived call paths span wide;
+  bursts show up as towers. Same `X`-event format.
+
 ### The recording file format
 
 `record_to_file` writes a **compact binary** format (`.mscope`) by default, or
