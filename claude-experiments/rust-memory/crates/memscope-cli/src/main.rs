@@ -32,6 +32,7 @@ fn main() {
         "paths" => cmd_paths(rest),
         "replay" => cmd_replay(rest),
         "perfetto" => cmd_perfetto(rest),
+        "flamegraph" => cmd_flamegraph(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -60,7 +61,9 @@ fn print_help() {
          memscope graph   [--sock P] [--limit N]        heap reference graph: top retainers\n  \
          memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n  \
          memscope replay  <FILE>                        read a record_to_file recording\n  \
-         memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n"
+         memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
+         memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live]\n  \
+         \x20                                            allocation flame graph by call stack\n"
     );
 }
 
@@ -768,8 +771,16 @@ struct RecEvent {
     thread: u32,
 }
 
-/// Read a recording (binary `.mscope` or JSON) into site labels + events.
-fn read_recording(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+/// Resolved info for one allocation site: its type label and its call stack
+/// (frame function names, innermost first — as recorded).
+#[derive(Default, Clone)]
+struct SiteInfo {
+    label: String,
+    frames: Vec<String>,
+}
+
+/// Read a recording (binary `.mscope` or JSON) into per-site info + events.
+fn read_recording(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
     use std::io::Read;
     let mut magic = [0u8; 4];
     {
@@ -783,7 +794,7 @@ fn read_recording(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), S
     }
 }
 
-fn read_recording_binary(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+fn read_recording_binary(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
     use memscope_proto::recfmt;
     use std::io::Read;
     let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
@@ -806,7 +817,7 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEve
     let _ = f.read_exact(&mut b4);
     let _exe = rd_str(&mut f);
 
-    let mut labels: HashMap<u32, String> = HashMap::new();
+    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
     while f.read_exact(&mut b1).is_ok() {
         match b1[0] {
@@ -818,13 +829,21 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEve
                 f.read_exact(&mut b1).map_err(|e| e.to_string())?;
                 let shape = recfmt::shape_from_code(b1[0]);
                 f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                let mut frames = Vec::new();
                 for _ in 0..u16::from_le_bytes(b2) {
-                    let _ = rd_str(&mut f);
-                    let _ = rd_str(&mut f);
-                    let _ = f.read_exact(&mut b4);
-                    let _ = f.read_exact(&mut b1);
+                    let func = rd_str(&mut f).unwrap_or_default();
+                    let _ = rd_str(&mut f); // file
+                    let _ = f.read_exact(&mut b4); // line
+                    let _ = f.read_exact(&mut b1); // inlined
+                    frames.push(func);
                 }
-                labels.insert(site, label_for(shape, ty));
+                labels.insert(
+                    site,
+                    SiteInfo {
+                        label: label_for(shape, ty),
+                        frames,
+                    },
+                );
             }
             recfmt::TAG_EVENTS => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
@@ -850,10 +869,10 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEve
     Ok((labels, events))
 }
 
-fn read_recording_json(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent>), String> {
+fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
     use std::io::BufRead;
     let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
-    let mut labels: HashMap<u32, String> = HashMap::new();
+    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
     for line in rdr.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -873,7 +892,16 @@ fn read_recording_json(file: &str) -> Result<(HashMap<u32, String>, Vec<RecEvent
                 (None, Some(t)) => t.clone(),
                 (None, None) => "<no type>".into(),
             };
-            labels.insert(site as u32, label);
+            let frames = v
+                .get("frames")
+                .and_then(|f| f.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|fr| fr.as_array()?.first()?.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            labels.insert(site as u32, SiteInfo { label, frames });
             continue;
         }
         let kind = match v.get("k").and_then(|x| x.as_str()) {
@@ -916,7 +944,8 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
 
     // Build the trace incrementally.
     let mut te: Vec<String> = Vec::new();
-    let label_of = |site: u32| -> &str { labels.get(&site).map(|s| s.as_str()).unwrap_or("<unknown>") };
+    let label_of =
+        |site: u32| -> &str { labels.get(&site).map(|s| s.label.as_str()).unwrap_or("<unknown>") };
     let us = |ts: u64| (ts as f64) / 1000.0; // ns -> µs for Chrome format
 
     // Process / thread metadata.
@@ -1007,6 +1036,201 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     }
     println!("  open it at https://ui.perfetto.dev  (Open trace file)");
     Ok(())
+}
+
+/// Strip a trailing rustc hash (`::h0123abcd…`) and crate disambiguators from a
+/// frame name for readable flame labels.
+fn clean_frame(f: &str) -> String {
+    let mut s = f;
+    if let Some(idx) = s.rfind("::h") {
+        if s[idx + 3..].len() >= 8 && s[idx + 3..].bytes().all(|b| b.is_ascii_hexdigit()) {
+            s = &s[..idx];
+        }
+    }
+    // Drop crate-hash decorations like `alloc[5fb2…]` -> `alloc`.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // skip a `[...]` disambiguator only if it looks like a hash
+            let mut inner = String::new();
+            while let Some(&n) = chars.peek() {
+                if n == ']' {
+                    chars.next();
+                    break;
+                }
+                inner.push(n);
+                chars.next();
+            }
+            if !inner.chars().all(|c| c.is_ascii_hexdigit()) {
+                out.push('[');
+                out.push_str(&inner);
+                out.push(']');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        return "[unknown]".to_string();
+    }
+    out
+}
+
+/// A node in the allocation flame tree (merged call stacks, weighted by bytes).
+#[derive(Default)]
+struct Flame {
+    bytes: u64,
+    samples: u64,
+    children: std::collections::BTreeMap<String, Flame>,
+}
+
+/// Build an allocation flame graph by call stack: aggregate every allocation's
+/// bytes onto its captured stack, then emit it either as folded stacks
+/// (`--format folded`, universal) or as a Chrome trace of nested synchronous
+/// duration events (`--format chrome`, default — width = bytes), which standard
+/// flame-graph importers render directly.
+fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
+    let file = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live]")?;
+    let format = flag(args, "--format").unwrap_or("chrome");
+    let by_count = flag(args, "--by") == Some("count");
+    let live_only = args.iter().any(|a| a == "--live");
+    let default_out = if format == "folded" {
+        "alloc.folded"
+    } else {
+        "alloc-flamegraph.json"
+    };
+    let out = flag(args, "--out").unwrap_or(default_out).to_string();
+
+    let (sites, events) = read_recording(file)?;
+
+    // Per-site weight: total allocation bytes/count (optionally live-only).
+    let mut live: HashMap<u64, (u64, u32)> = HashMap::new(); // for --live
+    let mut site_bytes: HashMap<u32, u64> = HashMap::new();
+    let mut site_count: HashMap<u32, u64> = HashMap::new();
+    for e in &events {
+        match e.kind {
+            memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
+                if live_only {
+                    live.insert(e.addr, (e.size, e.site));
+                } else {
+                    *site_bytes.entry(e.site).or_default() += e.size;
+                    *site_count.entry(e.site).or_default() += 1;
+                }
+            }
+            memscope_proto::EventKind::Dealloc if live_only => {
+                live.remove(&e.addr);
+            }
+            _ => {}
+        }
+    }
+    if live_only {
+        for (size, site) in live.values() {
+            *site_bytes.entry(*site).or_default() += *size;
+            *site_count.entry(*site).or_default() += 1;
+        }
+    }
+
+    // Merge each site's stack (reversed so the outermost frame is the root) into
+    // a tree, accumulating weight along the path.
+    let mut root = Flame::default();
+    for (site, info) in &sites {
+        let w = if by_count {
+            *site_count.get(site).unwrap_or(&0)
+        } else {
+            *site_bytes.get(site).unwrap_or(&0)
+        };
+        if w == 0 {
+            continue;
+        }
+        root.bytes += w;
+        root.samples += 1;
+        let mut node = &mut root;
+        // Recorded frames are innermost-first; reverse for root-at-bottom. Append
+        // the recovered type as the final (leaf) frame for readability.
+        let mut path: Vec<String> = info.frames.iter().rev().map(|f| clean_frame(f)).collect();
+        path.push(format!("[{}]", info.label));
+        for name in path {
+            node = node.children.entry(name).or_default();
+            node.bytes += w;
+            node.samples += 1;
+        }
+    }
+
+    if format == "folded" {
+        let mut out_s = String::new();
+        fold(&root, &mut Vec::new(), by_count, &mut out_s);
+        std::fs::write(&out, out_s).map_err(|e| e.to_string())?;
+        println!("wrote folded stacks: {out}");
+        println!("  pipe to inferno-flamegraph / flamegraph.pl, or load at speedscope.app");
+        return Ok(());
+    }
+
+    // Chrome trace: nested X (complete) duration events; ts/dur in "bytes" so the
+    // width of each frame is its total allocated bytes.
+    let mut te: Vec<String> = Vec::new();
+    te.push(r#"{"name":"process_name","ph":"M","pid":1,"args":{"name":"allocations by stack"}}"#.into());
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    emit_flame(&root, "all allocations", 0, &esc, &mut te);
+
+    let json = format!(
+        "{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n{}\n]}}",
+        te.join(",\n")
+    );
+    std::fs::write(&out, json).map_err(|e| e.to_string())?;
+    let unit = if by_count { "allocations" } else { "bytes" };
+    println!("wrote allocation flame graph (Chrome trace): {out}");
+    println!(
+        "  {} total {unit} across {} stacks; width = {unit}{}",
+        root.bytes,
+        root.samples,
+        if live_only { " (live only)" } else { "" }
+    );
+    println!("  open in your flame-graph viewer (Chrome trace importer), or ui.perfetto.dev");
+    Ok(())
+}
+
+fn fold(node: &Flame, stack: &mut Vec<String>, by_count: bool, out: &mut String) {
+    // Self weight = node weight minus children weight (allocations terminating here).
+    let child_sum: u64 = node
+        .children
+        .values()
+        .map(|c| if by_count { c.samples } else { c.bytes })
+        .sum();
+    let self_w = if by_count { node.samples } else { node.bytes }.saturating_sub(child_sum);
+    if self_w > 0 && !stack.is_empty() {
+        out.push_str(&stack.join(";"));
+        out.push(' ');
+        out.push_str(&self_w.to_string());
+        out.push('\n');
+    }
+    for (name, child) in &node.children {
+        stack.push(name.clone());
+        fold(child, stack, by_count, out);
+        stack.pop();
+    }
+}
+
+fn emit_flame(
+    node: &Flame,
+    name: &str,
+    x: u64,
+    esc: &impl Fn(&str) -> String,
+    te: &mut Vec<String>,
+) {
+    te.push(format!(
+        "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":0,\"args\":{{\"bytes\":{},\"allocs\":{}}}}}",
+        esc(name),
+        x,
+        node.bytes.max(1),
+        node.bytes,
+        node.samples
+    ));
+    let mut cx = x;
+    for (child_name, child) in &node.children {
+        emit_flame(child, child_name, cx, esc, te);
+        cx += child.bytes.max(1);
+    }
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
