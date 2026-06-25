@@ -2054,7 +2054,7 @@ impl<'ctx> Cg<'ctx> {
             ExprKind::TypeQuery { .. } => {
                 Err("codegen: unresolved type-query (compiler bug)".to_string())
             }
-            ExprKind::FieldMeta { .. } => {
+            ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
                 Err("codegen: unresolved field-reflection (compiler bug)".to_string())
             }
             // The zero value of a type (used to initialize a fresh local).

@@ -412,6 +412,10 @@ fn qualify_expr(
             ty(t)?;
             qualify_expr(idx, m, imps, table, tps, exports)?;
         }
+        ExprKind::FieldIndex { ty: t, name } => {
+            ty(t)?;
+            qualify_expr(name, m, imps, table, tps, exports)?;
+        }
     }
     Ok(())
 }

@@ -479,7 +479,7 @@ impl<'a> Mono<'a> {
             ExprKind::TypeQuery { .. } => {
                 return Err("mono: unresolved type-query (compiler bug)".to_string())
             }
-            ExprKind::FieldMeta { .. } => {
+            ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
                 return Err("mono: unresolved field-reflection (compiler bug)".to_string())
             }
             // Resolve a deferred trait call: substitute the Self type parameter to

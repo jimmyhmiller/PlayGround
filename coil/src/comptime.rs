@@ -173,7 +173,7 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         }
         // Per-field reflection folds when its index is a compile-time constant
         // (a literal, or evaluated inside a `comptime`); a runtime index errors.
-        ExprKind::FieldMeta { .. } => {
+        ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
             let v = match eval(e, &mut HashMap::new(), ctx)? {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray control flow in field reflection".to_string()),
@@ -453,6 +453,13 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
             };
             field_meta(*meta, ty, i, ctx)?
         }
+        ExprKind::FieldIndex { ty, name } => {
+            let want = match val!(eval(name, env, ctx)?) {
+                CtVal::Str(s) => s,
+                _ => return Err("comptime: field-index name must be a string".to_string()),
+            };
+            find_field_index(ty, &want, ctx)?
+        }
         ExprKind::Var(name) => env
             .get(name)
             .cloned()
@@ -730,7 +737,37 @@ fn field_meta(meta: FieldMeta, ty: &Type, i: i64, ctx: &Ctx) -> Result<CtVal, St
     Ok(match meta {
         FieldMeta::Name => CtVal::Str(fname.clone()),
         FieldMeta::TypeKind => CtVal::Int(type_kind_tag(fty, ctx)),
+        FieldMeta::TypeName => CtVal::Str(type_name_str(fty)),
     })
+}
+
+/// Find the index of the field named `want` in struct `ty` (for `field-index`).
+fn find_field_index(ty: &Type, want: &str, ctx: &Ctx) -> Result<CtVal, String> {
+    let name = match ty {
+        Type::Struct(n) | Type::App(n, _) => n.as_str(),
+        _ => return Err(format!("field-index: {ty:?} is not a struct")),
+    };
+    let sd = ctx.structs.get(name).ok_or_else(|| format!("field-index: {name} is not a struct"))?;
+    match sd.fields.iter().position(|(fname, _)| fname == want) {
+        Some(i) => Ok(CtVal::Int(i as i64)),
+        None => Err(format!("field-index: struct {name} has no field '{want}'")),
+    }
+}
+
+/// A type's display name (module prefix stripped): `i64`, `Point`, `ptr`, …
+fn type_name_str(ty: &Type) -> String {
+    let short = |n: &str| n.rsplit('.').next().unwrap_or(n).to_string();
+    match ty {
+        Type::Int(b, true) => format!("i{b}"),
+        Type::Int(b, false) => format!("u{b}"),
+        Type::Float(w) => format!("f{w}"),
+        Type::Bool => "bool".to_string(),
+        Type::Struct(n) | Type::App(n, _) => short(n),
+        Type::Ptr(_) | Type::Ref(..) => "ptr".to_string(),
+        Type::Array(..) => "array".to_string(),
+        Type::Slice(_) => "slice".to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// The kind tag of a type (see `ast::FieldMeta::TypeKind` for the scheme).

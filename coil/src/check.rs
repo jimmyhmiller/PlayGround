@@ -709,10 +709,20 @@ fn synth_inner(
                 return Err(format!("in '{fname}': field index must be an integer, got {}", ty_str(&it)).into());
             }
             let rty = match meta {
-                FieldMeta::Name => Type::Slice(Box::new(Type::Int(8, false))),
+                FieldMeta::Name | FieldMeta::TypeName => Type::Slice(Box::new(Type::Int(8, false))),
                 FieldMeta::TypeKind => Type::Int(64, true),
             };
             Ok((Expr::new(ExprKind::FieldMeta { meta: *meta, ty: ty.clone(), idx: Box::new(ie) }, e.span), rty))
+        }
+        // (field-index T name): struct type + a string name → i64.
+        ExprKind::FieldIndex { ty, name } => {
+            validate_type(ty, cx, tps)
+                .map_err(|e| format!("in '{fname}': field-index: {e}"))?;
+            let (ne, nt) = synth(name, None, env, cx, tps, fname)?;
+            if !matches!(nt, Type::Slice(_)) {
+                return Err(format!("in '{fname}': field-index name must be a string, got {}", ty_str(&nt)).into());
+            }
+            Ok((Expr::new(ExprKind::FieldIndex { ty: ty.clone(), name: Box::new(ne) }, e.span), Type::Int(64, true)))
         }
         ExprKind::Bin { op, lhs, rhs } => {
             let (le, lt) = synth(lhs, None, env, cx, tps, fname)?;

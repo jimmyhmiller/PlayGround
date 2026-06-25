@@ -126,3 +126,37 @@ fn compile_time_field_metadata_table() {
     );
     assert_eq!(code, 11);
 }
+
+// ---- field-index (find by name) + field-type-name -----------------------------
+
+#[test]
+fn field_index_finds_a_field_by_name() {
+    let code = build_and_run(
+        "(module a)\n\
+         (defstruct Rec [(id i64) (score i64) (active i64)])\n\
+         (defn main [] (-> i64) (+ (* (field-index Rec \"score\") 10) (field-index Rec \"active\")))", // 1*10 + 2 = 12
+    );
+    assert_eq!(code, 12);
+}
+
+#[test]
+fn field_index_missing_field_errors() {
+    let err = coil::emit_ir(
+        "(module a)\n(defstruct P [(x i64)])\n(defn main [] (-> i64) (field-index P \"nope\"))",
+    )
+    .unwrap_err();
+    assert!(err.contains("no field 'nope'"), "got:\n{err}");
+}
+
+#[test]
+fn field_type_name_is_a_comptime_string() {
+    let code = build_and_run(
+        "(module a)\n\
+         (import \"lib/slice.coil\" :use *)\n\
+         (defstruct Rec [(id i64) (p f64)])\n\
+         (defn main [] (-> i64)\n\
+           (+ (slice-len (comptime (field-type-name Rec 0)))\n\
+              (slice-len (comptime (field-type-name Rec 1)))))", // len("i64")=3 + len("f64")=3 = 6
+    );
+    assert_eq!(code, 6);
+}

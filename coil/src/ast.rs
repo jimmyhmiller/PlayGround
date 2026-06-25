@@ -324,6 +324,12 @@ pub enum ExprKind {
         ty: Type,
         idx: Box<Expr>,
     },
+    /// `(field-index T name)` → the index of the field named `name` (a comptime
+    /// string) in struct `ty`, as an `i64`; a compile-time error if absent.
+    FieldIndex {
+        ty: Type,
+        name: Box<Expr>,
+    },
     /// `(comptime E)` — evaluate `E` at compile time and splice the resulting
     /// literal. The checker type-checks `E` (so the form has `E`'s type) and a
     /// post-check pass interprets it over the typed program, replacing this node
@@ -370,6 +376,8 @@ pub enum FieldMeta {
     /// A tag for the field's type kind: 0 int, 1 float, 2 bool, 3 struct, 4 sum,
     /// 5 pointer/ref, 6 array, 7 slice, 8 other.
     TypeKind,
+    /// The field's type, as a display name string (`"i64"`, `"Point"`, …).
+    TypeName,
 }
 
 #[derive(Debug, Clone)]

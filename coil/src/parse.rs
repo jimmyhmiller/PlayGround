@@ -992,16 +992,30 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             };
             Ok(ExprKind::TypeQuery { q, ty: parse_type(&args[0])? })
         }
-        // per-field reflection: (field-name T i) / (field-type-kind T i)
-        "field-name" | "field-type-kind" => {
+        // per-field reflection: (field-name T i) / (field-type-kind T i) / (field-type-name T i)
+        "field-name" | "field-type-kind" | "field-type-name" => {
             if args.len() != 2 {
                 return Err(Diag::at(span, format!("{head}: expects ({head} TYPE index)")));
             }
-            let meta = if head == "field-name" { FieldMeta::Name } else { FieldMeta::TypeKind };
+            let meta = match head.as_str() {
+                "field-name" => FieldMeta::Name,
+                "field-type-kind" => FieldMeta::TypeKind,
+                _ => FieldMeta::TypeName,
+            };
             Ok(ExprKind::FieldMeta {
                 meta,
                 ty: parse_type(&args[0])?,
                 idx: Box::new(parse_expr(&args[1])?),
+            })
+        }
+        // (field-index T name) — index of the field named `name`
+        "field-index" => {
+            if args.len() != 2 {
+                return Err(Diag::at(span, "field-index: expects (field-index TYPE name)"));
+            }
+            Ok(ExprKind::FieldIndex {
+                ty: parse_type(&args[0])?,
+                name: Box::new(parse_expr(&args[1])?),
             })
         }
         // (loop [:label] body...) — the structured-loop primitive.
