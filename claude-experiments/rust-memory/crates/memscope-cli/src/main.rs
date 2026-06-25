@@ -1244,7 +1244,8 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
 /// Build a flame *chart* (timeline, NOT aggregated): each allocation is a stack
 /// sample placed at its time; per thread, consecutive samples are diffed so a run
 /// of identical stacks merges into one slice. The x-axis is time — you scrub it to
-/// see what was allocating when. Emitted as nested synchronous `X` events.
+/// see what was allocating when. Emitted as nested synchronous `B`/`E` events
+/// (nesting from event order, so call order survives).
 fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     let file = positional(args)
         .ok_or("usage: memscope flamechart <FILE> [--out F] [--no-std]")?;
@@ -1283,8 +1284,11 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
         te.push(format!(
             "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{tid},\"args\":{{\"name\":\"thread {tid}\"}}}}"
         ));
-        // Open frames on the current stack: (name, open_vt).
-        let mut open: Vec<(&str, u64)> = Vec::new();
+        // Currently-open stack of frame names. We emit B(egin)/E(nd) pairs (not
+        // X) so nesting comes from event order, not timestamp containment — a
+        // linear chain otherwise produces identical [ts,dur] intervals that
+        // importers can't nest (they fall back to alphabetical).
+        let mut open: Vec<&str> = Vec::new();
         let empty: Vec<String> = Vec::new();
         for (vt, site) in samples {
             total_samples += 1;
@@ -1293,29 +1297,33 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
             let mut common = 0;
             while common < open.len()
                 && common < path.len()
-                && open[common].0 == path[common].as_str()
+                && open[common] == path[common].as_str()
             {
                 common += 1;
             }
-            // Close diverged frames (deepest first) as X slices.
+            // Close diverged frames (deepest first).
             while open.len() > common {
-                let (name, ox) = open.pop().unwrap();
+                let name = open.pop().unwrap();
                 te.push(format!(
-                    "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"dur\":{:.3},\"pid\":1,\"tid\":{}}}",
-                    esc(name), us(ox), us(vt - ox).max(0.001), tid
+                    "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
+                    esc(name), us(*vt), tid
                 ));
             }
-            // Open new frames.
+            // Open new frames (shallowest first).
             for name in &path[common..] {
-                open.push((name.as_str(), *vt));
+                te.push(format!(
+                    "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
+                    esc(name), us(*vt), tid
+                ));
+                open.push(name.as_str());
             }
         }
         // Close whatever remains at the thread's last timestamp.
         let end = samples.last().map(|(vt, _)| *vt + 1).unwrap_or(1);
-        while let Some((name, ox)) = open.pop() {
+        while let Some(name) = open.pop() {
             te.push(format!(
-                "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"dur\":{:.3},\"pid\":1,\"tid\":{}}}",
-                esc(name), us(ox), us(end - ox).max(0.001), tid
+                "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{:.3},\"pid\":1,\"tid\":{}}}",
+                esc(name), us(end), tid
             ));
         }
     }
@@ -1330,7 +1338,7 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
         "  {} allocations across {} threads -> {} slices (every allocation, adjacent identical stacks merged)",
         total_samples,
         per_thread.len(),
-        te.iter().filter(|s| s.contains("\"ph\":\"X\"")).count()
+        te.iter().filter(|s| s.contains("\"ph\":\"B\"")).count()
     );
     println!("  open in your flame-graph viewer (Chrome trace) — x-axis is time, scrub to explore");
     Ok(())
@@ -1364,19 +1372,24 @@ fn emit_flame(
     esc: &impl Fn(&str) -> String,
     te: &mut Vec<String>,
 ) {
+    // Begin/End pair (not a single X): a linear chain has parent and child with
+    // the *same* [ts,dur], which X-importers can't nest — they fall back to
+    // alphabetical. B/E nests by event order, so call order is preserved.
+    let w = node.bytes.max(1);
     te.push(format!(
-        "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":0,\"args\":{{\"bytes\":{},\"allocs\":{}}}}}",
-        esc(name),
-        x,
-        node.bytes.max(1),
-        node.bytes,
-        node.samples
+        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0,\"args\":{{\"bytes\":{},\"allocs\":{}}}}}",
+        esc(name), x, node.bytes, node.samples
     ));
     let mut cx = x;
     for (child_name, child) in &node.children {
         emit_flame(child, child_name, cx, esc, te);
         cx += child.bytes.max(1);
     }
+    te.push(format!(
+        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0}}",
+        esc(name),
+        x + w
+    ));
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
