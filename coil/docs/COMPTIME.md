@@ -29,26 +29,33 @@ runs by interpretation — it is literally the same `=` as runtime.
 - The evaluator (`src/comptime.rs`) is a tree-walker over the typed `Expr` with a
   fuel budget (a runaway loop errors instead of hanging the compiler).
 
-## Stage 1 scope (the pure scalar subset)
+## Supported (Stages 1 + 1b)
 
-Supported: `int`/`bool`/`float` literals, arithmetic + comparison + `inot`,
-`if`/`let` (immutable) /`do`, `match`, sum **construction**, `cast`, and calls to
-monomorphic `defn`s (including recursion). The `=` trait works because it lowers
-to an ordinary impl call. The **result of a `comptime` form must be a scalar**.
+- scalars: `int`/`bool`/`float` literals, arithmetic + comparison + `inot`, `cast`.
+- control flow: `if`, `let` (immutable **and** mutable), `do`, `match`,
+  `loop`/`break`/`continue`.
+- the `=` trait (it lowers to an ordinary impl call) — so one `=` at both phases.
+- calls to monomorphic `defn`s, including recursion.
+- **memory model (1b):** mutable locals, `zeroed`/`alloc`, `load`/`store!`,
+  `field`/`index` places, struct/array/sum aggregates, and passing aggregates
+  **across function calls** (by reference). Modelled with reference-counted cells;
+  aggregate values are references into them, deep-copied where the language copies.
+
+The **result of a `comptime` form must still be a scalar** (returning a struct/
+array is the next increment — it needs the literal-back builder synthesis).
 
 Not supported *yet* — each raises a clear error rather than miscompiling:
 
-- memory / aggregates: `load`/`store!`/`field`/`index`/`zeroed`/references,
-  and passing a struct or sum **across a function call** (it goes by-reference) —
-  needs a comptime heap (Stage 1b).
-- mutable `let`, `loop`/`break`/`continue` — use recursion for now (Stage 1b).
-- generic calls, FFI/`extern`, `llvm-ir`, function pointers.
+- a `comptime` form whose result is an aggregate (scalar results only, for now).
+- generic calls, FFI/`extern`, `llvm-ir`, function pointers, strings,
+  `sizeof`/`alignof`/`offsetof`.
+
+A fuel budget bounds runaway loops/recursion.
 
 ## Roadmap
 
-- **1b** — a comptime memory model: aggregates as comptime values, mutable
-  locals, loops, and `comptime` forms that *return* structs/arrays; let `const`
-  take a `comptime` expression.
+- **1c** — aggregate *results*: a `comptime` form returning a struct/array
+  (synthesize a builder expression), and let `const` take a `comptime` expression.
 - **2** — comptime reflection as first-class values (the type tables you can
   already read syntactically become values).
 - **3** — staged macros: run code generation in the runtime language too (the big
