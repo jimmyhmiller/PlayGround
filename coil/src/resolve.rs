@@ -82,6 +82,7 @@ pub fn resolve_program(
         traits: vec![],
         impls: vec![],
         statics: vec![],
+        metas: vec![],
     };
     for (mut p, module) in parsed {
         if let Some(m) = &module {
@@ -123,6 +124,7 @@ fn merge(out: &mut Program, p: Program) -> Result<(), crate::span::Diag> {
     }
     out.funcs.extend(p.funcs);
     out.asserts.extend(p.asserts);
+    out.metas.extend(p.metas);
     // Traits + impls share one flat global namespace (v1): collected as-is.
     out.traits.extend(p.traits);
     out.impls.extend(p.impls);
@@ -209,6 +211,10 @@ fn qualify_program(
             qualify_type(t, m, imps, table, &empty, exports)?;
         }
         qualify_expr(&mut c.value, m, imps, table, &empty, exports)?;
+    }
+    // `(meta EXPR)` — EXPR is a comptime expression; qualify it.
+    for meta in &mut p.metas {
+        qualify_expr(meta, m, imps, table, &empty, exports)?;
     }
     // Traits: qualify the types in each method signature (Self stays unqualified,
     // treated as an in-scope type parameter). Trait names are a flat global

@@ -45,12 +45,172 @@ fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
     r.map_err(|e| span::render(&e.into(), src, "<source>"))
 }
 
-/// Read + macro-expand + load the module graph, then resolve names (the qualify
-/// pass) into one whole-program `Program`.
-fn read_expand_resolve(src: &str) -> Result<ast::Program, Diag> {
+/// The whole front end: read → macro-expand → resolve → check, with the Stage-3
+/// elaboration loop for `(meta …)` staged macros. Returns the checked `Program`.
+///
+/// Staged macros need generated definitions in place *before* the code that
+/// depends on them is checked. So when there are `(meta …)` forms: check the
+/// closure of functions the metas reach (the generators — they don't depend on
+/// generated code, so they check cleanly), run the metas via the comptime
+/// interpreter to get generated top-level forms, splice those in (dropping the
+/// `meta` forms), and check the whole program.
+fn elaborate(src: &str) -> Result<ast::Program, Diag> {
     let forms = reader::read_all(src)?;
     let (tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
-    resolve::resolve_program(tagged, &imports, &exports)
+    let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
+    let mut checked = if program.metas.is_empty() {
+        check::check(&program)?
+    } else {
+        let sub = generator_subprogram(&program);
+        let checked_sub = check::check(&sub)?;
+        let gen = comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new)?;
+        let module = tagged.iter().find(|(f, _)| is_meta_form(f)).and_then(|(_, m)| m.clone());
+        let mut tagged2: Vec<macros::TaggedForm> =
+            tagged.into_iter().filter(|(f, _)| !is_meta_form(f)).collect();
+        for g in gen {
+            tagged2.push((g, module.clone()));
+        }
+        let program2 = resolve::resolve_program(tagged2, &imports, &exports)?;
+        check::check(&program2)?
+    };
+    // Comptime-only functions (anything with a `Code` parameter or return — macro
+    // generators, code helpers) have done their job during elaboration and have no
+    // runtime representation; drop them before mono/codegen.
+    checked.funcs.retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
+    Ok(checked)
+}
+
+fn is_meta_form(s: &reader::Sexp) -> bool {
+    matches!(&s.kind, reader::SexpKind::List(items)
+        if matches!(items.first().map(|x| &x.kind), Some(reader::SexpKind::Sym(h)) if h == "meta"))
+}
+
+/// Build a sub-program containing only the functions reachable from the `meta`
+/// expressions (plus the full type/trait/const context), so generators can be
+/// checked without the code that consumes their output.
+fn generator_subprogram(p: &ast::Program) -> ast::Program {
+    let names: std::collections::HashSet<&str> = p.funcs.iter().map(|f| f.name.as_str()).collect();
+    let by_name: std::collections::HashMap<&str, &ast::Func> =
+        p.funcs.iter().map(|f| (f.name.as_str(), f)).collect();
+    let mut stack: Vec<String> = Vec::new();
+    for m in &p.metas {
+        collect_calls(m, &names, &mut stack);
+    }
+    let mut wanted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(n) = stack.pop() {
+        if wanted.insert(n.clone()) {
+            if let Some(f) = by_name.get(n.as_str()) {
+                for e in &f.body {
+                    collect_calls(e, &names, &mut stack);
+                }
+            }
+        }
+    }
+    ast::Program {
+        conventions: p.conventions.clone(),
+        structs: p.structs.clone(),
+        sums: p.sums.clone(),
+        externs: p.externs.clone(),
+        funcs: p.funcs.iter().filter(|f| wanted.contains(&f.name)).cloned().collect(),
+        asserts: vec![],
+        consts: p.consts.clone(),
+        traits: p.traits.clone(),
+        impls: p.impls.clone(),
+        statics: vec![],
+        metas: p.metas.clone(),
+    }
+}
+
+/// Collect the names of called functions (restricted to `names`) in `e`.
+fn collect_calls(e: &ast::Expr, names: &std::collections::HashSet<&str>, out: &mut Vec<String>) {
+    use ast::ExprKind as K;
+    let go = |x: &ast::Expr, out: &mut Vec<String>| collect_calls(x, names, out);
+    match &e.kind {
+        K::Call { func, args, .. } => {
+            if names.contains(func.as_str()) {
+                out.push(func.clone());
+            }
+            for a in args {
+                go(a, out);
+            }
+        }
+        K::Borrow { place, .. } => go(place, out),
+        K::SpillRef(x) | K::Not(x) | K::Load(x) | K::Free(x) | K::Comptime(x) => go(x, out),
+        K::Cast { expr, .. } => go(expr, out),
+        K::Bin { lhs, rhs, .. } | K::Cmp { lhs, rhs, .. } => {
+            go(lhs, out);
+            go(rhs, out);
+        }
+        K::If { cond, then, els } => {
+            go(cond, out);
+            go(then, out);
+            go(els, out);
+        }
+        K::Do(es) | K::Loop { body: es, .. } => {
+            for x in es {
+                go(x, out);
+            }
+        }
+        K::Break { value: Some(v), .. } => go(v, out),
+        K::Let { binds, body } => {
+            for (_, _, v) in binds {
+                go(v, out);
+            }
+            for x in body {
+                go(x, out);
+            }
+        }
+        K::Field { ptr, .. } | K::BitGet { ptr, .. } => go(ptr, out),
+        K::Store { ptr, val } => {
+            go(ptr, out);
+            go(val, out);
+        }
+        K::Index { ptr, idx } => {
+            go(ptr, out);
+            go(idx, out);
+        }
+        K::BitSet { ptr, val, .. } => {
+            go(ptr, out);
+            go(val, out);
+        }
+        K::Construct { args, .. } | K::CodeOp { args, .. } | K::TraitCall { args, .. } | K::LlvmIr { args, .. } => {
+            for a in args {
+                go(a, out);
+            }
+        }
+        K::CallPtr { fp, args } => {
+            go(fp, out);
+            for a in args {
+                go(a, out);
+            }
+        }
+        K::Match { scrut, arms } => {
+            go(scrut, out);
+            for arm in arms {
+                go(&arm.body, out);
+            }
+        }
+        K::FieldMeta { idx, .. } => go(idx, out),
+        K::FieldIndex { name, .. } => go(name, out),
+        K::Quasi(q) => collect_calls_quasi(q, names, out),
+        // leaves / no function calls
+        K::Int(_) | K::Str(_) | K::CStr(_) | K::Var(_) | K::Float(_) | K::Bool(_) | K::Zeroed(_)
+        | K::Alloc { .. } | K::SizeOf(_) | K::AlignOf(_) | K::OffsetOf(_, _) | K::FnPtrOf(_)
+        | K::Continue { .. } | K::Break { value: None, .. } | K::StaticRef(_)
+        | K::Quote(_) | K::TypeQuery { .. } => {}
+    }
+}
+
+fn collect_calls_quasi(q: &ast::Quasi, names: &std::collections::HashSet<&str>, out: &mut Vec<String>) {
+    match q {
+        ast::Quasi::Lit(_) => {}
+        ast::Quasi::Unquote(e) => collect_calls(e, names, out),
+        ast::Quasi::List(items) | ast::Quasi::Vector(items) => {
+            for it in items {
+                collect_calls_quasi(it, names, out);
+            }
+        }
+    }
 }
 
 /// The compile-time target description handed to the macro evaluator. Derived
@@ -102,8 +262,7 @@ fn build_module_dbg<'ctx>(
     triple: inkwell::targets::TargetTriple,
     dbg: Option<codegen::DebugInput>,
 ) -> Result<Module<'ctx>, Diag> {
-    let program = read_expand_resolve(src)?;
-    let program = check::check(&program)?;
+    let program = elaborate(src)?;
     let program = mono::monomorphize(program)?;
     Ok(codegen::compile_for_dbg(ctx, &program, triple, dbg)?)
 }
@@ -402,8 +561,7 @@ fn link_arch_flag(triple: &str) -> Option<&'static str> {
 /// execution — just diagnostics. (Coil has no `eval`/JIT: the only way to run a
 /// program is to AOT-compile it.)
 pub fn check_source(src: &str) -> Result<(), String> {
-    let program = reported(read_expand_resolve(src), src)?;
-    let program = reported(check::check(&program), src)?;
+    let program = reported(elaborate(src), src)?;
     // Run monomorphization too, so specialization-time errors (if any) surface
     // in a check-only pass as well.
     reported(mono::monomorphize(program), src)?;

@@ -108,6 +108,8 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         impls: vec![],
         // Static globals are already concrete (built from comptime values).
         statics: program.statics,
+        // Metas are evaluated + spliced by the elaboration loop before mono.
+        metas: vec![],
     })
 }
 

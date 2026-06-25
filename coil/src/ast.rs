@@ -647,6 +647,10 @@ pub struct Program {
     /// Static globals (aggregate consts), produced by checking; codegen emits each
     /// as an LLVM global with a constant initializer.
     pub statics: Vec<StaticDef>,
+    /// `(meta EXPR)` staged-macro forms: each `EXPR` is a comptime expression that
+    /// produces a `Code` value (top-level form(s)) to splice into the program. Run
+    /// by the elaboration loop (lib.rs) — generated code is then re-checked.
+    pub metas: Vec<Expr>,
 }
 
 impl Program {

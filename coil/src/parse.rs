@@ -25,6 +25,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     let mut consts = Vec::new();
     let mut traits = Vec::new();
     let mut impls = Vec::new();
+    let mut metas = Vec::new();
 
     for form in forms {
         // Any error from a top-level form gets that form's span as a fallback
@@ -62,6 +63,12 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
                 "const" => consts.push(parse_const(&items[1..])?),
                 "deftrait" => traits.push(parse_deftrait(&items[1..])?),
                 "impl" => impls.push(parse_impl(&items[1..], form.span)?),
+                "meta" => {
+                    if items.len() != 2 {
+                        return Err(Diag::new("meta: expected (meta EXPR)"));
+                    }
+                    metas.push(parse_expr(&items[1])?);
+                }
                 other => return Err(Diag::new(format!("unknown top-level form '{other}'"))),
             }
             Ok(())
@@ -80,6 +87,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
         traits,
         impls,
         statics: vec![], // produced by checking
+        metas,
     })
 }
 
@@ -565,6 +573,9 @@ fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
         // `:i32` (keyword) must be an int. A bare symbol is an int name, or
         // otherwise a struct name (so `(ptr c i8)` and `Point` both read well).
         SexpKind::Keyword(k) => prim_type(k).map_err(Diag::from),
+        // `Code` is the comptime quoted-code type (Stage 3); otherwise a primitive
+        // int name, else a struct name.
+        SexpKind::Sym(k) if k == "Code" => Ok(Type::Code),
         SexpKind::Sym(k) => Ok(prim_type(k).unwrap_or_else(|_| Type::Struct(k.clone()))),
         SexpKind::List(items) => match head_sym(items)?.as_str() {
             // (mut TYPE) -> a mutable reference to TYPE.

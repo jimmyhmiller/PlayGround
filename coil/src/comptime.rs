@@ -104,6 +104,46 @@ pub fn fold_program(
     Ok(())
 }
 
+/// Evaluate every `(meta …)` form to the top-level syntax it generates. Each meta
+/// expression must produce a `Code` value; a `(do …)` result splices into several
+/// top-level forms. Run by the elaboration loop after the generator functions are
+/// checked.
+pub fn run_metas(program: &Program) -> Result<Vec<crate::reader::Sexp>, String> {
+    use crate::reader::SexpKind;
+    let table: HashMap<String, Func> = program.funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
+    let smap: HashMap<String, StructDef> = program.structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let smap_sums: HashMap<String, SumDef> = program.sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let variants: HashSet<String> =
+        program.sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
+    let ctx = Ctx {
+        fns: &table,
+        structs: &smap,
+        sums: &smap_sums,
+        variants: &variants,
+        fuel: std::cell::Cell::new(FUEL),
+        gensym: std::cell::Cell::new(0),
+    };
+    let mut out = Vec::new();
+    for meta in &program.metas {
+        let v = match eval(meta, &mut HashMap::new(), &ctx)? {
+            Flow::Val(v) => v,
+            _ => return Err("meta: stray control flow at top level".to_string()),
+        };
+        let sexp = match v {
+            CtVal::Code(s) => s,
+            _ => return Err("meta: expression must produce Code (a quoted form)".to_string()),
+        };
+        // A `(do f1 f2 …)` result generates several top-level forms.
+        match &sexp.kind {
+            SexpKind::List(items) if matches!(items.first().map(|s| &s.kind), Some(SexpKind::Sym(h)) if h == "do") => {
+                out.extend(items[1..].iter().cloned());
+            }
+            _ => out.push(sexp),
+        }
+    }
+    Ok(out)
+}
+
 /// Evaluate a const's value expression to a constant-initializer tree, for an
 /// aggregate const lowered to a static global.
 pub fn eval_const(
@@ -155,6 +195,16 @@ fn ctval_to_const_init(v: &CtVal) -> Result<ConstInit, String> {
 
 // ---- the comptime fold (find Comptime nodes, evaluate, splice literals) -------
 
+/// Fold the unquote holes of a quasiquote template (literal syntax is untouched).
+fn fold_quasi(q: &Quasi, ctx: &Ctx) -> Result<Quasi, String> {
+    Ok(match q {
+        Quasi::Lit(s) => Quasi::Lit(s.clone()),
+        Quasi::Unquote(e) => Quasi::Unquote(Box::new(fold_expr(e, ctx)?)),
+        Quasi::List(items) => Quasi::List(items.iter().map(|i| fold_quasi(i, ctx)).collect::<Result<_, _>>()?),
+        Quasi::Vector(items) => Quasi::Vector(items.iter().map(|i| fold_quasi(i, ctx)).collect::<Result<_, _>>()?),
+    })
+}
+
 fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
     let go = |e: &Expr| fold_expr(e, ctx);
     let gb = |e: &Expr| -> Result<Box<Expr>, String> { Ok(Box::new(fold_expr(e, ctx)?)) };
@@ -177,17 +227,22 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         }
         // Per-field reflection folds when its index is a compile-time constant
         // (a literal, or evaluated inside a `comptime`); a runtime index errors.
-        ExprKind::FieldMeta { .. }
-        | ExprKind::FieldIndex { .. }
-        | ExprKind::Quote(_)
-        | ExprKind::CodeOp { .. }
-        | ExprKind::Quasi(_) => {
+        ExprKind::FieldMeta { .. } | ExprKind::FieldIndex { .. } => {
             let v = match eval(e, &mut HashMap::new(), ctx)? {
                 Flow::Val(v) => v,
                 _ => return Err("comptime: stray control flow in field reflection".to_string()),
             };
             return build_value(&v, e.span, ctx);
         }
+        // Code-as-data nodes are NOT folded here: inside a generator function they
+        // are the function's computation (run when it's called at comptime), and
+        // inside `(comptime …)` the Comptime arm evaluates them. Just recurse.
+        ExprKind::Quote(_) => e.kind.clone(),
+        ExprKind::CodeOp { op, args } => ExprKind::CodeOp {
+            op: *op,
+            args: args.iter().map(go).collect::<Result<_, _>>()?,
+        },
+        ExprKind::Quasi(q) => ExprKind::Quasi(fold_quasi(q, ctx)?),
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Bool(_)

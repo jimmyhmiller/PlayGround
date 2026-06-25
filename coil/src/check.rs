@@ -468,6 +468,19 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         }
     }
 
+    // ---- meta (staged-macro) forms: each must produce a `Code` value -----------
+    // Type-checked + elaborated here; evaluated later by the elaboration loop
+    // (lib.rs), which runs them via the comptime interpreter and splices the result.
+    let mut metas: Vec<Expr> = Vec::with_capacity(program.metas.len());
+    for meta in &program.metas {
+        let mut menv: HashMap<String, Type> = HashMap::new();
+        let (me, mt) = synth(meta, None, &mut menv, &cx, &empty_tps, "meta")?;
+        if mt != Type::Code {
+            return Err(format!("meta: expression must produce Code, got {}", ty_str(&mt)).into());
+        }
+        metas.push(me);
+    }
+
     Ok(Program {
         conventions: program.conventions.clone(),
         structs: program.structs.clone(),
@@ -483,6 +496,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         traits: program.traits.clone(),
         impls: program.impls.clone(),
         statics,
+        metas,
     })
 }
 
