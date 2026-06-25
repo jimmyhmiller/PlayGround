@@ -404,11 +404,6 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         });
     }
 
-    // ---- comptime: evaluate every (comptime …) to a literal -----------------
-    // Now that all functions are elaborated, run the compile-time interpreter so
-    // a `comptime` form can call any defn (incl. recursively).
-    crate::comptime::fold_program(&mut funcs, &program.structs, &program.sums)?;
-
     // ---- static-assert conditions ------------------------------------------
     let empty_tps = HashSet::new();
     let mut asserts: Vec<StaticAssert> = Vec::with_capacity(program.asserts.len());
@@ -426,6 +421,12 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
             msg: a.msg.clone(),
         });
     }
+
+    // ---- comptime: evaluate every (comptime …) to a literal -----------------
+    // Now that all functions are elaborated, run the compile-time interpreter so a
+    // `comptime` form can call any defn (incl. recursively), in function bodies and
+    // static-assert conditions alike.
+    crate::comptime::fold_program(&mut funcs, &mut asserts, &program.structs, &program.sums)?;
 
     Ok(Program {
         conventions: program.conventions.clone(),

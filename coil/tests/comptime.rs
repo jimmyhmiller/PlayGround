@@ -183,16 +183,45 @@ fn comptime_returns_a_sum() {
 }
 
 #[test]
-fn comptime_array_result_errors_clearly() {
-    // Arrays-as-results aren't supported yet (no element type recorded). Bind it
-    // (a valid use) so we reach the value-builder rather than a type error.
+fn comptime_returns_an_array_lookup_table() {
+    // The classic use: build a lookup table at compile time, index it at runtime.
+    let code = build_and_run(
+        "(module app)\n\
+         (defn squares [] (-> (array i64 5))\n\
+           (let [(mut a) (zeroed (array i64 5)) (mut i) 0]\n\
+             (loop (if (icmp-ge (load i) 5) (break)\n\
+                     (do (store! (index (mut a) (load i)) (imul (load i) (load i)))\n\
+                         (store! i (iadd (load i) 1)))))\n\
+             (load a)))\n\
+         (defn main [] (-> i64)\n\
+           (let [(mut t) (comptime (squares))]\n\
+             (iadd (load (index (mut t) 3)) (load (index (mut t) 4)))))", // 9 + 16 = 25
+    );
+    assert_eq!(code, 25);
+}
+
+#[test]
+fn comptime_static_assert_passes() {
+    // A static-assert whose condition runs real code at compile time.
+    let code = build_and_run(
+        "(module app)\n\
+         (defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))\n\
+         (static-assert (comptime (icmp-eq (fact 5) 120)) \"fact 5 = 120\")\n\
+         (defn main [] (-> i64) 7)",
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn comptime_static_assert_can_fail() {
     let err = coil::emit_ir(
         "(module app)\n\
-         (defn mk [] (-> (array i64 2)) (let [(mut a) (zeroed (array i64 2))] (store! (index (mut a) 0) 7) (load a)))\n\
-         (defn main [] (-> i64) (let [a (comptime (mk))] 0))",
+         (defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))\n\
+         (static-assert (comptime (icmp-eq (fact 5) 999)) \"fact 5 is not 999\")\n\
+         (defn main [] (-> i64) 0)",
     )
     .unwrap_err();
-    assert!(err.contains("returning an array"), "got:\n{err}");
+    assert!(err.contains("static assertion failed"), "got:\n{err}");
 }
 
 #[test]

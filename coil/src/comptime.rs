@@ -30,7 +30,9 @@ enum CtVal {
     /// A struct's fields, by declaration order, each in its own cell (so a `field`
     /// place is a real reference). `name` resolves field names to indices.
     Struct { name: String, fields: Vec<Cell> },
-    Array(Vec<Cell>),
+    /// Array elements, each in a cell, plus the element type (needed to rebuild
+    /// the array as a result via `alloc-stack`).
+    Array { elem: Type, cells: Vec<Cell> },
     Sum { variant: String, fields: Vec<Cell> },
     /// A pointer / place: a handle to a cell. Aggregate *values* are `Ref`s.
     Ref(Cell),
@@ -66,6 +68,7 @@ const FUEL: u64 = 50_000_000;
 /// Replace every `(comptime …)` in the checked program with its evaluated literal.
 pub fn fold_program(
     funcs: &mut Vec<Func>,
+    asserts: &mut [StaticAssert],
     structs: &[StructDef],
     sums: &[SumDef],
 ) -> Result<(), String> {
@@ -83,6 +86,11 @@ pub fn fold_program(
     for f in funcs.iter_mut() {
         let body = std::mem::take(&mut f.body);
         f.body = body.iter().map(|e| fold_expr(e, &ctx)).collect::<Result<_, _>>()?;
+    }
+    // Static-assert conditions can use `(comptime …)` too (the assertion then runs
+    // real code at compile time; codegen's const-eval sees the folded literal).
+    for a in asserts.iter_mut() {
+        a.cond = fold_expr(&a.cond, &ctx)?;
     }
     Ok(())
 }
@@ -181,7 +189,7 @@ fn build_value(v: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
         CtVal::Bool(b) => e(ExprKind::Bool(*b)),
         CtVal::Float(x) => e(ExprKind::Float(*x)),
         CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx)?,
-        CtVal::Struct { .. } | CtVal::Array(_) | CtVal::Sum { .. } => {
+        CtVal::Struct { .. } | CtVal::Array { .. } | CtVal::Sum { .. } => {
             // aggregates only appear behind a Ref as values
             build_content(v, span, ctx)?
         }
@@ -227,9 +235,34 @@ fn build_content(c: &CtVal, span: Span, ctx: &Ctx) -> Result<Expr, String> {
                 body,
             }))
         }
-        CtVal::Array(_) => Err(
-            "comptime: returning an array from (comptime …) isn't supported yet".to_string(),
-        ),
+        CtVal::Array { elem, cells } => {
+            // `(let [t (alloc-stack (array elem N))] (store! (index t i) v)… (load t))`
+            let n = ctx.gensym.get();
+            ctx.gensym.set(n + 1);
+            let t = format!("$ct{n}");
+            let var = || Expr::new(ExprKind::Var(t.clone()), span);
+            let arr_ty = Type::Array(Box::new(elem.clone()), cells.len() as u32);
+            let mut body = Vec::with_capacity(cells.len() + 1);
+            for (i, cell) in cells.iter().enumerate() {
+                let val = build_value(&cell_value(cell), span, ctx)?;
+                body.push(e(ExprKind::Store {
+                    ptr: Box::new(e(ExprKind::Index {
+                        ptr: Box::new(var()),
+                        idx: Box::new(e(ExprKind::Int(i as i64))),
+                    })),
+                    val: Box::new(val),
+                }));
+            }
+            body.push(e(ExprKind::Load(Box::new(var()))));
+            Ok(e(ExprKind::Let {
+                binds: vec![(
+                    t.clone(),
+                    false,
+                    e(ExprKind::Alloc { storage: Storage::Stack, ty: arr_ty }),
+                )],
+                body,
+            }))
+        }
         CtVal::Ref(cell) => build_content(&cell.borrow(), span, ctx),
     }
 }
@@ -243,7 +276,7 @@ fn new_cell(c: CtVal) -> Cell {
 }
 
 fn is_aggregate(c: &CtVal) -> bool {
-    matches!(c, CtVal::Struct { .. } | CtVal::Array(_) | CtVal::Sum { .. })
+    matches!(c, CtVal::Struct { .. } | CtVal::Array { .. } | CtVal::Sum { .. })
 }
 
 /// Deep-copy cell *content* (scalars copy; aggregates get fresh cells), giving
@@ -254,7 +287,10 @@ fn deep_clone(c: &CtVal) -> CtVal {
             name: name.clone(),
             fields: fields.iter().map(|f| new_cell(deep_clone(&f.borrow()))).collect(),
         },
-        CtVal::Array(es) => CtVal::Array(es.iter().map(|e| new_cell(deep_clone(&e.borrow()))).collect()),
+        CtVal::Array { elem, cells } => CtVal::Array {
+            elem: elem.clone(),
+            cells: cells.iter().map(|e| new_cell(deep_clone(&e.borrow()))).collect(),
+        },
         CtVal::Sum { variant, fields } => CtVal::Sum {
             variant: variant.clone(),
             fields: fields.iter().map(|f| new_cell(deep_clone(&f.borrow()))).collect(),
@@ -297,11 +333,11 @@ fn zeroed_content(ty: &Type, ctx: &Ctx) -> Result<CtVal, String> {
             CtVal::Struct { name: n.clone(), fields }
         }
         Type::Array(el, k) => {
-            let mut es = Vec::with_capacity(*k as usize);
+            let mut cells = Vec::with_capacity(*k as usize);
             for _ in 0..*k {
-                es.push(new_cell(zeroed_content(el, ctx)?));
+                cells.push(new_cell(zeroed_content(el, ctx)?));
             }
-            CtVal::Array(es)
+            CtVal::Array { elem: (**el).clone(), cells }
         }
         other => return Err(format!("comptime: `zeroed` of {other:?} isn't supported yet")),
     })
@@ -542,7 +578,7 @@ fn place_ref(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<CtVal, String> {
                 _ => return Err("comptime: `index` base isn't a place".to_string()),
             };
             let elems = match &*cell.borrow() {
-                CtVal::Array(es) => es.clone(),
+                CtVal::Array { cells, .. } => cells.clone(),
                 _ => return Err("comptime: `index` of a non-array".to_string()),
             };
             let el = elems.get(i).ok_or_else(|| format!("comptime: array index {i} out of bounds"))?;
