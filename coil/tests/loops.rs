@@ -126,7 +126,7 @@ fn never_branch_in_if_yields_other_type() {
 
 // ---- derived macros (lib/control.coil) ------------------------------------
 
-const IMPORT: &str = "(module app)\n(import \"lib/control.coil\")\n";
+const IMPORT: &str = "(module app)\n(import \"lib/control.coil\" :use *)\n";
 
 fn run_with(body: &str) -> i32 {
     build_and_run(&format!("{IMPORT}{body}"))

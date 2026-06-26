@@ -5,7 +5,7 @@
 mod common;
 use common::build_and_run;
 
-const IMPORT: &str = "(module app)\n(import \"lib/control.coil\")\n";
+const IMPORT: &str = "(module app)\n(import \"lib/control.coil\" :use *)\n";
 
 fn run_with(body: &str) -> i32 {
     build_and_run(&format!("{IMPORT}{body}"))

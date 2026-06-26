@@ -165,7 +165,7 @@ fn expand_stage3_macros_inner(
     imports: &macros::ImportMap,
     exports: &macros::ExportMap,
 ) -> Result<Vec<macros::TaggedForm>, Diag> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     let macro_subset: Vec<macros::TaggedForm> =
         tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
     let macro_ctx = resolve::resolve_program(macro_subset, imports, exports)?;
@@ -178,19 +178,17 @@ fn expand_stage3_macros_inner(
     if macro_quals.is_empty() {
         return Ok(tagged);
     }
-    // bare name -> qualified, for resolving a call-site `(name …)` to its fn.
-    let qual: HashMap<String, String> = macro_quals
-        .iter()
-        .map(|q| (q.rsplit('.').next().unwrap_or(q).to_string(), q.clone()))
-        .collect();
-    let bare: HashSet<String> = qual.keys().cloned().collect();
+    // The qualified names of all macros, and the comptime closure (macros + the
+    // helpers they call) whose bodies are left unexpanded (run at expansion time).
+    let macro_set: HashSet<String> = macro_quals.iter().cloned().collect();
     let wanted = closure_funcs(&macro_ctx, macro_quals);
-    // Bodies to leave unexpanded: every function in the comptime closure (macros AND
-    // the helpers they call) — their calls run at expansion time.
-    let skip: HashSet<String> =
-        wanted.iter().map(|w| w.rsplit('.').next().unwrap_or(w).to_string()).collect();
     let sub = closure_subprogram(&macro_ctx, &wanted, false);
     let checked_sub = check::check(&sub)?;
+    // Resolving a macro call respects module scope, exactly like the name resolver:
+    // a bare `(name …)` is a macro call only if `name` is a macro visible in the
+    // call's module (own module, or a `:use`d module's export); `alias/name` goes
+    // through `:as`; a `.`-qualified head comes from hygiene.
+    let env = MacroEnv { macros: &macro_set, comptime: &wanted, imports, exports, sub: &checked_sub };
     // All qualified function names (for referential hygiene of generated calls).
     // GROWS as macros generate defns, so hygiene also covers macro-generated fns.
     let qualify = |n: String, m: &Option<String>| match m {
@@ -204,7 +202,7 @@ fn expand_stage3_macros_inner(
     // macro-generated struct/sum (incremental, like the old def table).
     let mut gen: (Vec<ast::StructDef>, Vec<ast::SumDef>) = (Vec::new(), Vec::new());
     for (f, m) in tagged {
-        let out = expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &gen, &mut 0)?;
+        let out = expand_top_form(&f, m.as_deref(), &env, &all_fns, &gen, &mut 0)?;
         // A macro that expands to a top-level `(do …)` splices into several forms.
         // Record each result's generated decls + fn names so LATER forms see them.
         let mut produced: Vec<reader::Sexp> = Vec::new();
@@ -307,23 +305,70 @@ fn closure_subprogram(
     }
 }
 
+/// The immutable context for macro expansion: the qualified macro names, the
+/// comptime closure (macros + their helpers), the import/export tables (for scoped
+/// resolution), and the checked sub-program the macros run in.
+struct MacroEnv<'a> {
+    macros: &'a std::collections::HashSet<String>,
+    comptime: &'a std::collections::HashSet<String>,
+    imports: &'a macros::ImportMap,
+    exports: &'a macros::ExportMap,
+    sub: &'a ast::Program,
+}
+
+/// Resolve a call head to the qualified macro it names, scoped to `module` exactly
+/// like the name resolver — or `None` if it isn't a macro visible there.
+fn resolve_macro(head: &str, module: Option<&str>, env: &MacroEnv) -> Option<String> {
+    // `alias/name` → through this module's `:as` aliases, export-checked.
+    if let Some((alias, rest)) = head.split_once('/') {
+        let target = env.imports.get(module?)?.aliases.get(alias)?;
+        let q = format!("{target}.{rest}");
+        return (env.macros.contains(&q) && macros::exports(env.exports, target, rest)).then_some(q);
+    }
+    // A `.`-qualified head is hygiene-generated (already a full `module.name`).
+    if head.contains('.') {
+        return env.macros.contains(head).then(|| head.to_string());
+    }
+    // Bare: own module first (module-less programs name macros bare).
+    let own = match module {
+        Some(m) => format!("{m}.{head}"),
+        None => head.to_string(),
+    };
+    if env.macros.contains(&own) {
+        return Some(own);
+    }
+    // …then `:use`d modules' exported macros.
+    if let Some(imp) = env.imports.get(module.unwrap_or("")) {
+        for (target, spec) in &imp.uses {
+            let used = match spec {
+                macros::UseSpec::All => true,
+                macros::UseSpec::Names(ns) => ns.iter().any(|n| n == head),
+            };
+            if used && macros::exports(env.exports, target, head) {
+                let q = format!("{target}.{head}");
+                if env.macros.contains(&q) {
+                    return Some(q);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Expand expression-macro calls in one top-level form. Macro definitions and
 /// `(meta …)` forms are left alone (their bodies are comptime code, not user code).
-#[allow(clippy::too_many_arguments)]
 fn expand_top_form(
     f: &reader::Sexp,
-    bare: &std::collections::HashSet<String>,
-    skip: &std::collections::HashSet<String>,
-    qual: &std::collections::HashMap<String, String>,
-    sub: &ast::Program,
+    module: Option<&str>,
+    env: &MacroEnv,
     all_fns: &std::collections::HashSet<String>,
     gen: &(Vec<ast::StructDef>, Vec<ast::SumDef>),
     depth: &mut u32,
 ) -> Result<reader::Sexp, Diag> {
-    if is_meta_form(f) || is_comptime_defn(f, skip) {
+    if is_meta_form(f) || is_comptime_defn(f, module, env.comptime) {
         return Ok(f.clone());
     }
-    expand_calls(f, bare, qual, sub, all_fns, gen, depth)
+    expand_calls(f, module, env, all_fns, gen, depth)
 }
 
 /// The defined name of a `(defn NAME …)` form, else `None`.
@@ -340,15 +385,23 @@ fn defn_name(f: &reader::Sexp) -> Option<String> {
     None
 }
 
-/// A `(defn NAME …)` whose NAME is in the comptime closure (a macro or a helper a
-/// macro calls). Its body is comptime code — leave its calls unexpanded; they run
-/// when the macro itself runs.
-fn is_comptime_defn(f: &reader::Sexp, skip: &std::collections::HashSet<String>) -> bool {
+/// A `(defn NAME …)` in `module` whose qualified name is in the comptime closure (a
+/// macro or a helper a macro calls). Its body is comptime code — leave its calls
+/// unexpanded; they run when the macro itself runs.
+fn is_comptime_defn(
+    f: &reader::Sexp,
+    module: Option<&str>,
+    comptime: &std::collections::HashSet<String>,
+) -> bool {
     if let reader::SexpKind::List(items) = &f.kind {
         if let (Some(reader::SexpKind::Sym(h)), Some(reader::SexpKind::Sym(n))) =
             (items.first().map(|x| &x.kind), items.get(1).map(|x| &x.kind))
         {
-            return h == "defn" && skip.contains(n.rsplit('.').next().unwrap_or(n));
+            let qualified = match module {
+                Some(m) => format!("{m}.{n}"),
+                None => n.clone(),
+            };
+            return h == "defn" && comptime.contains(&qualified);
         }
     }
     false
@@ -357,12 +410,10 @@ fn is_comptime_defn(f: &reader::Sexp, skip: &std::collections::HashSet<String>) 
 /// Recursively expand `(macro args…)` calls outside-in: run the macro on its RAW
 /// (unexpanded) argument forms — so a macro like `scope` can inspect them as data —
 /// then re-expand the macro's output (which is where nested macro calls expand).
-#[allow(clippy::too_many_arguments)]
 fn expand_calls(
     s: &reader::Sexp,
-    bare: &std::collections::HashSet<String>,
-    qual: &std::collections::HashMap<String, String>,
-    sub: &ast::Program,
+    module: Option<&str>,
+    env: &MacroEnv,
     all_fns: &std::collections::HashSet<String>,
     gen: &(Vec<ast::StructDef>, Vec<ast::SumDef>),
     depth: &mut u32,
@@ -370,28 +421,24 @@ fn expand_calls(
     use reader::{Sexp, SexpKind};
     match &s.kind {
         SexpKind::List(items) => {
-            // The call head may be bare (`when`) or qualified by macro hygiene
-            // (`control.when`); match on the bare suffix either way.
-            let macro_name = match items.first().map(|x| &x.kind) {
-                Some(SexpKind::Sym(h)) => {
-                    let b = h.rsplit('.').next().unwrap_or(h);
-                    bare.contains(b).then(|| b.to_string())
-                }
+            let mac = match items.first().map(|x| &x.kind) {
+                Some(SexpKind::Sym(h)) => resolve_macro(h, module, env),
                 _ => None,
             };
-            if let Some(name) = macro_name {
+            if let Some(q) = mac {
                 *depth += 1;
                 if *depth > 100_000 {
                     return Err(Diag::new("macro expansion did not terminate"));
                 }
                 // RAW args (outside-in): the macro decides what to expand.
                 let args: Vec<Sexp> = items[1..].to_vec();
-                let out = comptime::expand_macro(sub, &qual[&name], args, all_fns, &gen.0, &gen.1).map_err(Diag::new)?;
-                expand_calls(&out, bare, qual, sub, all_fns, gen, depth)
+                let out = comptime::expand_macro(env.sub, &q, args, all_fns, &gen.0, &gen.1, env.imports, env.exports)
+                    .map_err(Diag::new)?;
+                expand_calls(&out, module, env, all_fns, gen, depth)
             } else {
                 let out: Vec<Sexp> = items
                     .iter()
-                    .map(|i| expand_calls(i, bare, qual, sub, all_fns, gen, depth))
+                    .map(|i| expand_calls(i, module, env, all_fns, gen, depth))
                     .collect::<Result<_, _>>()?;
                 Ok(Sexp::new(SexpKind::List(out), s.span))
             }
@@ -399,7 +446,7 @@ fn expand_calls(
         SexpKind::Vector(items) => {
             let out: Vec<Sexp> = items
                 .iter()
-                .map(|i| expand_calls(i, bare, qual, sub, all_fns, gen, depth))
+                .map(|i| expand_calls(i, module, env, all_fns, gen, depth))
                 .collect::<Result<_, _>>()?;
             Ok(Sexp::new(SexpKind::Vector(out), s.span))
         }

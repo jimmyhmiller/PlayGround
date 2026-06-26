@@ -2,7 +2,7 @@
 ; (itself a macro over loop/break/continue); the compiler knows nothing about it.
 ;   coil run examples/iter.coil; echo $?   => 60
 (module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 
 (defn main [] (-> :i64)
   (let [arr (alloc-stack (array i64 3))]

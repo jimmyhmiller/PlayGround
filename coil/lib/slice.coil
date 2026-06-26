@@ -13,7 +13,7 @@
 ; so it is passed/returned BY VALUE (like Rust's `&str`). Bounds are NOT checked
 ; here (debug-mode bounds checking is Phase-2 safety work).
 
-(import "control.coil")   ; `for` (and its loop/break lowering) for slice-for
+(import "control.coil" :use *)   ; `for` (and its loop/break lowering) for slice-for
 
 ; Construct a slice from a base element pointer and a length — `{data, len}` built
 ; with two `insertvalue`s. T is inferred from `data` at the call site.

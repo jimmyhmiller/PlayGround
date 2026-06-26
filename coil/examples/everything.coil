@@ -16,7 +16,7 @@
 (import "lib/alloc.coil" :use *)   ; Allocator vtable, malloc + arena, create/destroy
 (import "lib/io.coil" :use *)      ; Writer/Reader capability, print-int/str, FixBuf
 (import "lib/result.coil" :use *)  ; Option/Result/Some/None/Ok/Err
-(import "lib/closure.coil")        ; the `defclosure` macro
+(import "lib/closure.coil" :use *); the `defclosure` macro
 
 ; --- C interop: extern declarations (convention + signature, link-time symbol).
 (extern printf  :cc c [(ptr i8) ...] (-> i32))   ; variadic

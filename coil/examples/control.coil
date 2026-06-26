@@ -2,7 +2,7 @@
 ; compiler knows about them.
 ;   coil run examples/control.coil; echo $?   => 46
 (module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 
 (defn main [] (-> :i64)
   (let [(mut acc) 0]

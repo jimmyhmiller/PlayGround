@@ -2,7 +2,7 @@
 ; compiler (3 forms); `while` and `for` are MACROS over them (lib/control.coil).
 ;   coil run examples/loops.coil; echo $?   => 55
 (module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 
 ; Raw primitive: sum 1..=10 with an explicit loop that breaks with a value.
 (defn sum-to [(n :i64)] (-> :i64)

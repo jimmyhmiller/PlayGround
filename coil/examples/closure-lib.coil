@@ -1,7 +1,7 @@
 ; Use the closure library via the module system.
 ;   coil run examples/closure-lib.coil; echo $?   => 42
 (module app)
-(import "lib/closure.coil")          ; brings the `defclosure` macro into scope
+(import "lib/closure.coil" :use *); brings the `defclosure` macro into scope
 
 (defclosure adder  [(n :i64)] [(x :i64)] :i64 (iadd n x))
 (defclosure scaler [(k :i64)] [(x :i64)] :i64 (imul k x))

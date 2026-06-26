@@ -31,7 +31,7 @@ fn second_order_macro_hygiene_across_modules() {
         )],
     );
     let src = format!(
-        "(module app)\n(import \"{}\")\n(defn secret [(x :i64)] (-> :i64) x)\n\
+        "(module app)\n(import \"{}\" :use *)\n(defn secret [(x :i64)] (-> :i64) x)\n\
          (defn main [] (-> :i64) (bump 5))\n", // gen's macro-generated secret -> 105, not app's 5
         dir.join("gen.coil").display()
     );
@@ -137,7 +137,7 @@ fn macro_references_resolve_in_defining_module() {
     .unwrap();
     let src = format!(
         "(module app)\n\
-         (import \"{}\")\n\
+         (import \"{}\" :use *)\n\
          (defn secret [(x :i64)] (-> :i64) x)\n\
          (defn main [] (-> :i64) (bump 5))\n", // 105 (mathmod) not 5 (app)
         m.display()
@@ -216,4 +216,38 @@ fn reflection_on_an_ambiguous_cross_module_type_errors() {
     );
     let err = coil::check_source(&src).unwrap_err();
     assert!(err.contains("ambiguous"), "expected an ambiguity error, got:\n{err}");
+}
+
+#[test]
+fn macros_are_namespaced_not_global() {
+    // Clojure-like: `import` alone does NOT refer a module's macros — a bare `(cond …)`
+    // is undefined until you `:use` (refer) it. (Old behavior: macros were global.)
+    let src = "(module app)\n(import \"lib/control.coil\")\n\
+               (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("undefined") && err.contains("cond"), "got: {err}");
+    // …but `:use *` (refer all) brings it in, and `:as` gives qualified access.
+    let used = "(module app)\n(import \"lib/control.coil\" :use *)\n\
+                (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
+    assert_eq!(build_and_run(used), 7);
+    let aliased = "(module app)\n(import \"lib/control.coil\" :as c)\n\
+                   (defn main [] (-> :i64) (c/cond (icmp-eq 1 1) 7 0))\n";
+    assert_eq!(build_and_run(aliased), 7);
+}
+
+#[test]
+fn macros_are_namespaced_not_global() {
+    // Clojure-like: `import` alone does NOT refer a module's macros — a bare `(cond …)`
+    // is undefined until you `:use` (refer) it. (Old behavior: macros were global.)
+    let src = "(module app)\n(import \"lib/control.coil\")\n\
+               (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("undefined") && err.contains("cond"), "got: {err}");
+    // …but `:use *` (refer all) brings it in, and `:as` gives qualified access.
+    let used = "(module app)\n(import \"lib/control.coil\" :use *)\n\
+                (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
+    assert_eq!(build_and_run(used), 7);
+    let aliased = "(module app)\n(import \"lib/control.coil\" :as c)\n\
+                   (defn main [] (-> :i64) (c/cond (icmp-eq 1 1) 7 0))\n";
+    assert_eq!(build_and_run(aliased), 7);
 }

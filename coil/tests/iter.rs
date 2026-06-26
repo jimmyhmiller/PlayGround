@@ -7,7 +7,7 @@
 mod common;
 use common::build_and_run;
 
-const IMPORT: &str = "(module app)\n(import \"lib/control.coil\")\n";
+const IMPORT: &str = "(module app)\n(import \"lib/control.coil\" :use *)\n";
 
 fn run_with(body: &str) -> i32 {
     build_and_run(&format!("{IMPORT}{body}"))
@@ -67,7 +67,7 @@ fn for_in_extensible_iter_protocol() {
     // A user collection becomes iterable by supplying next: (ptr S) -> (Option T).
     // Drives entirely through the loop primitive + call-ptr; no core support.
     let src = r#"(module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 (import "lib/result.coil" :use *)
 (defstruct RangeState [(cur i64) (hi i64)])
 (defn rnext [(s (ptr RangeState))] (-> (Option i64))
@@ -89,7 +89,7 @@ fn for_in_iter_multi_statement_body() {
     // parser drops all but stmt1, the second statement silently vanishes (and a
     // body whose tail advances/terminates would infinite-loop). Both must run.
     let src = r#"(module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 (import "lib/result.coil" :use *)
 (defstruct RS [(cur i64) (hi i64)])
 (defn rn [(s (ptr RS))] (-> (Option i64))

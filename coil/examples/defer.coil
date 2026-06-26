@@ -3,7 +3,7 @@
 ; `(return-from :s …)` early exit.
 ;   coil run examples/defer.coil; echo $?   => 42
 (module app)
-(import "lib/control.coil")
+(import "lib/control.coil" :use *)
 
 ; A `scope :s` whose two defers run in reverse (LIFO) when the scope exits — even
 ; though we leave early via (return-from :s …). Here the "resource" is a counter.
