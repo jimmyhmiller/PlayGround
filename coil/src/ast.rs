@@ -133,6 +133,8 @@ pub enum CodeOp {
     Error,
     /// `(code-eq A B)` — structural equality of two `Code` values (ignoring spans).
     Eq,
+    /// `(code-keyword? X)` — is the `Code` value a `:keyword`?
+    IsKeyword,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an

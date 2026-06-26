@@ -83,11 +83,16 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
             .collect();
         let bare: HashSet<String> = qual.keys().cloned().collect();
         let wanted = closure_funcs(&macro_ctx, macro_quals.clone());
+        // Bodies to leave unexpanded: every function in the comptime closure (macros
+        // AND the helpers they call) — their calls run at expansion time, not as
+        // syntactic macro expansions.
+        let skip: HashSet<String> =
+            wanted.iter().map(|w| w.rsplit('.').next().unwrap_or(w).to_string()).collect();
         let sub = closure_subprogram(&macro_ctx, &wanted, false);
         let checked_sub = check::check(&sub)?;
         tagged = tagged
             .into_iter()
-            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &qual, &checked_sub, &mut 0)?, m)))
+            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &mut 0)?, m)))
             .collect::<Result<Vec<_>, Diag>>()?;
     }
     let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
@@ -136,18 +141,29 @@ fn keep_for_macro_detection(f: &reader::Sexp) -> bool {
         _ => return true,
     };
     match head {
-        "defn" => defn_returns_code(items),
+        "defn" => defn_involves_code(items),
         "impl" | "const" | "meta" | "static-assert" => false,
         _ => true, // defstruct/defsum/deftrait/extern/import/module/defcc …
     }
 }
 
-fn defn_returns_code(items: &[reader::Sexp]) -> bool {
+/// A `(defn …)` whose signature mentions `Code` — a macro or comptime helper (the
+/// only things that take/return `Code`). Its body parses without prior expansion.
+fn defn_involves_code(items: &[reader::Sexp]) -> bool {
     use reader::SexpKind as K;
-    items.iter().any(|it| {
-        matches!(&it.kind, K::List(l)
-            if matches!(l.first().map(|x| &x.kind), Some(K::Sym(h)) if h == "->")
-               && matches!(l.get(1).map(|x| &x.kind), Some(K::Sym(t)) if t == "Code"))
+    let is_code = |s: &reader::Sexp| matches!(&s.kind, K::Sym(t) if t == "Code");
+    items.iter().any(|it| match &it.kind {
+        // return type `(-> Code)`
+        K::List(l) => {
+            matches!(l.first().map(|x| &x.kind), Some(K::Sym(h)) if h == "->")
+                && l.get(1).is_some_and(is_code)
+        }
+        // a param vector with a `(name Code)` entry
+        K::Vector(ps) => ps.iter().any(|p| match &p.kind {
+            K::List(pair) => pair.get(1).is_some_and(is_code),
+            _ => false,
+        }),
+        _ => false,
     })
 }
 
@@ -201,29 +217,34 @@ fn closure_subprogram(
 fn expand_top_form(
     f: &reader::Sexp,
     bare: &std::collections::HashSet<String>,
+    skip: &std::collections::HashSet<String>,
     qual: &std::collections::HashMap<String, String>,
     sub: &ast::Program,
     depth: &mut u32,
 ) -> Result<reader::Sexp, Diag> {
-    if is_meta_form(f) || is_macro_defn(f, bare) {
+    if is_meta_form(f) || is_comptime_defn(f, skip) {
         return Ok(f.clone());
     }
     expand_calls(f, bare, qual, sub, depth)
 }
 
-fn is_macro_defn(f: &reader::Sexp, bare: &std::collections::HashSet<String>) -> bool {
+/// A `(defn NAME …)` whose NAME is in the comptime closure (a macro or a helper a
+/// macro calls). Its body is comptime code — leave its calls unexpanded; they run
+/// when the macro itself runs.
+fn is_comptime_defn(f: &reader::Sexp, skip: &std::collections::HashSet<String>) -> bool {
     if let reader::SexpKind::List(items) = &f.kind {
         if let (Some(reader::SexpKind::Sym(h)), Some(reader::SexpKind::Sym(n))) =
             (items.first().map(|x| &x.kind), items.get(1).map(|x| &x.kind))
         {
-            return h == "defn" && bare.contains(n);
+            return h == "defn" && skip.contains(n.rsplit('.').next().unwrap_or(n));
         }
     }
     false
 }
 
-/// Recursively expand `(macro args…)` calls: expand the arguments, run the macro
-/// on the quoted forms, then re-expand its output.
+/// Recursively expand `(macro args…)` calls outside-in: run the macro on its RAW
+/// (unexpanded) argument forms — so a macro like `scope` can inspect them as data —
+/// then re-expand the macro's output (which is where nested macro calls expand).
 fn expand_calls(
     s: &reader::Sexp,
     bare: &std::collections::HashSet<String>,
@@ -248,10 +269,8 @@ fn expand_calls(
                 if *depth > 100_000 {
                     return Err(Diag::new("macro expansion did not terminate"));
                 }
-                let args: Vec<Sexp> = items[1..]
-                    .iter()
-                    .map(|a| expand_calls(a, bare, qual, sub, depth))
-                    .collect::<Result<_, _>>()?;
+                // RAW args (outside-in): the macro decides what to expand.
+                let args: Vec<Sexp> = items[1..].to_vec();
                 let out = comptime::expand_macro(sub, &qual[&name], args).map_err(Diag::new)?;
                 expand_calls(&out, bare, qual, sub, depth)
             } else {

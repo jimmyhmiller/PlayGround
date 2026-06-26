@@ -15,29 +15,6 @@
 ; comptime-UNROLLED loop (bounds known at expand time), a pure macro needing no
 ; primitive at all.
 
-; ---- compile-time list helpers (not in the macro builtin set) -------------
-(def range-list
-  (lambda [lo hi]
-    (if (>= lo hi) (list)
-        (cons lo (range-list (+ lo 1) hi)))))
-
-(def reverse
-  (lambda [xs]
-    (if (empty? xs) (list)
-        (concat (reverse (rest xs)) (list (first xs))))))
-
-(def filter
-  (lambda [p xs]
-    (if (empty? xs) (list)
-        (if (p (first xs))
-            (cons (first xs) (filter p (rest xs)))
-            (filter p (rest xs))))))
-
-(def member?
-  (lambda [x xs]
-    (if (empty? xs) false
-        (if (= x (first xs)) true (member? x (rest xs))))))
-
 ; ---- conditionals ---------------------------------------------------------
 ; `(when c body...)` — evaluate body (yielding its last form) iff c is true,
 ; else 0. `(unless c body...)` is the negation.
@@ -197,70 +174,87 @@
 ; Go's runtime list) and must be DIRECT forms of the scope body (a `(defer …)`
 ; nested inside an `if`/loop hard-errors). `(continue :s)` is rejected.
 
-(def control-label   ; the target :label of a (break …)/(continue …)/(return-from …), or false
-  (lambda [form]
-    (let [r (rest form)]
-      (if (empty? r) false
-          (if (keyword? (first r)) (first r) false)))))
+; All Stage-3 comptime helpers over Code. `scope-escape` aborts via `(error …)` at
+; the point it finds an escaping transfer (rather than returning a string), since a
+; statically-typed helper can't return "string-or-false".
+(defn is-control? [(h Code)] (-> bool)
+  (if (code-eq h `break) true (if (code-eq h `continue) true (code-eq h `return-from))))
 
-(def loop-introducer?
-  (lambda [h]
-    (or (= h (quote loop)) (= h (quote while)) (= h (quote for))
-        (= h (quote block)) (= h (quote scope)))))
+(defn loop-introducer? [(h Code)] (-> bool)
+  (if (code-eq h `loop) true (if (code-eq h `while) true (if (code-eq h `for) true
+    (if (code-eq h `block) true (code-eq h `scope))))))
 
-; Walk one form; return an error string if it contains a scope-escaping control
-; transfer, else false. `depth` = enclosing in-body loops; `labels` = their
-; labels; `slabel` = the scope's own label.
-(def scope-escape
-  (lambda [form depth labels slabel]
-    (if (not (list? form))
-        false
-        (if (empty? form)
-            false
-            (let [h (first form)]
-              (if (or (= h (quote break)) (= h (quote continue)) (= h (quote return-from)))
-                  (let [lab (control-label form)]
-                    (if lab
-                        (if (member? lab labels)
-                            false
-                            (if (= lab slabel)
-                                (if (= h (quote continue))
-                                    "scope: (continue) cannot target the scope label; use return-from to exit"
-                                    false)
-                                "scope: a labeled break/continue escapes the (scope ...) past its defers"))
-                        (if (> depth 0)
-                            false
-                            "scope: an unlabeled break/continue cannot exit a (scope ...); use (return-from :label v)")))
-                  (if (loop-introducer? h)
-                      (scope-escape-list (rest form) (+ depth 1)
-                                         (let [r (rest form)]
-                                           (if (empty? r) labels
-                                               (if (keyword? (first r)) (cons (first r) labels) labels)))
-                                         slabel)
-                      (scope-escape-list (rest form) depth labels slabel))))))))
+; the :label of a (break …)/(continue …)/(return-from …) form, or `no-label
+(defn control-label [(form Code)] (-> Code)
+  (if (icmp-lt 1 (code-count form))
+      (let [a (code-nth form 1)] (if (code-keyword? a) a `no-label))
+      `no-label))
 
-(def scope-escape-list
-  (lambda [forms depth labels slabel]
-    (if (empty? forms) false
-        (let [e (scope-escape (first forms) depth labels slabel)]
-          (if e e (scope-escape-list (rest forms) depth labels slabel))))))
+(defn label-member? [(x Code) (xs Code) (i i64)] (-> bool)
+  (if (not (icmp-lt i (code-count xs))) false
+    (if (code-eq x (code-nth xs i)) true (label-member? x xs (iadd i 1)))))
 
-(def is-defer?
-  (lambda [f] (and (list? f) (not (empty? f)) (= (first f) (quote defer)))))
+; prepend a loop form's own label (if any) to the in-scope label list
+(defn escape-labels [(form Code) (labels Code)] (-> Code)
+  (if (icmp-lt 1 (code-count form))
+      (let [a (code-nth form 1)] (if (code-keyword? a) `(~a ~@labels) labels))
+      labels))
 
-(defmacro scope [label & body]
-  (if (not (keyword? label))
+(defn is-defer? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (icmp-lt 0 (code-count f)) (code-eq (code-nth f 0) `defer) false)
+      false))
+
+; Walk a form; (error …) if it has a scope-escaping break/continue, else return 0.
+; `depth` = enclosing in-body loops; `labels` = their labels; `slabel` = the scope's.
+(defn scope-escape [(form Code) (depth i64) (labels Code) (slabel Code)] (-> i64)
+  (if (not (code-list? form)) 0
+    (if (not (icmp-lt 0 (code-count form))) 0
+      (let [h (code-nth form 0)]
+        (if (is-control? h)
+            (let [lab (control-label form)]
+              (if (not (code-eq lab `no-label))
+                  (if (label-member? lab labels 0) 0
+                    (if (code-eq lab slabel)
+                        (if (code-eq h `continue)
+                            (error "scope: (continue) cannot target the scope label; use return-from to exit")
+                            0)
+                        (error "scope: a labeled break/continue escapes the (scope ...) past its defers")))
+                  (if (icmp-lt 0 depth) 0
+                      (error "scope: an unlabeled break/continue cannot exit a (scope ...); use (return-from :label v)"))))
+            (if (loop-introducer? h)
+                (scope-escape-list (code-rest form) (iadd depth 1) (escape-labels form labels) slabel)
+                (scope-escape-list (code-rest form) depth labels slabel)))))))
+
+(defn scope-escape-list [(forms Code) (depth i64) (labels Code) (slabel Code)] (-> i64)
+  (if (not (icmp-lt 0 (code-count forms))) 0
+    (let [chk (scope-escape (code-nth forms 0) depth labels slabel)]
+      (scope-escape-list (code-rest forms) depth labels slabel))))
+
+; cleanup exprs (defer bodies) in REVERSE (LIFO) order
+(defn scope-cleanups [(body Code) (i i64) (acc Code)] (-> Code)
+  (if (not (icmp-lt i (code-count body))) acc
+    (let [f (code-nth body i)]
+      (scope-cleanups body (iadd i 1)
+        (if (is-defer? f) `(~(code-nth f 1) ~@acc) acc)))))
+
+; the non-defer forms, in order
+(defn scope-mains [(body Code) (i i64) (acc Code)] (-> Code)
+  (if (not (icmp-lt i (code-count body))) acc
+    (let [f (code-nth body i)]
+      (scope-mains body (iadd i 1)
+        (if (is-defer? f) acc `(~@acc ~f))))))
+
+(defn scope [(label Code) & (body Code)] (-> Code)
+  (if (not (code-keyword? label))
       (error "scope: first argument must be a :label, e.g. (scope :s body...)")
-      (let [bad (scope-escape-list body 0 (list) label)]
-        (if bad
-            (error bad)
-            (let [defers   (filter is-defer? body)
-                  mains    (filter (lambda [f] (not (is-defer? f))) body)
-                  cleanups (reverse (map (lambda [d] (first (rest d))) defers))
-                  r        (gensym "scope-r")]
-              `(let [~r (block ~label ~@mains)]
-                 ~@cleanups
-                 ~r))))))
+      (let [chk      (scope-escape-list body 0 `() label)
+            cleanups (scope-cleanups body 0 `())
+            mains    (scope-mains body 0 `())
+            r        (gensym)]
+        `(let [~r (block ~label ~@mains)]
+           ~@cleanups
+           ~r))))
 
 ; A bare `(defer …)` is only meaningful as a direct child of `(scope …)`, where
 ; `scope` extracts it before this macro runs. Reaching this expansion means it

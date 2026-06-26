@@ -1082,11 +1082,12 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
         }
         // operations on Code values
         "code-list?" | "code-sym?" | "code-int?" | "code-count" | "code-nth" | "code-sym"
-        | "code-int" | "code-rest" | "code-eq" => {
+        | "code-int" | "code-rest" | "code-eq" | "code-keyword?" => {
             let op = match head.as_str() {
                 "code-list?" => CodeOp::IsList,
                 "code-sym?" => CodeOp::IsSym,
                 "code-int?" => CodeOp::IsInt,
+                "code-keyword?" => CodeOp::IsKeyword,
                 "code-count" => CodeOp::Count,
                 "code-nth" => CodeOp::Nth,
                 "code-sym" => CodeOp::Sym,

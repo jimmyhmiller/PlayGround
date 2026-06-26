@@ -984,6 +984,7 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
         CodeOp::IsList => CtVal::Bool(matches!(code.kind, K::List(_) | K::Vector(_))),
         CodeOp::IsSym => CtVal::Bool(matches!(code.kind, K::Sym(_))),
         CodeOp::IsInt => CtVal::Bool(matches!(code.kind, K::Int(_))),
+        CodeOp::IsKeyword => CtVal::Bool(matches!(code.kind, K::Keyword(_))),
         CodeOp::Count => match &code.kind {
             K::List(items) | K::Vector(items) => CtVal::Int(items.len() as i64),
             _ => return Err("comptime: code-count expects a list/vector".to_string()),
