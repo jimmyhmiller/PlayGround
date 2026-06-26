@@ -116,6 +116,16 @@ fn process_forms(
             }
             // `(import "path" [:as alias] [:use *|[names]])` — load another module.
             Some("import") => {
+                // A file with no `(module …)` is never name-qualified, so imported
+                // (non-macro) names would silently fail to resolve. Require a module
+                // declaration before importing, with a clear error instead.
+                if cur_module.is_none() {
+                    return Err("import requires a (module …) declaration: add one \
+                                (e.g. `(module app)`) at the top of the file, before any \
+                                imports — otherwise imported types and functions cannot \
+                                be resolved"
+                        .into());
+                }
                 process_import(form, out, base_dir, visited, &cur_module, imports, exports)?;
             }
             // Any other top-level form is collected raw, tagged with its module.

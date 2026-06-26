@@ -3,6 +3,7 @@
 ; new/call/free helpers. Nothing in the compiler knows about closures.
 ;   coil run examples/defclosure.coil; echo $?   => 42
 
+(module app)
 (import "lib/closure.coil" :use *)
 
 ; ---- usage: two closures from two one-liners ----
