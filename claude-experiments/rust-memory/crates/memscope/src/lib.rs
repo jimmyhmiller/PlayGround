@@ -26,7 +26,8 @@ pub use memscope_core::{
     LiveSet, MemScope, MetaGuard, Mode, RingMode, Stats,
 };
 pub use memscope_proto::{
-    AllocShape, Frame, LiveAlloc, MetaValue, RawEvent, SiteInfo, Snapshot, TypeId, TypeInfo,
+    AllocShape, EventKind, Frame, LiveAlloc, MetaValue, RawEvent, SiteInfo, Snapshot, TypeId,
+    TypeInfo,
 };
 
 /// Attach arbitrary key/value metadata to every allocation made in the current
