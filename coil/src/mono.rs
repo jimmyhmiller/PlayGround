@@ -293,6 +293,7 @@ impl<'a> Mono<'a> {
             params,
             ret,
             body,
+            macro_variadic: false, // macros are dropped before mono
             span: f.span,
         })
     }

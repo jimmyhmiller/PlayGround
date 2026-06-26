@@ -442,6 +442,10 @@ pub struct Func {
     pub params: Vec<Param>,
     pub ret: Type,
     pub body: Vec<Expr>,
+    /// A variadic *macro*: the last param soaks up all remaining call arguments as
+    /// a single `Code` list (only meaningful for `[Code…] -> Code` macros, marked
+    /// with `&` before the last param). Always false for ordinary functions.
+    pub macro_variadic: bool,
     /// Source location of the `(defn …)` form, for debug info (DWARF line). A
     /// function read from an included/imported file (whose offsets are in another
     /// source) carries `Span::DUMMY` — it just gets no line info, never wrong info.

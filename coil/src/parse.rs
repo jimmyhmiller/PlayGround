@@ -522,7 +522,14 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
     };
     i += 1;
     let mut params = Vec::new();
+    // `&` before the last param marks a variadic macro: that param soaks up all
+    // remaining call args as one Code list.
+    let mut macro_variadic = false;
     for p in params_v {
+        if matches!(&p.kind, SexpKind::Sym(s) if s == "&") {
+            macro_variadic = true;
+            continue;
+        }
         let pl = as_list(p, "parameter must be (name :type)")?;
         let pname = sym(&pl[0], "param name")?;
         let pty = parse_type(pl.get(1).ok_or("param missing type")?)?;
@@ -557,6 +564,7 @@ fn parse_defn(rest: &[Sexp]) -> Result<Func, Diag> {
         params,
         ret,
         body,
+        macro_variadic,
         // The caller (parse_program) stamps the real `(defn …)` form span; a Func
         // built in isolation has none.
         span: Span::DUMMY,

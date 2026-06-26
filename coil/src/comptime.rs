@@ -166,16 +166,27 @@ pub fn expand_macro(
         gensym: std::cell::Cell::new(0),
     };
     let callee = table.get(fn_name).ok_or_else(|| format!("macro '{fn_name}' not found"))?;
-    if callee.params.len() != args.len() {
-        return Err(format!(
-            "macro '{fn_name}': expects {} args, got {}",
-            callee.params.len(),
-            args.len()
-        ));
-    }
+    let np = callee.params.len();
     let mut env: Env = HashMap::new();
-    for (p, a) in callee.params.iter().zip(args) {
-        env.insert(p.name.clone(), CtVal::Code(a));
+    if callee.macro_variadic {
+        // first np-1 params bind positionally; the last soaks up the rest as a list.
+        if args.len() < np - 1 {
+            return Err(format!("macro '{fn_name}': expects at least {} args, got {}", np - 1, args.len()));
+        }
+        let mut args = args;
+        let rest: Vec<crate::reader::Sexp> = args.split_off(np - 1);
+        for (p, a) in callee.params.iter().zip(args) {
+            env.insert(p.name.clone(), CtVal::Code(a));
+        }
+        let rest_list = crate::reader::Sexp::new(crate::reader::SexpKind::List(rest), crate::span::Span::DUMMY);
+        env.insert(callee.params[np - 1].name.clone(), CtVal::Code(rest_list));
+    } else {
+        if np != args.len() {
+            return Err(format!("macro '{fn_name}': expects {} args, got {}", np, args.len()));
+        }
+        for (p, a) in callee.params.iter().zip(args) {
+            env.insert(p.name.clone(), CtVal::Code(a));
+        }
     }
     match eval_seq(&callee.body, &mut env, &ctx)? {
         Flow::Val(CtVal::Code(s)) => Ok(s),

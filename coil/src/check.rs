@@ -429,6 +429,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
             params: out_params,
             ret: erase_refs(&f.ret),
             body,
+            macro_variadic: f.macro_variadic,
             span: f.span,
         });
     }

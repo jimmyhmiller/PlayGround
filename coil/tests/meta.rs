@@ -116,3 +116,20 @@ fn gensym_avoids_capturing_user_bindings() {
     );
     assert_eq!(code, 106);
 }
+
+#[test]
+fn variadic_macro_folds_over_args() {
+    // `&` marks a variadic macro: the last param is the Code list of all args.
+    // A comptime helper recurses by index (the cond/and/|> pattern).
+    let code = build_and_run(
+        "(module a)\n\
+         (defn vand-from [(cs Code) (i i64)] (-> Code)\n\
+           (if (icmp-eq i (code-count cs)) `1\n\
+               `(if ~(code-nth cs i) ~(vand-from cs (iadd i 1)) 0)))\n\
+         (defn vand [& (cs Code)] (-> Code) (vand-from cs 0))\n\
+         (defn main [] (-> i64)\n\
+           (iadd (vand (icmp-lt 1 2) (icmp-lt 2 3) (icmp-lt 3 4))\n\
+                 (imul 10 (vand (icmp-lt 1 2) (icmp-lt 9 3)))))", // 1 + 0
+    );
+    assert_eq!(code, 1);
+}
