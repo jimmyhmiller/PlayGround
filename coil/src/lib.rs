@@ -55,13 +55,47 @@ fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
 /// interpreter to get generated top-level forms, splice those in (dropping the
 /// `meta` forms), and check the whole program.
 fn elaborate(src: &str) -> Result<ast::Program, Diag> {
+    use std::collections::{HashMap, HashSet};
     let forms = reader::read_all(src)?;
-    let (tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
-    let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
+    let (mut tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
+    let mut program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
+
+    // ---- expression-position macros: a macro is a `[Code…] -> Code` function;
+    // its calls expand inline in non-macro bodies (args are quoted to Code). ----
+    let macro_quals: Vec<String> = program
+        .funcs
+        .iter()
+        .filter(|f| f.ret == ast::Type::Code && f.params.iter().all(|p| p.ty == ast::Type::Code))
+        .map(|f| f.name.clone())
+        .collect();
+    if !macro_quals.is_empty() {
+        // bare name -> qualified, for resolving a call-site `(name …)` to its fn.
+        let qual: HashMap<String, String> = macro_quals
+            .iter()
+            .map(|q| (q.rsplit('.').next().unwrap_or(q).to_string(), q.clone()))
+            .collect();
+        let bare: HashSet<String> = qual.keys().cloned().collect();
+        let wanted = closure_funcs(&program, macro_quals.clone());
+        let sub = closure_subprogram(&program, &wanted, false);
+        let checked_sub = check::check(&sub)?;
+        tagged = tagged
+            .into_iter()
+            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &qual, &checked_sub, &mut 0)?, m)))
+            .collect::<Result<Vec<_>, Diag>>()?;
+        program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
+    }
+
+    // ---- top-level `(meta …)` staged macros (generate definitions) ----
     let mut checked = if program.metas.is_empty() {
         check::check(&program)?
     } else {
-        let sub = generator_subprogram(&program);
+        let mut stack: Vec<String> = Vec::new();
+        let names: HashSet<&str> = program.funcs.iter().map(|f| f.name.as_str()).collect();
+        for m in &program.metas {
+            collect_calls(m, &names, &mut stack);
+        }
+        let wanted = closure_funcs(&program, stack);
+        let sub = closure_subprogram(&program, &wanted, true);
         let checked_sub = check::check(&sub)?;
         let gen = comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new)?;
         let module = tagged.iter().find(|(f, _)| is_meta_form(f)).and_then(|(_, m)| m.clone());
@@ -73,7 +107,7 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
         let program2 = resolve::resolve_program(tagged2, &imports, &exports)?;
         check::check(&program2)?
     };
-    // Comptime-only functions (anything with a `Code` parameter or return — macro
+    // Comptime-only functions (anything with a `Code` parameter or return — macros,
     // generators, code helpers) have done their job during elaboration and have no
     // runtime representation; drop them before mono/codegen.
     checked.funcs.retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
@@ -85,18 +119,12 @@ fn is_meta_form(s: &reader::Sexp) -> bool {
         if matches!(items.first().map(|x| &x.kind), Some(reader::SexpKind::Sym(h)) if h == "meta"))
 }
 
-/// Build a sub-program containing only the functions reachable from the `meta`
-/// expressions (plus the full type/trait/const context), so generators can be
-/// checked without the code that consumes their output.
-fn generator_subprogram(p: &ast::Program) -> ast::Program {
+/// The closure of function names reachable (via calls) from the seed names.
+fn closure_funcs(p: &ast::Program, mut stack: Vec<String>) -> std::collections::HashSet<String> {
     let names: std::collections::HashSet<&str> = p.funcs.iter().map(|f| f.name.as_str()).collect();
     let by_name: std::collections::HashMap<&str, &ast::Func> =
         p.funcs.iter().map(|f| (f.name.as_str(), f)).collect();
-    let mut stack: Vec<String> = Vec::new();
-    for m in &p.metas {
-        collect_calls(m, &names, &mut stack);
-    }
-    let mut wanted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut wanted = std::collections::HashSet::new();
     while let Some(n) = stack.pop() {
         if wanted.insert(n.clone()) {
             if let Some(f) = by_name.get(n.as_str()) {
@@ -106,6 +134,16 @@ fn generator_subprogram(p: &ast::Program) -> ast::Program {
             }
         }
     }
+    wanted
+}
+
+/// A sub-program with only the `wanted` functions (plus full type/trait/const
+/// context), so a comptime stage can be checked without the code that consumes it.
+fn closure_subprogram(
+    p: &ast::Program,
+    wanted: &std::collections::HashSet<String>,
+    keep_metas: bool,
+) -> ast::Program {
     ast::Program {
         conventions: p.conventions.clone(),
         structs: p.structs.clone(),
@@ -117,7 +155,81 @@ fn generator_subprogram(p: &ast::Program) -> ast::Program {
         traits: p.traits.clone(),
         impls: p.impls.clone(),
         statics: vec![],
-        metas: p.metas.clone(),
+        metas: if keep_metas { p.metas.clone() } else { vec![] },
+    }
+}
+
+/// Expand expression-macro calls in one top-level form. Macro definitions and
+/// `(meta …)` forms are left alone (their bodies are comptime code, not user code).
+fn expand_top_form(
+    f: &reader::Sexp,
+    bare: &std::collections::HashSet<String>,
+    qual: &std::collections::HashMap<String, String>,
+    sub: &ast::Program,
+    depth: &mut u32,
+) -> Result<reader::Sexp, Diag> {
+    if is_meta_form(f) || is_macro_defn(f, bare) {
+        return Ok(f.clone());
+    }
+    expand_calls(f, bare, qual, sub, depth)
+}
+
+fn is_macro_defn(f: &reader::Sexp, bare: &std::collections::HashSet<String>) -> bool {
+    if let reader::SexpKind::List(items) = &f.kind {
+        if let (Some(reader::SexpKind::Sym(h)), Some(reader::SexpKind::Sym(n))) =
+            (items.first().map(|x| &x.kind), items.get(1).map(|x| &x.kind))
+        {
+            return h == "defn" && bare.contains(n);
+        }
+    }
+    false
+}
+
+/// Recursively expand `(macro args…)` calls: expand the arguments, run the macro
+/// on the quoted forms, then re-expand its output.
+fn expand_calls(
+    s: &reader::Sexp,
+    bare: &std::collections::HashSet<String>,
+    qual: &std::collections::HashMap<String, String>,
+    sub: &ast::Program,
+    depth: &mut u32,
+) -> Result<reader::Sexp, Diag> {
+    use reader::{Sexp, SexpKind};
+    match &s.kind {
+        SexpKind::List(items) => {
+            let is_macro_call = matches!(items.first().map(|x| &x.kind),
+                Some(SexpKind::Sym(h)) if bare.contains(h));
+            if is_macro_call {
+                *depth += 1;
+                if *depth > 100_000 {
+                    return Err(Diag::new("macro expansion did not terminate"));
+                }
+                let name = match &items[0].kind {
+                    SexpKind::Sym(h) => h.clone(),
+                    _ => unreachable!(),
+                };
+                let args: Vec<Sexp> = items[1..]
+                    .iter()
+                    .map(|a| expand_calls(a, bare, qual, sub, depth))
+                    .collect::<Result<_, _>>()?;
+                let out = comptime::expand_macro(sub, &qual[&name], args).map_err(Diag::new)?;
+                expand_calls(&out, bare, qual, sub, depth)
+            } else {
+                let out: Vec<Sexp> = items
+                    .iter()
+                    .map(|i| expand_calls(i, bare, qual, sub, depth))
+                    .collect::<Result<_, _>>()?;
+                Ok(Sexp::new(SexpKind::List(out), s.span))
+            }
+        }
+        SexpKind::Vector(items) => {
+            let out: Vec<Sexp> = items
+                .iter()
+                .map(|i| expand_calls(i, bare, qual, sub, depth))
+                .collect::<Result<_, _>>()?;
+            Ok(Sexp::new(SexpKind::Vector(out), s.span))
+        }
+        _ => Ok(s.clone()),
     }
 }
 

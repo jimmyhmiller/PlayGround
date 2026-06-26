@@ -144,6 +144,46 @@ pub fn run_metas(program: &Program) -> Result<Vec<crate::reader::Sexp>, String> 
     Ok(out)
 }
 
+/// Expand one expression-macro call: run the macro function `fn_name` (a checked
+/// `[Code…] -> Code` function in `program`) with its arguments bound to the quoted
+/// call-site forms, returning the generated syntax.
+pub fn expand_macro(
+    program: &Program,
+    fn_name: &str,
+    args: Vec<crate::reader::Sexp>,
+) -> Result<crate::reader::Sexp, String> {
+    let table: HashMap<String, Func> = program.funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
+    let smap: HashMap<String, StructDef> = program.structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let smap_sums: HashMap<String, SumDef> = program.sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let variants: HashSet<String> =
+        program.sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
+    let ctx = Ctx {
+        fns: &table,
+        structs: &smap,
+        sums: &smap_sums,
+        variants: &variants,
+        fuel: std::cell::Cell::new(FUEL),
+        gensym: std::cell::Cell::new(0),
+    };
+    let callee = table.get(fn_name).ok_or_else(|| format!("macro '{fn_name}' not found"))?;
+    if callee.params.len() != args.len() {
+        return Err(format!(
+            "macro '{fn_name}': expects {} args, got {}",
+            callee.params.len(),
+            args.len()
+        ));
+    }
+    let mut env: Env = HashMap::new();
+    for (p, a) in callee.params.iter().zip(args) {
+        env.insert(p.name.clone(), CtVal::Code(a));
+    }
+    match eval_seq(&callee.body, &mut env, &ctx)? {
+        Flow::Val(CtVal::Code(s)) => Ok(s),
+        Flow::Val(_) => Err(format!("macro '{fn_name}' did not return Code")),
+        _ => Err(format!("macro '{fn_name}': stray control flow")),
+    }
+}
+
 /// Evaluate a const's value expression to a constant-initializer tree, for an
 /// aggregate const lowered to a static global.
 pub fn eval_const(

@@ -58,3 +58,39 @@ fn generator_can_emit_multiple_defs() {
     );
     assert_eq!(code, 3);
 }
+
+// ---- expression-position macros (a [Code…] -> Code function, expanded inline) ---
+
+#[test]
+fn expression_macro_when() {
+    let code = build_and_run(
+        "(module a)\n\
+         (defn when2 [(c Code) (body Code)] (-> Code) `(if ~c ~body 0))\n\
+         (defn main [] (-> i64) (when2 (icmp-lt 1 2) 7))", // (if (icmp-lt 1 2) 7 0)
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn macros_compose_and_reflect() {
+    let code = build_and_run(
+        "(module a)\n\
+         (defstruct P [(a i64) (b i64) (c i64)])\n\
+         (defn nf [(t Code)] (-> Code) `~(field-count P))\n\
+         (defn dbl [(x Code)] (-> Code) `(iadd ~x ~x))\n\
+         (defn main [] (-> i64) (dbl (nf P)))", // dbl(3) = (iadd 3 3) = 6
+    );
+    assert_eq!(code, 6);
+}
+
+#[test]
+fn expression_macro_with_arithmetic_in_the_macro() {
+    // The macro runs real Coil at expand time (here, picks a branch by a code int).
+    let code = build_and_run(
+        "(module a)\n\
+         (defn twice-if-even [(n Code)] (-> Code)\n\
+           (if (= (urem (code-int n) 2) 0) `(imul ~n 2) `(iadd ~n 1)))\n\
+         (defn main [] (-> i64) (iadd (twice-if-even 10) (twice-if-even 7)))", // 20 + 8 = 28
+    );
+    assert_eq!(code, 28);
+}
