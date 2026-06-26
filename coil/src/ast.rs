@@ -159,6 +159,10 @@ pub enum CodeOp {
     CVariantCount,
     CVariantName,
     CVariantFields,
+    /// `(str-bytes S)` — a `Code` string to a `Code` list of its byte ints;
+    /// `(bytes->str L)` — the inverse. For compile-time format-string parsing.
+    StrBytes,
+    BytesToStr,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an

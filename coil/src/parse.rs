@@ -1086,6 +1086,11 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             };
             Ok(ExprKind::CodeOp { op, args: args.iter().map(parse_expr).collect::<Result<_, _>>()? })
         }
+        // (str-bytes S) / (bytes->str L) — compile-time string<->byte-list
+        "str-bytes" | "bytes->str" => Ok(ExprKind::CodeOp {
+            op: if head == "str-bytes" { CodeOp::StrBytes } else { CodeOp::BytesToStr },
+            args: args.iter().map(parse_expr).collect::<Result<_, _>>()?,
+        }),
         // (gensym) — a fresh Code symbol (hygiene)
         "gensym" => {
             if !args.is_empty() {

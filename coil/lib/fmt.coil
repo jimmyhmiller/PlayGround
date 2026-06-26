@@ -68,55 +68,40 @@
 ; {c} char, {b} bool; `{{`/`}}` are literal braces. Expands to a sequence of print-*
 ; calls. Too few args for the specs is a compile error (no silent wrong).
 
-(def fmt-reverse
-  (lambda [xs] (if (empty? xs) (list) (concat (fmt-reverse (rest xs)) (list (first xs))))))
+(defn fmt--printer [(spec i64)] (-> Code)
+  (if (icmp-eq spec 100) `print-i
+  (if (icmp-eq spec 115) `print-str
+  (if (icmp-eq spec 120) `print-hex
+  (if (icmp-eq spec 99)  `print-char
+  (if (icmp-eq spec 98)  `print-bool
+    (error "fmt: unknown spec; use {d} {s} {x} {c} {b}")))))))
 
-(def fmt-printer
-  (lambda [spec]
-    (if (= spec 100) (quote print-i)
-    (if (= spec 115) (quote print-str)
-    (if (= spec 120) (quote print-hex)
-    (if (= spec 99)  (quote print-char)
-    (if (= spec 98)  (quote print-bool)
-        (error "fmt: unknown spec; use {d} {s} {x} {c} {b}"))))))))
+; flush the accumulated literal bytes as a single print-str (or nothing if empty)
+(defn fmt--flush [(w Code) (lit Code)] (-> Code)
+  (if (icmp-eq (code-count lit) 0) `()
+    `((print-str ~w ~(bytes->str lit)))))
 
-; Flush accumulated literal bytes (reversed) as a (lit BYTES) part onto acc.
-(def fmt-flush
-  (lambda [cur acc]
-    (if (empty? cur) acc (cons (list (quote lit) (fmt-reverse cur)) acc))))
+; single pass over the format bytes (index i), accumulating literal bytes in `lit`
+; and consuming `args` (index ai). Returns a Code list of print-* call forms.
+(defn fmt--go [(w Code) (bs Code) (i i64) (lit Code) (args Code) (ai i64)] (-> Code)
+  (if (icmp-eq i (code-count bs))
+      (fmt--flush w lit)
+    (let [b (code-int (code-nth bs i))]
+      (if (icmp-eq b 123)                                              ; '{'
+          (if (if (icmp-lt (iadd i 1) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 1))) 123) false)
+              (fmt--go w bs (iadd i 2) `(~@lit 123) args ai)           ; '{{' -> literal '{'
+            (if (if (icmp-lt (iadd i 2) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 2))) 125) false)
+                (if (icmp-eq ai (code-count args))
+                    (error "fmt: not enough arguments for the format string")
+                  `(~@(fmt--flush w lit)
+                    (~(fmt--printer (code-int (code-nth bs (iadd i 1)))) ~w ~(code-nth args ai))
+                    ~@(fmt--go w bs (iadd i 3) `() args (iadd ai 1))))
+              (error "fmt: malformed spec, expected {X}")))
+        (if (icmp-eq b 125)                                            ; '}'
+            (if (if (icmp-lt (iadd i 1) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 1))) 125) false)
+                (fmt--go w bs (iadd i 2) `(~@lit 125) args ai)         ; '}}' -> literal '}'
+              (error "fmt: unmatched '}' (use '}}')"))
+          (fmt--go w bs (iadd i 1) `(~@lit ~(code-nth bs i)) args ai))))))
 
-; Parse format bytes into an ordered list of parts: (lit BYTES) | (spec BYTE).
-(def fmt-parse
-  (lambda [bytes acc cur]
-    (if (empty? bytes)
-        (fmt-reverse (fmt-flush cur acc))
-        (let [b (first bytes) bs (rest bytes)]
-          (if (= b 123)                                            ; '{'
-              (if (and (not (empty? bs)) (= (first bs) 123))
-                  (fmt-parse (rest bs) acc (cons 123 cur))         ; '{{' -> '{'
-                  (if (and (not (empty? bs)) (not (empty? (rest bs))) (= (first (rest bs)) 125))
-                      (fmt-parse (rest (rest bs))
-                                 (cons (list (quote spec) (first bs)) (fmt-flush cur acc))
-                                 (list))
-                      (error "fmt: malformed spec, expected {X}")))
-              (if (= b 125)                                        ; '}'
-                  (if (and (not (empty? bs)) (= (first bs) 125))
-                      (fmt-parse (rest bs) acc (cons 125 cur))     ; '}}' -> '}'
-                      (error "fmt: unmatched '}' (use '}}')"))
-                  (fmt-parse bs acc (cons b cur))))))))
-
-(def fmt-emit
-  (lambda [w parts args]
-    (if (empty? parts)
-        (list)
-        (let [p (first parts)]
-          (if (= (first p) (quote lit))
-              (cons (list (quote print-str) w (bytes->str (first (rest p))))
-                    (fmt-emit w (rest parts) args))
-              (if (empty? args)
-                  (error "fmt: not enough arguments for the format string")
-                  (cons (list (fmt-printer (first (rest p))) w (first args))
-                        (fmt-emit w (rest parts) (rest args)))))))))
-
-(defmacro fmt [w fmt-str & args]
-  (cons (quote do) (fmt-emit w (fmt-parse (str-bytes fmt-str) (list) (list)) args)))
+(defn fmt [(w Code) (fmt-str Code) & (args Code)] (-> Code)
+  `(do ~@(fmt--go w (str-bytes fmt-str) 0 `() args 0)))

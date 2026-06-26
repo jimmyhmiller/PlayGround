@@ -749,7 +749,7 @@ fn synth_inner(
                 CodeOp::Sym | CodeOp::Str => Type::Slice(Box::new(Type::Int(8, false))),
                 CodeOp::Nth | CodeOp::Gensym | CodeOp::Rest | CodeOp::Symbol
                 | CodeOp::CFieldName | CodeOp::CFieldType | CodeOp::CVariantSum
-                | CodeOp::CVariantName => Type::Code,
+                | CodeOp::CVariantName | CodeOp::StrBytes | CodeOp::BytesToStr => Type::Code,
                 CodeOp::CFieldCount | CodeOp::CFieldKind | CodeOp::CVariantCount
                 | CodeOp::CVariantFields => Type::Int(64, true),
                 // `(error …)` diverges — it unifies with any branch's type.

@@ -1118,6 +1118,36 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
             _ => unreachable!(),
         });
     }
+    if op == CodeOp::StrBytes {
+        let s = match args.first() {
+            Some(CtVal::Code(c)) => match &c.kind {
+                K::Str(x) => x.clone(),
+                _ => return Err("comptime: str-bytes expects a string".to_string()),
+            },
+            Some(CtVal::Str(x)) => x.clone(),
+            _ => return Err("comptime: str-bytes expects a string".to_string()),
+        };
+        let items = s.bytes().map(|b| Sexp::new(K::Int(b as i64), dummy)).collect();
+        return Ok(CtVal::Code(Sexp::new(K::List(items), dummy)));
+    }
+    if op == CodeOp::BytesToStr {
+        let list = match args.first() {
+            Some(CtVal::Code(c)) => match &c.kind {
+                K::List(items) | K::Vector(items) => items,
+                _ => return Err("comptime: bytes->str expects a list".to_string()),
+            },
+            _ => return Err("comptime: bytes->str expects a list".to_string()),
+        };
+        let mut bytes = Vec::with_capacity(list.len());
+        for it in list {
+            match &it.kind {
+                K::Int(n) => bytes.push(*n as u8),
+                _ => return Err("comptime: bytes->str list must be all ints".to_string()),
+            }
+        }
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        return Ok(CtVal::Code(Sexp::new(K::Str(s), dummy)));
+    }
     let code = match args.first() {
         Some(CtVal::Code(s)) => s,
         _ => return Err("comptime: code op expects a Code value".to_string()),
@@ -1168,7 +1198,8 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
         },
         CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::Str | CodeOp::CFieldCount
         | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType | CodeOp::CVariantSum
-        | CodeOp::CVariantCount | CodeOp::CVariantName | CodeOp::CVariantFields => {
+        | CodeOp::CVariantCount | CodeOp::CVariantName | CodeOp::CVariantFields
+        | CodeOp::StrBytes | CodeOp::BytesToStr => {
             unreachable!("handled above")
         }
     })

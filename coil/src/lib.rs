@@ -146,6 +146,25 @@ fn expand_stage3_macros(
     imports: &macros::ImportMap,
     exports: &macros::ExportMap,
 ) -> Result<Vec<macros::TaggedForm>, Diag> {
+    // The comptime interpreter recurses (Rust stack) for each step of a macro's
+    // evaluation — a macro that loops over, say, a format string's characters can
+    // go deep. Run on a large dedicated stack so it's robust off the main thread
+    // (e.g. inside cargo's 2 MiB test threads).
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || expand_stage3_macros_inner(tagged, imports, exports))
+            .expect("spawn macro-expansion thread")
+            .join()
+            .expect("macro-expansion thread panicked")
+    })
+}
+
+fn expand_stage3_macros_inner(
+    tagged: Vec<macros::TaggedForm>,
+    imports: &macros::ImportMap,
+    exports: &macros::ExportMap,
+) -> Result<Vec<macros::TaggedForm>, Diag> {
     use std::collections::{HashMap, HashSet};
     let macro_subset: Vec<macros::TaggedForm> =
         tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
