@@ -1,5 +1,12 @@
 # Stage 3 — staged macros via interleaved elaboration (design + plan)
 
+> **Status: this is the original design/plan doc.** Stage 3 shipped and the old
+> macro Lisp was deleted; the wording below (`defmacro`, "alongside the old Lisp")
+> reflects the plan, not the final shape. For how the implemented system actually
+> resolves names — module scoping, `coil.core` auto-refer, trait/method
+> namespacing, and the two-phase resolve with its `strict` gating — see
+> **[NAMESPACING.md](NAMESPACING.md)**.
+
 Goal: make **macros ordinary Coil code** that run during compilation, manipulate
 **code as a first-class value**, and use the **real (typed) reflection** — replacing
 the separate pre-type macro Lisp. One language, available at every stage.
