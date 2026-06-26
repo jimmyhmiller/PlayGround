@@ -265,7 +265,7 @@
 ; A bare `(defer …)` is only meaningful as a direct child of `(scope …)`, where
 ; `scope` extracts it before this macro runs. Reaching this expansion means it
 ; was used outside a scope (or nested too deep) — hard-error, never a no-op.
-(defmacro defer [& _]
+(defn defer [& (_ Code)] (-> Code)
   (error "defer: (defer expr) is only valid as a DIRECT form inside (scope :s ...)"))
 
 ; ---- comptime-unrolled loop ----------------------------------------------
@@ -273,17 +273,17 @@
 ; with i a compile-time literal each iteration (zero runtime loop overhead).
 ; LO/HI MUST be literal integers (known at expansion); for runtime bounds use
 ; `for`.
-(defmacro inline-for [binding & body]
-  (if (not (= (count binding) 3))
+(defn inline-for-iters [(i Code) (lo i64) (hi i64) (body Code)] (-> Code)
+  (if (icmp-lt lo hi)
+      `((let [~i ~lo] ~@body) ~@(inline-for-iters i (iadd lo 1) hi body))
+      `()))
+(defn inline-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 3))
       (error "inline-for: binding must be [i LO HI] with literal integer bounds")
-      (let [i    (first binding)
-            lo   (first (rest binding))
-            hi   (first (rest (rest binding)))
-            vals (range-list lo hi)]
-        (if (empty? vals)
-            0
-            (cons (quote do)
-                  (map (lambda [v] `(let [~i ~v] ~@body)) vals))))))
+      (let [i  (code-nth binding 0)
+            lo (code-int (code-nth binding 1))
+            hi (code-int (code-nth binding 2))]
+        `(do ~@(inline-for-iters i lo hi body)))))
 
 ; `(all a b c …)` / `(any a b c …)` — variadic boolean AND / OR, folding to the
 ; 2-ary core `and`/`or` (short-circuit). `(all)` = true, `(any)` = false; a single
