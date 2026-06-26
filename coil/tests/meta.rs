@@ -164,3 +164,14 @@ fn cond_macro_with_else() {
     );
     assert_eq!(code, 81);
 }
+
+#[test]
+fn runaway_macro_recursion_errors_cleanly() {
+    // A self-recursive comptime function must give a clean "too deep" error, not
+    // overflow the compiler's stack (SIGABRT).
+    let err = coil::emit_ir(
+        "(module a)\n(defn spin [(c Code)] (-> Code) (spin c))\n(defn main [] (-> i64) (spin 5))",
+    )
+    .unwrap_err();
+    assert!(err.contains("too deep") || err.contains("runaway"), "got:\n{err}");
+}

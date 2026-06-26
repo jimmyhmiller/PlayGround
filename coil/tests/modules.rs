@@ -182,3 +182,38 @@ fn cross_module_types_sums_and_use() {
     );
     assert_eq!(build_and_run(&src), 42);
 }
+
+#[test]
+fn importing_the_same_file_twice_is_idempotent() {
+    // The loader's `visited` dedup: importing the identical path twice in one
+    // program must not double-define its functions (no "duplicate definition").
+    let dir = write_modules(
+        "mod_dup",
+        &[("util.coil", "(module util)\n(defn u [(x :i64)] (-> :i64) (iadd x 7))\n")],
+    );
+    let p = dir.join("util.coil");
+    let src = format!(
+        "(module app)\n(import \"{0}\" :use *)\n(import \"{0}\" :use *)\n\
+         (defn main [] (-> :i64) (u 35))\n",
+        p.display()
+    );
+    assert_eq!(build_and_run(&src), 42);
+}
+
+#[test]
+fn reflection_on_an_ambiguous_cross_module_type_errors() {
+    // A bare type name that two imported modules both define must be a HARD ERROR
+    // in field reflection, never a silent pick of the wrong struct (regression:
+    // a derived eq once read 5 fields off a 1-field struct).
+    let dir = write_modules(
+        "mod_amb",
+        &[("other.coil", "(module other)\n(export P)\n(defstruct P [(a i64) (b i64) (c i64)])\n")],
+    );
+    let src = format!(
+        "(module app)\n(import \"lib/derive.coil\" :use *)\n(import \"{}\" :use *)\n\
+         (defstruct P [(v i64)])\n(derive Eq P)\n(defn main [] (-> :i64) 0)\n",
+        dir.join("other.coil").display()
+    );
+    let err = coil::check_source(&src).unwrap_err();
+    assert!(err.contains("ambiguous"), "expected an ambiguity error, got:\n{err}");
+}

@@ -217,7 +217,7 @@ fn expand_stage3_macros_inner(
             _ => produced.push(out),
         }
         for form in produced {
-            register_generated_decl(&form, &mut gen);
+            register_generated_decl(&form, &m, &mut gen)?;
             if let Some(n) = defn_name(&form) {
                 all_fns.insert(qualify(n, &m));
             }
@@ -227,9 +227,15 @@ fn expand_stage3_macros_inner(
     Ok(expanded)
 }
 
-/// If `form` is a `(defstruct …)`/`(defsum …)`, parse it and record it so later
-/// macros in the same pass can reflect on it.
-fn register_generated_decl(form: &reader::Sexp, gen: &mut (Vec<ast::StructDef>, Vec<ast::SumDef>)) {
+/// If `form` is a `(defstruct …)`/`(defsum …)`, parse it and record it (with its
+/// name QUALIFIED by `module`, matching how the resolver keys types) so later macros
+/// in the same pass can reflect on it by the same qualified key. A parse failure
+/// here is a real error in the generating macro's output — surface it, don't swallow.
+fn register_generated_decl(
+    form: &reader::Sexp,
+    module: &Option<String>,
+    gen: &mut (Vec<ast::StructDef>, Vec<ast::SumDef>),
+) -> Result<(), Diag> {
     let head = match &form.kind {
         reader::SexpKind::List(items) => items.first().and_then(|x| match &x.kind {
             reader::SexpKind::Sym(h) => Some(h.as_str()),
@@ -238,12 +244,22 @@ fn register_generated_decl(form: &reader::Sexp, gen: &mut (Vec<ast::StructDef>, 
         _ => None,
     };
     if !matches!(head, Some("defstruct") | Some("defsum")) {
-        return;
+        return Ok(());
     }
-    if let Ok(p) = parse::parse_program(std::slice::from_ref(form)) {
-        gen.0.extend(p.structs);
-        gen.1.extend(p.sums);
+    let qualify = |n: &str| match module {
+        Some(m) => format!("{m}.{n}"),
+        None => n.to_string(),
+    };
+    let p = parse::parse_program(std::slice::from_ref(form))?;
+    for mut s in p.structs {
+        s.name = qualify(&s.name);
+        gen.0.push(s);
     }
+    for mut s in p.sums {
+        s.name = qualify(&s.name);
+        gen.1.push(s);
+    }
+    Ok(())
 }
 
 fn is_meta_form(s: &reader::Sexp) -> bool {
