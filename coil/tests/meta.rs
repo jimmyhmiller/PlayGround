@@ -175,3 +175,19 @@ fn runaway_macro_recursion_errors_cleanly() {
     .unwrap_err();
     assert!(err.contains("too deep") || err.contains("runaway"), "got:\n{err}");
 }
+
+#[test]
+fn undefined_call_still_caught_in_a_meta_program() {
+    // The Stage-4 `strict` gating turns the undefined-reference check OFF for the
+    // pre-meta (intermediate) resolve — but it must still fire on the FINAL program.
+    // A meta program that calls a generated def AND a genuinely-undefined one: the
+    // generated call is fine, the undefined one is still an error.
+    let err = coil::check_source(
+        "(module a)\n\
+         (defn gen [] (-> Code) `(defn answer [] (-> i64) 42))\n\
+         (meta (gen))\n\
+         (defn main [] (-> i64) (iadd (answer) (totally-undefined 1)))",
+    )
+    .unwrap_err();
+    assert!(err.contains("undefined function 'totally-undefined'"), "got: {err}");
+}
