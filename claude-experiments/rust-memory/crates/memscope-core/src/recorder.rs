@@ -707,3 +707,36 @@ impl SiteCache {
 fn thread_id() -> u32 {
     THREAD_ID.try_with(|&id| id).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_interner_dedups() {
+        let mut k = KeyInterner::default();
+        let a = k.intern("subsystem");
+        let b = k.intern("phase");
+        assert_ne!(a, b);
+        assert_eq!(k.intern("subsystem"), a); // same name -> same id
+        assert_eq!(k.names[a as usize], "subsystem");
+        assert_eq!(k.names[b as usize], "phase");
+    }
+
+    #[test]
+    fn meta_interner_dedups_by_content() {
+        let mut m = MetaInterner::default();
+        let phys = vec![(0u32, MetaValue::Str("physics".into()))];
+        let io = vec![(0u32, MetaValue::Str("io".into()))];
+        let id1 = m.intern(&phys);
+        let id2 = m.intern(&io);
+        assert_ne!(id1, id2); // different value -> different context
+        assert_eq!(m.intern(&phys), id1); // identical content -> same id
+        assert_eq!(m.contexts[&id1], phys);
+        // Dynamic values still dedup per distinct set.
+        let req42 = vec![(1u32, MetaValue::Uint(42))];
+        let req43 = vec![(1u32, MetaValue::Uint(43))];
+        assert_ne!(m.intern(&req42), m.intern(&req43));
+        assert_eq!(m.intern(&req42), m.intern(&req42));
+    }
+}

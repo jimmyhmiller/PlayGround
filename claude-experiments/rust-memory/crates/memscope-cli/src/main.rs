@@ -1710,3 +1710,85 @@ fn cmd_mode(args: &[String]) -> Result<(), String> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+    use memscope_proto::EventKind::*;
+
+    fn ev(kind: memscope_proto::EventKind, thread: u32, site: u32, addr: u64) -> RecEvent {
+        RecEvent { kind, addr, size: 8, ts_nanos: 0, site, thread }
+    }
+
+    fn meta_tables() -> HashMap<u32, Vec<(String, String)>> {
+        let mut m = HashMap::new();
+        m.insert(1, vec![("subsystem".into(), "physics".into())]);
+        m.insert(2, vec![("shard".into(), "3".into())]);
+        m.insert(3, vec![("subsystem".into(), "io".into())]);
+        m
+    }
+
+    #[test]
+    fn correlate_nesting_and_per_thread() {
+        // thread 10 nests ctx1(physics) > ctx2(shard=3); thread 20 runs ctx3(io)
+        // concurrently and interleaved in the global stream.
+        let events = vec![
+            ev(MetaEnter, 10, 1, 0),
+            ev(MetaEnter, 20, 3, 0),
+            ev(MetaEnter, 10, 2, 0),
+            ev(Alloc, 10, 99, 0x1), // idx 3: {subsystem:physics, shard:3}
+            ev(Alloc, 20, 99, 0x2), // idx 4: {subsystem:io} (other thread unaffected)
+            ev(MetaExit, 10, 2, 0),
+            ev(Alloc, 10, 99, 0x3), // idx 6: {subsystem:physics}
+            ev(MetaExit, 10, 1, 0),
+            ev(Alloc, 10, 99, 0x4), // idx 8: {}
+        ];
+        let m = correlate_meta(&events, &meta_tables());
+        assert_eq!(m[3].get("subsystem").map(String::as_str), Some("physics"));
+        assert_eq!(m[3].get("shard").map(String::as_str), Some("3"));
+        assert_eq!(m[4].get("subsystem").map(String::as_str), Some("io"));
+        assert!(m[4].get("shard").is_none()); // thread 20 never saw shard
+        assert_eq!(m[6].get("subsystem").map(String::as_str), Some("physics"));
+        assert!(m[6].get("shard").is_none()); // ctx2 exited
+        assert!(m[8].is_empty()); // all scopes exited
+    }
+
+    #[test]
+    fn inner_scope_overrides_outer_key() {
+        let mut tables = HashMap::new();
+        tables.insert(1, vec![("subsystem".to_string(), "outer".to_string())]);
+        tables.insert(2, vec![("subsystem".to_string(), "inner".to_string())]);
+        let events = vec![
+            ev(MetaEnter, 1, 1, 0),
+            ev(MetaEnter, 1, 2, 0),
+            ev(Alloc, 1, 9, 0x1), // idx 2: inner wins (merged outer->inner)
+        ];
+        let m = correlate_meta(&events, &tables);
+        assert_eq!(m[2].get("subsystem").map(String::as_str), Some("inner"));
+    }
+
+    #[test]
+    fn live_indices_handles_free_and_reuse() {
+        let events = vec![
+            ev(Alloc, 1, 0, 0xA),   // 0
+            ev(Alloc, 1, 0, 0xB),   // 1
+            ev(Dealloc, 1, 0, 0xA), // frees 0xA
+            ev(Alloc, 1, 0, 0xA),   // 3: address reused -> this one is live
+        ];
+        let live = live_indices(&events);
+        assert!(!live.contains(&0)); // freed
+        assert!(live.contains(&1)); // never freed
+        assert!(live.contains(&3)); // the reuse
+        assert_eq!(live.len(), 2);
+    }
+
+    #[test]
+    fn parse_filters_multiple() {
+        let args: Vec<String> = ["--filter", "subsystem=io", "--x", "--filter", "shard=3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let f = parse_filters(&args);
+        assert_eq!(f, vec![("subsystem".into(), "io".into()), ("shard".into(), "3".into())]);
+    }
+}
