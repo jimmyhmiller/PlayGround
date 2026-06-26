@@ -1,7 +1,33 @@
+; A real macOS window, opened from Coil by talking straight to AppKit through the
+; Objective-C runtime — no wrapper library, just the `objc` macros.
+;   cd apps/chip8 && coil build && ./chip8-gui          ; constructs + reports
+;   ./chip8-gui --show                                  ; opens the window (runs the loop)
 (module app)
-(import "../../lib/control.coil" :use *)   ; reach the repo stdlib from a subdir project
-(defn main [] (-> i64)
-  (let [acc (alloc-stack i64)]
-    (do (store! acc 0)
-        (for [i 0 7] (store! acc (iadd (load acc) 6)))   ; 6*7 = 42
-        (load acc))))
+(import "../../lib/objc.coil" :use *)
+(extern printf :cc c [(ptr i8) ...] (-> :i32))
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+
+; alloc + initWithContentRect:styleMask:backing:defer: — the CGRect crosses by value
+(defn make-window [(w f64) (h f64)] (-> (ptr i8))
+  (let [rect (alloc-stack CGRect)
+        win  (msg (ptr i8) (class c"NSWindow") (sel c"alloc") [])]
+    (do (store! (field rect x) 200.0) (store! (field rect y) 200.0)
+        (store! (field rect w) w)     (store! (field rect h) h)
+        (msg (ptr i8) win (sel c"initWithContentRect:styleMask:backing:defer:")
+             [CGRect i64 i64 i64] (load rect) 15 2 0))))   ; titled|closable|mini|resizable, buffered
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (let [app (msg (ptr i8) (class c"NSApplication") (sel c"sharedApplication") [])]
+    (do
+      (msg (ptr i8) app (sel c"setActivationPolicy:") [i64] 0)          ; .regular
+      (let [win (make-window 640.0 320.0)]
+        (if (icmp-eq (cast :i64 win) 0)
+            (do (printf c"window construction FAILED\n") 1)
+            (do
+              (printf c"NSWindow constructed at %p\n" win)
+              (msg (ptr i8) win (sel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+              (msg (ptr i8) app (sel c"activateIgnoringOtherApps:") [i64] 1)
+              (if (icmp-ge (cast :i64 argc) 2)
+                  (do (msg (ptr i8) app (sel c"run") []) 0)             ; --show: blocks, window visible
+                  (do (printf c"(pass --show to open the window and run the event loop)\n") 0))))))))
