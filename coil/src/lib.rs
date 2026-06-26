@@ -55,67 +55,9 @@ fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
 /// interpreter to get generated top-level forms, splice those in (dropping the
 /// `meta` forms), and check the whole program.
 fn elaborate(src: &str) -> Result<ast::Program, Diag> {
-    use std::collections::{HashMap, HashSet};
     let forms = reader::read_all(src)?;
-    let (mut tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
-
-    // ---- expression-position macros: a macro is a `[Code…] -> Code` function;
-    // its calls expand inline in non-macro bodies (args quoted to Code). We must
-    // expand BEFORE parsing the full program, because a macro call with
-    // non-expression args (a `[i lo hi]` binding vector, a `:keyword`) doesn't
-    // parse until it's expanded. So detect + check the macros from a PARSEABLE
-    // subset (pure macro/helper defns + declarations — no runtime bodies), expand
-    // every form, then resolve the whole (now macro-free) program. ----
-    let macro_subset: Vec<macros::TaggedForm> =
-        tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
-    let macro_ctx = resolve::resolve_program(macro_subset, &imports, &exports)?;
-    let macro_quals: Vec<String> = macro_ctx
-        .funcs
-        .iter()
-        .filter(|f| f.ret == ast::Type::Code && f.params.iter().all(|p| p.ty == ast::Type::Code))
-        .map(|f| f.name.clone())
-        .collect();
-    if !macro_quals.is_empty() {
-        // bare name -> qualified, for resolving a call-site `(name …)` to its fn.
-        let qual: HashMap<String, String> = macro_quals
-            .iter()
-            .map(|q| (q.rsplit('.').next().unwrap_or(q).to_string(), q.clone()))
-            .collect();
-        let bare: HashSet<String> = qual.keys().cloned().collect();
-        let wanted = closure_funcs(&macro_ctx, macro_quals.clone());
-        // Bodies to leave unexpanded: every function in the comptime closure (macros
-        // AND the helpers they call) — their calls run at expansion time, not as
-        // syntactic macro expansions.
-        let skip: HashSet<String> =
-            wanted.iter().map(|w| w.rsplit('.').next().unwrap_or(w).to_string()).collect();
-        let sub = closure_subprogram(&macro_ctx, &wanted, false);
-        let checked_sub = check::check(&sub)?;
-        // All qualified function names (for referential hygiene of generated calls),
-        // scanned from the raw forms — includes runtime fns not in the macro closure.
-        let all_fns: HashSet<String> = tagged
-            .iter()
-            .filter_map(|(f, m)| defn_name(f).map(|n| match m {
-                Some(md) => format!("{md}.{n}"),
-                None => n,
-            }))
-            .collect();
-        let mut expanded: Vec<macros::TaggedForm> = Vec::with_capacity(tagged.len());
-        for (f, m) in tagged {
-            let out = expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &mut 0)?;
-            // A macro that expands to a top-level `(do …)` splices into several forms.
-            match &out.kind {
-                reader::SexpKind::List(items)
-                    if matches!(items.first().map(|x| &x.kind), Some(reader::SexpKind::Sym(h)) if h == "do") =>
-                {
-                    for child in &items[1..] {
-                        expanded.push((child.clone(), m.clone()));
-                    }
-                }
-                _ => expanded.push((out, m)),
-            }
-        }
-        tagged = expanded;
-    }
+    let (tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
+    let tagged = expand_stage3_macros(tagged, &imports, &exports)?;
     let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
 
     // ---- top-level `(meta …)` staged macros (generate definitions) ----
@@ -123,7 +65,8 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
         check::check(&program)?
     } else {
         let mut stack: Vec<String> = Vec::new();
-        let names: HashSet<&str> = program.funcs.iter().map(|f| f.name.as_str()).collect();
+        let names: std::collections::HashSet<&str> =
+            program.funcs.iter().map(|f| f.name.as_str()).collect();
         for m in &program.metas {
             collect_calls(m, &names, &mut stack);
         }
@@ -190,6 +133,69 @@ fn defn_involves_code(items: &[reader::Sexp]) -> bool {
         }),
         _ => false,
     })
+}
+
+/// Expand expression-position Stage-3 macros over the raw (post-old-expand) forms.
+/// A macro is a `[Code…] -> Code` function; its calls expand inline. We must expand
+/// BEFORE parsing the full program (a macro call with non-expression args — a
+/// `[i lo hi]` vector, a `:keyword` — doesn't parse until expanded), so detect +
+/// check the macros from a PARSEABLE subset (declarations + comptime defns), then
+/// expand every form. Returns the macro-free forms.
+fn expand_stage3_macros(
+    tagged: Vec<macros::TaggedForm>,
+    imports: &macros::ImportMap,
+    exports: &macros::ExportMap,
+) -> Result<Vec<macros::TaggedForm>, Diag> {
+    use std::collections::{HashMap, HashSet};
+    let macro_subset: Vec<macros::TaggedForm> =
+        tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
+    let macro_ctx = resolve::resolve_program(macro_subset, imports, exports)?;
+    let macro_quals: Vec<String> = macro_ctx
+        .funcs
+        .iter()
+        .filter(|f| f.ret == ast::Type::Code && f.params.iter().all(|p| p.ty == ast::Type::Code))
+        .map(|f| f.name.clone())
+        .collect();
+    if macro_quals.is_empty() {
+        return Ok(tagged);
+    }
+    // bare name -> qualified, for resolving a call-site `(name …)` to its fn.
+    let qual: HashMap<String, String> = macro_quals
+        .iter()
+        .map(|q| (q.rsplit('.').next().unwrap_or(q).to_string(), q.clone()))
+        .collect();
+    let bare: HashSet<String> = qual.keys().cloned().collect();
+    let wanted = closure_funcs(&macro_ctx, macro_quals);
+    // Bodies to leave unexpanded: every function in the comptime closure (macros AND
+    // the helpers they call) — their calls run at expansion time.
+    let skip: HashSet<String> =
+        wanted.iter().map(|w| w.rsplit('.').next().unwrap_or(w).to_string()).collect();
+    let sub = closure_subprogram(&macro_ctx, &wanted, false);
+    let checked_sub = check::check(&sub)?;
+    // All qualified function names (for referential hygiene of generated calls).
+    let all_fns: HashSet<String> = tagged
+        .iter()
+        .filter_map(|(f, m)| defn_name(f).map(|n| match m {
+            Some(md) => format!("{md}.{n}"),
+            None => n,
+        }))
+        .collect();
+    let mut expanded: Vec<macros::TaggedForm> = Vec::with_capacity(tagged.len());
+    for (f, m) in tagged {
+        let out = expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &mut 0)?;
+        // A macro that expands to a top-level `(do …)` splices into several forms.
+        match &out.kind {
+            reader::SexpKind::List(items)
+                if matches!(items.first().map(|x| &x.kind), Some(reader::SexpKind::Sym(h)) if h == "do") =>
+            {
+                for child in &items[1..] {
+                    expanded.push((child.clone(), m.clone()));
+                }
+            }
+            _ => expanded.push((out, m)),
+        }
+    }
+    Ok(expanded)
 }
 
 fn is_meta_form(s: &reader::Sexp) -> bool {
@@ -505,7 +511,9 @@ fn debug_input<'a>(src: &'a str, src_path: Option<&Path>) -> codegen::DebugInput
 /// post-expansion forms (before name resolution).
 pub fn expand_to_string(src: &str) -> Result<String, String> {
     let forms = reported(reader::read_all(src), src)?;
-    let (tagged, _, _) = reported(macros::expand_program(&forms, &host_target()), src)?;
+    let (tagged, imports, exports) = reported(macros::expand_program(&forms, &host_target()), src)?;
+    // Run Stage-3 macro expansion too, so generated definitions show up.
+    let tagged = reported(expand_stage3_macros(tagged, &imports, &exports), src)?;
     Ok(tagged
         .iter()
         .map(|(f, _)| f.to_string())

@@ -138,6 +138,9 @@ pub enum CodeOp {
     /// `(code-symbol PART…)` — concatenate the parts (strings / code symbols / ints)
     /// into a fresh `Code` symbol. Used to build derived names like `Point-eq`.
     Symbol,
+    /// `(code-str PART…)` — like `code-symbol`, but builds a string value (e.g. an
+    /// LLVM-IR template with a spliced-in address).
+    Str,
     /// Reflection on a type given as a `Code` symbol (what a macro receives), vs the
     /// syntactic `field-*` forms. `(code-field-count TC)` → i64;
     /// `(code-field-name TC i)` → the field name as a `Code` symbol;

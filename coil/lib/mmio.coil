@@ -15,29 +15,33 @@
 ;   UARTFR-txff  []        -> i32        ; (read >> 5) & 1
 (module mmio)
 
-(defmacro defmmio-reg [name addr fields]
+; one shift+mask getter per field (recurse by index). The mask `(1 << width) - 1`
+; is emitted as ordinary code (LLVM const-folds it), so no macro-time bit ops.
+(defn defmmio--fields [(name Code) (fields Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count fields)) `()
+    (let [f      (code-nth fields i)
+          fname  (code-nth f 0)
+          offset (code-nth f 1)
+          width  (code-nth f 2)]
+      `((defn ~(code-symbol name "-" fname) [] (-> u32)
+          (iand (ishr (~(code-symbol name "-read")) ~offset)
+                (isub (ishl 1 ~width) 1)))
+        ~@(defmmio--fields name fields (iadd i 1))))))
+
+(defn defmmio-reg [(name Code) (addr Code) (fields Code)] (-> Code)
   `(do
      ; volatile 32-bit load from the fixed MMIO address (address spliced into the IR).
      ; Registers are UNSIGNED (u32) — so field extraction uses a LOGICAL shift (lshr),
      ; the conventional + correct choice for register fields. (LLVM i32 == u32's repr.)
-     (defn ~(symbol name "-read") [] (-> u32)
+     (defn ~(code-symbol name "-read") [] (-> u32)
        (llvm-ir u32 []
-         ~(str "%p = inttoptr i64 " addr " to ptr\n"
-               "%v = load volatile i32, ptr %p\n"
-               "ret i32 %v")))
+         ~(code-str "%p = inttoptr i64 " addr " to ptr\n"
+                    "%v = load volatile i32, ptr %p\n"
+                    "ret i32 %v")))
      ; volatile 32-bit store.
-     (defn ~(symbol name "-write") [(v u32)] (-> i64)
+     (defn ~(code-symbol name "-write") [(v u32)] (-> i64)
        (llvm-ir i64 [v]
-         ~(str "%p = inttoptr i64 " addr " to ptr\n"
-               "store volatile i32 $0, ptr %p\n"
-               "ret i64 0")))
-     ; one shift+mask getter per field. The mask `(1 << width) - 1` is emitted as
-     ; ordinary code (LLVM const-folds it), so no macro-time bit ops are needed.
-     ~@(map (lambda [f]
-              (let [fname  (first f)
-                    offset (first (rest f))
-                    width  (first (rest (rest f)))]
-                `(defn ~(symbol name "-" fname) [] (-> u32)
-                   (iand (ishr (~(symbol name "-read")) ~offset)
-                         (isub (ishl 1 ~width) 1)))))
-            fields)))
+         ~(code-str "%p = inttoptr i64 " addr " to ptr\n"
+                    "store volatile i32 $0, ptr %p\n"
+                    "ret i64 0")))
+     ~@(defmmio--fields name fields 0)))

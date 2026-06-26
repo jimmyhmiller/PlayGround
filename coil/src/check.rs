@@ -746,7 +746,7 @@ fn synth_inner(
             }
             let rty = match op {
                 CodeOp::Count | CodeOp::Int => Type::Int(64, true),
-                CodeOp::Sym => Type::Slice(Box::new(Type::Int(8, false))),
+                CodeOp::Sym | CodeOp::Str => Type::Slice(Box::new(Type::Int(8, false))),
                 CodeOp::Nth | CodeOp::Gensym | CodeOp::Rest | CodeOp::Symbol
                 | CodeOp::CFieldName | CodeOp::CFieldType => Type::Code,
                 CodeOp::CFieldCount | CodeOp::CFieldKind => Type::Int(64, true),

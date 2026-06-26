@@ -1024,8 +1024,8 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
         };
         return Err(msg);
     }
-    if op == CodeOp::Symbol {
-        // concatenate the parts (strings / code symbols / ints) into one symbol
+    if op == CodeOp::Symbol || op == CodeOp::Str {
+        // concatenate the parts (strings / code symbols / ints)
         let mut name = String::new();
         for a in args {
             match a {
@@ -1034,12 +1034,16 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
                 CtVal::Code(s) => match &s.kind {
                     K::Sym(x) | K::Str(x) => name.push_str(x),
                     K::Int(n) => name.push_str(&n.to_string()),
-                    _ => return Err("comptime: code-symbol part must be a symbol/string/int".to_string()),
+                    _ => return Err("comptime: code-symbol/str part must be a symbol/string/int".to_string()),
                 },
-                _ => return Err("comptime: code-symbol part must be a string/int/code".to_string()),
+                _ => return Err("comptime: code-symbol/str part must be a string/int/code".to_string()),
             }
         }
-        return Ok(CtVal::Code(Sexp::new(K::Sym(name), dummy)));
+        return Ok(if op == CodeOp::Symbol {
+            CtVal::Code(Sexp::new(K::Sym(name), dummy))
+        } else {
+            CtVal::Str(name)
+        });
     }
     // Reflection on a type given as a Code symbol (for macros): look the struct up
     // by name in the comptime type table.
@@ -1121,7 +1125,7 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
             K::Int(n) => CtVal::Int(*n),
             _ => return Err("comptime: code-int expects an integer".to_string()),
         },
-        CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::CFieldCount
+        CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::Str | CodeOp::CFieldCount
         | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType => {
             unreachable!("handled above")
         }

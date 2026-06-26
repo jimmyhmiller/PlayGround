@@ -1066,9 +1066,9 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             Ok(ExprKind::Quasi(build_quasi(&args[0])?))
         }
         "unquote" => Err(Diag::at(span, "unquote (~) is only valid inside a quasiquote (`)")),
-        // (code-symbol PART…) — build a Code symbol by concatenating parts
-        "code-symbol" => Ok(ExprKind::CodeOp {
-            op: CodeOp::Symbol,
+        // (code-symbol PART…) / (code-str PART…) — concatenate parts into a symbol/string
+        "code-symbol" | "code-str" => Ok(ExprKind::CodeOp {
+            op: if head == "code-symbol" { CodeOp::Symbol } else { CodeOp::Str },
             args: args.iter().map(parse_expr).collect::<Result<_, _>>()?,
         }),
         // reflection on a type-as-Code (for macros): code-field-count/name/kind/type
