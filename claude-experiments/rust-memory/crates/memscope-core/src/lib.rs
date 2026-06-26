@@ -35,7 +35,7 @@ mod sink;
 mod tls_ring;
 mod unwind;
 
-pub use memscope_proto::{EventKind, RawEvent, SiteId, Snapshot};
+pub use memscope_proto::{EventKind, MetaValue, RawEvent, SiteId, Snapshot};
 pub use recorder::{Mode, Stats, MAX_FRAMES};
 pub use tls_ring::RingMode;
 pub use sink::{spawn_consumer, Consumer, EventSink, FanOut, FnSink, LiveRec, LiveSet};
@@ -270,6 +270,58 @@ pub fn stats() -> Stats {
 pub fn site_frames(site: SiteId) -> Option<Vec<u64>> {
     let _g = HookScope::enter();
     recorder().site_frames(site)
+}
+
+// --- metadata (`meta!`) -------------------------------------------------------
+
+/// Intern a metadata key name to a stable id (cache this at the call site).
+pub fn key_id(name: &str) -> u32 {
+    let _g = HookScope::enter();
+    recorder().intern_key(name)
+}
+
+/// Key name for an interned key id.
+pub fn key_name(id: u32) -> Option<String> {
+    let _g = HookScope::enter();
+    recorder().key_name(id)
+}
+
+/// The key/value pairs of an interned metadata context.
+pub fn meta_context(id: u32) -> Option<Vec<(u32, MetaValue)>> {
+    let _g = HookScope::enter();
+    recorder().meta_context(id)
+}
+
+/// Enter a metadata scope: every allocation made on this thread while the
+/// returned guard is alive is attributed to `kvs` (merged with any enclosing
+/// scopes). A no-op while recording is off. Drop the guard to leave the scope.
+///
+/// Prefer the `meta!` macro in the `memscope` facade over calling this directly.
+#[must_use = "the metadata scope ends when the guard is dropped"]
+pub fn push_meta(kvs: &[(u32, MetaValue)]) -> MetaGuard {
+    let _g = HookScope::enter();
+    let r = recorder();
+    if r.mode() == Mode::Off {
+        return MetaGuard { meta_id: None };
+    }
+    let id = r.intern_meta(kvs);
+    r.on_meta(EventKind::MetaEnter, id);
+    MetaGuard { meta_id: Some(id) }
+}
+
+/// RAII handle for an active metadata scope; emits the matching `MetaExit` on
+/// drop. See [`push_meta`].
+pub struct MetaGuard {
+    meta_id: Option<u32>,
+}
+
+impl Drop for MetaGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.meta_id {
+            let _g = HookScope::enter();
+            recorder().on_meta(EventKind::MetaExit, id);
+        }
+    }
 }
 
 /// Permanently exclude the *calling thread* from allocation tracking. Intended

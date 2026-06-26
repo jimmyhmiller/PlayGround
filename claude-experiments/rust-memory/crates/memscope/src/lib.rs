@@ -20,14 +20,36 @@
 //! snapshot. No nightly, no toolchain changes.
 
 pub use memscope_core::{
-    drain_events, ring_dropped, set_backtrace_depth, set_capture_sites, set_event_streaming,
-    set_frame_pointer_unwinding, set_mode, set_ring_mode, set_sample_rate, snapshot,
-    spawn_consumer, stats, Consumer, EventSink, FanOut, FnSink, LiveRec, LiveSet, MemScope, Mode,
-    RingMode, Stats,
+    drain_events, key_id, key_name, meta_context, push_meta, ring_dropped, set_backtrace_depth,
+    set_capture_sites, set_event_streaming, set_frame_pointer_unwinding, set_mode, set_ring_mode,
+    set_sample_rate, snapshot, spawn_consumer, stats, Consumer, EventSink, FanOut, FnSink, LiveRec,
+    LiveSet, MemScope, MetaGuard, Mode, RingMode, Stats,
 };
 pub use memscope_proto::{
-    AllocShape, Frame, LiveAlloc, RawEvent, SiteInfo, Snapshot, TypeId, TypeInfo,
+    AllocShape, Frame, LiveAlloc, MetaValue, RawEvent, SiteInfo, Snapshot, TypeId, TypeInfo,
 };
+
+/// Attach arbitrary key/value metadata to every allocation made in the current
+/// scope. Returns a guard; the scope ends when it drops. Scopes nest and merge.
+///
+/// ```ignore
+/// let _m = memscope::meta!(subsystem = "parser", file = path);
+/// parse(input);                       // allocs tagged { subsystem: "parser", file: … }
+///
+/// let _m = memscope::meta!(request = req.id);   // dynamic values are fine
+/// ```
+///
+/// Values may be any type implementing `Into<MetaValue>` (`&str`/`String`, the
+/// integer types, `f64`, `bool`). Keep the guard bound (`let _m = …`); a bare
+/// `let _ = …` would drop it immediately and tag nothing.
+#[macro_export]
+macro_rules! meta {
+    ($($key:ident = $val:expr),+ $(,)?) => {
+        $crate::push_meta(&[
+            $( ($crate::key_id(stringify!($key)), $crate::MetaValue::from($val)) ),+
+        ])
+    };
+}
 
 /// Start the transport agent on a background thread. Returns the socket path a
 /// consumer should connect to (also printed to stderr). Override the path with

@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use memscope_proto::{EventKind, Frame, LiveAlloc, RawEvent, SiteId, SiteInfo, Snapshot, TypeId};
+use memscope_proto::{
+    EventKind, Frame, LiveAlloc, MetaValue, RawEvent, SiteId, SiteInfo, Snapshot, TypeId,
+};
 
 /// Max stack depth captured per allocation site.
 pub const MAX_FRAMES: usize = 64;
@@ -55,6 +57,10 @@ pub struct Recorder {
 
     // --- allocation-site interner, sharded to avoid a global lock ---
     site_shards: [Mutex<SiteShard>; SITE_SHARDS],
+
+    // --- metadata interners (the `meta!` path; coarse, so a plain lock is fine) ---
+    keys: Mutex<KeyInterner>,
+    meta: Mutex<MetaInterner>,
 
     // --- the hot-path event sink: per-thread sharded rings ---
     ring: crate::tls_ring::ShardedRing,
@@ -131,6 +137,8 @@ impl Recorder {
             bt_depth: AtomicUsize::new(MAX_FRAMES),
             capture_sites: std::sync::atomic::AtomicBool::new(true),
             site_shards: std::array::from_fn(|_| Mutex::new(SiteShard::new())),
+            keys: Mutex::new(KeyInterner::default()),
+            meta: Mutex::new(MetaInterner::default()),
             ring: crate::tls_ring::ShardedRing::new(
                 DEFAULT_RING_CAP,
                 crate::tls_ring::RingMode::Overwrite,
@@ -505,6 +513,113 @@ impl Recorder {
             .get(&site.0)
             .map(|f| f.iter().map(|&ip| ip as u64).collect())
     }
+
+    // --- metadata (`meta!`) -------------------------------------------------
+
+    /// Intern a metadata key name to a stable id.
+    pub fn intern_key(&self, name: &str) -> u32 {
+        self.keys.lock().unwrap().intern(name)
+    }
+
+    /// Intern a metadata context (a scope's key/value pairs) to a stable id.
+    pub fn intern_meta(&self, kvs: &[(u32, MetaValue)]) -> u32 {
+        self.meta.lock().unwrap().intern(kvs)
+    }
+
+    /// Record entering/leaving a metadata scope: a marker event carrying the
+    /// context id in the `site` slot. Does nothing when recording is off.
+    pub fn on_meta(&self, kind: EventKind, meta_id: u32) {
+        if self.mode() == Mode::Off {
+            return;
+        }
+        self.ring.push(RawEvent {
+            kind,
+            seq: crate::tls_ring::tsc(),
+            ts_nanos: self.now_ms() as u64 * 1_000_000,
+            addr: 0,
+            size: 0,
+            align: 0,
+            site: SiteId(meta_id),
+            thread: thread_id(),
+        });
+    }
+
+    /// Key name for an interned key id (for the file recorder's `TAG_KEY` table).
+    pub fn key_name(&self, key_id: u32) -> Option<String> {
+        self.keys.lock().unwrap().names.get(key_id as usize).cloned()
+    }
+
+    /// The key/value pairs of an interned context (for the `TAG_META` table).
+    pub fn meta_context(&self, meta_id: u32) -> Option<Vec<(u32, MetaValue)>> {
+        self.meta.lock().unwrap().contexts.get(&meta_id).cloned()
+    }
+}
+
+/// Interns metadata key names. Tiny — a program has a handful of distinct keys.
+#[derive(Default)]
+struct KeyInterner {
+    ids: HashMap<String, u32>,
+    names: Vec<String>,
+}
+
+impl KeyInterner {
+    fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        self.names.push(name.to_string());
+        self.ids.insert(name.to_string(), id);
+        id
+    }
+}
+
+/// Interns metadata contexts (key/value sets) to ids, deduped by content.
+#[derive(Default)]
+struct MetaInterner {
+    buckets: HashMap<u64, Vec<u32>>,
+    contexts: HashMap<u32, Vec<(u32, MetaValue)>>,
+    next: u32,
+}
+
+impl MetaInterner {
+    fn intern(&mut self, kvs: &[(u32, MetaValue)]) -> u32 {
+        let h = hash_kvs(kvs);
+        if let Some(ids) = self.buckets.get(&h) {
+            for &id in ids {
+                if self.contexts.get(&id).map(|c| c.as_slice() == kvs).unwrap_or(false) {
+                    return id;
+                }
+            }
+        }
+        let id = self.next;
+        self.next += 1;
+        self.contexts.insert(id, kvs.to_vec());
+        self.buckets.entry(h).or_default().push(id);
+        id
+    }
+}
+
+fn hash_kvs(kvs: &[(u32, MetaValue)]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for (k, v) in kvs {
+        h = (h ^ *k as u64).wrapping_mul(0x100000001b3);
+        let vh = match v {
+            MetaValue::Str(s) => {
+                let mut x: u64 = 0;
+                for b in s.bytes() {
+                    x = (x ^ b as u64).wrapping_mul(0x100000001b3);
+                }
+                x
+            }
+            MetaValue::Int(i) => *i as u64,
+            MetaValue::Uint(u) => *u,
+            MetaValue::F64(f) => f.to_bits(),
+            MetaValue::Bool(b) => *b as u64,
+        };
+        h = (h ^ vh).wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Aggregate counters, cheap to read at any time.

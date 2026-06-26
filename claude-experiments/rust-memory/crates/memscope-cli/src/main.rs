@@ -64,6 +64,7 @@ fn print_help() {
          memscope replay  <FILE>                        read a record_to_file recording\n  \
          memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
          memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live] [--no-std]\n  \
+         \x20                       [--group-by KEY] [--filter KEY=VAL]   pivot/filter by meta!() metadata\n  \
          \x20                                            allocation flame graph by call stack (aggregated)\n  \
          memscope flamechart <FILE> [--no-std]          allocation flame CHART (full timeline, every allocation)\n  \
          \x20                                            (--no-std strips std/core/alloc/runtime frames)\n"
@@ -641,7 +642,21 @@ fn replay_binary(file: &str) -> Result<(), String> {
                             }
                             frees += 1;
                         }
+                        // Metadata markers aren't allocations.
+                        memscope_proto::EventKind::MetaEnter | memscope_proto::EventKind::MetaExit => {}
                     }
+                }
+            }
+            recfmt::TAG_KEY => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let _ = rd_str(&mut f);
+            }
+            recfmt::TAG_META => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                for _ in 0..u16::from_le_bytes(b2) {
+                    f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    read_meta_value(&mut f);
                 }
             }
             other => return Err(format!("corrupt recording: unknown tag {other}")),
@@ -774,6 +789,42 @@ struct RecEvent {
     thread: u32,
 }
 
+/// Read one encoded `MetaValue` from a stream, returning its display string
+/// (also used to skip the bytes when the value isn't needed).
+fn read_meta_value(f: &mut impl std::io::Read) -> Option<String> {
+    let mut t = [0u8; 1];
+    f.read_exact(&mut t).ok()?;
+    let mut b8 = [0u8; 8];
+    match t[0] {
+        0 => {
+            let mut l = [0u8; 2];
+            f.read_exact(&mut l).ok()?;
+            let n = u16::from_le_bytes(l) as usize;
+            let mut s = vec![0u8; n];
+            f.read_exact(&mut s).ok()?;
+            Some(String::from_utf8_lossy(&s).into_owned())
+        }
+        1 => {
+            f.read_exact(&mut b8).ok()?;
+            Some(i64::from_le_bytes(b8).to_string())
+        }
+        2 => {
+            f.read_exact(&mut b8).ok()?;
+            Some(u64::from_le_bytes(b8).to_string())
+        }
+        3 => {
+            f.read_exact(&mut b8).ok()?;
+            Some(f64::from_bits(u64::from_le_bytes(b8)).to_string())
+        }
+        4 => {
+            let mut b1 = [0u8; 1];
+            f.read_exact(&mut b1).ok()?;
+            Some((b1[0] != 0).to_string())
+        }
+        _ => None,
+    }
+}
+
 /// One resolved stack frame: function name + source location.
 #[derive(Default, Clone)]
 struct FrameMeta {
@@ -790,8 +841,17 @@ struct SiteInfo {
     frames: Vec<FrameMeta>,
 }
 
-/// Read a recording (binary `.mscope` or JSON) into per-site info + events.
-fn read_recording(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
+/// A parsed recording: per-site info, per-context metadata, and the events.
+#[derive(Default)]
+struct Recording {
+    sites: HashMap<u32, SiteInfo>,
+    /// meta context id -> resolved [(key, value)] pairs.
+    meta: HashMap<u32, Vec<(String, String)>>,
+    events: Vec<RecEvent>,
+}
+
+/// Read a recording (binary `.mscope` or JSON) into sites, metadata, and events.
+fn read_recording(file: &str) -> Result<Recording, String> {
     use std::io::Read;
     let mut magic = [0u8; 4];
     {
@@ -805,7 +865,7 @@ fn read_recording(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>),
     }
 }
 
-fn read_recording_binary(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
+fn read_recording_binary(file: &str) -> Result<Recording, String> {
     use memscope_proto::recfmt;
     use std::io::Read;
     let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
@@ -830,8 +890,30 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecE
 
     let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
+    let mut key_names: HashMap<u32, String> = HashMap::new();
+    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
     while f.read_exact(&mut b1).is_ok() {
         match b1[0] {
+            recfmt::TAG_KEY => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let id = u32::from_le_bytes(b4);
+                let name = rd_str(&mut f).unwrap_or_default();
+                key_names.insert(id, name);
+            }
+            recfmt::TAG_META => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let id = u32::from_le_bytes(b4);
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                let mut kvs = Vec::new();
+                for _ in 0..u16::from_le_bytes(b2) {
+                    f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    let kid = u32::from_le_bytes(b4);
+                    let val = read_meta_value(&mut f).unwrap_or_default();
+                    let key = key_names.get(&kid).cloned().unwrap_or_else(|| kid.to_string());
+                    kvs.push((key, val));
+                }
+                meta.insert(id, kvs);
+            }
             recfmt::TAG_SITE => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
                 let site = u32::from_le_bytes(b4);
@@ -878,14 +960,19 @@ fn read_recording_binary(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecE
             other => return Err(format!("corrupt recording: unknown tag {other}")),
         }
     }
-    Ok((labels, events))
+    Ok(Recording {
+        sites: labels,
+        meta,
+        events,
+    })
 }
 
-fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEvent>), String> {
+fn read_recording_json(file: &str) -> Result<Recording, String> {
     use std::io::BufRead;
     let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
     let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
+    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
     for line in rdr.lines() {
         let line = line.map_err(|e| e.to_string())?;
         let v: serde_json::Value = match serde_json::from_str(&line) {
@@ -893,6 +980,23 @@ fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEve
             Err(_) => continue,
         };
         if v.get("v").is_some() {
+            continue;
+        }
+        // Metadata context definition: {"meta":id,"kv":{k:v,...}}
+        if let Some(id) = v.get("meta").and_then(|x| x.as_u64()) {
+            if let Some(obj) = v.get("kv").and_then(|x| x.as_object()) {
+                let kvs = obj
+                    .iter()
+                    .map(|(k, val)| {
+                        let vs = match val {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        (k.clone(), vs)
+                    })
+                    .collect();
+                meta.insert(id as u32, kvs);
+            }
             continue;
         }
         if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
@@ -927,6 +1031,8 @@ fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEve
             Some("A") => memscope_proto::EventKind::Alloc,
             Some("R") => memscope_proto::EventKind::ReallocGrow,
             Some("D") => memscope_proto::EventKind::Dealloc,
+            Some("M") => memscope_proto::EventKind::MetaEnter,
+            Some("m") => memscope_proto::EventKind::MetaExit,
             _ => continue,
         };
         events.push(RecEvent {
@@ -938,7 +1044,91 @@ fn read_recording_json(file: &str) -> Result<(HashMap<u32, SiteInfo>, Vec<RecEve
             thread: v.get("t").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         });
     }
-    Ok((labels, events))
+    Ok(Recording {
+        sites: labels,
+        meta,
+        events,
+    })
+}
+
+/// Parse repeated `--filter KEY=VAL` arguments.
+fn parse_filters(args: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--filter" {
+            if let Some(kv) = it.next() {
+                if let Some((k, v)) = kv.split_once('=') {
+                    out.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Indices of alloc events whose allocation is still live at the end (address
+/// not subsequently freed). Handles address reuse by keeping the latest index.
+fn live_indices(events: &[RecEvent]) -> std::collections::HashSet<usize> {
+    let mut by_addr: HashMap<u64, usize> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        match e.kind {
+            memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
+                by_addr.insert(e.addr, i);
+            }
+            memscope_proto::EventKind::Dealloc => {
+                by_addr.remove(&e.addr);
+            }
+            _ => {}
+        }
+    }
+    by_addr.values().copied().collect()
+}
+
+/// Correlate metadata onto allocations: replay events per thread in order,
+/// maintaining each thread's context stack, and return — parallel to `events` —
+/// the merged metadata map active at each event (only meaningful for allocs).
+fn correlate_meta(
+    events: &[RecEvent],
+    meta: &HashMap<u32, Vec<(String, String)>>,
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    use std::collections::BTreeMap;
+    let mut stacks: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut out: Vec<BTreeMap<String, String>> = Vec::with_capacity(events.len());
+    for e in events {
+        match e.kind {
+            memscope_proto::EventKind::MetaEnter => {
+                stacks.entry(e.thread).or_default().push(e.site);
+                out.push(BTreeMap::new());
+            }
+            memscope_proto::EventKind::MetaExit => {
+                if let Some(s) = stacks.get_mut(&e.thread) {
+                    // Pop the matching id (LIFO; tolerate slight disorder).
+                    if let Some(pos) = s.iter().rposition(|&m| m == e.site) {
+                        s.remove(pos);
+                    } else {
+                        s.pop();
+                    }
+                }
+                out.push(BTreeMap::new());
+            }
+            _ => {
+                // Merge the thread's active context frames (outer -> inner).
+                let mut m = BTreeMap::new();
+                if let Some(s) = stacks.get(&e.thread) {
+                    for mid in s {
+                        if let Some(kvs) = meta.get(mid) {
+                            for (k, v) in kvs {
+                                m.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                out.push(m);
+            }
+        }
+    }
+    out
 }
 
 fn label_for(shape: Option<memscope_proto::AllocShape>, ty: Option<String>) -> String {
@@ -958,7 +1148,9 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     let file = positional(args).ok_or("usage: memscope perfetto <FILE> [--out trace.json]")?;
     let out = flag(args, "--out").unwrap_or("trace.json").to_string();
 
-    let (labels, events) = read_recording(file)?;
+    let rec = read_recording(file)?;
+    let labels = &rec.sites;
+    let events = &rec.events;
 
     // Build the trace incrementally.
     let mut te: Vec<String> = Vec::new();
@@ -969,7 +1161,7 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     // Process / thread metadata.
     te.push(r#"{"name":"process_name","ph":"M","pid":1,"args":{"name":"heap"}}"#.to_string());
     let mut threads: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    for e in &events {
+    for e in events {
         threads.insert(e.thread);
     }
     for t in &threads {
@@ -988,7 +1180,7 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     let mut last_ctr_ts = u64::MAX; // dedup counter samples to one per (ms) timestamp
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
 
-    for e in &events {
+    for e in events {
         last_ts = e.ts_nanos.max(last_ts);
         match e.kind {
             memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
@@ -1013,6 +1205,7 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
                     ));
                 }
             }
+            memscope_proto::EventKind::MetaEnter | memscope_proto::EventKind::MetaExit => {}
         }
         // One live_bytes counter sample per distinct timestamp (the clock is
         // ms-granular, so this collapses the within-ms burst to one point).
@@ -1176,11 +1369,13 @@ struct Flame {
 /// duration events (`--format chrome`, default — width = bytes), which standard
 /// flame-graph importers render directly.
 fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
-    let file = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live] [--no-std]")?;
+    let file = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live] [--no-std] [--group-by KEY] [--filter KEY=VAL]")?;
     let format = flag(args, "--format").unwrap_or("chrome");
     let by_count = flag(args, "--by") == Some("count");
     let live_only = args.iter().any(|a| a == "--live");
     let no_std = args.iter().any(|a| a == "--no-std" || a == "--exclude-std");
+    let group_by = flag(args, "--group-by").map(|s| s.to_string());
+    let filters = parse_filters(args);
     let default_out = if format == "folded" {
         "alloc.folded"
     } else {
@@ -1188,55 +1383,100 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
     };
     let out = flag(args, "--out").unwrap_or(default_out).to_string();
 
-    let (sites, events) = read_recording(file)?;
+    let rec = read_recording(file)?;
+    let sites = &rec.sites;
+    let events = &rec.events;
+    let meta_active = group_by.is_some() || !filters.is_empty();
 
-    // Per-site weight: total allocation bytes/count (optionally live-only).
-    let mut live: HashMap<u64, (u64, u32)> = HashMap::new(); // for --live
-    let mut site_bytes: HashMap<u32, u64> = HashMap::new();
-    let mut site_count: HashMap<u32, u64> = HashMap::new();
-    for e in &events {
-        match e.kind {
-            memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
-                if live_only {
-                    live.insert(e.addr, (e.size, e.site));
-                } else {
-                    *site_bytes.entry(e.site).or_default() += e.size;
-                    *site_count.entry(e.site).or_default() += 1;
+    let mut root = Flame::default();
+    if meta_active {
+        // Per-allocation pass: each alloc carries its correlated metadata, so the
+        // same call site can land under different group values.
+        let metas = correlate_meta(events, &rec.meta);
+        let live_idx = if live_only { Some(live_indices(events)) } else { None };
+        for (i, e) in events.iter().enumerate() {
+            if !matches!(
+                e.kind,
+                memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow
+            ) {
+                continue;
+            }
+            if let Some(ls) = &live_idx {
+                if !ls.contains(&i) {
+                    continue;
                 }
             }
-            memscope_proto::EventKind::Dealloc if live_only => {
-                live.remove(&e.addr);
+            let m = &metas[i];
+            if !filters
+                .iter()
+                .all(|(k, v)| m.get(k).map(|x| x == v).unwrap_or(false))
+            {
+                continue;
             }
-            _ => {}
+            let Some(info) = sites.get(&e.site) else { continue };
+            let w = if by_count { 1 } else { e.size };
+            if w == 0 {
+                continue;
+            }
+            root.bytes += w;
+            root.samples += 1;
+            let mut node = &mut root;
+            if let Some(gk) = &group_by {
+                let gv = m.get(gk).cloned().unwrap_or_else(|| "<none>".to_string());
+                node = node.children.entry(format!("{gk}={gv}")).or_default();
+                node.bytes += w;
+                node.samples += 1;
+            }
+            for name in site_to_path(&info.frames, &info.label, no_std) {
+                node = node.children.entry(name).or_default();
+                node.bytes += w;
+                node.samples += 1;
+            }
         }
-    }
-    if live_only {
-        for (size, site) in live.values() {
-            *site_bytes.entry(*site).or_default() += *size;
-            *site_count.entry(*site).or_default() += 1;
+    } else {
+        // Fast path: aggregate per site (no metadata needed).
+        let mut live: HashMap<u64, (u64, u32)> = HashMap::new(); // for --live
+        let mut site_bytes: HashMap<u32, u64> = HashMap::new();
+        let mut site_count: HashMap<u32, u64> = HashMap::new();
+        for e in events {
+            match e.kind {
+                memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
+                    if live_only {
+                        live.insert(e.addr, (e.size, e.site));
+                    } else {
+                        *site_bytes.entry(e.site).or_default() += e.size;
+                        *site_count.entry(e.site).or_default() += 1;
+                    }
+                }
+                memscope_proto::EventKind::Dealloc if live_only => {
+                    live.remove(&e.addr);
+                }
+                _ => {}
+            }
         }
-    }
-
-    // Merge each site's stack (reversed so the outermost frame is the root) into
-    // a tree, accumulating weight along the path.
-    let mut root = Flame::default();
-    for (site, info) in &sites {
-        let w = if by_count {
-            *site_count.get(site).unwrap_or(&0)
-        } else {
-            *site_bytes.get(site).unwrap_or(&0)
-        };
-        if w == 0 {
-            continue;
+        if live_only {
+            for (size, site) in live.values() {
+                *site_bytes.entry(*site).or_default() += *size;
+                *site_count.entry(*site).or_default() += 1;
+            }
         }
-        root.bytes += w;
-        root.samples += 1;
-        let mut node = &mut root;
-        let path = site_to_path(&info.frames, &info.label, no_std);
-        for name in path {
-            node = node.children.entry(name).or_default();
-            node.bytes += w;
-            node.samples += 1;
+        for (site, info) in sites {
+            let w = if by_count {
+                *site_count.get(site).unwrap_or(&0)
+            } else {
+                *site_bytes.get(site).unwrap_or(&0)
+            };
+            if w == 0 {
+                continue;
+            }
+            root.bytes += w;
+            root.samples += 1;
+            let mut node = &mut root;
+            for name in site_to_path(&info.frames, &info.label, no_std) {
+                node = node.children.entry(name).or_default();
+                node.bytes += w;
+                node.samples += 1;
+            }
         }
     }
 
@@ -1284,11 +1524,13 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     let out = flag(args, "--out").unwrap_or("alloc-flamechart.json").to_string();
     let no_std = args.iter().any(|a| a == "--no-std" || a == "--exclude-std");
 
-    let (sites, events) = read_recording(file)?;
+    let rec = read_recording(file)?;
+    let sites = &rec.sites;
+    let events = &rec.events;
 
     // Cleaned root->leaf path per site (reversed frames + the type as the leaf).
     let mut site_path: HashMap<u32, Vec<String>> = HashMap::new();
-    for (site, info) in &sites {
+    for (site, info) in sites {
         site_path.insert(*site, site_to_path(&info.frames, &info.label, no_std));
     }
 
@@ -1297,7 +1539,7 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     let mut per_thread: std::collections::BTreeMap<u32, Vec<(u64, u32, u64)>> =
         std::collections::BTreeMap::new();
     let mut vt: u64 = 0;
-    for e in &events {
+    for e in events {
         vt = (vt + 1).max(e.ts_nanos);
         if matches!(
             e.kind,

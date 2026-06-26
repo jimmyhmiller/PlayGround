@@ -17,12 +17,16 @@
 //!               | u32 site | u32 thread | u8 align_log2]   (34 bytes each)
 //! ```
 
-use crate::{AllocShape, EventKind, RawEvent, SiteId};
+use crate::{AllocShape, EventKind, MetaValue, RawEvent, SiteId};
 
 pub const MAGIC: [u8; 4] = *b"MSCP";
 pub const VERSION: u16 = 1;
 pub const TAG_SITE: u8 = b'S';
 pub const TAG_EVENTS: u8 = b'E';
+/// Interned metadata key name: `u32 key_id | u16 len+utf8`.
+pub const TAG_KEY: u8 = b'K';
+/// Interned metadata context: `u32 meta_id | u16 n | n × (u32 key_id, value)`.
+pub const TAG_META: u8 = b'C';
 /// Size of one encoded event record (the per-event hot-path cost).
 pub const EVENT_BYTES: usize = 1 + 8 + 8 + 8 + 4 + 4 + 1;
 
@@ -57,12 +61,16 @@ fn kind_code(k: EventKind) -> u8 {
         EventKind::Alloc => 0,
         EventKind::Dealloc => 1,
         EventKind::ReallocGrow => 2,
+        EventKind::MetaEnter => 3,
+        EventKind::MetaExit => 4,
     }
 }
 fn kind_from_code(c: u8) -> EventKind {
     match c {
         1 => EventKind::Dealloc,
         2 => EventKind::ReallocGrow,
+        3 => EventKind::MetaEnter,
+        4 => EventKind::MetaExit,
         _ => EventKind::Alloc,
     }
 }
@@ -125,6 +133,49 @@ pub fn encode_site(
         put_str(b, f.file);
         put_u32(b, f.line);
         b.push(f.inlined as u8);
+    }
+}
+
+/// Encode an interned metadata key name.
+pub fn encode_key(b: &mut Vec<u8>, key_id: u32, name: &str) {
+    b.push(TAG_KEY);
+    put_u32(b, key_id);
+    put_str(b, name);
+}
+
+/// Encode an interned metadata context (a scope's key/value pairs).
+pub fn encode_meta(b: &mut Vec<u8>, meta_id: u32, kvs: &[(u32, MetaValue)]) {
+    b.push(TAG_META);
+    put_u32(b, meta_id);
+    put_u16(b, kvs.len().min(u16::MAX as usize) as u16);
+    for (kid, val) in kvs.iter().take(u16::MAX as usize) {
+        put_u32(b, *kid);
+        encode_value(b, val);
+    }
+}
+
+fn encode_value(b: &mut Vec<u8>, v: &MetaValue) {
+    match v {
+        MetaValue::Str(s) => {
+            b.push(0);
+            put_str(b, s);
+        }
+        MetaValue::Int(i) => {
+            b.push(1);
+            put_u64(b, *i as u64);
+        }
+        MetaValue::Uint(u) => {
+            b.push(2);
+            put_u64(b, *u);
+        }
+        MetaValue::F64(f) => {
+            b.push(3);
+            put_u64(b, f.to_bits());
+        }
+        MetaValue::Bool(x) => {
+            b.push(4);
+            b.push(*x as u8);
+        }
     }
 }
 
@@ -291,6 +342,40 @@ mod tests {
         assert_eq!(d.site, SiteId(37));
         assert_eq!(d.thread, 7);
         assert_eq!(d.align, 16); // align_log2 round-trips back to 16
+    }
+
+    #[test]
+    fn key_and_meta_records() {
+        let mut b = Vec::new();
+        encode_key(&mut b, 0, "subsystem");
+        encode_meta(
+            &mut b,
+            7,
+            &[
+                (0, MetaValue::Str("parser".into())),
+                (1, MetaValue::Uint(42)),
+                (2, MetaValue::Bool(true)),
+            ],
+        );
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u8(), Some(TAG_KEY));
+        assert_eq!(r.u32(), Some(0));
+        assert_eq!(r.str().as_deref(), Some("subsystem"));
+        assert_eq!(r.u8(), Some(TAG_META));
+        assert_eq!(r.u32(), Some(7));
+        assert_eq!(r.u16(), Some(3));
+        // (0, Str "parser")
+        assert_eq!(r.u32(), Some(0));
+        assert_eq!(r.u8(), Some(0));
+        assert_eq!(r.str().as_deref(), Some("parser"));
+        // (1, Uint 42)
+        assert_eq!(r.u32(), Some(1));
+        assert_eq!(r.u8(), Some(2));
+        assert_eq!(r.u64(), Some(42));
+        // (2, Bool true)
+        assert_eq!(r.u32(), Some(2));
+        assert_eq!(r.u8(), Some(4));
+        assert_eq!(r.u8(), Some(1));
     }
 
     #[test]

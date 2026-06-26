@@ -110,6 +110,28 @@ recovered type and grouped by thread — so you can scrub the timeline, see the
 heap grow/shrink, and inspect when each typed object was alive. Every allocation
 is emitted (no caps).
 
+### Tag allocations with your own metadata (`meta!`)
+
+Attach arbitrary key/value context to a scope; every allocation made inside it
+inherits it (scopes nest and merge), then pivot the flame graph by any key:
+
+```rust
+let _m = memscope::meta!(subsystem = "physics");   // tag this scope
+particles.push(Box::new(p));                        // → { subsystem: "physics" }
+let _m = memscope::meta!(request = req.id);         // dynamic values are fine
+```
+
+```sh
+memscope flamegraph rec.mscope --group-by subsystem   # subsystem value becomes the flame root
+memscope flamegraph rec.mscope --filter subsystem=physics
+memscope flamegraph rec.mscope --group-by phase --filter tenant=acme
+```
+
+It costs nothing per allocation — a scope records one tiny `MetaEnter`/`MetaExit`
+marker on the event ring, and the reader correlates context onto allocations at
+read time. Allocations outside any scope group under `<key>=<none>`. Full design
+in `docs/METADATA.md`.
+
 ### Flame graph & flame chart (by call stack)
 
 Allocations carry their full call stack, so you get both classic views:

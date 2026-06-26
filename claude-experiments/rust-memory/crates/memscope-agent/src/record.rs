@@ -30,6 +30,8 @@ pub struct FileRecorder {
     w: BufWriter<std::fs::File>,
     oracle: Option<TypeOracle>,
     seen_sites: HashSet<u32>,
+    seen_meta: HashSet<u32>,
+    seen_keys: HashSet<u32>,
     format: Format,
     scratch: Vec<u8>,
     written: u64,
@@ -71,6 +73,8 @@ impl FileRecorder {
             w,
             oracle,
             seen_sites: HashSet::new(),
+            seen_meta: HashSet::new(),
+            seen_keys: HashSet::new(),
             format,
             scratch: Vec::with_capacity(64 * 1024),
             written: 0,
@@ -100,25 +104,58 @@ impl FileRecorder {
         }
     }
 
-    fn consume_binary(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
-        // Emit any new site definitions first (so events can reference them).
-        for e in events {
-            if e.kind != EventKind::Dealloc && e.site.is_some() && !self.seen_sites.contains(&e.site.0)
-            {
-                self.seen_sites.insert(e.site.0);
-                let (ty, shape, frames) = self.resolve_site(e.site.0);
-                let frecs: Vec<recfmt::FrameRec> = frames
-                    .iter()
-                    .map(|f| recfmt::FrameRec {
-                        function: f.function.as_deref().unwrap_or(""),
-                        file: f.file.as_deref().unwrap_or(""),
-                        line: f.line.unwrap_or(0),
-                        inlined: f.inlined,
-                    })
-                    .collect();
+    /// Write the `TAG_KEY` / `TAG_META` tables for a metadata context the first
+    /// time it's referenced, so the file is self-contained.
+    fn write_meta_def(&mut self, meta_id: u32) -> std::io::Result<()> {
+        if !self.seen_meta.insert(meta_id) {
+            return Ok(());
+        }
+        let kvs = match mem::meta_context(meta_id) {
+            Some(kvs) => kvs,
+            None => return Ok(()),
+        };
+        for (kid, _) in &kvs {
+            if self.seen_keys.insert(*kid) {
+                let name = mem::key_name(*kid).unwrap_or_default();
                 self.scratch.clear();
-                recfmt::encode_site(&mut self.scratch, e.site.0, ty.as_deref(), shape, &frecs);
+                recfmt::encode_key(&mut self.scratch, *kid, &name);
                 self.w.write_all(&self.scratch)?;
+            }
+        }
+        self.scratch.clear();
+        recfmt::encode_meta(&mut self.scratch, meta_id, &kvs);
+        self.w.write_all(&self.scratch)?;
+        Ok(())
+    }
+
+    fn consume_binary(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
+        // Emit any new site / metadata definitions first (so events can
+        // reference them). For alloc events `site` is a stack site; for
+        // MetaEnter it's a metadata context id.
+        for e in events {
+            match e.kind {
+                EventKind::MetaEnter => {
+                    self.write_meta_def(e.site.0)?;
+                }
+                EventKind::Dealloc | EventKind::MetaExit => {}
+                EventKind::Alloc | EventKind::ReallocGrow => {
+                    if e.site.is_some() && !self.seen_sites.contains(&e.site.0) {
+                        self.seen_sites.insert(e.site.0);
+                        let (ty, shape, frames) = self.resolve_site(e.site.0);
+                        let frecs: Vec<recfmt::FrameRec> = frames
+                            .iter()
+                            .map(|f| recfmt::FrameRec {
+                                function: f.function.as_deref().unwrap_or(""),
+                                file: f.file.as_deref().unwrap_or(""),
+                                line: f.line.unwrap_or(0),
+                                inlined: f.inlined,
+                            })
+                            .collect();
+                        self.scratch.clear();
+                        recfmt::encode_site(&mut self.scratch, e.site.0, ty.as_deref(), shape, &frecs);
+                        self.w.write_all(&self.scratch)?;
+                    }
+                }
             }
         }
         // One event batch: header + fixed records, a single write.
@@ -133,48 +170,74 @@ impl FileRecorder {
 
     fn consume_json(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         for e in events {
-            if e.kind != EventKind::Dealloc && e.site.is_some() && self.seen_sites.insert(e.site.0) {
-                let (ty, shape, frames) = self.resolve_site(e.site.0);
-                write!(self.w, "{{\"site\":{}", e.site.0)?;
-                if let Some(t) = &ty {
-                    write!(self.w, ",\"ty\":{}", json_str(t))?;
-                }
-                if let Some(s) = shape {
-                    write!(self.w, ",\"shape\":\"{s:?}\"")?;
-                }
-                write!(self.w, ",\"frames\":[")?;
-                for (i, fr) in frames.iter().enumerate() {
-                    if i > 0 {
-                        write!(self.w, ",")?;
+            match e.kind {
+                EventKind::Alloc | EventKind::ReallocGrow => {
+                    if e.site.is_some() && self.seen_sites.insert(e.site.0) {
+                        let (ty, shape, frames) = self.resolve_site(e.site.0);
+                        write!(self.w, "{{\"site\":{}", e.site.0)?;
+                        if let Some(t) = &ty {
+                            write!(self.w, ",\"ty\":{}", json_str(t))?;
+                        }
+                        if let Some(s) = shape {
+                            write!(self.w, ",\"shape\":\"{s:?}\"")?;
+                        }
+                        write!(self.w, ",\"frames\":[")?;
+                        for (i, fr) in frames.iter().enumerate() {
+                            if i > 0 {
+                                write!(self.w, ",")?;
+                            }
+                            write!(
+                                self.w,
+                                "[{},{},{},{}]",
+                                json_str(fr.function.as_deref().unwrap_or("")),
+                                json_str(fr.file.as_deref().unwrap_or("")),
+                                fr.line.unwrap_or(0),
+                                fr.inlined
+                            )?;
+                        }
+                        writeln!(self.w, "]}}")?;
                     }
-                    write!(
+                    let k = if e.kind == EventKind::Alloc { 'A' } else { 'R' };
+                    writeln!(
                         self.w,
-                        "[{},{},{},{}]",
-                        json_str(fr.function.as_deref().unwrap_or("")),
-                        json_str(fr.file.as_deref().unwrap_or("")),
-                        fr.line.unwrap_or(0),
-                        fr.inlined
+                        "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"s\":{},\"t\":{}}}",
+                        e.ts_nanos, e.addr, e.size, e.align, e.site.0, e.thread
                     )?;
                 }
-                writeln!(self.w, "]}}")?;
-            }
-            let k = match e.kind {
-                EventKind::Alloc => 'A',
-                EventKind::Dealloc => 'D',
-                EventKind::ReallocGrow => 'R',
-            };
-            if e.kind == EventKind::Dealloc {
-                writeln!(
-                    self.w,
-                    "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"t\":{}}}",
-                    e.ts_nanos, e.addr, e.size, e.align, e.thread
-                )?;
-            } else {
-                writeln!(
-                    self.w,
-                    "{{\"k\":\"{k}\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"s\":{},\"t\":{}}}",
-                    e.ts_nanos, e.addr, e.size, e.align, e.site.0, e.thread
-                )?;
+                EventKind::Dealloc => {
+                    writeln!(
+                        self.w,
+                        "{{\"k\":\"D\",\"ts\":{},\"a\":{},\"sz\":{},\"al\":{},\"t\":{}}}",
+                        e.ts_nanos, e.addr, e.size, e.align, e.thread
+                    )?;
+                }
+                EventKind::MetaEnter => {
+                    if self.seen_meta.insert(e.site.0) {
+                        if let Some(kvs) = mem::meta_context(e.site.0) {
+                            write!(self.w, "{{\"meta\":{},\"kv\":{{", e.site.0)?;
+                            for (i, (kid, val)) in kvs.iter().enumerate() {
+                                let name = mem::key_name(*kid).unwrap_or_default();
+                                if i > 0 {
+                                    write!(self.w, ",")?;
+                                }
+                                write!(self.w, "{}:{}", json_str(&name), json_str(&val.to_display()))?;
+                            }
+                            writeln!(self.w, "}}}}")?;
+                        }
+                    }
+                    writeln!(
+                        self.w,
+                        "{{\"k\":\"M\",\"ts\":{},\"s\":{},\"t\":{}}}",
+                        e.ts_nanos, e.site.0, e.thread
+                    )?;
+                }
+                EventKind::MetaExit => {
+                    writeln!(
+                        self.w,
+                        "{{\"k\":\"m\",\"ts\":{},\"s\":{},\"t\":{}}}",
+                        e.ts_nanos, e.site.0, e.thread
+                    )?;
+                }
             }
         }
         Ok(())

@@ -69,7 +69,72 @@ pub enum EventKind {
     /// Alloc(new); this variant marks the Alloc half so consumers can stitch
     /// growth history rather than treating it as a fresh allocation.
     ReallocGrow = 2,
+    /// Enter a metadata scope. The scope's interned context id rides in the
+    /// `site` field; the key/value pairs are in the recording's `TAG_META` table.
+    MetaEnter = 3,
+    /// Leave the innermost metadata scope (LIFO). `site` carries the same context
+    /// id for robustness.
+    MetaExit = 4,
 }
+
+/// A metadata value attached to a scope via `meta!`. Kept to a few flat,
+/// cheap-to-serialize cases; anything structured is stringified at the call site.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum MetaValue {
+    Str(String),
+    Int(i64),
+    Uint(u64),
+    F64(f64),
+    Bool(bool),
+}
+
+impl MetaValue {
+    /// Render for grouping/filtering/display.
+    pub fn to_display(&self) -> String {
+        match self {
+            MetaValue::Str(s) => s.clone(),
+            MetaValue::Int(i) => i.to_string(),
+            MetaValue::Uint(u) => u.to_string(),
+            MetaValue::F64(f) => f.to_string(),
+            MetaValue::Bool(b) => b.to_string(),
+        }
+    }
+}
+
+impl From<&str> for MetaValue {
+    fn from(s: &str) -> Self {
+        MetaValue::Str(s.to_string())
+    }
+}
+impl From<String> for MetaValue {
+    fn from(s: String) -> Self {
+        MetaValue::Str(s)
+    }
+}
+impl From<&String> for MetaValue {
+    fn from(s: &String) -> Self {
+        MetaValue::Str(s.clone())
+    }
+}
+impl From<bool> for MetaValue {
+    fn from(b: bool) -> Self {
+        MetaValue::Bool(b)
+    }
+}
+impl From<f64> for MetaValue {
+    fn from(f: f64) -> Self {
+        MetaValue::F64(f)
+    }
+}
+macro_rules! meta_from_int {
+    ($($t:ty),*) => { $( impl From<$t> for MetaValue { fn from(v: $t) -> Self { MetaValue::Int(v as i64) } } )* };
+}
+macro_rules! meta_from_uint {
+    ($($t:ty),*) => { $( impl From<$t> for MetaValue { fn from(v: $t) -> Self { MetaValue::Uint(v as u64) } } )* };
+}
+meta_from_int!(i8, i16, i32, i64, isize);
+meta_from_uint!(u8, u16, u32, u64, usize);
 
 /// The allocation-free event pushed onto the hot-path ring buffer. `#[repr(C)]`
 /// + `Copy` so it can also be memcpy'd across a shared-memory transport.

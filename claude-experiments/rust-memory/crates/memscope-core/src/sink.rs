@@ -132,6 +132,8 @@ impl LiveSet {
                     self.live_bytes = self.live_bytes.saturating_sub(rec.size);
                 }
             }
+            // Metadata scope markers carry no allocation; ignore in the live set.
+            EventKind::MetaEnter | EventKind::MetaExit => {}
         }
     }
 }
