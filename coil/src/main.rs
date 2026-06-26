@@ -22,6 +22,13 @@ use inkwell::targets::TargetTriple;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    // Manifest mode: `coil build` / `coil run` with no source file (or only flags)
+    // reads ./Coil.toml and drives the build from it.
+    if matches!(args.get(1).map(String::as_str), Some("build") | Some("run"))
+        && args.get(2).is_none_or(|a| a.starts_with('-'))
+    {
+        return run_manifest(args[1].as_str());
+    }
     if args.len() < 3 {
         return usage();
     }
@@ -113,6 +120,46 @@ fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], d
             eprintln!("error running executable: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `coil build` / `coil run` driven by `./Coil.toml` instead of CLI arguments.
+fn run_manifest(cmd: &str) -> ExitCode {
+    let path = Path::new(coil::manifest::MANIFEST);
+    if !path.exists() {
+        eprintln!(
+            "error: no {} in the current directory (pass a <file> to build directly)",
+            coil::manifest::MANIFEST
+        );
+        return ExitCode::FAILURE;
+    }
+    let m = match coil::manifest::Manifest::load(path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let entry = m.entry();
+    let src = match std::fs::read_to_string(&entry) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error reading entry {entry}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let link_flags = m.link_flags();
+    let triple = m.build.target.as_deref().map(TargetTriple::create);
+    match cmd {
+        "build" => {
+            let out = PathBuf::from(m.out());
+            let t = triple.unwrap_or_else(coil::codegen::target_triple);
+            let src_path = m.build.debug.then(|| Path::new(&entry));
+            let r = coil::build_executable_linked_dbg(&src, &out, t, &link_flags, src_path);
+            report(r.map(|_| format!("wrote {}", out.display())), &entry)
+        }
+        "run" => run_aot(&src, &entry, m.build.target.as_deref(), &link_flags, m.build.debug),
+        _ => usage(),
     }
 }
 

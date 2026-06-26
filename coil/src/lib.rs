@@ -12,6 +12,7 @@ pub mod codegen;
 pub mod comptime;
 pub mod convention;
 pub mod macros;
+pub mod manifest;
 pub mod mono;
 pub mod parse;
 pub mod reader;
