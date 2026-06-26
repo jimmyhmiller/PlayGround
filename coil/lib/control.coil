@@ -85,26 +85,25 @@
 ; ---- runtime loops (macros over the loop/break/continue primitive) --------
 ; `(while cond body...)` — repeat body while cond is true. Desugars to a `loop`
 ; that `break`s when cond goes false. `continue` re-checks cond (correct).
-(defmacro while [cond & body]
-  `(loop (if ~cond (do ~@body) (break))))
+(defn while [(c Code) & (body Code)] (-> Code)
+  `(loop (if ~c (do ~@body) (break))))
 
 ; `(for [i LO HI] body...)` — count i from LO to HI-1 (runtime bounds), binding i
 ; as an immutable value in body each iteration. The hidden counter is incremented
 ; at the TOP of the loop (starting LO-1), so a `continue` in body still advances
 ; the counter — matching C `for` semantics, no skipped increment.
-(defmacro for [binding & body]
-  (if (not (= (count binding) 3))
-      (error "for: binding must be [i LO HI]")
-      (let [i   (first binding)
-            lo  (first (rest binding))
-            hi  (first (rest (rest binding)))
-            idx (gensym "for-idx")]
-        `(let [(mut ~idx) (isub ~lo 1)]
-           (loop
-             (store! ~idx (iadd (load ~idx) 1))
-             (if (icmp-lt (load ~idx) ~hi)
-                 (let [~i (load ~idx)] ~@body)
-                 (break)))))))
+(defn for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 3)) (error "for: binding must be [i LO HI]")
+  (let [i   (code-nth binding 0)
+        lo  (code-nth binding 1)
+        hi  (code-nth binding 2)
+        idx (gensym)]
+    `(let [(mut ~idx) (isub ~lo 1)]
+       (loop
+         (store! ~idx (iadd (load ~idx) 1))
+         (if (icmp-lt (load ~idx) ~hi)
+             (let [~i (load ~idx)] ~@body)
+             (break)))))))
 
 ; `(for-in [x COLL] body...)` — iterate a collection, binding x to each element.
 ; A macro over `for`, dispatching on the collection FORM (the expander has no
@@ -180,10 +179,10 @@
 ;
 ; `(block :b e...)` => `(loop :b (break :b (do e...)))`: the inner `do` runs to a
 ; value then breaks; an early `(return-from :b v)` => `(break :b v)` short-circuits.
-(defmacro block [label & body]
+(defn block [(label Code) & (body Code)] (-> Code)
   `(loop ~label (break ~label (do ~@body))))
 
-(defmacro return-from [label v]
+(defn return-from [(label Code) (v Code)] (-> Code)
   `(break ~label ~v))
 
 ; ---- defer / scope guards (macros over block + break) ----------------------
@@ -295,11 +294,11 @@
 ; 2-ary core `and`/`or` (short-circuit). `(all)` = true, `(any)` = false; a single
 ; argument is returned as-is. (The core `and`/`or` stay 2-ary; these are the
 ; n-ary convenience over them.)
-(defmacro all [& xs]
-  (if (empty? xs)
-      (quote true)                       ; emit the `true` FORM, not the macro bool
-      (if (empty? (rest xs)) (first xs) `(and ~(first xs) (all ~@(rest xs))))))
-(defmacro any [& xs]
-  (if (empty? xs)
-      (quote false)
-      (if (empty? (rest xs)) (first xs) `(or ~(first xs) (any ~@(rest xs))))))
+(defn all [& (xs Code)] (-> Code)
+  (if (icmp-eq (code-count xs) 0) `true        ; emit the `true` FORM, not a macro bool
+    (if (icmp-eq (code-count xs) 1) (code-nth xs 0)
+      `(and ~(code-nth xs 0) (all ~@(code-rest xs))))))
+(defn any [& (xs Code)] (-> Code)
+  (if (icmp-eq (code-count xs) 0) `false
+    (if (icmp-eq (code-count xs) 1) (code-nth xs 0)
+      `(or ~(code-nth xs 0) (any ~@(code-rest xs))))))

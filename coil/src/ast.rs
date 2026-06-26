@@ -128,6 +128,9 @@ pub enum CodeOp {
     /// `(gensym)` — a fresh, globally-unique `Code` symbol (macro hygiene). Takes
     /// no `Code` argument.
     Gensym,
+    /// `(error STR)` — abort compile-time evaluation (macro expansion) with the
+    /// given message. Its argument is a string, not `Code`.
+    Error,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an

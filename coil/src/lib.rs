@@ -58,11 +58,18 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
     use std::collections::{HashMap, HashSet};
     let forms = reader::read_all(src)?;
     let (mut tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
-    let mut program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
 
     // ---- expression-position macros: a macro is a `[Code…] -> Code` function;
-    // its calls expand inline in non-macro bodies (args are quoted to Code). ----
-    let macro_quals: Vec<String> = program
+    // its calls expand inline in non-macro bodies (args quoted to Code). We must
+    // expand BEFORE parsing the full program, because a macro call with
+    // non-expression args (a `[i lo hi]` binding vector, a `:keyword`) doesn't
+    // parse until it's expanded. So detect + check the macros from a PARSEABLE
+    // subset (pure macro/helper defns + declarations — no runtime bodies), expand
+    // every form, then resolve the whole (now macro-free) program. ----
+    let macro_subset: Vec<macros::TaggedForm> =
+        tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
+    let macro_ctx = resolve::resolve_program(macro_subset, &imports, &exports)?;
+    let macro_quals: Vec<String> = macro_ctx
         .funcs
         .iter()
         .filter(|f| f.ret == ast::Type::Code && f.params.iter().all(|p| p.ty == ast::Type::Code))
@@ -75,15 +82,15 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
             .map(|q| (q.rsplit('.').next().unwrap_or(q).to_string(), q.clone()))
             .collect();
         let bare: HashSet<String> = qual.keys().cloned().collect();
-        let wanted = closure_funcs(&program, macro_quals.clone());
-        let sub = closure_subprogram(&program, &wanted, false);
+        let wanted = closure_funcs(&macro_ctx, macro_quals.clone());
+        let sub = closure_subprogram(&macro_ctx, &wanted, false);
         let checked_sub = check::check(&sub)?;
         tagged = tagged
             .into_iter()
             .map(|(f, m)| Ok((expand_top_form(&f, &bare, &qual, &checked_sub, &mut 0)?, m)))
             .collect::<Result<Vec<_>, Diag>>()?;
-        program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
     }
+    let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
 
     // ---- top-level `(meta …)` staged macros (generate definitions) ----
     let mut checked = if program.metas.is_empty() {
@@ -112,6 +119,36 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
     // runtime representation; drop them before mono/codegen.
     checked.funcs.retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
     Ok(checked)
+}
+
+/// Keep a form for macro detection iff it parses without depending on macros being
+/// expanded first: pure macro/helper defns (`(defn … (-> Code) …)`) and plain
+/// declarations. Runtime defns, impls, consts, metas have expression bodies that
+/// may contain not-yet-expanded macro calls (with binding-vector / keyword args).
+fn keep_for_macro_detection(f: &reader::Sexp) -> bool {
+    use reader::SexpKind as K;
+    let items = match &f.kind {
+        K::List(it) => it,
+        _ => return true,
+    };
+    let head = match items.first().map(|x| &x.kind) {
+        Some(K::Sym(h)) => h.as_str(),
+        _ => return true,
+    };
+    match head {
+        "defn" => defn_returns_code(items),
+        "impl" | "const" | "meta" | "static-assert" => false,
+        _ => true, // defstruct/defsum/deftrait/extern/import/module/defcc …
+    }
+}
+
+fn defn_returns_code(items: &[reader::Sexp]) -> bool {
+    use reader::SexpKind as K;
+    items.iter().any(|it| {
+        matches!(&it.kind, K::List(l)
+            if matches!(l.first().map(|x| &x.kind), Some(K::Sym(h)) if h == "->")
+               && matches!(l.get(1).map(|x| &x.kind), Some(K::Sym(t)) if t == "Code"))
+    })
 }
 
 fn is_meta_form(s: &reader::Sexp) -> bool {
@@ -197,17 +234,20 @@ fn expand_calls(
     use reader::{Sexp, SexpKind};
     match &s.kind {
         SexpKind::List(items) => {
-            let is_macro_call = matches!(items.first().map(|x| &x.kind),
-                Some(SexpKind::Sym(h)) if bare.contains(h));
-            if is_macro_call {
+            // The call head may be bare (`when`) or qualified by macro hygiene
+            // (`control.when`); match on the bare suffix either way.
+            let macro_name = match items.first().map(|x| &x.kind) {
+                Some(SexpKind::Sym(h)) => {
+                    let b = h.rsplit('.').next().unwrap_or(h);
+                    bare.contains(b).then(|| b.to_string())
+                }
+                _ => None,
+            };
+            if let Some(name) = macro_name {
                 *depth += 1;
                 if *depth > 100_000 {
                     return Err(Diag::new("macro expansion did not terminate"));
                 }
-                let name = match &items[0].kind {
-                    SexpKind::Sym(h) => h.clone(),
-                    _ => unreachable!(),
-                };
                 let args: Vec<Sexp> = items[1..]
                     .iter()
                     .map(|a| expand_calls(a, bare, qual, sub, depth))

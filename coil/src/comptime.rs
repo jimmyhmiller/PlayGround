@@ -952,17 +952,24 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
         let n = GENSYM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(CtVal::Code(Sexp::new(K::Sym(format!("$g{n}")), crate::span::Span::DUMMY)));
     }
+    if op == CodeOp::Error {
+        let msg = match args.first() {
+            Some(CtVal::Str(s)) => s.clone(),
+            _ => "error: message must be a string".to_string(),
+        };
+        return Err(msg);
+    }
     let code = match args.first() {
         Some(CtVal::Code(s)) => s,
         _ => return Err("comptime: code op expects a Code value".to_string()),
     };
     Ok(match op {
-        CodeOp::IsList => CtVal::Bool(matches!(code.kind, K::List(_))),
+        CodeOp::IsList => CtVal::Bool(matches!(code.kind, K::List(_) | K::Vector(_))),
         CodeOp::IsSym => CtVal::Bool(matches!(code.kind, K::Sym(_))),
         CodeOp::IsInt => CtVal::Bool(matches!(code.kind, K::Int(_))),
         CodeOp::Count => match &code.kind {
-            K::List(items) => CtVal::Int(items.len() as i64),
-            _ => return Err("comptime: code-count expects a list".to_string()),
+            K::List(items) | K::Vector(items) => CtVal::Int(items.len() as i64),
+            _ => return Err("comptime: code-count expects a list/vector".to_string()),
         },
         CodeOp::Nth => {
             let i = match args.get(1) {
@@ -970,11 +977,11 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
                 _ => return Err("comptime: code-nth index must be an integer".to_string()),
             };
             match &code.kind {
-                K::List(items) => match items.get(i) {
+                K::List(items) | K::Vector(items) => match items.get(i) {
                     Some(s) => CtVal::Code(s.clone()),
                     None => return Err(format!("comptime: code-nth index {i} out of range")),
                 },
-                _ => return Err("comptime: code-nth expects a list".to_string()),
+                _ => return Err("comptime: code-nth expects a list/vector".to_string()),
             }
         }
         CodeOp::Rest => match &code.kind {
@@ -992,7 +999,7 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
             K::Int(n) => CtVal::Int(*n),
             _ => return Err("comptime: code-int expects an integer".to_string()),
         },
-        CodeOp::Gensym => unreachable!("gensym handled above (takes no Code argument)"),
+        CodeOp::Gensym | CodeOp::Error => unreachable!("handled above (no Code argument)"),
     })
 }
 

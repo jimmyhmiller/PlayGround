@@ -89,7 +89,7 @@ fn expression_macro_with_arithmetic_in_the_macro() {
     let code = build_and_run(
         "(module a)\n\
          (defn twice-if-even [(n Code)] (-> Code)\n\
-           (if (= (urem (code-int n) 2) 0) `(imul ~n 2) `(iadd ~n 1)))\n\
+           (if (icmp-eq (urem (code-int n) 2) 0) `(imul ~n 2) `(iadd ~n 1)))\n\
          (defn main [] (-> i64) (iadd (twice-if-even 10) (twice-if-even 7)))", // 20 + 8 = 28
     );
     assert_eq!(code, 28);

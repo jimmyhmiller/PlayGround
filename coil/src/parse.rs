@@ -1073,6 +1073,13 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             }
             Ok(ExprKind::CodeOp { op: CodeOp::Gensym, args: vec![] })
         }
+        // (error MSG) — abort macro expansion with a message
+        "error" => {
+            if args.len() != 1 {
+                return Err(Diag::at(span, "error: expects (error MSG)"));
+            }
+            Ok(ExprKind::CodeOp { op: CodeOp::Error, args: vec![parse_expr(&args[0])?] })
+        }
         // operations on Code values
         "code-list?" | "code-sym?" | "code-int?" | "code-count" | "code-nth" | "code-sym"
         | "code-int" | "code-rest" => {
