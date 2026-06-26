@@ -333,7 +333,7 @@ fn atom(s: &str) -> SexpKind {
     if let Some(kw) = s.strip_prefix(':') {
         return SexpKind::Keyword(kw.to_string());
     }
-    if let Ok(n) = s.parse::<i64>() {
+    if let Some(n) = parse_int(s) {
         return SexpKind::Int(n);
     }
     // A float literal looks like a number (digit/sign-digit start) with a `.`
@@ -344,6 +344,38 @@ fn atom(s: &str) -> SexpKind {
         }
     }
     SexpKind::Sym(s.to_string())
+}
+
+/// Parse an integer literal: plain decimal (unchanged), or `0x`/`0b`/`0o`-prefixed
+/// hex/binary/octal, with an optional leading sign and `_` digit separators
+/// (`0xFF`, `0b1010`, `0o17`, `-0x10`, `1_000`, `0xFFFF_FFFF`). Non-numbers return
+/// `None` and stay symbols. Magnitudes are read as `u64` then reinterpreted as
+/// `i64`, so a full-width mask like `0xFFFFFFFFFFFFFFFF` is `-1`.
+fn parse_int(s: &str) -> Option<i64> {
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(n); // plain decimal — exact prior behavior
+    }
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (radix, digits) = if let Some(h) = body.strip_prefix("0x").or(body.strip_prefix("0X")) {
+        (16u32, h)
+    } else if let Some(b) = body.strip_prefix("0b").or(body.strip_prefix("0B")) {
+        (2, b)
+    } else if let Some(o) = body.strip_prefix("0o").or(body.strip_prefix("0O")) {
+        (8, o)
+    } else if body.contains('_') && looks_numeric(body) {
+        (10, body) // decimal with separators: `1_000`
+    } else {
+        return None;
+    };
+    let cleaned: String = digits.chars().filter(|&c| c != '_').collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let mag = u64::from_str_radix(&cleaned, radix).ok()? as i64;
+    Some(if neg { mag.wrapping_neg() } else { mag })
 }
 
 fn looks_numeric(s: &str) -> bool {
@@ -399,4 +431,22 @@ mod tests {
         assert!(!err.span.is_dummy(), "unclosed paren should carry a span");
         assert!(err.msg.contains("unclosed"));
     }
+
+    #[test]
+    fn reads_hex_bin_oct_and_separators() {
+        let cases = [("0xFF", 255), ("0X10", 16), ("0b1010", 10), ("0o17", 15),
+                     ("-0x10", -16), ("1_000", 1000), ("0xFFFF_FFFF", 0xFFFF_FFFF),
+                     ("0xFFFFFFFFFFFFFFFF", -1)];
+        for (src, want) in cases {
+            match super::atom(src) {
+                super::SexpKind::Int(n) => assert_eq!(n, want, "{src}"),
+                other => panic!("{src} -> {other:?}, wanted Int({want})"),
+            }
+        }
+        // type names / symbols with hex-ish chars stay symbols
+        for sym in ["f64", "0xfoo", "0x", "abc"] {
+            assert!(matches!(super::atom(sym), super::SexpKind::Sym(_)), "{sym} should stay a symbol");
+        }
+    }
+
 }

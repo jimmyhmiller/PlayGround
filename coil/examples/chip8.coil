@@ -48,16 +48,16 @@
 ; ---- accessors (everything is i64 in registers; mask to width on store) ----
 (defn vget [(c (ptr Chip8)) (i i64)] (-> i64) (cast :i64 (load (index (field c v) i))))
 (defn vset [(c (ptr Chip8)) (i i64) (x i64)] (-> i64)
-  (do (store! (index (field c v) i) (cast :u8 (iand x 255))) 0))
+  (do (store! (index (field c v) i) (cast :u8 (iand x 0xFF))) 0))
 (defn mget [(c (ptr Chip8)) (a i64)] (-> i64) (cast :i64 (load (index (field c mem) a))))
 (defn mset [(c (ptr Chip8)) (a i64) (x i64)] (-> i64)
-  (do (store! (index (field c mem) a) (cast :u8 (iand x 255))) 0))
+  (do (store! (index (field c mem) a) (cast :u8 (iand x 0xFF))) 0))
 (defn ireg-get [(c (ptr Chip8))] (-> i64) (load (field c ireg)))
-(defn ireg-set [(c (ptr Chip8)) (x i64)] (-> i64) (do (store! (field c ireg) (iand x 65535)) 0))
+(defn ireg-set [(c (ptr Chip8)) (x i64)] (-> i64) (do (store! (field c ireg) (iand x 0xFFFF)) 0))
 (defn key-raw [(c (ptr Chip8)) (k i64)] (-> i64) (cast :i64 (load (index (field c keys) k))))
 
 (defn pc-get [(c (ptr Chip8))] (-> i64) (load (field c pc)))
-(defn pc-set [(c (ptr Chip8)) (a i64)] (-> i64) (do (store! (field c pc) (iand a 4095)) 0))
+(defn pc-set [(c (ptr Chip8)) (a i64)] (-> i64) (do (store! (field c pc) (iand a 0xFFF)) 0))
 (defn pc-skip [(c (ptr Chip8))] (-> i64) (pc-set c (iadd (pc-get c) 2)))
 
 ; ---- stack -----------------------------------------------------------------
@@ -79,14 +79,14 @@
 
 ; Draw an n-byte sprite at (Vx,Vy), XOR onto the screen, VF = pixel-erased flag.
 (defn draw-sprite [(c (ptr Chip8)) (vx i64) (vy i64) (n i64)] (-> i64)
-  (let [x (iand (vget c vx) 63)
-        y (iand (vget c vy) 31)]
+  (let [x (iand (vget c vx) 0x3F)
+        y (iand (vget c vy) 0x1F)]
     (do
       (vset c 15 0)
       (for [row 0 n]
         (let [bits (mget c (iadd (ireg-get c) row))]
           (for [col 0 8]
-            (if (icmp-ne (iand bits (ishr 128 col)) 0)
+            (if (icmp-ne (iand bits (ishr 0x80 col)) 0)
                 (let [px  (irem (iadd x col) 64)
                       py  (irem (iadd y row) 32)
                       idx (iadd (imul py 64) px)
@@ -99,8 +99,8 @@
 
 ; ---- opcode groups ---------------------------------------------------------
 (defn op0 [(c (ptr Chip8)) (op i64)] (-> i64)
-  (cond (icmp-eq op 224) (clear-disp c)     ; 00E0 clear
-        (icmp-eq op 238) (stack-pop c)       ; 00EE return
+  (cond (icmp-eq op 0xE0) (clear-disp c)     ; 00E0 clear
+        (icmp-eq op 0xEE) (stack-pop c)       ; 00EE return
         0))
 
 (defn op8 [(c (ptr Chip8)) (x i64) (y i64) (n i64)] (-> i64)
@@ -118,8 +118,8 @@
       0)))
 
 (defn opE [(c (ptr Chip8)) (x i64) (nn i64)] (-> i64)
-  (cond (icmp-eq nn 158) (if (icmp-gt (key-raw c (vget c x)) 0) (pc-skip c) 0)   ; EX9E
-        (icmp-eq nn 161) (if (icmp-eq (key-raw c (vget c x)) 0) (pc-skip c) 0)   ; EXA1
+  (cond (icmp-eq nn 0x9E) (if (icmp-gt (key-raw c (vget c x)) 0) (pc-skip c) 0)   ; EX9E
+        (icmp-eq nn 0xA1) (if (icmp-eq (key-raw c (vget c x)) 0) (pc-skip c) 0)   ; EXA1
         0))
 
 ; FX0A — block until a key is down (stall the PC if none).
@@ -146,25 +146,25 @@
 
 (defn opF [(c (ptr Chip8)) (x i64) (nn i64)] (-> i64)
   (cond
-    (icmp-eq nn 7)   (vset c x (load (field c dt)))                   ; FX07 Vx = DT
-    (icmp-eq nn 10)  (wait-key c x)                                   ; FX0A wait key
-    (icmp-eq nn 21)  (do (store! (field c dt) (vget c x)) 0)          ; FX15 DT = Vx
-    (icmp-eq nn 24)  (do (store! (field c st) (vget c x)) 0)          ; FX18 ST = Vx
-    (icmp-eq nn 30)  (ireg-set c (iadd (ireg-get c) (vget c x)))      ; FX1E I += Vx
-    (icmp-eq nn 41)  (ireg-set c (iadd 80 (imul (vget c x) 5)))       ; FX29 I = font(Vx)
-    (icmp-eq nn 51)  (bcd c x)                                        ; FX33 BCD
-    (icmp-eq nn 85)  (store-regs c x)                                 ; FX55 store V0..Vx
-    (icmp-eq nn 101) (load-regs c x)                                  ; FX65 load V0..Vx
+    (icmp-eq nn 0x07) (vset c x (load (field c dt)))                  ; FX07 Vx = DT
+    (icmp-eq nn 0x0A) (wait-key c x)                                  ; FX0A wait key
+    (icmp-eq nn 0x15) (do (store! (field c dt) (vget c x)) 0)         ; FX15 DT = Vx
+    (icmp-eq nn 0x18) (do (store! (field c st) (vget c x)) 0)         ; FX18 ST = Vx
+    (icmp-eq nn 0x1E) (ireg-set c (iadd (ireg-get c) (vget c x)))     ; FX1E I += Vx
+    (icmp-eq nn 0x29) (ireg-set c (iadd 0x50 (imul (vget c x) 5)))    ; FX29 I = font(Vx)
+    (icmp-eq nn 0x33) (bcd c x)                                       ; FX33 BCD
+    (icmp-eq nn 0x55) (store-regs c x)                                ; FX55 store V0..Vx
+    (icmp-eq nn 0x65) (load-regs c x)                                 ; FX65 load V0..Vx
     0))
 
 ; ---- decode + dispatch one instruction -------------------------------------
 (defn exec [(c (ptr Chip8)) (op i64)] (-> i64)
-  (let [hi  (iand (ishr op 12) 15)
-        x   (iand (ishr op 8) 15)
-        y   (iand (ishr op 4) 15)
-        n   (iand op 15)
-        nn  (iand op 255)
-        nnn (iand op 4095)]
+  (let [hi  (iand (ishr op 12) 0xF)
+        x   (iand (ishr op 8) 0xF)
+        y   (iand (ishr op 4) 0xF)
+        n   (iand op 0xF)
+        nn  (iand op 0xFF)
+        nnn (iand op 0xFFF)]
     (cond
       (icmp-eq hi 0)  (op0 c op)
       (icmp-eq hi 1)  (pc-set c nnn)                                       ; 1NNN jump
@@ -258,19 +258,19 @@
       (mset c (iadd 83 o) e) (mset c (iadd 84 o) f) 0))
 (defn load-font [(c (ptr Chip8))] (-> i64)
   (do
-    (fnt c 0   240 144 144 144 240)  (fnt c 5    32  96  32  32 112)
-    (fnt c 10  240  16 240 128 240)  (fnt c 15  240  16 240  16 240)
-    (fnt c 20  144 144 240  16  16)  (fnt c 25  240 128 240  16 240)
-    (fnt c 30  240 128 240 144 240)  (fnt c 35  240  16  32  64  64)
-    (fnt c 40  240 144 240 144 240)  (fnt c 45  240 144 240  16 240)
-    (fnt c 50  240 144 240 144 144)  (fnt c 55  224 144 224 144 224)
-    (fnt c 60  240 128 128 128 240)  (fnt c 65  224 144 144 144 224)
-    (fnt c 70  240 128 240 128 240)  (fnt c 75  240 128 240 128 128)
+    (fnt c 0   0xF0 0x90 0x90 0x90 0xF0)  (fnt c 5   0x20 0x60 0x20 0x20 0x70)
+    (fnt c 10  0xF0 0x10 0xF0 0x80 0xF0)  (fnt c 15  0xF0 0x10 0xF0 0x10 0xF0)
+    (fnt c 20  0x90 0x90 0xF0 0x10 0x10)  (fnt c 25  0xF0 0x80 0xF0 0x10 0xF0)
+    (fnt c 30  0xF0 0x80 0xF0 0x90 0xF0)  (fnt c 35  0xF0 0x10 0x20 0x40 0x40)
+    (fnt c 40  0xF0 0x90 0xF0 0x90 0xF0)  (fnt c 45  0xF0 0x90 0xF0 0x10 0xF0)
+    (fnt c 50  0xF0 0x90 0xF0 0x90 0x90)  (fnt c 55  0xE0 0x90 0xE0 0x90 0xE0)
+    (fnt c 60  0xF0 0x80 0x80 0x80 0xF0)  (fnt c 65  0xE0 0x90 0x90 0x90 0xE0)
+    (fnt c 70  0xF0 0x80 0xF0 0x80 0xF0)  (fnt c 75  0xF0 0x80 0xF0 0x80 0x80)
     0))
 
 ; ---- setup + run -----------------------------------------------------------
 (defn init [(c (ptr Chip8))] (-> i64)
-  (do (memset c 0 (sizeof Chip8)) (store! (field c pc) 512) (load-font c) 0))
+  (do (memset c 0 (sizeof Chip8)) (store! (field c pc) 0x200) (load-font c) 0))
 
 (defn load-rom [(c (ptr Chip8)) (path (ptr i8))] (-> i64)
   (let [fd (cast :i64 (open path 0))]
