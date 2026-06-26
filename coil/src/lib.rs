@@ -58,11 +58,15 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
     let forms = reader::read_all(src)?;
     let (tagged, imports, exports) = macros::load_program(&forms, &host_target())?;
     let tagged = expand_stage3_macros(tagged, &imports, &exports)?;
-    let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
+    // With `(meta …)` generators present, this first resolve is intermediate — the
+    // program still calls definitions the metas haven't generated yet — so the
+    // undefined-reference check is deferred to the final `program2` resolve below.
+    let has_metas = tagged.iter().any(|(f, _)| is_meta_form(f));
+    let program = resolve::resolve_program(tagged.clone(), &imports, &exports, !has_metas)?;
 
     // ---- top-level `(meta …)` staged macros (generate definitions) ----
     let mut checked = if program.metas.is_empty() {
-        check::check(&program)?
+        check::check_with(&program, &imports, &exports)?
     } else {
         let mut stack: Vec<String> = Vec::new();
         let names: std::collections::HashSet<&str> =
@@ -80,8 +84,8 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
         for g in gen {
             tagged2.push((g, module.clone()));
         }
-        let program2 = resolve::resolve_program(tagged2, &imports, &exports)?;
-        check::check(&program2)?
+        let program2 = resolve::resolve_program(tagged2, &imports, &exports, true)?;
+        check::check_with(&program2, &imports, &exports)?
     };
     // Comptime-only functions (anything with a `Code` parameter or return — macros,
     // generators, code helpers) have done their job during elaboration and have no
@@ -168,7 +172,7 @@ fn expand_stage3_macros_inner(
     use std::collections::HashSet;
     let macro_subset: Vec<macros::TaggedForm> =
         tagged.iter().filter(|(f, _)| keep_for_macro_detection(f)).cloned().collect();
-    let macro_ctx = resolve::resolve_program(macro_subset, imports, exports)?;
+    let macro_ctx = resolve::resolve_program(macro_subset, imports, exports, false)?;
     let macro_quals: Vec<String> = macro_ctx
         .funcs
         .iter()

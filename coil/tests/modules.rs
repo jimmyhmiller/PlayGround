@@ -235,3 +235,47 @@ fn macros_are_namespaced_not_global() {
     assert_eq!(build_and_run(aliased), 7);
 }
 
+
+#[test]
+fn trait_methods_are_namespaced_per_module() {
+    // Two modules each define a `Show` trait with a `show` method — no longer a
+    // global-uniqueness error. A call resolves to whichever is `:use`d; `:use`ing
+    // both makes a bare call ambiguous (a hard error).
+    let dir = write_modules(
+        "mod_meth",
+        &[
+            ("a.coil", "(module a)\n(export Show show A)\n\
+                        (deftrait Show [Self] (show [(x Self)] (-> :i64)))\n\
+                        (defstruct A [(v :i64)])\n\
+                        (impl Show A (show [(x A)] (-> :i64) (iadd (load (field x v)) 100)))\n"),
+            ("b.coil", "(module b)\n(export Show show)\n\
+                        (deftrait Show [Self] (show [(x Self)] (-> :i64)))\n"),
+        ],
+    );
+    let mk = |imports: &str| {
+        format!(
+            "(module app)\n{imports}\n\
+             (defn run [(n :i64)] (-> :i64) (let [(mut x) (zeroed A)] (store! (field (mut x) v) n) (show (load x))))\n\
+             (defn main [] (-> :i64) (run 5))\n",
+        )
+    };
+    // Only a's Show referred → resolves to a's show.
+    let one = format!("(import \"{}\" :use *)", dir.join("a.coil").display());
+    assert_eq!(build_and_run(&mk(&one)), 105);
+    // Both referred → ambiguous.
+    let both = format!(
+        "(import \"{}\" :use *)\n(import \"{}\" :use *)",
+        dir.join("a.coil").display(),
+        dir.join("b.coil").display()
+    );
+    let err = coil::check_source(&mk(&both)).unwrap_err();
+    assert!(err.contains("ambiguous"), "expected ambiguity, got: {err}");
+}
+
+#[test]
+fn undefined_call_is_a_resolve_error() {
+    // Stage 4: a bare callee that is neither defined, an extern, nor a trait method
+    // is reported as undefined (no silent fallthrough).
+    let err = coil::check_source("(module app)\n(defn main [] (-> :i64) (no-such-fn 1))\n").unwrap_err();
+    assert!(err.contains("undefined function 'no-such-fn'"), "got: {err}");
+}

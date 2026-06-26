@@ -35,10 +35,15 @@ const CORE: &str = "coil.core";
 
 /// Parse every tagged form, qualify it under its module, and merge into one
 /// whole-program `Program`.
+/// `strict` enables the undefined-reference check (a still-bare callee that is
+/// neither an extern nor a trait method is an error). It must be OFF for an
+/// INTERMEDIATE resolve whose program still calls not-yet-generated definitions
+/// (the pre-`meta` pass, and the macro-detection subset); ON for the final program.
 pub fn resolve_program(
     tagged: Vec<TaggedForm>,
     imports: &ImportMap,
     exports: &ExportMap,
+    strict: bool,
 ) -> Result<Program, crate::span::Diag> {
     // Parse each form alone so it keeps its module identity.
     let mut parsed: Vec<(Program, Option<String>)> = Vec::with_capacity(tagged.len());
@@ -92,9 +97,22 @@ pub fn resolve_program(
         statics: vec![],
         metas: vec![],
     };
+    // Names allowed to remain bare after resolution: extern C symbols (global) and
+    // trait-method names (the checker resolves a method call against the caller's
+    // scope). Anything else still-bare is an undefined reference.
+    let mut bare_ok: HashSet<String> =
+        table.values().flat_map(|d| d.externs.iter().cloned()).collect();
+    for (p, _) in &parsed {
+        for t in &p.traits {
+            for meth in &t.methods {
+                bare_ok.insert(meth.name.clone());
+            }
+        }
+    }
+    let bare_ok = strict.then_some(&bare_ok);
     for (mut p, module) in parsed {
         if let Some(m) = &module {
-            qualify_program(&mut p, m, imports.get(m), &table, exports)?;
+            qualify_program(&mut p, m, imports.get(m), &table, exports, bare_ok)?;
         }
         merge(&mut out, p)?;
     }
@@ -159,6 +177,7 @@ fn qualify_program(
     imps: Option<&ModImports>,
     table: &DefTable,
     exports: &ExportMap,
+    bare_ok: Option<&HashSet<String>>,
 ) -> Result<(), String> {
     let empty = HashSet::new();
     for f in &mut p.funcs {
@@ -178,7 +197,7 @@ fn qualify_program(
         }
         qualify_type(&mut f.ret, m, imps, table, &tps, exports)?;
         for e in &mut f.body {
-            qualify_expr(e, m, imps, table, &tps, exports)?;
+            qualify_expr(e, m, imps, table, &tps, exports, bare_ok)?;
         }
     }
     for s in &mut p.structs {
@@ -217,18 +236,18 @@ fn qualify_program(
         qualify_type(&mut e.ret, m, imps, table, &empty, exports)?;
     }
     for a in &mut p.asserts {
-        qualify_expr(&mut a.cond, m, imps, table, &empty, exports)?;
+        qualify_expr(&mut a.cond, m, imps, table, &empty, exports, bare_ok)?;
     }
     // Const values are now expressions (possibly calling functions / using types).
     for c in &mut p.consts {
         if let Some(t) = &mut c.ty {
             qualify_type(t, m, imps, table, &empty, exports)?;
         }
-        qualify_expr(&mut c.value, m, imps, table, &empty, exports)?;
+        qualify_expr(&mut c.value, m, imps, table, &empty, exports, bare_ok)?;
     }
     // `(meta EXPR)` — EXPR is a comptime expression; qualify it.
     for meta in &mut p.metas {
-        qualify_expr(meta, m, imps, table, &empty, exports)?;
+        qualify_expr(meta, m, imps, table, &empty, exports, bare_ok)?;
     }
     // Traits: rename the trait to `module.Trait` and qualify the types in each
     // method signature (Self stays unqualified, an in-scope type parameter).
@@ -264,7 +283,7 @@ fn qualify_program(
             }
             qualify_type(&mut meth.ret, m, imps, table, &tps, exports)?;
             for e in &mut meth.body {
-                qualify_expr(e, m, imps, table, &tps, exports)?;
+                qualify_expr(e, m, imps, table, &tps, exports, bare_ok)?;
             }
         }
     }
@@ -278,13 +297,14 @@ fn qualify_quasi(
     table: &DefTable,
     tps: &HashSet<String>,
     exports: &ExportMap,
+    bare_ok: Option<&HashSet<String>>,
 ) -> Result<(), String> {
     match q {
         Quasi::Lit(_) => {}
-        Quasi::Unquote(e) | Quasi::Splice(e) => qualify_expr(e, m, imps, table, tps, exports)?,
+        Quasi::Unquote(e) | Quasi::Splice(e) => qualify_expr(e, m, imps, table, tps, exports, bare_ok)?,
         Quasi::List(items) | Quasi::Vector(items) => {
             for it in items {
-                qualify_quasi(it, m, imps, table, tps, exports)?;
+                qualify_quasi(it, m, imps, table, tps, exports, bare_ok)?;
             }
         }
     }
@@ -337,137 +357,147 @@ fn qualify_expr(
     table: &DefTable,
     tps: &HashSet<String>,
     exports: &ExportMap,
+    bare_ok: Option<&HashSet<String>>,
 ) -> Result<(), String> {
     let ty = |ty: &mut Type| qualify_type(ty, m, imps, table, tps, exports);
     let call = |name: &str, pick: Pick| resolve(name, m, imps, table, exports, pick);
     match &mut e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::CStr(_) | ExprKind::Var(_) => {}
         ExprKind::Zeroed(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) | ExprKind::OffsetOf(t, _) => ty(t)?,
-        ExprKind::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports)?,
+        ExprKind::Borrow { place, .. } => qualify_expr(place, m, imps, table, tps, exports, bare_ok)?,
         // `SpillRef` is inserted by the checker, which runs after name
         // resolution; the resolver never encounters one.
         ExprKind::SpillRef(_) => unreachable!("SpillRef is produced after name resolution"),
         ExprKind::Let { binds, body } => {
             for (_, _, v) in binds {
-                qualify_expr(v, m, imps, table, tps, exports)?;
+                qualify_expr(v, m, imps, table, tps, exports, bare_ok)?;
             }
             for e in body {
-                qualify_expr(e, m, imps, table, tps, exports)?;
+                qualify_expr(e, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::Bin { lhs, rhs, .. } | ExprKind::Cmp { lhs, rhs, .. } => {
-            qualify_expr(lhs, m, imps, table, tps, exports)?;
-            qualify_expr(rhs, m, imps, table, tps, exports)?;
+            qualify_expr(lhs, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(rhs, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::Not(x) | ExprKind::Load(x) | ExprKind::Free(x) => {
-            qualify_expr(x, m, imps, table, tps, exports)?
+            qualify_expr(x, m, imps, table, tps, exports, bare_ok)?
         }
         ExprKind::If { cond, then, els } => {
-            qualify_expr(cond, m, imps, table, tps, exports)?;
-            qualify_expr(then, m, imps, table, tps, exports)?;
-            qualify_expr(els, m, imps, table, tps, exports)?;
+            qualify_expr(cond, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(then, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(els, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::Do(es) => {
             for e in es {
-                qualify_expr(e, m, imps, table, tps, exports)?;
+                qualify_expr(e, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         // Loop bodies and break values are ordinary expressions; labels are not
         // names to resolve.
         ExprKind::Loop { body, .. } => {
             for e in body {
-                qualify_expr(e, m, imps, table, tps, exports)?;
+                qualify_expr(e, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::Break { value, .. } => {
             if let Some(v) = value {
-                qualify_expr(v, m, imps, table, tps, exports)?;
+                qualify_expr(v, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::Continue { .. } => {}
         ExprKind::Call { func, type_args, args } => {
             *func = call(func, |d| &d.callables)?;
+            // A still-bare callee (no module qualifier) that is neither a global
+            // extern nor a trait-method name is an undefined reference — report it
+            // here rather than letting it slip to a later pass. (Skipped on a
+            // non-strict resolve, whose program may still call generated defs.)
+            if let Some(ok) = bare_ok {
+                if !func.contains('.') && !ok.contains(func) {
+                    return Err(format!("in module '{m}': call to undefined function '{func}'"));
+                }
+            }
             for t in type_args {
                 qualify_type(t, m, imps, table, tps, exports)?;
             }
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::Alloc { ty: t, .. } => ty(t)?,
         ExprKind::Field { ptr, .. } | ExprKind::BitGet { ptr, .. } => {
-            qualify_expr(ptr, m, imps, table, tps, exports)?
+            qualify_expr(ptr, m, imps, table, tps, exports, bare_ok)?
         }
         ExprKind::Store { ptr, val } => {
-            qualify_expr(ptr, m, imps, table, tps, exports)?;
-            qualify_expr(val, m, imps, table, tps, exports)?;
+            qualify_expr(ptr, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(val, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::Index { ptr, idx } => {
-            qualify_expr(ptr, m, imps, table, tps, exports)?;
-            qualify_expr(idx, m, imps, table, tps, exports)?;
+            qualify_expr(ptr, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(idx, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::Cast { ty: t, expr } => {
             ty(t)?;
-            qualify_expr(expr, m, imps, table, tps, exports)?;
+            qualify_expr(expr, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::BitSet { ptr, val, .. } => {
-            qualify_expr(ptr, m, imps, table, tps, exports)?;
-            qualify_expr(val, m, imps, table, tps, exports)?;
+            qualify_expr(ptr, m, imps, table, tps, exports, bare_ok)?;
+            qualify_expr(val, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::Construct { sum, variant, args } => {
             *sum = call(sum, |d| &d.types)?;
             *variant = call(variant, |d| &d.callables)?;
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::Match { scrut, arms } => {
-            qualify_expr(scrut, m, imps, table, tps, exports)?;
+            qualify_expr(scrut, m, imps, table, tps, exports, bare_ok)?;
             for arm in arms {
                 arm.variant = call(&arm.variant, |d| &d.callables)?;
-                qualify_expr(&mut arm.body, m, imps, table, tps, exports)?;
+                qualify_expr(&mut arm.body, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::FnPtrOf(name) => *name = call(name, |d| &d.callables)?,
         ExprKind::CallPtr { fp, args } => {
-            qualify_expr(fp, m, imps, table, tps, exports)?;
+            qualify_expr(fp, m, imps, table, tps, exports, bare_ok)?;
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         ExprKind::LlvmIr { result, args, .. } => {
             ty(result)?;
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         // The parser never produces a TraitCall (the checker does, post-resolve);
         // recurse into args for completeness.
         ExprKind::TraitCall { args, .. } => {
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
-        ExprKind::Comptime(inner) => qualify_expr(inner, m, imps, table, tps, exports)?,
+        ExprKind::Comptime(inner) => qualify_expr(inner, m, imps, table, tps, exports, bare_ok)?,
         ExprKind::StaticRef(_) => {} // checker-produced; no names to qualify
         ExprKind::TypeQuery { ty: t, .. } => ty(t)?,
         ExprKind::FieldMeta { ty: t, idx, .. } => {
             ty(t)?;
-            qualify_expr(idx, m, imps, table, tps, exports)?;
+            qualify_expr(idx, m, imps, table, tps, exports, bare_ok)?;
         }
         ExprKind::FieldIndex { ty: t, name } => {
             ty(t)?;
-            qualify_expr(name, m, imps, table, tps, exports)?;
+            qualify_expr(name, m, imps, table, tps, exports, bare_ok)?;
         }
         // Quoted code is raw syntax — its names are data, not references.
         ExprKind::Quote(_) => {}
         ExprKind::CodeOp { args, .. } => {
             for a in args {
-                qualify_expr(a, m, imps, table, tps, exports)?;
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
             }
         }
         // A quasiquote template is data; only its unquote holes are real exprs.
-        ExprKind::Quasi(q) => qualify_quasi(q, m, imps, table, tps, exports)?,
+        ExprKind::Quasi(q) => qualify_quasi(q, m, imps, table, tps, exports, bare_ok)?,
     }
     Ok(())
 }

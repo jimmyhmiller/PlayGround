@@ -79,9 +79,13 @@ struct Cx {
     static_consts: std::cell::RefCell<HashSet<String>>,
     /// Trait declarations by name.
     trait_defs: HashMap<String, TraitDef>,
-    /// Trait-method name -> (trait name, index of the `Self`-typed parameter).
-    /// v1 requires method names be globally unique across traits.
-    methods: HashMap<String, (String, usize)>,
+    /// Trait-method name -> every (trait name, Self-param index) declaring it. A
+    /// call picks the candidate visible in the caller's module.
+    methods: HashMap<String, Vec<(String, usize)>>,
+    /// The program's import + export tables, for scoping method resolution to the
+    /// caller's namespace (own module + `:use`d + auto-referred `coil.core`).
+    imports: crate::macros::ImportMap,
+    exports: crate::macros::ExportMap,
     /// Which `(trait, type)` pairs have an impl (for resolution + bound checks).
     impls: std::collections::HashSet<(String, String)>,
     /// Bounds of the function whose body is currently being checked: type param ->
@@ -113,7 +117,73 @@ fn display_name(n: &str) -> &str {
     n.strip_prefix("coil.core.").unwrap_or(n)
 }
 
+/// Pick the trait that declares method `func` for a call in `fname`'s module. With
+/// one candidate (the usual case — operators) it's used directly. With several
+/// (different modules' traits sharing a method name) the one VISIBLE in the caller's
+/// namespace (own module / `:use`d / auto-referred coil.core) wins; zero or many
+/// visible is a hard error.
+fn resolve_method(func: &str, cands: &[(String, usize)], fname: &str, cx: &Cx) -> Result<(String, usize), Diag> {
+    if let [only] = cands {
+        return Ok(only.clone());
+    }
+    let caller = fname.rsplit_once('.').map(|(m, _)| m);
+    let visible: Vec<&(String, usize)> = cands
+        .iter()
+        .filter(|(tr, _)| trait_visible(tr, caller, &cx.imports, &cx.exports))
+        .collect();
+    match visible.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!(
+            "in '{fname}': trait method '{func}' is declared in {} traits, none in scope here \
+             (`:use` the module whose trait you mean)",
+            cands.len()
+        ).into()),
+        _ => Err(format!(
+            "in '{fname}': trait method '{func}' is ambiguous — {} in-scope traits declare it; \
+             rename one method to disambiguate",
+            visible.len()
+        ).into()),
+    }
+}
+
+/// Is the trait `tr` (a qualified name) visible in `caller_module`'s scope: its own
+/// module, a `:use`d module's export, or the auto-referred `coil.core`?
+fn trait_visible(
+    tr: &str,
+    caller: Option<&str>,
+    imports: &crate::macros::ImportMap,
+    exports: &crate::macros::ExportMap,
+) -> bool {
+    let Some((tmod, tname)) = tr.rsplit_once('.') else {
+        return true; // an unqualified (module-less) trait
+    };
+    if tmod == "coil.core" || Some(tmod) == caller {
+        return true;
+    }
+    let Some(cm) = caller else { return false };
+    let Some(imp) = imports.get(cm) else { return false };
+    imp.uses.iter().any(|(target, spec)| {
+        target == tmod
+            && match spec {
+                crate::macros::UseSpec::All => true,
+                crate::macros::UseSpec::Names(ns) => ns.iter().any(|n| n == tname),
+            }
+            && crate::macros::exports(exports, target, tname)
+    })
+}
+
 pub fn check(program: &Program) -> Result<Program, Diag> {
+    check_with(program, &HashMap::new(), &HashMap::new())
+}
+
+/// `check`, with the program's import/export tables for scoping trait-method
+/// resolution to the caller's namespace. (Plain `check` passes empty tables — fine
+/// for single-module programs and the comptime sub-program checks.)
+pub fn check_with(
+    program: &Program,
+    imports: &crate::macros::ImportMap,
+    exports: &crate::macros::ExportMap,
+) -> Result<Program, Diag> {
     // ---- type tables --------------------------------------------------------
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
     for sd in &program.structs {
@@ -149,7 +219,11 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
     // are lowered to ordinary functions named `Trait$Type$method`, appended to the
     // function list so they get signatures and are type-checked like any defn.
     let mut trait_defs: HashMap<String, TraitDef> = HashMap::new();
-    let mut methods: HashMap<String, (String, usize)> = HashMap::new();
+    // A method name maps to EVERY trait that declares it (qualified trait + Self
+    // index). Names are no longer globally unique across traits — a call picks the
+    // candidate VISIBLE in the caller's module (own/`:use`d/coil.core), erroring if
+    // ambiguous. Most methods (operators) have exactly one candidate.
+    let mut methods: HashMap<String, Vec<(String, usize)>> = HashMap::new();
     for t in &program.traits {
         for m in &t.methods {
             let self_idx = m
@@ -159,12 +233,7 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
                 .ok_or_else(|| {
                     format!("trait '{}' method '{}': needs a {} (Self) parameter", t.name, m.name, t.self_param)
                 })?;
-            if methods.insert(m.name.clone(), (t.name.clone(), self_idx)).is_some() {
-                return Err(format!(
-                    "trait method '{}' is declared in more than one trait (method names must be unique)",
-                    m.name
-                ).into());
-            }
+            methods.entry(m.name.clone()).or_default().push((t.name.clone(), self_idx));
         }
         if trait_defs.insert(t.name.clone(), t.clone()).is_some() {
             return Err(format!("trait '{}' defined twice", t.name).into());
@@ -265,6 +334,8 @@ pub fn check(program: &Program) -> Result<Program, Diag> {
         static_consts: std::cell::RefCell::new(HashSet::new()),
         trait_defs,
         methods,
+        imports: imports.clone(),
+        exports: exports.clone(),
         impls: impl_set,
         cur_bounds: std::cell::RefCell::new(HashMap::new()),
         loops: std::cell::RefCell::new(Vec::new()),
@@ -1105,7 +1176,8 @@ fn synth_inner(
             // (below, via `call_func`); a type-parameter Self defers to mono (and
             // is checked against the current function's declared bounds here).
             let mut call_func = func.clone();
-            if let Some((trait_name, self_idx)) = cx.methods.get(func).cloned() {
+            if let Some(cands) = cx.methods.get(func) {
+                let (trait_name, self_idx) = resolve_method(func, cands, fname, cx)?;
                 let td = cx.trait_defs.get(&trait_name).expect("trait of a known method");
                 let tm = td.methods.iter().find(|m| &m.name == func).expect("trait has method").clone();
                 let self_pname = td.self_param.clone();
