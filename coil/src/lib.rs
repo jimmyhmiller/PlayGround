@@ -56,7 +56,7 @@ fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
 /// `meta` forms), and check the whole program.
 fn elaborate(src: &str) -> Result<ast::Program, Diag> {
     let forms = reader::read_all(src)?;
-    let (tagged, imports, exports) = macros::expand_program(&forms, &host_target())?;
+    let (tagged, imports, exports) = macros::load_program(&forms, &host_target())?;
     let tagged = expand_stage3_macros(tagged, &imports, &exports)?;
     let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
 
@@ -563,7 +563,7 @@ fn debug_input<'a>(src: &'a str, src_path: Option<&Path>) -> codegen::DebugInput
 /// post-expansion forms (before name resolution).
 pub fn expand_to_string(src: &str) -> Result<String, String> {
     let forms = reported(reader::read_all(src), src)?;
-    let (tagged, imports, exports) = reported(macros::expand_program(&forms, &host_target()), src)?;
+    let (tagged, imports, exports) = reported(macros::load_program(&forms, &host_target()), src)?;
     // Run Stage-3 macro expansion too, so generated definitions show up.
     let tagged = reported(expand_stage3_macros(tagged, &imports, &exports), src)?;
     Ok(tagged
