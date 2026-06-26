@@ -123,6 +123,9 @@ pub enum CodeOp {
     Nth,
     Sym,
     Int,
+    /// `(gensym)` — a fresh, globally-unique `Code` symbol (macro hygiene). Takes
+    /// no `Code` argument.
+    Gensym,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an

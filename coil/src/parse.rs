@@ -1055,6 +1055,13 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             Ok(ExprKind::Quasi(build_quasi(&args[0])?))
         }
         "unquote" => Err(Diag::at(span, "unquote (~) is only valid inside a quasiquote (`)")),
+        // (gensym) — a fresh Code symbol (hygiene)
+        "gensym" => {
+            if !args.is_empty() {
+                return Err(Diag::at(span, "gensym: expects (gensym)"));
+            }
+            Ok(ExprKind::CodeOp { op: CodeOp::Gensym, args: vec![] })
+        }
         // operations on Code values
         "code-list?" | "code-sym?" | "code-int?" | "code-count" | "code-nth" | "code-sym"
         | "code-int" => {

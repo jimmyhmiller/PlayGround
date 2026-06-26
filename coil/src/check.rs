@@ -746,7 +746,7 @@ fn synth_inner(
             let rty = match op {
                 CodeOp::Count | CodeOp::Int => Type::Int(64, true),
                 CodeOp::Sym => Type::Slice(Box::new(Type::Int(8, false))),
-                CodeOp::Nth => Type::Code,
+                CodeOp::Nth | CodeOp::Gensym => Type::Code,
                 CodeOp::IsList | CodeOp::IsSym | CodeOp::IsInt => Type::Bool,
             };
             Ok((Expr::new(ExprKind::CodeOp { op: *op, args: new_args }, e.span), rty))

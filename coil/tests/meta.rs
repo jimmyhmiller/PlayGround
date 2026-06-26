@@ -94,3 +94,25 @@ fn expression_macro_with_arithmetic_in_the_macro() {
     );
     assert_eq!(code, 28);
 }
+
+#[test]
+fn gensym_is_hygienic() {
+    // Each expansion gets a fresh name (no collision between the two calls)…
+    let code = build_and_run(
+        "(module a)\n\
+         (defn dbl-safe [(x Code)] (-> Code) (let [t (gensym)] `(let [~t ~x] (iadd ~t ~t))))\n\
+         (defn main [] (-> i64) (iadd (dbl-safe 5) (dbl-safe 3)))", // 10 + 6
+    );
+    assert_eq!(code, 16);
+}
+
+#[test]
+fn gensym_avoids_capturing_user_bindings() {
+    // …and the macro's temp does not capture a user binding of the same idea.
+    let code = build_and_run(
+        "(module a)\n\
+         (defn add-tmp [(x Code)] (-> Code) (let [t (gensym)] `(let [~t ~x] (iadd ~t 1))))\n\
+         (defn main [] (-> i64) (let [t 100] (iadd t (add-tmp 5))))", // 100 + 6
+    );
+    assert_eq!(code, 106);
+}

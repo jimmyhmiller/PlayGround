@@ -915,9 +915,18 @@ fn ctval_to_sexp(v: &CtVal) -> Result<crate::reader::Sexp, String> {
     }
 }
 
-/// Evaluate a `Code` operation. `op`'s first argument is the `Code` value.
+/// A monotonic counter for `(gensym)` — fresh, collision-free names across every
+/// macro expansion in a compilation (macro hygiene).
+static GENSYM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Evaluate a `Code` operation. Most take a `Code` first argument; `Gensym` takes
+/// none and returns a fresh symbol.
 fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
-    use crate::reader::SexpKind as K;
+    use crate::reader::{Sexp, SexpKind as K};
+    if op == CodeOp::Gensym {
+        let n = GENSYM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(CtVal::Code(Sexp::new(K::Sym(format!("$g{n}")), crate::span::Span::DUMMY)));
+    }
     let code = match args.first() {
         Some(CtVal::Code(s)) => s,
         _ => return Err("comptime: code op expects a Code value".to_string()),
@@ -951,6 +960,7 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
             K::Int(n) => CtVal::Int(*n),
             _ => return Err("comptime: code-int expects an integer".to_string()),
         },
+        CodeOp::Gensym => unreachable!("gensym handled above (takes no Code argument)"),
     })
 }
 
