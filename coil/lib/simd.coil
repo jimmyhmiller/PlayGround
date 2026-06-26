@@ -9,7 +9,7 @@
 ; count and intrinsic suffix, or generate per-target with a `target-arch` macro.
 
 ; ---- construct a <4 x float> from four scalars (cast to f32) ----------------
-(defmacro vec4f [x0 x1 x2 x3]
+(defn vec4f [(x0 Code) (x1 Code) (x2 Code) (x3 Code)] (-> Code)
   `(llvm-ir (vec f32 4) [(cast :f32 ~x0) (cast :f32 ~x1) (cast :f32 ~x2) (cast :f32 ~x3)]
      "%v0 = insertelement <4 x float> undef, $t0 $0, i32 0
 %v1 = insertelement <4 x float> %v0, $t1 $1, i32 1
@@ -18,32 +18,32 @@
 ret $ret %r"))
 
 ; ---- broadcast one scalar across all four lanes ----------------------------
-(defmacro splat4f [x]
+(defn splat4f [(x Code)] (-> Code)
   `(llvm-ir (vec f32 4) [(cast :f32 ~x)]
      "%v = insertelement <4 x float> undef, $t0 $0, i32 0
 %r = shufflevector <4 x float> %v, <4 x float> undef, <4 x i32> zeroinitializer
 ret $ret %r"))
 
 ; ---- elementwise arithmetic (one template per op; any lane type via $ret) ---
-(defmacro vadd4f [a b]
+(defn vadd4f [(a Code) (b Code)] (-> Code)
   `(llvm-ir (vec f32 4) [~a ~b] "%r = fadd $ret $0, $1
 ret $ret %r"))
-(defmacro vsub4f [a b]
+(defn vsub4f [(a Code) (b Code)] (-> Code)
   `(llvm-ir (vec f32 4) [~a ~b] "%r = fsub $ret $0, $1
 ret $ret %r"))
-(defmacro vmul4f [a b]
+(defn vmul4f [(a Code) (b Code)] (-> Code)
   `(llvm-ir (vec f32 4) [~a ~b] "%r = fmul $ret $0, $1
 ret $ret %r"))
 
 ; ---- fused multiply-add via the @llvm.fma intrinsic (declare is hoisted) ----
-(defmacro vfma4f [a b c]
+(defn vfma4f [(a Code) (b Code) (c Code)] (-> Code)
   `(llvm-ir (vec f32 4) [~a ~b ~c]
      "declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)
 %r = call $ret @llvm.fma.v4f32($t0 $0, $t1 $1, $t2 $2)
 ret $ret %r"))
 
 ; ---- horizontal sum of the four lanes -> scalar f32 ------------------------
-(defmacro reduce-add4f [v]
+(defn reduce-add4f [(v Code)] (-> Code)
   `(llvm-ir f32 [~v]
      "declare float @llvm.vector.reduce.fadd.v4f32(float, <4 x float>)
 %r = call $ret @llvm.vector.reduce.fadd.v4f32(float 0.0, $t0 $0)

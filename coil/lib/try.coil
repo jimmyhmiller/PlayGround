@@ -20,17 +20,19 @@
 (import "result.coil"  :use *)   ; Ok / Err / Some / None
 (import "control.coil" :use *)   ; block / return-from / loop / break
 
-(defmacro try [& body]
+(defn try [& (body Code)] (-> Code)
   `(block :try ~@body))
 
 ; Result: (Ok v) -> v ; (Err e) -> short-circuit the enclosing (try) with (Err e).
-(defmacro try! [e]
-  `(match ~e
-     (Ok  [__v] __v)
-     (Err [__e] (return-from :try (Err __e)))))
+(defn try! [(e Code)] (-> Code)
+  (let [v (gensym) er (gensym)]
+    `(match ~e
+       (Ok  [~v] ~v)
+       (Err [~er] (return-from :try (Err ~er))))))
 
 ; Option: (Some v) -> v ; (None) -> short-circuit the enclosing (try) with (None).
-(defmacro try? [e]
-  `(match ~e
-     (Some [__v] __v)
-     (None []     (return-from :try (None)))))
+(defn try? [(e Code)] (-> Code)
+  (let [v (gensym)]
+    `(match ~e
+       (Some [~v] ~v)
+       (None []   (return-from :try (None))))))
