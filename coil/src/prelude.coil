@@ -1,9 +1,10 @@
-(module prelude)
-; THE PRELUDE — compiled into the compiler (src/prelude.coil) and auto-loaded into
-; every program, so the core traits are always in scope with no import. Trait names
-; are a flat global namespace and trait methods resolve program-wide, so `=` /
-; `hash` (and `case`, which defaults to `=`) just work. Add a type to a trait by
-; `(impl Eq YourType …)` or `(derive Eq YourType)` (lib/derive.coil).
+(module coil.core)
+; THE CORE NAMESPACE — compiled into the compiler (src/prelude.coil) and auto-loaded
+; (auto-referred) into every program, like Clojure's clojure.core. Its names — the
+; traits `Eq`/`Hash`/`Add`/… and their operator methods `=`/`+`/`hash`/… — are in
+; scope with NO import (every other module must be `:use`/`:as`-imported). Trait
+; names are namespaced to `coil.core`; add a type with `(impl Eq YourType …)` or
+; `(derive Eq YourType)` (lib/derive.coil).
 
 ; structural equality — the method is `=` (so `(= a b)` at runtime).
 (deftrait Eq [Self]

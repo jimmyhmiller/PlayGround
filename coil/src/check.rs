@@ -106,6 +106,13 @@ struct LoopFrame {
     expected: Option<Type>,
 }
 
+/// Display a (possibly `coil.core`-qualified) name for diagnostics: the auto-referred
+/// core namespace is stripped so builtins read as `Eq`, not `coil.core.Eq`; names
+/// from user modules keep their `module.Name` form.
+fn display_name(n: &str) -> &str {
+    n.strip_prefix("coil.core.").unwrap_or(n)
+}
+
 pub fn check(program: &Program) -> Result<Program, Diag> {
     // ---- type tables --------------------------------------------------------
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
@@ -1130,6 +1137,7 @@ fn synth_inner(
                         .get(&self_name)
                         .is_some_and(|ts| ts.contains(&trait_name));
                     if !bounded {
+                        let trait_name = display_name(&trait_name);
                         return Err(format!(
                             "in '{fname}': type parameter '{self_name}' is not bounded by '{trait_name}' \
                              (required to call '{func}')"
@@ -1167,9 +1175,8 @@ fn synth_inner(
                 }
                 // Concrete Self: require an impl, then dispatch to the lowered fn.
                 if !cx.impls.contains(&(trait_name.clone(), self_name.clone())) {
-                    return Err(format!(
-                        "in '{fname}': '{self_name}' does not implement '{trait_name}'"
-                    ).into());
+                    let (sn, tn) = (display_name(&self_name), display_name(&trait_name));
+                    return Err(format!("in '{fname}': '{sn}' does not implement '{tn}'").into());
                 }
                 call_func = trait_method_fn(&trait_name, &self_name, func);
             }
@@ -1294,6 +1301,7 @@ fn synth_inner(
                             .as_ref()
                             .is_some_and(|n| cx.impls.contains(&(tr.clone(), n.clone())));
                         if !ok {
+                            let tr = display_name(tr);
                             return Err(format!(
                                 "in '{fname}': '{}' does not implement '{tr}' (required by '{func}' bound on '{param}')",
                                 ty_str(ty)

@@ -23,10 +23,15 @@ use crate::parse;
 struct Defs {
     callables: HashSet<String>, // functions + sum-variant constructors
     types: HashSet<String>,     // struct + sum type names
+    traits: HashSet<String>,    // deftrait names
     convs: HashSet<String>,
     externs: HashSet<String>, // C symbols — referenced bare, never renamed
 }
 type DefTable = HashMap<String, Defs>;
+
+/// The core namespace (the prelude): auto-referred into every module like Clojure's
+/// `clojure.core`, so its traits/operators are in scope with no import.
+const CORE: &str = "coil.core";
 
 /// Parse every tagged form, qualify it under its module, and merge into one
 /// whole-program `Program`.
@@ -59,6 +64,9 @@ pub fn resolve_program(
                 for v in &s.variants {
                     d.callables.insert(v.name.clone());
                 }
+            }
+            for t in &p.traits {
+                d.traits.insert(t.name.clone());
             }
             for c in p.conventions.keys() {
                 if c != "c" {
@@ -159,6 +167,12 @@ fn qualify_program(
             f.name = format!("{m}.{}", f.name);
         }
         f.cc = resolve(&f.cc, m, imps, table, exports, |d| &d.convs)?;
+        // Resolve each trait name in the bounds (`(T Eq)` → `coil.core.Eq`).
+        for (_, traits) in &mut f.bounds {
+            for tr in traits {
+                *tr = resolve(tr, m, imps, table, exports, |d| &d.traits)?;
+            }
+        }
         for param in &mut f.params {
             qualify_type(&mut param.ty, m, imps, table, &tps, exports)?;
         }
@@ -216,10 +230,10 @@ fn qualify_program(
     for meta in &mut p.metas {
         qualify_expr(meta, m, imps, table, &empty, exports)?;
     }
-    // Traits: qualify the types in each method signature (Self stays unqualified,
-    // treated as an in-scope type parameter). Trait names are a flat global
-    // namespace in v1, so the name itself isn't renamed.
+    // Traits: rename the trait to `module.Trait` and qualify the types in each
+    // method signature (Self stays unqualified, an in-scope type parameter).
     for t in &mut p.traits {
+        t.name = format!("{m}.{}", t.name);
         let tps: HashSet<String> = std::iter::once(t.self_param.clone()).collect();
         for meth in &mut t.methods {
             for param in &mut meth.params {
@@ -232,6 +246,8 @@ fn qualify_program(
     // method's signature + body like an ordinary function (the method name is left
     // bare — the checker mangles it to <Trait>$<Type>$<method>).
     for im in &mut p.impls {
+        // Resolve the trait reference (`(impl Eq i64 …)` → `coil.core.Eq`).
+        im.trait_name = resolve(&im.trait_name, m, imps, table, exports, |d| &d.traits)?;
         // A scalar impl target (`(impl Eq i64 …)`) keeps its spelling; a nominal
         // one resolves to its qualified type name.
         if !crate::ast::is_scalar_typename(&im.for_type) {
@@ -502,6 +518,14 @@ fn resolve(
                         return Ok(format!("{target}.{name}"));
                     }
                 }
+            }
+        }
+    }
+    // `coil.core` is auto-referred into every module (like clojure.core).
+    if m != CORE {
+        if let Some(d) = table.get(CORE) {
+            if pick(d).contains(name) && macros::exports(exports, CORE, name) {
+                return Ok(format!("{CORE}.{name}"));
             }
         }
     }
