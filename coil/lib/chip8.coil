@@ -1,0 +1,193 @@
+; ============================================================================
+; chip8.coil — the CHIP-8 virtual machine core, front-end agnostic. Both the
+; terminal (examples/chip8.coil) and the macOS-window (apps/chip8) front-ends
+; import this module and supply their own rendering + input. No I/O here except
+; reading a ROM file.
+;
+;   (import "lib/chip8.coil" :as c8)
+;   (let [vm (alloc-stack c8/Chip8)]
+;     (c8/init vm) (c8/load-rom vm path)
+;     (c8/step vm) (c8/tick vm)
+;     (c8/px vm i)            ; pixel i (0/1) of the 64x32 display
+;     (c8/set-key vm k 8) (c8/decay-keys vm))
+; ============================================================================
+
+(module chip8)
+(export Chip8 init load-rom step tick px draw? clear-draw set-key key-down decay-keys)
+
+(import "control.coil" :use *)   ; cond / for / while
+
+(extern open       :cc c [(ptr i8) :i64] (-> :i32))
+(extern read       :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern close      :cc c [:i64] (-> :i32))
+(extern memset     :cc c [(ptr i8) :i64 :i64] (-> (ptr i8)))
+(extern arc4random :cc c [] (-> :u32))
+
+(defstruct Chip8
+  [(mem   (array u8 4096))
+   (v     (array u8 16))
+   (stack (array u16 16))
+   (disp  (array u8 2048))     ; 64x32, one byte per pixel
+   (keys  (array i32 16))      ; per-key "frames still held"
+   (ireg  i64) (pc i64) (sp i64) (dt i64) (st i64) (drawf i64)])
+
+; ---- internal accessors ----------------------------------------------------
+(defn vget [(c (ptr Chip8)) (i i64)] (-> i64) (cast :i64 (load (index (field c v) i))))
+(defn vset [(c (ptr Chip8)) (i i64) (x i64)] (-> i64)
+  (do (store! (index (field c v) i) (cast :u8 (iand x 0xFF))) 0))
+(defn mget [(c (ptr Chip8)) (a i64)] (-> i64) (cast :i64 (load (index (field c mem) a))))
+(defn mset [(c (ptr Chip8)) (a i64) (x i64)] (-> i64)
+  (do (store! (index (field c mem) a) (cast :u8 (iand x 0xFF))) 0))
+(defn ireg-get [(c (ptr Chip8))] (-> i64) (load (field c ireg)))
+(defn ireg-set [(c (ptr Chip8)) (x i64)] (-> i64) (do (store! (field c ireg) (iand x 0xFFFF)) 0))
+(defn key-raw [(c (ptr Chip8)) (k i64)] (-> i64) (cast :i64 (load (index (field c keys) k))))
+(defn pc-get [(c (ptr Chip8))] (-> i64) (load (field c pc)))
+(defn pc-set [(c (ptr Chip8)) (a i64)] (-> i64) (do (store! (field c pc) (iand a 0xFFF)) 0))
+(defn pc-skip [(c (ptr Chip8))] (-> i64) (pc-set c (iadd (pc-get c) 2)))
+
+(defn stack-push [(c (ptr Chip8)) (a i64)] (-> i64)
+  (let [sp (load (field c sp))]
+    (do (store! (index (field c stack) sp) (cast :u16 (pc-get c)))
+        (store! (field c sp) (iadd sp 1)) (pc-set c a))))
+(defn stack-pop [(c (ptr Chip8))] (-> i64)
+  (let [sp (isub (load (field c sp)) 1)]
+    (do (store! (field c sp) sp) (pc-set c (cast :i64 (load (index (field c stack) sp)))))))
+
+(defn clear-disp [(c (ptr Chip8))] (-> i64)
+  (do (for [i 0 2048] (store! (index (field c disp) i) (cast :u8 0)))
+      (store! (field c drawf) 1) 0))
+
+(defn draw-sprite [(c (ptr Chip8)) (vx i64) (vy i64) (n i64)] (-> i64)
+  (let [x (iand (vget c vx) 0x3F) y (iand (vget c vy) 0x1F)]
+    (do (vset c 15 0)
+        (for [row 0 n]
+          (let [bits (mget c (iadd (ireg-get c) row))]
+            (for [col 0 8]
+              (if (icmp-ne (iand bits (ishr 0x80 col)) 0)
+                  (let [px (irem (iadd x col) 64) py (irem (iadd y row) 32)
+                        idx (iadd (imul py 64) px)
+                        cur (cast :i64 (load (index (field c disp) idx)))]
+                    (do (if (icmp-eq cur 1) (vset c 15 1) 0)
+                        (store! (index (field c disp) idx) (cast :u8 (ixor cur 1))) 0))
+                  0))))
+        (store! (field c drawf) 1) 0)))
+
+(defn op0 [(c (ptr Chip8)) (op i64)] (-> i64)
+  (cond (icmp-eq op 0xE0) (clear-disp c) (icmp-eq op 0xEE) (stack-pop c) 0))
+
+(defn op8 [(c (ptr Chip8)) (x i64) (y i64) (n i64)] (-> i64)
+  (let [vx (vget c x) vy (vget c y)]
+    (cond
+      (icmp-eq n 0)  (vset c x vy)
+      (icmp-eq n 1)  (vset c x (ior vx vy))
+      (icmp-eq n 2)  (vset c x (iand vx vy))
+      (icmp-eq n 3)  (vset c x (ixor vx vy))
+      (icmp-eq n 4)  (let [s (iadd vx vy)] (do (vset c x s)        (vset c 15 (if (icmp-gt s 255) 1 0))))
+      (icmp-eq n 5)  (do (vset c x (isub vx vy)) (vset c 15 (if (icmp-ge vx vy) 1 0)))
+      (icmp-eq n 6)  (do (vset c x (ishr vx 1))  (vset c 15 (iand vx 1)))
+      (icmp-eq n 7)  (do (vset c x (isub vy vx)) (vset c 15 (if (icmp-ge vy vx) 1 0)))
+      (icmp-eq n 14) (do (vset c x (ishl vx 1))  (vset c 15 (iand (ishr vx 7) 1)))
+      0)))
+
+(defn opE [(c (ptr Chip8)) (x i64) (nn i64)] (-> i64)
+  (cond (icmp-eq nn 0x9E) (if (icmp-gt (key-raw c (vget c x)) 0) (pc-skip c) 0)
+        (icmp-eq nn 0xA1) (if (icmp-eq (key-raw c (vget c x)) 0) (pc-skip c) 0)
+        0))
+
+(defn find-key [(c (ptr Chip8))] (-> i64)
+  (let [r (alloc-stack i64)]
+    (do (store! r -1)
+        (for [k 0 16] (if (icmp-gt (key-raw c k) 0) (if (icmp-lt (load r) 0) (store! r k) 0) 0))
+        (load r))))
+(defn wait-key [(c (ptr Chip8)) (x i64)] (-> i64)
+  (let [k (find-key c)] (if (icmp-ge k 0) (vset c x k) (pc-set c (isub (pc-get c) 2)))))
+
+(defn bcd [(c (ptr Chip8)) (x i64)] (-> i64)
+  (let [v (vget c x) i (ireg-get c)]
+    (do (mset c i (idiv v 100)) (mset c (iadd i 1) (irem (idiv v 10) 10)) (mset c (iadd i 2) (irem v 10)) 0)))
+(defn store-regs [(c (ptr Chip8)) (x i64)] (-> i64)
+  (do (for [k 0 (iadd x 1)] (mset c (iadd (ireg-get c) k) (vget c k))) 0))
+(defn load-regs [(c (ptr Chip8)) (x i64)] (-> i64)
+  (do (for [k 0 (iadd x 1)] (vset c k (mget c (iadd (ireg-get c) k)))) 0))
+
+(defn opF [(c (ptr Chip8)) (x i64) (nn i64)] (-> i64)
+  (cond
+    (icmp-eq nn 0x07) (vset c x (load (field c dt)))
+    (icmp-eq nn 0x0A) (wait-key c x)
+    (icmp-eq nn 0x15) (do (store! (field c dt) (vget c x)) 0)
+    (icmp-eq nn 0x18) (do (store! (field c st) (vget c x)) 0)
+    (icmp-eq nn 0x1E) (ireg-set c (iadd (ireg-get c) (vget c x)))
+    (icmp-eq nn 0x29) (ireg-set c (iadd 0x50 (imul (vget c x) 5)))
+    (icmp-eq nn 0x33) (bcd c x)
+    (icmp-eq nn 0x55) (store-regs c x)
+    (icmp-eq nn 0x65) (load-regs c x)
+    0))
+
+(defn exec [(c (ptr Chip8)) (op i64)] (-> i64)
+  (let [hi (iand (ishr op 12) 0xF) x (iand (ishr op 8) 0xF) y (iand (ishr op 4) 0xF)
+        n (iand op 0xF) nn (iand op 0xFF) nnn (iand op 0xFFF)]
+    (cond
+      (icmp-eq hi 0)  (op0 c op)
+      (icmp-eq hi 1)  (pc-set c nnn)
+      (icmp-eq hi 2)  (stack-push c nnn)
+      (icmp-eq hi 3)  (if (icmp-eq (vget c x) nn) (pc-skip c) 0)
+      (icmp-eq hi 4)  (if (icmp-ne (vget c x) nn) (pc-skip c) 0)
+      (icmp-eq hi 5)  (if (icmp-eq (vget c x) (vget c y)) (pc-skip c) 0)
+      (icmp-eq hi 6)  (vset c x nn)
+      (icmp-eq hi 7)  (vset c x (iadd (vget c x) nn))
+      (icmp-eq hi 8)  (op8 c x y n)
+      (icmp-eq hi 9)  (if (icmp-ne (vget c x) (vget c y)) (pc-skip c) 0)
+      (icmp-eq hi 10) (ireg-set c nnn)
+      (icmp-eq hi 11) (pc-set c (iadd nnn (vget c 0)))
+      (icmp-eq hi 12) (vset c x (iand (cast :i64 (arc4random)) nn))
+      (icmp-eq hi 13) (draw-sprite c x y n)
+      (icmp-eq hi 14) (opE c x nn)
+      (icmp-eq hi 15) (opF c x nn)
+      0)))
+
+(defn fnt [(c (ptr Chip8)) (o i64) (a i64) (b i64) (d i64) (e i64) (f i64)] (-> i64)
+  (do (mset c (iadd 0x50 o) a) (mset c (iadd 0x51 o) b) (mset c (iadd 0x52 o) d)
+      (mset c (iadd 0x53 o) e) (mset c (iadd 0x54 o) f) 0))
+(defn load-font [(c (ptr Chip8))] (-> i64)
+  (do
+    (fnt c 0   0xF0 0x90 0x90 0x90 0xF0)  (fnt c 5   0x20 0x60 0x20 0x20 0x70)
+    (fnt c 10  0xF0 0x10 0xF0 0x80 0xF0)  (fnt c 15  0xF0 0x10 0xF0 0x10 0xF0)
+    (fnt c 20  0x90 0x90 0xF0 0x10 0x10)  (fnt c 25  0xF0 0x80 0xF0 0x10 0xF0)
+    (fnt c 30  0xF0 0x80 0xF0 0x90 0xF0)  (fnt c 35  0xF0 0x10 0x20 0x40 0x40)
+    (fnt c 40  0xF0 0x90 0xF0 0x90 0xF0)  (fnt c 45  0xF0 0x90 0xF0 0x10 0xF0)
+    (fnt c 50  0xF0 0x90 0xF0 0x90 0x90)  (fnt c 55  0xE0 0x90 0xE0 0x90 0xE0)
+    (fnt c 60  0xF0 0x80 0x80 0x80 0xF0)  (fnt c 65  0xE0 0x90 0x90 0x90 0xE0)
+    (fnt c 70  0xF0 0x80 0xF0 0x80 0xF0)  (fnt c 75  0xF0 0x80 0xF0 0x80 0x80)
+    0))
+
+; ---- public API ------------------------------------------------------------
+(defn init [(c (ptr Chip8))] (-> i64)
+  (do (memset c 0 (sizeof Chip8)) (store! (field c pc) 0x200) (load-font c) 0))
+
+; load a ROM at 0x200; returns 0 on success, -1 if the file can't be opened.
+(defn load-rom [(c (ptr Chip8)) (path (ptr i8))] (-> i64)
+  (let [fd (cast :i64 (open path 0))]
+    (if (icmp-lt fd 0) -1
+        (do (read fd (index (field c mem) 0x200) 3584) (close fd) 0))))
+
+(defn step [(c (ptr Chip8))] (-> i64)
+  (let [pc (pc-get c) op (ior (ishl (mget c pc) 8) (mget c (iadd pc 1)))]
+    (do (pc-set c (iadd pc 2)) (exec c op) 0)))
+
+; decrement the 60 Hz timers — call once per frame.
+(defn tick [(c (ptr Chip8))] (-> i64)
+  (do (if (icmp-gt (load (field c dt)) 0) (store! (field c dt) (isub (load (field c dt)) 1)) 0)
+      (if (icmp-gt (load (field c st)) 0) (store! (field c st) (isub (load (field c st)) 1)) 0) 0))
+
+(defn px       [(c (ptr Chip8)) (i i64)] (-> i64) (cast :i64 (load (index (field c disp) i))))
+(defn draw?    [(c (ptr Chip8))] (-> i64) (load (field c drawf)))
+(defn clear-draw [(c (ptr Chip8))] (-> i64) (do (store! (field c drawf) 0) 0))
+
+; input: front-ends mark a key "held for N frames" (terminals can't see key-up),
+; test it, and age all keys by one frame.
+(defn set-key   [(c (ptr Chip8)) (k i64) (frames i64)] (-> i64)
+  (do (store! (index (field c keys) k) (cast :i32 frames)) 0))
+(defn key-down  [(c (ptr Chip8)) (k i64)] (-> i64) (if (icmp-gt (key-raw c k) 0) 1 0))
+(defn decay-keys [(c (ptr Chip8))] (-> i64)
+  (do (for [k 0 16] (let [kv (key-raw c k)]
+                      (if (icmp-gt kv 0) (store! (index (field c keys) k) (cast :i32 (isub kv 1))) 0))) 0))
