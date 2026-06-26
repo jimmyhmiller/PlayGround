@@ -19,147 +19,105 @@
 ;                lossy; write hash by hand).
 ; sum/slice/pointer/compound fields are rejected by both — write the op by hand.
 
-; ---- derive-eq -------------------------------------------------------------
-; The per-field equality expression: (field a f) vs (field b f).
-(def derive--field-eq
-  (lambda [fname ftype a b]
-    (let [pa `(field ~a ~fname) pb `(field ~b ~fname)]
-      (if (not (symbol? ftype))
-          (error "derive-eq: unsupported field type (only scalars + nested structs)")
-          (if (= (type-kind ftype) :struct)
-              `(~(symbol ftype "-eq") ~pa ~pb)               ; nested struct: recurse
-              (if (= (type-kind ftype) :sum)
-                  (error "derive-eq: sum fields unsupported in v1; write eq by hand")
-                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
-                      `(fcmp-eq (load ~pa) (load ~pb))       ; float
-                      `(icmp-eq (load ~pa) (load ~pb)))))))))  ; int/bool
+; ---- shared field reflection helpers (Stage-3, over a type given as Code) ----
+; kind tags: 0=int 1=float 2=bool 3=struct 4=sum 5=ptr 6=array 7=slice 8=other
 
-; Fold the fields into a short-circuiting (and …); no fields => true.
-(def derive--eq-and
-  (lambda [fields a b]
-    (if (empty? fields)
-        true
-        (let [f (first fields)
-              this (derive--field-eq (first f) (first (rest f)) a b)]
-          (if (empty? (rest fields))
-              this
-              `(and ~this ~(derive--eq-and (rest fields) a b)))))))
+; ---- derive-eq (standalone T-eq function) ----------------------------------
+(defn derive--field-eq [(T Code) (a Code) (b Code) (i i64)] (-> Code)
+  (let [fname (code-field-name T i)
+        kind  (code-field-kind T i)
+        pa    `(field ~a ~fname)
+        pb    `(field ~b ~fname)]
+    (if (icmp-eq kind 3) `(~(code-symbol (code-field-type T i) "-eq") ~pa ~pb)  ; nested struct: recurse
+      (if (icmp-eq kind 4) (error "derive-eq: sum fields unsupported in v1; write eq by hand")
+        (if (icmp-eq kind 1) `(fcmp-eq (load ~pa) (load ~pb))                   ; float
+          `(icmp-eq (load ~pa) (load ~pb)))))))                                 ; int/bool
 
-(defmacro derive-eq [tname]
-  `(defn ~(symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
-     ~(derive--eq-and (struct-fields tname) (quote a) (quote b))))
+(defn derive--eq-and [(T Code) (a Code) (b Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `true
+    (let [this (derive--field-eq T a b i)]
+      (if (icmp-eq (iadd i 1) n) this
+        `(and ~this ~(derive--eq-and T a b (iadd i 1) n))))))
+
+(defn derive-eq [(tname Code)] (-> Code)
+  `(defn ~(code-symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
+     ~(derive--eq-and tname `a `b 0 (code-field-count tname))))
 
 ; ---- derive-hash (FNV-1a over the fields) ----------------------------------
-(def derive--field-hash
-  (lambda [fname ftype x]
-    (let [p `(field ~x ~fname)]
-      (if (not (symbol? ftype))
-          (error "derive-hash: unsupported field type (only integers + nested structs)")
-          (if (= (type-kind ftype) :struct)
-              `(~(symbol ftype "-hash") ~p)                  ; nested struct: recurse
-              (if (= (type-kind ftype) :sum)
-                  (error "derive-hash: sum fields unsupported in v1; write hash by hand")
-                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
-                      (error "derive-hash: float fields unsupported (bit-hashing is lossy); write hash by hand")
-                      `(load ~p))))))))                       ; int/bool
+(defn derive--field-hash [(T Code) (x Code) (i i64)] (-> Code)
+  (let [fname (code-field-name T i)
+        kind  (code-field-kind T i)
+        p     `(field ~x ~fname)]
+    (if (icmp-eq kind 3) `(~(code-symbol (code-field-type T i) "-hash") ~p)     ; nested struct: recurse
+      (if (icmp-eq kind 4) (error "derive-hash: sum fields unsupported in v1; write hash by hand")
+        (if (icmp-eq kind 1) (error "derive-hash: float fields unsupported (bit-hashing is lossy); write hash by hand")
+          `(load ~p))))))                                                       ; int/bool
 
-; One FNV step per field, mixing the field's hash into the accumulator h.
-(def derive--hash-steps
-  (lambda [fields x h]
-    (if (empty? fields)
-        (list)
-        (let [f (first fields)
-              fh (derive--field-hash (first f) (first (rest f)) x)]
-          (cons `(store! ~h (imul (ixor (load ~h) ~fh) 1099511628211))
-                (derive--hash-steps (rest fields) x h))))))
+(defn derive--hash-steps [(T Code) (x Code) (h Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `()
+    (let [fh (derive--field-hash T x i)]
+      `((store! ~h (imul (ixor (load ~h) ~fh) 1099511628211)) ~@(derive--hash-steps T x h (iadd i 1) n)))))
 
-(defmacro derive-hash [tname]
-  `(defn ~(symbol tname "-hash") [(x ~tname)] (-> :i64)
-     (let [(mut h) -3750763034362895579]                     ; FNV-1a offset basis
-       ~@(derive--hash-steps (struct-fields tname) (quote x) (quote h))
+(defn derive-hash [(tname Code)] (-> Code)
+  `(defn ~(code-symbol tname "-hash") [(x ~tname)] (-> i64)
+     (let [(mut h) -3750763034362895579]
+       ~@(derive--hash-steps tname `x `h 0 (code-field-count tname))
        (load h))))
 
 ; ---- derive (generate a TRAIT impl) ----------------------------------------
-; `(derive Eq T)` / `(derive Hash T)` reflect T's fields and expand to an
-; `(impl Trait T …)` — the trait version of derive-eq/derive-hash. Unlike the
-; standalone `T-eq`/`T-hash` functions above, nested-struct fields dispatch
-; through the TRAIT method (so nested types must themselves impl/derive the
-; trait). The Eq/Hash traits come from the auto-loaded prelude. Scalars
-; (int/bool/float) + nested structs only; other field types are a hard error.
+(defn derive--teq-field [(T Code) (a Code) (b Code) (i i64)] (-> Code)
+  (let [fname (code-field-name T i)
+        kind  (code-field-kind T i)
+        pa    `(field ~a ~fname)
+        pb    `(field ~b ~fname)]
+    (if (icmp-eq kind 3) `(= ~pa ~pb)                                           ; nested: trait =
+      (if (icmp-eq kind 4) (error "derive Eq: sum fields unsupported; impl by hand")
+        (if (icmp-eq kind 1) `(fcmp-eq (load ~pa) (load ~pb))
+          `(icmp-eq (load ~pa) (load ~pb)))))))
 
-; trait-aware per-field equality (nested structs -> the `eq` trait method)
-(def derive--teq-field
-  (lambda [fname ftype a b]
-    (let [pa `(field ~a ~fname) pb `(field ~b ~fname)]
-      (if (not (symbol? ftype))
-          (error "derive Eq: unsupported field type (scalars + nested structs only)")
-          (if (= (type-kind ftype) :struct)
-              `(= ~pa ~pb)                                   ; nested: trait dispatch (Eq method is `=`)
-              (if (= (type-kind ftype) :sum)
-                  (error "derive Eq: sum fields unsupported; impl by hand")
-                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
-                      `(fcmp-eq (load ~pa) (load ~pb))
-                      `(icmp-eq (load ~pa) (load ~pb)))))))))
+(defn derive--teq-and [(T Code) (a Code) (b Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `true
+    (let [this (derive--teq-field T a b i)]
+      (if (icmp-eq (iadd i 1) n) this
+        `(and ~this ~(derive--teq-and T a b (iadd i 1) n))))))
 
-(def derive--teq-and
-  (lambda [fields a b]
-    (if (empty? fields)
-        true
-        (let [f (first fields)
-              this (derive--teq-field (first f) (first (rest f)) a b)]
-          (if (empty? (rest fields))
-              this
-              `(and ~this ~(derive--teq-and (rest fields) a b)))))))
+(defn derive--thash-field [(T Code) (x Code) (i i64)] (-> Code)
+  (let [fname (code-field-name T i)
+        kind  (code-field-kind T i)
+        p     `(field ~x ~fname)]
+    (if (icmp-eq kind 3) `(hash ~p)                                             ; nested: trait hash
+      (if (icmp-eq kind 4) (error "derive Hash: sum fields unsupported; impl by hand")
+        (if (icmp-eq kind 1) (error "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
+          `(load ~p))))))
 
-; trait-aware per-field hash (nested structs -> the `hash` trait method)
-(def derive--thash-field
-  (lambda [fname ftype x]
-    (let [p `(field ~x ~fname)]
-      (if (not (symbol? ftype))
-          (error "derive Hash: unsupported field type (integers + nested structs only)")
-          (if (= (type-kind ftype) :struct)
-              `(hash ~p)                                     ; nested: trait dispatch
-              (if (= (type-kind ftype) :sum)
-                  (error "derive Hash: sum fields unsupported; impl by hand")
-                  (if (or (= (name ftype) "f32") (= (name ftype) "f64"))
-                      (error "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
-                      `(load ~p))))))))
+(defn derive--thash-steps [(T Code) (x Code) (h Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `()
+    (let [fh (derive--thash-field T x i)]
+      `((store! ~h (imul (ixor (load ~h) ~fh) 1099511628211)) ~@(derive--thash-steps T x h (iadd i 1) n)))))
 
-(def derive--thash-steps
-  (lambda [fields x h]
-    (if (empty? fields)
-        (list)
-        (let [f (first fields)
-              fh (derive--thash-field (first f) (first (rest f)) x)]
-          (cons `(store! ~h (imul (ixor (load ~h) ~fh) 1099511628211))
-                (derive--thash-steps (rest fields) x h))))))
-
-(defmacro derive [trait-name tname]
-  (if (= (name trait-name) "Eq")
+(defn derive [(trait-name Code) (tname Code)] (-> Code)
+  (if (code-eq trait-name `Eq)
       `(impl Eq ~tname
          (= [(a ~tname) (b ~tname)] (-> bool)
-           ~(derive--teq-and (struct-fields tname) (quote a) (quote b))))
-      (if (= (name trait-name) "Hash")
-          `(impl Hash ~tname
-             (hash [(x ~tname)] (-> i64)
-               (let [(mut h) -3750763034362895579]            ; FNV-1a offset basis
-                 ~@(derive--thash-steps (struct-fields tname) (quote x) (quote h))
-                 (load h))))
-          (error "derive: only Eq and Hash are supported (impl other traits by hand)"))))
+           ~(derive--teq-and tname `a `b 0 (code-field-count tname))))
+    (if (code-eq trait-name `Hash)
+        `(impl Hash ~tname
+           (hash [(x ~tname)] (-> i64)
+             (let [(mut h) -3750763034362895579]
+               ~@(derive--thash-steps tname `x `h 0 (code-field-count tname))
+               (load h))))
+      (error "derive: only Eq and Hash are supported (impl other traits by hand)"))))
 
 ; ---- derive-keyops (a HashMap key from derived eq + hash) -------------------
-; Wraps `T-eq`/`T-hash` in the type-erased (ptr i8) KeyOps signatures the map
-; uses (the stored slot holds the struct value; cast it back to (ptr T)). Derive
-; `eq` and `hash` for T first. Closes the hand-written-KeyOps friction (D10).
-(defmacro derive-keyops [tname]
+(defn derive-keyops [(tname Code)] (-> Code)
   `(do
-     (defn ~(symbol tname "-keyhash") [(slot (ptr i8)) (n :i64)] (-> :i64)
-       (~(symbol tname "-hash") (cast (ptr ~tname) slot)))
-     (defn ~(symbol tname "-keyeq") [(ka (ptr i8)) (kb (ptr i8)) (n :i64)] (-> bool)
-       (~(symbol tname "-eq") (cast (ptr ~tname) ka) (cast (ptr ~tname) kb)))
-     (defn ~(symbol tname "-keyops") [] (-> (ptr KeyOps))
+     (defn ~(code-symbol tname "-keyhash") [(slot (ptr i8)) (n i64)] (-> i64)
+       (~(code-symbol tname "-hash") (cast (ptr ~tname) slot)))
+     (defn ~(code-symbol tname "-keyeq") [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+       (~(code-symbol tname "-eq") (cast (ptr ~tname) ka) (cast (ptr ~tname) kb)))
+     (defn ~(code-symbol tname "-keyops") [] (-> (ptr KeyOps))
        (let [o (alloc-static KeyOps)]
-         (store! (field o hash) (fnptr-of ~(symbol tname "-keyhash")))
-         (store! (field o eq)   (fnptr-of ~(symbol tname "-keyeq")))
+         (store! (field o hash) (fnptr-of ~(code-symbol tname "-keyhash")))
+         (store! (field o eq)   (fnptr-of ~(code-symbol tname "-keyeq")))
          (store! (field o size) (sizeof ~tname))
          o))))

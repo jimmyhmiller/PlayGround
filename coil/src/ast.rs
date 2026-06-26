@@ -135,6 +135,18 @@ pub enum CodeOp {
     Eq,
     /// `(code-keyword? X)` — is the `Code` value a `:keyword`?
     IsKeyword,
+    /// `(code-symbol PART…)` — concatenate the parts (strings / code symbols / ints)
+    /// into a fresh `Code` symbol. Used to build derived names like `Point-eq`.
+    Symbol,
+    /// Reflection on a type given as a `Code` symbol (what a macro receives), vs the
+    /// syntactic `field-*` forms. `(code-field-count TC)` → i64;
+    /// `(code-field-name TC i)` → the field name as a `Code` symbol;
+    /// `(code-field-kind TC i)` → i64 kind tag; `(code-field-type TC i)` → the field
+    /// type's name as a `Code` symbol.
+    CFieldCount,
+    CFieldName,
+    CFieldKind,
+    CFieldType,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an

@@ -99,10 +99,22 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
                 None => n,
             }))
             .collect();
-        tagged = tagged
-            .into_iter()
-            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &mut 0)?, m)))
-            .collect::<Result<Vec<_>, Diag>>()?;
+        let mut expanded: Vec<macros::TaggedForm> = Vec::with_capacity(tagged.len());
+        for (f, m) in tagged {
+            let out = expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &mut 0)?;
+            // A macro that expands to a top-level `(do …)` splices into several forms.
+            match &out.kind {
+                reader::SexpKind::List(items)
+                    if matches!(items.first().map(|x| &x.kind), Some(reader::SexpKind::Sym(h)) if h == "do") =>
+                {
+                    for child in &items[1..] {
+                        expanded.push((child.clone(), m.clone()));
+                    }
+                }
+                _ => expanded.push((out, m)),
+            }
+        }
+        tagged = expanded;
     }
     let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
 
@@ -151,8 +163,12 @@ fn keep_for_macro_detection(f: &reader::Sexp) -> bool {
     };
     match head {
         "defn" => defn_involves_code(items),
-        "impl" | "const" | "meta" | "static-assert" => false,
-        _ => true, // defstruct/defsum/deftrait/extern/import/module/defcc …
+        // declarations the macros may reference — always parseable, no macro calls
+        "defstruct" | "defsum" | "deftrait" | "extern" | "module" | "import" | "include"
+        | "export" | "defcc" => true,
+        // impls/consts/metas have runtime bodies; a bare `(macro …)` call is not a
+        // definition — both may contain not-yet-expanded macro calls, so drop them.
+        _ => false,
     }
 }
 

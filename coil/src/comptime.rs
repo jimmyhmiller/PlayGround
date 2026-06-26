@@ -607,7 +607,7 @@ fn eval(e: &Expr, env: &mut Env, ctx: &Ctx) -> Result<Flow, String> {
             for a in args {
                 argv.push(val!(eval(a, env, ctx)?));
             }
-            code_op(*op, &argv)?
+            code_op(*op, &argv, ctx)?
         }
         ExprKind::Var(name) => env
             .get(name)
@@ -1010,11 +1010,12 @@ fn sexp_eq(a: &crate::reader::Sexp, b: &crate::reader::Sexp) -> bool {
 
 /// Evaluate a `Code` operation. Most take a `Code` first argument; `Gensym` takes
 /// none and returns a fresh symbol.
-fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
+fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
     use crate::reader::{Sexp, SexpKind as K};
+    let dummy = crate::span::Span::DUMMY;
     if op == CodeOp::Gensym {
         let n = GENSYM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok(CtVal::Code(Sexp::new(K::Sym(format!("$g{n}")), crate::span::Span::DUMMY)));
+        return Ok(CtVal::Code(Sexp::new(K::Sym(format!("$g{n}")), dummy)));
     }
     if op == CodeOp::Error {
         let msg = match args.first() {
@@ -1022,6 +1023,55 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
             _ => "error: message must be a string".to_string(),
         };
         return Err(msg);
+    }
+    if op == CodeOp::Symbol {
+        // concatenate the parts (strings / code symbols / ints) into one symbol
+        let mut name = String::new();
+        for a in args {
+            match a {
+                CtVal::Str(s) => name.push_str(s),
+                CtVal::Int(n) => name.push_str(&n.to_string()),
+                CtVal::Code(s) => match &s.kind {
+                    K::Sym(x) | K::Str(x) => name.push_str(x),
+                    K::Int(n) => name.push_str(&n.to_string()),
+                    _ => return Err("comptime: code-symbol part must be a symbol/string/int".to_string()),
+                },
+                _ => return Err("comptime: code-symbol part must be a string/int/code".to_string()),
+            }
+        }
+        return Ok(CtVal::Code(Sexp::new(K::Sym(name), dummy)));
+    }
+    // Reflection on a type given as a Code symbol (for macros): look the struct up
+    // by name in the comptime type table.
+    if matches!(op, CodeOp::CFieldCount | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType) {
+        let tname = match args.first() {
+            Some(CtVal::Code(s)) => match &s.kind {
+                K::Sym(n) => n.clone(),
+                _ => return Err("comptime: code-field-* expects a type symbol".to_string()),
+            },
+            _ => return Err("comptime: code-field-* expects a type symbol".to_string()),
+        };
+        // The macro may receive the type name bare (`P`) while it's stored qualified
+        // (`app.P`) — match exactly, else by `.`-suffix.
+        let sd = ctx
+            .structs
+            .get(&tname)
+            .or_else(|| ctx.structs.iter().find(|(k, _)| k.rsplit('.').next() == Some(tname.as_str())).map(|(_, v)| v))
+            .ok_or_else(|| format!("comptime: '{tname}' is not a struct (field reflection needs a struct; sums unsupported)"))?;
+        if op == CodeOp::CFieldCount {
+            return Ok(CtVal::Int(sd.fields.len() as i64));
+        }
+        let i = match args.get(1) {
+            Some(CtVal::Int(n)) => *n as usize,
+            _ => return Err("comptime: code-field-* index must be an integer".to_string()),
+        };
+        let (fname, fty) = sd.fields.get(i).ok_or_else(|| format!("comptime: field index {i} out of range"))?;
+        return Ok(match op {
+            CodeOp::CFieldName => CtVal::Code(Sexp::new(K::Sym(fname.clone()), dummy)),
+            CodeOp::CFieldKind => CtVal::Int(type_kind_tag(fty, ctx)),
+            CodeOp::CFieldType => CtVal::Code(Sexp::new(K::Sym(type_name_str(fty)), dummy)),
+            _ => unreachable!(),
+        });
     }
     let code = match args.first() {
         Some(CtVal::Code(s)) => s,
@@ -1071,7 +1121,10 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
             K::Int(n) => CtVal::Int(*n),
             _ => return Err("comptime: code-int expects an integer".to_string()),
         },
-        CodeOp::Gensym | CodeOp::Error => unreachable!("handled above (no Code argument)"),
+        CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::CFieldCount
+        | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType => {
+            unreachable!("handled above")
+        }
     })
 }
 
