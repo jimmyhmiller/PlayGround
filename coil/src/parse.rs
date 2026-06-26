@@ -382,6 +382,9 @@ fn build_quasi(s: &Sexp) -> Result<Quasi, Diag> {
                     if h == "unquote" {
                         return Ok(Quasi::Unquote(Box::new(parse_expr(&items[1])?)));
                     }
+                    if h == "unquote-splicing" {
+                        return Ok(Quasi::Splice(Box::new(parse_expr(&items[1])?)));
+                    }
                 }
             }
             Ok(Quasi::List(items.iter().map(build_quasi).collect::<Result<_, _>>()?))

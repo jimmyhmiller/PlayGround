@@ -2397,6 +2397,10 @@ fn check_quasi(
             let (ee, _) = synth(e, None, env, cx, tps, fname)?;
             Quasi::Unquote(Box::new(ee))
         }
+        Quasi::Splice(e) => {
+            let (ee, _) = synth(e, None, env, cx, tps, fname)?;
+            Quasi::Splice(Box::new(ee))
+        }
         Quasi::List(items) => {
             Quasi::List(items.iter().map(|i| check_quasi(i, env, cx, tps, fname)).collect::<Result<_, _>>()?)
         }

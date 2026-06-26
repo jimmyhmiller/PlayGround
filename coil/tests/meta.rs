@@ -133,3 +133,34 @@ fn variadic_macro_folds_over_args() {
     );
     assert_eq!(code, 1);
 }
+
+#[test]
+fn unquote_splicing_multi_body_when() {
+    // ~@ splices a Code list's elements into the surrounding list — multi-body when.
+    let code = build_and_run(
+        "(module a)\n\
+         (defn when2 [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))\n\
+         (defn main [] (-> i64)\n\
+           (let [(mut x) 0]\n\
+             (when2 (icmp-lt 1 2) (store! (mut x) 5) (store! (mut x) (iadd (load x) 3)))\n\
+             (load x)))", // 5 then +3 = 8
+    );
+    assert_eq!(code, 8);
+}
+
+#[test]
+fn cond_macro_with_else() {
+    // The real cond: variadic (test value) pairs + optional trailing else, via a
+    // comptime helper recursing by index in steps of two.
+    let code = build_and_run(
+        "(module a)\n\
+         (defn cond-from [(cs Code) (i i64)] (-> Code)\n\
+           (if (icmp-eq (isub (code-count cs) i) 0) `0\n\
+             (if (icmp-eq (isub (code-count cs) i) 1) (code-nth cs i)\n\
+               `(if ~(code-nth cs i) ~(code-nth cs (iadd i 1)) ~(cond-from cs (iadd i 2))))))\n\
+         (defn cond2 [& (cs Code)] (-> Code) (cond-from cs 0))\n\
+         (defn classify [(n i64)] (-> i64) (cond2 (icmp-lt n 0) 1 (icmp-eq n 0) 2 3))\n\
+         (defn main [] (-> i64) (iadd (classify -5) (iadd (imul 10 (classify 0)) (imul 20 (classify 9)))))", // 1+20+60
+    );
+    assert_eq!(code, 81);
+}

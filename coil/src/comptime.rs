@@ -251,6 +251,7 @@ fn fold_quasi(q: &Quasi, ctx: &Ctx) -> Result<Quasi, String> {
     Ok(match q {
         Quasi::Lit(s) => Quasi::Lit(s.clone()),
         Quasi::Unquote(e) => Quasi::Unquote(Box::new(fold_expr(e, ctx)?)),
+        Quasi::Splice(e) => Quasi::Splice(Box::new(fold_expr(e, ctx)?)),
         Quasi::List(items) => Quasi::List(items.iter().map(|i| fold_quasi(i, ctx)).collect::<Result<_, _>>()?),
         Quasi::Vector(items) => Quasi::Vector(items.iter().map(|i| fold_quasi(i, ctx)).collect::<Result<_, _>>()?),
     })
@@ -894,21 +895,34 @@ fn eval_quasi(q: &Quasi, env: &mut Env, ctx: &Ctx) -> Result<crate::reader::Sexp
             Flow::Val(v) => ctval_to_sexp(&v),
             _ => Err("comptime: control flow inside an unquote".to_string()),
         },
-        Quasi::List(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for it in items {
-                out.push(eval_quasi(it, env, ctx)?);
+        Quasi::Splice(_) => Err("comptime: ~@ (splice) is only valid inside a list/vector".to_string()),
+        Quasi::List(items) => Ok(Sexp::new(SexpKind::List(eval_quasi_items(items, env, ctx)?), Span::DUMMY)),
+        Quasi::Vector(items) => Ok(Sexp::new(SexpKind::Vector(eval_quasi_items(items, env, ctx)?), Span::DUMMY)),
+    }
+}
+
+/// Build a list/vector's elements, expanding `~@` splices in place.
+fn eval_quasi_items(items: &[Quasi], env: &mut Env, ctx: &Ctx) -> Result<Vec<crate::reader::Sexp>, String> {
+    use crate::reader::SexpKind;
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        if let Quasi::Splice(e) = it {
+            let v = match eval(e, env, ctx)? {
+                Flow::Val(v) => v,
+                _ => return Err("comptime: control flow inside a ~@ splice".to_string()),
+            };
+            match v {
+                CtVal::Code(s) => match s.kind {
+                    SexpKind::List(xs) | SexpKind::Vector(xs) => out.extend(xs),
+                    _ => return Err("comptime: ~@ splice expects a Code list".to_string()),
+                },
+                _ => return Err("comptime: ~@ splice expects a Code list".to_string()),
             }
-            Ok(Sexp::new(SexpKind::List(out), Span::DUMMY))
-        }
-        Quasi::Vector(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for it in items {
-                out.push(eval_quasi(it, env, ctx)?);
-            }
-            Ok(Sexp::new(SexpKind::Vector(out), Span::DUMMY))
+        } else {
+            out.push(eval_quasi(it, env, ctx)?);
         }
     }
+    Ok(out)
 }
 
 /// Convert a comptime value to spliceable syntax (for an unquote).

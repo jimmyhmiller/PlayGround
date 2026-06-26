@@ -316,7 +316,7 @@ fn collect_calls(e: &ast::Expr, names: &std::collections::HashSet<&str>, out: &m
 fn collect_calls_quasi(q: &ast::Quasi, names: &std::collections::HashSet<&str>, out: &mut Vec<String>) {
     match q {
         ast::Quasi::Lit(_) => {}
-        ast::Quasi::Unquote(e) => collect_calls(e, names, out),
+        ast::Quasi::Unquote(e) | ast::Quasi::Splice(e) => collect_calls(e, names, out),
         ast::Quasi::List(items) | ast::Quasi::Vector(items) => {
             for it in items {
                 collect_calls_quasi(it, names, out);

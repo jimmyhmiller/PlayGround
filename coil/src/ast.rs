@@ -137,6 +137,9 @@ pub enum Quasi {
     /// `~E` — splice the comptime value of `E` (a `Code` value, or a scalar/string
     /// converted to a literal form).
     Unquote(Box<Expr>),
+    /// `~@E` — splice the *elements* of `E` (a `Code` list) into the surrounding
+    /// list/vector. Only valid as a list/vector element.
+    Splice(Box<Expr>),
     /// A `( … )` list whose elements may be unquotes/nested.
     List(Vec<Quasi>),
     /// A `[ … ]` vector.

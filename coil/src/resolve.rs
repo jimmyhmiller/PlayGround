@@ -265,7 +265,7 @@ fn qualify_quasi(
 ) -> Result<(), String> {
     match q {
         Quasi::Lit(_) => {}
-        Quasi::Unquote(e) => qualify_expr(e, m, imps, table, tps, exports)?,
+        Quasi::Unquote(e) | Quasi::Splice(e) => qualify_expr(e, m, imps, table, tps, exports)?,
         Quasi::List(items) | Quasi::Vector(items) => {
             for it in items {
                 qualify_quasi(it, m, imps, table, tps, exports)?;
