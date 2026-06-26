@@ -748,8 +748,10 @@ fn synth_inner(
                 CodeOp::Count | CodeOp::Int => Type::Int(64, true),
                 CodeOp::Sym | CodeOp::Str => Type::Slice(Box::new(Type::Int(8, false))),
                 CodeOp::Nth | CodeOp::Gensym | CodeOp::Rest | CodeOp::Symbol
-                | CodeOp::CFieldName | CodeOp::CFieldType => Type::Code,
-                CodeOp::CFieldCount | CodeOp::CFieldKind => Type::Int(64, true),
+                | CodeOp::CFieldName | CodeOp::CFieldType | CodeOp::CVariantSum
+                | CodeOp::CVariantName => Type::Code,
+                CodeOp::CFieldCount | CodeOp::CFieldKind | CodeOp::CVariantCount
+                | CodeOp::CVariantFields => Type::Int(64, true),
                 // `(error …)` diverges — it unifies with any branch's type.
                 CodeOp::Error => Type::Never,
                 CodeOp::IsList | CodeOp::IsSym | CodeOp::IsInt | CodeOp::Eq | CodeOp::IsKeyword => {

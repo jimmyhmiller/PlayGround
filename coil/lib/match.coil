@@ -1,64 +1,50 @@
 (module match)
 ; `(match-else scrut (V1 [..] body) … (_ default))` — a `match` with a CATCH-ALL
 ; arm, as a pure-LIBRARY MACRO over the comptime reflection bridge (no compiler
-; `_` support). It reflects the sum (from the first explicit arm's variant name,
-; via `variant-sum`), enumerates its variants (`sum-variants`), and EXPANDS `_`
-; into an explicit arm for each NOT-yet-covered variant (with gensym'd field binds
-; the default ignores). So the boilerplate of spelling every variant when most map
-; to one default — the JSON-dogfood friction — is removed without a core change.
-;
-; The macro infers the sum from the arms' VARIANT NAMES (present at expansion),
-; NOT the scrutinee's type (which isn't known until type-checking) — that's why a
-; macro can do this at all.
+; `_` support). It infers the sum from the first explicit arm's variant name
+; (code-variant-sum), enumerates the sum's variants (code-variant-*), and expands
+; `_` into an explicit arm for each NOT-yet-covered variant (with gensym'd field
+; binds the default ignores). Stage-3: macros are ordinary [Code…] -> Code fns.
 ;
 ;   (match-else j (JNum [n] n) (_ 0))   ; the other Json variants -> 0
 
-(def me--last    (lambda [xs] (if (empty? (rest xs)) (first xs) (me--last (rest xs)))))
-(def me--butlast (lambda [xs] (if (empty? (rest xs)) (list) (cons (first xs) (me--butlast (rest xs))))))
-(def me--member  (lambda [xs x] (if (empty? xs) false (if (= (first xs) x) true (me--member (rest xs) x)))))
-(def me--covered (lambda [arms] (if (empty? arms) (list) (cons (first (first arms)) (me--covered (rest arms))))))
-; first name in `names` not in `valid`, else false (for a clear cross-sum error)
-(def me--first-bad
-  (lambda [names valid]
-    (if (empty? names)
-        false
-        (if (me--member valid (first names)) (me--first-bad (rest names) valid) (first names)))))
+; all but the last element of a list
+(defn me--butlast [(xs Code) (i i64)] (-> Code)
+  (if (icmp-eq i (isub (code-count xs) 1)) `()
+    `(~(code-nth xs i) ~@(me--butlast xs (iadd i 1)))))
 
 ; the `_` arm's body: (_ b) -> b ; (_ b1 b2 …) -> (do b1 b2 …)
-(def me--wild-body
-  (lambda [wild] (let [b (rest wild)] (if (empty? (rest b)) (first b) (cons (quote do) b)))))
+(defn me--wild-body [(wild Code)] (-> Code)
+  (let [b (code-rest wild)]
+    (if (icmp-eq (code-count b) 1) (code-nth b 0) `(do ~@b))))
 
-; one fresh bind name per field, as a `[…]` vector (the default ignores them)
-(def me--genlist (lambda [fs] (if (empty? fs) (list) (cons (gensym "_m") (me--genlist (rest fs))))))
+; is `vname` the variant of one of the explicit arms?
+(defn me--covered? [(explicit Code) (vname Code) (i i64)] (-> bool)
+  (if (icmp-eq i (code-count explicit)) false
+    (if (code-eq (code-nth (code-nth explicit i) 0) vname) true
+      (me--covered? explicit vname (iadd i 1)))))
 
-; an arm `(Vname [binds] default)` for each variant not in `covered`
-(def me--uncovered
-  (lambda [variants covered default]
-    (if (empty? variants)
-        (list)
-        (let [v (first variants) vname (first v) vfields (first (rest v))]
-          (if (me--member covered vname)
-              (me--uncovered (rest variants) covered default)
-              (cons (list vname (to-vector (me--genlist vfields)) default)
-                    (me--uncovered (rest variants) covered default)))))))
+; n fresh bind names as a list (the default ignores them)
+(defn me--genbinds [(n i64)] (-> Code)
+  (if (icmp-eq n 0) `() `(~(gensym) ~@(me--genbinds (isub n 1)))))
 
-(defmacro match-else [scrut & arms]
-  (let [wild     (me--last arms)
-        explicit (me--butlast arms)]
-    (if (not (= (first wild) (quote _)))
+; an arm `(Vname [binds] default)` for each variant of `sum` not already covered
+(defn me--uncovered [(sum Code) (explicit Code) (default Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-variant-count sum)) `()
+    (let [vname (code-variant-name sum i)]
+      (if (me--covered? explicit vname 0)
+          (me--uncovered sum explicit default (iadd i 1))
+          `((~vname [~@(me--genbinds (code-variant-fields sum i))] ~default)
+            ~@(me--uncovered sum explicit default (iadd i 1)))))))
+
+(defn match-else [(scrut Code) & (arms Code)] (-> Code)
+  (let [n        (code-count arms)
+        wild     (code-nth arms (isub n 1))
+        explicit (me--butlast arms 0)]
+    (if (not (code-eq (code-nth wild 0) `_))
         (error "match-else: the last arm must be (_ default)")
-        (if (empty? explicit)
-            (error "match-else: needs at least one explicit variant arm (to infer the sum)")
-            (let [default  (me--wild-body wild)
-                  sum      (variant-sum (first (first explicit)))
-                  variants (sum-variants sum)
-                  covered  (me--covered explicit)
-                  bad      (me--first-bad covered (map first variants))]
-              (if bad
-                  ; an explicit arm whose variant isn't in the inferred sum (the sum
-                  ; is taken from the FIRST arm) — clearer than the core checker's
-                  ; later per-arm rejection.
-                  (error (str "match-else: arm '" (name bad)
-                              "' is not a variant of the sum inferred from the first arm"))
-                  (cons (quote match)
-                        (cons scrut (concat explicit (me--uncovered variants covered default))))))))))
+      (if (icmp-eq (code-count explicit) 0)
+          (error "match-else: needs at least one explicit variant arm (to infer the sum)")
+        (let [default (me--wild-body wild)
+              sum     (code-variant-sum (code-nth (code-nth explicit 0) 0))]
+          `(match ~scrut ~@explicit ~@(me--uncovered sum explicit default 0)))))))

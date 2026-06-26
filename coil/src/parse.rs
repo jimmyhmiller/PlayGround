@@ -1072,12 +1072,17 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             args: args.iter().map(parse_expr).collect::<Result<_, _>>()?,
         }),
         // reflection on a type-as-Code (for macros): code-field-count/name/kind/type
-        "code-field-count" | "code-field-name" | "code-field-kind" | "code-field-type" => {
+        "code-field-count" | "code-field-name" | "code-field-kind" | "code-field-type"
+        | "code-variant-sum" | "code-variant-count" | "code-variant-name" | "code-variant-fields" => {
             let op = match head.as_str() {
                 "code-field-count" => CodeOp::CFieldCount,
                 "code-field-name" => CodeOp::CFieldName,
                 "code-field-kind" => CodeOp::CFieldKind,
-                _ => CodeOp::CFieldType,
+                "code-field-type" => CodeOp::CFieldType,
+                "code-variant-sum" => CodeOp::CVariantSum,
+                "code-variant-count" => CodeOp::CVariantCount,
+                "code-variant-name" => CodeOp::CVariantName,
+                _ => CodeOp::CVariantFields,
             };
             Ok(ExprKind::CodeOp { op, args: args.iter().map(parse_expr).collect::<Result<_, _>>()? })
         }

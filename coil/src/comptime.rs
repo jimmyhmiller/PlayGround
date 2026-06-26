@@ -1077,6 +1077,47 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
             _ => unreachable!(),
         });
     }
+    // Variant reflection on a sum given as a Code symbol.
+    if matches!(op, CodeOp::CVariantSum | CodeOp::CVariantCount | CodeOp::CVariantName | CodeOp::CVariantFields) {
+        let arg = match args.first() {
+            Some(CtVal::Code(s)) => match &s.kind {
+                K::Sym(n) => n.clone(),
+                _ => return Err("comptime: code-variant-* expects a symbol".to_string()),
+            },
+            _ => return Err("comptime: code-variant-* expects a symbol".to_string()),
+        };
+        // variant names may be stored qualified; compare on the bare suffix.
+        let bare = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+        let want = bare(&arg);
+        if op == CodeOp::CVariantSum {
+            // find the sum whose variants include `arg`
+            let sum = ctx
+                .sums
+                .iter()
+                .find(|(_, sd)| sd.variants.iter().any(|v| bare(&v.name) == want))
+                .map(|(k, _)| k.clone())
+                .ok_or_else(|| format!("comptime: '{arg}' is not a known variant"))?;
+            return Ok(CtVal::Code(Sexp::new(K::Sym(sum), dummy)));
+        }
+        let sd = ctx
+            .sums
+            .get(&arg)
+            .or_else(|| ctx.sums.iter().find(|(k, _)| k.rsplit('.').next() == Some(arg.as_str())).map(|(_, v)| v))
+            .ok_or_else(|| format!("comptime: '{arg}' is not a known sum"))?;
+        if op == CodeOp::CVariantCount {
+            return Ok(CtVal::Int(sd.variants.len() as i64));
+        }
+        let i = match args.get(1) {
+            Some(CtVal::Int(n)) => *n as usize,
+            _ => return Err("comptime: code-variant-* index must be an integer".to_string()),
+        };
+        let v = sd.variants.get(i).ok_or_else(|| format!("comptime: variant index {i} out of range"))?;
+        return Ok(match op {
+            CodeOp::CVariantName => CtVal::Code(Sexp::new(K::Sym(bare(&v.name)), dummy)),
+            CodeOp::CVariantFields => CtVal::Int(v.fields.len() as i64),
+            _ => unreachable!(),
+        });
+    }
     let code = match args.first() {
         Some(CtVal::Code(s)) => s,
         _ => return Err("comptime: code op expects a Code value".to_string()),
@@ -1126,7 +1167,8 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
             _ => return Err("comptime: code-int expects an integer".to_string()),
         },
         CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::Str | CodeOp::CFieldCount
-        | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType => {
+        | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType | CodeOp::CVariantSum
+        | CodeOp::CVariantCount | CodeOp::CVariantName | CodeOp::CVariantFields => {
             unreachable!("handled above")
         }
     })

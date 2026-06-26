@@ -150,6 +150,15 @@ pub enum CodeOp {
     CFieldName,
     CFieldKind,
     CFieldType,
+    /// Variant reflection on a sum given as `Code` (for macros).
+    /// `(code-variant-sum VC)` → the sum name (a `Code` symbol) that declares variant
+    /// `VC`; `(code-variant-count SC)` → i64; `(code-variant-name SC i)` → the
+    /// variant name as a `Code` symbol; `(code-variant-fields SC i)` → i64 (the
+    /// variant's field count).
+    CVariantSum,
+    CVariantCount,
+    CVariantName,
+    CVariantFields,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an
