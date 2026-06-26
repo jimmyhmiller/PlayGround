@@ -944,6 +944,23 @@ fn ctval_to_sexp(v: &CtVal) -> Result<crate::reader::Sexp, String> {
 /// macro expansion in a compilation (macro hygiene).
 static GENSYM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Structural equality of two `Code` values, ignoring source spans.
+fn sexp_eq(a: &crate::reader::Sexp, b: &crate::reader::Sexp) -> bool {
+    use crate::reader::SexpKind as K;
+    match (&a.kind, &b.kind) {
+        (K::Int(x), K::Int(y)) => x == y,
+        (K::Float(x), K::Float(y)) => x == y,
+        (K::Sym(x), K::Sym(y)) => x == y,
+        (K::Keyword(x), K::Keyword(y)) => x == y,
+        (K::Str(x), K::Str(y)) => x == y,
+        (K::CStr(x), K::CStr(y)) => x == y,
+        (K::List(x), K::List(y)) | (K::Vector(x), K::Vector(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| sexp_eq(p, q))
+        }
+        _ => false,
+    }
+}
+
 /// Evaluate a `Code` operation. Most take a `Code` first argument; `Gensym` takes
 /// none and returns a fresh symbol.
 fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
@@ -983,6 +1000,13 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
                 },
                 _ => return Err("comptime: code-nth expects a list/vector".to_string()),
             }
+        }
+        CodeOp::Eq => {
+            let b = match args.get(1) {
+                Some(CtVal::Code(s)) => s,
+                _ => return Err("comptime: code-eq expects two Code values".to_string()),
+            };
+            CtVal::Bool(sexp_eq(code, b))
         }
         CodeOp::Rest => match &code.kind {
             K::List(items) | K::Vector(items) => {

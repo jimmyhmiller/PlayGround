@@ -110,36 +110,33 @@
 ; types): `(range LO HI)` yields the ints LO..HI-1; `(over ARR LEN)` yields the
 ; elements of a fixed array ARR of length LEN. User collection types ride the
 ; iterator-value protocol (`for-each`, below) instead. No core support.
-(defmacro for-in [binding & body]
-  (if (not (= (count binding) 2))
-      (error "for-in: binding must be [x COLL]")
-      (let [x    (first binding)
-            coll (first (rest binding))]
-        (if (not (list? coll))
-            (error "for-in: COLL must be a form, e.g. (range lo hi) or (over arr len)")
-            (let [h (first coll)]
-              (if (= h (quote range))
-                  `(for [~x ~(first (rest coll)) ~(first (rest (rest coll)))] ~@body)
-                  (if (= h (quote over))
-                      (let [arr (first (rest coll))
-                            len (first (rest (rest coll)))
-                            i   (gensym "fin-i")]
-                        `(for [~i 0 ~len]
-                           (let [~x (load (index ~arr ~i))] ~@body)))
-                      ; The extensible protocol: (iter NEXT STATE) where NEXT is a
-                      ; fnptr (ptr S) -> (Option T) advancing STATE (a (ptr S)).
-                      ; Any user collection becomes iterable by supplying these.
-                      (if (= h (quote iter))
-                          (let [nf (first (rest coll))
-                                st (first (rest (rest coll)))
-                                nfv (gensym "fin-next")
-                                stv (gensym "fin-state")]
-                            `(let [~nfv ~nf ~stv ~st]
-                               (loop
-                                 (match (call-ptr ~nfv ~stv)
-                                   (None [] (break))
-                                   (Some [~x] ~@body)))))
-                          (error "for-in: unsupported collection; use (range lo hi), (over arr len), or (iter next state)")))))))))
+(defn for-in [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 2)) (error "for-in: binding must be [x COLL]")
+  (let [x    (code-nth binding 0)
+        coll (code-nth binding 1)]
+    (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (range lo hi) or (over arr len)")
+    (let [h (code-nth coll 0)]
+      (if (code-eq h `range)
+          `(for [~x ~(code-nth coll 1) ~(code-nth coll 2)] ~@body)
+          (if (code-eq h `over)
+              (let [arr (code-nth coll 1)
+                    len (code-nth coll 2)
+                    i   (gensym)]
+                `(for [~i 0 ~len]
+                   (let [~x (load (index ~arr ~i))] ~@body)))
+              ; The extensible protocol: (iter NEXT STATE) where NEXT is a fnptr
+              ; (ptr S) -> (Option T) advancing STATE (a (ptr S)).
+              (if (code-eq h `iter)
+                  (let [nf  (code-nth coll 1)
+                        st  (code-nth coll 2)
+                        nfv (gensym)
+                        stv (gensym)]
+                    `(let [~nfv ~nf ~stv ~st]
+                       (loop
+                         (match (call-ptr ~nfv ~stv)
+                           (None [] (break))
+                           (Some [~x] ~@body)))))
+                  (error "for-in: unsupported collection; use (range lo hi), (over arr len), or (iter next state)")))))))))
 
 ; ---- threading ------------------------------------------------------------
 ; Spelled `|>`/`|>>` (F#/Elixir/OCaml) rather than Clojure's `->`/`->>`: `->`
@@ -148,28 +145,26 @@
 ; `|>` is unreserved, so it's a clean macro.
 ;
 ; `(|> x (f a) g)` => `(g (f x a))` — thread x as the FIRST argument.
-(def thread-first
-  (lambda [x forms]
-    (if (empty? forms) x
-        (thread-first
-          (let [form (first forms)]
-            (if (list? form)
-                (cons (first form) (cons x (rest form)))
-                (list form x)))
-          (rest forms)))))
-(defmacro |> [x & forms] (thread-first x forms))
+(defn thread-first [(x Code) (forms Code)] (-> Code)
+  (if (icmp-eq (code-count forms) 0) x
+    (thread-first
+      (let [form (code-nth forms 0)]
+        (if (code-list? form)
+            `(~(code-nth form 0) ~x ~@(code-rest form))   ; (f a) → (f x a)
+            `(~form ~x)))                                  ; g → (g x)
+      (code-rest forms))))
+(defn |> [(x Code) & (forms Code)] (-> Code) (thread-first x forms))
 
 ; `(|>> x (f a) g)` => `(g (f a x))` — thread x as the LAST argument.
-(def thread-last
-  (lambda [x forms]
-    (if (empty? forms) x
-        (thread-last
-          (let [form (first forms)]
-            (if (list? form)
-                (concat form (list x))
-                (list form x)))
-          (rest forms)))))
-(defmacro |>> [x & forms] (thread-last x forms))
+(defn thread-last [(x Code) (forms Code)] (-> Code)
+  (if (icmp-eq (code-count forms) 0) x
+    (thread-last
+      (let [form (code-nth forms 0)]
+        (if (code-list? form)
+            `(~@form ~x)                                   ; (f a) → (f a x)
+            `(~form ~x)))
+      (code-rest forms))))
+(defn |>> [(x Code) & (forms Code)] (-> Code) (thread-last x forms))
 
 ; ---- labeled block + early return (macros over loop/break) ----------------
 ; `(block :b body...)` evaluates body and yields its value; `(return-from :b v)`

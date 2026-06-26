@@ -131,6 +131,8 @@ pub enum CodeOp {
     /// `(error STR)` — abort compile-time evaluation (macro expansion) with the
     /// given message. Its argument is a string, not `Code`.
     Error,
+    /// `(code-eq A B)` — structural equality of two `Code` values (ignoring spans).
+    Eq,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an
