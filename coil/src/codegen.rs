@@ -2462,6 +2462,10 @@ impl<'ctx> Cg<'ctx> {
                     }
                     // opaque pointers: a ptr->ptr reinterpret leaves it untouched.
                     Type::Ptr(..) => Ok((v, ty.clone())),
+                    // function pointer reinterpret (to another signature, or from a
+                    // raw pointer): with opaque pointers the value is already a
+                    // pointer, so this is a pure retype — `call-ptr` carries the ABI.
+                    Type::Fn(..) => Ok((v, ty.clone())),
                     // -> float: from an integer (sitofp/uitofp) or another float
                     // (fpext/fptrunc).
                     Type::Float(to) => {

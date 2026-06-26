@@ -132,3 +132,15 @@ fn rejects_wrong_argument_type_to_extern() {
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("argument 1 to 'putchar'"), "got: {err}");
 }
+
+/// A function pointer can be reinterpreted to another signature and called — the
+/// mechanism that lets one foreign symbol (e.g. `objc_msgSend`) be invoked under
+/// many ABIs. `abs` declared `i32->i32` is reached through a retyped pointer.
+#[test]
+fn fnptr_can_be_cast_to_another_signature() {
+    let src = "(extern abs :cc c [:i32] (-> :i32))\n\
+               (defn main [] (-> :i64)\n\
+                 (let [fp (cast (fnptr c [:i32] :i32) (fnptr-of abs))]\n\
+                   (cast :i64 (call-ptr fp (cast :i32 -7)))))";
+    assert_eq!(build_and_run(src), 7);
+}

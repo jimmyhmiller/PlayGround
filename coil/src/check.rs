@@ -1573,7 +1573,14 @@ fn synth_inner(
                 | (Type::Ptr(..), Type::Int(..))
                 | (Type::Float(..), Type::Float(..))
                 | (Type::Float(..), Type::Int(..))
-                | (Type::Int(..), Type::Float(..)) => Ok((
+                | (Type::Int(..), Type::Float(..))
+                // A function pointer reinterpreted as another signature, or to/from a
+                // raw pointer. Under opaque pointers this is a no-op at the machine
+                // level; `call-ptr` supplies the signature. This is what lets one
+                // foreign symbol (e.g. `objc_msgSend`) be called under many ABIs.
+                | (Type::Fn(..), Type::Fn(..))
+                | (Type::Fn(..), Type::Ptr(..))
+                | (Type::Ptr(..), Type::Fn(..)) => Ok((
                     Expr::new(ExprKind::Cast {
                         ty: ty.clone(),
                         expr: Box::new(ee),
