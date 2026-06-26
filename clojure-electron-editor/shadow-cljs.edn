@@ -16,4 +16,11 @@
                      :output-dir "resources/public/js"
                      :asset-path "js"
                      :js-options {:js-provider :require}
-                     :modules {:renderer {:init-fn app.renderer.core/start!}}}}}
+                     :modules {:renderer {:init-fn app.renderer.core/start!}}}
+
+          ;; Plain-browser build of the layers POC (app.renderer.new),
+          ;; bypassing the electron-coupled app.renderer.core.
+          :web {:target :browser
+                :output-dir "resources/public/js"
+                :asset-path "js"
+                :modules {:renderer {:init-fn app.renderer.new/start!}}}}}
