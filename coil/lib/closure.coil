@@ -3,39 +3,44 @@
 ; then `(defclosure NAME [captures] [params] RET body...)` to get a heap closure
 ; with NAME-new / NAME-call / NAME-free. Nothing in the compiler knows about it.
 
-(def param-types (lambda [ps] (map (lambda [p] (first (rest p))) ps)))
-(def param-names (lambda [ps] (map (lambda [p] (first p)) ps)))
-(def cap-loads (lambda [caps]
-  (if (empty? caps) (list)
-      (concat (list (first (first caps))
-                    `(load (field __self ~(first (first caps)))))
-              (cap-loads (rest caps))))))
-(def cap-stores (lambda [caps]
-  (if (empty? caps) (list)
-      (cons `(store! (field __e ~(first (first caps))) ~(first (first caps)))
-            (cap-stores (rest caps))))))
+; Stage-3 comptime helpers (recurse by index over Code vectors of (name type) pairs).
+(defn cl--param-types [(ps Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count ps)) `()
+    `(~(code-nth (code-nth ps i) 1) ~@(cl--param-types ps (iadd i 1)))))
+(defn cl--param-names [(ps Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count ps)) `()
+    `(~(code-nth (code-nth ps i) 0) ~@(cl--param-names ps (iadd i 1)))))
+; let-bindings that load each capture out of the env: name (load (field __self name)) …
+(defn cl--cap-loads [(caps Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count caps)) `()
+    (let [nm (code-nth (code-nth caps i) 0)]
+      `(~nm (load (field __self ~nm)) ~@(cl--cap-loads caps (iadd i 1))))))
+(defn cl--cap-stores [(caps Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count caps)) `()
+    (let [nm (code-nth (code-nth caps i) 0)]
+      `((store! (field __e ~nm) ~nm) ~@(cl--cap-stores caps (iadd i 1))))))
 
-(defmacro defclosure [name caps params ret & body]
-  (let [env-name  (symbol name "-env")
-        code-name (symbol name "-code")
-        new-name  (symbol name "-new")
-        call-name (symbol name "-call")
-        free-name (symbol name "-free")]
+(defn defclosure [(name Code) (caps Code) (params Code) (ret Code) & (body Code)] (-> Code)
+  (let [env-name  (code-symbol name "-env")
+        code-name (code-symbol name "-code")
+        new-name  (code-symbol name "-new")
+        call-name (code-symbol name "-call")
+        free-name (code-symbol name "-free")]
     `(do
        (defstruct ~env-name [~@caps])
        (defn ~code-name [(__self (ptr ~env-name)) ~@params] (-> ~ret)
-         (let [~@(cap-loads caps)] ~@body))
+         (let [~@(cl--cap-loads caps 0)] ~@body))
        (defstruct ~name
-         [(code (fnptr c [(ptr ~env-name) ~@(param-types params)] ~ret))
+         [(code (fnptr c [(ptr ~env-name) ~@(cl--param-types params 0)] ~ret))
           (env (ptr ~env-name))])
        (defn ~new-name [~@caps] (-> (ptr ~name))
          (let [__e (alloc-heap ~env-name)
                __c (alloc-heap ~name)]
-           ~@(cap-stores caps)
+           ~@(cl--cap-stores caps 0)
            (store! (field __c code) (fnptr-of ~code-name))
            (store! (field __c env) __e)
            __c))
        (defn ~call-name [(__c (ptr ~name)) ~@params] (-> ~ret)
-         (call-ptr (load (field __c code)) (load (field __c env)) ~@(param-names params)))
-       (defn ~free-name [(__c (ptr ~name))] (-> :i64)
+         (call-ptr (load (field __c code)) (load (field __c env)) ~@(cl--param-names params 0)))
+       (defn ~free-name [(__c (ptr ~name))] (-> i64)
          (do (free (load (field __c env))) (free __c))))))
