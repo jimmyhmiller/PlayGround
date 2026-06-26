@@ -41,8 +41,8 @@ fn custom_convention_runs_and_emits_fastcc() {
 // enough — not the C arg registers — that the trampoline's register marshalling
 // is actually exercised).
 const REG2_DEFCC: &str = r#"
-    (defmacro def-reg2 [name]
-      (if (= target-arch "x86_64")
+    (defn def-reg2 [(name Code)] (-> Code)
+      (if (code-eq (target-arch) `x86_64)
           `(defcc ~name :params [rax rdx] :ret rax
              :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
           `(defcc ~name :params [x9 x10] :ret x9

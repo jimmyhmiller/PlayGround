@@ -11,8 +11,8 @@
 ;   x86_64 : args in rax/rdx (not the SysV rdi/rsi), result in rax
 ;   aarch64: args in x9/x10  (not the AAPCS64 x0/x1), result in x9
 
-(defmacro def-reg2 [name]
-  (if (= target-arch "x86_64")
+(defn def-reg2 [(name Code)] (-> Code)
+  (if (code-eq (target-arch) `x86_64)
       `(defcc ~name
          :params [rax rdx]
          :ret rax

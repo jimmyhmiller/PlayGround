@@ -62,23 +62,22 @@
 ; User macros: a real compile-time Lisp (quasiquote/unquote/splice, & rest,
 ; recursion, helper lambdas, gensym hygiene, emitting top-level defs)
 ; ======================================================================
-(defmacro when2 [c & body] `(if ~c (do ~@body) 0))       ; & rest + ~@ splice
-(defmacro inc1 [x] `(iadd ~x 1))
-(defmacro cond2 [& cs]                                   ; recursive macro
-  (if (empty? cs)
-      0
-      (if (= (count cs) 1)
-          (first cs)
-          `(if ~(first cs) ~(first (rest cs)) (cond2 ~@(rest (rest cs)))))))
-(def powf (lambda [x n]                                  ; compile-time helper fn
-  (if (= n 0) 1 `(imul ~x ~(powf x (- n 1))))))
-(defmacro pow2 [x n] (powf x n))                          ; unrolls to nested imuls
-(defmacro dbl [x] `(let [t# ~x] (iadd t# t#)))           ; t# auto-gensyms (hygiene)
-(defmacro defconst [name v] `(defn ~name [] (-> :i64) ~v)); macro emits a top-level defn
+(defn when2 [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))   ; & rest + ~@ splice
+(defn inc1 [(x Code)] (-> Code) `(iadd ~x 1))
+(defn cond2-arms [(cs Code)] (-> Code)                   ; recursive Code-list helper
+  (if (icmp-eq (code-count cs) 0) `0
+    (if (icmp-eq (code-count cs) 1) (code-nth cs 0)
+      `(if ~(code-nth cs 0) ~(code-nth cs 1) ~(cond2-arms (code-rest (code-rest cs)))))))
+(defn cond2 [& (cs Code)] (-> Code) (cond2-arms cs))     ; variadic recursive macro
+(defn powf [(x Code) (n i64)] (-> Code)                  ; compile-time helper fn
+  (if (icmp-eq n 0) `1 `(imul ~x ~(powf x (isub n 1)))))
+(defn pow2 [(x Code) (n Code)] (-> Code) (powf x (code-int n)))  ; unrolls to nested imuls
+(defn dbl [(x Code)] (-> Code) (let [t (gensym)] `(let [~t ~x] (iadd ~t ~t))))  ; gensym hygiene
+(defn defconst [(name Code) (v Code)] (-> Code) `(defn ~name [] (-> :i64) ~v))  ; emits a top-level defn
 (defconst three 3)
 
 ; The check harness, itself a macro:
-(defmacro chk [got want code rest] `(if (icmp-eq ~got ~want) ~rest ~code))
+(defn chk [(got Code) (want Code) (code Code) (rest Code)] (-> Code) `(if (icmp-eq ~got ~want) ~rest ~code))
 
 ; ======================================================================
 ; Calling conventions (convention as type)
@@ -90,8 +89,8 @@
 
 ; :lower shim -> a register layout LLVM's CC enum can't express; realized with a
 ; naked trampoline. Registers are load-bearing, so pick them per target arch.
-(defmacro def-shimcc [name]
-  (if (= target-arch "x86_64")
+(defn def-shimcc [(name Code)] (-> Code)
+  (if (code-eq (target-arch) `x86_64)
       `(defcc ~name :params [rax rdx] :ret rax
          :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11] :lower shim)
       `(defcc ~name :params [x9 x10] :ret x9

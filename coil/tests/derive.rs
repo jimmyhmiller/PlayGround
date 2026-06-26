@@ -72,7 +72,7 @@ fn derive_reflects_a_macro_generated_struct() {
     // Macro-generated types are reflectable (incremental, like the def table): a
     // macro emits a defstruct, and a *later* derive reflects it.
     let code = run_with(
-        r#"(defmacro defpair [nm] `(defstruct ~nm [(a i64) (b i64)]))
+        r#"(defn defpair [(nm Code)] (-> Code) `(defstruct ~nm [(a i64) (b i64)]))
            (defpair Pair)
            (derive-eq Pair)          ; reflects the macro-generated Pair
            (defn mk [(a i64) (b i64)] (-> Pair)

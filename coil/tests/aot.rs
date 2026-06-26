@@ -27,10 +27,11 @@ fn aot_expands_all_macros_then_compiles() {
     // The whole point: macros expand at compile time (a tree-walking interpreter,
     // no JIT), then the result AOT-compiles to a native binary.
     let src = r#"
-        (defmacro when [c & body] `(if ~c (do ~@body) 0))
-        (defmacro inc [x] `(iadd ~x 1))
-        (def pow-form (lambda [x n] (if (= n 0) 1 `(imul ~x ~(pow-form x (- n 1))))))
-        (defmacro pow [x n] (pow-form x n))
+        (defn when [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))
+        (defn inc [(x Code)] (-> Code) `(iadd ~x 1))
+        (defn pow-form [(x Code) (n i64)] (-> Code)
+          (if (icmp-eq n 0) `1 `(imul ~x ~(pow-form x (isub n 1)))))
+        (defn pow [(x Code) (n Code)] (-> Code) (pow-form x (code-int n)))
         (defn main [] (-> :i64)
           (when (icmp-eq 1 1)
             (iadd (pow 2 5) (inc 9))))  ; 32 + 10 = 42

@@ -25,9 +25,9 @@ fn second_order_macro_hygiene_across_modules() {
         &[(
             "gen.coil",
             "(module gen)\n\
-             (defmacro def-secret [] `(defn secret [(x :i64)] (-> :i64) (iadd x 100)))\n\
+             (defn def-secret [] (-> Code) `(defn secret [(x :i64)] (-> :i64) (iadd x 100)))\n\
              (def-secret)\n\
-             (defmacro bump [v] `(secret ~v))\n",
+             (defn bump [(v Code)] (-> Code) `(secret ~v))\n",
         )],
     );
     let src = format!(
@@ -132,7 +132,7 @@ fn macro_references_resolve_in_defining_module() {
         &m,
         "(module mathmod)\n\
          (defn secret [(x :i64)] (-> :i64) (iadd x 100))\n\
-         (defmacro bump [v] `(secret ~v))\n", // references mathmod's own `secret`
+         (defn bump [(v Code)] (-> Code) `(secret ~v))\n", // references mathmod's own `secret`
     )
     .unwrap();
     let src = format!(

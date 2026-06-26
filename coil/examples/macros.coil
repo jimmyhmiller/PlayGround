@@ -1,33 +1,32 @@
 ; User-defined macros — a real compile-time Lisp, not template substitution.
+; A macro is an ordinary Coil function over `Code`: `[Code…] -> Code`, run at
+; compile time, its calls expanded inline.
 
 ; 1. Simple quasiquote/splicing macros.
-(defmacro when [c & body] `(if ~c (do ~@body) 0))
-(defmacro inc [x] `(iadd ~x 1))
+(defn when [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))
+(defn inc [(x Code)] (-> Code) `(iadd ~x 1))
 
-; 2. A recursive macro: cond expands to nested ifs. A lone trailing clause is
-;    the else branch.
-(defmacro cond [& cs]
-  (if (empty? cs)
-      0
-      (if (= (count cs) 1)
-          (first cs)
-          `(if ~(first cs)
-               ~(first (rest cs))
-               (cond ~@(rest (rest cs)))))))
+; 2. A recursive macro: cond expands to nested ifs (via a Code-list helper). A lone
+;    trailing clause is the else branch.
+(defn cond-arms [(cs Code)] (-> Code)
+  (if (icmp-eq (code-count cs) 0) `0
+    (if (icmp-eq (code-count cs) 1) (code-nth cs 0)
+      `(if ~(code-nth cs 0)
+           ~(code-nth cs 1)
+           ~(cond-arms (code-rest (code-rest cs)))))))
+(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
 
-; 3. Compile-time computation: a helper function unrolls `pow` into nested imuls.
-(def pow-form
-  (lambda [x n]
-    (if (= n 0) 1 `(imul ~x ~(pow-form x (- n 1))))))
-(defmacro pow [x n] (pow-form x n))
+; 3. Compile-time computation: a helper unrolls `pow` into nested imuls.
+(defn pow-form [(x Code) (n i64)] (-> Code)
+  (if (icmp-eq n 0) `1 `(imul ~x ~(pow-form x (isub n 1)))))
+(defn pow [(x Code) (n Code)] (-> Code) (pow-form x (code-int n)))
 
 ; 4. Hygiene: gensym introduces a fresh temp so `x` is evaluated once.
-(defmacro double [x]
-  (let [t (gensym "t")]
-    `(let [~t ~x] (iadd ~t ~t))))
+(defn double [(x Code)] (-> Code)
+  (let [t (gensym)] `(let [~t ~x] (iadd ~t ~t))))
 
 ; 5. A macro that emits a top-level definition.
-(defmacro defconst [name v] `(defn ~name [] (-> :i64) ~v))
+(defn defconst [(name Code) (v Code)] (-> Code) `(defn ~name [] (-> :i64) ~v))
 (defconst base 3)
 
 (defn classify [(n :i64)] (-> :i64)

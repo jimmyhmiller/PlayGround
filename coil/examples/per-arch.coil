@@ -4,8 +4,8 @@
 ; point — a `:shim` convention would make the registers load-bearing.)
 ;   coil run examples/per-arch.coil; echo $?   => 42
 
-(defmacro def-arch-cc [name]
-  (if (= target-arch "x86_64")
+(defn def-arch-cc [(name Code)] (-> Code)
+  (if (code-eq (target-arch) `x86_64)
       `(defcc ~name :params [rax rdx] :ret rax :clobber [rax rdx rcx] :native fast)
       `(defcc ~name :params [x0  x1 ] :ret x0  :clobber [x0  x1  x2 ] :native fast)))
 

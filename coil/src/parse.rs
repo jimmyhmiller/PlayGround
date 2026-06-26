@@ -1098,6 +1098,13 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             }
             Ok(ExprKind::CodeOp { op: CodeOp::Gensym, args: vec![] })
         }
+        // (target-arch) — the compile target's arch as a Code symbol
+        "target-arch" => {
+            if !args.is_empty() {
+                return Err(Diag::at(span, "target-arch: expects (target-arch)"));
+            }
+            Ok(ExprKind::CodeOp { op: CodeOp::TargetArch, args: vec![] })
+        }
         // (error MSG) — abort macro expansion with a message
         "error" => {
             if args.len() != 1 {

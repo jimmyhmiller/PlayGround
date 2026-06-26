@@ -163,6 +163,9 @@ pub enum CodeOp {
     /// `(bytes->str L)` — the inverse. For compile-time format-string parsing.
     StrBytes,
     BytesToStr,
+    /// `(target-arch)` — the compile target's CPU architecture as a `Code` symbol
+    /// (`x86_64`, `aarch64`, …). Takes no argument. For per-arch macros.
+    TargetArch,
 }
 
 /// A quasiquote template node (Stage 3). Literal syntax is kept verbatim; an
