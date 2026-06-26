@@ -233,13 +233,13 @@
 ; `k`/`v` to each key/value. `map-ptr` is a `(ptr (HashMap K V))` (K V inferred);
 ; order is unspecified (slot order). A macro over `for` + the slot array — the map
 ; iteration the JSON dogfood wanted (you could query a map but not walk it).
-(defmacro hm-for [binding & body]
-  (if (not (= (count binding) 3))
+(defn hm-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 3))
       (error "hm-for: binding must be [key val map-ptr]")
-      (let [k  (first binding)
-            v  (first (rest binding))
-            mp (first (rest (rest binding)))
-            m  (gensym "hm") i (gensym "hi") e (gensym "he")]
+      (let [k  (code-nth binding 0)
+            v  (code-nth binding 1)
+            mp (code-nth binding 2)
+            m  (gensym) i (gensym) e (gensym)]
         `(let [~m ~mp]
            (for [~i 0 (hm-cap (load ~m))]
              (let [~e (index (load (field ~m slots)) ~i)]

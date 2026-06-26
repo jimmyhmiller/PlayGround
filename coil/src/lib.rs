@@ -90,9 +90,18 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
             wanted.iter().map(|w| w.rsplit('.').next().unwrap_or(w).to_string()).collect();
         let sub = closure_subprogram(&macro_ctx, &wanted, false);
         let checked_sub = check::check(&sub)?;
+        // All qualified function names (for referential hygiene of generated calls),
+        // scanned from the raw forms — includes runtime fns not in the macro closure.
+        let all_fns: HashSet<String> = tagged
+            .iter()
+            .filter_map(|(f, m)| defn_name(f).map(|n| match m {
+                Some(md) => format!("{md}.{n}"),
+                None => n,
+            }))
+            .collect();
         tagged = tagged
             .into_iter()
-            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &mut 0)?, m)))
+            .map(|(f, m)| Ok((expand_top_form(&f, &bare, &skip, &qual, &checked_sub, &all_fns, &mut 0)?, m)))
             .collect::<Result<Vec<_>, Diag>>()?;
     }
     let program = resolve::resolve_program(tagged.clone(), &imports, &exports)?;
@@ -220,12 +229,27 @@ fn expand_top_form(
     skip: &std::collections::HashSet<String>,
     qual: &std::collections::HashMap<String, String>,
     sub: &ast::Program,
+    all_fns: &std::collections::HashSet<String>,
     depth: &mut u32,
 ) -> Result<reader::Sexp, Diag> {
     if is_meta_form(f) || is_comptime_defn(f, skip) {
         return Ok(f.clone());
     }
-    expand_calls(f, bare, qual, sub, depth)
+    expand_calls(f, bare, qual, sub, all_fns, depth)
+}
+
+/// The defined name of a `(defn NAME …)` form, else `None`.
+fn defn_name(f: &reader::Sexp) -> Option<String> {
+    if let reader::SexpKind::List(items) = &f.kind {
+        if let (Some(reader::SexpKind::Sym(h)), Some(reader::SexpKind::Sym(n))) =
+            (items.first().map(|x| &x.kind), items.get(1).map(|x| &x.kind))
+        {
+            if h == "defn" {
+                return Some(n.clone());
+            }
+        }
+    }
+    None
 }
 
 /// A `(defn NAME …)` whose NAME is in the comptime closure (a macro or a helper a
@@ -250,6 +274,7 @@ fn expand_calls(
     bare: &std::collections::HashSet<String>,
     qual: &std::collections::HashMap<String, String>,
     sub: &ast::Program,
+    all_fns: &std::collections::HashSet<String>,
     depth: &mut u32,
 ) -> Result<reader::Sexp, Diag> {
     use reader::{Sexp, SexpKind};
@@ -271,12 +296,12 @@ fn expand_calls(
                 }
                 // RAW args (outside-in): the macro decides what to expand.
                 let args: Vec<Sexp> = items[1..].to_vec();
-                let out = comptime::expand_macro(sub, &qual[&name], args).map_err(Diag::new)?;
-                expand_calls(&out, bare, qual, sub, depth)
+                let out = comptime::expand_macro(sub, &qual[&name], args, all_fns).map_err(Diag::new)?;
+                expand_calls(&out, bare, qual, sub, all_fns, depth)
             } else {
                 let out: Vec<Sexp> = items
                     .iter()
-                    .map(|i| expand_calls(i, bare, qual, sub, depth))
+                    .map(|i| expand_calls(i, bare, qual, sub, all_fns, depth))
                     .collect::<Result<_, _>>()?;
                 Ok(Sexp::new(SexpKind::List(out), s.span))
             }
@@ -284,7 +309,7 @@ fn expand_calls(
         SexpKind::Vector(items) => {
             let out: Vec<Sexp> = items
                 .iter()
-                .map(|i| expand_calls(i, bare, qual, sub, depth))
+                .map(|i| expand_calls(i, bare, qual, sub, all_fns, depth))
                 .collect::<Result<_, _>>()?;
             Ok(Sexp::new(SexpKind::Vector(out), s.span))
         }

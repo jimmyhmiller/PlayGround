@@ -68,6 +68,14 @@ struct Ctx<'a> {
     variants: &'a HashSet<String>,
     fuel: std::cell::Cell<u64>,
     gensym: std::cell::Cell<u64>,
+    /// When expanding a macro from module M, the literal (un-unquoted) symbols of
+    /// its quasiquote templates that name a function/variant in M are qualified to
+    /// M — referential hygiene, so generated calls resolve at the macro's
+    /// definition site, not the use site. `None` outside macro expansion.
+    qualify_module: Option<String>,
+    /// The set of all qualified function names in the program (for the hygiene
+    /// check above — broader than `fns`, which holds only the comptime closure).
+    module_fns: Option<&'a HashSet<String>>,
 }
 
 const FUEL: u64 = 50_000_000;
@@ -91,6 +99,8 @@ pub fn fold_program(
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
+        qualify_module: None,
+        module_fns: None,
     };
     for f in funcs.iter_mut() {
         let body = std::mem::take(&mut f.body);
@@ -122,6 +132,8 @@ pub fn run_metas(program: &Program) -> Result<Vec<crate::reader::Sexp>, String> 
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
+        qualify_module: None,
+        module_fns: None,
     };
     let mut out = Vec::new();
     for meta in &program.metas {
@@ -151,6 +163,7 @@ pub fn expand_macro(
     program: &Program,
     fn_name: &str,
     args: Vec<crate::reader::Sexp>,
+    all_fns: &HashSet<String>,
 ) -> Result<crate::reader::Sexp, String> {
     let table: HashMap<String, Func> = program.funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = program.structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
@@ -164,6 +177,9 @@ pub fn expand_macro(
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
+        // the macro's module, for referential hygiene of template symbols
+        qualify_module: fn_name.rsplit_once('.').map(|(m, _)| m.to_string()),
+        module_fns: Some(all_fns),
     };
     let callee = table.get(fn_name).ok_or_else(|| format!("macro '{fn_name}' not found"))?;
     let np = callee.params.len();
@@ -215,6 +231,8 @@ pub fn eval_const(
         variants: &variants,
         fuel: std::cell::Cell::new(FUEL),
         gensym: std::cell::Cell::new(0),
+        qualify_module: None,
+        module_fns: None,
     };
     let v = match eval(value, &mut HashMap::new(), &ctx)? {
         Flow::Val(v) => v,
@@ -885,6 +903,31 @@ fn find_field_index(ty: &Type, want: &str, ctx: &Ctx) -> Result<CtVal, String> {
     }
 }
 
+/// Referential hygiene: a literal template symbol in CALL-HEAD position that names
+/// a function in the expanding macro's module is qualified to that module, so the
+/// generated call resolves at the macro's definition site rather than the use site.
+/// Only the head is qualified — a symbol used as data (e.g. compared with `code-eq`)
+/// is left alone. Core forms, locals, and unquoted args are untouched.
+fn qualify_head(out: &mut [crate::reader::Sexp], items: &[Quasi], ctx: &Ctx) {
+    use crate::reader::SexpKind;
+    // Only when the head came from a literal symbol (not an unquote/splice).
+    let head_is_lit_sym =
+        matches!(items.first(), Some(Quasi::Lit(s)) if matches!(s.kind, SexpKind::Sym(_)));
+    if !head_is_lit_sym {
+        return;
+    }
+    if let (Some(m), Some(fns), Some(h)) = (&ctx.qualify_module, ctx.module_fns, out.first_mut()) {
+        if let SexpKind::Sym(name) = &h.kind {
+            if !name.contains('.') {
+                let q = format!("{m}.{name}");
+                if fns.contains(&q) {
+                    h.kind = SexpKind::Sym(q);
+                }
+            }
+        }
+    }
+}
+
 /// Build the `Sexp` of a quasiquote template, splicing unquote holes.
 fn eval_quasi(q: &Quasi, env: &mut Env, ctx: &Ctx) -> Result<crate::reader::Sexp, String> {
     use crate::reader::{Sexp, SexpKind};
@@ -896,7 +939,11 @@ fn eval_quasi(q: &Quasi, env: &mut Env, ctx: &Ctx) -> Result<crate::reader::Sexp
             _ => Err("comptime: control flow inside an unquote".to_string()),
         },
         Quasi::Splice(_) => Err("comptime: ~@ (splice) is only valid inside a list/vector".to_string()),
-        Quasi::List(items) => Ok(Sexp::new(SexpKind::List(eval_quasi_items(items, env, ctx)?), Span::DUMMY)),
+        Quasi::List(items) => {
+            let mut out = eval_quasi_items(items, env, ctx)?;
+            qualify_head(&mut out, items, ctx); // referential hygiene (call head only)
+            Ok(Sexp::new(SexpKind::List(out), Span::DUMMY))
+        }
         Quasi::Vector(items) => Ok(Sexp::new(SexpKind::Vector(eval_quasi_items(items, env, ctx)?), Span::DUMMY)),
     }
 }

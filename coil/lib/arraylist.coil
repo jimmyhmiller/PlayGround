@@ -110,7 +110,7 @@
   0)
 
 ; `(al-for [x xs] body...)` — iterate the list's elements (over its slice view).
-(defmacro al-for [binding & body]
-  (if (not (= (count binding) 2))
+(defn al-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 2))
       (error "al-for: binding must be [x arraylist]")
-      `(slice-for [~(first binding) (al-slice ~(first (rest binding)))] ~@body)))
+      `(slice-for [~(code-nth binding 0) (al-slice ~(code-nth binding 1))] ~@body)))

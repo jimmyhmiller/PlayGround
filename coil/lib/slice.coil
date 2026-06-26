@@ -49,18 +49,18 @@ ret $ret %d"))
 
 ; `(slice-of ARR LEN)` — a slice over a fixed array `ARR` (a `(ptr (array T N))`
 ; or element pointer) of length LEN. T is inferred.
-(defmacro slice-of [arr len]
+(defn slice-of [(arr Code) (len Code)] (-> Code)
   `(slice-new (index ~arr 0) ~len))
 
 ; `(slice-for [x s] body...)` — iterate a slice's elements, binding x to each.
 ; A macro over `for` (hence over the loop primitive); break/continue work inside.
-(defmacro slice-for [binding & body]
-  (if (not (= (count binding) 2))
+(defn slice-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 2))
       (error "slice-for: binding must be [x slice]")
-      (let [x  (first binding)
-            s  (first (rest binding))
-            sv (gensym "sl")
-            i  (gensym "sli")]
+      (let [x  (code-nth binding 0)
+            s  (code-nth binding 1)
+            sv (gensym)
+            i  (gensym)]
         `(let [~sv ~s]
            (for [~i 0 (slice-len ~sv)]
              (let [~x (slice-get ~sv ~i)] ~@body))))))
