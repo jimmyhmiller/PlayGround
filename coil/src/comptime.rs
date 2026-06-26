@@ -977,6 +977,13 @@ fn code_op(op: CodeOp, args: &[CtVal]) -> Result<CtVal, String> {
                 _ => return Err("comptime: code-nth expects a list".to_string()),
             }
         }
+        CodeOp::Rest => match &code.kind {
+            K::List(items) | K::Vector(items) => {
+                let rest = if items.is_empty() { vec![] } else { items[1..].to_vec() };
+                CtVal::Code(Sexp::new(K::List(rest), crate::span::Span::DUMMY))
+            }
+            _ => return Err("comptime: code-rest expects a list".to_string()),
+        },
         CodeOp::Sym => match &code.kind {
             K::Sym(s) => CtVal::Str(s.clone()),
             _ => return Err("comptime: code-sym expects a symbol".to_string()),

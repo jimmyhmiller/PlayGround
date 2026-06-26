@@ -123,6 +123,8 @@ pub enum CodeOp {
     Nth,
     Sym,
     Int,
+    /// `(code-rest LIST)` — the list with its first element dropped (a `Code` list).
+    Rest,
     /// `(gensym)` — a fresh, globally-unique `Code` symbol (macro hygiene). Takes
     /// no `Code` argument.
     Gensym,

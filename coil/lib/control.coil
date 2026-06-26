@@ -41,19 +41,19 @@
 ; ---- conditionals ---------------------------------------------------------
 ; `(when c body...)` — evaluate body (yielding its last form) iff c is true,
 ; else 0. `(unless c body...)` is the negation.
-(defmacro when [c & body] `(if ~c (do ~@body) 0))
-(defmacro unless [c & body] `(if ~c 0 (do ~@body)))
+; Stage-3 macros: ordinary `[Code…] -> Code` functions, expanded inline.
+(defn when [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))
+(defn unless [(c Code) & (body Code)] (-> Code) `(if ~c 0 (do ~@body)))
 
 ; `(cond t1 e1 t2 e2 ... [else])` — expands to nested ifs. A lone trailing
 ; clause is the else branch; an empty cond is 0.
-(defmacro cond [& cs]
-  (if (empty? cs)
-      0
-      (if (= (count cs) 1)
-          (first cs)
-          `(if ~(first cs)
-               ~(first (rest cs))
-               (cond ~@(rest (rest cs)))))))
+(defn cond-arms [(cs Code)] (-> Code)
+  (if (icmp-eq (code-count cs) 0) `0
+    (if (icmp-eq (code-count cs) 1) (code-nth cs 0)
+      `(if ~(code-nth cs 0)
+           ~(code-nth cs 1)
+           ~(cond-arms (code-rest (code-rest cs)))))))
+(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
 
 ; `(case x k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first `ei`
 ; whose `(= x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing
@@ -62,25 +62,20 @@
 ; "'T' does not implement 'Eq'". Primitives (i64/bool) and any `(derive Eq …)`
 ; struct work out of the box; for a custom comparison (e.g. `sexp-sym-is` on a
 ; non-`Eq` type) use `case-by`.
-(def case-arms
-  (lambda [v eq clauses]
-    (if (empty? clauses)
-        0
-        (if (= (count clauses) 1)
-            (first clauses)                                   ; lone trailing = default
-            `(if (~eq ~v ~(first clauses))
-                 ~(first (rest clauses))
-                 ~(case-arms v eq (rest (rest clauses))))))))
-(defmacro case [x & clauses]
-  (let [v (gensym "case-x")]
-    `(let [~v ~x] ~(case-arms v (quote =) clauses))))
+(defn case-arms [(v Code) (eq Code) (clauses Code)] (-> Code)
+  (if (icmp-eq (code-count clauses) 0) `0
+    (if (icmp-eq (code-count clauses) 1) (code-nth clauses 0)  ; lone trailing = default
+      `(if (~eq ~v ~(code-nth clauses 0))
+           ~(code-nth clauses 1)
+           ~(case-arms v eq (code-rest (code-rest clauses)))))))
+(defn case [(x Code) & (clauses Code)] (-> Code)
+  (let [v (gensym)] `(let [~v ~x] ~(case-arms v `= clauses))))
 
 ; `(case-by x eq? k1 e1 … [default])` — like `case`, but with an explicit 2-arg
 ; equality `eq?` instead of the `Eq` trait. For keys whose type isn't `Eq`, or a
 ; domain predicate: e.g. `(case-by head sexp-sym-is "if" … default)`.
-(defmacro case-by [x eq & clauses]
-  (let [v (gensym "case-x")]
-    `(let [~v ~x] ~(case-arms v eq clauses))))
+(defn case-by [(x Code) (eq Code) & (clauses Code)] (-> Code)
+  (let [v (gensym)] `(let [~v ~x] ~(case-arms v eq clauses))))
 
 ; NOTE on `->`/`->>` (thread macros): deliberately NOT provided. `->` collides
 ; with Coil's reserved `(-> :type)` return-type marker — the macro expander runs
