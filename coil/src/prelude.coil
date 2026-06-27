@@ -6,6 +6,12 @@
 ; names are namespaced to `coil.core`; add a type with `(impl Eq YourType …)` or
 ; `(derive Eq YourType)` (lib/derive.coil).
 
+; RE-EXPORT: `:reexport` re-publishes a module's exported names as part of core, so
+; they are auto-referred everywhere (only `:reexport`ed targets, not plain `:use`s).
+; This one line gives every program the everyday control flow (while/for/cond/when/
+; case/|>/…) with no import. Add another `:reexport` line here to fold more into core.
+(import "control.coil" :reexport)
+
 ; structural equality — the method is `=` (so `(= a b)` at runtime).
 (deftrait Eq [Self]
   (= [(a Self) (b Self)] (-> bool)))

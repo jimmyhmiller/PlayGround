@@ -7,9 +7,9 @@
 ;   keypad: 1234 / qwer / asdf / zxcv     (a real window CAN see key-up)
 ; ============================================================================
 (module app)
-(import "../../lib/objc.coil"    :use *)
-(import "../../lib/control.coil" :use *)
-(import "../../lib/chip8.coil"   :use *)
+(import "objc.coil"  :use *)   ; bundled stdlib — no path, resolves anywhere
+(import "chip8.coil" :use *)   ; the VM core
+; control flow (while/for/cond/…) is in coil.core — no import needed
 (extern printf :cc c [(ptr i8) ...] (-> :i32))
 
 ; CoreGraphics — plain C.

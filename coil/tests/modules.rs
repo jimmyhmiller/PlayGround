@@ -220,19 +220,31 @@ fn reflection_on_an_ambiguous_cross_module_type_errors() {
 
 #[test]
 fn macros_are_namespaced_not_global() {
-    // Clojure-like: `import` alone does NOT refer a module's macros — a bare `(cond …)`
-    // is undefined until you `:use` (refer) it. (Old behavior: macros were global.)
-    let src = "(module app)\n(import \"lib/control.coil\")\n\
-               (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
-    let err = coil::check_source(src).unwrap_err();
-    assert!(err.contains("undefined") && err.contains("cond"), "got: {err}");
+    // Clojure-like: `import` alone does NOT refer a module's macros — a bare call is
+    // undefined until you `:use` (refer) it. Uses a custom (non-core) macro so it
+    // tests scoping, not coil.core's re-exports.
+    let dir = write_modules(
+        "mod_macns",
+        &[("m.coil", "(module m)\n(defn twice [(x Code)] (-> Code) `(iadd ~x ~x))\n")],
+    );
+    let p = dir.join("m.coil");
+    let bare = format!(
+        "(module app)\n(import \"{}\")\n(defn main [] (-> :i64) (twice 21))\n",
+        p.display()
+    );
+    let err = coil::check_source(&bare).unwrap_err();
+    assert!(err.contains("undefined") && err.contains("twice"), "got: {err}");
     // …but `:use *` (refer all) brings it in, and `:as` gives qualified access.
-    let used = "(module app)\n(import \"lib/control.coil\" :use *)\n\
-                (defn main [] (-> :i64) (cond (icmp-eq 1 1) 7 0))\n";
-    assert_eq!(build_and_run(used), 7);
-    let aliased = "(module app)\n(import \"lib/control.coil\" :as c)\n\
-                   (defn main [] (-> :i64) (c/cond (icmp-eq 1 1) 7 0))\n";
-    assert_eq!(build_and_run(aliased), 7);
+    let used = format!(
+        "(module app)\n(import \"{}\" :use *)\n(defn main [] (-> :i64) (twice 21))\n",
+        p.display()
+    );
+    assert_eq!(build_and_run(&used), 42);
+    let aliased = format!(
+        "(module app)\n(import \"{}\" :as m)\n(defn main [] (-> :i64) (m/twice 21))\n",
+        p.display()
+    );
+    assert_eq!(build_and_run(&aliased), 42);
 }
 
 

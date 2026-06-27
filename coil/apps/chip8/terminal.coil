@@ -1,18 +1,17 @@
 ; ============================================================================
-; chip8.coil — TERMINAL front-end for the CHIP-8 core (lib/chip8.coil).
+; terminal.coil — TERMINAL front-end for the CHIP-8 core (chip8.coil, alongside).
 ;
-;   coil build examples/chip8.coil -o /tmp/chip8
-;   /tmp/chip8 roms/ibm.ch8          ; draws the IBM logo
-;   /tmp/chip8 roms/pong.ch8         ; 1234/qwer/asdf/zxcv = keypad, ESC quits
+;   cd apps/chip8 && coil run terminal.coil -- ../../roms/ibm.ch8
+;   keypad 1234/qwer/asdf/zxcv, ESC quits
 ;
 ; The 64x32 framebuffer is drawn with Unicode half-blocks (one cell = two vertical
 ; pixels). Input is raw, non-blocking stdin. Pure libc FFI — the VM itself lives in
-; the imported module; this file is just rendering + input + the run loop.
+; chip8.coil; this file is just rendering + input + the run loop. Control flow
+; (for/while/cond/…) is in coil.core — no import needed.
 ; ============================================================================
 
 (module app)
-(import "lib/control.coil" :use *)   ; cond / for / while
-(import "lib/chip8.coil"   :use *)   ; the VM core
+(import "chip8.coil" :use *)   ; the VM core (vendored in this app)
 
 (extern read       :cc c [:i64 (ptr i8) :i64] (-> :i64))
 (extern write      :cc c [:i64 (ptr i8) :i64] (-> :i64))

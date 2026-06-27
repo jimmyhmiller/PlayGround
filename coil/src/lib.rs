@@ -18,6 +18,7 @@ pub mod parse;
 pub mod reader;
 pub mod resolve;
 pub mod span;
+pub mod stdlib;
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -342,16 +343,27 @@ fn resolve_macro(head: &str, module: Option<&str>, env: &MacroEnv) -> Option<Str
     if env.macros.contains(&own) {
         return Some(own);
     }
-    // …then `:use`d modules' exported macros.
+    // …then this module's `:use`d exported macros.
     if let Some(imp) = env.imports.get(module.unwrap_or("")) {
         for (target, spec) in &imp.uses {
             let used = match spec {
                 macros::UseSpec::All => true,
                 macros::UseSpec::Names(ns) => ns.iter().any(|n| n == head),
             };
-            if used && macros::exports(env.exports, target, head) {
+            let q = format!("{target}.{head}");
+            if used && macros::exports(env.exports, target, head) && env.macros.contains(&q) {
+                return Some(q);
+            }
+        }
+    }
+    // …finally, macros from modules `coil.core` explicitly `:reexport`s — these are
+    // auto-referred everywhere (that's the one line in the prelude that makes
+    // control flow free). Only `:reexport`ed targets count, NOT coil.core's `:use`s.
+    if module != Some("coil.core") {
+        if let Some(core) = env.imports.get("coil.core") {
+            for target in &core.reexports {
                 let q = format!("{target}.{head}");
-                if env.macros.contains(&q) {
+                if macros::exports(env.exports, target, head) && env.macros.contains(&q) {
                     return Some(q);
                 }
             }
