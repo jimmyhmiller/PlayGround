@@ -35,6 +35,15 @@ pub struct Manifest {
     pub build: Build,
     #[serde(default)]
     pub link: Link,
+    #[serde(default)]
+    pub run: Run,
+}
+
+/// `[run]` — defaults for `coil run` when no `-- <args>` are given on the CLI.
+#[derive(Deserialize, Debug, Default)]
+pub struct Run {
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]

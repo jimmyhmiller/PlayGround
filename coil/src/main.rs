@@ -21,13 +21,26 @@ use std::process::{Command, ExitCode};
 use inkwell::targets::TargetTriple;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let all: Vec<String> = std::env::args().collect();
+    // Split coil's own args from the program's args at `--` (cargo-style):
+    //   coil run -- <prog args>        coil run file.coil -- <prog args>
+    let (args, prog_args): (Vec<String>, Vec<String>) = match all.iter().position(|a| a == "--") {
+        Some(i) => (all[..i].to_vec(), all[i + 1..].to_vec()),
+        None => (all.clone(), Vec::new()),
+    };
     // Manifest mode: `coil build` / `coil run` with no source file (or only flags)
     // reads ./Coil.toml and drives the build from it.
     if matches!(args.get(1).map(String::as_str), Some("build") | Some("run"))
         && args.get(2).is_none_or(|a| a.starts_with('-'))
     {
-        return run_manifest(args[1].as_str());
+        return run_manifest(args[1].as_str(), &prog_args);
+    }
+    // `coil new <name>` — scaffold a manifest project.
+    if args.get(1).map(String::as_str) == Some("new") {
+        return match args.get(2) {
+            Some(name) => cmd_new(name),
+            None => usage(),
+        };
     }
     if args.len() < 3 {
         return usage();
@@ -75,7 +88,7 @@ fn main() -> ExitCode {
             file,
         ),
         "expand" => report(coil::expand_to_string(&src), file),
-        "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags, opts.debug),
+        "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags, opts.debug, &prog_args),
         // cimport <header.h> [-o out.coil]: generate Coil FFI bindings from a C header
         // via clang's AST. (`file` is the header path; `src` above just read it.)
         "cimport" => {
@@ -100,7 +113,7 @@ fn print_error(body: &str, file: &str) {
 
 /// Build to a temp executable, run it, and propagate its exit code. With a cross
 /// `--target` the binary is run via `arch -<arch>` (Rosetta on macOS).
-fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], debug: bool) -> ExitCode {
+fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], debug: bool, prog_args: &[String]) -> ExitCode {
     let exe = std::env::temp_dir().join(format!("coil_run_{}", std::process::id()));
     let t = triple.map(TargetTriple::create).unwrap_or_else(coil::codegen::target_triple);
     let src_path = debug.then(|| Path::new(file));
@@ -110,8 +123,8 @@ fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], d
         return ExitCode::FAILURE;
     }
     let status = match run_arch(triple) {
-        Some(arch) => Command::new("arch").arg(format!("-{arch}")).arg(&exe).status(),
-        None => Command::new(&exe).status(),
+        Some(arch) => Command::new("arch").arg(format!("-{arch}")).arg(&exe).args(prog_args).status(),
+        None => Command::new(&exe).args(prog_args).status(),
     };
     let _ = std::fs::remove_file(&exe);
     match status {
@@ -124,7 +137,7 @@ fn run_aot(src: &str, file: &str, triple: Option<&str>, link_flags: &[String], d
 }
 
 /// `coil build` / `coil run` driven by `./Coil.toml` instead of CLI arguments.
-fn run_manifest(cmd: &str) -> ExitCode {
+fn run_manifest(cmd: &str, prog_args: &[String]) -> ExitCode {
     let path = Path::new(coil::manifest::MANIFEST);
     if !path.exists() {
         eprintln!(
@@ -158,7 +171,11 @@ fn run_manifest(cmd: &str) -> ExitCode {
             let r = coil::build_executable_linked_dbg(&src, &out, t, &link_flags, src_path);
             report(r.map(|_| format!("wrote {}", out.display())), &entry)
         }
-        "run" => run_aot(&src, &entry, m.build.target.as_deref(), &link_flags, m.build.debug),
+        "run" => {
+            // Program args: those after `--`, else the manifest's [run] args default.
+            let args = if prog_args.is_empty() { m.run.args.clone() } else { prog_args.to_vec() };
+            run_aot(&src, &entry, m.build.target.as_deref(), &link_flags, m.build.debug, &args)
+        }
         _ => usage(),
     }
 }
@@ -233,6 +250,31 @@ impl Opts {
     }
 }
 
+/// `coil new <name>` — scaffold `<name>/Coil.toml` + `<name>/src/main.coil`, ready
+/// to `cd <name> && coil run`.
+fn cmd_new(name: &str) -> ExitCode {
+    let dir = Path::new(name);
+    if dir.exists() {
+        eprintln!("error: '{name}' already exists");
+        return ExitCode::FAILURE;
+    }
+    let manifest = format!("[package]\nname  = \"{name}\"\nentry = \"src/main.coil\"\n");
+    let main = "(module app)\n\n(defn main [] (-> i64)\n  42)\n";
+    let r = std::fs::create_dir_all(dir.join("src"))
+        .and_then(|_| std::fs::write(dir.join(coil::manifest::MANIFEST), manifest))
+        .and_then(|_| std::fs::write(dir.join("src/main.coil"), main));
+    match r {
+        Ok(()) => {
+            println!("created {name}/ — `cd {name} && coil run`");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error scaffolding '{name}': {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn report(result: Result<String, String>, file: &str) -> ExitCode {
     match result {
         Ok(out) => {
@@ -261,9 +303,12 @@ fn default_out(file: &str, ext: &str) -> PathBuf {
 fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
+         coil new <name>                          scaffold a project (Coil.toml + src/main.coil)\n  \
+         coil <build|run>                         build/run the ./Coil.toml project\n  \
+         coil run -- <args…>                      … forwarding args to the program (else [run] args)\n  \
          coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out] [--target <triple>] \
-         [--link-flag <arg> | -l<lib>]… [-g]\n  \
-         coil cimport <header.h> [-o out.coil]   generate C FFI bindings via clang\n  \
+         [--link-flag <arg> | -l<lib>]… [-g] [-- <args…>]\n  \
+         coil cimport <header.h> [-o out.coil]    generate C FFI bindings via clang\n  \
          -g / --debug   emit DWARF debug info (build/run) for lldb/gdb"
     );
     ExitCode::from(2)
