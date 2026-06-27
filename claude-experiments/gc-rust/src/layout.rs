@@ -106,7 +106,15 @@ impl<'a> LayoutRegistry<'a> {
                 return Ok(Repr::Ref(self.vec_layout(&er)));
             }
             "Option" | "Result" => {
-                // Built-in enums — treat structurally as reference enums for now.
+                // Built-in enums. Honour a `#[value]` declaration (the prelude
+                // declares `Option` as a value enum so `array_get`/`vec_get` can
+                // return it without per-access heap allocation); otherwise fall
+                // back to the structural reference-enum layout.
+                if let Some(e) = self.ctx.enums.get(name).cloned() {
+                    if e.is_value {
+                        return Ok(Repr::Value(self.value_enum(name, &e, args)?));
+                    }
+                }
                 return Ok(Repr::Ref(self.builtin_enum_layout(name, args)?));
             }
             _ => {}

@@ -67,6 +67,6 @@ fn main() -> i64 {
         + unwrap_or(compute(20, 2), 0)     // 9
         + unwrap_or(compute(1, 0), 100)    // 100 (Err -> default)
         + add_bonus(0)                     // 5
-        + array_get(a, 0) + array_get(a, 1) + array_get(a, 2); // 42
+        + array_get_unchecked(a, 0) + array_get_unchecked(a, 1) + array_get_unchecked(a, 2); // 42
     total   // 7+42+1+9+100+5+42 = 206
 }

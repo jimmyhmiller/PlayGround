@@ -89,7 +89,7 @@ fn main() -> i64 {
       let mut i = 0;
       let mut hit = false;
       while i < n {
-        let mut b = vec_get(blocks, i);
+        let mut b = vec_get_unchecked(blocks, i);
         b.y = b.y + b.speed;
         if hits(px, player_y, player_r, b.x, b.y, b.w, b.w) {
           hit = true;
@@ -123,7 +123,7 @@ fn main() -> i64 {
     let n2 = vec_len(blocks);
     let mut j = 0;
     while j < n2 {
-      let b = vec_get(blocks, j);
+      let b = vec_get_unchecked(blocks, j);
       DrawRectangle(b.x as i32, b.y as i32, b.w as i32, b.w as i32, rgb(90, 170, 240));
       j = j + 1;
     }

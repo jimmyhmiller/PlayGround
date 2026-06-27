@@ -1045,7 +1045,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
             ExprKind::Field { base, field } => self.field_access(base, field, e.span),
 
-            ExprKind::Index { base, index } => self.array_get_op(base, index, e.span),
+            ExprKind::Index { base, index } => self.array_get_checked_op(base, index, e.span),
 
             ExprKind::Tuple(elems) => {
                 let mut cfields = Vec::with_capacity(elems.len());
@@ -1715,7 +1715,36 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let elem = self.repr_of(&elem_ty, span)?;
         let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
         check_assignable(&it, &Ty::i64(), idx.span)?;
-        Ok((CoreExpr::new(CoreExprKind::ArrayGet { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
+        // `array_get` yields `Option<T>` — `None` for an out-of-bounds index —
+        // so the absence of a value is carried in the type rather than aborting.
+        // The `elem` repr drives the in-bounds load; the CoreExpr repr is the
+        // Option value enum that codegen constructs (Some/None).
+        let opt_ty = Ty::Named { name: "Option".to_string(), args: vec![elem_ty] };
+        let opt_repr = self.repr_of(&opt_ty, span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGet { array: Box::new(ca), index: Box::new(ci), elem }, opt_repr), opt_ty))
+    }
+
+    /// The `a[i]` index operator: bounds-checked, yields `T` directly, aborts on
+    /// out-of-bounds (Rust-like). The `array_get` function returns `Option<T>`.
+    fn array_get_checked_op(&mut self, arr: &Expr, idx: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (ca, aty) = self.expr(arr, None)?;
+        let elem_ty = array_elem_ty(&aty).ok_or_else(|| LowerError { msg: "indexing a non-array".into(), span })?;
+        let elem = self.repr_of(&elem_ty, span)?;
+        let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
+        check_assignable(&it, &Ty::i64(), idx.span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGetChecked { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
+    }
+
+    /// `array_get_unchecked(a, i)` — the unsafe escape hatch behind `array_get`:
+    /// a raw load returning `T` with NO bounds check (out-of-bounds is undefined
+    /// behaviour). For trusted, already-bounds-checked code and hot paths.
+    fn array_get_unchecked_op(&mut self, arr: &Expr, idx: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (ca, aty) = self.expr(arr, None)?;
+        let elem_ty = array_elem_ty(&aty).ok_or_else(|| LowerError { msg: "array_get_unchecked on a non-array".into(), span })?;
+        let elem = self.repr_of(&elem_ty, span)?;
+        let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
+        check_assignable(&it, &Ty::i64(), idx.span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGetUnchecked { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
     }
 
     fn array_set_op(&mut self, arr: &Expr, idx: &Expr, val: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -2688,6 +2717,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 "array_new" if args.len() == 1 => return self.array_new(&args[0], expected, span),
                 "array_len" if args.len() == 1 => return self.array_len_op(&args[0], span),
                 "array_get" if args.len() == 2 => return self.array_get_op(&args[0], &args[1], span),
+                "array_get_unchecked" if args.len() == 2 => return self.array_get_unchecked_op(&args[0], &args[1], span),
                 "array_set" if args.len() == 3 => return self.array_set_op(&args[0], &args[1], &args[2], span),
                 _ => {}
             }

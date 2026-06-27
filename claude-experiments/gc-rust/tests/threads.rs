@@ -96,7 +96,7 @@ const JOIN_LIVE_ROOTS_SRC: &str = r#"
         let child = t.join();
         let mut s = 0;
         let mut j = 0;
-        while j < vec_len(m) { s = s + vec_get(m, j); j = j + 1; }
+        while j < vec_len(m) { s = s + vec_get_unchecked(m, j); j = j + 1; }
         s + child
     }
 "#;
@@ -188,7 +188,7 @@ fn thread_returns_vec() {
             let t = Thread::spawn(|| build(100));
             let r = t.join();
             let mut s = 0; let mut j = 0;
-            while j < vec_len(r) { s = s + vec_get(r, j); j = j + 1; }
+            while j < vec_len(r) { s = s + vec_get_unchecked(r, j); j = j + 1; }
             s
         }
     "#;
@@ -210,7 +210,7 @@ fn thread_returns_vec_under_stress() {
             let t = Thread::spawn(|| build(80));
             let r = t.join();
             let mut s = 0; let mut j = 0;
-            while j < vec_len(r) { s = s + vec_get(r, j); j = j + 1; }
+            while j < vec_len(r) { s = s + vec_get_unchecked(r, j); j = j + 1; }
             s
         }
     "#;

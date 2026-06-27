@@ -5,7 +5,7 @@ fn ivec_new() -> IntVec {
 }
 
 fn ivec_get(v: IntVec, i: i64) -> i64 {
-    array_get(v.data, i)
+    array_get_unchecked(v.data, i)
 }
 
 fn ivec_push(mut v: IntVec, x: i64) -> IntVec {
@@ -17,7 +17,7 @@ fn ivec_push(mut v: IntVec, x: i64) -> IntVec {
         let mut new_data: Array<i64> = array_new(new_cap);
         let mut i = 0;
         while i < v.len {
-            let _u = array_set(new_data, i, array_get(v.data, i));
+            let _u = array_set(new_data, i, array_get_unchecked(v.data, i));
             i = i + 1;
         }
         let _u2 = array_set(new_data, v.len, x);

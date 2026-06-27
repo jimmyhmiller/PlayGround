@@ -4,7 +4,7 @@ fn rpn(input: String) -> Result<i64, i64> {
   let mut stack: Vec<i64> = vec_new();
   let mut i = 0;
   while i < vec_len(parts) {
-    let p = vec_get(parts, i);
+    let p = vec_get_unchecked(parts, i);
     if string_eq(p, "+") || string_eq(p, "*") || string_eq(p, "-") {
       if vec_len(stack) < 2 { return Result::Err(1); }
       let b = vec_pop(stack); let a = vec_pop(stack);

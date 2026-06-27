@@ -6,7 +6,7 @@ enum Tx { Deposit(i64, i64), Withdraw(i64, i64), Transfer(i64, i64, i64) }
 fn find(accts: Vec<Account>, id: i64) -> i64 {
     let mut i = 0;
     while i < vec_len(accts) {
-        let a = vec_get(accts, i);
+        let a = vec_get_unchecked(accts, i);
         if a.id == id { return a.balance; }
         i = i + 1;
     }
@@ -17,7 +17,7 @@ fn apply(mut accts: Vec<Account>, t: Tx) -> Vec<Account> {
     let mut out = vec_new();
     let mut i = 0;
     while i < vec_len(accts) {
-        let a = vec_get(accts, i);
+        let a = vec_get_unchecked(accts, i);
         let nb = match t {
             Tx::Deposit(id, amt) => if a.id == id { a.balance + amt } else { a.balance },
             Tx::Withdraw(id, amt) => if a.id == id { a.balance - amt } else { a.balance },
@@ -51,7 +51,7 @@ fn main() -> i64 {
     // closures + higher-order over the balances
     let mut bals = vec_new();
     let mut j = 0;
-    while j < vec_len(accts) { let a = vec_get(accts, j); bals = vec_push(bals, a.balance); j = j + 1; }
+    while j < vec_len(accts) { let a = vec_get_unchecked(accts, j); bals = vec_push(bals, a.balance); j = j + 1; }
     let scale = 1;
     let scaled = vec_map(bals, |b: i64| b * scale);
     let total = vec_fold(scaled, 0, |acc: i64, b: i64| acc + b);   // 90 + 70 = 160

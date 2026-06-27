@@ -2513,6 +2513,86 @@ impl<'ctx> Cg<'ctx> {
                 self.builder.build_free(pv.into_pointer_value()).map_err(le)?;
                 Ok((i64t.const_zero().into(), Type::Int(64, true)))
             }
+            ExprKind::Erase { .. } => Err("codegen: unlowered Erase (checker should have made it a MakeDyn)".into()),
+            ExprKind::MakeDyn { dyn_struct, vtable_struct, methods, inner } => {
+                // The concrete object pointer (becomes the fat pointer's `data`).
+                let (iv, _) = self.emit_expr(inner, scope)?;
+                let data = iv.into_pointer_value();
+                // A constant vtable global: the impl methods' addresses, in order.
+                // Opaque pointers make `<Trait>$<T>$m(ptr T, …)` directly storable
+                // in the erased `(ptr i8, …)` slot — no thunks.
+                let vty = self
+                    .structs
+                    .get(vtable_struct)
+                    .ok_or_else(|| format!("codegen: unknown vtable struct '{vtable_struct}'"))?
+                    .ty;
+                let mut fields: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(methods.len());
+                for m in methods {
+                    let fv = *self
+                        .funcs
+                        .get(m)
+                        .ok_or_else(|| format!("codegen: dyn vtable references unknown fn '{m}'"))?;
+                    fields.push(fv.as_global_value().as_pointer_value().into());
+                }
+                let g = self.module.add_global(vty, None, &format!("vtable.{dyn_struct}"));
+                g.set_initializer(&vty.const_named_struct(&fields));
+                g.set_constant(true);
+                // Fill a caller-frame fat pointer { data, vtable }.
+                let dty = self
+                    .structs
+                    .get(dyn_struct)
+                    .ok_or_else(|| format!("codegen: unknown dyn struct '{dyn_struct}'"))?
+                    .ty;
+                let slot = self.builder.build_alloca(dty, "dyn.obj").map_err(le)?;
+                let dp = self.builder.build_struct_gep(dty, slot, 0, "dyn.data").map_err(le)?;
+                self.builder.build_store(dp, data).map_err(le)?;
+                let vp = self.builder.build_struct_gep(dty, slot, 1, "dyn.vt").map_err(le)?;
+                self.builder.build_store(vp, g.as_pointer_value()).map_err(le)?;
+                // The trait object is the fat-pointer struct BY VALUE (16 bytes) —
+                // load it out of the temp so it returns/passes in registers.
+                let val = self.builder.build_load(dty, slot, "dyn.val").map_err(le)?;
+                Ok((val, Type::Struct(dyn_struct.clone())))
+            }
+            ExprKind::DynDispatch { dyn_struct, vtable_struct, method_index, cc, params, ret, recv, args } => {
+                let pty = self.ctx.ptr_type(AddressSpace::default());
+                // The fat pointer by value — spill to a temp to read data + vtable.
+                let (rv, _) = self.emit_expr(recv, scope)?;
+                let dty = self
+                    .structs
+                    .get(dyn_struct)
+                    .ok_or_else(|| format!("codegen: unknown dyn struct '{dyn_struct}'"))?
+                    .ty;
+                let slot = self.builder.build_alloca(dty, "dyn.recv").map_err(le)?;
+                self.builder.build_store(slot, rv).map_err(le)?;
+                let dp = self.builder.build_struct_gep(dty, slot, 0, "dyn.data").map_err(le)?;
+                let data = self.builder.build_load(pty, dp, "data").map_err(le)?;
+                let vp = self.builder.build_struct_gep(dty, slot, 1, "dyn.vt").map_err(le)?;
+                let vtab = self.builder.build_load(pty, vp, "vt").map_err(le)?.into_pointer_value();
+                // Load the method's function pointer from the vtable struct.
+                let vty = self
+                    .structs
+                    .get(vtable_struct)
+                    .ok_or_else(|| format!("codegen: unknown vtable struct '{vtable_struct}'"))?
+                    .ty;
+                let mp = self.builder.build_struct_gep(vty, vtab, *method_index as u32, "vt.m").map_err(le)?;
+                let fnptr = self.builder.build_load(pty, mp, "fn").map_err(le)?.into_pointer_value();
+                // Indirect call: (data, args…).
+                let fn_ty = self.fn_type_types(params, ret);
+                let mut meta: Vec<BasicMetadataValueEnum<'ctx>> = vec![data.into()];
+                for a in args {
+                    let (v, _) = self.emit_expr(a, scope)?;
+                    meta.push(v.into());
+                }
+                let cs = self.builder.build_indirect_call(fn_ty, fnptr, &meta, "dyn.call").map_err(le)?;
+                if let Some(id) = self.conv_ids.get(cc) {
+                    cs.set_call_convention(*id);
+                }
+                let v = cs
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "codegen: dyn dispatch returned void".to_string())?;
+                Ok((v, ret.clone()))
+            }
             ExprKind::Construct { sum, variant, args } => self.emit_construct(sum, variant, args, scope),
             ExprKind::Match { scrut, arms } => self.emit_match(scrut, arms, scope),
             ExprKind::FnPtrOf(name) => {

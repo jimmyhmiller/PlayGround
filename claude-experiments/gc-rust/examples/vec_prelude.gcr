@@ -12,7 +12,7 @@ fn sum_squares(n: i64) -> i64 {
     let mut total = 0;
     let mut j = 0;
     while j < vec_len(v) {
-        total = total + vec_get(v, j);
+        total = total + vec_get_unchecked(v, j);
         j = j + 1;
     }
     total

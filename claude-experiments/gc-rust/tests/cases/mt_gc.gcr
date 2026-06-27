@@ -1,4 +1,4 @@
-fn worker(n: i64) -> i64 { let mut s = 0; let mut i = 0; while i < n { let mut v = vec_new(); v = vec_push(v, i % 50); s = s + vec_get(v, 0); i = i + 1; } s }
+fn worker(n: i64) -> i64 { let mut s = 0; let mut i = 0; while i < n { let mut v = vec_new(); v = vec_push(v, i % 50); s = s + vec_get_unchecked(v, 0); i = i + 1; } s }
 fn main() -> i64 {
     let mut total = 0; let mut round = 0;
     while round < 10 {

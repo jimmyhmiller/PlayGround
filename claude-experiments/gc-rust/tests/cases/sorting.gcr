@@ -5,5 +5,5 @@ fn main() -> i64 {
   let mut b = vec_new();
   b=vec_push(b, Score{name:"a",points:30}); b=vec_push(b, Score{name:"b",points:50}); b=vec_push(b, Score{name:"c",points:40});
   let sb = vec_sort_by(b, |x: Score, y: Score| x.points - y.points);   // [30,40,50]
-  vec_get(s,0) + vec_get(s,4) + vec_get(sb,0).points + vec_get(sb,2).points - 48   // 1+9+30+50-48 = 42
+  vec_get_unchecked(s,0) + vec_get_unchecked(s,4) + vec_get_unchecked(sb,0).points + vec_get_unchecked(sb,2).points - 48   // 1+9+30+50-48 = 42
 }

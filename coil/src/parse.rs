@@ -638,6 +638,14 @@ fn parse_type_inner(s: &Sexp) -> Result<Type, Diag> {
                 let n = sym(items.get(1).ok_or("struct type: missing name")?, "struct name")?;
                 Ok(Type::Struct(n))
             }
+            // (dyn Trait) -> a trait object: the `<Trait>-dyn` fat-pointer struct
+            // `defdyn` generates (lib/dyn.coil), passed/returned BY VALUE (16 bytes,
+            // like a slice). So a function taking `(dyn Write)` accepts any erased
+            // implementer and can return one without dangling.
+            "dyn" => {
+                let t = sym(items.get(1).ok_or("dyn type: expected (dyn Trait)")?, "dyn trait name")?;
+                Ok(Type::Struct(format!("{t}-dyn")))
+            }
             // (fnptr CC [param-types] ret-type)
             "fnptr" => {
                 let cc = sym(items.get(1).ok_or("fnptr type: missing convention")?, "fnptr cc")?;
@@ -950,6 +958,14 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
             }
             Ok(ExprKind::Free(Box::new(parse_expr(&args[0])?)))
         }
+        // (make-dyn Trait expr) — explicitly erase a (ptr T) to a (dyn Trait).
+        "make-dyn" => {
+            if args.len() != 2 {
+                return Err(Diag::at(span, "make-dyn: expects (make-dyn Trait expr)"));
+            }
+            let trait_name = sym(&args[0], "make-dyn trait name")?;
+            Ok(ExprKind::Erase { trait_name, inner: Box::new(parse_expr(&args[1])?) })
+        }
         "index" => {
             let (p, i) = two(args, "index")?;
             Ok(ExprKind::Index {
@@ -1083,6 +1099,19 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
                 "code-variant-count" => CodeOp::CVariantCount,
                 "code-variant-name" => CodeOp::CVariantName,
                 _ => CodeOp::CVariantFields,
+            };
+            Ok(ExprKind::CodeOp { op, args: args.iter().map(parse_expr).collect::<Result<_, _>>()? })
+        }
+        // trait reflection (for vtable / dyn-object generators)
+        "code-trait-method-count" | "code-trait-method-name" | "code-trait-arity"
+        | "code-trait-param-name" | "code-trait-param-type" | "code-trait-ret-type" => {
+            let op = match head.as_str() {
+                "code-trait-method-count" => CodeOp::CTraitMethodCount,
+                "code-trait-method-name" => CodeOp::CTraitMethodName,
+                "code-trait-arity" => CodeOp::CTraitArity,
+                "code-trait-param-name" => CodeOp::CTraitParamName,
+                "code-trait-param-type" => CodeOp::CTraitParamType,
+                _ => CodeOp::CTraitRetType,
             };
             Ok(ExprKind::CodeOp { op, args: args.iter().map(parse_expr).collect::<Result<_, _>>()? })
         }

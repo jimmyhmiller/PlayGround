@@ -351,8 +351,20 @@ pub enum CoreExprKind {
     ArrayNew { layout: LayoutId, len: Box<CoreExpr>, elem: Repr },
     /// Number of elements in an array (its varlen count). Yields i64.
     ArrayLen(Box<CoreExpr>),
-    /// Read element `index` from an array. Repr is the element repr.
+    /// Read element `index` from an array, returning `Option<T>` (`None` when
+    /// out of bounds). The CoreExpr's repr is the `Option<T>` value enum; `elem`
+    /// is the element repr used for the in-bounds load.
     ArrayGet { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
+    /// Unchecked element read: a raw load with NO bounds check, yielding `T`
+    /// directly. The unsafe escape hatch behind `array_get`; out-of-bounds is
+    /// undefined behaviour. Used by trusted, already-bounds-checked code (e.g.
+    /// the prelude's `Vec` internals) and hot paths. Repr is the element repr.
+    ArrayGetUnchecked { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
+    /// Checked element read for the `a[i]` index operator: bounds-checked, yields
+    /// `T` directly, and aborts (clear error) on out-of-bounds — Rust-like
+    /// indexing. (`array_get` the function returns `Option<T>` instead.) Repr is
+    /// the element repr.
+    ArrayGetChecked { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
     /// Write `value` to element `index` of an array. Yields i64 0.
     ArraySet { array: Box<CoreExpr>, index: Box<CoreExpr>, value: Box<CoreExpr>, elem: Repr },
     /// Numeric conversion: trunc / sext / zext / fp<->int / fp resize.

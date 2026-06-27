@@ -1407,6 +1407,19 @@ pub extern "C" fn ai_print_float(_thread: *mut Thread, v: f64) -> i64 {
     0
 }
 
+/// Abort with a clear message on an out-of-bounds array access. Called from the
+/// inlined bounds check codegen emits around every `array_get`/`array_set`; it
+/// never returns (the compiled fail path ends in `unreachable`). A legible
+/// diagnostic on stderr then `abort()`, instead of a silent memory-safety bug.
+#[unsafe(no_mangle)]
+pub extern "C" fn ai_bounds_fail(_thread: *mut Thread, index: i64, len: i64) -> ! {
+    eprintln!(
+        "gc-rust: array index out of bounds: the index is {} but the length is {}",
+        index, len
+    );
+    std::process::abort();
+}
+
 // ---- String primitives ----------------------------------------------------
 //
 // A gc-rust `String` is a varlen `Bytes` object: [ObjHeader (Full::SIZE)] then a

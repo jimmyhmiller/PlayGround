@@ -1793,7 +1793,9 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             }
             CoreExprKind::ArrayNew { layout, len, elem } => self.gen_array_new(fcx, *layout, len, elem, e.span),
             CoreExprKind::ArrayLen(arr) => self.gen_array_len(fcx, arr),
-            CoreExprKind::ArrayGet { array, index, elem } => self.gen_array_get(fcx, array, index, elem),
+            CoreExprKind::ArrayGet { array, index, elem } => self.gen_array_get(fcx, array, index, elem, &e.repr),
+            CoreExprKind::ArrayGetUnchecked { array, index, elem } => self.gen_array_get_unchecked(fcx, array, index, elem),
+            CoreExprKind::ArrayGetChecked { array, index, elem } => self.gen_array_get_checked(fcx, array, index, elem),
             CoreExprKind::ArraySet { array, index, value, elem } => self.gen_array_set(fcx, array, index, value, elem),
             CoreExprKind::MakeClosure { code, env, captures } => self.gen_make_closure(fcx, *code, *env, captures, e.span),
             CoreExprKind::CallClosure { callee, args } => self.gen_call_closure(fcx, callee, args, &e.repr),
@@ -1864,6 +1866,21 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             self.ctx.void_type().fn_type(&[ptr.into()], false),
             Some(inkwell::module::Linkage::External),
         );
+        // void ai_bounds_fail(ptr thread, i64 index, i64 len) -- aborts, never
+        // returns. Marked noreturn + cold so the inlined array bounds check keeps
+        // the in-bounds path straight-line and the trap path out of line.
+        {
+            let f = self.module.add_function(
+                "ai_bounds_fail",
+                self.ctx.void_type().fn_type(&[ptr.into(), i64t.into(), i64t.into()], false),
+                Some(inkwell::module::Linkage::External),
+            );
+            use inkwell::attributes::AttributeLoc;
+            for name in ["noreturn", "cold"] {
+                let kind = inkwell::attributes::Attribute::get_named_enum_kind_id(name);
+                f.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(kind, 0));
+            }
+        }
         // void ai_ffi_enter(ptr thread) / void ai_ffi_leave(ptr thread)
         // The managed↔native transition wrapped around every extern "C" call.
         self.module.add_function(
@@ -2265,18 +2282,31 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         tag: u32,
         fields: &[CoreExpr],
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
-        let sty = self.value_struct_ty(value);
-        let i32t = self.ctx.i32_type();
-        let max_ptrs = crate::core::value_enum_max_ptrs(
-            self.prog.values[value as usize].variants.as_ref().unwrap(),
-        ) as u32;
-        // Evaluate payload field values first.
+        // Evaluate payload field values first, then build the aggregate.
         let mut vals = Vec::with_capacity(fields.len());
         for f in fields {
             if let Some(v) = self.gen_expr(fcx, f)? {
                 vals.push((v, f.repr.clone()));
             }
         }
+        Ok(Some(self.build_value_variant(value, tag, &vals)))
+    }
+
+    /// Build a value-enum variant aggregate from already-computed payload values
+    /// (the guts of `gen_make_value_variant`, factored out so codegen-internal
+    /// constructions — e.g. wrapping an array element in `Option::Some` — can
+    /// reuse the exact layout logic without re-evaluating field expressions).
+    fn build_value_variant(
+        &self,
+        value: ValueId,
+        tag: u32,
+        vals: &[(BasicValueEnum<'ctx>, Repr)],
+    ) -> BasicValueEnum<'ctx> {
+        let sty = self.value_struct_ty(value);
+        let i32t = self.ctx.i32_type();
+        let max_ptrs = crate::core::value_enum_max_ptrs(
+            self.prog.values[value as usize].variants.as_ref().unwrap(),
+        ) as u32;
         let slot = self.builder.build_alloca(sty, "ve").unwrap();
         self.builder.build_store(slot, sty.const_zero()).unwrap();
 
@@ -2287,7 +2317,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             if sty.count_fields() > 1 {
                 let payload_addr = self.builder.build_struct_gep(sty, slot, 1, "ve.pl").unwrap();
                 let mut off = 0u64;
-                for (v, repr) in &vals {
+                for (v, repr) in vals {
                     let (sz, _) = Self::repr_size_align(repr);
                     off = align_up64(off, sz);
                     let field_addr = self.payload_field_addr(payload_addr, off);
@@ -2308,7 +2338,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
             let raw_addr = self.builder.build_struct_gep(sty, slot, 2, "ve.raw").unwrap();
             let mut ptr_slot = 0u64;
             let mut raw_off = 0u64;
-            for (v, repr) in &vals {
+            for (v, repr) in vals {
                 match repr {
                     Repr::Ref(_) => {
                         let elem = unsafe {
@@ -2331,8 +2361,7 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
                 }
             }
         }
-        let agg = self.builder.build_load(sty, slot, "ve.val").unwrap();
-        Ok(Some(agg))
+        self.builder.build_load(sty, slot, "ve.val").unwrap()
     }
 
     /// Address of a payload field at `byte_off` within the value-enum's byte
@@ -2388,18 +2417,74 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         }
     }
 
-    /// Element address: HEADER + 8 (count word) + index*stride.
-    fn array_elem_addr(&self, arr: PointerValue<'ctx>, index: IntValue<'ctx>, stride: u64) -> PointerValue<'ctx> {
+    /// Sign-extend an array index to i64 (indices are i64-typed for addressing
+    /// and the bounds check).
+    fn idx_to_i64(&self, index: IntValue<'ctx>) -> IntValue<'ctx> {
         let i64t = self.ctx.i64_type();
-        let ptr = self.ctx.ptr_type(AddressSpace::default());
-        let base = self.builder.build_ptr_to_int(arr, i64t, "a.i").unwrap();
-        let hdr = self.builder.build_int_add(base, i64t.const_int(Self::HEADER + 8, false), "a.h").unwrap();
-        let idx64 = if index.get_type().get_bit_width() < 64 {
+        if index.get_type().get_bit_width() < 64 {
             self.builder.build_int_s_extend(index, i64t, "a.ix").unwrap()
-        } else { index };
+        } else {
+            index
+        }
+    }
+
+    /// Element address: HEADER + 8 (count word) + index*stride, as an `inbounds`
+    /// GEP off the array pointer. Using a GEP (rather than ptrtoint/inttoptr
+    /// arithmetic) preserves pointer provenance, so LLVM's alias analysis and
+    /// strength reduction can optimize loops of array accesses. `idx64` must
+    /// already be i64 (see `idx_to_i64`).
+    fn array_elem_addr(&self, arr: PointerValue<'ctx>, idx64: IntValue<'ctx>, stride: u64) -> PointerValue<'ctx> {
+        let i8t = self.ctx.i8_type();
+        let i64t = self.ctx.i64_type();
         let off = self.builder.build_int_mul(idx64, i64t.const_int(stride, false), "a.off").unwrap();
-        let addr = self.builder.build_int_add(hdr, off, "a.ea").unwrap();
-        self.builder.build_int_to_ptr(addr, ptr, "a.ep").unwrap()
+        let off = self.builder.build_int_add(off, i64t.const_int(Self::HEADER + 8, false), "a.h").unwrap();
+        unsafe { self.builder.build_in_bounds_gep(i8t, arr, &[off], "a.ep").unwrap() }
+    }
+
+    /// Load an array's logical element count for a bounds check. The count word
+    /// (at `HEADER`) holds the element count for Values (traced) arrays and the
+    /// byte length for Bytes (scalar) arrays; the latter is divided by the
+    /// element stride. `arr_repr` is the array object's repr (`Repr::Ref(lid)`).
+    fn array_logical_len(&self, obj: PointerValue<'ctx>, arr_repr: &Repr) -> Result<IntValue<'ctx>, CodegenError> {
+        let i64t = self.ctx.i64_type();
+        let count_addr = self.obj_addr(obj, Self::HEADER);
+        let count_load = self.builder.build_load(i64t, count_addr, "cnt").unwrap();
+        // The array length is immutable after allocation, so the count word never
+        // changes. Mark the load `!invariant.load` so LLVM may coalesce repeated
+        // bounds-check length loads and not treat element stores as clobbering it.
+        if let Some(inst) = count_load.as_instruction_value() {
+            let kind = self.ctx.get_kind_id("invariant.load");
+            let node = self.ctx.metadata_node(&[]);
+            inst.set_metadata(node, kind).ok();
+        }
+        let count = count_load.into_int_value();
+        let lid = match arr_repr {
+            Repr::Ref(l) => *l,
+            _ => return Err(CodegenError("array bounds check on non-array".into())),
+        };
+        let lay = &self.prog.layouts[lid as usize];
+        let len = if matches!(lay.varlen, crate::core::VarLen::Values) {
+            count
+        } else {
+            let stride = lay.elem_stride.max(1) as u64;
+            self.builder.build_int_unsigned_div(count, i64t.const_int(stride, false), "alen").unwrap()
+        };
+        Ok(len)
+    }
+
+    /// Emit an inlined bounds check: if `idx64 >=u len` (unsigned, so negative
+    /// indices wrap large and also trap) call `ai_bounds_fail` (noreturn) on a
+    /// cold out-of-line path; otherwise fall through to the in-bounds block.
+    fn emit_bounds_check(&self, fcx: &FnCtx<'ctx>, idx64: IntValue<'ctx>, len: IntValue<'ctx>) {
+        let oob = self.builder.build_int_compare(IntPredicate::UGE, idx64, len, "oob").unwrap();
+        let fail_bb = self.ctx.append_basic_block(fcx.func, "bounds.fail");
+        let ok_bb = self.ctx.append_basic_block(fcx.func, "bounds.ok");
+        self.builder.build_conditional_branch(oob, fail_bb, ok_bb).unwrap();
+        self.builder.position_at_end(fail_bb);
+        let f = self.module.get_function("ai_bounds_fail").unwrap();
+        self.builder.build_call(f, &[fcx.thread.into(), idx64.into(), len.into()], "").unwrap();
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(ok_bb);
     }
 
     /// Allocate a `String` varlen object and copy the literal's UTF-8 bytes in.
@@ -2496,7 +2581,66 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         Ok(Some(logical.into()))
     }
 
+    /// `array_get(a, i)` yields `Option<T>`: `Some(a[i])` when in bounds, `None`
+    /// when out of bounds (no abort — the absence of a value is signalled in the
+    /// type). `result_repr` is the `Option<T>` value-enum repr assigned in
+    /// lowering. The in-bounds load is unchecked (it only runs after the bounds
+    /// compare), and when a caller immediately unwraps the result LLVM's SROA
+    /// collapses the Option away, leaving just the compare + load.
     fn gen_array_get(
+        &mut self,
+        fcx: &mut FnCtx<'ctx>,
+        array: &CoreExpr,
+        index: &CoreExpr,
+        elem: &Repr,
+        result_repr: &Repr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        // Option<T> from the prelude `enum Option<T> { None, Some(T) }`:
+        // declaration order fixes None = tag 0, Some = tag 1.
+        const OPTION_NONE_TAG: u32 = 0;
+        const OPTION_SOME_TAG: u32 = 1;
+        let option_vid = match result_repr {
+            Repr::Value(v) => *v,
+            _ => return Err(CodegenError("array_get result is not an Option value enum".into())),
+        };
+        let obj = self.gen_expr(fcx, array)?.unwrap().into_pointer_value();
+        let idx = self.gen_expr(fcx, index)?.unwrap().into_int_value();
+        let idx64 = self.idx_to_i64(idx);
+        let len = self.array_logical_len(obj, &array.repr)?;
+        let sty = self.value_struct_ty(option_vid);
+
+        let oob = self.builder.build_int_compare(IntPredicate::UGE, idx64, len, "oob").unwrap();
+        let some_bb = self.ctx.append_basic_block(fcx.func, "aget.some");
+        let none_bb = self.ctx.append_basic_block(fcx.func, "aget.none");
+        let merge_bb = self.ctx.append_basic_block(fcx.func, "aget.merge");
+        self.builder.build_conditional_branch(oob, none_bb, some_bb).unwrap();
+
+        // In bounds: load the element and wrap it in Some.
+        self.builder.position_at_end(some_bb);
+        let (stride, _) = Self::elem_stride(elem);
+        let addr = self.array_elem_addr(obj, idx64, stride);
+        let lty = self.llvm_ty(elem).ok_or_else(|| CodegenError("array of unit".into()))?;
+        let v = self.builder.build_load(lty, addr, "aget").unwrap();
+        let some = self.build_value_variant(option_vid, OPTION_SOME_TAG, &[(v, elem.clone())]);
+        let some_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        // Out of bounds: None.
+        self.builder.position_at_end(none_bb);
+        let none = self.build_value_variant(option_vid, OPTION_NONE_TAG, &[]);
+        let none_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        // Merge the two Option values.
+        self.builder.position_at_end(merge_bb);
+        let phi = self.builder.build_phi(sty, "aget.opt").unwrap();
+        phi.add_incoming(&[(&some, some_end), (&none, none_end)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
+    /// `array_get_unchecked(a, i)` — a raw element load with no bounds check,
+    /// yielding `T` directly (the unsafe escape hatch behind `array_get`).
+    fn gen_array_get_unchecked(
         &mut self,
         fcx: &mut FnCtx<'ctx>,
         array: &CoreExpr,
@@ -2505,10 +2649,32 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let obj = self.gen_expr(fcx, array)?.unwrap().into_pointer_value();
         let idx = self.gen_expr(fcx, index)?.unwrap().into_int_value();
+        let idx64 = self.idx_to_i64(idx);
         let (stride, _) = Self::elem_stride(elem);
-        let addr = self.array_elem_addr(obj, idx, stride);
+        let addr = self.array_elem_addr(obj, idx64, stride);
         let lty = self.llvm_ty(elem).ok_or_else(|| CodegenError("array of unit".into()))?;
-        let v = self.builder.build_load(lty, addr, "aget").unwrap();
+        let v = self.builder.build_load(lty, addr, "aget.unchecked").unwrap();
+        Ok(Some(v))
+    }
+
+    /// `a[i]` index operator: a bounds-checked element load that yields `T`
+    /// directly and aborts (clear error) on out-of-bounds — Rust-like indexing.
+    fn gen_array_get_checked(
+        &mut self,
+        fcx: &mut FnCtx<'ctx>,
+        array: &CoreExpr,
+        index: &CoreExpr,
+        elem: &Repr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let obj = self.gen_expr(fcx, array)?.unwrap().into_pointer_value();
+        let idx = self.gen_expr(fcx, index)?.unwrap().into_int_value();
+        let idx64 = self.idx_to_i64(idx);
+        let len = self.array_logical_len(obj, &array.repr)?;
+        self.emit_bounds_check(fcx, idx64, len);
+        let (stride, _) = Self::elem_stride(elem);
+        let addr = self.array_elem_addr(obj, idx64, stride);
+        let lty = self.llvm_ty(elem).ok_or_else(|| CodegenError("array of unit".into()))?;
+        let v = self.builder.build_load(lty, addr, "aget.checked").unwrap();
         Ok(Some(v))
     }
 
@@ -2523,8 +2689,11 @@ impl<'ctx, 'p> Codegen<'ctx, 'p> {
         let obj = self.gen_expr(fcx, array)?.unwrap().into_pointer_value();
         let idx = self.gen_expr(fcx, index)?.unwrap().into_int_value();
         let val = self.gen_expr(fcx, value)?.unwrap();
+        let idx64 = self.idx_to_i64(idx);
+        let len = self.array_logical_len(obj, &array.repr)?;
+        self.emit_bounds_check(fcx, idx64, len);
         let (stride, _) = Self::elem_stride(elem);
-        let addr = self.array_elem_addr(obj, idx, stride);
+        let addr = self.array_elem_addr(obj, idx64, stride);
         self.builder.build_store(addr, val).unwrap();
         // Generational write barrier: a long-lived (tenured) array may receive a
         // young pointer element. `emit_write_barrier` no-ops for scalar elements.
@@ -3739,6 +3908,7 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
         ("ai_atomic_i64_fetch_add", runtime::ai_atomic_i64_fetch_add as *const () as usize),
         ("ai_atomic_i64_compare_and_set", runtime::ai_atomic_i64_compare_and_set as *const () as usize),
         ("ai_gc_write_barrier", runtime::ai_gc_write_barrier as *const () as usize),
+        ("ai_bounds_fail", runtime::ai_bounds_fail as *const () as usize),
     ] {
         if let Some(f) = compiled.module.get_function(name) {
             ee.add_global_mapping(&f, addr);
@@ -4770,7 +4940,7 @@ mod tests {
                      array_set(a, 0, 10); \
                      array_set(a, 1, 20); \
                      array_set(a, 4, 12); \
-                     array_get(a, 0) + array_get(a, 1) + array_get(a, 4) \
+                     array_get_unchecked(a, 0) + array_get_unchecked(a, 1) + array_get_unchecked(a, 4) \
                    }";
         assert_eq!(run_gc(src, false), 42);
     }
@@ -4789,7 +4959,7 @@ mod tests {
                      while i < 100 { array_set(a, i, i); i = i + 1; } \
                      let mut sum = 0; \
                      let mut j = 0; \
-                     while j < 100 { sum = sum + array_get(a, j); j = j + 1; } \
+                     while j < 100 { sum = sum + array_get_unchecked(a, j); j = j + 1; } \
                      sum \
                    }";
         // sum 0..99 = 4950
@@ -4803,7 +4973,7 @@ mod tests {
                      array_set(a, 0, 1.5); \
                      array_set(a, 1, 2.5); \
                      array_set(a, 2, 4.0); \
-                     (array_get(a, 0) + array_get(a, 1) + array_get(a, 2)) as i64 \
+                     (array_get_unchecked(a, 0) + array_get_unchecked(a, 1) + array_get_unchecked(a, 2)) as i64 \
                    }";
         assert_eq!(run_gc(src, false), 8);
     }
@@ -4817,7 +4987,7 @@ mod tests {
                        let mut a: Array<i64> = array_new(3); \
                        array_set(a, 0, 100); array_set(a, 1, 20); array_set(a, 2, 3); \
                        let _x = mk(); let _y = mk(); \
-                       array_get(a, 0) + array_get(a, 1) + array_get(a, 2) \
+                       array_get_unchecked(a, 0) + array_get_unchecked(a, 1) + array_get_unchecked(a, 2) \
                    }";
         assert_eq!(run_gc(src, true), 123);
     }
@@ -4994,7 +5164,7 @@ mod tests {
 
     // ---- generic heap types (Option/Result) -------------------------------
 
-    const PRELUDE: &str = "enum Option<T> { None, Some(T) } \
+    const PRELUDE: &str = "#[value] enum Option<T> { None, Some(T) } \
                            enum Result<T, E> { Ok(T), Err(E) } ";
 
     #[test]

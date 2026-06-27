@@ -133,7 +133,7 @@ fn jit_array_copy_out_buffer() {
         fn main() -> i64 {
             let mut buf: Array<u8> = array_new(5);
             memset(as_c_bytes(buf), 7, 5);
-            let sum = (array_get(buf, 0) as i64) + (array_get(buf, 4) as i64);
+            let sum = (array_get_unchecked(buf, 0) as i64) + (array_get_unchecked(buf, 4) as i64);
             let mut a: Array<u8> = array_new(2);
             array_set(a, 0, 9); array_set(a, 1, 9);
             let mut b: Array<u8> = array_new(2);
@@ -159,7 +159,7 @@ fn jit_c_callback_into_gcrust() {
             array_set(arr, 0, 30); array_set(arr, 1, 10); array_set(arr, 2, 50);
             array_set(arr, 3, 20); array_set(arr, 4, 40);
             qsort(as_c_bytes(arr), 5, 8, cmp);
-            array_get(arr, 0) * 100 + array_get(arr, 4)
+            array_get_unchecked(arr, 0) * 100 + array_get_unchecked(arr, 4)
         }
     "#;
     assert_eq!(jit(src), 1050);

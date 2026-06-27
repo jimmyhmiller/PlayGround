@@ -5,6 +5,10 @@
 
 // ---- Core sum types -------------------------------------------------------
 
+// A value (unboxed) enum: a flat tag + payload, no heap allocation. This keeps
+// `array_get`/`vec_get` returning `Option<T>` free of per-access allocation —
+// when the result is matched immediately, LLVM collapses the Option entirely.
+#[value]
 enum Option<T> { None, Some(T) }
 
 enum Result<T, E> { Ok(T), Err(E) }
@@ -199,7 +203,15 @@ fn vec_with_capacity<T>(cap: i64) -> Vec<T> {
 
 fn vec_len<T>(v: Vec<T>) -> i64 { v.len }
 
-fn vec_get<T>(v: Vec<T>, i: i64) -> T { array_get(v.data, i) }
+// Bounds-checked indexing: Some(elem) when 0 <= i < len, None otherwise.
+fn vec_get<T>(v: Vec<T>, i: i64) -> Option<T> {
+    if i < 0 || i >= v.len { Option::None } else { Option::Some(array_get_unchecked(v.data, i)) }
+}
+
+// Unchecked indexing: returns the element directly with NO bounds check (the
+// unsafe escape hatch behind `vec_get`). For trusted, already-bounds-checked
+// callers and hot loops; out-of-range is undefined behaviour.
+fn vec_get_unchecked<T>(v: Vec<T>, i: i64) -> T { array_get_unchecked(v.data, i) }
 
 // `vec_set`/`vec_push` mutate the backing array, so they take `mut v`: under
 // gc-rust's immutable-by-default rule, mutating `v.data` requires `v` to be
@@ -218,7 +230,7 @@ fn vec_push<T>(mut v: Vec<T>, x: T) -> Vec<T> {
         let mut nd: Array<T> = array_new(new_cap);
         let mut i = 0;
         while i < v.len {
-            let _u = array_set(nd, i, array_get(v.data, i));
+            let _u = array_set(nd, i, array_get_unchecked(v.data, i));
             i = i + 1;
         }
         let _u2 = array_set(nd, v.len, x);
@@ -256,33 +268,33 @@ fn vec_truncate<T>(mut v: Vec<T>, n: i64) -> Vec<T> {
 
 // The last element, or None if empty.
 fn vec_last<T>(v: Vec<T>) -> Option<T> {
-    if v.len == 0 { Option::None } else { Option::Some(array_get(v.data, v.len - 1)) }
+    if v.len == 0 { Option::None } else { Option::Some(array_get_unchecked(v.data, v.len - 1)) }
 }
 
 // The first element, or None for an empty Vec.
 fn vec_first<T>(v: Vec<T>) -> Option<T> {
-    if v.len == 0 { Option::None } else { Option::Some(array_get(v.data, 0)) }
+    if v.len == 0 { Option::None } else { Option::Some(array_get_unchecked(v.data, 0)) }
 }
 
 // Bounds-checked indexing: Some(elem) in range, None otherwise.
 fn vec_get_opt<T>(v: Vec<T>, i: i64) -> Option<T> {
-    if i < 0 || i >= v.len { Option::None } else { Option::Some(array_get(v.data, i)) }
+    if i < 0 || i >= v.len { Option::None } else { Option::Some(array_get_unchecked(v.data, i)) }
 }
 
 // A fresh Vec with every element of `a` followed by every element of `b`.
 fn vec_concat<T>(a: Vec<T>, b: Vec<T>) -> Vec<T> {
     let mut out: Vec<T> = vec_with_capacity(a.len + b.len);
     let mut i = 0;
-    while i < a.len { out = vec_push(out, array_get(a.data, i)); i = i + 1; }
+    while i < a.len { out = vec_push(out, array_get_unchecked(a.data, i)); i = i + 1; }
     let mut j = 0;
-    while j < b.len { out = vec_push(out, array_get(b.data, j)); j = j + 1; }
+    while j < b.len { out = vec_push(out, array_get_unchecked(b.data, j)); j = j + 1; }
     out
 }
 
 // Append `b`'s elements onto `a` in place; returns the grown `a`.
 fn vec_extend<T>(mut a: Vec<T>, b: Vec<T>) -> Vec<T> {
     let mut j = 0;
-    while j < b.len { a = vec_push(a, array_get(b.data, j)); j = j + 1; }
+    while j < b.len { a = vec_push(a, array_get_unchecked(b.data, j)); j = j + 1; }
     a
 }
 
@@ -292,7 +304,7 @@ fn vec_slice<T>(v: Vec<T>, lo: i64, hi: i64) -> Vec<T> {
     let mut a = lo; if a < 0 { a = 0; }
     let mut b = hi; if b > v.len { b = v.len; }
     let mut out: Vec<T> = vec_new();
-    while a < b { out = vec_push(out, array_get(v.data, a)); a = a + 1; }
+    while a < b { out = vec_push(out, array_get_unchecked(v.data, a)); a = a + 1; }
     out
 }
 
@@ -302,8 +314,8 @@ fn vec_drop<T>(v: Vec<T>, n: i64) -> Vec<T> { vec_slice(v, n, v.len) }
 
 // Swap two elements in place; returns the Vec.
 fn vec_swap<T>(mut v: Vec<T>, i: i64, j: i64) -> Vec<T> {
-    let tmp = array_get(v.data, i);
-    let _u1 = array_set(v.data, i, array_get(v.data, j));
+    let tmp = array_get_unchecked(v.data, i);
+    let _u1 = array_set(v.data, i, array_get_unchecked(v.data, j));
     let _u2 = array_set(v.data, j, tmp);
     v
 }
@@ -314,7 +326,7 @@ fn vec_find<T>(v: Vec<T>, pred: fn(T) -> bool) -> Option<T> {
     let mut result: Option<T> = Option::None;
     while i < v.len {
         if opt_is_some(result) == false {
-            let x = array_get(v.data, i);
+            let x = array_get_unchecked(v.data, i);
             if pred(x) { result = Option::Some(x); }
         }
         i = i + 1;
@@ -327,7 +339,7 @@ fn vec_position<T>(v: Vec<T>, pred: fn(T) -> bool) -> i64 {
     let mut i = 0;
     let mut found = 0 - 1;
     while i < v.len {
-        if found < 0 { if pred(array_get(v.data, i)) { found = i; } }
+        if found < 0 { if pred(array_get_unchecked(v.data, i)) { found = i; } }
         i = i + 1;
     }
     found
@@ -339,7 +351,7 @@ fn vec_copy<T>(v: Vec<T>) -> Vec<T> {
     let mut nd: Array<T> = array_new(max_i64(v.cap, 1));
     let mut i = 0;
     while i < v.len {
-        let _u = array_set(nd, i, array_get(v.data, i));
+        let _u = array_set(nd, i, array_get_unchecked(v.data, i));
         i = i + 1;
     }
     Vec { data: nd, len: v.len, cap: max_i64(v.cap, 1) }
@@ -350,7 +362,7 @@ fn vec_reverse<T>(v: Vec<T>) -> Vec<T> {
     let mut out: Vec<T> = vec_with_capacity(max_i64(v.len, 1));
     let mut i = v.len;
     while i > 0 {
-        out = vec_push(out, array_get(v.data, i - 1));
+        out = vec_push(out, array_get_unchecked(v.data, i - 1));
         i = i - 1;
     }
     out
@@ -363,7 +375,7 @@ fn vec_index_of_i64(v: Vec<i64>, x: i64) -> i64 {
     let mut found = 0 - 1;
     while i < v.len {
         if found < 0 {
-            if array_get(v.data, i) == x {
+            if array_get_unchecked(v.data, i) == x {
                 found = i;
             }
         }
@@ -380,7 +392,7 @@ fn vec_sum_i64(v: Vec<i64>) -> i64 {
     let mut i = 0;
     let mut acc = 0;
     while i < v.len {
-        acc = acc + array_get(v.data, i);
+        acc = acc + array_get_unchecked(v.data, i);
         i = i + 1;
     }
     acc
@@ -391,12 +403,12 @@ fn vec_sum_i64(v: Vec<i64>) -> i64 {
 fn vec_sort_i64(mut v: Vec<i64>) -> Vec<i64> {
     let mut i = 1;
     while i < v.len {
-        let key = array_get(v.data, i);
+        let key = array_get_unchecked(v.data, i);
         let mut j = i - 1;
         // Shift larger elements right. `j` can go to -1, so guard before reading.
         let mut placed = false;
         while j >= 0 && placed == false {
-            let cur = array_get(v.data, j);
+            let cur = array_get_unchecked(v.data, j);
             if cur > key {
                 let _u = array_set(v.data, j + 1, cur);
                 j = j - 1;
@@ -561,7 +573,7 @@ fn str_len_chars(s: String) -> i64 {
 fn str_from_chars(cps: Vec<i64>) -> String {
     let mut out = "";
     let mut i = 0;
-    while i < vec_len(cps) { out = str_concat(out, char_to_str(vec_get(cps, i))); i = i + 1; }
+    while i < vec_len(cps) { out = str_concat(out, char_to_str(array_get_unchecked(cps.data, i))); i = i + 1; }
     out
 }
 
@@ -582,7 +594,7 @@ fn str_to_upper(s: String) -> String {
     let mut out: Vec<i64> = vec_new();
     let mut i = 0;
     while i < vec_len(cps) {
-        let c = vec_get(cps, i);
+        let c = array_get_unchecked(cps.data, i);
         out = vec_push(out, if c >= 97 && c <= 122 { c - 32 } else { c });
         i = i + 1;
     }
@@ -593,7 +605,7 @@ fn str_to_lower(s: String) -> String {
     let mut out: Vec<i64> = vec_new();
     let mut i = 0;
     while i < vec_len(cps) {
-        let c = vec_get(cps, i);
+        let c = array_get_unchecked(cps.data, i);
         out = vec_push(out, if c >= 65 && c <= 90 { c + 32 } else { c });
         i = i + 1;
     }
@@ -772,7 +784,7 @@ fn str_join(parts: Vec<String>, sep: String) -> String {
         if i > 0 {
             out = str_concat(out, sep);
         }
-        out = str_concat(out, vec_get(parts, i));
+        out = str_concat(out, array_get_unchecked(parts.data, i));
         i = i + 1;
     }
     out
@@ -805,10 +817,10 @@ fn mapstr_slot<V>(m: MapStr<V>, key: String) -> i64 {
     let mut result = 0 - 1;
     let mut steps = 0;
     while steps < m.cap && result < 0 {
-        if array_get(m.used, i) == 0 {
+        if array_get_unchecked(m.used, i) == 0 {
             result = i;
         } else {
-            if str_eq(array_get(m.keys, i), key) {
+            if str_eq(array_get_unchecked(m.keys, i), key) {
                 result = i;
             } else {
                 i = (i + 1) & mask;
@@ -822,7 +834,7 @@ fn mapstr_slot<V>(m: MapStr<V>, key: String) -> i64 {
 // Insert into a map known to have a free slot (used internally by insert/grow).
 fn mapstr_put_raw<V>(mut m: MapStr<V>, key: String, val: V) -> MapStr<V> {
     let slot = mapstr_slot(m, key);
-    let was_used = array_get(m.used, slot);
+    let was_used = array_get_unchecked(m.used, slot);
     let _u1 = array_set(m.keys, slot, key);
     let _u2 = array_set(m.vals, slot, val);
     let _u3 = array_set(m.used, slot, 1);
@@ -842,8 +854,8 @@ fn mapstr_grow<V>(m: MapStr<V>) -> MapStr<V> {
     };
     let mut i = 0;
     while i < m.cap {
-        if array_get(m.used, i) == 1 {
-            bigger = mapstr_put_raw(bigger, array_get(m.keys, i), array_get(m.vals, i));
+        if array_get_unchecked(m.used, i) == 1 {
+            bigger = mapstr_put_raw(bigger, array_get_unchecked(m.keys, i), array_get_unchecked(m.vals, i));
         }
         i = i + 1;
     }
@@ -860,7 +872,7 @@ fn mapstr_insert<V>(mut m: MapStr<V>, key: String, val: V) -> MapStr<V> {
 
 fn mapstr_contains<V>(m: MapStr<V>, key: String) -> bool {
     let slot = mapstr_slot(m, key);
-    if slot < 0 { false } else { array_get(m.used, slot) == 1 }
+    if slot < 0 { false } else { array_get_unchecked(m.used, slot) == 1 }
 }
 
 fn mapstr_get<V>(m: MapStr<V>, key: String) -> Option<V> {
@@ -868,8 +880,8 @@ fn mapstr_get<V>(m: MapStr<V>, key: String) -> Option<V> {
     if slot < 0 {
         Option::None
     } else {
-        if array_get(m.used, slot) == 1 {
-            Option::Some(array_get(m.vals, slot))
+        if array_get_unchecked(m.used, slot) == 1 {
+            Option::Some(array_get_unchecked(m.vals, slot))
         } else {
             Option::None
         }
@@ -883,7 +895,7 @@ fn mapstr_copy<V>(m: MapStr<V>) -> MapStr<V> {
     let mut c: MapStr<V> = mapstr_new();
     let mut i = 0;
     while i < m.cap {
-        if array_get(m.used, i) == 1 { c = mapstr_insert(c, array_get(m.keys, i), array_get(m.vals, i)); }
+        if array_get_unchecked(m.used, i) == 1 { c = mapstr_insert(c, array_get_unchecked(m.keys, i), array_get_unchecked(m.vals, i)); }
         i = i + 1;
     }
     c
@@ -912,13 +924,13 @@ fn arg_str(i: i64) -> String { "" }
 fn mapstr_keys<V>(m: MapStr<V>) -> Vec<String> {
     let mut ks: Vec<String> = vec_new();
     let mut i = 0;
-    while i < m.cap { if array_get(m.used, i) == 1 { ks = vec_push(ks, array_get(m.keys, i)); } i = i + 1; }
+    while i < m.cap { if array_get_unchecked(m.used, i) == 1 { ks = vec_push(ks, array_get_unchecked(m.keys, i)); } i = i + 1; }
     ks
 }
 fn mapstr_vals<V>(m: MapStr<V>) -> Vec<V> {
     let mut vs: Vec<V> = vec_new();
     let mut i = 0;
-    while i < m.cap { if array_get(m.used, i) == 1 { vs = vec_push(vs, array_get(m.vals, i)); } i = i + 1; }
+    while i < m.cap { if array_get_unchecked(m.used, i) == 1 { vs = vec_push(vs, array_get_unchecked(m.vals, i)); } i = i + 1; }
     vs
 }
 
@@ -948,10 +960,10 @@ fn hashmap_slot<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> i64 {
     let mut result = 0 - 1;
     let mut steps = 0;
     while steps < m.cap && result < 0 {
-        if array_get(m.used, i) == 0 {
+        if array_get_unchecked(m.used, i) == 0 {
             result = i;
         } else {
-            if array_get(m.keys, i).eq(key) {
+            if array_get_unchecked(m.keys, i).eq(key) {
                 result = i;
             } else {
                 i = (i + 1) & mask;
@@ -965,7 +977,7 @@ fn hashmap_slot<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> i64 {
 // Insert into a map known to have a free slot (used by insert/grow).
 fn hashmap_put_raw<K: Eq + Hash, V>(mut m: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
     let slot = hashmap_slot(m, key);
-    let was_used = array_get(m.used, slot);
+    let was_used = array_get_unchecked(m.used, slot);
     let _u1 = array_set(m.keys, slot, key);
     let _u2 = array_set(m.vals, slot, val);
     let _u3 = array_set(m.used, slot, 1);
@@ -985,8 +997,8 @@ fn hashmap_grow<K: Eq + Hash, V>(m: HashMap<K, V>) -> HashMap<K, V> {
     };
     let mut i = 0;
     while i < m.cap {
-        if array_get(m.used, i) == 1 {
-            bigger = hashmap_put_raw(bigger, array_get(m.keys, i), array_get(m.vals, i));
+        if array_get_unchecked(m.used, i) == 1 {
+            bigger = hashmap_put_raw(bigger, array_get_unchecked(m.keys, i), array_get_unchecked(m.vals, i));
         }
         i = i + 1;
     }
@@ -1002,7 +1014,7 @@ fn hashmap_insert<K: Eq + Hash, V>(mut m: HashMap<K, V>, key: K, val: V) -> Hash
 
 fn hashmap_contains<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> bool {
     let slot = hashmap_slot(m, key);
-    if slot < 0 { false } else { array_get(m.used, slot) == 1 }
+    if slot < 0 { false } else { array_get_unchecked(m.used, slot) == 1 }
 }
 
 fn hashmap_get<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> Option<V> {
@@ -1010,8 +1022,8 @@ fn hashmap_get<K: Eq + Hash, V>(m: HashMap<K, V>, key: K) -> Option<V> {
     if slot < 0 {
         Option::None
     } else {
-        if array_get(m.used, slot) == 1 {
-            Option::Some(array_get(m.vals, slot))
+        if array_get_unchecked(m.used, slot) == 1 {
+            Option::Some(array_get_unchecked(m.vals, slot))
         } else {
             Option::None
         }
@@ -1028,7 +1040,7 @@ fn hashmap_copy<K: Eq + Hash, V>(m: HashMap<K, V>) -> HashMap<K, V> {
     let mut c: HashMap<K, V> = hashmap_new();
     let mut i = 0;
     while i < m.cap {
-        if array_get(m.used, i) == 1 { c = hashmap_insert(c, array_get(m.keys, i), array_get(m.vals, i)); }
+        if array_get_unchecked(m.used, i) == 1 { c = hashmap_insert(c, array_get_unchecked(m.keys, i), array_get_unchecked(m.vals, i)); }
         i = i + 1;
     }
     c
@@ -1037,13 +1049,13 @@ fn hashmap_copy<K: Eq + Hash, V>(m: HashMap<K, V>) -> HashMap<K, V> {
 fn hashmap_keys<K, V>(m: HashMap<K, V>) -> Vec<K> {
     let mut ks: Vec<K> = vec_new();
     let mut i = 0;
-    while i < m.cap { if array_get(m.used, i) == 1 { ks = vec_push(ks, array_get(m.keys, i)); } i = i + 1; }
+    while i < m.cap { if array_get_unchecked(m.used, i) == 1 { ks = vec_push(ks, array_get_unchecked(m.keys, i)); } i = i + 1; }
     ks
 }
 fn hashmap_vals<K, V>(m: HashMap<K, V>) -> Vec<V> {
     let mut vs: Vec<V> = vec_new();
     let mut i = 0;
-    while i < m.cap { if array_get(m.used, i) == 1 { vs = vec_push(vs, array_get(m.vals, i)); } i = i + 1; }
+    while i < m.cap { if array_get_unchecked(m.used, i) == 1 { vs = vec_push(vs, array_get_unchecked(m.vals, i)); } i = i + 1; }
     vs
 }
 
@@ -1057,7 +1069,7 @@ fn vec_map<T, U>(v: Vec<T>, f: fn(T) -> U) -> Vec<U> {
     let mut out: Vec<U> = vec_with_capacity(max_i64(vec_len(v), 1));
     let mut i = 0;
     while i < vec_len(v) {
-        out = vec_push(out, f(vec_get(v, i)));
+        out = vec_push(out, f(array_get_unchecked(v.data, i)));
         i = i + 1;
     }
     out
@@ -1068,7 +1080,7 @@ fn vec_filter<T>(v: Vec<T>, pred: fn(T) -> bool) -> Vec<T> {
     let mut out: Vec<T> = vec_new();
     let mut i = 0;
     while i < vec_len(v) {
-        let x = vec_get(v, i);
+        let x = array_get_unchecked(v.data, i);
         if pred(x) {
             out = vec_push(out, x);
         }
@@ -1082,7 +1094,7 @@ fn vec_fold<T, A>(v: Vec<T>, init: A, f: fn(A, T) -> A) -> A {
     let mut acc = init;
     let mut i = 0;
     while i < vec_len(v) {
-        acc = f(acc, vec_get(v, i));
+        acc = f(acc, array_get_unchecked(v.data, i));
         i = i + 1;
     }
     acc
@@ -1093,7 +1105,7 @@ fn vec_any<T>(v: Vec<T>, pred: fn(T) -> bool) -> bool {
     let mut i = 0;
     let mut found = false;
     while i < vec_len(v) {
-        if pred(vec_get(v, i)) {
+        if pred(array_get_unchecked(v.data, i)) {
             found = true;
         }
         i = i + 1;
@@ -1106,7 +1118,7 @@ fn vec_all<T>(v: Vec<T>, pred: fn(T) -> bool) -> bool {
     let mut i = 0;
     let mut ok = true;
     while i < vec_len(v) {
-        if pred(vec_get(v, i)) == false {
+        if pred(array_get_unchecked(v.data, i)) == false {
             ok = false;
         }
         i = i + 1;
@@ -1119,7 +1131,7 @@ fn vec_count<T>(v: Vec<T>, pred: fn(T) -> bool) -> i64 {
     let mut i = 0;
     let mut n = 0;
     while i < vec_len(v) {
-        if pred(vec_get(v, i)) {
+        if pred(array_get_unchecked(v.data, i)) {
             n = n + 1;
         }
         i = i + 1;
@@ -1131,7 +1143,7 @@ fn vec_count<T>(v: Vec<T>, pred: fn(T) -> bool) -> i64 {
 fn vec_for_each<T>(v: Vec<T>, f: fn(T) -> i64) -> i64 {
     let mut i = 0;
     while i < vec_len(v) {
-        let _u = f(vec_get(v, i));
+        let _u = f(array_get_unchecked(v.data, i));
         i = i + 1;
     }
     0
@@ -1157,7 +1169,7 @@ fn vec_contains<T: Eq>(v: Vec<T>, x: T) -> bool {
     let mut i = 0;
     let mut found = false;
     while i < vec_len(v) {
-        if vec_get(v, i).eq(x) {
+        if array_get_unchecked(v.data, i).eq(x) {
             found = true;
         }
         i = i + 1;
@@ -1171,7 +1183,7 @@ fn vec_index_of<T: Eq>(v: Vec<T>, x: T) -> i64 {
     let mut found = 0 - 1;
     while i < vec_len(v) {
         if found < 0 {
-            if vec_get(v, i).eq(x) {
+            if array_get_unchecked(v.data, i).eq(x) {
                 found = i;
             }
         }
@@ -1185,11 +1197,11 @@ fn vec_index_of<T: Eq>(v: Vec<T>, x: T) -> i64 {
 fn vec_sort<T: Ord>(mut v: Vec<T>) -> Vec<T> {
     let mut i = 1;
     while i < v.len {
-        let key = array_get(v.data, i);
+        let key = array_get_unchecked(v.data, i);
         let mut j = i - 1;
         let mut placed = false;
         while j >= 0 && placed == false {
-            let cur = array_get(v.data, j);
+            let cur = array_get_unchecked(v.data, j);
             if cur.cmp(key) > 0 {
                 let _u = array_set(v.data, j + 1, cur);
                 j = j - 1;
@@ -1208,10 +1220,10 @@ fn vec_max<T: Ord>(v: Vec<T>) -> Option<T> {
     if vec_len(v) == 0 {
         Option::None
     } else {
-        let mut best = vec_get(v, 0);
+        let mut best = array_get_unchecked(v.data, 0);
         let mut i = 1;
         while i < vec_len(v) {
-            let x = vec_get(v, i);
+            let x = array_get_unchecked(v.data, i);
             if x.cmp(best) > 0 {
                 best = x;
             }

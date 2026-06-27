@@ -3,7 +3,7 @@ fn main() -> i64 {
     let mut counts: MapStr<i64> = mapstr_new();
     let mut i = 0;
     while i < vec_len(words) {
-        let w = vec_get(words, i);
+        let w = vec_get_unchecked(words, i);
         let c = match mapstr_get(counts, w) { Option::Some(n) => n, Option::None => 0 };
         counts = mapstr_insert(counts, w, c + 1);
         i = i + 1;

@@ -66,7 +66,7 @@ fn gen_program(rng: &mut Rng) -> (String, i64) {
          \x20 let mut i = 0;\n\
          \x20 while i < n { acc = vec_push(acc, i); i = i + 1; }\n\
          \x20 let mut s = 0; let mut j = 0;\n\
-         \x20 while j < vec_len(acc) { s = s + vec_get(acc, j); j = j + 1; }\n\
+         \x20 while j < vec_len(acc) { s = s + vec_get_unchecked(acc, j); j = j + 1; }\n\
          \x20 s\n\
          }\n\
          fn accum(a: Atom<i64>, n: i64) -> i64 {\n\
@@ -121,7 +121,7 @@ fn gen_program(rng: &mut Rng) -> (String, i64) {
     }
     src.push_str(
         "  let mut ms = 0; let mut mj = 0;\n\
-         \x20 while mj < vec_len(m) { ms = ms + vec_get(m, mj); mj = mj + 1; }\n\
+         \x20 while mj < vec_len(m) { ms = ms + vec_get_unchecked(m, mj); mj = mj + 1; }\n\
          \x20 total + ms\n}\n",
     );
 

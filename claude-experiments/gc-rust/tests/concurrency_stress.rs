@@ -51,7 +51,7 @@ const HELPERS: &str = r#"
         let mut acc = v; let mut i = 0;
         while i < n { acc = vec_push(acc, i); i = i + 1; }
         let mut s = 0; let mut j = 0;
-        while j < vec_len(acc) { s = s + vec_get(acc, j); j = j + 1; }
+        while j < vec_len(acc) { s = s + vec_get_unchecked(acc, j); j = j + 1; }
         s
     }
     fn bvec(n: i64) -> Vec<i64> {
@@ -62,7 +62,7 @@ const HELPERS: &str = r#"
     }
     fn vsum(v: Vec<i64>) -> i64 {
         let mut s = 0; let mut j = 0;
-        while j < vec_len(v) { s = s + vec_get(v, j); j = j + 1; }
+        while j < vec_len(v) { s = s + vec_get_unchecked(v, j); j = j + 1; }
         s
     }
 "#;
@@ -135,7 +135,7 @@ fn gen_prog(rng: &mut Rng) -> (String, i64) {
             }
             let n_total = per * k;
             body.push_str(&format!(
-                "  let mut total = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); total = total + vec_get(item, 0); got = got + 1; }}\n",
+                "  let mut total = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); total = total + vec_get_unchecked(item, 0); got = got + 1; }}\n",
                 n_total));
             for i in 0..k { body.push_str(&format!("  let _j{} = t{}.join();\n", i, i)); }
             body.push_str("  total\n}\n");
@@ -158,7 +158,7 @@ fn gen_prog(rng: &mut Rng) -> (String, i64) {
             body.push_str(&format!("  let tp = Thread::spawn(|| prod(ch, {}));\n", per));
             body.push_str(&format!("  let tv = Thread::spawn(|| bvec({}));\n", vn));
             body.push_str(&format!(
-                "  let mut csum = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); csum = csum + vec_get(item, 0); got = got + 1; }}\n",
+                "  let mut csum = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); csum = csum + vec_get_unchecked(item, 0); got = got + 1; }}\n",
                 per));
             body.push_str("  let _ja = ta.join();\n  let _jp = tp.join();\n  let vres = vsum(tv.join());\n");
             body.push_str("  a.deref() + csum + vres\n}\n");

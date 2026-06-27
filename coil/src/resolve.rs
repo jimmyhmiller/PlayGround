@@ -380,6 +380,26 @@ fn qualify_expr(
             qualify_expr(lhs, m, imps, table, tps, exports, bare_ok)?;
             qualify_expr(rhs, m, imps, table, tps, exports, bare_ok)?;
         }
+        // `(make-dyn Trait expr)`: qualify the trait name like a type reference,
+        // resolve the inner expression. `MakeDyn` is produced after resolution.
+        ExprKind::Erase { trait_name, inner } => {
+            let mut tt = Type::Struct(std::mem::take(trait_name));
+            ty(&mut tt)?;
+            if let Type::Struct(n) = tt {
+                *trait_name = n;
+            }
+            qualify_expr(inner, m, imps, table, tps, exports, bare_ok)?
+        }
+        ExprKind::MakeDyn { inner, .. } => {
+            qualify_expr(inner, m, imps, table, tps, exports, bare_ok)?
+        }
+        // `DynDispatch` is produced by the checker, after resolution.
+        ExprKind::DynDispatch { recv, args, .. } => {
+            qualify_expr(recv, m, imps, table, tps, exports, bare_ok)?;
+            for a in args {
+                qualify_expr(a, m, imps, table, tps, exports, bare_ok)?;
+            }
+        }
         ExprKind::Not(x) | ExprKind::Load(x) | ExprKind::Free(x) => {
             qualify_expr(x, m, imps, table, tps, exports, bare_ok)?
         }

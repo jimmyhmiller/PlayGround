@@ -534,7 +534,7 @@ pub fn check_with(
     // Now that all functions are elaborated, run the compile-time interpreter so a
     // `comptime` form can call any defn (incl. recursively), in function bodies and
     // static-assert conditions alike.
-    crate::comptime::fold_program(&mut funcs, &mut asserts, &program.structs, &program.sums)?;
+    crate::comptime::fold_program(&mut funcs, &mut asserts, &program.structs, &program.sums, &program.traits)?;
 
     // ---- aggregate consts: evaluate to a static-global initializer ----------
     let mut statics: Vec<StaticDef> = Vec::new();
@@ -673,7 +673,32 @@ fn synth(
     tps: &HashSet<String>,
     fname: &str,
 ) -> Result<(Expr, Type), Diag> {
-    synth_inner(e, expected, env, cx, tps, fname).map_err(|d| d.with_span(e.span))
+    // Wherever an expected `(dyn Trait)` is pushed down — function arguments, an
+    // `if`/`match` branch, a `let` binding, a function's return value — a concrete
+    // `(ptr T)` auto-erases to the trait object. Doing it here makes the coercion
+    // uniform across all those positions. The common (non-dyn) path stays a tail
+    // call so `synth`'s frame doesn't grow per recursion level (deep programs would
+    // otherwise overflow the stack).
+    let dyn_exp = expected.filter(|exp| is_dyn_target(exp, cx));
+    let Some(exp) = dyn_exp else {
+        return synth_inner(e, expected, env, cx, tps, fname).map_err(|d| d.with_span(e.span));
+    };
+    let (ae, at) = synth_inner(e, expected, env, cx, tps, fname).map_err(|d| d.with_span(e.span))?;
+    maybe_coerce_dyn(cx, ae, at, exp, e.span, fname)
+}
+
+/// Is `t` an expected type that a concrete `(ptr T)` could auto-erase into — i.e.
+/// a trait-object struct `<Trait>-dyn` (possibly behind a `(ref …)`)?
+fn is_dyn_target(t: &Type, cx: &Cx) -> bool {
+    let name = match t {
+        Type::Struct(d) => d,
+        Type::Ref(_, inner) => match &**inner {
+            Type::Struct(d) => d,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    dyn_struct_trait(cx, name).is_some()
 }
 
 fn synth_inner(
@@ -828,9 +853,12 @@ fn synth_inner(
                 CodeOp::Nth | CodeOp::Gensym | CodeOp::Rest | CodeOp::Symbol
                 | CodeOp::CFieldName | CodeOp::CFieldType | CodeOp::CVariantSum
                 | CodeOp::CVariantName | CodeOp::StrBytes | CodeOp::BytesToStr
-                | CodeOp::TargetArch => Type::Code,
+                | CodeOp::TargetArch | CodeOp::CTraitMethodName | CodeOp::CTraitParamName
+                | CodeOp::CTraitParamType | CodeOp::CTraitRetType => Type::Code,
                 CodeOp::CFieldCount | CodeOp::CFieldKind | CodeOp::CVariantCount
-                | CodeOp::CVariantFields => Type::Int(64, true),
+                | CodeOp::CVariantFields | CodeOp::CTraitMethodCount | CodeOp::CTraitArity => {
+                    Type::Int(64, true)
+                }
                 // `(error …)` diverges — it unifies with any branch's type.
                 CodeOp::Error => Type::Never,
                 CodeOp::IsList | CodeOp::IsSym | CodeOp::IsInt | CodeOp::Eq | CodeOp::IsKeyword => {
@@ -1201,6 +1229,50 @@ fn synth_inner(
                         ty_str(&self_ty)
                     )
                 })?;
+                // Trait object receiver (`<Trait>-dyn`): dispatch through its vtable
+                // (Rust's `dyn` dispatch) instead of a static impl. Object safety was
+                // checked at `defdyn`, so non-self params and the return don't mention
+                // Self; substituting Self → the dyn type is a no-op for them.
+                if dyn_struct_trait(cx, &self_name).is_some() {
+                    let method_index = td.methods.iter().position(|m| m.name == *func).expect("method index");
+                    let dyn_ty = Type::Struct(self_name.clone());
+                    // Receiver: the fat pointer by value.
+                    let (re, rt) = synth(&args[self_idx], Some(&dyn_ty), env, cx, tps, fname)?;
+                    let recv = coerce(re, rt, &dyn_ty, false, fname, "trait-object receiver")?;
+                    // Erased call signature: self slot is the (ptr i8) data; the rest
+                    // are the method's declared param types.
+                    let mut params = vec![Type::Ptr(Box::new(Type::Int(8, false)))];
+                    let mut new_args = Vec::with_capacity(args.len() - 1);
+                    for (i, a) in args.iter().enumerate() {
+                        if i == self_idx {
+                            continue;
+                        }
+                        let want = tm.params[i].ty.clone();
+                        let exp = match &want {
+                            Type::Ref(_, inner) => (**inner).clone(),
+                            _ => want.clone(),
+                        };
+                        let (ae, at) = synth(a, Some(&exp), env, cx, tps, fname)?;
+                        let (ae, at) = maybe_coerce_dyn(cx, ae, at, &want, e.span, fname)?;
+                        let is_mut = matches!(&a.kind, ExprKind::Borrow { mutable: true, .. });
+                        new_args.push(coerce_arg(is_mut, ae, at, &want, false, fname, &format!("argument to '{func}'"))?);
+                        params.push(want);
+                    }
+                    let vtable_struct = format!("{}-vtable", &self_name[..self_name.len() - 4]);
+                    return Ok((
+                        Expr::new(ExprKind::DynDispatch {
+                            dyn_struct: self_name,
+                            vtable_struct,
+                            method_index,
+                            cc: "c".to_string(),
+                            params,
+                            ret: tm.ret.clone(),
+                            recv: Box::new(recv),
+                            args: new_args,
+                        }, e.span),
+                        tm.ret.clone(),
+                    ));
+                }
                 if tps.contains(&self_name) {
                     // Deferred: definition-time bound check, then emit a TraitCall.
                     let bounded = cx
@@ -1306,6 +1378,8 @@ fn synth_inner(
                         _ => Some(&want),
                     };
                     let (ae, at) = synth(a, exp, env, cx, tps, fname)?;
+                    // Auto-erase a concrete `(ptr T)` to a `(dyn Trait)` parameter.
+                    let (ae, at) = maybe_coerce_dyn(cx, ae, at, &want, e.span, fname)?;
                     let ae = coerce_arg(
                         is_mut_borrow,
                         ae,
@@ -1624,6 +1698,16 @@ fn synth_inner(
                 ).into()),
             }
         }
+        // `(make-dyn Trait expr)` — explicit erasure to a trait object.
+        ExprKind::Erase { trait_name, inner } => {
+            let (ie, it) = synth(inner, None, env, cx, tps, fname)?;
+            build_make_dyn(cx, trait_name, ie, &it, e.span, fname).map_err(Into::into)
+        }
+        // Already lowered (the checker produces it); just report its type.
+        ExprKind::MakeDyn { dyn_struct, .. } => {
+            Ok((e.clone(), Type::Struct(dyn_struct.clone())))
+        }
+        ExprKind::DynDispatch { ret, .. } => Ok((e.clone(), ret.clone())),
         ExprKind::Construct { sum, variant, args } => {
             // The parser never emits Construct (it uses Call); kept for safety.
             synth_construct(variant, &[], args, None, env, cx, tps, fname, e.span)
@@ -2166,6 +2250,106 @@ fn param_ref_type(
 /// Coerce a call argument to a (possibly reference) parameter type. References
 /// require the argument to be a *place*; a `(mut T)` parameter additionally
 /// requires the argument be passed mutably — written `(mut x)`, or a raw pointer.
+/// Resolve a (bare or qualified) trait name against the known traits: exact match,
+/// else a unique `.`-suffix match. `None` if unknown or ambiguous.
+fn resolve_trait_name(cx: &Cx, name: &str) -> Option<String> {
+    if cx.trait_defs.contains_key(name) {
+        return Some(name.to_string());
+    }
+    let mut it = cx.trait_defs.keys().filter(|k| k.rsplit('.').next() == Some(name));
+    match (it.next(), it.next()) {
+        (Some(k), None) => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// If `name` is a trait-object struct `<Trait>-dyn` for a known trait, return that
+/// trait's resolved name (the dyn struct `defdyn` generates lives in the trait's
+/// module, so the names share a prefix).
+fn dyn_struct_trait(cx: &Cx, name: &str) -> Option<String> {
+    let base = name.strip_suffix("-dyn")?;
+    cx.trait_defs.contains_key(base).then(|| base.to_string())
+}
+
+/// Lower an erasure (explicit `make-dyn` or an implicit dyn-coercion) of an
+/// already-checked `(ptr T)` `inner` to a `(dyn Trait)` = `(ptr <Trait>-dyn)`.
+/// Verifies `T` implements `Trait` and `defdyn` has run; codegen fills the vtable
+/// from the impl methods named here.
+fn build_make_dyn(
+    cx: &Cx,
+    trait_name: &str,
+    inner: Expr,
+    inner_ty: &Type,
+    span: crate::span::Span,
+    fname: &str,
+) -> Result<(Expr, Type), Diag> {
+    let tr = resolve_trait_name(cx, trait_name)
+        .ok_or_else(|| Diag::at(span, format!("in '{fname}': make-dyn: unknown trait '{trait_name}'")))?;
+    let pointee = match inner_ty {
+        Type::Ptr(p) => (**p).clone(),
+        other => {
+            return Err(Diag::at(span, format!(
+                "in '{fname}': make-dyn expects a pointer to an implementer, got {}",
+                ty_str(other)
+            )))
+        }
+    };
+    let tn = type_impl_name(&pointee).ok_or_else(|| {
+        Diag::at(span, format!("in '{fname}': make-dyn: {} cannot implement a trait", ty_str(&pointee)))
+    })?;
+    if !cx.impls.contains(&(tr.clone(), tn.clone())) {
+        let (sn, td) = (display_name(&tn), display_name(&tr));
+        return Err(Diag::at(span, format!("in '{fname}': '{sn}' does not implement '{td}' (needed for (dyn {td}))")));
+    }
+    let dyn_struct = format!("{tr}-dyn");
+    let vtable_struct = format!("{tr}-vtable");
+    if !cx.structs.contains_key(&dyn_struct) {
+        return Err(Diag::at(span, format!(
+            "in '{fname}': trait '{}' has no trait object — call (defdyn {}) after the trait",
+            display_name(&tr), display_name(&tr)
+        )));
+    }
+    let td = cx.trait_defs.get(&tr).expect("trait def");
+    let methods: Vec<String> =
+        td.methods.iter().map(|m| trait_method_fn(&tr, &tn, &m.name)).collect();
+    // The trait object is the fat-pointer struct itself, by value.
+    let ty = Type::Struct(dyn_struct.clone());
+    Ok((Expr::new(ExprKind::MakeDyn { dyn_struct, vtable_struct, methods, inner: Box::new(inner) }, span), ty))
+}
+
+/// Implicit dyn-coercion at an argument/return site: if `want` is a `(dyn Trait)`
+/// and `at` is a `(ptr T)` for a different `T`, erase `ae` to the trait object.
+/// Otherwise pass through unchanged.
+fn maybe_coerce_dyn(
+    cx: &Cx,
+    ae: Expr,
+    at: Type,
+    want: &Type,
+    span: crate::span::Span,
+    fname: &str,
+) -> Result<(Expr, Type), Diag> {
+    // `want` is the trait-object struct `<Trait>-dyn` (possibly behind a `(ref …)`,
+    // since aggregates pass by reference); `at` is a concrete `(ptr T)` for a
+    // different `T` — erase it to the trait object (coerce_arg then spills it to the
+    // by-ref parameter).
+    let want_dyn = match want {
+        Type::Struct(d) => Some(d),
+        Type::Ref(_, inner) => match &**inner {
+            Type::Struct(d) => Some(d),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(dname) = want_dyn {
+        if matches!(at, Type::Ptr(_)) && !matches!(&at, Type::Ptr(p) if matches!(&**p, Type::Struct(n) if n == dname)) {
+            if let Some(tr) = dyn_struct_trait(cx, dname) {
+                return build_make_dyn(cx, &tr, ae, &at, span, fname);
+            }
+        }
+    }
+    Ok((ae, at))
+}
+
 fn coerce_arg(
     is_mut_borrow: bool,
     ae: Expr,

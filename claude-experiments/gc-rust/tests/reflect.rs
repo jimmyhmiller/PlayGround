@@ -164,7 +164,7 @@ fn held_values_survive_collection_during_construction() {
             // Sum `keep` — 0+1+…+99 = 4950 iff it survived relocation intact.
             let mut s = 0;
             let mut p = 0;
-            while p < vec_len(k) { s = s + vec_get(k, p); p = p + 1; }
+            while p < vec_len(k) { s = s + vec_get_unchecked(k, p); p = p + 1; }
             s
         }
     "#);

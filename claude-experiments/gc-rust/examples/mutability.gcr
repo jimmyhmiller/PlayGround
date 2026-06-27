@@ -42,7 +42,7 @@ fn main() -> i64 {
 
     let mut i = 0;
     while i < 5 {
-        total = total + array_get(squares, i);
+        total = total + array_get_unchecked(squares, i);
         i = i + 1;
     }                       // total == 30
 

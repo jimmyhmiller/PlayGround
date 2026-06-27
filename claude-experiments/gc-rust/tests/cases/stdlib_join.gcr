@@ -2,7 +2,7 @@ fn main() -> i64 {
   let mut a = vec_new(); a=vec_push(a,1); a=vec_push(a,2);
   let mut b = vec_new(); b=vec_push(b,3); b=vec_push(b,4);
   let c = vec_concat(a, b);                                  // [1,2,3,4]
-  let sum = vec_get(c,0)+vec_get(c,1)+vec_get(c,2)+vec_get(c,3);  // 10
+  let sum = vec_get_unchecked(c,0)+vec_get_unchecked(c,1)+vec_get_unchecked(c,2)+vec_get_unchecked(c,3);  // 10
   let parts = str_split_byte("alpha beta gamma", 32);        // 3 words
   let joined = str_join(parts, "_");                         // "alpha_beta_gamma"
   let ok = if string_eq(joined, "alpha_beta_gamma") { 1 } else { 0 };

@@ -13,25 +13,25 @@ fn shortest(g: Graph, src: i64, dst: i64) -> i64 {
         let mut u = 0 - 1; let mut best = inf();
         let mut j = 0;
         while j < g.n {
-            if vec_get(visited, j) == 0 && vec_get(dist, j) < best { best = vec_get(dist, j); u = j; }
+            if vec_get_unchecked(visited, j) == 0 && vec_get_unchecked(dist, j) < best { best = vec_get_unchecked(dist, j); u = j; }
             j = j + 1;
         }
         if u < 0 { count = g.n; }
         else {
             visited = vec_set(visited, u, 1);
-            let row = vec_get(g.w, u);
+            let row = vec_get_unchecked(g.w, u);
             let mut v = 0;
             while v < g.n {
-                let wuv = vec_get(row, v);
-                if wuv < inf() && vec_get(dist, u) + wuv < vec_get(dist, v) {
-                    dist = vec_set(dist, v, vec_get(dist, u) + wuv);
+                let wuv = vec_get_unchecked(row, v);
+                if wuv < inf() && vec_get_unchecked(dist, u) + wuv < vec_get_unchecked(dist, v) {
+                    dist = vec_set(dist, v, vec_get_unchecked(dist, u) + wuv);
                 }
                 v = v + 1;
             }
             count = count + 1;
         }
     }
-    vec_get(dist, dst)
+    vec_get_unchecked(dist, dst)
 }
 fn row5(a: i64, b: i64, c: i64, d: i64, e: i64) -> Vec<i64> {
     let mut r = vec_new(); r = vec_push(r, a); r = vec_push(r, b); r = vec_push(r, c); r = vec_push(r, d); r = vec_push(r, e); r

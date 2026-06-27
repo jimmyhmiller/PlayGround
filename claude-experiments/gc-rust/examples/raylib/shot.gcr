@@ -50,7 +50,7 @@ fn main() -> i64 {
     let n = vec_len(blocks);
     let mut i = 0;
     while i < n {
-      let mut b = vec_get(blocks, i);
+      let mut b = vec_get_unchecked(blocks, i);
       b.y = b.y + b.speed;
       if b.y < 640.0 { next = vec_push(next, b); }
       i = i + 1;
@@ -62,7 +62,7 @@ fn main() -> i64 {
     let n2 = vec_len(blocks);
     let mut j = 0;
     while j < n2 {
-      let b = vec_get(blocks, j);
+      let b = vec_get_unchecked(blocks, j);
       DrawRectangle(b.x as i32, b.y as i32, b.w as i32, b.w as i32, rgb(90, 170, 240));
       j = j + 1;
     }

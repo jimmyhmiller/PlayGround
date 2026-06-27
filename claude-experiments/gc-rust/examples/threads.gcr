@@ -16,7 +16,7 @@ fn build_and_sum(n: i64) -> i64 {
     let mut s = 0;
     let mut j = 0;
     while j < vec_len(acc) {
-        s = s + vec_get(acc, j);
+        s = s + vec_get_unchecked(acc, j);
         j = j + 1;
     }
     s

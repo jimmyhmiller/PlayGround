@@ -66,6 +66,7 @@ struct Ctx<'a> {
     structs: &'a HashMap<String, StructDef>,
     sums: &'a HashMap<String, SumDef>,
     variants: &'a HashSet<String>,
+    traits: &'a HashMap<String, TraitDef>,
     fuel: std::cell::Cell<u64>,
     /// Current comptime call-stack depth — bounds RUST recursion so runaway
     /// recursion errors cleanly instead of overflowing the (large) native stack.
@@ -100,10 +101,12 @@ pub fn fold_program(
     asserts: &mut [StaticAssert],
     structs: &[StructDef],
     sums: &[SumDef],
+    traits: &[TraitDef],
 ) -> Result<(), String> {
     let table: HashMap<String, Func> = funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let smap_sums: HashMap<String, SumDef> = sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let tmap: HashMap<String, TraitDef> = traits.iter().map(|t| (t.name.clone(), t.clone())).collect();
     let variants: HashSet<String> =
         sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
@@ -111,6 +114,7 @@ pub fn fold_program(
         structs: &smap,
         sums: &smap_sums,
         variants: &variants,
+        traits: &tmap,
         fuel: std::cell::Cell::new(FUEL),
         depth: std::cell::Cell::new(0),
         gensym: std::cell::Cell::new(0),
@@ -140,6 +144,7 @@ pub fn run_metas(program: &Program) -> Result<Vec<crate::reader::Sexp>, String> 
     let table: HashMap<String, Func> = program.funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = program.structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let smap_sums: HashMap<String, SumDef> = program.sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let tmap: HashMap<String, TraitDef> = program.traits.iter().map(|t| (t.name.clone(), t.clone())).collect();
     let variants: HashSet<String> =
         program.sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
@@ -147,6 +152,7 @@ pub fn run_metas(program: &Program) -> Result<Vec<crate::reader::Sexp>, String> 
         structs: &smap,
         sums: &smap_sums,
         variants: &variants,
+        traits: &tmap,
         fuel: std::cell::Cell::new(FUEL),
         depth: std::cell::Cell::new(0),
         gensym: std::cell::Cell::new(0),
@@ -202,6 +208,7 @@ pub fn expand_macro(
     for s in extra_sums {
         smap_sums.entry(s.name.clone()).or_insert_with(|| s.clone());
     }
+    let tmap: HashMap<String, TraitDef> = program.traits.iter().map(|t| (t.name.clone(), t.clone())).collect();
     let variants: HashSet<String> =
         program.sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
@@ -209,6 +216,7 @@ pub fn expand_macro(
         structs: &smap,
         sums: &smap_sums,
         variants: &variants,
+        traits: &tmap,
         fuel: std::cell::Cell::new(FUEL),
         depth: std::cell::Cell::new(0),
         gensym: std::cell::Cell::new(0),
@@ -259,6 +267,7 @@ pub fn eval_const(
     let table: HashMap<String, Func> = funcs.iter().map(|f| (f.name.clone(), f.clone())).collect();
     let smap: HashMap<String, StructDef> = structs.iter().map(|s| (s.name.clone(), s.clone())).collect();
     let smap_sums: HashMap<String, SumDef> = sums.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let tmap: HashMap<String, TraitDef> = HashMap::new();
     let variants: HashSet<String> =
         sums.iter().flat_map(|s| s.variants.iter().map(|v| v.name.clone())).collect();
     let ctx = Ctx {
@@ -266,6 +275,7 @@ pub fn eval_const(
         structs: &smap,
         sums: &smap_sums,
         variants: &variants,
+        traits: &tmap,
         fuel: std::cell::Cell::new(FUEL),
         depth: std::cell::Cell::new(0),
         gensym: std::cell::Cell::new(0),
@@ -371,6 +381,27 @@ fn fold_expr(e: &Expr, ctx: &Ctx) -> Result<Expr, String> {
         ExprKind::Not(x) => ExprKind::Not(gb(x)?),
         ExprKind::Load(x) => ExprKind::Load(gb(x)?),
         ExprKind::Free(x) => ExprKind::Free(gb(x)?),
+        ExprKind::Erase { trait_name, inner } => {
+            ExprKind::Erase { trait_name: trait_name.clone(), inner: gb(inner)? }
+        }
+        ExprKind::MakeDyn { dyn_struct, vtable_struct, methods, inner } => ExprKind::MakeDyn {
+            dyn_struct: dyn_struct.clone(),
+            vtable_struct: vtable_struct.clone(),
+            methods: methods.clone(),
+            inner: gb(inner)?,
+        },
+        ExprKind::DynDispatch { dyn_struct, vtable_struct, method_index, cc, params, ret, recv, args } => {
+            ExprKind::DynDispatch {
+                dyn_struct: dyn_struct.clone(),
+                vtable_struct: vtable_struct.clone(),
+                method_index: *method_index,
+                cc: cc.clone(),
+                params: params.clone(),
+                ret: ret.clone(),
+                recv: gb(recv)?,
+                args: args.iter().map(go).collect::<Result<_, _>>()?,
+            }
+        }
         ExprKind::Cast { ty, expr } => ExprKind::Cast { ty: ty.clone(), expr: gb(expr)? },
         ExprKind::Bin { op, lhs, rhs } => ExprKind::Bin { op: *op, lhs: gb(lhs)?, rhs: gb(rhs)? },
         ExprKind::Cmp { op, lhs, rhs } => ExprKind::Cmp { op: *op, lhs: gb(lhs)?, rhs: gb(rhs)? },
@@ -1220,6 +1251,56 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
             _ => unreachable!(),
         });
     }
+    // Trait reflection (for vtable / dyn-object generators): look the trait up by
+    // its `Code` symbol, report method/param/return signatures.
+    if matches!(op, CodeOp::CTraitMethodCount | CodeOp::CTraitMethodName | CodeOp::CTraitArity
+        | CodeOp::CTraitParamName | CodeOp::CTraitParamType | CodeOp::CTraitRetType) {
+        let tname = match args.first() {
+            Some(CtVal::Code(s)) => match &s.kind {
+                K::Sym(n) => n.clone(),
+                _ => return Err("comptime: code-trait-* expects a trait symbol".to_string()),
+            },
+            _ => return Err("comptime: code-trait-* expects a trait symbol".to_string()),
+        };
+        // The macro may receive the name bare (`Write`) while it's stored qualified
+        // (`io.Write`) — match exactly, else by a UNIQUE `.`-suffix; ambiguity errors.
+        let td = if let Some(t) = ctx.traits.get(&tname) {
+            t
+        } else {
+            let mut it = ctx.traits.iter().filter(|(k, _)| k.rsplit('.').next() == Some(tname.as_str()));
+            match (it.next(), it.next()) {
+                (Some((_, t)), None) => t,
+                (None, _) => return Err(format!("comptime: '{tname}' is not a known trait")),
+                (Some(_), Some(_)) => return Err(format!(
+                    "comptime: ambiguous trait '{tname}' — multiple modules define it; reflection can't disambiguate (qualify it)"
+                )),
+            }
+        };
+        if op == CodeOp::CTraitMethodCount {
+            return Ok(CtVal::Int(td.methods.len() as i64));
+        }
+        let mi = match args.get(1) {
+            Some(CtVal::Int(n)) => *n as usize,
+            _ => return Err("comptime: code-trait-* method index must be an integer".to_string()),
+        };
+        let m = td.methods.get(mi).ok_or_else(|| format!("comptime: trait method index {mi} out of range"))?;
+        match op {
+            CodeOp::CTraitMethodName => return Ok(CtVal::Code(Sexp::new(K::Sym(m.name.clone()), dummy))),
+            CodeOp::CTraitArity => return Ok(CtVal::Int(m.params.len() as i64)),
+            CodeOp::CTraitRetType => return Ok(CtVal::Code(type_to_code(&m.ret, dummy))),
+            _ => {}
+        }
+        let pj = match args.get(2) {
+            Some(CtVal::Int(n)) => *n as usize,
+            _ => return Err("comptime: code-trait-param-* needs a method index and a param index".to_string()),
+        };
+        let p = m.params.get(pj).ok_or_else(|| format!("comptime: trait param index {pj} out of range"))?;
+        return Ok(match op {
+            CodeOp::CTraitParamName => CtVal::Code(Sexp::new(K::Sym(p.name.clone()), dummy)),
+            CodeOp::CTraitParamType => CtVal::Code(type_to_code(&p.ty, dummy)),
+            _ => unreachable!(),
+        });
+    }
     if op == CodeOp::StrBytes {
         let s = match args.first() {
             Some(CtVal::Code(c)) => match &c.kind {
@@ -1301,10 +1382,52 @@ fn code_op(op: CodeOp, args: &[CtVal], ctx: &Ctx) -> Result<CtVal, String> {
         CodeOp::Gensym | CodeOp::Error | CodeOp::Symbol | CodeOp::Str | CodeOp::CFieldCount
         | CodeOp::CFieldName | CodeOp::CFieldKind | CodeOp::CFieldType | CodeOp::CVariantSum
         | CodeOp::CVariantCount | CodeOp::CVariantName | CodeOp::CVariantFields
-        | CodeOp::StrBytes | CodeOp::BytesToStr | CodeOp::TargetArch => {
+        | CodeOp::StrBytes | CodeOp::BytesToStr | CodeOp::TargetArch
+        | CodeOp::CTraitMethodCount | CodeOp::CTraitMethodName | CodeOp::CTraitArity
+        | CodeOp::CTraitParamName | CodeOp::CTraitParamType | CodeOp::CTraitRetType => {
             unreachable!("handled above")
         }
     })
+}
+
+/// Render a `Type` back to its surface syntax as a `Code` value, so a reflection
+/// op can hand a macro a full type (e.g. `(slice u8)`, `(ptr i8)`) — not just a
+/// head name — to splice into generated declarations. Output round-trips through
+/// `parse_type`. Names are kept verbatim (qualified ones stay qualified so they
+/// still resolve at the generated use site).
+fn type_to_code(ty: &Type, sp: crate::span::Span) -> crate::reader::Sexp {
+    use crate::reader::{Sexp, SexpKind as K};
+    let sym = |s: String| Sexp::new(K::Sym(s), sp);
+    let list = |items: Vec<Sexp>| Sexp::new(K::List(items), sp);
+    match ty {
+        Type::Int(b, true) => sym(format!("i{b}")),
+        Type::Int(b, false) => sym(format!("u{b}")),
+        Type::Float(w) => sym(format!("f{w}")),
+        Type::Bool => sym("bool".to_string()),
+        Type::Void => sym("void".to_string()),
+        Type::Code => sym("Code".to_string()),
+        Type::Struct(n) => sym(n.clone()),
+        Type::Ptr(t) => list(vec![sym("ptr".to_string()), type_to_code(t, sp)]),
+        Type::Ref(true, t) => list(vec![sym("mut".to_string()), type_to_code(t, sp)]),
+        Type::Ref(false, t) => list(vec![sym("ref".to_string()), type_to_code(t, sp)]),
+        Type::Slice(t) => list(vec![sym("slice".to_string()), type_to_code(t, sp)]),
+        Type::Array(t, n) => {
+            list(vec![sym("array".to_string()), type_to_code(t, sp), Sexp::new(K::Int(*n as i64), sp)])
+        }
+        Type::Vec(t, n) => {
+            list(vec![sym("vec".to_string()), type_to_code(t, sp), Sexp::new(K::Int(*n as i64), sp)])
+        }
+        Type::Fn(cc, params, ret) => {
+            let pv = Sexp::new(K::Vector(params.iter().map(|p| type_to_code(p, sp)).collect()), sp);
+            list(vec![sym("fnptr".to_string()), sym(cc.clone()), pv, type_to_code(ret, sp)])
+        }
+        Type::App(n, args) => {
+            let mut items = vec![sym(n.clone())];
+            items.extend(args.iter().map(|a| type_to_code(a, sp)));
+            list(items)
+        }
+        Type::Never => sym("Never".to_string()),
+    }
 }
 
 /// A type's display name (module prefix stripped): `i64`, `Point`, `ptr`, …

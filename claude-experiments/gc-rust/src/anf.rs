@@ -282,6 +282,16 @@ impl<'a> Anf<'a> {
                 let index = self.boxed(index, pending);
                 CoreExprKind::ArrayGet { array, index, elem }
             }
+            CoreExprKind::ArrayGetUnchecked { array, index, elem } => {
+                let array = self.boxed(array, pending);
+                let index = self.boxed(index, pending);
+                CoreExprKind::ArrayGetUnchecked { array, index, elem }
+            }
+            CoreExprKind::ArrayGetChecked { array, index, elem } => {
+                let array = self.boxed(array, pending);
+                let index = self.boxed(index, pending);
+                CoreExprKind::ArrayGetChecked { array, index, elem }
+            }
             CoreExprKind::ChanRecv { buf, ctrl, elem } => {
                 let buf = self.boxed(buf, pending);
                 let ctrl = self.boxed(ctrl, pending);

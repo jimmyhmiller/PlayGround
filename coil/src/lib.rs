@@ -486,6 +486,13 @@ fn collect_calls(e: &ast::Expr, names: &std::collections::HashSet<&str>, out: &m
         }
         K::Borrow { place, .. } => go(place, out),
         K::SpillRef(x) | K::Not(x) | K::Load(x) | K::Free(x) | K::Comptime(x) => go(x, out),
+        K::Erase { inner, .. } | K::MakeDyn { inner, .. } => go(inner, out),
+        K::DynDispatch { recv, args, .. } => {
+            go(recv, out);
+            for a in args {
+                go(a, out);
+            }
+        }
         K::Cast { expr, .. } => go(expr, out),
         K::Bin { lhs, rhs, .. } | K::Cmp { lhs, rhs, .. } => {
             go(lhs, out);

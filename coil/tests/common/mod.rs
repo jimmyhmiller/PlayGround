@@ -13,11 +13,26 @@ pub fn unique_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("coil_test_{}_{}_{}", tag, std::process::id(), n))
 }
 
+/// Run a compile on a thread with a large stack. The compiler is recursive
+/// descent; a deep program (e.g. the macro-heavy arraylist tests) can exceed the
+/// 2 MiB default *test-thread* stack, while it's fine on the 8 MiB main thread
+/// `coil run` uses. Matches the `examples` test, which does the same.
+fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn compile thread")
+        .join()
+        .expect("compile thread")
+}
+
 /// AOT-compile `src` to a native executable, run it, and return its exit code
 /// (the low 8 bits of the i64 `main` returns). No JIT anywhere in the pipeline.
 pub fn build_and_run(src: &str) -> i32 {
     let exe = unique_path("exe");
-    coil::build_executable(src, &exe).expect("build_executable");
+    let src = src.to_string();
+    let exe2 = exe.clone();
+    on_big_stack(move || coil::build_executable(&src, &exe2).expect("build_executable"));
     let code = Command::new(&exe)
         .status()
         .expect("run executable")
@@ -138,7 +153,9 @@ pub fn build_link_run(src: &str, c_path: &str, arch: CrossArch) -> i32 {
 /// Build, run with command-line `args`, capture (exit code, stdout).
 pub fn build_and_capture_args(src: &str, args: &[&str]) -> (i32, String) {
     let exe = unique_path("exe");
-    coil::build_executable(src, &exe).expect("build_executable");
+    let src = src.to_string();
+    let exe2 = exe.clone();
+    on_big_stack(move || coil::build_executable(&src, &exe2).expect("build_executable"));
     let out = Command::new(&exe).args(args).output().expect("run executable");
     let _ = std::fs::remove_file(&exe);
     (

@@ -444,6 +444,28 @@ impl<'a> Mono<'a> {
             ExprKind::AlignOf(ty) => ExprKind::AlignOf(self.resolve_ty(ty, map)?),
             ExprKind::OffsetOf(ty, f) => ExprKind::OffsetOf(self.resolve_ty(ty, map)?, f.clone()),
             ExprKind::Free(p) => ExprKind::Free(Box::new(go(self, p)?)),
+            ExprKind::Erase { trait_name, inner } => ExprKind::Erase {
+                trait_name: trait_name.clone(),
+                inner: Box::new(go(self, inner)?),
+            },
+            ExprKind::MakeDyn { dyn_struct, vtable_struct, methods, inner } => ExprKind::MakeDyn {
+                dyn_struct: dyn_struct.clone(),
+                vtable_struct: vtable_struct.clone(),
+                methods: methods.clone(),
+                inner: Box::new(go(self, inner)?),
+            },
+            ExprKind::DynDispatch { dyn_struct, vtable_struct, method_index, cc, params, ret, recv, args } => {
+                ExprKind::DynDispatch {
+                    dyn_struct: dyn_struct.clone(),
+                    vtable_struct: vtable_struct.clone(),
+                    method_index: *method_index,
+                    cc: cc.clone(),
+                    params: params.iter().map(|t| self.resolve_ty(t, map)).collect::<Result<_, _>>()?,
+                    ret: self.resolve_ty(ret, map)?,
+                    recv: Box::new(go(self, recv)?),
+                    args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
+                }
+            }
             ExprKind::Construct { sum, variant, args } => ExprKind::Construct {
                 sum: sum.clone(),
                 variant: variant.clone(),

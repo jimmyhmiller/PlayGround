@@ -1,0 +1,122 @@
+(module dyn)
+; Runtime-dispatched trait objects ("dyn traits"). `(defdyn Trait)` reflects a
+; trait's method signatures (the `code-trait-*` comptime ops) and generates a
+; vtable struct + a fat-pointer struct `Trait-dyn` + a forwarding impl, so the
+; type `(dyn Trait)` (sugar for `(ptr Trait-dyn)`) is "any implementer, chosen at
+; runtime" and trait-method calls on it dispatch through the vtable.
+;
+; Erasing a concrete `(ptr T)` to a `(dyn Trait)` is automatic at argument/return
+; sites, or explicit with `(make-dyn Trait ptr)`. Both are a small compiler
+; coercion (it materialises a caller-frame fat pointer + a constant vtable of the
+; impl methods' addresses — opaque pointers make them directly callable, so there
+; are NO thunks and nothing to register per type).
+;
+;   (deftrait Write [Self] (write [(self (ptr Self)) (bytes (slice u8))] (-> i64)))
+;   (defdyn Write)
+;   (impl Write File (write [(self (ptr File)) (bytes (slice u8))] (-> i64) ...))
+;   (defn use-it [(w (dyn Write))] ... (write w "hi"))
+;   (use-it some-file-ptr)        ; (ptr File) auto-erases to (dyn Write)
+;
+; CONVENTION: a dyn-trait method takes its receiver as `(self (ptr Self))`. The
+; first parameter of every method is the self/receiver; remaining params and the
+; return type must NOT mention `Self` (not object-safe — hard error).
+
+; ============================================================================
+; reflection helpers (over a trait given as a Code symbol, at expansion time)
+; ============================================================================
+
+; A Code form that mentions the bare symbol `Self` anywhere (object-safety check).
+(defn dyn--has-self? [(c Code)] (-> bool)
+  (if (code-sym? c) (code-eq c `Self)
+    (if (code-list? c) (dyn--has-self-list? c 0 (code-count c))
+      false)))
+
+(defn dyn--has-self-list? [(c Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-eq i n) false
+    (if (dyn--has-self? (code-nth c i)) true
+      (dyn--has-self-list? c (iadd i 1) n))))
+
+; Error out unless method `mi` is object-safe (arity >= 1; no `Self` past self).
+(defn dyn--check-method [(tn Code) (mi i64)] (-> bool)
+  (let [arity (code-trait-arity tn mi)]
+    (if (icmp-le arity 0)
+        (error "defdyn: a dyn-trait method must take a self parameter")
+      (if (dyn--check-params tn mi 1 arity)
+        (if (dyn--has-self? (code-trait-ret-type tn mi))
+            (error "defdyn: a dyn-trait method's return type may not mention Self (not object-safe)")
+          true)
+        false))))
+
+(defn dyn--check-params [(tn Code) (mi i64) (j i64) (arity i64)] (-> bool)
+  (if (icmp-eq j arity) true
+    (if (dyn--has-self? (code-trait-param-type tn mi j))
+        (error "defdyn: a dyn-trait method parameter (past self) may not mention Self (not object-safe)")
+      (dyn--check-params tn mi (iadd j 1) arity))))
+
+(defn dyn--check-all [(tn Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-eq i n) true
+    (if (dyn--check-method tn i) (dyn--check-all tn (iadd i 1) n) false)))
+
+; ============================================================================
+; defdyn — vtable struct + fat-pointer struct + forwarding impl
+; ============================================================================
+
+; param-type list for the vtable fnptr of method mi (self slot -> (ptr i8)).
+(defn dyn--vt-params [(tn Code) (mi i64) (j i64) (arity i64)] (-> Code)
+  (if (icmp-eq j arity) `()
+    (let [pty (if (icmp-eq j 0) `(ptr i8) (code-trait-param-type tn mi j))]
+      `(~pty ~@(dyn--vt-params tn mi (iadd j 1) arity)))))
+
+; one vtable field: (mname (fnptr c [erased-params] ret))
+(defn dyn--vt-field [(tn Code) (mi i64)] (-> Code)
+  (let [mname (code-trait-method-name tn mi)
+        arity (code-trait-arity tn mi)
+        ret   (code-trait-ret-type tn mi)]
+    `(~mname (fnptr c [~@(dyn--vt-params tn mi 0 arity)] ~ret))))
+
+(defn dyn--vt-fields [(tn Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `()
+    `(~(dyn--vt-field tn i) ~@(dyn--vt-fields tn (iadd i 1) n))))
+
+; param list for a forwarding impl method (self -> (ptr DynName), rest verbatim).
+(defn dyn--impl-params [(tn Code) (dynname Code) (mi i64) (j i64) (arity i64)] (-> Code)
+  (if (icmp-eq j arity) `()
+    (let [p (if (icmp-eq j 0) `(self (ptr ~dynname))
+              `(~(code-trait-param-name tn mi j) ~(code-trait-param-type tn mi j)))]
+      `(~p ~@(dyn--impl-params tn dynname mi (iadd j 1) arity)))))
+
+; call arguments j..arity (the param NAMES; self/data handled separately).
+(defn dyn--arg-names [(tn Code) (mi i64) (j i64) (arity i64)] (-> Code)
+  (if (icmp-eq j arity) `()
+    `(~(code-trait-param-name tn mi j) ~@(dyn--arg-names tn mi (iadd j 1) arity))))
+
+; one forwarding method: load fnptr from the vtable, call-ptr with (data, args...).
+(defn dyn--impl-method [(tn Code) (dynname Code) (mi i64)] (-> Code)
+  (let [mname (code-trait-method-name tn mi)
+        arity (code-trait-arity tn mi)
+        ret   (code-trait-ret-type tn mi)]
+    `(~mname [~@(dyn--impl-params tn dynname mi 0 arity)] (-> ~ret)
+       (call-ptr (load (field (load (field self vtable)) ~mname))
+                 (load (field self data))
+                 ~@(dyn--arg-names tn mi 1 arity)))))
+
+(defn dyn--impl-methods [(tn Code) (dynname Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n) `()
+    `(~(dyn--impl-method tn dynname i) ~@(dyn--impl-methods tn dynname (iadd i 1) n))))
+
+(defn defdyn [(tn Code)] (-> Code)
+  (let [n       (code-trait-method-count tn)
+        _safe   (dyn--check-all tn 0 n)
+        vtname  (code-symbol tn "-vtable")
+        dynname (code-symbol tn "-dyn")]
+    ;; Just the types: a vtable struct (one fnptr per method, in trait order) and
+    ;; the fat-pointer struct. Calling a trait method on a `<Trait>-dyn` value is
+    ;; lowered by the compiler to a vtable dispatch (no forwarding impl needed).
+    `(do
+       (defstruct ~vtname [~@(dyn--vt-fields tn 0 n)])
+       (defstruct ~dynname [(data (ptr i8)) (vtable (ptr ~vtname))]))))
+
+; Erasure (a concrete `(ptr T)` -> a `(dyn Trait)`) needs no library support: it
+; is the compiler's `make-dyn` coercion (automatic at call/return sites, explicit
+; via `(make-dyn Trait ptr)`), which builds a constant vtable directly from the
+; impl methods — so there is no per-type thunk/registration step.

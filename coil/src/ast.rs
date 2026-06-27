@@ -159,6 +159,21 @@ pub enum CodeOp {
     CVariantCount,
     CVariantName,
     CVariantFields,
+    /// Trait reflection on a trait given as a `Code` symbol (for macros that
+    /// generate vtables / dyn objects). `(code-trait-method-count T)` → i64;
+    /// `(code-trait-method-name T i)` → method i's name as a `Code` symbol;
+    /// `(code-trait-arity T i)` → method i's parameter count (including the self
+    /// param) as i64; `(code-trait-param-name T i j)` → param j's name (`Code`
+    /// symbol); `(code-trait-param-type T i j)` → param j's type as *full* `Code`
+    /// syntax (e.g. `(slice u8)`); `(code-trait-ret-type T i)` → method i's
+    /// return type as full `Code` syntax. The self type is reported verbatim
+    /// (`(ptr Self)` etc.) — the macro decides how to erase `Self`.
+    CTraitMethodCount,
+    CTraitMethodName,
+    CTraitArity,
+    CTraitParamName,
+    CTraitParamType,
+    CTraitRetType,
     /// `(str-bytes S)` — a `Code` string to a `Code` list of its byte ints;
     /// `(bytes->str L)` — the inverse. For compile-time format-string parsing.
     StrBytes,
@@ -330,6 +345,39 @@ pub enum ExprKind {
     },
     /// Release a heap pointer; evaluates to 0.
     Free(Box<Expr>),
+    /// `(make-dyn Trait expr)` — explicitly erase a concrete `(ptr T)` to a trait
+    /// object. The checker lowers this (and implicit dyn-coercions) to `MakeDyn`.
+    Erase {
+        trait_name: String,
+        inner: Box<Expr>,
+    },
+    /// A dynamic (vtable) dispatch of a trait method on a trait object: load the
+    /// `method_index`-th function pointer from `recv`'s vtable and call it with
+    /// `recv`'s data pointer plus `args`. Produced by the checker when a trait
+    /// method is called on a `<Trait>-dyn` receiver (Rust's `dyn` dispatch); codegen
+    /// lowers it. `params`/`ret` are the erased call signature (self slot = (ptr i8)).
+    DynDispatch {
+        dyn_struct: String,
+        vtable_struct: String,
+        method_index: usize,
+        cc: String,
+        params: Vec<Type>,
+        ret: Type,
+        recv: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// The lowered trait-object construction: build a vtable for `(Trait, T)` and a
+    /// fat pointer `{ data, vtable }`, yielding `(ptr <dyn_struct>)`. `methods` are
+    /// the resolved impl-method function names in trait-declaration order (codegen
+    /// fills a constant vtable from their addresses — opaque pointers make the
+    /// impl methods directly callable through the erased `(ptr i8)` slots). Only
+    /// the checker produces this; codegen lowers it.
+    MakeDyn {
+        dyn_struct: String,
+        vtable_struct: String,
+        methods: Vec<String>,
+        inner: Box<Expr>,
+    },
     /// Construct a sum-type variant. Produced by monomorphization from a call to
     /// a variant name; `sum` is the concrete (post-mono) sum type name.
     Construct {

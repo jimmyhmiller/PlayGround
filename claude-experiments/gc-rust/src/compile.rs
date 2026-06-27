@@ -194,7 +194,7 @@ mod tests {
                      let mut v: Vec<i64> = vec_new(); \
                      let mut i = 0; \
                      while i < 30 { v = vec_push(v, i * i); i = i + 1; } \
-                     vec_get(v, 5) + vec_get(v, 29) + vec_len(v) \
+                     vec_get_unchecked(v, 5) + vec_get_unchecked(v, 29) + vec_len(v) \
                    }";
         // 25 + 841 + 30 = 896
         assert_eq!(run(src), 896);
@@ -207,7 +207,7 @@ mod tests {
                      let mut i = 0; \
                      while i < 8 { v = vec_push(v, i); i = i + 1; } \
                      v = vec_set(v, 0, 100); \
-                     vec_get(v, 0) + vec_get(v, 7) + vec_len(v) \
+                     vec_get_unchecked(v, 0) + vec_get_unchecked(v, 7) + vec_len(v) \
                    }";
         // 100 + 7 + 8 = 115
         assert_eq!(run(src), 115);
@@ -297,7 +297,7 @@ mod tests {
                      let mut v: Vec<i64> = vec_new(); \
                      v = vec_push(v, 5); v = vec_push(v, 3); v = vec_push(v, 8); v = vec_push(v, 1); \
                      let s = vec_sort_i64(vec_copy(v)); \
-                     vec_get(s, 0) * 1000 + vec_get(s, 3) * 100 + vec_index_of_i64(v, 8) * 10 + vec_sum_i64(v) \
+                     vec_get_unchecked(s, 0) * 1000 + vec_get_unchecked(s, 3) * 100 + vec_index_of_i64(v, 8) * 10 + vec_sum_i64(v) \
                    }";
         // sorted[0]=1, sorted[3]=8, index_of(8)=2, sum=17 -> 1000+800+20+17 = 1837
         assert_eq!(run(src), 1837);
@@ -311,7 +311,7 @@ mod tests {
                      let last = opt_unwrap_or(vec_last(v), 0); \
                      let rev = vec_reverse(v); \
                      let popped = vec_pop(v); \
-                     last * 100 + vec_get(rev, 0) * 10 + vec_len(popped) \
+                     last * 100 + vec_get_unchecked(rev, 0) * 10 + vec_len(popped) \
                    }";
         // last=3, rev[0]=3, pop len=2 -> 300 + 30 + 2 = 332
         assert_eq!(run(src), 332);
@@ -356,7 +356,7 @@ mod tests {
                      v = vec_push(v, 30); v = vec_push(v, 10); v = vec_push(v, 20); \
                      let s = vec_sort(vec_copy(v)); \
                      let c = if vec_contains(v, 20) { 1 } else { 0 }; \
-                     vec_get(s, 0) * 100 + vec_get(s, 2) + opt_unwrap_or(vec_max(v), 0) + c \
+                     vec_get_unchecked(s, 0) * 100 + vec_get_unchecked(s, 2) + opt_unwrap_or(vec_max(v), 0) + c \
                    }";
         // sorted[0]=10, sorted[2]=30, max=30, contains=1 -> 1000+30+30+1 = 1061
         assert_eq!(run(src), 1061);
@@ -375,7 +375,7 @@ mod tests {
                      let mut v: Vec<P> = vec_new(); \
                      v = vec_push(v, P { level: 3 }); v = vec_push(v, P { level: 1 }); v = vec_push(v, P { level: 2 }); \
                      let s = vec_sort(v); \
-                     vec_get(s, 0).level * 100 + vec_get(s, 1).level * 10 + vec_get(s, 2).level \
+                     vec_get_unchecked(s, 0).level * 100 + vec_get_unchecked(s, 1).level * 10 + vec_get_unchecked(s, 2).level \
                    }";
         // sorted levels: 1, 2, 3 -> 123
         assert_eq!(run(src), 123);

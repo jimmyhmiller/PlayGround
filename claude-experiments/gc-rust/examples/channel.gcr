@@ -24,7 +24,7 @@ fn main() -> i64 {
     let mut got = 0;
     while got < 200 {
         let item = ch.recv();
-        total = total + vec_get(item, 0);
+        total = total + vec_get_unchecked(item, 0);
         got = got + 1;
     }
     let _a = t1.join();
