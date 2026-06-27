@@ -46,7 +46,7 @@
           (let [i   (iadd (imul y 64) x)
                 cur (cast :i64 (load (index fade i)))
                 v   (if (icmp-eq (px c i) 1) 0xFF (if (icmp-gt cur 70) (isub cur 70) 0))
-                o   (imul (iadd (imul (isub 31 y) 64) x) 4)]
+                o   (imul i 4)]   ; raw buffer fed to CGImage is top-down — no flip
             (do (store! (index fade i) (cast :u8 v))
                 (store! (index rgba o) (cast :u8 v)) (store! (index rgba (iadd o 1)) (cast :u8 v))
                 (store! (index rgba (iadd o 2)) (cast :u8 v)) (store! (index rgba (iadd o 3)) (cast :u8 0xFF))))))
