@@ -108,7 +108,7 @@ fn main() -> ExitCode {
 /// has the text but not the file name). A spanless message has no placeholder,
 /// so the substitution is a harmless no-op there.
 fn print_error(body: &str, file: &str) {
-    eprintln!("error: {}", body.replacen("<source>", file, 1));
+    eprintln!("error: {}", body.replace("<source>", file));
 }
 
 /// Build to a temp executable, run it, and propagate its exit code. With a cross

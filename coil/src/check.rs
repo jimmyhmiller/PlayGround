@@ -172,7 +172,7 @@ fn trait_visible(
     })
 }
 
-pub fn check(program: &Program) -> Result<Program, Diag> {
+pub fn check(program: &Program) -> Result<Program, Vec<Diag>> {
     check_with(program, &HashMap::new(), &HashMap::new())
 }
 
@@ -183,7 +183,37 @@ pub fn check_with(
     program: &Program,
     imports: &crate::macros::ImportMap,
     exports: &crate::macros::ExportMap,
-) -> Result<Program, Diag> {
+) -> Result<Program, Vec<Diag>> {
+    // Phase 1 (prerequisites) fails fast: the type/trait/signature tables must be
+    // sound before any body can be sensibly checked, so a single error there stops
+    // the pass. Phase 2 (function bodies) is where multi-error recovery lives —
+    // each function is independent, so we collect every body's error and report
+    // them together instead of stopping at the first. Phase 3 (comptime fold,
+    // static asserts, statics, metas) runs only once all bodies type-check.
+    let (cx, all_funcs) = setup(program, imports, exports).map_err(|e| vec![e])?;
+    let mut errors: Vec<Diag> = Vec::new();
+    let mut funcs: Vec<Func> = Vec::with_capacity(all_funcs.len());
+    for f in &all_funcs {
+        match check_func(f, &cx, program) {
+            Ok(func) => funcs.push(func),
+            Err(e) => errors.push(e),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    finish(program, &cx, funcs).map_err(|e| vec![e])
+}
+
+/// Phase 1: build the type/trait/signature/const tables and the checking context
+/// `Cx`, returning it alongside the full function list (user funcs + lowered impl
+/// methods). Fails fast on the first error — these tables are prerequisites for
+/// every later phase.
+fn setup(
+    program: &Program,
+    imports: &crate::macros::ImportMap,
+    exports: &crate::macros::ExportMap,
+) -> Result<(Cx, Vec<Func>), Diag> {
     // ---- type tables --------------------------------------------------------
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
     for sd in &program.structs {
@@ -409,10 +439,14 @@ pub fn check_with(
         }
     }
 
-    // ---- elaborate every function body -------------------------------------
-    let mut funcs: Vec<Func> = Vec::with_capacity(all_funcs.len());
-    for f in &all_funcs {
-        let tps: HashSet<String> = f.type_params.iter().cloned().collect();
+    Ok((cx, all_funcs))
+}
+
+/// Phase 2: type-check and elaborate one function body. Independent per function,
+/// so `check_with` collects errors across functions (multi-error reporting) rather
+/// than stopping at the first.
+fn check_func(f: &Func, cx: &Cx, program: &Program) -> Result<Func, Diag> {
+    let tps: HashSet<String> = f.type_params.iter().cloned().collect();
         // Make this function's trait bounds visible to `synth` (definition-time
         // trait-method resolution checks calls against the declared bounds).
         *cx.cur_bounds.borrow_mut() = f.bounds.iter().cloned().collect();
@@ -442,12 +476,12 @@ pub fn check_with(
         }
 
         for p in &f.params {
-            validate_type(&p.ty, &cx, &tps)
+            validate_type(&p.ty, cx, &tps)
                 .map_err(|e| format!("function '{}' param '{}': {e}", f.name, p.name))?;
         }
         // `void` is a valid return type (validate_type rejects it elsewhere).
         if f.ret != Type::Void {
-            validate_type(&f.ret, &cx, &tps)
+            validate_type(&f.ret, cx, &tps)
                 .map_err(|e| format!("function '{}' return type: {e}", f.name))?;
         }
 
@@ -465,7 +499,7 @@ pub fn check_with(
             if i + 1 == n {
                 // tail position: check against the declared return type, so a
                 // literal or constructor in the body's tail adopts it.
-                let (ee, et) = synth(e, Some(&f.ret), &mut env, &cx, &tps, &f.name)?;
+                let (ee, et) = synth(e, Some(&f.ret), &mut env, cx, &tps, &f.name)?;
                 let et_str = ty_str(&et);
                 let ee = coerce(ee, et, &f.ret, false, &f.name, "body").map_err(|_| {
                     format!(
@@ -477,7 +511,7 @@ pub fn check_with(
                 })?;
                 body.push(ee);
             } else {
-                let (ee, _) = synth(e, None, &mut env, &cx, &tps, &f.name)?;
+                let (ee, _) = synth(e, None, &mut env, cx, &tps, &f.name)?;
                 body.push(ee);
             }
         }
@@ -499,7 +533,7 @@ pub fn check_with(
                 ty: erase_refs(&param_ref_type(&p.ty, &cx.structs, &cx.sums, &tps)),
             })
             .collect();
-        funcs.push(Func {
+        Ok(Func {
             name: f.name.clone(),
             type_params: f.type_params.clone(),
             bounds: f.bounds.clone(),
@@ -509,15 +543,20 @@ pub fn check_with(
             body,
             macro_variadic: f.macro_variadic,
             span: f.span,
-        });
-    }
+        })
+}
 
+/// Phase 3: once every function body type-checks, run the comptime fold, the
+/// static-assert conditions, aggregate-const statics, and `(meta …)` forms, and
+/// assemble the final elaborated `Program`. Fails fast (these are whole-program
+/// steps, not independent per-item checks).
+fn finish(program: &Program, cx: &Cx, mut funcs: Vec<Func>) -> Result<Program, Diag> {
     // ---- static-assert conditions ------------------------------------------
     let empty_tps = HashSet::new();
     let mut asserts: Vec<StaticAssert> = Vec::with_capacity(program.asserts.len());
     for a in &program.asserts {
         let mut env: HashMap<String, Type> = HashMap::new();
-        let (cond, t) = synth(&a.cond, None, &mut env, &cx, &empty_tps, "static-assert")?;
+        let (cond, t) = synth(&a.cond, None, &mut env, cx, &empty_tps, "static-assert")?;
         if !is_cond(&t) {
             return Err(format!(
                 "static-assert: condition must be a bool or integer, got {}",
@@ -553,7 +592,7 @@ pub fn check_with(
     let mut metas: Vec<Expr> = Vec::with_capacity(program.metas.len());
     for meta in &program.metas {
         let mut menv: HashMap<String, Type> = HashMap::new();
-        let (me, mt) = synth(meta, None, &mut menv, &cx, &empty_tps, "meta")?;
+        let (me, mt) = synth(meta, None, &mut menv, cx, &empty_tps, "meta")?;
         if mt != Type::Code {
             return Err(format!("meta: expression must produce Code, got {}", ty_str(&mt)).into());
         }

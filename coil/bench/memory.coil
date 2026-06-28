@@ -10,5 +10,5 @@
 (defn main [] (-> :i64)
   (let [a (cast (ptr i64) (malloc (imul 20000000 8)))]
     (do (fill a 0 20000000)
-        (printf "%lu\n" (sum a 0 20000000 0))
+        (printf c"%lu\n" (sum a 0 20000000 0))
         0)))

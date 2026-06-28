@@ -167,9 +167,18 @@ pub fn build(nodes: &[NodeInput], layout: &LayoutIndex, mem: &dyn MemReader) -> 
         succ[e.from as usize].push(e.to);
     }
 
-    let roots: Vec<u32> = (0..n as u32)
+    // Approximate GC roots: allocations with no tracked inbound edge (their owner
+    // is on the stack/in statics, which we don't track, or is a by-value/raw
+    // pointer we couldn't model).
+    let mut roots: Vec<u32> = (0..n as u32)
         .filter(|&i| in_degree[i as usize] == 0)
         .collect();
+
+    // Rust has no GC: every allocation in the live set is live by definition, so
+    // nothing should read as "unreachable" (collectible garbage). Root one
+    // representative per component that has no in-degree-0 entry (a reference
+    // cycle) so 100% of the live set is reachable and gets a retained size.
+    let roots = complete_roots(n, &succ, std::mem::take(&mut roots));
 
     let idom = dominators(n, &succ, &roots);
 
@@ -208,6 +217,41 @@ pub fn build(nodes: &[NodeInput], layout: &LayoutIndex, mem: &dyn MemReader) -> 
         total_bytes,
         opaque_nodes,
     }
+}
+
+/// DFS-mark everything reachable from `start` over the successor lists.
+fn mark_reachable(start: u32, succ: &[Vec<u32>], reachable: &mut [bool], stack: &mut Vec<u32>) {
+    stack.push(start);
+    while let Some(node) = stack.pop() {
+        let ni = node as usize;
+        if reachable[ni] {
+            continue;
+        }
+        reachable[ni] = true;
+        for &s in &succ[ni] {
+            if !reachable[s as usize] {
+                stack.push(s);
+            }
+        }
+    }
+}
+
+/// Augment `roots` so every one of the `n` nodes is reachable: after the given
+/// roots, add one representative for each component still unreached (a reference
+/// cycle with no in-degree-0 entry). Keeps the live set 100% reachable.
+fn complete_roots(n: usize, succ: &[Vec<u32>], mut roots: Vec<u32>) -> Vec<u32> {
+    let mut reachable = vec![false; n];
+    let mut stack: Vec<u32> = Vec::new();
+    for &r in &roots {
+        mark_reachable(r, succ, &mut reachable, &mut stack);
+    }
+    for i in 0..n as u32 {
+        if !reachable[i as usize] {
+            roots.push(i);
+            mark_reachable(i, succ, &mut reachable, &mut stack);
+        }
+    }
+    roots
 }
 
 /// Candidate hashbrown control-group widths: 16 (x86_64 SSE2 / aarch64 NEON) and
@@ -477,6 +521,39 @@ mod tests {
     fn dom_chain() {
         let s = succ_of(4, &[(0, 1), (1, 2), (2, 3)]);
         assert_eq!(dominators(4, &s, &[0]), vec![-1, 0, 1, 2]);
+    }
+
+    /// Every node must be reachable (Rust has no garbage). A reference cycle with
+    /// no in-degree-0 entry still gets a root, so nothing reads as "unreachable".
+    #[test]
+    fn complete_roots_covers_cycles() {
+        // A pure cycle 0->1->0 with no in-degree-0 node and no initial roots.
+        let s = succ_of(2, &[(0, 1), (1, 0)]);
+        let roots = complete_roots(2, &s, vec![]);
+        assert_eq!(roots.len(), 1, "one representative rooted for the cycle");
+        // …and from the completed root set, every node is reachable.
+        assert!(all_reachable(2, &s, &roots));
+
+        // A cycle 1<->2 fed from in-degree-0 root 0: no extra roots needed.
+        let s = succ_of(3, &[(0, 1), (1, 2), (2, 1)]);
+        let roots = complete_roots(3, &s, vec![0]);
+        assert_eq!(roots, vec![0]);
+        assert!(all_reachable(3, &s, &roots));
+
+        // Two disjoint cycles with no entries -> one root each.
+        let s = succ_of(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
+        let roots = complete_roots(4, &s, vec![]);
+        assert_eq!(roots.len(), 2);
+        assert!(all_reachable(4, &s, &roots));
+    }
+
+    fn all_reachable(n: usize, succ: &[Vec<u32>], roots: &[u32]) -> bool {
+        let mut reachable = vec![false; n];
+        let mut stack = Vec::new();
+        for &r in roots {
+            mark_reachable(r, succ, &mut reachable, &mut stack);
+        }
+        reachable.iter().all(|&b| b)
     }
 
     #[test]

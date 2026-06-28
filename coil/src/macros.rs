@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::reader::{Sexp, SexpKind};
+use crate::span::{Diag, SourceMap};
 
 /// The compile target description (host triple, derived in `lib`).
 pub struct TargetInfo {
@@ -74,7 +75,8 @@ pub type TaggedForm = (Sexp, Option<String>);
 pub fn load_program(
     forms: &[Sexp],
     _target: &TargetInfo,
-) -> Result<(Vec<TaggedForm>, ImportMap, ExportMap), String> {
+    sm: &mut SourceMap,
+) -> Result<(Vec<TaggedForm>, ImportMap, ExportMap), Diag> {
     let mut out: Vec<TaggedForm> = Vec::new();
     // Loaded modules, by name — an import loads a module once no matter how it is
     // reached (disk path or bundled stdlib), so the prelude's `control` and a user's
@@ -85,14 +87,17 @@ pub fn load_program(
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // The prelude (`coil.core`: traits, operator impls, and a re-export of `control`)
     // is compiled into the compiler and auto-loaded into every program — so operators
-    // AND everyday control flow (while/for/cond/…) work unimported.
+    // AND everyday control flow (while/for/cond/…) work unimported. It is registered
+    // as its own source so a diagnostic in prelude code resolves to `<prelude>`.
     const PRELUDE: &str = include_str!("prelude.coil");
-    let prelude_forms = crate::reader::read_all_unspanned(PRELUDE)?;
-    process_forms(&prelude_forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports)?;
-    process_forms(forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports)?;
+    let prelude_id = sm.add("<prelude>", PRELUDE);
+    let prelude_forms = crate::reader::read_all(PRELUDE, prelude_id)?;
+    process_forms(&prelude_forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports, sm)?;
+    process_forms(forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports, sm)?;
     Ok((out, imports, exports))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_forms(
     forms: &[Sexp],
     out: &mut Vec<TaggedForm>,
@@ -101,7 +106,8 @@ fn process_forms(
     mut cur_module: Option<String>,
     imports: &mut ImportMap,
     exports: &mut ExportMap,
-) -> Result<(), String> {
+    sm: &mut SourceMap,
+) -> Result<(), Diag> {
     for form in forms {
         match list_head(form) {
             // `(module NAME)` — namespace the following top-level defs under NAME.
@@ -115,11 +121,12 @@ fn process_forms(
                 if let Some(m) = &cur_module {
                     let set = exports.entry(m.clone()).or_default();
                     for it in &as_list(form)?[1..] {
-                        let n = sym_name(it).ok_or("export: names must be symbols")?;
+                        let n = sym_name(it)
+                            .ok_or_else(|| Diag::at(it.span, "export: names must be symbols"))?;
                         set.insert(n.to_string());
                     }
                 } else {
-                    return Err("export: only valid inside a (module …)".into());
+                    return Err(Diag::at(form.span, "export: only valid inside a (module …)"));
                 }
             }
             // `(import "path" [:as alias] [:use *|[names]])` — load another module.
@@ -128,13 +135,13 @@ fn process_forms(
                 // (non-macro) names would silently fail to resolve. Require a module
                 // declaration before importing, with a clear error instead.
                 if cur_module.is_none() {
-                    return Err("import requires a (module …) declaration: add one \
-                                (e.g. `(module app)`) at the top of the file, before any \
-                                imports — otherwise imported types and functions cannot \
-                                be resolved"
-                        .into());
+                    return Err(Diag::at(form.span,
+                        "import requires a (module …) declaration: add one \
+                         (e.g. `(module app)`) at the top of the file, before any \
+                         imports — otherwise imported types and functions cannot \
+                         be resolved"));
                 }
-                process_import(form, out, base_dir, loaded, &cur_module, imports, exports)?;
+                process_import(form, out, base_dir, loaded, &cur_module, imports, exports, sm)?;
             }
             // Any other top-level form is collected raw, tagged with its module.
             _ => out.push((form.clone(), cur_module.clone())),
@@ -144,10 +151,10 @@ fn process_forms(
 }
 
 /// Parse the name out of `(module NAME)`.
-fn module_name(form: &Sexp) -> Result<String, String> {
+fn module_name(form: &Sexp) -> Result<String, Diag> {
     match as_list(form)?.get(1).and_then(sym_name) {
         Some(n) => Ok(n.to_string()),
-        None => Err("module: expected a name, e.g. (module math/vec)".into()),
+        None => Err(Diag::at(form.span, "module: expected a name, e.g. (module math/vec)")),
     }
 }
 
@@ -167,11 +174,12 @@ fn process_import(
     cur_module: &Option<String>,
     imports: &mut ImportMap,
     exports: &mut ExportMap,
-) -> Result<(), String> {
+    sm: &mut SourceMap,
+) -> Result<(), Diag> {
     let items = as_list(form)?;
     let path = match items.get(1).map(|s| &s.kind) {
         Some(SexpKind::Str(p)) => p,
-        _ => return Err("import: expected (import \"path\" [:as alias])".into()),
+        _ => return Err(Diag::at(form.span, "import: expected (import \"path\" [:as alias])")),
     };
     // optional `:as alias`, `:use *` / `:use [names]`, and `:reexport`
     let mut alias: Option<String> = None;
@@ -181,7 +189,8 @@ fn process_import(
     while i < items.len() {
         match items.get(i).map(|s| &s.kind) {
             Some(SexpKind::Keyword(k)) if k == "as" => {
-                let a = items.get(i + 1).and_then(sym_name).ok_or("import: :as expects an alias symbol")?;
+                let a = items.get(i + 1).and_then(sym_name)
+                    .ok_or_else(|| Diag::at(form.span, "import: :as expects an alias symbol"))?;
                 alias = Some(a.to_string());
                 i += 2;
             }
@@ -195,38 +204,43 @@ fn process_import(
                     Some(SexpKind::Vector(v)) => {
                         UseSpec::Names(v.iter().filter_map(sym_name).map(str::to_string).collect())
                     }
-                    _ => return Err("import: :use expects * or [names]".into()),
+                    _ => return Err(Diag::at(form.span, "import: :use expects * or [names]")),
                 });
                 i += 2;
             }
-            _ => return Err("import: expected :as alias, :use *|[names], or :reexport".into()),
+            _ => return Err(Diag::at(form.span, "import: expected :as alias, :use *|[names], or :reexport")),
         }
     }
     // Resolve the source: a real file relative to the importing file wins (so disk
     // edits during development take effect); otherwise the BUNDLED stdlib by file
     // basename, so `(import "control.coil")` / `(import "objc.coil")` work from
-    // anywhere with no `../../lib/` path.
+    // anywhere with no `../../lib/` path. The display name we register tracks which
+    // won, so a diagnostic in the imported file names the real path.
     let basename = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
-    let (text, inc_dir) = match base_dir.join(path).canonicalize() {
+    let span = form.span;
+    let (text, inc_dir, disp) = match base_dir.join(path).canonicalize() {
         Ok(canon) => {
-            let t = std::fs::read_to_string(&canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
+            let t = std::fs::read_to_string(&canon)
+                .map_err(|e| Diag::at(span, format!("import '{}': {e}", canon.display())))?;
             let dir = canon.parent().map(Path::to_path_buf).unwrap_or_else(|| base_dir.to_path_buf());
-            (t, dir)
+            let disp = canon.to_string_lossy().into_owned();
+            (t, dir, disp)
         }
         Err(_) => match crate::stdlib::lookup(basename) {
             // A bundled module's own nested imports resolve the same way (disk, then
             // bundle), so `base_dir` carries through.
-            Some(src) => (src.to_string(), base_dir.to_path_buf()),
-            None => return Err(format!(
+            Some(src) => (src.to_string(), base_dir.to_path_buf(), format!("<bundled {basename}>")),
+            None => return Err(Diag::at(span, format!(
                 "import '{path}': not found (no such file, and not a bundled stdlib module)"
-            )),
+            ))),
         },
     };
-    // The included file's bytes are a *different* source than the one we render
-    // diagnostics against, so its spans would point into the wrong file — strip them.
-    let inc_forms = crate::reader::read_all_unspanned(&text)?;
+    // The imported file is its own source: register it and read it spanned, so a
+    // diagnostic in it draws a caret into the right file (not `DUMMY`/the importer).
+    let inc_id = sm.add(disp, text.clone());
+    let inc_forms = crate::reader::read_all(&text, inc_id)?;
     let modname = declared_module(&inc_forms)
-        .ok_or_else(|| format!("import '{}': file has no (module …) declaration", path))?;
+        .ok_or_else(|| Diag::at(span, format!("import '{}': file has no (module …) declaration", path)))?;
     // Record the import in the importing module's table. `:as` adds a qualified
     // alias (defaulting to the module's own name); `:use` brings names in bare.
     let importer = cur_module.clone().unwrap_or_default();
@@ -240,21 +254,23 @@ fn process_import(
     }
     // Load the module once, by name — no matter which path/bundle reached it.
     if loaded.insert(modname.clone()) {
-        process_forms(&inc_forms, out, &inc_dir, loaded, None, imports, exports)
+        process_forms(&inc_forms, out, &inc_dir, loaded, None, imports, exports, sm)
             .map_err(|e| trace(e, || format!("import \"{path}\"")))?;
     }
     Ok(())
 }
 
-/// Append a one-line frame to an error message (used for import traces).
-pub fn trace(err: String, frame: impl FnOnce() -> String) -> String {
-    format!("{err}\n  in {}", frame())
+/// Append a one-line frame to a diagnostic's message (used for import traces). The
+/// span (the offending node in the imported file) is preserved.
+pub fn trace(mut err: Diag, frame: impl FnOnce() -> String) -> Diag {
+    err.msg = format!("{}\n  in {}", err.msg, frame());
+    err
 }
 
-fn as_list(s: &Sexp) -> Result<&[Sexp], String> {
+fn as_list(s: &Sexp) -> Result<&[Sexp], Diag> {
     match &s.kind {
         SexpKind::List(items) => Ok(items),
-        _ => Err("expected a list".to_string()),
+        _ => Err(Diag::at(s.span, "expected a list")),
     }
 }
 

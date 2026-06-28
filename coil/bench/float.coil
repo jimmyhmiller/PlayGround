@@ -2,4 +2,4 @@
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defn hsum [(i :i64) (n :i64) (s :f64)] (-> :f64)
   (if (icmp-gt i n) s (hsum (iadd i 1) n (fadd s (fdiv 1.0 (cast :f64 i))))))
-(defn main [] (-> :i64) (do (printf "%.12f\n" (hsum 1 200000000 0.0)) 0))
+(defn main [] (-> :i64) (do (printf c"%.12f\n" (hsum 1 200000000 0.0)) 0))

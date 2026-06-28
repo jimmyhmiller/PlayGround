@@ -36,15 +36,25 @@ const OPT_PIPELINE: &str = "default<O3>";
 use std::path::Path;
 use std::process::Command;
 
-use span::Diag;
+use span::{Diag, SourceMap};
 
-/// Render any pipeline error against `src` into a finished diagnostic string
-/// (`file:line:col` + caret when the error carries a span; a bare `error: msg`
-/// otherwise). Accepts both `String` errors (from passes that don't yet carry
-/// spans) and `Diag` errors (reader/parser), so every public entry point reports
-/// uniformly. The CLI substitutes the real path for the `<source>` placeholder.
-fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
-    r.map_err(|e| span::render(&e.into(), src, "<source>"))
+/// Render any pipeline error against the `SourceMap` into a finished diagnostic
+/// string (`file:line:col` + caret per error, plus an `N errors` summary when there
+/// is more than one). The main file is registered under the `<source>` placeholder,
+/// which the CLI substitutes for the real path; imported files carry their real path.
+fn reported<T>(r: Result<T, Vec<Diag>>, sm: &SourceMap) -> Result<T, String> {
+    r.map_err(|diags| span::render_all(&diags, sm))
+}
+
+/// Lift a single-error pass result into the multi-error spine.
+fn one<T>(r: Result<T, Diag>) -> Result<T, Vec<Diag>> {
+    r.map_err(|d| vec![d])
+}
+
+/// Collapse a multi-error checker result to one diagnostic — for the internal
+/// sub-program checks (macro/comptime contexts) that are reported single-error.
+fn collapse(diags: Vec<Diag>) -> Diag {
+    diags.into_iter().next().unwrap_or_else(|| Diag::new("type error"))
 }
 
 /// The whole front end: read → macro-expand → resolve → check, with the Stage-3
@@ -56,15 +66,22 @@ fn reported<T, E: Into<Diag>>(r: Result<T, E>, src: &str) -> Result<T, String> {
 /// generated code, so they check cleanly), run the metas via the comptime
 /// interpreter to get generated top-level forms, splice those in (dropping the
 /// `meta` forms), and check the whole program.
-fn elaborate(src: &str) -> Result<ast::Program, Diag> {
-    let forms = reader::read_all(src)?;
-    let (tagged, imports, exports) = macros::load_program(&forms, &host_target())?;
-    let tagged = expand_stage3_macros(tagged, &imports, &exports)?;
+fn elaborate(src: &str, sm: &mut SourceMap) -> Result<ast::Program, Vec<Diag>> {
+    // The main file is source 0, registered under the `<source>` placeholder (the CLI
+    // swaps in the real path; tests render against `<source>`). Imports + the prelude
+    // register themselves as further sources inside `load_program`.
+    let main = sm.add("<source>", src);
+    // The front-end pipeline up to the checker is fail-fast (single `Diag`); the
+    // checker (`check_with`) returns *all* of one program's body errors, which flow
+    // straight out as the multi-error `Vec<Diag>`.
+    let forms = one(reader::read_all(src, main))?;
+    let (tagged, imports, exports) = one(macros::load_program(&forms, &host_target(), sm))?;
+    let tagged = one(expand_stage3_macros(tagged, &imports, &exports, sm))?;
     // With `(meta …)` generators present, this first resolve is intermediate — the
     // program still calls definitions the metas haven't generated yet — so the
     // undefined-reference check is deferred to the final `program2` resolve below.
     let has_metas = tagged.iter().any(|(f, _)| is_meta_form(f));
-    let program = resolve::resolve_program(tagged.clone(), &imports, &exports, !has_metas)?;
+    let program = one(resolve::resolve_program(tagged.clone(), &imports, &exports, !has_metas))?;
 
     // ---- top-level `(meta …)` staged macros (generate definitions) ----
     let mut checked = if program.metas.is_empty() {
@@ -79,14 +96,14 @@ fn elaborate(src: &str) -> Result<ast::Program, Diag> {
         let wanted = closure_funcs(&program, stack);
         let sub = closure_subprogram(&program, &wanted, true);
         let checked_sub = check::check(&sub)?;
-        let gen = comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new)?;
+        let gen = one(comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new))?;
         let module = tagged.iter().find(|(f, _)| is_meta_form(f)).and_then(|(_, m)| m.clone());
         let mut tagged2: Vec<macros::TaggedForm> =
             tagged.into_iter().filter(|(f, _)| !is_meta_form(f)).collect();
         for g in gen {
             tagged2.push((g, module.clone()));
         }
-        let program2 = resolve::resolve_program(tagged2, &imports, &exports, true)?;
+        let program2 = one(resolve::resolve_program(tagged2, &imports, &exports, true))?;
         check::check_with(&program2, &imports, &exports)?
     };
     // Comptime-only functions (anything with a `Code` parameter or return — macros,
@@ -151,15 +168,17 @@ fn expand_stage3_macros(
     tagged: Vec<macros::TaggedForm>,
     imports: &macros::ImportMap,
     exports: &macros::ExportMap,
+    sm: &mut SourceMap,
 ) -> Result<Vec<macros::TaggedForm>, Diag> {
     // The comptime interpreter recurses (Rust stack) for each step of a macro's
     // evaluation — a macro that loops over, say, a format string's characters can
     // go deep. Run on a large dedicated stack so it's robust off the main thread
-    // (e.g. inside cargo's 2 MiB test threads).
+    // (e.g. inside cargo's 2 MiB test threads). The `SourceMap` is borrowed into the
+    // scoped thread so macro expansions can register provenance records.
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
-            .spawn_scoped(s, || expand_stage3_macros_inner(tagged, imports, exports))
+            .spawn_scoped(s, move || expand_stage3_macros_inner(tagged, imports, exports, sm))
             .expect("spawn macro-expansion thread")
             .join()
             .expect("macro-expansion thread panicked")
@@ -170,6 +189,7 @@ fn expand_stage3_macros_inner(
     tagged: Vec<macros::TaggedForm>,
     imports: &macros::ImportMap,
     exports: &macros::ExportMap,
+    sm: &mut SourceMap,
 ) -> Result<Vec<macros::TaggedForm>, Diag> {
     use std::collections::HashSet;
     let macro_subset: Vec<macros::TaggedForm> =
@@ -189,7 +209,7 @@ fn expand_stage3_macros_inner(
     let macro_set: HashSet<String> = macro_quals.iter().cloned().collect();
     let wanted = closure_funcs(&macro_ctx, macro_quals);
     let sub = closure_subprogram(&macro_ctx, &wanted, false);
-    let checked_sub = check::check(&sub)?;
+    let checked_sub = check::check(&sub).map_err(collapse)?;
     // Resolving a macro call respects module scope, exactly like the name resolver:
     // a bare `(name …)` is a macro call only if `name` is a macro visible in the
     // call's module (own module, or a `:use`d module's export); `alias/name` goes
@@ -208,7 +228,7 @@ fn expand_stage3_macros_inner(
     // macro-generated struct/sum (incremental, like the old def table).
     let mut gen: (Vec<ast::StructDef>, Vec<ast::SumDef>) = (Vec::new(), Vec::new());
     for (f, m) in tagged {
-        let out = expand_top_form(&f, m.as_deref(), &env, &all_fns, &gen, &mut 0)?;
+        let out = expand_top_form(&f, m.as_deref(), &env, &all_fns, &gen, &mut 0, sm)?;
         // A macro that expands to a top-level `(do …)` splices into several forms.
         // Record each result's generated decls + fn names so LATER forms see them.
         let mut produced: Vec<reader::Sexp> = Vec::new();
@@ -381,11 +401,32 @@ fn expand_top_form(
     all_fns: &std::collections::HashSet<String>,
     gen: &(Vec<ast::StructDef>, Vec<ast::SumDef>),
     depth: &mut u32,
+    sm: &mut SourceMap,
 ) -> Result<reader::Sexp, Diag> {
     if is_meta_form(f) || is_comptime_defn(f, module, env.comptime) {
         return Ok(f.clone());
     }
-    expand_calls(f, module, env, all_fns, gen, depth)
+    expand_calls(f, module, env, all_fns, gen, depth, sm)
+}
+
+/// Tag every macro-synthesized node (a template list/vector wrapper, which the
+/// quasiquote builder leaves `DUMMY`) with the expansion `ctxt` and locate it at the
+/// macro `call` site. Nodes that already carry a span are left untouched: a template
+/// *literal* keeps its real location in the macro's defining file (Stage A), and —
+/// crucially — code spliced in via `~unquote` keeps the *caller's* span, so a type
+/// error in a user expression passed to a macro is never mis-attributed to the macro.
+fn stamp_expansion(s: &mut reader::Sexp, call: span::Span, ctxt: u32) {
+    if s.span.is_dummy() {
+        s.span = span::Span { source: call.source, lo: call.lo, hi: call.hi, ctxt };
+    }
+    match &mut s.kind {
+        reader::SexpKind::List(items) | reader::SexpKind::Vector(items) => {
+            for it in items {
+                stamp_expansion(it, call, ctxt);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The defined name of a `(defn NAME …)` form, else `None`.
@@ -434,6 +475,7 @@ fn expand_calls(
     all_fns: &std::collections::HashSet<String>,
     gen: &(Vec<ast::StructDef>, Vec<ast::SumDef>),
     depth: &mut u32,
+    sm: &mut SourceMap,
 ) -> Result<reader::Sexp, Diag> {
     use reader::{Sexp, SexpKind};
     match &s.kind {
@@ -449,13 +491,30 @@ fn expand_calls(
                 }
                 // RAW args (outside-in): the macro decides what to expand.
                 let args: Vec<Sexp> = items[1..].to_vec();
-                let out = comptime::expand_macro(env.sub, &q, args, all_fns, &gen.0, &gen.1, env.imports, env.exports)
+                let mut out = comptime::expand_macro(env.sub, &q, args, all_fns, &gen.0, &gen.1, env.imports, env.exports)
                     .map_err(Diag::new)?;
-                expand_calls(&out, module, env, all_fns, gen, depth)
+                // Provenance: record this expansion (macro name + call site, chained to
+                // the call site's own context for nested macros) and tag the
+                // synthesized output with it, so a diagnostic landing in generated code
+                // traces back here. `s.span` is the macro call's location.
+                // The macro's definition span (its `(defn …)` template), so the trace
+                // can point at the code that produced the offending node.
+                let def_site = env.sub.funcs.iter()
+                    .find(|f| f.name == q)
+                    .map(|f| f.span)
+                    .unwrap_or(span::Span::DUMMY);
+                let ctxt = sm.add_expansion(span::Expansion {
+                    macro_name: q.clone(),
+                    call_site: s.span,
+                    def_site,
+                    parent: s.span.ctxt,
+                });
+                stamp_expansion(&mut out, s.span, ctxt);
+                expand_calls(&out, module, env, all_fns, gen, depth, sm)
             } else {
                 let out: Vec<Sexp> = items
                     .iter()
-                    .map(|i| expand_calls(i, module, env, all_fns, gen, depth))
+                    .map(|i| expand_calls(i, module, env, all_fns, gen, depth, sm))
                     .collect::<Result<_, _>>()?;
                 Ok(Sexp::new(SexpKind::List(out), s.span))
             }
@@ -463,7 +522,7 @@ fn expand_calls(
         SexpKind::Vector(items) => {
             let out: Vec<Sexp> = items
                 .iter()
-                .map(|i| expand_calls(i, module, env, all_fns, gen, depth))
+                .map(|i| expand_calls(i, module, env, all_fns, gen, depth, sm))
                 .collect::<Result<_, _>>()?;
             Ok(Sexp::new(SexpKind::Vector(out), s.span))
         }
@@ -599,8 +658,8 @@ fn host_target() -> macros::TargetInfo {
 /// monomorphize → module. The checker runs *before* monomorphization now: it
 /// types polymorphic code and infers/fills the generic type arguments, so the
 /// monomorphizer is a pure specializer over fully-explicit type args.
-fn build_module<'ctx>(ctx: &'ctx Context, src: &str) -> Result<Module<'ctx>, Diag> {
-    build_module_for(ctx, src, codegen::target_triple())
+fn build_module<'ctx>(ctx: &'ctx Context, src: &str, sm: &mut SourceMap) -> Result<Module<'ctx>, Vec<Diag>> {
+    build_module_for(ctx, src, codegen::target_triple(), sm)
 }
 
 /// `build_module` for an explicitly chosen target triple (cross-targeting).
@@ -608,8 +667,9 @@ fn build_module_for<'ctx>(
     ctx: &'ctx Context,
     src: &str,
     triple: inkwell::targets::TargetTriple,
-) -> Result<Module<'ctx>, Diag> {
-    build_module_dbg(ctx, src, triple, None)
+    sm: &mut SourceMap,
+) -> Result<Module<'ctx>, Vec<Diag>> {
+    build_module_dbg(ctx, src, triple, None, sm)
 }
 
 /// `build_module_for`, optionally emitting DWARF debug info (`-g`).
@@ -618,10 +678,11 @@ fn build_module_dbg<'ctx>(
     src: &str,
     triple: inkwell::targets::TargetTriple,
     dbg: Option<codegen::DebugInput>,
-) -> Result<Module<'ctx>, Diag> {
-    let program = elaborate(src)?;
-    let program = mono::monomorphize(program)?;
-    Ok(codegen::compile_for_dbg(ctx, &program, triple, dbg)?)
+    sm: &mut SourceMap,
+) -> Result<Module<'ctx>, Vec<Diag>> {
+    let program = elaborate(src, sm)?;
+    let program = mono::monomorphize(program).map_err(|e| vec![Diag::from(e)])?;
+    codegen::compile_for_dbg(ctx, &program, triple, dbg).map_err(|e| vec![Diag::from(e)])
 }
 
 /// Build the `DebugInput` (source text + file identity for the `DIFile`) from a
@@ -649,22 +710,29 @@ fn debug_input<'a>(src: &'a str, src_path: Option<&Path>) -> codegen::DebugInput
 /// Macro-expand and pretty-print the resulting forms (for `--expand`). Shows the
 /// post-expansion forms (before name resolution).
 pub fn expand_to_string(src: &str) -> Result<String, String> {
-    let forms = reported(reader::read_all(src), src)?;
-    let (tagged, imports, exports) = reported(macros::load_program(&forms, &host_target()), src)?;
-    // Run Stage-3 macro expansion too, so generated definitions show up.
-    let tagged = reported(expand_stage3_macros(tagged, &imports, &exports), src)?;
-    Ok(tagged
-        .iter()
-        .map(|(f, _)| f.to_string())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    let r = (|| -> Result<Vec<macros::TaggedForm>, Diag> {
+        let forms = reader::read_all(src, main)?;
+        let (tagged, imports, exports) = macros::load_program(&forms, &host_target(), &mut sm)?;
+        // Run Stage-3 macro expansion too, so generated definitions show up.
+        expand_stage3_macros(tagged, &imports, &exports, &mut sm)
+    })();
+    reported(r.map_err(|d| vec![d]), &sm).map(|tagged| {
+        tagged
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 /// Parse + check + emit textual LLVM IR (no JIT). Useful in tests and for
 /// inspecting how conventions lower.
 pub fn emit_ir(src: &str) -> Result<String, String> {
     let ctx = Context::create();
-    let module = reported(build_module(&ctx, src), src)?;
+    let mut sm = SourceMap::new();
+    let module = reported(build_module(&ctx, src, &mut sm), &sm)?;
     Ok(module.print_to_string().to_string())
 }
 
@@ -673,9 +741,10 @@ pub fn emit_ir(src: &str) -> Result<String, String> {
 /// struct coercion from an arm64 host).
 pub fn emit_ir_for(src: &str, triple: &str) -> Result<String, String> {
     let ctx = Context::create();
+    let mut sm = SourceMap::new();
     let module = reported(
-        build_module_for(&ctx, src, inkwell::targets::TargetTriple::create(triple)),
-        src,
+        build_module_for(&ctx, src, inkwell::targets::TargetTriple::create(triple), &mut sm),
+        &sm,
     )?;
     Ok(module.print_to_string().to_string())
 }
@@ -745,7 +814,8 @@ pub fn compile_to_object_dbg(
     let ctx = Context::create();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     let dbg = src_path.map(|_| debug_input(src, src_path));
-    let module = reported(build_module_dbg(&ctx, src, triple, dbg), src)?;
+    let mut sm = SourceMap::new();
+    let module = reported(build_module_dbg(&ctx, src, triple, dbg, &mut sm), &sm)?;
     let triple = module.get_triple();
     // Bare-metal aarch64 (the freestanding `-none` target) runs with the MMU off, so
     // RAM is Device memory — UNALIGNED accesses fault. `+strict-align` stops the backend
@@ -920,9 +990,10 @@ fn link_arch_flag(triple: &str) -> Option<&'static str> {
 /// execution — just diagnostics. (Coil has no `eval`/JIT: the only way to run a
 /// program is to AOT-compile it.)
 pub fn check_source(src: &str) -> Result<(), String> {
-    let program = reported(elaborate(src), src)?;
+    let mut sm = SourceMap::new();
+    let program = reported(elaborate(src, &mut sm), &sm)?;
     // Run monomorphization too, so specialization-time errors (if any) surface
     // in a check-only pass as well.
-    reported(mono::monomorphize(program), src)?;
+    reported(mono::monomorphize(program).map_err(|e| vec![Diag::from(e)]), &sm)?;
     Ok(())
 }

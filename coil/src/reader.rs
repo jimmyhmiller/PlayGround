@@ -76,38 +76,21 @@ impl Sexp {
     pub fn vector(items: Vec<Sexp>) -> Sexp {
         Sexp::new(SexpKind::Vector(items), Span::DUMMY)
     }
-
-    /// Drop source provenance from a whole tree. Used when a form's bytes belong
-    /// to a *different* source than the one diagnostics will render against
-    /// (included/imported files), so we never draw a caret into the wrong file.
-    pub fn unspanned(&self) -> Sexp {
-        let kind = match &self.kind {
-            SexpKind::List(items) => SexpKind::List(items.iter().map(Sexp::unspanned).collect()),
-            SexpKind::Vector(items) => {
-                SexpKind::Vector(items.iter().map(Sexp::unspanned).collect())
-            }
-            other => other.clone(),
-        };
-        Sexp::new(kind, Span::DUMMY)
-    }
 }
 
-pub fn read_all(src: &str) -> Result<Vec<Sexp>, Diag> {
-    let tokens = tokenize(src)?;
+/// Read every top-level form in `src`, stamping each node's span with `source`
+/// (the source's id in the [`SourceMap`](crate::span::SourceMap)). Every file the
+/// compiler reads — the main source, each `import`, the prelude — is registered as
+/// its own source and read with its own id, so a diagnostic resolves against the
+/// right file.
+pub fn read_all(src: &str, source: u32) -> Result<Vec<Sexp>, Diag> {
+    let tokens = tokenize(src, source)?;
     let mut p = Parser { toks: tokens, pos: 0 };
     let mut out = Vec::new();
     while p.pos < p.toks.len() {
         out.push(p.parse()?);
     }
     Ok(out)
-}
-
-/// `read_all` with every span dropped — for forms read from a *different* source
-/// than the one diagnostics render against (`include`/`import`). The error is
-/// likewise reduced to a bare message (its span would be into the other file).
-pub fn read_all_unspanned(src: &str) -> Result<Vec<Sexp>, String> {
-    let forms = read_all(src).map_err(|d| d.msg)?;
-    Ok(forms.iter().map(Sexp::unspanned).collect())
 }
 
 #[derive(Debug, Clone)]
@@ -136,11 +119,12 @@ fn read_string_body(
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     open: usize,
     src_len: usize,
+    source: u32,
 ) -> Result<(String, usize), Diag> {
     let mut s = String::new();
     loop {
         match chars.next() {
-            None => return Err(Diag::at(Span::new(open, src_len), "unterminated string literal")),
+            None => return Err(Diag::at(Span::new(source, open, src_len), "unterminated string literal")),
             Some((j, '"')) => return Ok((s, j + 1)),
             Some((_, '\\')) => match chars.next() {
                 Some((_, 'n')) => s.push('\n'),
@@ -149,7 +133,7 @@ fn read_string_body(
                 Some((_, '\\')) => s.push('\\'),
                 Some((_, c)) => s.push(c),
                 None => {
-                    return Err(Diag::at(Span::new(open, src_len), "unterminated string escape"))
+                    return Err(Diag::at(Span::new(source, open, src_len), "unterminated string escape"))
                 }
             },
             Some((_, c)) => s.push(c),
@@ -157,7 +141,7 @@ fn read_string_body(
     }
 }
 
-fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
+fn tokenize(src: &str, source: u32) -> Result<Vec<Tok>, Diag> {
     let mut toks = Vec::new();
     let mut chars = src.char_indices().peekable();
     while let Some(&(i, c)) = chars.peek() {
@@ -175,19 +159,19 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
                 }
             }
             '(' | '[' => {
-                toks.push(Tok { kind: TokKind::Open(c), span: Span::new(i, i + 1) });
+                toks.push(Tok { kind: TokKind::Open(c), span: Span::new(source, i, i + 1) });
                 chars.next();
             }
             ')' | ']' => {
-                toks.push(Tok { kind: TokKind::Close(c), span: Span::new(i, i + 1) });
+                toks.push(Tok { kind: TokKind::Close(c), span: Span::new(source, i, i + 1) });
                 chars.next();
             }
             '\'' => {
-                toks.push(Tok { kind: TokKind::Prefix("quote"), span: Span::new(i, i + 1) });
+                toks.push(Tok { kind: TokKind::Prefix("quote"), span: Span::new(source, i, i + 1) });
                 chars.next();
             }
             '`' => {
-                toks.push(Tok { kind: TokKind::Prefix("quasiquote"), span: Span::new(i, i + 1) });
+                toks.push(Tok { kind: TokKind::Prefix("quasiquote"), span: Span::new(source, i, i + 1) });
                 chars.next();
             }
             '~' => {
@@ -196,16 +180,16 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
                     let (j, _) = chars.next().unwrap();
                     toks.push(Tok {
                         kind: TokKind::Prefix("unquote-splicing"),
-                        span: Span::new(i, j + 1),
+                        span: Span::new(source, i, j + 1),
                     });
                 } else {
-                    toks.push(Tok { kind: TokKind::Prefix("unquote"), span: Span::new(i, i + 1) });
+                    toks.push(Tok { kind: TokKind::Prefix("unquote"), span: Span::new(source, i, i + 1) });
                 }
             }
             '"' => {
                 chars.next();
-                let (s, end) = read_string_body(&mut chars, i, src.len())?;
-                toks.push(Tok { kind: TokKind::Str(s), span: Span::new(i, end) });
+                let (s, end) = read_string_body(&mut chars, i, src.len(), source)?;
+                toks.push(Tok { kind: TokKind::Str(s), span: Span::new(source, i, end) });
             }
             _ => {
                 let start = i;
@@ -225,10 +209,10 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Diag> {
                 // a C-string literal, distinct from a `"..."` (slice) string.
                 if s == "c" && matches!(chars.peek(), Some((_, '"'))) {
                     chars.next(); // consume the opening quote
-                    let (cs, cend) = read_string_body(&mut chars, start, src.len())?;
-                    toks.push(Tok { kind: TokKind::CStr(cs), span: Span::new(start, cend) });
+                    let (cs, cend) = read_string_body(&mut chars, start, src.len(), source)?;
+                    toks.push(Tok { kind: TokKind::CStr(cs), span: Span::new(source, start, cend) });
                 } else {
-                    toks.push(Tok { kind: TokKind::Atom(s), span: Span::new(start, end) });
+                    toks.push(Tok { kind: TokKind::Atom(s), span: Span::new(source, start, end) });
                 }
             }
         }
@@ -393,7 +377,7 @@ mod tests {
 
     #[test]
     fn reads_nested() {
-        let forms = read_all("(defn f [(n :i64)] (-> :i64) (iadd n 1))").unwrap();
+        let forms = read_all("(defn f [(n :i64)] (-> :i64) (iadd n 1))", 0).unwrap();
         assert_eq!(forms.len(), 1);
         match &forms[0].kind {
             SexpKind::List(items) => {
@@ -406,7 +390,7 @@ mod tests {
 
     #[test]
     fn ignores_comments() {
-        let forms = read_all("; hi\n42 ; trailing\n").unwrap();
+        let forms = read_all("; hi\n42 ; trailing\n", 0).unwrap();
         assert_eq!(forms, vec![Sexp::int(42)]);
     }
 
@@ -414,11 +398,11 @@ mod tests {
     fn tracks_spans() {
         // `iadd` starts at byte 1 in "(iadd 1 2)".
         let src = "(iadd 1 2)";
-        let forms = read_all(src).unwrap();
+        let forms = read_all(src, 0).unwrap();
         let list = &forms[0];
-        assert_eq!(list.span, Span::new(0, src.len())); // whole list
+        assert_eq!(list.span, Span::new(0, 0, src.len())); // whole list
         if let SexpKind::List(items) = &list.kind {
-            assert_eq!(items[0].span, Span::new(1, 5)); // `iadd`
+            assert_eq!(items[0].span, Span::new(0, 1, 5)); // `iadd`
             assert_eq!(&src[items[0].span.lo as usize..items[0].span.hi as usize], "iadd");
         } else {
             panic!("expected list");
@@ -427,7 +411,7 @@ mod tests {
 
     #[test]
     fn unclosed_paren_has_span() {
-        let err = read_all("(iadd 1 2").unwrap_err();
+        let err = read_all("(iadd 1 2", 0).unwrap_err();
         assert!(!err.span.is_dummy(), "unclosed paren should carry a span");
         assert!(err.msg.contains("unclosed"));
     }

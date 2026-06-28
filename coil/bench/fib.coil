@@ -2,4 +2,4 @@
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defn fib [(n :i64)] (-> :i64)
   (if (icmp-lt n 2) n (iadd (fib (isub n 1)) (fib (isub n 2)))))
-(defn main [] (-> :i64) (do (printf "%ld\n" (fib 40)) 0))
+(defn main [] (-> :i64) (do (printf c"%ld\n" (fib 40)) 0))

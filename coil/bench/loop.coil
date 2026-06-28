@@ -3,4 +3,4 @@
 (extern printf :cc c [(ptr i8) ...] (-> i32))
 (defn run [(i :u64) (n :u64) (acc :u64)] (-> :u64)
   (if (icmp-ge i n) acc (run (iadd i 1) n (iadd (imul acc 1000003) i))))
-(defn main [] (-> :i64) (do (printf "%lu\n" (run 0 300000000 0)) 0))
+(defn main [] (-> :i64) (do (printf c"%lu\n" (run 0 300000000 0)) 0))
