@@ -1,0 +1,219 @@
+// bench.ft — shared core for the gc-rust benchmark toolkit.
+//
+// Like df.ft is to the dataflow views, this holds the loading, the GENERAL data
+// model, the metric math, and the formatting every bench widget reuses — so each
+// view (bars / table / scoreboard / …) is a thin, SCHEMA-DRIVEN renderer.
+//
+// It normalizes BOTH data sources into one shape:
+//   • `gcr bench <prog…> --json`  — the general runner: any program(s), each a
+//     `group` with a `gc-rust` series carrying runtime + compile + size + the
+//     runtime-only metrics (GC cycles/pauses, allocation churn, peak heap).
+//   • bench/results.json          — the language-suite comparison (gc-rust vs
+//     Rust/Go/JVM), the historical special case.
+//
+// Normalized shape (what every view consumes):
+//   { metrics: [ { key, label, unit, lower_better, dist } ],
+//     groups:  [ { name, verify, series: [ { label, values:{key:scalar|dist} } ] } ],
+//     baseline: "<series label or empty>" }   // empty ⇒ absolute mode
+import "host"
+
+export fn gv(rec, key, d) = unwrap_or(get(rec, key), d)
+export fn has(rec, key) = typeof(rec) == "Record" and typeof(get(rec, key)) == "Variant(Some)"
+
+// ---- colors ----------------------------------------------------------------
+
+fn palette() = ["#7ee0a0", "#e8a866", "#67c4e6", "#c79be8", "#e0708c", "#a0d468", "#f0c674", "#8fb8e8"]
+
+// A stable color for a series. Known languages keep their identity; anything
+// else (program names, variants) gets a palette slot by its position.
+export fn series_color(label, idx) {
+    if label == "gc-rust" or label == "gcrust" { "#7ee0a0" }
+    else if label == "Rust" or label == "rust" { "#e8a866" }
+    else if label == "Go" or label == "go" { "#67c4e6" }
+    else if label == "JVM" or label == "java" { "#c79be8" }
+    else { palette()[idx % len(palette())] }
+}
+
+export fn lang_label(l) {
+    if l == "gcrust" { "gc-rust" }
+    else if l == "rust" { "Rust" }
+    else if l == "go" { "Go" }
+    else if l == "java" { "JVM" }
+    else { l }
+}
+
+// ---- loading + normalization -----------------------------------------------
+
+export fn load_doc(path) {
+    let r = read_file(path)
+    if typeof(r) != "Record" or not gv(r, "ok", false) {
+        return { ok: false, error: "cannot read " + path }
+    }
+    let d = unwrap_or(json_parse(gv(r, "text", "")), {})
+    if typeof(d) != "Record" { return { ok: false, error: "invalid JSON in " + path } }
+    { ok: true, raw: d }
+}
+
+// Normalize either schema into { metrics, groups, baseline }.
+export fn normalize(raw) {
+    if gv(raw, "schema", "") == "gcr-bench/1" {
+        { metrics: gv(raw, "metrics", []), groups: gv(raw, "groups", []), baseline: "" }
+    } else if has(raw, "benchmarks") {
+        normalize_langsuite(raw)
+    } else {
+        { metrics: [], groups: [], baseline: "" }
+    }
+}
+
+// The historical bench/results.json (gc-rust vs Rust/Go/JVM) → normalized.
+fn normalize_langsuite(raw) {
+    let metrics = [
+        { key: "time", label: "runtime", unit: "ms", lower_better: true, dist: true },
+        { key: "compile", label: "compile", unit: "ms", lower_better: true, dist: false },
+        { key: "size", label: "binary size", unit: "KB", lower_better: true, dist: false },
+    ]
+    let bs = gv(raw, "benchmarks", {})
+    let benches = ["nbody", "spectralnorm", "fannkuchredux", "binarytrees"]
+    let langs = ["gcrust", "rust", "go", "java"]
+    let mut groups = []
+    for b in benches {
+        if has(bs, b) {
+            let bb = gv(bs, b, {})
+            let lr = gv(bb, "langs", {})
+            let mut series = []
+            for l in langs {
+                if has(lr, l) {
+                    let r = gv(lr, l, {})
+                    let t = gv(r, "time", {})
+                    let values = {
+                        time: { mean: gv(t, "mean_s", 0.0) * 1000.0, stddev: gv(t, "stddev_s", 0.0) * 1000.0,
+                                min: gv(t, "min_s", 0.0) * 1000.0, max: gv(t, "max_s", 0.0) * 1000.0 },
+                        compile: gv(r, "compile_ms", 0.0),
+                        size: to_float(gv(r, "size_bytes", 0)) / 1024.0,
+                    }
+                    series = push(series, { label: lang_label(l), values: values })
+                }
+            }
+            groups = push(groups, { name: b, verify: gv(bb, "verify", "") == "VERIFIED-MATCH", series: series })
+        }
+    }
+    { metrics: metrics, groups: groups, baseline: "Rust" }
+}
+
+// ---- metric access over the normalized model -------------------------------
+
+export fn metric_keys(norm) {
+    let mut ks = []
+    for m in gv(norm, "metrics", []) { ks = push(ks, gv(m, "key", "?")) }
+    ks
+}
+
+export fn metric_def(norm, key) {
+    for m in gv(norm, "metrics", []) { if gv(m, "key", "") == key { return m } }
+    { key: key, label: key, unit: "", lower_better: true, dist: false }
+}
+
+// A series' scalar for a metric (a distribution collapses to its mean).
+export fn series_scalar(series, key) {
+    let v = gv(gv(series, "values", {}), key, 0)
+    if typeof(v) == "Record" { gv(v, "mean", 0) } else { v }
+}
+
+export fn series_dist(series, key) = gv(gv(series, "values", {}), key, 0)
+
+// The largest scalar for a metric across all series in all groups (absolute scale).
+export fn max_scalar(norm, key) {
+    let mut mx = 0.0
+    for g in gv(norm, "groups", []) {
+        for s in gv(g, "series", []) {
+            let v = to_float(series_scalar(s, key))
+            if v > mx { mx = v }
+        }
+    }
+    if mx <= 0.0 { 1.0 } else { mx }
+}
+
+// Baseline series' scalar within a group (for ratio mode), or 0 if none.
+export fn baseline_scalar(norm, group, key) {
+    let base = gv(norm, "baseline", "")
+    if base == "" { return 0.0 }
+    for s in gv(group, "series", []) {
+        if gv(s, "label", "") == base { return to_float(series_scalar(s, key)) }
+    }
+    0.0
+}
+
+// The winning series label in a group for a metric (min if lower_better, else max).
+export fn group_winner(norm, group, key) {
+    let lower = gv(metric_def(norm, key), "lower_better", true)
+    let mut best = ""
+    let mut bestv = 0.0
+    for s in gv(group, "series", []) {
+        let v = to_float(series_scalar(s, key))
+        if v > 0.0 and (best == "" or (lower and v < bestv) or (not lower and v > bestv)) {
+            best = gv(s, "label", "")
+            bestv = v
+        }
+    }
+    best
+}
+
+// gc-rust's average ratio vs the baseline across groups (headline; ratio mode).
+export fn gcrust_avg_ratio(norm, key) {
+    if gv(norm, "baseline", "") == "" { return 0.0 }
+    let mut sum = 0.0
+    let mut n = 0
+    for g in gv(norm, "groups", []) {
+        let base = baseline_scalar(norm, g, key)
+        for s in gv(g, "series", []) {
+            if gv(s, "label", "") == "gc-rust" and base > 0.0 {
+                sum = sum + to_float(series_scalar(s, key)) / base
+                n = n + 1
+            }
+        }
+    }
+    if n > 0 { sum / to_float(n) } else { 0.0 }
+}
+
+// ---- formatting ------------------------------------------------------------
+
+export fn fmt_ratio(r) {
+    let h = to_int(round(r * 100.0))
+    let frac = h % 100
+    let fs = if frac < 10 { "0" + str(frac) } else { str(frac) }
+    str(h / 100) + "." + fs + "×"
+}
+
+fn fmt_ms(v) {
+    if v >= 1000.0 { str(round(v / 10.0) / 100.0) + "s" } else { str(round(v * 10.0) / 10.0) + "ms" }
+}
+
+export fn fmt_bytes(n) {
+    let f = to_float(n)
+    if f >= 1048576.0 { str(round(f / 104857.6) / 10.0) + "MB" }
+    else if f >= 1024.0 { str(round(f / 102.4) / 10.0) + "KB" }
+    else { str(to_int(round(f))) + "B" }
+}
+
+fn fmt_kb(v) {
+    if v >= 1024.0 { str(round(v / 102.4) / 10.0) + "MB" } else { str(round(v * 10.0) / 10.0) + "KB" }
+}
+
+fn fmt_count(v) {
+    let f = to_float(v)
+    if f >= 1000000.0 { str(round(f / 100000.0) / 10.0) + "M" }
+    else if f >= 1000.0 { str(round(f / 100.0) / 10.0) + "K" }
+    else { str(to_int(round(f))) }
+}
+
+// Format a scalar per its metric's unit.
+export fn fmt_value(v, unit) {
+    if unit == "ms" { fmt_ms(to_float(v)) }
+    else if unit == "KB" { fmt_kb(to_float(v)) }
+    else if unit == "B" { fmt_bytes(v) }
+    else { fmt_count(v) }
+}
+
+// ---- bus glue --------------------------------------------------------------
+
+export fn metric_topic() = "gcr/bench/metric"

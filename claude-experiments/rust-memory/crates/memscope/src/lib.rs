@@ -20,10 +20,10 @@
 //! snapshot. No nightly, no toolchain changes.
 
 pub use memscope_core::{
-    drain_events, key_id, key_name, meta_context, push_meta, ring_dropped, set_backtrace_depth,
-    set_capture_sites, set_event_streaming, set_frame_pointer_unwinding, set_mode, set_ring_mode,
-    set_sample_rate, snapshot, spawn_consumer, stats, Consumer, EventSink, FanOut, FnSink, LiveRec,
-    LiveSet, MemScope, MetaGuard, Mode, RingMode, Stats,
+    drain_events, key_id, key_name, mark, mark_label, meta_context, push_meta, ring_dropped,
+    set_backtrace_depth, set_capture_sites, set_event_streaming, set_frame_pointer_unwinding,
+    set_mode, set_ring_mode, set_sample_rate, snapshot, spawn_consumer, stats, Consumer, EventSink,
+    FanOut, FnSink, LiveRec, LiveSet, MemScope, MetaGuard, Mode, RingMode, Stats,
 };
 pub use memscope_proto::{
     AllocShape, EventKind, Frame, LiveAlloc, MetaValue, RawEvent, SiteInfo, Snapshot, TypeId,
@@ -69,3 +69,13 @@ pub fn start_agent_at(path: &str) -> std::io::Result<()> {
 /// is dropped. Read it back posthoc with `memscope replay <file>` or your own
 /// viewer. Requires `set_mode(Full)` for a complete trace.
 pub use memscope_agent::record_to_file;
+
+/// Write a JVM **HPROF** heap dump of the current process to `path`, openable in
+/// Eclipse MAT / VisualVM (dominator tree, retained sizes, paths-to-GC-roots).
+///
+/// Recovers types + layout from DWARF, then **`fork()`s** so the heap is walked
+/// against a frozen copy-on-write image — a consistent point-in-time snapshot
+/// without pausing the program (like Redis BGSAVE / `gcore`). Memory is read
+/// *safely* (via Mach `mach_vm_read_overwrite`), so a since-freed address can't
+/// crash the dump. Requires `[profile.*] debug = true` for type recovery.
+pub use memscope_agent::{heap_dump, HprofStats};

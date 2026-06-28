@@ -265,6 +265,50 @@ on 1b's STW + `AllocSite` foundation).
 
 ---
 
-*Prepared by Rust-gc; design APPROVED at Leader review 2026-06-20. No
-implementation started (gated on 1b sign-off). Reuses Target-1b's `pause_world`
-snapshot discipline and `AllocSite` table.*
+*Prepared by Rust-gc; design APPROVED at Leader review 2026-06-20. Reuses
+Target-1b's `pause_world` snapshot discipline and `AllocSite` table.*
+
+---
+
+## 9. Build status (2026-06-27)
+
+P1–P3 are **built and green**; P4 (per-object provenance) remains deferred/opt-in.
+
+- **P1 — snapshot data core + heap-diff: DONE.** `dump_heap_json` carries
+  `version` / `gc_collections` / `snapshot_pause_ns`, real roots via
+  `Heap::visit_roots` (the in-degree-0 proxy is gone), retained-size dominator
+  tree, and `top_retainers`. `gcr heap-diff a.json b.json` reports per-type
+  growth. (`tests/heap_diff.rs`.)
+- **P2 — on-demand trigger: DONE.** In-language `heap_snapshot()` intrinsic
+  (`ai_heap_snapshot`) publishes the requesting thread's frame then snapshots at
+  the safepoint; numbered JSON to `GCR_HEAP_SNAPSHOT_DIR`. (`tests/heap_snapshot.rs`.)
+- **NEW — `gcr heap <file> [--out <path>]`: the widget data source.** Runs a
+  program and emits a single snapshot JSON, **preferring the last mid-execution
+  `heap_snapshot()`** (live stack roots) and **falling back to the program-end
+  dump** for unmodified programs. Implemented via a new `GCR_HEAP_DUMP_FILE` env
+  redirect (the dump goes to a file, never interleaved with program stdout) in
+  both run paths (JIT `codegen.rs`, AOT `runtime.rs`). (`tests/heap_cmd.rs`, 4 tests.)
+- **P3 — interactive widget `widgets/gcr_heap.ft`: BUILT.** A funct widget in the
+  `gcr_xray.ft` proc-bridge mould: a `↻ Run` button drives `gcr heap … --series`,
+  reads the JSON, and renders five tabs — **types** (histogram with a
+  retained-bytes `bar`), **retainers** (top dominator subtrees), **roots** (live
+  GC roots), **objects**, **growth** — beside an **inspector** that shows the
+  selected object's reflected render + bytes/retained, its **→ outgoing refs**
+  (click to walk the graph) and **← retainers** (incoming edges, e.g. a shared
+  object's "retained by (2)"). Symlinked into `~/.terminal-bevy/widgets/`; spawn
+  against the `Rust GC` jim project. `examples/heap_demo.gcr` is the default
+  program (a tree + list + a deliberately shared `Point` so the incoming-ref view
+  is non-trivial).
+- **P3b — G5 growth / leak detection (snapshot series): BUILT.**
+  `gcr heap <file> --series <path>` bundles **every** in-program
+  `heap_snapshot()` (in call order) into one `{ "snapshots": [ … ] }` file (falls
+  back to a 1-element series from the end dump). The widget loads the series, adds
+  a **◀ k/N ▶ scrubber** (scrub the object/retainer/root/inspector views back and
+  forth through time), and a **growth tab** with a per-type retained-bytes unicode
+  sparkline across the series + a **▲ LEAK?** flag on monotonic non-decreasing
+  growers (the classic leak signature). `examples/heap_growth.gcr` is the demo (a
+  list grown one cell per loop iteration, snapshotting each step → a clean
+  monotonic climb). Tested in `tests/heap_cmd.rs`
+  (`heap_cmd_series_bundles_snapshots_in_order`, 5 tests total).
+- **P4 — per-object alloc-site provenance: still deferred** (opt-in
+  `GCR_TRACK_ALLOC_SITE=1`, header-width change; same adversarial review gate).

@@ -128,6 +128,22 @@ pub fn recognize(frames: &[ResolvedFrame]) -> Recognized {
         }
     }
 
+    // `Box<[T]>` — a boxed slice, e.g. the `vec![x]` → `into_vec` path — is really
+    // a `Vec<T>` backing buffer. Unwrap the slice to its element + a Vec shape so
+    // it matches the `.collect()` path instead of surfacing as a boxed `[T]`.
+    if shape == Some(AllocShape::Boxed) {
+        let slice_elem = element_type.as_deref().and_then(|t| {
+            t.strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .filter(|inner| !inner.contains(';')) // a slice `[T]`, not array `[T; N]`
+                .map(str::to_string)
+        });
+        if let Some(inner) = slice_elem {
+            element_type = Some(inner);
+            shape = Some(AllocShape::Vec);
+        }
+    }
+
     Recognized {
         shape,
         element_type,
@@ -180,6 +196,31 @@ mod tests {
         let r = run(&f);
         assert_eq!(r.shape, Some(AllocShape::Vec));
         assert_eq!(r.element_type.as_deref(), Some("u64"));
+    }
+
+    #[test]
+    fn boxed_slice_becomes_vec() {
+        // `vec![x]` allocates `Box<[T]>` via `into_vec`; surface it as `Vec<T>`,
+        // not a boxed slice `[T]` (which also collides with JVM array names).
+        let f = vec![
+            frame("alloc::boxed::Box<T>::new_uninit", Some("[String]")),
+            frame("app::main", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Vec));
+        assert_eq!(r.element_type.as_deref(), Some("String"));
+    }
+
+    #[test]
+    fn boxed_fixed_array_is_left_alone() {
+        // A genuine boxed fixed array `Box<[u8; 4]>` is not a slice — keep it.
+        let f = vec![
+            frame("alloc::boxed::Box<T>::new", Some("[u8; 4]")),
+            frame("app::main", None),
+        ];
+        let r = run(&f);
+        assert_eq!(r.shape, Some(AllocShape::Boxed));
+        assert_eq!(r.element_type.as_deref(), Some("[u8; 4]"));
     }
 
     #[test]

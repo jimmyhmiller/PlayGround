@@ -58,7 +58,7 @@ fn tagged_allocs(events: &[RawEvent]) -> Vec<(u64, BTreeMap<String, String>)> {
                 }
                 out.push((e.size, m));
             }
-            EventKind::Dealloc => {}
+            EventKind::Dealloc | EventKind::Mark => {}
         }
     }
     out

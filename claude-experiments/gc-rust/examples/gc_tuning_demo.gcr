@@ -1,0 +1,17 @@
+// gc_tuning_demo — an allocation-heavy program for the bench toolkit's
+// GC-tuning axis: `gcr bench examples/gc_tuning_demo.gcr --nursery 1,4,16`.
+// Building + discarding many trees stresses the nursery, so the minor-GC count,
+// pause time, and wall-clock change sharply with the nursery size — a benchmark
+// you can extract from ANY gc-rust program with no source changes.
+
+enum Tree { Leaf, Node(Tree, Tree) }
+
+fn make(d: i64) -> Tree { if d == 0 { Tree::Leaf } else { Tree::Node(make(d - 1), make(d - 1)) } }
+fn check(t: Tree) -> i64 { match t { Tree::Leaf => 1, Tree::Node(l, r) => 1 + check(l) + check(r) } }
+
+fn main() -> i64 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < 60 { total = total + check(make(13)); i = i + 1; }
+    total
+}

@@ -126,6 +126,33 @@ struct RawMember {
 /// live allocation, so an in-process reader can dereference directly.
 pub trait MemReader {
     fn read_uint(&self, addr: u64, size: u64) -> Option<u64>;
+
+    /// Read up to `buf.len()` bytes at `addr` into `buf`, returning how many were
+    /// read (a short/zero count means the rest was unreadable). Implementors that
+    /// can read in bulk (and *safely* — without faulting on unmapped memory)
+    /// should override this; the default reassembles via [`MemReader::read_uint`].
+    fn read_into(&self, addr: u64, buf: &mut [u8]) -> usize {
+        let mut n = 0usize;
+        while n + 8 <= buf.len() {
+            match self.read_uint(addr + n as u64, 8) {
+                Some(w) => {
+                    buf[n..n + 8].copy_from_slice(&w.to_le_bytes());
+                    n += 8;
+                }
+                None => return n,
+            }
+        }
+        while n < buf.len() {
+            match self.read_uint(addr + n as u64, 1) {
+                Some(b) => {
+                    buf[n] = b as u8;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        n
+    }
 }
 
 /// A flattened pointer-typed field of a type: a byte offset at which a pointer

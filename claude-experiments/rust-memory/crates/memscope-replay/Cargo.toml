@@ -1,0 +1,10 @@
+[package]
+name = "memscope-replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Reusable reader for memscope recordings: parse a .mscope/.jsonl file into sites, metadata, marks, and events, and reconstruct the live set at any checkpoint (Timeline / LiveState)."
+
+[dependencies]
+memscope-proto = { path = "../memscope-proto" }
+serde_json = { workspace = true }

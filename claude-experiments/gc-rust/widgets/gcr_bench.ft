@@ -1,0 +1,132 @@
+// gcr_bench.ft — the bench toolkit CONTROLLER (+ headline).
+//
+// The composable bench cockpit is a SET of decoupled widgets sharing one module
+// (bench.ft) and one bus topic:
+//   • gcr_bench.ft        — this: metric stepper + refresh, broadcasts selection
+//   • gcr_bench_bars.ft   — grouped bar chart (one graph)
+//   • gcr_bench_table.ft  — exact numbers (just a table)
+//   • gcr_bench_score.ft  — headline scoreboard
+// Each view also works STANDALONE (give it a `file`); when this controller is
+// present it keeps every connected view in sync. The data is ANY metrics doc:
+//   `gcr bench <prog…> --json out`  (run any program, get any benchmark), OR
+//   bench/results.json              (the language-suite comparison).
+//
+// params: { file: "<abs metrics json>", metric_topic }
+import "host"
+import { gv, series_color, load_doc, normalize, metric_keys, metric_def,
+         series_scalar, baseline_scalar, group_winner, gcrust_avg_ratio,
+         fmt_ratio, fmt_value, metric_topic } from "bench"
+import { col_text, col_muted, col_accent, col_err } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn results_path() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/bench/results.json")
+fn topic() = param("metric_topic", metric_topic())
+
+fn init_state() = { norm: {}, loaded: false, status: "loading…", metric: "" }
+let state = atom(init_state())
+
+fn broadcast(reload) { emit_retained(topic(), { metric: (@state).metric, reload: reload }) }
+
+fn reload() {
+    let r = load_doc(results_path())
+    if not r.ok { reset!(state, { ..(@state), loaded: false, status: r.error }); request_render(); return }
+    let norm = normalize(r.raw)
+    let keys = metric_keys(norm)
+    let cur = (@state).metric
+    let metric = if cur != "" and contains(keys, cur) { cur } else if len(keys) > 0 { keys[0] } else { "" }
+    reset!(state, { ..(@state), norm: norm, loaded: true, status: "", metric: metric })
+    request_render()
+}
+
+fn on_start() {
+    let m0 = param("metric", "")
+    if m0 != "" { reset!(state, { ..(@state), metric: m0 }) }
+    reload()
+    broadcast(false)
+}
+
+fn step(delta) {
+    let s = @state
+    let keys = metric_keys(s.norm)
+    if len(keys) == 0 { return }
+    let mut idx = 0
+    let mut i = 0
+    for k in keys { if k == s.metric { idx = i } i = i + 1 }
+    let n = len(keys)
+    let ni = ((idx + delta) % n + n) % n
+    reset!(state, { ..s, metric: keys[ni] })
+    broadcast(false)
+    request_render()
+}
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "refresh" { reload(); broadcast(true); return }
+    if id == "prev" { step(-1); return }
+    if id == "next" { step(1); return }
+}
+
+fn ratio_mode(norm) = gv(norm, "baseline", "") != ""
+
+fn metric_index(s) {
+    let keys = metric_keys(s.norm)
+    let mut idx = 0
+    let mut i = 0
+    for k in keys { if k == s.metric { idx = i } i = i + 1 }
+    { idx: idx, n: len(keys) }
+}
+
+fn headline(s) {
+    let key = s.metric
+    if ratio_mode(s.norm) {
+        let mut le = 0
+        for g in gv(s.norm, "groups", []) {
+            let base = baseline_scalar(s.norm, g, key)
+            let v = to_float(series_scalar_focus(g, key))
+            if base > 0.0 and v / base <= 1.02 { le = le + 1 }
+        }
+        let n = len(gv(s.norm, "groups", []))
+        "gc-rust avg " + fmt_ratio(gcrust_avg_ratio(s.norm, key)) + "  ·  " + str(le) + "/" + str(n) + " ≤ " + gv(s.norm, "baseline", "")
+    } else {
+        let n = len(gv(s.norm, "groups", []))
+        str(n) + " program" + (if n == 1 { "" } else { "s" }) + "  ·  " + gv(metric_def(s.norm, key), "label", key)
+    }
+}
+
+// gc-rust series scalar within a group (falls back to first series).
+fn series_scalar_focus(group, key) {
+    for sx in gv(group, "series", []) { if gv(sx, "label", "") == "gc-rust" { return series_scalar(sx, key) } }
+    let ss = gv(group, "series", [])
+    if len(ss) > 0 { series_scalar(ss[0], key) } else { 0 }
+}
+
+fn render(w, h) {
+    let s = @state
+    let mut kids = []
+    let def = metric_def(s.norm, s.metric)
+    let mi = metric_index(s)
+    kids = push(kids, { kind: "hstack", gap: 10.0, align: "center", children: [
+        { kind: "text", value: "◆ gcr bench", size: 13.0, weight: "bold", color: col_accent() },
+        { kind: "button", id: "refresh", label: "↻ run" },
+    ]})
+
+    if not s.loaded {
+        kids = push(kids, { kind: "text", value: s.status, size: 12.0, color: col_err(), wrap: true })
+        return { kind: "vstack", gap: 8.0, pad: 12.0, style: { height: "100%" }, children: kids }
+    }
+
+    // Metric stepper — scales to any number of metrics the data carries.
+    kids = push(kids, { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "button", id: "prev", label: "◀" },
+        { kind: "text", value: gv(def, "label", s.metric) + "  (" + str(mi.idx + 1) + "/" + str(mi.n) + ")",
+          size: 12.0, weight: "bold", color: col_text(), family: "mono", wrap: false },
+        { kind: "button", id: "next", label: "▶" },
+    ]})
+    kids = push(kids, { kind: "text", value: headline(s), size: 13.0, weight: "bold", color: series_color("gc-rust", 0) })
+    kids = push(kids, { kind: "divider" })
+    kids = push(kids, { kind: "text",
+        value: "Drives the metric for every connected view. Compose with:\n" +
+            "gcr_bench_bars · gcr_bench_table · gcr_bench_score (they sync to this).",
+        size: 11.0, color: col_muted(), wrap: true })
+
+    { kind: "vstack", gap: 8.0, pad: 12.0, style: { height: "100%" }, children: kids }
+}

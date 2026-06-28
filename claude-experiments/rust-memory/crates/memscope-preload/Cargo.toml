@@ -1,0 +1,15 @@
+[package]
+name = "memscope-preload"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Inject memscope into an UNMODIFIED program via DYLD_INSERT_LIBRARIES / LD_PRELOAD: interposes malloc/free, records allocations with type recovery, and writes a JVM HPROF heap dump on SIGUSR1 — no source changes to the target."
+
+[lib]
+name = "memscope_preload"
+crate-type = ["cdylib"]
+
+[dependencies]
+memscope-core = { path = "../memscope-core" }
+memscope-agent = { path = "../memscope-agent" }
+libc = "0.2"

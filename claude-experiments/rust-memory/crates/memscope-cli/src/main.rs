@@ -16,6 +16,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 use memscope_proto::{ClientMsg, HeapGraph, ServerMsg, Snapshot};
+use memscope_replay::{
+    analyze, boundary_frame, clean_frame, frame_location, is_std_frame, read_meta_value,
+    read_recording, site_stats, Finding, FrameMeta, RecEvent, Recording, SiteStats, Timeline,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,6 +38,12 @@ fn main() {
         "perfetto" => cmd_perfetto(rest),
         "flamegraph" => cmd_flamegraph(rest),
         "flamechart" => cmd_flamechart(rest),
+        "marks" => cmd_marks(rest),
+        "diff" => cmd_diff(rest),
+        "analyze" => cmd_analyze(rest),
+        "query" => cmd_query(rest),
+        "run" => cmd_run(rest),
+        "dump-pid" => cmd_dump_pid(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -67,7 +77,17 @@ fn print_help() {
          \x20                       [--group-by KEY] [--filter KEY=VAL]   pivot/filter by meta!() metadata\n  \
          \x20                                            allocation flame graph by call stack (aggregated)\n  \
          memscope flamechart <FILE> [--no-std]          allocation flame CHART (full timeline, every allocation)\n  \
-         \x20                                            (--no-std strips std/core/alloc/runtime frames)\n"
+         \x20                                            (--no-std strips std/core/alloc/runtime frames)\n  \
+         memscope marks   <FILE> [--json]               list checkpoints (memscope::mark) + heap size at each\n  \
+         memscope diff    <FILE> <A> <B> [--json]       diff the live set between two checkpoints (A->B)\n  \
+         \x20                                            A/B are mark labels, or `start`/`end` for the stream ends\n  \
+         memscope analyze <FILE> [--json] [--top N]     ranked memory findings (leaks/churn/realloc/short-lived)\n  \
+         memscope query   <FILE> (--site N | --type T) [--field stack|lifetimes|stats|sites] [--json]\n  \
+         \x20                                            drill into one finding: call stack, lifetime histogram, stats\n  \
+         memscope run     [--out PATH] [--on-exit] [--after DUR] [--at-bytes N] -- <prog> [args...]\n  \
+         \x20                                            run an UNMODIFIED binary under memscope, dump its heap to .hprof\n  \
+         \x20                                            (no DYLD/LD_PRELOAD setup needed; DUR e.g. 2s/500ms, N e.g. 5MB)\n  \
+         memscope dump-pid <PID>                        trigger a heap dump in a process started by `memscope run`\n"
     );
 }
 
@@ -642,14 +662,20 @@ fn replay_binary(file: &str) -> Result<(), String> {
                             }
                             frees += 1;
                         }
-                        // Metadata markers aren't allocations.
-                        memscope_proto::EventKind::MetaEnter | memscope_proto::EventKind::MetaExit => {}
+                        // Metadata / checkpoint markers aren't allocations.
+                        memscope_proto::EventKind::MetaEnter
+                        | memscope_proto::EventKind::MetaExit
+                        | memscope_proto::EventKind::Mark => {}
                     }
                 }
             }
             recfmt::TAG_KEY => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
                 let _ = rd_str(&mut f);
+            }
+            recfmt::TAG_MARK => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let _ = rd_str(&mut f); // label
             }
             recfmt::TAG_META => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
@@ -779,277 +805,6 @@ fn replay_json(file: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A decoded event from a recording (either format).
-struct RecEvent {
-    kind: memscope_proto::EventKind,
-    addr: u64,
-    size: u64,
-    ts_nanos: u64,
-    site: u32,
-    thread: u32,
-}
-
-/// Read one encoded `MetaValue` from a stream, returning its display string
-/// (also used to skip the bytes when the value isn't needed).
-fn read_meta_value(f: &mut impl std::io::Read) -> Option<String> {
-    let mut t = [0u8; 1];
-    f.read_exact(&mut t).ok()?;
-    let mut b8 = [0u8; 8];
-    match t[0] {
-        0 => {
-            let mut l = [0u8; 2];
-            f.read_exact(&mut l).ok()?;
-            let n = u16::from_le_bytes(l) as usize;
-            let mut s = vec![0u8; n];
-            f.read_exact(&mut s).ok()?;
-            Some(String::from_utf8_lossy(&s).into_owned())
-        }
-        1 => {
-            f.read_exact(&mut b8).ok()?;
-            Some(i64::from_le_bytes(b8).to_string())
-        }
-        2 => {
-            f.read_exact(&mut b8).ok()?;
-            Some(u64::from_le_bytes(b8).to_string())
-        }
-        3 => {
-            f.read_exact(&mut b8).ok()?;
-            Some(f64::from_bits(u64::from_le_bytes(b8)).to_string())
-        }
-        4 => {
-            let mut b1 = [0u8; 1];
-            f.read_exact(&mut b1).ok()?;
-            Some((b1[0] != 0).to_string())
-        }
-        _ => None,
-    }
-}
-
-/// One resolved stack frame: function name + source location.
-#[derive(Default, Clone)]
-struct FrameMeta {
-    func: String,
-    file: String,
-    line: u32,
-}
-
-/// Resolved info for one allocation site: its type label and its call stack
-/// (innermost first — as recorded).
-#[derive(Default, Clone)]
-struct SiteInfo {
-    label: String,
-    frames: Vec<FrameMeta>,
-}
-
-/// A parsed recording: per-site info, per-context metadata, and the events.
-#[derive(Default)]
-struct Recording {
-    sites: HashMap<u32, SiteInfo>,
-    /// meta context id -> resolved [(key, value)] pairs.
-    meta: HashMap<u32, Vec<(String, String)>>,
-    events: Vec<RecEvent>,
-}
-
-/// Read a recording (binary `.mscope` or JSON) into sites, metadata, and events.
-fn read_recording(file: &str) -> Result<Recording, String> {
-    use std::io::Read;
-    let mut magic = [0u8; 4];
-    {
-        let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
-        let _ = f.read(&mut magic);
-    }
-    if memscope_proto::recfmt::is_binary(&magic) {
-        read_recording_binary(file)
-    } else {
-        read_recording_json(file)
-    }
-}
-
-fn read_recording_binary(file: &str) -> Result<Recording, String> {
-    use memscope_proto::recfmt;
-    use std::io::Read;
-    let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
-    let mut b1 = [0u8; 1];
-    let mut b2 = [0u8; 2];
-    let mut b4 = [0u8; 4];
-    let rd_str = |f: &mut std::io::BufReader<std::fs::File>| -> Option<String> {
-        let mut l = [0u8; 2];
-        f.read_exact(&mut l).ok()?;
-        let n = u16::from_le_bytes(l) as usize;
-        let mut s = vec![0u8; n];
-        f.read_exact(&mut s).ok()?;
-        Some(String::from_utf8_lossy(&s).into_owned())
-    };
-    if f.read_exact(&mut b4).is_err() || b4 != recfmt::MAGIC {
-        return Err("not a memscope binary recording".into());
-    }
-    let _ = f.read_exact(&mut b2);
-    let _ = f.read_exact(&mut b2);
-    let _ = f.read_exact(&mut b4);
-    let _exe = rd_str(&mut f);
-
-    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
-    let mut events: Vec<RecEvent> = Vec::new();
-    let mut key_names: HashMap<u32, String> = HashMap::new();
-    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
-    while f.read_exact(&mut b1).is_ok() {
-        match b1[0] {
-            recfmt::TAG_KEY => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let id = u32::from_le_bytes(b4);
-                let name = rd_str(&mut f).unwrap_or_default();
-                key_names.insert(id, name);
-            }
-            recfmt::TAG_META => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let id = u32::from_le_bytes(b4);
-                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
-                let mut kvs = Vec::new();
-                for _ in 0..u16::from_le_bytes(b2) {
-                    f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                    let kid = u32::from_le_bytes(b4);
-                    let val = read_meta_value(&mut f).unwrap_or_default();
-                    let key = key_names.get(&kid).cloned().unwrap_or_else(|| kid.to_string());
-                    kvs.push((key, val));
-                }
-                meta.insert(id, kvs);
-            }
-            recfmt::TAG_SITE => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let site = u32::from_le_bytes(b4);
-                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
-                let ty = if b1[0] == 1 { rd_str(&mut f) } else { None };
-                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
-                let shape = recfmt::shape_from_code(b1[0]);
-                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
-                let mut frames = Vec::new();
-                for _ in 0..u16::from_le_bytes(b2) {
-                    let func = rd_str(&mut f).unwrap_or_default();
-                    let file = rd_str(&mut f).unwrap_or_default();
-                    f.read_exact(&mut b4).ok();
-                    let line = u32::from_le_bytes(b4);
-                    let _ = f.read_exact(&mut b1); // inlined
-                    frames.push(FrameMeta { func, file, line });
-                }
-                labels.insert(
-                    site,
-                    SiteInfo {
-                        label: label_for(shape, ty),
-                        frames,
-                    },
-                );
-            }
-            recfmt::TAG_EVENTS => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let count = u32::from_le_bytes(b4);
-                let mut rec = vec![0u8; recfmt::EVENT_BYTES * count as usize];
-                f.read_exact(&mut rec).map_err(|e| e.to_string())?;
-                let mut r = recfmt::Reader::new(&rec);
-                for _ in 0..count {
-                    let Some(e) = r.decode_event() else { break };
-                    events.push(RecEvent {
-                        kind: e.kind,
-                        addr: e.addr,
-                        size: e.size,
-                        ts_nanos: e.ts_nanos,
-                        site: e.site.0,
-                        thread: e.thread,
-                    });
-                }
-            }
-            other => return Err(format!("corrupt recording: unknown tag {other}")),
-        }
-    }
-    Ok(Recording {
-        sites: labels,
-        meta,
-        events,
-    })
-}
-
-fn read_recording_json(file: &str) -> Result<Recording, String> {
-    use std::io::BufRead;
-    let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
-    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
-    let mut events: Vec<RecEvent> = Vec::new();
-    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
-    for line in rdr.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("v").is_some() {
-            continue;
-        }
-        // Metadata context definition: {"meta":id,"kv":{k:v,...}}
-        if let Some(id) = v.get("meta").and_then(|x| x.as_u64()) {
-            if let Some(obj) = v.get("kv").and_then(|x| x.as_object()) {
-                let kvs = obj
-                    .iter()
-                    .map(|(k, val)| {
-                        let vs = match val {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        (k.clone(), vs)
-                    })
-                    .collect();
-                meta.insert(id as u32, kvs);
-            }
-            continue;
-        }
-        if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
-            let ty = v.get("ty").and_then(|x| x.as_str()).map(String::from);
-            let shape = v.get("shape").and_then(|x| x.as_str());
-            let label = match (shape, &ty) {
-                (Some(sh), Some(t)) => format!("{sh}<{t}>"),
-                (Some(sh), None) => format!("{sh}<?>"),
-                (None, Some(t)) => t.clone(),
-                (None, None) => "<no type>".into(),
-            };
-            let frames = v
-                .get("frames")
-                .and_then(|f| f.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|fr| {
-                            let a = fr.as_array()?;
-                            Some(FrameMeta {
-                                func: a.first()?.as_str()?.to_string(),
-                                file: a.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                line: a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            labels.insert(site as u32, SiteInfo { label, frames });
-            continue;
-        }
-        let kind = match v.get("k").and_then(|x| x.as_str()) {
-            Some("A") => memscope_proto::EventKind::Alloc,
-            Some("R") => memscope_proto::EventKind::ReallocGrow,
-            Some("D") => memscope_proto::EventKind::Dealloc,
-            Some("M") => memscope_proto::EventKind::MetaEnter,
-            Some("m") => memscope_proto::EventKind::MetaExit,
-            _ => continue,
-        };
-        events.push(RecEvent {
-            kind,
-            addr: v.get("a").and_then(|x| x.as_u64()).unwrap_or(0),
-            size: v.get("sz").and_then(|x| x.as_u64()).unwrap_or(0),
-            ts_nanos: v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0),
-            site: v.get("s").and_then(|x| x.as_u64()).unwrap_or(u32::MAX as u64) as u32,
-            thread: v.get("t").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        });
-    }
-    Ok(Recording {
-        sites: labels,
-        meta,
-        events,
-    })
-}
 
 /// Parse repeated `--filter KEY=VAL` arguments.
 fn parse_filters(args: &[String]) -> Vec<(String, String)> {
@@ -1131,15 +886,6 @@ fn correlate_meta(
     out
 }
 
-fn label_for(shape: Option<memscope_proto::AllocShape>, ty: Option<String>) -> String {
-    match (shape, ty) {
-        (Some(sh), Some(t)) => format!("{sh:?}<{t}>"),
-        (Some(sh), None) => format!("{sh:?}<?>"),
-        (None, Some(t)) => t,
-        (None, None) => "<no type>".into(),
-    }
-}
-
 /// Convert a recording into a Perfetto / Chrome JSON trace: a live-heap-bytes
 /// counter (overall + per type) over time, plus an async slice per allocation
 /// lifetime (alloc -> free), named by recovered type. Open it at
@@ -1205,7 +951,9 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
                     ));
                 }
             }
-            memscope_proto::EventKind::MetaEnter | memscope_proto::EventKind::MetaExit => {}
+            memscope_proto::EventKind::MetaEnter
+            | memscope_proto::EventKind::MetaExit
+            | memscope_proto::EventKind::Mark => {}
         }
         // One live_bytes counter sample per distinct timestamp (the clock is
         // ms-granular, so this collapses the within-ms burst to one point).
@@ -1240,37 +988,6 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Is this a Rust stdlib / language-runtime frame (std/core/alloc, the lang-start
-/// + panic machinery, `FnOnce`/`Fn` shims, pthread/libc/C entry)? Used by
-/// `--no-std` to collapse the boilerplate and leave only application frames.
-fn is_std_frame(name: &str) -> bool {
-    let n = name.trim_start_matches(['<', '&', ' ']);
-    const PREFIXES: &[&str] = &[
-        "std::", "core::", "alloc::", "proc_macro::", "test::", "backtrace::",
-        // hashbrown / allocator_api2 are std's own HashMap + allocator shim —
-        // separate crates, but pure stdlib plumbing for our purposes.
-        "hashbrown::", "allocator_api2::",
-        "__rust", "_rust", "rustc", "__pthread", "_pthread", "pthread", "__libc",
-        "libc::", "_main", "dyld", "start_",
-    ];
-    if PREFIXES.iter().any(|p| n.starts_with(p)) {
-        return true;
-    }
-    // Trait impls written `<T as std::…>` / `… as core::…` and the runtime shims.
-    name.contains(" as std::")
-        || name.contains(" as core::")
-        || name.contains(" as alloc::")
-        || name.contains("rust_begin_short_backtrace")
-        || name.contains("lang_start")
-        || name.contains("catch_unwind")
-        || name.contains("::panicking::")
-        || name.contains("ops::function::Fn")
-        || name.contains("call_once")
-        || name == "_main"
-        || name == "main"
-        || name == "start"
-        || name == "[unknown]"
-}
 
 /// Build a site's root→leaf path: cleaned frames (recorded innermost-first, so
 /// reversed to put the outermost/app frame at the root), then the recovered type
@@ -1316,44 +1033,6 @@ fn frame_label(func: &str, file: &str, line: u32) -> String {
     }
 }
 
-/// Strip a trailing rustc hash (`::h0123abcd…`) and crate disambiguators from a
-/// frame name for readable flame labels.
-fn clean_frame(f: &str) -> String {
-    let mut s = f;
-    if let Some(idx) = s.rfind("::h") {
-        if s[idx + 3..].len() >= 8 && s[idx + 3..].bytes().all(|b| b.is_ascii_hexdigit()) {
-            s = &s[..idx];
-        }
-    }
-    // Drop crate-hash decorations like `alloc[5fb2…]` -> `alloc`.
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '[' {
-            // skip a `[...]` disambiguator only if it looks like a hash
-            let mut inner = String::new();
-            while let Some(&n) = chars.peek() {
-                if n == ']' {
-                    chars.next();
-                    break;
-                }
-                inner.push(n);
-                chars.next();
-            }
-            if !inner.chars().all(|c| c.is_ascii_hexdigit()) {
-                out.push('[');
-                out.push_str(&inner);
-                out.push(']');
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    if out.is_empty() {
-        return "[unknown]".to_string();
-    }
-    out
-}
 
 /// A node in the allocation flame tree (merged call stacks, weighted by bytes).
 #[derive(Default)]
@@ -1708,6 +1387,727 @@ fn cmd_mode(args: &[String]) -> Result<(), String> {
         mode_name(stats.mode),
         stats.sample_rate
     );
+    Ok(())
+}
+
+// --- marks & diff (snapshot exploration) -------------------------------------
+
+/// A short JSON string escape for the small set of fields we emit.
+fn jesc(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push(' '),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// Locate a site in source as `func (file:line)`: the first *application* frame
+/// (frames are recorded innermost-first, so this is the boundary out of the
+/// std/alloc/runtime plumbing into user code), falling back to the innermost
+/// frame if every frame is runtime. Empty when the site has no resolved frames.
+fn site_loc(rec: &Recording, site: u32) -> String {
+    let Some(info) = rec.sites.get(&site) else { return String::new() };
+    // The application boundary frame, else the innermost frame as a fallback.
+    boundary_frame(&info.frames)
+        .or_else(|| info.frames.first())
+        .map(frame_location)
+        .unwrap_or_default()
+}
+
+/// `memscope marks <FILE> [--json]` — list checkpoints and the heap size at each.
+fn cmd_marks(args: &[String]) -> Result<(), String> {
+    let file = positional(args).ok_or("usage: memscope marks <FILE> [--json]")?;
+    let json = args.iter().any(|a| a == "--json");
+    let rec = read_recording(file)?;
+    let tl = Timeline::new(&rec);
+
+    // For each mark, reconstruct the live set and its top types by bytes.
+    let rows: Vec<(memscope_replay::MarkPoint, u64, Vec<(String, u64)>)> = tl
+        .marks()
+        .iter()
+        .map(|m| {
+            let st = tl.state_at_index(m.index + 1, None);
+            let mut by_type: HashMap<String, u64> = HashMap::new();
+            for a in &st.live {
+                *by_type.entry(rec.site_label(a.site).to_string()).or_default() += a.size;
+            }
+            let mut top: Vec<(String, u64)> = by_type.into_iter().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            top.truncate(3);
+            (m.clone(), st.total_live_bytes, top)
+        })
+        .collect();
+
+    if json {
+        let mut out = String::from("{\"marks\":[");
+        for (i, (m, bytes, top)) in rows.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let top_json: Vec<String> =
+                top.iter().map(|(t, b)| format!("[{},{}]", jesc(t), b)).collect();
+            out.push_str(&format!(
+                "{{\"label\":{},\"ts_ms\":{},\"live_bytes\":{},\"top\":[{}]}}",
+                jesc(&m.label),
+                m.ts_nanos / 1_000_000,
+                bytes,
+                top_json.join(",")
+            ));
+        }
+        out.push_str("]}");
+        println!("{out}");
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("no marks in {file} (call memscope::mark(\"label\") in the program)");
+        return Ok(());
+    }
+    println!("== checkpoints in {file} ==");
+    println!("   {:>10}  {:>12}  label   (top types)", "ts(ms)", "live");
+    println!("   ────────────────────────────────────────────────────────────");
+    for (m, bytes, top) in &rows {
+        let top_s: Vec<String> =
+            top.iter().map(|(t, b)| format!("{} {}", human_bytes(*b), t)).collect();
+        println!(
+            "   {:>10}  {:>12}  {}   [{}]",
+            m.ts_nanos / 1_000_000,
+            human_bytes(*bytes),
+            m.label,
+            top_s.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// One endpoint of a diff: a named live-set state plus where it sits in time.
+struct Endpoint {
+    name: String,
+    ts_nanos: u64,
+    state: memscope_replay::LiveState,
+}
+
+/// Resolve `start` / `end` / a mark label to a reconstructed [`Endpoint`].
+fn resolve_endpoint(tl: &Timeline, rec: &Recording, name: &str) -> Result<Endpoint, String> {
+    match name {
+        "start" => Ok(Endpoint {
+            name: name.into(),
+            ts_nanos: 0,
+            state: tl.state_at_index(0, None),
+        }),
+        "end" => {
+            let ts = rec.events.last().map(|e| e.ts_nanos).unwrap_or(0);
+            Ok(Endpoint { name: name.into(), ts_nanos: ts, state: tl.state_at_end() })
+        }
+        label => {
+            let state = tl
+                .state_at(label)
+                .ok_or_else(|| format!("no checkpoint labeled {label:?} (try `memscope marks <FILE>`)"))?;
+            let ts = state.at.as_ref().map(|m| m.ts_nanos).unwrap_or(0);
+            Ok(Endpoint { name: label.into(), ts_nanos: ts, state })
+        }
+    }
+}
+
+/// Aggregate a live set by site id -> (count, bytes).
+fn agg_by_site(state: &memscope_replay::LiveState) -> HashMap<u32, (u64, u64)> {
+    let mut m: HashMap<u32, (u64, u64)> = HashMap::new();
+    for a in &state.live {
+        let e = m.entry(a.site).or_default();
+        e.0 += 1;
+        e.1 += a.size;
+    }
+    m
+}
+
+/// One per-site delta in a diff.
+struct DiffRow {
+    site: u32,
+    label: String,
+    loc: String,
+    delta_count: i64,
+    delta_bytes: i64,
+    born: u64,
+    freed: u64,
+    b_count: u64,
+}
+
+const DIFF_CAP: usize = 50;
+
+/// `memscope diff <FILE> <A> <B> [--json]` — diff the live set between two
+/// checkpoints (set-diff by site), with born/freed-in-window attribution.
+fn cmd_diff(args: &[String]) -> Result<(), String> {
+    let json = args.iter().any(|a| a == "--json");
+    let pos: Vec<&str> = args.iter().filter(|a| !a.starts_with("--")).map(String::as_str).collect();
+    let (file, a_name, b_name) = match pos.as_slice() {
+        [f, a, b, ..] => (*f, *a, *b),
+        _ => return Err("usage: memscope diff <FILE> <A> <B> [--json]  (A/B = mark label, or start/end)".into()),
+    };
+
+    let rec = read_recording(file)?;
+    let tl = Timeline::new(&rec);
+    let a = resolve_endpoint(&tl, &rec, a_name)?;
+    let b = resolve_endpoint(&tl, &rec, b_name)?;
+    if a.state.upto > b.state.upto {
+        return Err(format!(
+            "{a_name} occurs after {b_name} in the stream; pass them in chronological order"
+        ));
+    }
+
+    // Born/freed per site within the window [a.upto, b.upto).
+    let born_freed = tl.window_born_freed(&a.state, b.state.upto);
+
+    let agg_a = agg_by_site(&a.state);
+    let agg_b = agg_by_site(&b.state);
+    let mut sites: Vec<u32> = agg_a.keys().chain(agg_b.keys()).copied().collect();
+    sites.sort_unstable();
+    sites.dedup();
+
+    let mut grew: Vec<DiffRow> = Vec::new();
+    let mut shrank: Vec<DiffRow> = Vec::new();
+    let mut unchanged = 0u32;
+    for s in sites {
+        let (ac, ab) = agg_a.get(&s).copied().unwrap_or((0, 0));
+        let (bc, bb) = agg_b.get(&s).copied().unwrap_or((0, 0));
+        let dc = bc as i64 - ac as i64;
+        let db = bb as i64 - ab as i64;
+        if dc == 0 && db == 0 {
+            unchanged += 1;
+            continue;
+        }
+        let (born, freed) = born_freed.get(&s).copied().unwrap_or((0, 0));
+        let row = DiffRow {
+            site: s,
+            label: rec.site_label(s).to_string(),
+            loc: site_loc(&rec, s),
+            delta_count: dc,
+            delta_bytes: db,
+            born,
+            freed,
+            b_count: bc,
+        };
+        if db >= 0 {
+            grew.push(row);
+        } else {
+            shrank.push(row);
+        }
+    }
+    grew.sort_by(|x, y| y.delta_bytes.cmp(&x.delta_bytes));
+    shrank.sort_by(|x, y| x.delta_bytes.cmp(&y.delta_bytes));
+    let grew_trunc = grew.len() > DIFF_CAP;
+    let shrank_trunc = shrank.len() > DIFF_CAP;
+    grew.truncate(DIFF_CAP);
+    shrank.truncate(DIFF_CAP);
+
+    let net = b.state.total_live_bytes as i64 - a.state.total_live_bytes as i64;
+    let window_ms = b.ts_nanos.saturating_sub(a.ts_nanos) / 1_000_000;
+
+    if json {
+        print_diff_json(&a, &b, &grew, &shrank, unchanged, net, window_ms, grew_trunc, shrank_trunc);
+    } else {
+        print_diff_text(&a, &b, &grew, &shrank, unchanged, net, window_ms, grew_trunc, shrank_trunc);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_diff_text(
+    a: &Endpoint,
+    b: &Endpoint,
+    grew: &[DiffRow],
+    shrank: &[DiffRow],
+    unchanged: u32,
+    net: i64,
+    window_ms: u64,
+    grew_trunc: bool,
+    shrank_trunc: bool,
+) {
+    let signed = |n: i64| if n >= 0 { format!("+{}", human_bytes(n as u64)) } else { format!("-{}", human_bytes((-n) as u64)) };
+    println!("== diff {} -> {}  ({} ms window) ==", a.name, b.name, window_ms);
+    println!(
+        "   live: {} -> {}   net retained: {}",
+        human_bytes(a.state.total_live_bytes),
+        human_bytes(b.state.total_live_bytes),
+        signed(net)
+    );
+    let print_section = |title: &str, rows: &[DiffRow], trunc: bool| {
+        if rows.is_empty() {
+            return;
+        }
+        println!("\n   {title}");
+        println!("   {:>8}  {:>11}  {:>6} {:>6}  type / site", "Δcount", "Δbytes", "born", "freed");
+        println!("   ───────────────────────────────────────────────────────────────────");
+        for r in rows {
+            let leak = if r.delta_count > 0 && r.freed == 0 { "  ← never freed" } else { "" };
+            let loc = if r.loc.is_empty() { String::new() } else { format!("  @ {}", r.loc) };
+            println!(
+                "   {:>+8}  {:>11}  {:>6} {:>6}  {}{}{}",
+                r.delta_count,
+                signed(r.delta_bytes),
+                r.born,
+                r.freed,
+                r.label,
+                loc,
+                leak
+            );
+        }
+        if trunc {
+            println!("   … (truncated to top {DIFF_CAP})");
+        }
+    };
+    print_section("GREW (live in B, not freed):", grew, grew_trunc);
+    print_section("SHRANK:", shrank, shrank_trunc);
+    println!("\n   {unchanged} type/site groups unchanged");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_diff_json(
+    a: &Endpoint,
+    b: &Endpoint,
+    grew: &[DiffRow],
+    shrank: &[DiffRow],
+    unchanged: u32,
+    net: i64,
+    window_ms: u64,
+    grew_trunc: bool,
+    shrank_trunc: bool,
+) {
+    let row_json = |r: &DiffRow| -> String {
+        format!(
+            "{{\"type\":{},\"site\":{},\"site_id\":{},\"delta_count\":{},\"delta_bytes\":{},\"born_in_window\":{},\"freed_in_window\":{},\"still_live\":{}}}",
+            jesc(&r.label),
+            jesc(&r.loc),
+            r.site,
+            r.delta_count,
+            r.delta_bytes,
+            r.born,
+            r.freed,
+            r.b_count
+        )
+    };
+    let grew_j: Vec<String> = grew.iter().map(row_json).collect();
+    let shrank_j: Vec<String> = shrank.iter().map(row_json).collect();
+    println!(
+        "{{\"v\":1,\
+         \"a\":{{\"label\":{},\"ts_ms\":{},\"live_bytes\":{}}},\
+         \"b\":{{\"label\":{},\"ts_ms\":{},\"live_bytes\":{}}},\
+         \"window_ms\":{},\"net_retained_delta\":{},\
+         \"grew\":[{}],\"shrank\":[{}],\"unchanged_groups\":{},\
+         \"truncated\":{{\"grew\":{},\"shrank\":{}}}}}",
+        jesc(&a.name),
+        a.ts_nanos / 1_000_000,
+        a.state.total_live_bytes,
+        jesc(&b.name),
+        b.ts_nanos / 1_000_000,
+        b.state.total_live_bytes,
+        window_ms,
+        net,
+        grew_j.join(","),
+        shrank_j.join(","),
+        unchanged,
+        grew_trunc,
+        shrank_trunc
+    );
+}
+
+/// `memscope analyze <FILE> [--json] [--top N]` — ranked memory findings.
+fn cmd_analyze(args: &[String]) -> Result<(), String> {
+    let file = positional(args).ok_or("usage: memscope analyze <FILE> [--json] [--top N]")?;
+    let json = args.iter().any(|a| a == "--json");
+    let top: usize = flag(args, "--top").and_then(|s| s.parse().ok()).unwrap_or(20);
+
+    let rec = read_recording(file)?;
+    let findings = analyze(&rec);
+    let total = findings.len();
+    let shown = total.min(top);
+
+    if json {
+        let mut out = String::from("{\"v\":1,\"findings\":[");
+        for (i, f) in findings.iter().take(shown).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&finding_json(f));
+        }
+        out.push_str(&format!(
+            "],\"summary\":{{\"total\":{total},\"shown\":{shown}}},\"truncated\":{}}}",
+            total > shown
+        ));
+        println!("{out}");
+        return Ok(());
+    }
+
+    if findings.is_empty() {
+        println!("no findings in {file} — no leaks, churn, realloc-thrash, or short-lived boxes detected");
+        return Ok(());
+    }
+    println!("== memory findings: {file}  ({total} found, showing {shown}) ==");
+    for (i, f) in findings.iter().take(shown).enumerate() {
+        let loc = &f.location;
+        let ev: Vec<String> = f.evidence.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        println!(
+            "\n[{}] {}  severity {:.2}  confidence {:.2}",
+            i + 1,
+            f.detector.to_uppercase(),
+            f.severity,
+            f.confidence
+        );
+        println!("    {}", f.title);
+        if !loc.is_empty() {
+            println!("    @ {loc}");
+        }
+        println!("    fix: {} — {}", f.fix_class, f.suggestion);
+        println!("    evidence: {}", ev.join(" "));
+    }
+    if total > shown {
+        println!("\n   … {} more (raise --top to see them)", total - shown);
+    }
+    Ok(())
+}
+
+fn finding_json(f: &Finding) -> String {
+    let ev: Vec<String> =
+        f.evidence.iter().map(|(k, v)| format!("{}:{}", jesc(k), jesc(v))).collect();
+    format!(
+        "{{\"detector\":{},\"severity\":{:.4},\"confidence\":{:.2},\"title\":{},\"type\":{},\"site\":{},\"site_loc\":{},\"fix_class\":{},\"suggestion\":{},\"evidence\":{{{}}}}}",
+        jesc(f.detector),
+        f.severity,
+        f.confidence,
+        jesc(&f.title),
+        jesc(&f.ty),
+        f.site,
+        jesc(&f.location),
+        jesc(f.fix_class),
+        jesc(&f.suggestion),
+        ev.join(",")
+    )
+}
+
+// --- run: dump an unmodified binary via injection -----------------------------
+
+/// Locate the preload dylib: `$MEMSCOPE_PRELOAD_LIB`, else a sibling of this
+/// executable (both land in `target/<profile>/`).
+fn preload_lib() -> Result<String, String> {
+    let name = if cfg!(target_os = "macos") {
+        "libmemscope_preload.dylib"
+    } else {
+        "libmemscope_preload.so"
+    };
+    if let Ok(p) = std::env::var("MEMSCOPE_PRELOAD_LIB") {
+        return Ok(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let sib = exe.with_file_name(name);
+        if sib.exists() {
+            return Ok(sib.to_string_lossy().into_owned());
+        }
+    }
+    Err(format!("could not find {name}; set MEMSCOPE_PRELOAD_LIB to its path"))
+}
+
+/// Parse a duration like `2s`, `500ms`, or a bare number of seconds.
+fn parse_dur(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if let Some(ms) = s.strip_suffix("ms") {
+        ms.trim().parse::<u64>().ok().map(std::time::Duration::from_millis)
+    } else if let Some(sec) = s.strip_suffix('s') {
+        sec.trim().parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+    } else {
+        s.parse::<f64>().ok().map(std::time::Duration::from_secs_f64)
+    }
+}
+
+/// `memscope run [--out PATH] [--on-exit] [--after DUR] [--at-bytes N] -- <prog> [args]`.
+fn cmd_run(args: &[String]) -> Result<(), String> {
+    let split = args.iter().position(|a| a == "--");
+    let (opts, cmd): (&[String], &[String]) = match split {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => return Err("usage: memscope run [opts] -- <program> [args...]  (note the `--`)".into()),
+    };
+    if cmd.is_empty() {
+        return Err("no program given after `--`".into());
+    }
+
+    let out = flag(opts, "--out");
+    let on_exit = opts.iter().any(|a| a == "--on-exit");
+    let after = flag(opts, "--after");
+    let at_bytes = flag(opts, "--at-bytes");
+    // Default trigger: dump at exit if nothing else was requested.
+    let default_on_exit = !on_exit && after.is_none() && at_bytes.is_none();
+
+    let lib = preload_lib()?;
+    let env_var = if cfg!(target_os = "macos") { "DYLD_INSERT_LIBRARIES" } else { "LD_PRELOAD" };
+
+    let mut child = std::process::Command::new(&cmd[0]);
+    child.args(&cmd[1..]);
+    child.env(env_var, &lib);
+    if let Some(o) = out {
+        child.env("MEMSCOPE_HPROF_OUT", o);
+    }
+    if on_exit || default_on_exit {
+        child.env("MEMSCOPE_HPROF_ON_EXIT", "1");
+    }
+    if let Some(n) = at_bytes {
+        child.env("MEMSCOPE_HPROF_AT_BYTES", n);
+    }
+
+    eprintln!("[memscope] launching `{}` under memscope ({env_var})", cmd.join(" "));
+    let mut handle = child.spawn().map_err(|e| format!("failed to launch {}: {e}", cmd[0]))?;
+    let pid = handle.id();
+
+    // Timed trigger: signal the child after the delay (it stays running).
+    if let Some(d) = after {
+        let dur = parse_dur(d).ok_or_else(|| format!("bad --after duration {d:?}"))?;
+        std::thread::spawn(move || {
+            std::thread::sleep(dur);
+            eprintln!("[memscope] --after elapsed — signalling pid {pid} for a dump");
+            unsafe {
+                libc::kill(pid as i32, libc::SIGUSR1);
+            }
+        });
+    }
+
+    let status = handle.wait().map_err(|e| e.to_string())?;
+    // Give the dumper thread a moment to finish an exit/threshold dump.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let expected = match out {
+        Some(o) => o.replace("{pid}", &pid.to_string()).replace("{n}", "0"),
+        None => format!("/tmp/memscope-{pid}-0.hprof"),
+    };
+    if std::path::Path::new(&expected).exists() {
+        eprintln!("[memscope] heap dump: {expected}");
+        eprintln!("           analyze it:  memscope analyze {expected}   (or open in MAT / heapster)");
+    } else {
+        eprintln!("[memscope] no dump found at {expected} — was a trigger reached? (--on-exit/--after/--at-bytes)");
+    }
+    std::process::exit(status.code().unwrap_or(0));
+}
+
+/// `memscope dump-pid <PID>` — trigger a dump in a process started by `run`.
+fn cmd_dump_pid(args: &[String]) -> Result<(), String> {
+    let pid: i32 = positional(args)
+        .and_then(|s| s.parse().ok())
+        .ok_or("usage: memscope dump-pid <PID>  (the process must have been started by `memscope run`)")?;
+    let rc = unsafe { libc::kill(pid, libc::SIGUSR1) };
+    if rc != 0 {
+        return Err(format!("could not signal pid {pid} (not running, or not yours)"));
+    }
+    eprintln!("[memscope] requested heap dump from pid {pid} (written by that process to its MEMSCOPE_HPROF_OUT)");
+    Ok(())
+}
+
+// --- query: bounded drill-down into a finding ---------------------------------
+
+/// Lifetime histogram buckets (upper bound in ms, exclusive; last is the tail).
+const LIFETIME_BUCKETS: &[(&str, u64)] = &[
+    ("<1ms", 1),
+    ("1-2ms", 2),
+    ("2-5ms", 5),
+    ("5-10ms", 10),
+    ("10-100ms", 100),
+    ("100ms-1s", 1000),
+    (">=1s", u64::MAX),
+];
+
+/// `memscope query <FILE> (--site N | --type T) [--field F] [--json]`.
+fn cmd_query(args: &[String]) -> Result<(), String> {
+    let file = positional(args).ok_or(
+        "usage: memscope query <FILE> (--site N | --type T) [--field stack|lifetimes|stats|sites] [--json]",
+    )?;
+    let json = args.iter().any(|a| a == "--json");
+    let field = flag(args, "--field").unwrap_or("stats");
+    let site_arg: Option<u32> = flag(args, "--site").and_then(|s| s.parse().ok());
+    let type_arg: Option<&str> = flag(args, "--type");
+    if site_arg.is_none() && type_arg.is_none() {
+        return Err("query needs --site N or --type T".into());
+    }
+
+    let rec = read_recording(file)?;
+    let stats = site_stats(&rec);
+
+    // The matching per-site stats (one for --site, all of a type for --type).
+    let matched: Vec<&SiteStats> = stats
+        .iter()
+        .filter(|s| match (site_arg, type_arg) {
+            (Some(id), _) => s.site == id,
+            (_, Some(ty)) => s.label == ty,
+            _ => false,
+        })
+        .collect();
+    if matched.is_empty() {
+        return Err(match (site_arg, type_arg) {
+            (Some(id), _) => format!("no site {id} in {file}"),
+            (_, Some(ty)) => format!("no allocations of type {ty:?} in {file}"),
+            _ => unreachable!(),
+        });
+    }
+
+    match field {
+        "stack" => query_stack(&rec, &matched, json),
+        "lifetimes" => query_lifetimes(&matched, json),
+        "sites" => query_sites(&rec, &matched, json),
+        "stats" => query_stats(&matched, json),
+        other => Err(format!("unknown --field {other:?} (stack|lifetimes|stats|sites)")),
+    }
+}
+
+/// Combined per-site stats into one aggregate (for `--type`).
+fn aggregate(matched: &[&SiteStats]) -> SiteStats {
+    let mut it = matched.iter();
+    let mut acc = (*it.next().unwrap()).clone();
+    for s in it {
+        acc.alloc_count += s.alloc_count;
+        acc.alloc_bytes += s.alloc_bytes;
+        acc.realloc_count += s.realloc_count;
+        acc.free_count += s.free_count;
+        acc.lifetime_sum_ms += s.lifetime_sum_ms;
+        acc.lifetime_sample.extend_from_slice(&s.lifetime_sample);
+        acc.live_count += s.live_count;
+        acc.live_bytes += s.live_bytes;
+    }
+    acc
+}
+
+fn query_stats(matched: &[&SiteStats], json: bool) -> Result<(), String> {
+    let a = aggregate(matched);
+    let median = a.median_lifetime_ms();
+    if json {
+        println!(
+            "{{\"type\":{},\"sites\":{},\"alloc_count\":{},\"alloc_bytes\":{},\"realloc_count\":{},\"free_count\":{},\"live_count\":{},\"live_bytes\":{},\"median_lifetime_ms\":{}}}",
+            jesc(&a.label),
+            matched.len(),
+            a.alloc_count,
+            a.alloc_bytes,
+            a.realloc_count,
+            a.free_count,
+            a.live_count,
+            a.live_bytes,
+            median.map(|m| m.to_string()).unwrap_or("null".into())
+        );
+        return Ok(());
+    }
+    println!("== {} ({} site(s)) ==", a.label, matched.len());
+    println!("   allocations : {} ({})", a.alloc_count, human_bytes(a.alloc_bytes));
+    println!("   reallocs    : {}", a.realloc_count);
+    println!("   freed       : {}", a.free_count);
+    println!("   live now    : {} ({})", a.live_count, human_bytes(a.live_bytes));
+    if let Some(m) = median {
+        println!("   median life : {m} ms");
+    }
+    Ok(())
+}
+
+fn query_lifetimes(matched: &[&SiteStats], json: bool) -> Result<(), String> {
+    let a = aggregate(matched);
+    if a.lifetime_sample.is_empty() {
+        if json {
+            println!("{{\"type\":{},\"lifetimes\":[],\"note\":\"nothing freed\"}}", jesc(&a.label));
+        } else {
+            println!("{}: nothing from this type was observed to free", a.label);
+        }
+        return Ok(());
+    }
+    let mut counts = vec![0u64; LIFETIME_BUCKETS.len()];
+    for &lt in &a.lifetime_sample {
+        let i = LIFETIME_BUCKETS.iter().position(|(_, hi)| lt < *hi).unwrap_or(LIFETIME_BUCKETS.len() - 1);
+        counts[i] += 1;
+    }
+    let total: u64 = counts.iter().sum();
+    if json {
+        let buckets: Vec<String> = LIFETIME_BUCKETS
+            .iter()
+            .zip(&counts)
+            .map(|((label, _), c)| format!("{{\"bucket\":{},\"count\":{}}}", jesc(label), c))
+            .collect();
+        println!(
+            "{{\"type\":{},\"sample\":{},\"buckets\":[{}]}}",
+            jesc(&a.label),
+            total,
+            buckets.join(",")
+        );
+        return Ok(());
+    }
+    println!("== lifetime histogram: {} ({} freed sampled) ==", a.label, total);
+    let max = counts.iter().copied().max().unwrap_or(1).max(1);
+    for ((label, _), c) in LIFETIME_BUCKETS.iter().zip(&counts) {
+        let bar = "█".repeat((*c as usize * 30 / max as usize).max(if *c > 0 { 1 } else { 0 }));
+        println!("   {label:>9}  {c:>7}  {bar}");
+    }
+    Ok(())
+}
+
+fn query_sites(rec: &Recording, matched: &[&SiteStats], json: bool) -> Result<(), String> {
+    let mut rows: Vec<(&SiteStats, String)> =
+        matched.iter().map(|s| (*s, site_loc(rec, s.site))).collect();
+    rows.sort_by(|a, b| b.0.alloc_bytes.cmp(&a.0.alloc_bytes));
+    if json {
+        let sites: Vec<String> = rows
+            .iter()
+            .map(|(s, loc)| {
+                format!(
+                    "{{\"site\":{},\"loc\":{},\"alloc_count\":{},\"alloc_bytes\":{},\"live_bytes\":{}}}",
+                    s.site, jesc(loc), s.alloc_count, s.alloc_bytes, s.live_bytes
+                )
+            })
+            .collect();
+        println!("{{\"sites\":[{}]}}", sites.join(","));
+        return Ok(());
+    }
+    println!("== {} sites of this type ==", rows.len());
+    for (s, loc) in &rows {
+        println!(
+            "   site {:>6}  {:>10} in {:>7} allocs  @ {}",
+            s.site,
+            human_bytes(s.alloc_bytes),
+            s.alloc_count,
+            loc
+        );
+    }
+    Ok(())
+}
+
+fn query_stack(rec: &Recording, matched: &[&SiteStats], json: bool) -> Result<(), String> {
+    // Use the biggest matching site (most allocations) as the representative.
+    let s = matched.iter().max_by_key(|s| s.alloc_bytes).unwrap();
+    let Some(info) = rec.sites.get(&s.site) else {
+        return Err(format!("no resolved frames for site {}", s.site));
+    };
+    // Frames are innermost-first; show application frames with file:line, and
+    // mark the runtime plumbing rather than hiding it entirely.
+    let frames: Vec<(String, bool)> = info
+        .frames
+        .iter()
+        .map(|f| (frame_location(f), is_std_frame(&clean_frame(&f.func))))
+        .collect();
+    if json {
+        let arr: Vec<String> = frames
+            .iter()
+            .map(|(loc, is_std)| format!("{{\"frame\":{},\"std\":{}}}", jesc(loc), is_std))
+            .collect();
+        println!(
+            "{{\"site\":{},\"type\":{},\"stack\":[{}]}}",
+            s.site,
+            jesc(&s.label),
+            arr.join(",")
+        );
+        return Ok(());
+    }
+    println!("== stack for site {} ({}) ==", s.site, s.label);
+    println!("   (innermost first; · = application frame, std/runtime dimmed)");
+    for (loc, is_std) in &frames {
+        let marker = if *is_std { "  " } else { "· " };
+        println!("   {marker}{loc}");
+    }
     Ok(())
 }
 

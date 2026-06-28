@@ -1,0 +1,145 @@
+{
+  "groups": [
+    {
+      "name": "gc_tuning_demo",
+      "series": [
+        {
+          "label": "nursery 1MB",
+          "values": {
+            "alloc_bytes": 39319200,
+            "alloc_objects": 982980,
+            "binary_kb": 1717.984375,
+            "compile_ms": 417.76416700000004,
+            "gc_major": 0,
+            "gc_minor": 37,
+            "gc_pause_max_ms": 4.7203,
+            "gc_pause_total_ms": 112.27,
+            "peak_heap_bytes": 1048560,
+            "wall_ms": {
+              "max": 331.575459,
+              "mean": 179.78232300000002,
+              "min": 128.908583,
+              "stddev": 101.19581707196163
+            }
+          }
+        },
+        {
+          "label": "nursery 4MB",
+          "values": {
+            "alloc_bytes": 39319200,
+            "alloc_objects": 982980,
+            "binary_kb": 1717.984375,
+            "compile_ms": 417.76416700000004,
+            "gc_major": 0,
+            "gc_minor": 9,
+            "gc_pause_max_ms": 2.1984,
+            "gc_pause_total_ms": 16.1446,
+            "peak_heap_bytes": 4194280,
+            "wall_ms": {
+              "max": 32.759625,
+              "mean": 32.557249999999996,
+              "min": 32.123082999999994,
+              "stddev": 0.2925672555316722
+            }
+          }
+        },
+        {
+          "label": "nursery 16MB",
+          "values": {
+            "alloc_bytes": 39319200,
+            "alloc_objects": 982980,
+            "binary_kb": 1717.984375,
+            "compile_ms": 417.76416700000004,
+            "gc_major": 0,
+            "gc_minor": 2,
+            "gc_pause_max_ms": 1.7129,
+            "gc_pause_total_ms": 3.1637,
+            "peak_heap_bytes": 16777200,
+            "wall_ms": {
+              "max": 20.16525,
+              "mean": 19.914354250000002,
+              "min": 19.735792,
+              "stddev": 0.21188015867210622
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "kind": "programs",
+    "runs": 4,
+    "vary": {
+      "env": "GCR_NURSERY_MB",
+      "values": [
+        "1",
+        "4",
+        "16"
+      ]
+    }
+  },
+  "metrics": [
+    {
+      "dist": true,
+      "key": "wall_ms",
+      "label": "runtime",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "compile_ms",
+      "label": "compile",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "binary_kb",
+      "label": "binary size",
+      "lower_better": true,
+      "unit": "KB"
+    },
+    {
+      "key": "gc_minor",
+      "label": "minor GCs",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "gc_major",
+      "label": "major GCs",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "gc_pause_max_ms",
+      "label": "max GC pause",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "gc_pause_total_ms",
+      "label": "total GC pause",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "alloc_objects",
+      "label": "allocations",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "alloc_bytes",
+      "label": "alloc churn",
+      "lower_better": true,
+      "unit": "B"
+    },
+    {
+      "key": "peak_heap_bytes",
+      "label": "peak heap",
+      "lower_better": true,
+      "unit": "B"
+    }
+  ],
+  "schema": "gcr-bench/1"
+}

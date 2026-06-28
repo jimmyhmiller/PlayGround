@@ -32,6 +32,7 @@ pub struct FileRecorder {
     seen_sites: HashSet<u32>,
     seen_meta: HashSet<u32>,
     seen_keys: HashSet<u32>,
+    seen_marks: HashSet<u32>,
     format: Format,
     scratch: Vec<u8>,
     written: u64,
@@ -75,6 +76,7 @@ impl FileRecorder {
             seen_sites: HashSet::new(),
             seen_meta: HashSet::new(),
             seen_keys: HashSet::new(),
+            seen_marks: HashSet::new(),
             format,
             scratch: Vec::with_capacity(64 * 1024),
             written: 0,
@@ -128,6 +130,17 @@ impl FileRecorder {
         Ok(())
     }
 
+    /// Write the `TAG_MARK` label definition the first time a checkpoint is seen.
+    fn write_mark_def(&mut self, label_id: u32) -> std::io::Result<()> {
+        if !self.seen_marks.insert(label_id) {
+            return Ok(());
+        }
+        let label = mem::mark_label(label_id).unwrap_or_default();
+        self.scratch.clear();
+        recfmt::encode_mark(&mut self.scratch, label_id, &label);
+        self.w.write_all(&self.scratch)
+    }
+
     fn consume_binary(&mut self, events: &[RawEvent]) -> std::io::Result<()> {
         // Emit any new site / metadata definitions first (so events can
         // reference them). For alloc events `site` is a stack site; for
@@ -136,6 +149,9 @@ impl FileRecorder {
             match e.kind {
                 EventKind::MetaEnter => {
                     self.write_meta_def(e.site.0)?;
+                }
+                EventKind::Mark => {
+                    self.write_mark_def(e.site.0)?;
                 }
                 EventKind::Dealloc | EventKind::MetaExit => {}
                 EventKind::Alloc | EventKind::ReallocGrow => {
@@ -235,6 +251,22 @@ impl FileRecorder {
                     writeln!(
                         self.w,
                         "{{\"k\":\"m\",\"ts\":{},\"s\":{},\"t\":{}}}",
+                        e.ts_nanos, e.site.0, e.thread
+                    )?;
+                }
+                EventKind::Mark => {
+                    if self.seen_marks.insert(e.site.0) {
+                        let label = mem::mark_label(e.site.0).unwrap_or_default();
+                        writeln!(
+                            self.w,
+                            "{{\"mark_def\":{},\"label\":{}}}",
+                            e.site.0,
+                            json_str(&label)
+                        )?;
+                    }
+                    writeln!(
+                        self.w,
+                        "{{\"k\":\"MK\",\"ts\":{},\"s\":{},\"t\":{}}}",
                         e.ts_nanos, e.site.0, e.thread
                     )?;
                 }

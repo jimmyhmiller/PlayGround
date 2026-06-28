@@ -177,8 +177,10 @@ dependencies = [
 name = "memscope-agent"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "memscope-core",
  "memscope-graph",
+ "memscope-hprof",
  "memscope-proto",
  "memscope-symbols",
  "serde",
@@ -189,7 +191,9 @@ dependencies = [
 name = "memscope-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "memscope-proto",
+ "memscope-replay",
  "serde",
  "serde_json",
 ]
@@ -211,10 +215,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "memscope-hprof"
+version = "0.1.0"
+dependencies = [
+ "memscope-proto",
+ "memscope-symbols",
+]
+
+[[package]]
+name = "memscope-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "memscope-preload"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memscope-agent",
+ "memscope-core",
+]
+
+[[package]]
 name = "memscope-proto"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "memscope-replay"
+version = "0.1.0"
+dependencies = [
+ "memscope-proto",
+ "serde_json",
 ]
 
 [[package]]

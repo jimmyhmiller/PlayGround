@@ -13,6 +13,28 @@ pub fn unique_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("coil_test_{}_{}_{}", tag, std::process::id(), n))
 }
 
+/// Popup-diagnosis timeline: append `<epoch_ms> | <event>` to a shared log that
+/// the click recorder also writes to. Set COIL_DIAG=1 to enable. Lets us correlate
+/// exactly which compile/link/run step was happening when a "Verifying…" popup
+/// appears. No-op unless COIL_DIAG is set, so normal test runs are unaffected.
+pub fn diag(event: &str) {
+    use std::io::Write;
+    if std::env::var_os("COIL_DIAG").is_none() {
+        return;
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/diag/timeline.log")
+    {
+        let _ = writeln!(f, "{t} | {event}");
+    }
+}
+
 /// Run a compile on a thread with a large stack. The compiler is recursive
 /// descent; a deep program (e.g. the macro-heavy arraylist tests) can exceed the
 /// 2 MiB default *test-thread* stack, while it's fine on the 8 MiB main thread
@@ -30,14 +52,19 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 /// (the low 8 bits of the i64 `main` returns). No JIT anywhere in the pipeline.
 pub fn build_and_run(src: &str) -> i32 {
     let exe = unique_path("exe");
+    let tag = exe.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
     let src = src.to_string();
     let exe2 = exe.clone();
+    diag(&format!("COMPILE+LINK start  {tag}"));
     on_big_stack(move || coil::build_executable(&src, &exe2).expect("build_executable"));
+    diag(&format!("COMPILE+LINK end    {tag}"));
+    diag(&format!("RUN exe start       {tag}"));
     let code = Command::new(&exe)
         .status()
         .expect("run executable")
         .code()
         .expect("exit code");
+    diag(&format!("RUN exe end         {tag}  (exit {code})"));
     let _ = std::fs::remove_file(&exe);
     code
 }
@@ -153,10 +180,15 @@ pub fn build_link_run(src: &str, c_path: &str, arch: CrossArch) -> i32 {
 /// Build, run with command-line `args`, capture (exit code, stdout).
 pub fn build_and_capture_args(src: &str, args: &[&str]) -> (i32, String) {
     let exe = unique_path("exe");
+    let tag = exe.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
     let src = src.to_string();
     let exe2 = exe.clone();
+    diag(&format!("COMPILE+LINK start  {tag}"));
     on_big_stack(move || coil::build_executable(&src, &exe2).expect("build_executable"));
+    diag(&format!("COMPILE+LINK end    {tag}"));
+    diag(&format!("RUN exe start       {tag}"));
     let out = Command::new(&exe).args(args).output().expect("run executable");
+    diag(&format!("RUN exe end         {tag}"));
     let _ = std::fs::remove_file(&exe);
     (
         out.status.code().expect("exit code"),

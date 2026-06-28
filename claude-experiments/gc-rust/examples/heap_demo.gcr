@@ -1,0 +1,54 @@
+// heap_demo — a small, interesting heap for the heap-explorer widget
+// (`gcr_heap.ft`). Builds a binary tree of labelled nodes plus a linked list
+// that shares some of the tree's leaf points, so the snapshot has a mix of
+// types, real retainer chains, and a shared object with two incoming refs.
+
+struct Point { x: i64, y: i64 }
+
+enum Tree { Leaf(Point), Branch(Tree, Tree) }
+enum List { Nil, Cons(Point, List) }
+
+fn leaf(n: i64) -> Tree { Tree::Leaf(Point { x: n, y: n * n }) }
+
+// A complete tree of the given depth (depth 0 = a single leaf).
+fn tree(depth: i64, n: i64) -> Tree {
+    if depth == 0 {
+        leaf(n)
+    } else {
+        Tree::Branch(tree(depth - 1, n * 2), tree(depth - 1, n * 2 + 1))
+    }
+}
+
+fn count(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf(p) => p.x,
+        Tree::Branch(l, r) => count(l) + count(r),
+    }
+}
+
+fn list(n: i64, acc: List) -> List {
+    if n == 0 { acc }
+    else { list(n - 1, List::Cons(Point { x: n, y: -n }, acc)) }
+}
+
+fn list_sum(l: List) -> i64 {
+    match l {
+        List::Nil => 0,
+        List::Cons(p, rest) => p.x + list_sum(rest),
+    }
+}
+
+fn main() -> i64 {
+    let t = tree(4, 1);       // 16 leaves + 15 branches, each with Points
+    let xs = list(8, List::Nil);
+    // A single Point referenced by TWO list cells — in the explorer this object
+    // shows "retained by (2)", demonstrating the incoming-ref / shared-node view.
+    let shared = Point { x: 99, y: 99 };
+    let pair = List::Cons(shared, List::Cons(shared, List::Nil));
+    let result = count(t) + list_sum(xs) + list_sum(pair);
+    // Snapshot here, while the locals are still in scope — so the heap explorer
+    // sees them as live GC roots with their full retainer chains (a program-end
+    // dump would show these as unreachable, since `main` has returned).
+    heap_snapshot();
+    result
+}

@@ -3958,10 +3958,20 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
     // Opt-in heap dump once the program returns (heap quiescent).
     // `GCR_HEAP_DUMP=json` emits a structured snapshot; other values emit text.
     if let Some(mode) = std::env::var_os("GCR_HEAP_DUMP") {
-        if mode == "json" {
-            eprint!("{}", unsafe { crate::gc::dump_heap_json(rt.heap()) });
+        let dump = if mode == "json" {
+            unsafe { crate::gc::dump_heap_json(rt.heap()) }
         } else {
-            eprint!("{}", unsafe { crate::gc::dump_heap_text(rt.heap()) });
+            unsafe { crate::gc::dump_heap_text(rt.heap()) }
+        };
+        // `GCR_HEAP_DUMP_FILE` redirects the dump to a file instead of stderr, so
+        // it is never interleaved with the program's own output — the clean data
+        // source for `gcr heap` and the heap-explorer widget.
+        if let Some(path) = std::env::var_os("GCR_HEAP_DUMP_FILE") {
+            if let Err(e) = std::fs::write(&path, &dump) {
+                eprintln!("gc-rust: cannot write heap dump to {:?}: {e}", path);
+            }
+        } else {
+            eprint!("{dump}");
         }
     }
     // Opt-in GC stats (set GCR_GC_STATS=1) — useful to confirm the generational
@@ -3983,6 +3993,11 @@ pub fn jit_run_i64_mode(prog: &CoreProgram, mode: GcRunMode) -> Result<i64, Code
     // per-site count+bytes table at program end (heap quiescent).
     if std::env::var_os("GCR_ALLOC_PROFILE").is_some() {
         eprint!("{}", rt.heap().alloc_site_profile_report());
+    }
+    // `gcr bench` metrics sink: GCR_METRICS_FILE=<path> writes the machine-readable
+    // per-run metrics (GC cycles/pauses, allocation churn, peak heap) as JSON.
+    if let Some(path) = std::env::var_os("GCR_METRICS_FILE") {
+        let _ = std::fs::write(&path, rt.heap().metrics_json());
     }
     Ok(result)
 }

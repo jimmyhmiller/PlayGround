@@ -18,7 +18,7 @@ use gcrust::resolve::resolve_module;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: gcr <new|check|parse|run|build|emit> [file.gcr | project-dir]");
+        eprintln!("usage: gcr <new|check|parse|run|build|emit|eval|heap|heap-diff> [file.gcr | project-dir]");
         return ExitCode::FAILURE;
     }
     let cmd = &args[1];
@@ -42,6 +42,19 @@ fn main() -> ExitCode {
     // not a `.gcr` source — dispatch it before the source-file path resolution.
     if cmd == "heap-diff" {
         return run_heap_diff(&args);
+    }
+    // `heap` runs a program and emits its program-end heap snapshot as JSON — the
+    // data source for `gcr_heap.ft` (the heap-explorer widget). Own dispatch so
+    // it can redirect the dump cleanly to `--out` (the widget reads that file).
+    if cmd == "heap" {
+        return run_heap(&args);
+    }
+    // `bench` runs ANY gc-rust program(s) and emits a general metrics schema
+    // (runtime + compile + size + GC cycles/pauses + allocation churn + peak
+    // heap) — the data source for the composable bench toolkit. Own dispatch:
+    // it builds + runs each program itself.
+    if cmd == "bench" {
+        return run_bench(&args);
     }
 
     // Resolve the entry file and (when in a project) its manifest. The first
@@ -580,6 +593,389 @@ fn resolve_entry(arg: &str) -> Result<String, String> {
 /// buffer is (or ends in) a bare expression with no `main`, a `main` is
 /// synthesized around it. A compile error is a *result* (reported in the JSON),
 /// not a process failure, so this exits SUCCESS unless the file is unreadable.
+/// `gcr bench <prog.gcr> [more.gcr …] [--runs N] [--json <out>]` — the GENERAL
+/// benchmark runner. Builds + runs each gc-rust program and emits one metrics
+/// document in the `gcr-bench/1` schema: every program is a `group` carrying a
+/// `gc-rust` series whose `values` hold runtime (mean/stddev/min/max over N
+/// runs), compile time, binary size, and the runtime-only numbers no native
+/// binary exposes — GC cycles + pause distribution, allocation churn, peak heap.
+/// This is "run any program, get any benchmark": the composable bench views
+/// (gcr_bench_*) render whatever metrics this produces.
+fn run_bench(args: &[String]) -> ExitCode {
+    use serde_json::{json, Value};
+    // Collect program paths, skipping flags AND their values (`--runs N`,
+    // `--json <path>`) so a flag's argument isn't mistaken for a program.
+    let mut progs: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--runs" || a == "--json" || a == "--vary" || a == "--nursery" {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        progs.push(a.clone());
+        i += 1;
+    }
+    if progs.is_empty() {
+        eprintln!("usage: gcr bench <prog.gcr> [more.gcr …] [--runs N] [--json <out>] \
+                   [--vary ENV=v1,v2,…] [--nursery m1,m2,…]");
+        return ExitCode::FAILURE;
+    }
+    // `--vary ENV=v1,v2,…` runs each program once PER value (a series per value),
+    // with that env var set — so general mode gets grouped bars over a tuning
+    // axis. `--nursery m1,m2,…` is sugar for `--vary GCR_NURSERY_MB=…` with nicer
+    // labels (the gc-rust GC nursery size, a knob no native binary exposes).
+    let vary: Option<(String, Vec<String>)> = parse_vary(args);
+    let runs: usize = args
+        .iter()
+        .position(|a| a == "--runs")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(8)
+        .max(1);
+    let json_out = args.iter().position(|a| a == "--json").and_then(|i| args.get(i + 1)).cloned();
+
+    let self_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gcr bench: cannot find own executable: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let tmp = std::env::temp_dir().join(format!("gcr_bench_run_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    if let Err(e) = std::fs::create_dir_all(&tmp) {
+        eprintln!("gcr bench: cannot create work dir: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // The metric catalog — what each value means, so the views are schema-driven
+    // (units + lower_better drive formatting, winners, and colors).
+    let metrics = json!([
+        {"key": "wall_ms", "label": "runtime", "unit": "ms", "lower_better": true, "dist": true},
+        {"key": "compile_ms", "label": "compile", "unit": "ms", "lower_better": true},
+        {"key": "binary_kb", "label": "binary size", "unit": "KB", "lower_better": true},
+        {"key": "gc_minor", "label": "minor GCs", "unit": "", "lower_better": true},
+        {"key": "gc_major", "label": "major GCs", "unit": "", "lower_better": true},
+        {"key": "gc_pause_max_ms", "label": "max GC pause", "unit": "ms", "lower_better": true},
+        {"key": "gc_pause_total_ms", "label": "total GC pause", "unit": "ms", "lower_better": true},
+        {"key": "alloc_objects", "label": "allocations", "unit": "", "lower_better": true},
+        {"key": "alloc_bytes", "label": "alloc churn", "unit": "B", "lower_better": true},
+        {"key": "peak_heap_bytes", "label": "peak heap", "unit": "B", "lower_better": true}
+    ]);
+
+    let mut groups: Vec<Value> = Vec::new();
+    for prog in &progs {
+        let path = match resolve_entry(prog) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("gcr bench: {e}");
+                continue;
+            }
+        };
+        let name = std::path::Path::new(&path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| prog.clone());
+        let bin = tmp.join(&name);
+
+        // Compile (timed). Shells our own `gcr build -o`, so the link config and
+        // staticlib refresh are handled exactly as a normal build.
+        let t0 = std::time::Instant::now();
+        let build = std::process::Command::new(&self_exe)
+            .args(["build", &path, "-o", &bin.to_string_lossy()])
+            .output();
+        let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let built_ok = matches!(&build, Ok(o) if o.status.success());
+        if !built_ok {
+            let err = build.map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default();
+            eprintln!("gcr bench: {name}: build failed: {}", err.trim());
+            groups.push(json!({"name": name, "error": "build failed",
+                "series": [{"label": "gc-rust", "values": {}}]}));
+            continue;
+        }
+        let binary_kb = std::fs::metadata(&bin).map(|m| m.len() as f64 / 1024.0).unwrap_or(0.0);
+
+        // One series per variant value (or a single "gc-rust" series with no
+        // `--vary`). Compile/size are program-level, so they're measured once and
+        // repeated across variants.
+        let variant_vals: Vec<Option<String>> = match &vary {
+            Some((_, vals)) => vals.iter().map(|v| Some(v.clone())).collect(),
+            None => vec![None],
+        };
+        let env_name = vary.as_ref().map(|(n, _)| n.clone());
+        let mut series: Vec<Value> = Vec::new();
+        for variant in &variant_vals {
+            // Wall-clock runs (output suppressed so I/O doesn't skew timing).
+            let mut times_ms: Vec<f64> = Vec::with_capacity(runs);
+            for _ in 0..runs {
+                let mut cmd = std::process::Command::new(&bin);
+                if let (Some(n), Some(v)) = (&env_name, variant) {
+                    cmd.env(n, v);
+                }
+                let t = std::time::Instant::now();
+                if cmd.output().is_err() {
+                    break;
+                }
+                times_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let (mean, stddev, mn, mx) = wall_stats(&times_ms);
+
+            // One extra run to capture the runtime-only metrics (GC/alloc/heap).
+            let mfile = tmp.join(format!("{name}.metrics.json"));
+            let mut mcmd = std::process::Command::new(&bin);
+            mcmd.env("GCR_METRICS_FILE", &mfile);
+            if let (Some(n), Some(v)) = (&env_name, variant) {
+                mcmd.env(n, v);
+            }
+            let _ = mcmd.output();
+            let m: Value = std::fs::read_to_string(&mfile)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| json!({}));
+            let mv = |k: &str| m.get(k).cloned().unwrap_or(json!(0));
+
+            let values = json!({
+                "wall_ms": {"mean": mean, "stddev": stddev, "min": mn, "max": mx},
+                "compile_ms": compile_ms,
+                "binary_kb": binary_kb,
+                "gc_minor": mv("gc_minor"),
+                "gc_major": mv("gc_major"),
+                "gc_pause_max_ms": mv("gc_pause_max_ms"),
+                "gc_pause_total_ms": mv("gc_pause_total_ms"),
+                "alloc_objects": mv("alloc_objects"),
+                "alloc_bytes": mv("alloc_bytes"),
+                "peak_heap_bytes": mv("peak_heap_bytes")
+            });
+            let label = variant_label(&env_name, variant);
+            series.push(json!({"label": label, "values": values}));
+        }
+        groups.push(json!({"name": name, "series": series}));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let mut meta = json!({"kind": "programs", "runs": runs});
+    if let Some((n, vals)) = &vary {
+        meta["vary"] = json!({"env": n, "values": vals});
+    }
+    let doc = json!({
+        "schema": "gcr-bench/1",
+        "meta": meta,
+        "metrics": metrics,
+        "groups": groups
+    });
+    let text = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into());
+    match json_out {
+        Some(o) => {
+            if let Err(e) = std::fs::write(&o, &text) {
+                eprintln!("gcr bench: cannot write {o}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("{o}");
+        }
+        None => println!("{text}"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Parse the bench variant axis: `--vary ENV=v1,v2,…` → (ENV, [v1,v2,…]), or
+/// `--nursery m1,m2,…` as sugar for `--vary GCR_NURSERY_MB=…`. `None` if neither
+/// is given (a single un-varied run).
+fn parse_vary(args: &[String]) -> Option<(String, Vec<String>)> {
+    if let Some(spec) = args.iter().position(|a| a == "--vary").and_then(|i| args.get(i + 1)) {
+        if let Some((env, csv)) = spec.split_once('=') {
+            let vals: Vec<String> = csv.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            if !vals.is_empty() {
+                return Some((env.to_string(), vals));
+            }
+        }
+    }
+    if let Some(csv) = args.iter().position(|a| a == "--nursery").and_then(|i| args.get(i + 1)) {
+        let vals: Vec<String> = csv.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        if !vals.is_empty() {
+            return Some(("GCR_NURSERY_MB".to_string(), vals));
+        }
+    }
+    None
+}
+
+/// A series label for a variant value (or "gc-rust" for an un-varied run).
+fn variant_label(env: &Option<String>, value: &Option<String>) -> String {
+    match (env, value) {
+        (Some(n), Some(v)) if n == "GCR_NURSERY_MB" => format!("nursery {v}MB"),
+        (Some(n), Some(v)) => format!("{n}={v}"),
+        _ => "gc-rust".to_string(),
+    }
+}
+
+/// (mean, sample-stddev, min, max) of a slice of millisecond timings.
+fn wall_stats(xs: &[f64]) -> (f64, f64, f64, f64) {
+    if xs.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = if xs.len() > 1 {
+        xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1.0)
+    } else {
+        0.0
+    };
+    let mn = xs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let mx = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    (mean, var.sqrt(), mn, mx)
+}
+
+/// `gcr heap <file.gcr> [--out <path>] [--gc-stress]` — run a program and emit
+/// its program-end heap snapshot as JSON (the same schema as `GCR_HEAP_DUMP=json`
+/// and `gcr heap-diff`). With `--out`, the JSON is written there (clean, never
+/// interleaved with program output) and the path is echoed on stdout; this is the
+/// contract the heap-explorer widget (`gcr_heap.ft`) drives. Without `--out`, the
+/// JSON is printed to stdout after the program's own output.
+fn run_heap(args: &[String]) -> ExitCode {
+    let arg_path = match args.iter().skip(2).find(|a| !a.starts_with('-')) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("usage: gcr heap <file.gcr> [--out <path>] [--gc-stress]");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = match resolve_entry(&arg_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gcr: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gcr: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stress = args.iter().any(|a| a == "--gc-stress");
+    let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1)).cloned();
+    // `--series <path>` bundles EVERY in-program `heap_snapshot()` into one JSON
+    // `{ "snapshots": [ <snap>, … ] }` (in call order) — the data for the
+    // explorer's growth/leak tab + snapshot scrubber. Falls back to a 1-element
+    // series from the program-end dump for programs that never snapshot.
+    let series = args.iter().position(|a| a == "--series").and_then(|i| args.get(i + 1)).cloned();
+
+    // We capture TWO kinds of snapshot and prefer the richer one:
+    //  1. In-program `heap_snapshot()` calls land (numbered) in a temp dir via
+    //     GCR_HEAP_SNAPSHOT_DIR — these are MID-EXECUTION, so they carry live
+    //     stack roots + real retainer chains (the whole point of a heap explorer).
+    //  2. The program-end dump (GCR_HEAP_DUMP_FILE) — a fallback for programs that
+    //     never call `heap_snapshot()`; at end, roots = globals only.
+    // The widget gets the last in-program snapshot if any, else the end dump.
+    let unique = std::process::id();
+    let snap_dir = std::env::temp_dir().join(format!("gcr_heap_snaps_{unique}"));
+    let _ = std::fs::remove_dir_all(&snap_dir);
+    if let Err(e) = std::fs::create_dir_all(&snap_dir) {
+        eprintln!("gcr heap: cannot create snapshot dir {}: {e}", snap_dir.display());
+        return ExitCode::FAILURE;
+    }
+    let end_dump = std::env::temp_dir().join(format!("gcr_heap_end_{unique}.json"));
+    // The dumps fire inside the JIT run, keyed on these env vars (see codegen.rs /
+    // runtime.rs). Safe: single-threaded here — set before any thread is spawned.
+    unsafe {
+        std::env::set_var("GCR_HEAP_SNAPSHOT_DIR", &snap_dir);
+        std::env::set_var("GCR_HEAP_DUMP", "json");
+        std::env::set_var("GCR_HEAP_DUMP_FILE", &end_dump);
+    }
+    let run = compile_and_run(&src, stress);
+    if let Err((stage, msg)) = run {
+        eprintln!("gcr heap: {stage}: {msg}");
+        let _ = std::fs::remove_dir_all(&snap_dir);
+        return ExitCode::FAILURE;
+    }
+    // `--series` mode: bundle every in-program snapshot (in call order) into one
+    // `{ "snapshots": [ … ] }` file, falling back to the end dump if none.
+    if let Some(series_path) = series {
+        let mut files = all_snapshots(&snap_dir);
+        if files.is_empty() {
+            files.push(end_dump.clone());
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(files.len());
+        for f in &files {
+            match std::fs::read_to_string(f) {
+                Ok(j) => parts.push(j.trim().to_string()),
+                Err(e) => {
+                    eprintln!("gcr heap: cannot read snapshot {}: {e}", f.display());
+                    let _ = std::fs::remove_dir_all(&snap_dir);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        // Each part is itself a complete JSON object, so joining with commas
+        // inside an array yields valid JSON without re-serialization.
+        let bundle = format!("{{\"snapshots\":[{}]}}", parts.join(","));
+        let _ = std::fs::remove_dir_all(&snap_dir);
+        let _ = std::fs::remove_file(&end_dump);
+        if let Err(e) = std::fs::write(&series_path, &bundle) {
+            eprintln!("gcr heap: cannot write {series_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("{series_path}");
+        return ExitCode::SUCCESS;
+    }
+
+    // Single-snapshot mode: highest-numbered in-program snapshot, else the
+    // program-end dump.
+    let chosen = latest_snapshot(&snap_dir).unwrap_or(end_dump.clone());
+    let json = match std::fs::read_to_string(&chosen) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("gcr heap: no snapshot produced ({}: {e})", chosen.display());
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            return ExitCode::FAILURE;
+        }
+    };
+    let _ = std::fs::remove_dir_all(&snap_dir);
+    let _ = std::fs::remove_file(&end_dump);
+    match out {
+        // `--out` given (the widget's path): write the JSON there, echo the path.
+        Some(o) => {
+            if let Err(e) = std::fs::write(&o, &json) {
+                eprintln!("gcr heap: cannot write {o}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("{o}");
+        }
+        // No `--out`: surface the JSON on stdout for scripting.
+        None => print!("{json}"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every `snapshot-NNNN.json` in `dir`, sorted by sequence (call order). Names
+/// are zero-padded, so lexical order == numeric order.
+fn all_snapshots(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut snaps: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+                if name.starts_with("snapshot-") && name.ends_with(".json") {
+                    snaps.push((name, path));
+                }
+            }
+        }
+    }
+    snaps.sort_by(|a, b| a.0.cmp(&b.0));
+    snaps.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The highest-numbered `snapshot-NNNN.json` in `dir` (the last in-program
+/// `heap_snapshot()` taken), or `None` if the program took no snapshots.
+fn latest_snapshot(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    all_snapshots(dir).into_iter().next_back()
+}
+
 fn run_eval(args: &[String]) -> ExitCode {
     let arg_path = match args.get(2) {
         Some(p) => p.clone(),

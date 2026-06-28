@@ -1180,6 +1180,66 @@ impl Heap {
         out
     }
 
+    /// Machine-readable per-run metrics for `gcr bench` (written when
+    /// `GCR_METRICS_FILE` is set). A flat JSON object of scalar metrics
+    /// aggregated from the GC log + allocation-site table — the rich,
+    /// runtime-only numbers (GC cycles, pause distribution, allocation churn,
+    /// peak heap) that you cannot get out of a native Rust/Go binary. Serde-free,
+    /// to keep the minimal runtime LLVM/serde-free.
+    pub fn metrics_json(&self) -> String {
+        let events = self.gc_events();
+        let (mut minor, mut major) = (0u64, 0u64);
+        let (mut pause_total, mut pause_max) = (0u64, 0u64);
+        let (mut reclaimed, mut promoted, mut peak) = (0u64, 0u64, 0u64);
+        let mut pauses: Vec<u64> = Vec::with_capacity(events.len());
+        for e in events.iter() {
+            match e.kind {
+                GcKind::Minor => minor += 1,
+                GcKind::Major | GcKind::Concurrent => major += 1,
+            }
+            pause_total += e.pause_ns;
+            pause_max = pause_max.max(e.pause_ns);
+            reclaimed += e
+                .before_bytes
+                .saturating_sub(e.after_bytes)
+                .saturating_sub(e.promoted_bytes);
+            promoted += e.promoted_bytes;
+            peak = peak.max(e.before_bytes); // high-water at collection time
+            pauses.push(e.pause_ns);
+        }
+        pauses.sort_unstable();
+        let pct = |q: f64| -> u64 {
+            if pauses.is_empty() {
+                0
+            } else {
+                pauses[((pauses.len() as f64 * q) as usize).min(pauses.len() - 1)]
+            }
+        };
+        let ms = |ns: u64| ns as f64 / 1.0e6;
+        let (mut alloc_objects, mut alloc_bytes) = (0u64, 0u64);
+        for s in self.alloc_site_profile() {
+            alloc_objects += s.count;
+            alloc_bytes += s.bytes;
+        }
+        format!(
+            "{{\"gc_minor\":{},\"gc_major\":{},\"gc_pause_total_ms\":{:.4},\
+             \"gc_pause_max_ms\":{:.4},\"gc_pause_p50_ms\":{:.4},\"gc_pause_p99_ms\":{:.4},\
+             \"gc_reclaimed_bytes\":{},\"gc_promoted_bytes\":{},\"peak_heap_bytes\":{},\
+             \"alloc_objects\":{},\"alloc_bytes\":{}}}",
+            minor,
+            major,
+            ms(pause_total),
+            ms(pause_max),
+            ms(pct(0.50)),
+            ms(pct(0.99)),
+            reclaimed,
+            promoted,
+            peak,
+            alloc_objects,
+            alloc_bytes,
+        )
+    }
+
     /// Run a stop-the-world collection.
     ///
     /// This is designed to be called by one thread (the triggering thread)

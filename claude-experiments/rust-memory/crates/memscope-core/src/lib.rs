@@ -200,6 +200,44 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for MemScope<A> {
     }
 }
 
+// --- external interposer recording API ---------------------------------------
+//
+// For a malloc shim (LD_PRELOAD / DYLD_INSERT_LIBRARIES) that observes the
+// process's allocations from *outside* the `GlobalAlloc` — same recording the
+// `MemScope` allocator does, but callable without owning allocation. Each is
+// reentrancy-guarded (the recorder's own allocations must not recurse) and
+// captures the call stack internally, so a shim just forwards address + size.
+
+/// Record an observed allocation at `addr` of `size` bytes (alignment best-effort).
+#[inline]
+pub fn note_alloc(addr: u64, size: u64, align: u32) {
+    let scope = HookScope::enter();
+    if !scope.was_active() {
+        recorder().on_alloc(addr, size, align, capture, EventKind::Alloc);
+    }
+}
+
+/// Record an observed free of the block at `addr` (its `size`, e.g. from
+/// `malloc_size`, keeps the live-bytes accounting exact).
+#[inline]
+pub fn note_free(addr: u64, size: u64, align: u32) {
+    let scope = HookScope::enter();
+    if !scope.was_active() {
+        recorder().on_dealloc(addr, size, align);
+    }
+}
+
+/// Record an observed reallocation (frees `old`, allocates `new`).
+#[inline]
+pub fn note_realloc(old: u64, old_size: u64, new: u64, new_size: u64, align: u32) {
+    let scope = HookScope::enter();
+    if !scope.was_active() {
+        let r = recorder();
+        r.on_dealloc(old, old_size, align);
+        r.on_alloc(new, new_size, align, capture, EventKind::ReallocGrow);
+    }
+}
+
 // --- public control + query API (all guarded: they allocate) -----------------
 
 /// Switch recording mode at runtime.
@@ -290,6 +328,27 @@ pub fn key_name(id: u32) -> Option<String> {
 pub fn meta_context(id: u32) -> Option<Vec<(u32, MetaValue)>> {
     let _g = HookScope::enter();
     recorder().meta_context(id)
+}
+
+/// Drop a named checkpoint into the event stream. The live set *at this instant*
+/// can later be reconstructed (and two checkpoints diffed) from a recording — see
+/// `memscope diff`. A no-op while recording is off; cost is one ring push (≈ a
+/// `meta!` enter), no allocation tracked.
+pub fn mark(label: &str) {
+    let _g = HookScope::enter();
+    let r = recorder();
+    if r.mode() == Mode::Off {
+        return;
+    }
+    let id = r.intern_mark(label);
+    r.on_mark(id);
+}
+
+/// The label string for an interned mark id (for the file recorder's `TAG_MARK`
+/// table).
+pub fn mark_label(id: u32) -> Option<String> {
+    let _g = HookScope::enter();
+    recorder().mark_label(id)
 }
 
 /// Enter a metadata scope: every allocation made on this thread while the

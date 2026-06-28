@@ -887,10 +887,19 @@ pub unsafe extern "C" fn gcr_runtime_main(
     // after the program returns (heap quiescent). `GCR_HEAP_DUMP=json` emits a
     // structured snapshot for tooling; any other non-empty value emits text.
     if let Some(mode) = std::env::var_os("GCR_HEAP_DUMP") {
-        if mode == "json" {
-            eprint!("{}", unsafe { crate::gc::dump::dump_heap_json(rt.heap()) });
+        let dump = if mode == "json" {
+            unsafe { crate::gc::dump::dump_heap_json(rt.heap()) }
         } else {
-            eprint!("{}", unsafe { crate::gc::dump::dump_heap_text(rt.heap()) });
+            unsafe { crate::gc::dump::dump_heap_text(rt.heap()) }
+        };
+        // `GCR_HEAP_DUMP_FILE` redirects the dump to a file (un-interleaved with
+        // program output) — the data source for `gcr heap` + the explorer widget.
+        if let Some(path) = std::env::var_os("GCR_HEAP_DUMP_FILE") {
+            if let Err(e) = std::fs::write(&path, &dump) {
+                eprintln!("gc-rust: cannot write heap dump to {:?}: {e}", path);
+            }
+        } else {
+            eprint!("{dump}");
         }
     }
     // Opt-in GC observability, matching the JIT path so AOT binaries report the
@@ -911,6 +920,11 @@ pub unsafe extern "C" fn gcr_runtime_main(
     // per-site count+bytes table at program end (heap quiescent).
     if std::env::var_os("GCR_ALLOC_PROFILE").is_some() {
         eprint!("{}", rt.heap().alloc_site_profile_report());
+    }
+    // `gcr bench` metrics sink: GCR_METRICS_FILE=<path> writes the machine-readable
+    // per-run metrics (GC cycles/pauses, allocation churn, peak heap) as JSON.
+    if let Some(path) = std::env::var_os("GCR_METRICS_FILE") {
+        let _ = std::fs::write(&path, rt.heap().metrics_json());
     }
     result
 }

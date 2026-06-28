@@ -1,0 +1,206 @@
+// gcr_bench_bars.ft — VIEW: grouped vertical bar chart (schema-driven).
+//
+// One node in the composable bench toolkit (bench.ft). Standalone: pass a `file`
+// (a `gcr bench --json` doc OR bench/results.json) and it renders. Connected: it
+// also follows the shared metric topic. Renders ONE metric as grouped bars — in
+// ratio mode (a baseline series exists, e.g. Rust) bars are × vs the baseline;
+// otherwise absolute values scaled to the max, labelled with the metric's unit.
+//
+// params: { file, metric: "<metric key>", metric_topic }
+import "host"
+import { gv, has, series_color, lang_label, load_doc, normalize, metric_keys,
+         metric_def, series_scalar, series_dist, max_scalar, baseline_scalar, group_winner,
+         gcrust_avg_ratio, fmt_ratio, fmt_value, metric_topic } from "bench"
+import { col_text, col_muted, col_axis, col_accent, col_err } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn results_path() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/bench/results.json")
+fn topic() = param("metric_topic", metric_topic())
+
+fn init_state() = { norm: {}, loaded: false, status: "loading…", metric: "" }
+let state = atom(init_state())
+
+fn ensure_metric(norm, cur) {
+    let keys = metric_keys(norm)
+    if len(keys) == 0 { return cur }
+    if cur != "" and contains(keys, cur) { cur } else { keys[0] }
+}
+
+fn reload() {
+    let r = load_doc(results_path())
+    if not r.ok { reset!(state, { ..(@state), loaded: false, status: r.error }); request_render(); return }
+    let norm = normalize(r.raw)
+    reset!(state, { ..(@state), norm: norm, loaded: true, status: "", metric: ensure_metric(norm, (@state).metric) })
+    request_render()
+}
+
+fn on_start() {
+    let m0 = param("metric", "")
+    if m0 != "" { reset!(state, { ..(@state), metric: m0 }) }
+    reload()
+}
+
+fn on_message(topic_, payload, sender) {
+    if topic_ != topic() { return }
+    let m = gv(payload, "metric", "")
+    if m != "" and contains(metric_keys((@state).norm), m) and m != (@state).metric {
+        reset!(state, { ..(@state), metric: m }); request_render()
+    }
+    if gv(payload, "reload", false) { reload() }
+}
+
+fn ratio_mode(norm) = gv(norm, "baseline", "") != ""
+
+fn plotted(norm, group, s, key) {
+    let raw = to_float(series_scalar(s, key))
+    if ratio_mode(norm) {
+        let base = baseline_scalar(norm, group, key)
+        if base > 0.0 { raw / base } else { 0.0 }
+    } else { raw }
+}
+
+fn plot_max(norm, key) {
+    if not ratio_mode(norm) { return max_scalar(norm, key) * 1.14 }
+    let mut mx = 1.2
+    for g in gv(norm, "groups", []) {
+        for s in gv(g, "series", []) {
+            let v = plotted(norm, g, s, key)
+            if v > mx { mx = v }
+        }
+    }
+    mx * 1.12
+}
+
+fn chart(cw, ch, norm, key) {
+    let def = metric_def(norm, key)
+    let unit = gv(def, "unit", "")
+    let rmode = ratio_mode(norm)
+    let groups = gv(norm, "groups", [])
+    let ng = len(groups)
+    let nl = if ng > 0 { len(gv(groups[0], "series", [])) } else { 0 }
+    let pad_l = 26.0
+    let pad_r = 14.0
+    let pad_t = 16.0
+    let pad_b = 30.0
+    let plot_w = cw - pad_l - pad_r
+    let plot_h = ch - pad_t - pad_b
+    let baseline = pad_t + plot_h
+    let group_w = if ng > 0 { plot_w / to_float(ng) } else { plot_w }
+    let cluster_w = group_w * 0.80
+    let bar_w = if nl > 0 { cluster_w / to_float(nl) } else { cluster_w }
+    let mx = plot_max(norm, key)
+
+    let mut items = []
+    items = push(items, { kind: "rect", id: "axis", x: pad_l, y: baseline,
+        w: plot_w, h: 1.5, color: col_axis(), anchor: "top-left" })
+
+    if rmode {
+        let ry = baseline - (1.0 / mx) * plot_h
+        let mut dx = pad_l
+        while dx < pad_l + plot_w {
+            items = push(items, { kind: "rect", id: "ref" + str(to_int(dx)), x: dx, y: ry,
+                w: 7.0, h: 1.0, color: "#e8a866", anchor: "top-left" })
+            dx = dx + 14.0
+        }
+        items = push(items, { kind: "text", id: "reflbl", x: pad_l + plot_w, y: ry - 3.0,
+            value: gv(norm, "baseline", "") + " 1.0×", size: 9.0, color: "#e8a866",
+            anchor: "bottom-center", family: "mono" })
+    }
+
+    let dist = gv(def, "dist", false)
+    let mut gi = 0
+    for group in groups {
+        let gx = pad_l + to_float(gi) * group_w
+        let cluster_x = gx + (group_w - cluster_w) / 2.0
+        let win = group_winner(norm, group, key)
+        let base = baseline_scalar(norm, group, key)
+        let mut li = 0
+        for s in gv(group, "series", []) {
+            let val = plotted(norm, group, s, key)
+            let bh = if mx > 0.0 { (val / mx) * plot_h } else { 0.0 }
+            let bx = cluster_x + to_float(li) * bar_w
+            let col = series_color(gv(s, "label", "?"), li)
+            items = push(items, { kind: "rect", id: "b" + str(gi) + "_" + str(li),
+                x: bx, y: baseline, w: bar_w - 2.0, h: bh, color: col, anchor: "bottom-left" })
+            items = push(items, { kind: "rect", id: "c" + str(gi) + "_" + str(li),
+                x: bx, y: baseline - bh, w: bar_w - 2.0, h: 2.0, color: col_text(), anchor: "top-left" })
+            // Error-bar whisker (min–max) for distribution metrics like runtime.
+            let dv = series_dist(s, key)
+            if dist and typeof(dv) == "Record" {
+                let lo0 = to_float(gv(dv, "min", 0))
+                let hi0 = to_float(gv(dv, "max", 0))
+                let scale = if rmode { if base > 0.0 { base } else { 1.0 } } else { 1.0 }
+                let ylo = baseline - ((lo0 / scale) / mx) * plot_h
+                let yhi = baseline - ((hi0 / scale) / mx) * plot_h
+                let cx = bx + (bar_w - 2.0) / 2.0
+                if ylo - yhi > 1.0 {
+                    items = push(items, { kind: "rect", id: "w" + str(gi) + "_" + str(li),
+                        x: cx - 0.5, y: yhi, w: 1.0, h: ylo - yhi, color: col_text() + "cc", anchor: "top-left" })
+                    items = push(items, { kind: "rect", id: "wt" + str(gi) + "_" + str(li),
+                        x: cx - 3.0, y: yhi, w: 6.0, h: 1.0, color: col_text() + "cc", anchor: "top-left" })
+                    items = push(items, { kind: "rect", id: "wb" + str(gi) + "_" + str(li),
+                        x: cx - 3.0, y: ylo, w: 6.0, h: 1.0, color: col_text() + "cc", anchor: "top-left" })
+                }
+            }
+            let lbl = if rmode { fmt_ratio(val) } else { fmt_value(series_scalar(s, key), unit) }
+            items = push(items, { kind: "text", id: "v" + str(gi) + "_" + str(li),
+                x: bx + (bar_w - 2.0) / 2.0, y: baseline - bh - 2.0,
+                value: lbl, size: 8.5, color: col, anchor: "bottom-center", family: "mono" })
+            li = li + 1
+        }
+        items = push(items, { kind: "text", id: "g" + str(gi),
+            x: gx + group_w / 2.0, y: baseline + 5.0,
+            value: gv(group, "name", "?"), size: 10.0, color: col_text(), anchor: "top-center", family: "mono" })
+        if has(group, "verify") {
+            items = push(items, { kind: "text", id: "gv" + str(gi),
+                x: gx + group_w / 2.0, y: baseline + 18.0,
+                value: if gv(group, "verify", false) { "✓ verified" } else { "✗ MISMATCH" },
+                size: 8.0, color: if gv(group, "verify", false) { "#7ee0a0" } else { col_err() },
+                anchor: "top-center" })
+        } else {
+            items = push(items, { kind: "text", id: "gw" + str(gi),
+                x: gx + group_w / 2.0, y: baseline + 18.0,
+                value: "best: " + win, size: 8.0, color: series_color(win, 0), anchor: "top-center" })
+        }
+        gi = gi + 1
+    }
+    items
+}
+
+fn legend(norm) {
+    let groups = gv(norm, "groups", [])
+    if len(groups) == 0 { return { kind: "hstack", children: [] } }
+    let mut items = []
+    let mut i = 0
+    for s in gv(groups[0], "series", []) {
+        items = push(items, { kind: "text", value: "● " + gv(s, "label", "?"), size: 11.0,
+            color: series_color(gv(s, "label", "?"), i), family: "mono", wrap: false })
+        i = i + 1
+    }
+    { kind: "hstack", gap: 14.0, align: "center", children: items }
+}
+
+fn render(w, h) {
+    let s = @state
+    let mut kids = []
+    let def = metric_def(s.norm, s.metric)
+    kids = push(kids, { kind: "hstack", gap: 10.0, align: "center", children: [
+        { kind: "text", value: "▮ " + gv(def, "label", s.metric), size: 12.0, weight: "bold", color: col_accent() },
+        { kind: "text", value: if ratio_mode(s.norm) { "× vs " + gv(s.norm, "baseline", "") + " · lower is better" }
+                               else { "absolute · lower is better" }, size: 10.0, color: col_muted() },
+    ]})
+    if not s.loaded {
+        kids = push(kids, { kind: "text", value: s.status, size: 12.0, color: col_err(), wrap: true })
+        return { kind: "vstack", gap: 6.0, pad: 10.0, style: { height: "100%" }, children: kids }
+    }
+    if ratio_mode(s.norm) {
+        kids = push(kids, { kind: "text", value: "gc-rust avg " + fmt_ratio(gcrust_avg_ratio(s.norm, s.metric)),
+            size: 11.0, weight: "bold", color: "#7ee0a0" })
+    }
+    kids = push(kids, legend(s.norm))
+    let cw = max(280.0, w - 20.0)
+    let ch = max(160.0, h - 96.0)
+    kids = push(kids, { kind: "canvas", style: { width: str(cw), height: str(ch) },
+                        children: chart(cw, ch, s.norm, s.metric) })
+    { kind: "vstack", gap: 6.0, pad: 10.0, style: { height: "100%" }, children: kids }
+}

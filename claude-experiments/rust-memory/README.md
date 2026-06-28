@@ -13,6 +13,13 @@ u64`). That join is what tools like heaptrack / bytehound / dhat don't do, and
 it's why memscope can say `Boxed<Particle>`, `HashTable<(u64, Session)>`,
 `Vec<Box<Particle>>` instead of just "1.1 MiB in 17,600 allocations".
 
+It can also emit a **real JVM `.hprof` heap dump** — so a Rust program's heap
+opens in **Eclipse MAT / VisualVM / heapster** with dominator tree, retained
+sizes, and paths-to-GC-roots — and it can do this for an **unmodified binary you
+never touched**, by injection (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`). See
+[Heap dumps (`.hprof`)](#heap-dumps-hprof--jvm-tooling-for-rust) and
+[Zero-instrumentation](#zero-instrumentation-dump-an-unmodified-binary).
+
 ## Quick start (try it in 30 seconds)
 
 Everything is already built in this workspace. Two terminals:
@@ -92,10 +99,219 @@ fn main() {
 ```rust
     memscope::set_mode(memscope::Mode::Full);
     memscope::record_to_file("allocs.jsonl").unwrap();   // self-contained recording
+    memscope::mark("after_warmup");                       // checkpoint to diff against later
 ```
 
 Then: `memscope replay allocs.mscope` (reference reader), or parse it yourself.
 Wrap a different inner allocator (jemalloc, mimalloc) with `MemScope::new(inner)`.
+
+### Heap dumps (`.hprof`) — JVM tooling for Rust
+
+memscope can serialize a point-in-time heap as a **JVM HPROF 1.0.2** dump. One
+call, anywhere your heap is interesting:
+
+```rust
+memscope::heap_dump("heap.hprof").unwrap();   // type-resolved, self-contained
+```
+
+Open `heap.hprof` in **Eclipse MAT**, **VisualVM**, or **heapster** and you get
+the full JVM heap-analysis experience — on a Rust program:
+
+```
+$ heapster heap.hprof describe 0x822c052c0
+  Class:         Session
+  Retained size: 592 bytes
+  Fields:
+    f@0x8   Object  0x823017e80  java.lang.Object[]    # the messages Vec
+    f@0x18  Object  0x823001b20  User                  # the Box<User>
+    f@0x20  Object  null                               # next: None
+  Shortest GC root path:
+    java.lang.Object[]  →  Session
+```
+
+Each Rust allocation becomes an object, each recovered type a class; struct
+pointer fields (from DWARF layout) become object references, `Vec`/`HashMap`
+become arrays, `String`/`Vec<u8>` become byte arrays (with real contents). The
+graph's roots become HPROF GC roots, so MAT's **dominator tree, retained sizes,
+paths-to-roots, and leak suspects** all work — verified end-to-end in heapster
+(class histogram, retention chains, even a 30-deep linked-list dominator chain).
+
+### Zero-instrumentation: dump an *unmodified* binary
+
+You don't even need to change the program — or fiddle with `DYLD`/`LD_PRELOAD`
+yourself. `memscope run` injects the shim, wires the dump trigger, and launches
+the target for you:
+
+```sh
+memscope run --on-exit  -- ./your_program args…     # dump the final heap
+memscope run --after 5s -- ./your_program args…     # dump 5s in (it keeps running)
+memscope run --at-bytes 50MB -- ./your_program      # dump when the live heap first hits 50MB
+memscope run --out /tmp/heap-{pid}.hprof -- ./prog  # choose the path ({pid}/{n} expand)
+memscope dump-pid <pid>                             # trigger a dump in a running `run` process
+```
+
+Under the hood it's a load-time `malloc` interpose + a `SIGUSR1` trigger, exactly
+like `jmap` — you can also drive it by hand:
+
+```sh
+DYLD_INSERT_LIBRARIES=target/release/libmemscope_preload.dylib ./your_program &  # macOS
+LD_PRELOAD=target/release/libmemscope_preload.so ./your_program &                # Linux
+kill -USR1 <pid>          # → /tmp/memscope-<pid>-0.hprof   (open in MAT/heapster)
+```
+
+**When should the snapshot be taken?** A heap dump is a point in time, and the
+right point depends on intent — there's no single default:
+
+* **`--on-exit`** — what the program *failed to free*. In Rust, RAII drops locals
+  at the end of `main`, so for a build-then-exit CLI this captures almost nothing;
+  it's right for *leaks* (globals, leaked `Box`, `Rc` cycles) and long-running
+  servers shutting down.
+* **`--at-bytes N`** — the heap *while it's big*. Robust for short programs (no
+  timing race), but beware it fires the **first** time the threshold is crossed —
+  which can be during *startup*, before the real working set is built.
+* **`--after DUR`** / **`dump-pid`** — at **steady state**, once the program has
+  done its loading/warmup. The most reliable way to capture "what is this process
+  holding right now." Use `dump-pid` for daemons/servers after they've loaded.
+* **Two dumps + `diff`** — for "what grew between phase A and B" (see above).
+
+A dyld `__interpose` table routes the *target's* allocator calls through
+memscope while the dylib's own allocations bind to the real `malloc` (per-image
+self-exemption — so it can never recurse). Backtraces captured at `malloc` time
+resolve against the **target binary's own DWARF**, so **types survive**:
+injecting into a plain `Account`/`Profile` program with no memscope in it at all
+still yields `Account` ×500, `Profile` ×500 in the dump. Requirements (none touch
+the target's source): the default system allocator (the Rust default), and — for
+type *names* — debug info / a `.dSYM` (else a complete but untyped dump). On
+macOS the target must be unsigned (dev `cargo build` output is); SIP-protected /
+signed binaries ignore `DYLD_INSERT_LIBRARIES`. (`DYLD_INSERT_LIBRARIES` is
+inherited by child processes, so subprocesses the target spawns are dumped too.)
+It captures `malloc`/`free` but **not** memory a program maps with `mmap`
+directly (file-backed regions, some custom arenas) — though most Rust heap
+*objects* go through `malloc`, so the bulk of a real heap is visible (heapster
+loading a 197 MB dump held **gigabytes** of malloc'd buffers + materialized
+objects, all captured).
+
+The real cost shows up at **scale**: in Full mode every allocation is tracked, so
+instrumenting a process with a multi-GB live heap is heavy — the tracking table
+itself grows large, the target slows down, and a full dump of tens of millions of
+live allocations is slow and memory-hungry. For large targets, capture **early**
+(`--at-bytes`), use **`Mode::Sampled`**, or dump a representative phase rather
+than the peak.
+
+### Checkpoints & diffs (snapshot exploration)
+
+Most memory debugging is *differential* — "it grew between request 1 and 100;
+what's the delta and who retains it?" Drop a named checkpoint anywhere in your
+program (costs one ring marker, no allocation tracked):
+
+```rust
+memscope::mark("after_warmup");
+// … serve a request …
+memscope::mark("end");
+```
+
+Then explore the recording posthoc — no live process needed:
+
+```sh
+memscope marks rec.mscope                       # list checkpoints + heap size at each
+memscope diff  rec.mscope after_warmup end      # set-diff the live set between two marks
+memscope diff  rec.mscope start end --json       # `start`/`end` = the stream ends; JSON for tools
+```
+
+`diff` groups the live set by `(type, site)` and reports what **grew**, what
+**shrank**, and — crucially — how many of each were **born vs freed** in the
+window. `born > 0, freed = 0` is the canonical "born and never died" leak
+fingerprint, and each row carries the **exact source line** of the allocating
+call:
+
+```
+== diff after_warmup -> end  (28 ms window) ==
+   live: 202.4 KiB -> 722.1 KiB   net retained: +519.7 KiB
+
+   GREW (live in B, not freed):
+     Δcount       Δbytes    born  freed  type / site
+   ───────────────────────────────────────────────────────────────────
+      +5000   +263.7 KiB    5000      0  StringBuf<u8>  @ markdemo::main (markdemo.rs:42)  ← never freed
+         +1   +256.0 KiB      11     10  Vec<Session>   @ markdemo::main (markdemo.rs:40)
+
+   22 type/site groups unchanged
+```
+
+The `--json` form is built for an **AI consumer**: a token-budgeted, ranked,
+source-located summary it can act on directly (then re-`diff` before/after a fix
+to confirm the leak's `delta_count` went to zero). Reconstruction lives in the
+reusable **`memscope-replay`** crate (`Timeline` / `LiveState`), so future tools
+(an MCP wrapper) build on the same replay rather than re-parsing the stream.
+Design + roadmap: `docs/ANALYSIS.md`.
+
+### Ranked findings (`analyze`)
+
+`diff` answers "what changed between two points"; `analyze` answers "what's
+*wrong*, ranked" — over the whole recording, no marks required:
+
+```sh
+memscope analyze rec.mscope                 # ranked findings, text
+memscope analyze rec.mscope --json          # same, for an AI to act on
+memscope analyze rec.mscope --top 5
+```
+
+It runs a set of detectors over the event stream and emits ranked, **source-located**
+findings, each with a closed-vocabulary **fix class** an agent can branch on:
+
+```
+== memory findings: rec.mscope  (2 found, showing 2) ==
+
+[1] CHURN-STORM  severity 0.89  confidence 0.80
+    Vec<u8>: 7.0 MiB allocated across 40000 allocations, 0 B live (all freed)
+    @ markdemo::main (markdemo.rs:47)
+    fix: reuse-buffer — hoist the allocation out of the hot loop, reuse one buffer, or use an arena.
+
+[2] MONOTONIC-GROWTH  severity 0.45  confidence 0.85
+    StringBuf<u8>: 263.7 KiB live in 5000 allocations, 0 freed (never freed)
+    @ markdemo::main (markdemo.rs:42)
+    fix: leak — ensure these are dropped, or bound their lifetime.
+```
+
+Detectors: **monotonic-growth** (leak / unbounded-cache — high live bytes, little
+freed), **churn-storm** (huge total allocated, ~nothing live → allocating in a hot
+loop), **realloc-thrash** (a buffer grown incrementally instead of `with_capacity`),
+**short-lived-box** (high-volume `Box<T>` freed almost immediately → stack/pool
+candidate). Findings are **merged by source location** (loop-unrolled call sites
+collapse into one) and memscope's **own** profiling allocations are filtered out,
+so the output is the program's issues, not the tool's. Design: `docs/ANALYSIS.md`.
+
+### Drill into a finding (`query`)
+
+A finding gives you a type and a site id; `query` pulls exactly the detail you
+(or an agent) want next, bounded:
+
+```sh
+memscope query rec.mscope --site 169 --field stack        # full call stack, app frames marked
+memscope query rec.mscope --type 'Vec<u8>' --field lifetimes  # freed-allocation lifetime histogram
+memscope query rec.mscope --type 'Vec<u8>' --field sites   # every call site of this type
+memscope query rec.mscope --type 'StringBuf<u8>'           # aggregate stats (default)
+```
+
+```
+== lifetime histogram: Vec<u8> (9340 freed sampled) ==
+        <1ms     9334  ██████████████████████████████
+       1-2ms        6  █
+```
+
+### Let an AI drive it (MCP)
+
+`memscope-mcp` is a tiny **MCP** server exposing `marks` / `diff` / `analyze` /
+`query` as tools, so a Claude session can debug a heap directly — run `analyze`,
+`query` the one site that matters, propose a patch, then re-`diff` to confirm the
+leak's `delta_count` went to zero. Point any MCP client at the `memscope-mcp`
+binary (set `MEMSCOPE_BIN` if the `memscope` CLI isn't a sibling or on `PATH`):
+
+```jsonc
+// e.g. an MCP client config
+{ "command": "/path/to/memscope-mcp" }
+```
+
+Every tool returns the same token-budgeted JSON the CLI's `--json` emits.
 
 ### View it on a timeline (Perfetto)
 
@@ -211,8 +427,12 @@ volume use `Mode::Sampled` to keep the file small.)
 | `memscope-graph` | **heap reference graph**: walks each allocation's pointer fields → edges → roots → dominator tree → retained sizes |
 | `memscope-proto` | the wire vocabulary: hot-path `RawEvent` POD + serializable `Snapshot` / `SiteInfo` / `TypeInfo` + client/server messages |
 | `memscope-agent` | in-process transport server (Unix socket, newline-JSON). Owns the type oracle and ships already-typed snapshots |
-| `memscope` | thin facade: `MemScope`, mode controls, `start_agent()` |
-| `memscope-cli` | terminal consumer: `monitor` / `dump` / `events` / `mode` / `show` |
+| `memscope` | thin facade: `MemScope`, mode controls, `mark()`, `start_agent()` |
+| `memscope-replay` | **reusable recording reader + analysis**: parses a `.mscope`/`.jsonl` into sites/metadata/marks/events, reconstructs the live set at any checkpoint (`Timeline` / `LiveState`), classifies frames (`frames`), and runs the finding detectors (`analyze`) — the substrate for `marks` / `diff` / `analyze` |
+| `memscope-cli` | terminal consumer: `monitor` / `dump` / `events` / `mode` / `show` / `marks` / `diff` / `analyze` / `query` |
+| `memscope-mcp` | **MCP stdio server**: exposes `marks` / `diff` / `analyze` / `query` as tools an AI agent can call (thin wrapper over the CLI's `--json`) |
+| `memscope-hprof` | **HPROF writer**: serializes a `HeapGraph` + layout as a JVM `.hprof` (instances/arrays/byte-arrays + GC roots) for Eclipse MAT / VisualVM / heapster |
+| `memscope-preload` | **zero-instrumentation injector** (`cdylib`): dyld/`LD_PRELOAD` `malloc` interposition + `SIGUSR1` → `.hprof`, for dumping an unmodified binary's heap |
 | `spike` | the original proof that DWARF (not demangling) is what recovers types |
 
 ## Capture modes & overhead

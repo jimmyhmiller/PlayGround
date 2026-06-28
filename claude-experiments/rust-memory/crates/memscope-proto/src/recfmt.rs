@@ -27,6 +27,10 @@ pub const TAG_EVENTS: u8 = b'E';
 pub const TAG_KEY: u8 = b'K';
 /// Interned metadata context: `u32 meta_id | u16 n | n × (u32 key_id, value)`.
 pub const TAG_META: u8 = b'C';
+/// Interned mark label: `u32 label_id | u16 len+utf8`. Defines the human label
+/// for a [`EventKind::Mark`] checkpoint; written once, the first time the mark
+/// is seen, so the recording stays self-contained.
+pub const TAG_MARK: u8 = b'M';
 /// Size of one encoded event record (the per-event hot-path cost).
 pub const EVENT_BYTES: usize = 1 + 8 + 8 + 8 + 4 + 4 + 1;
 
@@ -63,6 +67,7 @@ fn kind_code(k: EventKind) -> u8 {
         EventKind::ReallocGrow => 2,
         EventKind::MetaEnter => 3,
         EventKind::MetaExit => 4,
+        EventKind::Mark => 5,
     }
 }
 fn kind_from_code(c: u8) -> EventKind {
@@ -71,6 +76,7 @@ fn kind_from_code(c: u8) -> EventKind {
         2 => EventKind::ReallocGrow,
         3 => EventKind::MetaEnter,
         4 => EventKind::MetaExit,
+        5 => EventKind::Mark,
         _ => EventKind::Alloc,
     }
 }
@@ -141,6 +147,13 @@ pub fn encode_key(b: &mut Vec<u8>, key_id: u32, name: &str) {
     b.push(TAG_KEY);
     put_u32(b, key_id);
     put_str(b, name);
+}
+
+/// Encode an interned mark label (defines the label string for a checkpoint).
+pub fn encode_mark(b: &mut Vec<u8>, label_id: u32, label: &str) {
+    b.push(TAG_MARK);
+    put_u32(b, label_id);
+    put_str(b, label);
 }
 
 /// Encode an interned metadata context (a scope's key/value pairs).

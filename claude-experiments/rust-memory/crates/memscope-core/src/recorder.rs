@@ -61,6 +61,9 @@ pub struct Recorder {
     // --- metadata interners (the `meta!` path; coarse, so a plain lock is fine) ---
     keys: Mutex<KeyInterner>,
     meta: Mutex<MetaInterner>,
+    /// Interns `mark()` checkpoint labels to stable ids (reuses the same tiny
+    /// string-interner; a program has a handful of distinct marks).
+    marks: Mutex<KeyInterner>,
 
     // --- the hot-path event sink: per-thread sharded rings ---
     ring: crate::tls_ring::ShardedRing,
@@ -139,6 +142,7 @@ impl Recorder {
             site_shards: std::array::from_fn(|_| Mutex::new(SiteShard::new())),
             keys: Mutex::new(KeyInterner::default()),
             meta: Mutex::new(MetaInterner::default()),
+            marks: Mutex::new(KeyInterner::default()),
             ring: crate::tls_ring::ShardedRing::new(
                 DEFAULT_RING_CAP,
                 crate::tls_ring::RingMode::Overwrite,
@@ -552,6 +556,36 @@ impl Recorder {
     /// The key/value pairs of an interned context (for the `TAG_META` table).
     pub fn meta_context(&self, meta_id: u32) -> Option<Vec<(u32, MetaValue)>> {
         self.meta.lock().unwrap().contexts.get(&meta_id).cloned()
+    }
+
+    // --- marks (`mark()` checkpoints) ---------------------------------------
+
+    /// Intern a checkpoint label to a stable id.
+    pub fn intern_mark(&self, label: &str) -> u32 {
+        self.marks.lock().unwrap().intern(label)
+    }
+
+    /// The label string for an interned mark id (for the `TAG_MARK` table).
+    pub fn mark_label(&self, label_id: u32) -> Option<String> {
+        self.marks.lock().unwrap().names.get(label_id as usize).cloned()
+    }
+
+    /// Emit a checkpoint marker carrying the interned label id in the `site`
+    /// slot. A no-op while recording is off (no stream to fencepost).
+    pub fn on_mark(&self, label_id: u32) {
+        if self.mode() == Mode::Off {
+            return;
+        }
+        self.ring.push(RawEvent {
+            kind: EventKind::Mark,
+            seq: crate::tls_ring::tsc(),
+            ts_nanos: self.now_ms() as u64 * 1_000_000,
+            addr: 0,
+            size: 0,
+            align: 0,
+            site: SiteId(label_id),
+            thread: thread_id(),
+        });
     }
 }
 

@@ -75,6 +75,11 @@ pub enum EventKind {
     /// Leave the innermost metadata scope (LIFO). `site` carries the same context
     /// id for robustness.
     MetaExit = 4,
+    /// A named checkpoint in the stream (`memscope::mark("label")`). The interned
+    /// label id rides in the `site` field; the label string is in the recording's
+    /// `TAG_MARK` table. Carries no allocation — it's a timestamped fencepost the
+    /// reader uses to reconstruct the live set at a semantic moment.
+    Mark = 5,
 }
 
 /// A metadata value attached to a scope via `meta!`. Kept to a few flat,

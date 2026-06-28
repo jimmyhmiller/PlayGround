@@ -1,0 +1,102 @@
+// gcr_bench_table.ft — VIEW: the exact numbers, as a table (schema-driven).
+//
+// A standalone node in the bench toolkit (bench.ft): one row per group, one
+// column per series, cells = the selected metric's value (★ marks the winner).
+// Works for any `gcr bench --json` doc or the language-suite results.json, and
+// syncs to the shared metric topic.
+//
+// params: { file, metric: "<metric key>", metric_topic }
+import "host"
+import { gv, has, lang_label, load_doc, normalize, metric_keys, metric_def,
+         series_scalar, group_winner, fmt_value, metric_topic } from "bench"
+import { col_text, col_muted, col_accent, col_err } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn results_path() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/bench/results.json")
+fn topic() = param("metric_topic", metric_topic())
+
+fn init_state() = { norm: {}, loaded: false, status: "loading…", metric: "" }
+let state = atom(init_state())
+
+fn ensure_metric(norm, cur) {
+    let keys = metric_keys(norm)
+    if len(keys) == 0 { return cur }
+    if cur != "" and contains(keys, cur) { cur } else { keys[0] }
+}
+
+fn reload() {
+    let r = load_doc(results_path())
+    if not r.ok { reset!(state, { ..(@state), loaded: false, status: r.error }); request_render(); return }
+    let norm = normalize(r.raw)
+    reset!(state, { ..(@state), norm: norm, loaded: true, status: "", metric: ensure_metric(norm, (@state).metric) })
+    request_render()
+}
+
+fn on_start() {
+    let m0 = param("metric", "")
+    if m0 != "" { reset!(state, { ..(@state), metric: m0 }) }
+    reload()
+}
+
+fn on_message(topic_, payload, sender) {
+    if topic_ != topic() { return }
+    let m = gv(payload, "metric", "")
+    if m != "" and contains(metric_keys((@state).norm), m) and m != (@state).metric {
+        reset!(state, { ..(@state), metric: m }); request_render()
+    }
+    if gv(payload, "reload", false) { reload() }
+}
+
+// Series labels (from the first group — series are consistent across groups).
+fn series_labels(norm) {
+    let groups = gv(norm, "groups", [])
+    if len(groups) == 0 { return [] }
+    let mut ls = []
+    for s in gv(groups[0], "series", []) { ls = push(ls, gv(s, "label", "?")) }
+    ls
+}
+
+fn series_by_label(group, label) {
+    for s in gv(group, "series", []) { if gv(s, "label", "") == label { return s } }
+    {}
+}
+
+fn build_table(norm, key) {
+    let unit = gv(metric_def(norm, key), "unit", "")
+    let labels = series_labels(norm)
+    let mut cols = [ { header: "benchmark" } ]
+    for l in labels { cols = push(cols, { header: l }) }
+    let show_verify = false
+    let mut any_verify = false
+    for g in gv(norm, "groups", []) { if has(g, "verify") { any_verify = true } }
+    if any_verify { cols = push(cols, { header: "✓" }) }
+    let mut rows = []
+    for group in gv(norm, "groups", []) {
+        let win = group_winner(norm, group, key)
+        let mut cells = [ gv(group, "name", "?") ]
+        for l in labels {
+            let s = series_by_label(group, l)
+            let lbl = fmt_value(series_scalar(s, key), unit)
+            cells = push(cells, if l == win { "★ " + lbl } else { lbl })
+        }
+        if any_verify { cells = push(cells, if gv(group, "verify", false) { "✓" } else { "✗" }) }
+        rows = push(rows, cells)
+    }
+    { kind: "table", zebra: true, columns: cols, rows: rows }
+}
+
+fn render(w, h) {
+    let s = @state
+    let def = metric_def(s.norm, s.metric)
+    let mut kids = []
+    kids = push(kids, { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "text", value: "▦ " + gv(def, "label", s.metric), size: 12.0, weight: "bold", color: col_accent() },
+        { kind: "text", value: "★ = best per row", size: 10.0, color: col_muted() },
+    ]})
+    if not s.loaded {
+        kids = push(kids, { kind: "text", value: s.status, size: 12.0, color: col_err(), wrap: true })
+    } else {
+        kids = push(kids, build_table(s.norm, s.metric))
+    }
+    { kind: "vstack", gap: 8.0, pad: 12.0, style: { height: "100%" }, children: kids }
+}
