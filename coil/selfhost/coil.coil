@@ -113,6 +113,10 @@
 (extern LLVMInitializeX86TargetInfo        :cc c [] (-> void))
 (extern LLVMInitializeX86Target            :cc c [] (-> void))
 (extern LLVMInitializeX86TargetMC          :cc c [] (-> void))
+; AsmPrinter init is REQUIRED for object emission (without it the target machine
+; reports "can't emit a file of this type"). Rust's Target::initialize_all does it.
+(extern LLVMInitializeAArch64AsmPrinter    :cc c [] (-> void))
+(extern LLVMInitializeX86AsmPrinter        :cc c [] (-> void))
 (extern LLVMGetDefaultTargetTriple         :cc c [] (-> (ptr i8)))
 (extern LLVMGetTargetFromTriple            :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
 (extern LLVMCreateTargetMachine            :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) i32 i32 i32] (-> (ptr i8)))
@@ -121,6 +125,17 @@
 (extern LLVMABISizeOfType                  :cc c [(ptr i8) (ptr i8)] (-> i64))
 (extern LLVMABIAlignmentOfType             :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern LLVMOffsetOfElement                :cc c [(ptr i8) (ptr i8) i32] (-> i64))
+; ---- object emission + new pass manager (the `build` subcommand) ----
+; LLVMTargetMachineEmitToFile(tm, mod, filename, codegen, &err) -> LLVMBool (1=err);
+;   codegen: LLVMObjectFile = 1. LLVMRunPasses(mod, "default<O3>", tm, opts) ->
+;   LLVMErrorRef (null=success). Mirrors src/lib.rs::compile_to_object_dbg.
+(extern LLVMTargetMachineEmitToFile        :cc c [(ptr i8) (ptr i8) (ptr i8) i32 (ptr (ptr i8))] (-> i32))
+(extern LLVMCreatePassBuilderOptions       :cc c [] (-> (ptr i8)))
+(extern LLVMDisposePassBuilderOptions      :cc c [(ptr i8)] (-> void))
+(extern LLVMRunPasses                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMGetErrorMessage                :cc c [(ptr i8)] (-> (ptr i8)))
+; libc: shell out to `cc` for the link step.
+(extern system                             :cc c [(ptr i8)] (-> i32))
 ; ---- constants ----
 (extern LLVMConstInt                       :cc c [(ptr i8) i64 i32] (-> (ptr i8)))
 (extern LLVMConstReal                      :cc c [(ptr i8) f64] (-> (ptr i8)))
@@ -8266,42 +8281,151 @@
     (wb w 10)          ; mirror `coil dump-ir`'s println! trailing newline
     0))
 
-(defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout) s (alloc-stack LS)]
+; Shared front of the pipeline: read -> load -> expand -> resolve -> check -> mono.
+; Returns `(Some mono-Program)` on success; on any pass error it dumps the Diag to
+; `w` and returns `(None)`. Both `dump-ir-program` (print IR) and `build-ir-program`
+; (emit object) drive this so the two share ONE pipeline.
+(defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer))] (-> (Option (ptr Program)))
+  (let [s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out)     (al-new [TaggedForm] a))
     (store! (field s loaded)  (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
     (match (read-all a src)
-      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
             (match (expand-stage3 (mut s))
-              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
               (Ok [_]
                 (match (resolve-program a (mut s) true)
-                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
                   (Ok [prog]
                     (match (check-program a prog (mut s))
-                      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                      (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
                       (Ok [cp]
                         (do (drop-code-funcs a cp)
                             (match (monomorphize a cp)
-                              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-                              (Ok [mp] (do (sort-mono-program a mp) (emit-ir-normalized a w mp)))))))))))))))
+                              (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
+                              (Ok [mp] (do (sort-mono-program a mp) (Some mp))))))))))))))))
+
+(defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (run-pipeline a src cwd w)
+      (Some [mp] (emit-ir-normalized a w mp))
+      (None []   0)))
+  0)
+
+; mono'd Program -> native object file. Mirrors src/lib.rs::compile_to_object_dbg
+; (the release/`src_path = None` path): build the module (codegen-module already
+; sets target + datalayout), create a host target machine (cpu "generic", no
+; features, opt Aggressive=3, reloc PIC=2, codemodel Default=0), run the
+; `default<O3>` pipeline through the new pass manager, then EmitToFile as an object.
+(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8))] (-> i64)
+  (let [m         (codegen-module a mp)
+        triple    (LLVMGetDefaultTargetTriple)
+        targetout (alloc-stack (ptr i8))
+        errout    (alloc-stack (ptr i8))]
+    ; AsmPrinter init (targets themselves were initialized inside codegen-module).
+    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter)
+    (LLVMGetTargetFromTriple triple targetout errout)
+    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
+          pbo (LLVMCreatePassBuilderOptions)
+          rp  (LLVMRunPasses m c"default<O3>" tm pbo)]
+      (if (not (icmp-eq (cast i64 rp) 0))
+          (do (ps (stderr) "codegen: LLVMRunPasses failed: ")
+              (ps (stderr) (cstr->slice (LLVMGetErrorMessage rp)))
+              (wb (stderr) 10) (abort) 0)
+        0)
+      (let [emiterr (alloc-stack (ptr i8))
+            rc      (LLVMTargetMachineEmitToFile tm m obj-cstr 1 emiterr)]
+        (if (icmp-ne rc 0)
+            (do (ps (stderr) "codegen: LLVMTargetMachineEmitToFile failed: ")
+                (ps (stderr) (cstr->slice (load emiterr)))
+                (wb (stderr) 10) (abort) 0)
+          0))
+      0)))
+
+(defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8))] (-> i64)
+  (let [w (stderr)]
+    (match (run-pipeline a src cwd w)
+      (Some [mp] (build-object a mp obj-cstr))
+      (None []   0)))
   0)
 
 ; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
-(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))])
+; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
+(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8))])
 
-; pthread start_routine: unpack the context and run the real dump-ir pipeline on the
+; pthread start_routine: unpack the context and run the real pipeline on the
 ; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
 ; overflow the default ~8MB stack.
 (defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
   (let [ctx (cast (ptr DumpCtx) arg)]
-    (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)))
+    (if (icmp-eq (load (field ctx mode)) 1)
+        (build-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)))
+      (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd))))
     (cast (ptr i8) 0)))
+
+; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
+; DumpCtx. Shared by the `emit-ir` and `build` subcommands.
+(defn run-on-big-stack [(ctx (ptr DumpCtx))] (-> i64)
+  (let [attr (alloc-stack (array i8 64))
+        tid  (alloc-stack (ptr i8))]
+    (pthread_attr_init (cast (ptr i8) attr))
+    (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB
+    (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
+                    (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
+    (pthread_join (load tid) (cast (ptr i8) 0))
+    0))
+
+; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
+; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
+; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
+(defn build-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [file (load (index argv 2))
+        (mut outp)  (cast (ptr i8) 0)
+        (mut flags) (al-new [(slice u8)] a)
+        (mut i)     3]
+    ; parse -o / --link-flag from argv[3..].
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (str-eq arg "-o")
+                (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+              (if (str-eq arg "--link-flag")
+                  (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
+                (do (store! i (iadd (load i) 1)) 0)))))))
+    (if (icmp-eq (cast i64 (load outp)) 0)
+        (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
+      0)
+    (let [out-slice (cstr->slice (load outp))
+          (mut objsb) (sb-new a)]
+      (sb-push-str! (mut objsb) out-slice)
+      (sb-push-str! (mut objsb) ".o")
+      (let [obj-slice (sb-str (load objsb))
+            obj-cstr  (slice->cstr a obj-slice)
+            ctx       (alloc-stack DumpCtx)]
+        (store! (field ctx a)    a)
+        (store! (field ctx src)  (read-file a file))
+        (store! (field ctx cwd)  (cwd-slice a))
+        (store! (field ctx mode) 1)
+        (store! (field ctx obj)  obj-cstr)
+        (run-on-big-stack ctx)
+        ; link: cc <obj> -o <out> <flags...>
+        (let [(mut cmdsb) (sb-new a)]
+          (sb-push-str! (mut cmdsb) "cc ")
+          (sb-push-str! (mut cmdsb) obj-slice)
+          (sb-push-str! (mut cmdsb) " -o ")
+          (sb-push-str! (mut cmdsb) out-slice)
+          (let [(mut k) 0 nf (al-len [(slice u8)] (load flags))]
+            (loop (if (icmp-ge (load k) nf) (break)
+              (do (sb-push-str! (mut cmdsb) " ")
+                  (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
+                  (store! k (iadd (load k) 1))))))
+          (let [rc (system (slice->cstr a (sb-str (load cmdsb))))]
+            (if (icmp-ne rc 0) (do (ps (stderr) "build: link (cc) failed\n") (abort) 0) 0)))
+        0))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [a    (malloc-allocator)
@@ -8311,21 +8435,17 @@
       (if (str-eq sub "__normalize")
           (let [path (load (index argv 2)) src (read-file a path) w (stdout)]
             (ps w (normalize-ir a src)) 0)
+        (if (str-eq sub "build")
+            (build-cmd a argc argv)
           (let [path (load (index argv 2))
-                src  (read-file a path)
-                cwd  (cwd-slice a)
-                ctx  (alloc-stack DumpCtx)
-                attr (alloc-stack (array i8 64))
-                tid  (alloc-stack (ptr i8))]
-            (store! (field ctx a)   a)
-            (store! (field ctx src) src)
-            (store! (field ctx cwd) cwd)
-            (pthread_attr_init (cast (ptr i8) attr))
-            (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB
-            (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
-                            (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
-            (pthread_join (load tid) (cast (ptr i8) 0))
-            0))))
+                ctx  (alloc-stack DumpCtx)]
+            (store! (field ctx a)    a)
+            (store! (field ctx src)  (read-file a path))
+            (store! (field ctx cwd)  (cwd-slice a))
+            (store! (field ctx mode) 0)
+            (store! (field ctx obj)  (cast (ptr i8) 0))
+            (run-on-big-stack ctx)
+            0)))))
   0);; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
 (defsum CtVal
   (CInt    [(v i64)])
