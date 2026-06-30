@@ -27,11 +27,13 @@ SEEDS=(
   examples/lockfree.coil examples/mem.coil examples/references.coil
   examples/structs.coil examples/sums.coil examples/threads.coil
   examples/vector.coil examples/widths.coil
+  examples/calc.coil examples/json.coil examples/hashmap.coil
   apps/chip8/objc.coil
   lib/alloc.coil lib/arraylist.coil lib/atomic.coil lib/closure.coil
   lib/control.coil lib/derive.coil lib/dyn.coil lib/fmt.coil lib/hashmap.coil
   lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
   lib/slice.coil lib/thread.coil lib/try.coil
+  selfhost/coil.coil
 )
 
 [ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
