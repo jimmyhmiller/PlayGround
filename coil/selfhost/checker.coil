@@ -4448,9 +4448,29 @@
 
 ; build_make_dyn / dyn dispatch — not yet ported (hard error, never reached by
 ; non-dyn programs because maybe-coerce-dyn/is-dyn-target gate on a -dyn struct).
+(defn dyn-method-names [(a (ptr Allocator)) (td (ptr TraitDef)) (tr (slice u8)) (tn (slice u8))] (-> (ptr (ArrayList (slice u8))))
+  (let [ms (load (field td methods)) n (al-len [TraitMethod] (load ms)) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (tmfn a tr tn (load (field (al-elem [TraitMethod] ms (load i)) name))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
 (defn build-make-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (trait_name (slice u8)) (inner (ptr Expr)) (inner_ty (ptr Type)) (lo i64) (hi i64) (fname (slice u8))] (-> (Result SynPair Diag))
-  (do (unimplemented "check/synth: make-dyn / trait objects not yet ported")
-      (Err [SynPair Diag] (derr ""))))
+  (let [tr (resolve-trait-name cx trait_name)]
+    (if (icmp-eq (slice-len [u8] tr) 0)
+        (Err [SynPair Diag] (derr-at lo hi (sconcat1 a (sconcat4 a "in '" fname "': make-dyn: unknown trait '" (sconcat a trait_name "'")))))
+      (if (not (type-is-ptr inner_ty))
+          (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat3 a "in '" fname "': make-dyn expects a pointer to an implementer, got ") (ty-str a inner_ty))))
+        (let [pointee (t-inner inner_ty)]
+          (if (not (has-impl-name pointee))
+              (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat4 a "in '" fname "': make-dyn: " (ty-str a pointee)) " cannot implement a trait") "")))
+            (let [tn (type-impl-name a pointee)]
+              (if (not (impl-has cx tr tn))
+                  (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (display-name tn) "' does not implement '") (display-name tr)) "' (needed for (dyn ") (sconcat a (display-name tr) "))"))))
+                (let [dyn_struct (sconcat a tr "-dyn") vtable_struct (sconcat a tr "-vtable")]
+                  (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
+                      (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
+                    (let [td (trait-find cx tr) methods (dyn-method-names a td tr tn)]
+                      (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi)) (box-type a (TStruct dyn_struct)))))))))))))))
 (defn maybe-coerce-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (ae (ptr Expr)) (at (ptr Type)) (want (ptr Type)) (lo i64) (hi i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [wtg (type-tag want)
         wdname (if (icmp-eq wtg 6) (type-struct-name want) (if (and (icmp-eq wtg 5) (icmp-eq (type-tag (t-inner want)) 6)) (type-struct-name (t-inner want)) ""))]
@@ -4687,6 +4707,45 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 
+(defn method-index-of [(td (ptr TraitDef)) (func (slice u8))] (-> i64)
+  (let [ms (load (field td methods)) n (al-len [TraitMethod] (load ms)) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [TraitMethod] ms (load i)) name)) func) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn dyn-dispatch-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (self_idx i64) (func (slice u8)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (params (ptr (ArrayList Type))) (newargs (ptr (ArrayList Expr)))] (-> (Result i64 Diag))
+  (let [ps (load (field tm params)) n (al-len [Expr] (load args)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (load i) self_idx) 0
+            (let [want (field (al-elem [Param] ps (load i)) ty) exp (if (icmp-eq (type-tag (field (al-elem [Param] ps (load i)) ty)) 5) (t-inner (field (al-elem [Param] ps (load i)) ty)) (field (al-elem [Param] ps (load i)) ty))
+                  ismut (is-mut-borrow (al-elem [Expr] args (load i))) what (sconcat1 a (sconcat3 a "argument to '" func "'"))]
+              (match (do-synth a (al-elem [Expr] args (load i)) exp env cx tps fname)
+                (Err [d] (do (store! err d) (store! failed true) (break)))
+                (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
+                  (match (maybe-coerce-dyn a cx (load (field sp e)) (load (field sp t)) want elo ehi fname)
+                    (Err [d] (do (store! err d) (store! failed true) (break)))
+                    (Ok [mp0] (let [mp (alloc-stack SynPair)] (store! mp mp0)
+                      (match (coerce-arg a ismut (load (load (field mp e))) (load (field mp t)) want false fname what)
+                        (Err [d] (do (store! err d) (store! failed true) (break)))
+                        (Ok [ce] (do (al-push! [Expr] newargs ce) (al-push! [Type] params (load want)) 0)))))))))) )
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+(defn synth-dyn-dispatch [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (self_name (slice u8)) (self_idx i64) (td (ptr TraitDef)) (tm (ptr TraitMethod)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+  (let [mi (method-index-of td func) dyn_ty (box-type a (TStruct self_name))]
+    (match (do-synth a (al-elem [Expr] args self_idx) dyn_ty env cx tps fname)
+      (Err [d] (err-ep d))
+      (Ok [rsp0] (let [rsp (alloc-stack SynPair)] (store! rsp rsp0)
+        (match (coerce a (load (load (field rsp e))) (load (field rsp t)) dyn_ty false fname "trait-object receiver")
+          (Err [d] (err-ep d))
+          (Ok [recv]
+            (let [params (box-al [Type] a (al-new [Type] a)) newargs (box-al [Expr] a (al-new [Expr] a))]
+              (al-push! [Type] params (TPtr (box-type a (TInt 8 false))))
+              (match (dyn-dispatch-args a tm self_idx func args env cx tps fname elo ehi params newargs)
+                (Err [d] (err-ep d))
+                (Ok [_]
+                  (let [vtable_struct (sconcat a (subslice [u8] self_name 0 (isub (slice-len [u8] self_name) 4)) "-vtable")]
+                    (ok-ep (mk-expr (EDynDispatch self_name vtable_struct mi "c" params (load (field tm ret)) (box-expr a recv) newargs) elo ehi) (load (field tm ret)))))))))))))) 
+
 (defn synth-call-general [(a (ptr Allocator)) (func (slice u8)) (call_func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
   (try
    (do
@@ -4731,7 +4790,7 @@
                       (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' called on a type that can't carry an impl: ")) (ty-str a self_ty)) "")))) 0)
                   (let [self_name (type-impl-name a self_ty)]
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
-                        (return-from :try (do (unimplemented "check/synth: dyn trait-object dispatch not yet ported") (err-ep (derr "")))) 0)
+                        (return-from :try (synth-dyn-dispatch a cx func self_name self_idx td tm args env tps fname elo ehi)) 0)
                     (if (set-contains tps self_name)
                         (if (not (bounds-has (field cx cur_bounds) self_name trait_name))
                             (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a func "')")))))
