@@ -3315,10 +3315,12 @@
 
 ; ---- Cx table lookups (return a live (ptr T) or null) ----------------------
 (defn sig-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr Sig))
+  ; Mirror Rust's `sigs.insert` HashMap semantics: on a duplicate function name
+  ; the LAST inserted sig wins, so keep scanning and return the final match.
   (let [n (al-len [Sig] (load (field cx sigs))) (mut i) 0 (mut r) (cast (ptr Sig) 0)]
     (loop (if (icmp-ge (load i) n) (break)
       (do (if (str-eq (load (field (al-elem [Sig] (field cx sigs) (load i)) name)) name)
-              (do (store! r (al-elem [Sig] (field cx sigs) (load i))) (break)) 0)
+              (do (store! r (al-elem [Sig] (field cx sigs) (load i))) 0) 0)
           (store! i (iadd (load i) 1)))))
     (load r)))
 (defn struct-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr StructInfo))
