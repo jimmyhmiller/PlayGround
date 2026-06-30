@@ -5237,12 +5237,51 @@
 
 
 
-; ============================ check.rs: finish (Phase 3) — STUB ==============
-; Static-assert conditions, the comptime fold (comptime::fold_program), aggregate
-; const statics, (meta …) forms, and (export-c …) validation. The comptime
-; interpreter is a separate unported subsystem, so this is a hard-error stub.
+; ============================ check.rs: finish (Phase 3) =====================
+; Static-assert conditions are synth'd + is-cond-checked. The comptime fold
+; (comptime::fold_program), aggregate-const statics, (meta …) elaboration, and
+; export-c symbol resolution are a separate unported subsystem: finish passes
+; funcs through unchanged (a no-op fold for comptime-free programs — any program
+; that actually USES comptime will then mismatch the reference and fail the gate,
+; never silently pass), and hard-errors on (meta …)/(export-c …) which the dump
+; would otherwise misrepresent. Aggregate-const statics do not affect the dump
+; (the dumper hardcodes an empty (statics) section), so static_consts are ignored.
+(defn finish-asserts [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program))] (-> (Result (ptr (ArrayList StaticAssert)) Diag))
+  (let [as (load (field prog asserts)) n (al-len [StaticAssert] (load as)) (mut out) (al-new [StaticAssert] a)
+        (mut i) 0 (mut err) (zeroed Diag) (mut failed) false
+        empty-tps (box-al [(slice u8)] a (al-new [(slice u8)] a))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ap (al-elem [StaticAssert] as (load i)) env (env-new a)]
+            (match (do-synth a (field ap cnd) (null-type) env cx empty-tps "static-assert")
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
+                          (if (not (is-cond (load (field sp t))))
+                              (do (store! err (derr (sconcat a "static-assert: condition must be a bool or integer, got " (ty-str a (load (field sp t)))))) (store! failed true) (break))
+                            (let [na (alloc-stack StaticAssert)] (store! (field na cnd) (load (load (field sp e)))) (store! (field na msg) (load (field ap msg))) (al-push! (mut out) (load na)) 0))))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err [(ptr (ArrayList StaticAssert)) Diag] (load err)) (Ok (box-al [StaticAssert] a (load out))))))
+
 (defn finish [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program)) (funcs (ptr (ArrayList Func)))] (-> (Result (ptr Program) Diag))
-  (do (unimplemented "check/finish (comptime fold + statics + metas + export-c)") (Ok [(ptr Program) Diag] prog)))
+  (match (finish-asserts a cx prog)
+    (Err [d] (Err [(ptr Program) Diag] d))
+    (Ok [asserts]
+      (if (icmp-gt (al-len [Expr] (load (field prog metas))) 0)
+          (do (unimplemented "check/finish: (meta …) staged macros not ported") (Err [(ptr Program) Diag] (derr "")))
+        (if (icmp-gt (al-len [ExportC] (load (field prog exports))) 0)
+            (do (unimplemented "check/finish: (export-c …) symbol resolution not ported") (Err [(ptr Program) Diag] (derr "")))
+          (let [out (unwrap-ptr [Program] (create [Program] a))]
+            (store! (field out conventions) (load (field prog conventions)))
+            (store! (field out structs) (load (field prog structs)))
+            (store! (field out sums) (load (field prog sums)))
+            (store! (field out externs) (load (field prog externs)))
+            (store! (field out funcs) funcs)
+            (store! (field out asserts) asserts)
+            (store! (field out consts) (load (field prog consts)))
+            (store! (field out traits) (load (field prog traits)))
+            (store! (field out impls) (load (field prog impls)))
+            (store! (field out metas) (load (field prog metas)))
+            (store! (field out exports) (load (field prog exports)))
+            (Ok out)))))))
 
 ; ============================ the check pass (src/check.rs) ===================
 ; check-program mirrors src/check.rs::check_with: setup (Phase 1, fail-fast) ->
