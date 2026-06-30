@@ -6115,7 +6115,7 @@
         (ETypeQuery [q ty] (eval-todo "comptime/eval/ETypeQuery"))
         (EFieldMeta [meta ty idx] (eval-todo "comptime/eval/EFieldMeta"))
         (EFieldIndex [ty name] (eval-todo "comptime/eval/EFieldIndex"))
-        (EQuote [form] (eval-todo "comptime/eval/EQuote"))
+        (EQuote [form] (Ok (FVal (CCode (load form)))))
         (ECodeOp [op args] (eval-todo "comptime/eval/ECodeOp"))
         (EQuasi [q] (eval-todo "comptime/eval/EQuasi"))
         (ETraitCall [trait_name method self_tp args] (eval-todo "comptime/eval/ETraitCall"))
