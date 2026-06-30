@@ -697,15 +697,39 @@
   (d-types w (load (field e params))) (wb w 32)
   (dump-span w (load (field e lo)) (load (field e hi))) (wb w 41))
 
+; Byte-lexicographic `<` on strings (Rust String Ord over ASCII conv names):
+; a proper prefix is less than the longer string.
+(defn str-lt [(x (slice u8)) (y (slice u8))] (-> bool)
+  (let [nx (slice-len x) ny (slice-len y) (mut i) 0 (mut res) 0]
+    (loop (if (or (icmp-ge (load i) nx) (icmp-ge (load i) ny)) (break)
+      (let [cx (cast i64 (slice-get x (load i))) cy (cast i64 (slice-get y (load i)))]
+        (if (icmp-lt cx cy) (do (store! res 1) (break))
+          (if (icmp-gt cx cy) (do (store! res 2) (break))
+            (store! i (iadd (load i) 1)))))))
+    (if (icmp-eq (load res) 1) true (if (icmp-eq (load res) 2) false (icmp-lt nx ny)))))
+(defn conv-name [(c Convention)] (-> (slice u8))
+  (let [p (alloc-stack Convention)] (store! p c) (load (field p name))))
+
 ; A whole-section dumper: `(<tag>` then a space+item per element, then `)`.
 ; Mirrors dump_program's per-section loops.
-(defn d-program [(w (ptr Writer)) (p (ptr Program))] (-> i64)
-  ; conventions (already inserted in deterministic order by the parser)
+(defn d-program [(w (ptr Writer)) (p (ptr Program)) (a (ptr Allocator))] (-> i64)
+  ; conventions — sorted by name (mirrors dump_program's keys().sort()).
   (ps w "(conventions")
-  (let [(mut i) 0 n (al-len [Convention] (load (field p conventions)))]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (wb w 32) (let [c (alloc-stack Convention)] (store! c (al-get [Convention] (load (field p conventions)) (load i))) (d-convention w c))
-          (store! i (iadd (load i) 1))))))
+  (let [convs (load (field p conventions)) n (al-len [Convention] convs) (mut used) (al-new [bool] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (conv-name (al-get [Convention] convs (load bi))) (conv-name (al-get [Convention] convs (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (wb w 32)
+              (let [cc (alloc-stack Convention)] (store! cc (al-get [Convention] convs (load best))) (d-convention w cc)))
+            (store! c (iadd (load c) 1)))))))
   (wb w 41)
   (ps w "\n(structs")
   (let [(mut i) 0 n (al-len [StructDef] (load (field p structs)))]
@@ -777,10 +801,814 @@
   (let [w (stderr)] (ps w "UNIMPLEMENTED: ") (ps w who) (wb w 10))
   (abort) 0)
 
+; ---- generic boxing + string helpers ----
+(defn box-al [T] [(a (ptr Allocator)) (l (ArrayList T))] (-> (ptr (ArrayList T)))
+  (let [p (unwrap-ptr [(ArrayList T)] (create [(ArrayList T)] a))] (store! p l) p))
+(defn sconcat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
+  (match (str-concat a x y) (Some [v] v) (None [] "")))
+(defn sconcat3 [(a (ptr Allocator)) (x (slice u8)) (y (slice u8)) (z (slice u8))] (-> (slice u8))
+  (sconcat a (sconcat a x y) z))
+(defn push-mag [(buf (mut (ArrayList u8))) (n i64)] (-> i64)
+  (if (icmp-lt n 10) (al-push! (mut buf) (cast u8 (iadd n 48)))
+      (do (push-mag (mut buf) (udiv n 10)) (al-push! (mut buf) (cast u8 (iadd (urem n 10) 48))))))
+(defn i64->str [(a (ptr Allocator)) (n i64)] (-> (slice u8))
+  (let [(mut buf) (al-new [u8] a)]
+    (if (icmp-lt n 0) (do (al-push! (mut buf) (cast u8 45)) (push-mag (mut buf) (isub 0 n))) (push-mag (mut buf) n))
+    (al-slice [u8] (load buf))))
+(defn char1 [(a (ptr Allocator)) (c i64)] (-> (slice u8))
+  (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 c)) cb) 1))
+
+; ---- Sexp inspection (one match -> a flat info struct) ----
+(defstruct SxInfo [(tag i64) (ival i64) (sval (slice u8)) (items (ptr (ArrayList Sexp)))])
+(defn sx-info [(s Sexp)] (-> SxInfo)
+  (let [sp (alloc-stack Sexp) p (alloc-stack SxInfo)]
+    (store! sp s)
+    (store! (field p ival) 0) (store! (field p sval) "") (store! (field p items) (zeroed (ptr (ArrayList Sexp))))
+    (match (load (field sp kind))
+      (KInt   [v]  (do (store! (field p tag) 0) (store! (field p ival) v) 0))
+      (KFloat [b]  (do (store! (field p tag) 1) (store! (field p ival) b) 0))
+      (KSym   [x]  (do (store! (field p tag) 2) (store! (field p sval) x) 0))
+      (KKw    [x]  (do (store! (field p tag) 3) (store! (field p sval) x) 0))
+      (KStr   [x]  (do (store! (field p tag) 4) (store! (field p sval) x) 0))
+      (KCStr  [x]  (do (store! (field p tag) 5) (store! (field p sval) x) 0))
+      (KList  [it] (do (store! (field p tag) 6) (store! (field p items) it) 0))
+      (KVec   [it] (do (store! (field p tag) 7) (store! (field p items) it) 0)))
+    (load p)))
+(defn sx-tag   [(s Sexp)] (-> i64) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p tag))))
+(defn sx-ival  [(s Sexp)] (-> i64) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p ival))))
+(defn sx-sval  [(s Sexp)] (-> (slice u8)) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p sval))))
+(defn sx-items [(s Sexp)] (-> (ptr (ArrayList Sexp))) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p items))))
+(defn sx-lo [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p lo))))
+(defn sx-hi [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p hi))))
+(defn sx-len [(l (ptr (ArrayList Sexp)))] (-> i64) (al-len [Sexp] (load l)))
+(defn sx-at  [(l (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load l) i))
+(defn sx-get [(l (ptr (ArrayList Sexp))) (i i64)] (-> (Option Sexp))
+  (if (or (icmp-lt i 0) (icmp-ge i (sx-len l))) (None [Sexp]) (Some (sx-at l i))))
+(defn rest-from [(a (ptr Allocator)) (l (ptr (ArrayList Sexp))) (start i64)] (-> (ptr (ArrayList Sexp)))
+  (let [(mut out) (al-new [Sexp] a) n (sx-len l) (mut i) start]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (sx-at l (load i))) (store! i (iadd (load i) 1)))))
+    (box-al [Sexp] a (load out))))
+
+; small Option<Sexp> predicates
+(defn opt-is-vec [(o (Option Sexp))] (-> bool) (match o (Some [s] (icmp-eq (sx-tag s) 7)) (None [] false)))
+(defn opt-get [(o (Option Sexp))] (-> Sexp) (match o (Some [s] s) (None [] (zeroed Sexp))))
+(defn opt-is-kw [(o (Option Sexp)) (name (slice u8))] (-> bool) (match o (Some [s] (and (icmp-eq (sx-tag s) 3) (str-eq (sx-sval s) name))) (None [] false)))
+(defn opt-is-pos-int [(o (Option Sexp))] (-> bool) (match o (Some [s] (and (icmp-eq (sx-tag s) 0) (icmp-gt (sx-ival s) 0))) (None [] false)))
+(defn opt-int [(o (Option Sexp))] (-> i64) (match o (Some [s] (sx-ival s)) (None [] 0)))
+(defn opt-is-str [(o (Option Sexp))] (-> bool) (match o (Some [s] (icmp-eq (sx-tag s) 4)) (None [] false)))
+(defn opt-str-val [(o (Option Sexp))] (-> (slice u8)) (match o (Some [s] (sx-sval s)) (None [] "")))
+
+; ---- Sexp Display (src/reader.rs Display), for error interpolation ----
+(defn sexp-display [(a (ptr Allocator)) (s Sexp)] (-> (slice u8))
+  (let [tg (sx-tag s)]
+    (if (icmp-eq tg 0) (i64->str a (sx-ival s))
+    (if (icmp-eq tg 2) (sx-sval s)
+    (if (icmp-eq tg 3) (sconcat a ":" (sx-sval s))
+    (if (icmp-eq tg 6) (seq-display a (sx-items s) 40 41)
+    (if (icmp-eq tg 7) (seq-display a (sx-items s) 91 93)
+      (do (unimplemented "sexp-display/float-str-cstr") ""))))))))
+(defn seq-display [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (open i64) (close i64)] (-> (slice u8))
+  (let [(mut acc) (char1 a open) n (sx-len items) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (do (store! acc (sconcat a (load acc) " ")) 0) 0)
+          (store! acc (sconcat a (load acc) (sexp-display a (sx-at items (load i)))))
+          (store! i (iadd (load i) 1)))))
+    (sconcat a (load acc) (char1 a close))))
+
+; ---- diagnostics ----
+(defn derr    [(msg (slice u8))] (-> Diag) (mk-diag -1 -1 msg))
+(defn derr-at [(lo i64) (hi i64) (msg (slice u8))] (-> Diag) (mk-diag lo hi msg))
+(defn dwspan  [(d Diag) (lo i64) (hi i64)] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p d)
+    (if (icmp-lt (load (field p lo)) 0) (do (store! (field p lo) lo) (store! (field p hi) hi)) 0)
+    (load p)))
+
+; ---- Option -> Result with a message (mirrors `.ok_or(msg)?`) ----
+(defn need [T] [(o (Option T)) (msg (slice u8))] (-> (Result T Diag))
+  (match o (Some [v] (Ok v)) (None [] (Err (derr msg)))))
+
+; ---- matchers (src/parse.rs small helpers) ----
+(defn as-list [(s Sexp) (msg (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (if (icmp-eq (sx-tag s) 6) (Ok (sx-items s)) (Err (derr-at (sx-lo s) (sx-hi s) msg))))
+(defn head-sym [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (slice u8) Diag))
+  (if (icmp-eq (sx-len items) 0) (Err (derr "empty list"))
+      (let [h (sx-at items 0)]
+        (if (icmp-eq (sx-tag h) 2) (Ok (sx-sval h))
+            (Err (derr-at (sx-lo h) (sx-hi h) (sconcat a "expected a symbol head, got " (sexp-display a h))))))))
+(defn sym-of [(a (ptr Allocator)) (s Sexp) (what (slice u8))] (-> (Result (slice u8) Diag))
+  (if (icmp-eq (sx-tag s) 2) (Ok (sx-sval s))
+      (Err (derr-at (sx-lo s) (sx-hi s) (sconcat a what (sconcat a ": expected symbol, got " (sexp-display a s)))))))
+(defn kw-of [(a (ptr Allocator)) (s Sexp) (what (slice u8))] (-> (Result (slice u8) Diag))
+  (if (icmp-eq (sx-tag s) 3) (Ok (sx-sval s))
+      (Err (derr-at (sx-lo s) (sx-hi s) (sconcat a what (sconcat a ": expected keyword, got " (sexp-display a s)))))))
+(defn int-val [(a (ptr Allocator)) (s Sexp) (what (slice u8))] (-> (Result i64 Diag))
+  (if (icmp-eq (sx-tag s) 0) (Ok (sx-ival s))
+      (Err (derr-at (sx-lo s) (sx-hi s) (sconcat a what (sconcat a ": expected an integer, got " (sexp-display a s)))))))
+(defn pow2 [(s (Option Sexp))] (-> (Result i64 Diag))
+  (match s
+    (Some [x] (if (and (icmp-eq (sx-tag x) 0) (let [n (sx-ival x)] (and (icmp-gt n 0) (icmp-eq (iand n (isub n 1)) 0)))) (Ok (sx-ival x)) (Err (derr "alignment must be a positive power of two"))))
+    (None [] (Err (derr "alignment must be a positive power of two")))))
+(defn sym-vec [(a (ptr Allocator)) (s Sexp) (what (slice u8))] (-> (Result (ptr (ArrayList (slice u8))) Diag))
+  (if (icmp-eq (sx-tag s) 7)
+      (try (let [items (sx-items s) (mut out) (al-new [(slice u8)] a) n (sx-len items) (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (sym-of a (sx-at items (load i)) what))) (store! i (iadd (load i) 1)))))
+        (Ok (box-al [(slice u8)] a (load out)))))
+      (Err [(ptr (ArrayList (slice u8))) Diag] (derr-at (sx-lo s) (sx-hi s) (sconcat a what (sconcat a ": expected vector, got " (sexp-display a s)))))))
+(defn need-vec [(o (Option Sexp)) (msg (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (match o (Some [s] (if (icmp-eq (sx-tag s) 7) (Ok (sx-items s)) (Err (derr msg)))) (None [] (Err (derr msg)))))
+(defstruct Two [(x Sexp) (y Sexp)])
+(defn need-two [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (head (slice u8))] (-> (Result Two Diag))
+  (if (icmp-ne (sx-len args) 2) (Err (derr (sconcat a head ": expects exactly 2 arguments")))
+      (Ok (let [p (alloc-stack Two)] (store! (field p x) (sx-at args 0)) (store! (field p y) (sx-at args 1)) (load p)))))
+
+; ---- types (src/parse.rs prim_type / int_type / parse_type) ----
+(defn type-int-bits [(t Type)] (-> i64)
+  (match t (TInt [b s] b) (TFloat [_] -1) (TBool [] -1) (TVoid [] -1) (TPtr [_] -1) (TRef [_ _] -1)
+    (TStruct [_] -1) (TArray [_ _] -1) (TSlice [_] -1) (TVec [_ _] -1) (TFn [_ _ _] -1) (TApp [_ _] -1) (TNever [] -1) (TCode [] -1)))
+(defn not-int-diag [(a (ptr Allocator)) (name (slice u8))] (-> Diag) (derr (sconcat3 a "not an int type '" name "'")))
+(defn int-type [(a (ptr Allocator)) (name (slice u8))] (-> (Result Type Diag))
+  (let [n (slice-len name)]
+    (if (icmp-eq n 0) (Err (not-int-diag a name))
+      (let [c0 (cast i64 (slice-get name 0)) signed (if (icmp-eq c0 105) 1 (if (icmp-eq c0 117) 0 -1))]
+        (if (icmp-lt signed 0) (Err (not-int-diag a name))
+          (if (icmp-eq n 1) (Err (not-int-diag a name))
+            (let [(mut bits) 0 (mut bad) false (mut over) false (mut i) 1]
+              (loop (if (icmp-ge (load i) n) (break)
+                (let [c (cast i64 (slice-get name (load i)))]
+                  (if (and (icmp-ge c 48) (icmp-le c 57))
+                      (do (store! bits (iadd (imul (load bits) 10) (isub c 48)))
+                          (if (icmp-gt (load bits) 4294967295) (do (store! over true) 0) 0)
+                          (store! i (iadd (load i) 1)))
+                      (do (store! bad true) (break))))))
+              (if (load bad) (Err (not-int-diag a name))
+                (if (load over) (Err (derr (sconcat3 a "int width too large in '" name "'")))
+                  (if (or (icmp-eq (load bits) 0) (icmp-gt (load bits) 65535))
+                      (Err (derr (sconcat3 a "int width out of range in '" name "' (1..=65535)")))
+                      (Ok (TInt (load bits) (icmp-eq signed 1)))))))))))))
+(defn prim-type [(a (ptr Allocator)) (name (slice u8))] (-> (Result Type Diag))
+  (if (str-eq name "f32") (Ok (TFloat 32))
+  (if (str-eq name "f64") (Ok (TFloat 64))
+  (if (str-eq name "bool") (Ok (TBool))
+  (if (str-eq name "void") (Ok (TVoid))
+    (int-type a name))))))
+(defn parse-types [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList Type)) Diag))
+  (try (let [(mut out) (al-new [Type] a) n (sx-len items) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (parse-type a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
+    (Ok (box-al [Type] a (load out))))))
+(defn parse-type [(a (ptr Allocator)) (s Sexp)] (-> (Result Type Diag))
+  (match (parse-type-inner a s)
+    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s))))
+    (Ok [t] (Ok t))))
+(defn parse-type-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result Type Diag))
+  (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
+    (if (icmp-eq tg 3) (prim-type a (sx-sval s))
+    (if (icmp-eq tg 2) (let [k (sx-sval s)] (if (str-eq k "Code") (Ok (TCode)) (match (prim-type a k) (Ok [t] (Ok t)) (Err [_] (Ok (TStruct k))))))
+    (if (icmp-eq tg 6) (parse-type-list a (sx-items s))
+      (Err (derr-at slo shi (sconcat a "unsupported type: " (sexp-display a s)))))))))
+(defn parse-type-list [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result Type Diag))
+  (try (let [head (try! (head-sym a items))]
+    (if (str-eq head "mut")
+        (Ok (TRef true (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "mut: expects (mut TYPE)")))))))
+    (if (str-eq head "ref")
+        (Ok (TRef false (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "ref: expects (ref TYPE)")))))))
+    (if (str-eq head "ptr")
+        (Ok (TPtr (box-type a (match (sx-get items 1) (Some [t] (try! (parse-type a t))) (None [] (TInt 64 true))))))
+    (if (str-eq head "array")
+        (let [elem (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "array type: missing element type")))))
+              nn (if (opt-is-pos-int (sx-get items 2)) (opt-int (sx-get items 2)) -1)]
+          (if (icmp-lt nn 0) (Err [Type Diag] (derr "array type: expected a positive length")) (Ok (TArray elem nn))))
+    (if (str-eq head "slice")
+        (Ok (TSlice (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "slice type: missing element type")))))))
+    (if (str-eq head "vec")
+        (let [elem (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "vec type: missing element type")))))
+              nn (if (opt-is-pos-int (sx-get items 2)) (opt-int (sx-get items 2)) -1)]
+          (if (icmp-lt nn 0) (Err [Type Diag] (derr "vec type: expected a positive lane count")) (Ok (TVec elem nn))))
+    (if (str-eq head "struct")
+        (Ok (TStruct (try! (sym-of a (try! (need [Sexp] (sx-get items 1) "struct type: missing name")) "struct name"))))
+    (if (str-eq head "dyn")
+        (Ok (TStruct (sconcat a (try! (sym-of a (try! (need [Sexp] (sx-get items 1) "dyn type: expected (dyn Trait)")) "dyn trait name")) "-dyn")))
+    (if (str-eq head "fnptr")
+        (let [cc (try! (sym-of a (try! (need [Sexp] (sx-get items 1) "fnptr type: missing convention")) "fnptr cc"))
+              pv (try! (need-vec (sx-get items 2) "fnptr type: expected a vector of parameter types"))
+              params (try! (parse-types a pv))
+              ret (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 3) "fnptr type: missing return type")))))]
+          (Ok (TFn cc params ret)))
+      (Ok (TApp head (try! (parse-types a (rest-from a items 1)))))))))))))))))
+
+; ---- type parameters (src/parse.rs parse_type_params) ----
+(defstruct TPResult [(params (ptr (ArrayList (slice u8)))) (bounds (ptr (ArrayList Bound))) (consumed bool)])
+(defn parse-type-params [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (i i64)] (-> (Result TPResult Diag))
+  (try (let [a0 (sx-get rest i) a1 (sx-get rest (iadd i 1))]
+    (if (not (and (opt-is-vec a0) (opt-is-vec a1)))
+        (Ok (let [r (alloc-stack TPResult)]
+              (store! (field r params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+              (store! (field r bounds) (box-al [Bound] a (al-new [Bound] a)))
+              (store! (field r consumed) false) (load r)))
+        (let [tp (sx-items (opt-get a0)) (mut params) (al-new [(slice u8)] a) (mut bounds) (al-new [Bound] a) n (sx-len tp) (mut k) 0]
+          (loop (if (icmp-ge (load k) n) (break)
+            (let [entry (sx-at tp (load k))]
+              (store! k (iadd (load k) 1))
+              (if (icmp-eq (sx-tag entry) 2) (al-push! (mut params) (sx-sval entry))
+                (if (icmp-eq (sx-tag entry) 6)
+                    (let [eitems (sx-items entry)
+                          pname (try! (sym-of a (try! (need [Sexp] (sx-get eitems 0) "type parameter: empty () bound")) "type parameter"))
+                          (mut traits) (al-new [(slice u8)] a) tn (sx-len eitems) (mut ti) 1]
+                      (loop (if (icmp-ge (load ti) tn) (break) (do (al-push! (mut traits) (try! (sym-of a (sx-at eitems (load ti)) "bound trait"))) (store! ti (iadd (load ti) 1)))))
+                      (if (icmp-gt (al-len [(slice u8)] (load traits)) 0)
+                          (let [bp (alloc-stack Bound)] (store! (field bp name) pname) (store! (field bp traits) (box-al [(slice u8)] a (load traits))) (al-push! (mut bounds) (load bp))) 0)
+                      (al-push! (mut params) pname))
+                  (return-from :try (Err [TPResult Diag] (derr-at (sx-lo entry) (sx-hi entry) "type parameter must be a name or (name Trait…)"))))))))
+          (Ok (let [r (alloc-stack TPResult)]
+                (store! (field r params) (box-al [(slice u8)] a (load params)))
+                (store! (field r bounds) (box-al [Bound] a (load bounds)))
+                (store! (field r consumed) true) (load r))))))))
+
+; ---- quasiquote (src/parse.rs build_quasi) ----
+(defn build-quasi-seq [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (isvec bool)] (-> (Result Quasi Diag))
+  (try (let [(mut out) (al-new [Quasi] a) n (sx-len items) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (build-quasi a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
+    (Ok (if isvec (QVector (box-al [Quasi] a (load out))) (QList (box-al [Quasi] a (load out))))))))
+(defn build-quasi [(a (ptr Allocator)) (s Sexp)] (-> (Result Quasi Diag))
+  (let [tg (sx-tag s)]
+    (if (icmp-eq tg 6)
+        (let [items (sx-items s)]
+          (if (icmp-eq (sx-len items) 2)
+              (let [h (sx-at items 0)]
+                (if (icmp-eq (sx-tag h) 2)
+                    (let [hs (sx-sval h)]
+                      (if (str-eq hs "unquote")
+                          (match (parse-expr a (sx-at items 1)) (Err [d] (Err d)) (Ok [e] (Ok (QUnquote (box-expr a e)))))
+                        (if (str-eq hs "unquote-splicing")
+                          (match (parse-expr a (sx-at items 1)) (Err [d] (Err d)) (Ok [e] (Ok (QSplice (box-expr a e)))))
+                          (build-quasi-seq a items false))))
+                    (build-quasi-seq a items false)))
+              (build-quasi-seq a items false)))
+      (if (icmp-eq tg 7) (build-quasi-seq a (sx-items s) true)
+          (Ok (QLit (box-sexp a s)))))))
+
+; ---- expressions (src/parse.rs parse_expr / parse_list_expr) ----
+(defn mk-bin [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (head (slice u8)) (op i64)] (-> (Result ExprKind Diag))
+  (try (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args head)))
+    (Ok (EBin op (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))))))))
+(defn mk-cmp [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (head (slice u8)) (op i64)] (-> (Result ExprKind Diag))
+  (try (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args head)))
+    (Ok (ECmp op (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))))))))
+(defn binop-of [(h (slice u8))] (-> i64)
+  (if (str-eq h "iadd") 0 (if (str-eq h "isub") 1 (if (str-eq h "imul") 2 (if (str-eq h "idiv") 3 (if (str-eq h "irem") 4 (if (str-eq h "udiv") 5 (if (str-eq h "urem") 6 (if (str-eq h "iand") 7 (if (str-eq h "ior") 8 (if (str-eq h "ixor") 9 (if (str-eq h "ishl") 10 (if (str-eq h "ishr") 11 (if (str-eq h "fadd") 0 (if (str-eq h "fsub") 1 (if (str-eq h "fmul") 2 (if (str-eq h "fdiv") 3 (if (str-eq h "frem") 4 -1))))))))))))))))))
+(defn cmpop-of [(h (slice u8))] (-> i64)
+  (if (str-eq h "fcmp-lt") 0 (if (str-eq h "fcmp-le") 1 (if (str-eq h "fcmp-gt") 2 (if (str-eq h "fcmp-ge") 3 (if (str-eq h "fcmp-eq") 4 (if (str-eq h "fcmp-ne") 5 (if (str-eq h "icmp-lt") 0 (if (str-eq h "icmp-le") 1 (if (str-eq h "icmp-gt") 2 (if (str-eq h "icmp-ge") 3 (if (str-eq h "icmp-eq") 4 (if (str-eq h "icmp-ne") 5 -1)))))))))))))
+(defn codeop-of [(h (slice u8))] (-> i64)
+  (if (str-eq h "code-list?") 0 (if (str-eq h "code-sym?") 1 (if (str-eq h "code-int?") 2 (if (str-eq h "code-count") 3 (if (str-eq h "code-nth") 4 (if (str-eq h "code-sym") 5 (if (str-eq h "code-int") 6 (if (str-eq h "code-rest") 7 (if (str-eq h "code-eq") 10 (if (str-eq h "code-keyword?") 11 (if (str-eq h "code-symbol") 12 (if (str-eq h "code-str") 13 (if (str-eq h "code-field-count") 14 (if (str-eq h "code-field-name") 15 (if (str-eq h "code-field-kind") 16 (if (str-eq h "code-field-type") 17 (if (str-eq h "code-variant-sum") 18 (if (str-eq h "code-variant-count") 19 (if (str-eq h "code-variant-name") 20 (if (str-eq h "code-variant-fields") 21 (if (str-eq h "code-trait-method-count") 22 (if (str-eq h "code-trait-method-name") 23 (if (str-eq h "code-trait-arity") 24 (if (str-eq h "code-trait-param-name") 25 (if (str-eq h "code-trait-param-type") 26 (if (str-eq h "code-trait-ret-type") 27 (if (str-eq h "str-bytes") 28 (if (str-eq h "bytes->str") 29 -1)))))))))))))))))))))))))))))
+(defn typequery-of [(h (slice u8))] (-> i64)
+  (if (str-eq h "field-count") 0 (if (str-eq h "variant-count") 1 (if (str-eq h "struct?") 2 (if (str-eq h "sum?") 3 (if (str-eq h "int?") 4 (if (str-eq h "float?") 5 (if (str-eq h "ptr?") 6 (if (str-eq h "array?") 7 -1)))))))))
+(defn fieldmeta-of [(h (slice u8))] (-> i64)
+  (if (str-eq h "field-name") 0 (if (str-eq h "field-type-kind") 1 (if (str-eq h "field-type-name") 2 -1))))
+(defn alloc-form [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (storage i64)] (-> (Result ExprKind Diag))
+  (try (let [ty (match (sx-get args 0) (Some [t] (try! (parse-type a t))) (None [] (TInt 64 true)))] (Ok (EAlloc storage ty)))))
+(defn parse-exprs [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList Expr)) Diag))
+  (try (let [(mut out) (al-new [Expr] a) n (sx-len items) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (parse-expr a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
+    (Ok (box-al [Expr] a (load out))))))
+(defn parse-expr [(a (ptr Allocator)) (s Sexp)] (-> (Result Expr Diag))
+  (match (parse-expr-inner a s)
+    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s))))
+    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s))))))
+(defn parse-expr-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result ExprKind Diag))
+  (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
+    (if (icmp-eq tg 0) (Ok (EInt (sx-ival s)))
+    (if (icmp-eq tg 1) (Ok (EFloat (sx-ival s)))
+    (if (icmp-eq tg 2) (let [nm (sx-sval s)] (if (str-eq nm "true") (Ok (EBool true)) (if (str-eq nm "false") (Ok (EBool false)) (Ok (EVar nm)))))
+    (if (icmp-eq tg 3) (Err (derr-at slo shi (sconcat a "unexpected keyword :" (sconcat a (sx-sval s) " in expression"))))
+    (if (icmp-eq tg 4) (Ok (EStr (sx-sval s)))
+    (if (icmp-eq tg 5) (Ok (ECStr (sx-sval s)))
+    (if (icmp-eq tg 7) (Err (derr-at slo shi "unexpected vector in expression"))
+      (parse-list-expr a (sx-items s) slo shi))))))))))
+
+; A leading :label keyword (src/parse.rs parse_label).
+(defstruct LabelSplit [(label (Option (slice u8))) (rest (ptr (ArrayList Sexp)))])
+(defn split-label [(a (ptr Allocator)) (args (ptr (ArrayList Sexp)))] (-> LabelSplit)
+  (let [r (alloc-stack LabelSplit)]
+    (if (and (icmp-gt (sx-len args) 0) (icmp-eq (sx-tag (sx-at args 0)) 3))
+        (do (store! (field r label) (Some (sx-sval (sx-at args 0)))) (store! (field r rest) (rest-from a args 1)))
+        (do (store! (field r label) (None [(slice u8)])) (store! (field r rest) args)))
+    (load r)))
+
+; (let [binds...] body...) — src/parse.rs `let` arm.
+(defn parse-let [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+  (try (let [bvo (sx-get args 0)]
+    (if (not (opt-is-vec bvo)) (return-from :try (Err [ExprKind Diag] (derr-at slo shi "let: expected binding vector"))) 0)
+    (let [bv (sx-items (opt-get bvo)) nb (sx-len bv)]
+      (if (not (icmp-eq (urem nb 2) 0)) (return-from :try (Err [ExprKind Diag] (derr-at slo shi "let: bindings must be name/value pairs"))) 0)
+      (let [(mut binds) (al-new [Bind] a) (mut k) 0]
+        (loop (if (icmp-ge (load k) nb) (break)
+          (let [nmf (sx-at bv (load k)) vf (sx-at bv (iadd (load k) 1))]
+            (let [bp (alloc-stack Bind)]
+              (if (icmp-eq (sx-tag nmf) 2)
+                  (do (store! (field bp name) (sx-sval nmf)) (store! (field bp mutable) false))
+                (if (and (icmp-eq (sx-tag nmf) 6) (and (icmp-eq (sx-len (sx-items nmf)) 2) (str-eq (try! (head-sym a (sx-items nmf))) "mut")))
+                    (do (store! (field bp name) (try! (sym-of a (sx-at (sx-items nmf) 1) "let binding name"))) (store! (field bp mutable) true))
+                  (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo nmf) (sx-hi nmf) (sconcat3 a "let binding name must be `name` or `(mut name)`, got " (sexp-display a nmf) ""))))))
+              (store! (field bp value) (try! (parse-expr a vf)))
+              (al-push! (mut binds) (load bp)))
+            (store! k (iadd (load k) 2)))))
+        (let [body (try! (parse-exprs a (rest-from a args 1)))]
+          (if (icmp-eq (al-len [Expr] (load body)) 0) (return-from :try (Err [ExprKind Diag] (derr-at slo shi "let: empty body"))) 0)
+          (Ok (ELet (box-al [Bind] a (load binds)) body))))))))
+
+; (match scrut arms...) — src/parse.rs `match` arm.
+(defn parse-match [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+  (try (let [scrut (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "match: missing scrutinee")))))
+             (mut arms) (al-new [Arm] a) n (sx-len args) (mut i) 1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (let [arm-s (sx-at args (load i))]
+        (store! i (iadd (load i) 1))
+        (let [al (try! (as-list arm-s "match arm must be (Variant [binds] body)"))
+              variant (try! (sym-of a (try! (need [Sexp] (sx-get al 0) "arm: missing variant")) "variant"))
+              bvo (sx-get al 1)]
+          (if (not (opt-is-vec bvo)) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo arm-s) (sx-hi arm-s) (sconcat3 a "arm '" variant "': expected a bind vector")))) 0)
+          (let [bv (sx-items (opt-get bvo)) (mut binds) (al-new [(slice u8)] a) nb (sx-len bv) (mut bi) 0]
+            (loop (if (icmp-ge (load bi) nb) (break) (do (al-push! (mut binds) (try! (sym-of a (sx-at bv (load bi)) "bind"))) (store! bi (iadd (load bi) 1)))))
+            (let [bodyf (try! (parse-exprs a (rest-from a al 2))) nbody (al-len [Expr] (load bodyf))]
+              (let [body (if (icmp-eq nbody 0) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo arm-s) (sx-hi arm-s) (sconcat3 a "arm '" variant "': missing body"))))
+                           (if (icmp-eq nbody 1) (al-get [Expr] (load bodyf) 0) (mk-expr (EDo bodyf) (sx-lo arm-s) (sx-hi arm-s))))]
+                (let [ap (alloc-stack Arm)] (store! (field ap variant) variant) (store! (field ap binds) (box-al [(slice u8)] a (load binds))) (store! (field ap body) body) (al-push! (mut arms) (load ap))))))))))
+    (Ok (EMatch scrut (box-al [Arm] a (load arms)))))))
+
+; (llvm-ir RESULT [operands] "BODY") — src/parse.rs `llvm-ir` arm.
+(defn parse-llvm-ir [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+  (try (if (icmp-ne (sx-len args) 3) (Err [ExprKind Diag] (derr-at slo shi "llvm-ir: expects (llvm-ir RESULT-TYPE [operands...] \"BODY\")"))
+    (let [result (try! (parse-type a (sx-at args 0)))
+          ov (sx-at args 1)]
+      (if (not (icmp-eq (sx-tag ov) 7)) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo ov) (sx-hi ov) "llvm-ir: expected a [operand...] vector"))) 0)
+      (let [operands (try! (parse-exprs a (sx-items ov))) bv (sx-at args 2)]
+        (if (not (icmp-eq (sx-tag bv) 4)) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo bv) (sx-hi bv) "llvm-ir: body must be a string literal"))) 0)
+        (Ok (ELlvmIr result operands (sx-sval bv))))))))
+
+; the big head dispatch (src/parse.rs parse_list_expr).
+(defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+  (try (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
+    (let [bop (binop-of head)]
+    (if (icmp-ge bop 0) (mk-bin a args head bop)
+    (let [cop (cmpop-of head)]
+    (if (icmp-ge cop 0) (mk-cmp a args head cop)
+    (if (str-eq head "inot") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "inot: expects (inot x)")) (Ok (ENot (box-expr a (try! (parse-expr a (sx-at args 0)))))))
+    (if (str-eq head "and")
+        (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "and")))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))) (box-expr a (mk-expr (EBool false) slo shi)))))
+    (if (str-eq head "or")
+        (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "or")))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (mk-expr (EBool true) slo shi)) (box-expr a (try! (parse-expr a (load (field tp y))))))))
+    (if (str-eq head "not") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "not: expects (not x)"))
+        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (mk-expr (EBool false) slo shi)) (box-expr a (mk-expr (EBool true) slo shi)))))
+    (if (str-eq head "if") (if (icmp-ne nargs 3) (Err [ExprKind Diag] (derr-at slo shi "if: expects (if cond then else)"))
+        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (try! (parse-expr a (sx-at args 1)))) (box-expr a (try! (parse-expr a (sx-at args 2)))))))
+    (if (str-eq head "do") (Ok (EDo (try! (parse-exprs a args))))
+    (if (str-eq head "comptime") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "comptime: expects (comptime expr)")) (Ok (EComptime (box-expr a (try! (parse-expr a (sx-at args 0)))))))
+    (if (str-eq head "let") (parse-let a args slo shi)
+    (if (str-eq head "call")
+        (let [f (try! (sym-of a (try! (need [Sexp] (sx-get args 0) "call: missing function")) "call target"))]
+          (Ok (ECall f (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a (rest-from a args 1))))))
+    (if (str-eq head "zeroed") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "zeroed: expects (zeroed TYPE)")) (Ok (EZeroed (try! (parse-type a (sx-at args 0))))))
+    (if (str-eq head "mut") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "mut: expects (mut PLACE)")) (Ok (EBorrow true (box-expr a (try! (parse-expr a (sx-at args 0)))))))
+    (if (str-eq head "alloc-stack") (alloc-form a args 0)
+    (if (str-eq head "alloc-static") (alloc-form a args 1)
+    (if (str-eq head "alloc-heap") (alloc-form a args 2)
+    (if (str-eq head "field")
+        (Ok (EField (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "field: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "field: missing field name")) "field name"))))
+    (if (str-eq head "get")
+        (Ok (EBitGet (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "get: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "get: missing field name")) "field name"))))
+    (if (str-eq head "set!")
+        (Ok (EBitSet (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "set!: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "set!: missing field name")) "field name")) (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 2) "set!: missing value")))))))
+    (if (str-eq head "fnptr-of") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "fnptr-of: expects (fnptr-of name)")) (Ok (EFnPtrOf (try! (sym-of a (sx-at args 0) "function name")))))
+    (if (str-eq head "call-ptr")
+        (Ok (ECallPtr (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "call-ptr: missing function pointer"))))) (try! (parse-exprs a (rest-from a args 1)))))
+    (if (str-eq head "load") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "load: expects (load ptr)")) (Ok (ELoad (box-expr a (try! (parse-expr a (sx-at args 0)))))))
+    (if (str-eq head "store!")
+        (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "store!"))) (Ok (EStore (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))))))
+    (if (str-eq head "free") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "free: expects (free ptr)")) (Ok (EFree (box-expr a (try! (parse-expr a (sx-at args 0)))))))
+    (if (str-eq head "make-dyn") (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi "make-dyn: expects (make-dyn Trait expr)"))
+        (Ok (EErase (try! (sym-of a (sx-at args 0) "make-dyn trait name")) (box-expr a (try! (parse-expr a (sx-at args 1)))))))
+    (if (str-eq head "index")
+        (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "index"))) (Ok (EIndex (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))))))
+    (if (str-eq head "cast") (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi "cast: expects (cast :type expr)"))
+        (Ok (ECast (try! (parse-type a (sx-at args 0))) (box-expr a (try! (parse-expr a (sx-at args 1)))))))
+    (if (str-eq head "match") (parse-match a args slo shi)
+    (if (str-eq head "sizeof") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "sizeof: expects (sizeof TYPE)")) (Ok (ESizeOf (try! (parse-type a (sx-at args 0))))))
+    (if (str-eq head "alignof") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "alignof: expects (alignof TYPE)")) (Ok (EAlignOf (try! (parse-type a (sx-at args 0))))))
+    (if (str-eq head "offsetof") (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi "offsetof: expects (offsetof TYPE field)")) (Ok (EOffsetOf (try! (parse-type a (sx-at args 0))) (try! (sym-of a (sx-at args 1) "field")))))
+    (if (icmp-ge (typequery-of head) 0)
+        (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi (sconcat a head (sconcat a ": expects (" (sconcat a head " TYPE)"))))) (Ok (ETypeQuery (typequery-of head) (try! (parse-type a (sx-at args 0))))))
+    (if (icmp-ge (fieldmeta-of head) 0)
+        (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi (sconcat a head (sconcat a ": expects (" (sconcat a head " TYPE index)"))))) (Ok (EFieldMeta (fieldmeta-of head) (try! (parse-type a (sx-at args 0))) (box-expr a (try! (parse-expr a (sx-at args 1)))))))
+    (if (str-eq head "field-index") (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi "field-index: expects (field-index TYPE name)")) (Ok (EFieldIndex (try! (parse-type a (sx-at args 0))) (box-expr a (try! (parse-expr a (sx-at args 1)))))))
+    (if (str-eq head "quote") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "quote: expects (quote FORM)")) (Ok (EQuote (box-sexp a (sx-at args 0)))))
+    (if (str-eq head "quasiquote") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "quasiquote: expects one template")) (Ok (EQuasi (try! (build-quasi a (sx-at args 0))))))
+    (if (str-eq head "unquote") (Err [ExprKind Diag] (derr-at slo shi "unquote (~) is only valid inside a quasiquote (`)"))
+    (if (str-eq head "gensym") (if (not (icmp-eq nargs 0)) (Err [ExprKind Diag] (derr-at slo shi "gensym: expects (gensym)")) (Ok (ECodeOp 8 (box-al [Expr] a (al-new [Expr] a)))))
+    (if (str-eq head "target-arch") (if (not (icmp-eq nargs 0)) (Err [ExprKind Diag] (derr-at slo shi "target-arch: expects (target-arch)")) (Ok (ECodeOp 30 (box-al [Expr] a (al-new [Expr] a)))))
+    (if (str-eq head "error") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "error: expects (error MSG)")) (Ok (ECodeOp 9 (try! (parse-exprs a args)))))
+    (if (icmp-ge (codeop-of head) 0) (Ok (ECodeOp (codeop-of head) (try! (parse-exprs a args))))
+    (if (str-eq head "loop")
+        (let [lr (alloc-stack LabelSplit)] (store! lr (split-label a args))
+          (let [body (try! (parse-exprs a (load (field lr rest))))]
+            (if (icmp-eq (al-len [Expr] (load body)) 0) (Err [ExprKind Diag] (derr-at slo shi "loop: expects (loop [:label] body...)")) (Ok (ELoop (load (field lr label)) body)))))
+    (if (str-eq head "break")
+        (let [lr (alloc-stack LabelSplit)] (store! lr (split-label a args))
+          (let [r (load (field lr rest))]
+            (if (icmp-gt (sx-len r) 1) (Err [ExprKind Diag] (derr-at slo shi "break: expects (break [:label] [value])"))
+                (Ok (EBreak (load (field lr label)) (match (sx-get r 0) (Some [e] (Some (box-expr a (try! (parse-expr a e))))) (None [] (None [(ptr Expr)]))))))))
+    (if (str-eq head "continue")
+        (let [lr (alloc-stack LabelSplit)] (store! lr (split-label a args))
+          (if (icmp-gt (sx-len (load (field lr rest))) 0) (Err [ExprKind Diag] (derr-at slo shi "continue: expects (continue [:label])")) (Ok (EContinue (load (field lr label))))))
+    (if (str-eq head "llvm-ir") (parse-llvm-ir a args slo shi)
+      (let [fv (sx-get args 0)]
+        (if (opt-is-vec fv)
+            (Ok (ECall head (try! (parse-types a (sx-items (opt-get fv)))) (try! (parse-exprs a (rest-from a args 1)))))
+            (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+; ---- declaration parsers (src/parse.rs) ----
+(defn func-name [(f Func)] (-> (slice u8)) (let [p (alloc-stack Func)] (store! p f) (load (field p name))))
+
+; variant/struct fields: (name :type) -> Field.
+(defn parse-fields [(a (ptr Allocator)) (fv (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList Field)) Diag))
+  (try (let [(mut fs) (al-new [Field] a) n (sx-len fv) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (let [f (sx-at fv (load i))]
+        (store! i (iadd (load i) 1))
+        (let [fl (try! (as-list f "field must be (name :type)"))
+              fn0 (try! (sym-of a (sx-at fl 0) "field name"))
+              ft (try! (parse-type a (try! (need [Sexp] (sx-get fl 1) "field type"))))]
+          (let [fp (alloc-stack Field)] (store! (field fp name) fn0) (store! (field fp ty) ft) (al-push! (mut fs) (load fp)))))))
+    (Ok (box-al [Field] a (load fs))))))
+
+(defn parse-const [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Const Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "const: missing name")) "const name")) nr (sx-len rest)]
+    (if (icmp-eq nr 2)
+        (let [value (try! (parse-expr a (sx-at rest 1)))]
+          (Ok (let [c (alloc-stack Const)] (store! (field c name) name) (store! (field c ty) (None [Type])) (store! (field c value) value) (load c))))
+      (if (icmp-eq nr 3)
+          (let [ty (try! (parse-type a (sx-at rest 1))) value (try! (parse-expr a (sx-at rest 2)))]
+            (Ok (let [c (alloc-stack Const)] (store! (field c name) name) (store! (field c ty) (Some ty)) (store! (field c value) value) (load c))))
+          (Err [Const Diag] (derr "const: expected (const NAME VALUE) or (const NAME TYPE VALUE)")))))))
+
+(defn parse-defsum [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result SumDef Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defsum: missing name")) "sum name"))
+             (mut i) 1 (mut tps) (al-new [(slice u8)] a)]
+    (if (opt-is-vec (sx-get rest (load i)))
+        (do (let [it (sx-items (opt-get (sx-get rest (load i)))) n (sx-len it) (mut k) 0]
+              (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut tps) (try! (sym-of a (sx-at it (load k)) "type parameter"))) (store! k (iadd (load k) 1))))))
+            (store! i (iadd (load i) 1))) 0)
+    (let [(mut variants) (al-new [Variant] a) nr (sx-len rest) (mut vi) (load i)]
+      (loop (if (icmp-ge (load vi) nr) (break)
+        (let [v (sx-at rest (load vi))]
+          (store! vi (iadd (load vi) 1))
+          (let [vl (try! (as-list v "variant must be (Name [fields])"))
+                vname (try! (sym-of a (try! (need [Sexp] (sx-get vl 0) "variant: missing name")) "variant name"))
+                fields (if (opt-is-vec (sx-get vl 1)) (try! (parse-fields a (sx-items (opt-get (sx-get vl 1)))))
+                         (match (sx-get vl 1)
+                           (Some [_] (return-from :try (Err [SumDef Diag] (derr-at (sx-lo v) (sx-hi v) (sconcat3 a "variant '" vname "': fields must be a vector")))))
+                           (None [] (box-al [Field] a (al-new [Field] a)))))]
+            (let [vp (alloc-stack Variant)] (store! (field vp name) vname) (store! (field vp fields) fields) (al-push! (mut variants) (load vp)))))))
+      (Ok (let [sd (alloc-stack SumDef)] (store! (field sd name) name) (store! (field sd type_params) (box-al [(slice u8)] a (load tps))) (store! (field sd variants) (box-al [Variant] a (load variants))) (load sd)))))))
+
+(defn compute-backing [(a (ptr Allocator)) (name (slice u8)) (acc i64) (backing i64)] (-> (Result i64 Diag))
+  (if (icmp-ge backing 0)
+      (if (icmp-ge backing acc) (Ok backing)
+          (Err [i64 Diag] (derr (sconcat a (sconcat3 a "defstruct '" name "': :backing i") (sconcat a (i64->str a backing) (sconcat a " too small for " (sconcat a (i64->str a acc) " bits")))))))
+      (if (icmp-le acc 8) (Ok 8) (if (icmp-le acc 16) (Ok 16) (if (icmp-le acc 32) (Ok 32) (if (icmp-le acc 64) (Ok 64)
+          (Err [i64 Diag] (derr (sconcat a (sconcat3 a "defstruct '" name "': ") (sconcat a (i64->str a acc) " bits needs an explicit :backing"))))))))))
+
+(defstruct BitField [(fname (slice u8)) (width i64)])
+(defn parse-bitfield [(a (ptr Allocator)) (f Sexp)] (-> (Result BitField Diag))
+  (try (let [fl (try! (as-list f "bitfield must be (name :bits N)"))
+             fname (try! (sym-of a (sx-at fl 0) "field name"))
+             width (if (and (opt-is-kw (sx-get fl 1) "bits") (opt-is-pos-int (sx-get fl 2))) (opt-int (sx-get fl 2)) -1)]
+    (if (icmp-lt width 0) (Err [BitField Diag] (derr-at (sx-lo f) (sx-hi f) (sconcat3 a "field '" fname "' must be (name :bits N)")))
+        (Ok (let [b (alloc-stack BitField)] (store! (field b fname) fname) (store! (field b width) width) (load b)))))))
+
+(defn finish-bits [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (backing i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
+  (let [(mut fields) (al-new [Field] a) (mut offsets) (al-new [i64] a) (mut acc) 0 n (sx-len fields-items) (mut fi) 0
+        (mut out) (zeroed (Result StructDef Diag)) (mut failed) false]
+    (loop (if (icmp-ge (load fi) n) (break)
+      (let [f (sx-at fields-items (load fi))]
+        (store! fi (iadd (load fi) 1))
+        (match (parse-bitfield a f)
+          (Err [d] (do (store! out (Err d)) (store! failed true) (break)))
+          (Ok [fld]
+            (let [bp (alloc-stack BitField)] (store! bp fld)
+              (let [fr (alloc-stack Field)] (store! (field fr name) (load (field bp fname))) (store! (field fr ty) (TInt (load (field bp width)) false)) (al-push! (mut fields) (load fr)))
+              (al-push! (mut offsets) (load acc))
+              (store! acc (iadd (load acc) (load (field bp width))))))))))
+    (if (load failed) (load out)
+        (match (compute-backing a name (load acc) backing)
+          (Err [d] (Err d))
+          (Ok [bk] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd layout) (LBits bk (box-al [i64] a (load offsets)))) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
+
+(defstruct NField [(fname (slice u8)) (fty Type) (at (Option i64))])
+(defn parse-normal-field [(a (ptr Allocator)) (f Sexp)] (-> (Result NField Diag))
+  (try (let [fl (try! (as-list f "field must be (name :type [:at N])"))
+             fname (try! (sym-of a (sx-at fl 0) "field name"))
+             fty (try! (parse-type a (try! (need [Sexp] (sx-get fl 1) "field missing type"))))
+             (mut at) (None [i64]) (mut j) 2 fln (sx-len fl) (mut out) (zeroed (Result NField Diag)) (mut bad) false]
+    (loop (if (icmp-ge (load j) fln) (break)
+      (let [fj (sx-at fl (load j))]
+        (if (and (icmp-eq (sx-tag fj) 3) (str-eq (sx-sval fj) "at"))
+            (do (store! at (Some (try! (int-val a (try! (need [Sexp] (sx-get fl (iadd (load j) 1)) ":at missing value")) "at")))) (store! j (iadd (load j) 2)))
+            (do (store! out (Err (derr-at (sx-lo fj) (sx-hi fj) (sconcat a "unknown field option " (sexp-display a fj))))) (store! bad true) (break))))))
+    (if (load bad) (load out)
+        (Ok (let [nf (alloc-stack NField)] (store! (field nf fname) fname) (store! (field nf fty) fty) (store! (field nf at) (load at)) (load nf)))))))
+
+(defn compute-layout [(a (ptr Allocator)) (name (slice u8)) (packed bool) (explicit bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (anyat bool) (ats (ptr (ArrayList (Option i64))))] (-> (Result Layout Diag))
+  (if (icmp-ge aligned 0) (Ok (LAligned aligned))
+    (if (or explicit anyat)
+        (let [(mut offs) (al-new [i64] a) na (al-len [(Option i64)] (load ats)) (mut oi) 0 (mut bad) false]
+          (loop (if (icmp-ge (load oi) na) (break)
+            (match (al-get [(Option i64)] (load ats) (load oi))
+              (Some [o] (do (al-push! (mut offs) o) (store! oi (iadd (load oi) 1))))
+              (None [] (do (store! bad true) (break))))))
+          (if (load bad) (Err (derr (sconcat3 a "defstruct '" name "': explicit layout needs :at on every field")))
+              (Ok (LExplicit (box-al [i64] a (load offs)) (if has-size (Some exp-size) (None [i64])) exp-align))))
+      (if packed (Ok (LPacked)) (Ok (LC))))))
+
+(defn finish-normal [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (packed bool) (explicit bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
+  (let [(mut fields) (al-new [Field] a) (mut ats) (al-new [(Option i64)] a) (mut anyat) false n (sx-len fields-items) (mut fi) 0
+        (mut out) (zeroed (Result StructDef Diag)) (mut failed) false]
+    (loop (if (icmp-ge (load fi) n) (break)
+      (let [f (sx-at fields-items (load fi))]
+        (store! fi (iadd (load fi) 1))
+        (match (parse-normal-field a f)
+          (Err [d] (do (store! out (Err d)) (store! failed true) (break)))
+          (Ok [nf]
+            (let [np (alloc-stack NField)] (store! np nf)
+              (let [fr (alloc-stack Field)] (store! (field fr name) (load (field np fname))) (store! (field fr ty) (load (field np fty))) (al-push! (mut fields) (load fr)))
+              (match (load (field np at)) (Some [_] (store! anyat true)) (None [] false))
+              (al-push! (mut ats) (load (field np at)))))))))
+    (if (load failed) (load out)
+        (match (compute-layout a name packed explicit aligned exp-size has-size exp-align (load anyat) (box-al [(Option i64)] a (load ats)))
+          (Err [d] (Err d))
+          (Ok [layout] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd layout) layout) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
+
+(defstruct StructOpts [(packed bool) (explicit bool) (bits bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (backing i64) (next i64)])
+(defn parse-struct-opts [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (start i64)] (-> (Result StructOpts Diag))
+  (let [(mut packed) false (mut explicit) false (mut bits) false (mut aligned) -1 (mut exp-size) -1 (mut has-size) false (mut exp-align) 0 (mut backing) -1
+        (mut i) start (mut out) (zeroed (Result StructOpts Diag)) (mut failed) false]
+    (loop
+      (match (sx-get rest (load i))
+        (None [] (break))
+        (Some [kw]
+          (if (not (icmp-eq (sx-tag kw) 3)) (break)
+            (match (need [Sexp] (sx-get rest (iadd (load i) 1)) (sconcat3 a "defstruct: ':" (sx-sval kw) "' missing value"))
+              (Err [d] (do (store! out (Err d)) (store! failed true) (break)))
+              (Ok [val]
+                (let [k (sx-sval kw) (mut stop) false]
+                  (if (str-eq k "layout")
+                      (if (icmp-eq (sx-tag val) 2)
+                          (let [vs (sx-sval val)]
+                            (if (str-eq vs "c") 0
+                              (if (str-eq vs "packed") (do (store! packed true) 0)
+                                (if (str-eq vs "explicit") (do (store! explicit true) 0)
+                                  (if (str-eq vs "bits") (do (store! bits true) 0)
+                                    (do (store! out (Err [StructOpts Diag] (derr-at (sx-lo val) (sx-hi val) "layout must be c, packed, explicit, bits, or (align N)"))) (store! failed true) (store! stop true) 0))))))
+                        (if (and (icmp-eq (sx-tag val) 6) (icmp-gt (sx-len (sx-items val)) 0))
+                            (let [vit (sx-items val)]
+                              (if (and (icmp-eq (sx-tag (sx-at vit 0)) 2) (str-eq (sx-sval (sx-at vit 0)) "align"))
+                                  (match (pow2 (sx-get vit 1)) (Ok [v] (store! aligned v)) (Err [d] (do (store! out (Err d)) (store! failed true) (store! stop true) 0)))
+                                  (do (store! out (Err [StructOpts Diag] (derr-at (sx-lo val) (sx-hi val) "layout must be c, packed, explicit, bits, or (align N)"))) (store! failed true) (store! stop true) 0)))
+                            (do (store! out (Err [StructOpts Diag] (derr-at (sx-lo val) (sx-hi val) "layout must be c, packed, explicit, bits, or (align N)"))) (store! failed true) (store! stop true) 0)))
+                    (if (str-eq k "size")
+                        (match (int-val a val "size") (Ok [v] (do (store! exp-size v) (store! has-size true) 0)) (Err [d] (do (store! out (Err d)) (store! failed true) (store! stop true) 0)))
+                      (if (str-eq k "align")
+                          (match (pow2 (sx-get rest (iadd (load i) 1))) (Ok [v] (store! exp-align v)) (Err [d] (do (store! out (Err d)) (store! failed true) (store! stop true) 0)))
+                        (if (str-eq k "backing")
+                            (match (parse-type a val) (Err [d] (do (store! out (Err d)) (store! failed true) (store! stop true) 0))
+                              (Ok [bt] (let [bb (type-int-bits bt)] (if (icmp-lt bb 0) (do (store! out (Err [StructOpts Diag] (derr-at (sx-lo val) (sx-hi val) ":backing must be an integer type"))) (store! failed true) (store! stop true) 0) (store! backing bb)))))
+                          (do (store! stop true) 0)))))
+                  (if (load stop) (break) (store! i (iadd (load i) 2))))))))))
+    (if (load failed) (load out)
+        (Ok (let [o (alloc-stack StructOpts)]
+              (store! (field o packed) (load packed)) (store! (field o explicit) (load explicit)) (store! (field o bits) (load bits))
+              (store! (field o aligned) (load aligned)) (store! (field o exp-size) (load exp-size)) (store! (field o has-size) (load has-size))
+              (store! (field o exp-align) (load exp-align)) (store! (field o backing) (load backing)) (store! (field o next) (load i)) (load o))))))
+
+(defn parse-defstruct [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defstruct: missing name")) "struct name"))
+             opts (alloc-stack StructOpts)]
+    (store! opts (try! (parse-struct-opts a rest 1)))
+    (let [tpr (alloc-stack TPResult)] (store! tpr (try! (parse-type-params a rest (load (field opts next)))))
+      (let [i (if (load (field tpr consumed)) (iadd (load (field opts next)) 1) (load (field opts next)))
+            fields-items (if (opt-is-vec (sx-get rest i)) (sx-items (opt-get (sx-get rest i))) (zeroed (ptr (ArrayList Sexp))))]
+        (if (icmp-eq (cast i64 fields-items) 0) (Err [StructDef Diag] (derr (sconcat3 a "defstruct '" name "': expected a field vector")))
+          (if (load (field opts bits))
+              (finish-bits a name (load (field tpr params)) (load (field opts backing)) fields-items)
+              (finish-normal a name (load (field tpr params)) (load (field opts packed)) (load (field opts explicit)) (load (field opts aligned)) (load (field opts exp-size)) (load (field opts has-size)) (load (field opts exp-align)) fields-items))))))))
+(defn parse-extern [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Extern Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "extern: missing name")) "extern name")) (mut i) 1 (mut cc) "c"]
+    (match (sx-get rest (load i))
+      (Some [k] (if (and (icmp-eq (sx-tag k) 3) (str-eq (sx-sval k) "cc"))
+                    (do (store! cc (try! (sym-of a (try! (need [Sexp] (sx-get rest (iadd (load i) 1)) "extern: ':cc' missing convention")) "cc name"))) (store! i (iadd (load i) 2)) 0) 0))
+      (None [] 0))
+    (let [params-items (try! (need-vec (sx-get rest (load i)) (sconcat3 a "extern '" name "': expected a vector of parameter types")))]
+      (store! i (iadd (load i) 1))
+      (let [pn (sx-len params-items)
+            variadic (if (icmp-gt pn 0) (let [last (sx-at params-items (isub pn 1))] (and (icmp-eq (sx-tag last) 2) (str-eq (sx-sval last) "..."))) false)
+            fixed-n (if variadic (isub pn 1) pn) (mut params) (al-new [Type] a) (mut pi) 0]
+        (loop (if (icmp-ge (load pi) fixed-n) (break) (do (al-push! (mut params) (try! (parse-type a (sx-at params-items (load pi))))) (store! pi (iadd (load pi) 1)))))
+        (let [ret-l (try! (as-list (try! (need [Sexp] (sx-get rest (load i)) "extern: missing (-> :type)")) "expected (-> :type)"))]
+          (if (not (str-eq (try! (head-sym a ret-l)) "->")) (return-from :try (Err [Extern Diag] (derr (sconcat3 a "extern '" name "': expected (-> :type)")))) 0)
+          (let [ret (try! (parse-type a (try! (need [Sexp] (sx-get ret-l 1) "(-> ) missing type"))))]
+            (Ok (let [e (alloc-stack Extern)] (store! (field e name) name) (store! (field e cc) (load cc)) (store! (field e params) (box-al [Type] a (load params))) (store! (field e variadic) variadic) (store! (field e ret) ret) (load e))))))))))
+
+(defn native-cc-parse [(s (slice u8))] (-> i64)
+  (if (or (str-eq s "c") (str-eq s "ccc")) 0 (if (or (str-eq s "fast") (str-eq s "fastcc")) 1 (if (or (str-eq s "cold") (str-eq s "coldcc")) 2 -1))))
+
+(defn parse-defcc [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Convention Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defcc: missing name")) "defcc name"))
+             (mut params) (box-al [(slice u8)] a (al-new [(slice u8)] a)) (mut ret) (None [(slice u8)])
+             (mut clobber) (box-al [(slice u8)] a (al-new [(slice u8)] a)) (mut preserve) (box-al [(slice u8)] a (al-new [(slice u8)] a))
+             (mut native) -1 (mut shim) false (mut i) 1 nr (sx-len rest)]
+    (loop (if (icmp-ge (load i) nr) (break)
+      (let [kw (try! (kw-of a (sx-at rest (load i)) "defcc option"))
+            val (try! (need [Sexp] (sx-get rest (iadd (load i) 1)) (sconcat3 a "defcc: option ':" kw "' missing value")))]
+        (if (str-eq kw "params") (do (store! params (try! (sym-vec a val "params"))) 0)
+          (if (str-eq kw "ret") (do (store! ret (Some (try! (sym-of a val "ret")))) 0)
+            (if (str-eq kw "clobber") (do (store! clobber (try! (sym-vec a val "clobber"))) 0)
+              (if (str-eq kw "preserve") (do (store! preserve (try! (sym-vec a val "preserve"))) 0)
+                (if (str-eq kw "native")
+                    (let [nn (try! (sym-of a val "native")) code (native-cc-parse nn)]
+                      (if (icmp-lt code 0) (return-from :try (Err [Convention Diag] (derr-at (sx-lo val) (sx-hi val) (sconcat3 a "defcc: unknown native cc '" nn "'")))) (do (store! native code) 0)))
+                  (if (str-eq kw "lower")
+                      (if (str-eq (try! (sym-of a val "lower")) "shim") (do (store! shim true) 0) 0)
+                    (return-from :try (Err [Convention Diag] (derr-at (sx-lo (sx-at rest (load i))) (sx-hi (sx-at rest (load i))) (sconcat3 a "defcc: unknown option ':" kw "'"))))))))))
+        (store! i (iadd (load i) 2)))))
+    (let [lowering (if (icmp-ge (load native) 0) (LNative (load native)) (if (load shim) (LShim) (return-from :try (Err [Convention Diag] (derr (sconcat3 a "defcc '" name "': needs a lowering (:native <c|fast|cold> or :lower shim)"))))))]
+      (Ok (let [c (alloc-stack Convention)] (store! (field c name) name) (store! (field c params) (load params)) (store! (field c ret) (load ret)) (store! (field c clobber) (load clobber)) (store! (field c preserve) (load preserve)) (store! (field c lowering) lowering) (load c)))))))
+
+(defn parse-defn [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Func Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defn: missing name")) "defn name")) (mut i) 1 (mut cc) "c"]
+    (match (sx-get rest (load i))
+      (Some [k] (if (and (icmp-eq (sx-tag k) 3) (str-eq (sx-sval k) "cc"))
+                    (do (store! cc (try! (sym-of a (try! (need [Sexp] (sx-get rest (iadd (load i) 1)) "defn: ':cc' missing convention name")) "cc name"))) (store! i (iadd (load i) 2)) 0) 0))
+      (None [] 0))
+    (let [tpr (alloc-stack TPResult)] (store! tpr (try! (parse-type-params a rest (load i))))
+      (if (load (field tpr consumed)) (do (store! i (iadd (load i) 1)) 0) 0)
+      (let [params-items (try! (need-vec (sx-get rest (load i)) (sconcat3 a "defn '" name "': expected parameter vector")))]
+        (store! i (iadd (load i) 1))
+        (let [(mut params) (al-new [Param] a) (mut macrov) false np (sx-len params-items) (mut pi) 0]
+          (loop (if (icmp-ge (load pi) np) (break)
+            (let [p (sx-at params-items (load pi))]
+              (store! pi (iadd (load pi) 1))
+              (if (and (icmp-eq (sx-tag p) 2) (str-eq (sx-sval p) "&")) (do (store! macrov true) 0)
+                (let [pl (try! (as-list p "parameter must be (name :type)"))
+                      pn (try! (sym-of a (sx-at pl 0) "param name"))
+                      pt (try! (parse-type a (try! (need [Sexp] (sx-get pl 1) "param missing type"))))]
+                  (let [pp (alloc-stack Param)] (store! (field pp name) pn) (store! (field pp ty) pt) (al-push! (mut params) (load pp))))))))
+          (let [ret-l (try! (as-list (try! (need [Sexp] (sx-get rest (load i)) "defn: missing (-> :type)")) "expected (-> :type)"))]
+            (if (not (str-eq (try! (head-sym a ret-l)) "->")) (return-from :try (Err [Func Diag] (derr "defn: expected (-> :type) after params"))) 0)
+            (let [ret (try! (parse-type a (try! (need [Sexp] (sx-get ret-l 1) "(-> ) missing type"))))]
+              (store! i (iadd (load i) 1))
+              (let [body (try! (parse-exprs a (rest-from a rest (load i))))]
+                (if (icmp-eq (al-len [Expr] (load body)) 0) (return-from :try (Err [Func Diag] (derr (sconcat3 a "defn '" name "': empty body")))) 0)
+                (Ok (let [f (alloc-stack Func)]
+                      (store! (field f name) name) (store! (field f type_params) (load (field tpr params))) (store! (field f bounds) (load (field tpr bounds)))
+                      (store! (field f cc) (load cc)) (store! (field f params) (box-al [Param] a (load params))) (store! (field f ret) ret)
+                      (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (load f))))))))))))
+
+(defn parse-deftrait [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result TraitDef Diag))
+  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "deftrait: missing name")) "trait name"))
+             self-param (if (and (opt-is-vec (sx-get rest 1)) (icmp-eq (sx-len (sx-items (opt-get (sx-get rest 1)))) 1))
+                            (try! (sym-of a (sx-at (sx-items (opt-get (sx-get rest 1))) 0) "Self parameter"))
+                            (return-from :try (Err [TraitDef Diag] (derr "deftrait: expected [Self] after the name"))))
+             (mut methods) (al-new [TraitMethod] a) nr (sx-len rest) (mut mi) 2]
+    (loop (if (icmp-ge (load mi) nr) (break)
+      (let [m (sx-at rest (load mi))]
+        (store! mi (iadd (load mi) 1))
+        (let [ml (try! (as-list m "trait method must be (name [params] (-> ret))"))
+              mname (try! (sym-of a (try! (need [Sexp] (sx-get ml 0) "trait method: missing name")) "method name"))
+              params-items (if (opt-is-vec (sx-get ml 1)) (sx-items (opt-get (sx-get ml 1))) (return-from :try (Err [TraitDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "trait method '" mname "': expected a param vector")))))
+              (mut params) (al-new [Param] a) pnn (sx-len params-items) (mut pi) 0]
+          (loop (if (icmp-ge (load pi) pnn) (break)
+            (let [p (sx-at params-items (load pi))]
+              (store! pi (iadd (load pi) 1))
+              (let [pl (try! (as-list p "method param must be (name :type)"))
+                    pnm (try! (sym-of a (sx-at pl 0) "param name"))
+                    pty (try! (parse-type a (try! (need [Sexp] (sx-get pl 1) "method param missing type"))))]
+                (let [pp (alloc-stack Param)] (store! (field pp name) pnm) (store! (field pp ty) pty) (al-push! (mut params) (load pp)))))))
+          (let [ret-l (try! (as-list (try! (need [Sexp] (sx-get ml 2) "trait method: missing (-> ret)")) "expected (-> ret)"))]
+            (if (not (str-eq (try! (head-sym a ret-l)) "->")) (return-from :try (Err [TraitDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "trait method '" mname "': expected (-> ret)")))) 0)
+            (let [ret (try! (parse-type a (try! (need [Sexp] (sx-get ret-l 1) "(-> ) missing type"))))]
+              (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
+    (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
+
+(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ImplDef Diag))
+  (try (let [trait-name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "impl: missing trait name")) "trait name"))
+             for-type (try! (sym-of a (try! (need [Sexp] (sx-get rest 1) "impl: missing type name")) "impl type"))
+             (mut methods) (al-new [Func] a) nr (sx-len rest) (mut mi) 2]
+    (loop (if (icmp-ge (load mi) nr) (break)
+      (let [m (sx-at rest (load mi))]
+        (store! mi (iadd (load mi) 1))
+        (let [ml (try! (as-list m "impl method must be (name [params] (-> ret) body…)"))
+              f0 (try! (parse-defn a ml))]
+          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (al-push! (mut methods) (load fp)))))))
+    (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im))))))
+
+(defn parse-export-c [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList ExportC)) Diag))
+  (try (let [(mut out) (al-new [ExportC] a) n (sx-len rest) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (let [item (sx-at rest (load i))]
+        (store! i (iadd (load i) 1))
+        (let [tg (sx-tag item)]
+          (if (icmp-eq tg 2)
+              (let [ep (alloc-stack ExportC)] (store! (field ep name) (sx-sval item)) (store! (field ep symbol) (None [(slice u8)])) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep)))
+            (if (icmp-eq tg 7)
+                (let [v (sx-items item)
+                      nm (if (and (icmp-gt (sx-len v) 0) (icmp-eq (sx-tag (sx-at v 0)) 2)) (sx-sval (sx-at v 0)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))
+                      sym0 (if (and (opt-is-kw (sx-get v 1) "as") (opt-is-str (sx-get v 2))) (opt-str-val (sx-get v 2)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))]
+                  (let [ep (alloc-stack ExportC)] (store! (field ep name) nm) (store! (field ep symbol) (Some sym0)) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep))))
+              (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: each entry is a function name or [name :as \"symbol\"]")))))))))
+    (Ok (box-al [ExportC] a (load out))))))
+
+(defn default-c-convention [(a (ptr Allocator))] (-> Convention)
+  (let [c (alloc-stack Convention)]
+    (store! (field c name) "c") (store! (field c params) (box-al [(slice u8)] a (al-new [(slice u8)] a))) (store! (field c ret) (None [(slice u8)]))
+    (store! (field c clobber) (box-al [(slice u8)] a (al-new [(slice u8)] a))) (store! (field c preserve) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+    (store! (field c lowering) (LNative 0)) (load c)))
+
 ; `parse_program` in src/parse.rs: fold the top-level forms into a Program.
 (defn parse-program [(a (ptr Allocator)) (forms (ptr (ArrayList Sexp)))] (-> (Result Program Diag))
-  (unimplemented "parser/parse-program")
-  (zeroed (Result Program Diag)))
+  (let [(mut convs) (al-new [Convention] a) (mut structs) (al-new [StructDef] a) (mut sums) (al-new [SumDef] a)
+        (mut externs) (al-new [Extern] a) (mut funcs) (al-new [Func] a) (mut asserts) (al-new [StaticAssert] a)
+        (mut consts) (al-new [Const] a) (mut traits) (al-new [TraitDef] a) (mut impls) (al-new [ImplDef] a)
+        (mut metas) (al-new [Expr] a) (mut exports) (al-new [ExportC] a)
+        (mut err) (zeroed Diag) (mut failed) false]
+    (al-push! (mut convs) (default-c-convention a))
+    (let [nf (sx-len forms) (mut fi) 0]
+      (loop (if (icmp-ge (load fi) nf) (break)
+        (let [form (sx-at forms (load fi)) flo (sx-lo form) fhi (sx-hi form)]
+          (store! fi (iadd (load fi) 1))
+          (let [res
+                (match (as-list form "top-level form must be a list")
+                  (Err [d] (Err [i64 Diag] d))
+                  (Ok [items]
+                    (match (head-sym a items)
+                      (Err [d] (Err [i64 Diag] d))
+                      (Ok [head]
+                        (let [rest (rest-from a items 1)]
+                          (if (str-eq head "defcc")
+                              (match (parse-defcc a rest) (Err [d] (Err [i64 Diag] d))
+                                (Ok [c]
+                                  (let [cp (alloc-stack Convention)] (store! cp c)
+                                    (let [nm (load (field cp name)) (mut found) -1 (mut ci) 0 cn (al-len [Convention] (load convs))]
+                                      (loop (if (icmp-ge (load ci) cn) (break) (do (if (str-eq (conv-name (al-get [Convention] (load convs) (load ci))) nm) (do (store! found (load ci)) 0) 0) (store! ci (iadd (load ci) 1)))))
+                                      (if (icmp-ge (load found) 0)
+                                          (if (str-eq nm "c") (do (al-set! [Convention] (mut convs) (load found) (load cp)) (Ok [i64 Diag] 0)) (Err [i64 Diag] (derr (sconcat3 a "convention '" nm "' defined twice"))))
+                                          (do (al-push! (mut convs) (load cp)) (Ok [i64 Diag] 0)))))))
+                          (if (str-eq head "defstruct") (match (parse-defstruct a rest) (Ok [sd] (do (al-push! (mut structs) sd) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "defsum") (match (parse-defsum a rest) (Ok [sd] (do (al-push! (mut sums) sd) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "defn")
+                              (match (parse-defn a rest) (Err [d] (Err [i64 Diag] d))
+                                (Ok [f0]
+                                  (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) flo) (store! (field fp hi) fhi)
+                                    (let [nm (load (field fp name)) (mut dup) false (mut ci) 0 cn (al-len [Func] (load funcs))]
+                                      (loop (if (icmp-ge (load ci) cn) (break) (do (if (str-eq (func-name (al-get [Func] (load funcs) (load ci))) nm) (do (store! dup true) 0) 0) (store! ci (iadd (load ci) 1)))))
+                                      (if (load dup) (Err [i64 Diag] (derr (sconcat3 a "function '" nm "' defined twice"))) (do (al-push! (mut funcs) (load fp)) (Ok [i64 Diag] 0)))))))
+                          (if (str-eq head "extern") (match (parse-extern a rest) (Ok [e] (do (al-push! (mut externs) e) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "export-c")
+                              (match (parse-export-c a rest) (Err [d] (Err [i64 Diag] d))
+                                (Ok [es] (do (let [en (al-len [ExportC] (load es)) (mut ei) 0] (loop (if (icmp-ge (load ei) en) (break) (do (al-push! (mut exports) (al-get [ExportC] (load es) (load ei))) (store! ei (iadd (load ei) 1)))))) (Ok [i64 Diag] 0))))
+                          (if (str-eq head "static-assert")
+                              (match (parse-static-assert a items) (Ok [sa] (do (al-push! (mut asserts) sa) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "const") (match (parse-const a rest) (Ok [c] (do (al-push! (mut consts) c) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "deftrait") (match (parse-deftrait a rest) (Ok [t] (do (al-push! (mut traits) t) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "impl") (match (parse-impl a rest flo fhi) (Ok [im] (do (al-push! (mut impls) im) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "meta")
+                              (if (not (icmp-eq (sx-len items) 2)) (Err [i64 Diag] (derr "meta: expected (meta EXPR)"))
+                                  (match (parse-expr a (sx-at items 1)) (Ok [e] (do (al-push! (mut metas) e) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d))))
+                            (Err [i64 Diag] (derr (sconcat3 a "unknown top-level form '" head "'")))))))))))))))))))]
+            (match res (Ok [_] 0) (Err [d] (do (store! err (dwspan d flo fhi)) (store! failed true) (break)))))))))
+    (if (load failed) (Err (load err))
+        (Ok (let [pp (alloc-stack Program)]
+              (store! (field pp conventions) (box-al [Convention] a (load convs)))
+              (store! (field pp structs) (box-al [StructDef] a (load structs)))
+              (store! (field pp sums) (box-al [SumDef] a (load sums)))
+              (store! (field pp externs) (box-al [Extern] a (load externs)))
+              (store! (field pp funcs) (box-al [Func] a (load funcs)))
+              (store! (field pp asserts) (box-al [StaticAssert] a (load asserts)))
+              (store! (field pp consts) (box-al [Const] a (load consts)))
+              (store! (field pp traits) (box-al [TraitDef] a (load traits)))
+              (store! (field pp impls) (box-al [ImplDef] a (load impls)))
+              (store! (field pp metas) (box-al [Expr] a (load metas)))
+              (store! (field pp exports) (box-al [ExportC] a (load exports)))
+              (load pp))))))
+
+; static-assert (src/parse.rs): condition presence + message rule.
+(defn assert-msg [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (slice u8) Diag))
+  (match (sx-get items 2)
+    (None [] (Ok "static assertion failed"))
+    (Some [s] (if (icmp-eq (sx-tag s) 4) (Ok (sx-sval s)) (Err (derr "static-assert: message must be a string"))))))
+(defn parse-static-assert [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result StaticAssert Diag))
+  (try (let [cond (try! (parse-expr a (try! (need [Sexp] (sx-get items 1) "static-assert: missing condition"))))
+             msg (try! (assert-msg a items))]
+    (Ok (let [ap (alloc-stack StaticAssert)] (store! (field ap cnd) cond) (store! (field ap msg) msg) (load ap))))))
 
 ; ============================ reused reader =================================
 ; Ported (and verified) in selfhost/reader.coil — copied here so the parser can
@@ -1050,7 +1878,7 @@
       (Ok [forms]
         (match (parse-program a forms)
           (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-          (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp)))))))
+          (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp a)))))))
   0)
 
 ; ============================ file IO + entry ===============================
@@ -1121,7 +1949,7 @@
     (store! (field p impls) (let [bp (unwrap-ptr [(ArrayList ImplDef)] (create [(ArrayList ImplDef)] a))] (store! bp (al-new [ImplDef] a)) bp))
     (store! (field p metas) (let [bp (unwrap-ptr [(ArrayList Expr)] (create [(ArrayList Expr)] a))] (store! bp (al-new [Expr] a)) bp))
     (store! (field p exports) (let [bp (unwrap-ptr [(ArrayList ExportC)] (create [(ArrayList ExportC)] a))] (store! bp (al-new [ExportC] a)) bp))
-    (d-program w p))
+    (d-program w p a))
   0)
 
 ; coil-self CLI: `<bin> dump-ast <file>` (the gate's entry point) or
