@@ -5471,17 +5471,17 @@
 (defn find-struct-named [(lst (ptr (ArrayList StructDef))) (nm (slice u8))] (-> i64)
   (let [n (al-len [StructDef] (load lst)) (mut i) 0 (mut r) -1]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) nm) (do (store! r (load i)) (break)) 0)
+      (do (if (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
           (store! i (iadd (load i) 1))))) (load r)))
 (defn find-sum-named [(lst (ptr (ArrayList SumDef))) (nm (slice u8))] (-> i64)
   (let [n (al-len [SumDef] (load lst)) (mut i) 0 (mut r) -1]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) nm) (do (store! r (load i)) (break)) 0)
+      (do (if (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
           (store! i (iadd (load i) 1))))) (load r)))
 (defn find-func-named [(lst (ptr (ArrayList Func))) (nm (slice u8))] (-> i64)
   (let [n (al-len [Func] (load lst)) (mut i) 0 (mut r) -1]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (load (field (al-elem [Func] lst (load i)) name)) nm) (do (store! r (load i)) (break)) 0)
+      (do (if (str-eq (load (field (al-elem [Func] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
           (store! i (iadd (load i) 1))))) (load r)))
 (defn gstruct-has [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool) (icmp-ge (find-struct-named (load (field m gstructs)) nm) 0))
 (defn gsum-has    [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool) (icmp-ge (find-sum-named (load (field m gsums)) nm) 0))
@@ -5771,7 +5771,7 @@
                         (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
                         (store! (field nd layout) (load (field gs layout)))
                         (store! (field nd fields) nfs)
-                        (al-push! (mut (field m out-structs)) (load nd))))))
+                        (upsert-struct m (load nd))))))
                 (store! sc (iadd (load sc) 1)))
           (if (icmp-lt (load uc) (al-len [PendInst] (load (field m pending-sums))))
               (do (let [pi (al-elem [PendInst] (field m pending-sums) (load uc))
@@ -5780,7 +5780,7 @@
                         smap (subst-map a (load (field gs type_params)) args) mng (mangle a nm args)]
                     (match (resolve-sum m gs smap mng)
                       (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                      (Ok [ns] (al-push! (mut (field m out-sums)) ns))))
+                      (Ok [ns] (upsert-sum m ns))))
                   (store! uc (iadd (load uc) 1)))
             (if (icmp-lt (load fc) (al-len [PendInst] (load (field m pending-funcs))))
                 (do (let [pi (al-elem [PendInst] (field m pending-funcs) (load fc))
@@ -5789,7 +5789,7 @@
                           smap (subst-map a (load (field gf type_params)) args) mng (mangle a nm args)]
                       (match (resolve-func m gf smap mng)
                         (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                        (Ok [nf] (al-push! (mut (field m out-funcs)) nf))))
+                        (Ok [nf] (upsert-func m nf))))
                     (store! fc (iadd (load fc) 1)))
               (do (store! done true) 0)))))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
@@ -5842,7 +5842,7 @@
                       (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
                       (store! (field nd layout) (load (field sp layout)))
                       (store! (field nd fields) nfs)
-                      (al-push! (mut (field m out-structs)) (load nd)) 0)))
+                      (upsert-struct m (load nd)) 0)))
                 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
@@ -5853,7 +5853,7 @@
             (if (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
                 (match (resolve-sum m sp map (load (field sp name)))
                   (Err [d] (do (store! err d) (store! failed true) (break)))
-                  (Ok [ns] (al-push! (mut (field m out-sums)) ns)))
+                  (Ok [ns] (upsert-sum m ns)))
                 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
@@ -5864,7 +5864,7 @@
             (if (icmp-eq (al-len [(slice u8)] (load (field fp type_params))) 0)
                 (match (resolve-func m fp map (load (field fp name)))
                   (Err [d] (do (store! err d) (store! failed true) (break)))
-                  (Ok [nf] (al-push! (mut (field m out-funcs)) nf)))
+                  (Ok [nf] (upsert-func m nf)))
                 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
@@ -5891,6 +5891,35 @@
     (store! (field out metas) (box-al [Expr] a (al-new [Expr] a)))
     (store! (field out exports) (load (field p exports)))
     (Ok out)))
+; src/mono.rs keeps out_structs/out_sums/out_funcs in HashMaps keyed by name, so a
+; second insert with the same name OVERWRITES (last-writer-wins) — duplicate-named
+; concrete definitions (e.g. a fn re-seen via two import paths) collapse to one.
+; Our out lists are ArrayLists, so mirror that with insert-or-replace by name.
+(defn upsert-struct [(m (ptr MonoCtx)) (s StructDef)] (-> i64)
+  (let [n (al-len [StructDef] (load (field m out-structs))) (mut i) 0 (mut done) false]
+    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
+      (do (if (str-eq (sdef-name (al-get [StructDef] (load (field m out-structs)) (load i))) (sdef-name s))
+              (do (al-set! [StructDef] (mut (field m out-structs)) (load i) s) (store! done true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (load done) 0 (al-push! (mut (field m out-structs)) s))
+    0))
+(defn upsert-sum [(m (ptr MonoCtx)) (s SumDef)] (-> i64)
+  (let [n (al-len [SumDef] (load (field m out-sums))) (mut i) 0 (mut done) false]
+    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
+      (do (if (str-eq (sumdef-name (al-get [SumDef] (load (field m out-sums)) (load i))) (sumdef-name s))
+              (do (al-set! [SumDef] (mut (field m out-sums)) (load i) s) (store! done true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (load done) 0 (al-push! (mut (field m out-sums)) s))
+    0))
+(defn upsert-func [(m (ptr MonoCtx)) (f Func)] (-> i64)
+  (let [n (al-len [Func] (load (field m out-funcs))) (mut i) 0 (mut done) false]
+    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
+      (do (if (str-eq (func-name (al-get [Func] (load (field m out-funcs)) (load i))) (func-name f))
+              (do (al-set! [Func] (mut (field m out-funcs)) (load i) f) (store! done true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (load done) 0 (al-push! (mut (field m out-funcs)) f))
+    0))
+
 (defn monomorphize [(a (ptr Allocator)) (p (ptr Program))] (-> (Result (ptr Program) Diag))
   (let [m (unwrap-ptr [MonoCtx] (create [MonoCtx] a))]
     (store! (field m a) a)
@@ -5928,6 +5957,94 @@
                             (Err [d] (Err [(ptr Program) Diag] d))
                             (Ok [_] (build-mono-program a m p asserts))))))))))))))))
 
+; ---- post-check Code-func drop (mirror lib.rs::elaborate_on_stack's retain) --
+; Comptime-only functions (a `Code` parameter or return — macros, generators,
+; code helpers) have no runtime representation and are dropped after check,
+; before mono. Without this the auto-loaded prelude's Code-returning macros reach
+; mono and abort it. type-tag 13 == TCode.
+(defn func-has-code [(fp (ptr Func))] (-> bool)
+  (let [rt (alloc-stack Type)]
+    (store! rt (load (field fp ret)))
+    (if (icmp-eq (type-tag rt) 13)
+        true
+        (let [ps (load (field fp params)) n (al-len [Param] ps) (mut i) 0 (mut found) false]
+          (loop (if (or (load found) (icmp-ge (load i) n)) (break)
+            (do (let [pp (al-elem [Param] ps (load i)) pt (alloc-stack Type)]
+                  (store! pt (load (field pp ty)))
+                  (if (icmp-eq (type-tag pt) 13) (do (store! found true) 0) 0))
+                (store! i (iadd (load i) 1)))))
+          (load found)))))
+(defn drop-code-funcs [(a (ptr Allocator)) (p (ptr Program))] (-> i64)
+  (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut out) (al-new [Func] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Func] fs (load i))]
+            (if (func-has-code fp) 0 (al-push! (mut out) (load fp))))
+          (store! i (iadd (load i) 1)))))
+    (store! (field p funcs) (box-al [Func] a (load out)))
+    0))
+
+; ---- canonicalize mono output order (mirror dump_mono.rs's name sorts) -------
+; `mono::monomorphize` builds funcs/structs/sums from `HashMap::into_values()`
+; (nondeterministic), so the raw dump is not a stable oracle. Sort these three
+; sections by name (mangled names are unique → total order) before dumping. This
+; sort lives ONLY in the mono dump path; the shared dumper is untouched.
+(defn func-name [(f Func)] (-> (slice u8)) (let [p (alloc-stack Func)] (store! p f) (load (field p name))))
+(defn sdef-name [(s StructDef)] (-> (slice u8)) (let [p (alloc-stack StructDef)] (store! p s) (load (field p name))))
+(defn sumdef-name [(s SumDef)] (-> (slice u8)) (let [p (alloc-stack SumDef)] (store! p s) (load (field p name))))
+(defn sort-funcs [(a (ptr Allocator)) (src (ptr (ArrayList Func)))] (-> (ptr (ArrayList Func)))
+  (let [n (al-len [Func] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [Func] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (func-name (al-get [Func] (load src) (load bi))) (func-name (al-get [Func] (load src) (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [Func] (load src) (load best))))
+            (store! c (iadd (load c) 1))))))
+    (box-al [Func] a (load out))))
+(defn sort-structs [(a (ptr Allocator)) (src (ptr (ArrayList StructDef)))] (-> (ptr (ArrayList StructDef)))
+  (let [n (al-len [StructDef] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [StructDef] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (sdef-name (al-get [StructDef] (load src) (load bi))) (sdef-name (al-get [StructDef] (load src) (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [StructDef] (load src) (load best))))
+            (store! c (iadd (load c) 1))))))
+    (box-al [StructDef] a (load out))))
+(defn sort-sums [(a (ptr Allocator)) (src (ptr (ArrayList SumDef)))] (-> (ptr (ArrayList SumDef)))
+  (let [n (al-len [SumDef] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [SumDef] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (sumdef-name (al-get [SumDef] (load src) (load bi))) (sumdef-name (al-get [SumDef] (load src) (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [SumDef] (load src) (load best))))
+            (store! c (iadd (load c) 1))))))
+    (box-al [SumDef] a (load out))))
+(defn sort-mono-program [(a (ptr Allocator)) (p (ptr Program))] (-> i64)
+  (store! (field p funcs)   (sort-funcs   a (load (field p funcs))))
+  (store! (field p structs) (sort-structs a (load (field p structs))))
+  (store! (field p sums)    (sort-sums    a (load (field p sums))))
+  0)
+
 ; ============================ entry ========================================
 (defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
   (let [w (stdout) s (alloc-stack LS)]
@@ -5946,9 +6063,10 @@
                 (match (check-program a prog (mut s))
                   (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
                   (Ok [cp]
-                    (match (monomorphize a cp)
-                      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-                      (Ok [mp] (d-program w mp a)))))))))))
+                    (do (drop-code-funcs a cp)
+                        (match (monomorphize a cp)
+                          (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                          (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a)))))))))))))
   0)
 
 ; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).

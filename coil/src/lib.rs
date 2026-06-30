@@ -927,8 +927,15 @@ pub fn dump_mono(src: &str) -> Result<String, String> {
             macros::load_program(&forms, &host_target(), &mut sm).map_err(E::Diag)?;
         let resolved =
             resolve::resolve_program(tagged, &imports, &exports, true).map_err(E::Diag)?;
-        let checked = check::check_with(&resolved, &imports, &exports)
+        let mut checked = check::check_with(&resolved, &imports, &exports)
             .map_err(|ds| E::Diag(ds.into_iter().next().unwrap()))?;
+        // Mirror `elaborate_on_stack`: comptime-only functions (a `Code` parameter
+        // or return — macros, generators, code helpers) have no runtime
+        // representation and are dropped after check, before mono. Without this the
+        // auto-loaded prelude's Code-returning macros reach mono and abort it.
+        checked
+            .funcs
+            .retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
         mono::monomorphize(checked).map_err(E::Str)
     })();
     match r {

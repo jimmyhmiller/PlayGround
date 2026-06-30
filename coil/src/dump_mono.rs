@@ -20,7 +20,17 @@
 use std::fmt::Write;
 
 pub fn dump_mono(p: &crate::ast::Program) -> String {
-    crate::dump_ast::dump_program(p)
+    // `mono::monomorphize` builds its output funcs/structs/sums from
+    // `HashMap::into_values()`, whose order is nondeterministic, so the raw dump is
+    // not a stable oracle. Canonicalize by sorting these three sections by name
+    // (mangled names are unique, so the order is total) before the shared dumper.
+    // This sort lives ONLY in the mono dump path — the shared `dump_program` (used
+    // by ast/resolved/checked, which are already deterministic) is untouched.
+    let mut p = p.clone();
+    p.funcs.sort_by(|a, b| a.name.cmp(&b.name));
+    p.structs.sort_by(|a, b| a.name.cmp(&b.name));
+    p.sums.sort_by(|a, b| a.name.cmp(&b.name));
+    crate::dump_ast::dump_program(&p)
 }
 
 // Diag-error dump reuses the resolved error dumper verbatim.
