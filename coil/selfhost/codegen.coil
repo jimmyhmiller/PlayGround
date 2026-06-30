@@ -77,14 +77,111 @@
 (extern LLVMSetLinkage                     :cc c [(ptr i8) i32] (-> void))
 (extern LLVMAppendBasicBlockInContext      :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern LLVMPositionBuilderAtEnd           :cc c [(ptr i8) (ptr i8)] (-> void))
-; ---- constants / instructions (representative; the full port adds the rest) ----
+(extern LLVMFloatTypeInContext             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetTypeKind                    :cc c [(ptr i8)] (-> i32))
+(extern LLVMTypeOf                         :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMPrintTypeToString              :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGlobalGetValueType             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMCountParamTypes                :cc c [(ptr i8)] (-> i32))
+(extern LLVMGetParamTypes                  :cc c [(ptr i8) (ptr (ptr i8))] (-> void))
+; ---- module / globals / attributes ----
+(extern LLVMAddGlobal                      :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetInitializer                 :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMSetGlobalConstant              :cc c [(ptr i8) i32] (-> void))
+(extern LLVMSetAlignment                   :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetNamedFunction               :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetFunctionCallConv            :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetFunctionCallConv            :cc c [(ptr i8)] (-> i32))
+(extern LLVMSetInstructionCallConv         :cc c [(ptr i8) i32] (-> void))
+(extern LLVMSetTailCallKind                :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetTarget                      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetDataLayoutStr               :cc c [(ptr i8)] (-> (ptr i8)))
+; ---- target machine / data layout ----
+(extern LLVMInitializeAArch64TargetInfo    :cc c [] (-> void))
+(extern LLVMInitializeAArch64Target        :cc c [] (-> void))
+(extern LLVMInitializeAArch64TargetMC      :cc c [] (-> void))
+(extern LLVMInitializeX86TargetInfo        :cc c [] (-> void))
+(extern LLVMInitializeX86Target            :cc c [] (-> void))
+(extern LLVMInitializeX86TargetMC          :cc c [] (-> void))
+(extern LLVMGetDefaultTargetTriple         :cc c [] (-> (ptr i8)))
+(extern LLVMGetTargetFromTriple            :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
+(extern LLVMCreateTargetMachine            :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) i32 i32 i32] (-> (ptr i8)))
+(extern LLVMCreateTargetDataLayout         :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMCopyStringRepOfTargetData      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMABISizeOfType                  :cc c [(ptr i8) (ptr i8)] (-> i64))
+(extern LLVMABIAlignmentOfType             :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern LLVMOffsetOfElement                :cc c [(ptr i8) (ptr i8) i32] (-> i64))
+; ---- constants ----
 (extern LLVMConstInt                       :cc c [(ptr i8) i64 i32] (-> (ptr i8)))
+(extern LLVMConstReal                      :cc c [(ptr i8) f64] (-> (ptr i8)))
+(extern LLVMConstNull                      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMConstStringInContext           :cc c [(ptr i8) (ptr i8) i32 i32] (-> (ptr i8)))
+(extern LLVMConstStructInContext           :cc c [(ptr i8) (ptr (ptr i8)) i32 i32] (-> (ptr i8)))
+(extern LLVMConstNamedStruct               :cc c [(ptr i8) (ptr (ptr i8)) i32] (-> (ptr i8)))
+(extern LLVMConstArray2                    :cc c [(ptr i8) (ptr (ptr i8)) i64] (-> (ptr i8)))
+; ---- builder: arithmetic ----
 (extern LLVMBuildAdd                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern LLVMBuildSub                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern LLVMBuildMul                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildUDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSRem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildURem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildAnd                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildOr                        :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildXor                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildShl                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildLShr                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildAShr                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildNot                       :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFAdd                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFSub                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFMul                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFRem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+; ---- builder: compares / casts ----
+(extern LLVMBuildICmp                      :cc c [(ptr i8) i32 (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFCmp                      :cc c [(ptr i8) i32 (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildTrunc                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildZExt                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSExt                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildPtrToInt                  :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildIntToPtr                  :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSIToFP                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildUIToFP                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPToSI                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPToUI                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPExt                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPTrunc                   :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+; ---- builder: memory ----
+(extern LLVMBuildAlloca                    :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildLoad2                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildStore                     :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildGEP2                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr (ptr i8)) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildStructGEP2                :cc c [(ptr i8) (ptr i8) (ptr i8) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildMalloc                    :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFree                      :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetInstructionAlignment        :cc c [(ptr i8) i32] (-> void))
+; ---- builder: control / calls / phi ----
 (extern LLVMBuildCall2                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr (ptr i8)) i32 (ptr i8)] (-> (ptr i8)))
 (extern LLVMBuildRet                       :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern LLVMBuildRetVoid                   :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildBr                        :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildCondBr                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSwitch                    :cc c [(ptr i8) (ptr i8) (ptr i8) i32] (-> (ptr i8)))
+(extern LLVMAddCase                        :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> void))
+(extern LLVMBuildUnreachable               :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildPhi                       :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMAddIncoming                    :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8)) i32] (-> void))
+(extern LLVMGetInsertBlock                 :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetBasicBlockParent            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetBasicBlockTerminator        :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMSetValueName2                  :cc c [(ptr i8) (ptr i8) i64] (-> void))
+; ---- module linking (for (llvm-ir ...)) ----
+(extern LLVMCreateMemoryBufferWithMemoryRangeCopy :cc c [(ptr i8) i64 (ptr i8)] (-> (ptr i8)))
+(extern LLVMParseIRInContext               :cc c [(ptr i8) (ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
+(extern LLVMLinkModules2                   :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern LLVMVerifyModule                   :cc c [(ptr i8) i32 (ptr (ptr i8))] (-> i32))
 
 ; ============================ reader representation ==========================
 ; Copied verbatim from selfhost/reader.coil (the reader is a completed pass; the
@@ -6161,12 +6258,268 @@
     0))
 
 ; ============================ codegen (the frontier) =========================
-; src/codegen.rs (3496 lines) + src/abi.rs (450): monomorphized Program -> LLVM
-; module, built via the LLVM-C FFI surface above. The full port lowers every
-; struct/sum/extern/global/function/expr into LLVMBuild* calls. SCAFFOLD: a hard-
-; error stub. It references LLVMContextCreate so the LLVM link is genuinely
-; exercised (proving the binary links libLLVM), then aborts — NEVER returns a
-; fake module that the gate might accept.
+; src/codegen.rs (3496 lines): monomorphized Program -> LLVM module, built via the
+; LLVM-C FFI surface above. FAITHFUL, call-for-call port of `compile_for_dbg` with
+; dbg=None (every debug-info path skipped). The corpus has no shims / no struct-by-
+; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
+
+; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
+(defstruct Tv [(val (ptr i8)) (ty Type)])
+(defn mk-tv [(v (ptr i8)) (t Type)] (-> Tv)
+  (let [p (alloc-stack Tv)] (store! (field p val) v) (store! (field p ty) t) (load p)))
+(defn tv-val [(t Tv)] (-> (ptr i8)) (let [p (alloc-stack Tv)] (store! p t) (load (field p val))))
+(defn tv-ty  [(t Tv)] (-> Type)     (let [p (alloc-stack Tv)] (store! p t) (load (field p ty))))
+
+; ---- scope: a persistent cons-list (HashMap<String,Tv> with clone+insert = cons,
+;      lookup = linear-from-head so a later binding shadows an earlier one).
+(defsum Scope
+  (SNil  [])
+  (SBind [(name (slice u8)) (val (ptr i8)) (ty Type) (rest (ptr Scope))]))
+(defn scope-nil [(a (ptr Allocator))] (-> (ptr Scope))
+  (let [p (unwrap-ptr [Scope] (create [Scope] a))] (store! p (SNil)) p))
+(defn scope-put [(a (ptr Allocator)) (s (ptr Scope)) (name (slice u8)) (v (ptr i8)) (t Type)] (-> (ptr Scope))
+  (let [p (unwrap-ptr [Scope] (create [Scope] a))] (store! p (SBind name v t s)) p))
+(defn scope-get [(s (ptr Scope)) (name (slice u8))] (-> (Option Tv))
+  (match (load s)
+    (SNil  []          (None [Tv]))
+    (SBind [n v t rest] (if (str-eq n name) (Some [Tv] (mk-tv v t)) (scope-get rest name)))))
+
+; ---- Cg: codegen state (Rust `Cg<'ctx>` minus the debug-info fields). Maps are
+;      ArrayLists keyed by name (the established self-host pattern; mono uses it).
+(defstruct CgStruct [(name (slice u8)) (fields (ptr (ArrayList Field))) (ty (ptr i8)) (layout Layout)])
+(defstruct CgSum    [(name (slice u8)) (variants (ptr (ArrayList Variant))) (ty (ptr i8)) (vstructs (ptr (ArrayList (ptr i8))))])
+(defstruct CgFunc   [(name (slice u8)) (val (ptr i8))])
+(defstruct CgRet    [(name (slice u8)) (ty Type)])
+(defstruct CgSig    [(name (slice u8)) (cc (slice u8)) (params (ptr (ArrayList Type))) (ret Type)])
+(defstruct CgBreak  [(val (ptr i8)) (bb (ptr i8))])
+(defstruct CgLoop   [(label (Option (slice u8))) (body_bb (ptr i8)) (after_bb (ptr i8))
+                     (breaks (ArrayList CgBreak)) (break_ty (Option Type))])
+(defstruct CgStatic [(name (slice u8)) (ptr (ptr i8)) (ty Type)])
+(defstruct Cg
+  [(ctx (ptr i8)) (module (ptr i8)) (builder (ptr i8)) (td (ptr i8))
+   (structs (ArrayList CgStruct)) (sums (ArrayList CgSum))
+   (funcs (ArrayList CgFunc)) (rets (ArrayList CgRet)) (sigs (ArrayList CgSig))
+   (statics (ArrayList CgStatic))
+   (globals i64) (llvm_seq i64)
+   (loops (ArrayList CgLoop))
+   (a (ptr Allocator))])
+
+; ---- map lookups (linear; names are unique so first/last match is the same) ----
+(defn cg-struct-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [CgStruct] (load (field cg structs))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [CgStruct] (field cg structs) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-sum-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [CgSum] (load (field cg sums))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [CgSum] (field cg sums) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-func [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))   ; 0 if absent
+  (let [n (al-len [CgFunc] (load (field cg funcs))) (mut i) 0 (mut r) (cast (ptr i8) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [CgFunc] (field cg funcs) (load i))]
+            (if (str-eq (load (field fp name)) nm) (do (store! r (load (field fp val))) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-ret [(cg (ptr Cg)) (nm (slice u8))] (-> (Option Type))
+  (let [n (al-len [CgRet] (load (field cg rets))) (mut i) 0 (mut r) (None [Type])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [CgRet] (field cg rets) (load i))]
+            (if (str-eq (load (field fp name)) nm) (do (store! r (Some [Type] (load (field fp ty)))) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-sig-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [CgSig] (load (field cg sigs))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [CgSig] (field cg sigs) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-static-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [CgStatic] (load (field cg statics))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [CgStatic] (field cg statics) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; ---- small FFI conveniences ----
+(defn cg-bug [(msg (slice u8))] (-> Tv) (unimplemented msg) (mk-tv (cast (ptr i8) 0) (TInt 64 true)))
+(defn ty-is-void [(t (ptr Type))] (-> bool) (match-else (load t) (TVoid [] true) (_ false)))
+(defn int-width [(ctx (ptr i8)) (bits i64)] (-> (ptr i8)) (LLVMIntTypeInContext ctx (cast i32 bits)))
+; an ArrayList of opaque handles -> a contiguous C array (ptr (ptr i8)).
+(defn carr [(a (ptr Allocator)) (xs (ArrayList (ptr i8)))] (-> (ptr (ptr i8)))
+  (let [n (al-len [(ptr i8)] xs)
+        buf (cast (ptr (ptr i8)) (unwrap-ptr [i8] (raw-alloc a (imul (if (icmp-eq n 0) 1 n) 8) 8)))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index buf (load i)) (al-get [(ptr i8)] xs (load i)))
+          (store! i (iadd (load i) 1)))))
+    buf))
+; LLVMConstInt of `ty` for value 0 (the const_zero of an int/bool type).
+(defn cg-zero [(ty (ptr i8))] (-> (ptr i8)) (LLVMConstInt ty 0 0))
+
+; ---- the slice fat-pointer type { ptr, i64 } (a fresh literal struct; LLVM
+;      uniques it so repeated calls return the same type, exactly like inkwell).
+(defn cg-slice-ty [(cg (ptr Cg))] (-> (ptr i8))
+  (let [ctx (load (field cg ctx)) (mut fs) (al-new [(ptr i8)] (load (field cg a)))]
+    (al-push! (mut fs) (LLVMPointerTypeInContext ctx 0))
+    (al-push! (mut fs) (LLVMInt64TypeInContext ctx))
+    (LLVMStructTypeInContext ctx (carr (load (field cg a)) (load fs)) 2 0)))
+
+; ---- basic_ty: Coil Type -> LLVM type (src/codegen.rs:771). void/App/Code are
+;      compiler-bug paths (hard error, never a placeholder).
+(defn basic-ty [(cg (ptr Cg)) (t (ptr Type))] (-> (ptr i8))
+  (let [ctx (load (field cg ctx))]
+    (match (load t)
+      (TNever  []        (LLVMInt64TypeInContext ctx))
+      (TInt    [bits s]  (int-width ctx bits))
+      (TFloat  [b]       (if (icmp-eq b 32) (LLVMFloatTypeInContext ctx) (LLVMDoubleTypeInContext ctx)))
+      (TBool   []        (LLVMInt1TypeInContext ctx))
+      (TPtr    [i]       (LLVMPointerTypeInContext ctx 0))
+      (TRef    [m i]     (LLVMPointerTypeInContext ctx 0))
+      (TFn     [c p r]   (LLVMPointerTypeInContext ctx 0))
+      (TArray  [el n]    (LLVMArrayType2 (basic-ty cg el) n))
+      (TSlice  [el]      (cg-slice-ty cg))
+      (TStruct [nm]      (cg-nominal-ty cg nm))
+      (TVec    [el n]    (do (unimplemented "codegen/basic_ty: vec (no corpus use)") (cast (ptr i8) 0)))
+      (TVoid   []        (do (unimplemented "codegen/basic_ty: void reached as a value type (checker hole)") (cast (ptr i8) 0)))
+      (TApp    [n a]     (do (unimplemented "codegen/basic_ty: generic type survived monomorphization") (cast (ptr i8) 0)))
+      (TCode   []        (do (unimplemented "codegen/basic_ty: comptime-only Code reached codegen") (cast (ptr i8) 0))))))
+(defn cg-nominal-ty [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))
+  (let [ctx (load (field cg ctx)) si (cg-struct-idx cg nm)]
+    (if (icmp-ge si 0)
+        (let [sp (al-elem [CgStruct] (field cg structs) si)]
+          (match-else (load (field sp layout))
+            (LBits [backing offs] (int-width ctx backing))
+            (_ (load (field sp ty)))))
+      (let [ui (cg-sum-idx cg nm)]
+        (if (icmp-ge ui 0)
+            (load (field (al-elem [CgSum] (field cg sums) ui) ty))
+          (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0)))))))
+
+; ---- layout helpers (src/codegen.rs:3449): conservative payload sizing for sums.
+(defn align8 [(x i64)] (-> i64) (imul (udiv (iadd x 7) 8) 8))
+(defn type-bytes [(cg (ptr Cg)) (t (ptr Type))] (-> i64)
+  (match (load t)
+    (TInt   [bits s] (udiv (iadd bits 7) 8))
+    (TFloat [bits]   (udiv bits 8))
+    (TBool  []       1)
+    (TPtr   [i]      8)
+    (TFn    [c p r]  8)
+    (TRef   [m i]    8)
+    (TSlice [el]     16)
+    (TArray [el n]   (imul (align8 (type-bytes cg el)) n))
+    (TVec   [el n]   (imul (type-bytes cg el) n))
+    (TStruct [nm]    (cg-type-bytes-nominal cg nm))
+    (TNever []       (do (unimplemented "codegen/type_bytes: Never has no size") 0))
+    (TCode  []       (do (unimplemented "codegen/type_bytes: Code has no size") 0))
+    (TVoid  []       (do (unimplemented "codegen/type_bytes: void has no size") 0))
+    (TApp   [n a]    8)))
+(defn cg-type-bytes-nominal [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
+  (let [si (cg-struct-idx cg nm)]
+    (if (icmp-ge si 0)
+        (let [sp (al-elem [CgStruct] (field cg structs) si)
+              fs (load (field sp fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut sum) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (store! sum (iadd (load sum) (align8 (type-bytes cg (field (al-elem [Field] fs (load i)) ty)))))
+                (store! i (iadd (load i) 1)))))
+          (load sum))
+      (let [ui (cg-sum-idx cg nm)]
+        (if (icmp-ge ui 0)
+            (iadd 8 (imul (cg-sum-words cg (al-elem [CgSum] (field cg sums) ui)) 8))
+          8)))))
+(defn cg-sum-words [(cg (ptr Cg)) (sp (ptr CgSum))] (-> i64)
+  (let [vs (load (field sp variants)) nv (al-len [Variant] (load vs)) (mut i) 0 (mut maxb) 0]
+    (loop (if (icmp-ge (load i) nv) (break)
+      (do (let [vp (al-elem [Variant] vs (load i)) fs (load (field vp fields)) nf (al-len [Field] (load fs)) (mut j) 0 (mut acc) 0]
+            (loop (if (icmp-ge (load j) nf) (break)
+              (do (store! acc (iadd (load acc) (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
+                  (store! j (iadd (load j) 1)))))
+            (if (icmp-gt (load acc) (load maxb)) (store! maxb (load acc)) 0))
+          (store! i (iadd (load i) 1)))))
+    (udiv (load maxb) 8)))
+; sum_words from a SumDef (used during type registration, before CgSum exists).
+(defn cg-sum-words-def [(cg (ptr Cg)) (sd (ptr SumDef))] (-> i64)
+  (let [vs (load (field sd variants)) nv (al-len [Variant] (load vs)) (mut i) 0 (mut maxb) 0]
+    (loop (if (icmp-ge (load i) nv) (break)
+      (do (let [vp (al-elem [Variant] vs (load i)) fs (load (field vp fields)) nf (al-len [Field] (load fs)) (mut j) 0 (mut acc) 0]
+            (loop (if (icmp-ge (load j) nf) (break)
+              (do (store! acc (iadd (load acc) (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
+                  (store! j (iadd (load j) 1)))))
+            (if (icmp-gt (load acc) (load maxb)) (store! maxb (load acc)) 0))
+          (store! i (iadd (load i) 1)))))
+    (udiv (load maxb) 8)))
+
+; ---- offset_of / const_eval (for static-assert; src/codegen.rs:3118/3143).
+(defn cg-offset-of [(cg (ptr Cg)) (t (ptr Type)) (fname (slice u8))] (-> i64)
+  (match-else (load t)
+    (TStruct [nm]
+      (let [si (cg-struct-idx cg nm)]
+        (if (icmp-lt si 0) (do (unimplemented "codegen/offsetof: non-struct") 0)
+          (let [sp (al-elem [CgStruct] (field cg structs) si)
+                fs (load (field sp fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut idx) -1]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (if (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname) (store! idx (load i)) 0)
+                  (store! i (iadd (load i) 1)))))
+            (if (icmp-lt (load idx) 0) (do (unimplemented "codegen/offsetof: no such field") 0)
+              (match-else (load (field sp layout))
+                (LExplicit [offs sz al] (al-get [i64] (load offs) (load idx)))
+                (_ (LLVMOffsetOfElement (load (field cg td)) (load (field sp ty)) (cast i32 (load idx))))))))))
+    (_ (do (unimplemented "codegen/offsetof: needs a struct") 0))))
+; const_eval_t -> (value, is_unsigned). Faithful to src/codegen.rs:3153.
+(defstruct CEval [(v i64) (uns bool)])
+(defn mk-ceval [(v i64) (u bool)] (-> CEval)
+  (let [p (alloc-stack CEval)] (store! (field p v) v) (store! (field p uns) u) (load p)))
+(defn cev-v [(c CEval)] (-> i64) (let [p (alloc-stack CEval)] (store! p c) (load (field p v))))
+(defn cev-u [(c CEval)] (-> bool) (let [p (alloc-stack CEval)] (store! p c) (load (field p uns))))
+(defn const-eval-bin [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
+  (let [uns (or lu ru)]
+    (mk-ceval
+      (if (icmp-eq op 0)  (iadd l r)
+      (if (icmp-eq op 1)  (isub l r)
+      (if (icmp-eq op 2)  (imul l r)
+      (if (icmp-eq op 7)  (iand l r)
+      (if (icmp-eq op 8)  (ior l r)
+      (if (icmp-eq op 9)  (ixor l r)
+      (if (icmp-eq op 10) (ishl l r)
+      (if (icmp-eq op 11) (if uns (cast i64 (ishr (cast u64 l) (cast u64 r))) (ishr l r))
+      (if (icmp-eq op 3)  (if (icmp-eq r 0) (do (unimplemented "static-assert: divide by zero") 0) (if uns (udiv l r) (idiv l r)))
+      (if (icmp-eq op 4)  (if (icmp-eq r 0) (do (unimplemented "static-assert: mod by zero") 0) (if uns (urem l r) (irem l r)))
+      (if (icmp-eq op 5)  (if (icmp-eq r 0) (do (unimplemented "static-assert: divide by zero") 0) (udiv l r))
+                          (if (icmp-eq r 0) (do (unimplemented "static-assert: mod by zero") 0) (urem l r)))))))))))))
+      uns)))
+(defn const-eval-cmp [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
+  (let [b (if (or lu ru)
+              (let [lx (cast u64 l) rx (cast u64 r)]
+                (if (icmp-eq op 0) (icmp-lt lx rx) (if (icmp-eq op 1) (icmp-le lx rx)
+                (if (icmp-eq op 2) (icmp-gt lx rx) (if (icmp-eq op 3) (icmp-ge lx rx)
+                (if (icmp-eq op 4) (icmp-eq lx rx) (icmp-ne lx rx)))))))
+              (if (icmp-eq op 0) (icmp-lt l r) (if (icmp-eq op 1) (icmp-le l r)
+              (if (icmp-eq op 2) (icmp-gt l r) (if (icmp-eq op 3) (icmp-ge l r)
+              (if (icmp-eq op 4) (icmp-eq l r) (icmp-ne l r)))))))]
+    (mk-ceval (if b 1 0) false)))
+(defn const-eval-t [(cg (ptr Cg)) (e (ptr Expr))] (-> CEval)
+  (let [a (load (field cg a))]
+    (match-else (load (field e kind))
+      (EInt    [v]         (mk-ceval v false))
+      (EBool   [b]         (mk-ceval (if b 1 0) false))
+      (EIf     [c thn els] (if (icmp-ne (cev-v (const-eval-t cg c)) 0) (const-eval-t cg thn) (const-eval-t cg els)))
+      (ESizeOf [t]         (mk-ceval (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (box-type a t))) false))
+      (EAlignOf[t]         (mk-ceval (cast i64 (LLVMABIAlignmentOfType (load (field cg td)) (basic-ty cg (box-type a t)))) false))
+      (EOffsetOf[t fname]  (mk-ceval (cg-offset-of cg (box-type a t) fname) false))
+      (ECast   [t inner]   (mk-ceval (cev-v (const-eval-t cg inner)) (match-else t (TInt [bits s] (not s)) (_ false))))
+      (EBin    [op lhs rhs] (let [lc (const-eval-t cg lhs) rc (const-eval-t cg rhs)]
+                              (const-eval-bin op (cev-v lc) (cev-u lc) (cev-v rc) (cev-u rc))))
+      (ECmp    [op lhs rhs] (let [lc (const-eval-t cg lhs) rc (const-eval-t cg rhs)]
+                              (const-eval-cmp op (cev-v lc) (cev-u lc) (cev-v rc) (cev-u rc))))
+      (_ (do (unimplemented "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic and comparisons are allowed") (mk-ceval 0 false))))))
+(defn const-eval [(cg (ptr Cg)) (e (ptr Expr))] (-> i64) (cev-v (const-eval-t cg e)))
+
+; SCAFFOLD: the module lowering is still a hard-error stub. The foundation above
+; (basic_ty / layout / maps / const helpers) is ported and compiles; emit_expr and
+; the codegen-module driver are the next increments.
 (defn codegen-module [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr i8))
   (let [ctx (LLVMContextCreate)
         m   (LLVMModuleCreateWithNameInContext c"coil" ctx)]

@@ -5509,6 +5509,292 @@
 (defn cell-value [(cell (ptr CtVal))] (-> CtVal)
   (if (is-aggregate cell) (CRef cell) (load cell)))
 
+; ============================ comptime interpreter (Flow/Env/Ctx) ============
+; Mirrors src/comptime.rs's interpreter. `eval` returns a Flow (a `(Result Flow
+; Diag)`): a normal value is FVal, a `break`/`continue` propagate as FBrk/FCont up
+; to the enclosing loop (Rust's `Flow`). A real comptime error is the Err channel.
+(defsum Flow
+  (FVal  [(v CtVal)])
+  (FBrk  [(value (Option CtVal)) (label (Option (slice u8)))])
+  (FCont [(label (Option (slice u8)))]))
+
+; Env: Rust's `HashMap<String, CtVal>`, modelled as an assoc-list with HashMap
+; semantics — insert APPENDS, lookup returns the LAST match (so a later binding of
+; the same name shadows). Scopes are cloned per Let/Match (never mutated in place;
+; `eval` only READS its env), Calls start from a fresh empty env (comptime fns are
+; closed). CtVal is stored by value (a CRef just copies the cell pointer = sharing).
+(defstruct EnvBind [(name (slice u8)) (val CtVal)])
+
+(defn env-clone [(a (ptr Allocator)) (env (ptr (ArrayList EnvBind)))] (-> (ptr (ArrayList EnvBind)))
+  (let [n (al-len [EnvBind] (load env)) (mut out) (al-new [EnvBind] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (al-get [EnvBind] (load env) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [EnvBind] a (load out))))
+
+; env.clone() + scope.insert(name, v): a fresh env with `name`→`v` appended.
+(defn env-with [(a (ptr Allocator)) (env (ptr (ArrayList EnvBind))) (name (slice u8)) (v CtVal)] (-> (ptr (ArrayList EnvBind)))
+  (let [n (al-len [EnvBind] (load env)) (mut out) (al-new [EnvBind] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (al-get [EnvBind] (load env) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (let [eb (alloc-stack EnvBind)]
+      (store! (field eb name) name)
+      (store! (field eb val) v)
+      (al-push! (mut out) (load eb)))
+    (box-al [EnvBind] a (load out))))
+
+; env.get(name).cloned(): the LAST matching binding's value (HashMap last-wins).
+(defn env-find [(env (ptr (ArrayList EnvBind))) (name (slice u8))] (-> (Option CtVal))
+  (let [n (al-len [EnvBind] (load env)) (mut i) 0 (mut r) (None [CtVal])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [p (al-elem [EnvBind] env (load i))]
+            (if (str-eq (load (field p name)) name) (do (store! r (Some (load (field p val)))) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; The comptime evaluation context (src/comptime.rs::Ctx). The type/fn tables are
+; ArrayLists of the AST defs (the macro closure); fuel/depth/gensym are mutated
+; through the pointer. The qualify_* hygiene fields are present for the driver
+; (unused by the scalar interpreter; null/None = "outside macro expansion").
+(defstruct CtCtx
+  [(a (ptr Allocator))
+   (fns      (ptr (ArrayList Func)))
+   (structs  (ptr (ArrayList StructDef)))
+   (sums     (ptr (ArrayList SumDef)))
+   (variants (ptr (ArrayList (slice u8))))
+   (traits   (ptr (ArrayList TraitDef)))
+   (fuel i64)
+   (depth i64)
+   (gensym i64)
+   ; ---- referential-hygiene fields (driver chunk; null/None when not expanding)
+   (qmodule  (Option (slice u8)))
+   (module_fns      (ptr (ArrayList (slice u8))))
+   (qimports (ptr ModImports))
+   (qexports (ptr (ArrayList ExpEntry)))])
+
+; vget! — Rust's `val!` macro: unwrap a `(Result Flow Diag)`, yielding the CtVal of
+; an FVal; an FBrk/FCont short-circuits the enclosing `(try …)` returning the Flow
+; UNCHANGED (propagating break/continue up to the loop); a Diag propagates via try!.
+(defn vget! [(fl Code)] (-> Code)
+  (let [f (gensym) v (gensym)]
+    `(let [~f (try! ~fl)]
+       (match ~f
+         (FVal  [~v] ~v)
+         (FBrk  [vv ll] (return-from :try (Ok [Flow Diag] ~f)))
+         (FCont [ll]    (return-from :try (Ok [Flow Diag] ~f)))))))
+
+; Hard-error stub for an un-ported eval arm (RECIPE rule 2: never a silent fake).
+(defn eval-todo [(who (slice u8))] (-> (Result Flow Diag))
+  (do (unimplemented who) (Ok [Flow Diag] (FVal (CInt 0)))))
+
+; ---- CtVal scalar accessors (tag + total extractors; extractors are GUARDED by a
+;      tag check at every call site, mirroring Rust's irrefutable pattern matches).
+(defn ct-tag [(v CtVal)] (-> i64)
+  (match v (CInt [n] 0) (CBool [b] 1) (CFloat [x] 2) (CStr [s] 3) (CCode [f] 4)
+           (CStruct [a b] 5) (CArray [a b] 6) (CSum [a b] 7) (CRef [c] 8)))
+(defn cint-of [(v CtVal)] (-> i64)
+  (match v (CInt [n] n) (CBool [b] 0) (CFloat [x] 0) (CStr [s] 0) (CCode [f] 0)
+           (CStruct [a b] 0) (CArray [a b] 0) (CSum [a b] 0) (CRef [c] 0)))
+(defn cfloat-of [(v CtVal)] (-> f64)
+  (match v (CFloat [x] x) (CInt [n] 0.0) (CBool [b] 0.0) (CStr [s] 0.0) (CCode [f] 0.0)
+           (CStruct [a b] 0.0) (CArray [a b] 0.0) (CSum [a b] 0.0) (CRef [c] 0.0)))
+(defn cbool-of [(v CtVal)] (-> bool)
+  (match v (CBool [b] b) (CInt [n] false) (CFloat [x] false) (CStr [s] false) (CCode [f] false)
+           (CStruct [a b] false) (CArray [a b] false) (CSum [a b] false) (CRef [c] false)))
+
+; truthy (src/comptime.rs::truthy): a condition must be a bool or integer.
+(defn truthy [(v CtVal)] (-> (Result bool Diag))
+  (match v
+    (CBool [b] (Ok b))
+    (CInt  [n] (Ok (icmp-ne n 0)))
+    (CFloat [x] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CStr  [s] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CCode [f] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CStruct [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CArray  [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CSum    [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
+    (CRef    [c]   (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))))
+
+; i64 bit-pattern -> f64 (reverse of f64-bits; EFloat stores the bit pattern).
+(defn bits->f64 [(n i64)] (-> f64)
+  (let [p (alloc-stack i64)] (store! p n) (load (cast (ptr f64) p))))
+
+; trunc (src/comptime.rs::trunc): truncate `n` to `bits`, sign- or zero-extending.
+; Done in i64 (no i128): for bits<64 every intermediate fits (mask, masked, and
+; masked-(1<<bits) all in range).
+(defn trunc [(n i64) (bits i64) (signed bool)] (-> i64)
+  (if (icmp-ge bits 64) n
+    (let [mask (isub (ishl 1 bits) 1)
+          masked (iand n mask)]
+      (if (and signed (icmp-ne (iand masked (ishl 1 (isub bits 1))) 0))
+          (isub masked (ishl 1 bits))
+          masked))))
+
+; ---- ordering helpers (ord = -1/0/1; NaN sorts Less, matching Rust's
+;      partial_cmp(...).unwrap_or(Less)).
+(defn icmp-ord [(x i64) (y i64)] (-> i64) (if (icmp-lt x y) -1 (if (icmp-gt x y) 1 0)))
+(defn fcmp-ord [(x f64) (y f64)] (-> i64) (if (fcmp-lt x y) -1 (if (fcmp-eq x y) 0 (if (fcmp-gt x y) 1 -1))))
+(defn bool-ord [(x bool) (y bool)] (-> i64) (if (and (not x) y) -1 (if (and x (not y)) 1 0)))
+(defn cmp-apply [(op i64) (ord i64)] (-> bool)
+  (if (icmp-eq op 0) (icmp-eq ord -1)
+  (if (icmp-eq op 1) (icmp-ne ord 1)
+  (if (icmp-eq op 2) (icmp-eq ord 1)
+  (if (icmp-eq op 3) (icmp-ne ord -1)
+  (if (icmp-eq op 4) (icmp-eq ord 0)
+      (icmp-ne ord 0)))))))
+
+; bin (src/comptime.rs::bin): two floats -> float op (add/sub/mul/div only); else
+; two ints -> the full int op set; anything else is a type error.
+(defn ct-bin-float [(op i64) (x f64) (y f64)] (-> (Result CtVal Diag))
+  (if (icmp-eq op 0) (Ok (CFloat (fadd x y)))
+  (if (icmp-eq op 1) (Ok (CFloat (fsub x y)))
+  (if (icmp-eq op 2) (Ok (CFloat (fmul x y)))
+  (if (icmp-eq op 3) (Ok (CFloat (fdiv x y)))
+      (Err [CtVal Diag] (derr "comptime: unsupported float operation")))))))
+(defn ct-bin-int [(op i64) (x i64) (y i64)] (-> (Result CtVal Diag))
+  (if (icmp-eq op 0) (Ok (CInt (iadd x y)))
+  (if (icmp-eq op 1) (Ok (CInt (isub x y)))
+  (if (icmp-eq op 2) (Ok (CInt (imul x y)))
+  (if (icmp-eq op 3) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: division by zero")) (Ok (CInt (idiv x y))))
+  (if (icmp-eq op 4) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: remainder by zero")) (Ok (CInt (irem x y))))
+  (if (icmp-eq op 5) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: division by zero")) (Ok (CInt (udiv x y))))
+  (if (icmp-eq op 6) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: remainder by zero")) (Ok (CInt (urem x y))))
+  (if (icmp-eq op 7) (Ok (CInt (iand x y)))
+  (if (icmp-eq op 8) (Ok (CInt (ior x y)))
+  (if (icmp-eq op 9) (Ok (CInt (ixor x y)))
+  (if (icmp-eq op 10) (Ok (CInt (ishl x y)))
+      (Ok (CInt (ishr x y)))))))))))))))
+(defn ct-bin [(op i64) (a CtVal) (b CtVal)] (-> (Result CtVal Diag))
+  (if (and (icmp-eq (ct-tag a) 2) (icmp-eq (ct-tag b) 2))
+      (ct-bin-float op (cfloat-of a) (cfloat-of b))
+  (if (and (icmp-eq (ct-tag a) 0) (icmp-eq (ct-tag b) 0))
+      (ct-bin-int op (cint-of a) (cint-of b))
+      (Err [CtVal Diag] (derr "comptime: arithmetic needs two integers (or two floats)")))))
+
+; cmp (src/comptime.rs::cmp): compares two same-kind scalars (int/float/bool) -> bool.
+(defn ct-cmp [(op i64) (a CtVal) (b CtVal)] (-> (Result CtVal Diag))
+  (if (and (icmp-eq (ct-tag a) 0) (icmp-eq (ct-tag b) 0))
+      (Ok (CBool (cmp-apply op (icmp-ord (cint-of a) (cint-of b)))))
+  (if (and (icmp-eq (ct-tag a) 2) (icmp-eq (ct-tag b) 2))
+      (Ok (CBool (cmp-apply op (fcmp-ord (cfloat-of a) (cfloat-of b)))))
+  (if (and (icmp-eq (ct-tag a) 1) (icmp-eq (ct-tag b) 1))
+      (Ok (CBool (cmp-apply op (bool-ord (cbool-of a) (cbool-of b)))))
+      (Err [CtVal Diag] (derr "comptime: comparison needs two values of the same scalar kind"))))))
+
+; let-mut binding (src/comptime.rs Let arm): a mutable place. An aggregate already
+; IS a place (CRef); a scalar gets a fresh cell so it can be written through.
+(defn wrap-mut [(v CtVal)] (-> CtVal)
+  (if (icmp-eq (ct-tag v) 8) v (CRef (new-cell v))))
+
+; ct-cast (src/comptime.rs Cast arm): (Int, Int-type) truncates; everything else is
+; identity (the value passes through unchanged).
+(defn cast-trunc [(n i64) (ty Type)] (-> CtVal)
+  (match ty
+    (TInt  [bits signed] (CInt (trunc n bits signed)))
+    (TFloat [b] (CInt n)) (TBool [] (CInt n)) (TVoid [] (CInt n))
+    (TPtr [i] (CInt n)) (TRef [m i] (CInt n)) (TStruct [nm] (CInt n))
+    (TArray [e k] (CInt n)) (TSlice [e] (CInt n)) (TVec [e k] (CInt n))
+    (TFn [c p r] (CInt n)) (TApp [nm ar] (CInt n)) (TNever [] (CInt n)) (TCode [] (CInt n))))
+(defn ct-cast [(v CtVal) (ty Type)] (-> CtVal)
+  (if (icmp-eq (ct-tag v) 0) (cast-trunc (cint-of v) ty) v))
+
+; eval (src/comptime.rs::eval). SCALAR arms are ported; memory/loop/quote/code-op/
+; reflection/call arms hard-error via `eval-todo` until later fill chunks land, so a
+; partial port can never silently pass the gate.
+(defn eval [(e (ptr Expr)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Flow Diag))
+  (try
+    (let [f (load (field cx fuel))]
+      (if (icmp-eq f 0)
+          (return-from :try (Err [Flow Diag] (derr "comptime: evaluation budget exhausted (infinite loop/recursion?)")))
+          0)
+      (store! (field cx fuel) (isub f 1))
+      (match (load (field e kind))
+        (EInt   [n] (Ok (FVal (CInt n))))
+        (EBool  [b] (Ok (FVal (CBool b))))
+        (EFloat [bits] (Ok (FVal (CFloat (bits->f64 bits)))))
+        (EStr   [s] (Ok (FVal (CStr s))))
+        (EComptime [inner] (eval inner env cx))
+        (EVar [name]
+          (match (env-find env name)
+            (Some [v] (Ok (FVal v)))
+            (None []  (Err [Flow Diag] (derr (sconcat3 (load (field cx a)) "comptime: unbound variable '" name "'"))))))
+        (ENot [inner]
+          (let [v (vget! (eval inner env cx))]
+            (if (icmp-eq (ct-tag v) 0)
+                (Ok (FVal (CInt (ixor (cint-of v) -1))))
+                (Err [Flow Diag] (derr "comptime: `inot` needs an integer")))))
+        (EBin [op lhs rhs]
+          (let [x (vget! (eval lhs env cx)) y (vget! (eval rhs env cx))]
+            (Ok (FVal (try! (ct-bin op x y))))))
+        (ECmp [op lhs rhs]
+          (let [x (vget! (eval lhs env cx)) y (vget! (eval rhs env cx))]
+            (Ok (FVal (try! (ct-cmp op x y))))))
+        (EIf [cnd thn els]
+          (let [c (vget! (eval cnd env cx))]
+            (if (try! (truthy c)) (eval thn env cx) (eval els env cx))))
+        (EDo [body] (eval-seq body env cx))
+        (ELet [binds body]
+          (let [(mut scope) (env-clone (load (field cx a)) env) nb (al-len [Bind] (load binds)) (mut i) 0]
+            (loop (if (icmp-ge (load i) nb) (break)
+              (do (let [bp (al-elem [Bind] binds (load i))
+                        v  (vget! (eval (field bp value) (load scope) cx))
+                        bound (if (load (field bp mutable)) (wrap-mut v) v)]
+                    (store! scope (env-with (load (field cx a)) (load scope) (load (field bp name)) bound)))
+                  (store! i (iadd (load i) 1)))))
+            (eval-seq body (load scope) cx)))
+        (ECast [ty inner]
+          (let [v (vget! (eval inner env cx))]
+            (Ok (FVal (ct-cast v ty)))))
+        ; ---- un-ported arms (memory / loop / quote / code-op / reflection / call)
+        (ECStr  [s] (eval-todo "comptime/eval/ECStr"))
+        (EZeroed [ty] (eval-todo "comptime/eval/EZeroed"))
+        (EBorrow [mutable place] (eval-todo "comptime/eval/EBorrow"))
+        (ECall [func type_args args] (eval-todo "comptime/eval/ECall"))
+        (EAlloc [storage ty] (eval-todo "comptime/eval/EAlloc"))
+        (EField [p fname] (eval-todo "comptime/eval/EField"))
+        (ELoad [inner] (eval-todo "comptime/eval/ELoad"))
+        (EStore [p val] (eval-todo "comptime/eval/EStore"))
+        (EIndex [p idx] (eval-todo "comptime/eval/EIndex"))
+        (ESizeOf [ty] (eval-todo "comptime/eval/ESizeOf"))
+        (EAlignOf [ty] (eval-todo "comptime/eval/EAlignOf"))
+        (EOffsetOf [ty fname] (eval-todo "comptime/eval/EOffsetOf"))
+        (EBitGet [p fname] (eval-todo "comptime/eval/EBitGet"))
+        (EBitSet [p fname val] (eval-todo "comptime/eval/EBitSet"))
+        (EFree [inner] (eval-todo "comptime/eval/EFree"))
+        (EErase [trait_name inner] (eval-todo "comptime/eval/EErase"))
+        (EMatch [scrut arms] (eval-todo "comptime/eval/EMatch"))
+        (EFnPtrOf [name] (eval-todo "comptime/eval/EFnPtrOf"))
+        (ECallPtr [fp args] (eval-todo "comptime/eval/ECallPtr"))
+        (ELoop [label body] (eval-todo "comptime/eval/ELoop"))
+        (EBreak [label value] (eval-todo "comptime/eval/EBreak"))
+        (EContinue [label] (eval-todo "comptime/eval/EContinue"))
+        (ELlvmIr [result args body] (eval-todo "comptime/eval/ELlvmIr"))
+        (ETypeQuery [q ty] (eval-todo "comptime/eval/ETypeQuery"))
+        (EFieldMeta [meta ty idx] (eval-todo "comptime/eval/EFieldMeta"))
+        (EFieldIndex [ty name] (eval-todo "comptime/eval/EFieldIndex"))
+        (EQuote [form] (eval-todo "comptime/eval/EQuote"))
+        (ECodeOp [op args] (eval-todo "comptime/eval/ECodeOp"))
+        (EQuasi [q] (eval-todo "comptime/eval/EQuasi"))
+        (ESpillRef [inner] (eval-todo "comptime/eval/ESpillRef"))
+        (EConstruct [sum variant args] (eval-todo "comptime/eval/EConstruct"))
+        (ETraitCall [trait_name method self_tp args] (eval-todo "comptime/eval/ETraitCall"))
+        (EDynDispatch [dyn_struct vtable_struct method_index cc params ret recv args] (eval-todo "comptime/eval/EDynDispatch"))
+        (EMakeDyn [dyn_struct vtable_struct methods inner] (eval-todo "comptime/eval/EMakeDyn"))
+        (EStaticRef [name] (eval-todo "comptime/eval/EStaticRef"))))))
+
+; eval_seq (src/comptime.rs::eval_seq): evaluate a sequence, returning the LAST
+; expr's Flow; a break/continue in any non-last element short-circuits via vget!.
+(defn eval-seq [(es (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Flow Diag))
+  (try
+    (let [n (al-len [Expr] (load es))]
+      (if (icmp-eq n 0) (Ok [Flow Diag] (FVal (CInt 0)))
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) (isub n 1)) (break)
+            (do (let [discard (vget! (eval (al-elem [Expr] es (load i)) env cx))] 0)
+                (store! i (iadd (load i) 1)))))
+          (eval (al-elem [Expr] es (isub n 1)) env cx))))))
+
 ; ============================ THE EXPANDER (the FILL) ========================
 ; The Stage-3 macro EXPANDER: port of src/lib.rs::expand_stage3_macros +
 ; src/comptime.rs (the comptime tree-walk interpreter). Runs the Coil macro fns
