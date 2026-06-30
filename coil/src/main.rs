@@ -127,6 +127,7 @@ fn main() -> ExitCode {
         "dump-read" => report(coil::dump_read(&src), file),
         "dump-ast" => report(coil::dump_ast(&src), file),
         "dump-load" => report(coil::dump_load(&src), file),
+        "dump-expand" => report(coil::dump_expand(&src), file),
         "dump-resolved" => report(coil::dump_resolved(&src), file),
         "dump-checked" => report(coil::dump_checked(&src), file),
         "dump-mono" => report(coil::dump_mono(&src), file),

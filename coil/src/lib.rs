@@ -13,6 +13,7 @@ pub mod codegen;
 pub mod comptime;
 pub mod convention;
 pub mod dump_ast;
+pub mod dump_expand;
 pub mod dump_load;
 pub mod dump_resolved;
 pub mod dump_checked;
@@ -851,6 +852,53 @@ pub fn dump_load(src: &str) -> Result<String, String> {
             Ok(dump_load::dump_loaded(&tagged, &imports, &exports))
         }
         Err(d) => Err(span::render_all(std::slice::from_ref(&d), &sm)),
+    }
+}
+
+/// Canonical dump of the Stage-3 macro EXPANDER's output (`coil dump-expand`) —
+/// the differential oracle for the self-hosted macro expander. Reads the RAW
+/// (pre-macro) forms, runs `macros::load_program` (auto-loading the prelude + every
+/// imported file), then `expand_stage3_macros` (running the comptime macro engine to
+/// a fixpoint), and dumps the resulting module-tagged form list losslessly.
+///
+/// A LOAD failure is propagated as an error (non-zero exit), exactly like
+/// `dump-load`: the loader's failures depend on the filesystem (missing imports,
+/// non-module files), so the corpus snapshot excludes them by exit code rather than
+/// gating their wording. An EXPANSION failure is dumped in the canonical
+/// `(error@<lo>:<hi> "msg")` shape, so error-path parity is gated too.
+pub fn dump_expand(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    // Load step: a failure here is filesystem-dependent — propagate as an error so
+    // the snapshot excludes it (mirrors `dump_load`).
+    let loaded = (|| -> Result<_, Diag> {
+        let forms = reader::read_all(src, main)?;
+        macros::load_program(&forms, &host_target(), &mut sm)
+    })();
+    let (tagged, imports, exports) = match loaded {
+        Ok(t) => t,
+        Err(d) => return Err(span::render_all(std::slice::from_ref(&d), &sm)),
+    };
+    // Expand step: an error here is a property of the program — dump it canonically.
+    match expand_stage3_macros(tagged, &imports, &exports, &mut sm) {
+        Ok(expanded) => Ok(dump_expand::dump_expanded(&expanded)),
+        Err(d) => {
+            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
+            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
+            let mut msg = String::new();
+            for &b in d.msg.as_bytes() {
+                match b {
+                    b'\\' => msg.push_str("\\\\"),
+                    b'"' => msg.push_str("\\\""),
+                    b'\n' => msg.push_str("\\n"),
+                    b'\t' => msg.push_str("\\t"),
+                    b'\r' => msg.push_str("\\r"),
+                    0x20..=0x7e => msg.push(b as char),
+                    _ => msg.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+        }
     }
 }
 
