@@ -129,6 +129,7 @@ fn main() -> ExitCode {
         "dump-load" => report(coil::dump_load(&src), file),
         "dump-resolved" => report(coil::dump_resolved(&src), file),
         "dump-checked" => report(coil::dump_checked(&src), file),
+        "dump-mono" => report(coil::dump_mono(&src), file),
         "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags, opts.debug, &prog_args),
         // cimport <header.h> [-o out.coil]: generate Coil FFI bindings from a C header
         // via clang's AST. (`file` is the header path; `src` above just read it.)

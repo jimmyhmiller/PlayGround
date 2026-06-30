@@ -16,6 +16,7 @@ pub mod dump_ast;
 pub mod dump_load;
 pub mod dump_resolved;
 pub mod dump_checked;
+pub mod dump_mono;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
@@ -901,6 +902,39 @@ pub fn dump_checked(src: &str) -> Result<String, String> {
         Ok(p) => Ok(dump_checked::dump_checked(&p)),
         Err(E::One(d)) => Ok(dump_checked::dump_error(&d)),
         Err(E::Many(ds)) => Ok(dump_checked::dump_error(&ds[0])),
+    }
+}
+
+/// Canonical dump of the monomorphization pass's output (`coil dump-mono`) — the
+/// differential oracle for the self-hosted monomorphizer. Reads the (post-macro /
+/// RAW core) forms, runs `macros::load_program`, `resolve::resolve_program(strict)`,
+/// `check::check_with`, then `mono::monomorphize`, and dumps the resulting
+/// generics-free `Program` losslessly. A read, load, resolve, check (Diag), OR
+/// mono (String) error is dumped in the same canonical shape (`(error@<lo>:<hi>
+/// "msg")`); the front-end Diag uses its span, a mono error is spanless
+/// (`(error@D:D "msg")`). Always `Ok`: a malformed/ill-typed file is a
+/// well-defined dump, not a tool failure.
+pub fn dump_mono(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    enum E {
+        Diag(Diag),
+        Str(String),
+    }
+    let r = (|| -> Result<crate::ast::Program, E> {
+        let forms = reader::read_all(src, main).map_err(E::Diag)?;
+        let (tagged, imports, exports) =
+            macros::load_program(&forms, &host_target(), &mut sm).map_err(E::Diag)?;
+        let resolved =
+            resolve::resolve_program(tagged, &imports, &exports, true).map_err(E::Diag)?;
+        let checked = check::check_with(&resolved, &imports, &exports)
+            .map_err(|ds| E::Diag(ds.into_iter().next().unwrap()))?;
+        mono::monomorphize(checked).map_err(E::Str)
+    })();
+    match r {
+        Ok(p) => Ok(dump_mono::dump_mono(&p)),
+        Err(E::Diag(d)) => Ok(dump_mono::dump_error(&d)),
+        Err(E::Str(msg)) => Ok(dump_mono::dump_str_error(&msg)),
     }
 }
 
