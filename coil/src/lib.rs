@@ -12,6 +12,7 @@ pub mod cimport;
 pub mod codegen;
 pub mod comptime;
 pub mod convention;
+pub mod dump_ast;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
@@ -773,6 +774,36 @@ pub fn expand_to_string(src: &str) -> Result<String, String> {
 pub fn dump_read(src: &str) -> Result<String, String> {
     match reader::read_all(src, 0) {
         Ok(forms) => Ok(reader::dump_canonical(&forms)),
+        Err(d) => {
+            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
+            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
+            let mut msg = String::new();
+            for &b in d.msg.as_bytes() {
+                match b {
+                    b'\\' => msg.push_str("\\\\"),
+                    b'"' => msg.push_str("\\\""),
+                    b'\n' => msg.push_str("\\n"),
+                    b'\t' => msg.push_str("\\t"),
+                    b'\r' => msg.push_str("\\r"),
+                    0x20..=0x7e => msg.push(b as char),
+                    _ => msg.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+        }
+    }
+}
+
+/// Canonical dump of the parsed program (`coil dump-ast`) — the differential
+/// oracle for the self-hosted parser. Reads the (already-expanded, post-macro)
+/// core forms, runs `parse::parse_program`, and dumps the whole `Program`
+/// losslessly. A read OR parse error is dumped in the same canonical shape
+/// (`(error@<lo>:<hi> "msg")`), so error-path parity is gated too. Always `Ok`:
+/// a malformed file is a well-defined dump, not a tool failure.
+pub fn dump_ast(src: &str) -> Result<String, String> {
+    let parsed = reader::read_all(src, 0).and_then(|forms| parse::parse_program(&forms));
+    match parsed {
+        Ok(prog) => Ok(dump_ast::dump_program(&prog)),
         Err(d) => {
             let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
             let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };

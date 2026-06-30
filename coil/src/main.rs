@@ -125,6 +125,7 @@ fn main() -> ExitCode {
         ),
         "expand" => report(coil::expand_to_string(&src), file),
         "dump-read" => report(coil::dump_read(&src), file),
+        "dump-ast" => report(coil::dump_ast(&src), file),
         "run" => run_aot(&src, file, opts.target.as_deref(), &opts.link_flags, opts.debug, &prog_args),
         // cimport <header.h> [-o out.coil]: generate Coil FFI bindings from a C header
         // via clang's AST. (`file` is the header path; `src` above just read it.)
