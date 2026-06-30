@@ -13,6 +13,7 @@ pub mod codegen;
 pub mod comptime;
 pub mod convention;
 pub mod dump_ast;
+pub mod dump_load;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
@@ -821,6 +822,31 @@ pub fn dump_ast(src: &str) -> Result<String, String> {
             }
             Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
         }
+    }
+}
+
+/// Canonical dump of the module loader's output (`coil dump-load`) — the
+/// differential oracle for the self-hosted loader. Reads the RAW (pre-macro)
+/// forms, runs `macros::load_program` (which auto-loads the prelude and reads
+/// every imported file from disk relative to CWD), and dumps the resulting
+/// module-tagged form list + import/export tables losslessly.
+///
+/// Unlike `dump-read`/`dump-ast`, a load FAILURE is propagated as an error
+/// (non-zero exit), not dumped canonically: the loader's failures depend on the
+/// filesystem (missing imports, non-module files), so the corpus snapshot
+/// excludes them by exit code rather than gating their wording.
+pub fn dump_load(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    let loaded = (|| -> Result<_, Diag> {
+        let forms = reader::read_all(src, main)?;
+        macros::load_program(&forms, &host_target(), &mut sm)
+    })();
+    match loaded {
+        Ok((tagged, imports, exports)) => {
+            Ok(dump_load::dump_loaded(&tagged, &imports, &exports))
+        }
+        Err(d) => Err(span::render_all(std::slice::from_ref(&d), &sm)),
     }
 }
 
