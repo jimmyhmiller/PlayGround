@@ -20,6 +20,7 @@ pub mod dump_mono;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
+pub mod normalize_ir;
 pub mod parse;
 pub mod reader;
 pub mod resolve;
@@ -952,6 +953,17 @@ pub fn emit_ir(src: &str) -> Result<String, String> {
     let mut sm = SourceMap::new();
     let module = reported(build_module(&ctx, src, &mut sm), &sm)?;
     Ok(module.print_to_string().to_string())
+}
+
+/// `coil dump-ir` — the self-host codegen ORACLE. Emits the textual LLVM IR
+/// (`emit_ir`) then runs it through `normalize_ir::normalize`, which cancels the
+/// run-to-run nondeterminism in codegen's output (positional global numbering,
+/// attribute-group numbering, top-level emission order) so a byte-diff gate is
+/// meaningful. The self-host codegen prints its module with the same
+/// `LLVMPrintModuleToString` and passes it through the same normalization, so the
+/// two are compared on equal footing.
+pub fn dump_ir(src: &str) -> Result<String, String> {
+    Ok(normalize_ir::normalize(&emit_ir(src)?))
 }
 
 /// `emit_ir` for an explicitly chosen target triple — used to inspect a
