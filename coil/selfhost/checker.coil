@@ -2616,6 +2616,43 @@
       (and (booleq (load (field x variadic)) (load (field y variadic)))
            (type-eq (field x ret) (field y ret))))))
 
+; ============================ check.rs foundation =============================
+; display_name (src/check.rs:116) — strip the auto-referred "coil.core." prefix
+; from a name for diagnostics. "coil.core." is 10 bytes.
+(defn display-name [(n (slice u8))] (-> (slice u8))
+  (if (starts-with n "coil.core.")
+      (subslice [u8] n 10 (slice-len [u8] n))
+      n))
+
+; ty_str (src/check.rs:3017) — render a Type as the human string used in type
+; diagnostics. Pointer-accessor style (NOT match-by-value) to avoid the recursive
+; sum-by-value tag corruption; mirrors the resolver's type-eq.
+(defn ty-str-join [(a (ptr Allocator)) (v (ptr (ArrayList Type)))] (-> (slice u8))
+  (let [(mut out) "" n (al-len [Type] (load v)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (do (store! out (sconcat a (load out) " ")) 0) 0)
+          (let [tp (alloc-stack Type)] (store! tp (al-get [Type] (load v) (load i)))
+            (store! out (sconcat a (load out) (ty-str a tp))))
+          (store! i (iadd (load i) 1)))))
+    (load out)))
+
+(defn ty-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
+  (let [tg (type-tag t)]
+    (if (icmp-eq tg 12) "!"
+    (if (icmp-eq tg 13) "code"
+    (if (icmp-eq tg 3) "void"
+    (if (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
+    (if (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
+    (if (icmp-eq tg 2) "bool"
+    (if (icmp-eq tg 4) (sconcat3 a "(ptr " (ty-str a (t-inner t)) ")")
+    (if (icmp-eq tg 5) (if (t-ref-mut t) (sconcat3 a "(mut " (ty-str a (t-inner t)) ")") (sconcat3 a "(ref " (ty-str a (t-inner t)) ")"))
+    (if (icmp-eq tg 6) (type-struct-name t)
+    (if (icmp-eq tg 7) (sconcat3 a (sconcat3 a "(array " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
+    (if (icmp-eq tg 8) (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
+    (if (icmp-eq tg 9) (sconcat3 a (sconcat3 a "(vec " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
+    (if (icmp-eq tg 10) (sconcat3 a (sconcat3 a (sconcat3 a "(fnptr " (t-fn-cc t) " [") (ty-str-join a (t-fn-params t)) "] ") (ty-str a (t-fn-ret t)) ")")
+    (sconcat3 a (sconcat3 a "(" (t-app-name t) " ") (ty-str-join a (t-fn-params t)) ")"))))))))))))))))
+
 ; ---- qualify a Type in place (src/resolve.rs::qualify_type) ----------------
 (defn qualify-type-list [(c (ptr Ctx)) (lst (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
@@ -3278,6 +3315,17 @@
           args (box-al [Expr] a (al-new [Expr] a))
           recv (box-expr a (mk-expr (EVar "r") 19 20)) e (alloc-stack Expr)]
       (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18)) (d-expr w e)) (wb w 10)
+    ; ---- ty-str byte-exact checks (vs src/check.rs::ty_str) ----
+    (let [t (alloc-stack Type)] (store! t (TInt 64 true))  (ps w (ty-str a t))) (wb w 10)  ; i64
+    (let [t (alloc-stack Type)] (store! t (TInt 8 false))  (ps w (ty-str a t))) (wb w 10)  ; u8
+    (let [t (alloc-stack Type)] (store! t (TPtr (box-type a (TInt 8 false)))) (ps w (ty-str a t))) (wb w 10)  ; (ptr u8)
+    (let [t (alloc-stack Type)] (store! t (TRef true (box-type a (TStruct "Foo")))) (ps w (ty-str a t))) (wb w 10)  ; (mut Foo)
+    (let [(mut ps2) (al-new [Type] a)]
+      (al-push! (mut ps2) (TInt 64 true)) (al-push! (mut ps2) (TInt 64 true))
+      (let [t (alloc-stack Type)] (store! t (TApp "Pair" (box-al [Type] a (load ps2)))) (ps w (ty-str a t)))) (wb w 10)  ; (Pair i64 i64)
+    (let [(mut ps3) (al-new [Type] a)]
+      (al-push! (mut ps3) (TPtr (box-type a (TInt 8 true))))
+      (let [t (alloc-stack Type)] (store! t (TFn "c" (box-al [Type] a (load ps3)) (box-type a (TInt 64 true)))) (ps w (ty-str a t)))) (wb w 10)  ; (fnptr c [(ptr i8)] i64)
     0))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
