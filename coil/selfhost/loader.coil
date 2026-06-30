@@ -934,19 +934,148 @@
           (store! i (iadd (load i) 1)))))
     (if (load found) false (do (al-push! (mut (field s loaded)) name) true))))
 
-; ============================ the loader PORT (implement) ===================
-; STUBS — fill faithfully from src/macros.rs.
+; ============================ the loader PORT ==============================
+; Faithful port of src/macros.rs::{process_forms, process_import, load_program}.
+; Non-gated error paths (corpus files all load cleanly) hard-abort with a clear
+; message rather than threading a faithful Diag (those files are EXCLUDED).
+
+(defn as-str [(f (ptr Sexp))] (-> (Option (slice u8)))
+  (match (load (field f kind))
+    (KStr   [s] (Some s))
+    (KInt   [_] (None [(slice u8)]))
+    (KFloat [_] (None [(slice u8)]))
+    (KSym   [_] (None [(slice u8)]))
+    (KKw    [_] (None [(slice u8)]))
+    (KCStr  [_] (None [(slice u8)]))
+    (KList  [_] (None [(slice u8)]))
+    (KVec   [_] (None [(slice u8)]))))
+
+; `:use [names]` — collect the symbol names from a vector (filter_map sym_name).
+(defn collect-syms [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [Sexp] (load items)) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+            (match (sym-name it) (Some [nm] (al-push! (mut out) nm)) (None [] 0)))
+          (store! i (iadd (load i) 1)))))
+    (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! bp (load out)) bp)))
+
+; `(export a b c)` — restrict the module's public names to those listed.
+(defn handle-export [(s (mut LS)) (f (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
+  (match cur
+    (Some [m]
+      (let [items (as-list f) n (al-len [Sexp] (load items)) ep (exp-entry (mut s) m) (mut i) 1]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+                (match (sym-name it)
+                  (Some [nm] (ee-add-name! ep nm))
+                  (None []   (do (loader-abort "export: names must be symbols") 0))))
+              (store! i (iadd (load i) 1)))))
+        0))
+    (None [] (do (loader-abort "export: only valid inside a (module …)") 0))))
+
+; `(import "path" [:as alias] [:use *|[names]] [:reexport])` — load another module.
 (defn process-import [(s (mut LS)) (form (ptr Sexp)) (base (slice u8)) (cur (Option (slice u8)))] (-> i64)
-  (unimplemented "loader/process-import")
-  0)
+  (let [a (load (field s a))
+        items (as-list form) nit (al-len [Sexp] (load items))
+        path (if (icmp-lt nit 2)
+                 (do (loader-abort "import: expected (import \"path\" [:as alias])") "")
+                 (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) 1))
+                   (match (as-str it)
+                     (Some [p] p)
+                     (None []  (do (loader-abort "import: expected (import \"path\" [:as alias])") "")))))
+        (mut alias)    (None [(slice u8)])
+        (mut use-spec) (None [UseSpec])
+        (mut reexport) false
+        (mut i) 2]
+    ; optional :as / :reexport / :use
+    (loop (if (icmp-ge (load i) nit) (break)
+      (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+        (match (load (field it kind))
+          (KKw [k]
+            (if (str-eq k "as")
+                (let [a2 (alloc-stack Sexp)] (store! a2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                  (match (sym-name a2)
+                    (Some [al] (do (store! alias (Some al)) (store! i (iadd (load i) 2))))
+                    (None []   (do (loader-abort "import: :as expects an alias symbol") (store! i (iadd (load i) 2))))))
+              (if (str-eq k "reexport")
+                  (do (store! reexport true) (store! i (iadd (load i) 1)))
+                (if (str-eq k "use")
+                    (let [v2 (alloc-stack Sexp)] (store! v2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                      (match (load (field v2 kind))
+                        (KSym [sm] (if (str-eq sm "*")
+                                       (do (store! use-spec (Some (UAll))) (store! i (iadd (load i) 2)))
+                                       (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2)))))
+                        (KVec [vit] (do (store! use-spec (Some (UNames (collect-syms a vit)))) (store! i (iadd (load i) 2))))
+                        (KInt   [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KFloat [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KKw    [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KStr   [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KCStr  [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KList  [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))))
+                  (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1)))))))
+          (KInt   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KFloat [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KSym   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KStr   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KCStr  [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KList  [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KVec   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))))))
+    ; resolve the source (disk, then bundled), read it, find its module name
+    (let [rr (resolve-source a base path)
+          rp (alloc-stack Resolved)]
+      (store! rp rr)
+      (let [text (load (field rp text)) incdir (load (field rp incdir))]
+        (match (read-all a text)
+          (Err [d] (do (loader-abort "import: read error in imported file") 0))
+          (Ok [inc-forms]
+            (let [modname (match (declared-module inc-forms)
+                            (Some [m] m)
+                            (None []  (do (loader-abort "import: file has no (module …) declaration") "")))
+                  importer (match cur (Some [m] m) (None [] ""))
+                  imp (imp-entry (mut s) importer)
+                  alias-name (match (load alias) (Some [al] al) (None [] modname))]
+              (mi-add-alias! imp alias-name modname)
+              (match (load use-spec)
+                (Some [spec] (mi-add-use! imp modname spec))
+                (None []     0))
+              (if (load reexport) (mi-add-reexport! imp modname) 0)
+              (if (loaded-insert! (mut s) modname)
+                  (process-forms (mut s) inc-forms incdir (None [(slice u8)]))
+                  0)
+              0)))))))
 
+; Process a list of top-level forms, tagging each with its module.
 (defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
-  (unimplemented "loader/process-forms")
-  0)
+  (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
+    (store! cur cur0)
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (alloc-stack Sexp)] (store! f (al-get [Sexp] (load forms) (load i)))
+            (match (list-head f)
+              (Some [h]
+                (if (str-eq h "module")
+                    (let [name (module-name f)] (imp-entry (mut s) name) (store! cur (Some name)) 0)
+                  (if (str-eq h "export")
+                      (handle-export (mut s) f (load cur))
+                    (if (str-eq h "import")
+                        (match (load cur)
+                          (Some [m] (process-import (mut s) f base (load cur)))
+                          (None []  (do (loader-abort "import requires a (module …) declaration") 0)))
+                      (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))))
+              (None []
+                (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))
+          (store! i (iadd (load i) 1)))))
+    0))
 
+; Auto-load the prelude (src/prelude.coil), then the program. Mirrors load_program.
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
-  (unimplemented "loader/load-program")
-  0)
+  (let [a (load (field s a))
+        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))]
+    (match (read-all a prelude-text)
+      (Err [d] (do (loader-abort "read error in prelude") 0))
+      (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))
+    (process-forms (mut s) forms base (None [(slice u8)]))
+    0))
 
 ; ============================ entry ========================================
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
