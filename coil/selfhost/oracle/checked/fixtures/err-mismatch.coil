@@ -1,0 +1,6 @@
+(module errtest)
+(defstruct Pt [(x i64) (y i64)])
+(defn main [(w (slice u8))] (-> i64)
+  (let [p (alloc-stack Pt)]
+    (store! (field p x) w)
+    0))

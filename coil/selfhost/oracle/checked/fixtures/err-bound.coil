@@ -1,0 +1,5 @@
+(module errtest)
+(deftrait Show [Self]
+  (showit [(x Self)] (-> i64)))
+(defn use-it [T] [(x T)] (-> i64) (showit x))
+(defn main [] (-> i64) 0)

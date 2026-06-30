@@ -15,6 +15,7 @@ pub mod convention;
 pub mod dump_ast;
 pub mod dump_load;
 pub mod dump_resolved;
+pub mod dump_checked;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
@@ -870,6 +871,36 @@ pub fn dump_resolved(src: &str) -> Result<String, String> {
     match r {
         Ok(p) => Ok(dump_resolved::dump_resolved(&p)),
         Err(d) => Ok(dump_resolved::dump_error(&d)),
+    }
+}
+
+/// Canonical dump of the type-check pass's output (`coil dump-checked`) — the
+/// differential oracle for the self-hosted checker. Reads the (post-macro / RAW
+/// core) forms, runs `macros::load_program`, then `resolve::resolve_program(strict)`,
+/// then `check::check_with` (with the same import/export tables), and dumps the
+/// resulting typed, elaborated, lowered `Program` losslessly. A read, load,
+/// resolve, OR check error is dumped in the same canonical shape
+/// (`(error@<lo>:<hi> "msg")`) using the FIRST diagnostic, so error-path parity
+/// is gated too. Always `Ok`: a malformed/ill-typed file is a well-defined dump.
+pub fn dump_checked(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    enum E {
+        One(Diag),
+        Many(Vec<Diag>),
+    }
+    let r = (|| -> Result<crate::ast::Program, E> {
+        let forms = reader::read_all(src, main).map_err(E::One)?;
+        let (tagged, imports, exports) =
+            macros::load_program(&forms, &host_target(), &mut sm).map_err(E::One)?;
+        let resolved =
+            resolve::resolve_program(tagged, &imports, &exports, true).map_err(E::One)?;
+        check::check_with(&resolved, &imports, &exports).map_err(E::Many)
+    })();
+    match r {
+        Ok(p) => Ok(dump_checked::dump_checked(&p)),
+        Err(E::One(d)) => Ok(dump_checked::dump_error(&d)),
+        Err(E::Many(ds)) => Ok(dump_checked::dump_error(&ds[0])),
     }
 }
 
