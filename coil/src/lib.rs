@@ -14,6 +14,7 @@ pub mod comptime;
 pub mod convention;
 pub mod dump_ast;
 pub mod dump_load;
+pub mod dump_resolved;
 pub mod macros;
 pub mod manifest;
 pub mod mono;
@@ -847,6 +848,28 @@ pub fn dump_load(src: &str) -> Result<String, String> {
             Ok(dump_load::dump_loaded(&tagged, &imports, &exports))
         }
         Err(d) => Err(span::render_all(std::slice::from_ref(&d), &sm)),
+    }
+}
+
+/// Canonical dump of the name-resolution pass's output (`coil dump-resolved`) —
+/// the differential oracle for the self-hosted resolver. Reads the (already
+/// post-macro / RAW core) forms, runs `macros::load_program` (auto-loading the
+/// prelude + every imported file), then `resolve::resolve_program(.., strict=true)`,
+/// and dumps the resulting merged, name-resolved `Program` losslessly. A read,
+/// load, OR resolve error is dumped in the same canonical shape
+/// (`(error@<lo>:<hi> "msg")`), so error-path parity is gated too. Always `Ok`:
+/// a malformed/unresolvable file is a well-defined dump, not a tool failure.
+pub fn dump_resolved(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    let r = (|| -> Result<crate::ast::Program, Diag> {
+        let forms = reader::read_all(src, main)?;
+        let (tagged, imports, exports) = macros::load_program(&forms, &host_target(), &mut sm)?;
+        resolve::resolve_program(tagged, &imports, &exports, true)
+    })();
+    match r {
+        Ok(p) => Ok(dump_resolved::dump_resolved(&p)),
+        Err(d) => Ok(dump_resolved::dump_error(&d)),
     }
 }
 

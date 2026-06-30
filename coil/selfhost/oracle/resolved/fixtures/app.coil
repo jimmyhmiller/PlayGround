@@ -1,0 +1,28 @@
+; Curated resolve fixture — the cross-module workhorse. Exercises every import
+; path resolve cares about, all in one cleanly-resolving file:
+;   * :use [inc]      — a named bare reference resolves to rmod.helper.inc
+;   * :as h           — qualified `h/twice` resolves via the alias to its export
+;   * :use *          — a bare `str-eq` resolves into the real stdlib `str` module
+;   * coil.core auto-refer — `+` (Add method) stays bare via the trait-method allow
+;   * (export …)      — restrict this module's public names
+;   * (impl Eq Pt …)  — trait name → coil.core.Eq, for-type → rmod.app.Pt
+; The import path is repo-root relative because the main file's base_dir is CWD.
+(module rmod.app)
+
+(import "selfhost/oracle/resolved/fixtures/helper2.coil" :as h :use [inc])
+(import "lib/str.coil" :use *)
+
+(export run cmp)
+
+(defstruct Pt [(x i64) (y i64)])
+
+(impl Eq Pt
+  (= [(a Pt) (b Pt)] (-> bool) true))
+
+(defn run [(n i64)] (-> i64)
+  (let [a (inc n)
+        b (h/twice n)]
+    (+ a b)))
+
+(defn cmp [(s (slice u8))] (-> bool)
+  (str-eq s s))
