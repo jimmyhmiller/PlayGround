@@ -1077,7 +1077,11 @@ impl<'ctx> Cg<'ctx> {
     /// least 8 so that whole-eightbyte (i64/double) coerced loads/stores into it
     /// are naturally aligned, and never below the struct's own ABI alignment.
     fn struct_slot(&self, sa: &StructAbi<'ctx>, name: &str) -> Result<inkwell::values::PointerValue<'ctx>, String> {
-        let p = self.builder.build_alloca(sa.llvm_ty, name).map_err(le)?;
+        // Entry-block alloca: a constant-size alloca is a static (allocate-once)
+        // frame slot only in the entry block. Emitted inline inside a loop (e.g.
+        // an ABI spill for a by-value struct argument or return) it becomes a
+        // DYNAMIC stack growth, leaking a slot per iteration.
+        let p = self.entry_alloca(sa.llvm_ty.into(), name)?;
         if let Some(instr) = p.as_instruction() {
             let _ = instr.set_alignment(sa.align.max(8));
         }
@@ -1122,7 +1126,14 @@ impl<'ctx> Cg<'ctx> {
             let mut av = *v;
             if let Some(pt) = param_tys.get(i) {
                 if pt.is_pointer_type() && (av.is_struct_value() || av.is_array_value()) {
-                    let slot = self.builder.build_alloca(av.get_type(), "arg.spill").map_err(le)?;
+                    // Hoist the spill to the entry block: a constant-size alloca is
+                    // only a *static* (allocate-once) frame slot when it sits in the
+                    // entry block. Emitted inline inside a loop it would be a DYNAMIC
+                    // stack growth, leaking a fresh slot every iteration (the cause of
+                    // unbounded stack use in `sort-funcs`-style by-value-aggregate
+                    // loops). The pointer is consumed by the call below and never
+                    // escapes, so a single reused slot is correct.
+                    let slot = self.entry_alloca(av.get_type(), "arg.spill")?;
                     self.builder.build_store(slot, av).map_err(le)?;
                     av = slot.into();
                 }
@@ -1599,7 +1610,7 @@ impl<'ctx> Cg<'ctx> {
                     .get(&sumname)
                     .ok_or_else(|| format!("codegen: match on non-sum '{sumname}'"))?;
                 let sum_ty = info.ty;
-                let tmp = self.builder.build_alloca(sum_ty, "match.tmp").map_err(le)?;
+                let tmp = self.entry_alloca(sum_ty.into(), "match.tmp")?;
                 self.builder.build_store(tmp, sumval).map_err(le)?;
                 let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
                 let tag = self
@@ -2170,18 +2181,28 @@ impl<'ctx> Cg<'ctx> {
         let entry = func.get_first_basic_block().ok_or("codegen: function has no entry block")?;
         // The alloca is prologue, not a statement: emit it with NO line so it does
         // not pollute the line table (a body-line alloca at the front of `entry`
-        // would mis-place line breakpoints). Save/restore the caller's location.
-        let saved = self.builder.get_current_debug_location();
+        // would mis-place line breakpoints). Save/restore the caller's location —
+        // but ONLY under `-g`: with no debug info there is no location to preserve,
+        // and inkwell's get/unset round-trip would otherwise attach an empty `!{}`
+        // location to subsequent instructions (a verifier error).
+        let saved = if self.di.is_some() {
+            let s = self.builder.get_current_debug_location();
+            self.builder.unset_current_debug_location();
+            s
+        } else {
+            None
+        };
         match entry.get_first_instruction() {
             Some(first) => self.builder.position_before(&first),
             None => self.builder.position_at_end(entry),
         }
-        self.builder.unset_current_debug_location();
         let slot = self.builder.build_alloca(ty, name).map_err(le)?;
         self.builder.position_at_end(cur);
-        match saved {
-            Some(loc) => self.builder.set_current_debug_location(loc),
-            None => self.builder.unset_current_debug_location(),
+        if self.di.is_some() {
+            match saved {
+                Some(loc) => self.builder.set_current_debug_location(loc),
+                None => self.builder.unset_current_debug_location(),
+            }
         }
         Ok(slot)
     }
@@ -2307,7 +2328,7 @@ impl<'ctx> Cg<'ctx> {
             // temporary can be passed to a by-immutable-reference parameter.
             ExprKind::SpillRef(inner) => {
                 let (v, t) = self.emit_expr(inner, scope)?;
-                let slot = self.builder.build_alloca(self.basic_ty(&t), "spill").map_err(le)?;
+                let slot = self.entry_alloca(self.basic_ty(&t), "spill")?;
                 self.builder.build_store(slot, v).map_err(le)?;
                 Ok((slot.into(), Type::Ptr(Box::new(t))))
             }
@@ -2779,7 +2800,7 @@ impl<'ctx> Cg<'ctx> {
                     .get(dyn_struct)
                     .ok_or_else(|| format!("codegen: unknown dyn struct '{dyn_struct}'"))?
                     .ty;
-                let slot = self.builder.build_alloca(dty, "dyn.obj").map_err(le)?;
+                let slot = self.entry_alloca(dty.into(), "dyn.obj")?;
                 let dp = self.builder.build_struct_gep(dty, slot, 0, "dyn.data").map_err(le)?;
                 self.builder.build_store(dp, data).map_err(le)?;
                 let vp = self.builder.build_struct_gep(dty, slot, 1, "dyn.vt").map_err(le)?;
@@ -2798,7 +2819,7 @@ impl<'ctx> Cg<'ctx> {
                     .get(dyn_struct)
                     .ok_or_else(|| format!("codegen: unknown dyn struct '{dyn_struct}'"))?
                     .ty;
-                let slot = self.builder.build_alloca(dty, "dyn.recv").map_err(le)?;
+                let slot = self.entry_alloca(dty.into(), "dyn.recv")?;
                 self.builder.build_store(slot, rv).map_err(le)?;
                 let dp = self.builder.build_struct_gep(dty, slot, 0, "dyn.data").map_err(le)?;
                 let data = self.builder.build_load(pty, dp, "data").map_err(le)?;
@@ -2888,7 +2909,7 @@ impl<'ctx> Cg<'ctx> {
         let sum_ty = info.ty;
         let var_struct = info.variant_structs[vidx];
 
-        let tmp = self.builder.build_alloca(sum_ty, "sum.tmp").map_err(le)?;
+        let tmp = self.entry_alloca(sum_ty.into(), "sum.tmp")?;
         let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
         self.builder
             .build_store(tagptr, self.ctx.i32_type().const_int(vidx as u64, false))
@@ -2924,7 +2945,7 @@ impl<'ctx> Cg<'ctx> {
         let sum_ty = info.ty;
 
         // spill the scrutinee so we can GEP into it
-        let tmp = self.builder.build_alloca(sum_ty, "match.tmp").map_err(le)?;
+        let tmp = self.entry_alloca(sum_ty.into(), "match.tmp")?;
         self.builder.build_store(tmp, sumval).map_err(le)?;
         let tagptr = self.builder.build_struct_gep(sum_ty, tmp, 0, "tag").map_err(le)?;
         let tag = self
