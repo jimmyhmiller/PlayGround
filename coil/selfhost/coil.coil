@@ -41,6 +41,15 @@
 (extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
 (extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; NULL on failure
 (extern getcwd   :cc c [(ptr i8) i64] (-> (ptr i8)))
+; pthread FFI — run the deeply-recursive pipeline on a big stack, mirroring
+; src/lib.rs::elaborate which spawns a 256MB-stack scoped thread. A `coil build`
+; binary gets the default ~8MB main stack, which the recursive passes overflow on a
+; large input (the self-host's own source). pthread_t / pthread_attr_t are carried
+; as opaque buffers (a pointer-sized handle; attr is 64 bytes on macOS).
+(extern pthread_create            :cc c [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)] (-> i32))
+(extern pthread_join              :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_attr_init         :cc c [(ptr i8)] (-> i32))
+(extern pthread_attr_setstacksize :cc c [(ptr i8) i64] (-> i32))
 
 ; ============================ LLVM-C FFI surface =============================
 ; The codegen pass builds the module with LLVMBuild* and prints it with
@@ -7895,6 +7904,17 @@
                               (Ok [mp] (do (sort-mono-program a mp) (emit-ir-normalized a w mp)))))))))))))))
   0)
 
+; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
+(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))])
+
+; pthread start_routine: unpack the context and run the real dump-ir pipeline on the
+; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
+; overflow the default ~8MB stack.
+(defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
+  (let [ctx (cast (ptr DumpCtx) arg)]
+    (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)))
+    (cast (ptr i8) 0)))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [a    (malloc-allocator)
         sub  (cstr->slice (load (index argv 1)))]
@@ -7905,8 +7925,19 @@
             (ps w (normalize-ir a src)) 0)
           (let [path (load (index argv 2))
                 src  (read-file a path)
-                cwd  (cwd-slice a)]
-            (dump-ir-program a src cwd)))))
+                cwd  (cwd-slice a)
+                ctx  (alloc-stack DumpCtx)
+                attr (alloc-stack (array i8 64))
+                tid  (alloc-stack (ptr i8))]
+            (store! (field ctx a)   a)
+            (store! (field ctx src) src)
+            (store! (field ctx cwd) cwd)
+            (pthread_attr_init (cast (ptr i8) attr))
+            (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB
+            (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
+                            (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
+            (pthread_join (load tid) (cast (ptr i8) 0))
+            0))))
   0);; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
 (defsum CtVal
   (CInt    [(v i64)])
