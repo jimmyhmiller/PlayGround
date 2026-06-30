@@ -175,6 +175,9 @@
 (extern LLVMAddIncoming                    :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8)) i32] (-> void))
 (extern LLVMGetInsertBlock                 :cc c [(ptr i8)] (-> (ptr i8)))
 (extern LLVMGetBasicBlockParent            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetEntryBasicBlock             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetFirstInstruction            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMPositionBuilderBefore          :cc c [(ptr i8) (ptr i8)] (-> void))
 (extern LLVMGetBasicBlockTerminator        :cc c [(ptr i8)] (-> (ptr i8)))
 (extern LLVMSetValueName2                  :cc c [(ptr i8) (ptr i8) i64] (-> void))
 ; ---- module linking (for (llvm-ir ...)) ----
@@ -6528,6 +6531,23 @@
 (defn cg-pos [(cg (ptr Cg)) (bb (ptr i8))] (-> i64) (LLVMPositionBuilderAtEnd (cg-bld cg) bb) 0)
 (defn cg-cur-block [(cg (ptr Cg))] (-> (ptr i8)) (LLVMGetInsertBlock (cg-bld cg)))
 (defn cg-cur-func [(cg (ptr Cg))] (-> (ptr i8)) (LLVMGetBasicBlockParent (cg-cur-block cg)))
+; Entry-block alloca: a constant-size alloca is a STATIC (allocate-once) frame
+; slot only when it sits in the function's ENTRY block. Emitted inline inside a
+; loop it becomes a DYNAMIC per-iteration stack growth — the cause of unbounded
+; stack use when compiling large programs (e.g. a by-value-aggregate `al-push!`
+; loop). Build compiler-internal temp/spill slots here so each is allocated once
+; and reused across iterations. Mirrors src/codegen.rs::entry_alloca.
+(defn cg-entry-alloca [(cg (ptr Cg)) (ty (ptr i8)) (name (ptr i8))] (-> (ptr i8))
+  (let [b (cg-bld cg)
+        cur (LLVMGetInsertBlock b)
+        entry (LLVMGetEntryBasicBlock (LLVMGetBasicBlockParent cur))
+        first (LLVMGetFirstInstruction entry)]
+    (if (icmp-eq (cast i64 first) 0)
+        (do (LLVMPositionBuilderAtEnd b entry) 0)
+        (do (LLVMPositionBuilderBefore b first) 0))
+    (let [slot (LLVMBuildAlloca b ty name)]
+      (LLVMPositionBuilderAtEnd b cur)
+      slot)))
 (defn cg-terminated [(cg (ptr Cg))] (-> bool) (icmp-ne (cast i64 (LLVMGetBasicBlockTerminator (cg-cur-block cg))) 0))
 (defn cg-bl [(cg (ptr Cg)) (s (slice u8))] (-> (ptr i8)) (slice->cstr (load (field cg a)) s))
 ; next global counter value (shared g/str/cstr counter, per src/codegen.rs).
@@ -6580,7 +6600,7 @@
             (if (icmp-lt (load i) np)
                 (let [pt (load (index ptbuf (load i))) vk (LLVMGetTypeKind (LLVMTypeOf v))]
                   (if (and (icmp-eq (LLVMGetTypeKind pt) 12) (or (icmp-eq vk 10) (icmp-eq vk 11)))
-                      (let [slot (LLVMBuildAlloca (cg-bld cg) (LLVMTypeOf v) (cg-bl cg "arg.spill"))]
+                      (let [slot (cg-entry-alloca cg (LLVMTypeOf v) (cg-bl cg "arg.spill"))]
                         (LLVMBuildStore (cg-bld cg) v slot) (store! av slot) 0)
                       0))
                 0)
@@ -6614,7 +6634,7 @@
       (EZeroed [t] (mk-tv (LLVMConstNull (basic-ty cg (box-type a t))) t))
       (EBorrow [m place] (emit-expr cg place scp))
       (ESpillRef [inner] (let [tv (emit-expr cg inner scp) t (tv-ty tv)
-                               slot (LLVMBuildAlloca b (basic-ty cg (box-type a t)) (cg-bl cg "spill"))]
+                               slot (cg-entry-alloca cg (basic-ty cg (box-type a t)) (cg-bl cg "spill"))]
                            (LLVMBuildStore b (tv-val tv) slot)
                            (mk-tv slot (TPtr (box-type a t)))))
       (EBin [op lhs rhs]
@@ -6802,7 +6822,7 @@
     (if (icmp-lt ui 0) (cg-bug (sconcat a "codegen: unknown sum " sum))
       (let [sp (al-elem [CgSum] (field cg sums) ui) vidx (cg-variant-idx cg sp variant)
             sum-ty (load (field sp ty)) var-struct (al-get [(ptr i8)] (load (field sp vstructs)) vidx)
-            tmp (LLVMBuildAlloca b sum-ty (cg-bl cg "sum.tmp"))
+            tmp (cg-entry-alloca cg sum-ty (cg-bl cg "sum.tmp"))
             tagptr (LLVMBuildStructGEP2 b sum-ty tmp 0 (cg-bl cg "tag"))]
         (LLVMBuildStore b (LLVMConstInt (cg-i32t cg) vidx 0) tagptr)
         (let [payload (LLVMBuildStructGEP2 b sum-ty tmp 1 (cg-bl cg "payload"))
@@ -6821,7 +6841,7 @@
         ui (cg-sum-idx cg sumname)]
     (if (icmp-lt ui 0) (cg-bug (sconcat a "codegen: match on non-sum " sumname))
       (let [sp (al-elem [CgSum] (field cg sums) ui) sum-ty (load (field sp ty))
-            tmp (LLVMBuildAlloca b sum-ty (cg-bl cg "match.tmp"))]
+            tmp (cg-entry-alloca cg sum-ty (cg-bl cg "match.tmp"))]
         (LLVMBuildStore b (tv-val sv) tmp)
         (let [tagptr (LLVMBuildStructGEP2 b sum-ty tmp 0 (cg-bl cg "tag"))
               tag (LLVMBuildLoad2 b (cg-i32t cg) tagptr (cg-bl cg "tag"))
@@ -7148,7 +7168,7 @@
         sv (emit-expr cg scrut scp)
         sumname (match-else (tv-ty sv) (TStruct [s] s) (_ (cg-bug-sl "codegen: match on non-sum")))
         ui (cg-sum-idx cg sumname) sp (al-elem [CgSum] (field cg sums) ui) sum-ty (load (field sp ty))
-        tmp (LLVMBuildAlloca b sum-ty (cg-bl cg "match.tmp"))]
+        tmp (cg-entry-alloca cg sum-ty (cg-bl cg "match.tmp"))]
     (LLVMBuildStore b (tv-val sv) tmp)
     (let [tagptr (LLVMBuildStructGEP2 b sum-ty tmp 0 (cg-bl cg "tag"))
           tag (LLVMBuildLoad2 b (cg-i32t cg) tagptr (cg-bl cg "tag"))

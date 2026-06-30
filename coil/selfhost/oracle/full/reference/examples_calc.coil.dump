@@ -166,6 +166,8 @@ ifcont11:                                         ; preds = %else, %ifcont
 
 define internal i64 @"arraylist.al-reserve!__app.Tok"(ptr %l, i64 %newcap) {
 entry:
+  %match.tmp11 = alloca %coil.core.Option__ptr_app.Tok, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__app.Tok, ptr %l, i32 0, i32 2
   %load = load i64, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %arraylist.ArrayList__app.Tok, ptr %l, i32 0, i32 3
@@ -183,7 +185,6 @@ else:                                             ; preds = %entry
   %mul = mul i64 %load, 16
   %mul5 = mul i64 %newcap, 16
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-resize(ptr %load2, ptr %load4, i64 %mul, i64 %mul5, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag6 = load i32, ptr %tag, align 4
@@ -204,7 +205,6 @@ arm:                                              ; preds = %else
 
 arm7:                                             ; preds = %else
   %call10 = call %coil.core.Option__ptr_app.Tok @alloc.alloc-slice__app.Tok(ptr %load2, i64 %newcap)
-  %match.tmp11 = alloca %coil.core.Option__ptr_app.Tok, align 8
   store %coil.core.Option__ptr_app.Tok %call10, ptr %match.tmp11, align 8
   %tag12 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Tok, ptr %match.tmp11, i32 0, i32 0
   %tag13 = load i32, ptr %tag12, align 4
@@ -396,6 +396,7 @@ entry:
 
 define internal i64 @"hashmap.hm-grow!__i64__i64"(ptr %m, i64 %newcap) {
 entry:
+  %match.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
   %load = load ptr, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
@@ -403,7 +404,6 @@ entry:
   %field3 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
   %load4 = load i64, ptr %field3, align 8
   %call = call %coil.core.Option__ptr_hashmap.Entry__i64__i64 @alloc.alloc-slice__hashmap.Entry__i64__i64(ptr %load, i64 %newcap)
-  %match.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
   store %coil.core.Option__ptr_hashmap.Entry__i64__i64 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__i64__i64, ptr %match.tmp, i32 0, i32 0
   %tag5 = load i32, ptr %tag, align 4
@@ -610,9 +610,11 @@ entry:
 
 define internal %coil.core.Option__ptr_app.Tok @alloc.alloc-slice__app.Tok(ptr %a, i64 %n) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Tok, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_app.Tok, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %mul = mul i64 %n, 16
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %mul, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -623,7 +625,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_app.Tok, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Tok, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Tok, ptr %sum.tmp, i32 0, i32 1
@@ -633,7 +634,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Tok, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Tok, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Tok, ptr %sum.tmp5, i32 0, i32 1
@@ -648,9 +648,11 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_hashmap.Entry__i64__i64 @alloc.alloc-slice__hashmap.Entry__i64__i64(ptr %a, i64 %n) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %mul = mul i64 %n, 24
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %mul, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -661,7 +663,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__i64__i64, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__i64__i64, ptr %sum.tmp, i32 0, i32 1
@@ -671,7 +672,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.Entry__i64__i64, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__i64__i64, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__i64__i64, ptr %sum.tmp5, i32 0, i32 1
@@ -686,6 +686,8 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_i8 @alloc.ar-alloc(ptr %ctx, i64 %size, i64 %align) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %call = call i64 @alloc.align-up(i64 %load, i64 %align)
@@ -697,7 +699,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -708,7 +709,6 @@ else:                                             ; preds = %entry
   %field3 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
   %add4 = add i64 %call, %size
   store i64 %add4, ptr %field3, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_i8, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 1
@@ -757,8 +757,10 @@ entry:
 
 define internal %coil.core.Option__ptr_app.Ast @alloc.create__app.Ast(ptr %a) {
 entry:
-  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 32, i64 8)
+  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Ast, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_app.Ast, align 8
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
+  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 32, i64 8)
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -769,7 +771,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_app.Ast, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Ast, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Ast, ptr %sum.tmp, i32 0, i32 1
@@ -779,7 +780,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Ast, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Ast, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Ast, ptr %sum.tmp5, i32 0, i32 1
@@ -794,6 +794,8 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_i8 @alloc.ma-alloc(ptr %ctx, i64 %size, i64 %align) {
 entry:
+  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %call = call ptr @malloc(i64 %size)
   %ptrtoint = ptrtoint ptr %call to i64
   %cmp = icmp eq i64 %ptrtoint, 0
@@ -801,7 +803,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -809,7 +810,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Option__ptr_i8 %sum
 
 else:                                             ; preds = %entry
-  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
   %tag2 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 1
@@ -827,6 +827,8 @@ entry:
 
 define internal %coil.core.Option__ptr_i8 @alloc.ma-resize(ptr %ctx, ptr %p, i64 %old, i64 %new, i64 %align) {
 entry:
+  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %call = call ptr @realloc(ptr %p, i64 %new)
   %ptrtoint = ptrtoint ptr %call to i64
   %cmp = icmp eq i64 %ptrtoint, 0
@@ -834,7 +836,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -842,7 +843,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Option__ptr_i8 %sum
 
 else:                                             ; preds = %entry
-  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
   %tag2 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 1
@@ -899,8 +899,8 @@ entry:
 
 define internal ptr @alloc.unwrap-ptr__app.Ast(ptr %o) {
 entry:
-  %load = load %coil.core.Option__ptr_app.Ast, ptr %o, align 8
   %match.tmp = alloca %coil.core.Option__ptr_app.Ast, align 8
+  %load = load %coil.core.Option__ptr_app.Ast, ptr %o, align 8
   store %coil.core.Option__ptr_app.Ast %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_app.Ast, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -941,8 +941,8 @@ entry:
 
 define internal ptr @app.ast(ptr %a, ptr %x) {
 entry:
-  %call = call %coil.core.Option__ptr_app.Ast @alloc.create__app.Ast(ptr %a)
   %spill = alloca %coil.core.Option__ptr_app.Ast, align 8
+  %call = call %coil.core.Option__ptr_app.Ast @alloc.create__app.Ast(ptr %a)
   store %coil.core.Option__ptr_app.Ast %call, ptr %spill, align 8
   %call1 = call ptr @alloc.unwrap-ptr__app.Ast(ptr %spill)
   %load = load %app.Ast, ptr %x, align 8
@@ -952,8 +952,8 @@ entry:
 
 define internal i1 @app.at-end(ptr %p) {
 entry:
-  %call = call %app.Tok @app.peek(ptr %p)
   %match.tmp = alloca %app.Tok, align 8
+  %call = call %app.Tok @app.peek(ptr %p)
   store %app.Tok %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1005,8 +1005,9 @@ match.default:                                    ; preds = %entry
 
 define internal i64 @app.ev(ptr %n, ptr %env) {
 entry:
-  %load = load %app.Ast, ptr %n, align 8
+  %match.tmp6 = alloca %coil.core.Option__i64, align 8
   %match.tmp = alloca %app.Ast, align 8
+  %load = load %app.Ast, ptr %n, align 8
   store %app.Ast %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Ast, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1027,7 +1028,6 @@ arm2:                                             ; preds = %entry
   %vf5 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
   %nm = load i64, ptr %vf5, align 8
   %call = call %coil.core.Option__i64 @hashmap.hm-get__i64__i64(ptr %env, i64 %nm)
-  %match.tmp6 = alloca %coil.core.Option__i64, align 8
   store %coil.core.Option__i64 %call, ptr %match.tmp6, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %match.tmp6, i32 0, i32 0
   %tag8 = load i32, ptr %tag7, align 4
@@ -1102,8 +1102,8 @@ else27:                                           ; preds = %else23
 
 define internal i1 @app.is-eq(ptr %t) {
 entry:
-  %load = load %app.Tok, ptr %t, align 8
   %match.tmp = alloca %app.Tok, align 8
+  %load = load %app.Tok, ptr %t, align 8
   store %app.Tok %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1155,8 +1155,17 @@ match.default:                                    ; preds = %entry
 
 define internal void @app.lex(ptr sret(%arraylist.ArrayList__app.Tok) align 8 %0, ptr %a, { ptr, i64 } %s) {
 entry:
-  %stack.slot = alloca %arraylist.ArrayList__app.Tok, align 8
+  %ret.spill = alloca %arraylist.ArrayList__app.Tok, align 8
+  %sum.tmp83 = alloca %app.Tok, align 8
+  %sum.tmp79 = alloca %app.Tok, align 8
+  %sum.tmp71 = alloca %app.Tok, align 8
+  %sum.tmp63 = alloca %app.Tok, align 8
+  %sum.tmp55 = alloca %app.Tok, align 8
+  %sum.tmp43 = alloca %app.Tok, align 8
+  %sum.tmp33 = alloca %app.Tok, align 8
+  %sum.tmp = alloca %app.Tok, align 8
   %abi.sret = alloca %arraylist.ArrayList__app.Tok, align 8
+  %stack.slot = alloca %arraylist.ArrayList__app.Tok, align 8
   call void @arraylist.al-new__app.Tok(ptr sret(%arraylist.ArrayList__app.Tok) align 8 %abi.sret, ptr %a)
   %abi.ret = load %arraylist.ArrayList__app.Tok, ptr %abi.sret, align 8
   store %arraylist.ArrayList__app.Tok %abi.ret, ptr %stack.slot, align 8
@@ -1174,13 +1183,11 @@ loop.body:                                        ; preds = %ifcont101, %entry
 loop.after:                                       ; preds = %then
   %loop.val103 = phi i64 [ 0, %then ]
   %load104 = load %arraylist.ArrayList__app.Tok, ptr %stack.slot, align 8
-  %ret.spill = alloca %arraylist.ArrayList__app.Tok, align 8
   store %arraylist.ArrayList__app.Tok %load104, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 32, i1 false)
   ret void
 
 then:                                             ; preds = %loop.body
-  %sum.tmp = alloca %app.Tok, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp, i32 0, i32 0
   store i32 7, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp, i32 0, i32 1
@@ -1225,7 +1232,6 @@ loop.body15:                                      ; preds = %then27, %then12
 
 loop.after16:                                     ; preds = %else28, %then20
   %loop.val = phi i64 [ 0, %then20 ], [ 0, %else28 ]
-  %sum.tmp33 = alloca %app.Tok, align 8
   %tag34 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp33, i32 0, i32 0
   store i32 0, ptr %tag34, align 4
   %payload35 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp33, i32 0, i32 1
@@ -1262,7 +1268,6 @@ else28:                                           ; preds = %else21
   br label %loop.after16
 
 then41:                                           ; preds = %else13
-  %sum.tmp43 = alloca %app.Tok, align 8
   %tag44 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp43, i32 0, i32 0
   store i32 1, ptr %tag44, align 4
   %payload45 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp43, i32 0, i32 1
@@ -1281,7 +1286,6 @@ else42:                                           ; preds = %else13
   br i1 %ifc52, label %then53, label %else54
 
 then53:                                           ; preds = %else42
-  %sum.tmp55 = alloca %app.Tok, align 8
   %tag56 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp55, i32 0, i32 0
   store i32 3, ptr %tag56, align 4
   %payload57 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp55, i32 0, i32 1
@@ -1294,7 +1298,6 @@ else54:                                           ; preds = %else42
   br i1 %ifc60, label %then61, label %else62
 
 then61:                                           ; preds = %else54
-  %sum.tmp63 = alloca %app.Tok, align 8
   %tag64 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp63, i32 0, i32 0
   store i32 4, ptr %tag64, align 4
   %payload65 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp63, i32 0, i32 1
@@ -1307,7 +1310,6 @@ else62:                                           ; preds = %else54
   br i1 %ifc68, label %then69, label %else70
 
 then69:                                           ; preds = %else62
-  %sum.tmp71 = alloca %app.Tok, align 8
   %tag72 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp71, i32 0, i32 0
   store i32 5, ptr %tag72, align 4
   %payload73 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp71, i32 0, i32 1
@@ -1320,7 +1322,6 @@ else70:                                           ; preds = %else62
   br i1 %ifc76, label %then77, label %else78
 
 then77:                                           ; preds = %else70
-  %sum.tmp79 = alloca %app.Tok, align 8
   %tag80 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp79, i32 0, i32 0
   store i32 6, ptr %tag80, align 4
   %payload81 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp79, i32 0, i32 1
@@ -1328,7 +1329,6 @@ then77:                                           ; preds = %else70
   br label %ifcont
 
 else78:                                           ; preds = %else70
-  %sum.tmp83 = alloca %app.Tok, align 8
   %tag84 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp83, i32 0, i32 0
   store i32 2, ptr %tag84, align 4
   %payload85 = getelementptr inbounds nuw %app.Tok, ptr %sum.tmp83, i32 0, i32 1
@@ -1372,6 +1372,9 @@ ifcont101:                                        ; preds = %ifcont99, %then7
 
 define internal ptr @app.parse-expr(ptr %p) {
 entry:
+  %spill = alloca %app.Ast, align 8
+  %sum.tmp = alloca %app.Ast, align 8
+  %match.tmp = alloca %app.Tok, align 8
   %stack.slot = alloca ptr, align 8
   %call = call ptr @app.parse-term(ptr %p)
   store ptr %call, ptr %stack.slot, align 8
@@ -1379,7 +1382,6 @@ entry:
 
 loop.body:                                        ; preds = %match.end, %entry
   %call1 = call %app.Tok @app.peek(ptr %p)
-  %match.tmp = alloca %app.Tok, align 8
   store %app.Tok %call1, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag, align 4
@@ -1455,7 +1457,6 @@ then12:                                           ; preds = %ifcont
   %call14 = call i64 @app.adv(ptr %p)
   %field = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load = load ptr, ptr %field, align 8
-  %sum.tmp = alloca %app.Ast, align 8
   %tag15 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 0
   store i32 2, ptr %tag15, align 4
   %payload16 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 1
@@ -1468,7 +1469,6 @@ then12:                                           ; preds = %ifcont
   %vf21 = getelementptr inbounds nuw { i64, ptr, ptr }, ptr %payload16, i32 0, i32 2
   store ptr %call20, ptr %vf21, align 8
   %sum = load %app.Ast, ptr %sum.tmp, align 8
-  %spill = alloca %app.Ast, align 8
   store %app.Ast %sum, ptr %spill, align 8
   %call22 = call ptr @app.ast(ptr %load, ptr %spill)
   store ptr %call22, ptr %stack.slot, align 8
@@ -1480,8 +1480,22 @@ else13:                                           ; preds = %ifcont
 
 define internal ptr @app.parse-primary(ptr %p) {
 entry:
-  %call = call %app.Tok @app.peek(ptr %p)
+  %spill72 = alloca %app.Ast, align 8
+  %sum.tmp67 = alloca %app.Ast, align 8
+  %spill63 = alloca %app.Ast, align 8
+  %sum.tmp58 = alloca %app.Ast, align 8
+  %spill54 = alloca %app.Ast, align 8
+  %sum.tmp49 = alloca %app.Ast, align 8
+  %spill45 = alloca %app.Ast, align 8
+  %sum.tmp40 = alloca %app.Ast, align 8
+  %spill36 = alloca %app.Ast, align 8
+  %sum.tmp31 = alloca %app.Ast, align 8
+  %spill23 = alloca %app.Ast, align 8
+  %sum.tmp18 = alloca %app.Ast, align 8
+  %spill = alloca %app.Ast, align 8
+  %sum.tmp = alloca %app.Ast, align 8
   %match.tmp = alloca %app.Tok, align 8
+  %call = call %app.Tok @app.peek(ptr %p)
   store %app.Tok %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1503,14 +1517,12 @@ arm:                                              ; preds = %entry
   %call9 = call i64 @app.adv(ptr %p)
   %field = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load = load ptr, ptr %field, align 8
-  %sum.tmp = alloca %app.Ast, align 8
   %tag10 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag10, align 4
   %payload11 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 1
   %vf12 = getelementptr inbounds nuw { i64 }, ptr %payload11, i32 0, i32 0
   store i64 %v, ptr %vf12, align 8
   %sum = load %app.Ast, ptr %sum.tmp, align 8
-  %spill = alloca %app.Ast, align 8
   store %app.Ast %sum, ptr %spill, align 8
   %call13 = call ptr @app.ast(ptr %load, ptr %spill)
   ret ptr %call13
@@ -1521,14 +1533,12 @@ arm2:                                             ; preds = %entry
   %call15 = call i64 @app.adv(ptr %p)
   %field16 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load17 = load ptr, ptr %field16, align 8
-  %sum.tmp18 = alloca %app.Ast, align 8
   %tag19 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp18, i32 0, i32 0
   store i32 1, ptr %tag19, align 4
   %payload20 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp18, i32 0, i32 1
   %vf21 = getelementptr inbounds nuw { i64 }, ptr %payload20, i32 0, i32 0
   store i64 %nm, ptr %vf21, align 8
   %sum22 = load %app.Ast, ptr %sum.tmp18, align 8
-  %spill23 = alloca %app.Ast, align 8
   store %app.Ast %sum22, ptr %spill23, align 8
   %call24 = call ptr @app.ast(ptr %load17, ptr %spill23)
   ret ptr %call24
@@ -1544,14 +1554,12 @@ arm4:                                             ; preds = %entry
   %_ = load i64, ptr %vf28, align 8
   %field29 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load30 = load ptr, ptr %field29, align 8
-  %sum.tmp31 = alloca %app.Ast, align 8
   %tag32 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp31, i32 0, i32 0
   store i32 0, ptr %tag32, align 4
   %payload33 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp31, i32 0, i32 1
   %vf34 = getelementptr inbounds nuw { i64 }, ptr %payload33, i32 0, i32 0
   store i64 0, ptr %vf34, align 8
   %sum35 = load %app.Ast, ptr %sum.tmp31, align 8
-  %spill36 = alloca %app.Ast, align 8
   store %app.Ast %sum35, ptr %spill36, align 8
   %call37 = call ptr @app.ast(ptr %load30, ptr %spill36)
   ret ptr %call37
@@ -1559,14 +1567,12 @@ arm4:                                             ; preds = %entry
 arm5:                                             ; preds = %entry
   %field38 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load39 = load ptr, ptr %field38, align 8
-  %sum.tmp40 = alloca %app.Ast, align 8
   %tag41 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp40, i32 0, i32 0
   store i32 0, ptr %tag41, align 4
   %payload42 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp40, i32 0, i32 1
   %vf43 = getelementptr inbounds nuw { i64 }, ptr %payload42, i32 0, i32 0
   store i64 0, ptr %vf43, align 8
   %sum44 = load %app.Ast, ptr %sum.tmp40, align 8
-  %spill45 = alloca %app.Ast, align 8
   store %app.Ast %sum44, ptr %spill45, align 8
   %call46 = call ptr @app.ast(ptr %load39, ptr %spill45)
   ret ptr %call46
@@ -1574,14 +1580,12 @@ arm5:                                             ; preds = %entry
 arm6:                                             ; preds = %entry
   %field47 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load48 = load ptr, ptr %field47, align 8
-  %sum.tmp49 = alloca %app.Ast, align 8
   %tag50 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp49, i32 0, i32 0
   store i32 0, ptr %tag50, align 4
   %payload51 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp49, i32 0, i32 1
   %vf52 = getelementptr inbounds nuw { i64 }, ptr %payload51, i32 0, i32 0
   store i64 0, ptr %vf52, align 8
   %sum53 = load %app.Ast, ptr %sum.tmp49, align 8
-  %spill54 = alloca %app.Ast, align 8
   store %app.Ast %sum53, ptr %spill54, align 8
   %call55 = call ptr @app.ast(ptr %load48, ptr %spill54)
   ret ptr %call55
@@ -1589,14 +1593,12 @@ arm6:                                             ; preds = %entry
 arm7:                                             ; preds = %entry
   %field56 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load57 = load ptr, ptr %field56, align 8
-  %sum.tmp58 = alloca %app.Ast, align 8
   %tag59 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp58, i32 0, i32 0
   store i32 0, ptr %tag59, align 4
   %payload60 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp58, i32 0, i32 1
   %vf61 = getelementptr inbounds nuw { i64 }, ptr %payload60, i32 0, i32 0
   store i64 0, ptr %vf61, align 8
   %sum62 = load %app.Ast, ptr %sum.tmp58, align 8
-  %spill63 = alloca %app.Ast, align 8
   store %app.Ast %sum62, ptr %spill63, align 8
   %call64 = call ptr @app.ast(ptr %load57, ptr %spill63)
   ret ptr %call64
@@ -1604,14 +1606,12 @@ arm7:                                             ; preds = %entry
 arm8:                                             ; preds = %entry
   %field65 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load66 = load ptr, ptr %field65, align 8
-  %sum.tmp67 = alloca %app.Ast, align 8
   %tag68 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp67, i32 0, i32 0
   store i32 0, ptr %tag68, align 4
   %payload69 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp67, i32 0, i32 1
   %vf70 = getelementptr inbounds nuw { i64 }, ptr %payload69, i32 0, i32 0
   store i64 0, ptr %vf70, align 8
   %sum71 = load %app.Ast, ptr %sum.tmp67, align 8
-  %spill72 = alloca %app.Ast, align 8
   store %app.Ast %sum71, ptr %spill72, align 8
   %call73 = call ptr @app.ast(ptr %load66, ptr %spill72)
   ret ptr %call73
@@ -1622,8 +1622,11 @@ match.default:                                    ; preds = %entry
 
 define internal ptr @app.parse-stmt(ptr %p) {
 entry:
-  %call = call %app.Tok @app.peek(ptr %p)
+  %spill22 = alloca %app.Ast, align 8
+  %sum.tmp = alloca %app.Ast, align 8
+  %spill = alloca %app.Tok, align 8
   %match.tmp = alloca %app.Tok, align 8
+  %call = call %app.Tok @app.peek(ptr %p)
   store %app.Tok %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1649,7 +1652,6 @@ arm:                                              ; preds = %entry
   %add = add i64 %load10, 1
   %idx = getelementptr %app.Tok, ptr %load, i64 %add
   %load11 = load %app.Tok, ptr %idx, align 8
-  %spill = alloca %app.Tok, align 8
   store %app.Tok %load11, ptr %spill, align 8
   %call12 = call i1 @app.is-eq(ptr %spill)
   %ifc = icmp ne i1 %call12, false
@@ -1695,7 +1697,6 @@ then:                                             ; preds = %arm
   %call14 = call i64 @app.adv(ptr %p)
   %field15 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load16 = load ptr, ptr %field15, align 8
-  %sum.tmp = alloca %app.Ast, align 8
   %tag17 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 0
   store i32 3, ptr %tag17, align 4
   %payload18 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 1
@@ -1705,7 +1706,6 @@ then:                                             ; preds = %arm
   %vf21 = getelementptr inbounds nuw { i64, ptr }, ptr %payload18, i32 0, i32 1
   store ptr %call20, ptr %vf21, align 8
   %sum = load %app.Ast, ptr %sum.tmp, align 8
-  %spill22 = alloca %app.Ast, align 8
   store %app.Ast %sum, ptr %spill22, align 8
   %call23 = call ptr @app.ast(ptr %load16, ptr %spill22)
   ret ptr %call23
@@ -1717,6 +1717,9 @@ else:                                             ; preds = %arm
 
 define internal ptr @app.parse-term(ptr %p) {
 entry:
+  %spill = alloca %app.Ast, align 8
+  %sum.tmp = alloca %app.Ast, align 8
+  %match.tmp = alloca %app.Tok, align 8
   %stack.slot = alloca ptr, align 8
   %call = call ptr @app.parse-primary(ptr %p)
   store ptr %call, ptr %stack.slot, align 8
@@ -1724,7 +1727,6 @@ entry:
 
 loop.body:                                        ; preds = %match.end, %entry
   %call1 = call %app.Tok @app.peek(ptr %p)
-  %match.tmp = alloca %app.Tok, align 8
   store %app.Tok %call1, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag, align 4
@@ -1800,7 +1802,6 @@ then12:                                           ; preds = %ifcont
   %call14 = call i64 @app.adv(ptr %p)
   %field = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load = load ptr, ptr %field, align 8
-  %sum.tmp = alloca %app.Ast, align 8
   %tag15 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 0
   store i32 2, ptr %tag15, align 4
   %payload16 = getelementptr inbounds nuw %app.Ast, ptr %sum.tmp, i32 0, i32 1
@@ -1813,7 +1814,6 @@ then12:                                           ; preds = %ifcont
   %vf21 = getelementptr inbounds nuw { i64, ptr, ptr }, ptr %payload16, i32 0, i32 2
   store ptr %call20, ptr %vf21, align 8
   %sum = load %app.Ast, ptr %sum.tmp, align 8
-  %spill = alloca %app.Ast, align 8
   store %app.Ast %sum, ptr %spill, align 8
   %call22 = call ptr @app.ast(ptr %load, ptr %spill)
   store ptr %call22, ptr %stack.slot, align 8
@@ -1836,8 +1836,10 @@ entry:
 
 define internal i64 @app.run(ptr %a, ptr %w, { ptr, i64 } %src) {
 entry:
-  %stack.slot = alloca %arraylist.ArrayList__app.Tok, align 8
+  %match.tmp = alloca %app.Tok, align 8
+  %abi.sret5 = alloca %hashmap.HashMap__i64__i64, align 8
   %abi.sret = alloca %arraylist.ArrayList__app.Tok, align 8
+  %stack.slot = alloca %arraylist.ArrayList__app.Tok, align 8
   call void @app.lex(ptr sret(%arraylist.ArrayList__app.Tok) align 8 %abi.sret, ptr %a, { ptr, i64 } %src)
   %abi.ret = load %arraylist.ArrayList__app.Tok, ptr %abi.sret, align 8
   store %arraylist.ArrayList__app.Tok %abi.ret, ptr %stack.slot, align 8
@@ -1850,7 +1852,6 @@ entry:
   %field3 = getelementptr inbounds nuw %app.P, ptr %stack.slot1, i32 0, i32 2
   store ptr %a, ptr %field3, align 8
   %stack.slot4 = alloca %hashmap.HashMap__i64__i64, align 8
-  %abi.sret5 = alloca %hashmap.HashMap__i64__i64, align 8
   call void @hashmap.hm-new-scalar__i64__i64(ptr sret(%hashmap.HashMap__i64__i64) align 8 %abi.sret5, ptr %a)
   %abi.ret6 = load %hashmap.HashMap__i64__i64, ptr %abi.sret5, align 8
   store %hashmap.HashMap__i64__i64 %abi.ret6, ptr %stack.slot4, align 8
@@ -1879,7 +1880,6 @@ else:                                             ; preds = %loop.body
   %call11 = call %coil.core.Result__i64__io.IoError @fmt.print-i(ptr %w, i64 %load)
   %call12 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } { ptr @str.0, i64 1 })
   %call13 = call %app.Tok @app.peek(ptr %stack.slot1)
-  %match.tmp = alloca %app.Tok, align 8
   store %app.Tok %call13, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Tok, ptr %match.tmp, i32 0, i32 0
   %tag14 = load i32, ptr %tag, align 4
@@ -1936,12 +1936,12 @@ match.end:                                        ; preds = %arm21, %arm20, %arm
 
 define internal void @arraylist.al-new__app.Tok(ptr sret(%arraylist.ArrayList__app.Tok) align 8 %0, ptr %a) {
 entry:
+  %ret.spill = alloca %arraylist.ArrayList__app.Tok, align 8
   %stack.slot = alloca %arraylist.ArrayList__app.Tok, align 8
   store %arraylist.ArrayList__app.Tok zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__app.Tok, ptr %stack.slot, i32 0, i32 3
   store ptr %a, ptr %field, align 8
   %load = load %arraylist.ArrayList__app.Tok, ptr %stack.slot, align 8
-  %ret.spill = alloca %arraylist.ArrayList__app.Tok, align 8
   store %arraylist.ArrayList__app.Tok %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 32, i1 false)
   ret void
@@ -1973,6 +1973,8 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %n) {
 entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp slt i64 %n, 16
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
@@ -1985,7 +1987,6 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %div = sdiv i64 %n, 16
   %call6 = call %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %div)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call6, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag7 = load i32, ptr %tag, align 4
@@ -2012,7 +2013,6 @@ ifcont:                                           ; preds = %else4, %then3
 arm:                                              ; preds = %else
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag9 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag9, align 4
   %payload10 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2049,13 +2049,14 @@ ifcont19:                                         ; preds = %else16, %then15
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-i(ptr %w, i64 %n) {
 entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp slt i64 %n, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
   %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 45)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -2072,7 +2073,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %then
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2094,8 +2094,9 @@ match.default:                                    ; preds = %then
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-line(ptr %w, { ptr, i64 } %s) {
 entry:
-  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s)
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s)
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -2108,7 +2109,6 @@ entry:
 arm:                                              ; preds = %entry
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2150,12 +2150,14 @@ else:                                             ; preds = %entry
 
 define internal %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %n) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp eq i64 %n, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2167,7 +2169,6 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %udiv = udiv i64 %n, 16
   %call = call %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %udiv)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag1, align 4
@@ -2180,7 +2181,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
   %e = load %io.IoError, ptr %vf5, align 8
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 1, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2260,6 +2260,9 @@ else:                                             ; preds = %loop.body
 
 define internal %coil.core.Option__i64 @hashmap.hm-get__i64__i64(ptr %m, i64 %k) {
 entry:
+  %sum.tmp39 = alloca %coil.core.Option__i64, align 8
+  %sum.tmp33 = alloca %coil.core.Option__i64, align 8
+  %sum.tmp = alloca %coil.core.Option__i64, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %cmp = icmp eq i64 %load, 0
@@ -2267,7 +2270,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__i64, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp, i32 0, i32 1
@@ -2340,7 +2342,6 @@ else21:                                           ; preds = %ifcont
   br label %loop.body
 
 then31:                                           ; preds = %loop.after
-  %sum.tmp33 = alloca %coil.core.Option__i64, align 8
   %tag34 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp33, i32 0, i32 0
   store i32 1, ptr %tag34, align 4
   %payload35 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp33, i32 0, i32 1
@@ -2352,7 +2353,6 @@ then31:                                           ; preds = %loop.after
   ret %coil.core.Option__i64 %sum38
 
 else32:                                           ; preds = %loop.after
-  %sum.tmp39 = alloca %coil.core.Option__i64, align 8
   %tag40 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp39, i32 0, i32 0
   store i32 0, ptr %tag40, align 4
   %payload41 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp39, i32 0, i32 1
@@ -2503,11 +2503,11 @@ ifcont58:                                         ; preds = %ifcont56, %ifcont27
 
 define internal void @hashmap.hm-new-scalar__i64__i64(ptr sret(%hashmap.HashMap__i64__i64) align 8 %0, ptr %a) {
 entry:
-  %call = call ptr @hashmap.scalar-keyops__i64()
+  %ret.spill = alloca %hashmap.HashMap__i64__i64, align 8
   %abi.sret = alloca %hashmap.HashMap__i64__i64, align 8
+  %call = call ptr @hashmap.scalar-keyops__i64()
   call void @hashmap.hm-new__i64__i64(ptr sret(%hashmap.HashMap__i64__i64) align 8 %abi.sret, ptr %a, ptr %call)
   %abi.ret = load %hashmap.HashMap__i64__i64, ptr %abi.sret, align 8
-  %ret.spill = alloca %hashmap.HashMap__i64__i64, align 8
   store %hashmap.HashMap__i64__i64 %abi.ret, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 48, i1 false)
   ret void
@@ -2515,6 +2515,7 @@ entry:
 
 define internal void @hashmap.hm-new__i64__i64(ptr sret(%hashmap.HashMap__i64__i64) align 8 %0, ptr %a, ptr %ops) {
 entry:
+  %ret.spill = alloca %hashmap.HashMap__i64__i64, align 8
   %stack.slot = alloca %hashmap.HashMap__i64__i64, align 8
   store %hashmap.HashMap__i64__i64 zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %stack.slot, i32 0, i32 4
@@ -2522,7 +2523,6 @@ entry:
   %field1 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %stack.slot, i32 0, i32 5
   store ptr %ops, ptr %field1, align 8
   %load = load %hashmap.HashMap__i64__i64, ptr %stack.slot, align 8
-  %ret.spill = alloca %hashmap.HashMap__i64__i64, align 8
   store %hashmap.HashMap__i64__i64 %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 48, i1 false)
   ret void
@@ -2558,6 +2558,9 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %field = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 2
@@ -2587,11 +2590,9 @@ ifcont:                                           ; preds = %else, %then
   br i1 %ifc7, label %then8, label %else9
 
 then8:                                            ; preds = %ifcont
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp10 = alloca %io.IoError, align 8
   %tag11 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 0
   store i32 1, ptr %tag11, align 4
   %payload12 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 1
@@ -2604,7 +2605,6 @@ then8:                                            ; preds = %ifcont
   ret %coil.core.Result__i64__io.IoError %sum14
 
 else9:                                            ; preds = %ifcont
-  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag16 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 0
   store i32 0, ptr %tag16, align 4
   %payload17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 1
@@ -2616,6 +2616,9 @@ else9:                                            ; preds = %ifcont
 
 define internal %coil.core.Result__i64__io.IoError @io.fd-read(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %ptrtoint = ptrtoint ptr %ctx to i64
   %call = call i64 @read(i64 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
@@ -2623,11 +2626,9 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp1 = alloca %io.IoError, align 8
   %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
@@ -2640,7 +2641,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum5
 
 else:                                             ; preds = %entry
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 0, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2660,6 +2660,9 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.fd-write(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %ptrtoint = ptrtoint ptr %ctx to i64
   %call = call i64 @write(i64 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
@@ -2667,11 +2670,9 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp1 = alloca %io.IoError, align 8
   %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
@@ -2684,7 +2685,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum5
 
 else:                                             ; preds = %entry
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 0, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2797,12 +2797,19 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp42 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp36 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp27 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp19 = alloca %io.IoError, align 8
+  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp sle i64 %len, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2813,7 +2820,6 @@ then:                                             ; preds = %entry
 
 else:                                             ; preds = %entry
   %call = call %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag1, align 4
@@ -2826,7 +2832,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
   %e = load %io.IoError, ptr %vf5, align 8
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 1, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2846,11 +2851,9 @@ match.default:                                    ; preds = %else
   unreachable
 
 then14:                                           ; preds = %arm4
-  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 0
   store i32 1, ptr %tag17, align 4
   %payload18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 1
-  %sum.tmp19 = alloca %io.IoError, align 8
   %tag20 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 0
   store i32 1, ptr %tag20, align 4
   %payload21 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 1
@@ -2866,7 +2869,6 @@ else15:                                           ; preds = %arm4
   %idx = getelementptr i8, ptr %buf, i64 %n
   %sub = sub i64 %len, %n
   %call26 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %idx, i64 %sub)
-  %match.tmp27 = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call26, ptr %match.tmp27, align 8
   %tag28 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp27, i32 0, i32 0
   %tag29 = load i32, ptr %tag28, align 4
@@ -2879,7 +2881,6 @@ else15:                                           ; preds = %arm4
 arm31:                                            ; preds = %else15
   %vf34 = getelementptr inbounds nuw { %io.IoError }, ptr %payload30, i32 0, i32 0
   %e35 = load %io.IoError, ptr %vf34, align 8
-  %sum.tmp36 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag37 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 0
   store i32 1, ptr %tag37, align 4
   %payload38 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 1
@@ -2891,7 +2892,6 @@ arm31:                                            ; preds = %else15
 arm32:                                            ; preds = %else15
   %vf41 = getelementptr inbounds nuw { i64 }, ptr %payload30, i32 0, i32 0
   %m = load i64, ptr %vf41, align 8
-  %sum.tmp42 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag43 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 0
   store i32 0, ptr %tag43, align 4
   %payload44 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 1

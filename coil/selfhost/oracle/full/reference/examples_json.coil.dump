@@ -276,6 +276,8 @@ ifcont11:                                         ; preds = %else, %ifcont
 
 define internal i64 @"arraylist.al-reserve!__app.Json"(ptr %l, i64 %newcap) {
 entry:
+  %match.tmp11 = alloca %coil.core.Option__ptr_app.Json, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__app.Json, ptr %l, i32 0, i32 2
   %load = load i64, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %arraylist.ArrayList__app.Json, ptr %l, i32 0, i32 3
@@ -293,7 +295,6 @@ else:                                             ; preds = %entry
   %mul = mul i64 %load, 24
   %mul5 = mul i64 %newcap, 24
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-resize(ptr %load2, ptr %load4, i64 %mul, i64 %mul5, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag6 = load i32, ptr %tag, align 4
@@ -314,7 +315,6 @@ arm:                                              ; preds = %else
 
 arm7:                                             ; preds = %else
   %call10 = call %coil.core.Option__ptr_app.Json @alloc.alloc-slice__app.Json(ptr %load2, i64 %newcap)
-  %match.tmp11 = alloca %coil.core.Option__ptr_app.Json, align 8
   store %coil.core.Option__ptr_app.Json %call10, ptr %match.tmp11, align 8
   %tag12 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Json, ptr %match.tmp11, i32 0, i32 0
   %tag13 = load i32, ptr %tag12, align 4
@@ -393,6 +393,8 @@ ifcont:                                           ; preds = %else37, %then36
 
 define internal i64 @"arraylist.al-reserve!__u8"(ptr %l, i64 %newcap) {
 entry:
+  %match.tmp11 = alloca %coil.core.Option__ptr_u8, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
   %load = load i64, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 3
@@ -410,7 +412,6 @@ else:                                             ; preds = %entry
   %mul = mul i64 %load, 1
   %mul5 = mul i64 %newcap, 1
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-resize(ptr %load2, ptr %load4, i64 %mul, i64 %mul5, i64 1)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag6 = load i32, ptr %tag, align 4
@@ -431,7 +432,6 @@ arm:                                              ; preds = %else
 
 arm7:                                             ; preds = %else
   %call10 = call %coil.core.Option__ptr_u8 @alloc.alloc-slice__u8(ptr %load2, i64 %newcap)
-  %match.tmp11 = alloca %coil.core.Option__ptr_u8, align 8
   store %coil.core.Option__ptr_u8 %call10, ptr %match.tmp11, align 8
   %tag12 = getelementptr inbounds nuw %coil.core.Option__ptr_u8, ptr %match.tmp11, i32 0, i32 0
   %tag13 = load i32, ptr %tag12, align 4
@@ -623,6 +623,7 @@ entry:
 
 define internal i64 @"hashmap.hm-grow!__slice_u8__app.Json"(ptr %m, i64 %newcap) {
 entry:
+  %match.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %m, i32 0, i32 4
   %load = load ptr, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %m, i32 0, i32 0
@@ -630,7 +631,6 @@ entry:
   %field3 = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %m, i32 0, i32 1
   %load4 = load i64, ptr %field3, align 8
   %call = call %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json @alloc.alloc-slice__hashmap.Entry__slice_u8__app.Json(ptr %load, i64 %newcap)
-  %match.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
   store %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, ptr %match.tmp, i32 0, i32 0
   %tag5 = load i32, ptr %tag, align 4
@@ -890,9 +890,11 @@ entry:
 
 define internal %coil.core.Option__ptr_app.Json @alloc.alloc-slice__app.Json(ptr %a, i64 %n) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Json, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_app.Json, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %mul = mul i64 %n, 24
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %mul, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -903,7 +905,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_app.Json, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -913,7 +914,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_app.Json, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Json, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_app.Json, ptr %sum.tmp5, i32 0, i32 1
@@ -928,9 +928,11 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json @alloc.alloc-slice__hashmap.Entry__slice_u8__app.Json(ptr %a, i64 %n) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %mul = mul i64 %n, 48
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %mul, i64 8)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -941,7 +943,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -951,7 +952,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.Entry__slice_u8__app.Json, ptr %sum.tmp5, i32 0, i32 1
@@ -966,9 +966,11 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_u8 @alloc.alloc-slice__u8(ptr %a, i64 %n) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_u8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_u8, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %mul = mul i64 %n, 1
   %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %mul, i64 1)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -979,7 +981,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_u8, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_u8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_u8, ptr %sum.tmp, i32 0, i32 1
@@ -989,7 +990,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_u8, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_u8, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_u8, ptr %sum.tmp5, i32 0, i32 1
@@ -1004,6 +1004,8 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_i8 @alloc.ar-alloc(ptr %ctx, i64 %size, i64 %align) {
 entry:
+  %sum.tmp5 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %call = call i64 @alloc.align-up(i64 %load, i64 %align)
@@ -1015,7 +1017,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -1026,7 +1027,6 @@ else:                                             ; preds = %entry
   %field3 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
   %add4 = add i64 %call, %size
   store i64 %add4, ptr %field3, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_i8, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 1
@@ -1075,8 +1075,10 @@ entry:
 
 define internal %coil.core.Option__ptr_arraylist.ArrayList__app.Json @alloc.create__arraylist.ArrayList__app.Json(ptr %a) {
 entry:
-  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 32, i64 8)
+  %sum.tmp5 = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
+  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 32, i64 8)
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1087,7 +1089,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1097,7 +1098,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %sum.tmp5, i32 0, i32 1
@@ -1112,8 +1112,10 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json @alloc.create__hashmap.HashMap__slice_u8__app.Json(ptr %a) {
 entry:
-  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 48, i64 8)
+  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
+  %call = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 48, i64 8)
   store %coil.core.Option__ptr_i8 %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1124,7 +1126,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1134,7 +1135,6 @@ arm:                                              ; preds = %entry
 arm2:                                             ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %sum.tmp5 = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %sum.tmp5, i32 0, i32 1
@@ -1149,6 +1149,8 @@ match.default:                                    ; preds = %entry
 
 define internal %coil.core.Option__ptr_i8 @alloc.ma-alloc(ptr %ctx, i64 %size, i64 %align) {
 entry:
+  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %call = call ptr @malloc(i64 %size)
   %ptrtoint = ptrtoint ptr %call to i64
   %cmp = icmp eq i64 %ptrtoint, 0
@@ -1156,7 +1158,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -1164,7 +1165,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Option__ptr_i8 %sum
 
 else:                                             ; preds = %entry
-  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
   %tag2 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 1
@@ -1182,6 +1182,8 @@ entry:
 
 define internal %coil.core.Option__ptr_i8 @alloc.ma-resize(ptr %ctx, ptr %p, i64 %old, i64 %new, i64 %align) {
 entry:
+  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %call = call ptr @realloc(ptr %p, i64 %new)
   %ptrtoint = ptrtoint ptr %call to i64
   %cmp = icmp eq i64 %ptrtoint, 0
@@ -1189,7 +1191,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
@@ -1197,7 +1198,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Option__ptr_i8 %sum
 
 else:                                             ; preds = %entry
-  %sum.tmp1 = alloca %coil.core.Option__ptr_i8, align 8
   %tag2 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp1, i32 0, i32 1
@@ -1254,8 +1254,8 @@ entry:
 
 define internal ptr @alloc.unwrap-ptr__arraylist.ArrayList__app.Json(ptr %o) {
 entry:
-  %load = load %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %o, align 8
   %match.tmp = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
+  %load = load %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %o, align 8
   store %coil.core.Option__ptr_arraylist.ArrayList__app.Json %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_arraylist.ArrayList__app.Json, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1279,8 +1279,8 @@ match.default:                                    ; preds = %entry
 
 define internal ptr @alloc.unwrap-ptr__hashmap.HashMap__slice_u8__app.Json(ptr %o) {
 entry:
-  %load = load %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %o, align 8
   %match.tmp = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
+  %load = load %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %o, align 8
   store %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1304,8 +1304,14 @@ match.default:                                    ; preds = %entry
 
 define internal %app.Json @app.arr-get(ptr %j, i64 %i) {
 entry:
-  %load = load %app.Json, ptr %j, align 8
+  %sum.tmp26 = alloca %app.Json, align 8
+  %sum.tmp21 = alloca %app.Json, align 8
+  %sum.tmp16 = alloca %app.Json, align 8
+  %sum.tmp11 = alloca %app.Json, align 8
+  %sum.tmp = alloca %app.Json, align 8
+  %spill = alloca %arraylist.ArrayList__app.Json, align 8
   %match.tmp = alloca %app.Json, align 8
+  %load = load %app.Json, ptr %j, align 8
   store %app.Json %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1323,13 +1329,11 @@ arm:                                              ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %a = load ptr, ptr %vf, align 8
   %load7 = load %arraylist.ArrayList__app.Json, ptr %a, align 8
-  %spill = alloca %arraylist.ArrayList__app.Json, align 8
   store %arraylist.ArrayList__app.Json %load7, ptr %spill, align 8
   %call = call %app.Json @arraylist.al-get__app.Json(ptr %spill, i64 %i)
   ret %app.Json %call
 
 arm2:                                             ; preds = %entry
-  %sum.tmp = alloca %app.Json, align 8
   %tag8 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag8, align 4
   %payload9 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1339,7 +1343,6 @@ arm2:                                             ; preds = %entry
 arm3:                                             ; preds = %entry
   %vf10 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
   %"$g6" = load i64, ptr %vf10, align 8
-  %sum.tmp11 = alloca %app.Json, align 8
   %tag12 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp11, i32 0, i32 0
   store i32 0, ptr %tag12, align 4
   %payload13 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp11, i32 0, i32 1
@@ -1349,7 +1352,6 @@ arm3:                                             ; preds = %entry
 arm4:                                             ; preds = %entry
   %vf15 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
   %"$g7" = load i64, ptr %vf15, align 8
-  %sum.tmp16 = alloca %app.Json, align 8
   %tag17 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp16, i32 0, i32 0
   store i32 0, ptr %tag17, align 4
   %payload18 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp16, i32 0, i32 1
@@ -1359,7 +1361,6 @@ arm4:                                             ; preds = %entry
 arm5:                                             ; preds = %entry
   %vf20 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload, i32 0, i32 0
   %"$g8" = load { ptr, i64 }, ptr %vf20, align 8
-  %sum.tmp21 = alloca %app.Json, align 8
   %tag22 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp21, i32 0, i32 0
   store i32 0, ptr %tag22, align 4
   %payload23 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp21, i32 0, i32 1
@@ -1369,7 +1370,6 @@ arm5:                                             ; preds = %entry
 arm6:                                             ; preds = %entry
   %vf25 = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %"$g9" = load ptr, ptr %vf25, align 8
-  %sum.tmp26 = alloca %app.Json, align 8
   %tag27 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp26, i32 0, i32 0
   store i32 0, ptr %tag27, align 4
   %payload28 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp26, i32 0, i32 1
@@ -1382,8 +1382,8 @@ match.default:                                    ; preds = %entry
 
 define internal i64 @app.as-num(ptr %j) {
 entry:
-  %load = load %app.Json, ptr %j, align 8
   %match.tmp = alloca %app.Json, align 8
+  %load = load %app.Json, ptr %j, align 8
   store %app.Json %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1459,8 +1459,16 @@ else:                                             ; preds = %loop.body
 
 define internal %app.Json @app.obj-get(ptr %j, { ptr, i64 } %key) {
 entry:
-  %load = load %app.Json, ptr %j, align 8
+  %sum.tmp38 = alloca %app.Json, align 8
+  %sum.tmp33 = alloca %app.Json, align 8
+  %sum.tmp28 = alloca %app.Json, align 8
+  %sum.tmp23 = alloca %app.Json, align 8
+  %sum.tmp18 = alloca %app.Json, align 8
+  %sum.tmp = alloca %app.Json, align 8
+  %match.tmp8 = alloca %coil.core.Option__app.Json, align 8
+  %spill = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   %match.tmp = alloca %app.Json, align 8
+  %load = load %app.Json, ptr %j, align 8
   store %app.Json %load, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -1478,10 +1486,8 @@ arm:                                              ; preds = %entry
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %o = load ptr, ptr %vf, align 8
   %load7 = load %hashmap.HashMap__slice_u8__app.Json, ptr %o, align 8
-  %spill = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   store %hashmap.HashMap__slice_u8__app.Json %load7, ptr %spill, align 8
   %call = call %coil.core.Option__app.Json @hashmap.hm-get__slice_u8__app.Json(ptr %spill, { ptr, i64 } %key)
-  %match.tmp8 = alloca %coil.core.Option__app.Json, align 8
   store %coil.core.Option__app.Json %call, ptr %match.tmp8, align 8
   %tag9 = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %match.tmp8, i32 0, i32 0
   %tag10 = load i32, ptr %tag9, align 4
@@ -1492,7 +1498,6 @@ arm:                                              ; preds = %entry
   ]
 
 arm2:                                             ; preds = %entry
-  %sum.tmp18 = alloca %app.Json, align 8
   %tag19 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp18, i32 0, i32 0
   store i32 0, ptr %tag19, align 4
   %payload20 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp18, i32 0, i32 1
@@ -1502,7 +1507,6 @@ arm2:                                             ; preds = %entry
 arm3:                                             ; preds = %entry
   %vf22 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
   %"$g10" = load i64, ptr %vf22, align 8
-  %sum.tmp23 = alloca %app.Json, align 8
   %tag24 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp23, i32 0, i32 0
   store i32 0, ptr %tag24, align 4
   %payload25 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp23, i32 0, i32 1
@@ -1512,7 +1516,6 @@ arm3:                                             ; preds = %entry
 arm4:                                             ; preds = %entry
   %vf27 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
   %"$g11" = load i64, ptr %vf27, align 8
-  %sum.tmp28 = alloca %app.Json, align 8
   %tag29 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp28, i32 0, i32 0
   store i32 0, ptr %tag29, align 4
   %payload30 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp28, i32 0, i32 1
@@ -1522,7 +1525,6 @@ arm4:                                             ; preds = %entry
 arm5:                                             ; preds = %entry
   %vf32 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload, i32 0, i32 0
   %"$g12" = load { ptr, i64 }, ptr %vf32, align 8
-  %sum.tmp33 = alloca %app.Json, align 8
   %tag34 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp33, i32 0, i32 0
   store i32 0, ptr %tag34, align 4
   %payload35 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp33, i32 0, i32 1
@@ -1532,7 +1534,6 @@ arm5:                                             ; preds = %entry
 arm6:                                             ; preds = %entry
   %vf37 = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %"$g13" = load ptr, ptr %vf37, align 8
-  %sum.tmp38 = alloca %app.Json, align 8
   %tag39 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp38, i32 0, i32 0
   store i32 0, ptr %tag39, align 4
   %payload40 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp38, i32 0, i32 1
@@ -1543,7 +1544,6 @@ match.default:                                    ; preds = %entry
   unreachable
 
 arm12:                                            ; preds = %arm
-  %sum.tmp = alloca %app.Json, align 8
   %tag15 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag15, align 4
   %payload16 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1608,16 +1608,17 @@ entry:
 
 define internal %app.Json @app.parse-array(ptr %p) {
 entry:
+  %sum.tmp = alloca %app.Json, align 8
+  %abi.sret = alloca %arraylist.ArrayList__app.Json, align 8
+  %spill = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
   %call = call i64 @app.p-adv(ptr %p)
   %field = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load = load ptr, ptr %field, align 8
   %call1 = call %coil.core.Option__ptr_arraylist.ArrayList__app.Json @alloc.create__arraylist.ArrayList__app.Json(ptr %load)
-  %spill = alloca %coil.core.Option__ptr_arraylist.ArrayList__app.Json, align 8
   store %coil.core.Option__ptr_arraylist.ArrayList__app.Json %call1, ptr %spill, align 8
   %call2 = call ptr @alloc.unwrap-ptr__arraylist.ArrayList__app.Json(ptr %spill)
   %field3 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load4 = load ptr, ptr %field3, align 8
-  %abi.sret = alloca %arraylist.ArrayList__app.Json, align 8
   call void @arraylist.al-new__app.Json(ptr sret(%arraylist.ArrayList__app.Json) align 8 %abi.sret, ptr %load4)
   %abi.ret = load %arraylist.ArrayList__app.Json, ptr %abi.sret, align 8
   store %arraylist.ArrayList__app.Json %abi.ret, ptr %call2, align 8
@@ -1657,7 +1658,6 @@ else15:                                           ; preds = %loop.body
 
 ifcont:                                           ; preds = %loop.after, %then
   %ifval = phi i64 [ %call7, %then ], [ %loop.val, %loop.after ]
-  %sum.tmp = alloca %app.Json, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 4, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1669,6 +1669,7 @@ ifcont:                                           ; preds = %loop.after, %then
 
 define internal %app.Json @app.parse-number(ptr %p) {
 entry:
+  %sum.tmp = alloca %app.Json, align 8
   %stack.slot = alloca i64, align 8
   store i64 0, ptr %stack.slot, align 8
   %stack.slot1 = alloca i64, align 8
@@ -1698,7 +1699,6 @@ loop.body:                                        ; preds = %then6, %ifcont
 
 loop.after:                                       ; preds = %else7
   %loop.val = phi i64 [ 0, %else7 ]
-  %sum.tmp = alloca %app.Json, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 2, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1738,17 +1738,18 @@ ifcont17:                                         ; preds = %else13, %then12
 
 define internal %app.Json @app.parse-object(ptr %p) {
 entry:
+  %sum.tmp = alloca %app.Json, align 8
+  %abi.sret = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
+  %spill = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
   %call = call i64 @app.p-adv(ptr %p)
   %field = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load = load ptr, ptr %field, align 8
   %call1 = call %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json @alloc.create__hashmap.HashMap__slice_u8__app.Json(ptr %load)
-  %spill = alloca %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json, align 8
   store %coil.core.Option__ptr_hashmap.HashMap__slice_u8__app.Json %call1, ptr %spill, align 8
   %call2 = call ptr @alloc.unwrap-ptr__hashmap.HashMap__slice_u8__app.Json(ptr %spill)
   %field3 = getelementptr inbounds nuw %app.P, ptr %p, i32 0, i32 2
   %load4 = load ptr, ptr %field3, align 8
   %call5 = call ptr @str.str-keyops()
-  %abi.sret = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   call void @hashmap.hm-new__slice_u8__app.Json(ptr sret(%hashmap.HashMap__slice_u8__app.Json) align 8 %abi.sret, ptr %load4, ptr %call5)
   %abi.ret = load %hashmap.HashMap__slice_u8__app.Json, ptr %abi.sret, align 8
   store %hashmap.HashMap__slice_u8__app.Json %abi.ret, ptr %call2, align 8
@@ -1792,7 +1793,6 @@ else20:                                           ; preds = %loop.body
 
 ifcont:                                           ; preds = %loop.after, %then
   %ifval = phi i64 [ %call8, %then ], [ %loop.val, %loop.after ]
-  %sum.tmp = alloca %app.Json, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 5, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1835,6 +1835,10 @@ else:                                             ; preds = %loop.body
 
 define internal %app.Json @app.parse-value(ptr %p) {
 entry:
+  %sum.tmp26 = alloca %app.Json, align 8
+  %sum.tmp17 = alloca %app.Json, align 8
+  %sum.tmp8 = alloca %app.Json, align 8
+  %sum.tmp = alloca %app.Json, align 8
   %call = call i64 @app.skip-ws(ptr %p)
   %call1 = call i64 @app.p-peek(ptr %p)
   %cmp = icmp eq i64 %call1, 110
@@ -1843,7 +1847,6 @@ entry:
 
 then:                                             ; preds = %entry
   %call2 = call i64 @app.eat(ptr %p, i64 4)
-  %sum.tmp = alloca %app.Json, align 8
   %tag = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -1857,7 +1860,6 @@ else:                                             ; preds = %entry
 
 then5:                                            ; preds = %else
   %call7 = call i64 @app.eat(ptr %p, i64 4)
-  %sum.tmp8 = alloca %app.Json, align 8
   %tag9 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp8, i32 0, i32 0
   store i32 1, ptr %tag9, align 4
   %payload10 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp8, i32 0, i32 1
@@ -1873,7 +1875,6 @@ else6:                                            ; preds = %else
 
 then14:                                           ; preds = %else6
   %call16 = call i64 @app.eat(ptr %p, i64 5)
-  %sum.tmp17 = alloca %app.Json, align 8
   %tag18 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp17, i32 0, i32 0
   store i32 1, ptr %tag18, align 4
   %payload19 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp17, i32 0, i32 1
@@ -1888,7 +1889,6 @@ else15:                                           ; preds = %else6
   br i1 %ifc23, label %then24, label %else25
 
 then24:                                           ; preds = %else15
-  %sum.tmp26 = alloca %app.Json, align 8
   %tag27 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp26, i32 0, i32 0
   store i32 3, ptr %tag27, align 4
   %payload28 = getelementptr inbounds nuw %app.Json, ptr %sum.tmp26, i32 0, i32 1
@@ -1961,12 +1961,12 @@ entry:
 
 define internal void @arraylist.al-new__app.Json(ptr sret(%arraylist.ArrayList__app.Json) align 8 %0, ptr %a) {
 entry:
+  %ret.spill = alloca %arraylist.ArrayList__app.Json, align 8
   %stack.slot = alloca %arraylist.ArrayList__app.Json, align 8
   store %arraylist.ArrayList__app.Json zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__app.Json, ptr %stack.slot, i32 0, i32 3
   store ptr %a, ptr %field, align 8
   %load = load %arraylist.ArrayList__app.Json, ptr %stack.slot, align 8
-  %ret.spill = alloca %arraylist.ArrayList__app.Json, align 8
   store %arraylist.ArrayList__app.Json %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 32, i1 false)
   ret void
@@ -1974,12 +1974,12 @@ entry:
 
 define internal void @arraylist.al-new__u8(ptr sret(%arraylist.ArrayList__u8) align 8 %0, ptr %a) {
 entry:
+  %ret.spill = alloca %arraylist.ArrayList__u8, align 8
   %stack.slot = alloca %arraylist.ArrayList__u8, align 8
   store %arraylist.ArrayList__u8 zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %stack.slot, i32 0, i32 3
   store ptr %a, ptr %field, align 8
   %load = load %arraylist.ArrayList__u8, ptr %stack.slot, align 8
-  %ret.spill = alloca %arraylist.ArrayList__u8, align 8
   store %arraylist.ArrayList__u8 %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 32, i1 false)
   ret void
@@ -2021,6 +2021,8 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %n) {
 entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp slt i64 %n, 16
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
@@ -2033,7 +2035,6 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %div = sdiv i64 %n, 16
   %call6 = call %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %div)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call6, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag7 = load i32, ptr %tag, align 4
@@ -2060,7 +2061,6 @@ ifcont:                                           ; preds = %else4, %then3
 arm:                                              ; preds = %else
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag9 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag9, align 4
   %payload10 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2097,13 +2097,14 @@ ifcont19:                                         ; preds = %else16, %then15
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-i(ptr %w, i64 %n) {
 entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp slt i64 %n, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
   %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 45)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -2120,7 +2121,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %then
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2142,8 +2142,9 @@ match.default:                                    ; preds = %then
 
 define internal %coil.core.Result__i64__io.IoError @fmt.print-line(ptr %w, { ptr, i64 } %s) {
 entry:
-  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s)
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s)
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag1 = load i32, ptr %tag, align 4
@@ -2156,7 +2157,6 @@ entry:
 arm:                                              ; preds = %entry
   %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
   %e = load %io.IoError, ptr %vf, align 8
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag3, align 4
   %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2198,12 +2198,14 @@ else:                                             ; preds = %entry
 
 define internal %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %n) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp eq i64 %n, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2215,7 +2217,6 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %udiv = udiv i64 %n, 16
   %call = call %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %udiv)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag1, align 4
@@ -2228,7 +2229,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
   %e = load %io.IoError, ptr %vf5, align 8
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 1, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2308,6 +2308,9 @@ else:                                             ; preds = %loop.body
 
 define internal %coil.core.Option__app.Json @hashmap.hm-get__slice_u8__app.Json(ptr %m, { ptr, i64 } %k) {
 entry:
+  %sum.tmp39 = alloca %coil.core.Option__app.Json, align 8
+  %sum.tmp33 = alloca %coil.core.Option__app.Json, align 8
+  %sum.tmp = alloca %coil.core.Option__app.Json, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %m, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %cmp = icmp eq i64 %load, 0
@@ -2315,7 +2318,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__app.Json, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp, i32 0, i32 1
@@ -2388,7 +2390,6 @@ else21:                                           ; preds = %ifcont
   br label %loop.body
 
 then31:                                           ; preds = %loop.after
-  %sum.tmp33 = alloca %coil.core.Option__app.Json, align 8
   %tag34 = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp33, i32 0, i32 0
   store i32 1, ptr %tag34, align 4
   %payload35 = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp33, i32 0, i32 1
@@ -2400,7 +2401,6 @@ then31:                                           ; preds = %loop.after
   ret %coil.core.Option__app.Json %sum38
 
 else32:                                           ; preds = %loop.after
-  %sum.tmp39 = alloca %coil.core.Option__app.Json, align 8
   %tag40 = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp39, i32 0, i32 0
   store i32 0, ptr %tag40, align 4
   %payload41 = getelementptr inbounds nuw %coil.core.Option__app.Json, ptr %sum.tmp39, i32 0, i32 1
@@ -2551,6 +2551,7 @@ ifcont58:                                         ; preds = %ifcont56, %ifcont27
 
 define internal void @hashmap.hm-new__slice_u8__app.Json(ptr sret(%hashmap.HashMap__slice_u8__app.Json) align 8 %0, ptr %a, ptr %ops) {
 entry:
+  %ret.spill = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   %stack.slot = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   store %hashmap.HashMap__slice_u8__app.Json zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %stack.slot, i32 0, i32 4
@@ -2558,7 +2559,6 @@ entry:
   %field1 = getelementptr inbounds nuw %hashmap.HashMap__slice_u8__app.Json, ptr %stack.slot, i32 0, i32 5
   store ptr %ops, ptr %field1, align 8
   %load = load %hashmap.HashMap__slice_u8__app.Json, ptr %stack.slot, align 8
-  %ret.spill = alloca %hashmap.HashMap__slice_u8__app.Json, align 8
   store %hashmap.HashMap__slice_u8__app.Json %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 48, i1 false)
   ret void
@@ -2586,6 +2586,9 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %field = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
   %load = load i64, ptr %field, align 8
   %field1 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 2
@@ -2615,11 +2618,9 @@ ifcont:                                           ; preds = %else, %then
   br i1 %ifc7, label %then8, label %else9
 
 then8:                                            ; preds = %ifcont
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp10 = alloca %io.IoError, align 8
   %tag11 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 0
   store i32 1, ptr %tag11, align 4
   %payload12 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 1
@@ -2632,7 +2633,6 @@ then8:                                            ; preds = %ifcont
   ret %coil.core.Result__i64__io.IoError %sum14
 
 else9:                                            ; preds = %ifcont
-  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag16 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 0
   store i32 0, ptr %tag16, align 4
   %payload17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 1
@@ -2644,6 +2644,9 @@ else9:                                            ; preds = %ifcont
 
 define internal %coil.core.Result__i64__io.IoError @io.fd-read(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %ptrtoint = ptrtoint ptr %ctx to i64
   %call = call i64 @read(i64 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
@@ -2651,11 +2654,9 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp1 = alloca %io.IoError, align 8
   %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
@@ -2668,7 +2669,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum5
 
 else:                                             ; preds = %entry
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 0, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2688,6 +2688,9 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.fd-write(ptr %ctx, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %ptrtoint = ptrtoint ptr %ctx to i64
   %call = call i64 @write(i64 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
@@ -2695,11 +2698,9 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 1, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
-  %sum.tmp1 = alloca %io.IoError, align 8
   %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
   store i32 1, ptr %tag2, align 4
   %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
@@ -2712,7 +2713,6 @@ then:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum5
 
 else:                                             ; preds = %entry
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 0, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2825,12 +2825,19 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %buf, i64 %len) {
 entry:
+  %sum.tmp42 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp36 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp27 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp19 = alloca %io.IoError, align 8
+  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %cmp = icmp sle i64 %len, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
@@ -2841,7 +2848,6 @@ then:                                             ; preds = %entry
 
 else:                                             ; preds = %entry
   %call = call %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len)
-  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
   %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
   %tag2 = load i32, ptr %tag1, align 4
@@ -2854,7 +2860,6 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
   %e = load %io.IoError, ptr %vf5, align 8
-  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
   store i32 1, ptr %tag7, align 4
   %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
@@ -2874,11 +2879,9 @@ match.default:                                    ; preds = %else
   unreachable
 
 then14:                                           ; preds = %arm4
-  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 0
   store i32 1, ptr %tag17, align 4
   %payload18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 1
-  %sum.tmp19 = alloca %io.IoError, align 8
   %tag20 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 0
   store i32 1, ptr %tag20, align 4
   %payload21 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 1
@@ -2894,7 +2897,6 @@ else15:                                           ; preds = %arm4
   %idx = getelementptr i8, ptr %buf, i64 %n
   %sub = sub i64 %len, %n
   %call26 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %idx, i64 %sub)
-  %match.tmp27 = alloca %coil.core.Result__i64__io.IoError, align 8
   store %coil.core.Result__i64__io.IoError %call26, ptr %match.tmp27, align 8
   %tag28 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp27, i32 0, i32 0
   %tag29 = load i32, ptr %tag28, align 4
@@ -2907,7 +2909,6 @@ else15:                                           ; preds = %arm4
 arm31:                                            ; preds = %else15
   %vf34 = getelementptr inbounds nuw { %io.IoError }, ptr %payload30, i32 0, i32 0
   %e35 = load %io.IoError, ptr %vf34, align 8
-  %sum.tmp36 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag37 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 0
   store i32 1, ptr %tag37, align 4
   %payload38 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 1
@@ -2919,7 +2920,6 @@ arm31:                                            ; preds = %else15
 arm32:                                            ; preds = %else15
   %vf41 = getelementptr inbounds nuw { i64 }, ptr %payload30, i32 0, i32 0
   %m = load i64, ptr %vf41, align 8
-  %sum.tmp42 = alloca %coil.core.Result__i64__io.IoError, align 8
   %tag43 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 0
   store i32 0, ptr %tag43, align 4
   %payload44 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 1
@@ -2953,38 +2953,38 @@ entry:
 
 define i64 @main() {
 entry:
+  %spill20 = alloca %app.Json, align 8
+  %spill18 = alloca %app.Json, align 8
+  %spill15 = alloca %app.Json, align 8
+  %spill13 = alloca %app.Json, align 8
+  %spill11 = alloca %app.Json, align 8
+  %spill9 = alloca %app.Json, align 8
+  %spill7 = alloca %app.Json, align 8
+  %spill5 = alloca %app.Json, align 8
+  %spill3 = alloca %app.Json, align 8
+  %spill = alloca %app.Json, align 8
   %call = call ptr @alloc.malloc-allocator()
   %call1 = call %app.Json @app.parse(ptr %call, { ptr, i64 } { ptr @str.2, i64 41 })
-  %spill = alloca %app.Json, align 8
   store %app.Json %call1, ptr %spill, align 8
   %call2 = call %app.Json @app.obj-get(ptr %spill, { ptr, i64 } { ptr @str.3, i64 4 })
-  %spill3 = alloca %app.Json, align 8
   store %app.Json %call1, ptr %spill3, align 8
   %call4 = call %app.Json @app.obj-get(ptr %spill3, { ptr, i64 } { ptr @str.4, i64 4 })
-  %spill5 = alloca %app.Json, align 8
   store %app.Json %call2, ptr %spill5, align 8
   %call6 = call %app.Json @app.arr-get(ptr %spill5, i64 0)
-  %spill7 = alloca %app.Json, align 8
   store %app.Json %call6, ptr %spill7, align 8
   %call8 = call i64 @app.as-num(ptr %spill7)
-  %spill9 = alloca %app.Json, align 8
   store %app.Json %call2, ptr %spill9, align 8
   %call10 = call %app.Json @app.arr-get(ptr %spill9, i64 2)
-  %spill11 = alloca %app.Json, align 8
   store %app.Json %call10, ptr %spill11, align 8
   %call12 = call i64 @app.as-num(ptr %spill11)
   %add = add i64 %call8, %call12
-  %spill13 = alloca %app.Json, align 8
   store %app.Json %call4, ptr %spill13, align 8
   %call14 = call %app.Json @app.obj-get(ptr %spill13, { ptr, i64 } { ptr @str.5, i64 1 })
-  %spill15 = alloca %app.Json, align 8
   store %app.Json %call14, ptr %spill15, align 8
   %call16 = call i64 @app.as-num(ptr %spill15)
   %add17 = add i64 %add, %call16
-  %spill18 = alloca %app.Json, align 8
   store %app.Json %call2, ptr %spill18, align 8
   %call19 = call %app.Json @app.arr-get(ptr %spill18, i64 1)
-  %spill20 = alloca %app.Json, align 8
   store %app.Json %call19, ptr %spill20, align 8
   %call21 = call i64 @app.as-num(ptr %spill20)
   %sub = sub i64 %add17, %call21
@@ -3064,15 +3064,15 @@ entry:
 
 define internal void @str.sb-new(ptr sret(%str.StrBuf) align 8 %0, ptr %a) {
 entry:
+  %ret.spill = alloca %str.StrBuf, align 8
+  %abi.sret = alloca %arraylist.ArrayList__u8, align 8
   %stack.slot = alloca %str.StrBuf, align 8
   store %str.StrBuf zeroinitializer, ptr %stack.slot, align 8
   %field = getelementptr inbounds nuw %str.StrBuf, ptr %stack.slot, i32 0, i32 0
-  %abi.sret = alloca %arraylist.ArrayList__u8, align 8
   call void @arraylist.al-new__u8(ptr sret(%arraylist.ArrayList__u8) align 8 %abi.sret, ptr %a)
   %abi.ret = load %arraylist.ArrayList__u8, ptr %abi.sret, align 8
   store %arraylist.ArrayList__u8 %abi.ret, ptr %field, align 8
   %load = load %str.StrBuf, ptr %stack.slot, align 8
-  %ret.spill = alloca %str.StrBuf, align 8
   store %str.StrBuf %load, ptr %ret.spill, align 8
   call void @llvm.memcpy.p0.p0.i64(ptr align 8 %0, ptr align 8 %ret.spill, i64 32, i1 false)
   ret void
@@ -3104,11 +3104,13 @@ else:                                             ; preds = %entry
 
 define internal %coil.core.Option__slice_u8 @str.str-concat(ptr %a, { ptr, i64 } %x, { ptr, i64 } %y) {
 entry:
+  %sum.tmp11 = alloca %coil.core.Option__slice_u8, align 8
+  %sum.tmp = alloca %coil.core.Option__slice_u8, align 8
+  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %call = call i64 @slice.slice-len__u8({ ptr, i64 } %x)
   %call1 = call i64 @slice.slice-len__u8({ ptr, i64 } %y)
   %add = add i64 %call, %call1
   %call2 = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %add, i64 1)
-  %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
   store %coil.core.Option__ptr_i8 %call2, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %match.tmp, i32 0, i32 0
   %tag3 = load i32, ptr %tag, align 4
@@ -3119,7 +3121,6 @@ entry:
   ]
 
 arm:                                              ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__slice_u8, align 8
   %tag5 = getelementptr inbounds nuw %coil.core.Option__slice_u8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag5, align 4
   %payload6 = getelementptr inbounds nuw %coil.core.Option__slice_u8, ptr %sum.tmp, i32 0, i32 1
@@ -3134,7 +3135,6 @@ arm4:                                             ; preds = %entry
   %idx = getelementptr i8, ptr %buf, i64 %call
   %call9 = call ptr @slice.slice-data__u8({ ptr, i64 } %y)
   %call10 = call i64 @mem.mem-copy__u8(ptr %idx, ptr %call9, i64 %call1)
-  %sum.tmp11 = alloca %coil.core.Option__slice_u8, align 8
   %tag12 = getelementptr inbounds nuw %coil.core.Option__slice_u8, ptr %sum.tmp11, i32 0, i32 0
   store i32 1, ptr %tag12, align 4
   %payload13 = getelementptr inbounds nuw %coil.core.Option__slice_u8, ptr %sum.tmp11, i32 0, i32 1
@@ -3175,6 +3175,8 @@ entry:
 
 define internal %coil.core.Option__i64 @str.str-find-from({ ptr, i64 } %hay, { ptr, i64 } %needle, i64 %i) {
 entry:
+  %sum.tmp9 = alloca %coil.core.Option__i64, align 8
+  %sum.tmp = alloca %coil.core.Option__i64, align 8
   %call = call i64 @slice.slice-len__u8({ ptr, i64 } %needle)
   %add = add i64 %i, %call
   %call1 = call i64 @slice.slice-len__u8({ ptr, i64 } %hay)
@@ -3183,7 +3185,6 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %sum.tmp = alloca %coil.core.Option__i64, align 8
   %tag = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp, i32 0, i32 1
@@ -3199,7 +3200,6 @@ else:                                             ; preds = %entry
   br i1 %ifc6, label %then7, label %else8
 
 then7:                                            ; preds = %else
-  %sum.tmp9 = alloca %coil.core.Option__i64, align 8
   %tag10 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp9, i32 0, i32 0
   store i32 1, ptr %tag10, align 4
   %payload11 = getelementptr inbounds nuw %coil.core.Option__i64, ptr %sum.tmp9, i32 0, i32 1
