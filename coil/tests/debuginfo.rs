@@ -310,3 +310,54 @@ fn lldb_steps_line_by_line() {
     let _ = std::fs::remove_dir_all(exe.with_extension("dSYM"));
     let _ = std::fs::remove_file(&src_path);
 }
+
+/// Multi-file DWARF: a function defined in an *imported* file maps to THAT file in
+/// the DWARF (its own `DIFile` + line table), not the importing main file. Before
+/// per-source `DIFile`s this misattributed every imported function to `main.coil`.
+#[test]
+fn imported_function_maps_to_its_own_file() {
+    if !have("dwarfdump") {
+        eprintln!("SKIP: dwarfdump not found");
+        return;
+    }
+    // Two files in one temp dir; main imports the helper by ABSOLUTE path (so the
+    // import resolves regardless of the test's working directory).
+    let helper = unique_path("helper").with_extension("coil");
+    std::fs::write(&helper, "(module helper)\n(export triple)\n(defn triple [(n :i64)] (-> :i64)\n  (imul n 3))\n").unwrap();
+    let main = unique_path("mainm").with_extension("coil");
+    let main_src = format!(
+        "(module app)\n(import \"{}\" :use *)\n(defn main [] (-> :i64)\n  (triple 7))\n",
+        helper.display()
+    );
+    std::fs::write(&main, &main_src).unwrap();
+    let exe = unique_path("mfexe");
+    coil::build_executable_linked_dbg(&main_src, &exe, coil::codegen::target_triple(), &[], Some(&main))
+        .expect("debug build");
+
+    // It still computes triple(7) = 21.
+    assert_eq!(Command::new(&exe).status().unwrap().code().unwrap(), 21);
+
+    let dsym = exe.with_extension("dSYM");
+    let target: &Path = if dsym.exists() { &dsym } else { &exe };
+    let dump = Command::new("dwarfdump").arg("--debug-info").arg(target).output().unwrap();
+    let out = String::from_utf8_lossy(&dump.stdout);
+
+    // The imported function's subprogram must name the HELPER file at its real line
+    // (3), NOT the importing main file. Look at the window after the first
+    // `helper.triple` mention (the subprogram DIE), which carries decl_file/decl_line.
+    let helper_name = helper.file_name().unwrap().to_str().unwrap();
+    let main_name = main.file_name().unwrap().to_str().unwrap();
+    let sp = out.split_once("helper.triple").map(|(_, rest)| rest).unwrap_or("");
+    let frame = &sp[..sp.len().min(400)];
+    assert!(frame.contains(helper_name), "imported fn should map to {helper_name}:\n{frame}");
+    assert!(!frame.contains(main_name), "imported fn must NOT map to the main file {main_name}:\n{frame}");
+    assert!(
+        frame.contains("decl_line\t(3)") || frame.contains("decl_line (3)"),
+        "imported fn should be at line 3 of its own file:\n{frame}"
+    );
+
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_dir_all(&dsym);
+    let _ = std::fs::remove_file(&helper);
+    let _ = std::fs::remove_file(&main);
+}

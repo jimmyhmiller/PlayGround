@@ -110,6 +110,9 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         statics: program.statics,
         // Metas are evaluated + spliced by the elaboration loop before mono.
         metas: vec![],
+        // Exported functions are non-generic (checked), so their names are stable
+        // through monomorphization — carry the export list forward to codegen.
+        exports: program.exports,
     })
 }
 

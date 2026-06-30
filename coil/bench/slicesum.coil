@@ -1,0 +1,17 @@
+; Slice indexing on the hot path: a cache-resident 1024-element (slice i64) indexed
+; 200M times via slice-get (a fat-pointer + a generic, monomorphized accessor).
+; Isolates slice-get overhead vs C's a[i&1023] — both stay in L1 (not bandwidth).
+(module bench)
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+(import "slice.coil" :use *)
+(defn fill [(a (ptr i64)) (i :i64)] (-> :i64)
+  (if (icmp-ge i 1024) 0 (do (store! (index a i) (imul i 2654435761)) (fill a (iadd i 1)))))
+(defn run [(s (slice i64)) (i :i64) (n :i64) (acc :i64)] (-> :i64)
+  (if (icmp-ge i n) acc
+    (run s (iadd i 1) n (iadd acc (slice-get s (iand i 1023))))))
+(defn main [] (-> :i64)
+  (let [arr (alloc-stack (array i64 1024))
+        a   (cast (ptr i64) arr)]
+    (fill a 0)
+    (let [s (slice-new a 1024)]
+      (do (printf c"%ld\n" (run s 0 200000000 0)) 0))))

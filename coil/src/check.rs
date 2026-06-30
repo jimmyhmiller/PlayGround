@@ -599,6 +599,59 @@ fn finish(program: &Program, cx: &Cx, mut funcs: Vec<Func>) -> Result<Program, D
         metas.push(me);
     }
 
+    // ---- (export-c …) — validate each C export and finalize its symbol ----------
+    // A C ABI boundary: the function must exist, be non-generic (a generic has no one
+    // symbol), use a C-ABI convention (not `:shim`), and have a C-representable
+    // signature. The C symbol is the explicit `:as` or the bare name with `-`→`_`,
+    // and two exports may not resolve to the same symbol. See docs/SYMBOL_EXPORT.md.
+    let mut out_exports: Vec<ExportC> = Vec::with_capacity(program.exports.len());
+    let mut seen_syms: HashSet<String> = HashSet::new();
+    for e in &program.exports {
+        let dn = display_name(&e.name);
+        let f = program.funcs.iter().find(|f| f.name == e.name).ok_or_else(|| {
+            Diag::at(e.span, format!("export-c: unknown function '{dn}'"))
+        })?;
+        if !f.type_params.is_empty() {
+            return Err(Diag::at(e.span, format!(
+                "export-c: '{dn}' is generic — a generic function has no single C symbol; \
+                 export a concrete wrapper instead")));
+        }
+        if program.conventions.get(&f.cc).is_some_and(|c| c.is_shim()) {
+            return Err(Diag::at(e.span, format!(
+                "export-c: '{dn}' uses a :shim convention, which isn't the C ABI")));
+        }
+        for p in &f.params {
+            if !export_param_ok(&p.ty, &cx.sums) {
+                return Err(Diag::at(e.span, format!(
+                    "export-c: '{dn}' parameter '{}' has type {}, which has no C representation \
+                     (a slice, sum, SIMD vector, or generic instantiation can't cross the C \
+                     boundary — take a `(ptr …)` or lower it to a C-layout struct)",
+                    p.name, ty_str(&p.ty))));
+            }
+        }
+        if !export_ret_ok(&f.ret, &cx.sums) {
+            return Err(Diag::at(e.span, format!(
+                "export-c: '{dn}' returns {}, which has no C representation", ty_str(&f.ret))));
+        }
+        let sym = e.symbol.clone().unwrap_or_else(|| default_c_symbol(&f.name));
+        if !is_c_ident(&sym) {
+            return Err(Diag::at(e.span, format!(
+                "export-c: '{dn}' → '{sym}' isn't a valid C identifier; give one with :as \"name\"")));
+        }
+        if !seen_syms.insert(sym.clone()) {
+            return Err(Diag::at(e.span, format!(
+                "export-c: two functions export the same C symbol '{sym}'")));
+        }
+        out_exports.push(ExportC {
+            name: e.name.clone(),
+            symbol: Some(sym),
+            // The function's ORIGINAL param types (un-erased), so codegen can build the
+            // C-ABI thunk for a by-value struct param. (`f` is the input func.)
+            params: f.params.iter().map(|p| p.ty.clone()).collect(),
+            span: e.span,
+        });
+    }
+
     Ok(Program {
         conventions: program.conventions.clone(),
         structs: program.structs.clone(),
@@ -615,7 +668,47 @@ fn finish(program: &Program, cx: &Cx, mut funcs: Vec<Func>) -> Result<Program, D
         impls: program.impls.clone(),
         statics,
         metas,
+        exports: out_exports,
     })
+}
+
+/// Whether a type is a valid **parameter** of an `export-c` function: scalars,
+/// pointers, and C-layout structs (a by-value struct is bridged by the generated
+/// C-ABI thunk — see `emit_export_thunk` / docs/SYMBOL_EXPORT.md). A `defsum`, slice,
+/// SIMD vector, or generic instantiation (`App`) has no C parameter representation.
+/// (Plain non-generic structs only — an `App` param would need its mangled mono name,
+/// which isn't carried to codegen; lower it to a concrete struct or a pointer.)
+fn export_param_ok(t: &Type, sums: &HashMap<String, SumInfo>) -> bool {
+    match t {
+        Type::Int(..) | Type::Float(_) | Type::Bool | Type::Ptr(_) => true,
+        Type::Struct(name) => !sums.contains_key(name),
+        _ => false,
+    }
+}
+
+/// Whether a type is a valid **return** of an `export-c` function: scalars, pointers,
+/// `void`, and C-layout structs (incl. a monomorphized generic, an `App`) — Coil
+/// lowers a struct return through the real C struct ABI (sret / register pair). A
+/// `defsum` tagged union, slice, SIMD vector, array, or `Code` has no C return repr.
+fn export_ret_ok(t: &Type, sums: &HashMap<String, SumInfo>) -> bool {
+    match t {
+        Type::Int(..) | Type::Float(_) | Type::Bool | Type::Ptr(_) | Type::Void => true,
+        Type::Struct(name) | Type::App(name, _) => !sums.contains_key(name),
+        _ => false,
+    }
+}
+
+/// The default C symbol for an exported Coil function: its bare name (module prefix
+/// dropped) with `-` → `_` (`shapes.make-point` → `make_point`).
+fn default_c_symbol(qualified: &str) -> String {
+    qualified.rsplit('.').next().unwrap_or(qualified).replace('-', "_")
+}
+
+/// Whether `s` is a valid C identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_c_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Validate that a type is well-formed: every named type exists (or is an

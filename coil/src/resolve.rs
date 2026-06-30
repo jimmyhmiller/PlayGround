@@ -80,6 +80,11 @@ pub fn resolve_program(
             }
             for e in &p.externs {
                 d.externs.insert(e.name.clone());
+                // An extern resolves like any callable, so a bare reference in its
+                // module qualifies to `module.name` (its bare C symbol becomes the
+                // link name at codegen). This keeps externs from leaking across
+                // modules: `io`'s `write` is `io.write`, distinct from your `write`.
+                d.callables.insert(e.name.clone());
             }
         }
     }
@@ -96,12 +101,13 @@ pub fn resolve_program(
         impls: vec![],
         statics: vec![],
         metas: vec![],
+        exports: vec![],
     };
-    // Names allowed to remain bare after resolution: extern C symbols (global) and
-    // trait-method names (the checker resolves a method call against the caller's
-    // scope). Anything else still-bare is an undefined reference.
-    let mut bare_ok: HashSet<String> =
-        table.values().flat_map(|d| d.externs.iter().cloned()).collect();
+    // Names allowed to remain bare after resolution: trait-method names (the checker
+    // resolves a method call against the caller's scope). Externs are now qualified
+    // like callables, so they no longer need to stay bare. Anything else still-bare is
+    // an undefined reference.
+    let mut bare_ok: HashSet<String> = HashSet::new();
     for (p, _) in &parsed {
         for t in &p.traits {
             for meth in &t.methods {
@@ -149,6 +155,7 @@ fn merge(out: &mut Program, p: Program) -> Result<(), crate::span::Diag> {
         }
     }
     out.funcs.extend(p.funcs);
+    out.exports.extend(p.exports);
     out.asserts.extend(p.asserts);
     out.metas.extend(p.metas);
     // Traits + impls share one flat global namespace (v1): collected as-is.
@@ -228,12 +235,19 @@ fn qualify_program(
             p.conventions.insert(nk, c);
         }
     }
-    // externs keep their bare C names; only their types are qualified.
+    // Qualify the extern's Coil name to `module.name` (like a function); its bare C
+    // symbol — the last path component — becomes the LLVM/link name at codegen, so
+    // several modules can declare the same libc symbol without a name clash.
     for e in &mut p.externs {
+        e.name = format!("{m}.{}", e.name);
         for t in &mut e.params {
             qualify_type(t, m, imps, table, &empty, exports)?;
         }
         qualify_type(&mut e.ret, m, imps, table, &empty, exports)?;
+    }
+    // `(export-c foo)` names a function in this module — qualify it like a callable.
+    for ex in &mut p.exports {
+        ex.name = resolve(&ex.name, m, imps, table, exports, |d| &d.callables)?;
     }
     for a in &mut p.asserts {
         qualify_expr(&mut a.cond, m, imps, table, &empty, exports, bare_ok)?;
@@ -546,13 +560,10 @@ fn resolve(
         }
         return Ok(name.to_string());
     }
-    // own module (or a bare extern — a C symbol)
+    // own module (externs are in `callables`, so they qualify here too)
     if let Some(d) = table.get(m) {
         if pick(d).contains(name) {
             return Ok(format!("{m}.{name}"));
-        }
-        if d.externs.contains(name) {
-            return Ok(name.to_string());
         }
     }
     // `:use`d modules (only their exported names)

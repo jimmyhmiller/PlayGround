@@ -68,18 +68,23 @@
 ; {c} char, {b} bool; `{{`/`}}` are literal braces. Expands to a sequence of print-*
 ; calls. Too few args for the specs is a compile error (no silent wrong).
 
+; The printer for a spec, as a FULLY-QUALIFIED head (`io.print-str`/`fmt.print-i`/…).
+; The name is spliced into call-head position via `~unquote`, which bypasses the
+; macro's call-head hygiene — so qualify it here, otherwise it resolves at the use
+; site and breaks wherever the caller didn't import io/fmt (e.g. the ambient
+; `print`/`println`, which import nothing).
 (defn fmt--printer [(spec i64)] (-> Code)
-  (if (icmp-eq spec 100) `print-i
-  (if (icmp-eq spec 115) `print-str
-  (if (icmp-eq spec 120) `print-hex
-  (if (icmp-eq spec 99)  `print-char
-  (if (icmp-eq spec 98)  `print-bool
+  (if (icmp-eq spec 100) `fmt.print-i
+  (if (icmp-eq spec 115) `io.print-str
+  (if (icmp-eq spec 120) `fmt.print-hex
+  (if (icmp-eq spec 99)  `fmt.print-char
+  (if (icmp-eq spec 98)  `fmt.print-bool
     (error "fmt: unknown spec; use {d} {s} {x} {c} {b}")))))))
 
 ; flush the accumulated literal bytes as a single print-str (or nothing if empty)
 (defn fmt--flush [(w Code) (lit Code)] (-> Code)
   (if (icmp-eq (code-count lit) 0) `()
-    `((print-str ~w ~(bytes->str lit)))))
+    `((io.print-str ~w ~(bytes->str lit)))))
 
 ; single pass over the format bytes (index i), accumulating literal bytes in `lit`
 ; and consuming `args` (index ai). Returns a Code list of print-* call forms.

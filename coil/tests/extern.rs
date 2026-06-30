@@ -17,13 +17,31 @@ fn identical_extern_redeclaration_is_deduped() {
 
 #[test]
 fn conflicting_extern_redeclaration_errors() {
-    // Same name, DIFFERENT signature is a genuine conflict — hard error, not dedup.
+    // Same name, DIFFERENT signature WITHIN ONE MODULE is a genuine self-contradiction
+    // — a hard error. (Across modules the same C symbol is fine: externs are now
+    // module-qualified — `mem.memcmp` vs `app.memcmp` — and each module's own view
+    // drives its own calls, so they don't clash. See `extern_same_symbol_across_modules`.)
     let src = r#"(module app)
-(import "lib/mem.coil" :use *)
+(extern memcmp :cc c [(ptr i8) (ptr i8) :i64] (-> :i64))
 (extern memcmp :cc c [(ptr i8)] (-> :i64))
 (defn main [] (-> :i64) 0)"#;
     let err = coil::check_source(src).unwrap_err();
     assert!(err.contains("conflicting signatures"), "got: {err}");
+}
+
+/// Two modules may each declare the same C symbol with their own signature without a
+/// clash (the qualified names `helper.abs` / `app.abs` are distinct; codegen shares
+/// the one `abs` link symbol). This is what lets the prelude auto-load `io` (with its
+/// `write`/`read`/… externs) without colliding with a user's own `write`.
+#[test]
+fn extern_same_symbol_across_modules() {
+    let src = r#"(module helper)
+(extern abs :cc c [:i32] (-> :i32))
+(defn h [(x :i32)] (-> :i32) (abs x))
+(module app)
+(extern abs :cc c [:i32] (-> :i32))
+(defn main [] (-> :i64) (cast :i64 (abs -5)))"#;
+    coil::check_source(src).expect("same C symbol in two modules must be allowed");
 }
 
 #[test]

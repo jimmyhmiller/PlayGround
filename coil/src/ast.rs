@@ -615,6 +615,25 @@ pub struct Extern {
     pub ret: Type,
 }
 
+/// `(export-c name…)` — a Coil function exposed as a C symbol (the mirror of
+/// `extern`). The named function keeps EXTERNAL linkage under the C symbol so C (or
+/// any linker) can call it; its signature must be C-representable (checked at the
+/// boundary). See `docs/SYMBOL_EXPORT.md`.
+#[derive(Debug, Clone)]
+pub struct ExportC {
+    /// The exported Coil function's name (qualified by `resolve`).
+    pub name: String,
+    /// The C symbol: the explicit `:as "sym"`, else the bare name with `-`→`_`
+    /// (filled in by the checker after validation, so codegen just reads it).
+    pub symbol: Option<String>,
+    /// The function's ORIGINAL (un-erased) parameter types, captured by the checker
+    /// before the reference model erases aggregates to pointers. Codegen needs these
+    /// to build the C-ABI thunk when a parameter is a by-value struct (the internal
+    /// function only ever sees the erased `(ptr …)`). Empty until the checker fills it.
+    pub params: Vec<Type>,
+    pub span: crate::span::Span,
+}
+
 /// How a struct is laid out in memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layout {
@@ -749,6 +768,8 @@ pub struct Program {
     /// produces a `Code` value (top-level form(s)) to splice into the program. Run
     /// by the elaboration loop (lib.rs) — generated code is then re-checked.
     pub metas: Vec<Expr>,
+    /// `(export-c …)` — Coil functions exposed as C symbols (see `ExportC`).
+    pub exports: Vec<ExportC>,
 }
 
 impl Program {

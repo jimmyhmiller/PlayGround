@@ -1,0 +1,15 @@
+; Monomorphized generic on the hot path: a generic `gsum [T]` instantiated at i64,
+; indexing a cache-resident 1024-array 200M times. Proves the monomorphizer emits
+; the same machine code as a hand-written i64 loop (the C baseline).
+(module bench)
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+(defn gsum [T] [(a (ptr T)) (i :i64) (n :i64) (acc T)] (-> T)
+  (if (icmp-ge i n) acc
+    (gsum a (iadd i 1) n (iadd acc (load (index a (iand i 1023)))))))
+(defn fill [(a (ptr i64)) (i :i64)] (-> :i64)
+  (if (icmp-ge i 1024) 0 (do (store! (index a i) (imul i 2654435761)) (fill a (iadd i 1)))))
+(defn main [] (-> :i64)
+  (let [arr (alloc-stack (array i64 1024))
+        a   (cast (ptr i64) arr)]
+    (fill a 0)
+    (do (printf c"%ld\n" (gsum a 0 200000000 0)) 0)))

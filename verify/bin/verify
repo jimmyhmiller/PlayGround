@@ -82,6 +82,8 @@ OPTIONS
       --json                    print the full verdict as one JSON line to stdout
   -q, --quiet                   print nothing; communicate only via exit code
       --model <name>            override the model (env VERIFY_MODEL)
+      --flash                   use deepseek-v4-flash (fast, cheap)
+      --pro                     use deepseek-v4-pro (reasoning; the default)
       --base-url <url>          override the endpoint (env VERIFY_BASE_URL)
   -h, --help                    show this help and exit 2
   -v, --version                 print version and exit 2
@@ -141,6 +143,8 @@ function parseArgs(argv) {
       case "--json": a.json = true; break;
       case "-q": case "--quiet": a.quiet = true; break;
       case "--model": PROVIDER.model = next(); break;
+      case "--flash": PROVIDER.model = "deepseek-v4-flash"; break;
+      case "--pro": PROVIDER.model = "deepseek-v4-pro"; break;
       case "--base-url": PROVIDER.baseUrl = next(); break;
       default:
         if (t.startsWith("-") && t !== "-") die(`unknown option: ${t}  (try --help)`);

@@ -26,6 +26,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
     let mut traits = Vec::new();
     let mut impls = Vec::new();
     let mut metas = Vec::new();
+    let mut exports = Vec::new();
 
     for form in forms {
         // Any error from a top-level form gets that form's span as a fallback
@@ -51,6 +52,7 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
                     funcs.push(f);
                 }
                 "extern" => externs.push(parse_extern(&items[1..])?),
+                "export-c" => parse_export_c(&items[1..], &mut exports)?,
                 "static-assert" => {
                     let cond = parse_expr(items.get(1).ok_or("static-assert: missing condition")?)?;
                     let msg = match items.get(2).map(|s| &s.kind) {
@@ -88,7 +90,37 @@ pub fn parse_program(forms: &[Sexp]) -> Result<Program, Diag> {
         impls,
         statics: vec![], // produced by checking
         metas,
+        exports,
     })
+}
+
+/// `(export-c name… )` — each entry is a function name (default C symbol = the bare
+/// name with `-`→`_`) or `[name :as "symbol"]` for an explicit symbol.
+fn parse_export_c(rest: &[Sexp], out: &mut Vec<ExportC>) -> Result<(), Diag> {
+    for item in rest {
+        let (name, symbol) = match &item.kind {
+            SexpKind::Sym(n) => (n.clone(), None),
+            SexpKind::Vector(v) => {
+                let name = match v.first().map(|s| &s.kind) {
+                    Some(SexpKind::Sym(n)) => n.clone(),
+                    _ => return Err(Diag::at(item.span, "export-c: expected [name :as \"symbol\"]")),
+                };
+                let symbol = match (v.get(1).map(|s| &s.kind), v.get(2).map(|s| &s.kind)) {
+                    (Some(SexpKind::Keyword(k)), Some(SexpKind::Str(s))) if k == "as" => s.clone(),
+                    _ => return Err(Diag::at(item.span, "export-c: expected [name :as \"symbol\"]")),
+                };
+                (name, Some(symbol))
+            }
+            _ => {
+                return Err(Diag::at(
+                    item.span,
+                    "export-c: each entry is a function name or [name :as \"symbol\"]",
+                ))
+            }
+        };
+        out.push(ExportC { name, symbol, params: vec![], span: item.span });
+    }
+    Ok(())
 }
 
 /// `(deftrait Name [Self] (method [(a Self) …] (-> ret)) …)` — a trait: the

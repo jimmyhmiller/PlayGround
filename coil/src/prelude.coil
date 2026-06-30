@@ -12,6 +12,13 @@
 ; case/|>/…) with no import. Add another `:reexport` line here to fold more into core.
 (import "control.coil" :reexport)
 
+; Ambient `print`/`println` over stdout — zero-import everyday output (Clojure's
+; `println` in clojure.core). Only those two names are folded into core; the rest of
+; the IO/format machinery (Writer, `fmt`, print-*) stays in io/fmt, imported as
+; needed. A freestanding program that never prints drags none of it in (the io
+; functions are unreferenced → dead-stripped).
+(import "print.coil" :reexport)
+
 ; Option / Result (and Some/None/Ok/Err) are core vocabulary — like Rust's prelude.
 ; Pure generic sums (no runtime/externs), so this is freestanding-safe, and the
 ; allocator/IO trait signatures can use Option with no import at the use site.

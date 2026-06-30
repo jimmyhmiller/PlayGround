@@ -66,11 +66,47 @@ fn main() -> ExitCode {
 
     match cmd {
         "build" => {
-            let out = opts.out.unwrap_or_else(|| default_out(file, ""));
             let t = triple.unwrap_or_else(coil::codegen::target_triple);
             let src_path = opts.debug.then(|| Path::new(file));
-            let r = coil::build_executable_linked_dbg(&src, &out, t, &opts.link_flags, src_path);
-            report(r.map(|_| format!("wrote {}", out.display())), file)
+            // Optionally also write a C header for the exports (any build mode).
+            if let Some(hpath) = &opts.emit_header {
+                let r = coil::emit_header(&src).and_then(|h| {
+                    std::fs::write(hpath, h).map_err(|e| format!("writing {}: {e}", hpath.display()))
+                });
+                if let Err(e) = r {
+                    print_error(&e, file);
+                    return ExitCode::FAILURE;
+                }
+                println!("wrote {}", hpath.display());
+            }
+            let stem = Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("a").to_string();
+            let r = if opts.lib {
+                let out = opts.out.unwrap_or_else(|| PathBuf::from(format!("lib{stem}.a")));
+                coil::build_static_lib(&src, &out, t, src_path).map(|_| format!("wrote {}", out.display()))
+            } else if opts.shared {
+                let apple = t.as_str().to_string_lossy().contains("apple")
+                    || t.as_str().to_string_lossy().contains("darwin")
+                    || t.as_str().to_string_lossy().contains("macos");
+                let ext = if apple { "dylib" } else { "so" };
+                let out = opts.out.unwrap_or_else(|| PathBuf::from(format!("lib{stem}.{ext}")));
+                coil::build_shared_lib(&src, &out, t, &opts.link_flags, src_path)
+                    .map(|_| format!("wrote {}", out.display()))
+            } else {
+                let out = opts.out.unwrap_or_else(|| default_out(file, ""));
+                coil::build_executable_linked_dbg(&src, &out, t, &opts.link_flags, src_path)
+                    .map(|_| format!("wrote {}", out.display()))
+            };
+            report(r, file)
+        }
+        // cheader <file.coil> [-o out.h]: generate a C header for the file's
+        // `(export-c …)` set (the inverse of `cimport`).
+        "cheader" => {
+            let out = opts.out.unwrap_or_else(|| default_out(file, "h"));
+            let r = coil::emit_header(&src).and_then(|h| {
+                std::fs::write(&out, h).map_err(|e| format!("writing {}: {e}", out.display()))?;
+                Ok(format!("wrote {}", out.display()))
+            });
+            report(r, file)
         }
         "emit-obj" => {
             let out = opts.out.unwrap_or_else(|| default_out(file, "o"));
@@ -206,6 +242,12 @@ struct Opts {
     link_flags: Vec<String>,
     /// Emit DWARF debug info (`-g`) — function-level source mapping for lldb/gdb.
     debug: bool,
+    /// `--lib`: build a static archive (`.a`) instead of an executable.
+    lib: bool,
+    /// `--shared`: build a shared library (`.dylib`/`.so`).
+    shared: bool,
+    /// `--emit-header <path>`: also write a C header for the `(export-c …)` set.
+    emit_header: Option<PathBuf>,
 }
 
 impl Opts {
@@ -214,6 +256,9 @@ impl Opts {
         let mut target = None;
         let mut link_flags = Vec::new();
         let mut debug = false;
+        let mut lib = false;
+        let mut shared = false;
+        let mut emit_header = None;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -238,6 +283,19 @@ impl Opts {
                     debug = true;
                     i += 1;
                 }
+                "--lib" => {
+                    lib = true;
+                    i += 1;
+                }
+                "--shared" => {
+                    shared = true;
+                    i += 1;
+                }
+                "--emit-header" => {
+                    let p = rest.get(i + 1).ok_or("--emit-header needs a path")?;
+                    emit_header = Some(PathBuf::from(p));
+                    i += 2;
+                }
                 // shorthand: `-lfoo` is passed straight through.
                 other if other.starts_with("-l") && other.len() > 2 => {
                     link_flags.push(other.to_string());
@@ -246,7 +304,10 @@ impl Opts {
                 other => return Err(format!("unknown argument '{other}'")),
             }
         }
-        Ok(Opts { out, target, link_flags, debug })
+        if lib && shared {
+            return Err("--lib and --shared are mutually exclusive".into());
+        }
+        Ok(Opts { out, target, link_flags, debug, lib, shared, emit_header })
     }
 }
 
@@ -308,6 +369,9 @@ fn usage() -> ExitCode {
          coil run -- <args…>                      … forwarding args to the program (else [run] args)\n  \
          coil <build|run|emit-obj|emit-ir|expand> <file.coil> [-o out] [--target <triple>] \
          [--link-flag <arg> | -l<lib>]… [-g] [-- <args…>]\n  \
+         coil build <file.coil> --lib|--shared    build a C library (.a / .dylib) from (export-c …)\n  \
+         coil build <file.coil> --emit-header <h>  also write a C header for the exports\n  \
+         coil cheader <file.coil> [-o out.h]      generate the C header for (export-c …) (inverse of cimport)\n  \
          coil cimport <header.h> [-o out.coil]    generate C FFI bindings via clang\n  \
          -g / --debug   emit DWARF debug info (build/run) for lldb/gdb"
     );

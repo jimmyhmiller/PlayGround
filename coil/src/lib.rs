@@ -7,6 +7,7 @@
 pub mod abi;
 pub mod ast;
 pub mod check;
+pub mod cheader;
 pub mod cimport;
 pub mod codegen;
 pub mod comptime;
@@ -57,6 +58,20 @@ fn collapse(diags: Vec<Diag>) -> Diag {
     diags.into_iter().next().unwrap_or_else(|| Diag::new("type error"))
 }
 
+/// Time a build phase, printing `[time] <label>: <ms>` to stderr when `COIL_TIME` is
+/// set in the environment — a cheap always-available profiler that splits the front
+/// end (read→expand→check→mono) from codegen, the LLVM `-O3` pipeline, object
+/// emission, and linking, to see where `coil build` spends its time.
+fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    if std::env::var_os("COIL_TIME").is_none() {
+        return f();
+    }
+    let t = std::time::Instant::now();
+    let r = f();
+    eprintln!("  [time] {label}: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+    r
+}
+
 /// The whole front end: read → macro-expand → resolve → check, with the Stage-3
 /// elaboration loop for `(meta …)` staged macros. Returns the checked `Program`.
 ///
@@ -71,6 +86,24 @@ fn elaborate(src: &str, sm: &mut SourceMap) -> Result<ast::Program, Vec<Diag>> {
     // swaps in the real path; tests render against `<source>`). Imports + the prelude
     // register themselves as further sources inside `load_program`.
     let main = sm.add("<source>", src);
+    // Run the front end on a large dedicated stack. Type-checking recurses over
+    // expression nesting, and the auto-loaded prelude (`coil.core`) now always pulls
+    // in the comptime macro engine — `fmt`'s deeply-nested format walker and friends —
+    // so a default 2 MiB host thread (cargo's test threads) can otherwise overflow on
+    // even a trivial program. (The macro expander already does this for the same
+    // reason.) A real program with deep nesting is likewise protected.
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || elaborate_on_stack(src, main, sm))
+            .expect("spawn front-end thread")
+            .join()
+            .expect("front-end thread panicked")
+    })
+}
+
+/// The body of `elaborate`, run on a large stack (see `elaborate`).
+fn elaborate_on_stack(src: &str, main: u32, sm: &mut SourceMap) -> Result<ast::Program, Vec<Diag>> {
     // The front-end pipeline up to the checker is fail-fast (single `Diag`); the
     // checker (`check_with`) returns *all* of one program's body errors, which flow
     // straight out as the multi-error `Vec<Diag>`.
@@ -131,7 +164,7 @@ fn keep_for_macro_detection(f: &reader::Sexp) -> bool {
         "defn" => defn_involves_code(items),
         // declarations the macros may reference — always parseable, no macro calls
         "defstruct" | "defsum" | "deftrait" | "extern" | "module" | "import" | "include"
-        | "export" | "defcc" => true,
+        | "export" | "export-c" | "defcc" => true,
         // impls/consts/metas have runtime bodies; a bare `(macro …)` call is not a
         // definition — both may contain not-yet-expanded macro calls, so drop them.
         _ => false,
@@ -328,6 +361,7 @@ fn closure_subprogram(
         impls: p.impls.clone(),
         statics: vec![],
         metas: if keep_metas { p.metas.clone() } else { vec![] },
+        exports: vec![], // a comptime sub-program has no C exports
     }
 }
 
@@ -672,39 +706,43 @@ fn build_module_for<'ctx>(
     build_module_dbg(ctx, src, triple, None, sm)
 }
 
-/// `build_module_for`, optionally emitting DWARF debug info (`-g`).
+/// `build_module_for`, optionally emitting DWARF debug info (`-g`). `dbg` carries the
+/// main file's `(file_name, directory)` when `-g` is on; the `DebugInput` (which also
+/// needs the fully-populated `SourceMap` for its per-source `DIFile`s) is assembled
+/// *after* `elaborate` has registered every imported file.
 fn build_module_dbg<'ctx>(
     ctx: &'ctx Context,
     src: &str,
     triple: inkwell::targets::TargetTriple,
-    dbg: Option<codegen::DebugInput>,
+    dbg: Option<(String, String)>,
     sm: &mut SourceMap,
 ) -> Result<Module<'ctx>, Vec<Diag>> {
-    let program = elaborate(src, sm)?;
-    let program = mono::monomorphize(program).map_err(|e| vec![Diag::from(e)])?;
-    codegen::compile_for_dbg(ctx, &program, triple, dbg).map_err(|e| vec![Diag::from(e)])
+    let program = timed("front-end (elaborate)", || elaborate(src, sm))?;
+    let program = timed("monomorphize", || mono::monomorphize(program)).map_err(|e| vec![Diag::from(e)])?;
+    let dbg = dbg.map(|(main_file_name, main_directory)| codegen::DebugInput {
+        sources: sm,
+        main_file_name,
+        main_directory,
+    });
+    timed("codegen (IR gen)", || codegen::compile_for_dbg(ctx, &program, triple, dbg))
+        .map_err(|e| vec![Diag::from(e)])
 }
 
-/// Build the `DebugInput` (source text + file identity for the `DIFile`) from a
-/// source path. `<source>` stands in when there is no real file (the library/test
-/// entry points compile from a string).
-fn debug_input<'a>(src: &'a str, src_path: Option<&Path>) -> codegen::DebugInput<'a> {
-    let (file_name, directory) = match src_path {
-        Some(p) => {
-            let dir = p
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".to_string());
-            let name = p.file_name().map_or_else(
-                || p.to_string_lossy().into_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-            (name, dir)
-        }
-        None => ("<source>".to_string(), ".".to_string()),
-    };
-    codegen::DebugInput { source: src, file_name, directory }
+/// The `(file_name, directory)` for the main file's `DIFile` (source 0), or `None`
+/// when `-g` is off. `<source>` stands in when there is no real path (the library/
+/// test entry points compile from a string).
+fn debug_file_id(src_path: Option<&Path>) -> Option<(String, String)> {
+    let p = src_path?;
+    let dir = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    let name = p.file_name().map_or_else(
+        || p.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    Some((name, dir))
 }
 
 /// Macro-expand and pretty-print the resulting forms (for `--expand`). Shows the
@@ -813,7 +851,7 @@ pub fn compile_to_object_dbg(
     Target::initialize_all(&InitializationConfig::default());
     let ctx = Context::create();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let dbg = src_path.map(|_| debug_input(src, src_path));
+    let dbg = debug_file_id(src_path);
     let mut sm = SourceMap::new();
     let module = reported(build_module_dbg(&ctx, src, triple, dbg, &mut sm), &sm)?;
     let triple = module.get_triple();
@@ -878,10 +916,11 @@ pub fn compile_to_object_dbg(
     } else {
         OPT_PIPELINE
     };
-    module
-        .run_passes(pipeline, &tm, PassBuilderOptions::create())
-        .map_err(|e| format!("optimization passes failed: {e}"))?;
-    tm.write_to_file(&module, FileType::Object, obj_path)
+    timed("LLVM opt pipeline", || {
+        module.run_passes(pipeline, &tm, PassBuilderOptions::create())
+    })
+    .map_err(|e| format!("optimization passes failed: {e}"))?;
+    timed("object emit", || tm.write_to_file(&module, FileType::Object, obj_path))
         .map_err(|e| e.to_string())
 }
 
@@ -941,8 +980,7 @@ pub fn build_executable_linked_dbg(
     for f in link_flags {
         cc.arg(f);
     }
-    let status = cc
-        .status()
+    let status = timed("link (cc)", || cc.status())
         .map_err(|e| format!("failed to invoke linker (cc): {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_file(&obj_path);
@@ -984,6 +1022,70 @@ fn link_arch_flag(triple: &str) -> Option<&'static str> {
         "aarch64" | "arm64" | "arm64e" => (host != "aarch64" && host != "arm64").then_some("arm64"),
         _ => None,
     }
+}
+
+/// Generate a C header for a program's `(export-c …)` set — function prototypes
+/// under their C symbols plus the structs reachable from those signatures. The
+/// inverse of `cimport`. See `docs/SYMBOL_EXPORT.md`.
+pub fn emit_header(src: &str) -> Result<String, String> {
+    let mut sm = SourceMap::new();
+    let program = reported(elaborate(src, &mut sm), &sm)?;
+    cheader::render(&program)
+}
+
+/// AOT to a STATIC LIBRARY (`.a`): compile to an object and archive it with `ar`.
+/// A library has no `main`; its `export-c` functions are the public symbols (the
+/// rest internalize). The object is consumed into the archive and removed.
+pub fn build_static_lib(
+    src: &str,
+    out_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+    src_path: Option<&Path>,
+) -> Result<(), String> {
+    let obj_path = out_path.with_extension("o");
+    compile_to_object_dbg(src, &obj_path, triple, src_path)?;
+    let status = Command::new("ar")
+        .arg("rcs")
+        .arg(out_path)
+        .arg(&obj_path)
+        .status()
+        .map_err(|e| format!("failed to invoke archiver (ar): {e}"))?;
+    let _ = std::fs::remove_file(&obj_path);
+    if !status.success() {
+        return Err(format!("archiver (ar) failed with {status}"));
+    }
+    Ok(())
+}
+
+/// AOT to a SHARED LIBRARY (`.dylib`/`.so`): compile to an object and link it as a
+/// dynamic library with `cc` (`-dynamiclib` on Apple, `-shared` elsewhere). Extra
+/// `link_flags` (e.g. `-lm`) are passed through.
+pub fn build_shared_lib(
+    src: &str,
+    out_path: &Path,
+    triple: inkwell::targets::TargetTriple,
+    link_flags: &[String],
+    src_path: Option<&Path>,
+) -> Result<(), String> {
+    let triple_str = triple.as_str().to_string_lossy().into_owned();
+    let obj_path = out_path.with_extension("o");
+    compile_to_object_dbg(src, &obj_path, triple, src_path)?;
+    let mut cc = Command::new("cc");
+    if let Some(arch) = link_arch_flag(&triple_str) {
+        cc.arg("-arch").arg(arch);
+    }
+    let apple = triple_str.contains("apple") || triple_str.contains("darwin") || triple_str.contains("macos");
+    cc.arg(if apple { "-dynamiclib" } else { "-shared" });
+    cc.arg(&obj_path).arg("-o").arg(out_path);
+    for f in link_flags {
+        cc.arg(f);
+    }
+    let status = cc.status().map_err(|e| format!("failed to invoke linker (cc): {e}"))?;
+    let _ = std::fs::remove_file(&obj_path);
+    if !status.success() {
+        return Err(format!("linker (cc) failed with {status}"));
+    }
+    Ok(())
 }
 
 /// Front end only: read → expand → parse → check. No codegen, no LLVM

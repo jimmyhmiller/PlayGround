@@ -22,6 +22,7 @@ pub const BUNDLED: &[(&str, &str)] = &[
     ("match.coil", include_str!("../lib/match.coil")),
     ("mem.coil", include_str!("../lib/mem.coil")),
     ("mmio.coil", include_str!("../lib/mmio.coil")),
+    ("print.coil", include_str!("../lib/print.coil")),
     ("result.coil", include_str!("../lib/result.coil")),
     ("sexp.coil", include_str!("../lib/sexp.coil")),
     ("simd.coil", include_str!("../lib/simd.coil")),

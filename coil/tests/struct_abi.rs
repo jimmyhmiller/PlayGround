@@ -116,6 +116,43 @@ fn c_calls_coil_returning_structs_x86_64_under_rosetta() {
     assert_eq!(build_link_run(COIL_LIB_SRC, CALLS_COIL, CrossArch::X86_64), 42);
 }
 
+/// `(export-c …)` end to end: C calls Coil functions by their exported C symbols (one
+/// renamed via `:as`), while a private helper internalizes. The library has no `main`
+/// but the exports are the anchor (docs/SYMBOL_EXPORT.md).
+const EXPORTED_LIB_SRC: &str = r#"
+    (module shapes)
+    (defstruct Point [(x :i64) (y :i64)])
+    (defn clamp0 [(n :i64)] (-> :i64) (if (icmp-lt n 0) 0 n))   ; private -> internal
+    (defn make-point [(x :i64) (y :i64)] (-> Point)
+      (let [p (alloc-stack Point)]
+        (store! (field p x) (clamp0 x)) (store! (field p y) (clamp0 y)) (load p)))
+    (defn add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+    (defn dist2 [(p Point)] (-> :i64)                          ; struct BY VALUE -> thunk
+      (iadd (imul (load (field p x)) (load (field p x)))
+            (imul (load (field p y)) (load (field p y)))))
+    (export-c
+      [make-point :as "shapes_make_point"]
+      [add :as "shapes_add"]
+      [dist2 :as "shapes_dist2"])
+"#;
+const CALLS_EXPORTED: &str = "tests/fixtures/calls_exported_coil.c";
+
+#[test]
+fn c_calls_exported_coil_functions() {
+    assert_eq!(build_link_run(EXPORTED_LIB_SRC, CALLS_EXPORTED, CrossArch::Host), 0);
+}
+
+/// The same, cross-compiled to x86-64 (SysV ABI) and run under Rosetta — verifies the
+/// export thunk's struct-by-value marshalling on a *different* ABI than the host's.
+#[test]
+fn c_calls_exported_coil_functions_x86_64_under_rosetta() {
+    if !rosetta_available() {
+        eprintln!("skipping: Rosetta 2 not available to run the x86-64 SysV binary");
+        return;
+    }
+    assert_eq!(build_link_run(EXPORTED_LIB_SRC, CALLS_EXPORTED, CrossArch::X86_64), 0);
+}
+
 // --- IR shape vs clang (no execution needed; pure ABI verification) ----------
 
 /// Emit IR for `src` targeting `triple` and return the `declare`/`define` lines.

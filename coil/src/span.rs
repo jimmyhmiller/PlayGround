@@ -115,6 +115,15 @@ impl SourceMap {
         id
     }
 
+    /// The number of registered sources (ids `0..len`).
+    pub fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
     pub fn text(&self, id: u32) -> Option<&str> {
         self.sources.get(id as usize).map(|s| s.text.as_str())
     }

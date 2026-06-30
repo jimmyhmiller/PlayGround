@@ -193,38 +193,65 @@ fn const_array_of<'ctx>(
     }
 }
 
-/// What the caller supplies to turn on DWARF emission: the source text (to map a
-/// byte span to a line/column) and the file identity for the `DIFile`.
+/// What the caller supplies to turn on DWARF emission: the whole [`SourceMap`]
+/// (every file the compile touched — main, imports, prelude — so each maps to its
+/// own `DIFile` and line table) plus the real path of the main file (source 0,
+/// which the `SourceMap` only knows by the `<source>` placeholder).
+///
+/// [`SourceMap`]: crate::span::SourceMap
 pub struct DebugInput<'a> {
-    pub source: &'a str,
-    pub file_name: String,
-    pub directory: String,
+    pub sources: &'a crate::span::SourceMap,
+    pub main_file_name: String,
+    pub main_directory: String,
 }
 
-/// Live DWARF-emission state held on `Cg` while a module is built. Function
-/// granularity for now (a CU + a `DISubprogram` per function with its source
-/// line); per-statement line tables and local-variable info are a later slice.
+/// Live DWARF-emission state held on `Cg` while a module is built: a CU, a `DIFile`
+/// and line table *per source* (so a function defined in an imported file maps to
+/// the right file:line), and a `DISubprogram` per function with per-statement line
+/// info.
 struct DebugCtx<'ctx> {
     builder: DebugInfoBuilder<'ctx>,
+    /// The primary file (source 0 / the CU file) — used as a file-agnostic scope for
+    /// type definitions (struct/slice members aren't tied to a source).
     file: DIFile<'ctx>,
+    /// One `DIFile` per source id (indexed by `Span.source`).
+    files: Vec<DIFile<'ctx>>,
     /// Reused subroutine type — line info needs a type, but typed parameters are
     /// a later increment, so every function shares one opaque `() -> ?` signature.
     subroutine_ty: DISubroutineType<'ctx>,
-    /// Byte offset of the start of each source line, for offset → (line, col).
-    line_starts: Vec<u32>,
+    /// Byte offset of the start of each line, per source id, for offset → (line, col).
+    line_starts: Vec<Vec<u32>>,
 }
 
 impl<'ctx> DebugCtx<'ctx> {
-    /// 1-based (line, column) for a byte offset; `(0, 0)` for a dummy/out-of-range
-    /// span (a synthesized or included-file node — no line, never a wrong one).
-    fn line_col(&self, off: u32) -> (u32, u32) {
-        if off == u32::MAX {
+    /// 1-based (line, column) for a span, resolved against *its own source's* line
+    /// table; `(0, 0)` for a dummy span or an unknown source (no line, never wrong).
+    fn line_col(&self, span: crate::span::Span) -> (u32, u32) {
+        if span.is_dummy() {
             return (0, 0);
         }
-        // Last line whose start is <= off.
-        let line = self.line_starts.partition_point(|&s| s <= off);
-        let line_start = self.line_starts.get(line.saturating_sub(1)).copied().unwrap_or(0);
+        let Some(starts) = self.line_starts.get(span.source as usize) else {
+            return (0, 0);
+        };
+        let off = span.lo;
+        let line = starts.partition_point(|&s| s <= off);
+        let line_start = starts.get(line.saturating_sub(1)).copied().unwrap_or(0);
         (line as u32, off - line_start + 1)
+    }
+
+    /// The `DIFile` for a source id (the primary file as a fallback).
+    fn file_of(&self, source: u32) -> DIFile<'ctx> {
+        self.files.get(source as usize).copied().unwrap_or(self.file)
+    }
+}
+
+/// Split a `SourceMap` source name into a `(file_name, directory)` for `DIFile`.
+/// A real path splits at the last separator; a placeholder like `<prelude>` (no
+/// separator) becomes its own file name in directory `.`.
+fn split_source_path(name: &str) -> (String, String) {
+    match name.rfind('/') {
+        Some(i) => (name[i + 1..].to_string(), name[..i].to_string()),
+        None => (name.to_string(), ".".to_string()),
     }
 }
 
@@ -238,6 +265,10 @@ struct Cg<'ctx> {
     /// the scope for per-statement debug locations set in `emit_expr`. `None`
     /// outside a `-g` body or for a dummy-span function.
     cur_sp: std::cell::RefCell<Option<DISubprogram<'ctx>>>,
+    /// The source id of the function currently being emitted. A statement whose span
+    /// is in a *different* source (e.g. a macro template literal) is not given a
+    /// location — its line is meaningless against this function's `DIFile`.
+    cur_func_src: Cell<u32>,
     /// Cache of built struct `DICompositeType`s by name (so each struct's DWARF
     /// type is emitted once), and the set of structs currently mid-build (to break
     /// recursion on a struct that points at itself).
@@ -362,8 +393,8 @@ pub fn compile_for_dbg<'ctx>(
         let (dib, cu) = module.create_debug_info_builder(
             true, // allow unresolved (finalized later)
             DWARFSourceLanguage::C, // Coil isn't C, but C is the honest closest
-            &d.file_name,
-            &d.directory,
+            &d.main_file_name,
+            &d.main_directory,
             "coil",
             // NOT optimized: a `-g` build runs an almost-empty pipeline, so lldb
             // can trust the DWARF (prologue_end, variable locations) instead of
@@ -383,16 +414,29 @@ pub fn compile_for_dbg<'ctx>(
         let file = cu.get_file();
         let subroutine_ty =
             dib.create_subroutine_type(file, None, &[], inkwell::debug_info::DIFlags::ZERO);
-        // Precompute line starts (offset 0, then each byte after a '\n').
-        let mut line_starts = vec![0u32];
-        line_starts.extend(
-            d.source
-                .bytes()
-                .enumerate()
-                .filter(|&(_, b)| b == b'\n')
-                .map(|(i, _)| i as u32 + 1),
-        );
-        DebugCtx { builder: dib, file, subroutine_ty, line_starts }
+        // Build a DIFile + line table per source (indexed by `Span.source`). Source 0
+        // is the main file = the CU's own file (its real path from `DebugInput`);
+        // every other source (imports, prelude) gets its own `DIFile` from the path
+        // the `SourceMap` recorded, so a diagnostic/breakpoint there names that file.
+        let n = d.sources.len();
+        let mut files = Vec::with_capacity(n);
+        let mut line_starts = Vec::with_capacity(n);
+        for id in 0..n as u32 {
+            let text = d.sources.text(id).unwrap_or("");
+            let mut starts = vec![0u32];
+            starts.extend(
+                text.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32 + 1),
+            );
+            line_starts.push(starts);
+            let dif = if id == 0 {
+                file // the CU file (main, real path)
+            } else {
+                let (fname, dir) = split_source_path(d.sources.name(id).unwrap_or("<source>"));
+                dib.create_file(&fname, &dir)
+            };
+            files.push(dif);
+        }
+        DebugCtx { builder: dib, file, files, subroutine_ty, line_starts }
     });
 
     let mut cg = Cg {
@@ -401,6 +445,7 @@ pub fn compile_for_dbg<'ctx>(
         builder: ctx.create_builder(),
         di,
         cur_sp: std::cell::RefCell::new(None),
+        cur_func_src: Cell::new(0),
         di_structs: std::cell::RefCell::new(HashMap::new()),
         di_building: std::cell::RefCell::new(HashSet::new()),
         funcs: HashMap::new(),
@@ -518,7 +563,12 @@ pub fn compile_for_dbg<'ctx>(
         }
     }
 
-    // 1a. declare externs (foreign symbols resolved at link time).
+    // 1a. declare externs (foreign symbols resolved at link time). The extern's Coil
+    //     name is module-qualified (`io.write`); the LLVM/link symbol is its bare last
+    //     component (`write`). Several modules may declare the same C symbol, so one
+    //     LLVM declaration is SHARED per symbol — the first declarer's signature is the
+    //     canonical LLVM type, and a caller whose signature differs bitcasts the
+    //     function to its own type at the call site (the C model; see `emit_call`).
     for e in &program.externs {
         let conv = program
             .conventions
@@ -529,32 +579,64 @@ pub fn compile_for_dbg<'ctx>(
             .ok_or_else(|| format!("codegen: extern '{}' needs a native convention", e.name))?;
         let native_c = matches!(&conv.lowering, Lowering::Native(crate::convention::NativeCc::C));
         cg.check_c_abi_types(&format!("extern '{}'", e.name), &e.params, &e.ret)?;
-        let fv = if cg.needs_c_abi(&e.params, &e.ret) {
-            // A by-value struct in the signature: lower via the C struct ABI
-            // (coerced register slots, `byval`/`sret`) instead of the naive types.
-            let sig = cg.c_signature(&e.name, &e.params, &e.ret, e.variadic, native_c)?;
-            let fv = cg.module.add_function(&e.name, sig.fn_ty, None);
-            fv.set_call_conventions(cc_id);
-            for (loc, attr) in cg.csig_attrs(&sig) {
-                fv.add_attribute(loc, attr);
-            }
-            cg.csigs.insert(e.name.clone(), sig);
-            fv
+        let csym = e.name.rsplit('.').next().unwrap_or(e.name.as_str()).to_string();
+        // A by-value struct in the signature: lower via the C struct ABI (coerced
+        // register slots, `byval`/`sret`). Computed once per extern (also used at the
+        // call sites), recorded even when the LLVM declaration is shared.
+        let sig = if cg.needs_c_abi(&e.params, &e.ret) {
+            Some(cg.c_signature(&csym, &e.params, &e.ret, e.variadic, native_c)?)
         } else {
-            let p: Vec<BasicMetadataTypeEnum> =
-                e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
-            let fn_ty = cg.fn_type_with_ret(&e.ret, &p, e.variadic);
-            let fv = cg.module.add_function(&e.name, fn_ty, None);
-            fv.set_call_conventions(cc_id);
-            fv
+            None
         };
+        let fv = match cg.module.get_function(&csym) {
+            Some(existing) => existing, // same C symbol already declared by another module
+            None => {
+                let fv = match &sig {
+                    Some(sig) => {
+                        let fv = cg.module.add_function(&csym, sig.fn_ty, None);
+                        for (loc, attr) in cg.csig_attrs(sig) {
+                            fv.add_attribute(loc, attr);
+                        }
+                        fv
+                    }
+                    None => {
+                        let p: Vec<BasicMetadataTypeEnum> =
+                            e.params.iter().map(|t| cg.basic_ty(t).into()).collect();
+                        let fn_ty = cg.fn_type_with_ret(&e.ret, &p, e.variadic);
+                        cg.module.add_function(&csym, fn_ty, None)
+                    }
+                };
+                fv.set_call_conventions(cc_id);
+                fv
+            }
+        };
+        if let Some(sig) = sig {
+            cg.csigs.entry(e.name.clone()).or_insert(sig);
+        }
         cg.funcs.insert(e.name.clone(), fv);
         cg.rets.insert(e.name.clone(), e.ret.clone());
         cg.callables
             .insert(e.name.clone(), (e.cc.clone(), e.params.clone(), e.ret.clone()));
     }
 
-    // 1b. declare all functions (so mutual recursion resolves).
+    // 1b. declare all functions (so mutual recursion resolves). LINKAGE: a function is
+    //     EXTERNAL iff it is `main` or it is C-exported (`export-c`); everything else is
+    //     INTERNAL so the optimizer can prune it (see the `is_executable` discussion
+    //     below). An `export-c` function is emitted under its C symbol (not its
+    //     qualified Coil name), so C can call it (`docs/SYMBOL_EXPORT.md`).
+    //
+    //     The internalization needs an ANCHOR — a `main` or at least one export — to
+    //     apply. A program with NEITHER (a bare library or freestanding image with no
+    //     declared exports) keeps everything external for back-compat: some external
+    //     thing (a C caller, the crt0/linker) references its functions by symbol.
+    //     An export whose signature takes a struct BY VALUE needs a C-ABI THUNK (the
+    //     internal function is reference-model, taking the struct by pointer): then the
+    //     internal function keeps its qualified name + internal linkage and the THUNK
+    //     gets the C symbol. A thunk-free export is emitted directly under its C symbol.
+    let exports: HashMap<&str, &crate::ast::ExportC> =
+        program.exports.iter().map(|e| (e.name.as_str(), e)).collect();
+    let needs_thunk = |e: &crate::ast::ExportC| e.params.iter().any(|t| matches!(t, Type::Struct(_)));
+    let has_anchor = program.funcs.iter().any(|f| f.name == "main") || !exports.is_empty();
     for f in &program.funcs {
         let conv = program
             .conventions
@@ -574,24 +656,55 @@ pub fn compile_for_dbg<'ctx>(
         let f_params: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
         match &conv.lowering {
             Lowering::Native(cc) => {
+                // A thunk-FREE C export is emitted directly under its C symbol;
+                // everything else (incl. a thunk-needing export's internal function)
+                // under its qualified Coil name. Coil call sites resolve through
+                // `cg.funcs` (keyed by Coil name) → the same FunctionValue, so internal
+                // calls are unaffected by the symbol rename.
+                let exp = exports.get(f.name.as_str()).copied();
+                let direct_sym = exp.and_then(|e| (!needs_thunk(e)).then(|| e.symbol.as_deref()).flatten());
+                let llvm_name = direct_sym.unwrap_or(f.name.as_str());
                 // A function that returns (or, in principle, takes) a struct by
                 // value across the C ABI is lowered the same way as an extern, so
                 // a C caller — or a Coil call site — agrees on the wire format.
-                if cg.needs_c_abi(&f_params, &f.ret) {
+                let fv = if cg.needs_c_abi(&f_params, &f.ret) {
                     let native_c = *cc == crate::convention::NativeCc::C;
-                    let sig = cg.c_signature(&f.name, &f_params, &f.ret, false, native_c)?;
-                    let fv = cg.module.add_function(&f.name, sig.fn_ty, None);
+                    let sig = cg.c_signature(llvm_name, &f_params, &f.ret, false, native_c)?;
+                    let fv = cg.module.add_function(llvm_name, sig.fn_ty, None);
                     fv.set_call_conventions(cc.id());
                     for (loc, attr) in cg.csig_attrs(&sig) {
                         fv.add_attribute(loc, attr);
                     }
                     cg.csigs.insert(f.name.clone(), sig);
-                    cg.funcs.insert(f.name.clone(), fv);
+                    fv
                 } else {
-                    let fv = cg.module.add_function(&f.name, fn_ty, None);
+                    let fv = cg.module.add_function(llvm_name, fn_ty, None);
                     fv.set_call_conventions(cc.id());
-                    cg.funcs.insert(f.name.clone(), fv);
+                    fv
+                };
+                // Whole-program HOSTED compile: every function but the entry point
+                // `main` is private to this module, so give it INTERNAL linkage (like
+                // C's `static`). Without this the optimizer must keep every function —
+                // it can't delete one it inlined or proved dead — so it optimizes and
+                // emits machine code for far more than survives, and on deep call
+                // graphs inlining bloats the code O(n²). Internal linkage lets LLVM
+                // prune, which is most of clang's compile-time edge. Taking a
+                // function's address (`fnptr-of`, a C callback) still works on an
+                // internal function; only `main` (the C runtime's entry) stays
+                // external. `:shim` trampolines stay external (asm/FFI boundary).
+                //
+                // External iff `main`, or emitted directly under a C symbol (a
+                // thunk-free export); otherwise internal when there is an anchor. A
+                // thunk-needing export's internal function is internal here — the thunk
+                // (below) carries the C symbol. A no-anchor library/freestanding image
+                // keeps everything external (back-compat). Taking an internal function's
+                // address (`fnptr-of`, a C callback) still works — only calling it *by
+                // symbol* from C needs an export.
+                let external = f.name == "main" || direct_sym.is_some() || !has_anchor;
+                if !external {
+                    fv.set_linkage(inkwell::module::Linkage::Internal);
                 }
+                cg.funcs.insert(f.name.clone(), fv);
             }
             Lowering::Shim => {
                 let ret_reg = conv
@@ -628,6 +741,18 @@ pub fn compile_for_dbg<'ctx>(
         } else {
             let fv = cg.funcs[&f.name];
             cg.emit_func(f, fv)?;
+        }
+    }
+
+    // 2b. C-ABI export THUNKS: for each export that takes a struct by value, emit the
+    //     external C-symbol function that marshals the C ABI into the reference-model
+    //     (pointer) arguments the internal function takes, then calls it.
+    for e in &program.exports {
+        if needs_thunk(e) {
+            let sym = e.symbol.as_deref().ok_or("codegen: export missing C symbol")?;
+            let internal = cg.funcs[&e.name];
+            let ret = cg.rets[&e.name].clone();
+            cg.emit_export_thunk(sym, &e.name, internal, &e.params, &ret)?;
         }
     }
 
@@ -1115,6 +1240,96 @@ impl<'ctx> Cg<'ctx> {
         Ok((v, ret_ty))
     }
 
+    /// Emit a C-ABI **thunk** for an exported function that takes a struct by value.
+    /// The exported C symbol is this thunk; it receives parameters per the C ABI (a
+    /// small struct in coerced registers, a large one as a `byval` pointer), marshals
+    /// each into the reference-model POINTER the internal function expects, calls the
+    /// internal function, and forwards the result. The internal function is `internal`
+    /// linkage, so LLVM inlines it into the thunk at -O3 (no overhead). This is the
+    /// exact inverse of `emit_c_call` (see docs/SYMBOL_EXPORT.md).
+    fn emit_export_thunk(
+        &self,
+        c_symbol: &str,
+        internal_name: &str,
+        internal: FunctionValue<'ctx>,
+        params: &[Type],
+        ret: &Type,
+    ) -> Result<(), String> {
+        // The thunk's signature is the C ABI over the ORIGINAL (by-value) param types.
+        let sig = self.c_signature(c_symbol, params, ret, false, true)?;
+        let thunk = self.module.add_function(c_symbol, sig.fn_ty, None);
+        for (loc, attr) in self.csig_attrs(&sig) {
+            thunk.add_attribute(loc, attr);
+        }
+        let entry = self.ctx.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+
+        let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut idx: u32 = 0;
+        // sret: forward the hidden result pointer (the internal function returns the
+        // same struct, so it has the same leading sret parameter).
+        if sig.sret.is_some() {
+            call_args.push(thunk.get_nth_param(0).ok_or("thunk: missing sret param")?.into());
+            idx = 1;
+        }
+        for arg in &sig.args {
+            match arg {
+                ArgAbi::Scalar => {
+                    call_args.push(thunk.get_nth_param(idx).ok_or("thunk: missing param")?.into());
+                    idx += 1;
+                }
+                ArgAbi::Direct(sa) => {
+                    // Scatter the coerced register params into a struct slot (the
+                    // inverse of `emit_c_call`'s gather), then pass the slot POINTER.
+                    let slot = self.struct_slot(sa, "thunk.arg")?;
+                    if let Class::Direct(slots) = &sa.arg {
+                        for k in 0..slots.len() {
+                            let v = thunk.get_nth_param(idx).ok_or("thunk: missing coerced param")?;
+                            let off = (k as u64) * 8;
+                            let gep = if off == 0 {
+                                slot
+                            } else {
+                                unsafe {
+                                    self.builder
+                                        .build_gep(self.ctx.i8_type(), slot, &[self.ctx.i64_type().const_int(off, false)], "thunk.eb")
+                                        .map_err(le)?
+                                }
+                            };
+                            self.builder.build_store(gep, v).map_err(le)?;
+                            idx += 1;
+                        }
+                    }
+                    call_args.push(slot.into());
+                }
+                ArgAbi::Indirect(_) => {
+                    // The `byval` pointer is the caller-allocated copy — the thunk owns
+                    // it (it is the callee), so pass it straight through as the pointer.
+                    call_args.push(thunk.get_nth_param(idx).ok_or("thunk: missing byval param")?.into());
+                    idx += 1;
+                }
+            }
+        }
+
+        let cs = self.builder.build_call(internal, &call_args, "thunk.call").map_err(le)?;
+        cs.set_call_convention(internal.get_call_conventions());
+        // If the internal function uses the C struct ABI for its return (sret/byval),
+        // carry those attributes onto the call so the two declarations agree.
+        if let Some(isig) = self.csigs.get(internal_name) {
+            for (loc, attr) in self.csig_attrs(isig) {
+                cs.add_attribute(loc, attr);
+            }
+        }
+
+        if sig.sret.is_some() {
+            self.builder.build_return(None).map_err(le)?;
+        } else if let Some(v) = cs.try_as_basic_value().basic() {
+            self.builder.build_return(Some(&v)).map_err(le)?;
+        } else {
+            self.builder.build_return(None).map_err(le)?;
+        }
+        Ok(())
+    }
+
     /// `memcpy` `size` bytes from `src` to `dst` (both struct pointers).
     fn copy_struct(
         &self,
@@ -1137,13 +1352,17 @@ impl<'ctx> Cg<'ctx> {
         // — required once a function has a subprogram. A function from an
         // included/imported file (dummy span) gets none, never a wrong line.
         if let Some(di) = &self.di {
-            let (line, col) = di.line_col(f.span.lo);
+            let (line, col) = di.line_col(f.span);
             if line != 0 {
+                // The function maps to the DIFile of *its own* source (so a function
+                // from an imported file resolves to that file, not the main one).
+                let dfile = di.file_of(f.span.source);
+                self.cur_func_src.set(f.span.source);
                 let sp = di.builder.create_function(
-                    di.file.as_debug_info_scope(),
+                    dfile.as_debug_info_scope(),
                     &f.name,
                     Some(&f.name), // linkage name = the symbol
-                    di.file,
+                    dfile,
                     line,
                     di.subroutine_ty,
                     false, // not local to unit
@@ -1765,7 +1984,13 @@ impl<'ctx> Cg<'ctx> {
     fn set_dbg_loc(&self, span: crate::span::Span) {
         if let Some(di) = &self.di {
             if let Some(sp) = *self.cur_sp.borrow() {
-                let (line, col) = di.line_col(span.lo);
+                // Only locate statements from the function's own source: a span from a
+                // different source (a macro template literal) would render against the
+                // subprogram's file with a wrong line, so leave the prior location.
+                if span.source != self.cur_func_src.get() {
+                    return;
+                }
+                let (line, col) = di.line_col(span);
                 if line != 0 {
                     let loc = di
                         .builder
@@ -1777,9 +2002,10 @@ impl<'ctx> Cg<'ctx> {
     }
 
     /// A DWARF type for a Coil type, for local-variable debug info. Scalars and
-    /// pointers map to DWARF basic/pointer types; aggregates (struct/sum/slice/
-    /// array/fnptr) return `None` for now — those locals are simply not described
-    /// (no wrong type, just no `frame variable` entry).
+    /// pointers map to DWARF basic/pointer types; structs, arrays, and slices map to
+    /// composite/array types (so `frame variable` prints their fields/elements). A
+    /// sum, a fnptr, or a `:bits`/`:explicit` struct returns `None` — that local is
+    /// simply not described (no wrong type, just no `frame variable` entry).
     fn di_type(&self, di: &DebugCtx<'ctx>, t: &Type) -> Option<inkwell::debug_info::DIType<'ctx>> {
         use inkwell::debug_info::DIFlags;
         // DW_ATE encodings: boolean=0x02, float=0x04, signed=0x05, unsigned=0x07.
@@ -1899,10 +2125,11 @@ impl<'ctx> Cg<'ctx> {
             (Some(di), Some(sp)) => (di, sp),
             _ => return,
         };
-        let (line, _) = di.line_col(f.span.lo);
+        let (line, _) = di.line_col(f.span);
         if line == 0 {
             return;
         }
+        let dfile = di.file_of(f.span.source);
         let loc = di.builder.create_debug_location(self.ctx, line, 1, sp.as_debug_info_scope(), None);
         // The spill stores are prologue, not a steppable statement: emit them with
         // NO line so LLVM puts `prologue_end` on the first *body* instruction. A
@@ -1920,7 +2147,7 @@ impl<'ctx> Cg<'ctx> {
                 sp.as_debug_info_scope(),
                 &p.name,
                 i as u32 + 1,
-                di.file,
+                dfile,
                 line,
                 dty,
                 true,
@@ -1988,23 +2215,32 @@ impl<'ctx> Cg<'ctx> {
 
     /// Describe a `let` binding for the debugger (`-g`): spill its value to an
     /// entry-block debug slot and attach a `DILocalVariable` (auto variable), so
-    /// `frame variable` shows it. Scalars/pointers only (aggregates skipped).
+    /// `frame variable` shows it. In the reference model an aggregate (struct/array)
+    /// local is itself a *pointer* to its storage, so `di_type` describes it as a
+    /// pointer that the debugger dereferences to the fields; scalars and slices store
+    /// their value directly.
     fn declare_let_local(&self, name: &str, val: BasicValueEnum<'ctx>, ty: &Type, span: crate::span::Span) {
         let (di, sp) = match (&self.di, *self.cur_sp.borrow()) {
             (Some(di), Some(sp)) => (di, sp),
             _ => return,
         };
+        // A local declared in another source (a macro template literal) has no
+        // meaningful line against this function's file — skip it, like `set_dbg_loc`.
+        if span.source != self.cur_func_src.get() {
+            return;
+        }
         let Some(dty) = self.di_type(di, ty) else { return };
-        let (line, _) = di.line_col(span.lo);
+        let (line, _) = di.line_col(span);
         if line == 0 {
             return;
         }
+        let dfile = di.file_of(span.source);
         let Ok(slot) = self.entry_alloca(val.get_type(), &format!("{name}.dbg")) else { return };
         let _ = self.builder.build_store(slot, val);
         let var = di.builder.create_auto_variable(
             sp.as_debug_info_scope(),
             name,
-            di.file,
+            dfile,
             line,
             dty,
             true,

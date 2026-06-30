@@ -1,0 +1,29 @@
+(module print)
+; Ambient print/println over stdout — the convenience layer you can call with ZERO
+; imports (coil.core `:reexport`s this module, so `print`/`println` are auto-referred
+; everywhere, like Clojure's `println` in clojure.core).
+;
+; Format strings are `fmt`'s: {d} signed int, {s} string, {x} hex (>=0), {c} char,
+; {b} bool; `{{`/`}}` are literal braces. Too few args is a COMPILE error.
+;
+;   (println "x={d} ok={b}" 42 true)     ; -> stdout, with a trailing newline
+;   (print   "loading {s}" name)         ; -> stdout, no newline
+;
+; Both yield a `(Result i64 IoError)` (the underlying write result), so discard it in
+; a `(do … 0)` like any effectful call. The explicit-Writer forms remain in fmt/io
+; (`(fmt w …)`, `print-*`) for when you need a specific sink (a buffer, stderr, …);
+; this is just the everyday stdout shortcut.
+(export print println)
+(import "fmt.coil" :use *)   ; the `fmt` format-string macro + the print-* printers
+(import "io.coil"  :use *)   ; stdout
+
+; (print "fmt" args…) — format to stdout, no trailing newline. The writer is bound
+; once (a gensym) so a multi-spec format doesn't re-create the stdout writer per piece.
+(defn print [(f Code) & (args Code)] (-> Code)
+  (let [w (gensym)]
+    `(let [~w (stdout)] (fmt ~w ~f ~@args))))
+
+; (println "fmt" args…) — like `print`, plus a trailing newline.
+(defn println [(f Code) & (args Code)] (-> Code)
+  (let [w (gensym)]
+    `(let [~w (stdout)] (do (fmt ~w ~f ~@args) (print-nl ~w)))))
