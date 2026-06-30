@@ -765,6 +765,34 @@ pub fn expand_to_string(src: &str) -> Result<String, String> {
     })
 }
 
+/// Canonical span-bearing dump of the reader output (`coil dump-read`) — the
+/// differential-oracle target for the self-hosted reader. On a read error,
+/// dumps the diagnostic in the same canonical shape (`(error@<lo>:<hi> "msg")`)
+/// so error-path parity is gated too. Always `Ok`: a malformed file is a
+/// well-defined dump, not a tool failure.
+pub fn dump_read(src: &str) -> Result<String, String> {
+    match reader::read_all(src, 0) {
+        Ok(forms) => Ok(reader::dump_canonical(&forms)),
+        Err(d) => {
+            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
+            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
+            let mut msg = String::new();
+            for &b in d.msg.as_bytes() {
+                match b {
+                    b'\\' => msg.push_str("\\\\"),
+                    b'"' => msg.push_str("\\\""),
+                    b'\n' => msg.push_str("\\n"),
+                    b'\t' => msg.push_str("\\t"),
+                    b'\r' => msg.push_str("\\r"),
+                    0x20..=0x7e => msg.push(b as char),
+                    _ => msg.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+        }
+    }
+}
+
 /// Parse + check + emit textual LLVM IR (no JIT). Useful in tests and for
 /// inspecting how conventions lower.
 pub fn emit_ir(src: &str) -> Result<String, String> {

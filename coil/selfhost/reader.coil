@@ -1,0 +1,598 @@
+; selfhost/reader.coil — the Coil port of src/reader.rs (the s-expression reader).
+;
+; THE CONTRACT (see selfhost/oracle/): build this with the Rust `coil`, then
+;   selfhost/oracle/gate.sh <this-binary>
+; must be byte-identical to the reference `coil dump-read` across the whole
+; corpus. A shortcut (dropped span, faked number, skipped error path) makes the
+; corpus diff non-empty and the gate FAILS — there is nowhere to hide.
+;
+; WHAT IS ALREADY WRITTEN (do not touch): the data representation, the canonical
+; dumper (dump-*), file IO, and `main`. These are deterministic glue, identical
+; by construction to the Rust side — they are NOT the thing being ported.
+;
+; WHAT YOU IMPLEMENT (the `(unimplemented …)` stubs): tokenize / read-string-body
+; / parse-one / read-all / atom / parse-int / looks-numeric. Port each FAITHFULLY
+; from the corresponding function in src/reader.rs. lib/sexp.coil shows the Coil
+; reader idioms (Reader cursor, `sx`/box, ArrayList) but is a SIMPLER reader —
+; it does not match the canonical dump, so it cannot be delegated to.
+(module selfhost.reader)
+
+(import "lib/alloc.coil"     :use *)   ; Allocator, raw-alloc, create, unwrap-ptr, box, abort
+(import "lib/result.coil"    :use *)   ; Result/Ok/Err, Option/Some/None
+(import "lib/slice.coil"     :use *)   ; (slice u8): slice-len / slice-get / slice-data / subslice
+(import "lib/str.coil"       :use *)   ; str-eq, char-at, substr
+(import "lib/arraylist.coil" :use *)   ; ArrayList: al-new / al-push! / al-get / al-len / al-slice
+(import "lib/io.coil"        :use *)   ; Writer, stdout/stderr, print-str / write-byte, read (fd)
+(import "lib/control.coil"   :use *)   ; while / for / case
+(import "lib/try.coil"       :use *)   ; try / try! / try? for Result/Option short-circuit
+
+; ---- libc the self-host tool needs (read/write/abort come from io/alloc) -----
+(extern open   :cc c [(ptr i8) i32] (-> i32))                 ; int open(path, flags); O_RDONLY=0
+(extern close  :cc c [i32] (-> i32))
+(extern strtod :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))      ; double strtod(s, &end)
+
+; ============================ representation =================================
+; Mirrors src/reader.rs's SexpKind + Sexp (span carried on every node). Floats
+; are stored as raw IEEE-754 bits (i64) so the dump matches `f64::to_bits()`
+; exactly. Recursion goes through `(ptr (ArrayList Sexp))`, like json.coil/Json.
+(defsum SexpKind
+  (KInt   [(v i64)])
+  (KFloat [(bits i64)])
+  (KSym   [(s (slice u8))])
+  (KKw    [(s (slice u8))])     ; keyword `:foo`, stored without the leading colon
+  (KStr   [(s (slice u8))])     ; "..."  — slice string
+  (KCStr  [(s (slice u8))])     ; c"..." — FFI cstring
+  (KList  [(items (ptr (ArrayList Sexp)))])
+  (KVec   [(items (ptr (ArrayList Sexp)))]))
+
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64)])
+
+; Tokens, mirroring src/reader.rs's TokKind/Tok. Open/Close carry the delimiter
+; byte ('(' '[' ')' ']'); Prefix carries the desugared head ("quote" etc.).
+(defsum TokKind
+  (TOpen   [(c i64)])
+  (TClose  [(c i64)])
+  (TPrefix [(s (slice u8))])
+  (TStr    [(s (slice u8))])
+  (TCStr   [(s (slice u8))])
+  (TAtom   [(s (slice u8))]))
+
+(defstruct Tok [(kind TokKind) (lo i64) (hi i64)])
+
+; Parser cursor over the token vector (src/reader.rs's `Parser { toks, pos }`).
+(defstruct Parser [(toks (ptr (ArrayList Tok))) (pos i64)])
+
+; A read diagnostic (src/reader.rs's Diag). A DUMMY span is lo = -1 (Rust uses
+; u32::MAX); it prints as `@D:D`. read-string-body's result: built bytes + end.
+(defstruct Diag    [(lo i64) (hi i64) (msg (slice u8))])
+(defstruct StrRead [(s (slice u8)) (end i64)])
+
+; ============================ small constructors =============================
+(defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
+  (let [p (alloc-stack Sexp)]
+    (store! (field p kind) kind)
+    (store! (field p lo) lo)
+    (store! (field p hi) hi)
+    (load p)))
+
+(defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
+  (let [p (alloc-stack Tok)]
+    (store! (field p kind) kind)
+    (store! (field p lo) lo)
+    (store! (field p hi) hi)
+    (load p)))
+
+(defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
+  (let [p (alloc-stack Diag)]
+    (store! (field p lo) lo)
+    (store! (field p hi) hi)
+    (store! (field p msg) msg)
+    (load p)))
+
+(defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
+  (let [p (alloc-stack StrRead)]
+    (store! (field p s) s)
+    (store! (field p end) end)
+    (load p)))
+
+; Heap-box an ArrayList of children so a (ptr (ArrayList Sexp)) can live in a node.
+(defn box-items [(a (ptr Allocator)) (items (ArrayList Sexp))] (-> (ptr (ArrayList Sexp)))
+  (let [p (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a))]
+    (store! p items)
+    p))
+
+; ============================ numeric/string utils ===========================
+; Reinterpret an f64 as its raw i64 bits (a bitcast via a stack round-trip), so
+; the dump matches Rust's `x.to_bits()`. Use in `atom`'s float branch.
+(defn f64-bits [(x f64)] (-> i64)
+  (let [p (alloc-stack f64)]
+    (store! p x)
+    (load (cast (ptr i64) p))))
+
+; Copy a (slice u8) into a fresh NUL-terminated buffer (for strtod, which needs a
+; C string and would otherwise read past the token into the source).
+(defn slice->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s)
+        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
+            (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast i8 0))
+    buf))
+
+; ============================ canonical dumper ===============================
+; ALREADY CORRECT — mirrors `dump_canonical` in src/reader.rs. Do not edit.
+; Two output primitives that both return i64 so they compose in `if`/`do`.
+(defn wb [(w (ptr Writer)) (b i64)] (-> i64) (write-byte w (cast u8 b)) 0)
+(defn ps [(w (ptr Writer)) (s (slice u8))] (-> i64) (print-str w s) 0)
+(defn hexd [(d i64)] (-> i64) (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))
+
+; signed decimal (KInt values can be negative); magnitude via unsigned div/rem.
+(defn dump-dec-mag [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (icmp-lt n 10)
+      (wb w (iadd n 48))
+      (do (dump-dec-mag w (udiv n 10))
+          (wb w (iadd (urem n 10) 48)))))
+(defn dump-dec [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (icmp-lt n 0)
+      (do (wb w 45) (dump-dec-mag w (isub 0 n)))
+      (dump-dec-mag w n)))
+
+; 16 lowercase hex digits of n-as-unsigned (for float bits).
+(defn u-hex16 [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [(mut k) 60]
+    (loop
+      (if (icmp-lt (load k) 0) (break)
+        (do (wb w (hexd (iand (ishr n (load k)) 15)))
+            (store! k (isub (load k) 4))))))
+  0)
+
+(defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
+  (wb w 64)                                              ; '@'
+  (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))          ; 'D' or decimal
+  (wb w 58)                                              ; ':'
+  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi)))
+
+; per-byte canonical escape (matches `esc` in src/reader.rs).
+(defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
+  (wb w (hexd (iand (ishr b 4) 15)))
+  (wb w (hexd (iand b 15))))
+(defn esc-write [(w (ptr Writer)) (s (slice u8))] (-> i64)
+  (let [(mut i) 0 n (slice-len s)]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (let [b (cast i64 (slice-get s (load i)))]
+              (if (icmp-eq b 92) (ps w "\\\\")
+              (if (icmp-eq b 34) (ps w "\\\"")
+              (if (icmp-eq b 10) (ps w "\\n")
+              (if (icmp-eq b 9)  (ps w "\\t")
+              (if (icmp-eq b 13) (ps w "\\r")
+              (if (and (icmp-ge b 32) (icmp-le b 126)) (wb w b)
+              (do (ps w "\\x") (hex2 w b)))))))))
+            (store! i (iadd (load i) 1))))))
+  0)
+
+(defn dump-atom-node [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (lo i64) (hi i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w lo hi)
+  (ps w " \"") (esc-write w s) (ps w "\")"))
+
+(defn dump-seq-node [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (lo i64) (hi i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w lo hi)
+  (let [(mut i) 0 n (al-len [Sexp] (load items))]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (wb w 32)
+            (let [child (alloc-stack Sexp)]
+              (store! child (al-get [Sexp] (load items) (load i)))
+              (dump-node w child))
+            (store! i (iadd (load i) 1))))))
+  (wb w 41))
+
+(defn dump-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
+  (let [lo (load (field x lo)) hi (load (field x hi))]
+    (match (load (field x kind))
+      (KInt   [v]     (do (ps w "(int") (dump-span w lo hi) (wb w 32) (dump-dec w v) (wb w 41)))
+      (KFloat [bits]  (do (ps w "(float") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
+      (KSym   [s]     (dump-atom-node w "sym" s lo hi))
+      (KKw    [s]     (dump-atom-node w "kw" s lo hi))
+      (KStr   [s]     (dump-atom-node w "str" s lo hi))
+      (KCStr  [s]     (dump-atom-node w "cstr" s lo hi))
+      (KList  [items] (dump-seq-node w "list" items lo hi))
+      (KVec   [items] (dump-seq-node w "vec" items lo hi)))))
+
+(defn dump-canonical [(w (ptr Writer)) (forms (ptr (ArrayList Sexp)))] (-> i64)
+  (let [(mut i) 0 n (al-len [Sexp] (load forms))]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (if (icmp-gt (load i) 0) (wb w 10) 0)
+            (let [child (alloc-stack Sexp)]
+              (store! child (al-get [Sexp] (load forms) (load i)))
+              (dump-node w child))
+            (store! i (iadd (load i) 1))))))
+  0)
+
+(defn dump-error [(w (ptr Writer)) (d Diag)] (-> i64)
+  (let [p (alloc-stack Diag)]
+    (store! p d)
+    (ps w "(error")
+    (dump-span w (load (field p lo)) (load (field p hi)))
+    (ps w " \"")
+    (esc-write w (load (field p msg)))
+    (ps w "\")")))
+
+(defn dump-read-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src)
+      (Ok  [forms] (dump-canonical w forms))
+      (Err [d]     (dump-error w d))))
+  0)
+
+; ============================ the PORT (implement these) =====================
+; Each stub HARD-ABORTS with a clear message (never a silent wrong value).
+; Replace the `(unimplemented …)`/`(zeroed …)` body with a faithful port of the
+; same-named function in src/reader.rs. The `(zeroed …)` is dead once you do.
+(defn unimplemented [(who (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (ps w "UNIMPLEMENTED: ") (ps w who) (wb w 10))
+  (abort)
+  0)
+
+; `looks_numeric` in src/reader.rs: first byte is a digit, or sign/'.' followed
+; by a digit. Determines whether a `.`/`e` token is parsed as a float.
+(defn looks-numeric [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)]
+    (if (icmp-eq n 0)
+        false
+        (let [c0 (cast i64 (slice-get s 0))]
+          (if (and (icmp-ge c0 48) (icmp-le c0 57))
+              true
+              (if (or (icmp-eq c0 45) (or (icmp-eq c0 43) (icmp-eq c0 46)))
+                  (if (icmp-ge n 2)
+                      (let [c1 (cast i64 (slice-get s 1))]
+                        (and (icmp-ge c1 48) (icmp-le c1 57)))
+                      false)
+                  false))))))
+
+; `parse_int` in src/reader.rs: plain decimal, or 0x/0b/0o with optional sign and
+; `_` separators; full-width magnitudes wrap into i64. None => stays a symbol.
+(defn parse-int [(s (slice u8))] (-> (Option i64))
+  (let [n (slice-len s)]
+    ; ---- attempt 1: plain signed decimal (mirrors s.parse::<i64>()) ----
+    (let [dec
+          (if (icmp-eq n 0)
+              (None [i64])
+              (let [(mut i) 0 (mut neg) false]
+                (let [c0 (cast i64 (slice-get s 0))]
+                  (if (icmp-eq c0 45) (do (store! neg true) (store! i 1))
+                    (if (icmp-eq c0 43) (store! i 1) 0)))
+                (if (icmp-ge (load i) n)
+                    (None [i64])
+                    (let [(mut mag) 0 (mut ok) true (mut overflow) false
+                          maxrem (if (load neg) 8 7)]
+                      (loop
+                        (if (icmp-ge (load i) n) (break)
+                          (let [c (cast i64 (slice-get s (load i)))]
+                            (if (and (icmp-ge c 48) (icmp-le c 57))
+                                (let [d (isub c 48)]
+                                  (if (or (icmp-gt (load mag) 922337203685477580)
+                                          (and (icmp-eq (load mag) 922337203685477580) (icmp-gt d maxrem)))
+                                      (do (store! overflow true) (break))
+                                      (do (store! mag (iadd (imul (load mag) 10) d))
+                                          (store! i (iadd (load i) 1)))))
+                                (do (store! ok false) (break))))))
+                      (if (or (not (load ok)) (load overflow))
+                          (None [i64])
+                          (Some (if (load neg) (isub 0 (load mag)) (load mag))))))))]
+      (match dec
+        (Some [v] (Some v))
+        (None []
+          ; ---- attempt 2: 0x/0b/0o prefix or `_`-separated decimal ----
+          (if (icmp-eq n 0)
+              (None [i64])
+              (let [(mut neg2) false (mut bstart) 0]
+                (let [c0 (cast i64 (slice-get s 0))]
+                  (if (icmp-eq c0 45) (do (store! neg2 true) (store! bstart 1))
+                    (if (icmp-eq c0 43) (store! bstart 1) 0)))
+                (let [blen (isub n (load bstart))
+                      (mut radix) 0
+                      (mut dstart) (load bstart)]
+                  (if (and (icmp-ge blen 2) (icmp-eq (cast i64 (slice-get s (load bstart))) 48))
+                      (let [c1 (cast i64 (slice-get s (iadd (load bstart) 1)))]
+                        (if (or (icmp-eq c1 120) (icmp-eq c1 88)) (do (store! radix 16) (store! dstart (iadd (load bstart) 2)))
+                          (if (or (icmp-eq c1 98) (icmp-eq c1 66)) (do (store! radix 2) (store! dstart (iadd (load bstart) 2)))
+                            (if (or (icmp-eq c1 111) (icmp-eq c1 79)) (do (store! radix 8) (store! dstart (iadd (load bstart) 2)))
+                              0))))
+                      0)
+                  (if (icmp-eq (load radix) 0)
+                      (let [body (subslice s (load bstart) n)
+                            has-us (do (let [(mut f) false (mut j) (load bstart)]
+                                         (loop
+                                           (if (icmp-ge (load j) n) (break)
+                                             (do (if (icmp-eq (cast i64 (slice-get s (load j))) 95) (store! f true) false)
+                                                 (store! j (iadd (load j) 1)))))
+                                         (load f)))]
+                        (if (and has-us (looks-numeric body))
+                            (do (store! radix 10) (store! dstart (load bstart)))
+                            0))
+                      0)
+                  (if (icmp-eq (load radix) 0)
+                      (None [i64])
+                      (let [(mut mag) 0 (mut count) 0 (mut bad) false (mut ovf) false
+                            (mut j) (load dstart) rr (load radix)]
+                        (loop
+                          (if (icmp-ge (load j) n) (break)
+                            (let [c (cast i64 (slice-get s (load j)))]
+                              (store! j (iadd (load j) 1))
+                              (if (icmp-eq c 95) 0
+                                (let [dv (let [v0 (if (and (icmp-ge c 48) (icmp-le c 57)) (isub c 48)
+                                                    (if (and (icmp-ge c 97) (icmp-le c 122)) (iadd (isub c 97) 10)
+                                                      (if (and (icmp-ge c 65) (icmp-le c 90)) (iadd (isub c 65) 10)
+                                                        -1)))]
+                                           (if (icmp-lt v0 0) -1 (if (icmp-ge v0 rr) -1 v0)))]
+                                  (if (icmp-lt dv 0)
+                                      (do (store! bad true) (break))
+                                      (let [maxdiv (udiv -1 rr) maxrem (urem -1 rr)]
+                                        (if (or (icmp-gt (cast u64 (load mag)) (cast u64 maxdiv))
+                                                (and (icmp-eq (load mag) maxdiv) (icmp-gt (cast u64 dv) (cast u64 maxrem))))
+                                            (do (store! ovf true) (break))
+                                            (do (store! mag (iadd (imul (load mag) rr) dv))
+                                                (store! count (iadd (load count) 1)))))))))))
+                        (if (or (load bad) (or (load ovf) (icmp-eq (load count) 0)))
+                            (None [i64])
+                            (Some (if (load neg2) (isub 0 (load mag)) (load mag))))))))))))))
+
+; `atom` in src/reader.rs: keyword (`:kw`) -> KKw; integer -> KInt; float
+; (looks-numeric && has `.`/`e`/`E`, parsed via strtod over the WHOLE token,
+; stored as f64-bits) -> KFloat; otherwise -> KSym.
+(defn atom [(s (slice u8))] (-> SexpKind)
+  (let [n (slice-len s)]
+    (if (and (icmp-gt n 0) (icmp-eq (cast i64 (slice-get s 0)) 58))   ; ':' keyword
+        (KKw (subslice s 1 n))
+        (match (parse-int s)
+          (Some [v] (KInt v))
+          (None []
+            (if (and (looks-numeric s)
+                     (do (let [(mut f) false (mut j) 0]
+                           (loop
+                             (if (icmp-ge (load j) n) (break)
+                               (do (let [c (cast i64 (slice-get s (load j)))]
+                                     (if (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69))) (store! f true) false))
+                                   (store! j (iadd (load j) 1)))))
+                           (load f))))
+                (let [a (malloc-allocator)
+                      buf (slice->cstr a s)
+                      ep (alloc-stack (ptr i8))
+                      x (strtod buf ep)
+                      consumed (isub (cast i64 (load ep)) (cast i64 buf))]
+                  (if (and (icmp-gt n 0) (icmp-eq consumed n))
+                      (KFloat (f64-bits x))
+                      (KSym s)))
+                (KSym s)))))))
+
+; `read_string_body` in src/reader.rs: scan from byte `i` (just past the opening
+; quote) to the closing quote, unescaping \n \t \" \\ (\c -> c); build the bytes
+; into a fresh (slice u8). `open-off` is the literal start (for error spans).
+; Errors: unterminated string literal / unterminated string escape.
+(defn read-string-body [(a (ptr Allocator)) (src (slice u8)) (open-off i64) (i i64)] (-> (Result StrRead Diag))
+  (let [n (slice-len src)
+        (mut buf) (al-new [u8] a)
+        (mut k) i
+        (mut out) (zeroed (Result StrRead Diag))]
+    (loop
+      (if (icmp-ge (load k) n)
+          (do (store! out (Err (mk-diag open-off n "unterminated string literal"))) (break))
+          (let [c (cast i64 (slice-get src (load k)))]
+            (store! k (iadd (load k) 1))
+            (if (icmp-eq c 34)   ; closing '"'
+                (do (store! out (Ok (mk-strread (al-slice [u8] (load buf)) (load k)))) (break))
+              (if (icmp-eq c 92)   ; '\' escape
+                  (if (icmp-ge (load k) n)
+                      (do (store! out (Err (mk-diag open-off n "unterminated string escape"))) (break))
+                      (let [e (cast i64 (slice-get src (load k)))]
+                        (store! k (iadd (load k) 1))
+                        (al-push! (mut buf)
+                          (cast u8 (if (icmp-eq e 110) 10
+                                     (if (icmp-eq e 116) 9
+                                       (if (icmp-eq e 34) 34
+                                         (if (icmp-eq e 92) 92
+                                           e))))))))
+                  (al-push! (mut buf) (cast u8 c)))))))
+    (load out)))
+
+; `tokenize` in src/reader.rs: produce the token vector. Handles whitespace, `;`
+; line comments, `( ) [ ]`, reader prefixes (' ` ~ ~@), "..." and c"..." strings
+; (via read-string-body), and atom runs (terminated by ws / delim / quote chars).
+(defn tokenize [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Tok)) Diag))
+  (let [n (slice-len src)
+        (mut toks) (al-new [Tok] a)
+        (mut i) 0
+        (mut out) (zeroed (Result (ptr (ArrayList Tok)) Diag))
+        (mut done) false]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (let [c (cast i64 (slice-get src (load i)))]
+          (if (or (icmp-eq c 32) (or (icmp-eq c 9) (or (icmp-eq c 10) (or (icmp-eq c 13) (or (icmp-eq c 11) (icmp-eq c 12))))))
+              (store! i (iadd (load i) 1))                          ; whitespace
+            (if (icmp-eq c 59)                                      ; ';' line comment
+                (loop
+                  (if (icmp-ge (load i) n) (break)
+                    (let [ch (cast i64 (slice-get src (load i)))]
+                      (store! i (iadd (load i) 1))
+                      (if (icmp-eq ch 10) (break) 0))))
+              (if (or (icmp-eq c 40) (icmp-eq c 91))                ; '(' '['
+                  (do (al-push! (mut toks) (mk-tok (TOpen c) (load i) (iadd (load i) 1)))
+                      (store! i (iadd (load i) 1)))
+                (if (or (icmp-eq c 41) (icmp-eq c 93))              ; ')' ']'
+                    (do (al-push! (mut toks) (mk-tok (TClose c) (load i) (iadd (load i) 1)))
+                        (store! i (iadd (load i) 1)))
+                  (if (icmp-eq c 39)                               ; '\''
+                      (do (al-push! (mut toks) (mk-tok (TPrefix "quote") (load i) (iadd (load i) 1)))
+                          (store! i (iadd (load i) 1)))
+                    (if (icmp-eq c 96)                             ; '`'
+                        (do (al-push! (mut toks) (mk-tok (TPrefix "quasiquote") (load i) (iadd (load i) 1)))
+                            (store! i (iadd (load i) 1)))
+                      (if (icmp-eq c 126)                          ; '~' / '~@'
+                          (let [istart (load i)]
+                            (store! i (iadd (load i) 1))
+                            (if (and (icmp-lt (load i) n) (icmp-eq (cast i64 (slice-get src (load i))) 64))
+                                (do (al-push! (mut toks) (mk-tok (TPrefix "unquote-splicing") istart (iadd (load i) 1)))
+                                    (store! i (iadd (load i) 1)))
+                                (al-push! (mut toks) (mk-tok (TPrefix "unquote") istart (iadd istart 1)))))
+                        (if (icmp-eq c 34)                          ; '"' string
+                            (let [istart (load i)]
+                              (store! i (iadd (load i) 1))
+                              (match (read-string-body a src istart (load i))
+                                (Err [d] (do (store! out (Err d)) (store! done true) (break)))
+                                (Ok [sr]
+                                  (let [srp (alloc-stack StrRead)]
+                                    (store! srp sr)
+                                    (al-push! (mut toks) (mk-tok (TStr (load (field srp s))) istart (load (field srp end))))
+                                    (store! i (load (field srp end)))))))
+                            ; ---- atom run ----
+                            (let [start (load i) (mut end) (load i)]
+                              (loop
+                                (if (icmp-ge (load i) n) (break)
+                                  (let [cc (cast i64 (slice-get src (load i)))]
+                                    (if (or (or (icmp-eq cc 32) (or (icmp-eq cc 9) (or (icmp-eq cc 10) (or (icmp-eq cc 13) (or (icmp-eq cc 11) (icmp-eq cc 12))))))
+                                            (or (icmp-eq cc 40) (or (icmp-eq cc 41) (or (icmp-eq cc 91) (or (icmp-eq cc 93) (or (icmp-eq cc 59) (or (icmp-eq cc 39) (or (icmp-eq cc 96) (or (icmp-eq cc 126) (icmp-eq cc 34))))))))))
+                                        (break)
+                                        (do (store! i (iadd (load i) 1)) (store! end (load i)))))))
+                              (let [stok (subslice src start (load end))]
+                                (if (and (and (icmp-eq (isub (load end) start) 1) (icmp-eq (cast i64 (slice-get src start)) 99))
+                                         (and (icmp-lt (load i) n) (icmp-eq (cast i64 (slice-get src (load i))) 34)))
+                                    (do (store! i (iadd (load i) 1))   ; c"..." — consume opening quote
+                                        (match (read-string-body a src start (load i))
+                                          (Err [d] (do (store! out (Err d)) (store! done true) (break)))
+                                          (Ok [sr]
+                                            (let [srp (alloc-stack StrRead)]
+                                              (store! srp sr)
+                                              (al-push! (mut toks) (mk-tok (TCStr (load (field srp s))) start (load (field srp end))))
+                                              (store! i (load (field srp end)))))))
+                                    (al-push! (mut toks) (mk-tok (TAtom stok) start (load end)))))))))))))))))
+    (if (load done)
+        (load out)
+        (Ok (let [bp (unwrap-ptr [(ArrayList Tok)] (create [(ArrayList Tok)] a))]
+              (store! bp (load toks))
+              bp)))))
+
+; `Parser::parse` in src/reader.rs: one form from the cursor. Lists/vectors
+; (matching delimiters; mismatch/unclosed errors), prefixes -> `(<head> form)`,
+; strings/atoms. Bumps `(field p pos)`. EOF => "unexpected end of input" (DUMMY).
+(defn parse-one [(p (ptr Parser)) (a (ptr Allocator))] (-> (Result Sexp Diag))
+  (let [toks (load (field p toks))
+        ntok (al-len [Tok] (load toks))
+        pos  (load (field p pos))]
+    (if (icmp-ge pos ntok)
+        (Err (mk-diag -1 -1 "unexpected end of input"))
+        (let [tok (alloc-stack Tok)]
+          (store! tok (al-get [Tok] (load toks) pos))
+          (store! (field p pos) (iadd pos 1))
+          (let [tlo (load (field tok lo)) thi (load (field tok hi))]
+            (match (load (field tok kind))
+              (TStr  [s] (Ok (mk-sexp (KStr s) tlo thi)))
+              (TCStr [s] (Ok (mk-sexp (KCStr s) tlo thi)))
+              (TAtom [s] (Ok (mk-sexp (atom s) tlo thi)))
+              (TClose [c]
+                ; "unexpected '<c>'"
+                (let [cs (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 c)) cb) 1)
+                      m1 (match (str-concat a "unexpected '" cs) (Some [v] v) (None [] ""))
+                      m2 (match (str-concat a m1 "'") (Some [v] v) (None [] ""))]
+                  (Err (mk-diag tlo thi m2))))
+              (TPrefix [sym]
+                (match (parse-one p a)
+                  (Err [d] (Err d))
+                  (Ok [inner]
+                    (let [ip (alloc-stack Sexp)]
+                      (store! ip inner)
+                      (let [ihi (load (field ip hi)) (mut kids) (al-new [Sexp] a)]
+                        (al-push! (mut kids) (mk-sexp (KSym sym) tlo thi))
+                        (al-push! (mut kids) (load ip))
+                        (Ok (mk-sexp (KList (box-items a (load kids))) tlo ihi)))))))
+              (TOpen [open]
+                (let [close (if (icmp-eq open 40) 41 93)
+                      (mut items) (al-new [Sexp] a)
+                      (mut out) (zeroed (Result Sexp Diag))]
+                  (loop
+                    (let [cpos (load (field p pos))]
+                      (if (icmp-ge cpos ntok)
+                          ; "unclosed '<open>'"
+                          (do (let [cs (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 open)) cb) 1)
+                                    m1 (match (str-concat a "unclosed '" cs) (Some [v] v) (None [] ""))
+                                    m2 (match (str-concat a m1 "'") (Some [v] v) (None [] ""))]
+                                (store! out (Err (mk-diag tlo thi m2))))
+                              (break))
+                          (let [nt (alloc-stack Tok)]
+                            (store! nt (al-get [Tok] (load toks) cpos))
+                            (let [cdelim (match (load (field nt kind))
+                                           (TClose [cc] cc) (TOpen [_] -1) (TPrefix [_] -1)
+                                           (TStr [_] -1) (TCStr [_] -1) (TAtom [_] -1))]
+                              (if (icmp-ge cdelim 0)
+                                  (if (icmp-ne cdelim close)
+                                      ; "mismatched delimiters: '<open>' .. '<cdelim>'"
+                                      (do (let [os (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 open)) cb) 1)
+                                                ds (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 cdelim)) cb) 1)
+                                                m1 (match (str-concat a "mismatched delimiters: '" os) (Some [v] v) (None [] ""))
+                                                m2 (match (str-concat a m1 "' .. '") (Some [v] v) (None [] ""))
+                                                m3 (match (str-concat a m2 ds) (Some [v] v) (None [] ""))
+                                                m4 (match (str-concat a m3 "'") (Some [v] v) (None [] ""))]
+                                            (store! out (Err (mk-diag (load (field nt lo)) (load (field nt hi)) m4))))
+                                          (break))
+                                      (do (store! (field p pos) (iadd cpos 1))
+                                          (store! out (Ok (mk-sexp (if (icmp-eq open 40)
+                                                                       (KList (box-items a (load items)))
+                                                                       (KVec (box-items a (load items))))
+                                                                   tlo (load (field nt hi)))))
+                                          (break)))
+                                  (match (parse-one p a)
+                                    (Ok [child] (do (al-push! (mut items) child) 0))
+                                    (Err [d] (do (store! out (Err d)) (break))))))))))
+                  (load out)))))))))
+
+; `read_all` in src/reader.rs: tokenize, then parse-one until the tokens run out,
+; collecting top-level forms into an ArrayList<Sexp>.
+(defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (match (tokenize a src)
+    (Err [d] (Err d))
+    (Ok [toks]
+      (let [p (alloc-stack Parser)
+            (mut out) (al-new [Sexp] a)
+            (mut err) (zeroed Diag)
+            (mut failed) false]
+        (store! (field p toks) toks)
+        (store! (field p pos) 0)
+        (loop
+          (if (icmp-ge (load (field p pos)) (al-len [Tok] (load toks))) (break)
+            (match (parse-one p a)
+              (Ok [s] (do (al-push! (mut out) s) 0))
+              (Err [d] (do (store! err d) (store! failed true) (break))))))
+        (if (load failed)
+            (Err (load err))
+            (Ok (box-items a (load out))))))))
+
+; ============================ file IO + entry ================================
+; Slurp a file into a (slice u8) (64 KiB read loop). Plumbing — already correct.
+(defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (let [fd  (open path 0)
+        buf (unwrap-ptr [i8] (raw-alloc a 65536 1))
+        (mut bytes) (al-new [u8] a)]
+    (loop
+      (let [n (read (cast i64 fd) buf 65536)]
+        (if (icmp-le n 0) (break)
+          (let [(mut i) 0]
+            (loop
+              (if (icmp-ge (load i) n) (break)
+                (do (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
+                    (store! i (iadd (load i) 1)))))))))
+    (close fd)
+    (al-slice [u8] (load bytes))))
+
+; coil-self CLI: `<bin> dump-read <file>` — the gate's entry point. argv[2] is
+; the path. Reads it, runs the reader, prints the canonical dump to stdout.
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [a    (malloc-allocator)
+        path (load (index argv 2))
+        src  (read-file a path)]
+    (dump-read-program a src))
+  0)

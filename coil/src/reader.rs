@@ -313,6 +313,97 @@ fn write_seq(
     write!(f, "{close}")
 }
 
+/// Canonical, lossless, span-bearing textual encoding of read forms — the
+/// differential-oracle target for the self-hosted reader (`coil dump-read`).
+/// Each node is `(<tag>@<lo>:<hi> …)`; floats are dumped as raw IEEE bits and
+/// strings via a fixed per-byte escape, so *formatting* can never be the axis
+/// along which two faithful readers diverge. A dummy span prints as `@D:D`.
+pub fn dump_canonical(forms: &[Sexp]) -> String {
+    let mut out = String::new();
+    for (i, f) in forms.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        dump_node(f, &mut out);
+    }
+    out
+}
+
+fn dump_span(span: Span, out: &mut String) {
+    use std::fmt::Write;
+    if span.lo == u32::MAX {
+        out.push_str("@D:");
+    } else {
+        write!(out, "@{}:", span.lo).unwrap();
+    }
+    if span.hi == u32::MAX {
+        out.push('D');
+    } else {
+        write!(out, "{}", span.hi).unwrap();
+    }
+}
+
+fn dump_node(s: &Sexp, out: &mut String) {
+    use std::fmt::Write;
+    match &s.kind {
+        SexpKind::Int(n) => {
+            out.push_str("(int");
+            dump_span(s.span, out);
+            write!(out, " {n})").unwrap();
+        }
+        SexpKind::Float(x) => {
+            out.push_str("(float");
+            dump_span(s.span, out);
+            write!(out, " 0x{:016x})", x.to_bits()).unwrap();
+        }
+        SexpKind::Sym(t) => dump_atom("sym", t, s.span, out),
+        SexpKind::Keyword(k) => dump_atom("kw", k, s.span, out),
+        SexpKind::Str(t) => dump_atom("str", t, s.span, out),
+        SexpKind::CStr(t) => dump_atom("cstr", t, s.span, out),
+        SexpKind::List(items) => dump_seq("list", items, s.span, out),
+        SexpKind::Vector(items) => dump_seq("vec", items, s.span, out),
+    }
+}
+
+fn dump_atom(tag: &str, text: &str, span: Span, out: &mut String) {
+    out.push('(');
+    out.push_str(tag);
+    dump_span(span, out);
+    out.push_str(" \"");
+    esc(text, out);
+    out.push_str("\")");
+}
+
+fn dump_seq(tag: &str, items: &[Sexp], span: Span, out: &mut String) {
+    out.push('(');
+    out.push_str(tag);
+    dump_span(span, out);
+    for it in items {
+        out.push(' ');
+        dump_node(it, out);
+    }
+    out.push(')');
+}
+
+/// Per-byte canonical escape: `\` `"` `\n` `\t` `\r` get a backslash form, the
+/// printable ASCII range passes through literally, everything else (control
+/// bytes and UTF-8 continuation bytes alike) becomes `\xHH`. Byte-oriented so a
+/// `(slice u8)` port reproduces it exactly without any Unicode handling.
+fn esc(text: &str, out: &mut String) {
+    use std::fmt::Write;
+    for &b in text.as_bytes() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(b as char),
+            _ => write!(out, "\\x{b:02x}").unwrap(),
+        }
+    }
+}
+
 fn atom(s: &str) -> SexpKind {
     if let Some(kw) = s.strip_prefix(':') {
         return SexpKind::Keyword(kw.to_string());
