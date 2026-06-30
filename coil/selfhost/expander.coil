@@ -5431,6 +5431,84 @@
       (let [t (alloc-stack Type)] (store! t (TFn "c" (box-al [Type] a (load ps3)) (box-type a (TInt 64 true)))) (ps w (ty-str a t)))) (wb w 10)  ; (fnptr c [(ptr i8)] i64)
     0))
 
+; ============================ comptime CtVal + cell arena ====================
+; Mirrors src/comptime.rs. Comptime memory is ARENA-lived and NEVER FREED, so
+; Rust's `Cell = Rc<RefCell<CtVal>>` collapses to a malloc'd heap pointer to a
+; tagged CtVal: a Cell = `(ptr CtVal)`, a Ref = that pointer, mutate-through =
+; `store!`. No refcounting, no GC. Struct/Array/Sum hold an ArrayList of cell
+; pointers; Code holds a Sexp (by value). CFloat stores the f64 directly (mirrors
+; CtVal::Float — float arithmetic at comptime stays exact).
+(defsum CtVal
+  (CInt    [(v i64)])
+  (CBool   [(b bool)])
+  (CFloat  [(x f64)])
+  (CStr    [(s (slice u8))])
+  (CCode   [(form Sexp)])
+  (CStruct [(name (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
+  (CArray  [(elem Type) (cells (ptr (ArrayList (ptr CtVal))))])
+  (CSum    [(variant (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
+  (CRef    [(cell (ptr CtVal))]))
+
+; new_cell: a fresh arena cell holding `c` (src/comptime.rs::new_cell). The arena
+; is the process malloc-allocator singleton (never freed during a compile).
+(defn new-cell [(c CtVal)] (-> (ptr CtVal))
+  (let [p (unwrap-ptr [CtVal] (create [CtVal] (malloc-allocator)))] (store! p c) p))
+
+; is_aggregate (src/comptime.rs::is_aggregate): Struct/Array/Sum are aggregates.
+(defn is-aggregate [(c (ptr CtVal))] (-> bool)
+  (match (load c)
+    (CStruct [name fields]    true)
+    (CArray  [elem cells]     true)
+    (CSum    [variant fields] true)
+    (CInt    [v]    false)
+    (CBool   [b]    false)
+    (CFloat  [x]    false)
+    (CStr    [s]    false)
+    (CCode   [f]    false)
+    (CRef    [cell] false)))
+
+; deep_clone helper: clone an ArrayList of cells, each into a FRESH cell.
+(defn clone-cells [(cells (ptr (ArrayList (ptr CtVal))))] (-> (ptr (ArrayList (ptr CtVal))))
+  (let [a (malloc-allocator) n (al-len [(ptr CtVal)] (load cells)) (mut out) (al-new [(ptr CtVal)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (new-cell (deep-clone (al-get [(ptr CtVal)] (load cells) (load i)))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(ptr CtVal)] a (load out))))
+
+; deep_clone (src/comptime.rs::deep_clone): deep-copy cell CONTENT — scalars copy
+; (Ref shares its cell, matching Rust's scalar fallthrough); aggregates get fresh
+; cells, giving value semantics where the language copies.
+(defn deep-clone [(c (ptr CtVal))] (-> CtVal)
+  (match (load c)
+    (CStruct [name fields]    (CStruct name    (clone-cells fields)))
+    (CArray  [elem cells]     (CArray  elem    (clone-cells cells)))
+    (CSum    [variant fields] (CSum    variant (clone-cells fields)))
+    (CInt    [v]    (CInt v))
+    (CBool   [b]    (CBool b))
+    (CFloat  [x]    (CFloat x))
+    (CStr    [s]    (CStr s))
+    (CCode   [f]    (CCode f))
+    (CRef    [cell] (CRef cell))))
+
+; to_content (src/comptime.rs::to_content): turn an evaluated value into cell
+; CONTENT — a reference's pointee is copied in (so a cell never holds a Ref).
+(defn to-content [(c (ptr CtVal))] (-> CtVal)
+  (match (load c)
+    (CRef    [cell] (deep-clone cell))
+    (CInt    [v]    (CInt v))
+    (CBool   [b]    (CBool b))
+    (CFloat  [x]    (CFloat x))
+    (CStr    [s]    (CStr s))
+    (CCode   [f]    (CCode f))
+    (CStruct [name fields]    (CStruct name fields))
+    (CArray  [elem cells]     (CArray elem cells))
+    (CSum    [variant fields] (CSum variant fields))))
+
+; cell_value (src/comptime.rs::cell_value): read a cell as a VALUE — a scalar comes
+; back directly; an aggregate comes back as a Ref to the cell (aggregate-value rep).
+(defn cell-value [(cell (ptr CtVal))] (-> CtVal)
+  (if (is-aggregate cell) (CRef cell) (load cell)))
+
 ; ============================ THE EXPANDER (the FILL) ========================
 ; The Stage-3 macro EXPANDER: port of src/lib.rs::expand_stage3_macros +
 ; src/comptime.rs (the comptime tree-walk interpreter). Runs the Coil macro fns
