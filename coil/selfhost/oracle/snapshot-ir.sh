@@ -22,9 +22,18 @@ LIST=$IR/corpus.txt
 
 # Real .coil files included in the codegen corpus (kept small; emit-ir must succeed).
 SEEDS=(
-  examples/fib.coil
-  examples/structs.coil
-  examples/sums.coil
+  examples/allocation.coil examples/allocators.coil examples/args.coil
+  examples/bitfields.coil examples/closure.coil examples/explicit-layout.coil
+  examples/extern.coil examples/fib.coil examples/generics.coil
+  examples/inference.coil examples/io.coil examples/layout.coil
+  examples/lockfree.coil examples/mem.coil examples/references.coil
+  examples/structs.coil examples/sums.coil examples/threads.coil
+  examples/vector.coil examples/widths.coil
+  apps/chip8/objc.coil
+  lib/alloc.coil lib/arraylist.coil lib/atomic.coil lib/closure.coil
+  lib/control.coil lib/derive.coil lib/dyn.coil lib/fmt.coil lib/hashmap.coil
+  lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
+  lib/slice.coil lib/thread.coil lib/try.coil
 )
 
 [ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
