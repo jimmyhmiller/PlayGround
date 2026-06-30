@@ -6173,13 +6173,458 @@
     (unimplemented "codegen/emit-module")
     (cast (ptr i8) 0)))
 
-; Port of src/normalize_ir.rs — cancels codegen's run-to-run nondeterminism so the
-; self-host's LLVMPrintModuleToString text matches the normalized reference. The
-; Rust reference normalizes both sides identically; the self-host must reproduce
-; this. SCAFFOLD: hard-error stub.
+; ===== Port of src/normalize_ir.rs — cancels codegen's run-to-run nondeterminism
+; so the self-host's LLVMPrintModuleToString text matches the normalized reference.
+; Faithful, function-for-function port. Families: 0=g 1=str 2=cstr 3=llvmir.
+; Categories: 0=type 1=global 2=declare 3=define 4=misc.
+
+(defstruct NumRes  [(val i64) (len i64)])
+(defstruct ScanRes [(fam i64) (num i64) (endd i64)])
+(defstruct NzBlock [(cat i64) (name (slice u8)) (body (ArrayList (slice u8)))])
+(defstruct NzParsed [(header (ArrayList (slice u8))) (blocks (ArrayList NzBlock))])
+(defstruct Renum   [(g (ArrayList i64)) (st (ArrayList i64)) (cs (ArrayList i64)) (lv (ArrayList i64))])
+(defstruct AttrDef [(old i64) (body (slice u8))])
+
+(defn nz-b [(s (slice u8)) (i i64)] (-> i64) (cast i64 (slice-get s i)))
+(defn nz-digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+(defn nz-alnum? [(c i64)] (-> bool)
+  (or (and (icmp-ge c 48) (icmp-le c 57))
+      (or (and (icmp-ge c 65) (icmp-le c 90)) (and (icmp-ge c 97) (icmp-le c 122)))))
+(defn nz-ident? [(c i64)] (-> bool) (or (nz-alnum? c) (icmp-eq c 95)))
+(defn nz-sym? [(c i64)] (-> bool)
+  (or (nz-alnum? c) (or (icmp-eq c 95) (or (icmp-eq c 46) (or (icmp-eq c 36) (icmp-eq c 45))))))
+
+(defn nz-contains? [(hay (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find hay needle) (Some [_] true) (None [] false)))
+
+(defn nz-find-i64 [(l (ArrayList i64)) (x i64)] (-> i64)
+  (let [n (al-len [i64] l) (mut i) 0 (mut res) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load res) 0)) (break)
+            (if (icmp-eq (al-get [i64] l (load i)) x) (store! res (load i)) (store! i (iadd (load i) 1)))))
+    (load res)))
+
+(defn nz-all-digits? [(s (slice u8))] (-> bool)
+  (let [n (slice-len s) (mut i) 0 (mut ok) true]
+    (loop (if (or (icmp-ge (load i) n) (not (load ok))) (break)
+            (if (nz-digit? (nz-b s (load i))) (do (store! i (iadd (load i) 1)) 0) (do (store! ok false) 0))))
+    (and (icmp-gt n 0) (load ok))))
+
+(defn nz-leading-number [(s (slice u8)) (start i64)] (-> NumRes)
+  (let [n (slice-len s) (mut j) start (mut v) 0]
+    (loop (if (or (icmp-ge (load j) n) (not (nz-digit? (nz-b s (load j))))) (break)
+            (do (store! v (iadd (imul (load v) 10) (isub (nz-b s (load j)) 48)))
+                (store! j (iadd (load j) 1)))))
+    (let [r (alloc-stack NumRes)]
+      (store! (field r val) (load v))
+      (store! (field r len) (isub (load j) start))
+      (load r))))
+
+(defn nz-parse-int [(s (slice u8))] (-> i64)
+  (let [r (alloc-stack NumRes)] (store! r (nz-leading-number s 0)) (load (field r val))))
+
+(defn nz-split-lines [(a (ptr Allocator)) (text (slice u8))] (-> (ArrayList (slice u8)))
+  (let [(mut out) (al-new [(slice u8)] a) n (slice-len text) (mut start) 0 (mut i) 0]
+    (loop
+      (if (icmp-gt (load i) n) (break)
+        (if (icmp-eq (load i) n)
+            (do (al-push! (mut out) (subslice text (load start) (load i))) (store! i (iadd (load i) 1)))
+            (if (icmp-eq (nz-b text (load i)) 10)
+                (do (al-push! (mut out) (subslice text (load start) (load i)))
+                    (store! start (iadd (load i) 1)) (store! i (iadd (load i) 1)))
+                (store! i (iadd (load i) 1))))))
+    (load out)))
+
+(defn nz-first-token [(l (slice u8))] (-> (slice u8))
+  (match (str-find l " ") (Some [i] (subslice l 0 i)) (None [] l)))
+
+(defn nz-at-symbol [(l (slice u8))] (-> (slice u8))
+  (match (str-find l "@")
+    (None [] l)
+    (Some [at]
+      (let [n (slice-len l) (mut j) (iadd at 1)]
+        (if (and (icmp-lt (load j) n) (icmp-eq (nz-b l (load j)) 34))
+            (do (store! j (iadd (load j) 1))
+                (loop (if (or (icmp-ge (load j) n) (icmp-eq (nz-b l (load j)) 34)) (break)
+                        (store! j (iadd (load j) 1))))
+                (if (icmp-lt (load j) n) (store! j (iadd (load j) 1)) 0)
+                (subslice l at (load j)))
+            (do (loop (if (or (icmp-ge (load j) n) (not (nz-sym? (nz-b l (load j))))) (break)
+                        (store! j (iadd (load j) 1))))
+                (subslice l at (load j))))))))
+
+(defn nz-pos-define-name? [(name (slice u8))] (-> bool)
+  (let [pre "@__coil_llvm_ir_" pl (slice-len pre)]
+    (if (not (starts-with name pre)) false
+        (if (icmp-le (slice-len name) pl) false
+            (nz-all-digits? (subslice name pl (slice-len name)))))))
+
+; ---- scan_positional -------------------------------------------------------
+(defn nz-mk-scan [(fam i64) (num i64) (endd i64)] (-> ScanRes)
+  (let [s (alloc-stack ScanRes)]
+    (store! (field s fam) fam) (store! (field s num) num) (store! (field s endd) endd) (load s)))
+
+(defn nz-try-fam [(s (slice u8)) (i i64) (pre (slice u8)) (fam i64)] (-> (Option ScanRes))
+  (let [n (slice-len s) pl (slice-len pre) ps (iadd i 1)]
+    (if (icmp-gt (iadd ps pl) n) (None [ScanRes])
+        (if (not (str-eq (subslice s ps (iadd ps pl)) pre)) (None [ScanRes])
+            (let [nr (alloc-stack NumRes)]
+              (store! nr (nz-leading-number s (iadd ps pl)))
+              (if (icmp-eq (load (field nr len)) 0) (None [ScanRes])
+                  (let [endd (iadd (iadd ps pl) (load (field nr len)))]
+                    (if (or (icmp-ge endd n) (not (nz-ident? (nz-b s endd))))
+                        (Some (nz-mk-scan fam (load (field nr val)) endd))
+                        (None [ScanRes])))))))))
+
+(defn nz-scan-positional [(s (slice u8)) (i i64)] (-> (Option ScanRes))
+  (if (icmp-ge i (slice-len s)) (None [ScanRes])
+      (if (icmp-ne (nz-b s i) 64) (None [ScanRes])
+          (match (nz-try-fam s i "g." 0)
+            (Some [r] (Some r))
+            (None []
+              (match (nz-try-fam s i "str." 1)
+                (Some [r] (Some r))
+                (None []
+                  (match (nz-try-fam s i "cstr." 2)
+                    (Some [r] (Some r))
+                    (None [] (nz-try-fam s i "__coil_llvm_ir_" 3))))))))))
+
+; ---- renumber map (4 first-encounter lists) --------------------------------
+(defn nz-renum-assign! [(r (ptr Renum)) (fam i64) (old i64)] (-> i64)
+  (if (icmp-eq fam 0)
+      (if (icmp-lt (nz-find-i64 (load (field r g)) old) 0) (al-push! (mut (field r g)) old) 0)
+   (if (icmp-eq fam 1)
+      (if (icmp-lt (nz-find-i64 (load (field r st)) old) 0) (al-push! (mut (field r st)) old) 0)
+   (if (icmp-eq fam 2)
+      (if (icmp-lt (nz-find-i64 (load (field r cs)) old) 0) (al-push! (mut (field r cs)) old) 0)
+      (if (icmp-lt (nz-find-i64 (load (field r lv)) old) 0) (al-push! (mut (field r lv)) old) 0)))))
+
+(defn nz-renum-lookup [(r (ptr Renum)) (fam i64) (old i64)] (-> i64)
+  (if (icmp-eq fam 0) (nz-find-i64 (load (field r g)) old)
+   (if (icmp-eq fam 1) (nz-find-i64 (load (field r st)) old)
+    (if (icmp-eq fam 2) (nz-find-i64 (load (field r cs)) old)
+       (nz-find-i64 (load (field r lv)) old)))))
+
+(defn nz-assign-line! [(r (ptr Renum)) (line (slice u8))] (-> i64)
+  (let [n (slice-len line) (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+          (if (icmp-eq (nz-b line (load i)) 64)
+              (match (nz-scan-positional line (load i))
+                (Some [sr] (let [s (alloc-stack ScanRes)] (store! s sr)
+                             (nz-renum-assign! r (load (field s fam)) (load (field s num)))
+                             (store! i (load (field s endd)))))
+                (None [] (store! i (iadd (load i) 1))))
+              (store! i (iadd (load i) 1)))))
+    0))
+
+(defn nz-name-of [(blocks (ArrayList NzBlock)) (idx i64)] (-> (slice u8))
+  (let [b (alloc-stack NzBlock)] (store! b (al-get [NzBlock] blocks idx)) (load (field b name))))
+
+(defn nz-pnum [(blocks (ArrayList NzBlock)) (idx i64) (r (ptr Renum))] (-> i64)
+  (let [name (nz-name-of blocks idx) nr (alloc-stack NumRes)]
+    (store! nr (nz-leading-number name (slice-len "@__coil_llvm_ir_")))
+    (let [pos (nz-find-i64 (load (field r lv)) (load (field nr val)))]
+      (if (icmp-lt pos 0) 9223372036854775807 pos))))
+
+(defn nz-assign-block-bodies [(r (ptr Renum)) (blocks (ArrayList NzBlock)) (idx i64)] (-> i64)
+  (let [b (alloc-stack NzBlock)]
+    (store! b (al-get [NzBlock] blocks idx))
+    (let [body (load (field b body)) n (al-len [(slice u8)] body) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+              (do (nz-assign-line! r (al-get [(slice u8)] body (load i))) (store! i (iadd (load i) 1))))))
+    0))
+
+(defn nz-assign-idxs [(r (ptr Renum)) (blocks (ArrayList NzBlock)) (idxs (ArrayList i64))] (-> i64)
+  (let [n (al-len [i64] idxs) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (nz-assign-block-bodies r blocks (al-get [i64] idxs (load i))) (store! i (iadd (load i) 1)))))
+    0))
+
+(defn nz-sort-idx-by-name [(a (ptr Allocator)) (blocks (ArrayList NzBlock)) (idxs (ArrayList i64))] (-> (ArrayList i64))
+  (let [n (al-len [i64] idxs) (mut used) (al-new [bool] a) (mut out) (al-new [i64] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (nz-name-of blocks (al-get [i64] idxs (load bi)))
+                                        (nz-name-of blocks (al-get [i64] idxs (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [i64] idxs (load best))))
+            (store! c (iadd (load c) 1))))))
+    (load out)))
+
+(defn nz-sort-idx-by-pnum [(a (ptr Allocator)) (blocks (ArrayList NzBlock)) (idxs (ArrayList i64)) (r (ptr Renum))] (-> (ArrayList i64))
+  (let [n (al-len [i64] idxs) (mut used) (al-new [bool] a) (mut out) (al-new [i64] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (icmp-lt (nz-pnum blocks (al-get [i64] idxs (load bi)) r)
+                                         (nz-pnum blocks (al-get [i64] idxs (load best)) r)))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [i64] idxs (load best))))
+            (store! c (iadd (load c) 1))))))
+    (load out)))
+
+(defn nz-build-renumber [(a (ptr Allocator)) (blocks (ArrayList NzBlock))] (-> Renum)
+  (let [rstk (alloc-stack Renum)]
+    (store! (field rstk g)  (al-new [i64] a))
+    (store! (field rstk st) (al-new [i64] a))
+    (store! (field rstk cs) (al-new [i64] a))
+    (store! (field rstk lv) (al-new [i64] a))
+    (let [nb (al-len [NzBlock] blocks) (mut stable) (al-new [i64] a) (mut pos) (al-new [i64] a) (mut k) 0]
+      (loop (if (icmp-ge (load k) nb) (break)
+              (do (let [b (alloc-stack NzBlock)]
+                    (store! b (al-get [NzBlock] blocks (load k)))
+                    (if (icmp-eq (load (field b cat)) 3)
+                        (if (nz-pos-define-name? (load (field b name)))
+                            (al-push! (mut pos) (load k))
+                            (al-push! (mut stable) (load k)))
+                        0))
+                  (store! k (iadd (load k) 1)))))
+      (nz-assign-idxs rstk blocks (nz-sort-idx-by-name a blocks (load stable)))
+      (nz-assign-idxs rstk blocks (nz-sort-idx-by-pnum a blocks (load pos) rstk))
+      (let [(mut g2) 0]
+        (loop (if (icmp-ge (load g2) nb) (break)
+                (do (let [b (alloc-stack NzBlock)]
+                      (store! b (al-get [NzBlock] blocks (load g2)))
+                      (if (icmp-eq (load (field b cat)) 1)
+                          (nz-assign-block-bodies rstk blocks (load g2)) 0))
+                    (store! g2 (iadd (load g2) 1)))))))
+    (load rstk)))
+
+; ---- apply_renumber --------------------------------------------------------
+(defn nz-push-str! [(out (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (al-push! (mut out) (slice-get s (load i))) (store! i (iadd (load i) 1)))))
+    0))
+
+(defn nz-fam-str [(fam i64)] (-> (slice u8))
+  (if (icmp-eq fam 0) "g" (if (icmp-eq fam 1) "str" "cstr")))
+
+(defn nz-emit-renamed [(out (mut (ArrayList u8))) (fam i64) (newn i64)] (-> i64)
+  (if (icmp-eq fam 3)
+      (do (nz-push-str! (mut out) "@__coil_llvm_ir_") (push-mag (mut out) newn))
+      (do (al-push! (mut out) (cast u8 64))
+          (nz-push-str! (mut out) (nz-fam-str fam))
+          (al-push! (mut out) (cast u8 46))
+          (push-mag (mut out) newn))))
+
+(defn nz-apply-renumber [(a (ptr Allocator)) (line (slice u8)) (r (ptr Renum))] (-> (slice u8))
+  (let [n (slice-len line) (mut out) (al-new [u8] a) (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (if (icmp-eq (nz-b line (load i)) 64)
+            (match (nz-scan-positional line (load i))
+              (Some [sr] (let [s (alloc-stack ScanRes)] (store! s sr)
+                           (let [newn (nz-renum-lookup r (load (field s fam)) (load (field s num)))]
+                             (if (icmp-lt newn 0)
+                                 (do (al-push! (mut out) (slice-get line (load i))) (store! i (iadd (load i) 1)))
+                                 (do (nz-emit-renamed (mut out) (load (field s fam)) newn)
+                                     (store! i (load (field s endd))))))))
+              (None [] (do (al-push! (mut out) (slice-get line (load i))) (store! i (iadd (load i) 1)))))
+            (do (al-push! (mut out) (slice-get line (load i))) (store! i (iadd (load i) 1))))))
+    (al-slice [u8] (load out))))
+
+(defn nz-map-apply [(a (ptr Allocator)) (body (ArrayList (slice u8))) (r (ptr Renum))] (-> (ArrayList (slice u8)))
+  (let [n (al-len [(slice u8)] body) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (al-push! (mut out) (nz-apply-renumber a (al-get [(slice u8)] body (load i)) r))
+                (store! i (iadd (load i) 1)))))
+    (load out)))
+
+; ---- parse_blocks ----------------------------------------------------------
+(defn nz-one-body [(a (ptr Allocator)) (l (slice u8))] (-> (ArrayList (slice u8)))
+  (let [(mut b) (al-new [(slice u8)] a)] (al-push! (mut b) l) (load b)))
+
+(defn nz-push-block! [(a (ptr Allocator)) (blocks (mut (ArrayList NzBlock))) (cat i64) (name (slice u8)) (body (ArrayList (slice u8)))] (-> i64)
+  (let [b (alloc-stack NzBlock)]
+    (store! (field b cat) cat) (store! (field b name) name) (store! (field b body) body)
+    (al-push! (mut blocks) (load b)) 0))
+
+(defn nz-parse-define [(a (ptr Allocator)) (blocks (mut (ArrayList NzBlock))) (lines (ArrayList (slice u8))) (nlines i64) (i i64) (l (slice u8))] (-> i64)
+  (let [(mut body) (al-new [(slice u8)] a) (mut j) (iadd i 1)]
+    (al-push! (mut body) l)
+    (loop (if (or (icmp-ge (load j) nlines) (str-eq (al-get [(slice u8)] lines (load j)) "}")) (break)
+            (do (al-push! (mut body) (al-get [(slice u8)] lines (load j))) (store! j (iadd (load j) 1)))))
+    (if (icmp-lt (load j) nlines)
+        (do (al-push! (mut body) (al-get [(slice u8)] lines (load j))) (store! j (iadd (load j) 1)))
+        0)
+    (nz-push-block! a (mut blocks) 3 (nz-at-symbol l) (load body))
+    (load j)))
+
+(defn nz-parse-one-block [(a (ptr Allocator)) (blocks (mut (ArrayList NzBlock))) (lines (ArrayList (slice u8))) (nlines i64) (i i64) (l (slice u8))] (-> i64)
+  (if (and (icmp-eq (nz-b l 0) 37) (nz-contains? l "= type"))
+      (do (nz-push-block! a (mut blocks) 0 (nz-first-token l) (nz-one-body a l)) (iadd i 1))
+   (if (icmp-eq (nz-b l 0) 64)
+      (do (nz-push-block! a (mut blocks) 1 (nz-first-token l) (nz-one-body a l)) (iadd i 1))
+   (if (starts-with l "declare")
+      (do (nz-push-block! a (mut blocks) 2 (nz-at-symbol l) (nz-one-body a l)) (iadd i 1))
+   (if (starts-with l "define")
+      (nz-parse-define a (mut blocks) lines nlines i l)
+      (do (nz-push-block! a (mut blocks) 4 l (nz-one-body a l)) (iadd i 1)))))))
+
+(defn nz-parse-blocks [(a (ptr Allocator)) (text (slice u8))] (-> NzParsed)
+  (let [lines (nz-split-lines a text) nlines (al-len [(slice u8)] lines)
+        (mut header) (al-new [(slice u8)] a) (mut blocks) (al-new [NzBlock] a) (mut i) 0]
+    (loop (if (or (icmp-ge (load i) nlines) (icmp-eq (slice-len (al-get [(slice u8)] lines (load i))) 0)) (break)
+            (do (al-push! (mut header) (al-get [(slice u8)] lines (load i))) (store! i (iadd (load i) 1)))))
+    (loop (if (icmp-ge (load i) nlines) (break)
+            (let [l (al-get [(slice u8)] lines (load i))]
+              (if (icmp-eq (slice-len l) 0)
+                  (store! i (iadd (load i) 1))
+                  (store! i (nz-parse-one-block a (mut blocks) lines nlines (load i) l))))))
+    (let [p (alloc-stack NzParsed)]
+      (store! (field p header) (load header)) (store! (field p blocks) (load blocks)) (load p))))
+
+; ---- block sort by (cat, name) ---------------------------------------------
+(defn nz-block-lt [(blocks (ArrayList NzBlock)) (i i64) (j i64)] (-> bool)
+  (let [bi (alloc-stack NzBlock) bj (alloc-stack NzBlock)]
+    (store! bi (al-get [NzBlock] blocks i)) (store! bj (al-get [NzBlock] blocks j))
+    (let [ci (load (field bi cat)) cj (load (field bj cat))]
+      (if (icmp-lt ci cj) true
+          (if (icmp-gt ci cj) false
+              (str-lt (load (field bi name)) (load (field bj name))))))))
+
+(defn nz-sort-blocks [(a (ptr Allocator)) (blocks (ArrayList NzBlock))] (-> (ArrayList NzBlock))
+  (let [n (al-len [NzBlock] blocks) (mut used) (al-new [bool] a) (mut out) (al-new [NzBlock] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0) (nz-block-lt blocks (load bi) (load best)))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [NzBlock] blocks (load best))))
+            (store! c (iadd (load c) 1))))))
+    (load out)))
+
+; ---- attribute-group renumber ----------------------------------------------
+(defn nz-body-of [(defs (ArrayList AttrDef)) (idx i64)] (-> (slice u8))
+  (let [d (alloc-stack AttrDef)] (store! d (al-get [AttrDef] defs idx)) (load (field d body))))
+
+(defn nz-sort-attrs [(a (ptr Allocator)) (defs (ArrayList AttrDef))] (-> (ArrayList AttrDef))
+  (let [n (al-len [AttrDef] defs) (mut used) (al-new [bool] a) (mut out) (al-new [AttrDef] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (nz-body-of defs (load bi)) (nz-body-of defs (load best))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (al-push! (mut out) (al-get [AttrDef] defs (load best))))
+            (store! c (iadd (load c) 1))))))
+    (load out)))
+
+(defn nz-attr-newof [(defs (ArrayList AttrDef)) (old i64)] (-> i64)
+  (let [n (al-len [AttrDef] defs) (mut i) 0 (mut res) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load res) 0)) (break)
+            (do (let [d (alloc-stack AttrDef)] (store! d (al-get [AttrDef] defs (load i)))
+                  (if (icmp-eq (load (field d old)) old) (store! res (load i)) 0))
+                (store! i (iadd (load i) 1)))))
+    (load res)))
+
+(defn nz-replace-attr-refs [(a (ptr Allocator)) (text (slice u8)) (sorted (ArrayList AttrDef))] (-> (slice u8))
+  (let [n (slice-len text) (mut out) (al-new [u8] a) (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (if (and (icmp-eq (nz-b text (load i)) 35)
+                 (and (icmp-lt (iadd (load i) 1) n) (nz-digit? (nz-b text (iadd (load i) 1)))))
+            (let [(mut j) (iadd (load i) 1)]
+              (loop (if (or (icmp-ge (load j) n) (not (nz-digit? (nz-b text (load j))))) (break)
+                      (store! j (iadd (load j) 1))))
+              (if (or (icmp-ge (load j) n) (not (nz-ident? (nz-b text (load j)))))
+                  (let [newn (nz-attr-newof sorted (nz-parse-int (subslice text (iadd (load i) 1) (load j))))]
+                    (if (icmp-ge newn 0)
+                        (do (al-push! (mut out) (cast u8 35)) (push-mag (mut out) newn) (store! i (load j)))
+                        (do (al-push! (mut out) (slice-get text (load i))) (store! i (iadd (load i) 1)))))
+                  (do (al-push! (mut out) (slice-get text (load i))) (store! i (iadd (load i) 1)))))
+            (do (al-push! (mut out) (slice-get text (load i))) (store! i (iadd (load i) 1))))))
+    (al-slice [u8] (load out))))
+
+(defn nz-renumber-attrs [(a (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [lines (nz-split-lines a text) nl (al-len [(slice u8)] lines)
+        (mut defs) (al-new [AttrDef] a) (mut i) 0 pre "attributes #"]
+    (loop (if (icmp-ge (load i) nl) (break)
+            (do (let [l (al-get [(slice u8)] lines (load i))]
+                  (if (starts-with l pre)
+                      (let [rest (subslice l (slice-len pre) (slice-len l))]
+                        (match (str-find rest " = ")
+                          (None [] 0)
+                          (Some [eq]
+                            (let [numpart (subslice rest 0 eq)]
+                              (if (nz-all-digits? numpart)
+                                  (let [d (alloc-stack AttrDef)]
+                                    (store! (field d old) (nz-parse-int numpart))
+                                    (store! (field d body) (subslice rest (iadd eq 3) (slice-len rest)))
+                                    (al-push! (mut defs) (load d)) 0)
+                                  0)))))
+                      0))
+                (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (al-len [AttrDef] defs) 0)
+        text
+        (nz-replace-attr-refs a text (nz-sort-attrs a (load defs))))))
+
+; ---- assemble + normalize --------------------------------------------------
+(defn nz-assemble [(a (ptr Allocator)) (header (ArrayList (slice u8))) (nblocks (ArrayList NzBlock))] (-> (slice u8))
+  (let [(mut out) (al-new [u8] a) nh (al-len [(slice u8)] header) (mut i) 0]
+    (loop (if (icmp-ge (load i) nh) (break)
+            (do (nz-push-str! (mut out) (al-get [(slice u8)] header (load i)))
+                (al-push! (mut out) (cast u8 10)) (store! i (iadd (load i) 1)))))
+    (al-push! (mut out) (cast u8 10))
+    (let [nb (al-len [NzBlock] nblocks) (mut k) 0]
+      (loop (if (icmp-ge (load k) nb) (break)
+              (do (let [b (alloc-stack NzBlock)] (store! b (al-get [NzBlock] nblocks (load k)))
+                    (let [body (load (field b body)) nbody (al-len [(slice u8)] body) (mut j) 0]
+                      (loop (if (icmp-ge (load j) nbody) (break)
+                              (do (nz-push-str! (mut out) (al-get [(slice u8)] body (load j)))
+                                  (al-push! (mut out) (cast u8 10)) (store! j (iadd (load j) 1)))))
+                      (al-push! (mut out) (cast u8 10))))
+                  (store! k (iadd (load k) 1))))))
+    (loop
+      (let [m (al-len [u8] (load out))]
+        (if (and (icmp-ge m 2)
+                 (and (icmp-eq (nz-b (al-slice [u8] (load out)) (isub m 1)) 10)
+                      (icmp-eq (nz-b (al-slice [u8] (load out)) (isub m 2)) 10)))
+            (do (al-pop! [u8] (mut out)) 0)
+            (break))))
+    (al-slice [u8] (load out))))
+
 (defn normalize-ir [(a (ptr Allocator)) (ir (slice u8))] (-> (slice u8))
-  (unimplemented "codegen/normalize-ir")
-  "")
+  (let [text (nz-renumber-attrs a ir)
+        parsed (alloc-stack NzParsed)]
+    (store! parsed (nz-parse-blocks a text))
+    (let [header (load (field parsed header)) blocks0 (load (field parsed blocks))
+          rstk (alloc-stack Renum)]
+      (store! rstk (nz-build-renumber a blocks0))
+      (let [nb (al-len [NzBlock] blocks0) (mut nblocks) (al-new [NzBlock] a) (mut i) 0]
+        (loop (if (icmp-ge (load i) nb) (break)
+                (do (let [b (alloc-stack NzBlock) nbk (alloc-stack NzBlock)]
+                      (store! b (al-get [NzBlock] blocks0 (load i)))
+                      (store! (field nbk cat) (load (field b cat)))
+                      (store! (field nbk name) (nz-apply-renumber a (load (field b name)) rstk))
+                      (store! (field nbk body) (nz-map-apply a (load (field b body)) rstk))
+                      (al-push! (mut nblocks) (load nbk)))
+                    (store! i (iadd (load i) 1)))))
+        (nz-assemble a header (nz-sort-blocks a (load nblocks)))))))
 
 ; Tail of the pipeline: mono'd Program -> codegen -> print -> normalize -> stdout.
 ; Mirrors src/lib.rs::dump_ir (emit_ir then normalize_ir::normalize).
@@ -6189,6 +6634,7 @@
         ir      (cstr->slice ir-cstr)
         norm    (normalize-ir a ir)]
     (ps w norm)
+    (wb w 10)          ; mirror `coil dump-ir`'s println! trailing newline
     0))
 
 (defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
@@ -6219,8 +6665,11 @@
         sub  (cstr->slice (load (index argv 1)))]
     (if (str-eq sub "__smoke")
         (smoke a)
-        (let [path (load (index argv 2))
-              src  (read-file a path)
-              cwd  (cwd-slice a)]
-          (dump-ir-program a src cwd))))
+      (if (str-eq sub "__normalize")
+          (let [path (load (index argv 2)) src (read-file a path) w (stdout)]
+            (ps w (normalize-ir a src)) 0)
+          (let [path (load (index argv 2))
+                src  (read-file a path)
+                cwd  (cwd-slice a)]
+            (dump-ir-program a src cwd)))))
   0)
