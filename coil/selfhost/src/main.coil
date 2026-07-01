@@ -27,6 +27,7 @@
 (import "selfhost/src/diag.coil" :use *)
 (import "selfhost/src/comptime.coil" :use *)
 (import "selfhost/src/expander.coil" :use *)
+(import "selfhost/src/codegen_a64.coil" :use *)
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
@@ -410,6 +411,13 @@
           0))
       0)))
 
+; arm64 native backend: mono Program -> Mach-O object, no LLVM anywhere.
+(defn build-arm64-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (match (run-pipeline a src cwd w path)
+      (Some [mp] (do (cga64-build-object a mp obj-cstr) 1))
+      (None []   0))))
+
 ; Returns 1 if the pipeline succeeded (object emitted), 0 if a diagnostic was
 ; reported. build-cmd checks this and HALTS before linking on failure (mirroring
 ; Rust: `compile_to_object_dbg(...)?` returns Err before `cc` is ever invoked).
@@ -433,9 +441,11 @@
 ; overflow the default ~8MB stack.
 (defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
   (let [ctx (cast (ptr DumpCtx) arg)
-        r   (if (icmp-eq (load (field ctx mode)) 1)
+        r   (if (icmp-eq (load (field ctx mode)) 2)
+                (build-arm64-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 1)
                 (build-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
-              (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path))))]
+              (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path)))))]
     (store! (field ctx ok) r)
     (cast (ptr i8) 0)))
 
@@ -485,15 +495,21 @@
   (let [file (load (index argv 2))
         (mut outp)  (cast (ptr i8) 0)
         (mut flags) (al-new [(slice u8)] a)
+        (mut backend) 1
         (mut i)     3]
-    ; parse -o / --link-flag from argv[3..].
+    ; parse -o / --link-flag / --backend from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
       (do (let [arg (cstr->slice (load (index argv (load i))))]
             (if (str-eq arg "-o")
                 (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
               (if (str-eq arg "--link-flag")
                   (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
-                (do (store! i (iadd (load i) 1)) 0)))))))
+                (if (str-eq arg "--backend")
+                    (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
+                            (store! backend 2)
+                          (store! backend 1))
+                        (store! i (iadd (load i) 2)) 0)
+                  (do (store! i (iadd (load i) 1)) 0))))))))
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
       0)
@@ -505,7 +521,7 @@
         (store! (field ctx src)  (read-file a file))
         (store! (field ctx cwd)  (cwd-slice a))
         (store! (field ctx path) (cstr->slice file))
-        (store! (field ctx mode) 1)
+        (store! (field ctx mode) (load backend))
         (store! (field ctx obj)  obj-cstr)
         (store! (field ctx triple) (cast (ptr i8) 0))
         (store! (field ctx ok) 0)

@@ -1,0 +1,400 @@
+; selfhost/src/a64.coil — AArch64 (arm64) instruction encoder for the native
+; backend. Zero dependencies: encoders compose instruction words from the ARM
+; ARM bit fields and append them (little-endian) to a plain byte buffer.
+;
+; Conventions:
+;  - registers are plain i64 numbers 0..30; 31 means sp OR zr depending on the
+;    instruction (each encoder documents which it means there).
+;  - every encoder returns the 32-bit instruction word as an i64; `a64-w!`
+;    appends a word to the buffer.
+;  - in-function branches go through labels: `a64-new-label` allocates an id,
+;    `a64-bind-label!` pins it to the current offset, branch emitters record a
+;    fixup, `a64-resolve-fixups!` patches the words once the function is done.
+(module a64)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+
+; ============================ byte buffer ====================================
+; The output buffer is a bare (ArrayList u8); these helpers keep all
+; little-endian byte-splitting in one place.
+
+(defn b-u8! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (al-push! (mut b) (cast u8 (iand v 255))) 0)
+(defn b-u16! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (b-u8! (mut b) v) (b-u8! (mut b) (ishr v 8)) 0)
+(defn b-u32! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (b-u8! (mut b) v) (b-u8! (mut b) (ishr v 8)) (b-u8! (mut b) (ishr v 16)) (b-u8! (mut b) (ishr v 24)) 0)
+(defn b-u64! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (b-u32! (mut b) v) (b-u32! (mut b) (ishr v 32)) 0)
+(defn b-bytes! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut b) (slice-get s (load i)))
+          (store! i (iadd (load i) 1))))))
+  0)
+(defn b-zeros! [(b (mut (ArrayList u8))) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut b) (cast u8 0)) (store! i (iadd (load i) 1))))))
+  0)
+; pad with zero bytes up to the next multiple of `align`.
+(defn b-align! [(b (mut (ArrayList u8))) (align i64)] (-> i64)
+  (let [len (al-len [u8] (load b)) rem (urem len align)]
+    (if (icmp-eq rem 0) 0 (b-zeros! (mut b) (isub align rem)))))
+(defn b-patch-u32! [(b (mut (ArrayList u8))) (off i64) (v i64)] (-> i64)
+  (al-set! (mut b) off              (cast u8 (iand v 255)))
+  (al-set! (mut b) (iadd off 1)     (cast u8 (iand (ishr v 8) 255)))
+  (al-set! (mut b) (iadd off 2)     (cast u8 (iand (ishr v 16) 255)))
+  (al-set! (mut b) (iadd off 3)     (cast u8 (iand (ishr v 24) 255)))
+  0)
+(defn b-patch-u64! [(b (mut (ArrayList u8))) (off i64) (v i64)] (-> i64)
+  (b-patch-u32! (mut b) off v) (b-patch-u32! (mut b) (iadd off 4) (ishr v 32)))
+(defn b-read-u32 [(b (ptr (ArrayList u8))) (off i64)] (-> i64)
+  (ior (ior (cast i64 (al-get [u8] (load b) off))
+            (ishl (cast i64 (al-get [u8] (load b) (iadd off 1))) 8))
+       (ior (ishl (cast i64 (al-get [u8] (load b) (iadd off 2))) 16)
+            (ishl (cast i64 (al-get [u8] (load b) (iadd off 3))) 24))))
+
+; pointer to element i of an ArrayList reached by pointer (live, mutable).
+; (named al-at to avoid colliding with resolve.coil's al-elem under :use *)
+(defn al-at [T] [(p (ptr (ArrayList T))) (i i64)] (-> (ptr T))
+  (index (load (field p data)) i))
+
+; ============================ assembler state ================================
+; Labels + fixups are per-function; the code buffer is program-wide.
+; fixup kinds: 0 = b/bl imm26, 1 = b.cond imm19, 2 = cbz/cbnz imm19.
+(defstruct A64Fixup [(off i64) (label i64) (kind i64)])
+(defstruct Asm
+  [(buf (ArrayList u8))            ; the whole __text section
+   (labels (ArrayList i64))        ; label id -> offset (-1 = unbound)
+   (fixups (ArrayList A64Fixup))
+   (a (ptr Allocator))])
+
+(defn asm-new [(a (ptr Allocator))] (-> Asm)
+  (let [p (alloc-stack Asm)]
+    (store! (field p buf)    (al-new [u8] a))
+    (store! (field p labels) (al-new [i64] a))
+    (store! (field p fixups) (al-new [A64Fixup] a))
+    (store! (field p a) a)
+    (load p)))
+
+(defn a64-off [(s (mut Asm))] (-> i64) (al-len [u8] (load (field s buf))))
+
+(defn a64-w! [(s (mut Asm)) (w i64)] (-> i64)
+  (b-u32! (mut (field s buf)) w))
+
+(defn a64-new-label [(s (mut Asm))] (-> i64)
+  (let [id (al-len [i64] (load (field s labels)))]
+    (al-push! (mut (field s labels)) -1)
+    id))
+(defn a64-bind-label! [(s (mut Asm)) (id i64)] (-> i64)
+  (al-set! (mut (field s labels)) id (a64-off (mut s))))
+(defn a64-add-fixup! [(s (mut Asm)) (label i64) (kind i64)] (-> i64)
+  (let [f (alloc-stack A64Fixup)]
+    (store! (field f off) (a64-off (mut s)))
+    (store! (field f label) label)
+    (store! (field f kind) kind)
+    (al-push! (mut (field s fixups)) (load f))))
+
+; Patch every recorded fixup; called once per function after its body is
+; emitted. Unbound labels are a compiler bug (hard error).
+(defn a64-resolve-fixups! [(s (mut Asm))] (-> i64)
+  (let [n (al-len [A64Fixup] (load (field s fixups))) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (al-get [A64Fixup] (load (field s fixups)) (load i))
+                fp (alloc-stack A64Fixup)]
+            (store! fp f)
+            (let [off (load (field fp off))
+                  tgt (al-get [i64] (load (field s labels)) (load (field fp label)))]
+              (if (icmp-lt tgt 0)
+                  (do (print-str (stderr) "a64: unbound label in fixup resolution\n") (abort) 0)
+                0)
+              (let [delta (idiv (isub tgt off) 4)
+                    w (b-read-u32 (mut (field s buf)) off)
+                    k (load (field fp kind))]
+                (if (icmp-eq k 0)
+                    ; b/bl: imm26 at [25:0]
+                    (b-patch-u32! (mut (field s buf)) off
+                                  (ior w (iand delta 67108863)))
+                  ; b.cond / cbz / cbnz: imm19 at [23:5]
+                  (b-patch-u32! (mut (field s buf)) off
+                                (ior w (ishl (iand delta 524287) 5)))))))
+          (store! i (iadd (load i) 1))))))
+  ; clear fixups + labels for the next function
+  (store! (field (field s fixups) len) 0)
+  (store! (field (field s labels) len) 0)
+  0)
+
+; ============================ encoders =======================================
+; Each function documents the ARM ARM field layout it composes.
+
+; ---- moves / constants ----
+; MOVZ/MOVN/MOVK: sf opc(2) 100101 hw(2) imm16 rd   (100101 = 37)
+(defn a64-movz [(rd i64) (imm16 i64) (hw i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 2 29) (ior (ishl 37 23) (ior (ishl hw 21) (ior (ishl (iand imm16 65535) 5) rd))))))
+(defn a64-movk [(rd i64) (imm16 i64) (hw i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 3 29) (ior (ishl 37 23) (ior (ishl hw 21) (ior (ishl (iand imm16 65535) 5) rd))))))
+(defn a64-movn [(rd i64) (imm16 i64) (hw i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 0 29) (ior (ishl 37 23) (ior (ishl hw 21) (ior (ishl (iand imm16 65535) 5) rd))))))
+
+; Materialize an arbitrary 64-bit constant into rd (movz + up to 3 movk).
+(defn a64-mov-imm! [(s (mut Asm)) (rd i64) (v i64)] (-> i64)
+  ; negative constants with few leading-one holes would be shorter via movn,
+  ; but correctness-first: movz+movk covers every value in <=4 instructions.
+  (let [c0 (iand v 65535)
+        c1 (iand (ishr v 16) 65535)
+        c2 (iand (ishr v 32) 65535)
+        c3 (iand (ishr v 48) 65535)]
+    (a64-w! (mut s) (a64-movz rd c0 0))
+    (if (icmp-ne c1 0) (a64-w! (mut s) (a64-movk rd c1 1)) 0)
+    (if (icmp-ne c2 0) (a64-w! (mut s) (a64-movk rd c2 2)) 0)
+    (if (icmp-ne c3 0) (a64-w! (mut s) (a64-movk rd c3 3)) 0)
+    0))
+
+; ---- add/sub ----
+; ADD/SUB (immediate): sf op S 100010 sh imm12 rn rd   (100010 = 34)
+; rn/rd 31 = SP here.
+(defn a64-addsub-imm [(sf i64) (op i64) (setf i64) (rd i64) (rn i64) (imm12 i64) (sh i64)] (-> i64)
+  (ior (ishl sf 31) (ior (ishl op 30) (ior (ishl setf 29) (ior (ishl 34 23)
+    (ior (ishl sh 22) (ior (ishl (iand imm12 4095) 10) (ior (ishl rn 5) rd))))))))
+(defn a64-add-imm [(rd i64) (rn i64) (imm12 i64)] (-> i64) (a64-addsub-imm 1 0 0 rd rn imm12 0))
+(defn a64-sub-imm [(rd i64) (rn i64) (imm12 i64)] (-> i64) (a64-addsub-imm 1 1 0 rd rn imm12 0))
+(defn a64-add-imm-lsl12 [(rd i64) (rn i64) (imm12 i64)] (-> i64) (a64-addsub-imm 1 0 0 rd rn imm12 1))
+(defn a64-sub-imm-lsl12 [(rd i64) (rn i64) (imm12 i64)] (-> i64) (a64-addsub-imm 1 1 0 rd rn imm12 1))
+
+; ADD/SUB (shifted register): sf op S 01011 sh(2) 0 rm imm6 rn rd  (01011 = 11)
+; rn/rd/rm 31 = ZR here.
+(defn a64-addsub-reg [(sf i64) (op i64) (setf i64) (rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl sf 31) (ior (ishl op 30) (ior (ishl setf 29) (ior (ishl 11 24)
+    (ior (ishl rm 16) (ior (ishl rn 5) rd)))))))
+(defn a64-add-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-addsub-reg 1 0 0 rd rn rm))
+(defn a64-sub-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-addsub-reg 1 1 0 rd rn rm))
+(defn a64-cmp-reg [(rn i64) (rm i64)] (-> i64) (a64-addsub-reg 1 1 1 31 rn rm))
+(defn a64-cmp-reg32 [(rn i64) (rm i64)] (-> i64) (a64-addsub-reg 0 1 1 31 rn rm))
+(defn a64-cmp-imm [(rn i64) (imm12 i64)] (-> i64) (a64-addsub-imm 1 1 1 31 rn imm12 0))
+; mov rd, rn  (rn may be SP): add rd, rn, #0
+(defn a64-mov-sp [(rd i64) (rn i64)] (-> i64) (a64-add-imm rd rn 0))
+
+; ---- multiply / divide ----
+; MADD/MSUB: sf 0011011 000 rm o0 ra rn rd   (0011011 = 27 at [30:24])
+(defn a64-madd [(rd i64) (rn i64) (rm i64) (ra i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 27 24) (ior (ishl rm 16) (ior (ishl ra 10) (ior (ishl rn 5) rd))))))
+(defn a64-msub [(rd i64) (rn i64) (rm i64) (ra i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 27 24) (ior (ishl rm 16) (ior (ishl 1 15) (ior (ishl ra 10) (ior (ishl rn 5) rd)))))))
+(defn a64-mul [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-madd rd rn rm 31))
+; SDIV/UDIV: sf 0011010110 rm 00001 o1 rn rd  (0011010110 = 214 at [30:21])
+(defn a64-sdiv [(rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 214 21) (ior (ishl rm 16) (ior (ishl 3 10) (ior (ishl rn 5) rd))))))
+(defn a64-udiv [(rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 214 21) (ior (ishl rm 16) (ior (ishl 2 10) (ior (ishl rn 5) rd))))))
+
+; ---- logical (shifted register) ----
+; sf opc(2) 01010 shift(2) N rm imm6 rn rd   (01010 = 10 at [28:24])
+(defn a64-logic-reg [(opc i64) (n i64) (rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl opc 29) (ior (ishl 10 24) (ior (ishl n 21) (ior (ishl rm 16) (ior (ishl rn 5) rd)))))))
+(defn a64-and-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-logic-reg 0 0 rd rn rm))
+(defn a64-orr-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-logic-reg 1 0 rd rn rm))
+(defn a64-eor-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-logic-reg 2 0 rd rn rm))
+(defn a64-orn-reg [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-logic-reg 1 1 rd rn rm))
+; mov rd, rm (register, ZR-flavored): orr rd, zr, rm
+(defn a64-mov-reg [(rd i64) (rm i64)] (-> i64) (a64-orr-reg rd 31 rm))
+; mvn rd, rm: orn rd, zr, rm
+(defn a64-mvn-reg [(rd i64) (rm i64)] (-> i64) (a64-orn-reg rd 31 rm))
+; tst rn, rm: ands zr, rn, rm
+(defn a64-tst-reg [(rn i64) (rm i64)] (-> i64) (a64-logic-reg 3 0 31 rn rm))
+
+; ---- variable shifts ----
+; LSLV/LSRV/ASRV: sf 0011010110 rm 0010 op2 rn rd; op2: 00 lsl, 01 lsr, 10 asr
+(defn a64-shiftv [(op2 i64) (rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 214 21) (ior (ishl rm 16) (ior (ishl (ior 8 op2) 10) (ior (ishl rn 5) rd))))))
+(defn a64-lslv [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-shiftv 0 rd rn rm))
+(defn a64-lsrv [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-shiftv 1 rd rn rm))
+(defn a64-asrv [(rd i64) (rn i64) (rm i64)] (-> i64) (a64-shiftv 2 rd rn rm))
+
+; ---- bitfield (sign/zero extension, immediate shifts) ----
+; SBFM/UBFM: sf opc(2) 100110 N immr imms rn rd  (100110 = 38 at [28:23]); N=sf
+(defn a64-bfm [(opc i64) (sf i64) (rd i64) (rn i64) (immr i64) (imms i64)] (-> i64)
+  (ior (ishl sf 31) (ior (ishl opc 29) (ior (ishl 38 23) (ior (ishl sf 22)
+    (ior (ishl immr 16) (ior (ishl imms 10) (ior (ishl rn 5) rd))))))))
+(defn a64-sxtb [(rd i64) (rn i64)] (-> i64) (a64-bfm 0 1 rd rn 0 7))
+(defn a64-sxth [(rd i64) (rn i64)] (-> i64) (a64-bfm 0 1 rd rn 0 15))
+(defn a64-sxtw [(rd i64) (rn i64)] (-> i64) (a64-bfm 0 1 rd rn 0 31))
+(defn a64-uxtb [(rd i64) (rn i64)] (-> i64) (a64-bfm 2 0 rd rn 0 7))
+(defn a64-uxth [(rd i64) (rn i64)] (-> i64) (a64-bfm 2 0 rd rn 0 15))
+; uxtw: 32-bit mov wd, wn zero-extends: orr wd, wzr, wn (sf=0)
+(defn a64-mov32 [(rd i64) (rm i64)] (-> i64)
+  (ior (ishl 1 29) (ior (ishl 10 24) (ior (ishl rm 16) (ior (ishl 31 5) rd)))))
+(defn a64-lsl-imm [(rd i64) (rn i64) (sh i64)] (-> i64)
+  (a64-bfm 2 1 rd rn (iand (isub 64 sh) 63) (isub 63 sh)))
+(defn a64-lsr-imm [(rd i64) (rn i64) (sh i64)] (-> i64) (a64-bfm 2 1 rd rn sh 63))
+(defn a64-asr-imm [(rd i64) (rn i64) (sh i64)] (-> i64) (a64-bfm 0 1 rd rn sh 63))
+
+; ---- loads/stores (unsigned scaled immediate) ----
+; size(2) 111 V 01 opc(2) imm12 rn rt ; imm12 scaled by size. rn 31 = SP.
+(defn a64-ldst-uimm [(size i64) (v i64) (opc i64) (rt i64) (rn i64) (imm12 i64)] (-> i64)
+  (ior (ishl size 30) (ior (ishl 7 27) (ior (ishl v 26) (ior (ishl 1 24)
+    (ior (ishl opc 22) (ior (ishl (iand imm12 4095) 10) (ior (ishl rn 5) rt))))))))
+(defn a64-ldr-x  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 3 0 1 rt rn (idiv off 8)))
+(defn a64-str-x  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 3 0 0 rt rn (idiv off 8)))
+(defn a64-ldr-w  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 2 0 1 rt rn (idiv off 4)))
+(defn a64-str-w  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 2 0 0 rt rn (idiv off 4)))
+(defn a64-ldr-h  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 1 0 1 rt rn (idiv off 2)))
+(defn a64-str-h  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 1 0 0 rt rn (idiv off 2)))
+(defn a64-ldr-b  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 0 0 1 rt rn off))
+(defn a64-str-b  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 0 0 0 rt rn off))
+; FP/SIMD loads/stores: V=1. s: size 10; d: size 11; q: size 00 with opc|2.
+(defn a64-ldr-s  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 2 1 1 rt rn (idiv off 4)))
+(defn a64-str-s  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 2 1 0 rt rn (idiv off 4)))
+(defn a64-ldr-d  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 3 1 1 rt rn (idiv off 8)))
+(defn a64-str-d  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 3 1 0 rt rn (idiv off 8)))
+(defn a64-ldr-q  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 0 1 3 rt rn (idiv off 16)))
+(defn a64-str-q  [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 0 1 2 rt rn (idiv off 16)))
+; ldr (register offset): size 111 V 00 opc 1 rm option(3) S 10 rn rt
+(defn a64-ldst-roff [(size i64) (v i64) (opc i64) (rt i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl size 30) (ior (ishl 7 27) (ior (ishl v 26) (ior (ishl opc 22)
+    (ior (ishl 1 21) (ior (ishl rm 16) (ior (ishl 3 13) (ior (ishl 2 10) (ior (ishl rn 5) rt))))))))))
+
+; ---- load/store pair ----
+; opc(2) 101 V 0 mode(3) L imm7 rt2 rn rt; x pairs: opc=10.
+; mode: 011 = pre-index (writeback), 001 = post-index, 010 = signed offset.
+(defn a64-ldstp [(mode i64) (l i64) (rt i64) (rt2 i64) (rn i64) (imm7 i64)] (-> i64)
+  (ior (ishl 2 30) (ior (ishl 5 27) (ior (ishl mode 23) (ior (ishl l 22)
+    (ior (ishl (iand imm7 127) 15) (ior (ishl rt2 10) (ior (ishl rn 5) rt))))))))
+; stp x29, x30, [sp, #-16]!  /  ldp x29, x30, [sp], #16
+(defn a64-stp-pre  [(rt i64) (rt2 i64) (rn i64) (imm i64)] (-> i64) (a64-ldstp 3 0 rt rt2 rn (idiv imm 8)))
+(defn a64-ldp-post [(rt i64) (rt2 i64) (rn i64) (imm i64)] (-> i64) (a64-ldstp 1 1 rt rt2 rn (idiv imm 8)))
+(defn a64-stp-off  [(rt i64) (rt2 i64) (rn i64) (imm i64)] (-> i64) (a64-ldstp 2 0 rt rt2 rn (idiv imm 8)))
+(defn a64-ldp-off  [(rt i64) (rt2 i64) (rn i64) (imm i64)] (-> i64) (a64-ldstp 2 1 rt rt2 rn (idiv imm 8)))
+
+; ---- branches ----
+; B: 000101 imm26 (5 at [31:26]); BL: 100101 imm26 (37 at [31:26])
+(defn a64-b-raw  [] (-> i64) (ishl 5 26))
+(defn a64-bl-raw [] (-> i64) (ishl 37 26))
+; B.cond: 01010100 imm19 0 cond  (84 at [31:24])
+(defn a64-bcond-raw [(cnd i64)] (-> i64) (ior (ishl 84 24) cnd))
+; CBZ/CBNZ: sf 011010 op imm19 rt  (011010 = 26 at [30:25])
+(defn a64-cbz-raw  [(rt i64)] (-> i64) (ior (ishl 1 31) (ior (ishl 26 25) rt)))
+(defn a64-cbnz-raw [(rt i64)] (-> i64) (ior (ishl 1 31) (ior (ishl 26 25) (ior (ishl 1 24) rt))))
+; BR/BLR/RET: 1101011 opc(4) 11111 000000 rn 00000 (1101011 = 107 at [31:25])
+; opc: 0000 br, 0001 blr, 0010 ret
+(defn a64-br  [(rn i64)] (-> i64) (ior (ishl 107 25) (ior (ishl 31 16) (ishl rn 5))))
+(defn a64-blr [(rn i64)] (-> i64) (ior (ishl 107 25) (ior (ishl 1 21) (ior (ishl 31 16) (ishl rn 5)))))
+(defn a64-ret [] (-> i64) (ior (ishl 107 25) (ior (ishl 2 21) (ior (ishl 31 16) (ishl 30 5)))))
+; BRK #imm16: 11010100 001 imm16 00000  (212 at [31:24])
+(defn a64-brk [(imm16 i64)] (-> i64) (ior (ishl 212 24) (ior (ishl 1 21) (ishl (iand imm16 65535) 5))))
+(defn a64-nop [] (-> i64)
+  ; 11010101000000110010000000011111
+  (ior (ishl 213 24) (ior (ishl 3 16) (ior (ishl 32 8) 31))))
+
+; label-branch emitters (record fixup at the current offset, emit placeholder)
+(defn a64-b-label!  [(s (mut Asm)) (label i64)] (-> i64)
+  (a64-add-fixup! (mut s) label 0) (a64-w! (mut s) (a64-b-raw)))
+(defn a64-bcond-label! [(s (mut Asm)) (cnd i64) (label i64)] (-> i64)
+  (a64-add-fixup! (mut s) label 1) (a64-w! (mut s) (a64-bcond-raw cnd)))
+(defn a64-cbz-label!  [(s (mut Asm)) (rt i64) (label i64)] (-> i64)
+  (a64-add-fixup! (mut s) label 2) (a64-w! (mut s) (a64-cbz-raw rt)))
+(defn a64-cbnz-label! [(s (mut Asm)) (rt i64) (label i64)] (-> i64)
+  (a64-add-fixup! (mut s) label 2) (a64-w! (mut s) (a64-cbnz-raw rt)))
+
+; condition codes
+(defn cond-eq [] (-> i64) 0)
+(defn cond-ne [] (-> i64) 1)
+(defn cond-hs [] (-> i64) 2)   ; unsigned >=
+(defn cond-lo [] (-> i64) 3)   ; unsigned <
+(defn cond-mi [] (-> i64) 4)
+(defn cond-vc [] (-> i64) 7)
+(defn cond-hi [] (-> i64) 8)   ; unsigned >
+(defn cond-ls [] (-> i64) 9)   ; unsigned <=
+(defn cond-ge [] (-> i64) 10)
+(defn cond-lt [] (-> i64) 11)
+(defn cond-gt [] (-> i64) 12)
+(defn cond-le [] (-> i64) 13)
+(defn cond-invert [(c i64)] (-> i64) (ixor c 1))
+
+; ---- conditional select ----
+; CSEL/CSINC: sf op 0 11010100 rm cond(4) 0 o2 rn rd  (11010100 = 212 at [28:21])
+(defn a64-csel [(rd i64) (rn i64) (rm i64) (cnd i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 212 21) (ior (ishl rm 16) (ior (ishl cnd 12) (ior (ishl rn 5) rd))))))
+(defn a64-csinc [(rd i64) (rn i64) (rm i64) (cnd i64)] (-> i64)
+  (ior (ishl 1 31) (ior (ishl 212 21) (ior (ishl rm 16) (ior (ishl cnd 12) (ior (ishl 1 10) (ior (ishl rn 5) rd)))))))
+; cset rd, cond == csinc rd, zr, zr, invert(cond)
+(defn a64-cset [(rd i64) (cnd i64)] (-> i64) (a64-csinc rd 31 31 (cond-invert cnd)))
+
+; ---- ADRP + ADD (page-relative address of a symbol; both get relocations) ----
+; ADRP: 1 immlo(2) 10000 immhi(19) rd  (op=1, 10000 = 16 at [28:24])
+(defn a64-adrp [(rd i64)] (-> i64) (ior (ishl 1 31) (ior (ishl 16 24) rd)))
+; the matching ADD is a64-add-imm with imm 0 (PAGEOFF12 reloc patches it)
+
+; ---- scalar floating point ----
+; fp two-source: 00011110 ty 1 rm opcode(4) 10 rn rd (00011110 = 30 at [31:24])
+; ty: 00 = s, 01 = d. opcode: 0010 add, 0011 sub, 0000 mul, 0001 div.
+(defn a64-fbin [(ty i64) (op i64) (rd i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 30 24) (ior (ishl ty 22) (ior (ishl 1 21) (ior (ishl rm 16)
+    (ior (ishl op 12) (ior (ishl 2 10) (ior (ishl rn 5) rd))))))))
+(defn a64-fadd [(ty i64) (rd i64) (rn i64) (rm i64)] (-> i64) (a64-fbin ty 2 rd rn rm))
+(defn a64-fsub [(ty i64) (rd i64) (rn i64) (rm i64)] (-> i64) (a64-fbin ty 3 rd rn rm))
+(defn a64-fmul [(ty i64) (rd i64) (rn i64) (rm i64)] (-> i64) (a64-fbin ty 0 rd rn rm))
+(defn a64-fdiv [(ty i64) (rd i64) (rn i64) (rm i64)] (-> i64) (a64-fbin ty 1 rd rn rm))
+; FCMP: 00011110 ty 1 rm 001000 rn 00000
+(defn a64-fcmp [(ty i64) (rn i64) (rm i64)] (-> i64)
+  (ior (ishl 30 24) (ior (ishl ty 22) (ior (ishl 1 21) (ior (ishl rm 16) (ior (ishl 8 10) (ishl rn 5)))))))
+; int<->float conversions: sf 00 11110 ty 1 rmode(2) opcode(3) 000000 rn rd
+(defn a64-fcvt-int [(sf i64) (ty i64) (rmode i64) (opcode i64) (rd i64) (rn i64)] (-> i64)
+  (ior (ishl sf 31) (ior (ishl 30 24) (ior (ishl ty 22) (ior (ishl 1 21)
+    (ior (ishl rmode 19) (ior (ishl opcode 16) (ior (ishl rn 5) rd))))))))
+(defn a64-scvtf  [(ty i64) (rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 ty 0 2 rd rn))
+(defn a64-ucvtf  [(ty i64) (rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 ty 0 3 rd rn))
+(defn a64-fcvtzs [(ty i64) (rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 ty 3 0 rd rn))
+(defn a64-fcvtzu [(ty i64) (rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 ty 3 1 rd rn))
+; fmov gpr <-> fp (64-bit d): opcode 110 = fp->gpr, 111 = gpr->fp
+(defn a64-fmov-fp-to-x [(rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 1 0 6 rd rn))
+(defn a64-fmov-x-to-fp [(rd i64) (rn i64)] (-> i64) (a64-fcvt-int 1 1 0 7 rd rn))
+; fmov gpr <-> fp (32-bit s)
+(defn a64-fmov-fp-to-w [(rd i64) (rn i64)] (-> i64) (a64-fcvt-int 0 0 0 6 rd rn))
+(defn a64-fmov-w-to-fp [(rd i64) (rn i64)] (-> i64) (a64-fcvt-int 0 0 0 7 rd rn))
+; FCVT (fp -> fp width): 00011110 ty 1 0001 opc(2) 10000 rn rd
+(defn a64-fcvt [(tyfrom i64) (opc i64) (rd i64) (rn i64)] (-> i64)
+  (ior (ishl 30 24) (ior (ishl tyfrom 22) (ior (ishl 1 21) (ior (ishl 1 17)
+    (ior (ishl opc 15) (ior (ishl 1 14) (ior (ishl rn 5) rd))))))))
+(defn a64-fcvt-s-to-d [(rd i64) (rn i64)] (-> i64) (a64-fcvt 0 1 rd rn))
+(defn a64-fcvt-d-to-s [(rd i64) (rn i64)] (-> i64) (a64-fcvt 1 0 rd rn))
+; fmov d<-d (fp move): 00011110 ty 1 0000 00 10000 rn rd
+(defn a64-fmov-reg [(ty i64) (rd i64) (rn i64)] (-> i64)
+  (ior (ishl 30 24) (ior (ishl ty 22) (ior (ishl 1 21) (ior (ishl 1 14) (ior (ishl rn 5) rd))))))
+; ---- signed sub-64 loads into X registers ----
+; LDRSB/LDRSH/LDRSW (unsigned scaled imm): size 111 V 01 opc=10 (into Xt)
+(defn a64-ldrsb-x [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 0 0 2 rt rn off))
+(defn a64-ldrsh-x [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 1 0 2 rt rn (idiv off 2)))
+(defn a64-ldrsw-x [(rt i64) (rn i64) (off i64)] (-> i64) (a64-ldst-uimm 2 0 2 rt rn (idiv off 4)))
+
+; ---- LSE atomics (all seq_cst variants) ----
+; LDADDAL Xs, Xt, [Xn]: size=11 111000 A=1 R=1 1 Rs opc(3)=000 00 Rn Rt
+(defn a64-ldaddal [(rs i64) (rt i64) (rn i64)] (-> i64)
+  (ior (ishl 3 30) (ior (ishl 7 27) (ior (ishl 1 23) (ior (ishl 1 22) (ior (ishl 1 21)
+    (ior (ishl rs 16) (ior (ishl rn 5) rt))))))))
+; SWPAL Xs, Xt, [Xn]: same class, bit15=1
+(defn a64-swpal [(rs i64) (rt i64) (rn i64)] (-> i64)
+  (ior (a64-ldaddal rs rt rn) (ishl 1 15)))
+; CASAL Xs, Xt, [Xn]: size=11 0010001 L=1 1 Rs o0=1 11111 Rn Rt
+(defn a64-casal [(rs i64) (rt i64) (rn i64)] (-> i64)
+  (ior (ishl 3 30) (ior (ishl 17 23) (ior (ishl 1 22) (ior (ishl 1 21)
+    (ior (ishl rs 16) (ior (ishl 1 15) (ior (ishl 31 10) (ior (ishl rn 5) rt)))))))))
+; LDAR Xt, [Xn] / STLR Xt, [Xn]
+(defn a64-ldar [(rt i64) (rn i64)] (-> i64)
+  (ior (ishl 3 30) (ior (ishl 8 24) (ior (ishl 1 23) (ior (ishl 1 22)
+    (ior (ishl 31 16) (ior (ishl 1 15) (ior (ishl 31 10) (ior (ishl rn 5) rt)))))))))
+(defn a64-stlr [(rt i64) (rn i64)] (-> i64)
+  (ior (ishl 3 30) (ior (ishl 8 24) (ior (ishl 1 23)
+    (ior (ishl 31 16) (ior (ishl 1 15) (ior (ishl 31 10) (ior (ishl rn 5) rt))))))))
+; NEG xd, xm = sub xd, xzr, xm
+(defn a64-neg [(rd i64) (rm i64)] (-> i64) (a64-sub-reg rd 31 rm))
+; FMADD (scalar): 00011111 ty 0 rm 0 ra rn rd; ty 00=s 01=d
+(defn a64-fmadd [(ty i64) (rd i64) (rn i64) (rm i64) (ra i64)] (-> i64)
+  (ior (ishl 31 24) (ior (ishl ty 22) (ior (ishl rm 16) (ior (ishl ra 10) (ior (ishl rn 5) rd))))))

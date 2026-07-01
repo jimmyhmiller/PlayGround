@@ -1,0 +1,47 @@
+# Behavioral corpus for the arm64 backend gate: <file> [argv...]
+# Programs must be deterministic (verified by running twice) and non-interactive.
+# everything.coil + shim.coil are excluded for now: the self-host LLVM backend
+# cannot build them either (inline-asm streamer limitation) — revisit once the
+# arm64 backend supports :shim conventions natively.
+examples/allocation.coil
+examples/allocators.coil
+examples/args.coil alpha beta gamma
+examples/arraylist.coil
+examples/bitfields.coil
+examples/calc.coil
+examples/cinterop.coil
+examples/closure-lib.coil
+examples/closure.coil
+examples/control.coil
+examples/conventions.coil
+examples/defclosure.coil
+examples/defer.coil
+examples/dyn_write.coil
+examples/explicit-layout.coil
+examples/extern.coil
+examples/fib.coil
+examples/fmt.coil
+examples/generics.coil
+examples/hashmap.coil
+examples/inference.coil
+examples/io.coil
+examples/iter.coil
+examples/json.coil
+examples/layout.coil
+examples/lisp.coil
+examples/lockfree.coil
+examples/loops.coil
+examples/macros.coil
+examples/mem.coil
+examples/nl.coil
+examples/per-arch.coil
+examples/references.coil
+examples/simd.coil
+examples/slice.coil
+examples/structabi.coil
+examples/structs.coil
+examples/sums.coil
+examples/threads.coil
+examples/try.coil
+examples/vector.coil
+examples/widths.coil
