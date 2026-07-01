@@ -103,6 +103,45 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v1.7 — REAL dependent pattern matching: the convoy; a proper linear type system; mult-poly; 179 tests)
+
+The release where the "dependent" half becomes real at the term level:
+
+- **THE CONVOY — index refinement in dependent `match`** (`docs/CONVOY_HANDOFF.md`).
+  A match on a scrutinee whose type is indexed by (`Succ` of) a variable re-binds
+  the index-dependent context values at their per-constructor REFINED types, via a
+  dependent motive (`NatCase` large elimination computes the predecessor — J-free).
+  Arms the index refutes are **omitted** (real dependent coverage): `vhead`/`vtail`
+  over `Vec a (Succ k)` need no `Nil` arm. The flagship programs COMPILE AND RUN:
+  - `examples/lookup.tal` — `lookup : {0 n} -> Fin n -> Vec Nat n -> Nat`:
+    total-coverage, bounds-check-free vector indexing; the `Nil` case is
+    discharged as absurd (`Fin Zero` uninhabited). `tally run` → 2.
+  - `examples/scoped_eval.tal` — **the running dependent eval**: a well-scoped-
+    by-typing interpreter (depth-indexed AST, `var : Fin d -> Expr d`, so an
+    out-of-scope variable cannot be constructed), environment a length-indexed
+    `Vec`, linear `Own` children freed exactly once as it walks. → 42.
+  The elaborator is untrusted throughout — the kernel re-checks the motive, every
+  method, and the final application; a wrong convoy can only be rejected.
+- **A proper linear type system** — `linear` declarations (user-declared resources:
+  handles, capabilities, sessions — no leak, no double-use), and the
+  **linearity×parametricity hole CLOSED**: every implicit Type-parameter's
+  LINEAR-CAPABILITY is inferred (the body is re-checked with the parameter assumed
+  linear), so generic code that drops its elements simply cannot be instantiated
+  at `Own`/linear types — the leak is a compile error, not a runtime bug.
+- **Multiplicity polymorphism** (`docs/MULT_POLY_PLAN.md`): one
+  `lmap : … (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b`
+  serves a linear-freeing callback (`lmap(1, free, xs)`) and an unrestricted one
+  (`lmap(w, inc, xs)`), monomorphized per call site; the kernel's rig stays
+  `{0,1,ω}`. `examples/mult_poly.tal`.
+- **The stratum-(A) solver** (`src/solver.rs`, `docs/PHASE_C_SOLVER_PLAN.md`):
+  definitional equality decides linear `Nat` arithmetic (`Vec (m+n) ≡ Vec (n+m)`),
+  and `le(a,b)`/`lt(a,b)` DISCHARGE open bounds (`n ≤ n+m`) as kernel-re-checked
+  `Σ`-witness proofs (LCF style). `examples/bounds_dec.tal`, `index_arith.tal`.
+- **The view layer runs** (`docs/VIEW_LAYER_PLAN.md`): `Ptr l` (ω address) /
+  `PtsTo l a` (linear permission) with real lowering — `valloc`/`vwrite` (STRONG
+  update)/`vread`/`vtake`/`vfree`; leak, double-free, and use-after-free are type
+  errors. `examples/views.tal`.
+
 > **The sections below are a historical changelog.** They record how the compiler
 > got here and describe surfaces that no longer exist. Two things to know when
 > reading them: (1) the CLI is now just `tally check` / `tally run` / `tally build`
