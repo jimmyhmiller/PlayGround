@@ -1205,3 +1205,269 @@ fn recursive_tree_fold_with_let_is_total() {
     let prog = check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
     assert!(prog.totality.iter().any(|(n, t, _)| n == "size" && *t), "size must be total");
 }
+
+// ---------------------------------------------------------------------------
+// stratum (A): the linear-Nat index decision procedure (src/solver.rs). Index
+// `+` is now decided up to commutativity / associativity / `+0` / `Suc n = n+1`,
+// so these equalities hold BY THE KERNEL — no rewrite proofs — while false ones
+// are still rejected. See docs/PHASE_C_SOLVER_PLAN.md.
+// ---------------------------------------------------------------------------
+
+const BNAT: &str = r#"
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+"#;
+
+#[test]
+fn index_plus_is_commutative() {
+    let src = format!(
+        "{BNAT}\ncomm : (n : Nat) -> (m : Nat) -> Eq Nat (n + m) (m + n)\nfn comm(n, m) {{ refl(n + m) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn index_plus_zero_is_identity() {
+    let src = format!(
+        "{BNAT}\nrid : (n : Nat) -> Eq Nat (n + Zero) n\nfn rid(n) {{ refl(n) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn index_plus_is_associative() {
+    let src = format!(
+        "{BNAT}\nas : (a : Nat) -> (b : Nat) -> (c : Nat) -> Eq Nat ((a + b) + c) (a + (b + c))\nfn as(a, b, c) {{ refl(a + b + c) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn index_succ_is_plus_one() {
+    let src = format!(
+        "{BNAT}\nsp : (n : Nat) -> Eq Nat (Succ n) (n + Succ Zero)\nfn sp(n) {{ refl(Succ(n)) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn index_false_equation_is_still_rejected() {
+    // n + m = n is NOT a linear-Nat identity — the solver must keep it distinct,
+    // or the kernel would be unsound.
+    let src = format!(
+        "{BNAT}\nbad : (n : Nat) -> (m : Nat) -> Eq Nat (n + m) n\nfn bad(n, m) {{ refl(n + m) }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// stratum (A): the inequality decision — `Le`/`Lt` propositions discharged by
+// the explicit, proof-producing `le`/`lt` (src/solver.rs::diff_witness). The
+// solver emits `(d, refl)`; the kernel re-checks it, so soundness does not rest
+// on the solver. See docs/PHASE_C_SOLVER_PLAN.md.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_bound_is_discharged() {
+    // 1 < 3
+    let src = format!(
+        "{BNAT}\np : Lt (Succ Zero) (Succ (Succ (Succ Zero)))\nfn p() {{ lt(Succ(Zero), Succ(Succ(Succ(Zero)))) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn open_bound_over_variables_is_discharged() {
+    // n <= n + m  — impossible to build with an inductive LT over variables.
+    let src = format!(
+        "{BNAT}\nw : (n : Nat) -> (m : Nat) -> Le n (n + m)\nfn w(n, m) {{ le(n, n + m) }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn false_strict_bound_is_a_hard_error() {
+    // n < n does not hold.
+    let src = format!("{BNAT}\nb : (n : Nat) -> Lt n n\nfn b(n) {{ lt(n, n) }}\n");
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn false_open_bound_is_a_hard_error() {
+    // n + m <= n does not hold for all m.
+    let src = format!(
+        "{BNAT}\nb : (n : Nat) -> (m : Nat) -> Le (n + m) n\nfn b(n, m) {{ le(n + m, n) }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn decided_bound_gates_an_array_read() {
+    // the headline: a bounds-checked read whose `i < n` obligation is discharged
+    // by the solver, and whose out-of-bounds variant is rejected.
+    let prelude = format!(
+        "{BNAT}\n\
+         postulate Arr : Type -> Nat -> Type\n\
+         postulate get : {{0 a : Type}} -> (n : Nat) -> (i : Nat) -> (0 _ : Lt i n) -> Arr a n -> a\n"
+    );
+    let ok = format!(
+        "{prelude}\
+         read1 : {{0 a : Type}} -> Arr a (Succ (Succ (Succ Zero))) -> a\n\
+         fn read1(arr) {{ get(Succ(Succ(Succ(Zero))), Succ(Zero), lt(Succ(Zero), Succ(Succ(Succ(Zero)))), arr) }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+
+    let oob = format!(
+        "{prelude}\
+         readbad : {{0 a : Type}} -> Arr a (Succ (Succ (Succ Zero))) -> a\n\
+         fn readbad(arr) {{ get(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Zero))), lt(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Zero)))), arr) }}\n"
+    );
+    assert!(check_program(&oob).is_err(), "out-of-bounds read must be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// the VIEW LAYER (L3 address/permission split), slice 1 — TYPE-LEVEL. The
+// docs/02 memory model expressed in the QTT core as postulates: a copyable
+// `Ptr l` (the alias) separated from a LINEAR `PtsTo l a` (the permission). All
+// of use-after-free / double-free / leak fall out of linearity on the view, and
+// STRONG UPDATE (type-changing `vwrite`) type-checks. See examples/views.tal.
+// ---------------------------------------------------------------------------
+
+// `Loc`/`Ptr`/`PtsTo`/`Cell`/`valloc`/`vwrite`/`vread`/`vfree`/`Unit` all come
+// from the BUILT-IN prelude (these tests exercise the real primitives); only the
+// program-specific datatypes are declared here.
+const VIEWS: &str = r#"
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+enum Bool { False : Bool, True : Bool }
+enum Two  { MkTwo : Unit -> Unit -> Two }
+"#;
+
+#[test]
+fn view_strong_update_then_free_typechecks() {
+    // allocate a Nat cell, strong-update it to a Bool in place, then free.
+    let src = format!(
+        "{VIEWS}\ndemo : Unit\nfn demo() {{ match valloc(Zero) {{ MkCell(p, v) => vfree(p, vwrite(p, v, True)), }} }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn view_pointer_is_copyable_view_is_linear() {
+    // `p` used many times (ω address), the view threaded exactly once — accepted.
+    let src = format!(
+        "{VIEWS}\nok : Unit\nfn ok() {{ match valloc(Zero) {{ MkCell(p, v) => vfree(p, vwrite(p, vwrite(p, v, True), Zero)), }} }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn view_leak_is_rejected() {
+    // dropping the linear view is a leak (0 ⋢ 1).
+    let src = format!(
+        "{VIEWS}\nbad : Unit\nfn bad() {{ match valloc(Zero) {{ MkCell(p, v) => U, }} }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn view_double_free_is_rejected() {
+    // using the view twice is a double-free (ω ⋢ 1).
+    let src = format!(
+        "{VIEWS}\nbad : Two\nfn bad() {{ match valloc(Zero) {{ MkCell(p, v) => MkTwo(vfree(p, v), vfree(p, v)), }} }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn view_use_after_free_is_rejected() {
+    // reusing the view after a strong update consumed it (use-after-free).
+    let src = format!(
+        "{VIEWS}\nbad : Two\nfn bad() {{ match valloc(Zero) {{ MkCell(p, v) => MkTwo(vfree(p, vwrite(p, v, True)), vfree(p, v)), }} }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn view_take_then_leaking_the_hole_is_rejected() {
+    // `vtake` MOVES the value out and hands back a `PtsTo l Hole`; forgetting it
+    // is a leak (the cell is never refilled or freed). Sound: 0 ⋢ 1.
+    let src = format!(
+        "{VIEWS}\nbad : Nat\nfn bad() {{ match valloc(Zero) {{ MkCell(p, v) => let (x, vh) = vtake(p, v); x, }} }}\n"
+    );
+    assert!(check_program(&src).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// PROPER LINEAR TYPES: the `linear` declaration marks a type whose values are
+// resources (no drop, no dup). Views (`PtsTo`) and `Own` are `linear` in the
+// prelude; users can declare their own (file handles, sockets, …). An
+// un-annotated binder of a linear type defaults to multiplicity 1, closing the
+// silent-leak hole. See examples/linear_resource.tal, docs/VIEW_LAYER_PLAN.md.
+// ---------------------------------------------------------------------------
+
+const FILE: &str = r#"
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Two { MkTwo : Unit -> Unit -> Two }
+linear postulate File : Type
+postulate openf  : Nat -> File
+postulate readf  : File -> File
+postulate closef : File -> Unit
+"#;
+
+#[test]
+fn linear_resource_used_once_is_accepted() {
+    let src = format!("{FILE}\np : Nat -> Unit\nfn p(n) {{ closef(readf(openf(n))) }}\n");
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn linear_resource_dropped_is_rejected() {
+    // an un-annotated `File` binder defaults to multiplicity 1, so dropping it leaks.
+    let src = format!("{FILE}\nbad : File -> Unit\nfn bad(f) {{ U }}\n");
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn linear_resource_used_twice_is_rejected() {
+    let src = format!("{FILE}\nbad : File -> Two\nfn bad(f) {{ MkTwo(closef(f), closef(f)) }}\n");
+    assert!(check_program(&src).is_err());
+}
+
+#[test]
+fn bare_view_binder_defaults_linear() {
+    // regression guard: a bare (un-annotated) view binder must NOT silently leak.
+    // `PtsTo` is `linear` in the prelude, so dropping `v` is rejected.
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               bad : {0 l : Loc} -> {0 a : Type} -> Ptr l -> PtsTo l a -> Unit\n\
+               fn bad(p, v) { U }\n";
+    assert!(check_program(src).is_err());
+}
+
+#[test]
+fn generic_higher_order_over_linear_data() {
+    // ONE generic `lmap` transports a whole list of LINEAR resources: it maps
+    // `free` over a list of `Own Nat`, releasing each exactly once. Proves generic
+    // higher-order code over linear data is expressible with explicit
+    // multiplicities. See examples/linear_generic.tal.
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+               lmap : {0 a : Type} -> {0 b : Type} -> (w f : (1 x : a) -> b) -> (1 xs : LList a) -> LList b\n\
+               fn lmap(f, xs) { match xs { LNil => LNil, LCons(h, t) => LCons(f(h), lmap(f, t)), } }\n\
+               freeNat : (1 o : Own Nat) -> Unit\n\
+               fn freeNat(o) { free(o) }\n\
+               freeall : (1 xs : LList (Own Nat)) -> LList Unit\n\
+               fn freeall(xs) { lmap(freeNat, xs) }\n";
+    assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
+}
+
+#[test]
+fn mult_variable_binder_parses_and_errors_cleanly() {
+    // Multiplicity-polymorphism foundation: a `(m x : a)` binder (mult variable)
+    // parses, and — until the monomorphization layer lands — resolution fails with
+    // a CLEAN error, never a panic. (Locks in the SMult representation + parsing.)
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               id : {0 a : Type} -> (m x : a) -> a\n\
+               fn id(x) { x }\n";
+    let err = check_program(src).err().expect("mult-var must not yet check");
+    assert!(err.iter().any(|e| e.contains("multiplicity variable")), "got: {err:?}");
+}

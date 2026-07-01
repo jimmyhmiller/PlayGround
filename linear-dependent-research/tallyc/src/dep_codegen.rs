@@ -570,9 +570,92 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*ci); // O(1) free of the node
                 self.box_single_ctor("VL", "MkVL", &[elem, *li])
             }
-            // type-level postulates (Own/Region/List/Cursor/Arr): these only
-            // ever appear inside ERASED type annotations, so they must never
-            // reach a runtime value position. If one does, that is a real bug.
+            // ---- the view layer (docs/02): the L3 address/permission split ----
+            // A location is erased; `Ptr l` and the linear view `PtsTo l a` are
+            // BOTH represented as the raw cell address (linearity keeps the view
+            // single-use, so no stale one can exist). See docs/VIEW_LAYER_PLAN.md.
+            //
+            // valloc : {0 a} -> a -> Cell a  = ∃l. (Ptr l ⊗ a@l). malloc one slot,
+            // store the payload, pack the address as BOTH the pointer and the view.
+            "valloc" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [payload] = rt.as_slice() else {
+                    return Err(format!(
+                        "valloc: expected 1 runtime argument (the payload), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.malloc_cell(1, "cell");
+                self.store(cell, 0, *payload);
+                let addr = self.toint(cell, "addr");
+                self.box_single_ctor("Cell", "MkCell", &[addr, addr])
+            }
+            // vwrite : ... -> Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b
+            // STRONG UPDATE: store the new payload at the cell, hand back the
+            // (same) address retyped as `b@l`. The old view is consumed.
+            "vwrite" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [_p, v, new] = rt.as_slice() else {
+                    return Err(format!(
+                        "vwrite: expected 3 runtime arguments (ptr, view, value), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.toptr(*v, "cellp");
+                self.store(cell, 0, *new);
+                Ok(*v)
+            }
+            // vtake : ... -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
+            // MOVE the payload out, retyping the slot as `Hole` (the cell is NOT
+            // freed and NOT read again as `a` — the returned view is `PtsTo l Hole`,
+            // which must be refilled by `vwrite` or reclaimed by `vfree`). Sound for
+            // ANY payload — unlike a copying borrow, which would need `a` copyable.
+            "vtake" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [_p, v] = rt.as_slice() else {
+                    return Err(format!(
+                        "vtake: expected 2 runtime arguments (ptr, view), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.toptr(*v, "cellp");
+                let payload = self.load(cell, 0, "taken");
+                // the slot's bits are now stale but UNTYPEABLE as `a` (the view is
+                // `PtsTo l Hole`); no store needed. Return (moved value, hole view).
+                self.box_single_ctor("Taken", "MkTaken", &[payload, *v])
+            }
+            // vread : ... -> Ptr l -> (1 v : PtsTo l a) -> a
+            // Destructive read: load the payload, CONSUME the view, and reclaim
+            // the cell. (A borrowing read that returns the view is a later slice.)
+            "vread" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [_p, v] = rt.as_slice() else {
+                    return Err(format!(
+                        "vread: expected 2 runtime arguments (ptr, view), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.toptr(*v, "cellp");
+                let payload = self.load(cell, 0, "read");
+                self.free_int(*v);
+                Ok(payload)
+            }
+            // vfree : ... -> Ptr l -> (1 v : PtsTo l a) -> Unit
+            // consume the view and reclaim the cell; Unit is represented as 0.
+            "vfree" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [_p, v] = rt.as_slice() else {
+                    return Err(format!(
+                        "vfree: expected 2 runtime arguments (ptr, view), got {}",
+                        rt.len()
+                    ));
+                };
+                self.free_int(*v);
+                Ok(self.i64t.const_zero())
+            }
+            // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
+            // these only ever appear inside ERASED type annotations, so they must
+            // never reach a runtime value position. If one does, that is a real bug.
             other => Err(format!(
                 "cannot run the abstract postulate `{other}` (no native impl yet)"
             )),
@@ -2080,5 +2163,52 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
              main : Nat\nfn main() {{ fin2nat(z3) }}\n"
         );
         assert_eq!(run(&src), 0);
+    }
+
+    // ---- the VIEW LAYER (docs/02): L3 address/permission split, running natively.
+    // `valloc`/`vwrite`/`vread`/`vfree` are prelude built-ins with real
+    // malloc/store/free lowering (see `compile_postulate`). ----
+
+    #[test]
+    fn view_alloc_write_read_runs() {
+        // valloc a cell holding 0, STRONG-UPDATE it to 2 in place, then read the
+        // value back (reclaiming the cell). Native malloc → store → load → free.
+        let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                   main : Nat\n\
+                   fn main() { match valloc(Zero) { MkCell(p, v) => vread(p, vwrite(p, v, Succ(Succ(Zero)))), } }\n";
+        assert_eq!(run(src), 2);
+    }
+
+    #[test]
+    fn view_strong_update_changes_type_runs() {
+        // a Bool cell strong-updated to a Nat 5, then read — the stored TYPE
+        // changes in place (Bool@l → Nat@l), sound because the view is linear.
+        let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                   enum Bool { False : Bool, True : Bool }\n\
+                   main : Nat\n\
+                   fn main() { match valloc(False) { MkCell(p, v) => vread(p, vwrite(p, v, Succ(Succ(Succ(Succ(Succ(Zero))))))), } }\n";
+        assert_eq!(run(src), 5);
+    }
+
+    #[test]
+    fn view_take_modify_write_read_runs() {
+        // READ-MODIFY-WRITE via `vtake`: move 2 out (slot → Hole), write 3 back,
+        // read it. `vtake` is a move, so it is sound for any payload. → 3.
+        let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                   main : Nat\n\
+                   fn main() { match valloc(Succ(Succ(Zero))) { MkCell(p, v) => \
+                       let (x, vh) = vtake(p, v); let v2 = vwrite(p, vh, Succ(x)); vread(p, v2), } }\n";
+        assert_eq!(run(src), 3);
+    }
+
+    #[test]
+    fn view_take_then_free_hole_runs() {
+        // move the value out, then reclaim the (Hole) cell directly; return the
+        // moved value. → 1.
+        let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                   main : Nat\n\
+                   fn main() { match valloc(Succ(Zero)) { MkCell(p, v) => \
+                       let (x, vh) = vtake(p, v); let u = vfree(p, vh); x, } }\n";
+        assert_eq!(run(src), 1);
     }
 }

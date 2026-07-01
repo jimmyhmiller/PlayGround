@@ -1,0 +1,46 @@
+// GENERIC HIGHER-ORDER CODE OVER LINEAR DATA — the proof that proper linear types
+// are fully expressive here, using only explicit multiplicities.
+//
+//   tally check examples/linear_generic.tal
+//
+// `lmap` is polymorphic in the element type and maps a list by applying a callback
+// to each element. Read the multiplicities carefully — they are the whole point:
+//
+//   (w f : (1 x : a) -> b)   the callback VALUE is unrestricted (`w` = ω): it is
+//                            reused once per element across the recursion; but each
+//                            APPLICATION consumes its argument exactly once (`1`) —
+//                            so the callback may itself be linear-consuming.
+//   (1 xs : LList a)         the list is consumed linearly (used exactly once).
+//
+// These two multiplicities are independent, and getting them right is what lets a
+// SINGLE generic `lmap` transport LINEAR resources: `freeall` maps a whole list of
+// owned pointers through `free`, releasing each exactly once — no leak, no double
+// free — with the guarantees discharged by the ordinary QTT usage checker.
+
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
+
+lmap : {0 a : Type} -> {0 b : Type} -> (w f : (1 x : a) -> b) -> (1 xs : LList a) -> LList b
+fn lmap(f, xs) {
+    match xs {
+        LNil       => LNil,
+        LCons(h, t) => LCons(f(h), lmap(f, t)),
+    }
+}
+
+// consume a whole list of owned heap cells, freeing every one exactly once. The
+// element type `Own Nat` is LINEAR; `free` consumes it; `lmap` threads each element
+// through `free` and never duplicates or drops one. Accepted.
+freeNat : (1 o : Own Nat) -> Unit
+fn freeNat(o) { free(o) }
+
+freeall : (1 xs : LList (Own Nat)) -> LList Unit
+fn freeall(xs) { lmap(freeNat, xs) }
+
+// NOTE ON MULTIPLICITY POLYMORPHISM. Because the callback here uses its argument
+// exactly once, this `lmap` serves any linear-consuming callback. A callback that
+// stores its argument in an ordinary (ω) constructor — e.g. `Succ(x)` — is an
+// ω-argument function and needs a second `lmap` declared `(w f : (w x : a) -> b)`.
+// Collapsing the two into one `lmap : {m : Mult} -> (w f : (m x : a) -> b) -> ...`
+// is *multiplicity polymorphism* — a write-once convenience, NOT a missing
+// capability: everything above is already expressible with explicit multiplicities.

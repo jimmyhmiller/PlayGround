@@ -211,6 +211,12 @@ pub struct Signature {
     pub datas: Vec<DataDecl>,
     /// opaque postulates: a name and its (closed) type.
     pub postulates: Vec<(String, Term)>,
+    /// names of postulates / datatypes declared `linear` — a value of such a type
+    /// is a resource that may not be duplicated or dropped. An un-annotated binder
+    /// of such a type defaults to multiplicity 1, and `contains_linear` treats it
+    /// as linear. This closes the silent-leak hole for resource types (memory
+    /// views, file handles, …) and lets users declare their own linear types.
+    pub linear_types: std::collections::HashSet<String>,
 }
 
 impl Signature {
@@ -633,7 +639,13 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
 }
 
 fn conv(lvl: usize, a: &Value, b: &Value) -> bool {
-    quote(lvl, a) == quote(lvl, b)
+    // Definitional equality is structural on NbE normal forms, but the linear-Nat
+    // index fragment is compared up to its decidable canonical form (stratum (A)
+    // of `docs/03`): commutativity/associativity/`+0`/`Suc n = n+1`. `canon` only
+    // rewrites genuinely-arithmetic subterms and only by true `Nat` identities, so
+    // this makes conversion coarser strictly by *valid* equalities. See
+    // `src/solver.rs` and `docs/PHASE_C_SOLVER_PLAN.md`.
+    crate::solver::canon(&quote(lvl, a)) == crate::solver::canon(&quote(lvl, b))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,48 @@
+// Stratum (A), inequality slice: the linear-Nat order propositions `Le`/`Lt` and
+// their EXPLICIT, solver-decided discharge `le(a,b)` / `lt(a,b)`.
+//
+//   tally check examples/bounds_dec.tal
+//
+// `Le a b` / `Lt a b` are `Σ (0 d : Nat). a (+1) + d = b` — no new kernel
+// primitive, just `Σ` + the identity type whose equation the linear-Nat solver
+// decides. `le`/`lt` run the decision procedure and emit an LCF-checked proof
+// `(d, refl)` the kernel re-checks — so a solver bug could only FAIL to compile,
+// never mint an unsound proof. It is a pure decision, no search: you write the
+// bound explicitly, the compiler discharges it. Requires `%builtin Nat`.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// A bounds-checked array read: reading index `i` of a length-`n` array demands a
+// proof `i < n`. Compare `examples/proofs.rs.tal`, where the same proof is built
+// BY HAND as `LTS(LTZ)`; here it is discharged by `lt(...)`.
+postulate Arr : Type -> Nat -> Type
+postulate get : {0 a : Type} -> (n : Nat) -> (i : Nat) -> (0 _ : Lt i n) -> Arr a n -> a
+
+// read index 1 of a length-3 array — the bound `1 < 3` is decided.
+read1 : {0 a : Type} -> Arr a (Succ (Succ (Succ Zero))) -> a
+fn read1(arr) {
+    get(Succ(Succ(Succ(Zero))), Succ(Zero),
+        lt(Succ(Zero), Succ(Succ(Succ(Zero)))), arr)
+}
+
+// `Le`/`Lt` decide OPEN bounds too — over variables, which the inductive `LT` of
+// `proofs.rs.tal` cannot construct (you cannot case-split a variable).
+
+// n ≤ n + m  for all n, m
+weaken : (n : Nat) -> (m : Nat) -> Le n (n + m)
+fn weaken(n, m) { le(n, n + m) }
+
+// n < n + 1  for all n
+lt_succ : (n : Nat) -> Lt n (n + Succ Zero)
+fn lt_succ(n) { lt(n, n + Succ(Zero)) }
+
+// The safety net (copy either in to see the hard error):
+//
+//   oob : {0 a : Type} -> Arr a (Succ (Succ (Succ Zero))) -> a
+//   fn oob(arr) { get(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Zero))),
+//                     lt(Succ(Succ(Succ(Zero))), Succ(Succ(Succ(Zero)))), arr) }
+//                                     -- REJECTED: `lt`: cannot prove 3 < 3
+//
+//   nope : (n : Nat) -> (m : Nat) -> Le (n + m) n
+//   fn nope(n, m) { le(n + m, n) }    -- REJECTED: does not hold for all Nat

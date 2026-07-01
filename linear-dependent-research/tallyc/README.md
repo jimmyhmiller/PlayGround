@@ -98,10 +98,19 @@ nullary constructors (`Leaf`/`Nil`) used to `malloc` a cell each, doubling the
 allocations on a tree; they are now shared module-level constants (zero allocation),
 matching C's NULL-for-leaf (see `bench/README.md`).
 
-`cargo test`: **53 tests**, including `%builtin Nat` (literals,
+`cargo test`: **127 tests**, including `%builtin Nat` (literals,
 `+`, `match`→native loop, no overflow at `mul(1000,1000)`), general recursion
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
+
+> **The sections below are a historical changelog.** They record how the compiler
+> got here and describe surfaces that no longer exist. Two things to know when
+> reading them: (1) the CLI is now just `tally check` / `tally run` / `tally build`
+> — the older `tally lang` and `tally dep` verbs were unified into these; (2) the
+> low-level `struct`/`Ptr<S>`/`Own<S>` frontend (v0.2–v0.3) and the `data … where`
+> dependent surface (v0.9) were both **superseded by the single `rust_surface`**
+> (`fn`/`enum`/`match`). Some example files those sections cite were removed or
+> ported to the current surface — see `examples/` for what actually ships today.
 
 ## Status (v1.4 — GENERAL boxed datatypes run natively; the memory layer is real libc; erasure proven in the IR)
 

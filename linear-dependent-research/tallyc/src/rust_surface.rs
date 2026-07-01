@@ -66,6 +66,7 @@ enum Tok {
     KwBuiltin,
     KwTotal,
     KwPartial,
+    KwLinear,
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -125,6 +126,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "let" => Tok::KwLet,
                 "Type" => Tok::KwType,
                 "postulate" => Tok::KwPostulate,
+                "linear" => Tok::KwLinear,
                 _ => Tok::Ident(w.to_string()),
             });
         } else {
@@ -151,13 +153,41 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
 // surface AST
 // ===========================================================================
 
+/// A surface multiplicity: a concrete rig element, or a variable bound by a
+/// `(m : Mult)` parameter (multiplicity polymorphism). A `Var` is substituted to a
+/// concrete `Mult` at each call site before elaboration — the kernel never sees a
+/// multiplicity variable (see `docs/MULT_POLY_PLAN.md`).
+#[derive(Clone, Debug, PartialEq)]
+enum SMult {
+    Lit(Mult),
+    Var(String),
+}
+
+impl SMult {
+    /// Resolve to a concrete `Mult`, given a substitution for variables. A residual
+    /// variable is a hard error — it means a mult-poly function reached elaboration
+    /// without being monomorphized, which is a compiler bug, not a user error.
+    fn resolve(&self, env: &HashMap<String, Mult>) -> Result<Mult, String> {
+        match self {
+            SMult::Lit(m) => Ok(*m),
+            SMult::Var(v) => env.get(v).copied().ok_or_else(|| {
+                format!("unresolved multiplicity variable `{v}` (mult-poly not monomorphized)")
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Ty {
     Var(String),
     Type,
     App(Box<Ty>, Box<Ty>),
+    /// built-in `Nat` addition at the index level, e.g. `Vec a (m + n)`. Binds
+    /// looser than application and tighter than `->`. Elaborates to `Term::Add`,
+    /// which the kernel decides up to linear-Nat equality (see `src/solver.rs`).
+    Add(Box<Ty>, Box<Ty>),
     /// (mult, implicit?, name, domain, codomain)
-    Arrow(Mult, bool, Option<String>, Box<Ty>, Box<Ty>),
+    Arrow(SMult, bool, Option<String>, Box<Ty>, Box<Ty>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -193,7 +223,7 @@ pub(crate) enum TotAnnot {
 
 #[derive(Clone, Debug)]
 struct Binder {
-    mult: Option<Mult>,
+    mult: Option<SMult>,
     implicit: bool,
     name: String,
     ty: Ty,
@@ -209,13 +239,16 @@ enum Item {
         params: Vec<Binder>,
         index_ty: Option<Ty>,
         variants: Vec<(String, Ty)>,
+        /// declared `linear`: values of this type are resources (no drop/dup).
+        linear: bool,
     },
     Struct {
         name: String,
         params: Vec<Binder>,
         fields: Vec<(String, Ty)>,
     },
-    Postulate(String, Ty),
+    /// `(name, type, linear?)` — `linear` marks a resource postulate type.
+    Postulate(String, Ty, bool),
     /// `%builtin Nat <Type>` — opt `<Type>` into the packed integer
     /// representation (it must be a Nat-shaped enum). Holds the type name.
     BuiltinNat(String),
@@ -283,15 +316,22 @@ impl Parser {
                 self.next();
                 self.parse_fn(Some(TotAnnot::Partial))
             }
-            Some(Tok::KwEnum) => self.parse_enum(),
+            Some(Tok::KwEnum) => self.parse_enum(false),
             Some(Tok::KwStruct) => self.parse_struct(),
             Some(Tok::KwFn) => self.parse_fn(None),
-            Some(Tok::KwPostulate) => {
+            Some(Tok::KwPostulate) => self.parse_postulate(false),
+            // `linear` prefixes a resource `postulate` or `enum` — a value of that
+            // type may not be dropped or duplicated (an un-annotated binder of it
+            // defaults to multiplicity 1). See `docs/VIEW_LAYER_PLAN.md`.
+            Some(Tok::KwLinear) => {
                 self.next();
-                let name = self.ident()?;
-                self.eat(&Tok::Colon)?;
-                let ty = self.parse_ty()?;
-                Ok(Item::Postulate(name, ty))
+                match self.peek() {
+                    Some(Tok::KwPostulate) => self.parse_postulate(true),
+                    Some(Tok::KwEnum) => self.parse_enum(true),
+                    other => Err(format!(
+                        "`linear` must be followed by `postulate` or `enum`, found {other:?}"
+                    )),
+                }
             }
             Some(Tok::Ident(_)) => {
                 let name = self.ident()?;
@@ -316,7 +356,12 @@ impl Parser {
             && matches!(self.toks.get(k + 1), Some(Tok::Ident(_)))
             && self.toks.get(k + 2) == Some(&Tok::Colon))
             || (matches!(self.toks.get(k), Some(Tok::Ident(_)))
-                && self.toks.get(k + 1) == Some(&Tok::Colon));
+                && self.toks.get(k + 1) == Some(&Tok::Colon))
+            // a multiplicity-VARIABLE binder `( m x : … )`: two identifiers then `:`
+            // (the first is the mult var, the second the binder name).
+            || (matches!(self.toks.get(k), Some(Tok::Ident(_)))
+                && matches!(self.toks.get(k + 1), Some(Tok::Ident(_)))
+                && self.toks.get(k + 2) == Some(&Tok::Colon));
         if ok {
             Some(open)
         } else {
@@ -324,19 +369,30 @@ impl Parser {
         }
     }
 
-    fn parse_mult(&mut self) -> Option<Mult> {
+    fn parse_mult(&mut self) -> Option<SMult> {
         match self.peek() {
             Some(Tok::Num(0)) => {
                 self.next();
-                Some(Mult::Zero)
+                Some(SMult::Lit(Mult::Zero))
             }
             Some(Tok::Num(1)) => {
                 self.next();
-                Some(Mult::One)
+                Some(SMult::Lit(Mult::One))
             }
             Some(Tok::Ident(w)) if w == "w" => {
                 self.next();
-                Some(Mult::Omega)
+                Some(SMult::Lit(Mult::Omega))
+            }
+            // a multiplicity VARIABLE: an identifier that is the binder's
+            // multiplicity (a `(m x : T)` binder), disambiguated from the binder
+            // NAME by a following identifier. `(x : T)` has one ident (the name);
+            // `(m x : T)` has two (mult var, then name).
+            Some(Tok::Ident(v))
+                if matches!(self.toks.get(self.pos + 1), Some(Tok::Ident(_))) =>
+            {
+                let v = v.clone();
+                self.next();
+                Some(SMult::Var(v))
             }
             _ => None,
         }
@@ -367,16 +423,24 @@ impl Parser {
             let body = self.parse_ty()?;
             let mut out = body;
             for b in binders.into_iter().rev() {
-                let m = b.mult.unwrap_or(if b.implicit { Mult::Zero } else { Mult::Omega });
+                let m = b.mult.clone().unwrap_or(SMult::Lit(
+                    if b.implicit { Mult::Zero } else { Mult::Omega },
+                ));
                 out = Ty::Arrow(m, b.implicit, Some(b.name), Box::new(b.ty), Box::new(out));
             }
             Ok(out)
         } else {
-            let lhs = self.parse_ty_app()?;
+            // index-level `+` binds looser than application, tighter than `->`.
+            let mut lhs = self.parse_ty_app()?;
+            while self.peek() == Some(&Tok::Plus) {
+                self.next();
+                let rhs = self.parse_ty_app()?;
+                lhs = Ty::Add(Box::new(lhs), Box::new(rhs));
+            }
             if self.peek() == Some(&Tok::Arrow) {
                 self.next();
                 let rhs = self.parse_ty()?;
-                Ok(Ty::Arrow(Mult::Omega, false, None, Box::new(lhs), Box::new(rhs)))
+                Ok(Ty::Arrow(SMult::Lit(Mult::Omega), false, None, Box::new(lhs), Box::new(rhs)))
             } else {
                 Ok(lhs)
             }
@@ -414,7 +478,15 @@ impl Parser {
         }
     }
 
-    fn parse_enum(&mut self) -> Result<Item, String> {
+    fn parse_postulate(&mut self, linear: bool) -> Result<Item, String> {
+        self.eat(&Tok::KwPostulate)?;
+        let name = self.ident()?;
+        self.eat(&Tok::Colon)?;
+        let ty = self.parse_ty()?;
+        Ok(Item::Postulate(name, ty, linear))
+    }
+
+    fn parse_enum(&mut self, linear: bool) -> Result<Item, String> {
         self.eat(&Tok::KwEnum)?;
         let name = self.ident()?;
         let mut params = Vec::new();
@@ -439,7 +511,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::RBrace)?;
-        Ok(Item::Enum { name, params, index_ty, variants })
+        Ok(Item::Enum { name, params, index_ty, variants, linear })
     }
 
     fn parse_struct(&mut self) -> Result<Item, String> {
@@ -687,6 +759,10 @@ struct Elab {
     /// blow up exponentially with the self-calls). Interior mutability so the
     /// `&self` elaboration methods can scope it around a `Fix` body.
     in_fix: std::cell::Cell<bool>,
+    /// current substitution for multiplicity variables (`(m : Mult)` params),
+    /// set while elaborating a monomorphized instance of a mult-poly function.
+    /// Empty for ordinary code, where every `SMult` is already `Lit`.
+    mult_env: std::cell::RefCell<HashMap<String, Mult>>,
 }
 
 fn neutral_env(n: usize) -> Vec<Value> {
@@ -773,6 +849,30 @@ impl Elab {
             let head = Term::Ann(Box::new(body.clone()), Box::new(ty.clone()));
             return Ok(args.into_iter().fold(head, |f, a| Term::App(Box::new(f), Box::new(a))));
         }
+        // The linear-Nat order built-ins are a FALLBACK — a user `enum Lt`,
+        // `fn lt`, etc. always wins (checked above). Types `Le a b` / `Lt a b`
+        // (see `mk_ineq_type`); proofs `le(a,b)` / `lt(a,b)` run the stratum-(A)
+        // solver and emit an LCF-checked witness (see `mk_ineq_proof`). All four
+        // need `%builtin Nat` (index `+`).
+        match (name, args.len()) {
+            ("Le", 2) => {
+                let mut a = args.into_iter();
+                return Ok(mk_ineq_type(&a.next().unwrap(), &a.next().unwrap(), false));
+            }
+            ("Lt", 2) => {
+                let mut a = args.into_iter();
+                return Ok(mk_ineq_type(&a.next().unwrap(), &a.next().unwrap(), true));
+            }
+            ("le", 2) => {
+                let mut a = args.into_iter();
+                return mk_ineq_proof(&a.next().unwrap(), &a.next().unwrap(), false);
+            }
+            ("lt", 2) => {
+                let mut a = args.into_iter();
+                return mk_ineq_proof(&a.next().unwrap(), &a.next().unwrap(), true);
+            }
+            _ => {}
+        }
         Err(format!("unbound name `{name}`"))
     }
 
@@ -799,7 +899,8 @@ impl Elab {
                 // param leaks, not double-frees; it needs real surface linear params,
                 // Phase A). A bare `->` and an explicit `(ω …)` are indistinguishable in
                 // the surface, but an ω linear binder is never legitimately wanted.
-                let m = if *m == Mult::Omega && type_is_linear(&ta, &self.rc) { Mult::One } else { *m };
+                let m = m.resolve(&self.mult_env.borrow())?;
+                let m = if m == Mult::Omega && type_is_linear(&ta, &self.rc) { Mult::One } else { m };
                 Ok(Term::Pi(m, Box::new(ta), Box::new(tb)))
             }
             Ty::Var(_) | Ty::App(_, _) => {
@@ -810,6 +911,10 @@ impl Elab {
                     _ => Err("the head of a type application must be a name".into()),
                 }
             }
+            Ty::Add(a, b) => Ok(Term::Add(
+                Box::new(self.elab_ty(a, scope)?),
+                Box::new(self.elab_ty(b, scope)?),
+            )),
         }
     }
 
@@ -1550,7 +1655,7 @@ fn decompose_ctor(mut t: Term, data: &str, nparams: usize) -> Result<(Vec<(Mult,
 }
 
 /// Peel a `Ty` arrow chain into (mult, implicit, name?, domain) entries.
-fn peel_arrows(t: &Ty) -> (Vec<(Mult, bool, Option<String>, Ty)>, Ty) {
+fn peel_arrows(t: &Ty) -> (Vec<(SMult, bool, Option<String>, Ty)>, Ty) {
     let mut out = Vec::new();
     let mut t = t.clone();
     while let Ty::Arrow(m, imp, name, a, b) = t {
@@ -2452,7 +2557,7 @@ fn split_signature(sig: &Ty, explicit: &[String]) -> Result<(Vec<String>, Vec<bo
                     nm
                 } else {
                     // no more fn params: this arrow belongs to the return type
-                    return Ok((names, imps, tys, Ty::Arrow(Mult::Omega, implicit, name, a, b)));
+                    return Ok((names, imps, tys, Ty::Arrow(SMult::Lit(Mult::Omega), implicit, name, a, b)));
                 };
                 let rest = match &name {
                     Some(sn) if Some(&nm) != name.as_ref() => rename_ty(&b, sn, &nm),
@@ -2512,7 +2617,7 @@ fn type_is_linear(ty: &Term, rc: &Rc<Signature>) -> bool {
 
 fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::HashSet<String>) -> bool {
     match ty {
-        Term::Const(n) => n == "Own",
+        Term::Const(n) => rc.linear_types.contains(n),
         Term::Sigma(crate::mult::Mult::One, _, _) => true,
         Term::Sigma(_, a, b) | Term::Pi(_, a, b) | Term::App(a, b) | Term::Pair(a, b) | Term::Add(a, b) => {
             contains_linear(a, rc, seen) || contains_linear(b, rc, seen)
@@ -2523,7 +2628,7 @@ fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::H
         Term::Ann(e, _) => contains_linear(e, rc, seen),
         Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => contains_linear(x, rc, seen),
         Term::Data(name, args) => {
-            if name == "Own" {
+            if rc.linear_types.contains(name) {
                 return true;
             }
             // a linear type ARGUMENT (e.g. `Vec (Own T) n`, `Pair (Own Nat) Unit`).
@@ -2617,8 +2722,12 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
         Ty::Arrow(m, i, name, a, b) => {
             let a2 = rename_ty(a, from, to);
             let b2 = if name.as_deref() == Some(from) { (**b).clone() } else { rename_ty(b, from, to) };
-            Ty::Arrow(*m, *i, name.clone(), Box::new(a2), Box::new(b2))
+            Ty::Arrow(m.clone(), *i, name.clone(), Box::new(a2), Box::new(b2))
         }
+        Ty::Add(a, b) => Ty::Add(
+            Box::new(rename_ty(a, from, to)),
+            Box::new(rename_ty(b, from, to)),
+        ),
     }
 }
 
@@ -2631,16 +2740,27 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
 /// these types (linearity ⇒ no leak / no use-after-free).
 const PRELUDE: &str = r#"
 enum Unit { U : Unit }
-postulate Own   : Type -> Type
+linear postulate Own : Type -> Type
 postulate alloc : {0 a : Type} -> a -> Own a
 postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
 postulate unbox : {0 a : Type} -> (1 o : Own a) -> a
+postulate Loc   : Type
+postulate Ptr   : Loc -> Type
+linear postulate PtsTo : Loc -> Type -> Type
+postulate Hole  : Type
+enum Cell (a : Type) { MkCell : {0 l : Loc} -> (p : Ptr l) -> (1 v : PtsTo l a) -> Cell a }
+enum Taken (a : Type) (l : Loc) { MkTaken : a -> (1 v : PtsTo l Hole) -> Taken a l }
+postulate valloc : {0 a : Type} -> a -> Cell a
+postulate vwrite : {0 a : Type} -> {0 b : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b
+postulate vtake  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
+postulate vread  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> a
+postulate vfree  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Unit
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
 fn item_name(it: &Item) -> Option<&str> {
     match it {
-        Item::Sig(n, _) | Item::Fn(n, _, _, _) | Item::Postulate(n, _) => Some(n),
+        Item::Sig(n, _) | Item::Fn(n, _, _, _) | Item::Postulate(n, _, _) => Some(n),
         Item::Enum { name, .. } | Item::Struct { name, .. } => Some(name),
         Item::BuiltinNat(_) => None,
     }
@@ -2677,6 +2797,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         nat_types: std::collections::HashSet::new(),
         nat_ctor: HashMap::new(),
         in_fix: std::cell::Cell::new(false),
+        mult_env: std::cell::RefCell::new(HashMap::new()),
     };
 
     // pass A: `%builtin Nat T` pragmas. Validate each names a Nat-shaped enum (one
@@ -2686,7 +2807,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     for it in &items {
         if let Item::BuiltinNat(tyname) = it {
             let decl = items.iter().find_map(|x| match x {
-                Item::Enum { name, params, index_ty, variants } if name == tyname => {
+                Item::Enum { name, params, index_ty, variants, .. } if name == tyname => {
                     Some((params, index_ty, variants))
                 }
                 _ => None,
@@ -2732,7 +2853,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     // pass B: arities (skipping the `%builtin Nat` types — they alias the kernel Nat)
     for it in &items {
         match it {
-            Item::Enum { name, params, index_ty, variants } if !elab.nat_types.contains(name) => {
+            Item::Enum { name, params, index_ty, variants, .. } if !elab.nat_types.contains(name) => {
                 let np = params.len();
                 let ni = match index_ty {
                     Some(e) => count_index_pis(e)?,
@@ -2757,7 +2878,10 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     let mut sig = Signature::default();
     for it in &items {
         match it {
-            Item::Enum { name, params, index_ty, variants } if !elab.nat_types.contains(name) => {
+            Item::Enum { name, params, index_ty, variants, linear } if !elab.nat_types.contains(name) => {
+                if *linear {
+                    sig.linear_types.insert(name.clone());
+                }
                 let np = params.len();
                 // family parameters are always solved (implicit) at constructor use sites
                 let param_implicit: Vec<bool> = vec![true; np];
@@ -2765,7 +2889,11 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 let mut kparams = Vec::new();
                 for b in params {
                     let ty = elab.elab_ty(&b.ty, &scope)?;
-                    kparams.push((b.mult.unwrap_or(Mult::Zero), ty));
+                    let pm = match &b.mult {
+                        Some(sm) => sm.resolve(&elab.mult_env.borrow())?,
+                        None => Mult::Zero,
+                    };
+                    kparams.push((pm, ty));
                     scope.push(b.name.clone());
                 }
                 let mut indices = Vec::new();
@@ -2816,7 +2944,11 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 let mut kparams = Vec::new();
                 for b in params {
                     let ty = elab.elab_ty(&b.ty, &scope)?;
-                    kparams.push((b.mult.unwrap_or(Mult::Zero), ty));
+                    let pm = match &b.mult {
+                        Some(sm) => sm.resolve(&elab.mult_env.borrow())?,
+                        None => Mult::Zero,
+                    };
+                    kparams.push((pm, ty));
                     scope.push(b.name.clone());
                 }
                 let mut args = Vec::new();
@@ -2847,13 +2979,16 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             }
             // postulates (opaque typed constants — the memory primitives, etc.),
             // processed in source order so each sees the earlier declarations
-            Item::Postulate(name, pty) => {
+            Item::Postulate(name, pty, linear) => {
                 let ty_term = elab.elab_ty(pty, &[])?;
                 let (arrows, _) = peel_arrows(pty);
                 let flags: Vec<bool> = arrows.iter().map(|(_, i, _, _)| *i).collect();
                 elab.defs.insert(name.clone(), (Term::Const(name.clone()), ty_term.clone()));
                 elab.def_implicit.insert(name.clone(), flags);
                 sig.postulates.push((name.clone(), ty_term));
+                if *linear {
+                    sig.linear_types.insert(name.clone());
+                }
             }
             _ => {}
         }
@@ -2997,6 +3132,53 @@ impl Program {
 }
 
 /// Pretty-print a kernel `Term` (used to display the normal form of `main`).
+/// The order proposition `a ≤ b` (`strict=false`) or `a < b` (`strict=true`) as a
+/// kernel type, encoded existentially over the difference — NO new kernel
+/// primitive, just `Σ` + the identity type whose equation the linear-Nat solver
+/// decides (`src/solver.rs`, `docs/03` stratum A):
+/// ```text
+///   Le a b := Σ (0 d : Nat). Eq Nat (a + d)      b
+///   Lt a b := Σ (0 d : Nat). Eq Nat (Succ a + d) b
+/// ```
+/// `a`/`b` live in the current context; under the fresh `Σ`-binder `d` (de Bruijn
+/// 0) they are shifted up by one.
+fn mk_ineq_type(a: &Term, b: &Term, strict: bool) -> Term {
+    let a1 = dep::shift_term(1, a);
+    let b1 = dep::shift_term(1, b);
+    let lhs = if strict { Term::Suc(Box::new(a1)) } else { a1 };
+    let eqn = Term::Eq(
+        Box::new(Term::Nat),
+        Box::new(Term::Add(Box::new(lhs), Box::new(Term::Var(0)))),
+        Box::new(b1),
+    );
+    Term::Sigma(Mult::Zero, Box::new(Term::Nat), Box::new(eqn))
+}
+
+/// EXPLICIT, proof-producing discharge of `a ≤ b` / `a < b`: the stratum-(A)
+/// solver decides the bound and, if it holds, emits the kernel proof `(d, refl)`
+/// which the kernel re-checks INDEPENDENTLY (LCF discipline — a solver bug fails
+/// to compile, it can never mint an unsound proof). If the bound does not hold it
+/// is a hard error, never a silent stub. The result is annotated with its
+/// `Le`/`Lt` type so it also type-checks in inference position (a bare pair
+/// cannot be inferred). Requires `%builtin Nat` (index `+`).
+fn mk_ineq_proof(a: &Term, b: &Term, strict: bool) -> Result<Term, String> {
+    let lhs = if strict { Term::Suc(Box::new(a.clone())) } else { a.clone() };
+    let d = crate::solver::diff_witness(b, &lhs).ok_or_else(|| {
+        format!(
+            "`{}`: cannot prove  {}  {}  {}  — it does not hold for all Nat",
+            if strict { "lt" } else { "le" },
+            pretty(a),
+            if strict { "<" } else { "<=" },
+            pretty(b),
+        )
+    })?;
+    // (d, refl(lhs + d)): the solver chose d so that `lhs + d ≡ b`, so the kernel's
+    // refl re-check (via `conv`/`canon`) succeeds.
+    let eq = Term::Refl(Box::new(Term::Add(Box::new(lhs), Box::new(d.clone()))));
+    let pair = Term::Pair(Box::new(d), Box::new(eq));
+    Ok(Term::Ann(Box::new(pair), Box::new(mk_ineq_type(a, b, strict))))
+}
+
 pub fn pretty(t: &Term) -> String {
     fn atom(t: &Term) -> String {
         match t {

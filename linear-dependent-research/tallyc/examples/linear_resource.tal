@@ -1,0 +1,36 @@
+// PROPER, USER-DEFINED LINEAR TYPES.
+//
+//   tally check examples/linear_resource.tal
+//
+// `linear` marks a type whose values are RESOURCES: the checker forbids dropping
+// one (a leak) or using one twice (a double-use / use-after-release). This is the
+// exact discipline the memory `Own` and the view layer (`PtsTo`) use — now
+// available to ANY resource: file handles, sockets, capabilities, session
+// channels — with the guarantees falling out of QTT linearity and costing nothing
+// at runtime (the multiplicities are erased). An un-annotated binder of a linear
+// type defaults to multiplicity 1, so you cannot accidentally leak or duplicate
+// it even without writing `(1 ...)`.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// A file handle is a linear resource: opening acquires it, closing releases it.
+linear postulate File : Type
+postulate openf  : Nat -> File     // acquire  (path → handle)
+postulate readf  : File -> File    // use      (consumes and returns the handle)
+postulate closef : File -> Unit    // release  (consumes the handle)
+
+// Open, read twice, close. The handle is THREADED linearly through every use and
+// released exactly once — the type checker verifies acquire/use/release with no
+// bespoke analysis and no runtime cost. Accepted.
+process : Nat -> Unit
+fn process(path) { closef(readf(readf(openf(path)))) }
+
+// The safety net — copy either in to watch linearity reject it:
+//
+//   fn leak(f : File) { U }                          -- REJECTED: handle leaked (0 ⋢ 1)
+//   enum Two { MkTwo : Unit -> Unit -> Two }
+//   fn dbl(f : File) { MkTwo(closef(f), closef(f)) } -- REJECTED: closed twice (ω ⋢ 1)
+//
+// A linear resource may also be wrapped in an ordinary datatype and still be
+// protected: `enum Conn { MkConn : File -> Conn }` makes `Conn` linear too (it
+// contains a linear field), so a `Conn` cannot be dropped or duplicated either.

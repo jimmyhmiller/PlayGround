@@ -17,6 +17,7 @@
 pub mod dep;
 pub mod mult;
 pub mod rust_surface;
+pub mod solver;
 pub(crate) mod totality;
 
 pub mod dep_codegen;

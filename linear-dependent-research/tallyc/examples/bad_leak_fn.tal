@@ -1,13 +1,16 @@
-struct C { val: Int }
+// EXPECTED: REJECTED — this file demonstrates the safety net, so it does NOT
+// type-check by design:
+//
+//   $ tally check examples/bad_leak_fn.tal
+//   fn leak: the variable bound at multiplicity 1 is used 0 time(s) (0 ⋢ 1)
+//
+// A linear owning capability `Own a` is taken at multiplicity `1` (exactly once).
+// Here `o` is dropped — the memory it owns is leaked — and that is a TYPE ERROR,
+// caught by linearity with no bespoke leak analysis. The kernel re-checks the
+// elaborated term, so the discipline is not trusted to the front end.
 
-// takes ownership but neither frees nor returns it: the linear `c` leaks
-fn drop_it(c: Own<C>) -> Int {
-  0
-}
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
-fn main() -> Int {
-  let a = make(1);
-  drop_it(a)
-}
-
-fn make(n: Int) -> Own<C> { alloc C { val: n } }
+// takes ownership but neither frees nor returns it: the linear `o` leaks.
+leak : (1 o : Own Nat) -> Unit
+fn leak(o) { U }
