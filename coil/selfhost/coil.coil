@@ -6777,8 +6777,68 @@
       (ETypeQuery [q t] (cg-bug "codegen: unresolved type-query (compiler bug)"))
       (EFieldMeta [m t idx] (cg-bug "codegen: unresolved field-reflection (compiler bug)"))
       (EFieldIndex [t name] (cg-bug "codegen: unresolved field-reflection (compiler bug)"))
-      (EMakeDyn [ds vt methods inner] (do (unimplemented "codegen: MakeDyn (deferred; no corpus use)") (cg-bug "makedyn")))
-      (EDynDispatch [ds vt mi cc params ret recv args] (do (unimplemented "codegen: DynDispatch (deferred; no corpus use)") (cg-bug "dyndispatch"))))))
+      (EMakeDyn [ds vt methods inner] (emit-make-dyn cg ds vt methods inner scp))
+      (EDynDispatch [ds vt mi cc params ret recv args] (emit-dyn-dispatch cg ds vt mi cc params (box-type (load (field cg a)) ret) recv args scp)))))
+
+; ExprKind::MakeDyn (src/codegen.rs:2774) — erase a concrete (ptr T) to a
+; (dyn Trait) fat pointer. Materialise a constant vtable global (the impl methods'
+; addresses in trait order) and a caller-frame { data, vtable } struct BY VALUE.
+(defn emit-make-dyn [(cg (ptr Cg)) (ds (slice u8)) (vt (slice u8)) (methods (ptr (ArrayList (slice u8)))) (inner (ptr Expr)) (scp (ptr Scope))] (-> Tv)
+  (let [a (load (field cg a)) b (cg-bld cg)
+        iv (emit-expr cg inner scp) data (tv-val iv)
+        vsi (cg-struct-idx cg vt)]
+    (if (icmp-lt vsi 0) (cg-bug (sconcat a "codegen: unknown vtable struct " vt))
+      (let [vty (load (field (al-elem [CgStruct] (field cg structs) vsi) ty))
+            nm (al-len [(slice u8)] (load methods)) (mut fields) (al-new [(ptr i8)] a) (mut i) 0]
+        (loop (if (icmp-ge (load i) nm) (break)
+          (do (let [mn (al-get [(slice u8)] (load methods) (load i)) fv (cg-func cg mn)]
+                (if (icmp-eq (cast i64 fv) 0) (do (unimplemented (sconcat a "codegen: dyn vtable references unknown fn " mn)) 0) 0)
+                (al-push! (mut fields) fv))
+              (store! i (iadd (load i) 1)))))
+        (let [g (LLVMAddGlobal (load (field cg module)) vty (slice->cstr a (sconcat a "vtable." ds)))]
+          (LLVMSetInitializer g (LLVMConstNamedStruct vty (carr a (load fields)) (cast i32 nm)))
+          (LLVMSetGlobalConstant g 1)
+          (let [dsi (cg-struct-idx cg ds)]
+            (if (icmp-lt dsi 0) (cg-bug (sconcat a "codegen: unknown dyn struct " ds))
+              (let [dty (load (field (al-elem [CgStruct] (field cg structs) dsi) ty))
+                    slot (cg-entry-alloca cg dty (cg-bl cg "dyn.obj"))
+                    dp (LLVMBuildStructGEP2 b dty slot 0 (cg-bl cg "dyn.data"))]
+                (LLVMBuildStore b data dp)
+                (let [vp (LLVMBuildStructGEP2 b dty slot 1 (cg-bl cg "dyn.vt"))]
+                  (LLVMBuildStore b g vp)
+                  (mk-tv (LLVMBuildLoad2 b dty slot (cg-bl cg "dyn.val")) (TStruct ds)))))))))))
+
+; ExprKind::DynDispatch (src/codegen.rs:2813) — call a trait method through the
+; fat pointer's vtable: spill the receiver, load data + vtable, load the method's
+; fnptr from vtable slot `mi`, then indirect-call (data, args…).
+(defn emit-dyn-dispatch [(cg (ptr Cg)) (ds (slice u8)) (vt (slice u8)) (mi i64) (cc (slice u8)) (params (ptr (ArrayList Type))) (ret (ptr Type)) (recv (ptr Expr)) (args (ptr (ArrayList Expr))) (scp (ptr Scope))] (-> Tv)
+  (let [a (load (field cg a)) b (cg-bld cg) pty (LLVMPointerTypeInContext (cg-ctx cg) 0)
+        rv (emit-expr cg recv scp) dsi (cg-struct-idx cg ds)]
+    (if (icmp-lt dsi 0) (cg-bug (sconcat a "codegen: unknown dyn struct " ds))
+      (let [dty (load (field (al-elem [CgStruct] (field cg structs) dsi) ty))
+            slot (cg-entry-alloca cg dty (cg-bl cg "dyn.recv"))]
+        (LLVMBuildStore b (tv-val rv) slot)
+        (let [dp (LLVMBuildStructGEP2 b dty slot 0 (cg-bl cg "dyn.data"))
+              data (LLVMBuildLoad2 b pty dp (cg-bl cg "data"))
+              vp (LLVMBuildStructGEP2 b dty slot 1 (cg-bl cg "dyn.vt"))
+              vtab (LLVMBuildLoad2 b pty vp (cg-bl cg "vt"))
+              vsi (cg-struct-idx cg vt)]
+          (if (icmp-lt vsi 0) (cg-bug (sconcat a "codegen: unknown vtable struct " vt))
+            (let [vty (load (field (al-elem [CgStruct] (field cg structs) vsi) ty))
+                  mp (LLVMBuildStructGEP2 b vty vtab (cast i32 mi) (cg-bl cg "vt.m"))
+                  fnptr (LLVMBuildLoad2 b pty mp (cg-bl cg "fn"))
+                  fnty (cg-fn-type cg params ret)
+                  (mut meta) (al-new [(ptr i8)] a)]
+              (al-push! (mut meta) data)
+              (let [n (al-len [Expr] (load args)) (mut i) 0]
+                (loop (if (icmp-ge (load i) n) (break)
+                  (do (let [av (emit-expr cg (al-elem [Expr] args (load i)) scp)]
+                        (al-push! (mut meta) (tv-val av)))
+                      (store! i (iadd (load i) 1))))))
+              (let [cs (LLVMBuildCall2 b fnty fnptr (carr a (load meta)) (cast i32 (al-len [(ptr i8)] (load meta))) (cg-bl cg "dyn.call"))
+                    id (native-cc-parse cc)]
+                (if (icmp-ge id 0) (do (LLVMSetInstructionCallConv cs (cast i32 id)) 0) 0)
+                (mk-tv cs (load ret))))))))))
 
 ; emit a `do`/let body: last value, default (i64 0); stop at a terminator.
 (defn emit-body [(cg (ptr Cg)) (body (ptr (ArrayList Expr))) (scp (ptr Scope))] (-> Tv)
