@@ -49,7 +49,7 @@
   (KList  [(items (ptr (ArrayList Sexp)))])
   (KVec   [(items (ptr (ArrayList Sexp)))]))
 
-(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64)])
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 (defsum TokKind
   (TOpen   [(c i64)])
@@ -147,7 +147,9 @@
   (EMakeDyn   [(dyn_struct (slice u8)) (vtable_struct (slice u8)) (methods (ptr (ArrayList (slice u8)))) (inner (ptr Expr))])
   (EStaticRef [(name (slice u8))]))
 
-(defstruct Expr [(kind ExprKind) (lo i64) (hi i64)])
+; source/ctxt mirror Sexp: an Expr inherits its originating node's SourceMap id
+; and expansion context, so the resolved/checked/mono dumps carry @source:lo:hi:ctxt.
+(defstruct Expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 ; A let binding (name, mutable, value).
 (defstruct Bind [(name (slice u8)) (mutable bool) (value Expr)])
@@ -211,7 +213,7 @@
    (ret Type)
    (body (ptr (ArrayList Expr)))
    (macro_variadic bool)
-   (lo i64) (hi i64)])
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 (defstruct StaticAssert [(cnd Expr) (msg (slice u8))])
 (defstruct Const [(name (slice u8)) (ty (Option Type)) (value Expr)])
@@ -224,7 +226,7 @@
 
 (defstruct ExportC
   [(name (slice u8)) (symbol (Option (slice u8))) (params (ptr (ArrayList Type)))
-   (lo i64) (hi i64)])
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 ; The whole program (src/ast.rs Program). `statics` is omitted: parsing never
 ; produces statics (they come from checking), so the dump always emits an empty
@@ -243,12 +245,13 @@
    (exports (ptr (ArrayList ExportC)))])
 
 ; A parse/read diagnostic (src/span.rs Diag); dummy span = -1.
-(defstruct Diag [(lo i64) (hi i64) (msg (slice u8))])
+(defstruct Diag [(lo i64) (hi i64) (msg (slice u8)) (source i64) (ctxt i64)])
 
 ; ============================ small constructors =============================
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
   (let [p (alloc-stack Sexp)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
   (let [p (alloc-stack Tok)]
@@ -257,6 +260,7 @@
 (defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
   (let [p (alloc-stack Diag)]
     (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p msg) msg)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
   (let [p (alloc-stack StrRead)]
@@ -273,10 +277,16 @@
 (defn box-type [(a (ptr Allocator)) (t Type)] (-> (ptr Type))
   (let [p (unwrap-ptr [Type] (create [Type] a))] (store! p t) p))
 
-(defn mk-expr [(kind ExprKind) (lo i64) (hi i64)] (-> Expr)
+; An Expr carries the source id + expansion ctxt of the node it derives from
+; (a Sexp via sx-source/sx-ctxt, or another Expr via esrc/ectxt); a synthesized
+; node passes source=-1 (dummy span, prints D). Kept as the sole Expr constructor.
+(defn mk-expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> Expr)
   (let [p (alloc-stack Expr)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) source) (store! (field p ctxt) ctxt)
     (load p)))
+(defn esrc  [(e (ptr Expr))] (-> i64) (load (field e source)))
+(defn ectxt [(e (ptr Expr))] (-> i64) (load (field e ctxt)))
 
 ; ============================ numeric/string utils ===========================
 (defn f64-bits [(x f64)] (-> i64)
@@ -314,16 +324,15 @@
         (do (wb w (hexd (iand (ishr n (load k)) 15))) (store! k (isub (load k) 4))))))
   0)
 
-; A span `@lo:hi`, dummy (lo/hi = -1) prints as `@D:…`/`…:D` (mirrors dump_span).
-(defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
+; Canonical span `@source:lo:hi:ctxt`; a field <0 (u32::MAX / dummy) prints 'D'.
+(defn dump-span-field [(w (ptr Writer)) (v i64)] (-> i64)
+  (if (icmp-lt v 0) (wb w 68) (dump-dec w v)))
+(defn dump-span [(w (ptr Writer)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
   (wb w 64)
-  (if (icmp-lt lo 0) (wb w 68) (wb w 48))
-  (wb w 58)
-  (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))
-  (wb w 58)
-  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi))
-  (wb w 58)
-  (wb w 48))
+  (dump-span-field w source) (wb w 58)
+  (dump-span-field w lo)     (wb w 58)
+  (dump-span-field w hi)     (wb w 58)
+  (dump-span-field w ctxt))
 
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
   (wb w (hexd (iand (ishr b 4) 15))) (wb w (hexd (iand b 15))))
@@ -350,10 +359,10 @@
 ; ============================ Sexp canonical dump (for quote) =================
 ; Mirrors src/reader.rs dump_node (reused by EQuote / QLit). Identical to
 ; selfhost/reader.coil's dumper.
-(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi) (ps w " \"") (esc-write w s) (ps w "\")"))
-(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi)
+(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt) (ps w " \"") (esc-write w s) (ps w "\")"))
+(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt)
   (let [(mut i) 0 n (al-len [Sexp] (load items))]
     (loop
       (if (icmp-ge (load i) n) (break)
@@ -364,16 +373,17 @@
             (store! i (iadd (load i) 1))))))
   (wb w 41))
 (defn sx-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
-  (let [lo (load (field x lo)) hi (load (field x hi))]
+  (let [lo (load (field x lo)) hi (load (field x hi))
+        src (load (field x source)) ctxt (load (field x ctxt))]
     (match (load (field x kind))
-      (KInt   [v]     (do (ps w "(int") (dump-span w lo hi) (wb w 32) (dump-dec w v) (wb w 41)))
-      (KFloat [bits]  (do (ps w "(float") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
-      (KSym   [s]     (sx-atom w "sym" s lo hi))
-      (KKw    [s]     (sx-atom w "kw" s lo hi))
-      (KStr   [s]     (sx-atom w "str" s lo hi))
-      (KCStr  [s]     (sx-atom w "cstr" s lo hi))
-      (KList  [items] (sx-seq w "list" items lo hi))
-      (KVec   [items] (sx-seq w "vec" items lo hi)))))
+      (KInt   [v]     (do (ps w "(int") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v) (wb w 41)))
+      (KFloat [bits]  (do (ps w "(float") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
+      (KSym   [s]     (sx-atom w "sym" s src lo hi ctxt))
+      (KKw    [s]     (sx-atom w "kw" s src lo hi ctxt))
+      (KStr   [s]     (sx-atom w "str" s src lo hi ctxt))
+      (KCStr  [s]     (sx-atom w "cstr" s src lo hi ctxt))
+      (KList  [items] (sx-seq w "list" items src lo hi ctxt))
+      (KVec   [items] (sx-seq w "vec" items src lo hi ctxt)))))
 
 ; ============================ AST canonical dump =============================
 ; Mirrors src/dump_ast.rs EXACTLY. Every helper corresponds to a Rust dumper.
@@ -515,60 +525,61 @@
                           (wb w 41)))))
 
 (defn d-expr [(w (ptr Writer)) (e (ptr Expr))] (-> i64)
-  (let [lo (load (field e lo)) hi (load (field e hi))]
+  (let [lo (load (field e lo)) hi (load (field e hi))
+        src (load (field e source)) ctxt (load (field e ctxt))]
     (wb w 40)
     (match (load (field e kind))
-      (EInt   [v]    (do (ps w "eint") (dump-span w lo hi) (wb w 32) (dump-dec w v)))
-      (EFloat [bits] (do (ps w "efloat") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits)))
-      (EBool  [b]    (do (ps w "ebool") (dump-span w lo hi) (wb w 32) (dbool w b)))
-      (EStr   [s]    (do (ps w "estr") (dump-span w lo hi) (wb w 32) (dstr w s)))
-      (ECStr  [s]    (do (ps w "ecstr") (dump-span w lo hi) (wb w 32) (dstr w s)))
-      (EVar   [name] (do (ps w "var") (dump-span w lo hi) (wb w 32) (dstr w name)))
-      (EZeroed[ty]   (do (ps w "zeroed") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EBorrow[m place] (do (ps w "borrow") (dump-span w lo hi) (wb w 32) (dbool w m) (wb w 32) (d-expr w place)))
-      (ELet   [binds body] (do (ps w "let") (dump-span w lo hi) (wb w 32) (d-binds w binds) (wb w 32) (d-exprs w body)))
-      (EBin   [op lhs rhs] (do (ps w "bin") (dump-span w lo hi) (wb w 32) (d-binop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
-      (ENot   [inner] (do (ps w "inot") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (ECmp   [op lhs rhs] (do (ps w "cmp") (dump-span w lo hi) (wb w 32) (d-cmpop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
-      (EIf    [cnd thn els] (do (ps w "if") (dump-span w lo hi) (wb w 32) (d-expr w cnd) (wb w 32) (d-expr w thn) (wb w 32) (d-expr w els)))
-      (EDo    [body] (do (ps w "do") (dump-span w lo hi) (wb w 32) (d-exprs w body)))
-      (ECall  [func type_args args] (do (ps w "call") (dump-span w lo hi) (wb w 32) (dstr w func) (wb w 32) (d-types w type_args) (wb w 32) (d-exprs w args)))
-      (EAlloc [storage ty] (do (ps w "alloc") (dump-span w lo hi) (wb w 32) (d-storage w storage) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EField [p fname] (do (ps w "field") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
-      (ELoad  [inner] (do (ps w "load") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (EStore [p val] (do (ps w "store") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (d-expr w val)))
-      (EIndex [p idx] (do (ps w "index") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (d-expr w idx)))
-      (ECast  [ty inner] (do (ps w "cast") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
-      (ESizeOf[ty] (do (ps w "sizeof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EAlignOf[ty] (do (ps w "alignof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EOffsetOf[ty fname] (do (ps w "offsetof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (dstr w fname)))
-      (EBitGet[p fname] (do (ps w "bitget") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
-      (EBitSet[p fname val] (do (ps w "bitset") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname) (wb w 32) (d-expr w val)))
-      (EFree  [inner] (do (ps w "free") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (EErase [trait_name inner] (do (ps w "erase") (dump-span w lo hi) (wb w 32) (dstr w trait_name) (wb w 32) (d-expr w inner)))
-      (EMatch [scrut arms] (do (ps w "match") (dump-span w lo hi) (wb w 32) (d-expr w scrut) (wb w 32) (d-arms w arms)))
-      (EFnPtrOf[name] (do (ps w "fnptrof") (dump-span w lo hi) (wb w 32) (dstr w name)))
-      (ECallPtr[fp args] (do (ps w "callptr") (dump-span w lo hi) (wb w 32) (d-expr w fp) (wb w 32) (d-exprs w args)))
-      (ELoop  [label body] (do (ps w "loop") (dump-span w lo hi) (wb w 32) (d-opt-str w label) (wb w 32) (d-exprs w body)))
-      (EBreak [label value] (do (ps w "break") (dump-span w lo hi) (wb w 32) (d-opt-str w label) (wb w 32) (d-opt-expr w value)))
-      (EContinue[label] (do (ps w "continue") (dump-span w lo hi) (wb w 32) (d-opt-str w label)))
-      (ELlvmIr[result args body] (do (ps w "llvmir") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t result) (d-type w t)) (wb w 32) (d-exprs w args) (wb w 32) (dstr w body)))
-      (ETypeQuery[q ty] (do (ps w "typequery") (dump-span w lo hi) (wb w 32) (d-typequery w q) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EFieldMeta[meta ty idx] (do (ps w "fieldmeta") (dump-span w lo hi) (wb w 32) (d-fieldmeta w meta) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w idx)))
-      (EFieldIndex[ty name] (do (ps w "fieldindex") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w name)))
-      (EQuote [form] (do (ps w "quote") (dump-span w lo hi) (wb w 32) (sx-node w form)))
-      (ECodeOp[op args] (do (ps w "codeop") (dump-span w lo hi) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
-      (EQuasi [q] (do (ps w "quasi") (dump-span w lo hi) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
-      (EComptime[inner] (do (ps w "comptime") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
+      (EInt   [v]    (do (ps w "eint") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v)))
+      (EFloat [bits] (do (ps w "efloat") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits)))
+      (EBool  [b]    (do (ps w "ebool") (dump-span w src lo hi ctxt) (wb w 32) (dbool w b)))
+      (EStr   [s]    (do (ps w "estr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (ECStr  [s]    (do (ps w "ecstr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (EVar   [name] (do (ps w "var") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (EZeroed[ty]   (do (ps w "zeroed") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EBorrow[m place] (do (ps w "borrow") (dump-span w src lo hi ctxt) (wb w 32) (dbool w m) (wb w 32) (d-expr w place)))
+      (ELet   [binds body] (do (ps w "let") (dump-span w src lo hi ctxt) (wb w 32) (d-binds w binds) (wb w 32) (d-exprs w body)))
+      (EBin   [op lhs rhs] (do (ps w "bin") (dump-span w src lo hi ctxt) (wb w 32) (d-binop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (ENot   [inner] (do (ps w "inot") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (ECmp   [op lhs rhs] (do (ps w "cmp") (dump-span w src lo hi ctxt) (wb w 32) (d-cmpop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (EIf    [cnd thn els] (do (ps w "if") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w cnd) (wb w 32) (d-expr w thn) (wb w 32) (d-expr w els)))
+      (EDo    [body] (do (ps w "do") (dump-span w src lo hi ctxt) (wb w 32) (d-exprs w body)))
+      (ECall  [func type_args args] (do (ps w "call") (dump-span w src lo hi ctxt) (wb w 32) (dstr w func) (wb w 32) (d-types w type_args) (wb w 32) (d-exprs w args)))
+      (EAlloc [storage ty] (do (ps w "alloc") (dump-span w src lo hi ctxt) (wb w 32) (d-storage w storage) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EField [p fname] (do (ps w "field") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (ELoad  [inner] (do (ps w "load") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EStore [p val] (do (ps w "store") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w val)))
+      (EIndex [p idx] (do (ps w "index") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w idx)))
+      (ECast  [ty inner] (do (ps w "cast") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
+      (ESizeOf[ty] (do (ps w "sizeof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EAlignOf[ty] (do (ps w "alignof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EOffsetOf[ty fname] (do (ps w "offsetof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (dstr w fname)))
+      (EBitGet[p fname] (do (ps w "bitget") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (EBitSet[p fname val] (do (ps w "bitset") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname) (wb w 32) (d-expr w val)))
+      (EFree  [inner] (do (ps w "free") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EErase [trait_name inner] (do (ps w "erase") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (d-expr w inner)))
+      (EMatch [scrut arms] (do (ps w "match") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w scrut) (wb w 32) (d-arms w arms)))
+      (EFnPtrOf[name] (do (ps w "fnptrof") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (ECallPtr[fp args] (do (ps w "callptr") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w fp) (wb w 32) (d-exprs w args)))
+      (ELoop  [label body] (do (ps w "loop") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-exprs w body)))
+      (EBreak [label value] (do (ps w "break") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-opt-expr w value)))
+      (EContinue[label] (do (ps w "continue") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label)))
+      (ELlvmIr[result args body] (do (ps w "llvmir") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t result) (d-type w t)) (wb w 32) (d-exprs w args) (wb w 32) (dstr w body)))
+      (ETypeQuery[q ty] (do (ps w "typequery") (dump-span w src lo hi ctxt) (wb w 32) (d-typequery w q) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EFieldMeta[meta ty idx] (do (ps w "fieldmeta") (dump-span w src lo hi ctxt) (wb w 32) (d-fieldmeta w meta) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w idx)))
+      (EFieldIndex[ty name] (do (ps w "fieldindex") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w name)))
+      (EQuote [form] (do (ps w "quote") (dump-span w src lo hi ctxt) (wb w 32) (sx-node w form)))
+      (ECodeOp[op args] (do (ps w "codeop") (dump-span w src lo hi ctxt) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
+      (EQuasi [q] (do (ps w "quasi") (dump-span w src lo hi ctxt) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
+      (EComptime[inner] (do (ps w "comptime") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
       ; ---- the 6 check-introduced variants (mirror src/dump_ast.rs) ----
-      (ESpillRef[inner] (do (ps w "spillref") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (EConstruct[sum variant args] (do (ps w "construct") (dump-span w lo hi) (wb w 32) (dstr w sum) (wb w 32) (dstr w variant) (wb w 32) (d-exprs w args)))
-      (ETraitCall[trait_name method self_tp args] (do (ps w "traitcall") (dump-span w lo hi) (wb w 32) (dstr w trait_name) (wb w 32) (dstr w method) (wb w 32) (dstr w self_tp) (wb w 32) (d-exprs w args)))
+      (ESpillRef[inner] (do (ps w "spillref") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EConstruct[sum variant args] (do (ps w "construct") (dump-span w src lo hi ctxt) (wb w 32) (dstr w sum) (wb w 32) (dstr w variant) (wb w 32) (d-exprs w args)))
+      (ETraitCall[trait_name method self_tp args] (do (ps w "traitcall") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (dstr w method) (wb w 32) (dstr w self_tp) (wb w 32) (d-exprs w args)))
       (EDynDispatch[dyn_struct vtable_struct method_index cc params ret recv args]
-        (do (ps w "dyndispatch") (dump-span w lo hi) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (dump-dec w method_index) (wb w 32) (dstr w cc) (wb w 32) (d-types w params) (wb w 32) (let [t (alloc-stack Type)] (store! t ret) (d-type w t)) (wb w 32) (d-expr w recv) (wb w 32) (d-exprs w args)))
+        (do (ps w "dyndispatch") (dump-span w src lo hi ctxt) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (dump-dec w method_index) (wb w 32) (dstr w cc) (wb w 32) (d-types w params) (wb w 32) (let [t (alloc-stack Type)] (store! t ret) (d-type w t)) (wb w 32) (d-expr w recv) (wb w 32) (d-exprs w args)))
       (EMakeDyn[dyn_struct vtable_struct methods inner]
-        (do (ps w "makedyn") (dump-span w lo hi) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (d-strs w methods) (wb w 32) (d-expr w inner)))
-      (EStaticRef[name] (do (ps w "staticref") (dump-span w lo hi) (wb w 32) (dstr w name))))
+        (do (ps w "makedyn") (dump-span w src lo hi ctxt) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (d-strs w methods) (wb w 32) (d-expr w inner)))
+      (EStaticRef[name] (do (ps w "staticref") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name))))
     (wb w 41)))
 
 ; ---- declarations ----
@@ -626,7 +637,7 @@
   (let [t (alloc-stack Type)] (store! t (load (field f ret))) (d-type w t)) (wb w 32)
   (d-exprs w (load (field f body))) (wb w 32)
   (dbool w (load (field f macro_variadic))) (wb w 32)
-  (dump-span w (load (field f lo)) (load (field f hi))) (wb w 41))
+  (dump-span w (load (field f source)) (load (field f lo)) (load (field f hi)) (load (field f ctxt))) (wb w 41))
 
 (defn d-convention [(w (ptr Writer)) (c (ptr Convention))] (-> i64)
   (ps w "(cc ") (dstr w (load (field c name))) (wb w 32)
@@ -721,7 +732,7 @@
   (ps w "(export ") (dstr w (load (field e name))) (wb w 32)
   (d-opt-str w (load (field e symbol))) (wb w 32)
   (d-types w (load (field e params))) (wb w 32)
-  (dump-span w (load (field e lo)) (load (field e hi))) (wb w 41))
+  (dump-span w (load (field e source)) (load (field e lo)) (load (field e hi)) (load (field e ctxt))) (wb w 41))
 
 ; Byte-lexicographic `<` on strings (Rust String Ord over ASCII conv names):
 ; a proper prefix is less than the longer string.
@@ -866,6 +877,8 @@
 (defn sx-items [(s Sexp)] (-> (ptr (ArrayList Sexp))) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p items))))
 (defn sx-lo [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p lo))))
 (defn sx-hi [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p hi))))
+(defn sx-source [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p source))))
+(defn sx-ctxt [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p ctxt))))
 (defn sx-len [(l (ptr (ArrayList Sexp)))] (-> i64) (al-len [Sexp] (load l)))
 (defn sx-at  [(l (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load l) i))
 (defn sx-get [(l (ptr (ArrayList Sexp))) (i i64)] (-> (Option Sexp))
@@ -904,9 +917,9 @@
 ; ---- diagnostics ----
 (defn derr    [(msg (slice u8))] (-> Diag) (mk-diag -1 -1 msg))
 (defn derr-at [(lo i64) (hi i64) (msg (slice u8))] (-> Diag) (mk-diag lo hi msg))
-(defn dwspan  [(d Diag) (lo i64) (hi i64)] (-> Diag)
+(defn dwspan  [(d Diag) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> Diag)
   (let [p (alloc-stack Diag)] (store! p d)
-    (if (icmp-lt (load (field p lo)) 0) (do (store! (field p lo) lo) (store! (field p hi) hi)) 0)
+    (if (icmp-lt (load (field p lo)) 0) (do (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p source) source) (store! (field p ctxt) ctxt)) 0)
     (load p)))
 
 ; ---- Option -> Result with a message (mirrors `.ok_or(msg)?`) ----
@@ -983,7 +996,7 @@
     (Ok (box-al [Type] a (load out))))))
 (defn parse-type [(a (ptr Allocator)) (s Sexp)] (-> (Result Type Diag))
   (match (parse-type-inner a s)
-    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s))))
+    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s))))
     (Ok [t] (Ok t))))
 (defn parse-type-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result Type Diag))
   (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
@@ -1097,8 +1110,8 @@
     (Ok (box-al [Expr] a (load out))))))
 (defn parse-expr [(a (ptr Allocator)) (s Sexp)] (-> (Result Expr Diag))
   (match (parse-expr-inner a s)
-    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s))))
-    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s))))))
+    (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s))))
+    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s))))))
 (defn parse-expr-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result ExprKind Diag))
   (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
     (if (icmp-eq tg 0) (Ok (EInt (sx-ival s)))
@@ -1108,7 +1121,7 @@
     (if (icmp-eq tg 4) (Ok (EStr (sx-sval s)))
     (if (icmp-eq tg 5) (Ok (ECStr (sx-sval s)))
     (if (icmp-eq tg 7) (Err (derr-at slo shi "unexpected vector in expression"))
-      (parse-list-expr a (sx-items s) slo shi))))))))))
+      (parse-list-expr a (sx-items s) slo shi (sx-source s) (sx-ctxt s)))))))))))
 
 ; A leading :label keyword (src/parse.rs parse_label).
 (defstruct LabelSplit [(label (Option (slice u8))) (rest (ptr (ArrayList Sexp)))])
@@ -1156,7 +1169,7 @@
             (loop (if (icmp-ge (load bi) nb) (break) (do (al-push! (mut binds) (try! (sym-of a (sx-at bv (load bi)) "bind"))) (store! bi (iadd (load bi) 1)))))
             (let [bodyf (try! (parse-exprs a (rest-from a al 2))) nbody (al-len [Expr] (load bodyf))]
               (let [body (if (icmp-eq nbody 0) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo arm-s) (sx-hi arm-s) (sconcat3 a "arm '" variant "': missing body"))))
-                           (if (icmp-eq nbody 1) (al-get [Expr] (load bodyf) 0) (mk-expr (EDo bodyf) (sx-lo arm-s) (sx-hi arm-s))))]
+                           (if (icmp-eq nbody 1) (al-get [Expr] (load bodyf) 0) (mk-expr (EDo bodyf) (sx-lo arm-s) (sx-hi arm-s) (sx-source arm-s) (sx-ctxt arm-s))))]
                 (let [ap (alloc-stack Arm)] (store! (field ap variant) variant) (store! (field ap binds) (box-al [(slice u8)] a (load binds))) (store! (field ap body) body) (al-push! (mut arms) (load ap))))))))))
     (Ok (EMatch scrut (box-al [Arm] a (load arms)))))))
 
@@ -1171,7 +1184,7 @@
         (Ok (ELlvmIr result operands (sx-sval bv))))))))
 
 ; the big head dispatch (src/parse.rs parse_list_expr).
-(defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+(defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ExprKind Diag))
   (try (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
     (let [bop (binop-of head)]
     (if (icmp-ge bop 0) (mk-bin a args head bop)
@@ -1180,12 +1193,12 @@
     (if (str-eq head "inot") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "inot: expects (inot x)")) (Ok (ENot (box-expr a (try! (parse-expr a (sx-at args 0)))))))
     (if (str-eq head "and")
         (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "and")))
-          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))) (box-expr a (mk-expr (EBool false) slo shi)))))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))) (box-expr a (mk-expr (EBool false) slo shi ssrc sctxt)))))
     (if (str-eq head "or")
         (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "or")))
-          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (mk-expr (EBool true) slo shi)) (box-expr a (try! (parse-expr a (load (field tp y))))))))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (mk-expr (EBool true) slo shi ssrc sctxt)) (box-expr a (try! (parse-expr a (load (field tp y))))))))
     (if (str-eq head "not") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "not: expects (not x)"))
-        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (mk-expr (EBool false) slo shi)) (box-expr a (mk-expr (EBool true) slo shi)))))
+        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (mk-expr (EBool false) slo shi ssrc sctxt)) (box-expr a (mk-expr (EBool true) slo shi ssrc sctxt)))))
     (if (str-eq head "if") (if (icmp-ne nargs 3) (Err [ExprKind Diag] (derr-at slo shi "if: expects (if cond then else)"))
         (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (try! (parse-expr a (sx-at args 1)))) (box-expr a (try! (parse-expr a (sx-at args 2)))))))
     (if (str-eq head "do") (Ok (EDo (try! (parse-exprs a args))))
@@ -1497,7 +1510,7 @@
                 (Ok (let [f (alloc-stack Func)]
                       (store! (field f name) name) (store! (field f type_params) (load (field tpr params))) (store! (field f bounds) (load (field tpr bounds)))
                       (store! (field f cc) (load cc)) (store! (field f params) (box-al [Param] a (load params))) (store! (field f ret) ret)
-                      (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (load f))))))))))))
+                      (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0) (load f))))))))))))
 
 (defn parse-deftrait [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result TraitDef Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "deftrait: missing name")) "trait name"))
@@ -1525,7 +1538,7 @@
               (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
     (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
 
-(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ImplDef Diag))
+(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef Diag))
   (try (let [trait-name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "impl: missing trait name")) "trait name"))
              for-type (try! (sym-of a (try! (need [Sexp] (sx-get rest 1) "impl: missing type name")) "impl type"))
              (mut methods) (al-new [Func] a) nr (sx-len rest) (mut mi) 2]
@@ -1534,7 +1547,7 @@
         (store! mi (iadd (load mi) 1))
         (let [ml (try! (as-list m "impl method must be (name [params] (-> ret) body…)"))
               f0 (try! (parse-defn a ml))]
-          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (al-push! (mut methods) (load fp)))))))
+          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (store! (field fp source) ssrc) (store! (field fp ctxt) sctxt) (al-push! (mut methods) (load fp)))))))
     (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im))))))
 
 (defn parse-export-c [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList ExportC)) Diag))
@@ -1544,12 +1557,12 @@
         (store! i (iadd (load i) 1))
         (let [tg (sx-tag item)]
           (if (icmp-eq tg 2)
-              (let [ep (alloc-stack ExportC)] (store! (field ep name) (sx-sval item)) (store! (field ep symbol) (None [(slice u8)])) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep)))
+              (let [ep (alloc-stack ExportC)] (store! (field ep name) (sx-sval item)) (store! (field ep symbol) (None [(slice u8)])) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (store! (field ep source) (sx-source item)) (store! (field ep ctxt) (sx-ctxt item)) (al-push! (mut out) (load ep)))
             (if (icmp-eq tg 7)
                 (let [v (sx-items item)
                       nm (if (and (icmp-gt (sx-len v) 0) (icmp-eq (sx-tag (sx-at v 0)) 2)) (sx-sval (sx-at v 0)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))
                       sym0 (if (and (opt-is-kw (sx-get v 1) "as") (opt-is-str (sx-get v 2))) (opt-str-val (sx-get v 2)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))]
-                  (let [ep (alloc-stack ExportC)] (store! (field ep name) nm) (store! (field ep symbol) (Some sym0)) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep))))
+                  (let [ep (alloc-stack ExportC)] (store! (field ep name) nm) (store! (field ep symbol) (Some sym0)) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (store! (field ep source) (sx-source item)) (store! (field ep ctxt) (sx-ctxt item)) (al-push! (mut out) (load ep))))
               (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: each entry is a function name or [name :as \"symbol\"]")))))))))
     (Ok (box-al [ExportC] a (load out))))))
 
@@ -1569,7 +1582,7 @@
     (al-push! (mut convs) (default-c-convention a))
     (let [nf (sx-len forms) (mut fi) 0]
       (loop (if (icmp-ge (load fi) nf) (break)
-        (let [form (sx-at forms (load fi)) flo (sx-lo form) fhi (sx-hi form)]
+        (let [form (sx-at forms (load fi)) flo (sx-lo form) fhi (sx-hi form) fsrc (sx-source form) fctxt (sx-ctxt form)]
           (store! fi (iadd (load fi) 1))
           (let [res
                 (match (as-list form "top-level form must be a list")
@@ -1593,7 +1606,7 @@
                           (if (str-eq head "defn")
                               (match (parse-defn a rest) (Err [d] (Err [i64 Diag] d))
                                 (Ok [f0]
-                                  (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) flo) (store! (field fp hi) fhi)
+                                  (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) flo) (store! (field fp hi) fhi) (store! (field fp source) fsrc) (store! (field fp ctxt) fctxt)
                                     (let [nm (load (field fp name)) (mut dup) false (mut ci) 0 cn (al-len [Func] (load funcs))]
                                       (loop (if (icmp-ge (load ci) cn) (break) (do (if (str-eq (func-name (al-get [Func] (load funcs) (load ci))) nm) (do (store! dup true) 0) 0) (store! ci (iadd (load ci) 1)))))
                                       (if (load dup) (Err [i64 Diag] (derr (sconcat3 a "function '" nm "' defined twice"))) (do (al-push! (mut funcs) (load fp)) (Ok [i64 Diag] 0)))))))
@@ -1605,12 +1618,12 @@
                               (match (parse-static-assert a items) (Ok [sa] (do (al-push! (mut asserts) sa) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "const") (match (parse-const a rest) (Ok [c] (do (al-push! (mut consts) c) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "deftrait") (match (parse-deftrait a rest) (Ok [t] (do (al-push! (mut traits) t) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
-                          (if (str-eq head "impl") (match (parse-impl a rest flo fhi) (Ok [im] (do (al-push! (mut impls) im) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "impl") (match (parse-impl a rest flo fhi fsrc fctxt) (Ok [im] (do (al-push! (mut impls) im) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "meta")
                               (if (not (icmp-eq (sx-len items) 2)) (Err [i64 Diag] (derr "meta: expected (meta EXPR)"))
                                   (match (parse-expr a (sx-at items 1)) (Ok [e] (do (al-push! (mut metas) e) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d))))
                             (Err [i64 Diag] (derr (sconcat3 a "unknown top-level form '" head "'")))))))))))))))))))]
-            (match res (Ok [_] 0) (Err [d] (do (store! err (dwspan d flo fhi)) (store! failed true) (break)))))))))
+            (match res (Ok [_] 0) (Err [d] (do (store! err (dwspan d flo fhi fsrc fctxt)) (store! failed true) (break)))))))))
     (if (load failed) (Err (load err))
         (Ok (let [pp (alloc-stack Program)]
               (store! (field pp conventions) (box-al [Convention] a (load convs)))
@@ -1877,9 +1890,28 @@
                                     (Err [d] (do (store! out (Err d)) (break))))))))))
                   (load out)))))))))
 
-(defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+; Recursively stamp `source` on a node + descendants (in place); ctxt untouched.
+(defn stamp-source-list [(items (ptr (ArrayList Sexp))) (source i64)] (-> i64)
+  (let [n (al-len [Sexp] (load items)) (mut i) 0 data (load (field items data))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (stamp-source-node (index data (load i)) source) (store! i (iadd (load i) 1))))))
+  0)
+(defn stamp-source-node [(x (ptr Sexp)) (source i64)] (-> i64)
+  (store! (field x source) source)
+  (match (load (field x kind))
+    (KList  [items] (stamp-source-list items source))
+    (KVec   [items] (stamp-source-list items source))
+    (KInt   [v] 0) (KFloat [b] 0) (KSym  [s] 0)
+    (KKw    [s] 0) (KStr   [s] 0) (KCStr [s] 0))
+  0)
+(defn diag-with-source [(d Diag) (source i64)] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p d)
+    (if (icmp-ge (load (field p lo)) 0) (store! (field p source) source) 0)
+    (load p)))
+
+(defn read-all [(a (ptr Allocator)) (src (slice u8)) (source i64)] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (match (tokenize a src)
-    (Err [d] (Err d))
+    (Err [d] (Err (diag-with-source d source)))
     (Ok [toks]
       (let [p (alloc-stack Parser) (mut out) (al-new [Sexp] a) (mut err) (zeroed Diag) (mut failed) false]
         (store! (field p toks) toks) (store! (field p pos) 0)
@@ -1888,18 +1920,19 @@
             (match (parse-one p a)
               (Ok [s] (do (al-push! (mut out) s) 0))
               (Err [d] (do (store! err d) (store! failed true) (break))))))
-        (if (load failed) (Err (load err)) (Ok (box-items a (load out))))))))
+        (if (load failed) (Err (diag-with-source (load err) source))
+          (let [forms (box-items a (load out))] (stamp-source-list forms source) (Ok forms)))))))
 
 ; ============================ canonical dump entry ==========================
 ; Emits the `(error@lo:hi "msg")` shape on a read/parse error (mirrors dump_ast
 ; in src/lib.rs). A dummy span (lo/hi = -1) prints `D`.
 (defn dump-error [(w (ptr Writer)) (d (ptr Diag))] (-> i64)
-  (ps w "(error") (dump-span w (load (field d lo)) (load (field d hi)))
+  (ps w "(error") (dump-span w (load (field d source)) (load (field d lo)) (load (field d hi)) (load (field d ctxt)))
   (ps w " \"") (esc-write w (load (field d msg))) (ps w "\")"))
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
-    (match (read-all a src)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (match (parse-program a forms)
@@ -2003,7 +2036,10 @@
    (out     (ArrayList TaggedForm))
    (loaded  (ArrayList (slice u8)))
    (imports (ArrayList ImpEntry))
-   (exports (ArrayList ExpEntry))])
+   (exports (ArrayList ExpEntry))
+   ; Next SourceMap id to hand out (main=0, prelude=1, imports 2..; a duplicate
+   ; import still consumes an id — mirrors src/macros.rs sm.add before dedup).
+   (srccount i64)])
 
 (defstruct Resolved [(text (slice u8)) (incdir (slice u8))])
 
@@ -2307,8 +2343,10 @@
     (let [rr (resolve-source a base path)
           rp (alloc-stack Resolved)]
       (store! rp rr)
-      (let [text (load (field rp text)) incdir (load (field rp incdir))]
-        (match (read-all a text)
+      (let [text (load (field rp text)) incdir (load (field rp incdir))
+            inc-id (load (field s srccount))
+            _ignore (store! (field s srccount) (iadd inc-id 1))]
+        (match (read-all a text inc-id)
           (Err [d] (do (loader-abort "import: read error in imported file") 0))
           (Ok [inc-forms]
             (let [modname (match (declared-module inc-forms)
@@ -2350,8 +2388,10 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))]
-    (match (read-all a prelude-text)
+        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))
+        prelude-id (load (field s srccount))
+        _ignore (store! (field s srccount) (iadd prelude-id 1))]
+    (match (read-all a prelude-text prelude-id)
       (Err [d] (do (loader-abort "read error in prelude") 0))
       (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))
     (process-forms (mut s) forms base (None [(slice u8)]))
@@ -3500,7 +3540,7 @@
 ; coerce_lit (src/check.rs:2867)
 (defn coerce-lit [(a (ptr Allocator)) (e Expr) (target (ptr Type)) (fname (slice u8))] (-> (Result Expr Diag))
   (let [ep (alloc-stack Expr)] (store! ep e)
-    (let [wrap (mk-expr (ECast (load target) (box-expr a (load ep))) (load (field ep lo)) (load (field ep hi)))]
+    (let [wrap (mk-expr (ECast (load target) (box-expr a (load ep))) (load (field ep lo)) (load (field ep hi)) (load (field ep source)) (load (field ep ctxt)))]
       (match-else (load (field ep kind))
         (EInt [n]
           (match-else (load target)
@@ -3524,7 +3564,7 @@
                 (match-else (load et)
                   (TRef [m inner]
                     (if (type-eq inner target)
-                        (Ok (mk-expr (ELoad (box-expr a (load ep))) (load (field ep lo)) (load (field ep hi))))
+                        (Ok (mk-expr (ELoad (box-expr a (load ep))) (load (field ep lo)) (load (field ep hi)) (load (field ep source)) (load (field ep ctxt))))
                         (coerce-fail a et target fname what)))
                   (_ (coerce-fail a et target fname what)))))))))))
 
@@ -3534,27 +3574,27 @@
     (match-else (load (field (field cp value) kind))
       (EInt [n]
         (match (load (field cp ty))
-          (None [] (Ok (mk-evalpair (mk-expr (EInt n) -1 -1) (TInt 64 true))))
+          (None [] (Ok (mk-evalpair (mk-expr (EInt n) -1 -1 -1 0) (TInt 64 true))))
           (Some [wt]
             (match-else wt
               (TInt [bits signed]
                 (if (not (fits n bits signed))
                     (Err [EvalPair Diag] (derr (sconcat a (sconcat a (sconcat3 a "const '" nm "': literal ") (i64->str a n)) (sconcat a " does not fit in " (ty-str a (box-type a wt))))))
-                    (Ok (mk-evalpair (mk-expr (EInt n) -1 -1) (TInt bits signed)))))
+                    (Ok (mk-evalpair (mk-expr (EInt n) -1 -1 -1 0) (TInt bits signed)))))
               (_ (Err [EvalPair Diag] (derr (sconcat a (sconcat3 a "const '" nm "': integer value cannot have type ") (ty-str a (box-type a wt))))))))))
       (EFloat [bits]
         (match (load (field cp ty))
-          (None [] (Ok (mk-evalpair (mk-expr (EFloat bits) -1 -1) (TFloat 64))))
+          (None [] (Ok (mk-evalpair (mk-expr (EFloat bits) -1 -1 -1 0) (TFloat 64))))
           (Some [wt]
             (match-else wt
-              (TFloat [b] (Ok (mk-evalpair (mk-expr (EFloat bits) -1 -1) (TFloat b))))
+              (TFloat [b] (Ok (mk-evalpair (mk-expr (EFloat bits) -1 -1 -1 0) (TFloat b))))
               (_ (Err [EvalPair Diag] (derr (sconcat a (sconcat3 a "const '" nm "': float value cannot have type ") (ty-str a (box-type a wt))))))))))
       (EBool [b]
         (match (load (field cp ty))
-          (None [] (Ok (mk-evalpair (mk-expr (EBool b) -1 -1) (TBool))))
+          (None [] (Ok (mk-evalpair (mk-expr (EBool b) -1 -1 -1 0) (TBool))))
           (Some [wt]
             (match-else wt
-              (TBool [] (Ok (mk-evalpair (mk-expr (EBool b) -1 -1) (TBool))))
+              (TBool [] (Ok (mk-evalpair (mk-expr (EBool b) -1 -1 -1 0) (TBool))))
               (_ (Err [EvalPair Diag] (derr (sconcat a (sconcat3 a "const '" nm "': boolean value cannot have type ") (ty-str a (box-type a wt))))))))))
       (_ (do (unimplemented "check/const-entry called on non-literal (unreachable)") (Err [EvalPair Diag] (derr "")))))))
 
@@ -4011,6 +4051,8 @@
           (store! (field outf macro_variadic) (load (field fp macro_variadic)))
           (store! (field outf lo) (load (field fp lo)))
           (store! (field outf hi) (load (field fp hi)))
+          (store! (field outf source) (load (field fp source)))
+          (store! (field outf ctxt) (load (field fp ctxt)))
           (Ok (load outf))))))))
 
 ; ============================ check.rs: synth helpers =======================
@@ -4239,7 +4281,7 @@
             (if (icmp-eq (cast i64 ap) 0)
                 (if want_mut (Err [Expr Diag] (derr (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " is a (mut ")) (sconcat a (ty-str a wp) ") parameter; pass a mutable place as (mut …)"))))
                   (if (not (type-eq at wp)) (Err [Expr Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " expects a reference to ")) (ty-str a wp)) (sconcat a ", got " (ty-str a at)))))
-                    (Ok (mk-expr (ESpillRef (box-expr a (load aep))) (load (field aep lo)) (load (field aep hi))))))
+                    (Ok (mk-expr (ESpillRef (box-expr a (load aep))) (load (field aep lo)) (load (field aep hi)) (load (field aep source)) (load (field aep ctxt))))))
                 (if (not (type-eq ap wp))
                     (Err [Expr Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " has type ")) (ty-str a at)) (sconcat a " but expected a reference to " (ty-str a wp)))))
                   (if want_mut
@@ -4458,7 +4500,7 @@
       (do (al-push! (mut out) (tmfn a tr tn (load (field (al-elem [TraitMethod] ms (load i)) name))))
           (store! i (iadd (load i) 1)))))
     (box-al [(slice u8)] a (load out))))
-(defn build-make-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (trait_name (slice u8)) (inner (ptr Expr)) (inner_ty (ptr Type)) (lo i64) (hi i64) (fname (slice u8))] (-> (Result SynPair Diag))
+(defn build-make-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (trait_name (slice u8)) (inner (ptr Expr)) (inner_ty (ptr Type)) (lo i64) (hi i64) (source i64) (ctxt i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [tr (resolve-trait-name cx trait_name)]
     (if (icmp-eq (slice-len [u8] tr) 0)
         (Err [SynPair Diag] (derr-at lo hi (sconcat1 a (sconcat4 a "in '" fname "': make-dyn: unknown trait '" (sconcat a trait_name "'")))))
@@ -4474,14 +4516,14 @@
                   (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
                       (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
                     (let [td (trait-find cx tr) methods (dyn-method-names a td tr tn)]
-                      (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi)) (box-type a (TStruct dyn_struct)))))))))))))))
-(defn maybe-coerce-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (ae (ptr Expr)) (at (ptr Type)) (want (ptr Type)) (lo i64) (hi i64) (fname (slice u8))] (-> (Result SynPair Diag))
+                      (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi source ctxt)) (box-type a (TStruct dyn_struct)))))))))))))))
+(defn maybe-coerce-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (ae (ptr Expr)) (at (ptr Type)) (want (ptr Type)) (lo i64) (hi i64) (source i64) (ctxt i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [wtg (type-tag want)
         wdname (if (icmp-eq wtg 6) (type-struct-name want) (if (and (icmp-eq wtg 5) (icmp-eq (type-tag (t-inner want)) 6)) (type-struct-name (t-inner want)) ""))]
     (if (icmp-eq (slice-len [u8] wdname) 0) (Ok (mk-synpair a ae at))
       (if (and (type-is-ptr at) (not (and (icmp-eq (type-tag (t-inner at)) 6) (str-eq (type-struct-name (t-inner at)) wdname))))
           (let [tr (dyn-struct-trait cx wdname)]
-            (if (icmp-gt (slice-len [u8] tr) 0) (build-make-dyn a cx tr ae at lo hi fname) (Ok (mk-synpair a ae at))))
+            (if (icmp-gt (slice-len [u8] tr) 0) (build-make-dyn a cx tr ae at lo hi source ctxt fname) (Ok (mk-synpair a ae at))))
         (Ok (mk-synpair a ae at))))))
 ; synth_construct (src/check.rs:2016)
 (defn variant-in-sum [(si (ptr SumInfo)) (variant (slice u8))] (-> (ptr Variant))
@@ -4503,7 +4545,7 @@
           (store! i (iadd (load i) 1)))))
     (load all)))
 
-(defn synth-construct [(a (ptr Allocator)) (variant (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (lo i64) (hi i64)] (-> (Result EvalPair Diag))
+(defn synth-construct [(a (ptr Allocator)) (variant (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (let [sumname (load (field (vts-find cx variant) sum)) si (sum-find cx (load (field (vts-find cx variant) sum)))
@@ -4526,9 +4568,9 @@
                   (try! (construct-check-args a field_types args subst variant env cx tps fname))
                   (try! (construct-infer-args a field_types args subst tparams variant env cx tps fname)))]
           (if (icmp-eq np 0)
-              (ok-ep (mk-expr (ECall variant (box-items-type a) new_args) lo hi) (TStruct sumname))
+              (ok-ep (mk-expr (ECall variant (box-items-type a) new_args) lo hi source ctxt) (TStruct sumname))
             (let [out_targs (subst-targs a tparams subst)]
-              (ok-ep (mk-expr (ECall variant out_targs new_args) lo hi) (TApp sumname out_targs))))))))))
+              (ok-ep (mk-expr (ECall variant out_targs new_args) lo hi source ctxt) (TApp sumname out_targs))))))))))
 
 (defn validate-targs [(a (ptr Allocator)) (cx (ptr Cx)) (type_args (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load type_args)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
@@ -4630,7 +4672,7 @@
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 
 ; non-generic call args (check.rs:1476)
-(defn ca-nongeneric [(a (ptr Allocator)) (sig (ptr Sig)) (args (ptr (ArrayList Expr))) (func (slice u8)) (elo i64) (ehi i64) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
+(defn ca-nongeneric [(a (ptr Allocator)) (sig (ptr Sig)) (args (ptr (ArrayList Expr))) (func (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [params (load (field sig params)) nparams (al-len [Type] (load params)) is_extern (load (field sig is_extern))
         n (al-len [Expr] (load args)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -4647,7 +4689,7 @@
                 (match (do-synth a (al-elem [Expr] args (load i)) exp env cx tps fname)
                   (Err [d] (do (store! err d) (store! failed true) (break)))
                   (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
-                              (match (maybe-coerce-dyn a cx (load (field sp e)) (load (field sp t)) want elo ehi fname)
+                              (match (maybe-coerce-dyn a cx (load (field sp e)) (load (field sp t)) want elo ehi esrc ectxt fname)
                                 (Err [d] (do (store! err d) (store! failed true) (break)))
                                 (Ok [mp0] (let [mp (alloc-stack SynPair)] (store! mp mp0)
                                             (match (coerce-arg a ismut (load (load (field mp e))) (load (field mp t)) want is_extern fname what)
@@ -4717,7 +4759,7 @@
       (do (if (str-eq (load (field (al-elem [TraitMethod] ms (load i)) name)) func) (do (store! r (load i)) (break)) 0)
           (store! i (iadd (load i) 1)))))
     (load r)))
-(defn dyn-dispatch-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (self_idx i64) (func (slice u8)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (params (ptr (ArrayList Type))) (newargs (ptr (ArrayList Expr)))] (-> (Result i64 Diag))
+(defn dyn-dispatch-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (self_idx i64) (func (slice u8)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64) (params (ptr (ArrayList Type))) (newargs (ptr (ArrayList Expr)))] (-> (Result i64 Diag))
   (let [ps (load (field tm params)) n (al-len [Expr] (load args)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
       (do (if (icmp-eq (load i) self_idx) 0
@@ -4726,7 +4768,7 @@
               (match (do-synth a (al-elem [Expr] args (load i)) exp env cx tps fname)
                 (Err [d] (do (store! err d) (store! failed true) (break)))
                 (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
-                  (match (maybe-coerce-dyn a cx (load (field sp e)) (load (field sp t)) want elo ehi fname)
+                  (match (maybe-coerce-dyn a cx (load (field sp e)) (load (field sp t)) want elo ehi esrc ectxt fname)
                     (Err [d] (do (store! err d) (store! failed true) (break)))
                     (Ok [mp0] (let [mp (alloc-stack SynPair)] (store! mp mp0)
                       (match (coerce-arg a ismut (load (load (field mp e))) (load (field mp t)) want false fname what)
@@ -4734,7 +4776,7 @@
                         (Ok [ce] (do (al-push! [Expr] newargs ce) (al-push! [Type] params (load want)) 0)))))))))) )
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
-(defn synth-dyn-dispatch [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (self_name (slice u8)) (self_idx i64) (td (ptr TraitDef)) (tm (ptr TraitMethod)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-dyn-dispatch [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (self_name (slice u8)) (self_idx i64) (td (ptr TraitDef)) (tm (ptr TraitMethod)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (let [mi (method-index-of td func) dyn_ty (box-type a (TStruct self_name))]
     (match (do-synth a (al-elem [Expr] args self_idx) dyn_ty env cx tps fname)
       (Err [d] (err-ep d))
@@ -4744,13 +4786,13 @@
           (Ok [recv]
             (let [params (box-al [Type] a (al-new [Type] a)) newargs (box-al [Expr] a (al-new [Expr] a))]
               (al-push! [Type] params (TPtr (box-type a (TInt 8 false))))
-              (match (dyn-dispatch-args a tm self_idx func args env cx tps fname elo ehi params newargs)
+              (match (dyn-dispatch-args a tm self_idx func args env cx tps fname elo ehi esrc ectxt params newargs)
                 (Err [d] (err-ep d))
                 (Ok [_]
                   (let [vtable_struct (sconcat a (subslice [u8] self_name 0 (isub (slice-len [u8] self_name) 4)) "-vtable")]
-                    (ok-ep (mk-expr (EDynDispatch self_name vtable_struct mi "c" params (load (field tm ret)) (box-expr a recv) newargs) elo ehi) (load (field tm ret)))))))))))))) 
+                    (ok-ep (mk-expr (EDynDispatch self_name vtable_struct mi "c" params (load (field tm ret)) (box-expr a recv) newargs) elo ehi esrc ectxt) (load (field tm ret)))))))))))))) 
 
-(defn synth-call-general [(a (ptr Allocator)) (func (slice u8)) (call_func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-call-general [(a (ptr Allocator)) (func (slice u8)) (call_func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (let [sig (sig-find cx call_func)]
@@ -4763,8 +4805,8 @@
         (if (icmp-eq (al-len [(slice u8)] (load (field sig type_params))) 0)
             (do (if (icmp-gt (al-len [Type] (load type_args)) 0)
                     (return-from :try (err-ep (derr (sconcat1 a (sconcat5 a "in '" fname "': '" func "' is not generic but got type arguments"))))) 0)
-                (let [new_args (try! (ca-nongeneric a sig args func elo ehi env cx tps fname))]
-                  (return-from :try (ok-ep (mk-expr (ECall call_func (box-items-type a) new_args) elo ehi) (load (field sig ret))))))
+                (let [new_args (try! (ca-nongeneric a sig args func elo ehi esrc ectxt env cx tps fname))]
+                  (return-from :try (ok-ep (mk-expr (ECall call_func (box-items-type a) new_args) elo ehi esrc ectxt) (load (field sig ret))))))
           (let [defs (box-al [Deferred] a (al-new [Deferred] a))
                 argl (ca-build-arglist a args defs env cx tps fname)
                 subst (try! (solve-type-args a (load (field sig type_params)) (load (field sig params)) type_args argl (field sig ret) expected cx tps fname func))]
@@ -4773,13 +4815,13 @@
             (let [new_args (try! (ca-final-coerce a argl sig subst args func fname))
                   out_targs (subst-targs a (load (field sig type_params)) subst)
                   ret (subst-apply a (field sig ret) subst)]
-              (ok-ep (mk-expr (ECall func out_targs new_args) elo ehi) ret)))))))))
+              (ok-ep (mk-expr (ECall func out_targs new_args) elo ehi esrc ectxt) ret)))))))))
 
-(defn synth-call [(a (ptr Allocator)) (func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-call [(a (ptr Allocator)) (func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (if (icmp-ne (cast i64 (vts-find cx func)) 0)
-        (return-from :try (synth-construct a func type_args args expected env cx tps fname elo ehi)) 0)
+        (return-from :try (synth-construct a func type_args args expected env cx tps fname elo ehi esrc ectxt)) 0)
     (let [(mut call_func) func]
       (if (methods-has cx func)
           (let [me0 (try! (resolve-method a cx func fname)) me (alloc-stack MethodEntry)] (store! me me0)
@@ -4794,19 +4836,19 @@
                       (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' called on a type that can't carry an impl: ")) (ty-str a self_ty)) "")))) 0)
                   (let [self_name (type-impl-name a self_ty)]
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
-                        (return-from :try (synth-dyn-dispatch a cx func self_name self_idx td tm args env tps fname elo ehi)) 0)
+                        (return-from :try (synth-dyn-dispatch a cx func self_name self_idx td tm args env tps fname elo ehi esrc ectxt)) 0)
                     (if (set-contains tps self_name)
                         (if (not (bounds-has (field cx cur_bounds) self_name trait_name))
                             (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a func "')")))))
                           (let [self_as_ty (box-type a (TStruct self_name))
                                 new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname func))
                                 ret (subst-self a (field tm ret) self_pname self_as_ty)]
-                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi) ret))))
+                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi esrc ectxt) ret))))
                       (do (if (not (impl-has cx trait_name self_name))
                               (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (display-name self_name) "' does not implement '") (display-name trait_name)) "'")))) 0)
                           (store! call_func (tmfn a trait_name self_name func)) 0)))))))
           0)
-      (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi)))))
+      (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi esrc ectxt)))))
 ; ELet (src/check.rs:1231)
 (defn mk-bind [(name (slice u8)) (mutable bool) (value Expr)] (-> Bind)
   (let [p (alloc-stack Bind)] (store! (field p name) name) (store! (field p mutable) mutable) (store! (field p value) value) (load p)))
@@ -4827,7 +4869,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [Type Diag] (load err)) (Ok (load last)))))
 
-(defn process-let-bind [(a (ptr Allocator)) (bp (ptr Bind)) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result i64 Diag))
+(defn process-let-bind [(a (ptr Allocator)) (bp (ptr Bind)) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
   (let [name (load (field bp name)) mutable (load (field bp mutable))]
     (match (do-synth a (field bp value) (null-type) env cx tps fname)
       (Err [d] (Err [i64 Diag] d))
@@ -4844,32 +4886,32 @@
               (if (or mutable (is-place-value-type vt cx))
                   (let [slot (sconcat a name ".slot") (mut initdo) (al-new [Expr] a)]
                     (env-insert! env name (box-type a (TRef mutable (box-type a (load vt)))))
-                    (al-push! (mut initdo) (mk-expr (EStore (box-expr a (mk-expr (EVar slot) elo ehi)) (box-expr a ve)) elo ehi))
-                    (al-push! (mut initdo) (mk-expr (EVar slot) elo ehi))
-                    (al-push! [Bind] nbinds (mk-bind slot false (mk-expr (EAlloc 0 (erase-refs a vt)) elo ehi)))
-                    (al-push! [Bind] nbinds (mk-bind name false (mk-expr (EDo (box-al [Expr] a (load initdo))) elo ehi)))
+                    (al-push! (mut initdo) (mk-expr (EStore (box-expr a (mk-expr (EVar slot) elo ehi esrc ectxt)) (box-expr a ve)) elo ehi esrc ectxt))
+                    (al-push! (mut initdo) (mk-expr (EVar slot) elo ehi esrc ectxt))
+                    (al-push! [Bind] nbinds (mk-bind slot false (mk-expr (EAlloc 0 (erase-refs a vt)) elo ehi esrc ectxt)))
+                    (al-push! [Bind] nbinds (mk-bind name false (mk-expr (EDo (box-al [Expr] a (load initdo))) elo ehi esrc ectxt)))
                     (Ok [i64 Diag] 0))
                 (do (env-insert! env name (box-type a (load vt)))
                     (al-push! [Bind] nbinds (mk-bind name false ve)) (Ok [i64 Diag] 0))))))))) ))
 
-(defn process-let-binds [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result i64 Diag))
+(defn process-let-binds [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
   (let [nb (al-len [Bind] (load binds)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) nb) (break)
-      (do (match (process-let-bind a (al-elem [Bind] binds (load i)) nbinds env cx tps fname elo ehi)
+      (do (match (process-let-bind a (al-elem [Bind] binds (load i)) nbinds env cx tps fname elo ehi esrc ectxt)
             (Err [d] (do (store! err d) (store! failed true) (break)))
             (Ok [_] 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
-(defn synth-let [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-let [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (let [saved (al-len [EnvEntry] (load env)) nbinds (box-al [Bind] a (al-new [Bind] a))]
-    (match (process-let-binds a binds nbinds env cx tps fname elo ehi)
+    (match (process-let-binds a binds nbinds env cx tps fname elo ehi esrc ectxt)
       (Err [d] (err-ep d))
       (Ok [_]
         (let [outl (box-al [Expr] a (al-new [Expr] a))]
           (match (synth-let-body a body expected outl env cx tps fname "let body")
             (Err [d] (err-ep d))
-            (Ok [last] (do (env-truncate! env saved) (ok-ep (mk-expr (ELet nbinds outl) elo ehi) last)))))))))
+            (Ok [last] (do (env-truncate! env saved) (ok-ep (mk-expr (ELet nbinds outl) elo ehi esrc ectxt) last)))))))))
 
 ; EMatch (src/check.rs:1848)
 (defn variant-by-name [(variants (ptr (ArrayList Variant))) (name (slice u8))] (-> (ptr Variant))
@@ -4920,7 +4962,7 @@
           (store! j (iadd (load j) 1)))))
     (box-al [Arm] a (load newarms))))
 
-(defn synth-match [(a (ptr Allocator)) (scrut (ptr Expr)) (arms (ptr (ArrayList Arm))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-match [(a (ptr Allocator)) (scrut (ptr Expr)) (arms (ptr (ArrayList Arm))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (let [ssp0 (try! (do-synth a scrut (null-type) env cx tps fname)) ssp (alloc-stack SynPair)] (store! ssp ssp0)
@@ -4928,7 +4970,7 @@
         (if (icmp-eq (type-tag st0) 5)
             (let [inner (t-inner st0)]
               (if (load (field (alloc-stack-store-sumvars a inner cx) found))
-                  (do (store! se (box-expr a (mk-expr (ELoad (load se)) elo ehi))) (store! st inner) 0) 0)) 0)
+                  (do (store! se (box-expr a (mk-expr (ELoad (load se)) elo ehi esrc ectxt))) (store! st inner) 0) 0)) 0)
         (let [svp (alloc-stack-store-sumvars a (load st) cx)]
           (if (not (load (field svp found)))
               (return-from :try (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': match expects a sum value, got ") (ty-str a (load st)))))) 0)
@@ -4941,10 +4983,10 @@
               (if (not (icmp-eq (al-len [(slice u8)] (load covered)) (al-len [Variant] (load variants))))
                   (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': non-exhaustive match on '" (sconcat a sumname "' (")) (i64->str a (al-len [(slice u8)] (load covered)))) " of ") (i64->str a (al-len [Variant] (load variants)))) " variants)")))) 0)
               (if (expected-some? expected)
-                  (ok-ep (mk-expr (EMatch (load se) checked) elo ehi) (load expected))
+                  (ok-ep (mk-expr (EMatch (load se) checked) elo ehi esrc ectxt) (load expected))
                 (let [outl (box-al [Expr] a (al-new [Expr] a))
                       t (try! (unify-branches a synb outl fname "match arms"))]
-                  (ok-ep (mk-expr (EMatch (load se) (build-newarms a metav metab outl)) elo ehi) t))))))))))) 
+                  (ok-ep (mk-expr (EMatch (load se) (build-newarms a metav metab outl)) elo ehi esrc ectxt) t))))))))))) 
 (defn alloc-stack-store-sumvars [(a (ptr Allocator)) (t (ptr Type)) (cx (ptr Cx))] (-> (ptr SumVars))
   (let [p (unwrap-ptr [SumVars] (create [SumVars] a))] (store! p (sum-variants a t cx)) p))
 ; ---- loop / break / continue (cx.loops frames) ----
@@ -4982,15 +5024,15 @@
             (match-else popped (Some [pf] (let [pfp (alloc-stack LoopFrame)] (store! pfp pf) (match-else (load (field pfp break_ty)) (Some [bt] (store! lty bt)) (_ (store! lty (TNever)))))) (_ (store! lty (TNever)))))
           (Ok (load lty)))))))
 
-(defn synth-loop [(a (ptr Allocator)) (label (Option (slice u8))) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-loop [(a (ptr Allocator)) (label (Option (slice u8))) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (if (and (label-some? label) (loop-label-exists cx (label-val label)))
       (err-ep (derr (sconcat1 a (sconcat4 a "in '" fname "': loop label ':" (sconcat a (label-val label) "' shadows an enclosing loop with the same label")))))
     (let [outl (box-al [Expr] a (al-new [Expr] a))]
       (match (run-loop-body a label body expected outl env cx tps fname)
         (Err [d] (err-ep d))
-        (Ok [lty] (ok-ep (mk-expr (ELoop label outl) elo ehi) lty))))))
+        (Ok [lty] (ok-ep (mk-expr (ELoop label outl) elo ehi esrc ectxt) lty))))))
 
-(defn synth-break [(a (ptr Allocator)) (label (Option (slice u8))) (value (Option (ptr Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-break [(a (ptr Allocator)) (label (Option (slice u8))) (value (Option (ptr Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (if (icmp-eq (loops-len cx) 0) (return-from :try (err-ep (derr (sconcat3 a "in '" fname "': break outside of a loop")))) 0)
@@ -5013,18 +5055,18 @@
                 (Some [prev] (if (not (type-eq (box-type a prev) (load vty)))
                                  (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': loop breaks with different value types (" (ty-str a (box-type a prev))) " vs ") (ty-str a (load vty))) ")")))) 0))
                 (_ (do (store! (field (al-elem [LoopFrame] (field cx loops) idx) break_ty) (Some (load (load vty)))) 0))) 0)
-          (ok-ep (mk-expr (EBreak label (if (load have_val) (Some (load valexpr)) (None [(ptr Expr)]))) elo ehi) (TNever))))))))
+          (ok-ep (mk-expr (EBreak label (if (load have_val) (Some (load valexpr)) (None [(ptr Expr)]))) elo ehi esrc ectxt) (TNever))))))))
 
-(defn synth-continue [(a (ptr Allocator)) (label (Option (slice u8))) (cx (ptr Cx)) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-continue [(a (ptr Allocator)) (label (Option (slice u8))) (cx (ptr Cx)) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (if (icmp-eq (loops-len cx) 0) (err-ep (derr (sconcat3 a "in '" fname "': continue outside of a loop")))
     (match-else label
-      (Some [l] (if (icmp-lt (loops-rpos-label cx l) 0) (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': continue to unknown loop label ':" l) "'"))) (ok-ep (mk-expr (EContinue label) elo ehi) (TNever))))
-      (_ (ok-ep (mk-expr (EContinue label) elo ehi) (TNever))))))
+      (Some [l] (if (icmp-lt (loops-rpos-label cx l) 0) (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': continue to unknown loop label ':" l) "'"))) (ok-ep (mk-expr (EContinue label) elo ehi esrc ectxt) (TNever))))
+      (_ (ok-ep (mk-expr (EContinue label) elo ehi esrc ectxt) (TNever))))))
 
 ; ---- bin/cmp ----
 (defn mk-branch [(e (ptr Expr)) (t (ptr Type))] (-> Branch)
   (let [p (alloc-stack Branch)] (store! (field p e) e) (store! (field p t) t) (load p)))
-(defn synth-binop [(a (ptr Allocator)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr)) (iscmp bool) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-binop [(a (ptr Allocator)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr)) (iscmp bool) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
    (do
     (let [lsp (try! (do-synth a lhs (null-type) env cx tps fname)) lp (alloc-stack SynPair)] (store! lp lsp)
@@ -5036,8 +5078,8 @@
             (if (not (numeric tp tps))
                 (return-from :try (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a (if iscmp "comparison requires integers, got " "arithmetic requires integers, got ") (ty-str a tp))))))
               (if iscmp
-                  (ok-ep (mk-expr (ECmp op (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi) (TBool))
-                  (ok-ep (mk-expr (EBin op (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi) t))))))))))
+                  (ok-ep (mk-expr (ECmp op (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi esrc ectxt) (TBool))
+                  (ok-ep (mk-expr (EBin op (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi esrc ectxt) t))))))))))
 
 ; ---- small arg-loop helpers ----
 (defn synth-discard-args [(a (ptr Allocator)) (args (ptr (ArrayList Expr))) (forbidvoid bool) (voidmsg (slice u8)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
@@ -5071,13 +5113,13 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 ; ---- per-arm helpers for the complex variants ----
-(defn synth-do [(a (ptr Allocator)) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-do [(a (ptr Allocator)) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [outl (box-al [Expr] a (al-new [Expr] a))
           last (try! (synth-let-body a body expected outl env cx tps fname "do result"))]
-      (ok-ep (mk-expr (EDo outl) elo ehi) last)))))
+      (ok-ep (mk-expr (EDo outl) elo ehi esrc ectxt) last)))))
 
-(defn synth-if [(a (ptr Allocator)) (cnd (ptr Expr)) (thn (ptr Expr)) (els (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-if [(a (ptr Allocator)) (cnd (ptr Expr)) (thn (ptr Expr)) (els (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [csp0 (try! (do-synth a cnd (null-type) env cx tps fname)) csp (alloc-stack SynPair)] (store! csp csp0)
       (if (not (is-cond (load (field csp t))))
@@ -5085,16 +5127,16 @@
       (if (expected-some? expected)
           (let [te (try! (check-to a thn expected env cx tps fname "if branch"))
                 ee (try! (check-to a els expected env cx tps fname "if branch"))]
-            (ok-ep (mk-expr (EIf (load (field csp e)) (box-expr a te) (box-expr a ee)) elo ehi) (load expected)))
+            (ok-ep (mk-expr (EIf (load (field csp e)) (box-expr a te) (box-expr a ee)) elo ehi esrc ectxt) (load expected)))
         (let [tsp0 (try! (do-synth a thn (null-type) env cx tps fname)) tsp (alloc-stack SynPair)] (store! tsp tsp0)
           (let [esp0 (try! (do-synth a els (null-type) env cx tps fname)) esp (alloc-stack SynPair)] (store! esp esp0)
             (let [(mut brs) (al-new [Branch] a) outl (box-al [Expr] a (al-new [Expr] a))]
               (al-push! (mut brs) (mk-branch (load (field tsp e)) (load (field tsp t))))
               (al-push! (mut brs) (mk-branch (load (field esp e)) (load (field esp t))))
               (let [t (try! (unify-branches a (box-al [Branch] a (load brs)) outl fname "if branches"))]
-                (ok-ep (mk-expr (EIf (load (field csp e)) (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi) t))))))))))
+                (ok-ep (mk-expr (EIf (load (field csp e)) (al-elem [Expr] outl 0) (al-elem [Expr] outl 1)) elo ehi esrc ectxt) t))))))))))
 
-(defn synth-field [(a (ptr Allocator)) (pp (ptr Expr)) (ffld (slice u8)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-field [(a (ptr Allocator)) (pp (ptr Expr)) (ffld (slice u8)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [psp (try! (do-synth a pp (null-type) env cx tps fname)) sp (alloc-stack SynPair)] (store! sp psp)
       (let [pt (load (field sp t)) pointee (place-pointee pt)]
@@ -5114,9 +5156,9 @@
                       (store! i (iadd (load i) 1)))))
                 (if (icmp-eq (cast i64 (load fty)) 0)
                     (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': struct '" (sconcat a sname "' has no field '")) ffld) "'")))) 0)
-                (ok-ep (mk-expr (EField (load (field sp e)) ffld) elo ehi) (replace-pointee a pt fty)))))))))))
+                (ok-ep (mk-expr (EField (load (field sp e)) ffld) elo ehi esrc ectxt) (replace-pointee a pt fty)))))))))))
 
-(defn synth-store [(a (ptr Allocator)) (pp (ptr Expr)) (val (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-store [(a (ptr Allocator)) (pp (ptr Expr)) (val (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [psp (try! (do-synth a pp (null-type) env cx tps fname)) sp (alloc-stack SynPair)] (store! sp psp)
       (let [pt (load (field sp t)) pointee (place-pointee pt)]
@@ -5125,9 +5167,9 @@
         (let [vsp (try! (do-synth a val pointee env cx tps fname)) vp (alloc-stack SynPair)] (store! vp vsp)
           (match (coerce a (load (load (field vp e))) (load (field vp t)) pointee false fname "store! value")
             (Err [d] (return-from :try (err-ep d)))
-            (Ok [ve] (ok-ep (mk-expr (EStore (load (field sp e)) (box-expr a ve)) elo ehi) (load pointee))))))))))
+            (Ok [ve] (ok-ep (mk-expr (EStore (load (field sp e)) (box-expr a ve)) elo ehi esrc ectxt) (load pointee))))))))))
 
-(defn synth-index [(a (ptr Allocator)) (pp (ptr Expr)) (idx (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-index [(a (ptr Allocator)) (pp (ptr Expr)) (idx (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [psp (try! (do-synth a pp (null-type) env cx tps fname)) sp (alloc-stack SynPair)] (store! sp psp)
       (let [isp (try! (do-synth a idx (null-type) env cx tps fname)) ip (alloc-stack SynPair)] (store! ip isp)
@@ -5136,35 +5178,35 @@
               pt (load (field sp t)) pointee (place-pointee pt)]
           (if (icmp-eq (cast i64 pointee) 0) (return-from :try (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': index expects a pointer or reference, got ") (ty-str a pt))))) 0)
           (let [elem (if (icmp-eq (type-tag pointee) 7) (t-inner pointee) pointee)]
-            (ok-ep (mk-expr (EIndex (load (field sp e)) (box-expr a ie)) elo ehi) (replace-pointee a pt elem)))))))))
+            (ok-ep (mk-expr (EIndex (load (field sp e)) (box-expr a ie)) elo ehi esrc ectxt) (replace-pointee a pt elem)))))))))
 
-(defn synth-cast [(a (ptr Allocator)) (ty Type) (inner (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-cast [(a (ptr Allocator)) (ty Type) (inner (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (let [tp (box-type a ty)]
     (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': cast target: "))))
       (Ok [_] (match (do-synth a inner (null-type) env cx tps fname) (Err [d] (err-ep d))
         (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
           (let [et (load (field sp t)) tt (type-tag tp) etg (type-tag et)
                 ok (or (and (icmp-eq tt 0) (icmp-eq etg 0)) (or (and (icmp-eq tt 4) (icmp-eq etg 4)) (or (and (icmp-eq tt 0) (icmp-eq etg 4)) (or (and (icmp-eq tt 4) (icmp-eq etg 0)) (or (and (icmp-eq tt 1) (icmp-eq etg 1)) (or (and (icmp-eq tt 1) (icmp-eq etg 0)) (or (and (icmp-eq tt 0) (icmp-eq etg 1)) (or (and (icmp-eq tt 10) (icmp-eq etg 10)) (or (and (icmp-eq tt 10) (icmp-eq etg 4)) (and (icmp-eq tt 4) (icmp-eq etg 10)))))))))))]
-            (if ok (ok-ep (mk-expr (ECast ty (load (field sp e))) elo ehi) ty)
+            (if ok (ok-ep (mk-expr (ECast ty (load (field sp e))) elo ehi esrc ectxt) ty)
               (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': cast only converts among int, float, and ptr (got " (ty-str a et)) " to ") (ty-str a tp)) ")")))))))))))) 
 
-(defn synth-offsetof [(a (ptr Allocator)) (ty Type) (ffld (slice u8)) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-offsetof [(a (ptr Allocator)) (ty Type) (ffld (slice u8)) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (let [tp (box-type a ty)]
     (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': offsetof: "))))
       (Ok [_] (match (struct-fields a tp cx) (Err [_] (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': offsetof needs a struct type, got ") (ty-str a tp)))))
         (Ok [fs] (let [nf (al-len [Field] (load fs)) (mut i) 0 (mut found) false]
           (loop (if (icmp-ge (load i) nf) (break) (do (if (str-eq (load (field (al-elem [Field] fs (load i)) name)) ffld) (do (store! found true) (break)) 0) (store! i (iadd (load i) 1)))))
           (if (not (load found)) (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': offsetof: struct '" (struct-name tp)) "' has no field '") ffld) "'")))
-            (ok-ep (mk-expr (EOffsetOf ty ffld) elo ehi) (TInt 64 true))))))))))
+            (ok-ep (mk-expr (EOffsetOf ty ffld) elo ehi esrc ectxt) (TInt 64 true))))))))))
 
-(defn synth-fnptr [(a (ptr Allocator)) (name (slice u8)) (cx (ptr Cx)) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-fnptr [(a (ptr Allocator)) (name (slice u8)) (cx (ptr Cx)) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (let [sig (sig-find cx name)]
     (if (icmp-eq (cast i64 sig) 0) (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': fnptr-of unknown function '" name) "'")))
       (if (icmp-gt (al-len [(slice u8)] (load (field sig type_params))) 0) (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': cannot take a function pointer to generic function '" name) "'")))
         (if (not (load (field sig fnptr_ok))) (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': cannot take a function pointer to '" name) "' (shim-convention functions are not supported yet)")))
-          (ok-ep (mk-expr (EFnPtrOf name) elo ehi) (TFn (load (field sig cc)) (load (field sig params)) (box-type a (load (field sig ret))))))))))
+          (ok-ep (mk-expr (EFnPtrOf name) elo ehi esrc ectxt) (TFn (load (field sig cc)) (load (field sig params)) (box-type a (load (field sig ret))))))))))
 
-(defn synth-callptr [(a (ptr Allocator)) (fp (ptr Expr)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64)] (-> (Result EvalPair Diag))
+(defn synth-callptr [(a (ptr Allocator)) (fp (ptr Expr)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do
     (let [fsp (try! (do-synth a fp (null-type) env cx tps fname)) sp (alloc-stack SynPair)] (store! sp fsp)
       (let [ft (load (field sp t))]
@@ -5173,19 +5215,20 @@
           (if (not (icmp-eq (al-len [Type] (load params)) (al-len [Expr] (load args))))
               (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': function pointer expects " (i64->str a (al-len [Type] (load params)))) " args, got ") (i64->str a (al-len [Expr] (load args)))) "")))) 0)
           (let [na (try! (synth-callptr-args a params args env cx tps fname))]
-            (ok-ep (mk-expr (ECallPtr (load (field sp e)) na) elo ehi) (load ret)))))))))
+            (ok-ep (mk-expr (ECallPtr (load (field sp e)) na) elo ehi esrc ectxt) (load ret)))))))))
 
 ; ============================ synth_inner (src/check.rs:836) =================
 (defn synth-inner [(a (ptr Allocator)) (e (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result EvalPair Diag))
-  (let [elo (load (field e lo)) ehi (load (field e hi))]
+  (let [elo (load (field e lo)) ehi (load (field e hi))
+        esrc (load (field e source)) ectxt (load (field e ctxt))]
     (match (load (field e kind))
-      (EInt   [v] (ok-ep (mk-expr (EInt v) elo ehi) (TInt 64 true)))
-      (EFloat [bits] (ok-ep (mk-expr (EFloat bits) elo ehi) (TFloat 64)))
-      (EBool  [b] (ok-ep (mk-expr (EBool b) elo ehi) (TBool)))
-      (EStr   [s] (ok-ep (mk-expr (EStr s) elo ehi) (TSlice (box-type a (TInt 8 false)))))
-      (ECStr  [s] (ok-ep (mk-expr (ECStr s) elo ehi) (TPtr (box-type a (TInt 8 true)))))
+      (EInt   [v] (ok-ep (mk-expr (EInt v) elo ehi esrc ectxt) (TInt 64 true)))
+      (EFloat [bits] (ok-ep (mk-expr (EFloat bits) elo ehi esrc ectxt) (TFloat 64)))
+      (EBool  [b] (ok-ep (mk-expr (EBool b) elo ehi esrc ectxt) (TBool)))
+      (EStr   [s] (ok-ep (mk-expr (EStr s) elo ehi esrc ectxt) (TSlice (box-type a (TInt 8 false)))))
+      (ECStr  [s] (ok-ep (mk-expr (ECStr s) elo ehi esrc ectxt) (TPtr (box-type a (TInt 8 true)))))
       (EZeroed [ty]
-        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': zeroed: ")))) (Ok [_] (ok-ep (mk-expr (EZeroed ty) elo ehi) ty)))))
+        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': zeroed: ")))) (Ok [_] (ok-ep (mk-expr (EZeroed ty) elo ehi esrc ectxt) ty)))))
       (EBorrow [mutable place]
         (match (do-synth a place (null-type) env cx tps fname) (Err [d] (err-ep d))
           (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
@@ -5195,94 +5238,94 @@
                   (ok-ep (load (load (field sp e))) (TRef mutable (box-type a (load pointee)))))))))))
       (EVar [name]
         (let [te (env-get env name)]
-          (if (icmp-ne (cast i64 te) 0) (ok-ep (mk-expr (EVar name) elo ehi) (load te))
+          (if (icmp-ne (cast i64 te) 0) (ok-ep (mk-expr (EVar name) elo ehi esrc ectxt) (load te))
             (let [ce (const-find cx name)]
               (if (icmp-ne (cast i64 ce) 0)
                   (if (set-contains (field cx static_consts) name)
-                      (ok-ep (mk-expr (EStaticRef name) elo ehi) (TRef false (box-type a (load (field ce ty)))))
+                      (ok-ep (mk-expr (EStaticRef name) elo ehi esrc ectxt) (TRef false (box-type a (load (field ce ty)))))
                     (if (is-literal-value (field ce value))
-                        (ok-ep (mk-expr (load (field (field ce value) kind)) elo ehi) (load (field ce ty)))
-                      (ok-ep (mk-expr (EComptime (box-expr a (load (field ce value)))) elo ehi) (load (field ce ty)))))
+                        (ok-ep (mk-expr (load (field (field ce value) kind)) elo ehi esrc ectxt) (load (field ce ty)))
+                      (ok-ep (mk-expr (EComptime (box-expr a (load (field ce value)))) elo ehi esrc ectxt) (load (field ce ty)))))
                 (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': unbound variable '" name) "'"))))))))
       (ELlvmIr [result args body]
         (let [rp (box-type a result)] (match (validate-type rp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': llvm-ir result type: "))))
           (Ok [_] (match (synth-discard-args a args true (sconcat3 a "in '" fname "': llvm-ir operand uses a void value (a (-> void) call yields nothing)") env cx tps fname)
-                    (Err [d] (err-ep d)) (Ok [eargs] (ok-ep (mk-expr (ELlvmIr result eargs body) elo ehi) result)))))))
+                    (Err [d] (err-ep d)) (Ok [eargs] (ok-ep (mk-expr (ELlvmIr result eargs body) elo ehi esrc ectxt) result)))))))
       (ETraitCall [trait_name method self_tp args]
         (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': internal: unresolved trait call '" method) "' in input"))))
       (EComptime [inner]
-        (match (do-synth a inner expected env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0) (ok-ep (mk-expr (EComptime (load (field sp e))) elo ehi) (load (load (field sp t))))))))
+        (match (do-synth a inner expected env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0) (ok-ep (mk-expr (EComptime (load (field sp e))) elo ehi esrc ectxt) (load (load (field sp t))))))))
       (EStaticRef [name]
         (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': internal: unexpected static-ref '" name) "' in input"))))
       (ETypeQuery [q ty]
-        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': type reflection: ")))) (Ok [_] (ok-ep (mk-expr (ETypeQuery q ty) elo ehi) (if (icmp-le q 1) (TInt 64 true) (TBool)))))))
+        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': type reflection: ")))) (Ok [_] (ok-ep (mk-expr (ETypeQuery q ty) elo ehi esrc ectxt) (if (icmp-le q 1) (TInt 64 true) (TBool)))))))
       (EFieldMeta [meta ty idx]
         (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': field reflection: "))))
           (Ok [_] (match (do-synth a idx (box-type a (TInt 64 true)) env cx tps fname) (Err [d] (err-ep d))
             (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
               (if (not (type-is-int (load (field sp t)))) (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': field index must be an integer, got ") (ty-str a (load (field sp t))))))
-                (ok-ep (mk-expr (EFieldMeta meta ty (load (field sp e))) elo ehi) (if (icmp-eq meta 1) (TInt 64 true) (TSlice (box-type a (TInt 8 false)))))))))))))
-      (EQuote [form] (ok-ep (mk-expr (EQuote form) elo ehi) (TCode)))
+                (ok-ep (mk-expr (EFieldMeta meta ty (load (field sp e))) elo ehi esrc ectxt) (if (icmp-eq meta 1) (TInt 64 true) (TSlice (box-type a (TInt 8 false)))))))))))))
+      (EQuote [form] (ok-ep (mk-expr (EQuote form) elo ehi esrc ectxt) (TCode)))
       (EQuasi [q]
-        (let [qp (alloc-stack Quasi)] (store! qp q) (match (check-quasi a qp env cx tps fname) (Err [d] (err-ep d)) (Ok [nq] (ok-ep (mk-expr (EQuasi nq) elo ehi) (TCode))))))
+        (let [qp (alloc-stack Quasi)] (store! qp q) (match (check-quasi a qp env cx tps fname) (Err [d] (err-ep d)) (Ok [nq] (ok-ep (mk-expr (EQuasi nq) elo ehi esrc ectxt) (TCode))))))
       (ECodeOp [op args]
-        (match (synth-discard-args a args false "" env cx tps fname) (Err [d] (err-ep d)) (Ok [na] (ok-ep (mk-expr (ECodeOp op na) elo ehi) (codeop-rty op)))))
+        (match (synth-discard-args a args false "" env cx tps fname) (Err [d] (err-ep d)) (Ok [na] (ok-ep (mk-expr (ECodeOp op na) elo ehi esrc ectxt) (codeop-rty op)))))
       (EFieldIndex [ty name]
         (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': field-index: "))))
           (Ok [_] (match (do-synth a name (null-type) env cx tps fname) (Err [d] (err-ep d))
             (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
               (if (not (icmp-eq (type-tag (load (field sp t))) 8)) (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': field-index name must be a string, got ") (ty-str a (load (field sp t))))))
-                (ok-ep (mk-expr (EFieldIndex ty (load (field sp e))) elo ehi) (TInt 64 true))))))))))
-      (EBin [op lhs rhs] (synth-binop a op lhs rhs false env cx tps fname elo ehi))
+                (ok-ep (mk-expr (EFieldIndex ty (load (field sp e))) elo ehi esrc ectxt) (TInt 64 true))))))))))
+      (EBin [op lhs rhs] (synth-binop a op lhs rhs false env cx tps fname elo ehi esrc ectxt))
       (ENot [inner]
         (match (do-synth a inner (null-type) env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
           (if (not (numeric (load (field sp t)) tps)) (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': inot requires an integer, got ") (ty-str a (load (field sp t))))))
-            (ok-ep (mk-expr (ENot (load (field sp e))) elo ehi) (load (load (field sp t)))))))))
-      (ECmp [op lhs rhs] (synth-binop a op lhs rhs true env cx tps fname elo ehi))
-      (ELoop [label body] (synth-loop a label body expected env cx tps fname elo ehi))
-      (EBreak [label value] (synth-break a label value env cx tps fname elo ehi))
-      (EContinue [label] (synth-continue a label cx fname elo ehi))
-      (EIf [cnd thn els] (synth-if a cnd thn els expected env cx tps fname elo ehi))
-      (EDo [body] (synth-do a body expected env cx tps fname elo ehi))
-      (ELet [binds body] (synth-let a binds body expected env cx tps fname elo ehi))
-      (ECall [func type_args args] (synth-call a func type_args args expected env cx tps fname elo ehi))
+            (ok-ep (mk-expr (ENot (load (field sp e))) elo ehi esrc ectxt) (load (load (field sp t)))))))))
+      (ECmp [op lhs rhs] (synth-binop a op lhs rhs true env cx tps fname elo ehi esrc ectxt))
+      (ELoop [label body] (synth-loop a label body expected env cx tps fname elo ehi esrc ectxt))
+      (EBreak [label value] (synth-break a label value env cx tps fname elo ehi esrc ectxt))
+      (EContinue [label] (synth-continue a label cx fname elo ehi esrc ectxt))
+      (EIf [cnd thn els] (synth-if a cnd thn els expected env cx tps fname elo ehi esrc ectxt))
+      (EDo [body] (synth-do a body expected env cx tps fname elo ehi esrc ectxt))
+      (ELet [binds body] (synth-let a binds body expected env cx tps fname elo ehi esrc ectxt))
+      (ECall [func type_args args] (synth-call a func type_args args expected env cx tps fname elo ehi esrc ectxt))
       (EAlloc [storage ty]
-        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': alloc: ")))) (Ok [_] (ok-ep (mk-expr (EAlloc storage ty) elo ehi) (TPtr (box-type a ty)))))))
-      (EField [pp ffld] (synth-field a pp ffld env cx tps fname elo ehi))
+        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': alloc: ")))) (Ok [_] (ok-ep (mk-expr (EAlloc storage ty) elo ehi esrc ectxt) (TPtr (box-type a ty)))))))
+      (EField [pp ffld] (synth-field a pp ffld env cx tps fname elo ehi esrc ectxt))
       (ELoad [inner]
         (match (do-synth a inner (null-type) env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
           (let [pp (place-pointee (load (field sp t)))]
-            (if (icmp-ne (cast i64 pp) 0) (ok-ep (mk-expr (ELoad (load (field sp e))) elo ehi) (load pp))
+            (if (icmp-ne (cast i64 pp) 0) (ok-ep (mk-expr (ELoad (load (field sp e))) elo ehi esrc ectxt) (load pp))
               (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': load expects a pointer or reference, got ") (ty-str a (load (field sp t)))))))))))) 
-      (EStore [pp val] (synth-store a pp val env cx tps fname elo ehi))
-      (EIndex [pp idx] (synth-index a pp idx env cx tps fname elo ehi))
-      (ECast [ty inner] (synth-cast a ty inner env cx tps fname elo ehi))
+      (EStore [pp val] (synth-store a pp val env cx tps fname elo ehi esrc ectxt))
+      (EIndex [pp idx] (synth-index a pp idx env cx tps fname elo ehi esrc ectxt))
+      (ECast [ty inner] (synth-cast a ty inner env cx tps fname elo ehi esrc ectxt))
       (ESizeOf [ty]
-        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': sizeof: ")))) (Ok [_] (ok-ep (mk-expr (ESizeOf ty) elo ehi) (TInt 64 true))))))
+        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': sizeof: ")))) (Ok [_] (ok-ep (mk-expr (ESizeOf ty) elo ehi esrc ectxt) (TInt 64 true))))))
       (EAlignOf [ty]
-        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': alignof: ")))) (Ok [_] (ok-ep (mk-expr (EAlignOf ty) elo ehi) (TInt 64 true))))))
-      (EOffsetOf [ty ffld] (synth-offsetof a ty ffld cx tps fname elo ehi))
+        (let [tp (box-type a ty)] (match (validate-type tp cx tps) (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': alignof: ")))) (Ok [_] (ok-ep (mk-expr (EAlignOf ty) elo ehi esrc ectxt) (TInt 64 true))))))
+      (EOffsetOf [ty ffld] (synth-offsetof a ty ffld cx tps fname elo ehi esrc ectxt))
       (EBitGet [pp bfld]
-        (match (bit-field-type a pp bfld env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0) (ok-ep (mk-expr (EBitGet (load (field sp e)) bfld) elo ehi) (load (load (field sp t))))))))
+        (match (bit-field-type a pp bfld env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0) (ok-ep (mk-expr (EBitGet (load (field sp e)) bfld) elo ehi esrc ectxt) (load (load (field sp t))))))))
       (EBitSet [pp bfld val]
         (match (bit-field-type a pp bfld env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
           (let [fty (load (field sp t))]
             (match (do-synth a val fty env cx tps fname) (Err [d] (err-ep d)) (Ok [vsp0] (let [vsp (alloc-stack SynPair)] (store! vsp vsp0)
               (match (coerce a (load (load (field vsp e))) (load (field vsp t)) fty false fname (sconcat a (sconcat3 a "set! into bitfield '" bfld "'") "")) (Err [d] (err-ep d))
-                (Ok [ve] (ok-ep (mk-expr (EBitSet (load (field sp e)) bfld (box-expr a ve)) elo ehi) (load fty)))))))))))) 
+                (Ok [ve] (ok-ep (mk-expr (EBitSet (load (field sp e)) bfld (box-expr a ve)) elo ehi esrc ectxt) (load fty)))))))))))) 
       (EFree [inner]
         (match (do-synth a inner (null-type) env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
-          (if (type-is-ptr (load (field sp t))) (ok-ep (mk-expr (EFree (load (field sp e))) elo ehi) (TInt 64 true))
+          (if (type-is-ptr (load (field sp t))) (ok-ep (mk-expr (EFree (load (field sp e))) elo ehi esrc ectxt) (TInt 64 true))
             (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': free expects a pointer, got ") (ty-str a (load (field sp t)))))))))))
       (EErase [trait_name inner]
         (match (do-synth a inner (null-type) env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
-          (match (build-make-dyn a cx trait_name (load (field sp e)) (load (field sp t)) elo ehi fname) (Err [d] (err-ep d))
+          (match (build-make-dyn a cx trait_name (load (field sp e)) (load (field sp t)) elo ehi esrc ectxt fname) (Err [d] (err-ep d))
             (Ok [mp0] (let [mp (alloc-stack SynPair)] (store! mp mp0) (ok-ep (load (load (field mp e))) (load (load (field mp t)))))))))))
-      (EMatch [scrut arms] (synth-match a scrut arms expected env cx tps fname elo ehi))
-      (EFnPtrOf [name] (synth-fnptr a name cx fname elo ehi))
-      (ECallPtr [fp args] (synth-callptr a fp args env cx tps fname elo ehi))
+      (EMatch [scrut arms] (synth-match a scrut arms expected env cx tps fname elo ehi esrc ectxt))
+      (EFnPtrOf [name] (synth-fnptr a name cx fname elo ehi esrc ectxt))
+      (ECallPtr [fp args] (synth-callptr a fp args env cx tps fname elo ehi esrc ectxt))
       (EConstruct [sum variant args]
-        (match (synth-construct a variant (box-items-type a) args (null-type) env cx tps fname elo ehi) (Err [d] (err-ep d))
+        (match (synth-construct a variant (box-items-type a) args (null-type) env cx tps fname elo ehi esrc ectxt) (Err [d] (err-ep d))
           (Ok [rv] (let [r (alloc-stack EvalPair)] (store! r rv) (ok-ep (load (field r e)) (TStruct sum))))))
       (EMakeDyn [dyn_struct vtable_struct methods inner] (ok-ep (load e) (TStruct dyn_struct)))
       (EDynDispatch [ds vt mi cc params ret recv args] (ok-ep (load e) ret))
@@ -5292,11 +5335,11 @@
 (defn synth [(a (ptr Allocator)) (e (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result EvalPair Diag))
   (let [dynt (if (expected-some? expected) (is-dyn-target expected cx) false)]
     (match (synth-inner a e expected env cx tps fname)
-      (Err [d] (err-ep (dwspan d (load (field e lo)) (load (field e hi)))))
+      (Err [d] (err-ep (dwspan d (load (field e lo)) (load (field e hi)) (load (field e source)) (load (field e ctxt)))))
       (Ok [rv]
         (if (not dynt) (Ok [EvalPair Diag] rv)
           (let [r (alloc-stack EvalPair)] (store! r rv)
-            (match (maybe-coerce-dyn a cx (box-expr a (load (field r e))) (box-type a (load (field r t))) expected (load (field e lo)) (load (field e hi)) fname)
+            (match (maybe-coerce-dyn a cx (box-expr a (load (field r e))) (box-type a (load (field r t))) expected (load (field e lo)) (load (field e hi)) (load (field e source)) (load (field e ctxt)) fname)
               (Err [d] (err-ep d))
               (Ok [mp0] (let [mp (alloc-stack SynPair)] (store! mp mp0) (ok-ep (load (load (field mp e))) (load (load (field mp t))))))))))) ))
 
@@ -5626,6 +5669,8 @@
                   (store! (field nf macro_variadic) false)
                   (store! (field nf lo) (load (field f lo)))
                   (store! (field nf hi) (load (field f hi)))
+                  (store! (field nf source) (load (field f source)))
+                  (store! (field nf ctxt) (load (field f ctxt)))
                   (Ok (load nf)))))))))))
 
 ; ---- resolve expressions (src/mono.rs::resolve_expr) -------------------------
@@ -5753,7 +5798,7 @@
 (defn resolve-expr [(m (ptr MonoCtx)) (e (ptr Expr)) (map (ptr Subst))] (-> (Result Expr Diag))
   (match (resolve-expr-kind m e map)
     (Err [d] (Err [Expr Diag] d))
-    (Ok [k] (Ok (mk-expr k (load (field e lo)) (load (field e hi)))))))
+    (Ok [k] (Ok (mk-expr k (load (field e lo)) (load (field e hi)) (load (field e source)) (load (field e ctxt)))))))
 
 ; ---- drain the worklist (src/mono.rs::drain) --------------------------------
 ; LIFO in Rust; an append-only cursor sweep here (same fixpoint, output order is
@@ -6057,7 +6102,8 @@
     (store! (field s loaded)  (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
-    (match (read-all a src)
+    (store! (field s srccount) 1)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
@@ -6078,29 +6124,29 @@
 (defn smoke [(a (ptr Allocator))] (-> i64)
   (let [w (stdout)]
     ; (staticref@1:2 "foo")
-    (let [e (alloc-stack Expr)] (store! e (mk-expr (EStaticRef "foo") 1 2)) (d-expr w e)) (wb w 10)
+    (let [e (alloc-stack Expr)] (store! e (mk-expr (EStaticRef "foo") 1 2 0 0)) (d-expr w e)) (wb w 10)
     ; (spillref@5:6 (eint@3:4 7))
-    (let [inner (box-expr a (mk-expr (EInt 7) 3 4)) e (alloc-stack Expr)]
-      (store! e (mk-expr (ESpillRef inner) 5 6)) (d-expr w e)) (wb w 10)
+    (let [inner (box-expr a (mk-expr (EInt 7) 3 4 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (ESpillRef inner) 5 6 0 0)) (d-expr w e)) (wb w 10)
     ; (construct@9:10 "Opt" "Some" [(eint@7:8 9)])
     (let [(mut xs) (al-new [Expr] a)]
-      (al-push! (mut xs) (mk-expr (EInt 9) 7 8))
+      (al-push! (mut xs) (mk-expr (EInt 9) 7 8 0 0))
       (let [args (box-al [Expr] a (load xs)) e (alloc-stack Expr)]
-        (store! e (mk-expr (EConstruct "Opt" "Some" args) 9 10)) (d-expr w e))) (wb w 10)
+        (store! e (mk-expr (EConstruct "Opt" "Some" args) 9 10 0 0)) (d-expr w e))) (wb w 10)
     ; (traitcall@11:12 "Eq" "eq" "T" [])
     (let [args (box-al [Expr] a (al-new [Expr] a)) e (alloc-stack Expr)]
-      (store! e (mk-expr (ETraitCall "Eq" "eq" "T" args) 11 12)) (d-expr w e)) (wb w 10)
+      (store! e (mk-expr (ETraitCall "Eq" "eq" "T" args) 11 12 0 0)) (d-expr w e)) (wb w 10)
     ; (makedyn@13:14 "Dyn" "VT" ["m0" "m1"] (var@15:16 "x"))
     (let [(mut ms) (al-new [(slice u8)] a)]
       (al-push! (mut ms) "m0") (al-push! (mut ms) "m1")
       (let [methods (box-al [(slice u8)] a (load ms))
-            inner (box-expr a (mk-expr (EVar "x") 15 16)) e (alloc-stack Expr)]
-        (store! e (mk-expr (EMakeDyn "Dyn" "VT" methods inner) 13 14)) (d-expr w e))) (wb w 10)
+            inner (box-expr a (mk-expr (EVar "x") 15 16 0 0)) e (alloc-stack Expr)]
+        (store! e (mk-expr (EMakeDyn "Dyn" "VT" methods inner) 13 14 0 0)) (d-expr w e))) (wb w 10)
     ; (dyndispatch@17:18 "Dyn" "VT" 2 "c" [] void (var@19:20 "r") [])
     (let [params (box-al [Type] a (al-new [Type] a))
           args (box-al [Expr] a (al-new [Expr] a))
-          recv (box-expr a (mk-expr (EVar "r") 19 20)) e (alloc-stack Expr)]
-      (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18)) (d-expr w e)) (wb w 10)
+          recv (box-expr a (mk-expr (EVar "r") 19 20 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18 0 0)) (d-expr w e)) (wb w 10)
     ; ---- ty-str byte-exact checks (vs src/check.rs::ty_str) ----
     (let [t (alloc-stack Type)] (store! t (TInt 64 true))  (ps w (ty-str a t))) (wb w 10)  ; i64
     (let [t (alloc-stack Type)] (store! t (TInt 8 false))  (ps w (ty-str a t))) (wb w 10)  ; u8

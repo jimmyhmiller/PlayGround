@@ -49,7 +49,11 @@
   (KList  [(items (ptr (ArrayList Sexp)))])
   (KVec   [(items (ptr (ArrayList Sexp)))]))
 
-(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64)])
+; source = the SourceMap id of the file this node was read from (0 = main file,
+; 1 = <prelude>, then each import in load order). ctxt = expansion context (0 =
+; user-written; nonzero only after the macro expander stamps it). Stamped by
+; read-all (per file) and by stamp-expansion (per macro expansion).
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 (defsum TokKind
   (TOpen   [(c i64)])
@@ -243,12 +247,13 @@
    (exports (ptr (ArrayList ExportC)))])
 
 ; A parse/read diagnostic (src/span.rs Diag); dummy span = -1.
-(defstruct Diag [(lo i64) (hi i64) (msg (slice u8))])
+(defstruct Diag [(lo i64) (hi i64) (msg (slice u8)) (source i64) (ctxt i64)])
 
 ; ============================ small constructors =============================
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
   (let [p (alloc-stack Sexp)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
   (let [p (alloc-stack Tok)]
@@ -257,10 +262,22 @@
 (defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
   (let [p (alloc-stack Diag)]
     (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p msg) msg)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
   (let [p (alloc-stack StrRead)]
     (store! (field p s) s) (store! (field p end) end)
+    (load p)))
+
+; Rebuild a Sexp of the given kind carrying the FULL span (source+lo+hi+ctxt) of an
+; existing node — mirrors Rust `Sexp::new(kind, s.span)`. Used by expand-calls when it
+; reconstructs a List/Vector so a source-N / macro-stamped-ctxt wrapper keeps its span
+; (mk-sexp would reset source to 0 / ctxt to 0 from lo alone).
+(defn mk-sexp-like [(kind SexpKind) (s (ptr Sexp))] (-> Sexp)
+  (let [p (alloc-stack Sexp)]
+    (store! (field p kind) kind)
+    (store! (field p lo) (load (field s lo))) (store! (field p hi) (load (field s hi)))
+    (store! (field p source) (load (field s source))) (store! (field p ctxt) (load (field s ctxt)))
     (load p)))
 
 (defn box-items [(a (ptr Allocator)) (items (ArrayList Sexp))] (-> (ptr (ArrayList Sexp)))
@@ -315,15 +332,19 @@
   0)
 
 ; A span `@lo:hi`, dummy (lo/hi = -1) prints as `@D:…`/`…:D` (mirrors dump_span).
+; Emit one span field: 'D' for a dummy value (< 0 = u32::MAX in Rust) else decimal.
+(defn dump-span-field [(w (ptr Writer)) (v i64)] (-> i64)
+  (if (icmp-lt v 0) (wb w 68) (dump-dec w v)))
+(defn dump-span4 [(w (ptr Writer)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 64)                                        ; '@'
+  (dump-span-field w source) (wb w 58)             ; source ':'
+  (dump-span-field w lo)     (wb w 58)             ; lo ':'
+  (dump-span-field w hi)     (wb w 58)             ; hi ':'
+  (dump-span-field w ctxt))                        ; ctxt
+; Compat wrapper for the Expr dumper (d-expr): Exprs carry only lo/hi, so the
+; source mirrors lo's dummy-ness and ctxt is 0 (d-expr is NOT on the expand path).
 (defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
-  (wb w 64)
-  (if (icmp-lt lo 0) (wb w 68) (wb w 48))
-  (wb w 58)
-  (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))
-  (wb w 58)
-  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi))
-  (wb w 58)
-  (wb w 48))
+  (dump-span4 w (if (icmp-lt lo 0) -1 0) lo hi 0))
 
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
   (wb w (hexd (iand (ishr b 4) 15))) (wb w (hexd (iand b 15))))
@@ -350,10 +371,10 @@
 ; ============================ Sexp canonical dump (for quote) =================
 ; Mirrors src/reader.rs dump_node (reused by EQuote / QLit). Identical to
 ; selfhost/reader.coil's dumper.
-(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi) (ps w " \"") (esc-write w s) (ps w "\")"))
-(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi)
+(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span4 w source lo hi ctxt) (ps w " \"") (esc-write w s) (ps w "\")"))
+(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span4 w source lo hi ctxt)
   (let [(mut i) 0 n (al-len [Sexp] (load items))]
     (loop
       (if (icmp-ge (load i) n) (break)
@@ -364,16 +385,17 @@
             (store! i (iadd (load i) 1))))))
   (wb w 41))
 (defn sx-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
-  (let [lo (load (field x lo)) hi (load (field x hi))]
+  (let [lo (load (field x lo)) hi (load (field x hi))
+        src (load (field x source)) ctxt (load (field x ctxt))]
     (match (load (field x kind))
-      (KInt   [v]     (do (ps w "(int") (dump-span w lo hi) (wb w 32) (dump-dec w v) (wb w 41)))
-      (KFloat [bits]  (do (ps w "(float") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
-      (KSym   [s]     (sx-atom w "sym" s lo hi))
-      (KKw    [s]     (sx-atom w "kw" s lo hi))
-      (KStr   [s]     (sx-atom w "str" s lo hi))
-      (KCStr  [s]     (sx-atom w "cstr" s lo hi))
-      (KList  [items] (sx-seq w "list" items lo hi))
-      (KVec   [items] (sx-seq w "vec" items lo hi)))))
+      (KInt   [v]     (do (ps w "(int") (dump-span4 w src lo hi ctxt) (wb w 32) (dump-dec w v) (wb w 41)))
+      (KFloat [bits]  (do (ps w "(float") (dump-span4 w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
+      (KSym   [s]     (sx-atom w "sym" s src lo hi ctxt))
+      (KKw    [s]     (sx-atom w "kw" s src lo hi ctxt))
+      (KStr   [s]     (sx-atom w "str" s src lo hi ctxt))
+      (KCStr  [s]     (sx-atom w "cstr" s src lo hi ctxt))
+      (KList  [items] (sx-seq w "list" items src lo hi ctxt))
+      (KVec   [items] (sx-seq w "vec" items src lo hi ctxt)))))
 
 ; ============================ AST canonical dump =============================
 ; Mirrors src/dump_ast.rs EXACTLY. Every helper corresponds to a Rust dumper.
@@ -1877,9 +1899,32 @@
                                     (Err [d] (do (store! out (Err d)) (break))))))))))
                   (load out)))))))))
 
-(defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+; Recursively stamp `source` onto a node and all its descendants (in place),
+; mirroring the Rust reader stamping each Sexp's span with its file's source id.
+; ctxt is left untouched (0 from the constructor; the macro expander sets it).
+(defn stamp-source-list [(items (ptr (ArrayList Sexp))) (source i64)] (-> i64)
+  (let [n (al-len [Sexp] (load items)) (mut i) 0 data (load (field items data))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (stamp-source-node (index data (load i)) source)
+          (store! i (iadd (load i) 1))))))
+  0)
+(defn stamp-source-node [(x (ptr Sexp)) (source i64)] (-> i64)
+  (store! (field x source) source)
+  (match (load (field x kind))
+    (KList  [items] (stamp-source-list items source))
+    (KVec   [items] (stamp-source-list items source))
+    (KInt   [v] 0) (KFloat [b] 0) (KSym  [s] 0)
+    (KKw    [s] 0) (KStr   [s] 0) (KCStr [s] 0))
+  0)
+; Attach a non-dummy diagnostic to `source` (a dummy diag — lo<0 — keeps its D span).
+(defn diag-with-source [(d Diag) (source i64)] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p d)
+    (if (icmp-ge (load (field p lo)) 0) (store! (field p source) source) 0)
+    (load p)))
+
+(defn read-all [(a (ptr Allocator)) (src (slice u8)) (source i64)] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (match (tokenize a src)
-    (Err [d] (Err d))
+    (Err [d] (Err (diag-with-source d source)))
     (Ok [toks]
       (let [p (alloc-stack Parser) (mut out) (al-new [Sexp] a) (mut err) (zeroed Diag) (mut failed) false]
         (store! (field p toks) toks) (store! (field p pos) 0)
@@ -1888,18 +1933,22 @@
             (match (parse-one p a)
               (Ok [s] (do (al-push! (mut out) s) 0))
               (Err [d] (do (store! err d) (store! failed true) (break))))))
-        (if (load failed) (Err (load err)) (Ok (box-items a (load out))))))))
+        (if (load failed)
+            (Err (diag-with-source (load err) source))
+            (let [forms (box-items a (load out))]
+              (stamp-source-list forms source)
+              (Ok forms)))))))
 
 ; ============================ canonical dump entry ==========================
 ; Emits the `(error@lo:hi "msg")` shape on a read/parse error (mirrors dump_ast
 ; in src/lib.rs). A dummy span (lo/hi = -1) prints `D`.
 (defn dump-error [(w (ptr Writer)) (d (ptr Diag))] (-> i64)
-  (ps w "(error") (dump-span w (load (field d lo)) (load (field d hi)))
+  (ps w "(error") (dump-span4 w (load (field d source)) (load (field d lo)) (load (field d hi)) (load (field d ctxt)))
   (ps w " \"") (esc-write w (load (field d msg))) (ps w "\")"))
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
-    (match (read-all a src)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (match (parse-program a forms)
@@ -2003,7 +2052,11 @@
    (out     (ArrayList TaggedForm))
    (loaded  (ArrayList (slice u8)))
    (imports (ArrayList ImpEntry))
-   (exports (ArrayList ExpEntry))])
+   (exports (ArrayList ExpEntry))
+   ; Next SourceMap id to hand out. Main file is source 0 (read in the dump entry),
+   ; so this starts at 1; the prelude then takes 1, each import the next (a duplicate
+   ; import still consumes an id, mirroring src/macros.rs sm.add before dedup).
+   (srccount i64)])
 
 (defstruct Resolved [(text (slice u8)) (incdir (slice u8))])
 
@@ -2307,8 +2360,12 @@
     (let [rr (resolve-source a base path)
           rp (alloc-stack Resolved)]
       (store! rp rr)
-      (let [text (load (field rp text)) incdir (load (field rp incdir))]
-        (match (read-all a text)
+      (let [text (load (field rp text)) incdir (load (field rp incdir))
+            ; A source id is claimed for EVERY import (before the load-once dedup),
+            ; exactly like src/macros.rs registers the source then dedups.
+            inc-id (load (field s srccount))
+            _ignore (store! (field s srccount) (iadd inc-id 1))]
+        (match (read-all a text inc-id)
           (Err [d] (do (loader-abort "import: read error in imported file") 0))
           (Ok [inc-forms]
             (let [modname (match (declared-module inc-forms)
@@ -2350,8 +2407,11 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))]
-    (match (read-all a prelude-text)
+        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))
+        ; The prelude is its own source (id 1: main is 0, claimed in the dump entry).
+        prelude-id (load (field s srccount))
+        _ignore (store! (field s srccount) (iadd prelude-id 1))]
+    (match (read-all a prelude-text prelude-id)
       (Err [d] (do (loader-abort "read error in prelude") 0))
       (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))
     (process-forms (mut s) forms base (None [(slice u8)]))
@@ -5382,7 +5442,8 @@
     (store! (field s loaded)  (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
-    (match (read-all a src)
+    (store! (field s srccount) 1)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
@@ -6669,7 +6730,7 @@
                   (if (or (has-dot name) (icmp-ge (find-slash name) 0)) 0
                     (match (resolve-in-module cx name m)
                       (None [] 0)
-                      (Some [q] (do (store! hp (mk-sexp (KSym q) (sx-lo (load hp)) (sx-hi (load hp)))) 0)))))))))))))
+                      (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
 
 ; ---- eval_quasi / eval_quasi_items (src/comptime.rs) ----------------------
 (defn eval-quasi-items [(items (ptr (ArrayList Quasi))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList Sexp)) Diag))
@@ -6949,14 +7010,18 @@
                         (let [core (imports-find impb "coil.core")]
                           (if (icmp-eq (cast i64 core) 0) (None [(slice u8)]) (macro-reexport-match core macros expb head a)))))))))))))
 
-; ---- stamp_expansion (src/lib.rs::stamp_expansion): set DUMMY spans (lo<0) to
-;      the call site's lo/hi (recursively). ctxt is not modelled (not dumped).
-(defn stamp-expansion [(s (ptr Sexp)) (lo i64) (hi i64)] (-> i64)
-  (if (icmp-lt (sx-lo (load s)) 0) (do (store! (field s lo) lo) (store! (field s hi) hi) 0) 0)
+; ---- stamp_expansion (src/lib.rs::stamp_expansion): every macro-synthesized node
+;      (a template wrapper the quasiquote builder left DUMMY, lo<0) is relocated to
+;      the call site {source,lo,hi} and tagged with the expansion `ctxt`. Non-dummy
+;      nodes (template literals, ~unquote-spliced caller code) are left untouched;
+;      recursion into List/Vector children happens either way.
+(defn stamp-expansion [(s (ptr Sexp)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (if (icmp-lt (sx-lo (load s)) 0)
+      (do (store! (field s source) source) (store! (field s lo) lo) (store! (field s hi) hi) (store! (field s ctxt) ctxt) 0) 0)
   (let [tg (sx-tag (load s))]
     (if (or (icmp-eq tg 6) (icmp-eq tg 7))
         (let [items (sx-items (load s)) n (sx-len items) (mut i) 0]
-          (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) lo hi) (store! i (iadd (load i) 1)))))) 0)) 0)
+          (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt) (store! i (iadd (load i) 1)))))) 0)) 0)
 
 ; ---- expand_macro (src/comptime.rs::expand_macro) -------------------------
 ; Merge sub structs/sums with the (gap-filling) generated ones, build a CtCtx,
@@ -7039,7 +7104,11 @@
 ; ---- expand_calls (src/lib.rs::expand_calls) outside-in to a fixpoint ------
 (defstruct ExpEnv
   [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
-   (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
+   (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))
+   ; Monotonic expansion counter (mirrors SourceMap.add_expansion returning the
+   ; 1-based count). Bumped once per macro expansion, in outside-in DFS order; the
+   ; resulting id is stamped onto that expansion's synthesized nodes as their ctxt.
+   (expcount i64)])
 (defn expand-calls-list [(items (ptr (ArrayList Sexp))) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64))] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (let [a (load (field env a)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
@@ -7060,16 +7129,21 @@
                       (Err [d] (Err [Sexp Diag] d))
                       (Ok [outs]
                         (let [op (box-sexp a outs)]
-                          (stamp-expansion op (sx-lo (load s)) (sx-hi (load s)))
-                          (expand-calls op module env allfns gs gu depth)))))))
+                          ; Record this expansion (bump the counter, 1-based like
+                          ; SourceMap.add_expansion) and tag the synthesized output
+                          ; with it, BEFORE re-expanding (nested macros bump further).
+                          (store! (field env expcount) (iadd (load (field env expcount)) 1))
+                          (let [ctxt (load (field env expcount))]
+                            (stamp-expansion op (load (field s source)) (sx-lo (load s)) (sx-hi (load s)) ctxt)
+                            (expand-calls op module env allfns gs gu depth))))))))
             (None []
               (match (expand-calls-list items module env allfns gs gu depth)
                 (Err [d] (Err [Sexp Diag] d))
-                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp (KList outitems) (sx-lo (load s)) (sx-hi (load s)))))))))
+                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-like (KList outitems) s)))))))
         (if (icmp-eq tg 7)
             (match (expand-calls-list (sx-items (load s)) module env allfns gs gu depth)
               (Err [d] (Err [Sexp Diag] d))
-              (Ok [outitems] (Ok [Sexp Diag] (mk-sexp (KVec outitems) (sx-lo (load s)) (sx-hi (load s))))))
+              (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-like (KVec outitems) s))))
             (Ok [Sexp Diag] (load s))))))
 (defn expand-top-form [(f (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64))] (-> (Result Sexp Diag))
   (if (or (is-meta-form f) (is-comptime-defn f module (load (field env comptime)) (load (field env a)))) (Ok [Sexp Diag] (load f))
@@ -7175,6 +7249,7 @@
     (store! (field result items) (al-new [TaggedForm] a))
     (store! (field env macros) macros) (store! (field env comptime) comptime)
     (store! (field env sub) checked) (store! (field env impb) impb) (store! (field env expb) expb) (store! (field env a) a)
+    (store! (field env expcount) 0)
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nforms)) (break)
       (do (let [tf (alloc-stack TaggedForm)] (store! tf (al-get [TaggedForm] (load out-forms) (load i)))
             (let [module (load (field tf module))]
@@ -7237,7 +7312,9 @@
     (store! (field s loaded)  (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
-    (match (read-all a src)
+    ; Main file = source 0; the next id handed out (prelude) is 1.
+    (store! (field s srccount) 1)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
