@@ -2,23 +2,24 @@
 //! (`.mscope`, default) or newline-JSON (`.json`/`.jsonl`, human-readable).
 //!
 //! Either way it's an [`EventSink`](memscope_core::EventSink) on the recorder's
-//! pump (off the hot path). Both formats are **self-contained**: the first time
-//! a site is seen it's resolved (frames + recovered type + shape) via the
-//! binary's DWARF and written once; events reference it by id, so a reader needs
-//! no binary or debug info.
+//! pump (off the hot path). Sites are written **raw** — the interned id plus the
+//! captured return addresses (`TAG_RSITE`) — the first time each is seen; the
+//! header carries the load slide. **No DWARF runs in the traced process**:
+//! symbolication (frames + recovered type + shape) is deferred to the reader
+//! (`memscope replay`/`analyze`), which resolves the addresses against the
+//! binary's dSYM once. This keeps a profiled program lean and fast even under a
+//! heavy, multi-threaded allocation load, where building and querying the DWARF
+//! index in-process previously dominated both memory and CPU.
 //!
 //! Per-event cost is the point: the binary writer encodes a fixed 34-byte record
 //! into a reused buffer and flushes a whole batch in one write — ~10× smaller and
-//! much faster than JSON, suitable for allocation-heavy programs. Site
-//! resolution is per-site (interned — only a handful even in a billion-alloc
-//! run), so it never dominates.
+//! much faster than JSON, suitable for allocation-heavy programs.
 
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 
 use memscope_core::{self as mem, EventKind, EventSink, RawEvent};
 use memscope_proto::{recfmt, SiteId};
-use memscope_symbols::TypeOracle;
 
 enum Format {
     Binary,
@@ -26,9 +27,15 @@ enum Format {
 }
 
 /// An [`EventSink`] that appends the event stream to a file.
+///
+/// Sites are written **raw** — just the interned id plus the captured return
+/// addresses — so the hot consumer path never touches DWARF. Symbolication (type
+/// recovery + stacks) happens in the reader (`memscope replay`/`analyze`), which
+/// resolves the addresses against the binary's dSYM once, off the traced
+/// process. The header carries the load slide so the reader can map runtime
+/// addresses back to static ones.
 pub struct FileRecorder {
     w: BufWriter<std::fs::File>,
-    oracle: Option<TypeOracle>,
     seen_sites: HashSet<u32>,
     seen_meta: HashSet<u32>,
     seen_keys: HashSet<u32>,
@@ -49,30 +56,38 @@ impl FileRecorder {
         };
         let f = std::fs::File::create(path)?;
         let mut w = BufWriter::new(f);
-        let exe = std::env::current_exe()
+        // The image memscope lives in — the main executable, OR a dylib (e.g. a
+        // Node native addon) when injected. The frames + slide are relative to
+        // *this* image, so the reader must symbolicate against it, not the host
+        // executable (which would be `node` for an addon).
+        let exe = memscope_symbols::current_image_path()
+            .or_else(|| std::env::current_exe().ok())
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+
+        // The load slide lets the reader map recorded runtime addresses back to
+        // static (link-time) addresses for symbolication.
+        let slide = memscope_symbols::current_image_slide();
 
         match format {
             Format::Binary => {
                 let mut hdr = Vec::new();
-                recfmt::encode_header(&mut hdr, std::process::id(), &exe);
+                recfmt::encode_header(&mut hdr, std::process::id(), &exe, slide);
                 w.write_all(&hdr)?;
             }
             Format::Json => {
                 writeln!(
                     w,
-                    "{{\"v\":1,\"pid\":{},\"exe\":{}}}",
+                    "{{\"v\":2,\"pid\":{},\"exe\":{},\"slide\":{}}}",
                     std::process::id(),
-                    json_str(&exe)
+                    json_str(&exe),
+                    slide
                 )?;
             }
         }
 
-        let oracle = TypeOracle::for_current_process().ok();
         Ok(FileRecorder {
             w,
-            oracle,
             seen_sites: HashSet::new(),
             seen_meta: HashSet::new(),
             seen_keys: HashSet::new(),
@@ -87,23 +102,16 @@ impl FileRecorder {
         self.written
     }
 
-    /// Resolve a site's frames + type the first time we see it.
-    fn resolve_site(
-        &self,
-        site: u32,
-    ) -> (
-        Option<String>,
-        Option<memscope_proto::AllocShape>,
-        Vec<memscope_proto::Frame>,
-    ) {
-        let ips = mem::site_frames(SiteId(site)).unwrap_or_default();
-        match &self.oracle {
-            Some(o) => {
-                let (frames, ty, shape) = o.resolve_site_ips(&ips);
-                (ty, shape, frames)
-            }
-            None => (None, None, Vec::new()),
+    /// Write a raw site definition (interned id + captured return addresses) the
+    /// first time the site is seen. No DWARF here — the reader symbolicates.
+    fn write_rsite(&mut self, site: u32) -> std::io::Result<()> {
+        if !self.seen_sites.insert(site) {
+            return Ok(());
         }
+        let ips = mem::site_frames(SiteId(site)).unwrap_or_default();
+        self.scratch.clear();
+        recfmt::encode_rsite(&mut self.scratch, site, &ips);
+        self.w.write_all(&self.scratch)
     }
 
     /// Write the `TAG_KEY` / `TAG_META` tables for a metadata context the first
@@ -155,21 +163,8 @@ impl FileRecorder {
                 }
                 EventKind::Dealloc | EventKind::MetaExit => {}
                 EventKind::Alloc | EventKind::ReallocGrow => {
-                    if e.site.is_some() && !self.seen_sites.contains(&e.site.0) {
-                        self.seen_sites.insert(e.site.0);
-                        let (ty, shape, frames) = self.resolve_site(e.site.0);
-                        let frecs: Vec<recfmt::FrameRec> = frames
-                            .iter()
-                            .map(|f| recfmt::FrameRec {
-                                function: f.function.as_deref().unwrap_or(""),
-                                file: f.file.as_deref().unwrap_or(""),
-                                line: f.line.unwrap_or(0),
-                                inlined: f.inlined,
-                            })
-                            .collect();
-                        self.scratch.clear();
-                        recfmt::encode_site(&mut self.scratch, e.site.0, ty.as_deref(), shape, &frecs);
-                        self.w.write_all(&self.scratch)?;
+                    if e.site.is_some() {
+                        self.write_rsite(e.site.0)?;
                     }
                 }
             }
@@ -189,27 +184,15 @@ impl FileRecorder {
             match e.kind {
                 EventKind::Alloc | EventKind::ReallocGrow => {
                     if e.site.is_some() && self.seen_sites.insert(e.site.0) {
-                        let (ty, shape, frames) = self.resolve_site(e.site.0);
-                        write!(self.w, "{{\"site\":{}", e.site.0)?;
-                        if let Some(t) = &ty {
-                            write!(self.w, ",\"ty\":{}", json_str(t))?;
-                        }
-                        if let Some(s) = shape {
-                            write!(self.w, ",\"shape\":\"{s:?}\"")?;
-                        }
-                        write!(self.w, ",\"frames\":[")?;
-                        for (i, fr) in frames.iter().enumerate() {
+                        // Raw site: just the captured return addresses. The reader
+                        // symbolicates against the binary's dSYM.
+                        let ips = mem::site_frames(SiteId(e.site.0)).unwrap_or_default();
+                        write!(self.w, "{{\"rsite\":{},\"ips\":[", e.site.0)?;
+                        for (i, ip) in ips.iter().enumerate() {
                             if i > 0 {
                                 write!(self.w, ",")?;
                             }
-                            write!(
-                                self.w,
-                                "[{},{},{},{}]",
-                                json_str(fr.function.as_deref().unwrap_or("")),
-                                json_str(fr.file.as_deref().unwrap_or("")),
-                                fr.line.unwrap_or(0),
-                                fr.inlined
-                            )?;
+                            write!(self.w, "{ip}")?;
                         }
                         writeln!(self.w, "]}}")?;
                     }

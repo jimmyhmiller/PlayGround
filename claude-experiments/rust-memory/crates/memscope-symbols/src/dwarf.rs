@@ -688,7 +688,7 @@ fn attr_ref_global(entry: &Die, attr: gimli::DwAt, unit: &gimli::Unit<Reader>) -
 
 /// Resolve `DW_AT_type` on `entry` to a human type name (the referenced DIE's
 /// `DW_AT_name`), reconstructing pointer/ref/array shapes that have no name.
-fn attr_type_name<'a>(
+pub(crate) fn attr_type_name<'a>(
     dwarf: &gimli::Dwarf<Reader<'a>>,
     unit: &gimli::Unit<Reader<'a>>,
     entry: &Die<'a, '_>,
