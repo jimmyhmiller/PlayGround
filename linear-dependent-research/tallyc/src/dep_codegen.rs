@@ -304,6 +304,34 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     let (func, erased) = self.build_fix(strip_ann(head), ty, body)?;
                     return self.compile_call(f, env, func, &erased, &args);
                 }
+                // The CONVOY (a dependent match whose motive Π-abstracts the
+                // index-dependent context variables — rust_surface's
+                // `elab_nested_match`): the checked term is `(Case/Elim …) dep₁ … dep_k`,
+                // each method ending in k dep-lambdas. COMMUTE the application into
+                // the arms (the case-commuting conversion): substitute the deps into
+                // each method body and compile the plain `Case`/`Elim`, the switch
+                // shape this backend already knows. Sound because exactly one arm
+                // runs, and the elaborator only applies context VARIABLES here
+                // (already-computed values — nothing is re-evaluated or duplicated).
+                match strip_ann(head) {
+                    Term::Case(d, m, methods, sc) => {
+                        let new = self.commute_apply_into_methods(d, methods, &args, false)?;
+                        return self.compile(
+                            f,
+                            env,
+                            &Term::Case(d.clone(), m.clone(), new, sc.clone()),
+                        );
+                    }
+                    Term::Elim(d, m, methods, sc) => {
+                        let new = self.commute_apply_into_methods(d, methods, &args, true)?;
+                        return self.compile(
+                            f,
+                            env,
+                            &Term::Elim(d.clone(), m.clone(), new, sc.clone()),
+                        );
+                    }
+                    _ => {}
+                }
                 // The head is an annotated function `(λ…. body : Π…. _)` (defs are
                 // inlined this way). Walk the body's lambdas and the type's Pi
                 // telescope in lockstep so we know each argument's MULTIPLICITY: a
@@ -356,6 +384,78 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Const(c) => self.compile_postulate(f, env, c, &[]),
             other => Err(format!("not a runtime value: {other:?}")),
         }
+    }
+
+    /// Case-commuting conversion for a CONVOY application `(Case/Elim …) a₁ … a_k`:
+    /// rewrite each method `λ(telescope). λdep₁…λdep_k. body` to
+    /// `λ(telescope). body[depⱼ := aⱼ]` so the result is a plain `Case`/`Elim`.
+    /// A REFUTED arm's method (the convoy's `Nat`-sentinel dead code) binds NO
+    /// deps — it is kept as-is; the scrutinee's type guarantees it never runs.
+    fn commute_apply_into_methods(
+        &self,
+        data: &str,
+        methods: &[Term],
+        args: &[&Term],
+        with_ih: bool,
+    ) -> Result<Vec<Term>, String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("case on unknown datatype `{data}`"))?;
+        let k = args.len();
+        let mut out = Vec::with_capacity(methods.len());
+        for (ci, ctor) in decl.ctors.iter().enumerate() {
+            let lay = ctor_layout(self.sig, data, &ctor.name)?;
+            let nb = ctor.args.len()
+                + if with_ih {
+                    lay.arg_recursive.iter().filter(|b| **b).count()
+                } else {
+                    0
+                };
+            let mut body = strip_ann(&methods[ci]);
+            for _ in 0..nb {
+                match body {
+                    Term::Lam(inner) => body = strip_ann(inner),
+                    _ => {
+                        return Err(format!(
+                            "case[{data}]: method for `{}` is not a {nb}-argument function",
+                            ctor.name
+                        ))
+                    }
+                }
+            }
+            // peel up to k dep-lambdas (a refuted arm's sentinel has none).
+            let mut kp = 0;
+            while kp < k {
+                match body {
+                    Term::Lam(inner) => {
+                        body = strip_ann(inner);
+                        kp += 1;
+                    }
+                    _ => break,
+                }
+            }
+            // `body` sits under `nb` telescope binders + `kp` dep binders
+            // (innermost). Substitute the dep binders with the (shifted) applied
+            // arguments and close the `kp`-binder gap for everything else.
+            let new_body = crate::dep::map_vars(body, 0, &|i, depth| {
+                if i < depth {
+                    return Term::Var(i);
+                }
+                let rel = i - depth;
+                if rel < kp {
+                    crate::dep::shift_term(nb + depth, args[kp - 1 - rel])
+                } else {
+                    Term::Var(i - kp)
+                }
+            });
+            let mut m = new_body;
+            for _ in 0..nb {
+                m = Term::Lam(Box::new(m));
+            }
+            out.push(m);
+        }
+        Ok(out)
     }
 
     /// `malloc(nslots * 8)` and return the raw pointer.

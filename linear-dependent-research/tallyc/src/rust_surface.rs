@@ -1197,6 +1197,17 @@ impl Elab {
                 let sol = holes[pos]
                     .clone()
                     .ok_or_else(|| format!("cannot infer implicit argument of `{cname}`"))?;
+                // A "solution" that still mentions a hole (its own, or one leaked
+                // from an ENCLOSING call's open implicit) is not a solution —
+                // report it cleanly rather than quoting it (which would underflow
+                // on the synthetic hole level). Same guard as `solve_fn_call`.
+                if value_has_hole(&sol) {
+                    return Err(format!(
+                        "cannot infer implicit argument of `{cname}` (it depends on an \
+                         implicit of the enclosing call that is not yet determined — \
+                         bind the argument to a named, annotated definition first)"
+                    ));
+                }
                 terms.push(dep::quote_at(n, &sol));
                 env.push(sol);
             } else {
@@ -1423,8 +1434,12 @@ impl Elab {
         self.elab_nested_match(&e_term, &dname, &dargs, std::slice::from_ref(&arm), expected, cx, rec)
     }
 
-    /// A `match`/`let` in CHECK mode (the motive is the constant expected type —
-    /// a non-dependent elimination). The scrutinee is an arbitrary elaborated term.
+    /// A `match`/`let` in CHECK mode. The motive is normally the constant
+    /// expected type (a non-dependent elimination) — but when the scrutinee's
+    /// type is INDEXED by (`Succ` of) a context variable and other context
+    /// variables' types depend on that index, the CONVOY (docs/CONVOY_HANDOFF.md;
+    /// "the view from the left") abstracts those dependents into the motive so
+    /// each arm re-binds them at their per-constructor REFINED types.
     fn elab_nested_match(&self, e_term: &Term, dname: &str, dargs: &[Value], arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         let decl = self.rc.data(dname).unwrap().clone();
         let np = decl.params.len();
@@ -1432,19 +1447,26 @@ impl Elab {
         let n = cx.len();
         let sparam_tms: Vec<Term> = dargs[..np].iter().map(|v| dep::quote_at(n, v)).collect();
 
-        // constant motive: λ indices. λ _. expected
         let exp_tm = dep::quote_at(n, expected);
-        let mut motive = dep::shift_term(ni + 1, &exp_tm);
-        for _ in 0..(ni + 1) {
-            motive = Term::Lam(Box::new(motive));
-        }
+        let convoy = self.detect_convoy(e_term, &decl, dargs, &exp_tm, cx);
+        let motive = match &convoy {
+            // constant motive: λ indices. λ _. expected
+            None => {
+                let mut m = dep::shift_term(ni + 1, &exp_tm);
+                for _ in 0..(ni + 1) {
+                    m = Term::Lam(Box::new(m));
+                }
+                m
+            }
+            Some(cv) => cv.build_motive(&exp_tm, n),
+        };
         let motive_tm = motive.clone();
 
         // In a `Fix` body (`in_fix`) the match lowers to a NON-recursive `Case` (no IH,
         // recursion via the `Fix` self-call); otherwise the recursive `Elim`.
         let as_case = self.in_fix.get();
         let mut methods = Vec::with_capacity(decl.ctors.len());
-        for ctor in &decl.ctors {
+        for (ci, ctor) in decl.ctors.iter().enumerate() {
             let info = &self.ctor_info[&ctor.name];
             let nargs = ctor.args.len();
             let rec_fields: Vec<usize> = ctor
@@ -1454,6 +1476,28 @@ impl Elab {
                 .filter(|(_, (_, a))| matches!(a, Term::Data(d, _) if d == dname))
                 .map(|(i, _)| i)
                 .collect();
+            let nlam = if as_case { nargs } else { nargs + rec_fields.len() };
+            // An arm the index REFUTES (a `Zero`-headed constructor index against the
+            // scrutinee's `Succ`-headed index) is impossible: it must be OMITTED, and
+            // its method is the `Nat` sentinel of the convoy motive's `Zero` branch —
+            // typed dead code the kernel accepts and no run can reach (the scrutinee's
+            // type rules the constructor out).
+            if convoy.as_ref().is_some_and(|cv| cv.absurd_ctor[ci]) {
+                if arms.iter().any(|a| a.ctor == ctor.name) {
+                    return Err(format!(
+                        "`match`: the case `{}` is impossible here — the scrutinee's \
+                         index is `Succ`-headed and this constructor's is `Zero` — \
+                         remove the arm",
+                        ctor.name
+                    ));
+                }
+                let mut m = Term::NatLit(0);
+                for _ in 0..nlam {
+                    m = Term::Lam(Box::new(m));
+                }
+                methods.push(m);
+                continue;
+            }
             let arm = arms
                 .iter()
                 .find(|a| a.ctor == ctor.name)
@@ -1483,37 +1527,262 @@ impl Elab {
                     binder_names.push(format!("$ih{kk}"));
                 }
             }
-            let (binder_tys_full, _) =
-                dep::elim_method_telescope(&self.rc, dname, &sparam_tms, &motive_tm, &ctor.name)?;
-            // for a `Case`, keep only the ARG binder types (the first `nargs`); the
-            // remaining entries are the IH types, which a `Case` method does not bind.
-            let binder_tys: Vec<(crate::mult::Mult, Term)> = if as_case {
-                binder_tys_full[..nargs].to_vec()
-            } else {
-                binder_tys_full
-            };
+            let (binder_tys, result_tm) =
+                dep::elim_method_telescope(&self.rc, dname, &sparam_tms, &motive_tm, &ctor.name, !as_case)?;
             let mut arm_cx = cx.clone();
             for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
                 let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
                 arm_cx.push(bn.clone(), v);
             }
+            // CONVOY: the method's result type is `motive ctor-index (ctor args)`,
+            // which β/ι-reduces to `Π (dep : refined-ty) …. expected'` — peel those
+            // Πs, RE-BINDING each dependent under its ORIGINAL name (it shadows the
+            // outer binding) at its refined type, and check the arm at the reduced
+            // codomain. The refinement is computed by the kernel's own method-type
+            // machinery, and the final term is re-checked by the kernel — a wrong
+            // convoy can only be rejected, never unsoundly accepted.
+            let ndep = convoy.as_ref().map_or(0, |cv| cv.deps.len());
+            let arm_expected = match &convoy {
+                None => expected.clone(),
+                Some(cv) => {
+                    let mut res_v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &result_tm);
+                    for d in &cv.deps {
+                        match res_v {
+                            Value::VPi(_, dom, clo) => {
+                                arm_cx.push(d.name.clone(), *dom);
+                                res_v = clo.apply(dep::nvar(arm_cx.len() - 1));
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "internal: convoy method type for `{}` did not reduce \
+                                     to a Π over the abstracted dependents",
+                                    ctor.name
+                                ))
+                            }
+                        }
+                    }
+                    res_v
+                }
+            };
             // USE-SITE LINEARITY (see `rebind_linear_fields`): re-bind each linear
             // field at 1 so a hidden `Own` (incl. a generic instantiated at `Own`)
             // can't be used twice in a nested/expression `match` either.
             let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
-            let mut body = self.check(&arm_body, expected, &arm_cx, rec)?;
-            let nlam = if as_case { nargs } else { nargs + rec_fields.len() };
-            for _ in 0..nlam {
+            let mut body = self.check(&arm_body, &arm_expected, &arm_cx, rec)?;
+            for _ in 0..(nlam + ndep) {
                 body = Term::Lam(Box::new(body));
             }
             methods.push(body);
         }
-        if as_case {
-            Ok(Term::Case(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
+        let mut out = if as_case {
+            Term::Case(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone()))
         } else {
-            Ok(Term::Elim(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone())))
+            Term::Elim(dname.to_string(), Box::new(motive), methods, Box::new(e_term.clone()))
+        };
+        // apply the eliminator's Π-over-dependents result to the ACTUAL dependents
+        // (whose per-arm refinements the methods just consumed).
+        if let Some(cv) = &convoy {
+            for d in &cv.deps {
+                out = Term::App(Box::new(out), Box::new(Term::Var(n - 1 - d.lvl)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Detect a CONVOY opportunity for a `match` on `e_term : dname dargs`
+    /// (docs/CONVOY_HANDOFF.md). v1 scope, all misses CONSERVATIVE (constant
+    /// motive, as before):
+    ///
+    /// - the family has exactly ONE index, of builtin `Nat` type;
+    /// - the scrutinee's index value is a context VARIABLE (`r = 0`) or `Succ`
+    ///   of one (`r = 1`);
+    /// - the dependents are the context variables whose types mention that
+    ///   variable (transitively through other dependents); none may mention the
+    ///   scrutinee itself;
+    /// - for `r = 1`, every constructor's result index must be `Zero`- or
+    ///   `Succ`-headed (so the motive's `NatCase` reduces in every method type);
+    ///   `Zero`-headed constructors are REFUTED arms (must be omitted).
+    ///
+    /// Fires when there are dependents, or (`r = 1`) when it refutes an arm or
+    /// the EXPECTED type mentions the index variable (the `Succ`-inversion in
+    /// the motive is then what types `vhead`/`vtail`-style index projections).
+    fn detect_convoy(&self, e_term: &Term, decl: &dep::DataDecl, dargs: &[Value], exp_tm: &Term, cx: &Cx) -> Option<Convoy> {
+        let np = decl.params.len();
+        if decl.indices.len() != 1 || !matches!(decl.indices[0].1, Term::Nat) {
+            return None;
+        }
+        let n = cx.len();
+        // peel `Succ` layers off the index value down to a context variable.
+        let mut r = 0usize;
+        let mut v = &dargs[np];
+        while let Value::VSuc(inner) = v {
+            r += 1;
+            v = inner;
+        }
+        // v1: `Succ`-depth ≤ 1 (deeper would need nested `NatCase`s whose inner
+        // case is STUCK on the constructor's own neutral index).
+        if r > 1 {
+            return None;
+        }
+        let lvl = match v {
+            Value::VNeu(dep::Neutral::NVar(l)) if *l < n => *l,
+            _ => return None,
+        };
+        let mut scrut = e_term;
+        while let Term::Ann(inner, _) = scrut {
+            scrut = inner;
+        }
+        let scrut_lvl = match scrut {
+            Term::Var(i) if *i < n => Some(n - 1 - *i),
+            _ => None,
+        };
+        let mut dep_lvls: Vec<usize> = vec![lvl];
+        let mut deps: Vec<ConvoyDep> = Vec::new();
+        for l in 0..n {
+            if l == lvl || Some(l) == scrut_lvl {
+                continue;
+            }
+            let ty = dep::quote_at(n, &cx.types[l]);
+            if !term_mentions_levels(&ty, n, &dep_lvls) {
+                continue;
+            }
+            if let Some(sl) = scrut_lvl {
+                if term_mentions_levels(&ty, n, &[sl]) {
+                    return None; // a dependent typed BY the scrutinee: out of v1 scope
+                }
+            }
+            let mult = if type_is_linear(&ty, &self.rc) { Mult::One } else { Mult::Omega };
+            dep_lvls.push(l);
+            deps.push(ConvoyDep { lvl: l, name: cx.names[l].clone(), ty, mult });
+        }
+        let mut absurd_ctor = vec![false; decl.ctors.len()];
+        if r == 1 {
+            for (ci, ctor) in decl.ctors.iter().enumerate() {
+                // the constructor's result index, evaluated with params at their
+                // actual values and the ctor's own args neutral. `Zero` vs the
+                // scrutinee's `Succ`-headed index is DECIDABLY disjoint, so the
+                // refuted-arm classification cannot be wrong (there is no
+                // reachable arm to misclassify; cf. the `try_absurd_match`
+                // Nat-sentinel caveat, which this satisfies).
+                let mut env: Vec<Value> = dargs[..np].to_vec();
+                for j in 0..ctor.args.len() {
+                    env.push(dep::nvar(n + j));
+                }
+                let idx_v = dep::eval_rc(&self.rc, &env, &ctor.idxs[0]);
+                match idx_v {
+                    Value::VNatLit(0) => absurd_ctor[ci] = true,
+                    Value::VNatLit(_) | Value::VSuc(_) => {}
+                    _ => return None, // non-ctor-headed index: the NatCase would stick
+                }
+            }
+        }
+        let worthwhile = !deps.is_empty()
+            || (r == 1
+                && (absurd_ctor.iter().any(|b| *b) || term_mentions_levels(exp_tm, n, &[lvl])));
+        if !worthwhile {
+            return None;
+        }
+        Some(Convoy { r, lvl, deps, absurd_ctor })
+    }
+}
+
+/// The CONVOY: a dependent-match motive that Π-abstracts the index-dependent
+/// context variables, so each arm sees them REFINED by that constructor's
+/// index. For `r = 0` the index variable itself becomes the motive's index
+/// binder; for `r = 1` the variable sits UNDER a `Succ`, so the motive computes
+/// it back from the index binder by LARGE ELIMINATION (`NatCase` — the
+/// predecessor; the same J-free technique as the absurd discharge, and what
+/// connects a tail's index to a constructor's own implicit without an identity
+/// eliminator).
+struct Convoy {
+    /// `Succ`-depth of the scrutinee's index over the variable (0 or 1).
+    r: usize,
+    /// context LEVEL of the index variable.
+    lvl: usize,
+    /// the abstracted dependents, ascending by context level.
+    deps: Vec<ConvoyDep>,
+    /// per-constructor: is the arm refuted by the index? (`r = 1` only)
+    absurd_ctor: Vec<bool>,
+}
+
+struct ConvoyDep {
+    lvl: usize,
+    name: String,
+    /// the dependent's type, quoted at the match's context length.
+    ty: Term,
+    /// `1` for a linear dependent (the kernel then enforces exactly-once use of
+    /// the re-bound dependent in every arm), `ω` otherwise — same rule as `let`.
+    mult: Mult,
+}
+
+impl Convoy {
+    /// `r = 0`:  λ idx. λ scrut. Π deps[x := idx]. expected[x := idx]
+    /// `r = 1`:  λ idx. λ scrut. NatCase[λ_.Type] idx Nat (λ p. Π deps[x := p]. expected[x := p])
+    /// (the `Nat` in the `Zero` branch is the refuted-arm sentinel: no reachable
+    /// use site computes it, and a misclassification yields a kernel-rejected term).
+    fn build_motive(&self, exp_tm: &Term, n: usize) -> Term {
+        let k = self.deps.len();
+        // binders between the original context and the Π-chain: [idx, scrut] for
+        // r = 0; [idx, scrut, p] for r = 1 (p = the NatCase predecessor binder).
+        let base = 2 + self.r;
+        // the index variable's replacement, at Π-chain depth j: the idx binder
+        // (r = 0) or the predecessor binder p (r = 1).
+        let idx_repl = |j: usize| if self.r == 0 { j + 1 } else { j };
+        let mut body = self.remap(exp_tm, n, base + k, idx_repl(k), k);
+        for j in (0..k).rev() {
+            let ty = self.remap(&self.deps[j].ty, n, base + j, idx_repl(j), j);
+            body = Term::Pi(self.deps[j].mult, Box::new(ty), Box::new(body));
+        }
+        if self.r == 0 {
+            Term::Lam(Box::new(Term::Lam(Box::new(body))))
+        } else {
+            Term::Lam(Box::new(Term::Lam(Box::new(Term::NatCase(
+                Box::new(Term::Lam(Box::new(Term::Type(0)))),
+                Box::new(Term::Nat),
+                Box::new(Term::Lam(Box::new(body))),
+                Box::new(Term::Var(1)), // the index binder
+            )))))
         }
     }
+
+    /// Re-target a term quoted at level `n` to sit under `d` inserted binders:
+    /// the index variable ↦ `Var(idx_repl)`, the first `j` dependents ↦ their
+    /// own Π binders, every other free variable shifted by `d`. (Replacement
+    /// indices are relative to the insertion point; `map_vars` supplies the
+    /// local binder depth.)
+    fn remap(&self, t: &Term, n: usize, d: usize, idx_repl: usize, j: usize) -> Term {
+        dep::map_vars(t, 0, &|i, depth| {
+            if i < depth {
+                return Term::Var(i);
+            }
+            let outer = i - depth;
+            if outer < n {
+                let l = n - 1 - outer;
+                if l == self.lvl {
+                    return Term::Var(idx_repl + depth);
+                }
+                if let Some(m) = self.deps[..j].iter().position(|dp| dp.lvl == l) {
+                    return Term::Var(j - 1 - m + depth);
+                }
+            }
+            Term::Var(i + d)
+        })
+    }
+}
+
+/// Does `t` (quoted at level `n`) mention any of the context levels in `lvls`?
+fn term_mentions_levels(t: &Term, n: usize, lvls: &[usize]) -> bool {
+    let hit = std::cell::Cell::new(false);
+    dep::map_vars(t, 0, &|i, depth| {
+        if i >= depth {
+            let outer = i - depth;
+            if outer < n && lvls.contains(&(n - 1 - outer)) {
+                hit.set(true);
+            }
+        }
+        Term::Var(i)
+    });
+    hit.get()
 }
 
 /// First-order matching: bind holes in `holes` so that `pat` matches `target`.
@@ -2504,7 +2773,7 @@ impl Elab {
             // kernel types (from the eliminator method telescope)
             let motive_tm = motive.clone();
             let (binder_tys, ret_ty_tm) =
-                dep::elim_method_telescope(&self.rc, &data, &sparam_tms, &motive_tm, &ctor.name)?;
+                dep::elim_method_telescope(&self.rc, &data, &sparam_tms, &motive_tm, &ctor.name, true)?;
             let mut arm_cx = fn_cx.clone();
             for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
                 let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
@@ -3087,7 +3356,40 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             // TOTAL ⇒ lower to a kernel eliminator (or a non-recursive body).
             let body_inner = match body {
                 Tm::Match(scrut, arms) => {
-                    elab.elab_match_body(name, &fn_cx, params, &full_tys, &ret, scrut, arms)?
+                    // CONVOY at the fn level: when the scrutinee's index refines
+                    // context dependents / refutes arms, route through the
+                    // nested-match elaborator (which builds the dependent motive)
+                    // instead of `elab_match_body`'s constant one. v1: only for a
+                    // body with NO self-call (a recursive convoy body would need
+                    // dep-applied induction hypotheses — not yet built; such fns
+                    // are `%partial` and take the `Fix` path above).
+                    let fn_convoy = {
+                        let no_self_call = {
+                            let mut calls = Vec::new();
+                            collect_all_calls(body, &mut calls);
+                            calls.iter().all(|c| c.callee != *name)
+                        };
+                        no_self_call
+                            && fn_cx.debruijn(scrut).is_some()
+                            && match fn_cx.var_type(scrut) {
+                                Some(Value::VData(d, dargs)) => {
+                                    let decl = elab.rc.data(&d).unwrap().clone();
+                                    let sidx = fn_cx.debruijn(scrut).unwrap();
+                                    let ret_tm = elab.elab_ty(&ret, &full_names)?;
+                                    let exp_v = dep::eval_rc(&elab.rc, &neutral_env(fn_cx.len()), &ret_tm);
+                                    let exp_tm = dep::quote_at(fn_cx.len(), &exp_v);
+                                    elab.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, &fn_cx)
+                                        .is_some()
+                                }
+                                _ => false,
+                            }
+                    };
+                    if fn_convoy {
+                        let expected = dep::eval_rc(&elab.rc, &neutral_env(full_names.len()), &elab.elab_ty(&ret, &full_names)?);
+                        elab.check(body, &expected, &fn_cx, None)?
+                    } else {
+                        elab.elab_match_body(name, &fn_cx, params, &full_tys, &ret, scrut, arms)?
+                    }
                 }
                 other => {
                     let expected = dep::eval_rc(&elab.rc, &neutral_env(full_names.len()), &elab.elab_ty(&ret, &full_names)?);

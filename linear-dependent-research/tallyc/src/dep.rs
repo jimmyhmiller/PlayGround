@@ -674,7 +674,7 @@ fn subst(t: &Term, sub: &[Term]) -> Term {
 
 /// Generic variable traversal: `f(index, binder_depth)` is called for each
 /// `Var`, with `binder_depth` = number of binders crossed so far.
-fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
+pub(crate) fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term) -> Term {
     let go = |t: &Term| map_vars(t, depth, f);
     let go1 = |t: &Term| map_vars(t, depth + 1, f);
     match t {
@@ -1945,6 +1945,7 @@ pub(crate) fn elim_method_telescope(
     sparam_tms: &[Term],
     motive_tm: &Term,
     ctor_name: &str,
+    with_ih: bool,
 ) -> Result<(Vec<(Mult, Term)>, Term), String> {
     let decl = sig.data(data).ok_or_else(|| format!("unknown datatype `{data}`"))?;
     let ctor = decl
@@ -1952,12 +1953,15 @@ pub(crate) fn elim_method_telescope(
         .iter()
         .find(|c| c.name == ctor_name)
         .ok_or_else(|| format!("unknown constructor `{ctor_name}`"))?;
-    let nrec = ctor
-        .args
-        .iter()
-        .filter(|(_, a)| rec_spine(data, a).is_some())
-        .count();
-    let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm, true);
+    let nrec = if with_ih {
+        ctor.args
+            .iter()
+            .filter(|(_, a)| rec_spine(data, a).is_some())
+            .count()
+    } else {
+        0
+    };
+    let mut t = method_ty_tm(decl, ctor, sparam_tms, motive_tm, with_ih);
     let mut binders = Vec::new();
     for _ in 0..(ctor.args.len() + nrec) {
         match t {
