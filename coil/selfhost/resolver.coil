@@ -48,7 +48,7 @@
   (KList  [(items (ptr (ArrayList Sexp)))])
   (KVec   [(items (ptr (ArrayList Sexp)))]))
 
-(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64)])
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 (defsum TokKind
   (TOpen   [(c i64)])
@@ -138,7 +138,9 @@
   (EQuasi     [(q Quasi)])
   (EComptime  [(inner (ptr Expr))]))
 
-(defstruct Expr [(kind ExprKind) (lo i64) (hi i64)])
+; source/ctxt mirror Sexp: an Expr inherits its originating node's SourceMap id
+; and expansion context, so the resolved/checked/mono dumps carry @source:lo:hi:ctxt.
+(defstruct Expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 ; A let binding (name, mutable, value).
 (defstruct Bind [(name (slice u8)) (mutable bool) (value Expr)])
@@ -202,7 +204,7 @@
    (ret Type)
    (body (ptr (ArrayList Expr)))
    (macro_variadic bool)
-   (lo i64) (hi i64)])
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 (defstruct StaticAssert [(cnd Expr) (msg (slice u8))])
 (defstruct Const [(name (slice u8)) (ty (Option Type)) (value Expr)])
@@ -215,7 +217,7 @@
 
 (defstruct ExportC
   [(name (slice u8)) (symbol (Option (slice u8))) (params (ptr (ArrayList Type)))
-   (lo i64) (hi i64)])
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
 
 ; The whole program (src/ast.rs Program). `statics` is omitted: parsing never
 ; produces statics (they come from checking), so the dump always emits an empty
@@ -234,12 +236,13 @@
    (exports (ptr (ArrayList ExportC)))])
 
 ; A parse/read diagnostic (src/span.rs Diag); dummy span = -1.
-(defstruct Diag [(lo i64) (hi i64) (msg (slice u8))])
+(defstruct Diag [(lo i64) (hi i64) (msg (slice u8)) (source i64) (ctxt i64)])
 
 ; ============================ small constructors =============================
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
   (let [p (alloc-stack Sexp)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
   (let [p (alloc-stack Tok)]
@@ -248,6 +251,7 @@
 (defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
   (let [p (alloc-stack Diag)]
     (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p msg) msg)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
     (load p)))
 (defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
   (let [p (alloc-stack StrRead)]
@@ -264,10 +268,16 @@
 (defn box-type [(a (ptr Allocator)) (t Type)] (-> (ptr Type))
   (let [p (unwrap-ptr [Type] (create [Type] a))] (store! p t) p))
 
-(defn mk-expr [(kind ExprKind) (lo i64) (hi i64)] (-> Expr)
+; An Expr carries the source id + expansion ctxt of the node it derives from
+; (a Sexp via sx-source/sx-ctxt, or another Expr via esrc/ectxt); a synthesized
+; node passes source=-1 (dummy span, prints D). Kept as the sole Expr constructor.
+(defn mk-expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> Expr)
   (let [p (alloc-stack Expr)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) source) (store! (field p ctxt) ctxt)
     (load p)))
+(defn esrc  [(e (ptr Expr))] (-> i64) (load (field e source)))
+(defn ectxt [(e (ptr Expr))] (-> i64) (load (field e ctxt)))
 
 ; ============================ numeric/string utils ===========================
 (defn f64-bits [(x f64)] (-> i64)
@@ -305,16 +315,15 @@
         (do (wb w (hexd (iand (ishr n (load k)) 15))) (store! k (isub (load k) 4))))))
   0)
 
-; A span `@lo:hi`, dummy (lo/hi = -1) prints as `@D:…`/`…:D` (mirrors dump_span).
-(defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
+; Canonical span `@source:lo:hi:ctxt`; a field <0 (u32::MAX / dummy) prints 'D'.
+(defn dump-span-field [(w (ptr Writer)) (v i64)] (-> i64)
+  (if (icmp-lt v 0) (wb w 68) (dump-dec w v)))
+(defn dump-span [(w (ptr Writer)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
   (wb w 64)
-  (if (icmp-lt lo 0) (wb w 68) (wb w 48))
-  (wb w 58)
-  (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))
-  (wb w 58)
-  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi))
-  (wb w 58)
-  (wb w 48))
+  (dump-span-field w source) (wb w 58)
+  (dump-span-field w lo)     (wb w 58)
+  (dump-span-field w hi)     (wb w 58)
+  (dump-span-field w ctxt))
 
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
   (wb w (hexd (iand (ishr b 4) 15))) (wb w (hexd (iand b 15))))
@@ -341,10 +350,10 @@
 ; ============================ Sexp canonical dump (for quote) =================
 ; Mirrors src/reader.rs dump_node (reused by EQuote / QLit). Identical to
 ; selfhost/reader.coil's dumper.
-(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi) (ps w " \"") (esc-write w s) (ps w "\")"))
-(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (lo i64) (hi i64)] (-> i64)
-  (wb w 40) (ps w tag) (dump-span w lo hi)
+(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt) (ps w " \"") (esc-write w s) (ps w "\")"))
+(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt)
   (let [(mut i) 0 n (al-len [Sexp] (load items))]
     (loop
       (if (icmp-ge (load i) n) (break)
@@ -355,16 +364,17 @@
             (store! i (iadd (load i) 1))))))
   (wb w 41))
 (defn sx-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
-  (let [lo (load (field x lo)) hi (load (field x hi))]
+  (let [lo (load (field x lo)) hi (load (field x hi))
+        src (load (field x source)) ctxt (load (field x ctxt))]
     (match (load (field x kind))
-      (KInt   [v]     (do (ps w "(int") (dump-span w lo hi) (wb w 32) (dump-dec w v) (wb w 41)))
-      (KFloat [bits]  (do (ps w "(float") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
-      (KSym   [s]     (sx-atom w "sym" s lo hi))
-      (KKw    [s]     (sx-atom w "kw" s lo hi))
-      (KStr   [s]     (sx-atom w "str" s lo hi))
-      (KCStr  [s]     (sx-atom w "cstr" s lo hi))
-      (KList  [items] (sx-seq w "list" items lo hi))
-      (KVec   [items] (sx-seq w "vec" items lo hi)))))
+      (KInt   [v]     (do (ps w "(int") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v) (wb w 41)))
+      (KFloat [bits]  (do (ps w "(float") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
+      (KSym   [s]     (sx-atom w "sym" s src lo hi ctxt))
+      (KKw    [s]     (sx-atom w "kw" s src lo hi ctxt))
+      (KStr   [s]     (sx-atom w "str" s src lo hi ctxt))
+      (KCStr  [s]     (sx-atom w "cstr" s src lo hi ctxt))
+      (KList  [items] (sx-seq w "list" items src lo hi ctxt))
+      (KVec   [items] (sx-seq w "vec" items src lo hi ctxt)))))
 
 ; ============================ AST canonical dump =============================
 ; Mirrors src/dump_ast.rs EXACTLY. Every helper corresponds to a Rust dumper.
@@ -506,51 +516,52 @@
                           (wb w 41)))))
 
 (defn d-expr [(w (ptr Writer)) (e (ptr Expr))] (-> i64)
-  (let [lo (load (field e lo)) hi (load (field e hi))]
+  (let [lo (load (field e lo)) hi (load (field e hi))
+        src (load (field e source)) ctxt (load (field e ctxt))]
     (wb w 40)
     (match (load (field e kind))
-      (EInt   [v]    (do (ps w "eint") (dump-span w lo hi) (wb w 32) (dump-dec w v)))
-      (EFloat [bits] (do (ps w "efloat") (dump-span w lo hi) (ps w " 0x") (u-hex16 w bits)))
-      (EBool  [b]    (do (ps w "ebool") (dump-span w lo hi) (wb w 32) (dbool w b)))
-      (EStr   [s]    (do (ps w "estr") (dump-span w lo hi) (wb w 32) (dstr w s)))
-      (ECStr  [s]    (do (ps w "ecstr") (dump-span w lo hi) (wb w 32) (dstr w s)))
-      (EVar   [name] (do (ps w "var") (dump-span w lo hi) (wb w 32) (dstr w name)))
-      (EZeroed[ty]   (do (ps w "zeroed") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EBorrow[m place] (do (ps w "borrow") (dump-span w lo hi) (wb w 32) (dbool w m) (wb w 32) (d-expr w place)))
-      (ELet   [binds body] (do (ps w "let") (dump-span w lo hi) (wb w 32) (d-binds w binds) (wb w 32) (d-exprs w body)))
-      (EBin   [op lhs rhs] (do (ps w "bin") (dump-span w lo hi) (wb w 32) (d-binop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
-      (ENot   [inner] (do (ps w "inot") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (ECmp   [op lhs rhs] (do (ps w "cmp") (dump-span w lo hi) (wb w 32) (d-cmpop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
-      (EIf    [cnd thn els] (do (ps w "if") (dump-span w lo hi) (wb w 32) (d-expr w cnd) (wb w 32) (d-expr w thn) (wb w 32) (d-expr w els)))
-      (EDo    [body] (do (ps w "do") (dump-span w lo hi) (wb w 32) (d-exprs w body)))
-      (ECall  [func type_args args] (do (ps w "call") (dump-span w lo hi) (wb w 32) (dstr w func) (wb w 32) (d-types w type_args) (wb w 32) (d-exprs w args)))
-      (EAlloc [storage ty] (do (ps w "alloc") (dump-span w lo hi) (wb w 32) (d-storage w storage) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EField [p fname] (do (ps w "field") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
-      (ELoad  [inner] (do (ps w "load") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (EStore [p val] (do (ps w "store") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (d-expr w val)))
-      (EIndex [p idx] (do (ps w "index") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (d-expr w idx)))
-      (ECast  [ty inner] (do (ps w "cast") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
-      (ESizeOf[ty] (do (ps w "sizeof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EAlignOf[ty] (do (ps w "alignof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EOffsetOf[ty fname] (do (ps w "offsetof") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (dstr w fname)))
-      (EBitGet[p fname] (do (ps w "bitget") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
-      (EBitSet[p fname val] (do (ps w "bitset") (dump-span w lo hi) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname) (wb w 32) (d-expr w val)))
-      (EFree  [inner] (do (ps w "free") (dump-span w lo hi) (wb w 32) (d-expr w inner)))
-      (EErase [trait_name inner] (do (ps w "erase") (dump-span w lo hi) (wb w 32) (dstr w trait_name) (wb w 32) (d-expr w inner)))
-      (EMatch [scrut arms] (do (ps w "match") (dump-span w lo hi) (wb w 32) (d-expr w scrut) (wb w 32) (d-arms w arms)))
-      (EFnPtrOf[name] (do (ps w "fnptrof") (dump-span w lo hi) (wb w 32) (dstr w name)))
-      (ECallPtr[fp args] (do (ps w "callptr") (dump-span w lo hi) (wb w 32) (d-expr w fp) (wb w 32) (d-exprs w args)))
-      (ELoop  [label body] (do (ps w "loop") (dump-span w lo hi) (wb w 32) (d-opt-str w label) (wb w 32) (d-exprs w body)))
-      (EBreak [label value] (do (ps w "break") (dump-span w lo hi) (wb w 32) (d-opt-str w label) (wb w 32) (d-opt-expr w value)))
-      (EContinue[label] (do (ps w "continue") (dump-span w lo hi) (wb w 32) (d-opt-str w label)))
-      (ELlvmIr[result args body] (do (ps w "llvmir") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t result) (d-type w t)) (wb w 32) (d-exprs w args) (wb w 32) (dstr w body)))
-      (ETypeQuery[q ty] (do (ps w "typequery") (dump-span w lo hi) (wb w 32) (d-typequery w q) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
-      (EFieldMeta[meta ty idx] (do (ps w "fieldmeta") (dump-span w lo hi) (wb w 32) (d-fieldmeta w meta) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w idx)))
-      (EFieldIndex[ty name] (do (ps w "fieldindex") (dump-span w lo hi) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w name)))
-      (EQuote [form] (do (ps w "quote") (dump-span w lo hi) (wb w 32) (sx-node w form)))
-      (ECodeOp[op args] (do (ps w "codeop") (dump-span w lo hi) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
-      (EQuasi [q] (do (ps w "quasi") (dump-span w lo hi) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
-      (EComptime[inner] (do (ps w "comptime") (dump-span w lo hi) (wb w 32) (d-expr w inner))))
+      (EInt   [v]    (do (ps w "eint") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v)))
+      (EFloat [bits] (do (ps w "efloat") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits)))
+      (EBool  [b]    (do (ps w "ebool") (dump-span w src lo hi ctxt) (wb w 32) (dbool w b)))
+      (EStr   [s]    (do (ps w "estr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (ECStr  [s]    (do (ps w "ecstr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (EVar   [name] (do (ps w "var") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (EZeroed[ty]   (do (ps w "zeroed") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EBorrow[m place] (do (ps w "borrow") (dump-span w src lo hi ctxt) (wb w 32) (dbool w m) (wb w 32) (d-expr w place)))
+      (ELet   [binds body] (do (ps w "let") (dump-span w src lo hi ctxt) (wb w 32) (d-binds w binds) (wb w 32) (d-exprs w body)))
+      (EBin   [op lhs rhs] (do (ps w "bin") (dump-span w src lo hi ctxt) (wb w 32) (d-binop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (ENot   [inner] (do (ps w "inot") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (ECmp   [op lhs rhs] (do (ps w "cmp") (dump-span w src lo hi ctxt) (wb w 32) (d-cmpop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (EIf    [cnd thn els] (do (ps w "if") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w cnd) (wb w 32) (d-expr w thn) (wb w 32) (d-expr w els)))
+      (EDo    [body] (do (ps w "do") (dump-span w src lo hi ctxt) (wb w 32) (d-exprs w body)))
+      (ECall  [func type_args args] (do (ps w "call") (dump-span w src lo hi ctxt) (wb w 32) (dstr w func) (wb w 32) (d-types w type_args) (wb w 32) (d-exprs w args)))
+      (EAlloc [storage ty] (do (ps w "alloc") (dump-span w src lo hi ctxt) (wb w 32) (d-storage w storage) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EField [p fname] (do (ps w "field") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (ELoad  [inner] (do (ps w "load") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EStore [p val] (do (ps w "store") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w val)))
+      (EIndex [p idx] (do (ps w "index") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w idx)))
+      (ECast  [ty inner] (do (ps w "cast") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
+      (ESizeOf[ty] (do (ps w "sizeof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EAlignOf[ty] (do (ps w "alignof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EOffsetOf[ty fname] (do (ps w "offsetof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (dstr w fname)))
+      (EBitGet[p fname] (do (ps w "bitget") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (EBitSet[p fname val] (do (ps w "bitset") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname) (wb w 32) (d-expr w val)))
+      (EFree  [inner] (do (ps w "free") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EErase [trait_name inner] (do (ps w "erase") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (d-expr w inner)))
+      (EMatch [scrut arms] (do (ps w "match") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w scrut) (wb w 32) (d-arms w arms)))
+      (EFnPtrOf[name] (do (ps w "fnptrof") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (ECallPtr[fp args] (do (ps w "callptr") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w fp) (wb w 32) (d-exprs w args)))
+      (ELoop  [label body] (do (ps w "loop") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-exprs w body)))
+      (EBreak [label value] (do (ps w "break") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-opt-expr w value)))
+      (EContinue[label] (do (ps w "continue") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label)))
+      (ELlvmIr[result args body] (do (ps w "llvmir") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t result) (d-type w t)) (wb w 32) (d-exprs w args) (wb w 32) (dstr w body)))
+      (ETypeQuery[q ty] (do (ps w "typequery") (dump-span w src lo hi ctxt) (wb w 32) (d-typequery w q) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EFieldMeta[meta ty idx] (do (ps w "fieldmeta") (dump-span w src lo hi ctxt) (wb w 32) (d-fieldmeta w meta) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w idx)))
+      (EFieldIndex[ty name] (do (ps w "fieldindex") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w name)))
+      (EQuote [form] (do (ps w "quote") (dump-span w src lo hi ctxt) (wb w 32) (sx-node w form)))
+      (ECodeOp[op args] (do (ps w "codeop") (dump-span w src lo hi ctxt) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
+      (EQuasi [q] (do (ps w "quasi") (dump-span w src lo hi ctxt) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
+      (EComptime[inner] (do (ps w "comptime") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner))))
     (wb w 41)))
 
 ; ---- declarations ----
@@ -608,7 +619,7 @@
   (let [t (alloc-stack Type)] (store! t (load (field f ret))) (d-type w t)) (wb w 32)
   (d-exprs w (load (field f body))) (wb w 32)
   (dbool w (load (field f macro_variadic))) (wb w 32)
-  (dump-span w (load (field f lo)) (load (field f hi))) (wb w 41))
+  (dump-span w (load (field f source)) (load (field f lo)) (load (field f hi)) (load (field f ctxt))) (wb w 41))
 
 (defn d-convention [(w (ptr Writer)) (c (ptr Convention))] (-> i64)
   (ps w "(cc ") (dstr w (load (field c name))) (wb w 32)
@@ -703,7 +714,7 @@
   (ps w "(export ") (dstr w (load (field e name))) (wb w 32)
   (d-opt-str w (load (field e symbol))) (wb w 32)
   (d-types w (load (field e params))) (wb w 32)
-  (dump-span w (load (field e lo)) (load (field e hi))) (wb w 41))
+  (dump-span w (load (field e source)) (load (field e lo)) (load (field e hi)) (load (field e ctxt))) (wb w 41))
 
 ; Byte-lexicographic `<` on strings (Rust String Ord over ASCII conv names):
 ; a proper prefix is less than the longer string.
@@ -848,6 +859,8 @@
 (defn sx-items [(s Sexp)] (-> (ptr (ArrayList Sexp))) (let [p (alloc-stack SxInfo)] (store! p (sx-info s)) (load (field p items))))
 (defn sx-lo [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p lo))))
 (defn sx-hi [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p hi))))
+(defn sx-source [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p source))))
+(defn sx-ctxt [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p ctxt))))
 (defn sx-len [(l (ptr (ArrayList Sexp)))] (-> i64) (al-len [Sexp] (load l)))
 (defn sx-at  [(l (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load l) i))
 (defn sx-get [(l (ptr (ArrayList Sexp))) (i i64)] (-> (Option Sexp))
@@ -1080,7 +1093,7 @@
 (defn parse-expr [(a (ptr Allocator)) (s Sexp)] (-> (Result Expr Diag))
   (match (parse-expr-inner a s)
     (Err [d] (Err (dwspan d (sx-lo s) (sx-hi s))))
-    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s))))))
+    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s))))))
 (defn parse-expr-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result ExprKind Diag))
   (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
     (if (icmp-eq tg 0) (Ok (EInt (sx-ival s)))
@@ -1090,7 +1103,7 @@
     (if (icmp-eq tg 4) (Ok (EStr (sx-sval s)))
     (if (icmp-eq tg 5) (Ok (ECStr (sx-sval s)))
     (if (icmp-eq tg 7) (Err (derr-at slo shi "unexpected vector in expression"))
-      (parse-list-expr a (sx-items s) slo shi))))))))))
+      (parse-list-expr a (sx-items s) slo shi (sx-source s) (sx-ctxt s)))))))))))
 
 ; A leading :label keyword (src/parse.rs parse_label).
 (defstruct LabelSplit [(label (Option (slice u8))) (rest (ptr (ArrayList Sexp)))])
@@ -1138,7 +1151,7 @@
             (loop (if (icmp-ge (load bi) nb) (break) (do (al-push! (mut binds) (try! (sym-of a (sx-at bv (load bi)) "bind"))) (store! bi (iadd (load bi) 1)))))
             (let [bodyf (try! (parse-exprs a (rest-from a al 2))) nbody (al-len [Expr] (load bodyf))]
               (let [body (if (icmp-eq nbody 0) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo arm-s) (sx-hi arm-s) (sconcat3 a "arm '" variant "': missing body"))))
-                           (if (icmp-eq nbody 1) (al-get [Expr] (load bodyf) 0) (mk-expr (EDo bodyf) (sx-lo arm-s) (sx-hi arm-s))))]
+                           (if (icmp-eq nbody 1) (al-get [Expr] (load bodyf) 0) (mk-expr (EDo bodyf) (sx-lo arm-s) (sx-hi arm-s) (sx-source arm-s) (sx-ctxt arm-s))))]
                 (let [ap (alloc-stack Arm)] (store! (field ap variant) variant) (store! (field ap binds) (box-al [(slice u8)] a (load binds))) (store! (field ap body) body) (al-push! (mut arms) (load ap))))))))))
     (Ok (EMatch scrut (box-al [Arm] a (load arms)))))))
 
@@ -1153,7 +1166,7 @@
         (Ok (ELlvmIr result operands (sx-sval bv))))))))
 
 ; the big head dispatch (src/parse.rs parse_list_expr).
-(defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
+(defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ExprKind Diag))
   (try (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
     (let [bop (binop-of head)]
     (if (icmp-ge bop 0) (mk-bin a args head bop)
@@ -1162,12 +1175,12 @@
     (if (str-eq head "inot") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "inot: expects (inot x)")) (Ok (ENot (box-expr a (try! (parse-expr a (sx-at args 0)))))))
     (if (str-eq head "and")
         (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "and")))
-          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))) (box-expr a (mk-expr (EBool false) slo shi)))))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))) (box-expr a (mk-expr (EBool false) slo shi ssrc sctxt)))))
     (if (str-eq head "or")
         (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args "or")))
-          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (mk-expr (EBool true) slo shi)) (box-expr a (try! (parse-expr a (load (field tp y))))))))
+          (Ok (EIf (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (mk-expr (EBool true) slo shi ssrc sctxt)) (box-expr a (try! (parse-expr a (load (field tp y))))))))
     (if (str-eq head "not") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "not: expects (not x)"))
-        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (mk-expr (EBool false) slo shi)) (box-expr a (mk-expr (EBool true) slo shi)))))
+        (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (mk-expr (EBool false) slo shi ssrc sctxt)) (box-expr a (mk-expr (EBool true) slo shi ssrc sctxt)))))
     (if (str-eq head "if") (if (icmp-ne nargs 3) (Err [ExprKind Diag] (derr-at slo shi "if: expects (if cond then else)"))
         (Ok (EIf (box-expr a (try! (parse-expr a (sx-at args 0)))) (box-expr a (try! (parse-expr a (sx-at args 1)))) (box-expr a (try! (parse-expr a (sx-at args 2)))))))
     (if (str-eq head "do") (Ok (EDo (try! (parse-exprs a args))))
@@ -1479,7 +1492,7 @@
                 (Ok (let [f (alloc-stack Func)]
                       (store! (field f name) name) (store! (field f type_params) (load (field tpr params))) (store! (field f bounds) (load (field tpr bounds)))
                       (store! (field f cc) (load cc)) (store! (field f params) (box-al [Param] a (load params))) (store! (field f ret) ret)
-                      (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (load f))))))))))))
+                      (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0) (load f))))))))))))
 
 (defn parse-deftrait [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result TraitDef Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "deftrait: missing name")) "trait name"))
@@ -1507,7 +1520,7 @@
               (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
     (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
 
-(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ImplDef Diag))
+(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef Diag))
   (try (let [trait-name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "impl: missing trait name")) "trait name"))
              for-type (try! (sym-of a (try! (need [Sexp] (sx-get rest 1) "impl: missing type name")) "impl type"))
              (mut methods) (al-new [Func] a) nr (sx-len rest) (mut mi) 2]
@@ -1516,7 +1529,7 @@
         (store! mi (iadd (load mi) 1))
         (let [ml (try! (as-list m "impl method must be (name [params] (-> ret) body…)"))
               f0 (try! (parse-defn a ml))]
-          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (al-push! (mut methods) (load fp)))))))
+          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (store! (field fp source) ssrc) (store! (field fp ctxt) sctxt) (al-push! (mut methods) (load fp)))))))
     (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im))))))
 
 (defn parse-export-c [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList ExportC)) Diag))
@@ -1526,12 +1539,12 @@
         (store! i (iadd (load i) 1))
         (let [tg (sx-tag item)]
           (if (icmp-eq tg 2)
-              (let [ep (alloc-stack ExportC)] (store! (field ep name) (sx-sval item)) (store! (field ep symbol) (None [(slice u8)])) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep)))
+              (let [ep (alloc-stack ExportC)] (store! (field ep name) (sx-sval item)) (store! (field ep symbol) (None [(slice u8)])) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (store! (field ep source) (sx-source item)) (store! (field ep ctxt) (sx-ctxt item)) (al-push! (mut out) (load ep)))
             (if (icmp-eq tg 7)
                 (let [v (sx-items item)
                       nm (if (and (icmp-gt (sx-len v) 0) (icmp-eq (sx-tag (sx-at v 0)) 2)) (sx-sval (sx-at v 0)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))
                       sym0 (if (and (opt-is-kw (sx-get v 1) "as") (opt-is-str (sx-get v 2))) (opt-str-val (sx-get v 2)) (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: expected [name :as \"symbol\"]"))))]
-                  (let [ep (alloc-stack ExportC)] (store! (field ep name) nm) (store! (field ep symbol) (Some sym0)) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (al-push! (mut out) (load ep))))
+                  (let [ep (alloc-stack ExportC)] (store! (field ep name) nm) (store! (field ep symbol) (Some sym0)) (store! (field ep params) (box-al [Type] a (al-new [Type] a))) (store! (field ep lo) (sx-lo item)) (store! (field ep hi) (sx-hi item)) (store! (field ep source) (sx-source item)) (store! (field ep ctxt) (sx-ctxt item)) (al-push! (mut out) (load ep))))
               (return-from :try (Err [(ptr (ArrayList ExportC)) Diag] (derr-at (sx-lo item) (sx-hi item) "export-c: each entry is a function name or [name :as \"symbol\"]")))))))))
     (Ok (box-al [ExportC] a (load out))))))
 
@@ -1551,7 +1564,7 @@
     (al-push! (mut convs) (default-c-convention a))
     (let [nf (sx-len forms) (mut fi) 0]
       (loop (if (icmp-ge (load fi) nf) (break)
-        (let [form (sx-at forms (load fi)) flo (sx-lo form) fhi (sx-hi form)]
+        (let [form (sx-at forms (load fi)) flo (sx-lo form) fhi (sx-hi form) fsrc (sx-source form) fctxt (sx-ctxt form)]
           (store! fi (iadd (load fi) 1))
           (let [res
                 (match (as-list form "top-level form must be a list")
@@ -1575,7 +1588,7 @@
                           (if (str-eq head "defn")
                               (match (parse-defn a rest) (Err [d] (Err [i64 Diag] d))
                                 (Ok [f0]
-                                  (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) flo) (store! (field fp hi) fhi)
+                                  (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) flo) (store! (field fp hi) fhi) (store! (field fp source) fsrc) (store! (field fp ctxt) fctxt)
                                     (let [nm (load (field fp name)) (mut dup) false (mut ci) 0 cn (al-len [Func] (load funcs))]
                                       (loop (if (icmp-ge (load ci) cn) (break) (do (if (str-eq (func-name (al-get [Func] (load funcs) (load ci))) nm) (do (store! dup true) 0) 0) (store! ci (iadd (load ci) 1)))))
                                       (if (load dup) (Err [i64 Diag] (derr (sconcat3 a "function '" nm "' defined twice"))) (do (al-push! (mut funcs) (load fp)) (Ok [i64 Diag] 0)))))))
@@ -1587,7 +1600,7 @@
                               (match (parse-static-assert a items) (Ok [sa] (do (al-push! (mut asserts) sa) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "const") (match (parse-const a rest) (Ok [c] (do (al-push! (mut consts) c) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "deftrait") (match (parse-deftrait a rest) (Ok [t] (do (al-push! (mut traits) t) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
-                          (if (str-eq head "impl") (match (parse-impl a rest flo fhi) (Ok [im] (do (al-push! (mut impls) im) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
+                          (if (str-eq head "impl") (match (parse-impl a rest flo fhi fsrc fctxt) (Ok [im] (do (al-push! (mut impls) im) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d)))
                           (if (str-eq head "meta")
                               (if (not (icmp-eq (sx-len items) 2)) (Err [i64 Diag] (derr "meta: expected (meta EXPR)"))
                                   (match (parse-expr a (sx-at items 1)) (Ok [e] (do (al-push! (mut metas) e) (Ok [i64 Diag] 0))) (Err [d] (Err [i64 Diag] d))))
@@ -1859,9 +1872,28 @@
                                     (Err [d] (do (store! out (Err d)) (break))))))))))
                   (load out)))))))))
 
-(defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+; Recursively stamp `source` on a node + descendants (in place); ctxt untouched.
+(defn stamp-source-list [(items (ptr (ArrayList Sexp))) (source i64)] (-> i64)
+  (let [n (al-len [Sexp] (load items)) (mut i) 0 data (load (field items data))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (stamp-source-node (index data (load i)) source) (store! i (iadd (load i) 1))))))
+  0)
+(defn stamp-source-node [(x (ptr Sexp)) (source i64)] (-> i64)
+  (store! (field x source) source)
+  (match (load (field x kind))
+    (KList  [items] (stamp-source-list items source))
+    (KVec   [items] (stamp-source-list items source))
+    (KInt   [v] 0) (KFloat [b] 0) (KSym  [s] 0)
+    (KKw    [s] 0) (KStr   [s] 0) (KCStr [s] 0))
+  0)
+(defn diag-with-source [(d Diag) (source i64)] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p d)
+    (if (icmp-ge (load (field p lo)) 0) (store! (field p source) source) 0)
+    (load p)))
+
+(defn read-all [(a (ptr Allocator)) (src (slice u8)) (source i64)] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (match (tokenize a src)
-    (Err [d] (Err d))
+    (Err [d] (Err (diag-with-source d source)))
     (Ok [toks]
       (let [p (alloc-stack Parser) (mut out) (al-new [Sexp] a) (mut err) (zeroed Diag) (mut failed) false]
         (store! (field p toks) toks) (store! (field p pos) 0)
@@ -1870,18 +1902,19 @@
             (match (parse-one p a)
               (Ok [s] (do (al-push! (mut out) s) 0))
               (Err [d] (do (store! err d) (store! failed true) (break))))))
-        (if (load failed) (Err (load err)) (Ok (box-items a (load out))))))))
+        (if (load failed) (Err (diag-with-source (load err) source))
+          (let [forms (box-items a (load out))] (stamp-source-list forms source) (Ok forms)))))))
 
 ; ============================ canonical dump entry ==========================
 ; Emits the `(error@lo:hi "msg")` shape on a read/parse error (mirrors dump_ast
 ; in src/lib.rs). A dummy span (lo/hi = -1) prints `D`.
 (defn dump-error [(w (ptr Writer)) (d (ptr Diag))] (-> i64)
-  (ps w "(error") (dump-span w (load (field d lo)) (load (field d hi)))
+  (ps w "(error") (dump-span w (load (field d source)) (load (field d lo)) (load (field d hi)) (load (field d ctxt)))
   (ps w " \"") (esc-write w (load (field d msg))) (ps w "\")"))
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
-    (match (read-all a src)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (match (parse-program a forms)
@@ -1985,7 +2018,10 @@
    (out     (ArrayList TaggedForm))
    (loaded  (ArrayList (slice u8)))
    (imports (ArrayList ImpEntry))
-   (exports (ArrayList ExpEntry))])
+   (exports (ArrayList ExpEntry))
+   ; Next SourceMap id to hand out (main=0, prelude=1, imports 2..; a duplicate
+   ; import still consumes an id — mirrors src/macros.rs sm.add before dedup).
+   (srccount i64)])
 
 (defstruct Resolved [(text (slice u8)) (incdir (slice u8))])
 
@@ -2289,8 +2325,10 @@
     (let [rr (resolve-source a base path)
           rp (alloc-stack Resolved)]
       (store! rp rr)
-      (let [text (load (field rp text)) incdir (load (field rp incdir))]
-        (match (read-all a text)
+      (let [text (load (field rp text)) incdir (load (field rp incdir))
+            inc-id (load (field s srccount))
+            _ignore (store! (field s srccount) (iadd inc-id 1))]
+        (match (read-all a text inc-id)
           (Err [d] (do (loader-abort "import: read error in imported file") 0))
           (Ok [inc-forms]
             (let [modname (match (declared-module inc-forms)
@@ -2332,8 +2370,10 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))]
-    (match (read-all a prelude-text)
+        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))
+        prelude-id (load (field s srccount))
+        _ignore (store! (field s srccount) (iadd prelude-id 1))]
+    (match (read-all a prelude-text prelude-id)
       (Err [d] (do (loader-abort "read error in prelude") 0))
       (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))
     (process-forms (mut s) forms base (None [(slice u8)]))
@@ -3207,7 +3247,8 @@
     (store! (field s loaded)  (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
-    (match (read-all a src)
+    (store! (field s srccount) 1)
+    (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
