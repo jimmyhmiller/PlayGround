@@ -41,6 +41,10 @@ SEEDS=(
   selfhost/oracle/features/meta_stage3.coil   # (meta …) Stage-3 staged macros
   selfhost/oracle/features/export_c.coil      # (export-c …) C ABI export thunks
   selfhost/oracle/features/x86_sysv_abi.coil  # struct-by-value (host lowering; x86 gate below)
+  examples/conventions.coil                    # custom calling convention -> LLVM fastcc
+  examples/per-arch.coil                       # per-arch defcc (fastcc, informational regs)
+  examples/shim.coil                           # :shim convention (naked trampoline + inline asm)
+  examples/everything.coil                     # variadic externs + :shim + fastcc + aligned layout
 )
 
 [ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
