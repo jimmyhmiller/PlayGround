@@ -1,0 +1,5 @@
+; `(comptime (sizeof …))` — the comptime tree-walker has no sizeof/alignof/offsetof
+; support. Rust's src/comptime.rs eval returns `Err("comptime: sizeof/alignof/
+; offsetof isn't supported yet")` (kind_name), a spanless diagnostic rendered as
+; `error: <msg>` with exit 1. The self-host used to SIGABRT with UNIMPLEMENTED here.
+(defn main [] (-> :i64) (comptime (sizeof :i64)))

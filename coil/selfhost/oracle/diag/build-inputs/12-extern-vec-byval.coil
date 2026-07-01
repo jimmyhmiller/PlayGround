@@ -1,0 +1,4 @@
+; An extern returning a `(vec …)` by value — same eager C-ABI rejection path.
+; `error: extern 'foo': a vec cannot cross the C ABI by value; pass a pointer to it`.
+(extern foo :cc c [i64] (-> (vec f32 4)))
+(defn main [] (-> :i64) 0)

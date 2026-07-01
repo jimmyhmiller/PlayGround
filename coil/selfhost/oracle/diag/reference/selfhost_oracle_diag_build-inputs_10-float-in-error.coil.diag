@@ -1,0 +1,5 @@
+error: let binding name must be `name` or `(mut name)`, got 3.5
+  --> selfhost/oracle/diag/build-inputs/10-float-in-error.coil:4:31
+  |
+4 | (defn main [] (-> :i64) (let [3.5 5] 5))
+  |                               ^^^

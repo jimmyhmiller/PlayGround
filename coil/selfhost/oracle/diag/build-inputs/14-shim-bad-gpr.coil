@@ -1,0 +1,9 @@
+; A :shim convention naming a register that isn't a general-purpose register on the
+; build target (q0 is a vector reg on aarch64). Rust's src/codegen.rs check_shim_regs
+; returns `Err("codegen: shim convention names parameter register 'q0', which is not
+; a general-purpose register on the target architecture (aarch64). Declare the
+; convention per-arch …")` — spanless, exit 1. The self-host used to SIGABRT with a
+; DIFFERENT (shorter) message; it now renders Rust's message byte-for-byte.
+(defcc myc :lower shim :params [q0] :ret x0)
+(defn f :cc myc [(a i64)] (-> i64) a)
+(defn main [] (-> :i64) 0)

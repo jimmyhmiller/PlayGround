@@ -44,6 +44,7 @@
 ; `report`/`ExitCode::FAILURE` produces, instead of `abort`'s SIGABRT (134).
 (extern exit     :cc c [i32] (-> i64))
 (extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 (extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; NULL on failure
 (extern getcwd   :cc c [(ptr i8) i64] (-> (ptr i8)))
 ; pthread FFI — run the deeply-recursive pipeline on a big stack, mirroring
@@ -1112,6 +1113,85 @@
                 (char1 a b)))))))))))
           (store! i (iadd (load i) 1)))))
     (load acc)))
+; ---- f64 Debug (Rust `{x:?}`), for error interpolation of float literals ----
+; A string of `n` ASCII '0' characters.
+(defn nzeros [(a (ptr Allocator)) (n i64)] (-> (slice u8))
+  (let [(mut acc) "" (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! acc (sconcat a (load acc) "0")) (store! i (iadd (load i) 1)))))
+    (load acc)))
+; Faithful reproduction of Rust's `impl Debug for f64` (the shortest decimal that
+; round-trips, formatted via `float_to_general_debug`). Input is the raw f64 bit
+; pattern (a KFloat carries bits, not a decimal). Strategy: libc gives correctly
+; rounded p-significant-digit decimals; we search p=1..17 for the SHORTEST p whose
+; `%.*e` output parses back (strtod) to the identical f64 — this is exactly the
+; shortest-round-trip Ryū would find. We then re-render (sign, digits, exponent) in
+; Rust's own layout: fixed notation with a mandatory `.0`, switching to exponential
+; iff `abs < 1e-4 || abs >= 1e16` (Rust's GeneralFormat rule, equivalently the
+; leading-digit exponent E < -4 || E >= 16).
+(defn f64-debug [(a (ptr Allocator)) (bits i64)] (-> (slice u8))
+  (let [absbits  (iand bits 9223372036854775807)
+        sign     (icmp-eq (cast i64 (ishr (cast u64 bits) 63)) 1)
+        expfield (iand (cast i64 (ishr (cast u64 bits) 52)) 2047)
+        mant     (iand bits 4503599627370495)]
+    (if (icmp-eq expfield 2047)
+        (if (icmp-ne mant 0) "NaN" (if sign "-inf" "inf"))
+    (if (icmp-eq absbits 0)
+        (if sign "-0.0" "0.0")
+      (let [absx (bits->f64 absbits)
+            buf  (alloc-stack (array u8 64))
+            bp   (cast (ptr i8) buf)
+            ep   (alloc-stack (ptr i8))
+            (mut p) 1 (mut done) false]
+        ; shortest p whose %.*e round-trips
+        (loop (if (or (load done) (icmp-gt (load p) 17)) (break)
+          (do (snprintf bp 64 c"%.*e" (cast i32 (isub (load p) 1)) absx)
+              (if (icmp-eq (f64-bits (strtod bp ep)) absbits)
+                  (do (store! done true) 0)
+                (do (store! p (iadd (load p) 1)) 0)))))
+        ; buf now holds "d[.ddd]e±XX" for the shortest p; parse into digits + E
+        (let [(mut ei) 0]
+          (loop (if (icmp-eq (cast i64 (load (index bp (load ei)))) 101) (break)
+            (store! ei (iadd (load ei) 1))))
+          (let [(mut ds) (char1 a (cast i64 (load (index bp 0))))]
+            (if (icmp-gt (load ei) 1)
+                (let [(mut k) 2]
+                  (loop (if (icmp-ge (load k) (load ei)) (break)
+                    (do (store! ds (sconcat a (load ds) (char1 a (cast i64 (load (index bp (load k)))))))
+                        (store! k (iadd (load k) 1))))))
+                0)
+            (let [(mut ecur) (iadd (load ei) 2) (mut emag) 0]
+              (loop (let [c (cast i64 (load (index bp (load ecur))))]
+                      (if (icmp-eq c 0) (break)
+                        (do (store! emag (iadd (imul (load emag) 10) (isub c 48)))
+                            (store! ecur (iadd (load ecur) 1))))))
+              (let [esignc (cast i64 (load (index bp (iadd (load ei) 1))))
+                    ee (if (icmp-eq esignc 45) (isub 0 (load emag)) (load emag))
+                    ; strip trailing zeros from the significand
+                    (mut dlen) (slice-len (load ds))]
+                (loop (if (icmp-le (load dlen) 1) (break)
+                  (if (icmp-eq (cast i64 (slice-get (load ds) (isub (load dlen) 1))) 48)
+                      (store! dlen (isub (load dlen) 1)) (break))))
+                (let [dg (subslice (load ds) 0 (load dlen))
+                      k  (load dlen)
+                      point (iadd ee 1)
+                      body
+                      (if (or (icmp-lt ee -4) (icmp-ge ee 16))
+                          ; exponential: d1[.rest]e<E>
+                          (sconcat a
+                            (sconcat a
+                              (if (icmp-gt k 1)
+                                  (sconcat a (sconcat a (subslice dg 0 1) ".") (subslice dg 1 k))
+                                (subslice dg 0 1))
+                              "e")
+                            (if (icmp-lt ee 0) (sconcat a "-" (i64->str a (isub 0 ee))) (i64->str a ee)))
+                        ; fixed: always at least one fractional digit
+                        (if (icmp-le point 0)
+                            (sconcat a (sconcat a "0." (nzeros a (isub 0 point))) dg)
+                          (if (icmp-ge point k)
+                              (sconcat a (sconcat a dg (nzeros a (isub point k))) ".0")
+                            (sconcat a (sconcat a (subslice dg 0 point) ".") (subslice dg point k)))))]
+                  (if sign (sconcat a "-" body) body)))))))))))
 ; ---- Sexp Display (src/reader.rs Display), for error interpolation ----
 (defn sexp-display [(a (ptr Allocator)) (s Sexp)] (-> (slice u8))
   (let [tg (sx-tag s)]
@@ -1122,10 +1202,9 @@
     (if (icmp-eq tg 5) (sconcat a (sconcat a "c\"" (dbg-escape a (sx-sval s))) "\"")
     (if (icmp-eq tg 6) (seq-display a (sx-items s) 40 41)
     (if (icmp-eq tg 7) (seq-display a (sx-items s) 91 93)
-      ; Float (tag 1) Display is Rust `{x:?}` = shortest-round-trip f64 decimal
-      ; (Ryū); the self-host has no decimal-float formatter, so this stays a clear
-      ; error. Reachable only via a float where a symbol/int/name is expected.
-      (do (unimplemented "sexp-display/float (needs shortest-round-trip f64 formatter)") ""))))))))))
+      ; Float (tag 1) Display is Rust `{x:?}` = shortest-round-trip f64 decimal.
+      ; The KFloat carries the raw bit pattern (sx-ival); f64-debug reproduces it.
+      (f64-debug a (sx-ival s)))))))))))
 (defn seq-display [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (open i64) (close i64)] (-> (slice u8))
   (let [(mut acc) (char1 a open) n (sx-len items) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -6835,6 +6914,14 @@
   (let [p (alloc-stack CEval)] (store! (field p v) v) (store! (field p uns) u) (load p)))
 (defn cev-v [(c CEval)] (-> i64) (let [p (alloc-stack CEval)] (store! p c) (load (field p v))))
 (defn cev-u [(c CEval)] (-> bool) (let [p (alloc-stack CEval)] (store! p c) (load (field p uns))))
+; A spanless codegen error (Rust returns `Err(String)`, rendered by `report` as a
+; bare `error: <msg>` + exit 1). The self-host's codegen paths (const-eval-t → CEval,
+; emit-expr → Tv, the extern C-ABI check → i64) have no Result channel, so — exactly
+; like the assertion-failed case — print the rendered line and exit(1). The stderr
+; text + exit code are byte-identical to Rust's front-end returning the Err. Used for
+; static-assert folding, the by-value-view C-ABI rejection, and bitwise-op-on-float.
+(defn cg-fail [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "error: ") (ps w msg) (wb w 10) (exit 1) 0))
 (defn const-eval-bin [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
   (let [uns (or lu ru)]
     (mk-ceval
@@ -6846,10 +6933,10 @@
       (if (icmp-eq op 9)  (ixor l r)
       (if (icmp-eq op 10) (ishl l r)
       (if (icmp-eq op 11) (if uns (cast i64 (ishr (cast u64 l) (cast u64 r))) (ishr l r))
-      (if (icmp-eq op 3)  (if (icmp-eq r 0) (do (unimplemented "static-assert: divide by zero") 0) (if uns (udiv l r) (idiv l r)))
-      (if (icmp-eq op 4)  (if (icmp-eq r 0) (do (unimplemented "static-assert: mod by zero") 0) (if uns (urem l r) (irem l r)))
-      (if (icmp-eq op 5)  (if (icmp-eq r 0) (do (unimplemented "static-assert: divide by zero") 0) (udiv l r))
-                          (if (icmp-eq r 0) (do (unimplemented "static-assert: mod by zero") 0) (urem l r)))))))))))))
+      (if (icmp-eq op 3)  (if (icmp-eq r 0) (do (cg-fail "static-assert: divide/mod by zero") 0) (if uns (udiv l r) (idiv l r)))
+      (if (icmp-eq op 4)  (if (icmp-eq r 0) (do (cg-fail "static-assert: divide/mod by zero") 0) (if uns (urem l r) (irem l r)))
+      (if (icmp-eq op 5)  (if (icmp-eq r 0) (do (cg-fail "static-assert: divide/mod by zero") 0) (udiv l r))
+                          (if (icmp-eq r 0) (do (cg-fail "static-assert: divide/mod by zero") 0) (urem l r)))))))))))))
       uns)))
 (defn const-eval-cmp [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
   (let [b (if (or lu ru)
@@ -6875,7 +6962,7 @@
                               (const-eval-bin op (cev-v lc) (cev-u lc) (cev-v rc) (cev-u rc))))
       (ECmp    [op lhs rhs] (let [lc (const-eval-t cg lhs) rc (const-eval-t cg rhs)]
                               (const-eval-cmp op (cev-v lc) (cev-u lc) (cev-v rc) (cev-u rc))))
-      (_ (do (unimplemented "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic and comparisons are allowed") (mk-ceval 0 false))))))
+      (_ (do (cg-fail "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic and comparisons are allowed") (mk-ceval 0 false))))))
 (defn const-eval [(cg (ptr Cg)) (e (ptr Expr))] (-> i64) (cev-v (const-eval-t cg e)))
 
 ; ---- builder conveniences ----
@@ -7016,10 +7103,20 @@
     (load ok)))
 (defn cg-is-valid-gpr [(cg (ptr Cg)) (reg (slice u8))] (-> bool)
   (if (icmp-eq (load (field cg arch)) 0) (x86-gpr? reg) (aarch64-gpr? reg)))
-; reject a shim convention naming a register that doesn't exist on the target arch.
+; reject a shim convention naming a register that isn't a GPR on the target arch
+; (src/codegen.rs check_shim_regs). Rust returns Err(...) → spanless `error: <msg>`
+; + exit 1; cg-fail reproduces that. Message is byte-identical incl the arch name.
 (defn cg-check-gpr [(cg (ptr Cg)) (reg (slice u8)) (what (slice u8))] (-> i64)
   (if (cg-is-valid-gpr cg reg) 0
-    (do (unimplemented (sconcat3 (load (field cg a)) (sconcat3 (load (field cg a)) "codegen: shim convention names a " what " register '") reg "' that is not a GPR on the target architecture")) 0)))
+    (let [a (load (field cg a))
+          arch (if (icmp-eq (load (field cg arch)) 0) "x86_64" "aarch64")]
+      (cg-fail (sconcat3 a
+                 (sconcat3 a
+                   (sconcat3 a "codegen: shim convention names " what " register '")
+                   reg
+                   "', which is not a general-purpose register on the target architecture (")
+                 arch
+                 "). Declare the convention per-arch (see examples/per-arch.coil).")))))
 (defn cg-check-shim-regs [(cg (ptr Cg)) (shim (ptr CgShim)) (n i64)] (-> i64)
   (let [prs (load (field shim param_regs)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -7204,7 +7301,7 @@
                      (if (icmp-eq op 2) (LLVMBuildFMul b l r (cg-bl cg "fmul"))
                      (if (icmp-eq op 3) (LLVMBuildFDiv b l r (cg-bl cg "fdiv"))
                      (if (icmp-eq op 4) (LLVMBuildFRem b l r (cg-bl cg "frem"))
-                         (do (unimplemented "codegen: bitwise op on a float") (cast (ptr i8) 0))))))) lt)
+                         (do (cg-fail "codegen: bitwise op on a float") (cast (ptr i8) 0))))))) lt)
             (let [signed (match-else lt (TInt [bits s] s) (_ false))]
               (mk-tv (if (icmp-eq op 0) (LLVMBuildAdd b l r (cg-bl cg "add"))
                      (if (icmp-eq op 1) (LLVMBuildSub b l r (cg-bl cg "sub"))
@@ -8400,27 +8497,34 @@
     (al-push! (mut ix) (cg-const-uoff cg off))
     (LLVMBuildGEP2 (cg-bld cg) (LLVMInt8TypeInContext (cg-ctx cg)) base (carr a (load ix)) 1 (cg-bl cg "abi.eb"))))
 
-; ---- reject by-value slice/vec crossing the C boundary (extern path only) ----
-(defn cg-reject-view [(cg (ptr Cg)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-    (TSlice [el] (do (unimplemented "extern: a slice cannot cross the C ABI by value") 0))
-    (TVec [el n] (do (unimplemented "extern: a vec cannot cross the C ABI by value") 0))
-    (TStruct [nm]
-      (let [si (cg-struct-idx cg nm)]
-        (if (icmp-lt si 0) 0
-          (match-else (load (field (al-elem [CgStruct] (field cg structs) si) layout))
-            (LBits [b o] 0)
-            (_ (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields)) n (al-len [Field] (load fs)) (mut i) 0]
-                 (loop (if (icmp-ge (load i) n) (break)
-                   (do (cg-reject-view cg (field (al-elem [Field] fs (load i)) ty)) (store! i (iadd (load i) 1)))))
-                 0))))))
-    (TArray [el n] (cg-reject-view cg el))
-    (_ 0)))
-(defn cg-check-c-abi-types [(cg (ptr Cg)) (params (ptr (ArrayList Type))) (ret (ptr Type))] (-> i64)
-  (cg-reject-view cg ret)
+; ---- reject by-value slice/vec crossing the C boundary (src/codegen.rs
+; reject_view_at_c_abi) ---- Runs eagerly over EVERY extern declaration (before,
+; and independent of, per-target struct classification), so it holds on every
+; target. A by-value slice or SIMD vec — direct, or nested in a by-value struct
+; field / array — has no defined C representation. Rust returns `Err("<who>: …")`
+; rendered as a bare spanless `error: <msg>` + exit 1; codegen here has no Result
+; channel, so cg-fail prints and exits — byte-identical stderr + exit code.
+(defn cg-reject-view [(cg (ptr Cg)) (t (ptr Type)) (who (slice u8))] (-> i64)
+  (let [a (load (field cg a))]
+    (match-else (load t)
+      (TSlice [el] (cg-fail (sconcat a who ": a slice cannot cross the C ABI by value (it is a Coil view type); for FFI pass a c\"…\"/(ptr i8) and a length")))
+      (TVec [el n] (cg-fail (sconcat a who ": a vec cannot cross the C ABI by value; pass a pointer to it")))
+      (TStruct [nm]
+        (let [si (cg-struct-idx cg nm)]
+          (if (icmp-lt si 0) 0
+            (match-else (load (field (al-elem [CgStruct] (field cg structs) si) layout))
+              (LBits [b o] 0)
+              (_ (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields)) n (al-len [Field] (load fs)) (mut i) 0]
+                   (loop (if (icmp-ge (load i) n) (break)
+                     (do (cg-reject-view cg (field (al-elem [Field] fs (load i)) ty) who) (store! i (iadd (load i) 1)))))
+                   0))))))
+      (TArray [el n] (cg-reject-view cg el who))
+      (_ 0))))
+(defn cg-check-c-abi-types [(cg (ptr Cg)) (params (ptr (ArrayList Type))) (ret (ptr Type)) (who (slice u8))] (-> i64)
+  (cg-reject-view cg ret who)
   (let [n (al-len [Type] (load params)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (cg-reject-view cg (al-elem [Type] params (load i))) (store! i (iadd (load i) 1))))))
+      (do (cg-reject-view cg (al-elem [Type] params (load i)) who) (store! i (iadd (load i) 1))))))
   0)
 
 ; ---- emit a call through the C struct ABI (src/codegen.rs emit_c_call) ----
@@ -8491,9 +8595,13 @@
                 ; (externs are always native; a :shim extern is rejected in check).
                 conv (cg-prog-conv p (load (field ep cc)))
                 cc-id (if (icmp-ne (cast i64 conv) 0) (conv-native-id conv) 0)]
+            ; Eager C-ABI view check for EVERY extern (Rust src/codegen.rs:581),
+            ; before — and regardless of — the struct-by-value branch below. A bare
+            ; `(slice u8)`/`(vec …)` param isn't a struct, so the struct branch
+            ; alone would wave it through; this catches it at declaration.
+            (cg-check-c-abi-types cg params (box-type a ret) (sconcat3 a "extern '" ename "'"))
             (if (or (cg-abi-struct? cg (box-type a ret)) (ty-list-has-struct cg params))
-                (do (cg-check-c-abi-types cg params (box-type a ret))
-                    (let [sig (c-signature cg params (box-type a ret) (load (field ep variadic)))
+                (let [sig (c-signature cg params (box-type a ret) (load (field ep variadic)))
                           existing (LLVMGetNamedFunction (load (field cg module)) (slice->cstr a csym))
                           fv (if (icmp-ne (cast i64 existing) 0) existing
                                (let [nf (LLVMAddFunction (load (field cg module)) (slice->cstr a csym) (load (field sig fn_ty)))]
@@ -8501,7 +8609,7 @@
                                  (LLVMSetFunctionCallConv nf (cast i32 cc-id)) nf))]
                       (if (not (cg-has-csig cg ename)) (cg-add-csig cg ename sig) 0)
                       (cg-add-func cg ename fv)
-                      (cg-record-callable cg ename (load (field ep cc)) params ret)))
+                      (cg-record-callable cg ename (load (field ep cc)) params ret))
               (let [existing (LLVMGetNamedFunction (load (field cg module)) (slice->cstr a csym))
                     fv (if (icmp-ne (cast i64 existing) 0) existing
                          (let [fnty (cg-fn-type-v cg params (box-type a ret) (load (field ep variadic)))
@@ -9561,8 +9669,6 @@
          (FVal  [~v] ~v)
          (FBrk  [vv ll] (return-from :try (Ok [Flow Diag] ~f)))
          (FCont [ll]    (return-from :try (Ok [Flow Diag] ~f)))))))
-(defn eval-todo [(who (slice u8))] (-> (Result Flow Diag))
-  (do (unimplemented who) (Ok [Flow Diag] (FVal (CInt 0)))))
 (defn ct-tag [(v CtVal)] (-> i64)
   (match v (CInt [n] 0) (CBool [b] 1) (CFloat [x] 2) (CStr [s] 3) (CCode [f] 4)
            (CStruct [a b] 5) (CArray [a b] 6) (CSum [a b] 7) (CRef [c] 8)))
@@ -9999,17 +10105,17 @@
             (None []   (Ok (FBrk (None [CtVal]) label)))))
         (EContinue [label] (Ok (FCont label)))
         ; ---- still un-ported arms (quote / code-op / reflection / dyn) ----
-        (ECStr  [s] (eval-todo "comptime/eval/ECStr"))
-        (ESizeOf [ty] (eval-todo "comptime/eval/ESizeOf"))
-        (EAlignOf [ty] (eval-todo "comptime/eval/EAlignOf"))
-        (EOffsetOf [ty fname] (eval-todo "comptime/eval/EOffsetOf"))
-        (EBitGet [p fname] (eval-todo "comptime/eval/EBitGet"))
-        (EBitSet [p fname val] (eval-todo "comptime/eval/EBitSet"))
-        (EFree [inner] (eval-todo "comptime/eval/EFree"))
-        (EErase [trait_name inner] (eval-todo "comptime/eval/EErase"))
-        (EFnPtrOf [name] (eval-todo "comptime/eval/EFnPtrOf"))
-        (ECallPtr [fp args] (eval-todo "comptime/eval/ECallPtr"))
-        (ELlvmIr [result args body] (eval-todo "comptime/eval/ELlvmIr"))
+        (ECStr  [s] (Err [Flow Diag] (derr "comptime: a string (comptime strings aren't supported yet) isn't supported yet")))
+        (ESizeOf [ty] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
+        (EAlignOf [ty] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
+        (EOffsetOf [ty fname] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
+        (EBitGet [p fname] (Err [Flow Diag] (derr "comptime: a bitfield op isn't supported yet")))
+        (EBitSet [p fname val] (Err [Flow Diag] (derr "comptime: a bitfield op isn't supported yet")))
+        (EFree [inner] (Err [Flow Diag] (derr "comptime: free isn't supported yet")))
+        (EErase [trait_name inner] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
+        (EFnPtrOf [name] (Err [Flow Diag] (derr "comptime: a function pointer isn't supported yet")))
+        (ECallPtr [fp args] (Err [Flow Diag] (derr "comptime: a function pointer isn't supported yet")))
+        (ELlvmIr [result args body] (Err [Flow Diag] (derr "comptime: raw llvm-ir isn't supported yet")))
         (ETypeQuery [q ty]
           (match (type-query q ty cx)
             (Err [d] (Err [Flow Diag] d))
@@ -10039,10 +10145,10 @@
             (match (eval-quasi qp env cx)
               (Err [d] (Err [Flow Diag] d))
               (Ok [s] (Ok [Flow Diag] (FVal (CCode s)))))))
-        (ETraitCall [trait_name method self_tp args] (eval-todo "comptime/eval/ETraitCall"))
-        (EDynDispatch [dyn_struct vtable_struct method_index cc params ret recv args] (eval-todo "comptime/eval/EDynDispatch"))
-        (EMakeDyn [dyn_struct vtable_struct methods inner] (eval-todo "comptime/eval/EMakeDyn"))
-        (EStaticRef [name] (eval-todo "comptime/eval/EStaticRef"))))))
+        (ETraitCall [trait_name method self_tp args] (Err [Flow Diag] (derr "comptime: an unresolved trait call isn't supported yet")))
+        (EDynDispatch [dyn_struct vtable_struct method_index cc params ret recv args] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
+        (EMakeDyn [dyn_struct vtable_struct methods inner] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
+        (EStaticRef [name] (Err [Flow Diag] (derr "comptime: a reference to an aggregate const (a static global) isn't supported yet")))))))
 (defn eval-seq [(es (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Flow Diag))
   (try
     (let [n (al-len [Expr] (load es))]

@@ -1,0 +1,4 @@
+; A comptime C-string — Rust's eval falls to the kind_name catch-all for a string,
+; `error: comptime: a string (comptime strings aren't supported yet) isn't
+; supported yet` (rc 1). Exercises the ECStr eval arm.
+(defn main [] (-> :i64) (comptime (do c"hi" 0)))

@@ -1,0 +1,5 @@
+; A static-assert whose constant fold divides by zero. Rust src/codegen.rs
+; const_eval_t returns `Err("static-assert: divide/mod by zero")` (ONE message for
+; both div and mod), rendered `error: <msg>` exit 1. The self-host used to SIGABRT.
+(static-assert (icmp-eq (idiv 1 0) 0))
+(defn main [] (-> :i64) 0)

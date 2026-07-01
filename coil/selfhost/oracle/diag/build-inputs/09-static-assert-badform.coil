@@ -1,0 +1,5 @@
+; A static-assert condition that isn't a constant-foldable form (a load). Rust's
+; const_eval_t catch-all returns `error: static-assert: only int literals,
+; sizeof/alignof/offsetof, casts, arithmetic and comparisons are allowed` (rc 1).
+(static-assert (icmp-eq (load (cast (ptr :i64) 0)) 0))
+(defn main [] (-> :i64) 0)
