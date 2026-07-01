@@ -5509,27 +5509,141 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList StaticAssert)) Diag] (load err)) (Ok (box-al [StaticAssert] a (load out))))))
 
+; ---- check.rs finish: (meta …) elaboration + (export-c …) symbol resolution ----
+; display_name: strip the auto-referred coil.core. prefix in diagnostics.
+(defn display-name [(n (slice u8))] (-> (slice u8))
+  (let [pfx "coil.core." pl (slice-len pfx)]
+    (if (and (icmp-ge (slice-len n) pl) (str-eq (subslice n 0 pl) pfx)) (subslice n pl (slice-len n)) n)))
+; whether convention `cc` uses a :shim lowering (the C ABI needs a native lowering).
+(defn conv-cc-is-shim [(cx (ptr Cx)) (cc (slice u8))] (-> bool)
+  (let [cv (conv-find cx cc)] (and (icmp-ne (cast i64 cv) 0) (conv-is-shim cv))))
+; a valid export-c PARAMETER type: scalars/ptr, or a C-layout struct (not a defsum).
+(defn export-param-ok [(cx (ptr Cx)) (t (ptr Type))] (-> bool)
+  (let [tg (type-tag t)]
+    (if (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (icmp-eq tg 4)))) true
+      (if (icmp-eq tg 6) (icmp-eq (cast i64 (sum-find cx (type-struct-name t))) 0) false))))
+; a valid export-c RETURN type: scalars/ptr/void, or a C-layout struct/App (not a defsum).
+(defn export-ret-ok [(cx (ptr Cx)) (t (ptr Type))] (-> bool)
+  (let [tg (type-tag t)]
+    (if (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (or (icmp-eq tg 3) (icmp-eq tg 4))))) true
+      (if (or (icmp-eq tg 6) (icmp-eq tg 11))
+          (icmp-eq (cast i64 (sum-find cx (if (icmp-eq tg 6) (type-struct-name t) (t-app-name t)))) 0) false))))
+; the default C symbol: bare name (module dropped) with `-` -> `_`.
+(defn default-c-symbol [(a (ptr Allocator)) (qualified (slice u8))] (-> (slice u8))
+  (let [base (last-component qualified) n (slice-len base) (mut buf) (al-new [u8] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [c (slice-get base (load i))] (al-push! (mut buf) (if (icmp-eq (cast i64 c) 45) (cast u8 95) c)))
+          (store! i (iadd (load i) 1)))))
+    (al-slice [u8] (load buf))))
+(defn c-ident-char? [(c i64) (first bool)] (-> bool)
+  (or (icmp-eq c 95)
+      (or (and (icmp-ge c 65) (icmp-le c 90))
+          (or (and (icmp-ge c 97) (icmp-le c 122))
+              (and (not first) (and (icmp-ge c 48) (icmp-le c 57)))))))
+(defn is-c-ident [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)]
+    (if (icmp-eq n 0) false
+      (let [(mut ok) (c-ident-char? (cast i64 (slice-get s 0)) true) (mut i) 1]
+        (loop (if (or (not (load ok)) (icmp-ge (load i) n)) (break)
+          (do (if (c-ident-char? (cast i64 (slice-get s (load i))) false) 0 (do (store! ok false) 0))
+              (store! i (iadd (load i) 1)))))
+        (load ok)))))
+(defn fn-param-types [(a (ptr Allocator)) (ps (ptr (ArrayList Param)))] (-> (ptr (ArrayList Type)))
+  (let [n (al-len [Param] (load ps)) (mut out) (al-new [Type] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (load (field (al-elem [Param] ps (load i)) ty))) (store! i (iadd (load i) 1)))))
+    (box-al [Type] a (load out))))
+(defn export-first-bad-param [(cx (ptr Cx)) (ps (ptr (ArrayList Param)))] (-> (ptr Param))
+  (let [n (al-len [Param] (load ps)) (mut i) 0 (mut r) (cast (ptr Param) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [pp (al-elem [Param] ps (load i))]
+            (if (not (export-param-ok cx (field pp ty))) (do (store! r pp) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn export-param-msg [(a (ptr Allocator)) (dn (slice u8)) (pname (slice u8)) (t (ptr Type))] (-> (slice u8))
+  (sconcat a (sconcat3 a "export-c: '" dn "' parameter '")
+    (sconcat a pname
+      (sconcat a "' has type "
+        (sconcat a (ty-str a t)
+          ", which has no C representation (a slice, sum, SIMD vector, or generic instantiation can't cross the C boundary — take a `(ptr …)` or lower it to a C-layout struct)")))))
+; validate ONE export and finalize its C symbol; returns the resolved ExportC.
+(defn validate-export [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program)) (ep (ptr ExportC))] (-> (Result ExportC Diag))
+  (try
+    (let [ename (load (field ep name)) dn (display-name ename) elo (load (field ep lo)) ehi (load (field ep hi))
+          f (prog-fn-find prog ename)]
+      (if (icmp-eq (cast i64 f) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: unknown function '" dn "'")))) 0)
+      (if (icmp-gt (al-len [(slice u8)] (load (field f type_params))) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: '" dn "' is generic — a generic function has no single C symbol; export a concrete wrapper instead")))) 0)
+      (if (conv-cc-is-shim cx (load (field f cc)))
+          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: '" dn "' uses a :shim convention, which isn't the C ABI")))) 0)
+      (let [bp (export-first-bad-param cx (load (field f params)))]
+        (if (icmp-ne (cast i64 bp) 0)
+            (return-from :try (Err [ExportC Diag] (derr-at elo ehi (export-param-msg a dn (load (field bp name)) (field bp ty))))) 0))
+      (if (not (export-ret-ok cx (field f ret)))
+          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' returns ") (sconcat a (ty-str a (field f ret)) ", which has no C representation"))))) 0)
+      (let [sym (match (load (field ep symbol)) (Some [s] s) (None [] (default-c-symbol a ename)))]
+        (if (not (is-c-ident sym))
+            (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' → '") (sconcat a sym "' isn't a valid C identifier; give one with :as \"name\""))))) 0)
+        (let [ec (alloc-stack ExportC)]
+          (store! (field ec name) ename)
+          (store! (field ec symbol) (Some [(slice u8)] sym))
+          (store! (field ec params) (fn-param-types a (load (field f params))))
+          (store! (field ec lo) elo) (store! (field ec hi) ehi)
+          (Ok [ExportC Diag] (load ec)))))))
+(defn finish-metas [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program))] (-> (Result (ptr (ArrayList Expr)) Diag))
+  (let [ms (load (field prog metas)) n (al-len [Expr] (load ms)) (mut out) (al-new [Expr] a)
+        (mut i) 0 (mut err) (zeroed Diag) (mut failed) false
+        empty-tps (box-al [(slice u8)] a (al-new [(slice u8)] a))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [mp (al-elem [Expr] ms (load i)) env (env-new a)]
+            (match (do-synth a mp (null-type) env cx empty-tps "meta")
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
+                          (if (not (icmp-eq (type-tag (load (field sp t))) 13))
+                              (do (store! err (derr (sconcat a "meta: expression must produce Code, got " (ty-str a (load (field sp t)))))) (store! failed true) (break))
+                            (do (al-push! (mut out) (load (load (field sp e)))) 0))))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
+(defn finish-exports [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program))] (-> (Result (ptr (ArrayList ExportC)) Diag))
+  (let [es (load (field prog exports)) n (al-len [ExportC] (load es)) (mut out) (al-new [ExportC] a)
+        seenb (unwrap-ptr [SBox] (create [SBox] a))
+        (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (store! (field seenb items) (al-new [(slice u8)] a))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (validate-export a cx prog (al-elem [ExportC] es (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Ok [ec0] (let [ec (alloc-stack ExportC)] (store! ec ec0)
+                        (let [sym (match (load (field ec symbol)) (Some [s] s) (None [] ""))]
+                          (if (set-contains (field seenb items) sym)
+                              (do (store! err (derr-at (load (field ec lo)) (load (field ec hi)) (sconcat3 a "export-c: two functions export the same C symbol '" sym "'"))) (store! failed true) (break))
+                            (do (al-push! (mut (field seenb items)) sym) (al-push! (mut out) (load ec))))))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err [(ptr (ArrayList ExportC)) Diag] (load err)) (Ok (box-al [ExportC] a (load out))))))
+
 (defn finish [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program)) (funcs (ptr (ArrayList Func)))] (-> (Result (ptr Program) Diag))
   (match (finish-asserts a cx prog)
     (Err [d] (Err [(ptr Program) Diag] d))
     (Ok [asserts]
-      (if (icmp-gt (al-len [Expr] (load (field prog metas))) 0)
-          (do (unimplemented "check/finish: (meta …) staged macros not ported") (Err [(ptr Program) Diag] (derr "")))
-        (if (icmp-gt (al-len [ExportC] (load (field prog exports))) 0)
-            (do (unimplemented "check/finish: (export-c …) symbol resolution not ported") (Err [(ptr Program) Diag] (derr "")))
-          (let [out (unwrap-ptr [Program] (create [Program] a))]
-            (store! (field out conventions) (load (field prog conventions)))
-            (store! (field out structs) (load (field prog structs)))
-            (store! (field out sums) (load (field prog sums)))
-            (store! (field out externs) (load (field prog externs)))
-            (store! (field out funcs) funcs)
-            (store! (field out asserts) asserts)
-            (store! (field out consts) (load (field prog consts)))
-            (store! (field out traits) (load (field prog traits)))
-            (store! (field out impls) (load (field prog impls)))
-            (store! (field out metas) (load (field prog metas)))
-            (store! (field out exports) (load (field prog exports)))
-            (Ok out)))))))
+      (match (finish-metas a cx prog)
+        (Err [d] (Err [(ptr Program) Diag] d))
+        (Ok [metas]
+          (match (finish-exports a cx prog)
+            (Err [d] (Err [(ptr Program) Diag] d))
+            (Ok [exports]
+              (let [out (unwrap-ptr [Program] (create [Program] a))]
+                (store! (field out conventions) (load (field prog conventions)))
+                (store! (field out structs) (load (field prog structs)))
+                (store! (field out sums) (load (field prog sums)))
+                (store! (field out externs) (load (field prog externs)))
+                (store! (field out funcs) funcs)
+                (store! (field out asserts) asserts)
+                (store! (field out consts) (load (field prog consts)))
+                (store! (field out traits) (load (field prog traits)))
+                (store! (field out impls) (load (field prog impls)))
+                (store! (field out metas) metas)
+                (store! (field out exports) exports)
+                (Ok out)))))))))
 
 ; ============================ the check pass (src/check.rs) ===================
 ; check-program mirrors src/check.rs::check_with: setup (Phase 1, fail-fast) ->
@@ -7410,6 +7524,7 @@
         (cg-declare-externs cgp p)
         (cg-declare-funcs cgp p)
         (cg-emit-bodies cgp p)
+        (cg-emit-thunks cgp p)
         module))))
 
 ; 0a-0d: two-phase type registration.
@@ -7865,26 +7980,100 @@
     (loop (if (icmp-ge (load i) n) (break)
       (do (if (str-eq (load (field (al-elem [Func] fs (load i)) name)) "main") (do (store! r true) 0) 0) (store! i (iadd (load i) 1)))))
     (or (load r) (icmp-gt (al-len [ExportC] (load (field p exports))) 0))))
+; find the ExportC for a function name (null if not exported).
+(defn cg-export-find [(p (ptr Program)) (name (slice u8))] (-> (ptr ExportC))
+  (let [es (load (field p exports)) n (al-len [ExportC] (load es)) (mut i) 0 (mut r) (cast (ptr ExportC) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [ExportC] es (load i)) name)) name) (do (store! r (al-elem [ExportC] es (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; an export takes a struct BY VALUE (a TStruct param) -> it needs a C-ABI thunk (the
+; internal function is reference-model, taking the struct by pointer).
+(defn cg-export-needs-thunk [(e (ptr ExportC))] (-> bool)
+  (let [ps (load (field e params)) n (al-len [Type] (load ps)) (mut i) 0 (mut r) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (type-tag (al-elem [Type] ps (load i))) 6) (do (store! r true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
 (defn cg-declare-funcs [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
   (let [a (load (field cg a)) fs (load (field p funcs)) n (al-len [Func] (load fs))
         anchor (cg-has-anchor p) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [fp (al-elem [Func] fs (load i)) fname (load (field fp name))
-                fparams (cg-param-types cg (load (field fp params))) ret (load (field fp ret))]
+                fparams (cg-param-types cg (load (field fp params))) ret (load (field fp ret))
+                exp (cg-export-find p fname)
+                ; a thunk-FREE C export is emitted directly under its C symbol; everything
+                ; else (incl. a thunk-needing export's internal function) under its Coil name.
+                direct-sym (if (and (icmp-ne (cast i64 exp) 0) (not (cg-export-needs-thunk exp)))
+                               (load (field exp symbol)) (None [(slice u8)]))
+                llvm-name (match direct-sym (Some [sm] sm) (None [] fname))
+                external (or (str-eq fname "main") (or (match direct-sym (Some [sm2] true) (None [] false)) (not anchor)))]
             (cg-record-callable cg fname (load (field fp cc)) fparams ret)
             (if (or (cg-abi-struct? cg (box-type a ret)) (ty-list-has-struct cg fparams))
                 (let [sig (c-signature cg fparams (box-type a ret) false)
-                      fv (LLVMAddFunction (load (field cg module)) (slice->cstr a fname) (load (field sig fn_ty)))]
+                      fv (LLVMAddFunction (load (field cg module)) (slice->cstr a llvm-name) (load (field sig fn_ty)))]
                   (LLVMSetFunctionCallConv fv 0)
                   (cg-apply-csig-attrs cg sig fv false)
                   (cg-add-csig cg fname sig)
-                  (if (not (or (str-eq fname "main") (not anchor))) (do (LLVMSetLinkage fv 8) 0) 0)
+                  (if (not external) (do (LLVMSetLinkage fv 8) 0) 0)
                   (cg-add-func cg fname fv))
               (let [fnty (cg-fn-type cg fparams (box-type a ret))
-                    fv (LLVMAddFunction (load (field cg module)) (slice->cstr a fname) fnty)]
+                    fv (LLVMAddFunction (load (field cg module)) (slice->cstr a llvm-name) fnty)]
                 (LLVMSetFunctionCallConv fv 0)
-                (if (not (or (str-eq fname "main") (not anchor))) (do (LLVMSetLinkage fv 8) 0) 0)
+                (if (not external) (do (LLVMSetLinkage fv 8) 0) 0)
                 (cg-add-func cg fname fv))))
+          (store! i (iadd (load i) 1)))))
+    0))
+; 2b: C-ABI export THUNKS (src/codegen.rs emit_export_thunk). For each export that
+; takes a struct by value, emit the external C-symbol function that marshals the C ABI
+; into the reference-model (pointer) args the internal function takes, then calls it.
+(defn cg-emit-export-thunk [(cg (ptr Cg)) (c-symbol (slice u8)) (internal-name (slice u8)) (internal (ptr i8)) (params (ptr (ArrayList Type))) (ret (ptr Type))] (-> i64)
+  (let [a (load (field cg a)) b (cg-bld cg)
+        sig (c-signature cg params ret false)
+        thunk (LLVMAddFunction (load (field cg module)) (slice->cstr a c-symbol) (load (field sig fn_ty)))]
+    (LLVMSetFunctionCallConv thunk 0)
+    (cg-apply-csig-attrs cg sig thunk false)
+    (let [entry (cg-append cg thunk (cg-bl cg "entry"))]
+      (cg-pos cg entry)
+      (let [(mut meta) (al-new [(ptr i8)] a) sret-sa (load (field sig sret)) (mut idx) 0]
+        (if (icmp-ne (cast i64 sret-sa) 0)
+            (do (al-push! (mut meta) (LLVMGetParam thunk 0)) (store! idx 1)) 0)
+        (let [args (load (field sig args)) n (al-len [ArgAbiK] (load args)) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (match (al-get [ArgAbiK] (load args) (load i))
+                  (AAScalar [] (do (al-push! (mut meta) (LLVMGetParam thunk (cast i32 (load idx)))) (store! idx (iadd (load idx) 1))))
+                  (AADirect [sa]
+                    (let [slot (cg-struct-slot cg sa "thunk.arg")]
+                      (match-else (load (field sa arg))
+                        (ACDirect [slots]
+                          (let [ns (al-len [(ptr i8)] (load slots)) (mut k) 0]
+                            (loop (if (icmp-ge (load k) ns) (break)
+                              (do (let [v (LLVMGetParam thunk (cast i32 (load idx))) off (imul (load k) 8)
+                                        gep (if (icmp-eq off 0) slot (cg-gep-i8 cg slot off))]
+                                    (LLVMBuildStore b v gep) (store! idx (iadd (load idx) 1)))
+                                  (store! k (iadd (load k) 1)))))
+                            0))
+                        (_ 0))
+                      (al-push! (mut meta) slot)))
+                  (AAIndirect [sa] (do (al-push! (mut meta) (LLVMGetParam thunk (cast i32 (load idx)))) (store! idx (iadd (load idx) 1)))))
+                (store! i (iadd (load i) 1)))))
+        (let [cs (LLVMBuildCall2 b (LLVMGlobalGetValueType internal) internal (carr a (load meta)) (cast i32 (al-len [(ptr i8)] (load meta))) (cg-call-name cg (LLVMGlobalGetValueType internal) "thunk.call"))]
+          (LLVMSetInstructionCallConv cs (LLVMGetFunctionCallConv internal))
+          (if (cg-has-csig cg internal-name) (cg-apply-csig-attrs cg (cg-csig cg internal-name) cs true) 0)
+          (if (icmp-ne (cast i64 sret-sa) 0) (do (LLVMBuildRetVoid b) 0)
+            (if (ty-is-void ret) (do (LLVMBuildRetVoid b) 0)
+              (do (LLVMBuildRet b cs) 0))))))
+    0)))
+(defn cg-emit-thunks [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
+  (let [a (load (field cg a)) es (load (field p exports)) n (al-len [ExportC] (load es)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ep (al-elem [ExportC] es (load i))]
+            (if (cg-export-needs-thunk ep)
+                (let [sym (match (load (field ep symbol)) (Some [s] s) (None [] ""))
+                      internal (cg-func cg (load (field ep name)))
+                      ret (match (cg-ret cg (load (field ep name))) (Some [t] (box-type a t)) (None [] (box-type a (TVoid))))]
+                  (cg-emit-export-thunk cg sym (load (field ep name)) internal (load (field ep params)) ret))
+              0))
           (store! i (iadd (load i) 1)))))
     0))
 (defn cg-param-types [(cg (ptr Cg)) (params (ptr (ArrayList Param)))] (-> (ptr (ArrayList Type)))
@@ -8384,10 +8573,10 @@
             (match (expand-stage3 (mut s))
               (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
               (Ok [_]
-                (match (resolve-program a (mut s) true)
+                (match (resolve-program a (mut s) (not (ls-has-meta (mut s))))
                   (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
                   (Ok [prog]
-                    (match (check-program a prog (mut s))
+                    (match (frontend-check a (mut s) prog)
                       (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
                       (Ok [cp]
                         (do (drop-code-funcs a cp)
@@ -9740,6 +9929,104 @@
   (and (icmp-eq (sx-tag (load f)) 6)
        (let [it (sx-items (load f))]
          (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "meta"))))))
+; ---- comptime::run_metas — evaluate each (meta …) form (checked/elaborated) via the
+;      comptime interpreter to a Code value, splice a `(do …)` result, else push it.
+;      Returns the generated top-level forms as raw Sexp (re-resolved by the caller).
+(defn run-metas [(checked (ptr Program)) (a (ptr Allocator))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (let [cx (alloc-stack CtCtx)]
+    (store! (field cx a) a)
+    (store! (field cx fns) (load (field checked funcs)))
+    (store! (field cx structs) (load (field checked structs)))
+    (store! (field cx sums) (load (field checked sums)))
+    (store! (field cx variants) (all-variant-names (load (field checked sums)) a))
+    (store! (field cx traits) (load (field checked traits)))
+    (store! (field cx fuel) 50000000)
+    (store! (field cx depth) 0)
+    (store! (field cx gensym) 0)
+    (store! (field cx qmodule) (None [(slice u8)]))
+    (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field cx qimports) (cast (ptr ModImports) 0))
+    (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
+    (let [ms (load (field checked metas)) n (al-len [Expr] (load ms)) (mut out) (al-new [Sexp] a)
+          (mut i) 0 (mut errf) (None [Diag])]
+      (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
+        (do (match (eval (al-elem [Expr] ms (load i)) (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
+              (Err [d] (do (store! errf (Some d)) 0))
+              (Ok [fl]
+                (match fl
+                  (FVal [v]
+                    (if (not (is-ccode v)) (do (store! errf (Some (derr "meta: expression must produce Code (a quoted form)"))) 0)
+                      (let [sexp (ccode-of v)]
+                        (if (and (icmp-eq (sx-tag sexp) 6)
+                                 (let [it (sx-items sexp)] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "do")))))
+                            (let [it (sx-items sexp) m (sx-len it) (mut j) 1]
+                              (loop (if (icmp-ge (load j) m) (break) (do (al-push! (mut out) (sx-at it (load j))) (store! j (iadd (load j) 1))))) 0)
+                          (do (al-push! (mut out) sexp) 0)))))
+                  (FBrk [vv ll] (do (store! errf (Some (derr "meta: stray control flow at top level"))) 0))
+                  (FCont [ll]   (do (store! errf (Some (derr "meta: stray control flow at top level"))) 0)))))
+            (store! i (iadd (load i) 1)))))
+      (match (load errf) (Some [d] (Err [(ptr (ArrayList Sexp)) Diag] d)) (None [] (Ok (box-al [Sexp] a (load out))))))))
+; whether any top-level tagged form in `s` is a (meta …) form (so the first resolve
+; is non-strict — undefined refs to not-yet-generated defns are expected).
+(defn ls-has-meta [(s (mut LS))] (-> bool)
+  (let [a (load (field s a)) out (box-al [TaggedForm] a (load (field s out))) n (al-len [TaggedForm] (load out)) (mut i) 0 (mut r) false]
+    (loop (if (or (load r) (icmp-ge (load i) n)) (break)
+      (do (if (is-meta-form (field (al-elem [TaggedForm] out (load i)) form)) (do (store! r true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; splice: rebuild s.out = (tagged forms sans meta) ++ generated forms (tagged with the
+; first meta form's module, mirroring src/lib.rs::elaborate_on_stack's tagged2).
+(defn splice-metas [(s (mut LS)) (gen (ptr (ArrayList Sexp))) (a (ptr Allocator))] (-> i64)
+  (let [old (box-al [TaggedForm] a (load (field s out))) n (al-len [TaggedForm] (load old)) (mut newout) (al-new [TaggedForm] a)
+        (mut mmod) (None [(slice u8)]) (mut found) false (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [tf (al-elem [TaggedForm] old (load i))]
+            (if (is-meta-form (field tf form))
+                (do (if (load found) 0 (do (store! mmod (load (field tf module))) (store! found true) 0)) 0)
+              (do (al-push! (mut newout) (load tf)) 0)))
+          (store! i (iadd (load i) 1)))))
+    (let [ng (al-len [Sexp] (load gen)) (mut j) 0]
+      (loop (if (icmp-ge (load j) ng) (break)
+        (do (let [tf (alloc-stack TaggedForm)]
+              (store! (field tf form) (al-get [Sexp] (load gen) (load j)))
+              (store! (field tf module) (load mmod))
+              (al-push! (mut newout) (load tf)))
+            (store! j (iadd (load j) 1))))))
+    (store! (field s out) (load newout))
+    0))
+; src/lib.rs::elaborate_on_stack — the (meta …) staged-macro loop. `prog` is the
+; NON-STRICT first resolve (metas non-empty): check the generator closure, run the
+; metas, splice the generated forms, then STRICT re-resolve + final check.
+(defn elaborate-metas [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
+  (let [stackb (unwrap-ptr [SBox] (create [SBox] a))]
+    (store! (field stackb items) (al-new [(slice u8)] a))
+    (let [names (prog-fn-names prog a) ms (load (field prog metas)) nm (al-len [Expr] (load ms)) (mut i) 0]
+      (loop (if (icmp-ge (load i) nm) (break)
+        (do (collect-calls (al-elem [Expr] ms (load i)) names stackb) (store! i (iadd (load i) 1))))))
+    (let [wanted (closure-funcs prog (field stackb items) a) sub (closure-subprogram prog wanted a)]
+      (store! (field sub metas) (load (field prog metas)))
+      (let [checkls (alloc-stack LS)]
+        (store! (field checkls a) a)
+        (store! (field checkls out) (al-new [TaggedForm] a))
+        (store! (field checkls loaded) (al-new [(slice u8)] a))
+        (store! (field checkls imports) (al-new [ImpEntry] a))
+        (store! (field checkls exports) (al-new [ExpEntry] a))
+        (match (check-program a sub (mut checkls))
+          (Err [d] (Err [(ptr Program) Diag] d))
+          (Ok [checked]
+            (match (run-metas checked a)
+              (Err [d] (Err [(ptr Program) Diag] d))
+              (Ok [gen]
+                (do (splice-metas (mut s) gen a)
+                    (match (resolve-program a (mut s) true)
+                      (Err [d] (Err [(ptr Program) Diag] d))
+                      (Ok [prog2] (check-program a prog2 (mut s)))))))))))))
+; src/lib.rs::elaborate — check the resolved program, running the (meta …) staged-macro
+; loop first when there are meta forms; returns the final checked/elaborated Program.
+(defn frontend-check [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
+  (if (icmp-eq (al-len [Expr] (load (field prog metas))) 0)
+      (check-program a prog (mut s))
+    (elaborate-metas a (mut s) prog)))
 (defn defn-name-of [(f (ptr Sexp))] (-> (Option (slice u8)))
   (if (icmp-ne (sx-tag (load f)) 6) (None [(slice u8)])
     (let [it (sx-items (load f))]
