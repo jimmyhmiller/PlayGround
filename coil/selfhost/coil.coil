@@ -6607,7 +6607,10 @@
   0)
 
 ; ============================ entry ========================================
-(defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+; dump-mono: read -> load -> resolve -> check -> mono -> sorted mono Program dump.
+; (Was named dump-checked-program; the real checked dumper — which STOPS at check,
+; no mono — is defined below. This serves the `dump-mono` gate subcommand.)
+(defn dump-mono-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
   (let [w (stdout) s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out)     (al-new [TaggedForm] a))
@@ -6636,6 +6639,228 @@
                         (match (monomorphize a cp)
                           (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
                           (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a))))))))))))))
+  0)
+
+; dump-checked: read -> load -> resolve -> check -> checked Program dump (NO mono).
+(defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Ok [cp] (d-program w cp a))))))))))
+  0)
+
+; dump-resolved: read -> load -> resolve -> resolved Program dump.
+(defn dump-resolved-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog] (d-program w prog a))))))))
+  0)
+
+; dump-read: raw read -> canonical Sexp forms (reader oracle). sx-node's
+; @source:lo:hi:ctxt is byte-identical to the standalone reader dumper for raw
+; single-file input (source=0, ctxt=0, no dummy spans).
+(defn dump-read-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (let [(mut i) 0 n (al-len [Sexp] (load forms))]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (if (icmp-gt (load i) 0) (wb w 10) 0)
+                (let [child (alloc-stack Sexp)]
+                  (store! child (al-get [Sexp] (load forms) (load i)))
+                  (sx-node w child))
+                (store! i (iadd (load i) 1)))))))))
+  0)
+
+; ---- loader-dump helpers ported verbatim from selfhost/loader.coil ----
+; (imp-elem/exp-elem/d-strs/d-opt-str/dstr already defined above.)
+(defn alias-key [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p alias))))
+(defn alias-tgt [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p target))))
+(defn use-tgt  [(x Use)]   (-> (slice u8)) (let [p (alloc-stack Use)]   (store! p x) (load (field p target))))
+(defn use-spec [(x Use)]   (-> UseSpec)    (let [p (alloc-stack Use)]   (store! p x) (load (field p spec))))
+
+; selection-sort a COPY of a slice list ascending by str-cmp.
+(defn sorted-strs [(a (ptr Allocator)) (l (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [(slice u8)] (load l)) (mut c) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut c) (al-get [(slice u8)] (load l) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load c) (load q))
+                                (al-get [(slice u8)] (load c) (load m)))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [(slice u8)] (load c) (load p))
+                    tm (al-get [(slice u8)] (load c) (load m))]
+                (al-set! (mut c) (load p) tm)
+                (al-set! (mut c) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! bp (load c)) bp)))
+
+; sorted index permutation of 0..n by the parallel key strings (selection sort).
+(defn sort-idx [(a (ptr Allocator)) (keys (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList i64)))
+  (let [n (al-len [(slice u8)] (load keys)) (mut idx) (al-new [i64] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut idx) (load i)) (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load q)))
+                                (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load m))))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [i64] (load idx) (load p))
+                    tm (al-get [i64] (load idx) (load m))]
+                (al-set! (mut idx) (load p) tm)
+                (al-set! (mut idx) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList i64)] (create [(ArrayList i64)] a))]
+      (store! bp (load idx)) bp)))
+
+; `(aliases [(al "k" "v") …]) (uses [(use "t" SPEC) …]) (reexports [...])`.
+(defn d-modimports [(w (ptr Writer)) (a (ptr Allocator)) (m (mut ModImports))] (-> i64)
+  (ps w "(aliases [")
+  (let [na (al-len [Alias] (load (field m aliases)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) na) (break)
+      (do (al-push! (mut keys) (alias-key (al-get [Alias] (load (field m aliases)) (load i))))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) na) (break)
+          (do (if (icmp-gt (load j) 0) (wb w 32) 0)
+              (let [e (al-get [Alias] (load (field m aliases)) (al-get [i64] (load idx) (load j)))]
+                (ps w "(al ") (dstr w (alias-key e)) (wb w 32)
+                (dstr w (alias-tgt e)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (ps w "]) (uses [")
+  (let [nu (al-len [Use] (load (field m uses))) (mut i) 0]
+    (loop (if (icmp-ge (load i) nu) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [u (al-get [Use] (load (field m uses)) (load i))]
+            (ps w "(use ") (dstr w (use-tgt u)) (wb w 32)
+            (match (use-spec u)
+              (UAll   []      (ps w "(all)"))
+              (UNames [names] (do (ps w "(names ") (d-strs w names) (wb w 41))))
+            (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (ps w "]) (reexports ")
+  (let [rp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+    (store! rp (load (field m reexports)))
+    (d-strs w rp))
+  (wb w 41))
+
+; dump-load: read -> load -> canonical loaded-forms/imports/exports dump.
+(defn dump-loaded [(w (ptr Writer)) (a (ptr Allocator)) (s (mut LS))] (-> i64)
+  (ps w "(forms")
+  (let [n (al-len [TaggedForm] (load (field s out))) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (ps w " (tf ")
+          (let [tf (alloc-stack TaggedForm)]
+            (store! tf (al-get [TaggedForm] (load (field s out)) (load i)))
+            (d-opt-str w (load (field tf module)))
+            (wb w 32)
+            (let [fp (alloc-stack Sexp)] (store! fp (load (field tf form))) (sx-node w fp)))
+          (wb w 41)
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (wb w 10) (ps w "(imports")
+  (let [n (al-len [ImpEntry] (load (field s imports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (imp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (imp-elem (mut s) (al-get [i64] (load idx) (load j)))]
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-modimports w a (mut (field e imp))) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  (wb w 10) (ps w "(exports")
+  (let [n (al-len [ExpEntry] (load (field s exports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (exp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (exp-elem (mut s) (al-get [i64] (load idx) (load j)))
+                    namesp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+                (store! namesp (load (field e names)))
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-strs w (sorted-strs a namesp)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  0)
+
+(defn dump-load-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+            (dump-loaded w a (mut s))))))
   0)
 
 ; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).
@@ -9578,6 +9803,20 @@
             (ps w (normalize-ir a src)) 0)
         (if (str-eq sub "build")
             (build-cmd a argc argv)
+         (if (str-eq sub "dump-read")
+             (let [path (load (index argv 2))] (dump-read-program a (read-file a path)))
+          (if (str-eq sub "dump-ast")
+              (let [path (load (index argv 2))] (dump-ast-program a (read-file a path)))
+           (if (str-eq sub "dump-load")
+               (let [path (load (index argv 2))] (dump-load-program a (read-file a path) (cwd-slice a)))
+            (if (str-eq sub "dump-expand")
+                (let [path (load (index argv 2))] (dump-expand-program a (read-file a path) (cwd-slice a)))
+             (if (str-eq sub "dump-resolved")
+                 (let [path (load (index argv 2))] (dump-resolved-program a (read-file a path) (cwd-slice a)))
+              (if (str-eq sub "dump-checked")
+                  (let [path (load (index argv 2))] (dump-checked-program a (read-file a path) (cwd-slice a)))
+               (if (str-eq sub "dump-mono")
+                   (let [path (load (index argv 2))] (dump-mono-program a (read-file a path) (cwd-slice a)))
           (let [path (load (index argv 2))
                 ctx  (alloc-stack DumpCtx)
                 (mut trip) (cast (ptr i8) 0) (mut i) 3]
@@ -9597,7 +9836,7 @@
             (store! (field ctx ok) 0)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
 (defsum CtVal
   (CInt    [(v i64)])
@@ -10617,7 +10856,7 @@
                   (if (or (has-dot name) (icmp-ge (find-slash name) 0)) 0
                     (match (resolve-in-module cx name m)
                       (None [] 0)
-                      (Some [q] (do (store! hp (mk-sexp (KSym q) (sx-lo (load hp)) (sx-hi (load hp)))) 0)))))))))))))
+                      (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
 (defn eval-quasi-items [(items (ptr (ArrayList Quasi))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (let [a (load (field cx a)) n (al-len [Quasi] (load items)) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
@@ -11442,6 +11681,7 @@
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
     (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
     (store! (field s srccount) 1)
     (register-source! (mut s) "<source>" src)
     (match (read-all a src 0)
