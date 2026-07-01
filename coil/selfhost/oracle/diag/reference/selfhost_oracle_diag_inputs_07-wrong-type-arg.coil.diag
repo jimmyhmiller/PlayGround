@@ -1,0 +1,5 @@
+error: in 'main': argument 1 to 'm.takes-i64' has type f64 but expected i64
+  --> selfhost/oracle/diag/inputs/07-wrong-type-arg.coil:3:24
+  |
+3 | (defn main [] (-> i64) (takes-i64 3.5))
+  |                        ^^^^^^^^^^^^^^^

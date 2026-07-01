@@ -1,0 +1,13 @@
+error: in 'm.a': unbound variable 'bad1'
+  --> selfhost/oracle/diag/inputs/10-multi-error.coil:2:27
+  |
+2 | (defn a [] (-> i64) (iadd bad1 1))
+  |                           ^^^^
+
+error: in 'm.b': unbound variable 'bad2'
+  --> selfhost/oracle/diag/inputs/10-multi-error.coil:3:27
+  |
+3 | (defn b [] (-> i64) (iadd bad2 2))
+  |                           ^^^^
+
+2 errors

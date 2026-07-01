@@ -1,0 +1,5 @@
+error: in 'badlib.bad': unbound variable 'nope'
+  --> selfhost/oracle/diag/imports/badlib.coil:2:29
+  |
+2 | (defn bad [] (-> i64) (iadd nope 1))
+  |                             ^^^^
