@@ -9,19 +9,31 @@
 //!
 //! Layout (little-endian):
 //! ```text
-//! header:  magic "MSCP" | u16 version | u16 flags | u32 pid | u16 exe_len | exe…
+//! header:  magic "MSCP" | u16 version | u16 flags | u32 pid | u16 exe_len | exe… | u64 slide
 //! record:  u8 tag, then:
 //!   'S' site:   u32 id | u8 has_ty (+ u16 len+utf8) | u8 shape_code | u16 nframes
 //!               nframes × [u16 fn_len+utf8 | u16 file_len+utf8 | u32 line | u8 inlined]
+//!   'R' rsite:  u32 id | u16 nframes | nframes × u64 ip   (raw return addresses;
+//!               symbolicated by the reader against the binary's dSYM — keeps the
+//!               traced process off the DWARF path entirely)
 //!   'E' events: u32 count | count × [u8 kind | u64 addr | u64 size | u64 ts
 //!               | u32 site | u32 thread | u8 align_log2]   (34 bytes each)
 //! ```
+//!
+//! `slide` is the main image's ASLR load slide at record time, so the reader can
+//! map a recorded runtime return address back to its static (link-time) address:
+//! `static = ip - slide`.
 
 use crate::{AllocShape, EventKind, MetaValue, RawEvent, SiteId};
 
 pub const MAGIC: [u8; 4] = *b"MSCP";
-pub const VERSION: u16 = 1;
+/// v2 adds the header `slide` field and the `TAG_RSITE` raw-site record (sites
+/// symbolicated at read time rather than in the traced process).
+pub const VERSION: u16 = 2;
 pub const TAG_SITE: u8 = b'S';
+/// Raw (unresolved) site: `u32 id | u16 nframes | nframes × u64 ip`. The reader
+/// symbolicates the return addresses against the binary's dSYM.
+pub const TAG_RSITE: u8 = b'R';
 pub const TAG_EVENTS: u8 = b'E';
 /// Interned metadata key name: `u32 key_id | u16 len+utf8`.
 pub const TAG_KEY: u8 = b'K';
@@ -98,13 +110,15 @@ fn put_str(b: &mut Vec<u8>, s: &str) {
     b.extend_from_slice(&bytes[..bytes.len().min(u16::MAX as usize)]);
 }
 
-/// Encode the file header into `b`.
-pub fn encode_header(b: &mut Vec<u8>, pid: u32, exe: &str) {
+/// Encode the file header into `b`. `slide` is the main image's ASLR load slide
+/// (so the reader can map runtime IPs back to static addresses).
+pub fn encode_header(b: &mut Vec<u8>, pid: u32, exe: &str, slide: u64) {
     b.extend_from_slice(&MAGIC);
     put_u16(b, VERSION);
     put_u16(b, 0); // flags
     put_u32(b, pid);
     put_str(b, exe);
+    put_u64(b, slide);
 }
 
 /// A resolved frame as stored in a site record.
@@ -139,6 +153,18 @@ pub fn encode_site(
         put_str(b, f.file);
         put_u32(b, f.line);
         b.push(f.inlined as u8);
+    }
+}
+
+/// Encode a raw (unresolved) site: just the interned id + the captured return
+/// addresses. Cheap to write on the hot consumer path — no DWARF, no strings.
+/// The reader symbolicates these against the binary's dSYM.
+pub fn encode_rsite(b: &mut Vec<u8>, site: u32, ips: &[u64]) {
+    b.push(TAG_RSITE);
+    put_u32(b, site);
+    put_u16(b, ips.len().min(u16::MAX as usize) as u16);
+    for &ip in ips.iter().take(u16::MAX as usize) {
+        put_u64(b, ip);
     }
 }
 
@@ -295,6 +321,9 @@ pub struct Header {
     pub version: u16,
     pub pid: u32,
     pub exe: String,
+    /// Main-image ASLR load slide at record time (`static = ip - slide`). 0 for
+    /// pre-v2 recordings, which carried already-resolved sites.
+    pub slide: u64,
 }
 
 /// Validate magic + parse the header; returns the header and bytes consumed.
@@ -308,7 +337,9 @@ pub fn decode_header(buf: &[u8]) -> Option<(Header, usize)> {
     let _flags = r.u16()?;
     let pid = r.u32()?;
     let exe = r.str()?;
-    Some((Header { version, pid, exe }, r.pos))
+    // v2+ carries the load slide; tolerate older files (slide = 0).
+    let slide = r.u64().unwrap_or(0);
+    Some((Header { version, pid, exe, slide }, r.pos))
 }
 
 /// Quick check: does this look like a binary `.mscope` recording?
@@ -323,12 +354,13 @@ mod tests {
     #[test]
     fn header_roundtrip() {
         let mut b = Vec::new();
-        encode_header(&mut b, 4242, "/path/to/bin");
+        encode_header(&mut b, 4242, "/path/to/bin", 0x1000);
         assert!(is_binary(&b));
         let (h, used) = decode_header(&b).unwrap();
         assert_eq!(h.version, VERSION);
         assert_eq!(h.pid, 4242);
         assert_eq!(h.exe, "/path/to/bin");
+        assert_eq!(h.slide, 0x1000);
         assert_eq!(used, b.len());
     }
 
@@ -394,7 +426,7 @@ mod tests {
     #[test]
     fn site_and_batch_stream() {
         let mut b = Vec::new();
-        encode_header(&mut b, 1, "x");
+        encode_header(&mut b, 1, "x", 0);
         let frames = [FrameRec {
             function: "app::main",
             file: "main.rs",
@@ -438,5 +470,19 @@ mod tests {
         assert_eq!(e0.addr, 0x1000);
         let e1 = r.decode_event().unwrap();
         assert_eq!(e1.addr, 0x1001);
+    }
+
+    #[test]
+    fn rsite_roundtrip() {
+        let mut b = Vec::new();
+        let ips = [0xdead_beefu64, 0x1234_5678, 0xfeed_face];
+        encode_rsite(&mut b, 7, &ips);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u8(), Some(TAG_RSITE));
+        assert_eq!(r.u32(), Some(7));
+        assert_eq!(r.u16(), Some(3));
+        assert_eq!(r.u64(), Some(0xdead_beef));
+        assert_eq!(r.u64(), Some(0x1234_5678));
+        assert_eq!(r.u64(), Some(0xfeed_face));
     }
 }

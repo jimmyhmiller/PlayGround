@@ -17,9 +17,15 @@ use std::os::unix::net::UnixStream;
 
 use memscope_proto::{ClientMsg, HeapGraph, ServerMsg, Snapshot};
 use memscope_replay::{
-    analyze, boundary_frame, clean_frame, frame_location, is_std_frame, read_meta_value,
-    read_recording, site_stats, Finding, FrameMeta, RecEvent, Recording, SiteStats, Timeline,
+    analyze, boundary_frame, clean_frame, frame_location, is_std_frame, label_for, read_meta_value,
+    read_recording, read_recording_raw, site_stats, Finding, FrameMeta, RecEvent, Recording,
+    SiteStats, Timeline,
 };
+
+// Read-time symbolication is allocation-heavy; mimalloc returns freed memory to
+// the OS more readily than the system allocator (which retains it in magazines).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -607,8 +613,13 @@ fn replay_binary(file: &str) -> Result<(), String> {
     let _ = rd!(b4); // pid
     let pid = u32::from_le_bytes(b4);
     let exe = rd_str(&mut f).unwrap_or_default();
+    // v2+ carries the load slide (for read-time symbolication of raw sites).
+    let mut b8 = [0u8; 8];
+    let slide = if rd!(b8) { u64::from_le_bytes(b8) } else { 0 };
 
     let mut site_label: HashMap<u32, String> = HashMap::new();
+    // Raw sites are symbolicated after the stream is read (see below).
+    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
     let mut live: HashMap<u64, (u64, u32)> = HashMap::new();
     let (mut allocs, mut frees, mut peak, mut cur) = (0u64, 0u64, 0u64, 0u64);
 
@@ -640,6 +651,19 @@ fn replay_binary(file: &str) -> Result<(), String> {
                     (None, None) => "<no type>".into(),
                 };
                 site_label.insert(site, label);
+            }
+            recfmt::TAG_RSITE => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let site = u32::from_le_bytes(b4);
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                let n = u16::from_le_bytes(b2) as usize;
+                let mut ips = Vec::with_capacity(n);
+                let mut ipb = [0u8; 8];
+                for _ in 0..n {
+                    f.read_exact(&mut ipb).map_err(|e| e.to_string())?;
+                    ips.push(u64::from_le_bytes(ipb));
+                }
+                raw_sites.insert(site, ips);
             }
             recfmt::TAG_EVENTS => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
@@ -689,6 +713,19 @@ fn replay_binary(file: &str) -> Result<(), String> {
         }
     }
 
+    // Symbolicate raw sites once, against the binary's dSYM (off the traced
+    // process). Best-effort: a missing dSYM just leaves labels unresolved.
+    if !raw_sites.is_empty() {
+        let sites: Vec<(u32, Vec<u64>)> = raw_sites.into_iter().collect();
+        if let Ok(resolved) =
+            memscope_symbols::resolve_raw_sites(std::path::Path::new(&exe), slide, &sites)
+        {
+            for (id, r) in resolved {
+                site_label.insert(id, label_for(r.shape, r.element_type));
+            }
+        }
+    }
+
     println!("== memscope binary recording: {file} ==");
     println!("  pid {pid}   exe {exe}");
     println!(
@@ -727,6 +764,9 @@ fn replay_json(file: &str) -> Result<(), String> {
     let rdr = std::io::BufReader::new(f);
 
     let mut site_label: HashMap<u64, String> = HashMap::new();
+    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
+    let mut exe = String::new();
+    let mut slide = 0u64;
     // addr -> (size, site)
     let mut live: HashMap<u64, (u64, u64)> = HashMap::new();
     let (mut allocs, mut frees, mut peak_bytes, mut cur_bytes) = (0u64, 0u64, 0u64, 0u64);
@@ -740,6 +780,17 @@ fn replay_json(file: &str) -> Result<(), String> {
         };
         if v.get("v").is_some() {
             header = line.clone();
+            exe = v.get("exe").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            slide = v.get("slide").and_then(|x| x.as_u64()).unwrap_or(0);
+            continue;
+        }
+        if let Some(id) = v.get("rsite").and_then(|x| x.as_u64()) {
+            let ips = v
+                .get("ips")
+                .and_then(|x| x.as_array())
+                .map(|arr| arr.iter().filter_map(|n| n.as_u64()).collect())
+                .unwrap_or_default();
+            raw_sites.insert(id as u32, ips);
             continue;
         }
         if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
@@ -770,6 +821,19 @@ fn replay_json(file: &str) -> Result<(), String> {
                 frees += 1;
             }
             _ => {}
+        }
+    }
+
+    // Symbolicate raw sites once, against the binary's dSYM (off the traced
+    // process). Best-effort: a missing dSYM just leaves labels unresolved.
+    if !raw_sites.is_empty() {
+        let sites: Vec<(u32, Vec<u64>)> = raw_sites.into_iter().collect();
+        if let Ok(resolved) =
+            memscope_symbols::resolve_raw_sites(std::path::Path::new(&exe), slide, &sites)
+        {
+            for (id, r) in resolved {
+                site_label.insert(id as u64, label_for(r.shape, r.element_type));
+            }
         }
     }
 
@@ -1035,11 +1099,37 @@ fn frame_label(func: &str, file: &str, line: u32) -> String {
 
 
 /// A node in the allocation flame tree (merged call stacks, weighted by bytes).
+/// Edges are keyed by an *interned* frame-name id, not an owned `String`: the
+/// same function name recurs in millions of tree positions, so interning keeps
+/// the tree to `u32` keys + each unique name stored once (the difference between
+/// ~2 GB and tens of GB for a million-site recording).
 #[derive(Default)]
 struct Flame {
     bytes: u64,
     samples: u64,
-    children: std::collections::BTreeMap<String, Flame>,
+    children: std::collections::BTreeMap<u32, Flame>,
+}
+
+/// Interns frame-name strings to stable ids for the flame tree.
+#[derive(Default)]
+struct Interner {
+    map: HashMap<String, u32>,
+    names: Vec<String>,
+}
+
+impl Interner {
+    fn id(&mut self, s: String) -> u32 {
+        if let Some(&i) = self.map.get(&s) {
+            return i;
+        }
+        let i = self.names.len() as u32;
+        self.names.push(s.clone());
+        self.map.insert(s, i);
+        i
+    }
+    fn name(&self, id: u32) -> &str {
+        &self.names[id as usize]
+    }
 }
 
 /// Build an allocation flame graph by call stack: aggregate every allocation's
@@ -1062,12 +1152,43 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
     };
     let out = flag(args, "--out").unwrap_or(default_out).to_string();
 
-    let rec = read_recording(file)?;
-    let sites = &rec.sites;
+    // Constant-memory: read sites unresolved, symbolicate the unique IPs once,
+    // then resolve each site's frames transiently and fold them into the
+    // (prefix-merging) tree — never holding every site's full stack at once.
+    let rec = read_recording_raw(file)?;
+    let unique_ips: Vec<u64> = {
+        let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for ips in rec.raw_sites.values() {
+            set.extend(ips.iter().copied());
+        }
+        set.into_iter().collect()
+    };
+    let resolver = memscope_symbols::SiteResolver::build(
+        std::path::Path::new(&rec.exe),
+        rec.slide,
+        &unique_ips,
+    )
+    .map_err(|e| e.to_string())?;
+    // Resolve one site to (frames, label), transiently (caller drops it).
+    let site_frames = |site: u32| -> Option<(Vec<FrameMeta>, String)> {
+        let ips = rec.raw_sites.get(&site)?;
+        let r = resolver.resolve_site(ips);
+        let frames: Vec<FrameMeta> = r
+            .frames
+            .into_iter()
+            .map(|fr| FrameMeta {
+                func: fr.function.unwrap_or_default(),
+                file: fr.file.unwrap_or_default(),
+                line: fr.line.unwrap_or(0),
+            })
+            .collect();
+        Some((frames, label_for(r.shape, r.element_type)))
+    };
     let events = &rec.events;
     let meta_active = group_by.is_some() || !filters.is_empty();
 
     let mut root = Flame::default();
+    let mut interner = Interner::default();
     if meta_active {
         // Per-allocation pass: each alloc carries its correlated metadata, so the
         // same call site can land under different group values.
@@ -1092,7 +1213,7 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
             {
                 continue;
             }
-            let Some(info) = sites.get(&e.site) else { continue };
+            let Some((frames, label)) = site_frames(e.site) else { continue };
             let w = if by_count { 1 } else { e.size };
             if w == 0 {
                 continue;
@@ -1102,12 +1223,14 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
             let mut node = &mut root;
             if let Some(gk) = &group_by {
                 let gv = m.get(gk).cloned().unwrap_or_else(|| "<none>".to_string());
-                node = node.children.entry(format!("{gk}={gv}")).or_default();
+                let id = interner.id(format!("{gk}={gv}"));
+                node = node.children.entry(id).or_default();
                 node.bytes += w;
                 node.samples += 1;
             }
-            for name in site_to_path(&info.frames, &info.label, no_std) {
-                node = node.children.entry(name).or_default();
+            for name in site_to_path(&frames, &label, no_std) {
+                let id = interner.id(name);
+                node = node.children.entry(id).or_default();
                 node.bytes += w;
                 node.samples += 1;
             }
@@ -1139,47 +1262,51 @@ fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
                 *site_count.entry(*site).or_default() += 1;
             }
         }
-        for (site, info) in sites {
-            let w = if by_count {
-                *site_count.get(site).unwrap_or(&0)
-            } else {
-                *site_bytes.get(site).unwrap_or(&0)
-            };
+        // Stream over sites that actually allocated; resolve each transiently.
+        let counts = if by_count { &site_count } else { &site_bytes };
+        for (&site, &w) in counts {
             if w == 0 {
                 continue;
             }
+            let Some((frames, label)) = site_frames(site) else { continue };
             root.bytes += w;
             root.samples += 1;
             let mut node = &mut root;
-            for name in site_to_path(&info.frames, &info.label, no_std) {
-                node = node.children.entry(name).or_default();
+            for name in site_to_path(&frames, &label, no_std) {
+                let id = interner.id(name);
+                node = node.children.entry(id).or_default();
                 node.bytes += w;
                 node.samples += 1;
             }
         }
     }
 
+    // Stream the output straight to disk — never build the (multi-GB) serialized
+    // form in memory.
+    use std::io::Write as _;
+    let file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+    let mut w = std::io::BufWriter::new(file);
+
     if format == "folded" {
-        let mut out_s = String::new();
-        fold(&root, &mut Vec::new(), by_count, &mut out_s);
-        std::fs::write(&out, out_s).map_err(|e| e.to_string())?;
+        fold(&root, &mut Vec::new(), by_count, &interner, &mut w).map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())?;
         println!("wrote folded stacks: {out}");
         println!("  pipe to inferno-flamegraph / flamegraph.pl, or load at speedscope.app");
         return Ok(());
     }
 
-    // Chrome trace: nested X (complete) duration events; ts/dur in "bytes" so the
-    // width of each frame is its total allocated bytes.
-    let mut te: Vec<String> = Vec::new();
-    te.push(r#"{"name":"process_name","ph":"M","pid":1,"args":{"name":"allocations by stack"}}"#.into());
+    // Chrome trace: nested B/E duration events; ts/dur in "bytes" so each frame's
+    // width is its total allocated bytes.
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    emit_flame(&root, "all allocations", 0, &esc, &mut te);
-
-    let json = format!(
-        "{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n{}\n]}}",
-        te.join(",\n")
-    );
-    std::fs::write(&out, json).map_err(|e| e.to_string())?;
+    write!(w, "{{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n").map_err(|e| e.to_string())?;
+    write!(
+        w,
+        "{{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\"args\":{{\"name\":\"allocations by stack\"}}}}"
+    )
+    .map_err(|e| e.to_string())?;
+    emit_flame(&root, "all allocations", 0, &esc, &interner, &mut w).map_err(|e| e.to_string())?;
+    write!(w, "\n]}}").map_err(|e| e.to_string())?;
+    w.flush().map_err(|e| e.to_string())?;
     let unit = if by_count { "allocations" } else { "bytes" };
     println!("wrote allocation flame graph (Chrome trace): {out}");
     println!(
@@ -1307,7 +1434,13 @@ fn cmd_flamechart(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn fold(node: &Flame, stack: &mut Vec<String>, by_count: bool, out: &mut String) {
+fn fold<W: std::io::Write>(
+    node: &Flame,
+    stack: &mut Vec<u32>,
+    by_count: bool,
+    interner: &Interner,
+    w: &mut W,
+) -> std::io::Result<()> {
     // Self weight = node weight minus children weight (allocations terminating here).
     let child_sum: u64 = node
         .children
@@ -1316,43 +1449,54 @@ fn fold(node: &Flame, stack: &mut Vec<String>, by_count: bool, out: &mut String)
         .sum();
     let self_w = if by_count { node.samples } else { node.bytes }.saturating_sub(child_sum);
     if self_w > 0 && !stack.is_empty() {
-        out.push_str(&stack.join(";"));
-        out.push(' ');
-        out.push_str(&self_w.to_string());
-        out.push('\n');
+        for (i, id) in stack.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b";")?;
+            }
+            w.write_all(interner.name(*id).as_bytes())?;
+        }
+        writeln!(w, " {self_w}")?;
     }
-    for (name, child) in &node.children {
-        stack.push(name.clone());
-        fold(child, stack, by_count, out);
+    for (id, child) in &node.children {
+        stack.push(*id);
+        fold(child, stack, by_count, interner, w)?;
         stack.pop();
     }
+    Ok(())
 }
 
-fn emit_flame(
+/// Stream this subtree as Chrome-trace B/E events to `w`. Each event is written
+/// with a leading `,\n` (the caller emits a comma-free event first), so nothing
+/// accumulates in memory.
+fn emit_flame<W: std::io::Write>(
     node: &Flame,
     name: &str,
     x: u64,
     esc: &impl Fn(&str) -> String,
-    te: &mut Vec<String>,
-) {
+    interner: &Interner,
+    w: &mut W,
+) -> std::io::Result<()> {
     // Begin/End pair (not a single X): a linear chain has parent and child with
     // the *same* [ts,dur], which X-importers can't nest — they fall back to
     // alphabetical. B/E nests by event order, so call order is preserved.
-    let w = node.bytes.max(1);
-    te.push(format!(
-        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0,\"args\":{{\"bytes\":{},\"allocs\":{}}}}}",
+    let wgt = node.bytes.max(1);
+    write!(
+        w,
+        ",\n{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0,\"args\":{{\"bytes\":{},\"allocs\":{}}}}}",
         esc(name), x, node.bytes, node.samples
-    ));
+    )?;
     let mut cx = x;
-    for (child_name, child) in &node.children {
-        emit_flame(child, child_name, cx, esc, te);
+    for (child_id, child) in &node.children {
+        emit_flame(child, interner.name(*child_id), cx, esc, interner, w)?;
         cx += child.bytes.max(1);
     }
-    te.push(format!(
-        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0}}",
+    write!(
+        w,
+        ",\n{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"alloc\",\"ts\":{},\"pid\":1,\"tid\":0}}",
         esc(name),
-        x + w
-    ));
+        x + wgt
+    )?;
+    Ok(())
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -1725,7 +1869,11 @@ fn cmd_analyze(args: &[String]) -> Result<(), String> {
     let json = args.iter().any(|a| a == "--json");
     let top: usize = flag(args, "--top").and_then(|s| s.parse().ok()).unwrap_or(20);
 
-    let rec = read_recording(file)?;
+    // Constant-memory path: read sites unresolved, then symbolicate the unique
+    // IPs once and keep only a compact per-site result. Avoids materializing
+    // every site's full stack (tens of GB for a million-site recording).
+    let mut rec = read_recording_raw(file)?;
+    rec.resolve_sites_compact();
     let findings = analyze(&rec);
     let total = findings.len();
     let shown = total.min(top);

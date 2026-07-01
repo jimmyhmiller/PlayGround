@@ -391,7 +391,7 @@ mod tests {
         for (id, label) in sites {
             s.insert(*id, SiteInfo { label: (*label).to_string(), frames: vec![] });
         }
-        Recording { sites: s, meta: HashMap::new(), marks: HashMap::new(), events }
+        Recording { sites: s, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() }
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
             events.push(ev(EventKind::Alloc, 0x90000 + i, 1024, i * 2, 2));
             events.push(ev(EventKind::Dealloc, 0x90000 + i, 1024, i * 2 + 1, 0));
         }
-        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events };
+        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() };
         let f = analyze(&rec);
         let churn: Vec<_> = f.iter().filter(|f| f.detector == "churn-storm").collect();
         assert_eq!(churn.len(), 1, "two unrolled sites should merge into one finding");
@@ -485,7 +485,7 @@ mod tests {
         for i in 0..5_000u64 {
             events.push(ev(EventKind::Alloc, 0x10 + i, 1024, i, 5));
         }
-        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events };
+        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() };
         assert!(analyze(&rec).is_empty(), "profiler-origin site must be filtered out");
     }
 

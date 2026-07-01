@@ -57,6 +57,12 @@ pub struct SiteInfo {
 
 /// A parsed recording: per-site info, per-context metadata, mark labels, and the
 /// ordered event stream.
+///
+/// Sites can be carried **unresolved** (`raw_sites` populated, `sites` empty)
+/// when read via [`read_recording_raw`], so a caller can symbolicate only the
+/// subset it needs — symbolicating *every* site of a large recording costs many
+/// GB, but the numeric per-site stats (bytes/counts, which drive ranking) need
+/// no symbols at all. See [`Recording::resolve_sites`].
 #[derive(Default, Clone, Debug)]
 pub struct Recording {
     pub sites: HashMap<u32, SiteInfo>,
@@ -65,6 +71,12 @@ pub struct Recording {
     /// mark label id -> human label (from `memscope::mark`).
     pub marks: HashMap<u32, String>,
     pub events: Vec<RecEvent>,
+    /// Unresolved sites: interned id -> raw return addresses. Populated by
+    /// [`read_recording_raw`]; empty once resolved into `sites`.
+    pub raw_sites: HashMap<u32, Vec<u64>>,
+    /// Binary path + load slide for symbolicating `raw_sites` (read-time).
+    pub exe: String,
+    pub slide: u64,
 }
 
 impl Recording {
@@ -72,11 +84,116 @@ impl Recording {
     pub fn site_label(&self, site: u32) -> &str {
         self.sites.get(&site).map(|s| s.label.as_str()).unwrap_or("<unknown site>")
     }
+
+    /// Symbolicate just the given site ids (from `raw_sites`) into `sites`. This
+    /// is the constant-memory path: cost scales with `wanted.len()`, not with the
+    /// total number of sites in the recording. No-op for ids already resolved or
+    /// absent from `raw_sites`.
+    pub fn resolve_sites(&mut self, wanted: &[u32]) {
+        let pending: Vec<(u32, Vec<u64>)> = wanted
+            .iter()
+            .filter(|id| !self.sites.contains_key(id))
+            .filter_map(|id| self.raw_sites.get(id).map(|ips| (*id, ips.clone())))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        if let Ok(resolved) =
+            memscope_symbols::resolve_raw_sites(std::path::Path::new(&self.exe), self.slide, &pending)
+        {
+            for (id, r) in resolved {
+                let frames = r
+                    .frames
+                    .into_iter()
+                    .map(|fr| FrameMeta {
+                        func: fr.function.unwrap_or_default(),
+                        file: fr.file.unwrap_or_default(),
+                        line: fr.line.unwrap_or(0),
+                    })
+                    .collect();
+                self.sites.insert(
+                    id,
+                    SiteInfo {
+                        label: label_for(r.shape, r.element_type),
+                        frames,
+                    },
+                );
+            }
+        }
+    }
+}
+
+impl Recording {
+    /// Symbolicate sites with **bounded memory**, keeping only a compact result
+    /// per site (its type label + boundary frame) rather than every site's full
+    /// stack. Resolves each *unique* IP once via [`memscope_symbols::SiteResolver`],
+    /// then assembles each site transiently and discards its frames.
+    ///
+    /// This is what makes `analyze` work on recordings with millions of deep
+    /// sites built from a few thousand IPs (full-frame resolution would need tens
+    /// of GB). `analyze`/`diff` only need the label + boundary location, which is
+    /// exactly what's retained.
+    pub fn resolve_sites_compact(&mut self) {
+        if self.raw_sites.is_empty() {
+            return;
+        }
+        let unique: Vec<u64> = {
+            let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            for ips in self.raw_sites.values() {
+                set.extend(ips.iter().copied());
+            }
+            set.into_iter().collect()
+        };
+        let resolver = match memscope_symbols::SiteResolver::build(
+            std::path::Path::new(&self.exe),
+            self.slide,
+            &unique,
+        ) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for (id, ips) in &self.raw_sites {
+            let r = resolver.resolve_site(ips);
+            let frames: Vec<FrameMeta> = r
+                .frames
+                .into_iter()
+                .map(|fr| FrameMeta {
+                    func: fr.function.unwrap_or_default(),
+                    file: fr.file.unwrap_or_default(),
+                    line: fr.line.unwrap_or(0),
+                })
+                .collect();
+            // Keep only the boundary frame (first non-runtime) — all `analyze`
+            // and `diff` need beyond the type label.
+            let boundary = boundary_frame(&frames).cloned();
+            self.sites.insert(
+                *id,
+                SiteInfo {
+                    label: label_for(r.shape, r.element_type),
+                    frames: boundary.into_iter().collect(),
+                },
+            );
+        }
+    }
 }
 
 /// Read a recording (binary `.mscope` or JSON) into sites, metadata, marks, and
-/// the event stream.
+/// the event stream. Sites are fully symbolicated (may be expensive for large
+/// recordings — see [`read_recording_raw`] for the constant-memory path).
 pub fn read_recording(file: &str) -> Result<Recording, String> {
+    let mut rec = read_recording_raw(file)?;
+    let raw = std::mem::take(&mut rec.raw_sites);
+    let all: Vec<u32> = raw.keys().copied().collect();
+    rec.raw_sites = raw;
+    rec.resolve_sites(&all);
+    Ok(rec)
+}
+
+/// Read a recording **without symbolicating sites** — `raw_sites`/`exe`/`slide`
+/// are populated and `sites` is left empty. Callers resolve only what they need
+/// via [`Recording::resolve_sites`]. This keeps memory bounded for huge
+/// recordings (e.g. ranking allocation sites needs no symbols).
+pub fn read_recording_raw(file: &str) -> Result<Recording, String> {
     use std::io::Read;
     let mut magic = [0u8; 4];
     {
@@ -107,12 +224,22 @@ fn read_recording_binary(file: &str) -> Result<Recording, String> {
     if f.read_exact(&mut b4).is_err() || b4 != recfmt::MAGIC {
         return Err("not a memscope binary recording".into());
     }
-    let _ = f.read_exact(&mut b2);
-    let _ = f.read_exact(&mut b2);
-    let _ = f.read_exact(&mut b4);
-    let _exe = rd_str(&mut f);
+    let _ = f.read_exact(&mut b2); // version
+    let _ = f.read_exact(&mut b2); // flags
+    let _ = f.read_exact(&mut b4); // pid
+    let exe = rd_str(&mut f).unwrap_or_default();
+    // v2+ carries the load slide (for read-time symbolication of raw sites).
+    let mut b8 = [0u8; 8];
+    let slide = if f.read_exact(&mut b8).is_ok() {
+        u64::from_le_bytes(b8)
+    } else {
+        0
+    };
 
     let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
+    // Raw sites (TAG_RSITE): interned id -> captured return addresses, resolved
+    // against the binary's dSYM after the stream is read (off the hot path).
+    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
     let mut key_names: HashMap<u32, String> = HashMap::new();
     let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
@@ -170,6 +297,19 @@ fn read_recording_binary(file: &str) -> Result<Recording, String> {
                     },
                 );
             }
+            recfmt::TAG_RSITE => {
+                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                let site = u32::from_le_bytes(b4);
+                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                let n = u16::from_le_bytes(b2) as usize;
+                let mut ips = Vec::with_capacity(n);
+                let mut b8 = [0u8; 8];
+                for _ in 0..n {
+                    f.read_exact(&mut b8).map_err(|e| e.to_string())?;
+                    ips.push(u64::from_le_bytes(b8));
+                }
+                raw_sites.insert(site, ips);
+            }
             recfmt::TAG_EVENTS => {
                 f.read_exact(&mut b4).map_err(|e| e.to_string())?;
                 let count = u32::from_le_bytes(b4);
@@ -191,16 +331,31 @@ fn read_recording_binary(file: &str) -> Result<Recording, String> {
             other => return Err(format!("corrupt recording: unknown tag {other}")),
         }
     }
-    Ok(Recording { sites: labels, meta, marks, events })
+
+    // Carry sites unresolved; the caller symbolicates the subset it needs (see
+    // `Recording::resolve_sites`). Legacy `TAG_SITE` recordings already have
+    // resolved entries in `labels`.
+    Ok(Recording {
+        sites: labels,
+        meta,
+        marks,
+        events,
+        raw_sites,
+        exe,
+        slide,
+    })
 }
 
 fn read_recording_json(file: &str) -> Result<Recording, String> {
     use std::io::BufRead;
     let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
     let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
+    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
     let mut events: Vec<RecEvent> = Vec::new();
     let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
     let mut marks: HashMap<u32, String> = HashMap::new();
+    let mut exe = String::new();
+    let mut slide = 0u64;
     for line in rdr.lines() {
         let line = line.map_err(|e| e.to_string())?;
         let v: serde_json::Value = match serde_json::from_str(&line) {
@@ -208,6 +363,19 @@ fn read_recording_json(file: &str) -> Result<Recording, String> {
             Err(_) => continue,
         };
         if v.get("v").is_some() {
+            // Header: {"v":2,"pid":…,"exe":…,"slide":…}
+            exe = v.get("exe").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            slide = v.get("slide").and_then(|x| x.as_u64()).unwrap_or(0);
+            continue;
+        }
+        // Raw site: {"rsite":id,"ips":[…]} — resolved after the stream is read.
+        if let Some(id) = v.get("rsite").and_then(|x| x.as_u64()) {
+            let ips = v
+                .get("ips")
+                .and_then(|x| x.as_array())
+                .map(|arr| arr.iter().filter_map(|n| n.as_u64()).collect())
+                .unwrap_or_default();
+            raw_sites.insert(id as u32, ips);
             continue;
         }
         // Mark label definition: {"mark_def":id,"label":"…"}
@@ -279,7 +447,15 @@ fn read_recording_json(file: &str) -> Result<Recording, String> {
             thread: v.get("t").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         });
     }
-    Ok(Recording { sites: labels, meta, marks, events })
+    Ok(Recording {
+        sites: labels,
+        meta,
+        marks,
+        events,
+        raw_sites,
+        exe,
+        slide,
+    })
 }
 
 /// Read one encoded `MetaValue` from a stream, returning its display string
@@ -495,7 +671,7 @@ mod tests {
             ev(EventKind::Alloc, 0x30, 128, 5, 7),
             ev(EventKind::Mark, 1, 0, 6, 1), // "end": 0x20,0x30 live = 192 bytes
         ];
-        Recording { sites, meta: HashMap::new(), marks, events }
+        Recording { sites, meta: HashMap::new(), marks, events, ..Default::default() }
     }
 
     #[test]
@@ -556,7 +732,7 @@ mod tests {
         ];
         let mut marks = HashMap::new();
         marks.insert(0, "start".to_string());
-        let rec = Recording { sites, meta: HashMap::new(), marks, events };
+        let rec = Recording { sites, meta: HashMap::new(), marks, events, ..Default::default() };
         let tl = Timeline::new(&rec);
         let start = tl.state_at("start").unwrap();
         let bf = tl.window_born_freed(&start, rec.events.len());
