@@ -1,0 +1,14 @@
+(module shapes)
+(defstruct Point [(x i64) (y i64)])
+(defn clamp0 [(n i64)] (-> i64) (if (icmp-lt n 0) 0 n))
+(defn make-point [(x i64) (y i64)] (-> Point)
+  (let [p (alloc-stack Point)]
+    (store! (field p x) (clamp0 x))
+    (store! (field p y) (clamp0 y))
+    (load p)))
+(defn dist2 [(p Point)] (-> i64)
+  (iadd (imul (load (field p x)) (load (field p x)))
+        (imul (load (field p y)) (load (field p y)))))
+(export-c
+  [make-point :as "shapes_make_point"]
+  [dist2 :as "shapes_dist2"])

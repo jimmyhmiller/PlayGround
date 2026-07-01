@@ -34,6 +34,13 @@ SEEDS=(
   lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
   lib/slice.coil lib/thread.coil lib/try.coil
   selfhost/coil.coil
+  # --- feature corpora: each exercises a stubbed self-host feature so it becomes
+  # part of the contract (currently failing on the self-host, green on Rust). ---
+  examples/dyn_write.coil                     # trait objects / dyn dispatch (lib/dyn.coil)
+  examples/simd.coil lib/simd.coil            # SIMD / vector types (lib/simd.coil)
+  selfhost/oracle/features/meta_stage3.coil   # (meta …) Stage-3 staged macros
+  selfhost/oracle/features/export_c.coil      # (export-c …) C ABI export thunks
+  selfhost/oracle/features/x86_sysv_abi.coil  # struct-by-value (host lowering; x86 gate below)
 )
 
 [ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }

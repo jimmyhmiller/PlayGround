@@ -972,6 +972,13 @@ pub fn dump_ir(src: &str) -> Result<String, String> {
     Ok(normalize_ir::normalize(&emit_ir(src)?))
 }
 
+/// `coil dump-ir --target <triple>` — the normalized IR oracle for a *non-host*
+/// target (e.g. the x86-64 SysV ABI from an arm64 host). Same normalization as
+/// `dump_ir`, so the self-host's `emit-ir --target …` is gated on equal footing.
+pub fn dump_ir_for(src: &str, triple: &str) -> Result<String, String> {
+    Ok(normalize_ir::normalize(&emit_ir_for(src, triple)?))
+}
+
 /// `emit_ir` for an explicitly chosen target triple — used to inspect a
 /// program's ABI lowering for a non-host target (e.g. verifying the x86-64 SysV
 /// struct coercion from an arm64 host).

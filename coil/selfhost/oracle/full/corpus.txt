@@ -5,6 +5,7 @@ examples/args.coil
 examples/bitfields.coil
 examples/calc.coil
 examples/closure.coil
+examples/dyn_write.coil
 examples/explicit-layout.coil
 examples/extern.coil
 examples/fib.coil
@@ -17,6 +18,7 @@ examples/layout.coil
 examples/lockfree.coil
 examples/mem.coil
 examples/references.coil
+examples/simd.coil
 examples/structs.coil
 examples/sums.coil
 examples/threads.coil
@@ -36,10 +38,14 @@ lib/mem.coil
 lib/mmio.coil
 lib/print.coil
 lib/result.coil
+lib/simd.coil
 lib/slice.coil
 lib/thread.coil
 lib/try.coil
 selfhost/coil.coil
+selfhost/oracle/features/export_c.coil
+selfhost/oracle/features/meta_stage3.coil
+selfhost/oracle/features/x86_sysv_abi.coil
 selfhost/oracle/ir/fixtures/call.coil
 selfhost/oracle/ir/fixtures/iadd.coil
 selfhost/oracle/ir/fixtures/ret0.coil
