@@ -12,7 +12,6 @@
 //! `dump-read`/`dump-ast` (`(error@<lo>:<hi> "msg")`), so error-path parity is
 //! gated too. This module is ADDITIVE: it changes no existing compiler behavior.
 
-use std::fmt::Write;
 
 use crate::ast::Program;
 use crate::span::Diag;
@@ -25,19 +24,5 @@ pub fn dump_resolved(p: &Program) -> String {
 /// Canonical dump of a load/resolve diagnostic, identical in shape to the
 /// `dump-read` / `dump-ast` error path.
 pub fn dump_error(d: &Diag) -> String {
-    let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
-    let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
-    let mut msg = String::new();
-    for &b in d.msg.as_bytes() {
-        match b {
-            b'\\' => msg.push_str("\\\\"),
-            b'"' => msg.push_str("\\\""),
-            b'\n' => msg.push_str("\\n"),
-            b'\t' => msg.push_str("\\t"),
-            b'\r' => msg.push_str("\\r"),
-            0x20..=0x7e => msg.push(b as char),
-            _ => write!(msg, "\\x{b:02x}").unwrap(),
-        }
-    }
-    format!("(error@{lo}:{hi} \"{msg}\")")
+    crate::span::dump_diag_canonical(d)
 }

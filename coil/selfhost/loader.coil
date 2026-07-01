@@ -182,9 +182,13 @@
 
 (defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
   (wb w 64)
+  (if (icmp-lt lo 0) (wb w 68) (wb w 48))
+  (wb w 58)
   (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))
   (wb w 58)
-  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi)))
+  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi))
+  (wb w 58)
+  (wb w 48))
 
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
   (wb w (hexd (iand (ishr b 4) 15))) (wb w (hexd (iand b 15))))

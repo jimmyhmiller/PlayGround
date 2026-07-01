@@ -330,17 +330,7 @@ pub fn dump_canonical(forms: &[Sexp]) -> String {
 }
 
 fn dump_span(span: Span, out: &mut String) {
-    use std::fmt::Write;
-    if span.lo == u32::MAX {
-        out.push_str("@D:");
-    } else {
-        write!(out, "@{}:", span.lo).unwrap();
-    }
-    if span.hi == u32::MAX {
-        out.push('D');
-    } else {
-        write!(out, "{}", span.hi).unwrap();
-    }
+    crate::span::dump_span_into(span, out);
 }
 
 fn dump_node(s: &Sexp, out: &mut String) {

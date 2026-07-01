@@ -176,6 +176,54 @@ impl Diag {
     }
 }
 
+/// Canonical, lossless dump of a `Span` for the differential oracle: every field
+/// is emitted, `@<source>:<lo>:<hi>:<ctxt>`, so two faithful passes can only agree
+/// if they agree on the *whole* span — source id and expansion context included,
+/// not just the byte range. A field equal to `u32::MAX` prints as `D` (the reader
+/// stamps `u32::MAX` on a dummy/no-source span). The self-host mirrors this exact
+/// shape in every `dump-span` helper.
+pub fn dump_span_into(span: Span, out: &mut String) {
+    use std::fmt::Write;
+    let field = |v: u32, out: &mut String| {
+        if v == u32::MAX {
+            out.push('D');
+        } else {
+            write!(out, "{v}").unwrap();
+        }
+    };
+    out.push('@');
+    field(span.source, out);
+    out.push(':');
+    field(span.lo, out);
+    out.push(':');
+    field(span.hi, out);
+    out.push(':');
+    field(span.ctxt, out);
+}
+
+/// Canonical dump of a diagnostic as `(error<span> "<escaped-msg>")` — the shape
+/// every front-end pass uses when it dumps an error instead of a value, so
+/// error-path parity is gated byte-for-byte. The message is escaped with the
+/// reader's per-byte canonical escape.
+pub fn dump_diag_canonical(d: &Diag) -> String {
+    let mut out = String::from("(error");
+    dump_span_into(d.span, &mut out);
+    out.push_str(" \"");
+    for &b in d.msg.as_bytes() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out.push_str("\")");
+    out
+}
+
 impl From<String> for Diag {
     fn from(s: String) -> Diag {
         Diag::new(s)

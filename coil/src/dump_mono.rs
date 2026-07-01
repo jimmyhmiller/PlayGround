@@ -17,7 +17,6 @@
 //! `Diag` with a dummy span renders. This module is ADDITIVE: it changes no
 //! existing compiler behavior.
 
-use std::fmt::Write;
 
 pub fn dump_mono(p: &crate::ast::Program) -> String {
     // `mono::monomorphize` builds its output funcs/structs/sums from
@@ -39,17 +38,7 @@ pub use crate::dump_resolved::dump_error;
 /// Canonical dump of a `mono` (String) error: spanless, so `lo`/`hi` render as
 /// `D` exactly like a `Diag` carrying `Span::DUMMY` (`u32::MAX`).
 pub fn dump_str_error(msg: &str) -> String {
-    let mut out = String::new();
-    for &b in msg.as_bytes() {
-        match b {
-            b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
-            b'\n' => out.push_str("\\n"),
-            b'\t' => out.push_str("\\t"),
-            b'\r' => out.push_str("\\r"),
-            0x20..=0x7e => out.push(b as char),
-            _ => write!(out, "\\x{b:02x}").unwrap(),
-        }
-    }
-    format!("(error@D:D \"{out}\")")
+    // A mono error is spanless — dump it as the reader's canonical DUMMY span so
+    // the shape matches the other passes' error dumps (`@D:D:D:0`).
+    crate::span::dump_diag_canonical(&crate::span::Diag::new(msg))
 }

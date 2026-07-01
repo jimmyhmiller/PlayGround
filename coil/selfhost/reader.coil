@@ -149,11 +149,20 @@
             (store! k (isub (load k) 4))))))
   0)
 
+; Canonical, lossless span dump `@<source>:<lo>:<hi>:<ctxt>` (mirrors
+; span::dump_span_into). The self-host Sexp carries only lo/hi, so source and ctxt
+; are emitted as the single-file/no-macro reader's values: source=0 (D when the
+; span is dummy, i.e. lo<0), ctxt=0. A later pass that actually tracks macro
+; provenance / multiple sources must fill these in for real.
 (defn dump-span [(w (ptr Writer)) (lo i64) (hi i64)] (-> i64)
   (wb w 64)                                              ; '@'
+  (if (icmp-lt lo 0) (wb w 68) (wb w 48))                ; source: 'D' if dummy else '0'
+  (wb w 58)                                              ; ':'
   (if (icmp-lt lo 0) (wb w 68) (dump-dec w lo))          ; 'D' or decimal
   (wb w 58)                                              ; ':'
-  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi)))
+  (if (icmp-lt hi 0) (wb w 68) (dump-dec w hi))          ; 'D' or decimal
+  (wb w 58)                                              ; ':'
+  (wb w 48))                                             ; ctxt: '0'
 
 ; per-byte canonical escape (matches `esc` in src/reader.rs).
 (defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)

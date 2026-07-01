@@ -135,16 +135,7 @@ fn dstr(s: &str, o: &mut String) {
 }
 
 fn dump_span(span: Span, o: &mut String) {
-    if span.lo == u32::MAX {
-        o.push_str("@D:");
-    } else {
-        write!(o, "@{}:", span.lo).unwrap();
-    }
-    if span.hi == u32::MAX {
-        o.push('D');
-    } else {
-        write!(o, "{}", span.hi).unwrap();
-    }
+    crate::span::dump_span_into(span, o);
 }
 
 fn dbool(b: bool, o: &mut String) {

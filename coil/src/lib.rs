@@ -781,21 +781,7 @@ pub fn dump_read(src: &str) -> Result<String, String> {
     match reader::read_all(src, 0) {
         Ok(forms) => Ok(reader::dump_canonical(&forms)),
         Err(d) => {
-            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
-            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
-            let mut msg = String::new();
-            for &b in d.msg.as_bytes() {
-                match b {
-                    b'\\' => msg.push_str("\\\\"),
-                    b'"' => msg.push_str("\\\""),
-                    b'\n' => msg.push_str("\\n"),
-                    b'\t' => msg.push_str("\\t"),
-                    b'\r' => msg.push_str("\\r"),
-                    0x20..=0x7e => msg.push(b as char),
-                    _ => msg.push_str(&format!("\\x{b:02x}")),
-                }
-            }
-            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+            Ok(span::dump_diag_canonical(&d))
         }
     }
 }
@@ -811,21 +797,7 @@ pub fn dump_ast(src: &str) -> Result<String, String> {
     match parsed {
         Ok(prog) => Ok(dump_ast::dump_program(&prog)),
         Err(d) => {
-            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
-            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
-            let mut msg = String::new();
-            for &b in d.msg.as_bytes() {
-                match b {
-                    b'\\' => msg.push_str("\\\\"),
-                    b'"' => msg.push_str("\\\""),
-                    b'\n' => msg.push_str("\\n"),
-                    b'\t' => msg.push_str("\\t"),
-                    b'\r' => msg.push_str("\\r"),
-                    0x20..=0x7e => msg.push(b as char),
-                    _ => msg.push_str(&format!("\\x{b:02x}")),
-                }
-            }
-            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+            Ok(span::dump_diag_canonical(&d))
         }
     }
 }
@@ -883,21 +855,7 @@ pub fn dump_expand(src: &str) -> Result<String, String> {
     match expand_stage3_macros(tagged, &imports, &exports, &mut sm) {
         Ok(expanded) => Ok(dump_expand::dump_expanded(&expanded)),
         Err(d) => {
-            let lo = if d.span.lo == u32::MAX { "D".to_string() } else { d.span.lo.to_string() };
-            let hi = if d.span.hi == u32::MAX { "D".to_string() } else { d.span.hi.to_string() };
-            let mut msg = String::new();
-            for &b in d.msg.as_bytes() {
-                match b {
-                    b'\\' => msg.push_str("\\\\"),
-                    b'"' => msg.push_str("\\\""),
-                    b'\n' => msg.push_str("\\n"),
-                    b'\t' => msg.push_str("\\t"),
-                    b'\r' => msg.push_str("\\r"),
-                    0x20..=0x7e => msg.push(b as char),
-                    _ => msg.push_str(&format!("\\x{b:02x}")),
-                }
-            }
-            Ok(format!("(error@{lo}:{hi} \"{msg}\")"))
+            Ok(span::dump_diag_canonical(&d))
         }
     }
 }
