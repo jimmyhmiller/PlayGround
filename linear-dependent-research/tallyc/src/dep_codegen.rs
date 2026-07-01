@@ -2335,6 +2335,22 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
     }
 
     #[test]
+    fn dependent_eval_runs_natively() {
+        // THE COMPLETE RUNNING DEPENDENT EVAL (examples/scoped_eval.tal): a
+        // well-scoped-by-typing interpreter — depth-indexed AST (`Expr d`,
+        // `var : Fin d -> Expr d` makes out-of-scope UNREPRESENTABLE), a
+        // length-indexed environment, bounds-check-free total `lookup` (absurd
+        // `Nil` case discharged via the convoy), linear `Own` children freed
+        // exactly once as `eval` walks. env = [10, 20];
+        // prog = x0 + (x1 + 12) → 42. All indices/permissions erased.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/scoped_eval.tal"),
+        )
+        .unwrap();
+        assert_eq!(run(&src), 42);
+    }
+
+    #[test]
     fn convoy_vec_head_tail_run_natively() {
         // The index PROJECTIONS the convoy's Succ-inversion types: `vhead`/`vtail`
         // over `Vec Nat (Succ k)` with the impossible `Nil` arm OMITTED (refuted

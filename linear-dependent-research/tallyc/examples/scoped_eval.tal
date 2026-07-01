@@ -1,0 +1,55 @@
+// THE RUNNING DEPENDENT EVAL — the complete demonstration program:
+// a well-scoped-BY-TYPING expression interpreter, compiled to native code.
+// `tally run examples/scoped_eval.tal` → 42.
+//
+// The AST is indexed by SCOPE DEPTH (`Expr d`); a variable is `var : Fin d ->
+// Expr d`, so an out-of-scope variable is IMPOSSIBLE TO CONSTRUCT (rejected at
+// type-check — try `var(FS(FS(FZ)))` under depth 2). The environment is a
+// length-indexed `Vec Nat d`, so `lookup` needs NO bounds check and cannot
+// fail — the `Nil` case is discharged as ABSURD (the convoy refines `i` to
+// `Fin Zero`, which is uninhabited). The AST's children are LINEAR `Own`
+// pointers: `eval` frees each node exactly once as it walks (no GC, no leaks,
+// checked). Every index, bound, and permission is erased: the binary is a bare
+// tag-switch tree walk over malloc'd cells.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
+}
+enum Fin : Nat -> Type {
+    FZ : {0 n : Nat} -> Fin (Succ n),
+    FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
+}
+enum Void { }
+exfalso : {0 a : Type} -> Void -> a
+fn exfalso(v) { match v { } }
+fzv : Fin Zero -> Void
+fn fzv(f) { match f { } }
+lookup : {0 n : Nat} -> Fin n -> Vec Nat n -> Nat
+fn lookup(i, env) {
+    match env {
+        Nil           => exfalso(fzv(i)),
+        Cons(v, rest) => match i { FZ => v, FS(j) => lookup(j, rest) },
+    }
+}
+enum Expr : Nat -> Type {
+    lit : {0 d : Nat} -> Nat -> Expr d,
+    var : {0 d : Nat} -> Fin d -> Expr d,
+    add : {0 d : Nat} -> Own (Expr d) -> Own (Expr d) -> Expr d,
+}
+eval : {0 d : Nat} -> Vec Nat d -> Own (Expr d) -> Nat
+fn eval(env, e) {
+    match unbox(e) {
+        lit(n)    => n,
+        var(i)    => lookup(i, env),
+        add(a, b) => let va = eval(env, a); let vb = eval(env, b); va + vb,
+    }
+}
+env2 : Vec Nat (Succ (Succ Zero))
+fn env2() { Cons(10, Cons(20, Nil)) }
+prog : Own (Expr (Succ (Succ Zero)))
+fn prog() { alloc(add(alloc(var(FZ)), alloc(add(alloc(var(FS(FZ))), alloc(lit(12)))))) }
+main : Nat
+fn main() { eval(env2, prog) }

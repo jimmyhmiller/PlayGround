@@ -763,6 +763,12 @@ struct Elab {
     /// set while elaborating a monomorphized instance of a mult-poly function.
     /// Empty for ordinary code, where every `SMult` is already `Lit`.
     mult_env: std::cell::RefCell<HashMap<String, Mult>>,
+    /// allocator for GLOBALLY-UNIQUE elaboration-hole ids (offsets above
+    /// `HOLE_BASE`). Every in-flight solver (`solve_ctor`/`solve_fn_call`,
+    /// nested calls included) draws a disjoint block, so a hole leaked into a
+    /// nested elaboration is FOREIGN there (opaque), never aliased into the
+    /// inner solver's slots (which used to corrupt them and panic on quote).
+    hole_ctr: std::cell::Cell<usize>,
 }
 
 fn neutral_env(n: usize) -> Vec<Value> {
@@ -772,6 +778,22 @@ fn neutral_env(n: usize) -> Vec<Value> {
 impl Elab {
     fn debruijn(scope: &[String], name: &str) -> Option<usize> {
         scope.iter().rev().position(|s| s == name)
+    }
+
+    /// Allocate a DISJOINT block of `len` elaboration holes (see `Holes`).
+    fn fresh_hole_block(&self, len: usize) -> Holes {
+        let base = self.hole_ctr.get();
+        self.hole_ctr.set(base + len);
+        Holes { base, slots: vec![None; len] }
+    }
+
+    /// A fresh synthetic neutral backed by NO hole block: opaque to every
+    /// solver (nothing can bind it). Used as the placeholder value of a
+    /// deferred argument.
+    fn fresh_opaque(&self) -> Value {
+        let base = self.hole_ctr.get();
+        self.hole_ctr.set(base + 1);
+        dep::nvar(HOLE_BASE + base)
     }
 
     fn ctor_has_implicits(&self, name: &str) -> bool {
@@ -1099,7 +1121,18 @@ impl Elab {
                     Err(format!("cannot infer the type of `{name}` (Phase 2)"))
                 }
             }
-            Tm::Call(name, args) if self.defs.contains_key(name) => {
+            // a call to a def — or to a CONTEXT VARIABLE WITH REGISTERED IMPLICITS
+            // (the `Fix` self-binder of the function being defined): both go through
+            // the implicit solver (`solve_fn_call` resolves a not-in-`defs` callee as
+            // the in-scope self binder). Without the second disjunct, a self-call in
+            // INFER position (e.g. `let va = eval(env, a)`) fell to the curried
+            // context-variable path below, which never solves implicits — it consumed
+            // the explicit args against the IMPLICIT Πs and built a wrong partial
+            // application the kernel then rejected.
+            Tm::Call(name, args)
+                if self.defs.contains_key(name)
+                    || (self.def_has_implicits(name) && cx.var_type(name).is_some()) =>
+            {
                 self.solve_fn_call(name, args, None, cx, rec)
             }
             // a constructor application of a NON-indexed, NON-parameterized family
@@ -1178,8 +1211,9 @@ impl Elab {
         }
 
         // fresh holes for every position; build the result type with holes
-        let mut holes: Vec<Option<Value>> = (0..total).map(|_| None).collect();
-        let hole_env: Vec<Value> = (0..total).map(|id| dep::nvar(HOLE_BASE + id)).collect();
+        let mut holes = self.fresh_hole_block(total);
+        let hole_env: Vec<Value> =
+            (0..total).map(|id| dep::nvar(HOLE_BASE + holes.base + id)).collect();
         let mut result_args: Vec<Value> = (0..np).map(|p| hole_env[p].clone()).collect();
         for idx in &ctor.idxs {
             result_args.push(dep::eval_rc(&self.rc, &hole_env, idx));
@@ -1194,7 +1228,7 @@ impl Elab {
         for pos in 0..total {
             let dom_tm = if pos < np { &decl.params[pos].1 } else { &ctor.args[pos - np].1 };
             if implicit_of(pos) {
-                let sol = holes[pos]
+                let sol = holes.slots[pos]
                     .clone()
                     .ok_or_else(|| format!("cannot infer implicit argument of `{cname}`"))?;
                 // A "solution" that still mentions a hole (its own, or one leaked
@@ -1268,21 +1302,36 @@ impl Elab {
         let codomain = t;
         let n = cx.len();
 
-        let mut holes: Vec<Option<Value>> = (0..total).map(|_| None).collect();
+        let mut holes = self.fresh_hole_block(total);
         let mut env: Vec<Value> = Vec::with_capacity(total); // arg values, in `cx`'s context
         let mut terms: Vec<Option<Term>> = vec![None; total];
+        // explicit args whose elaboration is DEFERRED: their domain still
+        // mentioned an open hole in pass 1 (a nested call/constructor with its
+        // own implicits can't be checked against a hole), so they are checked
+        // AFTER the other args and the expected type have pinned the implicits.
+        let mut deferred: Vec<(usize, usize)> = Vec::new(); // (position, user index)
         let mut next_user = 0;
         for pos in 0..total {
             let dom_val = dep::eval_rc(&self.rc, &env, &domains[pos]);
             if flags[pos] {
-                env.push(dep::nvar(HOLE_BASE + pos)); // a hole, solved below
+                env.push(dep::nvar(HOLE_BASE + holes.base + pos)); // a hole, solved below
             } else {
                 // try to infer the arg's type (to pin implicits); else check it
-                // against the (current) domain — for args that pin nothing
+                // against the (current) domain — for args that pin nothing —
+                // unless that domain still has holes, in which case DEFER it.
                 let arg_tm = match self.infer_arg(&user_args[next_user], cx, rec) {
                     Ok((arg_tm, arg_ty)) => {
                         solve(&mut holes, &dom_val, &arg_ty);
                         arg_tm
+                    }
+                    Err(_) if value_has_hole(&dom_val) => {
+                        deferred.push((pos, next_user));
+                        next_user += 1;
+                        // an OPAQUE placeholder value (a fresh id backed by no
+                        // block, so nothing can bind it) — later domains that
+                        // mention this argument's VALUE stay neutral.
+                        env.push(self.fresh_opaque());
+                        continue;
                     }
                     Err(_) => self.check(&user_args[next_user], &dom_val, cx, rec)?,
                 };
@@ -1298,7 +1347,7 @@ impl Elab {
         }
         for pos in 0..total {
             if flags[pos] {
-                let sol = holes[pos]
+                let sol = holes.slots[pos]
                     .clone()
                     .ok_or_else(|| format!("cannot infer implicit argument {pos} of `{fname}`"))?;
                 // A solution that still mentions an unsolved hole means the implicit
@@ -1314,17 +1363,31 @@ impl Elab {
                 terms[pos] = Some(dep::quote_at(n, &sol));
             }
         }
-        // re-evaluate the codomain with solved holes for the returned type
-        let solved_env: Vec<Value> = (0..total)
-            .map(|p| {
-                if flags[p] {
-                    holes[p].clone().unwrap()
-                } else {
-                    env[p].clone()
+        // final pass: re-evaluate the telescope with everything solved, checking
+        // each DEFERRED argument against its now-concrete domain as we go (an
+        // earlier deferred arg's value feeds a later deferred arg's domain).
+        let mut final_env: Vec<Value> = Vec::with_capacity(total);
+        for pos in 0..total {
+            if flags[pos] {
+                final_env.push(holes.slots[pos].clone().unwrap());
+            } else if let Some((_, ui)) = deferred.iter().find(|(p, _)| *p == pos) {
+                let dom_val = dep::eval_rc(&self.rc, &final_env, &domains[pos]);
+                if value_has_hole(&dom_val) {
+                    return Err(format!(
+                        "cannot determine the type of argument {} of `{fname}` \
+                         (an implicit it depends on was never pinned)",
+                        ui + 1
+                    ));
                 }
-            })
-            .collect();
-        let result_ty = dep::eval_rc(&self.rc, &solved_env, &codomain);
+                let arg_tm = self.check(&user_args[*ui], &dom_val, cx, rec)?;
+                let v = self.eval(n, &arg_tm);
+                terms[pos] = Some(arg_tm);
+                final_env.push(v);
+            } else {
+                final_env.push(env[pos].clone());
+            }
+        }
+        let result_ty = dep::eval_rc(&self.rc, &final_env, &codomain);
         let head = Term::Ann(Box::new(body), Box::new(fty));
         let term = terms
             .into_iter()
@@ -1448,7 +1511,7 @@ impl Elab {
         let sparam_tms: Vec<Term> = dargs[..np].iter().map(|v| dep::quote_at(n, v)).collect();
 
         let exp_tm = dep::quote_at(n, expected);
-        let convoy = self.detect_convoy(e_term, &decl, dargs, &exp_tm, cx);
+        let convoy = self.detect_convoy(e_term, &decl, dargs, &exp_tm, arms, cx);
         let motive = match &convoy {
             // constant motive: λ indices. λ _. expected
             None => {
@@ -1606,7 +1669,12 @@ impl Elab {
     /// Fires when there are dependents, or (`r = 1`) when it refutes an arm or
     /// the EXPECTED type mentions the index variable (the `Succ`-inversion in
     /// the motive is then what types `vhead`/`vtail`-style index projections).
-    fn detect_convoy(&self, e_term: &Term, decl: &dep::DataDecl, dargs: &[Value], exp_tm: &Term, cx: &Cx) -> Option<Convoy> {
+    ///
+    /// A candidate dependent is abstracted only if some arm body REFERENCES its
+    /// name: abstracting an unused one is never needed for typing, and for a
+    /// LINEAR dependent already consumed before the match (e.g. the `Own` the
+    /// scrutinee was just `unbox`ed from) the re-application would double-use it.
+    fn detect_convoy(&self, e_term: &Term, decl: &dep::DataDecl, dargs: &[Value], exp_tm: &Term, arms: &[Arm], cx: &Cx) -> Option<Convoy> {
         let np = decl.params.len();
         if decl.indices.len() != 1 || !matches!(decl.indices[0].1, Term::Nat) {
             return None;
@@ -1636,10 +1704,17 @@ impl Elab {
             Term::Var(i) if *i < n => Some(n - 1 - *i),
             _ => None,
         };
+        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for a in arms {
+            collect_tm_names(&a.body, &mut referenced);
+        }
         let mut dep_lvls: Vec<usize> = vec![lvl];
         let mut deps: Vec<ConvoyDep> = Vec::new();
         for l in 0..n {
             if l == lvl || Some(l) == scrut_lvl {
+                continue;
+            }
+            if !referenced.contains(&cx.names[l]) {
                 continue;
             }
             let ty = dep::quote_at(n, &cx.types[l]);
@@ -1770,6 +1845,39 @@ impl Convoy {
     }
 }
 
+/// Every identifier a surface term references (variables, callees, match
+/// scrutinees — recursively). Shadowing is ignored: a shadowed name still
+/// counts as referenced, which over-approximates (safe — over-abstraction is
+/// caught by the kernel; the filter's job is only to skip CLEARLY-unused deps).
+fn collect_tm_names(t: &Tm, out: &mut std::collections::HashSet<String>) {
+    match t {
+        Tm::Var(nm) => {
+            out.insert(nm.clone());
+        }
+        Tm::Call(nm, args) => {
+            out.insert(nm.clone());
+            for a in args {
+                collect_tm_names(a, out);
+            }
+        }
+        Tm::Match(s, arms) => {
+            out.insert(s.clone());
+            for a in arms {
+                collect_tm_names(&a.body, out);
+            }
+        }
+        Tm::Lit(_) => {}
+        Tm::Add(a, b) => {
+            collect_tm_names(a, out);
+            collect_tm_names(b, out);
+        }
+        Tm::LetPair(_, e, b) | Tm::Let(_, e, b) => {
+            collect_tm_names(e, out);
+            collect_tm_names(b, out);
+        }
+    }
+}
+
 /// Does `t` (quoted at level `n`) mention any of the context levels in `lvls`?
 fn term_mentions_levels(t: &Term, n: usize, lvls: &[usize]) -> bool {
     let hit = std::cell::Cell::new(false);
@@ -1785,17 +1893,53 @@ fn term_mentions_levels(t: &Term, n: usize, lvls: &[usize]) -> bool {
     hit.get()
 }
 
+/// A solver's hole block: `slots[i]` is the hole with GLOBAL id `base + i`
+/// (level `HOLE_BASE + base + i`). Blocks are allocated from `Elab::hole_ctr`,
+/// so every in-flight solver owns a DISJOINT id range: a FOREIGN hole (an
+/// enclosing call's still-open implicit appearing in `expected`) is simply
+/// opaque here — bindable as a solution's CONTENT (then caught by
+/// `value_has_hole`) but never aliased onto this block's slots.
+struct Holes {
+    base: usize,
+    slots: Vec<Option<Value>>,
+}
+
+impl Holes {
+    /// the solved value at GLOBAL id `gid`, if this block owns it and it is solved.
+    fn lookup(&self, gid: usize) -> Option<&Value> {
+        gid.checked_sub(self.base)
+            .and_then(|i| self.slots.get(i))
+            .and_then(|s| s.as_ref())
+    }
+    fn owns(&self, gid: usize) -> bool {
+        gid.checked_sub(self.base).is_some_and(|i| i < self.slots.len())
+    }
+    fn set(&mut self, gid: usize, v: Value) {
+        let i = gid - self.base;
+        self.slots[i] = Some(v);
+    }
+}
+
 /// First-order matching: bind holes in `holes` so that `pat` matches `target`.
 /// Non-hole mismatches are ignored (the kernel re-checks the final term).
-fn solve(holes: &mut Vec<Option<Value>>, pat: &Value, target: &Value) {
+fn solve(holes: &mut Holes, pat: &Value, target: &Value) {
     let pat = deref(holes, pat);
     let target = deref(holes, target);
     if let Some(id) = hole_id(&pat) {
-        holes[id] = Some(target);
-        return;
+        if holes.owns(id) {
+            holes.set(id, target);
+            return;
+        }
     }
     if let Some(id) = hole_id(&target) {
-        holes[id] = Some(pat);
+        if holes.owns(id) {
+            holes.set(id, pat);
+            return;
+        }
+    }
+    // two foreign holes / a foreign hole vs. structure: nothing to bind here —
+    // fall through (mismatches are ignored; the kernel re-check is the backstop).
+    if hole_id(&pat).is_some() || hole_id(&target).is_some() {
         return;
     }
     match (&pat, &target) {
@@ -1824,7 +1968,7 @@ fn solve(holes: &mut Vec<Option<Value>>, pat: &Value, target: &Value) {
 }
 
 /// Descend into a neutral spine (e.g. `Own ?a` vs `Own Nat`) to bind holes.
-fn solve_neu(holes: &mut Vec<Option<Value>>, n1: &crate::dep::Neutral, n2: &crate::dep::Neutral) {
+fn solve_neu(holes: &mut Holes, n1: &crate::dep::Neutral, n2: &crate::dep::Neutral) {
     use crate::dep::Neutral::NApp;
     if let (NApp(f1, a1), NApp(f2, a2)) = (n1, n2) {
         solve_neu(holes, f1, f2);
@@ -1879,10 +2023,11 @@ fn value_has_hole(v: &Value) -> bool {
     }
 }
 
-fn deref(holes: &[Option<Value>], v: &Value) -> Value {
+fn deref(holes: &Holes, v: &Value) -> Value {
     if let Some(id) = hole_id(v) {
-        if let Some(sol) = &holes[id] {
-            return deref(holes, sol);
+        if let Some(sol) = holes.lookup(id) {
+            let sol = sol.clone();
+            return deref(holes, &sol);
         }
     }
     v.clone()
@@ -3067,6 +3212,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         nat_ctor: HashMap::new(),
         in_fix: std::cell::Cell::new(false),
         mult_env: std::cell::RefCell::new(HashMap::new()),
+        hole_ctr: std::cell::Cell::new(0),
     };
 
     // pass A: `%builtin Nat T` pragmas. Validate each names a Nat-shaped enum (one
@@ -3378,7 +3524,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                                     let ret_tm = elab.elab_ty(&ret, &full_names)?;
                                     let exp_v = dep::eval_rc(&elab.rc, &neutral_env(fn_cx.len()), &ret_tm);
                                     let exp_tm = dep::quote_at(fn_cx.len(), &exp_v);
-                                    elab.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, &fn_cx)
+                                    elab.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, arms, &fn_cx)
                                         .is_some()
                                 }
                                 _ => false,
