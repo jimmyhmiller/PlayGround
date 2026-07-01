@@ -180,7 +180,9 @@ impl SMult {
 #[derive(Clone, Debug)]
 enum Ty {
     Var(String),
-    Type,
+    /// `Type` (level 0) or `Type i` — the i-th universe. The kernel's hierarchy
+    /// (`Type i : Type (i+1)`, cumulative, predicative) is now surface-reachable.
+    Type(usize),
     App(Box<Ty>, Box<Ty>),
     /// built-in `Nat` addition at the index level, e.g. `Vec a (m + n)`. Binds
     /// looser than application and tighter than `->`. Elaborates to `Term::Add`,
@@ -478,7 +480,14 @@ impl Parser {
         match self.peek() {
             Some(Tok::KwType) => {
                 self.next();
-                Ok(Ty::Type)
+                // an optional LEVEL literal: `Type 1`, `Type 2`, … (default 0).
+                if let Some(Tok::Num(l)) = self.peek() {
+                    let l = *l as usize;
+                    self.next();
+                    Ok(Ty::Type(l))
+                } else {
+                    Ok(Ty::Type(0))
+                }
             }
             Some(Tok::Ident(_)) => Ok(Ty::Var(self.ident()?)),
             Some(Tok::LParen) => {
@@ -965,7 +974,7 @@ impl Elab {
             // `Term::Type`. Until it is, a definition that genuinely needs a higher
             // universe must be written at the kernel level; the surface stays in
             // `Type 0`, which is sound, just less polymorphic.)
-            Ty::Type => Ok(Term::Type(0)),
+            Ty::Type(l) => Ok(Term::Type(*l)),
             Ty::Arrow(m, _, name, a, b) => {
                 let ta = self.elab_ty(a, scope)?;
                 let mut s2 = scope.to_vec();
@@ -2073,7 +2082,7 @@ fn subst_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
         Ty::Add(a, b) => {
             Ty::Add(Box::new(subst_mult_ty(a, subst)), Box::new(subst_mult_ty(b, subst)))
         }
-        Ty::Var(_) | Ty::Type => t.clone(),
+        Ty::Var(_) | Ty::Type(_) => t.clone(),
     }
 }
 
@@ -2796,10 +2805,12 @@ fn peel_arrows(t: &Ty) -> (Vec<(SMult, bool, Option<String>, Ty)>, Ty) {
     (out, t)
 }
 
-fn count_index_pis(t: &Ty) -> Result<usize, String> {
+/// A datatype head's index telescope: the arrow count and the UNIVERSE the
+/// family is declared to live in (`… -> Type i`, default `Type` = 0).
+fn count_index_pis(t: &Ty) -> Result<(usize, usize), String> {
     let (arrows, ret) = peel_arrows(t);
     match ret {
-        Ty::Type => Ok(arrows.len()),
+        Ty::Type(l) => Ok((arrows.len(), l)),
         _ => Err("a datatype's index telescope must end in `Type`".into()),
     }
 }
@@ -3927,7 +3938,7 @@ fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
 
 fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
     match t {
-        Ty::Type => Ty::Type,
+        Ty::Type(l) => Ty::Type(*l),
         Ty::Var(v) => Ty::Var(if v == from { to.to_string() } else { v.clone() }),
         Ty::App(f, a) => Ty::App(Box::new(rename_ty(f, from, to)), Box::new(rename_ty(a, from, to))),
         Ty::Arrow(m, i, name, a, b) => {
@@ -4092,7 +4103,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             Item::Enum { name, params, index_ty, variants, .. } if !elab.nat_types.contains(name) => {
                 let np = params.len();
                 let ni = match index_ty {
-                    Some(e) => count_index_pis(e)?,
+                    Some(e) => count_index_pis(e)?.0,
                     None => 0,
                 };
                 elab.data_arity.insert(name.clone(), np + ni);
@@ -4160,15 +4171,19 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     });
                     ctors.push(Constructor { name: cn.clone(), args, idxs });
                 }
-                // Surface datatypes live in `Type 0` (all surface `Type`s are
-                // `Type 0`). A constructor that tried to store a `Type` would have
-                // an argument in `Type 1`, which `check_signature` rejects against
-                // this `universe: 0` — the predicativity/Girard guard. Until the
-                // surface gains universe annotations, such datatypes are written at
-                // the kernel level.
+                // The datatype's UNIVERSE is what it declares (`enum T : Type 1
+                // { … }` — default `Type` = 0). `check_signature`'s predicativity
+                // side-condition (every field/param level ≤ the universe, never a
+                // universe quantifying over itself — the Girard guard) then checks
+                // the declaration genuinely: a `Type`-storing container must say
+                // `Type 1`, and saying it makes it legal.
+                let universe = match index_ty {
+                    Some(e) => count_index_pis(e)?.1,
+                    None => 0,
+                };
                 sig.datas.push(DataDecl {
                     name: name.clone(),
-                    universe: 0,
+                    universe,
                     params: kparams,
                     indices,
                     ctors,
@@ -4328,7 +4343,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             // the definition the program uses is the ordinary one above.)
             let mut capable = vec![true; full_names.len()];
             for i in 0..full_names.len() {
-                if full_imps[i] && matches!(full_tys[i], Ty::Type) {
+                if full_imps[i] && matches!(full_tys[i], Ty::Type(_)) {
                     elab.pess_linear.borrow_mut().insert(full_names[i].clone());
                     let ok = elab
                         .elab_fn_term(

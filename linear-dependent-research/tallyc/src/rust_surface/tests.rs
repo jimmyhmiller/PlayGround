@@ -1693,3 +1693,28 @@ fn nested_patterns_preserve_linearity() {
     );
     assert!(check_program(&leak).is_err(), "a leak through a nested pattern must reject");
 }
+
+// ---------------------------------------------------------------------------
+// Universe levels at the surface (Phase F: `Type i` annotations)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn surface_universe_levels() {
+    // a Type-storing container is now DECLARABLE — at `Type 1`, where it lives;
+    // matching on it (large elimination) works; a `{0 a : Type 1}` binder
+    // accepts a level-0 type by CUMULATIVITY (practical level polymorphism for
+    // the common direction).
+    let ok = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum TyBox : Type 1 { mkTyBox : Type -> TyBox }\n\
+        unbox1 : TyBox -> Type\nfn unbox1(b) { match b { mkTyBox(t) => t } }\n\
+        pick : {0 a : Type 1} -> a -> a\nfn pick(x) { x }\n\
+        main : Nat\nfn main() { pick(Zero) }\n";
+    assert!(check_program(ok).is_ok(), "{:?}", check_program(ok).err());
+    // …and WITHOUT the annotation the Girard/predicativity guard still fires:
+    // a `Type 0` datatype cannot store a type from its own universe.
+    let bad = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum TyBox { mkTyBox : Type -> TyBox }\n\
+        main : Nat\nfn main() { Zero }\n";
+    let err = check_program(bad).err().expect("a Type-storing Type-0 enum must reject");
+    assert!(err.iter().any(|e| e.contains("predicativity") || e.contains("universe") || e.contains("Type 1")), "got: {err:?}");
+}
