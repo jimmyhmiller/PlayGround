@@ -215,6 +215,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 Ok(self.builder.build_int_add(x, y, "add").unwrap())
             }
             Term::Var(i) => self.read_var(env, *i),
+            // `J(P, b, e)`: at runtime every closed equality proof is `refl`
+            // (the kernel admits no equality axioms), so path induction ERASES
+            // to its base case — the motive and the proof cost nothing.
+            Term::J(_, b, _) => self.compile(f, env, b),
             Term::Ann(e, _) => self.compile(f, env, e),
             // CALL-BY-VALUE let: compile `e` ONCE (so its effects — e.g. `free` — run
             // exactly once), bind it, compile the body. (`ty` is 0-erased.)

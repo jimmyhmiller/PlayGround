@@ -1046,3 +1046,95 @@ fn accumulator_fold_into_function_lowering_is_valid_today() {
     // and it type-checks at Nat:
     assert_eq!(infer_closed(&app), Ok(Nat));
 }
+
+// ===========================================================================
+// J — the eliminator of the identity type (path induction)
+// ===========================================================================
+
+#[test]
+fn j_subst_transport_and_iota() {
+    // SUBST (transport), the canonical J instance:
+    //   subst : Π[0](P : Nat→Type). Π[0](x:Nat). Π[0](y:Nat). Π[1](e : Eq Nat x y). Π[1](p : P x). P y
+    //   λP. λx. λy. λe. λp. J((λz. λ_. P x → P z), (λq. q), e) p
+    // The J motive abstracts the equality's ENDPOINT; the base case is the
+    // identity function at `P x`.
+    let subst_ty = Pi(
+        Zero,
+        b(Pi(Omega, b(Nat), b(Type(0)))),
+        b(Pi(
+            Zero,
+            b(Nat),
+            b(Pi(
+                Zero,
+                b(Nat),
+                b(Pi(
+                    One,
+                    b(Eq(b(Nat), b(Var(1)), b(Var(0)))),
+                    b(Pi(One, b(App(b(Var(3)), b(Var(2)))), b(App(b(Var(4)), b(Var(2)))))),
+                )),
+            )),
+        )),
+    );
+    // motive: λz. λ_. (P x → P z)   (under binders P,x,y,e,p then z,_)
+    let motive = Lam(b(Lam(b(Pi(
+        One,
+        b(App(b(Var(6)), b(Var(5)))), // P x
+        b(App(b(Var(7)), b(Var(2)))), // P z   (z is 2 binders out from the Π binder)
+    )))));
+    let subst_tm = Lam(b(Lam(b(Lam(b(Lam(b(Lam(b(App(
+        b(J(b(motive), b(Lam(b(Var(0)))), b(Var(1)))),
+        b(Var(0)),
+    )))))))))));
+    assert!(
+        check_closed(&subst_tm, &subst_ty).is_ok(),
+        "subst via J must type-check: {:?}",
+        check_closed(&subst_tm, &subst_ty)
+    );
+
+    // ι-reduction: J(P, b, refl) ≡ b — transporting 7 along refl computes to 7.
+    let id_p = Lam(b(Nat)); // P := λ_. Nat
+    let app = App(
+        b(App(
+            b(App(
+                b(App(
+                    b(App(b(Ann(b(subst_tm), b(subst_ty))), b(id_p))),
+                    b(NatLit(3)),
+                )),
+                b(NatLit(3)),
+            )),
+            b(Refl(b(NatLit(3)))),
+        )),
+        b(NatLit(7)),
+    );
+    assert_eq!(normalize_closed(&app), NatLit(7), "J ι-reduces on refl");
+}
+
+#[test]
+fn j_rejects_wrong_base_and_non_equality() {
+    // base case at the WRONG type (P y instead of P x) must be rejected.
+    let ty = Pi(
+        One,
+        b(Eq(b(Nat), b(NatLit(1)), b(NatLit(2)))),
+        b(Nat),
+    );
+    // J with motive λz. λ_. Nat, base = 5 : Nat — fine shape, but scrutinee is
+    // an Eq between DIFFERENT literals: still types (the equality is just
+    // uninhabited), result Nat. Sanity: this CHECKS (J is total on its type).
+    let ok = Lam(b(J(
+        b(Lam(b(Lam(b(Nat))))),
+        b(NatLit(5)),
+        b(Var(0)),
+    )));
+    assert!(check_closed(&ok, &ty).is_ok(), "{:?}", check_closed(&ok, &ty));
+    // J on a non-equality scrutinee is rejected.
+    let bad_ty = Pi(One, b(Nat), b(Nat));
+    let bad = Lam(b(J(b(Lam(b(Lam(b(Nat))))), b(NatLit(5)), b(Var(0)))));
+    let err = check_closed(&bad, &bad_ty);
+    assert!(err.is_err(), "J on a Nat scrutinee must be rejected");
+    // a motive that is not a 2-argument function of endpoint+proof is rejected.
+    let bad_motive = Lam(b(J(b(NatLit(0)), b(NatLit(5)), b(Var(0)))));
+    assert!(
+        check_closed(&bad_motive, &ty).is_err(),
+        "a non-functional J motive must be rejected"
+    );
+}

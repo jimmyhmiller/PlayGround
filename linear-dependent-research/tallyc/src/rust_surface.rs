@@ -2724,6 +2724,7 @@ fn value_has_hole(v: &Value) -> bool {
             Neutral::NNatCase(p, z, s, sc) => {
                 value_has_hole(p) || value_has_hole(z) || value_has_hole(s) || neu(sc)
             }
+            Neutral::NJ(p, b, e) => value_has_hole(p) || value_has_hole(b) || neu(e),
             // a `Fix` holds closed terms — no elaboration holes can survive in it.
             Neutral::NConst(_) | Neutral::NFix(_, _) => false,
         }

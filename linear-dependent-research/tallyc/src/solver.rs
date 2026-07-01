@@ -118,6 +118,9 @@ pub fn canon(t: &Term) -> Term {
             Box::new(canon(sc)),
         ),
         Term::Fix(ty, body) => Term::Fix(Box::new(canon(ty)), Box::new(canon(body))),
+        Term::J(pm, b, e) => {
+            Term::J(Box::new(canon(pm)), Box::new(canon(b)), Box::new(canon(e)))
+        }
         Term::Eq(a, x, y) => {
             Term::Eq(Box::new(canon(a)), Box::new(canon(x)), Box::new(canon(y)))
         }

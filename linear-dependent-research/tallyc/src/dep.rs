@@ -74,6 +74,14 @@ pub enum Term {
     // ---- the identity type ----
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
+    /// `J(P, b, e)` — the ELIMINATOR of the identity type (path induction):
+    /// given `e : Eq A x y`, a motive `P : (z:A) → Eq A x z → Type ℓ`, and a
+    /// base case `b : P x (refl x)`, produce `P y e`. ι-rule: `J(P, b, refl a)
+    /// ↦ b`. This is what makes `Eq` USABLE (transport/subst/cong are all `J`
+    /// instances) — the engine for equality-based proofs (FUTURE_WORK §3.2),
+    /// e.g. the `natWf` accessibility lemma. At runtime every closed proof is
+    /// a `refl`, so `J` erases to its base case (zero cost).
+    J(Box<Term>, Box<Term>, Box<Term>),
     // ---- GENERAL inductive families (looked up in the Signature) ----
     /// `D` applied to its parameters then indices: a fully-applied type.
     Data(String, Vec<Term>),
@@ -156,6 +164,8 @@ pub enum Neutral {
     NElim(String, Box<Value>, Vec<Value>, Box<Neutral>),
     /// a `Case` (non-recursive general case-split) stuck on a neutral scrutinee.
     NCase(String, Box<Value>, Vec<Value>, Box<Neutral>),
+    /// a `J` stuck on a neutral equality proof: motive, base, proof.
+    NJ(Box<Value>, Box<Value>, Box<Neutral>),
     /// an opaque postulate constant.
     NConst(String),
 }
@@ -302,6 +312,11 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             Box::new(eval(sig, env, y)),
         ),
         Term::Refl(a) => Value::VRefl(Box::new(eval(sig, env, a))),
+        Term::J(p, b, e) => vj(
+            eval(sig, env, p),
+            eval(sig, env, b),
+            eval(sig, env, e),
+        ),
         Term::Data(name, args) => {
             Value::VData(name.clone(), args.iter().map(|a| eval(sig, env, a)).collect())
         }
@@ -381,6 +396,17 @@ fn vnatelim(p: Value, z: Value, s: Value, scrut: Value) -> Value {
             Box::new(nu),
         )),
         _ => unreachable!("natElim on a non-Nat (ill-typed term reached eval)"),
+    }
+}
+
+/// `J P b e` — path induction: on `refl` return the base case; stuck on a
+/// neutral proof. (No other closed form inhabits `Eq` — the kernel has no
+/// axioms adding equality proofs.)
+fn vj(p: Value, b: Value, e: Value) -> Value {
+    match e {
+        Value::VRefl(_) => b,
+        Value::VNeu(ne) => Value::VNeu(Neutral::NJ(Box::new(p), Box::new(b), Box::new(ne))),
+        _ => unreachable!("J on a non-Eq value (ill-typed term reached eval)"),
     }
 }
 
@@ -620,6 +646,11 @@ fn quote_neu(lvl: usize, n: &Neutral) -> Term {
             Box::new(quote(lvl, s)),
             Box::new(quote_neu(lvl, scrut)),
         ),
+        Neutral::NJ(pm, b, e) => Term::J(
+            Box::new(quote(lvl, pm)),
+            Box::new(quote(lvl, b)),
+            Box::new(quote_neu(lvl, e)),
+        ),
         // a `Fix` is closed and opaque — re-emit it verbatim.
         Neutral::NFix(ty, body) => Term::Fix(ty.clone(), body.clone()),
         Neutral::NElim(data, m, methods, scrut) => Term::Elim(
@@ -709,6 +740,7 @@ pub(crate) fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term)
         Term::Add(a, b) => Term::Add(Box::new(go(a)), Box::new(go(b))),
         Term::Eq(a, x, y) => Term::Eq(Box::new(go(a)), Box::new(go(x)), Box::new(go(y))),
         Term::Refl(a) => Term::Refl(Box::new(go(a))),
+        Term::J(pm, b, e) => Term::J(Box::new(go(pm)), Box::new(go(b)), Box::new(go(e))),
         Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(|a| go(a)).collect()),
         Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(|a| go(a)).collect()),
         Term::Elim(data, m, methods, sc) => Term::Elim(
@@ -1243,6 +1275,28 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
                 uzero(n),
             ))
         }
+        // path induction: `e : Eq A x y`, `P : (z:A) → Eq A x z → Type ℓ`
+        // (validated + genuinely type-checked like an eliminator motive; its
+        // usage is 0-fragment), `b : P x (refl x)` ⇒ `J(P,b,e) : P y e`.
+        Term::J(pm, b, e) => {
+            let (ety, u_e) = infer(ctx, e)?;
+            let Value::VEq(a, x, y) = ety else {
+                return Err(format!(
+                    "J on a non-equality (type {:?})",
+                    quote(n, &ety)
+                ));
+            };
+            let doms = vec![
+                (*a).clone(),
+                Value::VEq(a.clone(), x.clone(), Box::new(Value::VNeu(Neutral::NVar(n)))),
+            ];
+            motive_level(ctx, pm, &doms)?;
+            let vp = eval(&ctx.sig, &ctx.env(), pm);
+            let base_ty = vapp(vapp(vp.clone(), (*x).clone()), Value::VRefl(x.clone()));
+            let u_b = check(ctx, b, &base_ty)?;
+            let ve = eval(&ctx.sig, &ctx.env(), e);
+            Ok((vapp(vapp(vp, (*y).clone()), ve), uadd(&u_b, &u_e)))
+        }
         Term::App(f, x) => match infer(ctx, f)? {
             (Value::VPi(pi, dom, cod), uf) => {
                 let ux = check(ctx, x, &dom)?;
@@ -1529,6 +1583,11 @@ fn occurs(data: &str, t: &Term) -> bool {
             Term::Pair(a, b) => {
                 go(data, a, found);
                 go(data, b, found);
+            }
+            Term::J(pm, b, e) => {
+                go(data, pm, found);
+                go(data, b, found);
+                go(data, e, found);
             }
             Term::Eq(a, x, y) => {
                 go(data, a, found);
