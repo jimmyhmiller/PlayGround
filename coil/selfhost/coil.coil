@@ -2237,7 +2237,10 @@
    ; 2..). expansions[ctxt-1] = the macro provenance for ctxt (>=1). Both grow in
    ; the exact order src/span.rs registers them, so ids/ctxts match the reference.
    (sources    (ArrayList Source))
-   (expansions (ArrayList Expansion))])
+   (expansions (ArrayList Expansion))
+   ; All type-check body errors (build path renders every one; the dump-checked
+   ; oracle still reports [0]). A heap-boxed list so the checker can push through it.
+   (check_diags (ptr (ArrayList Diag)))])
 
 (defstruct Resolved [(text (slice u8)) (incdir (slice u8)) (disp (slice u8))])
 
@@ -5720,14 +5723,21 @@
 ; check_func over every function (Phase 2; FIRST error wins, matching the oracle's
 ; dump_error of diagnostics[0]) -> finish (Phase 3). Returns the typed/elaborated/
 ; LOWERED Program, or Err(diag) dumped canonically.
-(defn check-all-funcs [(a (ptr Allocator)) (cx (ptr Cx)) (allf (ptr (ArrayList Func)))] (-> (Result (ptr (ArrayList Func)) Diag))
-  (let [n (al-len [Func] (load allf)) (mut out) (al-new [Func] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+; Check every function body. Mirrors src/check.rs check_with Phase 2: it collects
+; ALL body errors (checking continues past a failing function) into `diags`, so the
+; build path can render every error (`N errors`). The single-Diag return keeps the
+; dump-checked oracle unchanged (it reports diagnostics[0]).
+(defn check-all-funcs [(a (ptr Allocator)) (cx (ptr Cx)) (allf (ptr (ArrayList Func))) (s (mut LS))] (-> (Result (ptr (ArrayList Func)) Diag))
+  (let [n (al-len [Func] (load allf)) (mut out) (al-new [Func] a) (mut dgs) (al-new [Diag] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (match (check-func a cx (al-elem [Func] allf (load i)))
-            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Err [d] (al-push! (mut dgs) d))
             (Ok [f] (al-push! (mut out) f)))
           (store! i (iadd (load i) 1)))))
-    (if (load failed) (Err (load err)) (Ok (box-al [Func] a (load out))))))
+    (store! (field s check_diags) (box-al [Diag] a (load dgs)))
+    (if (icmp-gt (al-len [Diag] (load dgs)) 0)
+        (Err (al-get [Diag] (load dgs) 0))
+        (Ok (box-al [Func] a (load out))))))
 (defn check-program [(a (ptr Allocator)) (p (ptr Program)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (let [impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
         expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
@@ -5737,7 +5747,7 @@
     (match (setup a cx p impb expb)
       (Err [d] (Err [(ptr Program) Diag] d))
       (Ok [allf]
-        (match (check-all-funcs a cx allf)
+        (match (check-all-funcs a cx allf (mut s))
           (Err [d] (Err [(ptr Program) Diag] d))
           (Ok [funcs] (finish a cx p funcs)))))))
 
@@ -6426,6 +6436,7 @@
     (store! (field s exports) (al-new [ExpEntry] a))
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
     (store! (field s srccount) 1)
     (register-source! (mut s) "<source>" src)
     (match (read-all a src 0)
@@ -8857,6 +8868,13 @@
 (defn report-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
   (ps w "error: ") (render-diag w (mut s) d) (wb w 10) 0)
 
+; A check failure: render EVERY collected body error (`error: … / … / N errors`)
+; when there is more than one, else the single diagnostic. Mirrors render_all.
+(defn report-check-diags [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
+  (if (icmp-gt (al-len [Diag] (load (field s check_diags))) 1)
+      (do (ps w "error: ") (render-all w (mut s) (load (field s check_diags))) (wb w 10) 0)
+    (report-diag w (mut s) d)))
+
 (defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))] (-> (Option (ptr Program)))
   (let [s (alloc-stack LS)]
     (store! (field s a) a)
@@ -8866,6 +8884,7 @@
     (store! (field s exports) (al-new [ExpEntry] a))
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
     (store! (field s srccount) 1)
     (register-source! (mut s) path src)
     (match (read-all a src 0)
@@ -8879,7 +8898,7 @@
                   (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
                   (Ok [prog]
                     (match (frontend-check a (mut s) prog)
-                      (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                      (Err [d] (do (report-check-diags w (mut s) d) (None [(ptr Program)])))
                       (Ok [cp]
                         (do (drop-code-funcs a cp)
                             (match (monomorphize a cp)
@@ -10687,6 +10706,7 @@
     (store! (field s exports) (al-new [ExpEntry] a))
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
     (store! (field s srccount) 1)
     (register-source! (mut s) "<source>" src)
     (match (read-all a src 0)
