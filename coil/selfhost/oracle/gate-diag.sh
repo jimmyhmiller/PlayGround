@@ -39,6 +39,38 @@ while IFS= read -r f; do
   fi
 done < "$LIST"
 
+# ---- build-path inputs: compare BOTH combined output AND exit code -----------
+# Drives `coil build` for the halt-on-error / link-failure / static-assert cases,
+# with an extensionless -o in a scratch dir (see snapshot-diag.sh for why the
+# object name — hence any linker diagnostic — stays byte-identical). A build gate
+# case passes iff the self-host's stdout+stderr AND its exit code both match the
+# Rust reference exactly.
+BLIST=selfhost/oracle/diag/build-corpus.txt
+if [ -f "$BLIST" ]; then
+  TMPD=$(mktemp -d)
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    ref="$REF/$(echo "$f" | tr '/' '_').diag"
+    refec="$REF/$(echo "$f" | tr '/' '_').exit"
+    o="$TMPD/$(basename "$f" .coil)"
+    "$BIN" ${COIL_SELF_ARGS:-} build "$f" -o "$o" > "$TMPD/raw" 2>&1
+    code=$?
+    got=$(sed "s|$ROOT/||g" "$TMPD/raw")
+    want=$(cat "$ref")
+    wantec=$(cat "$refec" 2>/dev/null)
+    if [ "$got" = "$want" ] && [ "$code" = "$wantec" ]; then
+      pass=$((pass+1))
+    else
+      fail=$((fail+1)); [ -z "$first_fail" ] && first_fail="$f (build mismatch)"
+      if [ "${VERBOSE:-}" = 1 ]; then
+        echo "FAIL(build) $f  exit got=$code want=$wantec"
+        diff <(printf '%s' "$want") <(printf '%s' "$got") | head -14
+      fi
+    fi
+  done < "$BLIST"
+  rm -rf "$TMPD"
+fi
+
 echo "gate-diag: $pass pass, $fail fail"
 if [ $fail -ne 0 ]; then
   echo "first failure: $first_fail"

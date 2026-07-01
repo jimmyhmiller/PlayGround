@@ -1,0 +1,10 @@
+; The pipeline succeeds and an object is emitted, but the LINKER (cc) fails: the
+; object references a symbol that resolves nowhere, so `cc` exits nonzero. Rust
+; reports `error: linker (cc) failed with exit status: 1`; the self-host must match
+; that exact wording (Divergence #2, src/lib.rs). cc's own stderr (Undefined
+; symbols … / clang: error …) precedes it and is part of the compared output.
+; (A genuine duplicate-symbol is unreachable in Coil — duplicate `defn` is
+; last-wins and duplicate `export-c` is caught at check time — so an unresolved
+; extern is the faithful way to make the linker itself fail.)
+(extern coil_diag_missing_symbol :cc c [] (-> i64))
+(defn main [] (-> i64) (coil_diag_missing_symbol))

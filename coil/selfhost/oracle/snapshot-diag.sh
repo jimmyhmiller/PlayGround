@@ -36,4 +36,36 @@ while IFS= read -r f; do
   "$COIL" emit-ir "$f" 2>&1 | sed "s|$ROOT/||g" > "$out" || true
   n=$((n+1))
 done < "$LIST"
-echo "snapshot-diag: $n error inputs -> $REF"
+echo "snapshot-diag: $n emit-ir error inputs -> $REF"
+
+# ---- build-path inputs -------------------------------------------------------
+# These drive `coil build` (not emit-ir) to pin the CLI/build control flow around
+# diagnostics: (1) a compile error MUST halt before the link step (no `cc … .o`
+# junk), (2) a link failure prints Rust's exact `linker (cc) failed with exit
+# status: N`, (3) a failing static-assert renders a real diagnostic. We capture
+# BOTH the combined stdout+stderr AND the process exit code (a `.exit` sidecar),
+# since faithfulness here is as much about exit codes as about text.
+#
+# The `-o` is EXTENSIONLESS and lives in a scratch dir: Rust's `with_extension("o")`
+# and the self-host's obj-path then agree on the `<basename>.o` name, so any linker
+# diagnostic that prints the object is byte-identical. The linker only ever prints
+# the object BASENAME (derived from the input filename), never the scratch dir, so
+# the snapshot is location-independent; we still strip $ROOT for good measure.
+BLIST=selfhost/oracle/diag/build-corpus.txt
+find selfhost/oracle/diag/build-inputs -name '*.coil' 2>/dev/null | sort > "$BLIST"
+TMPD=$(mktemp -d)
+b=0
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  out="$REF/$(echo "$f" | tr '/' '_').diag"
+  ec="$REF/$(echo "$f" | tr '/' '_').exit"
+  o="$TMPD/$(basename "$f" .coil)"
+  # `|| code=$?` captures the (nonzero) exit without tripping `set -e`.
+  code=0
+  "$COIL" build "$f" -o "$o" > "$TMPD/raw" 2>&1 || code=$?
+  sed "s|$ROOT/||g" "$TMPD/raw" > "$out"
+  echo "$code" > "$ec"
+  b=$((b+1))
+done < "$BLIST"
+rm -rf "$TMPD"
+echo "snapshot-diag: $b build error inputs -> $REF"

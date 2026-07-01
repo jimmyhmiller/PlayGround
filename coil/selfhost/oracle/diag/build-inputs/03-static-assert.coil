@@ -1,0 +1,8 @@
+; A failing `(static-assert …)`. Rust's codegen returns
+; `Err("static assertion failed: <msg>")`, rendered as
+; `error: static assertion failed: static assertion failed` (the default message)
+; and exits nonzero. The self-host used to hard-error with `UNIMPLEMENTED:` here;
+; it must now render the real diagnostic (Divergence #3, src/codegen.rs +
+; src/main.rs). The condition `(icmp-eq 1 2)` folds to 0, so the assert fires.
+(static-assert (icmp-eq 1 2))
+(defn main [] (-> i64) 0)
