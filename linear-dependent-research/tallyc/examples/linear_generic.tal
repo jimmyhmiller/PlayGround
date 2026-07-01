@@ -20,11 +20,16 @@
 enum Nat  { Zero : Nat, Succ : Nat -> Nat }
 enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
 
+// The body LET-SEQUENCES each linear consumption (`let y = f(h); …`) rather than
+// nesting it in the constructor: this is the form the LINEAR-CAPABILITY check
+// verifies (each abstract-typed value used exactly once), which is what licenses
+// instantiating `a` at a LINEAR type below. A body that DROPPED an element would
+// make that instantiation a compile error, not a leak.
 lmap : {0 a : Type} -> {0 b : Type} -> (w f : (1 x : a) -> b) -> (1 xs : LList a) -> LList b
 fn lmap(f, xs) {
     match xs {
         LNil       => LNil,
-        LCons(h, t) => LCons(f(h), lmap(f, t)),
+        LCons(h, t) => let y = f(h); let r = lmap(f, t); LCons(y, r),
     }
 }
 

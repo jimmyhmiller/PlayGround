@@ -599,6 +599,17 @@ G makes it usable.
   may depend on a value it is used with). QTT handles the basics; the view layer
   (Phase C) is where the genuine research risk is — this is the part F\*/Steel
   needed years and an SMT solver for, and tallyc wants to do it decidably.
+- **~~Linearity × parametricity~~ — RESOLVED (linear-capability inference).**
+  The old hole: a generic body saw only the abstract `a`, so it could silently
+  DROP a linear element (`drophead : {0 a} -> (1 LList a) -> Nat` leaked every
+  `Own` in the list at `a := Own Nat`). Now every implicit Type parameter's
+  LINEAR-CAPABILITY is *inferred* — the body is re-elaborated + kernel-checked
+  with the parameter assumed linear — and an instantiation at a linear type is
+  rejected unless the parameter is capable (`generic_code_cannot_leak_linear_elements`).
+  Two disciplines follow: a linear consumption feeding an unrestricted position
+  must be CBV-`let`-sequenced (`let y = f(x); C(y, …)`), and a linear RECURSIVE
+  field in a total fold is consumed by the eliminator itself (only the IH may
+  use it; the direct binder is hidden).
 - **Termination expressiveness vs convenience.** A purely structural checker rejects
   too much; well-founded recursion is powerful but demands the programmer supply a
   measure. Finding the ergonomic sweet spot is open.

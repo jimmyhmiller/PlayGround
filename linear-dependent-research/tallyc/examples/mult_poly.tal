@@ -1,0 +1,25 @@
+// MULTIPLICITY POLYMORPHISM (docs/MULT_POLY_PLAN.md slice 2): ONE `lmap`,
+// generic over the callback's argument multiplicity `(m : Mult)`, serves both a
+// LINEAR-consuming callback (`lmap(1, freeNat, xs)` releases every Own exactly
+// once) and an unrestricted one (`lmap(w, inc, xs)`). Monomorphized per call
+// site (`lmap$1`, `lmap$w`) before elaboration, so the kernel's rig stays
+// {0,1,w} and every checked instance is concrete. The unsound instances are
+// compile errors: `lmap(0, …)` over Owns fails the linear-capability check
+// (the leak is unrepresentable), `lmap(w, freeNat, …)` is a plain type error.
+//
+//   tally check examples/mult_poly.tal
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
+lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b
+fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }
+freeNat : (1 o : Own Nat) -> Unit
+fn freeNat(o) { free(o) }
+inc : Nat -> Nat
+fn inc(n) { Succ(n) }
+freeall : (1 xs : LList (Own Nat)) -> LList Unit
+fn freeall(xs) { lmap(1, freeNat, xs) }
+incall : LList Nat -> LList Nat
+fn incall(xs) { lmap(w, inc, xs) }
+main : Nat
+fn main() { Zero }

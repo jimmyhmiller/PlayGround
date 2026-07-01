@@ -47,14 +47,18 @@ concrete. The finite rig makes this cheap (≤ 3 instances per mult parameter).
    reports `unresolved multiplicity variable` (test:
    `mult_variable_binder_parses_and_errors_cleanly`).
 
-2. **NEXT — monomorphization + dispatch (architectural).** Recognize a `(m : Mult)`
-   parameter (a binder whose type is the `Mult` sort). Store such a function
-   *un-elaborated* (its surface signature + body), because its usage-validity
-   depends on `m`. At each call site, read the concrete `m`, set `Elab.mult_env`,
-   `elab_ty` the signature and elaborate the body to a monomorphic instance
-   (memoized per `m`), and check that instance concretely. This is the only piece
-   that needs care: defs are currently elaborated once, so mult-poly defs need a
-   separate store and on-demand instantiation.
+2. **DONE — monomorphization (surface pre-pass).** `monomorphize_mult_poly`
+   (src/rust_surface.rs) runs on the parsed item list, BEFORE elaboration: a `fn`
+   with an explicit `(m : Mult)` parameter is pulled out; every call site's mult
+   argument (`0`/`1`/`w`, or an enclosing instance's own mult parameter) selects a
+   concrete instance (`lmap$1`, `lmap$w`, …), synthesized once (signature with the
+   `Mult` arrows stripped + `SMult::Var`s substituted; body with nested mult-poly
+   calls rewritten under the substitution, so poly-calls-poly chains resolve) and
+   spliced in at the original definition's position. Mult variables never reach
+   elaboration, the kernel's rig stays `{0,1,ω}`, and each instance is checked
+   concretely — including the LINEAR-CAPABILITY inference, which is what rejects
+   `lmap(0, …)` over linear elements (the leak) at the instantiating call.
+   `examples/mult_poly.tal`; tests `mult_poly_*`.
 
 3. (Optional later) implicit `{m : Mult}` solved from the argument's
    argument-multiplicity, so the caller need not write it.

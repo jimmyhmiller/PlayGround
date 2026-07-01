@@ -1448,16 +1448,44 @@ fn generic_higher_order_over_linear_data() {
     // ONE generic `lmap` transports a whole list of LINEAR resources: it maps
     // `free` over a list of `Own Nat`, releasing each exactly once. Proves generic
     // higher-order code over linear data is expressible with explicit
-    // multiplicities. See examples/linear_generic.tal.
+    // multiplicities. See examples/linear_generic.tal. The `f(h)` consumption is
+    // CBV-`let`-sequenced (the sanctioned form for feeding a linear consumption
+    // into an unrestricted constructor position) — that is also what the
+    // LINEAR-CAPABILITY check verifies, so `lmap` may be instantiated at `Own Nat`.
     let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
                enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
                lmap : {0 a : Type} -> {0 b : Type} -> (w f : (1 x : a) -> b) -> (1 xs : LList a) -> LList b\n\
-               fn lmap(f, xs) { match xs { LNil => LNil, LCons(h, t) => LCons(f(h), lmap(f, t)), } }\n\
+               fn lmap(f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(f, t); LCons(y, r), } }\n\
                freeNat : (1 o : Own Nat) -> Unit\n\
                fn freeNat(o) { free(o) }\n\
                freeall : (1 xs : LList (Own Nat)) -> LList Unit\n\
                fn freeall(xs) { lmap(freeNat, xs) }\n";
     assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
+}
+
+#[test]
+fn generic_code_cannot_leak_linear_elements() {
+    // SOUNDNESS (closes the FUTURE_WORK §13 parametricity hole): a generic
+    // function whose body DROPS values of its abstract type parameter must not
+    // be instantiable at a LINEAR type — before the linear-capability check,
+    // `drophead` silently leaked every `Own Nat` in the list (the use-site
+    // rebind saw only the abstract `a`, never the linear instantiation).
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+               enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+               drophead : {0 a : Type} -> (1 xs : LList a) -> Nat\n\
+               fn drophead(xs) { match xs { LNil => Zero, LCons(h, t) => drophead(t) } }\n\
+               leak : (1 xs : LList (Own Nat)) -> Nat\n\
+               fn leak(xs) { drophead(xs) }\n";
+    let err = check_program(src).err().expect("generic linear leak must be rejected");
+    assert!(err.iter().any(|e| e.contains("LINEAR type")), "got: {err:?}");
+    // ...while the same generic function at a COPYABLE type stays fine.
+    let ok = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+              enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+              drophead : {0 a : Type} -> (1 xs : LList a) -> Nat\n\
+              fn drophead(xs) { match xs { LNil => Zero, LCons(h, t) => drophead(t) } }\n\
+              use2 : (1 xs : LList Nat) -> Nat\n\
+              fn use2(xs) { drophead(xs) }\n";
+    assert!(check_program(ok).is_ok(), "{:?}", check_program(ok).err());
 }
 
 #[test]
@@ -1551,4 +1579,49 @@ fn convoy_vtail_index_projection_type_checks() {
          fn vtail(v) {{ match v {{ Cons(h, t) => t }} }}\nmain : Nat\nfn main() {{ Zero }}\n"
     );
     assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+// ---------------------------------------------------------------------------
+// Multiplicity polymorphism, slice 2 (docs/MULT_POLY_PLAN.md) — monomorphization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mult_poly_one_lmap_serves_linear_and_unrestricted_callbacks() {
+    // ONE `lmap` with an explicit `(m : Mult)` parameter is monomorphized per
+    // call site: `lmap(1, freeNat, xs)` frees a list of linear Owns (m := 1);
+    // `lmap(w, inc, xs)` maps a copyable list (m := w). The kernel only ever
+    // sees the concrete instances (`lmap$1`, `lmap$w`).
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
+        fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
+        freeNat : (1 o : Own Nat) -> Unit\nfn freeNat(o) { free(o) }\n\
+        inc : Nat -> Nat\nfn inc(n) { Succ(n) }\n\
+        freeall : (1 xs : LList (Own Nat)) -> LList Unit\nfn freeall(xs) { lmap(1, freeNat, xs) }\n\
+        incall : LList Nat -> LList Nat\nfn incall(xs) { lmap(w, inc, xs) }\n";
+    assert!(check_program(src).is_ok(), "{:?}", check_program(src).err());
+}
+
+#[test]
+fn mult_poly_unsound_instantiations_are_rejected() {
+    // m := 0 over LINEAR elements: the 0-callback never consumes them, so
+    // `lmap$0` fails the linear-capability check and the instantiation at
+    // `Own Nat` is rejected (the leak is a compile error).
+    let zero = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
+        fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
+        dropNat : (0 o : Own Nat) -> Unit\nfn dropNat(o) { U }\n\
+        leakall : (1 xs : LList (Own Nat)) -> LList Unit\nfn leakall(xs) { lmap(0, dropNat, xs) }\n";
+    let err = check_program(zero).err().expect("m := 0 over linear elements must reject");
+    assert!(err.iter().any(|e| e.contains("LINEAR type")), "got: {err:?}");
+    // m := w with a LINEAR-consuming callback: `(1 x) -> b` is not `(w x) -> b`
+    // (the ω instance could call it many times on one value) — plain type error.
+    let omega = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
+        fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
+        freeNat : (1 o : Own Nat) -> Unit\nfn freeNat(o) { free(o) }\n\
+        badall : (1 xs : LList (Own Nat)) -> LList Unit\nfn badall(xs) { lmap(w, freeNat, xs) }\n";
+    assert!(check_program(omega).is_err(), "m := w with a linear-consuming callback must reject");
 }

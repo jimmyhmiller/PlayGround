@@ -706,6 +706,12 @@ struct Rec<'a> {
     /// lowers to `App(…App(ih, e₁′)…, e_K′)`; `acc_tys` are the (closed) kernel types
     /// of the non-scrutinee params in param order, used to check each new acc arg.
     acc_tys: Option<&'a [Value]>,
+    /// the type of a FULLY-APPLIED recursive call (`ih_for`'s result): the bare
+    /// IH's type in verbatim-fold mode, `R` in accumulator mode. All these
+    /// motives are CONSTANT (non-dependent), so one value suffices — it lets a
+    /// recursive call be INFERRED (e.g. as a `let` right-hand side), not only
+    /// checked.
+    result_ty: Value,
 }
 
 /// A typing context: each bound variable's name and type (as a Value).
@@ -763,6 +769,16 @@ struct Elab {
     /// set while elaborating a monomorphized instance of a mult-poly function.
     /// Empty for ordinary code, where every `SMult` is already `Lit`.
     mult_env: std::cell::RefCell<HashMap<String, Mult>>,
+    /// type-parameter names currently assumed LINEAR: the pessimistic mode of
+    /// the linear-capability check (`def_linear_capable`). Empty for ordinary
+    /// elaboration.
+    pess_linear: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// per-definition LINEAR-CAPABILITY of each parameter position: `true` when
+    /// the body stays usage-valid with that (Type-)parameter assumed linear,
+    /// INFERRED by re-elaborating the body pessimistically. Instantiating a
+    /// non-capable parameter at a linear type is rejected at the call site
+    /// (closing the FUTURE_WORK s13 "generic code drops a linear element" hole).
+    def_linear_capable: std::cell::RefCell<HashMap<String, Vec<bool>>>,
     /// allocator for GLOBALLY-UNIQUE elaboration-hole ids (offsets above
     /// `HOLE_BASE`). Every in-flight solver (`solve_ctor`/`solve_fn_call`,
     /// nested calls included) draws a disjoint block, so a hole leaked into a
@@ -1121,6 +1137,14 @@ impl Elab {
                     Err(format!("cannot infer the type of `{name}` (Phase 2)"))
                 }
             }
+            // a RECURSIVE call in INFER position (e.g. `let r = f(x, t)`): the same
+            // IH mapping `check` uses; its fully-applied type is the (constant)
+            // motive result carried on `Rec`.
+            Tm::Call(name, args) if rec.is_some_and(|r| r.fnname == name) => {
+                let r = rec.unwrap();
+                let t = self.ih_for(r, args, cx)?;
+                Ok((t, r.result_ty.clone()))
+            }
             // a call to a def — or to a CONTEXT VARIABLE WITH REGISTERED IMPLICITS
             // (the `Fix` self-binder of the function being defined): both go through
             // the implicit solver (`solve_fn_call` resolves a not-in-`defs` callee as
@@ -1363,6 +1387,38 @@ impl Elab {
                 terms[pos] = Some(dep::quote_at(n, &sol));
             }
         }
+        // LINEAR-CAPABILITY gate (see `def_linear_capable`): a Type-implicit
+        // solved at a LINEAR type is only sound when the callee's body was
+        // verified usage-valid with that parameter assumed linear — otherwise a
+        // generic body could silently DROP or DUPLICATE the linear values it
+        // abstracts over (the FUTURE_WORK §13 parametricity hole). Postulates
+        // and the in-flight definition itself (recursive calls during its own
+        // capability check) default to capable.
+        for pos in 0..total {
+            if !flags[pos] || !matches!(domains[pos], Term::Type(_)) {
+                continue;
+            }
+            let Some(sol_tm) = &terms[pos] else { continue };
+            if type_is_linear_in(sol_tm, &self.rc, &self.pess_linear.borrow(), &cx.names, n) {
+                let capable = self
+                    .def_linear_capable
+                    .borrow()
+                    .get(fname)
+                    .map(|v| v.get(pos).copied().unwrap_or(true))
+                    .unwrap_or(true);
+                if !capable {
+                    return Err(format!(
+                        "`{fname}` cannot be instantiated at a LINEAR type here: its \
+                         body is not verified to use values of that type parameter \
+                         exactly once (implicit argument {pos}), which only copyable \
+                         types allow. In `{fname}`: consume each such value exactly \
+                         once, and sequence a consumption feeding an unrestricted \
+                         position through `let` (`let y = f(x); C(y, …)`, not \
+                         `C(f(x), …)`)"
+                    ));
+                }
+            }
+        }
         // final pass: re-evaluate the telescope with everything solved, checking
         // each DEFERRED argument against its now-concrete domain as we go (an
         // earlier deferred arg's value feeds a later deferred arg's domain).
@@ -1419,7 +1475,7 @@ impl Elab {
         // LINEAR value (whose type carries an `Own`/`Σ[1]`) binds at `1`, so using it
         // twice is `ω ⋢ 1` (double-free) and dropping it is `0 ⋢ 1` (leak); a copyable
         // value binds at `ω` so ordinary `let x = e; … x … x …` works.
-        let binder_mult = if type_is_linear(&e_ty_tm, &self.rc) { Mult::One } else { Mult::Omega };
+        let binder_mult = if type_is_linear_in(&e_ty_tm, &self.rc, &self.pess_linear.borrow(), &cx.names, n) { Mult::One } else { Mult::Omega };
         Ok(Term::Let(binder_mult, Box::new(e_ty_tm), Box::new(e_term), Box::new(body_term)))
     }
 
@@ -1630,7 +1686,7 @@ impl Elab {
             // USE-SITE LINEARITY (see `rebind_linear_fields`): re-bind each linear
             // field at 1 so a hidden `Own` (incl. a generic instantiated at `Own`)
             // can't be used twice in a nested/expression `match` either.
-            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
+            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc, &self.pess_linear.borrow(), &arm_cx.names, n);
             let mut body = self.check(&arm_body, &arm_expected, &arm_cx, rec)?;
             for _ in 0..(nlam + ndep) {
                 body = Term::Lam(Box::new(body));
@@ -1726,7 +1782,7 @@ impl Elab {
                     return None; // a dependent typed BY the scrutinee: out of v1 scope
                 }
             }
-            let mult = if type_is_linear(&ty, &self.rc) { Mult::One } else { Mult::Omega };
+            let mult = if type_is_linear_in(&ty, &self.rc, &self.pess_linear.borrow(), &cx.names, n) { Mult::One } else { Mult::Omega };
             dep_lvls.push(l);
             deps.push(ConvoyDep { lvl: l, name: cx.names[l].clone(), ty, mult });
         }
@@ -1843,6 +1899,303 @@ impl Convoy {
             Term::Var(i + d)
         })
     }
+}
+
+// ===========================================================================
+// MULT-POLY MONOMORPHIZATION (docs/MULT_POLY_PLAN.md slice 2)
+// ===========================================================================
+
+/// A function declared with explicit `(m : Mult)` parameter(s), stored
+/// UN-elaborated (its usage-validity depends on `m`).
+struct PolyDef {
+    sig: Ty,
+    params: Vec<String>,
+    body: Tm,
+    annot: Option<TotAnnot>,
+    /// (explicit-argument index, parameter name) of each `Mult` parameter.
+    mult_params: Vec<(usize, String)>,
+}
+
+fn is_mult_sort(t: &Ty) -> bool {
+    matches!(t, Ty::Var(n) if n == "Mult")
+}
+
+/// The explicit-position `(m : Mult)` parameters of a signature.
+fn mult_params_of(sig: &Ty) -> Result<Vec<(usize, String)>, String> {
+    let (arrows, _) = peel_arrows(sig);
+    let mut out = Vec::new();
+    let mut expl = 0usize;
+    for (_, imp, name, dom) in &arrows {
+        if *imp {
+            if is_mult_sort(dom) {
+                return Err("an implicit `{m : Mult}` parameter is not supported yet — \
+                            make it explicit: `(m : Mult)` (explicit-first)"
+                    .into());
+            }
+            continue;
+        }
+        if is_mult_sort(dom) {
+            let n = name.clone().ok_or("a `Mult` parameter must be named: `(m : Mult)`")?;
+            out.push((expl, n));
+        }
+        expl += 1;
+    }
+    Ok(out)
+}
+
+/// `0`/`1`/`w` — or an enclosing instance's own `(x : Mult)` parameter.
+fn resolve_mult_arg(t: &Tm, subst: &HashMap<String, Mult>) -> Result<Mult, String> {
+    match t {
+        Tm::Lit(0) => Ok(Mult::Zero),
+        Tm::Lit(1) => Ok(Mult::One),
+        Tm::Var(v) if v == "w" => Ok(Mult::Omega),
+        Tm::Var(v) => subst.get(v).copied().ok_or_else(|| {
+            format!(
+                "`{v}` is not a multiplicity — a `Mult` argument must be `0`, `1`, `w`, \
+                 or an enclosing `(x : Mult)` parameter"
+            )
+        }),
+        _ => Err("a `Mult` argument must be `0`, `1`, or `w`".into()),
+    }
+}
+
+fn mult_char(m: Mult) -> char {
+    match m {
+        Mult::Zero => '0',
+        Mult::One => '1',
+        Mult::Omega => 'w',
+    }
+}
+
+fn mono_name(base: &str, mults: &[Mult]) -> String {
+    let suffix: String = mults.iter().map(|m| mult_char(*m)).collect();
+    format!("{base}${suffix}")
+}
+
+/// Substitute concrete multiplicities for `SMult::Var`s throughout a type.
+fn subst_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
+    match t {
+        Ty::Arrow(m, imp, n, a, b) => {
+            let m2 = match m {
+                SMult::Var(v) => match subst.get(v) {
+                    Some(mm) => SMult::Lit(*mm),
+                    None => SMult::Var(v.clone()),
+                },
+                SMult::Lit(l) => SMult::Lit(*l),
+            };
+            Ty::Arrow(
+                m2,
+                *imp,
+                n.clone(),
+                Box::new(subst_mult_ty(a, subst)),
+                Box::new(subst_mult_ty(b, subst)),
+            )
+        }
+        Ty::App(f, a) => {
+            Ty::App(Box::new(subst_mult_ty(f, subst)), Box::new(subst_mult_ty(a, subst)))
+        }
+        Ty::Add(a, b) => {
+            Ty::Add(Box::new(subst_mult_ty(a, subst)), Box::new(subst_mult_ty(b, subst)))
+        }
+        Ty::Var(_) | Ty::Type => t.clone(),
+    }
+}
+
+/// An instance's signature: the original with the explicit `(m : Mult)` arrows
+/// REMOVED and every mult variable substituted concretely.
+fn strip_mult_arrows(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
+    match t {
+        Ty::Arrow(_, false, _, dom, cod) if is_mult_sort(dom) => strip_mult_arrows(cod, subst),
+        Ty::Arrow(m, imp, n, a, b) => {
+            let m2 = match m {
+                SMult::Var(v) => match subst.get(v) {
+                    Some(mm) => SMult::Lit(*mm),
+                    None => SMult::Var(v.clone()),
+                },
+                SMult::Lit(l) => SMult::Lit(*l),
+            };
+            Ty::Arrow(
+                m2,
+                *imp,
+                n.clone(),
+                Box::new(subst_mult_ty(a, subst)),
+                Box::new(strip_mult_arrows(b, subst)),
+            )
+        }
+        other => subst_mult_ty(other, subst),
+    }
+}
+
+/// Rewrite calls to mult-poly functions into calls to their concrete instances,
+/// queuing each newly-needed instance. `subst` maps the enclosing instance's own
+/// mult parameters (empty outside one).
+fn mono_rewrite_tm(
+    t: &Tm,
+    polys: &HashMap<String, PolyDef>,
+    subst: &HashMap<String, Mult>,
+    queue: &mut Vec<(String, Vec<Mult>)>,
+) -> Result<Tm, String> {
+    match t {
+        Tm::Var(name) if polys.contains_key(name) => Err(format!(
+            "`{name}` is multiplicity-polymorphic — it must be applied to its `Mult` \
+             argument(s) (a bare reference cannot be monomorphized)"
+        )),
+        Tm::Var(_) | Tm::Lit(_) => Ok(t.clone()),
+        Tm::Call(name, args) => {
+            if let Some(pd) = polys.get(name) {
+                let mut mults = Vec::new();
+                let mut rest = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    if pd.mult_params.iter().any(|(mi, _)| *mi == i) {
+                        mults.push(resolve_mult_arg(a, subst)?);
+                    } else {
+                        rest.push(mono_rewrite_tm(a, polys, subst, queue)?);
+                    }
+                }
+                if mults.len() != pd.mult_params.len() {
+                    return Err(format!(
+                        "`{name}` expects {} explicit argument(s) including its `Mult` \
+                         parameter(s), got {}",
+                        pd.mult_params.last().map(|(i, _)| i + 1).unwrap_or(0).max(args.len()),
+                        args.len()
+                    ));
+                }
+                if !queue.iter().any(|(n, ms)| n == name && *ms == mults) {
+                    queue.push((name.clone(), mults.clone()));
+                }
+                Ok(Tm::Call(mono_name(name, &mults), rest))
+            } else {
+                let eargs = args
+                    .iter()
+                    .map(|a| mono_rewrite_tm(a, polys, subst, queue))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Tm::Call(name.clone(), eargs))
+            }
+        }
+        Tm::Match(s, arms) => {
+            let arms2 = arms
+                .iter()
+                .map(|a| {
+                    Ok(Arm {
+                        ctor: a.ctor.clone(),
+                        binders: a.binders.clone(),
+                        body: mono_rewrite_tm(&a.body, polys, subst, queue)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Tm::Match(s.clone(), arms2))
+        }
+        Tm::Add(a, b) => Ok(Tm::Add(
+            Box::new(mono_rewrite_tm(a, polys, subst, queue)?),
+            Box::new(mono_rewrite_tm(b, polys, subst, queue)?),
+        )),
+        Tm::Let(n, e, b) => Ok(Tm::Let(
+            n.clone(),
+            Box::new(mono_rewrite_tm(e, polys, subst, queue)?),
+            Box::new(mono_rewrite_tm(b, polys, subst, queue)?),
+        )),
+        Tm::LetPair(ns, e, b) => Ok(Tm::LetPair(
+            ns.clone(),
+            Box::new(mono_rewrite_tm(e, polys, subst, queue)?),
+            Box::new(mono_rewrite_tm(b, polys, subst, queue)?),
+        )),
+    }
+}
+
+/// The slice-2 pre-pass: pull out every `fn` with a `(m : Mult)` parameter,
+/// rewrite all remaining bodies (queuing needed instances), instantiate each
+/// requested (function × multiplicities) pair ONCE — a poly body's own calls
+/// are rewritten under its substitution, so poly-calls-poly chains resolve —
+/// and splice the instances in at the original definition's position (they
+/// precede every caller, since a definition precedes its uses).
+fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
+    let mut sigs: HashMap<String, Ty> = HashMap::new();
+    for it in items.iter() {
+        if let Item::Sig(n, t) = it {
+            sigs.insert(n.clone(), t.clone());
+        }
+    }
+    let mut polys: HashMap<String, PolyDef> = HashMap::new();
+    for it in items.iter() {
+        if let Item::Fn(name, params, body, annot) = it {
+            let Some(sig) = sigs.get(name) else { continue };
+            let mps = mult_params_of(sig)?;
+            if !mps.is_empty() {
+                polys.insert(
+                    name.clone(),
+                    PolyDef {
+                        sig: sig.clone(),
+                        params: params.clone(),
+                        body: body.clone(),
+                        annot: *annot,
+                        mult_params: mps,
+                    },
+                );
+            }
+        }
+    }
+    if polys.is_empty() {
+        return Ok(());
+    }
+    // rewrite every non-poly body, queuing the needed instances
+    let mut queue: Vec<(String, Vec<Mult>)> = Vec::new();
+    for it in items.iter_mut() {
+        if let Item::Fn(name, _, body, _) = it {
+            if !polys.contains_key(name) {
+                *body = mono_rewrite_tm(body, &polys, &HashMap::new(), &mut queue)?;
+            }
+        }
+    }
+    // instantiate (a poly body may queue further instances — drain to fixpoint)
+    let mut made: Vec<(String, Item, Item)> = Vec::new(); // (original, Sig, Fn)
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut qi = 0;
+    while qi < queue.len() {
+        let (orig, mults) = queue[qi].clone();
+        qi += 1;
+        let iname = mono_name(&orig, &mults);
+        if !done.insert(iname.clone()) {
+            continue;
+        }
+        let pd = &polys[&orig];
+        let subst: HashMap<String, Mult> = pd
+            .mult_params
+            .iter()
+            .zip(&mults)
+            .map(|((_, n), m)| (n.clone(), *m))
+            .collect();
+        let isig = strip_mult_arrows(&pd.sig, &subst);
+        let iparams: Vec<String> = pd
+            .params
+            .iter()
+            .filter(|p| !pd.mult_params.iter().any(|(_, n)| n == *p))
+            .cloned()
+            .collect();
+        let ibody = mono_rewrite_tm(&pd.body, &polys, &subst, &mut queue)?;
+        made.push((
+            orig.clone(),
+            Item::Sig(iname.clone(), isig),
+            Item::Fn(iname, iparams, ibody, pd.annot),
+        ));
+    }
+    // splice: drop each poly Sig/Fn, inserting its instances at the Fn's position
+    let mut out: Vec<Item> = Vec::with_capacity(items.len() + made.len());
+    for it in items.drain(..) {
+        match &it {
+            Item::Sig(n, _) if polys.contains_key(n) => {}
+            Item::Fn(n, _, _, _) if polys.contains_key(n) => {
+                for (orig, s, f) in &made {
+                    if orig == n {
+                        out.push(s.clone());
+                        out.push(f.clone());
+                    }
+                }
+            }
+            _ => out.push(it),
+        }
+    }
+    *items = out;
+    Ok(())
 }
 
 /// Every identifier a surface term references (variables, callees, match
@@ -2417,7 +2770,7 @@ impl Elab {
         let s_expected = p_at(Value::VSuc(Box::new(k_val)));
         let mut fields: HashMap<String, String> = HashMap::new();
         fields.insert(pred_name, ih_name);
-        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None };
+        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: p_at(Value::VNeu(dep::Neutral::NVar(succ_cx.len()))) };
         let body = self.check(&succ_arm.body, &s_expected, &succ_cx, Some(&r))?;
         let s_method = Term::Lam(Box::new(Term::Lam(Box::new(body))));
 
@@ -2599,7 +2952,7 @@ impl Elab {
         }
         let mut fields: HashMap<String, String> = HashMap::new();
         fields.insert(pred_name, ih_name);
-        let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals) };
+        let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals), result_ty: r_val.clone() };
         let mut s_method = self.check(&succ_arm.body, &r_val, &succ_cx, Some(&r))?;
         for _ in 0..k {
             s_method = Term::Lam(Box::new(s_method)); // a_K … a₁
@@ -2907,18 +3260,32 @@ impl Elab {
                     next_pat += 1;
                 }
             }
-            let mut fields: HashMap<String, String> = HashMap::new();
-            for (kk, &fi) in rec_fields.iter().enumerate() {
-                let ih = format!("$ih{kk}");
-                fields.insert(binder_names[fi].clone(), ih.clone());
-                binder_names.push(ih);
-            }
-
             // typing context: the fn params, then the method binders with their
             // kernel types (from the eliminator method telescope)
             let motive_tm = motive.clone();
             let (binder_tys, ret_ty_tm) =
                 dep::elim_method_telescope(&self.rc, &data, &sparam_tms, &motive_tm, &ctor.name, true)?;
+            let mut fields: HashMap<String, String> = HashMap::new();
+            for (kk, &fi) in rec_fields.iter().enumerate() {
+                let ih = format!("$ih{kk}");
+                fields.insert(binder_names[fi].clone(), ih.clone());
+                // A LINEAR recursive field is consumed by the FOLD ITSELF: its one
+                // legal use is through the induction hypothesis (`fields` maps the
+                // surface name there), so HIDE the direct binder — a second, direct
+                // consumption of the tail (a double-free the eliminator's own
+                // traversal would compound) becomes unrepresentable, and the
+                // use-site rebind correctly does not demand a direct use.
+                if type_is_linear_in(
+                    &binder_tys[fi].1,
+                    &self.rc,
+                    &self.pess_linear.borrow(),
+                    &fn_cx.names,
+                    fn_cx.len() + fi,
+                ) {
+                    binder_names[fi] = format!("$folded{fi}");
+                }
+                binder_names.push(ih);
+            }
             let mut arm_cx = fn_cx.clone();
             for (bn, (_, bty)) in binder_names.iter().zip(&binder_tys) {
                 let v = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), bty);
@@ -2926,7 +3293,7 @@ impl Elab {
             }
             let expected = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &ret_ty_tm);
 
-            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None };
+            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: expected.clone() };
             // USE-SITE LINEARITY (the convergent, whack-a-mole-proof check): re-bind
             // each EXPLICIT field whose INSTANTIATED type is linear via `let f = f`, so
             // the let-binder rule binds it at `1` and the kernel enforces exactly-once
@@ -2935,7 +3302,7 @@ impl Elab {
             // — a generic container instantiated at `Own` (`Pair (Own Nat) Unit`), a
             // nested generic, an alias — not just a syntactic field. (Non-linear fields
             // are untouched, so copyable fields stay ω/multi-usable.)
-            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc);
+            let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc, &self.pess_linear.borrow(), &arm_cx.names, fn_cx.len());
             let mut body = self.check(&arm_body, &expected, &arm_cx, Some(&r))?;
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
@@ -3026,27 +3393,62 @@ fn ctor_head(t: &Term) -> Option<String> {
 /// FUTURE_WORK §13 polymorphism corner (a leak through an abstract-typed ω param, NOT a
 /// double-free), handled when real surface linear params land.
 fn type_is_linear(ty: &Term, rc: &Rc<Signature>) -> bool {
-    contains_linear(ty, rc, &mut std::collections::HashSet::new())
+    let no_pess = std::collections::HashSet::new();
+    contains_linear(ty, rc, &mut std::collections::HashSet::new(), &no_pess, &[], 0, 0)
 }
 
-fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::HashSet<String>) -> bool {
+/// `type_is_linear` UNDER a pessimistic assumption: the context variables whose
+/// NAMES are in `pess` (resolved through `cx_names`; `lvl` = the level `ty` was
+/// quoted at, `depth` = binders crossed inside `ty`) are treated as LINEAR
+/// types. This is how a generic function's body is checked for LINEAR-CAPABILITY
+/// of a type parameter (see `def_linear_capable`): with the parameter assumed
+/// linear, every use-site rule (match-field rebind, `let` binder multiplicity,
+/// convoy dependents) binds abstract-typed values at `1`.
+fn type_is_linear_in(
+    ty: &Term,
+    rc: &Rc<Signature>,
+    pess: &std::collections::HashSet<String>,
+    cx_names: &[String],
+    lvl: usize,
+) -> bool {
+    contains_linear(ty, rc, &mut std::collections::HashSet::new(), pess, cx_names, lvl, 0)
+}
+
+fn contains_linear(
+    ty: &Term,
+    rc: &Rc<Signature>,
+    seen: &mut std::collections::HashSet<String>,
+    pess: &std::collections::HashSet<String>,
+    cx_names: &[String],
+    lvl: usize,
+    depth: usize,
+) -> bool {
+    let go = |t: &Term, seen: &mut std::collections::HashSet<String>| {
+        contains_linear(t, rc, seen, pess, cx_names, lvl, depth)
+    };
+    let go1 = |t: &Term, seen: &mut std::collections::HashSet<String>| {
+        contains_linear(t, rc, seen, pess, cx_names, lvl, depth + 1)
+    };
     match ty {
         Term::Const(n) => rc.linear_types.contains(n),
         Term::Sigma(crate::mult::Mult::One, _, _) => true,
-        Term::Sigma(_, a, b) | Term::Pi(_, a, b) | Term::App(a, b) | Term::Pair(a, b) | Term::Add(a, b) => {
-            contains_linear(a, rc, seen) || contains_linear(b, rc, seen)
-        }
-        Term::Eq(a, b, c) => {
-            contains_linear(a, rc, seen) || contains_linear(b, rc, seen) || contains_linear(c, rc, seen)
-        }
-        Term::Ann(e, _) => contains_linear(e, rc, seen),
-        Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => contains_linear(x, rc, seen),
+        Term::Sigma(_, a, b) => go(a, seen) || go1(b, seen),
+        // A FUNCTION is not a resource: a Π CONSUMING a linear argument (or
+        // producing one per call) is itself freely copyable — every call gets a
+        // fresh argument. (Propagating through Π made `(w f : (1 x : Own T) -> b)`
+        // silently linear, breaking higher-order code over linear data. A genuine
+        // one-shot function is declared with an explicit `(1 f : …)`.)
+        Term::Pi(_, _, _) => false,
+        Term::App(a, b) | Term::Pair(a, b) | Term::Add(a, b) => go(a, seen) || go(b, seen),
+        Term::Eq(a, b, c) => go(a, seen) || go(b, seen) || go(c, seen),
+        Term::Ann(e, _) => go(e, seen),
+        Term::Suc(x) | Term::Fst(x) | Term::Snd(x) | Term::Refl(x) => go(x, seen),
         Term::Data(name, args) => {
             if rc.linear_types.contains(name) {
                 return true;
             }
             // a linear type ARGUMENT (e.g. `Vec (Own T) n`, `Pair (Own Nat) Unit`).
-            if args.iter().any(|a| contains_linear(a, rc, seen)) {
+            if args.iter().any(|a| go(a, seen)) {
                 return true;
             }
             // a linear FIELD hidden behind the datatype's name — recurse into the
@@ -3055,7 +3457,7 @@ fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::H
                 if let Some(decl) = rc.data(name) {
                     for ctor in &decl.ctors {
                         for (_, fty) in &ctor.args {
-                            if contains_linear(fty, rc, seen) {
+                            if contains_linear(fty, rc, seen, pess, cx_names, lvl, depth) {
                                 return true;
                             }
                         }
@@ -3064,9 +3466,26 @@ fn contains_linear(ty: &Term, rc: &Rc<Signature>, seen: &mut std::collections::H
             }
             false
         }
-        Term::Constr(_, args) => args.iter().any(|a| contains_linear(a, rc, seen)),
-        // Var / Type / Nat / NatLit / Zero / Lam / Fix / NatElim / NatCase / Elim:
-        // no linear component (an abstract `Var` is the deferred §13 polymorphism case).
+        Term::Constr(_, args) => args.iter().any(|a| go(a, seen)),
+        // an abstract type VARIABLE: linear exactly when the pessimistic set says
+        // so (the linear-capability check); otherwise the §13 default (not linear —
+        // an instantiation at a linear type is then gated by `def_linear_capable`).
+        Term::Var(i) => {
+            if pess.is_empty() || *i < depth {
+                return false;
+            }
+            let outer = i - depth;
+            if outer >= lvl {
+                return false;
+            }
+            // context level of this variable; a level past `cx_names` is a local
+            // binder introduced after the named context (e.g. a method-telescope
+            // binder) — never a pessimistic type parameter.
+            let level = lvl - 1 - outer;
+            level < cx_names.len() && pess.contains(&cx_names[level])
+        }
+        // Type / Nat / NatLit / Zero / Lam / Fix / NatElim / NatCase / Elim:
+        // no linear component.
         _ => false,
     }
 }
@@ -3086,6 +3505,9 @@ fn rebind_linear_fields(
     binder_tys: &[(crate::mult::Mult, Term)],
     nargs: usize,
     rc: &Rc<Signature>,
+    pess: &std::collections::HashSet<String>,
+    cx_names: &[String],
+    base_lvl: usize,
 ) -> Tm {
     let mut wrapped = body.clone();
     for j in (0..nargs).rev() {
@@ -3095,7 +3517,18 @@ fn rebind_linear_fields(
         // would OVER-reject. Only an ω/1 field of an instantiated-linear type is bound
         // at 1.
         let erased = binder_tys[j].0 == crate::mult::Mult::Zero;
-        if explicit && !erased && type_is_linear(&binder_tys[j].1, rc) {
+        // A HIDDEN binder (`$folded…` — a linear RECURSIVE field whose consumption
+        // belongs to the eliminator; see `elab_match_body`) is not directly usable,
+        // so demanding a direct use of it would always fail: skip it.
+        if binder_names[j].starts_with('$') {
+            continue;
+        }
+        // `binder_tys[j]` sits under `j` earlier telescope binders: it is quoted at
+        // level `base_lvl + j` for the pessimistic (linear-capability) resolution.
+        if explicit
+            && !erased
+            && type_is_linear_in(&binder_tys[j].1, rc, pess, cx_names, base_lvl + j)
+        {
             let nm = binder_names[j].clone();
             wrapped = Tm::Let(nm.clone(), Box::new(Tm::Var(nm)), Box::new(wrapped));
         }
@@ -3201,6 +3634,14 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         items = merged;
     }
 
+    // MULT-POLY MONOMORPHIZATION (docs/MULT_POLY_PLAN.md slice 2) — a SURFACE
+    // pre-pass: functions with an explicit `(m : Mult)` parameter are replaced
+    // by per-call-site concrete instances (`f$1`, `f$w`, …), so the kernel's rig
+    // stays `{0,1,ω}` and every checked instance is concrete (its usage-validity
+    // is decided by the ordinary checker — no symbolic-rig reasoning, no new
+    // trusted code). Behavior-neutral for programs with no `Mult` parameters.
+    monomorphize_mult_poly(&mut items)?;
+
     let mut elab = Elab {
         rc: Rc::new(Signature::default()),
         data_arity: HashMap::new(),
@@ -3212,6 +3653,8 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         nat_ctor: HashMap::new(),
         in_fix: std::cell::Cell::new(false),
         mult_env: std::cell::RefCell::new(HashMap::new()),
+        pess_linear: std::cell::RefCell::new(std::collections::HashSet::new()),
+        def_linear_capable: std::cell::RefCell::new(HashMap::new()),
         hole_ctr: std::cell::Cell::new(0),
     };
 
@@ -3465,93 +3908,161 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 full.reason().map(|s| s.to_string()),
             ));
 
-            // the fn's typing context: each parameter's name + kernel type
-            let mut fn_cx = Cx::default();
-            for (i, (pn, pty)) in full_names.iter().zip(&full_tys).enumerate() {
-                let kty = elab.elab_ty(pty, &full_names[..i])?;
-                let v = dep::eval_rc(&elab.rc, &neutral_env(i), &kty);
-                fn_cx.push(pn.clone(), v);
-            }
+            let term = elab.elab_fn_term(
+                name,
+                params,
+                body,
+                &ty_term,
+                &full_names,
+                &full_tys,
+                &ret,
+                structural.is_total(),
+            )?;
 
-            // PARTIAL ⇒ general recursion via an opaque `Fix` (the kernel never
-            // unfolds it, so it cannot reduce in a type — the partial/total
-            // boundary). Currently only `%builtin Nat` case-splits have a `Fix`
-            // lowering; a partial recursion on any other shape is an honest hard
-            // error (NOT silently accepted), pending the Phase E2 machinery.
-            if !structural.is_total() {
-                // A `%builtin Nat`-scrutinee match keeps the proven `NatCase` `Fix`
-                // lowering. ANY other partial recursion — on a boxed/heap structure, or a
-                // body that is not a direct param-match (e.g. `match unbox(e)`) — lowers
-                // via the GENERAL `Case`-based `Fix` (`in_fix` mode): heap recursion RUNS
-                // as `%partial`. (`%partial` relaxes TERMINATION, not LINEARITY: the `Fix`
-                // body is still fully linearity-checked by the kernel; and the kernel
-                // treats `Fix` OPAQUELY, so no `%partial` term reduces during type-checking.)
-                let nat_scrut_match = matches!(body, Tm::Match(scrut, _)
-                    if full_names.iter().position(|p| p == scrut).is_some_and(|sp| matches!(
-                        flatten_ty(&full_tys[sp]).0, Ty::Var(n) if elab.nat_types.contains(n))));
-                let term = if let (true, Tm::Match(scrut, arms)) = (nat_scrut_match, body) {
-                    elab.elab_fix_nat(name, &ty_term, &full_names, &full_tys, &ret, scrut, arms)?
-                } else {
-                    elab.elab_fix(name, &ty_term, &full_names, &full_tys, &ret, body)?
-                };
-                elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
-                out_defs.push((name.clone(), ty_term, term));
-                continue;
-            }
-
-            // TOTAL ⇒ lower to a kernel eliminator (or a non-recursive body).
-            let body_inner = match body {
-                Tm::Match(scrut, arms) => {
-                    // CONVOY at the fn level: when the scrutinee's index refines
-                    // context dependents / refutes arms, route through the
-                    // nested-match elaborator (which builds the dependent motive)
-                    // instead of `elab_match_body`'s constant one. v1: only for a
-                    // body with NO self-call (a recursive convoy body would need
-                    // dep-applied induction hypotheses — not yet built; such fns
-                    // are `%partial` and take the `Fix` path above).
-                    let fn_convoy = {
-                        let no_self_call = {
-                            let mut calls = Vec::new();
-                            collect_all_calls(body, &mut calls);
-                            calls.iter().all(|c| c.callee != *name)
-                        };
-                        no_self_call
-                            && fn_cx.debruijn(scrut).is_some()
-                            && match fn_cx.var_type(scrut) {
-                                Some(Value::VData(d, dargs)) => {
-                                    let decl = elab.rc.data(&d).unwrap().clone();
-                                    let sidx = fn_cx.debruijn(scrut).unwrap();
-                                    let ret_tm = elab.elab_ty(&ret, &full_names)?;
-                                    let exp_v = dep::eval_rc(&elab.rc, &neutral_env(fn_cx.len()), &ret_tm);
-                                    let exp_tm = dep::quote_at(fn_cx.len(), &exp_v);
-                                    elab.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, arms, &fn_cx)
-                                        .is_some()
-                                }
-                                _ => false,
+            // LINEAR-CAPABILITY inference (see `def_linear_capable`): for each
+            // implicit Type-parameter, re-elaborate + kernel-check the body with
+            // that parameter assumed LINEAR. Success ⇒ the body never drops or
+            // duplicates values of it ⇒ instantiating it at a linear type is
+            // sound. (The pessimistic term is discarded — only pass/fail counts;
+            // the definition the program uses is the ordinary one above.)
+            let mut capable = vec![true; full_names.len()];
+            for i in 0..full_names.len() {
+                if full_imps[i] && matches!(full_tys[i], Ty::Type) {
+                    elab.pess_linear.borrow_mut().insert(full_names[i].clone());
+                    let ok = elab
+                        .elab_fn_term(
+                            name,
+                            params,
+                            body,
+                            &ty_term,
+                            &full_names,
+                            &full_tys,
+                            &ret,
+                            structural.is_total(),
+                        )
+                        .and_then(|t| {
+                            dep::check_closed_in((*elab.rc).clone(), &t, &ty_term)
+                                .map_err(|e| e)
+                        })
+                        .map_err(|e| {
+                            if std::env::var("TALLY_DEBUG_CAP").is_ok() {
+                                eprintln!("[cap] {name} not capable in {}: {e}", full_names[i]);
                             }
-                    };
-                    if fn_convoy {
-                        let expected = dep::eval_rc(&elab.rc, &neutral_env(full_names.len()), &elab.elab_ty(&ret, &full_names)?);
-                        elab.check(body, &expected, &fn_cx, None)?
-                    } else {
-                        elab.elab_match_body(name, &fn_cx, params, &full_tys, &ret, scrut, arms)?
-                    }
+                            e
+                        })
+                        .is_ok();
+                    elab.pess_linear.borrow_mut().clear();
+                    capable[i] = ok;
                 }
-                other => {
-                    let expected = dep::eval_rc(&elab.rc, &neutral_env(full_names.len()), &elab.elab_ty(&ret, &full_names)?);
-                    elab.check(other, &expected, &fn_cx, None)?
-                }
-            };
-            let mut term = body_inner;
-            for _ in 0..full_names.len() {
-                term = Term::Lam(Box::new(term));
             }
+            elab.def_linear_capable.borrow_mut().insert(name.clone(), capable);
+
             elab.defs.insert(name.clone(), (term.clone(), ty_term.clone()));
             out_defs.push((name.clone(), ty_term, term));
         }
     }
 
     Ok(Program { sig: (*elab.rc).clone(), defs: out_defs, totality: totality_status })
+}
+
+impl Elab {
+    /// Elaborate one `fn`'s body to its final definition term (the pass-D
+    /// per-function work, factored out so the linear-capability check can run it
+    /// a second time pessimistically). Inserts nothing; the caller registers the
+    /// def.
+    #[allow(clippy::too_many_arguments)]
+    fn elab_fn_term(
+        &self,
+        name: &str,
+        params: &[String],
+        body: &Tm,
+        ty_term: &Term,
+        full_names: &[String],
+        full_tys: &[Ty],
+        ret: &Ty,
+        structural_total: bool,
+    ) -> Result<Term, String> {
+        // the fn's typing context: each parameter's name + kernel type
+        let mut fn_cx = Cx::default();
+        for (i, (pn, pty)) in full_names.iter().zip(full_tys).enumerate() {
+            let kty = self.elab_ty(pty, &full_names[..i])?;
+            let v = dep::eval_rc(&self.rc, &neutral_env(i), &kty);
+            fn_cx.push(pn.clone(), v);
+        }
+
+        // PARTIAL ⇒ general recursion via an opaque `Fix` (the kernel never
+        // unfolds it, so it cannot reduce in a type — the partial/total
+        // boundary). Currently only `%builtin Nat` case-splits have a `Fix`
+        // lowering; a partial recursion on any other shape is an honest hard
+        // error (NOT silently accepted), pending the Phase E2 machinery.
+        if !structural_total {
+            // A `%builtin Nat`-scrutinee match keeps the proven `NatCase` `Fix`
+            // lowering. ANY other partial recursion — on a boxed/heap structure, or a
+            // body that is not a direct param-match (e.g. `match unbox(e)`) — lowers
+            // via the GENERAL `Case`-based `Fix` (`in_fix` mode): heap recursion RUNS
+            // as `%partial`. (`%partial` relaxes TERMINATION, not LINEARITY: the `Fix`
+            // body is still fully linearity-checked by the kernel; and the kernel
+            // treats `Fix` OPAQUELY, so no `%partial` term reduces during type-checking.)
+            let nat_scrut_match = matches!(body, Tm::Match(scrut, _)
+                if full_names.iter().position(|p| p == scrut).is_some_and(|sp| matches!(
+                    flatten_ty(&full_tys[sp]).0, Ty::Var(n) if self.nat_types.contains(n))));
+            let term = if let (true, Tm::Match(scrut, arms)) = (nat_scrut_match, body) {
+                self.elab_fix_nat(name, ty_term, full_names, full_tys, ret, scrut, arms)?
+            } else {
+                self.elab_fix(name, ty_term, full_names, full_tys, ret, body)?
+            };
+            return Ok(term);
+        }
+
+        // TOTAL ⇒ lower to a kernel eliminator (or a non-recursive body).
+        let body_inner = match body {
+            Tm::Match(scrut, arms) => {
+                // CONVOY at the fn level: when the scrutinee's index refines
+                // context dependents / refutes arms, route through the
+                // nested-match elaborator (which builds the dependent motive)
+                // instead of `elab_match_body`'s constant one. v1: only for a
+                // body with NO self-call (a recursive convoy body would need
+                // dep-applied induction hypotheses — not yet built; such fns
+                // are `%partial` and take the `Fix` path above).
+                let fn_convoy = {
+                    let no_self_call = {
+                        let mut calls = Vec::new();
+                        collect_all_calls(body, &mut calls);
+                        calls.iter().all(|c| c.callee != *name)
+                    };
+                    no_self_call
+                        && fn_cx.debruijn(scrut).is_some()
+                        && match fn_cx.var_type(scrut) {
+                            Some(Value::VData(d, dargs)) => {
+                                let decl = self.rc.data(&d).unwrap().clone();
+                                let sidx = fn_cx.debruijn(scrut).unwrap();
+                                let ret_tm = self.elab_ty(ret, full_names)?;
+                                let exp_v = dep::eval_rc(&self.rc, &neutral_env(fn_cx.len()), &ret_tm);
+                                let exp_tm = dep::quote_at(fn_cx.len(), &exp_v);
+                                self.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, arms, &fn_cx)
+                                    .is_some()
+                            }
+                            _ => false,
+                        }
+                };
+                if fn_convoy {
+                    let expected = dep::eval_rc(&self.rc, &neutral_env(full_names.len()), &self.elab_ty(ret, full_names)?);
+                    self.check(body, &expected, &fn_cx, None)?
+                } else {
+                    self.elab_match_body(name, &fn_cx, params, full_tys, ret, scrut, arms)?
+                }
+            }
+            other => {
+                let expected = dep::eval_rc(&self.rc, &neutral_env(full_names.len()), &self.elab_ty(ret, full_names)?);
+                self.check(other, &expected, &fn_cx, None)?
+            }
+        };
+        let mut term = body_inner;
+        for _ in 0..full_names.len() {
+            term = Term::Lam(Box::new(term));
+        }
+        Ok(term)
+    }
 }
 
 pub fn check_program(src: &str) -> Result<Program, Vec<String>> {

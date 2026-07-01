@@ -1048,8 +1048,9 @@ fn check(ctx: &Ctx, t: &Term, ty: &Value) -> Result<Usage, String> {
             let sigma = ub.pop().unwrap();
             if !sigma.leq(*pi) {
                 return Err(format!(
-                    "the variable bound at multiplicity {pi} is used {sigma} time(s) \
-                     ({sigma} ⋢ {pi})"
+                    "the variable bound at multiplicity {pi} (of type {:?}) is used \
+                     {sigma} time(s) ({sigma} ⋢ {pi})",
+                    quote(n, dom)
                 ));
             }
             Ok(ub)
@@ -1477,8 +1478,9 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             let sigma_u = u_body.pop().expect("let body sees the bound variable");
             if !sigma_u.leq(*sigma) {
                 return Err(format!(
-                    "the let-bound variable at multiplicity {sigma} is used {sigma_u} \
-                     time(s) ({sigma_u} ⋢ {sigma})"
+                    "the let-bound variable at multiplicity {sigma} (of type {:?}) is \
+                     used {sigma_u} time(s) ({sigma_u} ⋢ {sigma})",
+                    quote(n, &vty)
                 ));
             }
             // result type = the body's type with the bound variable SUBSTITUTED by `e`
