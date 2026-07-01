@@ -22,10 +22,13 @@ while IFS= read -r line; do
   case "$line" in \#*) continue;; esac
   # corpus line: <file> [args...]
   set -- $line
+  RUSTREF=""
+  if [ "$1" = "R" ]; then RUSTREF=1; shift; fi
   f="$1"; shift
   id=$(echo "$f" | tr '/.' '__')
   exe="/tmp/coil-arm64-ref-$id"
-  if ! "$BIN" build "$f" -o "$exe" >/dev/null 2>"$REF/$id.buildlog"; then
+  RBIN="$BIN"; [ -n "$RUSTREF" ] && RBIN=./target/debug/coil
+  if ! "$RBIN" build "$f" -o "$exe" >/dev/null 2>"$REF/$id.buildlog"; then
     echo "BUILD FAIL: $f (see $REF/$id.buildlog)"; fail=1; continue
   fi
   cp "$exe" /tmp/coil-arm64-fixed-$id && out=$(/tmp/coil-arm64-fixed-$id "$@" </dev/null 2>"$REF/$id.stderr"; echo "EXIT:$?")

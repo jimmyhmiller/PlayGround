@@ -47,7 +47,9 @@
   [(name (slice u8)) (variants (ptr (ArrayList Variant))) (words i64)])
 (defstruct GSig      ; one callable (function or extern)
   [(name (slice u8)) (params (ptr (ArrayList Type))) (ret Type)
-   (variadic bool) (symidx i64)])
+   (variadic bool) (symidx i64)
+   (shim bool) (implsym i64)          ; :shim conventions (trampoline realization)
+   (shimregs (ptr (ArrayList i64))) (shimret i64)])
 (defstruct GLoop
   [(label (Option (slice u8))) (contlabel i64) (breaklabel i64)
    (resslot i64) (resty Type) (has_res bool)])
@@ -85,7 +87,8 @@
    (dwfns (ArrayList DwFn))
    (dwvars (ArrayList DwVar))
    (dwevs (ArrayList DwLineEv))
-   (dwcursrc i64) (dwcurlo i64)])
+   (dwcursrc i64) (dwcurlo i64)
+   (convs (ptr (ArrayList Convention)))])
 
 ; hard error helper — no silent fallbacks anywhere in this backend.
 (defn cga-fail [(msg (slice u8))] (-> i64)
@@ -443,6 +446,10 @@
             (store! (field e ret) (load (field ed ret)))
             (store! (field e variadic) (load (field ed variadic)))
             (store! (field e symidx) sym)
+            (store! (field e shim) false)
+            (store! (field e implsym) -1)
+            (store! (field e shimregs) (box-al [i64] (load (field g a)) (al-new [i64] (load (field g a)))))
+            (store! (field e shimret) 0)
             ; duplicate extern declarations across modules are expected; keep the first
             (if (icmp-lt (g-sig-idx g (load (field ed name))) 0)
                 (al-push! (mut (field g sigs)) (load e))
@@ -465,9 +472,56 @@
             (store! (field e ret) (load (field fd ret)))
             (store! (field e variadic) false)
             (store! (field e symidx) sym)
+            (store! (field e shim) false)
+            (store! (field e implsym) -1)
+            (store! (field e shimregs) (box-al [i64] (load (field g a)) (al-new [i64] (load (field g a)))))
+            (store! (field e shimret) 0)
+            ; a :shim-convention function is realized as <name>__impl + trampoline
+            (let [ci (g-conv-idx g (load (field fd cc)))]
+              (if (icmp-ge ci 0)
+                  (match-else (load (field (al-at [Convention] (load (field g convs)) ci) lowering))
+                    (LShim []
+                      (let [cv (al-at [Convention] (load (field g convs)) ci)
+                            (mut regs) (al-new [i64] (load (field g a)))
+                            prs (load (field cv params))
+                            npr (al-len [(slice u8)] (load prs))
+                            (mut j) 0]
+                        (loop (if (icmp-ge (load j) npr) (break)
+                          (do (al-push! (mut regs) (g-parse-xreg g (al-get [(slice u8)] (load prs) (load j))))
+                              (store! j (iadd (load j) 1)))))
+                        (store! (field e shim) true)
+                        (store! (field e shimregs) (box-al [i64] (load (field g a)) (load regs)))
+                        (store! (field e shimret)
+                          (match (load (field cv ret))
+                            (Some [r] (g-parse-xreg g r))
+                            (None [] 0)))
+                        (store! (field e implsym)
+                          (mobj-add-sym! (mut (field g obj))
+                            (g-mangle g (sconcat (load (field g a)) (load (field fd name)) "__impl"))
+                            (load (field g text)) 0 false))
+                        0))
+                    (_ 0))
+                0))
             (al-push! (mut (field g sigs)) (load e)))
           (store! i (iadd (load i) 1))))))
   0)
+
+(defn g-conv-idx [(g (ptr Cga)) (nm (slice u8))] (-> i64)
+  (let [cs (load (field g convs)) n (al-len [Convention] (load cs)) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-at [Convention] cs (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; "x20" -> 20 (shim conventions name GPRs as xN; validated by the checker)
+(defn g-parse-xreg [(g (ptr Cga)) (r (slice u8))] (-> i64)
+  (if (or (str-eq r "lr") (str-eq r "x30")) 30
+    (if (icmp-ne (cast i64 (slice-get r 0)) 120)
+        (cga-fail2 "shim register is not an x-register: " r)
+      (let [v (str->i64 (subslice r 1 (slice-len r)))]
+        (if (or (icmp-ge v 28) (and (icmp-ge v 16) (icmp-le v 17)))
+            (cga-fail2 "shim register collides with backend-reserved registers: " r)
+          v)))))
 
 ; set a defined symbol's section offset once known (function start / global).
 (defn mobj-set-sym! [(o (ptr MObj)) (idx i64) (sect i64) (off i64)] (-> i64)
@@ -1506,7 +1560,13 @@
             (if (icmp-eq op 1) (a64-w! (mut s) (a64-fsub fty 0 0 1))
               (if (icmp-eq op 2) (a64-w! (mut s) (a64-fmul fty 0 0 1))
                 (if (icmp-eq op 3) (a64-w! (mut s) (a64-fdiv fty 0 0 1))
-                  (cga-fail "unsupported float binary op (frem?)")))))
+                  (if (icmp-eq op 4)
+                      ; frem: libm fmod(d0,d1) — args are already in d0/d1
+                      (let [fsym (g-runtime-sym! g (if (icmp-eq fb 4) "_fmodf" "_fmod"))]
+                        (mobj-add-reloc! (mut (field g obj)) (load (field g text))
+                                         (a64-off (mut s)) fsym (reloc-branch26) true 2)
+                        (a64-w! (mut s) (a64-bl-raw)))
+                    (cga-fail "unsupported float binary op"))))))
           (let [slot (slot-for-ty! g t)]
             (emit-store-fp! g 0 28 slot fb)
             (mk-aval 1 slot (av-ty lav))))
@@ -1843,9 +1903,34 @@
         (do (al-push! (mut avs) (emit-expr g (al-at [Expr] args (load i))))
             (store! i (iadd (load i) 1)))))
       (store! dummy (mk-aval 0 0 (TInt 64 true)))
-      (emit-call! g (load (field e symidx)) dummy
-                  (load (field e params)) (load (field e variadic)) (load (field e ret))
-                  (box-al [AVal] (load (field g a)) (load avs))))))
+      (if (load (field e shim))
+          ; register-constrained call: args in the convention's registers,
+          ; result read back from its return register.
+          (let [s (field g asm)
+                regs (load (field e shimregs))
+                (mut slots) (al-new [i64] (load (field g a)))
+                (mut j) 0]
+            (loop (if (icmp-ge (load j) n) (break)
+              (do (al-push! (mut slots) (av-slot! g (al-get [AVal] (load avs) (load j))))
+                  (store! j (iadd (load j) 1)))))
+            (store! j 0)
+            (loop (if (icmp-ge (load j) n) (break)
+              (do (emit-load-int! g (al-get [i64] (load regs) (load j)) 28
+                                  (al-get [i64] (load slots) (load j)) 8 false)
+                  (store! j (iadd (load j) 1)))))
+            (mobj-add-reloc! (mut (field g obj)) (load (field g text))
+                             (a64-off (mut s)) (load (field e symidx)) (reloc-branch26) true 2)
+            (a64-w! (mut s) (a64-bl-raw))
+            (let [retp (alloc-stack Type)]
+              (store! retp (load (field e ret)))
+              (if (match-else (load (field e ret)) (TVoid [] true) (_ false))
+                  (mk-aval 0 0 (TInt 64 true))
+                (let [slot (slot-for-ty! g retp)]
+                  (emit-store-int! g (load (field e shimret)) 28 slot (ty-size g retp))
+                  (mk-aval 1 slot (load (field e ret)))))))
+        (emit-call! g (load (field e symidx)) dummy
+                    (load (field e params)) (load (field e variadic)) (load (field e ret))
+                    (box-al [AVal] (load (field g a)) (load avs)))))))
 
 ; ---- bit-struct access --------------------------------------------------------
 ; layout info for a bit-struct: backing width + per-field low-bit offsets.
@@ -2556,8 +2641,12 @@
         a (load (field g a))
         si (g-sig-idx g (load (field fd name)))]
     (if (icmp-lt si 0) (cga-fail2 "emit-func!: unregistered function " (load (field fd name))) 0)
-    ; pin the symbol to the function start
-    (mobj-set-sym! (mut (field g obj)) (load (field (al-at [GSig] (field g sigs) si) symidx))
+    ; pin the symbol to the function start (a :shim function's BODY is the
+    ; __impl symbol; the Coil name gets the trampoline emitted afterwards)
+    (mobj-set-sym! (mut (field g obj))
+                   (if (load (field (al-at [GSig] (field g sigs) si) shim))
+                       (load (field (al-at [GSig] (field g sigs) si) implsym))
+                     (load (field (al-at [GSig] (field g sigs) si) symidx)))
                    (load (field g text)) (a64-off (mut s)))
     (store! (field g fnstart) (a64-off (mut s)))
     ; line row at the function entry (its defn line) — the prologue-end row
@@ -2741,6 +2830,31 @@
                 (store! (field df varlo) dwvarlo)
                 (store! (field df varhi) (al-len [DwVar] (load (field g dwvars))))
                 (al-push! (mut (field g dwfns)) (load df)))
+              ; :shim: the Coil-named symbol is a trampoline that moves the
+              ; convention's registers into the C argument registers, calls
+              ; __impl, and moves x0 back into the convention's return register.
+              (if (load (field (al-at [GSig] (field g sigs) si) shim))
+                  (let [e (al-at [GSig] (field g sigs) si)
+                        regs (load (field e shimregs))
+                        nr (al-len [i64] (load regs))]
+                    (mobj-set-sym! (mut (field g obj)) (load (field e symidx))
+                                   (load (field g text)) (a64-off (mut s)))
+                    (a64-w! (mut s) (a64-stp-pre 29 30 31 -16))
+                    (a64-w! (mut s) (a64-mov-sp 29 31))
+                    (let [(mut j) 0]
+                      (loop (if (icmp-ge (load j) nr) (break)
+                        (do (a64-w! (mut s) (a64-mov-reg (load j) (al-get [i64] (load regs) (load j))))
+                            (store! j (iadd (load j) 1))))))
+                    (mobj-add-reloc! (mut (field g obj)) (load (field g text))
+                                     (a64-off (mut s)) (load (field e implsym)) (reloc-branch26) true 2)
+                    (a64-w! (mut s) (a64-bl-raw))
+                    (if (icmp-ne (load (field e shimret)) 0)
+                        (a64-w! (mut s) (a64-mov-reg (load (field e shimret)) 0))
+                      0)
+                    (a64-w! (mut s) (a64-ldp-post 29 30 31 16))
+                    (a64-w! (mut s) (a64-ret))
+                    0)
+                0)
               0)))))))
   0)
 
@@ -2772,6 +2886,7 @@
     (store! (field g dwevs) (al-new [DwLineEv] a))
     (store! (field g dwcursrc) -1)
     (store! (field g dwcurlo) -1)
+    (store! (field g convs) (load (field mp conventions)))
     ; sections: ordinals are 1-based in push order
     (store! (field g text)     (mobj-add-sect! (mut (field g obj)) "__TEXT" "__text" 2 2147484672))
     (store! (field g constsec) (mobj-add-sect! (mut (field g obj)) "__TEXT" "__const" 3 0))

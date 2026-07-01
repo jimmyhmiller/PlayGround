@@ -1,8 +1,8 @@
 # Behavioral corpus for the arm64 backend gate: <file> [argv...]
 # Programs must be deterministic (verified by running twice) and non-interactive.
-# everything.coil + shim.coil are excluded for now: the self-host LLVM backend
-# cannot build them either (inline-asm streamer limitation) — revisit once the
-# arm64 backend supports :shim conventions natively.
+# Lines prefixed `R ` snapshot their reference behavior from the RUST compiler:
+# the self-host LLVM backend cannot build them (inline-asm streamer limitation)
+# but the arm64 backend assembles :shim trampolines natively.
 examples/allocation.coil
 examples/allocators.coil
 examples/args.coil alpha beta gamma
@@ -45,3 +45,5 @@ examples/threads.coil
 examples/try.coil
 examples/vector.coil
 examples/widths.coil
+R examples/everything.coil
+R examples/shim.coil

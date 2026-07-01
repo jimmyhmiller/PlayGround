@@ -15,6 +15,8 @@ while IFS= read -r line; do
   [ -z "$line" ] && continue
   case "$line" in \#*) continue;; esac
   set -- $line
+  RUSTREF=""
+  if [ "$1" = "R" ]; then RUSTREF=1; shift; fi
   f="$1"; shift
   id=$(echo "$f" | tr '/.' '__')
   exe="/tmp/coil-arm64-gate-$id"
