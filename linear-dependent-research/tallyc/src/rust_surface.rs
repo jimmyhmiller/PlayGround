@@ -765,6 +765,24 @@ struct Rec<'a> {
     /// recursive call be INFERRED (e.g. as a `let` right-hand side), not only
     /// checked.
     result_ty: Value,
+    /// CONVOY-FOLD mode: the recursive call's varying arguments are exactly the
+    /// convoy's index-dependent deps, and the IH is a FUNCTION of them (the
+    /// dependent motive abstracts them) — apply it, checked against the IH's
+    /// refined Π domains.
+    fold: Option<&'a FnFold>,
+}
+
+/// A structurally-descending recursive fn whose non-scrutinee arguments vary
+/// — legal when they are exactly the scrutinee's index-dependent values (the
+/// convoy deps): the dependent motive abstracts them, so the eliminator's IH
+/// is a function of them and the recursion is a kernel-checked TOTAL fold.
+struct FnFold {
+    fnname: String,
+    /// position of the scrutinee among the EXPLICIT parameters.
+    scrut_pos: usize,
+    /// explicit-argument positions of the convoy deps, in motive dep order.
+    dep_args: Vec<usize>,
+    explicit_params: Vec<String>,
 }
 
 /// A typing context: each bound variable's name and type (as a Value).
@@ -1046,6 +1064,46 @@ impl Elab {
             // binder `v` whose induction hypothesis is in scope as `r.fields[v]`.
             Tm::Var(v) if r.fields.contains_key(v) => {
                 let ih = Term::Var(cx.debruijn(&r.fields[v]).expect("ih var in scope"));
+                if let Some(fo) = r.fold {
+                    // CONVOY FOLD: apply the IH to the arguments at the DEP
+                    // positions, checked against its (per-arm REFINED) Π
+                    // domains. Every other non-scrutinee argument must be
+                    // passed VERBATIM — it is captured, not threaded, so a
+                    // changed value there would be silently dropped (the
+                    // 1a′ value-correctness guard).
+                    for (i, a) in args.iter().enumerate() {
+                        if i == r.scrut_pos || fo.dep_args.contains(&i) {
+                            continue;
+                        }
+                        let verbatim = matches!(a, Tm::Var(av)
+                            if Some(av.as_str()) == fo.explicit_params.get(i).map(|p| p.as_str()));
+                        if !verbatim {
+                            return Err(format!(
+                                "recursive call to `{}`: argument #{} must be passed                                  through unchanged (only the index-dependent arguments                                  the match refines may vary)",
+                                r.fnname,
+                                i + 1
+                            ));
+                        }
+                    }
+                    let mut t = ih;
+                    let mut ty = cx.var_type(&r.fields[v]).expect("ih type in scope");
+                    for p in &fo.dep_args {
+                        let a = args.get(*p).ok_or_else(|| {
+                            format!("recursive call to `{}` has too few arguments", r.fnname)
+                        })?;
+                        let Value::VPi(_, dom, cod) = ty else {
+                            return Err(format!(
+                                "recursive call to `{}`: the induction hypothesis accepts                                  fewer varying arguments than supplied",
+                                r.fnname
+                            ));
+                        };
+                        let ea = self.check(a, &dom, cx, Some(r))?;
+                        let va = self.eval(cx.len(), &ea);
+                        t = Term::App(Box::new(t), Box::new(ea));
+                        ty = cod.apply(va);
+                    }
+                    return Ok(t);
+                }
                 match r.acc_tys {
                     // verbatim-arg fold: the IH IS the recursive result (the verdict has
                     // guaranteed every other argument is passed verbatim).
@@ -1562,7 +1620,7 @@ impl Elab {
         match &e_ty {
             Value::VData(d, a) => {
                 let a = a.clone();
-                self.elab_nested_match(&e_term, d, &a, arms, expected, cx, rec)
+                self.elab_nested_match(&e_term, d, &a, arms, expected, cx, rec, None)
             }
             // a nested/expression case split on a built-in `Nat` ⇒ a non-recursive
             // `NatCase` (no induction hypothesis); the constant motive is the
@@ -1623,7 +1681,7 @@ impl Elab {
             ));
         }
         let arm = Arm { ctor: decl.ctors[0].name.clone(), binders: names.to_vec(), pats: vec![], body: body.clone() };
-        self.elab_nested_match(&e_term, &dname, &dargs, std::slice::from_ref(&arm), expected, cx, rec)
+        self.elab_nested_match(&e_term, &dname, &dargs, std::slice::from_ref(&arm), expected, cx, rec, None)
     }
 
     /// A `match`/`let` in CHECK mode. The motive is normally the constant
@@ -1632,7 +1690,8 @@ impl Elab {
     /// variables' types depend on that index, the CONVOY (docs/CONVOY_HANDOFF.md;
     /// "the view from the left") abstracts those dependents into the motive so
     /// each arm re-binds them at their per-constructor REFINED types.
-    fn elab_nested_match(&self, e_term: &Term, dname: &str, dargs: &[Value], arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn elab_nested_match(&self, e_term: &Term, dname: &str, dargs: &[Value], arms: &[Arm], expected: &Value, cx: &Cx, rec: Option<&Rec>, fold: Option<&FnFold>) -> Result<Term, String> {
         let decl = self.rc.data(dname).unwrap().clone();
         let np = decl.params.len();
         let ni = decl.indices.len();
@@ -1668,7 +1727,7 @@ impl Elab {
         // reference, which for a LINEAR recursive field would re-traverse a
         // resource the body consumes directly. Only a genuine structural fold
         // (`rec` Some) needs `Elim`.
-        let as_case = self.in_fix.get() || rec.is_none();
+        let as_case = self.in_fix.get() || (rec.is_none() && fold.is_none());
         let mut methods = Vec::with_capacity(decl.ctors.len());
         for (ci, ctor) in decl.ctors.iter().enumerate() {
             let info = &self.ctor_info[&ctor.name];
@@ -1768,11 +1827,27 @@ impl Elab {
                     res_v
                 }
             };
+            // CONVOY FOLD: bind this arm's recursive fields to their IHs so a
+            // self-call maps to `IH(new-deps)` (see `ih_for`'s fold branch).
+            let mut arm_fields: HashMap<String, String> = HashMap::new();
+            if fold.is_some() {
+                for (kk, &fi) in rec_fields.iter().enumerate() {
+                    arm_fields.insert(binder_names[fi].clone(), format!("$ih{kk}"));
+                }
+            }
+            let arm_rec = fold.map(|fo| Rec {
+                fnname: &fo.fnname,
+                scrut_pos: fo.scrut_pos,
+                fields: &arm_fields,
+                acc_tys: None,
+                result_ty: arm_expected.clone(),
+                fold: Some(fo),
+            });
             // USE-SITE LINEARITY (see `rebind_linear_fields`): re-bind each linear
             // field at 1 so a hidden `Own` (incl. a generic instantiated at `Own`)
             // can't be used twice in a nested/expression `match` either.
             let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc, &self.pess_linear.borrow(), &arm_cx.names, n);
-            let mut body = self.check(&arm_body, &arm_expected, &arm_cx, rec)?;
+            let mut body = self.check(&arm_body, &arm_expected, &arm_cx, arm_rec.as_ref().or(rec))?;
             for _ in 0..(nlam + ndep) {
                 body = Term::Lam(Box::new(body));
             }
@@ -1855,7 +1930,13 @@ impl Elab {
             if l == lvl || Some(l) == scrut_lvl {
                 continue;
             }
-            if !referenced.contains(&cx.names[l]) {
+            // the referenced-names filter skips deps no arm uses (abstracting an
+            // already-consumed linear value would double-use it) — but an
+            // INDUCTION HYPOTHESIS binder (`$ih…`, a nested match inside a
+            // convoy fold) is referenced only through the recursive-call
+            // mapping, which the surface names can't show: always a candidate
+            // (it is a function — never linear, harmless if unused).
+            if !referenced.contains(&cx.names[l]) && !cx.names[l].starts_with("$ih") {
                 continue;
             }
             let ty = dep::quote_at(n, &cx.types[l]);
@@ -3145,7 +3226,7 @@ impl Elab {
         let s_expected = p_at(Value::VSuc(Box::new(k_val)));
         let mut fields: HashMap<String, String> = HashMap::new();
         fields.insert(pred_name, ih_name);
-        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: p_at(Value::VNeu(dep::Neutral::NVar(succ_cx.len()))) };
+        let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: p_at(Value::VNeu(dep::Neutral::NVar(succ_cx.len()))) , fold: None };
         let body = self.check(&succ_arm.body, &s_expected, &succ_cx, Some(&r))?;
         let s_method = Term::Lam(Box::new(Term::Lam(Box::new(body))));
 
@@ -3327,7 +3408,7 @@ impl Elab {
         }
         let mut fields: HashMap<String, String> = HashMap::new();
         fields.insert(pred_name, ih_name);
-        let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals), result_ty: r_val.clone() };
+        let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals), result_ty: r_val.clone() , fold: None };
         let mut s_method = self.check(&succ_arm.body, &r_val, &succ_cx, Some(&r))?;
         for _ in 0..k {
             s_method = Term::Lam(Box::new(s_method)); // a_K … a₁
@@ -3668,7 +3749,7 @@ impl Elab {
             }
             let expected = dep::eval_rc(&self.rc, &neutral_env(arm_cx.len()), &ret_ty_tm);
 
-            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: expected.clone() };
+            let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: expected.clone() , fold: None };
             // USE-SITE LINEARITY (the convergent, whack-a-mole-proof check): re-bind
             // each EXPLICIT field whose INSTANTIATED type is linear via `let f = f`, so
             // the let-binder rule binds it at `1` and the kernel enforces exactly-once
@@ -4281,6 +4362,9 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
 
     let mut out_defs = Vec::new();
     let mut totality_status: Vec<(String, bool, Option<String>)> = Vec::new();
+    // fns whose recursion was certified by a kernel-checked CONVOY FOLD after the
+    // analyzer (conservatively) declined them.
+    let mut promoted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for it in &items {
         if let Item::Fn(name, params, body, annot) = it {
             let sig = sigs.get(name).ok_or_else(|| format!("`fn {name}` has no type signature"))?.clone();
@@ -4313,10 +4397,37 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             } else {
                 structural
             };
-            if *annot == Some(TotAnnot::Total) {
+            // CONVOY-FOLD PROMOTION: a structurally-descending recursion whose
+            // varying arguments are the scrutinee's INDEX-DEPENDENT values was
+            // declined only for want of a lowering — try the dependent-motive
+            // eliminator; a kernel-checked success IS the totality certificate.
+            // Never attempted under `%partial` (that forces `Fix`).
+            let promoted_term = if !structural.is_total() && *annot != Some(TotAnnot::Partial) {
+                elab.try_convoy_fold(name, params, body, &ty_term, &full_names, &full_tys, &ret)
+            } else {
+                None
+            };
+            if promoted_term.is_some() {
+                promoted.insert(name.clone());
+            }
+            if *annot == Some(TotAnnot::Total) && promoted_term.is_none() {
                 if let Some(reason) = full.reason() {
-                    return Err(format!("`%total fn {name}` is not total: {reason}"));
+                    // a caller of a PROMOTED fn: its analyzer verdict predates the
+                    // promotion — treat a direct calls-X reason as satisfied.
+                    let excused = reason
+                        .strip_prefix("calls `")
+                        .and_then(|r| r.split('`').next())
+                        .is_some_and(|callee| promoted.contains(callee));
+                    if !excused {
+                        return Err(format!("`%total fn {name}` is not total: {reason}"));
+                    }
                 }
+            }
+            if let Some(t) = &promoted_term {
+                totality_status.push((name.clone(), true, None));
+                elab.defs.insert(name.clone(), (t.clone(), ty_term.clone()));
+                out_defs.push((name.clone(), ty_term, t.clone()));
+                continue;
             }
             totality_status.push((
                 name.clone(),
@@ -4378,10 +4489,100 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         }
     }
 
+    // the analyzer's `full` verdicts predate any convoy-fold promotions: flip
+    // the now-stale "calls `X`, which is not total" reasons (to a fixpoint, so
+    // chains of callers promote too).
+    loop {
+        let total_now: std::collections::HashSet<String> = totality_status
+            .iter()
+            .filter(|(_, t, _)| *t)
+            .map(|(n, _, _)| n.clone())
+            .collect();
+        let mut changed = false;
+        for entry in totality_status.iter_mut() {
+            if entry.1 {
+                continue;
+            }
+            let stale = entry.2.as_deref().is_some_and(|r| {
+                r.strip_prefix("calls `")
+                    .and_then(|x| x.split('`').next())
+                    .is_some_and(|callee| total_now.contains(callee))
+            });
+            if stale {
+                entry.1 = true;
+                entry.2 = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     Ok(Program { sig: (*elab.rc).clone(), defs: out_defs, totality: totality_status })
 }
 
 impl Elab {
+    /// Attempt the CONVOY-FOLD lowering for a structurally-descending recursion
+    /// whose non-scrutinee arguments vary (declined by the verdict as "not yet
+    /// lowerable"): if the varying arguments are exactly the scrutinee's
+    /// index-dependent deps, the dependent motive abstracts them and the
+    /// recursion is an ordinary eliminator — which the KERNEL RE-CHECKS here,
+    /// making success a genuine totality certificate. Any miss returns `None`
+    /// (the caller falls back to the honest `Fix` path unchanged).
+    fn try_convoy_fold(
+        &self,
+        name: &str,
+        params: &[String],
+        body: &Tm,
+        ty_term: &Term,
+        full_names: &[String],
+        full_tys: &[Ty],
+        ret: &Ty,
+    ) -> Option<Term> {
+        let Tm::Match(scrut, arms) = body else { return None };
+        if arms.is_empty() {
+            return None;
+        }
+        let mut fn_cx = Cx::default();
+        for (i, (pn, pty)) in full_names.iter().zip(full_tys).enumerate() {
+            let kty = self.elab_ty(pty, &full_names[..i]).ok()?;
+            let v = dep::eval_rc(&self.rc, &neutral_env(i), &kty);
+            fn_cx.push(pn.clone(), v);
+        }
+        let sidx = fn_cx.debruijn(scrut)?;
+        let Some(Value::VData(d, dargs)) = fn_cx.var_type(scrut) else { return None };
+        let decl = self.rc.data(&d)?.clone();
+        let ret_tm = self.elab_ty(ret, full_names).ok()?;
+        let expected = dep::eval_rc(&self.rc, &neutral_env(fn_cx.len()), &ret_tm);
+        let exp_tm = dep::quote_at(fn_cx.len(), &expected);
+        let cv = self.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, arms, &fn_cx)?;
+        if cv.deps.is_empty() {
+            return None;
+        }
+        let mut dep_args = Vec::new();
+        for dp in &cv.deps {
+            let pname = fn_cx.names.get(dp.lvl)?;
+            dep_args.push(params.iter().position(|p| p == pname)?);
+        }
+        let fold = FnFold {
+            fnname: name.to_string(),
+            scrut_pos: params.iter().position(|p| p == scrut)?,
+            dep_args,
+            explicit_params: params.to_vec(),
+        };
+        let body_t = self
+            .elab_nested_match(&Term::Var(sidx), &d, &dargs, arms, &expected, &fn_cx, None, Some(&fold))
+            .ok()?;
+        let mut term = body_t;
+        for _ in 0..full_names.len() {
+            term = Term::Lam(Box::new(term));
+        }
+        // the un-fakeable gate: only a kernel-checked fold is a certificate.
+        dep::check_closed_in((*self.rc).clone(), &term, ty_term).ok()?;
+        Some(term)
+    }
+
     /// Elaborate one `fn`'s body to its final definition term (the pass-D
     /// per-function work, factored out so the linear-capability check can run it
     /// a second time pessimistically). Inserts nothing; the caller registers the

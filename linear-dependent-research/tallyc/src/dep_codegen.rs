@@ -126,6 +126,7 @@ struct DepCg<'c, 'a> {
     /// `NatElim`, the IH (at de Bruijn LEVEL `level`) is the recursive fold on the
     /// predecessor `k`; `App(ih, accs…)` compiles to a call `func(k, accs…)`.
     acc_ih_selves: RefCell<Vec<AccIhSelf<'c>>>,
+    elim_fold_ihs: RefCell<Vec<ElimFoldIh<'c>>>,
 }
 
 struct FixSelf<'c> {
@@ -144,6 +145,18 @@ struct AccIhSelf<'c> {
     ih_level: usize,
     func: FunctionValue<'c>,
     k_level: usize,
+}
+
+/// A CONVOY-FOLD induction hypothesis (a boxed eliminator whose motive
+/// Π-abstracts the index-dependent deps): `ih(deps…)` compiles to
+/// `func(field, deps…, live…)`. The recursive FIELD and the captured live
+/// slots are identified by env LEVEL so they thread through nested helpers.
+struct ElimFoldIh<'c> {
+    ih_level: usize,
+    func: FunctionValue<'c>,
+    field_level: usize,
+    live_idx: Vec<usize>,
+    ndep: usize,
 }
 
 /// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
@@ -263,6 +276,44 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 // on the predecessor `k`, with `k` prepended to the accumulators.
                 if let Term::Var(i) = strip_ann(head) {
                     let lvl = env.len() - 1 - *i;
+                    // a CONVOY-FOLD IH applied to its deps: recurse on the field.
+                    let ef = self
+                        .elim_fold_ihs
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|e| e.ih_level == lvl)
+                        .map(|e| (e.func, e.field_level, e.live_idx.clone(), e.ndep));
+                    if let Some((func, field_level, live_idx, ndep)) = ef {
+                        if args.len() != ndep {
+                            return Err(format!(
+                                "convoy-fold recursive call: expected {ndep} varying                                  argument(s), got {}",
+                                args.len()
+                            ));
+                        }
+                        let fieldv = env[field_level]
+                            .ok_or("convoy-fold: the recursive field was erased")?;
+                        let mut ca: Vec<inkwell::values::BasicMetadataValueEnum> =
+                            vec![fieldv.into()];
+                        for a in &args {
+                            ca.push(self.compile(f, env, a)?.into());
+                        }
+                        for li in live_idx {
+                            ca.push(
+                                env[li]
+                                    .ok_or("convoy-fold: a captured value was erased")?
+                                    .into(),
+                            );
+                        }
+                        return Ok(self
+                            .builder
+                            .build_call(func, &ca, "foldih.call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_int_value());
+                    }
                     // copy the lookup OUT of the borrow before compiling args (which may
                     // re-enter and borrow `acc_ih_selves` again).
                     let ih_hit = self
@@ -327,6 +378,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         );
                     }
                     Term::Elim(d, m, methods, sc) => {
+                        // methods that USE their induction hypotheses are a real
+                        // recursive fold — deps vary per level, so they must be
+                        // threaded as parameters, not substituted in.
+                        if self.elim_methods_use_ih(d, methods, args.len())? {
+                            return self.compile_elim_dep_fold(f, env, d, methods, sc, &args);
+                        }
                         let new = self.commute_apply_into_methods(d, methods, &args, true)?;
                         return self.compile(
                             f,
@@ -388,6 +445,202 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Const(c) => self.compile_postulate(f, env, c, &[]),
             other => Err(format!("not a runtime value: {other:?}")),
         }
+    }
+
+    /// Does any method of this eliminator REFERENCE one of its own induction-
+    /// hypothesis binders? (Method shape: `λ^nargs. λ^nrec. λ^ndep. body`; the IH
+    /// binders sit between the fields and the deps.)
+    fn elim_methods_use_ih(&self, data: &str, methods: &[Term], ndep: usize) -> Result<bool, String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("elim on unknown datatype `{data}`"))?;
+        for (ci, ctor) in decl.ctors.iter().enumerate() {
+            let lay = ctor_layout(self.sig, data, &ctor.name)?;
+            let nrec = lay.arg_recursive.iter().filter(|b| **b).count();
+            if nrec == 0 {
+                continue;
+            }
+            let nargs = ctor.args.len();
+            let mut body = strip_ann(&methods[ci]);
+            let mut peeled = 0;
+            while peeled < nargs + nrec + ndep {
+                match body {
+                    Term::Lam(inner) => {
+                        body = strip_ann(inner);
+                        peeled += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if peeled < nargs + nrec {
+                continue; // a refuted-arm sentinel — no IHs bound
+            }
+            let kdep = peeled - nargs - nrec;
+            // IH i has de Bruijn index kdep + (nrec-1-i) at the body's top.
+            let hit = std::cell::Cell::new(false);
+            crate::dep::map_vars(body, 0, &|i, depth| {
+                if i >= depth {
+                    let rel = i - depth;
+                    if rel >= kdep && rel < kdep + nrec {
+                        hit.set(true);
+                    }
+                }
+                Term::Var(i)
+            });
+            if hit.get() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// A CONVOY FOLD `(Elim …) dep₁ … dep_d` whose methods use their IHs: compile
+    /// to a native recursive helper `g(node, deps…, live…)` — a tag-switch whose
+    /// recursive calls (`ih(newdeps)`) descend on the matched field with the NEW
+    /// deps, threading the captured live environment unchanged. This is the exact
+    /// recursion a C programmer writes for the same dependent fold; the deps are
+    /// parameters because they legitimately VARY per level (substituting them, as
+    /// the commute does for non-recursive matches, would freeze them).
+    fn compile_elim_dep_fold(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        data: &str,
+        methods: &[Term],
+        scrut: &Term,
+        deps: &[&Term],
+    ) -> Result<IntValue<'c>, String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("elim on unknown datatype `{data}`"))?
+            .clone();
+        let nd = deps.len();
+        let scrut_val = self.compile(f, env, scrut)?;
+        let dep_vals: Vec<IntValue<'c>> =
+            deps.iter().map(|a| self.compile(f, env, a)).collect::<Result<_, _>>()?;
+        let live: Vec<(usize, IntValue<'c>)> =
+            env.iter().enumerate().filter_map(|(i, s)| s.map(|v| (i, v))).collect();
+        let live_idx: Vec<usize> = live.iter().map(|(i, _)| *i).collect();
+
+        let nparams = 1 + nd + live.len();
+        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            vec![self.i64t.into(); nparams];
+        let fname = self.fresh(&format!("tally_fold_{data}"));
+        let helper = self
+            .module
+            .add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
+
+        let saved = self.builder.get_insert_block().unwrap();
+        // inner env: the outer SHAPE with live slots bound to helper params, so
+        // every level-identified reference (markers, captured vars) threads.
+        let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
+        for (k, (i, _)) in live.iter().enumerate() {
+            inner_env[*i] =
+                Some(helper.get_nth_param((1 + nd + k) as u32).unwrap().into_int_value());
+        }
+        let node = helper.get_nth_param(0).unwrap().into_int_value();
+
+        let entry = self.ctx.append_basic_block(helper, "entry");
+        self.builder.position_at_end(entry);
+        let node_ptr = self.builder.build_int_to_ptr(node, self.ptr, "fold.node").unwrap();
+        let tag = self.load(node_ptr, 0, "fold.tag");
+        let default = self.ctx.append_basic_block(helper, "fold.default");
+        let arm_blocks: Vec<_> = decl
+            .ctors
+            .iter()
+            .map(|c| self.ctx.append_basic_block(helper, &format!("fold.{}", c.name)))
+            .collect();
+        let cases: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> = decl
+            .ctors
+            .iter()
+            .enumerate()
+            .map(|(ci, _)| (self.i64t.const_int(ci as u64, false), arm_blocks[ci]))
+            .collect();
+        self.builder.build_switch(tag, default, &cases).unwrap();
+        self.builder.position_at_end(default);
+        self.builder.build_unreachable().unwrap();
+
+        for (ci, ctor) in decl.ctors.iter().enumerate() {
+            self.builder.position_at_end(arm_blocks[ci]);
+            let lay = ctor_layout(self.sig, data, &ctor.name)?;
+            let mut menv = inner_env.clone();
+            for ai in 0..ctor.args.len() {
+                let v: Slot<'c> = lay.arg_slot[ai].map(|sl| self.load(node_ptr, sl, "fold.field"));
+                menv.push(v);
+            }
+            // IH markers: level-identified recursion points (no eager fold).
+            let mut nmarks = 0;
+            for ai in 0..ctor.args.len() {
+                if lay.arg_recursive[ai] {
+                    let field_level = inner_env.len() + ai;
+                    self.elim_fold_ihs.borrow_mut().push(ElimFoldIh {
+                        ih_level: menv.len(),
+                        func: helper,
+                        field_level,
+                        live_idx: live_idx.clone(),
+                        ndep: nd,
+                    });
+                    menv.push(None);
+                    nmarks += 1;
+                }
+            }
+            let nrec = nmarks;
+            // peel the method: fields + IHs strictly, then up to nd dep binders
+            // (a refuted-arm sentinel binds none).
+            let mut body = strip_ann(&methods[ci]);
+            for _ in 0..(ctor.args.len() + nrec) {
+                match body {
+                    Term::Lam(inner) => body = strip_ann(inner),
+                    _ => {
+                        return Err(format!(
+                            "convoy fold[{data}]: method for `{}` is not a {}-binder function",
+                            ctor.name,
+                            ctor.args.len() + nrec
+                        ))
+                    }
+                }
+            }
+            let mut kdep = 0;
+            while kdep < nd {
+                match body {
+                    Term::Lam(inner) => {
+                        body = strip_ann(inner);
+                        kdep += 1;
+                    }
+                    _ => break,
+                }
+            }
+            for j in 0..kdep {
+                menv.push(Some(
+                    helper.get_nth_param((1 + j) as u32).unwrap().into_int_value(),
+                ));
+            }
+            let result = self.compile(helper, &menv, body);
+            for _ in 0..nmarks {
+                self.elim_fold_ihs.borrow_mut().pop();
+            }
+            let result = result?;
+            self.builder.build_return(Some(&result)).unwrap();
+        }
+
+        self.builder.position_at_end(saved);
+        let mut ca: Vec<inkwell::values::BasicMetadataValueEnum> = vec![scrut_val.into()];
+        for v in &dep_vals {
+            ca.push((*v).into());
+        }
+        for (_, v) in &live {
+            ca.push((*v).into());
+        }
+        Ok(self
+            .builder
+            .build_call(helper, &ca, "fold.call")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_int_value())
     }
 
     /// Case-commuting conversion for a CONVOY application `(Case/Elim …) a₁ … a_k`:
@@ -1546,6 +1799,7 @@ fn build_module<'c>(
         fix_cache: RefCell::new(std::collections::HashMap::new()),
         fix_selves: RefCell::new(Vec::new()),
         acc_ih_selves: RefCell::new(Vec::new()),
+        elim_fold_ihs: RefCell::new(Vec::new()),
     };
     let result = cg.compile(f, &[], main)?;
     builder.build_return(Some(&result)).unwrap();

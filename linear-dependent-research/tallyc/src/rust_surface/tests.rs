@@ -1718,3 +1718,27 @@ fn surface_universe_levels() {
     let err = check_program(bad).err().expect("a Type-storing Type-0 enum must reject");
     assert!(err.iter().any(|e| e.contains("predicativity") || e.contains("universe") || e.contains("Type 1")), "got: {err:?}");
 }
+
+#[test]
+fn convoy_fold_certifies_lookup_total() {
+    // THE CONVOY FOLD: `lookup`'s recursion varies `i` — the analyzer declines
+    // it, but the varying argument is exactly the scrutinee's index-dependent
+    // value, so the dependent motive abstracts it and the recursion is a
+    // KERNEL-CHECKED eliminator: certified `%total` (and its callers with it).
+    let src = format!(
+        "{CONVOY_HDR}lookup : {{0 n : Nat}} -> Fin n -> Vec Nat n -> Nat\n\
+         %total fn lookup(i, env) {{ match env {{ Nil => exfalso(fzv(i)), Cons(v, rest) => match i {{ FZ => v, FS(j) => lookup(j, rest) }} }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("total lookup must certify: {e:?}"));
+    assert!(is_total(&prog, "lookup"), "lookup must be certified total via the convoy fold");
+    // red-team: varying an argument that is NOT index-dependent still falls back
+    // (the fold's verbatim guard rejects it; the fn stays honest %partial-style)
+    // — and `%total` on it is a hard error, not a silent acceptance.
+    let bad = format!(
+        "{CONVOY_HDR}wander : {{0 n : Nat}} -> Nat -> Vec Nat n -> Nat\n\
+         %total fn wander(acc, env) {{ match env {{ Nil => acc, Cons(v, rest) => wander(v, rest) }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&bad).is_err(), "a non-dep varying arg must not certify %total");
+}
