@@ -463,6 +463,15 @@
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
     (store! (field p source) source) (store! (field p ctxt) ctxt)
     (load p)))
+; Rebuild a Sexp of `kind` preserving `orig`'s full span (source+ctxt+lo+hi),
+; mirroring Rust `Sexp::new(kind, s.span)` — so the expander's non-macro
+; List/Vector reconstruction never drops source/ctxt.
+(defn mk-sexp-src [(kind SexpKind) (orig (ptr Sexp))] (-> Sexp)
+  (let [p (alloc-stack Sexp)]
+    (store! (field p kind) kind)
+    (store! (field p lo) (load (field orig lo))) (store! (field p hi) (load (field orig hi)))
+    (store! (field p source) (load (field orig source))) (store! (field p ctxt) (load (field orig ctxt)))
+    (load p)))
 
 ; ============================ numeric/string utils ===========================
 (defn f64-bits [(x f64)] (-> i64)
@@ -10390,12 +10399,30 @@
                       (if (str-eq mname "coil.core") (None [(slice u8)])
                         (let [core (imports-find impb "coil.core")]
                           (if (icmp-eq (cast i64 core) 0) (None [(slice u8)]) (macro-reexport-match core macros expb head a)))))))))))))
-(defn stamp-expansion [(s (ptr Sexp)) (lo i64) (hi i64)] (-> i64)
-  (if (icmp-lt (sx-lo (load s)) 0) (do (store! (field s lo) lo) (store! (field s hi) hi) 0) 0)
+; Tag every macro-synthesized (dummy-span) node with the expansion `ctxt`, located
+; at the call site. Non-dummy nodes (template literals, ~unquote-spliced caller
+; code) keep their own span. Faithful port of src/lib.rs::stamp_expansion.
+(defn stamp-expansion [(s (ptr Sexp)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (if (icmp-lt (sx-lo (load s)) 0)
+      (do (store! (field s source) source) (store! (field s lo) lo) (store! (field s hi) hi) (store! (field s ctxt) ctxt) 0) 0)
   (let [tg (sx-tag (load s))]
     (if (or (icmp-eq tg 6) (icmp-eq tg 7))
         (let [items (sx-items (load s)) n (sx-len items) (mut i) 0]
-          (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) lo hi) (store! i (iadd (load i) 1)))))) 0)) 0)
+          (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt) (store! i (iadd (load i) 1)))))) 0)) 0)
+; Find a function by name in `p` (for a macro's def-site span). Null if absent.
+(defn find-func-ptr [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (func-name (al-get [Func] (load fs) (load i))) name) (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn mk-expansion [(name (slice u8)) (cs i64) (cl i64) (ch i64) (cc i64) (ds i64) (dl i64) (dh i64) (dc i64) (parent i64)] (-> Expansion)
+  (let [p (alloc-stack Expansion)]
+    (store! (field p macro_name) name)
+    (store! (field p call_source) cs) (store! (field p call_lo) cl) (store! (field p call_hi) ch) (store! (field p call_ctxt) cc)
+    (store! (field p def_source) ds)  (store! (field p def_lo) dl)  (store! (field p def_hi) dh)  (store! (field p def_ctxt) dc)
+    (store! (field p parent) parent)
+    (load p)))
 (defn merge-structs-gen [(sub (ptr Program)) (gen (ptr (ArrayList StructDef))) (a (ptr Allocator))] (-> (ptr (ArrayList StructDef)))
   (let [base (load (field sub structs)) nb (al-len [StructDef] (load base)) (mut out) (al-new [StructDef] a) (mut i) 0]
     (loop (if (icmp-ge (load i) nb) (break) (do (al-push! (mut out) (al-get [StructDef] (load base) (load i))) (store! i (iadd (load i) 1)))))
@@ -10472,15 +10499,15 @@
 (defstruct ExpEnv
   [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
    (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
-(defn expand-calls-list [(items (ptr (ArrayList Sexp))) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+(defn expand-calls-list [(items (ptr (ArrayList Sexp))) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (let [a (load (field env a)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
-      (do (match (expand-calls (al-elem [Sexp] items (load i)) module env allfns gs gu depth)
+      (do (match (expand-calls (al-elem [Sexp] items (load i)) module env allfns gs gu depth (mut ls))
             (Err [d] (do (store! errf (Some d)) 0))
             (Ok [r] (do (al-push! (mut out) r) 0)))
           (store! i (iadd (load i) 1)))))
     (match (load errf) (Some [d] (Err [(ptr (ArrayList Sexp)) Diag] d)) (None [] (Ok [(ptr (ArrayList Sexp)) Diag] (box-al [Sexp] a (load out)))))))
-(defn expand-calls [(s (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64))] (-> (Result Sexp Diag))
+(defn expand-calls [(s (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result Sexp Diag))
   (let [a (load (field env a)) tg (sx-tag (load s))]
     (if (icmp-eq tg 6)
         (let [items (sx-items (load s)) headq (if (and (icmp-ge (sx-len items) 1) (icmp-eq (sx-tag (sx-at items 0)) 2)) (resolve-macro (sx-sval (sx-at items 0)) module (load (field env macros)) (load (field env impb)) (load (field env expb)) a) (None [(slice u8)]))]
@@ -10491,21 +10518,30 @@
                     (match (expand-macro (load (field env sub)) q (rest-from a items 1) allfns gs gu (load (field env impb)) (load (field env expb)) a)
                       (Err [d] (Err [Sexp Diag] d))
                       (Ok [outs]
-                        (let [op (box-sexp a outs)]
-                          (stamp-expansion op (sx-lo (load s)) (sx-hi (load s)))
-                          (expand-calls op module env allfns gs gu depth)))))))
+                        (let [op (box-sexp a outs)
+                              dfp (find-func-ptr (load (field env sub)) q)
+                              have-def (icmp-ne (cast i64 dfp) 0)
+                              def-src (if have-def (load (field dfp source)) -1)
+                              def-lo  (if have-def (load (field dfp lo)) -1)
+                              def-hi  (if have-def (load (field dfp hi)) -1)
+                              def-ctxt (if have-def (load (field dfp ctxt)) 0)
+                              exp (mk-expansion q (sx-source (load s)) (sx-lo (load s)) (sx-hi (load s)) (sx-ctxt (load s))
+                                                def-src def-lo def-hi def-ctxt (sx-ctxt (load s)))
+                              ctxt (add-expansion! (mut ls) exp)]
+                          (stamp-expansion op (sx-source (load s)) (sx-lo (load s)) (sx-hi (load s)) ctxt)
+                          (expand-calls op module env allfns gs gu depth (mut ls))))))))
             (None []
-              (match (expand-calls-list items module env allfns gs gu depth)
+              (match (expand-calls-list items module env allfns gs gu depth (mut ls))
                 (Err [d] (Err [Sexp Diag] d))
-                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp (KList outitems) (sx-lo (load s)) (sx-hi (load s)))))))))
+                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KList outitems) s)))))))
         (if (icmp-eq tg 7)
-            (match (expand-calls-list (sx-items (load s)) module env allfns gs gu depth)
+            (match (expand-calls-list (sx-items (load s)) module env allfns gs gu depth (mut ls))
               (Err [d] (Err [Sexp Diag] d))
-              (Ok [outitems] (Ok [Sexp Diag] (mk-sexp (KVec outitems) (sx-lo (load s)) (sx-hi (load s))))))
+              (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KVec outitems) s))))
             (Ok [Sexp Diag] (load s))))))
-(defn expand-top-form [(f (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64))] (-> (Result Sexp Diag))
+(defn expand-top-form [(f (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result Sexp Diag))
   (if (or (is-meta-form f) (is-comptime-defn f module (load (field env comptime)) (load (field env a)))) (Ok [Sexp Diag] (load f))
-    (expand-calls f module env allfns gs gu depth)))
+    (expand-calls f module env allfns gs gu depth (mut ls))))
 (defn qualify-structdefs! [(p (ptr Program)) (module (Option (slice u8))) (gs (ptr SBoxStruct)) (a (ptr Allocator))] (-> i64)
   (let [ss (load (field p structs)) n (al-len [StructDef] (load ss)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -10604,7 +10640,7 @@
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nforms)) (break)
       (do (let [tf (alloc-stack TaggedForm)] (store! tf (al-get [TaggedForm] (load out-forms) (load i)))
             (let [module (load (field tf module))]
-              (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv))
+              (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv) (mut s))
                 (Err [d] (do (store! errf (Some d)) 0))
                 (Ok [outf]
                   (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf))))))
