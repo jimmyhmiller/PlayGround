@@ -1,0 +1,5 @@
+error: import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved
+  --> selfhost/oracle/diag/inputs/13-import-no-module.coil:1:1
+  |
+1 | (import "x.coil" :use *)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^

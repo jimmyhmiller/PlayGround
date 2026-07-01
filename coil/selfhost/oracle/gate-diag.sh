@@ -55,7 +55,7 @@ if [ -f "$BLIST" ]; then
     o="$TMPD/$(basename "$f" .coil)"
     "$BIN" ${COIL_SELF_ARGS:-} build "$f" -o "$o" > "$TMPD/raw" 2>&1
     code=$?
-    got=$(sed "s|$ROOT/||g" "$TMPD/raw")
+    got=$(sed "s|$ROOT/||g; s|$TMPD/||g" "$TMPD/raw")
     want=$(cat "$ref")
     wantec=$(cat "$refec" 2>/dev/null)
     if [ "$got" = "$want" ] && [ "$code" = "$wantec" ]; then

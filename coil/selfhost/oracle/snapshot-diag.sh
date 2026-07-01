@@ -63,7 +63,9 @@ while IFS= read -r f; do
   # `|| code=$?` captures the (nonzero) exit without tripping `set -e`.
   code=0
   "$COIL" build "$f" -o "$o" > "$TMPD/raw" 2>&1 || code=$?
-  sed "s|$ROOT/||g" "$TMPD/raw" > "$out"
+  # Strip $ROOT and the scratch dir so a build-SUCCESS `wrote <TMPD>/<name>` line
+  # (and any object path) is location-independent and reproducible in the gate.
+  sed "s|$ROOT/||g; s|$TMPD/||g" "$TMPD/raw" > "$out"
   echo "$code" > "$ec"
   b=$((b+1))
 done < "$BLIST"
