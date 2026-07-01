@@ -1,0 +1,128 @@
+; selfhost/src/diag.coil — self-host Coil compiler, diag module.
+(module diag)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+(import "loader.coil" :use *)
+(import "parser.coil" :use *)
+
+(defn dump-error [(w (ptr Writer)) (d (ptr Diag))] (-> i64)
+  (ps w "(error") (dump-span w (load (field d source)) (load (field d lo)) (load (field d hi)) (load (field d ctxt)))
+  (ps w " \"") (esc-write w (load (field d msg))) (ps w "\")"))
+
+(defn sm-src-text [(s (mut LS)) (id i64)] (-> (Option (slice u8)))
+  (if (or (icmp-lt id 0) (icmp-ge id (al-len [Source] (load (field s sources))))) (None [(slice u8)])
+    (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load (field s sources)) id)) (Some (load (field sp text))))))
+(defn sm-src-name [(s (mut LS)) (id i64)] (-> (slice u8))
+  (if (or (icmp-lt id 0) (icmp-ge id (al-len [Source] (load (field s sources))))) "<source>"
+    (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load (field s sources)) id)) (load (field sp name)))))
+(defn sm-exp [(s (mut LS)) (ctxt i64)] (-> (Option Expansion))
+  (if (or (icmp-le ctxt 0) (icmp-gt ctxt (al-len [Expansion] (load (field s expansions))))) (None [Expansion])
+    (Some (al-get [Expansion] (load (field s expansions)) (isub ctxt 1)))))
+
+; number of decimal digits in n (n >= 0).
+(defn dec-len [(n i64)] (-> i64)
+  (if (icmp-lt n 10) 1 (iadd 1 (dec-len (udiv n 10)))))
+(defn wspaces [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break) (do (wb w 32) (store! i (iadd (load i) 1)))))) 0)
+(defn wrepeat [(w (ptr Writer)) (b i64) (n i64)] (-> i64)
+  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break) (do (wb w b) (store! i (iadd (load i) 1)))))) 0)
+
+; line (1-based), column (1-based, bytes = chars for ASCII), and the offending
+; line's [start,end) byte range, for offset `off` in `src`. Mirrors span::locate.
+(defstruct Loc [(line i64) (col i64) (lstart i64) (lend i64)])
+(defn locate [(src (slice u8)) (off0 i64)] (-> Loc)
+  (let [n (slice-len src) off (if (icmp-gt off0 n) n off0)
+        (mut ls) 0 (mut line) 1 (mut k) 0]
+    (loop (if (icmp-ge (load k) off) (break)
+      (do (if (icmp-eq (cast i64 (slice-get src (load k))) 10)
+              (do (store! line (iadd (load line) 1)) (store! ls (iadd (load k) 1))) 0)
+          (store! k (iadd (load k) 1)))))
+    (let [(mut le) off]
+      (loop (if (icmp-ge (load le) n) (break)
+        (if (icmp-eq (cast i64 (slice-get src (load le))) 10) (break) (store! le (iadd (load le) 1)))))
+      (let [lp (alloc-stack Loc)]
+        (store! (field lp line) (load line)) (store! (field lp col) (iadd (isub off (load ls)) 1))
+        (store! (field lp lstart) (load ls)) (store! (field lp lend) (load le))
+        (load lp)))))
+
+; Render one located frame (mirrors span::render_frame). Returns false (no output)
+; when the span is dummy / out of range, so the caller falls back to the message.
+(defn render-frame [(w (ptr Writer)) (s (mut LS)) (source i64) (lo i64) (hi i64) (msg (slice u8)) (arrow (slice u8))] (-> bool)
+  (match (sm-src-text (mut s) source)
+    (None [] false)
+    (Some [src]
+      (if (or (icmp-lt lo 0) (icmp-gt lo (slice-len src))) false
+        (let [loc (alloc-stack Loc)]
+          (store! loc (locate src lo))
+          (let [line (load (field loc line)) col (load (field loc col))
+                lstart (load (field loc lstart)) lend (load (field loc lend))
+                hic (let [h (if (icmp-gt hi lend) lend hi)] (if (icmp-lt h lo) lo h))
+                carets (let [c (isub hic lo)] (if (icmp-lt c 1) 1 c))
+                numlen (dec-len line) file (sm-src-name (mut s) source)]
+            (if (icmp-gt (slice-len msg) 0) (do (ps w msg) (wb w 10)) 0)
+            (wspaces w numlen) (wb w 32) (ps w arrow) (wb w 32) (ps w file) (wb w 58) (dump-dec w line) (wb w 58) (dump-dec w col) (wb w 10)
+            (wspaces w numlen) (ps w " |") (wb w 10)
+            (dump-dec w line) (ps w " | ") (print-str w (subslice src lstart lend)) (wb w 10)
+            (wspaces w numlen) (ps w " | ") (wspaces w (isub col 1)) (wrepeat w 94 carets)
+            true))))))
+
+; Render one diagnostic body (mirrors span::render). No leading `error:`.
+(defn render-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
+  (let [dp (alloc-stack Diag)] (store! dp d)
+    (let [source (load (field dp source)) lo (load (field dp lo)) hi (load (field dp hi))
+          ctxt0 (load (field dp ctxt)) msg (load (field dp msg))]
+      (if (not (render-frame w (mut s) source lo hi msg "-->"))
+          (ps w msg)                                    ; fallback: bare message
+        (let [(mut ctxt) ctxt0]
+          (loop
+            (match (sm-exp (mut s) (load ctxt))
+              (None [] (break))
+              (Some [exp]
+                (let [ep (alloc-stack Expansion)] (store! ep exp)
+                  (let [def-dummy (icmp-lt (load (field ep def_lo)) 0)
+                        at-src  (if def-dummy (load (field ep call_source)) (load (field ep def_source)))
+                        at-lo   (if def-dummy (load (field ep call_lo)) (load (field ep def_lo)))
+                        at-hi   (if def-dummy (load (field ep call_hi)) (load (field ep def_hi)))
+                        note    (sconcat3 (load (field s a)) "note: in expansion of macro `" (load (field ep macro_name)) "`")]
+                    (wb w 10)                            ; the "\n" before each note
+                    (if (not (render-frame w (mut s) at-src at-lo at-hi note ":::")) (ps w note) 0)
+                    (store! ctxt (load (field ep parent))))))))))))
+  0)
+
+; Render all diagnostics (mirrors span::render_all): the caller has written the
+; leading `error: `; subsequent errors get their own `\n\nerror: `, then an
+; `N errors` summary when there is more than one.
+(defn render-all [(w (ptr Writer)) (s (mut LS)) (diags (ptr (ArrayList Diag)))] (-> i64)
+  (let [n (al-len [Diag] (load diags))]
+    (if (icmp-le n 1)
+        (if (icmp-eq n 0) 0 (render-diag w (mut s) (al-get [Diag] (load diags) 0)))
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (if (icmp-gt (load i) 0) (ps w "\n\nerror: ") 0)
+              (render-diag w (mut s) (al-get [Diag] (load diags) (load i)))
+              (store! i (iadd (load i) 1)))))
+        (ps w "\n\n") (dump-dec w n) (ps w " errors") 0)))
+  0)
+
+; A single diagnostic → the top-level `error: <rendered>` on stderr (mirrors
+; main.rs report/print_error). The main source (id 0) is registered under the real
+; path, so no `<source>` substitution is needed.
+(defn report-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
+  (ps w "error: ") (render-diag w (mut s) d) (wb w 10) 0)
+
+; A check failure: render EVERY collected body error (`error: … / … / N errors`)
+; when there is more than one, else the single diagnostic. Mirrors render_all.
+(defn report-check-diags [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
+  (if (icmp-gt (al-len [Diag] (load (field s check_diags))) 1)
+      (do (ps w "error: ") (render-all w (mut s) (load (field s check_diags))) (wb w 10) 0)
+    (report-diag w (mut s) d)))
+

@@ -1,0 +1,380 @@
+; selfhost/src/expander.coil — self-host Coil compiler, expander module.
+(module expander)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "check.coil" :use *)
+(import "comptime.coil" :use *)
+(import "diag.coil" :use *)
+(import "loader.coil" :use *)
+(import "parser.coil" :use *)
+(import "reader.coil" :use *)
+(import "resolve.coil" :use *)
+
+(defn defn-name-of [(f (ptr Sexp))] (-> (Option (slice u8)))
+  (if (icmp-ne (sx-tag (load f)) 6) (None [(slice u8)])
+    (let [it (sx-items (load f))]
+      (if (icmp-lt (sx-len it) 2) (None [(slice u8)])
+        (if (and (icmp-eq (sx-tag (sx-at it 0)) 2) (and (str-eq (sx-sval (sx-at it 0)) "defn") (icmp-eq (sx-tag (sx-at it 1)) 2)))
+            (Some (sx-sval (sx-at it 1))) (None [(slice u8)]))))))
+(defn qualify-name [(a (ptr Allocator)) (n (slice u8)) (m (Option (slice u8)))] (-> (slice u8))
+  (match m (Some [md] (sconcat3 a md "." n)) (None [] n)))
+(defn is-comptime-defn [(f (ptr Sexp)) (module (Option (slice u8))) (comptime (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> bool)
+  (match (defn-name-of f)
+    (None [] false)
+    (Some [n] (set-contains comptime (qualify-name a n module)))))
+(defn macro-use-match [(impe (ptr ImpEntry)) (macros (ptr (ArrayList (slice u8)))) (expb (ptr (ArrayList ExpEntry))) (head (slice u8)) (a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [uses (field (field impe imp) uses) n (al-len [Use] (load uses)) (mut i) 0 (mut r) (None [(slice u8)])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load i)))
+            (let [target (load (field up target))
+                  used (match (load (field up spec)) (UAll [] true) (UNames [names] (set-contains names head)))
+                  q (sconcat3 a target "." head)]
+              (if (and used (and (exports-check expb target head) (set-contains macros q))) (do (store! r (Some q)) (break)) 0)))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn macro-reexport-match [(core (ptr ImpEntry)) (macros (ptr (ArrayList (slice u8)))) (expb (ptr (ArrayList ExpEntry))) (head (slice u8)) (a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [res (field (field core imp) reexports) n (al-len [(slice u8)] (load res)) (mut i) 0 (mut r) (None [(slice u8)])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [target (al-get [(slice u8)] (load res) (load i)) q (sconcat3 a target "." head)]
+            (if (and (exports-check expb target head) (set-contains macros q)) (do (store! r (Some q)) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn resolve-macro [(head (slice u8)) (module (Option (slice u8))) (macros (ptr (ArrayList (slice u8)))) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [sl (find-slash head)]
+    (if (icmp-ge sl 0)
+        ; alias/name
+        (let [alias (subslice head 0 sl) rest (subslice head (iadd sl 1) (slice-len head))]
+          (match module
+            (None [] (None [(slice u8)]))
+            (Some [m]
+              (let [impe (imports-find impb m)]
+                (if (icmp-eq (cast i64 impe) 0) (None [(slice u8)])
+                  (match (alias-target impe alias)
+                    (None [] (None [(slice u8)]))
+                    (Some [target]
+                      (let [q (sconcat3 a target "." rest)]
+                        (if (and (set-contains macros q) (exports-check expb target rest)) (Some q) (None [(slice u8)]))))))))))
+        (if (has-dot head)
+            (if (set-contains macros head) (Some head) (None [(slice u8)]))
+            ; bare
+            (let [own (qualify-name a head module)]
+              (if (set-contains macros own) (Some own)
+                (let [mname (match module (Some [m] m) (None [] ""))
+                      impe (imports-find impb mname)
+                      r1 (if (icmp-eq (cast i64 impe) 0) (None [(slice u8)]) (macro-use-match impe macros expb head a))]
+                  (match r1
+                    (Some [q] (Some q))
+                    (None []
+                      (if (str-eq mname "coil.core") (None [(slice u8)])
+                        (let [core (imports-find impb "coil.core")]
+                          (if (icmp-eq (cast i64 core) 0) (None [(slice u8)]) (macro-reexport-match core macros expb head a)))))))))))))
+; Tag every macro-synthesized (dummy-span) node with the expansion `ctxt`, located
+; at the call site. Non-dummy nodes (template literals, ~unquote-spliced caller
+; code) keep their own span. Faithful port of src/lib.rs::stamp_expansion.
+(defn stamp-expansion [(s (ptr Sexp)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (if (icmp-lt (sx-lo (load s)) 0)
+      (do (store! (field s source) source) (store! (field s lo) lo) (store! (field s hi) hi) (store! (field s ctxt) ctxt) 0) 0)
+  (let [tg (sx-tag (load s))]
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+        (let [items (sx-items (load s)) n (sx-len items) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt) (store! i (iadd (load i) 1)))))) 0)) 0)
+; Find a function by name in `p` (for a macro's def-site span). Null if absent.
+(defn find-func-ptr [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (func-name (al-get [Func] (load fs) (load i))) name) (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn mk-expansion [(name (slice u8)) (cs i64) (cl i64) (ch i64) (cc i64) (ds i64) (dl i64) (dh i64) (dc i64) (parent i64)] (-> Expansion)
+  (let [p (alloc-stack Expansion)]
+    (store! (field p macro_name) name)
+    (store! (field p call_source) cs) (store! (field p call_lo) cl) (store! (field p call_hi) ch) (store! (field p call_ctxt) cc)
+    (store! (field p def_source) ds)  (store! (field p def_lo) dl)  (store! (field p def_hi) dh)  (store! (field p def_ctxt) dc)
+    (store! (field p parent) parent)
+    (load p)))
+(defn merge-structs-gen [(sub (ptr Program)) (gen (ptr (ArrayList StructDef))) (a (ptr Allocator))] (-> (ptr (ArrayList StructDef)))
+  (let [base (load (field sub structs)) nb (al-len [StructDef] (load base)) (mut out) (al-new [StructDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) nb) (break) (do (al-push! (mut out) (al-get [StructDef] (load base) (load i))) (store! i (iadd (load i) 1)))))
+    (let [ng (al-len [StructDef] (load gen)) (mut j) 0]
+      (loop (if (icmp-ge (load j) ng) (break)
+        (do (let [g (al-elem [StructDef] gen (load j)) gname (load (field g name)) (mut found) false (mut k) 0]
+              (loop (if (icmp-ge (load k) nb) (break) (do (if (str-eq (load (field (al-elem [StructDef] base (load k)) name)) gname) (do (store! found true) (break)) 0) (store! k (iadd (load k) 1)))))
+              (if (load found) 0 (do (al-push! (mut out) (load g)) 0)))
+            (store! j (iadd (load j) 1))))))
+    (box-al [StructDef] a (load out))))
+(defn merge-sums-gen [(sub (ptr Program)) (gen (ptr (ArrayList SumDef))) (a (ptr Allocator))] (-> (ptr (ArrayList SumDef)))
+  (let [base (load (field sub sums)) nb (al-len [SumDef] (load base)) (mut out) (al-new [SumDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) nb) (break) (do (al-push! (mut out) (al-get [SumDef] (load base) (load i))) (store! i (iadd (load i) 1)))))
+    (let [ng (al-len [SumDef] (load gen)) (mut j) 0]
+      (loop (if (icmp-ge (load j) ng) (break)
+        (do (let [g (al-elem [SumDef] gen (load j)) gname (load (field g name)) (mut found) false (mut k) 0]
+              (loop (if (icmp-ge (load k) nb) (break) (do (if (str-eq (load (field (al-elem [SumDef] base (load k)) name)) gname) (do (store! found true) (break)) 0) (store! k (iadd (load k) 1)))))
+              (if (load found) 0 (do (al-push! (mut out) (load g)) 0)))
+            (store! j (iadd (load j) 1))))))
+    (box-al [SumDef] a (load out))))
+(defn all-variant-names [(sums (ptr (ArrayList SumDef))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [SumDef] (load sums)) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [vs (load (field (al-elem [SumDef] sums (load i)) variants)) nv (al-len [Variant] (load vs)) (mut j) 0]
+            (loop (if (icmp-ge (load j) nv) (break) (do (al-push! (mut out) (load (field (al-elem [Variant] vs (load j)) name))) (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+(defn module-of [(name (slice u8))] (-> (Option (slice u8)))
+  (let [n (slice-len name) (mut i) (isub n 1) (mut at) -1]
+    (loop (if (icmp-lt (load i) 0) (break) (do (if (and (icmp-lt (load at) 0) (icmp-eq (cast i64 (slice-get name (load i))) 46)) (store! at (load i)) 0) (store! i (isub (load i) 1)))))
+    (if (icmp-lt (load at) 0) (None [(slice u8)]) (Some (subslice name 0 (load at))))))
+(defn expand-macro [(sub (ptr Program)) (fn-name (slice u8)) (margs (ptr (ArrayList Sexp))) (allfns (ptr (ArrayList (slice u8)))) (genstructs (ptr (ArrayList StructDef))) (gensums (ptr (ArrayList SumDef))) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))] (-> (Result Sexp Diag))
+  (let [smap (merge-structs-gen sub genstructs a) sumap (merge-sums-gen sub gensums a)
+        cx (alloc-stack CtCtx) callee (prog-fn-find sub fn-name)]
+    (store! (field cx a) a)
+    (store! (field cx fns) (load (field sub funcs)))
+    (store! (field cx structs) smap)
+    (store! (field cx sums) sumap)
+    (store! (field cx variants) (all-variant-names (load (field sub sums)) a))
+    (store! (field cx traits) (load (field sub traits)))
+    (store! (field cx fuel) 50000000)
+    (store! (field cx depth) 0)
+    (store! (field cx gensym) 0)
+    (store! (field cx qmodule) (module-of fn-name))
+    (store! (field cx module_fns) allfns)
+    (store! (field cx qimports) (match (module-of fn-name) (Some [m] (let [ie (imports-find impb m)] (if (icmp-eq (cast i64 ie) 0) (cast (ptr ModImports) 0) (field ie imp)))) (None [] (cast (ptr ModImports) 0))))
+    (store! (field cx qexports) expb)
+    (if (icmp-eq (cast i64 callee) 0) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' not found")))
+      (let [pparams (load (field callee params)) np (al-len [Param] (load pparams)) na (al-len [Sexp] (load margs)) (mut env) (al-new [EnvBind] a)]
+        (if (load (field callee macro_variadic))
+            (if (icmp-lt na (isub np 1)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' arity (variadic) mismatch")))
+              (do (let [(mut k) 0]
+                    (loop (if (icmp-ge (load k) (isub np 1)) (break)
+                      (do (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (load k)) name))) (store! (field eb val) (CCode (al-get [Sexp] (load margs) (load k)))) (al-push! (mut env) (load eb)))
+                          (store! k (iadd (load k) 1)))))
+                  (let [(mut rest) (al-new [Sexp] a) (mut r) (isub np 1)]
+                    (loop (if (icmp-ge (load r) na) (break) (do (al-push! (mut rest) (al-get [Sexp] (load margs) (load r))) (store! r (iadd (load r) 1)))))
+                    (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (isub np 1)) name))) (store! (field eb val) (CCode (mk-sexp (KList (box-al [Sexp] a (load rest))) -1 -1))) (al-push! (mut env) (load eb))))
+                  (finish-macro callee (box-al [EnvBind] a (load env)) cx a fn-name))))
+            (if (icmp-ne np na) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' arity mismatch")))
+              (do (let [(mut k) 0]
+                    (loop (if (icmp-ge (load k) np) (break)
+                      (do (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (load k)) name))) (store! (field eb val) (CCode (al-get [Sexp] (load margs) (load k)))) (al-push! (mut env) (load eb)))
+                          (store! k (iadd (load k) 1)))))
+                  (finish-macro callee (box-al [EnvBind] a (load env)) cx a fn-name)))))))))
+(defn finish-macro [(callee (ptr Func)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx)) (a (ptr Allocator)) (fn-name (slice u8))] (-> (Result Sexp Diag))
+  (match (eval-seq (load (field callee body)) env cx)
+    (Err [d] (Err [Sexp Diag] d))
+    (Ok [fl]
+      (match fl
+        (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
+        (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
+        (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))))))
+(defstruct ExpEnv
+  [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
+   (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
+(defn expand-calls-list [(items (ptr (ArrayList Sexp))) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (let [a (load (field env a)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
+      (do (match (expand-calls (al-elem [Sexp] items (load i)) module env allfns gs gu depth (mut ls))
+            (Err [d] (do (store! errf (Some d)) 0))
+            (Ok [r] (do (al-push! (mut out) r) 0)))
+          (store! i (iadd (load i) 1)))))
+    (match (load errf) (Some [d] (Err [(ptr (ArrayList Sexp)) Diag] d)) (None [] (Ok [(ptr (ArrayList Sexp)) Diag] (box-al [Sexp] a (load out)))))))
+(defn expand-calls [(s (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result Sexp Diag))
+  (let [a (load (field env a)) tg (sx-tag (load s))]
+    (if (icmp-eq tg 6)
+        (let [items (sx-items (load s)) headq (if (and (icmp-ge (sx-len items) 1) (icmp-eq (sx-tag (sx-at items 0)) 2)) (resolve-macro (sx-sval (sx-at items 0)) module (load (field env macros)) (load (field env impb)) (load (field env expb)) a) (None [(slice u8)]))]
+          (match headq
+            (Some [q]
+              (do (store! depth (iadd (load depth) 1))
+                  (if (icmp-gt (load depth) 100000) (Err [Sexp Diag] (derr "macro expansion did not terminate"))
+                    (match (expand-macro (load (field env sub)) q (rest-from a items 1) allfns gs gu (load (field env impb)) (load (field env expb)) a)
+                      (Err [d] (Err [Sexp Diag] d))
+                      (Ok [outs]
+                        (let [op (box-sexp a outs)
+                              dfp (find-func-ptr (load (field env sub)) q)
+                              have-def (icmp-ne (cast i64 dfp) 0)
+                              def-src (if have-def (load (field dfp source)) -1)
+                              def-lo  (if have-def (load (field dfp lo)) -1)
+                              def-hi  (if have-def (load (field dfp hi)) -1)
+                              def-ctxt (if have-def (load (field dfp ctxt)) 0)
+                              exp (mk-expansion q (sx-source (load s)) (sx-lo (load s)) (sx-hi (load s)) (sx-ctxt (load s))
+                                                def-src def-lo def-hi def-ctxt (sx-ctxt (load s)))
+                              ctxt (add-expansion! (mut ls) exp)]
+                          (stamp-expansion op (sx-source (load s)) (sx-lo (load s)) (sx-hi (load s)) ctxt)
+                          (expand-calls op module env allfns gs gu depth (mut ls))))))))
+            (None []
+              (match (expand-calls-list items module env allfns gs gu depth (mut ls))
+                (Err [d] (Err [Sexp Diag] d))
+                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KList outitems) s)))))))
+        (if (icmp-eq tg 7)
+            (match (expand-calls-list (sx-items (load s)) module env allfns gs gu depth (mut ls))
+              (Err [d] (Err [Sexp Diag] d))
+              (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KVec outitems) s))))
+            (Ok [Sexp Diag] (load s))))))
+(defn expand-top-form [(f (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result Sexp Diag))
+  (if (or (is-meta-form f) (is-comptime-defn f module (load (field env comptime)) (load (field env a)))) (Ok [Sexp Diag] (load f))
+    (expand-calls f module env allfns gs gu depth (mut ls))))
+(defn qualify-structdefs! [(p (ptr Program)) (module (Option (slice u8))) (gs (ptr SBoxStruct)) (a (ptr Allocator))] (-> i64)
+  (let [ss (load (field p structs)) n (al-len [StructDef] (load ss)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [sd (alloc-stack StructDef)] (store! sd (al-get [StructDef] (load ss) (load i)))
+            (store! (field sd name) (qualify-name a (load (field sd name)) module))
+            (al-push! (mut (field gs items)) (load sd)))
+          (store! i (iadd (load i) 1)))))) 0)
+(defn qualify-sumdefs! [(p (ptr Program)) (module (Option (slice u8))) (gu (ptr SBoxSum)) (a (ptr Allocator))] (-> i64)
+  (let [ss (load (field p sums)) n (al-len [SumDef] (load ss)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [sd (alloc-stack SumDef)] (store! sd (al-get [SumDef] (load ss) (load i)))
+            (store! (field sd name) (qualify-name a (load (field sd name)) module))
+            (al-push! (mut (field gu items)) (load sd)))
+          (store! i (iadd (load i) 1)))))) 0)
+(defn register-generated-decl [(form (ptr Sexp)) (module (Option (slice u8))) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (a (ptr Allocator))] (-> (Option Diag))
+  (if (icmp-ne (sx-tag (load form)) 6) (None [Diag])
+    (let [it (sx-items (load form))]
+      (if (icmp-lt (sx-len it) 1) (None [Diag])
+        (if (icmp-ne (sx-tag (sx-at it 0)) 2) (None [Diag])
+          (let [head (sx-sval (sx-at it 0))]
+            (if (not (or (str-eq head "defstruct") (str-eq head "defsum"))) (None [Diag])
+              (let [single (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a)) (mut sl) (al-new [Sexp] a)]
+                (al-push! (mut sl) (load form)) (store! single (load sl))
+                (match (parse-program a single)
+                  (Err [d] (Some d))
+                  (Ok [p] (let [pp (box-program a p)]
+                            (qualify-structdefs! pp module gs a)
+                            (qualify-sumdefs! pp module gu a)
+                            (None [Diag]))))))))))))
+(defn box-program [(a (ptr Allocator)) (p Program)] (-> (ptr Program)) (let [pp (unwrap-ptr [Program] (create [Program] a))] (store! pp p) pp))
+(defstruct SBoxStruct [(items (ArrayList StructDef))])
+(defstruct SBoxSum    [(items (ArrayList SumDef))])
+(defstruct SBoxTF     [(items (ArrayList TaggedForm))])
+(defn code-sig-funcs [(p (ptr Program)) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Func] fs (load i))]
+            (if (and (type-is-code (field fp ret)) (all-params-code (load (field fp params)))) (do (al-push! (mut out) (load (field fp name))) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+(defn all-params-code [(ps (ptr (ArrayList Param)))] (-> bool)
+  (let [n (al-len [Param] (load ps)) (mut i) 0 (mut r) true]
+    (loop (if (or (not (load r)) (icmp-ge (load i) n)) (break)
+      (do (if (type-is-code (field (al-elem [Param] ps (load i)) ty)) 0 (do (store! r false) 0)) (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn all-defn-names [(out-forms (ptr (ArrayList TaggedForm))) (a (ptr Allocator))] (-> (ptr SBox))
+  (let [sb (unwrap-ptr [SBox] (create [SBox] a)) n (al-len [TaggedForm] (load out-forms)) (mut i) 0]
+    (store! (field sb items) (al-new [(slice u8)] a))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [tf (al-elem [TaggedForm] out-forms (load i)) fp (field tf form)]
+            (match (defn-name-of fp) (Some [nm] (al-push! (mut (field sb items)) (qualify-name a nm (load (field tf module))))) (None [] 0)))
+          (store! i (iadd (load i) 1)))))
+    sb))
+(defn expand-stage3 [(s (mut LS))] (-> (Result i64 Diag))
+  (let [a (load (field s a)) out-forms (box-al [TaggedForm] a (load (field s out))) nforms (al-len [TaggedForm] (load out-forms))
+        ; 1. macro detection subset
+        subls (alloc-stack LS) (mut subset) (al-new [TaggedForm] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) nforms) (break)
+      (do (let [tf (al-elem [TaggedForm] out-forms (load i))]
+            (if (keep-for-macro-detection (field tf form)) (do (al-push! (mut subset) (load tf)) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (store! (field subls a) a)
+    (store! (field subls out) (load subset))
+    (store! (field subls loaded) (al-new [(slice u8)] a))
+    (store! (field subls imports) (load (field s imports)))
+    (store! (field subls exports) (load (field s exports)))
+    (match (resolve-program a (mut subls) false)
+      (Err [d] (Err [i64 Diag] d))
+      (Ok [macroctx]
+        (let [quals (code-sig-funcs macroctx a)]
+          (if (icmp-eq (al-len [(slice u8)] (load quals)) 0) (Ok [i64 Diag] 0)
+            (let [wanted (closure-funcs macroctx quals a) sub (closure-subprogram macroctx wanted a)
+                  checkls (alloc-stack LS)]
+              (store! (field checkls a) a)
+              (store! (field checkls out) (al-new [TaggedForm] a))
+              (store! (field checkls loaded) (al-new [(slice u8)] a))
+              (store! (field checkls imports) (al-new [ImpEntry] a))
+              (store! (field checkls exports) (al-new [ExpEntry] a))
+              (match (check-program a sub (mut checkls))
+                (Err [d] (Err [i64 Diag] d))
+                (Ok [checked] (run-expand (mut s) quals wanted checked a))))))))))
+(defn run-expand [(s (mut LS)) (macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8)))) (checked (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
+  (let [out-forms (box-al [TaggedForm] a (load (field s out))) nforms (al-len [TaggedForm] (load out-forms))
+        impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
+        expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
+        env (alloc-stack ExpEnv)
+        allfns (all-defn-names out-forms a)
+        gs (unwrap-ptr [SBoxStruct] (create [SBoxStruct] a)) gu (unwrap-ptr [SBoxSum] (create [SBoxSum] a))
+        result (unwrap-ptr [SBoxTF] (create [SBoxTF] a))
+        (mut i) 0 (mut errf) (None [Diag]) (mut depthv) 0]
+    (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+    (store! (field gs items) (al-new [StructDef] a)) (store! (field gu items) (al-new [SumDef] a))
+    (store! (field result items) (al-new [TaggedForm] a))
+    (store! (field env macros) macros) (store! (field env comptime) comptime)
+    (store! (field env sub) checked) (store! (field env impb) impb) (store! (field env expb) expb) (store! (field env a) a)
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nforms)) (break)
+      (do (let [tf (alloc-stack TaggedForm)] (store! tf (al-get [TaggedForm] (load out-forms) (load i)))
+            (let [module (load (field tf module))]
+              (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv) (mut s))
+                (Err [d] (do (store! errf (Some d)) 0))
+                (Ok [outf]
+                  (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf))))))
+          (store! i (iadd (load i) 1)))))
+    (match (load errf)
+      (Some [d] (Err [i64 Diag] d))
+      (None [] (do (store! (field s out) (load (field result items))) (Ok [i64 Diag] 0))))))
+(defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
+  (let [(mut produced) (al-new [Sexp] a)]
+    (if (and (icmp-eq (sx-tag (load outf)) 6)
+             (let [it (sx-items (load outf))] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "do")))))
+        (let [it (sx-items (load outf)) n (sx-len it) (mut k) 1]
+          (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut produced) (sx-at it (load k))) (store! k (iadd (load k) 1))))))
+        (al-push! (mut produced) (load outf)))
+    (let [np (al-len [Sexp] (load produced)) (mut j) 0]
+      (loop (if (or (diag-some? (load errf)) (icmp-ge (load j) np)) (break)
+        (do (let [form (al-elem [Sexp] produced (load j))]
+              (match (register-generated-decl form module gs gu a)
+                (Some [d] (do (store! errf (Some d)) 0))
+                (None []
+                  (do (match (defn-name-of form) (Some [nm] (al-push! (mut (field allfns items)) (qualify-name a nm module))) (None [] 0))
+                      (let [tf (alloc-stack TaggedForm)] (store! (field tf form) (load form)) (store! (field tf module) module) (al-push! (mut (field result items)) (load tf)) 0)))))
+            (store! j (iadd (load j) 1))))))) 0)
+(defn d-expanded [(w (ptr Writer)) (a (ptr Allocator)) (s (mut LS))] (-> i64)
+  (ps w "(forms")
+  (let [n (al-len [TaggedForm] (load (field s out))) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (ps w " (tf ")
+          (let [tf (alloc-stack TaggedForm)]
+            (store! tf (al-get [TaggedForm] (load (field s out)) (load i)))
+            (d-opt-str w (load (field tf module)))
+            (wb w 32)
+            (let [fp (alloc-stack Sexp)] (store! fp (load (field tf form))) (sx-node w fp)))
+          (wb w 41)
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  0)
+(defn dump-expand-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+            (match (expand-stage3 (mut s))
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [_] (d-expanded w a (mut s))))))))
+  0)

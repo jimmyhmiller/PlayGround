@@ -1,0 +1,459 @@
+; selfhost/src/astdump.coil — self-host Coil compiler, astdump module.
+(module astdump)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+
+(defn d-strs [(w (ptr Writer)) (v (ptr (ArrayList (slice u8))))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [(slice u8)] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (dstr w (al-get [(slice u8)] (load v) (load i)))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+; `(some "x")` / `(none)` — an optional string.
+(defn d-opt-str [(w (ptr Writer)) (v (Option (slice u8)))] (-> i64)
+  (match v
+    (Some [s] (do (ps w "(some ") (dstr w s) (wb w 41)))
+    (None []  (ps w "(none)"))))
+
+; ---- types ----
+(defn d-types [(w (ptr Writer)) (v (ptr (ArrayList Type)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Type] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [t (alloc-stack Type)] (store! t (al-get [Type] (load v) (load i))) (d-type w t))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-type [(w (ptr Writer)) (t (ptr Type))] (-> i64)
+  (match (load t)
+    (TInt   [bits signed] (do (ps w "(int ") (dump-dec w bits) (wb w 32) (dbool w signed) (wb w 41)))
+    (TFloat [bits]        (do (ps w "(float ") (dump-dec w bits) (wb w 41)))
+    (TBool  []            (ps w "bool"))
+    (TVoid  []            (ps w "void"))
+    (TPtr   [inner]       (do (ps w "(ptr ") (d-type w inner) (wb w 41)))
+    (TRef   [m inner]     (do (ps w "(ref ") (dbool w m) (wb w 32) (d-type w inner) (wb w 41)))
+    (TStruct[name]        (do (ps w "(struct ") (dstr w name) (wb w 41)))
+    (TArray [elem n]      (do (ps w "(array ") (d-type w elem) (wb w 32) (dump-dec w n) (wb w 41)))
+    (TSlice [elem]        (do (ps w "(slice ") (d-type w elem) (wb w 41)))
+    (TVec   [elem n]      (do (ps w "(vec ") (d-type w elem) (wb w 32) (dump-dec w n) (wb w 41)))
+    (TFn    [cc params ret] (do (ps w "(fn ") (dstr w cc) (wb w 32) (d-types w params) (wb w 32) (d-type w ret) (wb w 41)))
+    (TApp   [name args]   (do (ps w "(app ") (dstr w name) (wb w 32) (d-types w args) (wb w 41)))
+    (TNever []            (ps w "never"))
+    (TCode  []            (ps w "code"))))
+
+; ---- enum-tag dumpers (i64 code -> string, mirrors *_tag in dump_ast.rs) ----
+(defn d-binop [(w (ptr Writer)) (op i64)] (-> i64)
+  (ps w (if (icmp-eq op 0) "add" (if (icmp-eq op 1) "sub" (if (icmp-eq op 2) "mul"
+        (if (icmp-eq op 3) "div" (if (icmp-eq op 4) "rem" (if (icmp-eq op 5) "udiv"
+        (if (icmp-eq op 6) "urem" (if (icmp-eq op 7) "and" (if (icmp-eq op 8) "or"
+        (if (icmp-eq op 9) "xor" (if (icmp-eq op 10) "shl" "shr")))))))))))))
+(defn d-cmpop [(w (ptr Writer)) (op i64)] (-> i64)
+  (ps w (if (icmp-eq op 0) "lt" (if (icmp-eq op 1) "le" (if (icmp-eq op 2) "gt"
+        (if (icmp-eq op 3) "ge" (if (icmp-eq op 4) "eq" "ne")))))))
+(defn d-storage [(w (ptr Writer)) (s i64)] (-> i64)
+  (ps w (if (icmp-eq s 0) "stack" (if (icmp-eq s 1) "static" "heap"))))
+(defn d-typequery [(w (ptr Writer)) (q i64)] (-> i64)
+  (ps w (if (icmp-eq q 0) "fieldcount" (if (icmp-eq q 1) "variantcount"
+        (if (icmp-eq q 2) "isstruct" (if (icmp-eq q 3) "issum" (if (icmp-eq q 4) "isint"
+        (if (icmp-eq q 5) "isfloat" (if (icmp-eq q 6) "isptr" "isarray")))))))))
+(defn d-fieldmeta [(w (ptr Writer)) (m i64)] (-> i64)
+  (ps w (if (icmp-eq m 0) "name" (if (icmp-eq m 1) "typekind" "typename"))))
+(defn d-codeop [(w (ptr Writer)) (op i64)] (-> i64)
+  (ps w (if (icmp-eq op 0) "islist" (if (icmp-eq op 1) "issym" (if (icmp-eq op 2) "isint"
+        (if (icmp-eq op 3) "count" (if (icmp-eq op 4) "nth" (if (icmp-eq op 5) "sym"
+        (if (icmp-eq op 6) "int" (if (icmp-eq op 7) "rest" (if (icmp-eq op 8) "gensym"
+        (if (icmp-eq op 9) "error" (if (icmp-eq op 10) "eq" (if (icmp-eq op 11) "iskeyword"
+        (if (icmp-eq op 12) "symbol" (if (icmp-eq op 13) "str" (if (icmp-eq op 14) "cfieldcount"
+        (if (icmp-eq op 15) "cfieldname" (if (icmp-eq op 16) "cfieldkind" (if (icmp-eq op 17) "cfieldtype"
+        (if (icmp-eq op 18) "cvariantsum" (if (icmp-eq op 19) "cvariantcount" (if (icmp-eq op 20) "cvariantname"
+        (if (icmp-eq op 21) "cvariantfields" (if (icmp-eq op 22) "ctraitmethodcount" (if (icmp-eq op 23) "ctraitmethodname"
+        (if (icmp-eq op 24) "ctraitarity" (if (icmp-eq op 25) "ctraitparamname" (if (icmp-eq op 26) "ctraitparamtype"
+        (if (icmp-eq op 27) "ctraitrettype" (if (icmp-eq op 28) "strbytes" (if (icmp-eq op 29) "bytestostr"
+        "targetarch"))))))))))))))))))))))))))))))))
+
+; ---- exprs ----
+(defn d-exprs [(w (ptr Writer)) (v (ptr (ArrayList Expr)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Expr] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [e (alloc-stack Expr)] (store! e (al-get [Expr] (load v) (load i))) (d-expr w e))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-opt-expr [(w (ptr Writer)) (v (Option (ptr Expr)))] (-> i64)
+  (match v
+    (Some [e] (do (ps w "(some ") (d-expr w e) (wb w 41)))
+    (None []  (ps w "(none)"))))
+
+(defn d-binds [(w (ptr Writer)) (v (ptr (ArrayList Bind)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Bind] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [b (alloc-stack Bind)]
+            (store! b (al-get [Bind] (load v) (load i)))
+            (ps w "(bind ") (dstr w (load (field b name))) (wb w 32)
+            (dbool w (load (field b mutable))) (wb w 32)
+            (let [ve (alloc-stack Expr)] (store! ve (load (field b value))) (d-expr w ve))
+            (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-arms [(w (ptr Writer)) (v (ptr (ArrayList Arm)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Arm] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [a (alloc-stack Arm)]
+            (store! a (al-get [Arm] (load v) (load i)))
+            (ps w "(arm ") (dstr w (load (field a variant))) (wb w 32)
+            (d-strs w (load (field a binds))) (wb w 32)
+            (let [be (alloc-stack Expr)] (store! be (load (field a body))) (d-expr w be))
+            (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-quasi [(w (ptr Writer)) (q (ptr Quasi))] (-> i64)
+  (match (load q)
+    (QLit     [form] (do (ps w "(qlit ") (sx-node w form) (wb w 41)))
+    (QUnquote [e]    (do (ps w "(qunq ") (d-expr w e) (wb w 41)))
+    (QSplice  [e]    (do (ps w "(qspl ") (d-expr w e) (wb w 41)))
+    (QList    [items] (do (ps w "(qlist")
+                          (let [(mut i) 0 n (al-len [Quasi] (load items))]
+                            (loop (if (icmp-ge (load i) n) (break)
+                              (do (wb w 32)
+                                  (let [c (alloc-stack Quasi)] (store! c (al-get [Quasi] (load items) (load i))) (d-quasi w c))
+                                  (store! i (iadd (load i) 1))))))
+                          (wb w 41)))
+    (QVector  [items] (do (ps w "(qvec")
+                          (let [(mut i) 0 n (al-len [Quasi] (load items))]
+                            (loop (if (icmp-ge (load i) n) (break)
+                              (do (wb w 32)
+                                  (let [c (alloc-stack Quasi)] (store! c (al-get [Quasi] (load items) (load i))) (d-quasi w c))
+                                  (store! i (iadd (load i) 1))))))
+                          (wb w 41)))))
+
+(defn d-expr [(w (ptr Writer)) (e (ptr Expr))] (-> i64)
+  (let [lo (load (field e lo)) hi (load (field e hi))
+        src (load (field e source)) ctxt (load (field e ctxt))]
+    (wb w 40)
+    (match (load (field e kind))
+      (EInt   [v]    (do (ps w "eint") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v)))
+      (EFloat [bits] (do (ps w "efloat") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits)))
+      (EBool  [b]    (do (ps w "ebool") (dump-span w src lo hi ctxt) (wb w 32) (dbool w b)))
+      (EStr   [s]    (do (ps w "estr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (ECStr  [s]    (do (ps w "ecstr") (dump-span w src lo hi ctxt) (wb w 32) (dstr w s)))
+      (EVar   [name] (do (ps w "var") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (EZeroed[ty]   (do (ps w "zeroed") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EBorrow[m place] (do (ps w "borrow") (dump-span w src lo hi ctxt) (wb w 32) (dbool w m) (wb w 32) (d-expr w place)))
+      (ELet   [binds body] (do (ps w "let") (dump-span w src lo hi ctxt) (wb w 32) (d-binds w binds) (wb w 32) (d-exprs w body)))
+      (EBin   [op lhs rhs] (do (ps w "bin") (dump-span w src lo hi ctxt) (wb w 32) (d-binop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (ENot   [inner] (do (ps w "inot") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (ECmp   [op lhs rhs] (do (ps w "cmp") (dump-span w src lo hi ctxt) (wb w 32) (d-cmpop w op) (wb w 32) (d-expr w lhs) (wb w 32) (d-expr w rhs)))
+      (EIf    [cnd thn els] (do (ps w "if") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w cnd) (wb w 32) (d-expr w thn) (wb w 32) (d-expr w els)))
+      (EDo    [body] (do (ps w "do") (dump-span w src lo hi ctxt) (wb w 32) (d-exprs w body)))
+      (ECall  [func type_args args] (do (ps w "call") (dump-span w src lo hi ctxt) (wb w 32) (dstr w func) (wb w 32) (d-types w type_args) (wb w 32) (d-exprs w args)))
+      (EAlloc [storage ty] (do (ps w "alloc") (dump-span w src lo hi ctxt) (wb w 32) (d-storage w storage) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EField [p fname] (do (ps w "field") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (ELoad  [inner] (do (ps w "load") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EStore [p val] (do (ps w "store") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w val)))
+      (EIndex [p idx] (do (ps w "index") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (d-expr w idx)))
+      (ECast  [ty inner] (do (ps w "cast") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
+      (ESizeOf[ty] (do (ps w "sizeof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EAlignOf[ty] (do (ps w "alignof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EOffsetOf[ty fname] (do (ps w "offsetof") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (dstr w fname)))
+      (EBitGet[p fname] (do (ps w "bitget") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname)))
+      (EBitSet[p fname val] (do (ps w "bitset") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w p) (wb w 32) (dstr w fname) (wb w 32) (d-expr w val)))
+      (EFree  [inner] (do (ps w "free") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EErase [trait_name inner] (do (ps w "erase") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (d-expr w inner)))
+      (EMatch [scrut arms] (do (ps w "match") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w scrut) (wb w 32) (d-arms w arms)))
+      (EFnPtrOf[name] (do (ps w "fnptrof") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name)))
+      (ECallPtr[fp args] (do (ps w "callptr") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w fp) (wb w 32) (d-exprs w args)))
+      (ELoop  [label body] (do (ps w "loop") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-exprs w body)))
+      (EBreak [label value] (do (ps w "break") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label) (wb w 32) (d-opt-expr w value)))
+      (EContinue[label] (do (ps w "continue") (dump-span w src lo hi ctxt) (wb w 32) (d-opt-str w label)))
+      (ELlvmIr[result args body] (do (ps w "llvmir") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t result) (d-type w t)) (wb w 32) (d-exprs w args) (wb w 32) (dstr w body)))
+      (ETypeQuery[q ty] (do (ps w "typequery") (dump-span w src lo hi ctxt) (wb w 32) (d-typequery w q) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t))))
+      (EFieldMeta[meta ty idx] (do (ps w "fieldmeta") (dump-span w src lo hi ctxt) (wb w 32) (d-fieldmeta w meta) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w idx)))
+      (EFieldIndex[ty name] (do (ps w "fieldindex") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w name)))
+      (EQuote [form] (do (ps w "quote") (dump-span w src lo hi ctxt) (wb w 32) (sx-node w form)))
+      (ECodeOp[op args] (do (ps w "codeop") (dump-span w src lo hi ctxt) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
+      (EQuasi [q] (do (ps w "quasi") (dump-span w src lo hi ctxt) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
+      (EComptime[inner] (do (ps w "comptime") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      ; ---- the 6 check-introduced variants (mirror src/dump_ast.rs) ----
+      (ESpillRef[inner] (do (ps w "spillref") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EConstruct[sum variant args] (do (ps w "construct") (dump-span w src lo hi ctxt) (wb w 32) (dstr w sum) (wb w 32) (dstr w variant) (wb w 32) (d-exprs w args)))
+      (ETraitCall[trait_name method self_tp args] (do (ps w "traitcall") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (dstr w method) (wb w 32) (dstr w self_tp) (wb w 32) (d-exprs w args)))
+      (EDynDispatch[dyn_struct vtable_struct method_index cc params ret recv args]
+        (do (ps w "dyndispatch") (dump-span w src lo hi ctxt) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (dump-dec w method_index) (wb w 32) (dstr w cc) (wb w 32) (d-types w params) (wb w 32) (let [t (alloc-stack Type)] (store! t ret) (d-type w t)) (wb w 32) (d-expr w recv) (wb w 32) (d-exprs w args)))
+      (EMakeDyn[dyn_struct vtable_struct methods inner]
+        (do (ps w "makedyn") (dump-span w src lo hi ctxt) (wb w 32) (dstr w dyn_struct) (wb w 32) (dstr w vtable_struct) (wb w 32) (d-strs w methods) (wb w 32) (d-expr w inner)))
+      (EStaticRef[name] (do (ps w "staticref") (dump-span w src lo hi ctxt) (wb w 32) (dstr w name))))
+    (wb w 41)))
+
+; ---- declarations ----
+(defn d-param [(w (ptr Writer)) (p (ptr Param))] (-> i64)
+  (ps w "(param ") (dstr w (load (field p name))) (wb w 32)
+  (let [t (alloc-stack Type)] (store! t (load (field p ty))) (d-type w t)) (wb w 41))
+(defn d-params [(w (ptr Writer)) (v (ptr (ArrayList Param)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Param] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [p (alloc-stack Param)] (store! p (al-get [Param] (load v) (load i))) (d-param w p))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-field [(w (ptr Writer)) (f (ptr Field))] (-> i64)
+  (ps w "(fld ") (dstr w (load (field f name))) (wb w 32)
+  (let [t (alloc-stack Type)] (store! t (load (field f ty))) (d-type w t)) (wb w 41))
+(defn d-fields [(w (ptr Writer)) (v (ptr (ArrayList Field)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Field] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [f (alloc-stack Field)] (store! f (al-get [Field] (load v) (load i))) (d-field w f))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-i64s [(w (ptr Writer)) (v (ptr (ArrayList i64)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [i64] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (dump-dec w (al-get [i64] (load v) (load i)))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-bounds [(w (ptr Writer)) (v (ptr (ArrayList Bound)))] (-> i64)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Bound] (load v))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [b (alloc-stack Bound)]
+            (store! b (al-get [Bound] (load v) (load i)))
+            (ps w "(bound ") (dstr w (load (field b name))) (wb w 32)
+            (d-strs w (load (field b traits))) (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93))
+
+(defn d-func [(w (ptr Writer)) (f (ptr Func))] (-> i64)
+  (ps w "(func ") (dstr w (load (field f name))) (wb w 32)
+  (d-strs w (load (field f type_params))) (wb w 32)
+  (d-bounds w (load (field f bounds))) (wb w 32)
+  (dstr w (load (field f cc))) (wb w 32)
+  (d-params w (load (field f params))) (wb w 32)
+  (let [t (alloc-stack Type)] (store! t (load (field f ret))) (d-type w t)) (wb w 32)
+  (d-exprs w (load (field f body))) (wb w 32)
+  (dbool w (load (field f macro_variadic))) (wb w 32)
+  (dump-span w (load (field f source)) (load (field f lo)) (load (field f hi)) (load (field f ctxt))) (wb w 41))
+
+(defn d-convention [(w (ptr Writer)) (c (ptr Convention))] (-> i64)
+  (ps w "(cc ") (dstr w (load (field c name))) (wb w 32)
+  (d-strs w (load (field c params))) (wb w 32)
+  (d-opt-str w (load (field c ret))) (wb w 32)
+  (d-strs w (load (field c clobber))) (wb w 32)
+  (d-strs w (load (field c preserve))) (wb w 32)
+  (match (load (field c lowering))
+    (LNative [cc] (do (ps w "(native ") (ps w (if (icmp-eq cc 0) "c" (if (icmp-eq cc 1) "fast" "cold"))) (wb w 41)))
+    (LShim   []   (ps w "(shim)")))
+  (wb w 41))
+
+(defn d-layout [(w (ptr Writer)) (l (ptr Layout))] (-> i64)
+  (match (load l)
+    (LC       []   (ps w "(c)"))
+    (LPacked  []   (ps w "(packed)"))
+    (LAligned [n]  (do (ps w "(aligned ") (dump-dec w n) (wb w 41)))
+    (LExplicit[offsets size align]
+      (do (ps w "(explicit ") (d-i64s w offsets) (wb w 32)
+          (match size (Some [n] (do (ps w "(some ") (dump-dec w n) (wb w 41))) (None [] (ps w "(none)")))
+          (wb w 32) (dump-dec w align) (wb w 41)))
+    (LBits    [backing offsets]
+      (do (ps w "(bits ") (dump-dec w backing) (wb w 32) (d-i64s w offsets) (wb w 41)))))
+
+(defn d-struct [(w (ptr Writer)) (s (ptr StructDef))] (-> i64)
+  (ps w "(struct ") (dstr w (load (field s name))) (wb w 32)
+  (d-strs w (load (field s type_params))) (wb w 32)
+  (let [lp (alloc-stack Layout)] (store! lp (load (field s layout))) (d-layout w lp)) (wb w 32)
+  (d-fields w (load (field s fields))) (wb w 41))
+
+(defn d-variant [(w (ptr Writer)) (vr (ptr Variant))] (-> i64)
+  (ps w "(variant ") (dstr w (load (field vr name))) (wb w 32)
+  (d-fields w (load (field vr fields))) (wb w 41))
+(defn d-sum [(w (ptr Writer)) (s (ptr SumDef))] (-> i64)
+  (ps w "(sum ") (dstr w (load (field s name))) (wb w 32)
+  (d-strs w (load (field s type_params))) (wb w 32)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Variant] (load (field s variants)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [vr (alloc-stack Variant)] (store! vr (al-get [Variant] (load (field s variants)) (load i))) (d-variant w vr))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93) (wb w 41))
+
+(defn d-extern [(w (ptr Writer)) (e (ptr Extern))] (-> i64)
+  (ps w "(extern ") (dstr w (load (field e name))) (wb w 32)
+  (dstr w (load (field e cc))) (wb w 32)
+  (d-types w (load (field e params))) (wb w 32)
+  (dbool w (load (field e variadic))) (wb w 32)
+  (let [t (alloc-stack Type)] (store! t (load (field e ret))) (d-type w t)) (wb w 41))
+
+(defn d-assert [(w (ptr Writer)) (a (ptr StaticAssert))] (-> i64)
+  (ps w "(assert ")
+  (let [ce (alloc-stack Expr)] (store! ce (load (field a cnd))) (d-expr w ce)) (wb w 32)
+  (dstr w (load (field a msg))) (wb w 41))
+
+(defn d-const [(w (ptr Writer)) (c (ptr Const))] (-> i64)
+  (ps w "(const ") (dstr w (load (field c name))) (wb w 32)
+  (match (load (field c ty))
+    (Some [t] (do (ps w "(some ") (let [tp (alloc-stack Type)] (store! tp t) (d-type w tp)) (wb w 41)))
+    (None []  (ps w "(none)")))
+  (wb w 32)
+  (let [ve (alloc-stack Expr)] (store! ve (load (field c value))) (d-expr w ve)) (wb w 41))
+
+(defn d-trait [(w (ptr Writer)) (t (ptr TraitDef))] (-> i64)
+  (ps w "(trait ") (dstr w (load (field t name))) (wb w 32)
+  (dstr w (load (field t self_param))) (wb w 32)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [TraitMethod] (load (field t methods)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [m (alloc-stack TraitMethod)]
+            (store! m (al-get [TraitMethod] (load (field t methods)) (load i)))
+            (ps w "(method ") (dstr w (load (field m name))) (wb w 32)
+            (d-params w (load (field m params))) (wb w 32)
+            (let [rt (alloc-stack Type)] (store! rt (load (field m ret))) (d-type w rt)) (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93) (wb w 41))
+
+(defn d-impl [(w (ptr Writer)) (im (ptr ImplDef))] (-> i64)
+  (ps w "(impl ") (dstr w (load (field im trait_name))) (wb w 32)
+  (dstr w (load (field im for_type))) (wb w 32)
+  (wb w 91)
+  (let [(mut i) 0 n (al-len [Func] (load (field im methods)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [f (alloc-stack Func)] (store! f (al-get [Func] (load (field im methods)) (load i))) (d-func w f))
+          (store! i (iadd (load i) 1))))))
+  (wb w 93) (wb w 41))
+
+(defn d-export [(w (ptr Writer)) (e (ptr ExportC))] (-> i64)
+  (ps w "(export ") (dstr w (load (field e name))) (wb w 32)
+  (d-opt-str w (load (field e symbol))) (wb w 32)
+  (d-types w (load (field e params))) (wb w 32)
+  (dump-span w (load (field e source)) (load (field e lo)) (load (field e hi)) (load (field e ctxt))) (wb w 41))
+
+; Byte-lexicographic `<` on strings (Rust String Ord over ASCII conv names):
+; a proper prefix is less than the longer string.
+(defn str-lt [(x (slice u8)) (y (slice u8))] (-> bool)
+  (let [nx (slice-len x) ny (slice-len y) (mut i) 0 (mut res) 0]
+    (loop (if (or (icmp-ge (load i) nx) (icmp-ge (load i) ny)) (break)
+      (let [cx (cast i64 (slice-get x (load i))) cy (cast i64 (slice-get y (load i)))]
+        (if (icmp-lt cx cy) (do (store! res 1) (break))
+          (if (icmp-gt cx cy) (do (store! res 2) (break))
+            (store! i (iadd (load i) 1)))))))
+    (if (icmp-eq (load res) 1) true (if (icmp-eq (load res) 2) false (icmp-lt nx ny)))))
+(defn conv-name [(c Convention)] (-> (slice u8))
+  (let [p (alloc-stack Convention)] (store! p c) (load (field p name))))
+
+; A whole-section dumper: `(<tag>` then a space+item per element, then `)`.
+; Mirrors dump_program's per-section loops.
+(defn d-program [(w (ptr Writer)) (p (ptr Program)) (a (ptr Allocator))] (-> i64)
+  ; conventions — sorted by name (mirrors dump_program's keys().sort()).
+  (ps w "(conventions")
+  (let [convs (load (field p conventions)) n (al-len [Convention] convs) (mut used) (al-new [bool] a) (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
+    (let [(mut c) 0]
+      (loop (if (icmp-ge (load c) n) (break)
+        (do (let [(mut best) -1 (mut bi) 0]
+              (loop (if (icmp-ge (load bi) n) (break)
+                (do (if (not (al-get [bool] (load used) (load bi)))
+                        (if (or (icmp-lt (load best) 0)
+                                (str-lt (conv-name (al-get [Convention] convs (load bi))) (conv-name (al-get [Convention] convs (load best)))))
+                            (store! best (load bi)) 0) 0)
+                    (store! bi (iadd (load bi) 1)))))
+              (al-set! [bool] (mut used) (load best) true)
+              (wb w 32)
+              (let [cc (alloc-stack Convention)] (store! cc (al-get [Convention] convs (load best))) (d-convention w cc)))
+            (store! c (iadd (load c) 1)))))))
+  (wb w 41)
+  (ps w "\n(structs")
+  (let [(mut i) 0 n (al-len [StructDef] (load (field p structs)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [s (alloc-stack StructDef)] (store! s (al-get [StructDef] (load (field p structs)) (load i))) (d-struct w s))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(sums")
+  (let [(mut i) 0 n (al-len [SumDef] (load (field p sums)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [s (alloc-stack SumDef)] (store! s (al-get [SumDef] (load (field p sums)) (load i))) (d-sum w s))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(externs")
+  (let [(mut i) 0 n (al-len [Extern] (load (field p externs)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [e (alloc-stack Extern)] (store! e (al-get [Extern] (load (field p externs)) (load i))) (d-extern w e))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(funcs")
+  (let [(mut i) 0 n (al-len [Func] (load (field p funcs)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [f (alloc-stack Func)] (store! f (al-get [Func] (load (field p funcs)) (load i))) (d-func w f))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(asserts")
+  (let [(mut i) 0 n (al-len [StaticAssert] (load (field p asserts)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [a (alloc-stack StaticAssert)] (store! a (al-get [StaticAssert] (load (field p asserts)) (load i))) (d-assert w a))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(consts")
+  (let [(mut i) 0 n (al-len [Const] (load (field p consts)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [c (alloc-stack Const)] (store! c (al-get [Const] (load (field p consts)) (load i))) (d-const w c))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(traits")
+  (let [(mut i) 0 n (al-len [TraitDef] (load (field p traits)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [t (alloc-stack TraitDef)] (store! t (al-get [TraitDef] (load (field p traits)) (load i))) (d-trait w t))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(impls")
+  (let [(mut i) 0 n (al-len [ImplDef] (load (field p impls)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [im (alloc-stack ImplDef)] (store! im (al-get [ImplDef] (load (field p impls)) (load i))) (d-impl w im))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(statics)")
+  (ps w "\n(metas")
+  (let [(mut i) 0 n (al-len [Expr] (load (field p metas)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [m (alloc-stack Expr)] (store! m (al-get [Expr] (load (field p metas)) (load i))) (d-expr w m))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (ps w "\n(exports")
+  (let [(mut i) 0 n (al-len [ExportC] (load (field p exports)))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb w 32) (let [e (alloc-stack ExportC)] (store! e (al-get [ExportC] (load (field p exports)) (load i))) (d-export w e))
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  0)
+
+; ============================ the PORT (implement these) =====================
+; Each stub HARD-ABORTS (never a silent wrong value). Replace the body with a
+; faithful port of the same-named function in src/parse.rs.

@@ -1,0 +1,318 @@
+; selfhost/src/reader.coil — self-host Coil compiler, reader module.
+(module reader)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ffi.coil" :use *)
+(import "ast.coil" :use *)
+
+(defsum SexpKind
+  (KInt   [(v i64)])
+  (KFloat [(bits i64)])
+  (KSym   [(s (slice u8))])
+  (KKw    [(s (slice u8))])
+  (KStr   [(s (slice u8))])
+  (KCStr  [(s (slice u8))])
+  (KList  [(items (ptr (ArrayList Sexp)))])
+  (KVec   [(items (ptr (ArrayList Sexp)))]))
+
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
+
+(defsum TokKind
+  (TOpen   [(c i64)])
+  (TClose  [(c i64)])
+  (TPrefix [(s (slice u8))])
+  (TStr    [(s (slice u8))])
+  (TCStr   [(s (slice u8))])
+  (TAtom   [(s (slice u8))]))
+
+(defstruct Tok [(kind TokKind) (lo i64) (hi i64)])
+(defstruct Parser [(toks (ptr (ArrayList Tok))) (pos i64)])
+(defstruct StrRead [(s (slice u8)) (end i64)])
+
+; ============================ AST representation =============================
+; Mirrors src/ast.rs. Recursion goes through (ptr Expr) / (ptr Type) (single
+; box) and (ptr (ArrayList X)) (a sequence), like reader.coil/Sexp. Spans live as
+; raw i64 lo/hi (dummy = -1), exactly as the reader stores them.
+
+; Type — 14 constructable variants (src/ast.rs Type).
+(defn looks-numeric [(s (slice u8))] (-> bool)
+  (let [n (slice-len s)]
+    (if (icmp-eq n 0) false
+        (let [c0 (cast i64 (slice-get s 0))]
+          (if (and (icmp-ge c0 48) (icmp-le c0 57)) true
+              (if (or (icmp-eq c0 45) (or (icmp-eq c0 43) (icmp-eq c0 46)))
+                  (if (icmp-ge n 2)
+                      (let [c1 (cast i64 (slice-get s 1))] (and (icmp-ge c1 48) (icmp-le c1 57)))
+                      false)
+                  false))))))
+
+(defn parse-int [(s (slice u8))] (-> (Option i64))
+  (let [n (slice-len s)]
+    (let [dec
+          (if (icmp-eq n 0) (None [i64])
+              (let [(mut i) 0 (mut neg) false]
+                (let [c0 (cast i64 (slice-get s 0))]
+                  (if (icmp-eq c0 45) (do (store! neg true) (store! i 1))
+                    (if (icmp-eq c0 43) (store! i 1) 0)))
+                (if (icmp-ge (load i) n) (None [i64])
+                    (let [(mut mag) 0 (mut ok) true (mut overflow) false
+                          maxrem (if (load neg) 8 7)]
+                      (loop
+                        (if (icmp-ge (load i) n) (break)
+                          (let [c (cast i64 (slice-get s (load i)))]
+                            (if (and (icmp-ge c 48) (icmp-le c 57))
+                                (let [d (isub c 48)]
+                                  (if (or (icmp-gt (load mag) 922337203685477580)
+                                          (and (icmp-eq (load mag) 922337203685477580) (icmp-gt d maxrem)))
+                                      (do (store! overflow true) (break))
+                                      (do (store! mag (iadd (imul (load mag) 10) d)) (store! i (iadd (load i) 1)))))
+                                (do (store! ok false) (break))))))
+                      (if (or (not (load ok)) (load overflow)) (None [i64])
+                          (Some (if (load neg) (isub 0 (load mag)) (load mag))))))))]
+      (match dec
+        (Some [v] (Some v))
+        (None []
+          (if (icmp-eq n 0) (None [i64])
+              (let [(mut neg2) false (mut bstart) 0]
+                (let [c0 (cast i64 (slice-get s 0))]
+                  (if (icmp-eq c0 45) (do (store! neg2 true) (store! bstart 1))
+                    (if (icmp-eq c0 43) (store! bstart 1) 0)))
+                (let [blen (isub n (load bstart)) (mut radix) 0 (mut dstart) (load bstart)]
+                  (if (and (icmp-ge blen 2) (icmp-eq (cast i64 (slice-get s (load bstart))) 48))
+                      (let [c1 (cast i64 (slice-get s (iadd (load bstart) 1)))]
+                        (if (or (icmp-eq c1 120) (icmp-eq c1 88)) (do (store! radix 16) (store! dstart (iadd (load bstart) 2)))
+                          (if (or (icmp-eq c1 98) (icmp-eq c1 66)) (do (store! radix 2) (store! dstart (iadd (load bstart) 2)))
+                            (if (or (icmp-eq c1 111) (icmp-eq c1 79)) (do (store! radix 8) (store! dstart (iadd (load bstart) 2)))
+                              0))))
+                      0)
+                  (if (icmp-eq (load radix) 0)
+                      (let [body (subslice s (load bstart) n)
+                            has-us (do (let [(mut f) false (mut j) (load bstart)]
+                                         (loop (if (icmp-ge (load j) n) (break)
+                                             (do (if (icmp-eq (cast i64 (slice-get s (load j))) 95) (store! f true) false)
+                                                 (store! j (iadd (load j) 1)))))
+                                         (load f)))]
+                        (if (and has-us (looks-numeric body)) (do (store! radix 10) (store! dstart (load bstart))) 0))
+                      0)
+                  (if (icmp-eq (load radix) 0) (None [i64])
+                      (let [(mut mag) 0 (mut count) 0 (mut bad) false (mut ovf) false
+                            (mut j) (load dstart) rr (load radix)]
+                        (loop
+                          (if (icmp-ge (load j) n) (break)
+                            (let [c (cast i64 (slice-get s (load j)))]
+                              (store! j (iadd (load j) 1))
+                              (if (icmp-eq c 95) 0
+                                (let [dv (let [v0 (if (and (icmp-ge c 48) (icmp-le c 57)) (isub c 48)
+                                                    (if (and (icmp-ge c 97) (icmp-le c 122)) (iadd (isub c 97) 10)
+                                                      (if (and (icmp-ge c 65) (icmp-le c 90)) (iadd (isub c 65) 10) -1)))]
+                                           (if (icmp-lt v0 0) -1 (if (icmp-ge v0 rr) -1 v0)))]
+                                  (if (icmp-lt dv 0) (do (store! bad true) (break))
+                                      (let [maxdiv (udiv -1 rr) maxrem (urem -1 rr)]
+                                        (if (or (icmp-gt (cast u64 (load mag)) (cast u64 maxdiv))
+                                                (and (icmp-eq (load mag) maxdiv) (icmp-gt (cast u64 dv) (cast u64 maxrem))))
+                                            (do (store! ovf true) (break))
+                                            (do (store! mag (iadd (imul (load mag) rr) dv)) (store! count (iadd (load count) 1)))))))))))
+                        (if (or (load bad) (or (load ovf) (icmp-eq (load count) 0))) (None [i64])
+                            (Some (if (load neg2) (isub 0 (load mag)) (load mag))))))))))))))
+
+(defn atom [(s (slice u8))] (-> SexpKind)
+  (let [n (slice-len s)]
+    (if (and (icmp-gt n 0) (icmp-eq (cast i64 (slice-get s 0)) 58)) (KKw (subslice s 1 n))
+        (match (parse-int s)
+          (Some [v] (KInt v))
+          (None []
+            (if (and (looks-numeric s)
+                     (do (let [(mut f) false (mut j) 0]
+                           (loop (if (icmp-ge (load j) n) (break)
+                               (do (let [c (cast i64 (slice-get s (load j)))]
+                                     (if (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69))) (store! f true) false))
+                                   (store! j (iadd (load j) 1)))))
+                           (load f))))
+                (let [a (malloc-allocator) buf (slice->cstr a s) ep (alloc-stack (ptr i8))
+                      x (strtod buf ep) consumed (isub (cast i64 (load ep)) (cast i64 buf))]
+                  (if (and (icmp-gt n 0) (icmp-eq consumed n)) (KFloat (f64-bits x)) (KSym s)))
+                (KSym s)))))))
+
+(defn read-string-body [(a (ptr Allocator)) (src (slice u8)) (open-off i64) (i i64)] (-> (Result StrRead Diag))
+  (let [n (slice-len src) (mut buf) (al-new [u8] a) (mut k) i (mut out) (zeroed (Result StrRead Diag))]
+    (loop
+      (if (icmp-ge (load k) n)
+          (do (store! out (Err (mk-diag open-off n "unterminated string literal"))) (break))
+          (let [c (cast i64 (slice-get src (load k)))]
+            (store! k (iadd (load k) 1))
+            (if (icmp-eq c 34)
+                (do (store! out (Ok (mk-strread (al-slice [u8] (load buf)) (load k)))) (break))
+              (if (icmp-eq c 92)
+                  (if (icmp-ge (load k) n)
+                      (do (store! out (Err (mk-diag open-off n "unterminated string escape"))) (break))
+                      (let [e (cast i64 (slice-get src (load k)))]
+                        (store! k (iadd (load k) 1))
+                        (al-push! (mut buf)
+                          (cast u8 (if (icmp-eq e 110) 10 (if (icmp-eq e 116) 9 (if (icmp-eq e 34) 34 (if (icmp-eq e 92) 92 e))))))))
+                  (al-push! (mut buf) (cast u8 c)))))))
+    (load out)))
+
+(defn tokenize [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Tok)) Diag))
+  (let [n (slice-len src) (mut toks) (al-new [Tok] a) (mut i) 0
+        (mut out) (zeroed (Result (ptr (ArrayList Tok)) Diag)) (mut done) false]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (let [c (cast i64 (slice-get src (load i)))]
+          (if (or (icmp-eq c 32) (or (icmp-eq c 9) (or (icmp-eq c 10) (or (icmp-eq c 13) (or (icmp-eq c 11) (icmp-eq c 12))))))
+              (store! i (iadd (load i) 1))
+            (if (icmp-eq c 59)
+                (loop (if (icmp-ge (load i) n) (break)
+                    (let [ch (cast i64 (slice-get src (load i)))]
+                      (store! i (iadd (load i) 1)) (if (icmp-eq ch 10) (break) 0))))
+              (if (or (icmp-eq c 40) (icmp-eq c 91))
+                  (do (al-push! (mut toks) (mk-tok (TOpen c) (load i) (iadd (load i) 1))) (store! i (iadd (load i) 1)))
+                (if (or (icmp-eq c 41) (icmp-eq c 93))
+                    (do (al-push! (mut toks) (mk-tok (TClose c) (load i) (iadd (load i) 1))) (store! i (iadd (load i) 1)))
+                  (if (icmp-eq c 39)
+                      (do (al-push! (mut toks) (mk-tok (TPrefix "quote") (load i) (iadd (load i) 1))) (store! i (iadd (load i) 1)))
+                    (if (icmp-eq c 96)
+                        (do (al-push! (mut toks) (mk-tok (TPrefix "quasiquote") (load i) (iadd (load i) 1))) (store! i (iadd (load i) 1)))
+                      (if (icmp-eq c 126)
+                          (let [istart (load i)]
+                            (store! i (iadd (load i) 1))
+                            (if (and (icmp-lt (load i) n) (icmp-eq (cast i64 (slice-get src (load i))) 64))
+                                (do (al-push! (mut toks) (mk-tok (TPrefix "unquote-splicing") istart (iadd (load i) 1))) (store! i (iadd (load i) 1)))
+                                (al-push! (mut toks) (mk-tok (TPrefix "unquote") istart (iadd istart 1)))))
+                        (if (icmp-eq c 34)
+                            (let [istart (load i)]
+                              (store! i (iadd (load i) 1))
+                              (match (read-string-body a src istart (load i))
+                                (Err [d] (do (store! out (Err d)) (store! done true) (break)))
+                                (Ok [sr]
+                                  (let [srp (alloc-stack StrRead)]
+                                    (store! srp sr)
+                                    (al-push! (mut toks) (mk-tok (TStr (load (field srp s))) istart (load (field srp end))))
+                                    (store! i (load (field srp end)))))))
+                            (let [start (load i) (mut end) (load i)]
+                              (loop
+                                (if (icmp-ge (load i) n) (break)
+                                  (let [cc (cast i64 (slice-get src (load i)))]
+                                    (if (or (or (icmp-eq cc 32) (or (icmp-eq cc 9) (or (icmp-eq cc 10) (or (icmp-eq cc 13) (or (icmp-eq cc 11) (icmp-eq cc 12))))))
+                                            (or (icmp-eq cc 40) (or (icmp-eq cc 41) (or (icmp-eq cc 91) (or (icmp-eq cc 93) (or (icmp-eq cc 59) (or (icmp-eq cc 39) (or (icmp-eq cc 96) (or (icmp-eq cc 126) (icmp-eq cc 34))))))))))
+                                        (break)
+                                        (do (store! i (iadd (load i) 1)) (store! end (load i)))))))
+                              (let [stok (subslice src start (load end))]
+                                (if (and (and (icmp-eq (isub (load end) start) 1) (icmp-eq (cast i64 (slice-get src start)) 99))
+                                         (and (icmp-lt (load i) n) (icmp-eq (cast i64 (slice-get src (load i))) 34)))
+                                    (do (store! i (iadd (load i) 1))
+                                        (match (read-string-body a src start (load i))
+                                          (Err [d] (do (store! out (Err d)) (store! done true) (break)))
+                                          (Ok [sr]
+                                            (let [srp (alloc-stack StrRead)]
+                                              (store! srp sr)
+                                              (al-push! (mut toks) (mk-tok (TCStr (load (field srp s))) start (load (field srp end))))
+                                              (store! i (load (field srp end)))))))
+                                    (al-push! (mut toks) (mk-tok (TAtom stok) start (load end)))))))))))))))))
+    (if (load done) (load out)
+        (Ok (let [bp (unwrap-ptr [(ArrayList Tok)] (create [(ArrayList Tok)] a))] (store! bp (load toks)) bp)))))
+
+(defn parse-one [(p (ptr Parser)) (a (ptr Allocator))] (-> (Result Sexp Diag))
+  (let [toks (load (field p toks)) ntok (al-len [Tok] (load toks)) pos (load (field p pos))]
+    (if (icmp-ge pos ntok) (Err (mk-diag -1 -1 "unexpected end of input"))
+        (let [tok (alloc-stack Tok)]
+          (store! tok (al-get [Tok] (load toks) pos))
+          (store! (field p pos) (iadd pos 1))
+          (let [tlo (load (field tok lo)) thi (load (field tok hi))]
+            (match (load (field tok kind))
+              (TStr  [s] (Ok (mk-sexp (KStr s) tlo thi)))
+              (TCStr [s] (Ok (mk-sexp (KCStr s) tlo thi)))
+              (TAtom [s] (Ok (mk-sexp (atom s) tlo thi)))
+              (TClose [c]
+                (let [cs (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 c)) cb) 1)
+                      m1 (match (str-concat a "unexpected '" cs) (Some [v] v) (None [] ""))
+                      m2 (match (str-concat a m1 "'") (Some [v] v) (None [] ""))]
+                  (Err (mk-diag tlo thi m2))))
+              (TPrefix [sym]
+                (match (parse-one p a)
+                  (Err [d] (Err d))
+                  (Ok [inner]
+                    (let [ip (alloc-stack Sexp)]
+                      (store! ip inner)
+                      (let [ihi (load (field ip hi)) (mut kids) (al-new [Sexp] a)]
+                        (al-push! (mut kids) (mk-sexp (KSym sym) tlo thi))
+                        (al-push! (mut kids) (load ip))
+                        (Ok (mk-sexp (KList (box-items a (load kids))) tlo ihi)))))))
+              (TOpen [open]
+                (let [close (if (icmp-eq open 40) 41 93) (mut items) (al-new [Sexp] a) (mut out) (zeroed (Result Sexp Diag))]
+                  (loop
+                    (let [cpos (load (field p pos))]
+                      (if (icmp-ge cpos ntok)
+                          (do (let [cs (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 open)) cb) 1)
+                                    m1 (match (str-concat a "unclosed '" cs) (Some [v] v) (None [] ""))
+                                    m2 (match (str-concat a m1 "'") (Some [v] v) (None [] ""))]
+                                (store! out (Err (mk-diag tlo thi m2))))
+                              (break))
+                          (let [nt (alloc-stack Tok)]
+                            (store! nt (al-get [Tok] (load toks) cpos))
+                            (let [cdelim (match (load (field nt kind))
+                                           (TClose [cc] cc) (TOpen [_] -1) (TPrefix [_] -1)
+                                           (TStr [_] -1) (TCStr [_] -1) (TAtom [_] -1))]
+                              (if (icmp-ge cdelim 0)
+                                  (if (icmp-ne cdelim close)
+                                      (do (let [os (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 open)) cb) 1)
+                                                ds (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 cdelim)) cb) 1)
+                                                m1 (match (str-concat a "mismatched delimiters: '" os) (Some [v] v) (None [] ""))
+                                                m2 (match (str-concat a m1 "' .. '") (Some [v] v) (None [] ""))
+                                                m3 (match (str-concat a m2 ds) (Some [v] v) (None [] ""))
+                                                m4 (match (str-concat a m3 "'") (Some [v] v) (None [] ""))]
+                                            (store! out (Err (mk-diag (load (field nt lo)) (load (field nt hi)) m4))))
+                                          (break))
+                                      (do (store! (field p pos) (iadd cpos 1))
+                                          (store! out (Ok (mk-sexp (if (icmp-eq open 40)
+                                                                       (KList (box-items a (load items)))
+                                                                       (KVec (box-items a (load items))))
+                                                                   tlo (load (field nt hi)))))
+                                          (break)))
+                                  (match (parse-one p a)
+                                    (Ok [child] (do (al-push! (mut items) child) 0))
+                                    (Err [d] (do (store! out (Err d)) (break))))))))))
+                  (load out)))))))))
+
+; Recursively stamp `source` on a node + descendants (in place); ctxt untouched.
+(defn stamp-source-list [(items (ptr (ArrayList Sexp))) (source i64)] (-> i64)
+  (let [n (al-len [Sexp] (load items)) (mut i) 0 data (load (field items data))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (stamp-source-node (index data (load i)) source) (store! i (iadd (load i) 1))))))
+  0)
+(defn stamp-source-node [(x (ptr Sexp)) (source i64)] (-> i64)
+  (store! (field x source) source)
+  (match (load (field x kind))
+    (KList  [items] (stamp-source-list items source))
+    (KVec   [items] (stamp-source-list items source))
+    (KInt   [v] 0) (KFloat [b] 0) (KSym  [s] 0)
+    (KKw    [s] 0) (KStr   [s] 0) (KCStr [s] 0))
+  0)
+(defn diag-with-source [(d Diag) (source i64)] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p d)
+    (if (icmp-ge (load (field p lo)) 0) (store! (field p source) source) 0)
+    (load p)))
+
+(defn read-all [(a (ptr Allocator)) (src (slice u8)) (source i64)] (-> (Result (ptr (ArrayList Sexp)) Diag))
+  (match (tokenize a src)
+    (Err [d] (Err (diag-with-source d source)))
+    (Ok [toks]
+      (let [p (alloc-stack Parser) (mut out) (al-new [Sexp] a) (mut err) (zeroed Diag) (mut failed) false]
+        (store! (field p toks) toks) (store! (field p pos) 0)
+        (loop
+          (if (icmp-ge (load (field p pos)) (al-len [Tok] (load toks))) (break)
+            (match (parse-one p a)
+              (Ok [s] (do (al-push! (mut out) s) 0))
+              (Err [d] (do (store! err d) (store! failed true) (break))))))
+        (if (load failed) (Err (diag-with-source (load err) source))
+          (let [forms (box-items a (load out))] (stamp-source-list forms source) (Ok forms)))))))
+
+; ============================ canonical dump entry ==========================
+; Emits the `(error@source:lo:hi:ctxt "msg")` shape on a read/parse error.

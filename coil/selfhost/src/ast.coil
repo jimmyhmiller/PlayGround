@@ -1,0 +1,336 @@
+; selfhost/src/ast.coil — self-host Coil compiler, ast module.
+(module ast)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "reader.coil" :use *)
+
+(defsum Type
+  (TInt    [(bits i64) (signed bool)])
+  (TFloat  [(bits i64)])
+  (TBool   [])
+  (TVoid   [])
+  (TPtr    [(inner (ptr Type))])
+  (TRef    [(mutable bool) (inner (ptr Type))])
+  (TStruct [(name (slice u8))])
+  (TArray  [(elem (ptr Type)) (n i64)])
+  (TSlice  [(elem (ptr Type))])
+  (TVec    [(elem (ptr Type)) (n i64)])
+  (TFn     [(cc (slice u8)) (params (ptr (ArrayList Type))) (ret (ptr Type))])
+  (TApp    [(name (slice u8)) (args (ptr (ArrayList Type)))])
+  (TNever  [])
+  (TCode   []))
+
+; A function parameter (name + type).
+(defstruct Param [(name (slice u8)) (ty Type)])
+; A struct/variant field (name + type).
+(defstruct Field [(name (slice u8)) (ty Type)])
+
+; ExprKind — the 42 variants `parse_program` can PRODUCE (the 6 checker/mono-only
+; variants — SpillRef, DynDispatch, MakeDyn, Construct, StaticRef, TraitCall —
+; are never produced by the parser, so they are intentionally absent here).
+; Numeric op tags: BinOp/CmpOp/Storage/TypeQuery/FieldMeta/CodeOp are stored as
+; i64 codes (see the d-*-tag dumpers for the code->string mapping).
+(defsum ExprKind
+  (EInt       [(v i64)])
+  (EStr       [(s (slice u8))])
+  (ECStr      [(s (slice u8))])
+  (EVar       [(name (slice u8))])
+  (EZeroed    [(ty Type)])
+  (EBorrow    [(mutable bool) (place (ptr Expr))])
+  (ELet       [(binds (ptr (ArrayList Bind))) (body (ptr (ArrayList Expr)))])
+  (EBin       [(op i64) (lhs (ptr Expr)) (rhs (ptr Expr))])
+  (ENot       [(inner (ptr Expr))])
+  (EFloat     [(bits i64)])
+  (EBool      [(b bool)])
+  (ECmp       [(op i64) (lhs (ptr Expr)) (rhs (ptr Expr))])
+  (EIf        [(cnd (ptr Expr)) (thn (ptr Expr)) (els (ptr Expr))])
+  (EDo        [(body (ptr (ArrayList Expr)))])
+  (ECall      [(func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr)))])
+  (EAlloc     [(storage i64) (ty Type)])
+  (EField     [(p (ptr Expr)) (fname (slice u8))])
+  (ELoad      [(inner (ptr Expr))])
+  (EStore     [(p (ptr Expr)) (val (ptr Expr))])
+  (EIndex     [(p (ptr Expr)) (idx (ptr Expr))])
+  (ECast      [(ty Type) (inner (ptr Expr))])
+  (ESizeOf    [(ty Type)])
+  (EAlignOf   [(ty Type)])
+  (EOffsetOf  [(ty Type) (fname (slice u8))])
+  (EBitGet    [(p (ptr Expr)) (fname (slice u8))])
+  (EBitSet    [(p (ptr Expr)) (fname (slice u8)) (val (ptr Expr))])
+  (EFree      [(inner (ptr Expr))])
+  (EErase     [(trait_name (slice u8)) (inner (ptr Expr))])
+  (EMatch     [(scrut (ptr Expr)) (arms (ptr (ArrayList Arm)))])
+  (EFnPtrOf   [(name (slice u8))])
+  (ECallPtr   [(fp (ptr Expr)) (args (ptr (ArrayList Expr)))])
+  (ELoop      [(label (Option (slice u8))) (body (ptr (ArrayList Expr)))])
+  (EBreak     [(label (Option (slice u8))) (value (Option (ptr Expr)))])
+  (EContinue  [(label (Option (slice u8)))])
+  (ELlvmIr    [(result Type) (args (ptr (ArrayList Expr))) (body (slice u8))])
+  (ETypeQuery [(q i64) (ty Type)])
+  (EFieldMeta [(meta i64) (ty Type) (idx (ptr Expr))])
+  (EFieldIndex[(ty Type) (name (ptr Expr))])
+  (EQuote     [(form (ptr Sexp))])
+  (ECodeOp    [(op i64) (args (ptr (ArrayList Expr)))])
+  (EQuasi     [(q Quasi)])
+  (EComptime  [(inner (ptr Expr))])
+  ; ---- the 6 check-introduced variants (parser/resolver never emit these;
+  ; the type-checker LOWERS calls/borrows/etc. into them). Mirror src/ast.rs.
+  (ESpillRef  [(inner (ptr Expr))])
+  (EConstruct [(sum (slice u8)) (variant (slice u8)) (args (ptr (ArrayList Expr)))])
+  (ETraitCall [(trait_name (slice u8)) (method (slice u8)) (self_tp (slice u8)) (args (ptr (ArrayList Expr)))])
+  (EDynDispatch [(dyn_struct (slice u8)) (vtable_struct (slice u8)) (method_index i64) (cc (slice u8)) (params (ptr (ArrayList Type))) (ret Type) (recv (ptr Expr)) (args (ptr (ArrayList Expr)))])
+  (EMakeDyn   [(dyn_struct (slice u8)) (vtable_struct (slice u8)) (methods (ptr (ArrayList (slice u8)))) (inner (ptr Expr))])
+  (EStaticRef [(name (slice u8))]))
+
+(defstruct Expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
+
+; A let binding (name, mutable, value).
+(defstruct Bind [(name (slice u8)) (mutable bool) (value Expr)])
+; A match arm (variant, bound names, body).
+(defstruct Arm [(variant (slice u8)) (binds (ptr (ArrayList (slice u8)))) (body Expr)])
+
+; A quasiquote template node (src/ast.rs Quasi).
+(defsum Quasi
+  (QLit     [(form (ptr Sexp))])
+  (QUnquote [(e (ptr Expr))])
+  (QSplice  [(e (ptr Expr))])
+  (QList    [(items (ptr (ArrayList Quasi)))])
+  (QVector  [(items (ptr (ArrayList Quasi)))]))
+
+; Calling-convention lowering (src/convention.rs).
+(defsum Lowering
+  (LNative [(cc i64)])   ; cc: 0=c 1=fast 2=cold
+  (LShim   []))
+
+(defstruct Convention
+  [(name (slice u8))
+   (params (ptr (ArrayList (slice u8))))
+   (ret (Option (slice u8)))
+   (clobber (ptr (ArrayList (slice u8))))
+   (preserve (ptr (ArrayList (slice u8))))
+   (lowering Lowering)])
+
+; Struct memory layout (src/ast.rs Layout).
+(defsum Layout
+  (LC       [])
+  (LPacked  [])
+  (LAligned [(n i64)])
+  (LExplicit[(offsets (ptr (ArrayList i64))) (size (Option i64)) (align i64)])
+  (LBits    [(backing i64) (offsets (ptr (ArrayList i64)))]))
+
+(defstruct StructDef
+  [(name (slice u8))
+   (type_params (ptr (ArrayList (slice u8))))
+   (layout Layout)
+   (fields (ptr (ArrayList Field)))])
+
+(defstruct Variant [(name (slice u8)) (fields (ptr (ArrayList Field)))])
+(defstruct SumDef
+  [(name (slice u8))
+   (type_params (ptr (ArrayList (slice u8))))
+   (variants (ptr (ArrayList Variant)))])
+
+(defstruct Extern
+  [(name (slice u8)) (cc (slice u8)) (params (ptr (ArrayList Type)))
+   (variadic bool) (ret Type)])
+
+; A trait bound on a type parameter (name + required trait names).
+(defstruct Bound [(name (slice u8)) (traits (ptr (ArrayList (slice u8))))])
+
+(defstruct Func
+  [(name (slice u8))
+   (type_params (ptr (ArrayList (slice u8))))
+   (bounds (ptr (ArrayList Bound)))
+   (cc (slice u8))
+   (params (ptr (ArrayList Param)))
+   (ret Type)
+   (body (ptr (ArrayList Expr)))
+   (macro_variadic bool)
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
+
+(defstruct StaticAssert [(cnd Expr) (msg (slice u8))])
+(defstruct Const [(name (slice u8)) (ty (Option Type)) (value Expr)])
+
+(defstruct TraitMethod [(name (slice u8)) (params (ptr (ArrayList Param))) (ret Type)])
+(defstruct TraitDef
+  [(name (slice u8)) (self_param (slice u8)) (methods (ptr (ArrayList TraitMethod)))])
+(defstruct ImplDef
+  [(trait_name (slice u8)) (for_type (slice u8)) (methods (ptr (ArrayList Func)))])
+
+(defstruct ExportC
+  [(name (slice u8)) (symbol (Option (slice u8))) (params (ptr (ArrayList Type)))
+   (lo i64) (hi i64) (source i64) (ctxt i64)])
+
+; The whole program (src/ast.rs Program). `statics` is omitted: parsing never
+; produces statics (they come from checking), so the dump always emits an empty
+; `(statics)` section.
+(defstruct Program
+  [(conventions (ptr (ArrayList Convention)))
+   (structs (ptr (ArrayList StructDef)))
+   (sums (ptr (ArrayList SumDef)))
+   (externs (ptr (ArrayList Extern)))
+   (funcs (ptr (ArrayList Func)))
+   (asserts (ptr (ArrayList StaticAssert)))
+   (consts (ptr (ArrayList Const)))
+   (traits (ptr (ArrayList TraitDef)))
+   (impls (ptr (ArrayList ImplDef)))
+   (metas (ptr (ArrayList Expr)))
+   (exports (ptr (ArrayList ExportC)))])
+
+; A parse/read diagnostic (src/span.rs Diag); dummy span = -1.
+(defstruct Diag [(lo i64) (hi i64) (msg (slice u8)) (source i64) (ctxt i64)])
+
+; ============================ small constructors =============================
+(defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
+  (let [p (alloc-stack Sexp)]
+    (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
+    (load p)))
+(defn mk-tok [(kind TokKind) (lo i64) (hi i64)] (-> Tok)
+  (let [p (alloc-stack Tok)]
+    (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (load p)))
+(defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
+  (let [p (alloc-stack Diag)]
+    (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p msg) msg)
+    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
+    (load p)))
+(defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
+  (let [p (alloc-stack StrRead)]
+    (store! (field p s) s) (store! (field p end) end)
+    (load p)))
+
+(defn box-items [(a (ptr Allocator)) (items (ArrayList Sexp))] (-> (ptr (ArrayList Sexp)))
+  (let [p (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a))]
+    (store! p items) p))
+(defn box-sexp [(a (ptr Allocator)) (s Sexp)] (-> (ptr Sexp))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) p))
+(defn box-expr [(a (ptr Allocator)) (e Expr)] (-> (ptr Expr))
+  (let [p (unwrap-ptr [Expr] (create [Expr] a))] (store! p e) p))
+(defn box-type [(a (ptr Allocator)) (t Type)] (-> (ptr Type))
+  (let [p (unwrap-ptr [Type] (create [Type] a))] (store! p t) p))
+
+(defn mk-expr [(kind ExprKind) (lo i64) (hi i64) (source i64) (ctxt i64)] (-> Expr)
+  (let [p (alloc-stack Expr)]
+    (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
+    (store! (field p source) source) (store! (field p ctxt) ctxt)
+    (load p)))
+; Rebuild a Sexp of `kind` preserving `orig`'s full span (source+ctxt+lo+hi),
+; mirroring Rust `Sexp::new(kind, s.span)` — so the expander's non-macro
+; List/Vector reconstruction never drops source/ctxt.
+(defn mk-sexp-src [(kind SexpKind) (orig (ptr Sexp))] (-> Sexp)
+  (let [p (alloc-stack Sexp)]
+    (store! (field p kind) kind)
+    (store! (field p lo) (load (field orig lo))) (store! (field p hi) (load (field orig hi)))
+    (store! (field p source) (load (field orig source))) (store! (field p ctxt) (load (field orig ctxt)))
+    (load p)))
+
+; ============================ numeric/string utils ===========================
+(defn f64-bits [(x f64)] (-> i64)
+  (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
+
+(defn slice->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s)
+        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
+            (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast i8 0))
+    buf))
+
+; ============================ output primitives ==============================
+(defn wb [(w (ptr Writer)) (b i64)] (-> i64) (write-byte w (cast u8 b)) 0)
+(defn ps [(w (ptr Writer)) (s (slice u8))] (-> i64) (print-str w s) 0)
+(defn hexd [(d i64)] (-> i64) (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))
+
+(defn dump-dec-mag [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (icmp-lt n 10)
+      (wb w (iadd n 48))
+      (do (dump-dec-mag w (udiv n 10)) (wb w (iadd (urem n 10) 48)))))
+(defn dump-dec [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (icmp-lt n 0)
+      (do (wb w 45) (dump-dec-mag w (isub 0 n)))
+      (dump-dec-mag w n)))
+
+(defn u-hex16 [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [(mut k) 60]
+    (loop
+      (if (icmp-lt (load k) 0) (break)
+        (do (wb w (hexd (iand (ishr n (load k)) 15))) (store! k (isub (load k) 4))))))
+  0)
+
+; A span `@lo:hi`, dummy (lo/hi = -1) prints as `@D:…`/`…:D` (mirrors dump_span).
+(defn dump-span-field [(w (ptr Writer)) (v i64)] (-> i64)
+  (if (icmp-lt v 0) (wb w 68) (dump-dec w v)))
+(defn dump-span [(w (ptr Writer)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 64)
+  (dump-span-field w source) (wb w 58)
+  (dump-span-field w lo)     (wb w 58)
+  (dump-span-field w hi)     (wb w 58)
+  (dump-span-field w ctxt))
+
+(defn hex2 [(w (ptr Writer)) (b i64)] (-> i64)
+  (wb w (hexd (iand (ishr b 4) 15))) (wb w (hexd (iand b 15))))
+(defn esc-write [(w (ptr Writer)) (s (slice u8))] (-> i64)
+  (let [(mut i) 0 n (slice-len s)]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (let [b (cast i64 (slice-get s (load i)))]
+              (if (icmp-eq b 92) (ps w "\\\\")
+              (if (icmp-eq b 34) (ps w "\\\"")
+              (if (icmp-eq b 10) (ps w "\\n")
+              (if (icmp-eq b 9)  (ps w "\\t")
+              (if (icmp-eq b 13) (ps w "\\r")
+              (if (and (icmp-ge b 32) (icmp-le b 126)) (wb w b)
+              (do (ps w "\\x") (hex2 w b)))))))))
+            (store! i (iadd (load i) 1))))))
+  0)
+; A quoted string `"<escaped>"`.
+(defn dstr [(w (ptr Writer)) (s (slice u8))] (-> i64)
+  (wb w 34) (esc-write w s) (wb w 34))
+; A bool as '1'/'0'.
+(defn dbool [(w (ptr Writer)) (b bool)] (-> i64) (if b (wb w 49) (wb w 48)))
+
+; ============================ Sexp canonical dump (for quote) =================
+; Mirrors src/reader.rs dump_node (reused by EQuote / QLit). Identical to
+; selfhost/reader.coil's dumper.
+(defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt) (ps w " \"") (esc-write w s) (ps w "\")"))
+(defn sx-seq [(w (ptr Writer)) (tag (slice u8)) (items (ptr (ArrayList Sexp))) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
+  (wb w 40) (ps w tag) (dump-span w source lo hi ctxt)
+  (let [(mut i) 0 n (al-len [Sexp] (load items))]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (wb w 32)
+            (let [child (alloc-stack Sexp)]
+              (store! child (al-get [Sexp] (load items) (load i)))
+              (sx-node w child))
+            (store! i (iadd (load i) 1))))))
+  (wb w 41))
+(defn sx-node [(w (ptr Writer)) (x (ptr Sexp))] (-> i64)
+  (let [lo (load (field x lo)) hi (load (field x hi))
+        src (load (field x source)) ctxt (load (field x ctxt))]
+    (match (load (field x kind))
+      (KInt   [v]     (do (ps w "(int") (dump-span w src lo hi ctxt) (wb w 32) (dump-dec w v) (wb w 41)))
+      (KFloat [bits]  (do (ps w "(float") (dump-span w src lo hi ctxt) (ps w " 0x") (u-hex16 w bits) (wb w 41)))
+      (KSym   [s]     (sx-atom w "sym" s src lo hi ctxt))
+      (KKw    [s]     (sx-atom w "kw" s src lo hi ctxt))
+      (KStr   [s]     (sx-atom w "str" s src lo hi ctxt))
+      (KCStr  [s]     (sx-atom w "cstr" s src lo hi ctxt))
+      (KList  [items] (sx-seq w "list" items src lo hi ctxt))
+      (KVec   [items] (sx-seq w "vec" items src lo hi ctxt)))))
+
+; ============================ AST canonical dump =============================
+; Mirrors src/dump_ast.rs EXACTLY. Every helper corresponds to a Rust dumper.
+
+; `["a" "b"]` — a vector of strings.

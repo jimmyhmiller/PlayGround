@@ -1,0 +1,199 @@
+; selfhost/src/ffi.coil — the FFI surface (libc + LLVM-C) for the self-host
+; compiler. All extern declarations live here; modules that call them
+; (import "ffi.coil" :use *). Extern link-names are the bare C symbols.
+(module ffi)
+
+(extern open     :cc c [(ptr i8) i32] (-> i32))
+(extern close    :cc c [i32] (-> i32))
+; libc `void exit(int)` — process exit with a code. Declared `(-> i64)` (like
+; `abort`) so it composes as an expression; the return is never taken (exit does
+; not return). Used to halt the tool with the faithful nonzero exit code Rust's
+; `report`/`ExitCode::FAILURE` produces, instead of `abort`'s SIGABRT (134).
+(extern exit     :cc c [i32] (-> i64))
+(extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; NULL on failure
+(extern getcwd   :cc c [(ptr i8) i64] (-> (ptr i8)))
+; pthread FFI — run the deeply-recursive pipeline on a big stack, mirroring
+; src/lib.rs::elaborate which spawns a 256MB-stack scoped thread. A `coil build`
+; binary gets the default ~8MB main stack, which the recursive passes overflow on a
+; large input (the self-host's own source). pthread_t / pthread_attr_t are carried
+; as opaque buffers (a pointer-sized handle; attr is 64 bytes on macOS).
+(extern pthread_create            :cc c [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)] (-> i32))
+(extern pthread_join              :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_attr_init         :cc c [(ptr i8)] (-> i32))
+(extern pthread_attr_setstacksize :cc c [(ptr i8) i64] (-> i32))
+
+; ============================ LLVM-C FFI surface =============================
+; The codegen pass builds the module with LLVMBuild* and prints it with
+; LLVMPrintModuleToString (mirroring src/lib.rs::emit_ir, which uses inkwell over
+; the same C API). Opaque LLVM handles are carried as `(ptr i8)`. This is the
+; surface src/codegen.rs needs; the full port wires each `LLVMBuild*` call. The
+; feasibility of linking + calling these is PROVEN by selfhost/llvm_probe.coil.
+(extern LLVMContextCreate                  :cc c [] (-> (ptr i8)))
+(extern LLVMContextDispose                 :cc c [(ptr i8)] (-> void))
+(extern LLVMModuleCreateWithNameInContext  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMDisposeModule                  :cc c [(ptr i8)] (-> void))
+(extern LLVMPrintModuleToString            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMSetDataLayout                  :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMSetTarget                      :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMCreateBuilderInContext         :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMDisposeBuilder                 :cc c [(ptr i8)] (-> void))
+; ---- types ----
+(extern LLVMVoidTypeInContext              :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMInt1TypeInContext              :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMInt8TypeInContext              :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMInt32TypeInContext             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMInt64TypeInContext             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMIntTypeInContext               :cc c [(ptr i8) i32] (-> (ptr i8)))
+(extern LLVMDoubleTypeInContext            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMPointerTypeInContext           :cc c [(ptr i8) i32] (-> (ptr i8)))
+(extern LLVMArrayType2                     :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern LLVMVectorType                     :cc c [(ptr i8) i32] (-> (ptr i8)))
+(extern LLVMStructTypeInContext            :cc c [(ptr i8) (ptr (ptr i8)) i32 i32] (-> (ptr i8)))
+(extern LLVMStructCreateNamed              :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMStructSetBody                  :cc c [(ptr i8) (ptr (ptr i8)) i32 i32] (-> void))
+(extern LLVMFunctionType                   :cc c [(ptr i8) (ptr (ptr i8)) i32 i32] (-> (ptr i8)))
+; ---- functions / blocks ----
+(extern LLVMAddFunction                    :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMGetParam                       :cc c [(ptr i8) i32] (-> (ptr i8)))
+(extern LLVMSetLinkage                     :cc c [(ptr i8) i32] (-> void))
+(extern LLVMAppendBasicBlockInContext      :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMPositionBuilderAtEnd           :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMFloatTypeInContext             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetTypeKind                    :cc c [(ptr i8)] (-> i32))
+(extern LLVMGetReturnType                  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMTypeOf                         :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMPrintTypeToString              :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGlobalGetValueType             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMCountParamTypes                :cc c [(ptr i8)] (-> i32))
+(extern LLVMGetParamTypes                  :cc c [(ptr i8) (ptr (ptr i8))] (-> void))
+; ---- module / globals / attributes ----
+(extern LLVMAddGlobal                      :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetInitializer                 :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMSetGlobalConstant              :cc c [(ptr i8) i32] (-> void))
+(extern LLVMSetAlignment                   :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetNamedFunction               :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetFunctionCallConv            :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetFunctionCallConv            :cc c [(ptr i8)] (-> i32))
+(extern LLVMSetInstructionCallConv         :cc c [(ptr i8) i32] (-> void))
+(extern LLVMSetTailCallKind                :cc c [(ptr i8) i32] (-> void))
+(extern LLVMGetTarget                      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetDataLayoutStr               :cc c [(ptr i8)] (-> (ptr i8)))
+; ---- target machine / data layout ----
+(extern LLVMInitializeAArch64TargetInfo    :cc c [] (-> void))
+(extern LLVMInitializeAArch64Target        :cc c [] (-> void))
+(extern LLVMInitializeAArch64TargetMC      :cc c [] (-> void))
+(extern LLVMInitializeX86TargetInfo        :cc c [] (-> void))
+(extern LLVMInitializeX86Target            :cc c [] (-> void))
+(extern LLVMInitializeX86TargetMC          :cc c [] (-> void))
+; AsmPrinter init is REQUIRED for object emission (without it the target machine
+; reports "can't emit a file of this type"). Rust's Target::initialize_all does it.
+(extern LLVMInitializeAArch64AsmPrinter    :cc c [] (-> void))
+(extern LLVMInitializeX86AsmPrinter        :cc c [] (-> void))
+(extern LLVMGetDefaultTargetTriple         :cc c [] (-> (ptr i8)))
+(extern LLVMGetTargetFromTriple            :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
+(extern LLVMCreateTargetMachine            :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) i32 i32 i32] (-> (ptr i8)))
+(extern LLVMCreateTargetDataLayout         :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMCopyStringRepOfTargetData      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMABISizeOfType                  :cc c [(ptr i8) (ptr i8)] (-> i64))
+(extern LLVMABIAlignmentOfType             :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern LLVMOffsetOfElement                :cc c [(ptr i8) (ptr i8) i32] (-> i64))
+; ---- object emission + new pass manager (the `build` subcommand) ----
+; LLVMTargetMachineEmitToFile(tm, mod, filename, codegen, &err) -> LLVMBool (1=err);
+;   codegen: LLVMObjectFile = 1. LLVMRunPasses(mod, "default<O3>", tm, opts) ->
+;   LLVMErrorRef (null=success). Mirrors src/lib.rs::compile_to_object_dbg.
+(extern LLVMTargetMachineEmitToFile        :cc c [(ptr i8) (ptr i8) (ptr i8) i32 (ptr (ptr i8))] (-> i32))
+(extern LLVMCreatePassBuilderOptions       :cc c [] (-> (ptr i8)))
+(extern LLVMDisposePassBuilderOptions      :cc c [(ptr i8)] (-> void))
+(extern LLVMRunPasses                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMGetErrorMessage                :cc c [(ptr i8)] (-> (ptr i8)))
+; libc: shell out to `cc` for the link step.
+(extern system                             :cc c [(ptr i8)] (-> i32))
+; ---- constants ----
+(extern LLVMConstInt                       :cc c [(ptr i8) i64 i32] (-> (ptr i8)))
+(extern LLVMConstReal                      :cc c [(ptr i8) f64] (-> (ptr i8)))
+(extern LLVMConstNull                      :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMConstStringInContext           :cc c [(ptr i8) (ptr i8) i32 i32] (-> (ptr i8)))
+(extern LLVMConstStructInContext           :cc c [(ptr i8) (ptr (ptr i8)) i32 i32] (-> (ptr i8)))
+(extern LLVMConstNamedStruct               :cc c [(ptr i8) (ptr (ptr i8)) i32] (-> (ptr i8)))
+(extern LLVMConstArray2                    :cc c [(ptr i8) (ptr (ptr i8)) i64] (-> (ptr i8)))
+; ---- builder: arithmetic ----
+(extern LLVMBuildAdd                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSub                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildMul                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildUDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSRem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildURem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildAnd                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildOr                        :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildXor                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildShl                       :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildLShr                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildAShr                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildNot                       :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFAdd                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFSub                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFMul                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFDiv                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFRem                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+; ---- builder: compares / casts ----
+(extern LLVMBuildICmp                      :cc c [(ptr i8) i32 (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFCmp                      :cc c [(ptr i8) i32 (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildTrunc                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildZExt                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSExt                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildPtrToInt                  :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildIntToPtr                  :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSIToFP                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildUIToFP                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPToSI                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPToUI                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPExt                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFPTrunc                   :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+; ---- builder: memory ----
+(extern LLVMBuildAlloca                    :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildLoad2                     :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildStore                     :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildGEP2                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr (ptr i8)) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildStructGEP2                :cc c [(ptr i8) (ptr i8) (ptr i8) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildMalloc                    :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildFree                      :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMSetInstructionAlignment        :cc c [(ptr i8) i32] (-> void))
+; ---- builder: control / calls / phi ----
+(extern LLVMBuildCall2                      :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr (ptr i8)) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildRet                       :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildRetVoid                   :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildBr                        :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildCondBr                    :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildSwitch                    :cc c [(ptr i8) (ptr i8) (ptr i8) i32] (-> (ptr i8)))
+(extern LLVMAddCase                        :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> void))
+(extern LLVMBuildUnreachable               :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMBuildPhi                       :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern LLVMAddIncoming                    :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8)) i32] (-> void))
+(extern LLVMGetInsertBlock                 :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetBasicBlockParent            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetEntryBasicBlock             :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMGetFirstInstruction            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMPositionBuilderBefore          :cc c [(ptr i8) (ptr i8)] (-> void))
+(extern LLVMGetBasicBlockTerminator        :cc c [(ptr i8)] (-> (ptr i8)))
+(extern LLVMSetValueName2                  :cc c [(ptr i8) (ptr i8) i64] (-> void))
+; ---- attributes + memcpy (C-ABI struct-by-value passing: src/abi.rs + codegen) ----
+(extern LLVMGetEnumAttributeKindForName    :cc c [(ptr i8) i64] (-> i32))
+(extern LLVMCreateEnumAttribute            :cc c [(ptr i8) i32 i64] (-> (ptr i8)))
+(extern LLVMCreateTypeAttribute            :cc c [(ptr i8) i32 (ptr i8)] (-> (ptr i8)))
+(extern LLVMAddAttributeAtIndex            :cc c [(ptr i8) i32 (ptr i8)] (-> void))
+(extern LLVMAddCallSiteAttribute           :cc c [(ptr i8) i32 (ptr i8)] (-> void))
+(extern LLVMBuildMemCpy                    :cc c [(ptr i8) (ptr i8) i32 (ptr i8) i32 (ptr i8)] (-> (ptr i8)))
+; ---- inline asm (:shim trampolines + register-constrained shim call sites) ----
+(extern LLVMGetInlineAsm                   :cc c [(ptr i8) (ptr i8) i64 (ptr i8) i64 i32 i32 i32 i32] (-> (ptr i8)))
+; ---- module linking (for (llvm-ir ...)) ----
+(extern LLVMCreateMemoryBufferWithMemoryRangeCopy :cc c [(ptr i8) i64 (ptr i8)] (-> (ptr i8)))
+(extern LLVMParseIRInContext               :cc c [(ptr i8) (ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
+(extern LLVMLinkModules2                   :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern LLVMVerifyModule                   :cc c [(ptr i8) i32 (ptr (ptr i8))] (-> i32))
+
+; ============================ reader representation ==========================
+; Copied verbatim from selfhost/reader.coil (the reader is a completed pass; the
+; parser reuses it to turn source text into Sexp before parsing).
