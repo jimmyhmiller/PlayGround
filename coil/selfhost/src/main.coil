@@ -341,7 +341,8 @@
 ; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
 
 ; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
-(defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))] (-> (Option (ptr Program)))
+(defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))
+                    (srcpaths (ptr (ArrayList (slice u8)))) (srctexts (ptr (ArrayList (slice u8))))] (-> (Option (ptr Program)))
   (let [s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out)     (al-new [TaggedForm] a))
@@ -372,12 +373,22 @@
                         (do (drop-code-funcs a cp)
                             (match (monomorphize a cp)
                               (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
-                              (Ok [mp] (do (sort-mono-program a mp) (Some mp)))))))))))))))))
+                              (Ok [mp]
+                                (do (sort-mono-program a mp)
+                                    ; export the source registry (for DWARF)
+                                    (let [ns (al-len [Source] (load (field s sources))) (mut i) 0]
+                                      (loop (if (icmp-ge (load i) ns) (break)
+                                        (do (let [sp (al-elem [Source] (field s sources) (load i))]
+                                              (al-push! (mut srcpaths) (load (field sp name)))
+                                              (al-push! (mut srctexts) (load (field sp text))))
+                                            (store! i (iadd (load i) 1))))))
+                                    (Some mp)))))))))))))))))
 
 ; Returns 1 if the pipeline succeeded (IR printed), 0 if a diagnostic was reported.
 (defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
-  (let [w (stdout)]
-    (match (run-pipeline a src cwd w path)
+  (let [w (stdout)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
       (Some [mp] (do (emit-ir-normalized a w mp triple) 1))
       (None []   0))))
 
@@ -413,17 +424,22 @@
 
 ; arm64 native backend: mono Program -> Mach-O object, no LLVM anywhere.
 (defn build-arm64-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
-  (let [w (stderr)]
-    (match (run-pipeline a src cwd w path)
-      (Some [mp] (do (cga64-build-object a mp obj-cstr) 1))
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (cga64-build-object a mp obj-cstr path cwd
+                                         (box-al [(slice u8)] a (load sp0))
+                                         (box-al [(slice u8)] a (load st0)))
+                     1))
       (None []   0))))
 
 ; Returns 1 if the pipeline succeeded (object emitted), 0 if a diagnostic was
 ; reported. build-cmd checks this and HALTS before linking on failure (mirroring
 ; Rust: `compile_to_object_dbg(...)?` returns Err before `cc` is ever invoked).
 (defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
-  (let [w (stderr)]
-    (match (run-pipeline a src cwd w path)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
       (Some [mp] (do (build-object a mp obj-cstr triple) 1))
       (None []   0))))
 

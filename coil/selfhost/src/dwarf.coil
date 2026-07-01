@@ -1,0 +1,397 @@
+; selfhost/src/dwarf.coil — DWARF v4 emission for the arm64 backend.
+; Zero dependencies: builds __debug_abbrev / __debug_info / __debug_str /
+; __debug_line section bytes directly. The Rust -g reference sets the spec:
+; DWARF v4, language C, one DW_TAG_subprogram per function at its defn line,
+; per-expression line rows, params/locals as DW_OP_fbreg over x29, and DI
+; types for scalars/pointers/structs/slices/arrays (sums/fnptrs omitted —
+; never a wrong type).
+(module dwarf)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+(import "a64.coil" :use *)
+
+; box an ArrayList on the heap (parser.coil has box-al; kept local to avoid
+; importing the whole parser here — name differs to dodge :use * collisions).
+(defn dw-box-al [T] [(a (ptr Allocator)) (l (ArrayList T))] (-> (ptr (ArrayList T)))
+  (let [p (unwrap-ptr [(ArrayList T)] (create [(ArrayList T)] a))] (store! p l) p))
+
+(defn uleb! [(b (mut (ArrayList u8))) (v0 i64)] (-> i64)
+  (let [(mut v) v0]
+    (loop
+      (let [byte (iand (load v) 127)
+            rest (cast i64 (ishr (cast u64 (load v)) (cast u64 7)))]
+        (if (icmp-eq rest 0)
+            (do (b-u8! (mut b) byte) (break))
+          (do (b-u8! (mut b) (ior byte 128))
+              (store! v rest)
+              0))))
+    0))
+(defn sleb! [(b (mut (ArrayList u8))) (v0 i64)] (-> i64)
+  (let [(mut v) v0 (mut more) true]
+    (loop
+      (if (not (load more)) (break)
+        (let [byte (iand (load v) 127)]
+          (store! v (ishr (load v) 7))   ; arithmetic shift keeps the sign
+          (if (or (and (icmp-eq (load v) 0)  (icmp-eq (iand byte 64) 0))
+                  (and (icmp-eq (load v) -1) (icmp-ne (iand byte 64) 0)))
+              (do (b-u8! (mut b) byte) (store! more false) 0)
+            (do (b-u8! (mut b) (ior byte 128)) 0)))))
+    0))
+
+; ---- string table (dedup by content) ----------------------------------------
+(defstruct DwStr [(s (slice u8)) (off i64)])
+(defstruct DwStrs [(items (ArrayList DwStr)) (buf (ArrayList u8))])
+(defn dwstrs-new [(a (ptr Allocator))] (-> DwStrs)
+  (let [p (alloc-stack DwStrs)]
+    (store! (field p items) (al-new [DwStr] a))
+    (store! (field p buf) (al-new [u8] a))
+    (load p)))
+(defn dwstr! [(t (ptr DwStrs)) (s (slice u8))] (-> i64)
+  (let [n (al-len [DwStr] (load (field t items))) (mut i) 0 (mut found) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-at [DwStr] (field t items) (load i)) s)) s)
+              (store! found (load (field (al-at [DwStr] (field t items) (load i)) off)))
+            0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load found) 0)
+        (load found)
+      (let [off (al-len [u8] (load (field t buf)))
+            e (alloc-stack DwStr)]
+        (b-bytes! (mut (field t buf)) s)
+        (b-u8! (mut (field t buf)) 0)
+        (store! (field e s) s)
+        (store! (field e off) off)
+        (al-push! (mut (field t items)) (load e))
+        off))))
+
+; ---- per-source line starts --------------------------------------------------
+; linestarts[k] = byte offset where line k+1 begins; lookup by binary-free scan
+; is O(lines) — fine (dozens of lookups per file are cached by monotonicity in
+; the line program builder, which walks events in offset order per source).
+(defn dw-line-starts [(a (ptr Allocator)) (text (slice u8))] (-> (ptr (ArrayList i64)))
+  (let [(mut ls) (al-new [i64] a) n (slice-len text) (mut i) 0]
+    (al-push! (mut ls) 0)
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get text (load i))) 10)
+              (al-push! (mut ls) (iadd (load i) 1))
+            0)
+          (store! i (iadd (load i) 1)))))
+    (dw-box-al [i64] a (load ls))))
+; (line, col) both 1-based; returned packed line<<20|col.
+(defn dw-linecol [(ls (ptr (ArrayList i64))) (off i64)] (-> i64)
+  (let [n (al-len [i64] (load ls)) (mut lo) 0 (mut hi) (isub n 1)]
+    ; binary search for the last linestart <= off
+    (loop (if (icmp-ge (load lo) (load hi)) (break)
+      (let [mid (idiv (iadd (iadd (load lo) (load hi)) 1) 2)]
+        (if (icmp-le (al-get [i64] (load ls) mid) off)
+            (do (store! lo mid) 0)
+          (do (store! hi (isub mid 1)) 0)))))
+    (ior (ishl (iadd (load lo) 1) 20)
+         (iadd (isub off (al-get [i64] (load ls) (load lo))) 1))))
+
+; ============================ input model ====================================
+; The backend (codegen_a64) collects these during emission; dw-build! turns
+; them into the four section buffers plus relocation requests.
+
+; type entries (closure precomputed by the backend, offsets assigned here):
+; kind 0 = base (name, enc, size); 1 = pointer (to, -1 = void*);
+; 2 = struct (name, size, fields); 3 = array (to = elem, count)
+(defstruct DwField [(name (slice u8)) (tyidx i64) (off i64)])
+(defstruct DwTy
+  [(kind i64) (name (slice u8)) (size i64) (enc i64) (to i64)
+   (fields (ArrayList DwField)) (count i64) (off i64)])
+(defstruct DwFn
+  [(name (slice u8)) (symidx i64) (source i64) (lo i64)
+   (textoff i64) (len i64) (slotbytes i64) (varlo i64) (varhi i64)])
+(defstruct DwVar
+  [(name (slice u8)) (tyidx i64) (slot i64) (indirect bool) (param bool)
+   (source i64) (lo i64)])
+(defstruct DwLineEv [(textoff i64) (source i64) (lo i64) (pe bool)])
+; a relocation request: sect 1 = __debug_info, 2 = __debug_line
+(defstruct DwReloc [(sect i64) (off i64) (symidx i64)])
+
+(defstruct DwOut
+  [(abbrev (ptr (ArrayList u8)))
+   (info (ptr (ArrayList u8)))
+   (line (ptr (ArrayList u8)))
+   (strs (ptr (ArrayList u8)))
+   (relocs (ptr (ArrayList DwReloc)))])
+
+; ---- the fixed abbreviation table -------------------------------------------
+(defn dw-abbrev-bytes [(a (ptr Allocator))] (-> (ptr (ArrayList u8)))
+  (let [(mut b) (al-new [u8] a)]
+    ; 1: compile_unit, children
+    (uleb! (mut b) 1) (uleb! (mut b) 17) (b-u8! (mut b) 1)
+    (uleb! (mut b) 37) (uleb! (mut b) 14)   ; producer strp
+    (uleb! (mut b) 19) (uleb! (mut b) 5)    ; language data2
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)   ; name strp
+    (uleb! (mut b) 27) (uleb! (mut b) 14)   ; comp_dir strp
+    (uleb! (mut b) 16) (uleb! (mut b) 23)   ; stmt_list sec_offset
+    (uleb! (mut b) 17) (uleb! (mut b) 1)    ; low_pc addr
+    (uleb! (mut b) 18) (uleb! (mut b) 7)    ; high_pc data8 (length)
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 2: subprogram, children
+    (uleb! (mut b) 2) (uleb! (mut b) 46) (b-u8! (mut b) 1)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)   ; name strp
+    (uleb! (mut b) 58) (uleb! (mut b) 15)   ; decl_file udata
+    (uleb! (mut b) 59) (uleb! (mut b) 6)    ; decl_line data4
+    (uleb! (mut b) 17) (uleb! (mut b) 1)    ; low_pc addr
+    (uleb! (mut b) 18) (uleb! (mut b) 7)    ; high_pc data8 (length)
+    (uleb! (mut b) 64) (uleb! (mut b) 24)   ; frame_base exprloc
+    (uleb! (mut b) 63) (uleb! (mut b) 25)   ; external flag_present
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 3: base_type
+    (uleb! (mut b) 3) (uleb! (mut b) 36) (b-u8! (mut b) 0)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)
+    (uleb! (mut b) 62) (uleb! (mut b) 11)   ; encoding data1
+    (uleb! (mut b) 11) (uleb! (mut b) 11)   ; byte_size data1
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 4: pointer_type (typed)
+    (uleb! (mut b) 4) (uleb! (mut b) 15) (b-u8! (mut b) 0)
+    (uleb! (mut b) 73) (uleb! (mut b) 19)   ; type ref4
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 5: pointer_type (void*)
+    (uleb! (mut b) 5) (uleb! (mut b) 15) (b-u8! (mut b) 0)
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 6: formal_parameter
+    (uleb! (mut b) 6) (uleb! (mut b) 5) (b-u8! (mut b) 0)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)
+    (uleb! (mut b) 58) (uleb! (mut b) 15)
+    (uleb! (mut b) 59) (uleb! (mut b) 6)
+    (uleb! (mut b) 73) (uleb! (mut b) 19)
+    (uleb! (mut b) 2)  (uleb! (mut b) 24)   ; location exprloc
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 7: variable
+    (uleb! (mut b) 7) (uleb! (mut b) 52) (b-u8! (mut b) 0)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)
+    (uleb! (mut b) 58) (uleb! (mut b) 15)
+    (uleb! (mut b) 59) (uleb! (mut b) 6)
+    (uleb! (mut b) 73) (uleb! (mut b) 19)
+    (uleb! (mut b) 2)  (uleb! (mut b) 24)
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 8: structure_type, children
+    (uleb! (mut b) 8) (uleb! (mut b) 19) (b-u8! (mut b) 1)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)
+    (uleb! (mut b) 11) (uleb! (mut b) 5)    ; byte_size data2
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 9: member
+    (uleb! (mut b) 9) (uleb! (mut b) 13) (b-u8! (mut b) 0)
+    (uleb! (mut b) 3)  (uleb! (mut b) 14)
+    (uleb! (mut b) 73) (uleb! (mut b) 19)
+    (uleb! (mut b) 56) (uleb! (mut b) 5)    ; data_member_location data2
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 10: array_type, children
+    (uleb! (mut b) 10) (uleb! (mut b) 1) (b-u8! (mut b) 1)
+    (uleb! (mut b) 73) (uleb! (mut b) 19)
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    ; 11: subrange_type
+    (uleb! (mut b) 11) (uleb! (mut b) 33) (b-u8! (mut b) 0)
+    (uleb! (mut b) 55) (uleb! (mut b) 7)    ; count data8
+    (uleb! (mut b) 0) (uleb! (mut b) 0)
+    (uleb! (mut b) 0)   ; end of abbrevs
+    (dw-box-al [u8] a (load b))))
+
+; byte size of a type DIE (fixed per kind; strp/ref4 are 4 bytes each)
+(defn dw-ty-size [(e (ptr DwTy))] (-> i64)
+  (let [k (load (field e kind))]
+    (if (icmp-eq k 0) 7
+      (if (icmp-eq k 1) (if (icmp-lt (load (field e to)) 0) 1 5)
+        (if (icmp-eq k 2)
+            (iadd 8 (imul 11 (al-len [DwField] (load (field e fields)))))
+          15)))))   ; array: 5 + subrange 9 + null 1
+
+; ============================ the builder ====================================
+(defn dw-build! [(a (ptr Allocator))
+                 (mainpath (slice u8)) (compdir (slice u8))
+                 (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))
+                 (tys (ptr (ArrayList DwTy)))
+                 (fns (ptr (ArrayList DwFn)))
+                 (vars (ptr (ArrayList DwVar)))
+                 (evs (ptr (ArrayList DwLineEv)))
+                 (textlen i64) (ltmpsym i64)] (-> (ptr DwOut))
+  (let [strs (alloc-stack DwStrs)
+        (mut info) (al-new [u8] a)
+        (mut line) (al-new [u8] a)
+        (mut relocs) (al-new [DwReloc] a)
+        nty (al-len [DwTy] (load tys))
+        nfn (al-len [DwFn] (load fns))
+        nsrc (al-len [(slice u8)] (load paths))]
+    (store! strs (dwstrs-new a))
+    ; ---- per-source line starts
+    (let [(mut lstarts) (al-new [(ptr (ArrayList i64))] a)]
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nsrc) (break)
+          (do (al-push! (mut lstarts) (dw-line-starts a (al-get [(slice u8)] (load texts) (load i))))
+              (store! i (iadd (load i) 1))))))
+      ; ---- assign type DIE offsets (CU header 11 + CU DIE 35 = 46)
+      (let [(mut off) 46]
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) nty) (break)
+            (do (let [e (al-at [DwTy] tys (load i))]
+                  (store! (field e off) (load off))
+                  (store! off (iadd (load off) (dw-ty-size e))))
+                (store! i (iadd (load i) 1))))))
+        ; ================= __debug_info =================
+        ; CU header: length (patched), version 4, abbrev off 0, addr size 8
+        (b-u32! (mut info) 0)
+        (b-u16! (mut info) 4)
+        (b-u32! (mut info) 0)
+        (b-u8! (mut info) 8)
+        ; CU DIE (19 bytes)
+        (uleb! (mut info) 1)
+        (b-u32! (mut info) (dwstr! strs "coil"))
+        (b-u16! (mut info) 2)                       ; DW_LANG_C
+        (b-u32! (mut info) (dwstr! strs mainpath))
+        (b-u32! (mut info) (dwstr! strs compdir))
+        (b-u32! (mut info) 0)                       ; stmt_list -> line table 0
+        ; CU address range: [text start, text end). Mach-O convention: debug
+        ; sections carry NO relocations — addresses are final section-relative
+        ; values; the linker debug map translates them (dsymutil/lldb).
+        (b-u64! (mut info) 0)
+        (b-u64! (mut info) textlen)
+        ; type DIEs
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) nty) (break)
+            (do (let [e (al-at [DwTy] tys (load i))
+                      k (load (field e kind))]
+                  (if (icmp-eq k 0)
+                      (do (uleb! (mut info) 3)
+                          (b-u32! (mut info) (dwstr! strs (load (field e name))))
+                          (b-u8! (mut info) (load (field e enc)))
+                          (b-u8! (mut info) (load (field e size)))
+                          0)
+                    (if (icmp-eq k 1)
+                        (if (icmp-lt (load (field e to)) 0)
+                            (uleb! (mut info) 5)
+                          (do (uleb! (mut info) 4)
+                              (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field e to))) off)))
+                              0))
+                      (if (icmp-eq k 2)
+                          (do (uleb! (mut info) 8)
+                              (b-u32! (mut info) (dwstr! strs (load (field e name))))
+                              (b-u16! (mut info) (load (field e size)))
+                              (let [nf (al-len [DwField] (load (field e fields))) (mut j) 0]
+                                (loop (if (icmp-ge (load j) nf) (break)
+                                  (do (let [f (al-at [DwField] (field e fields) (load j))]
+                                        (uleb! (mut info) 9)
+                                        (b-u32! (mut info) (dwstr! strs (load (field f name))))
+                                        (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field f tyidx))) off)))
+                                        (b-u16! (mut info) (load (field f off))))
+                                      (store! j (iadd (load j) 1))))))
+                              (uleb! (mut info) 0)
+                              0)
+                        ; array
+                        (do (uleb! (mut info) 10)
+                            (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field e to))) off)))
+                            (uleb! (mut info) 11)
+                            (b-u64! (mut info) (load (field e count)))
+                            (uleb! (mut info) 0)
+                            0)))))
+                (store! i (iadd (load i) 1))))))
+        ; subprogram DIEs
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) nfn) (break)
+            (do (let [f (al-at [DwFn] fns (load i))
+                      ls (al-get [(ptr (ArrayList i64))] (load lstarts) (load (field f source)))
+                      lc (dw-linecol ls (load (field f lo)))]
+                  (uleb! (mut info) 2)
+                  (b-u32! (mut info) (dwstr! strs (load (field f name))))
+                  (uleb! (mut info) (iadd (load (field f source)) 1))
+                  (b-u32! (mut info) (ishr lc 20))
+                  ; low_pc: the function's section-relative address (no reloc)
+                  (b-u64! (mut info) (load (field f textoff)))
+                  (b-u64! (mut info) (load (field f len)))
+                  ; frame_base: DW_OP_reg29
+                  (uleb! (mut info) 1) (b-u8! (mut info) 109)
+                  ; vars
+                  (let [(mut v) (load (field f varlo))]
+                    (loop (if (icmp-ge (load v) (load (field f varhi))) (break)
+                      (do (let [vp (al-at [DwVar] vars (load v))
+                                vls (al-get [(ptr (ArrayList i64))] (load lstarts) (load (field vp source)))
+                                vlc (dw-linecol vls (load (field vp lo)))
+                                fboff (isub (load (field vp slot)) (iadd 16 (load (field f slotbytes))))]
+                            (uleb! (mut info) (if (load (field vp param)) 6 7))
+                            (b-u32! (mut info) (dwstr! strs (load (field vp name))))
+                            (uleb! (mut info) (iadd (load (field vp source)) 1))
+                            (b-u32! (mut info) (ishr vlc 20))
+                            (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field vp tyidx))) off)))
+                            ; location: fbreg <sleb> [deref]
+                            (let [(mut ex) (al-new [u8] a)]
+                              (b-u8! (mut ex) 145)      ; DW_OP_fbreg
+                              (sleb! (mut ex) fboff)
+                              (if (load (field vp indirect)) (b-u8! (mut ex) 6) 0)   ; DW_OP_deref
+                              (uleb! (mut info) (al-len [u8] (load ex)))
+                              (b-bytes! (mut info) (al-slice [u8] (load ex)))))
+                          (store! v (iadd (load v) 1))))))
+                  (uleb! (mut info) 0))   ; end subprogram children
+                (store! i (iadd (load i) 1))))))
+        (uleb! (mut info) 0)   ; end CU children
+        (b-patch-u32! (mut info) 0 (isub (al-len [u8] (load info)) 4))
+        ; ================= __debug_line =================
+        (b-u32! (mut line) 0)      ; unit_length (patched)
+        (b-u16! (mut line) 4)      ; version
+        (b-u32! (mut line) 0)      ; header_length (patched)
+        (let [hdrstart (al-len [u8] (load line))]
+          (b-u8! (mut line) 1)     ; min_inst_length
+          (b-u8! (mut line) 1)     ; max_ops_per_inst
+          (b-u8! (mut line) 1)     ; default_is_stmt
+          (b-u8! (mut line) 251)   ; line_base = -5
+          (b-u8! (mut line) 14)    ; line_range
+          (b-u8! (mut line) 13)    ; opcode_base
+          (b-u8! (mut line) 0) (b-u8! (mut line) 1) (b-u8! (mut line) 1) (b-u8! (mut line) 1)
+          (b-u8! (mut line) 1) (b-u8! (mut line) 0) (b-u8! (mut line) 0) (b-u8! (mut line) 0)
+          (b-u8! (mut line) 1) (b-u8! (mut line) 0) (b-u8! (mut line) 0) (b-u8! (mut line) 1)
+          (b-u8! (mut line) 0)     ; empty include_directories
+          (let [(mut i) 0]
+            (loop (if (icmp-ge (load i) nsrc) (break)
+              (do (b-bytes! (mut line) (al-get [(slice u8)] (load paths) (load i)))
+                  (b-u8! (mut line) 0)
+                  (uleb! (mut line) 0) (uleb! (mut line) 0) (uleb! (mut line) 0)
+                  (store! i (iadd (load i) 1))))))
+          (b-u8! (mut line) 0)     ; end file_names
+          (b-patch-u32! (mut line) 6 (isub (al-len [u8] (load line)) hdrstart))
+          ; program: set_address (relocated to text start), then rows
+          (b-u8! (mut line) 0) (uleb! (mut line) 9) (b-u8! (mut line) 2)
+          (b-u64! (mut line) 0)   ; text section base (section-relative, no reloc)
+          (let [nev (al-len [DwLineEv] (load evs))
+                (mut curoff) 0 (mut curfile) 1 (mut curline) 1 (mut i) 0]
+            (loop (if (icmp-ge (load i) nev) (break)
+              (do (let [e (al-at [DwLineEv] evs (load i))
+                        ls (al-get [(ptr (ArrayList i64))] (load lstarts) (load (field e source)))
+                        lc (dw-linecol ls (load (field e lo)))
+                        f (iadd (load (field e source)) 1)]
+                    (if (icmp-ne f (load curfile))
+                        (do (b-u8! (mut line) 4) (uleb! (mut line) f) (store! curfile f) 0)
+                      0)
+                    (b-u8! (mut line) 5) (uleb! (mut line) (iand lc 1048575))
+                    (if (icmp-ne (ishr lc 20) (load curline))
+                        (do (b-u8! (mut line) 3) (sleb! (mut line) (isub (ishr lc 20) (load curline)))
+                            (store! curline (ishr lc 20)) 0)
+                      0)
+                    (if (icmp-ne (load (field e textoff)) (load curoff))
+                        (do (b-u8! (mut line) 2) (uleb! (mut line) (isub (load (field e textoff)) (load curoff)))
+                            (store! curoff (load (field e textoff))) 0)
+                      0)
+                    (if (load (field e pe)) (b-u8! (mut line) 10) 0)   ; set_prologue_end
+                    (b-u8! (mut line) 1))   ; copy
+                  (store! i (iadd (load i) 1)))))
+            (if (icmp-gt textlen (load curoff))
+                (do (b-u8! (mut line) 2) (uleb! (mut line) (isub textlen (load curoff))) 0)
+              0)
+            (b-u8! (mut line) 0) (uleb! (mut line) 1) (b-u8! (mut line) 1))   ; end_sequence
+          (b-patch-u32! (mut line) 0 (isub (al-len [u8] (load line)) 4)))
+        ; ================= result =================
+        (let [out (unwrap-ptr [DwOut] (create [DwOut] a))]
+          (store! (field out abbrev) (dw-abbrev-bytes a))
+          (store! (field out info) (dw-box-al [u8] a (load info)))
+          (store! (field out line) (dw-box-al [u8] a (load line)))
+          (store! (field out strs) (dw-box-al [u8] a (load (field strs buf))))
+          (store! (field out relocs) (dw-box-al [DwReloc] a (load relocs)))
+          out)))))

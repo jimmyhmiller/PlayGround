@@ -100,7 +100,16 @@ dsymutil).
       threads through pthread fnptrs). Gate teeth proven: caught 12 segfaults
       (copy-helper reg clobber + inverted tail conditions) and a u2-width
       miscompile before passing.
-- [ ] DWARF line/info + lldb gate.
-- [ ] Self-host-via-arm64 bootstrap + oracle gates.
+- [x] DWARF v4 always-on (debug backend): CU with address range, subprograms
+      at defn lines, per-expression line rows with prologue_end, params/locals
+      as DW_OP_fbreg over x29 (mut vars via deref; `.slot` internals hidden),
+      DI types for scalars/pointers/structs/slices/arrays (sums omitted — never
+      a wrong type). Mach-O convention: debug sections carry NO relocations
+      (section-relative addresses; ld64 debug map + lldb translate).
+      `gate-lldb.sh` 12/12: name+file:line breakpoints land post-prologue at
+      source lines, `frame variable` shows typed values, `p *p` renders
+      structs, slices render as {data,len}.
+- [x] Self-host-via-arm64 bootstrap + oracle gates (`bootstrap-arm64.sh`):
+      stage2/stage3 pass gate-full; stage2.o == stage3.o byte-identical.
 - [ ] 10× bench report.
 - [ ] (stretch) direct executable emission + ad-hoc codesign, no `cc`.

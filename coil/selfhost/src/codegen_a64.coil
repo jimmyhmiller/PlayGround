@@ -31,6 +31,7 @@
 (import "parser.coil" :use *)
 (import "a64.coil" :use *)
 (import "macho.coil" :use *)
+(import "dwarf.coil" :use *)
 
 ; file-writing externs (creat is NOT variadic, unlike open-with-O_CREAT)
 (extern cga64.creat [(ptr i8) i64] (-> i64))
@@ -78,7 +79,13 @@
    (sretslot i64)                   ; slot holding incoming x8, -1 = none
    (epilabel i64)
    (outbytes i64)                   ; max outgoing stack-arg bytes of any call
-   (fnstart i64)])                  ; text offset of current function start
+   (fnstart i64)                    ; text offset of current function start
+   ; ---- DWARF collection ----
+   (dwtys (ArrayList DwTy))
+   (dwfns (ArrayList DwFn))
+   (dwvars (ArrayList DwVar))
+   (dwevs (ArrayList DwLineEv))
+   (dwcursrc i64) (dwcurlo i64)])
 
 ; hard error helper — no silent fallbacks anywhere in this backend.
 (defn cga-fail [(msg (slice u8))] (-> i64)
@@ -1162,11 +1169,18 @@
                         pslot (slot-new! g 8 8)]
                     (emit-slot-addr! g 9 vslot)
                     (emit-store-int! g 9 28 pslot 8)
+                    (dw-note-var! g (load (field b name)) t pslot true false
+                                  (load (field (field b value) source)) (load (field (field b value) lo)))
                     (store! (field g env)
                       (gscope-put (load a) (load (field g env)) (load (field b name))
                         (mk-aval 1 pslot (TPtr (box-type (load a) (av-ty av))))))
                     0))
-              (do (store! (field g env)
+              (do (if (icmp-eq (av-kind av) 1)
+                      (dw-note-bind! g (load (field b name)) av
+                                     (load (field (field b value) source))
+                                     (load (field (field b value) lo)))
+                    0)
+                  (store! (field g env)
                     (gscope-put (load a) (load (field g env)) (load (field b name)) av))
                   0)))
           (store! i (iadd (load i) 1))))))
@@ -1199,6 +1213,7 @@
           (load r))))))
 
 (defn emit-expr [(g (ptr Cga)) (e (ptr Expr))] (-> AVal)
+  (dw-note-span! g e)
   (match (load (field e kind))
     (EInt [v] (mk-aval 0 v (TInt 64 true)))
     (EFloat [bits] (mk-aval 2 bits (TFloat 64)))
@@ -2529,6 +2544,8 @@
 (defn emit-func! [(g (ptr Cga)) (fd (ptr Func))] (-> i64)
   ; reset per-function state
   (store! (field g frame) 0)
+  (store! (field g dwcursrc) -1)
+  (store! (field g dwcurlo) -1)
   (store! (field g env) (gscope-nil (load (field g a))))
   (store! (field (field g loops) len) 0)
   (store! (field g terminated) false)
@@ -2543,6 +2560,21 @@
     (mobj-set-sym! (mut (field g obj)) (load (field (al-at [GSig] (field g sigs) si) symidx))
                    (load (field g text)) (a64-off (mut s)))
     (store! (field g fnstart) (a64-off (mut s)))
+    ; line row at the function entry (its defn line) — the prologue-end row
+    ; after param intake then tells lldb where breakpoints should land
+    (if (icmp-ge (load (field fd source)) 0)
+        (let [ev (alloc-stack DwLineEv)]
+          (store! (field ev textoff) (a64-off (mut s)))
+          (store! (field ev source) (load (field fd source)))
+          (store! (field ev lo) (if (icmp-lt (load (field fd lo)) 0) 0 (load (field fd lo))))
+          (store! (field ev pe) false)
+          (al-push! (mut (field g dwevs)) (load ev))
+          (store! (field g dwcursrc) (load (field fd source)))
+          (store! (field g dwcurlo) (load (field ev lo)))
+          0)
+      0)
+    (let [dwvarlo (al-len [DwVar] (load (field g dwvars)))
+          dwfnlo (load (field fd lo)) dwfnsrc (load (field fd source))]
     ; ---- prologue (frame sizes patched at the end)
     (a64-w! (mut s) (a64-stp-pre 29 30 31 -16))
     (a64-w! (mut s) (a64-mov-sp 29 31))
@@ -2631,10 +2663,23 @@
                                 (do (emit-load-int! g 9 29 (iadd 16 (load stk)) 8 false)
                                     (emit-copy-from-mem! g slot 9 sz)
                                     (store! stk (iadd (load stk) 8)) 0)))))))
+                    (dw-note-var! g (load (field prm name)) t slot false true
+                                  (load (field fd source)) (load (field fd lo)))
                     (store! (field g env)
                       (gscope-put a (load (field g env)) (load (field prm name))
                         (mk-aval 1 slot (load t)))))
                   (store! i (iadd (load i) 1))))))
+          ; ---- prologue is complete: mark it for the line table so lldb
+          ; stops AFTER params are spilled (frame vars valid from here)
+          (if (icmp-ge (load (field fd source)) 0)
+              (let [ev (alloc-stack DwLineEv)]
+                (store! (field ev textoff) (a64-off (mut s)))
+                (store! (field ev source) (load (field fd source)))
+                (store! (field ev lo) (if (icmp-lt (load (field fd lo)) 0) 0 (load (field fd lo))))
+                (store! (field ev pe) true)
+                (al-push! (mut (field g dwevs)) (load ev))
+                0)
+            0)
           ; ---- body
           (let [bav (emit-body g (load (field fd body)))]
             (if (load (field g terminated))
@@ -2684,11 +2729,25 @@
               (b-patch-u32! (mut (field s buf)) (iadd p1 8)
                             (a64-add-imm 28 31 out))
               (if (icmp-gt total 68719476735) (cga-fail "frame too large") 0)
-              0))))))
+              ; record the function for DWARF
+              (let [df (alloc-stack DwFn)]
+                (store! (field df name) (load (field fd name)))
+                (store! (field df symidx) (load (field (al-at [GSig] (field g sigs) si) symidx)))
+                (store! (field df source) (if (icmp-lt dwfnsrc 0) 0 dwfnsrc))
+                (store! (field df lo) (if (icmp-lt dwfnlo 0) 0 dwfnlo))
+                (store! (field df textoff) (load (field g fnstart)))
+                (store! (field df len) (isub (a64-off (mut s)) (load (field g fnstart))))
+                (store! (field df slotbytes) slotbytes)
+                (store! (field df varlo) dwvarlo)
+                (store! (field df varhi) (al-len [DwVar] (load (field g dwvars))))
+                (al-push! (mut (field g dwfns)) (load df)))
+              0)))))))
   0)
 
 ; ============================ driver =========================================
-(defn cga64-build-object [(a (ptr Allocator)) (mp (ptr Program)) (objpath (ptr i8))] (-> i64)
+(defn cga64-build-object [(a (ptr Allocator)) (mp (ptr Program)) (objpath (ptr i8))
+                          (mainpath (slice u8)) (compdir (slice u8))
+                          (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))] (-> i64)
   (let [g (alloc-stack Cga)]
     (store! (field g a) a)
     (store! (field g structs) (al-new [GStruct] a))
@@ -2707,6 +2766,12 @@
     (store! (field g fnstart) 0)
     (store! (field g retty) (TInt 64 true))
     (store! (field g epilabel) 0)
+    (store! (field g dwtys) (al-new [DwTy] a))
+    (store! (field g dwfns) (al-new [DwFn] a))
+    (store! (field g dwvars) (al-new [DwVar] a))
+    (store! (field g dwevs) (al-new [DwLineEv] a))
+    (store! (field g dwcursrc) -1)
+    (store! (field g dwcurlo) -1)
     ; sections: ordinals are 1-based in push order
     (store! (field g text)     (mobj-add-sect! (mut (field g obj)) "__TEXT" "__text" 2 2147484672))
     (store! (field g constsec) (mobj-add-sect! (mut (field g obj)) "__TEXT" "__const" 3 0))
@@ -2726,6 +2791,29 @@
     ; move the code into the __text section and serialize
     (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) (load (field g text))))
               (al-slice [u8] (load (field (field g asm) buf))))
+    ; ---- DWARF (always on: this is the debug backend)
+    (let [ltmp (mobj-add-sym! (mut (field g obj)) "ltmp0" (load (field g text)) 0 false)
+          dw (dw-build! a mainpath compdir paths texts
+                        (mut (field g dwtys)) (mut (field g dwfns))
+                        (mut (field g dwvars)) (mut (field g dwevs))
+                        (al-len [u8] (load (field (field g asm) buf))) ltmp)
+          dbgattr 33554432
+          sline (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_line" 0 dbgattr)
+          sinfo (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_info" 0 dbgattr)
+          sabbr (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_abbrev" 0 dbgattr)
+          sstr  (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_str" 0 dbgattr)]
+      (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) sline)) (al-slice [u8] (load (load (field dw line)))))
+      (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) sinfo)) (al-slice [u8] (load (load (field dw info)))))
+      (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) sabbr)) (al-slice [u8] (load (load (field dw abbrev)))))
+      (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) sstr))  (al-slice [u8] (load (load (field dw strs)))))
+      (let [rl (load (field dw relocs)) nr (al-len [DwReloc] (load rl)) (mut i) 0]
+        (loop (if (icmp-ge (load i) nr) (break)
+          (do (let [r (al-at [DwReloc] rl (load i))]
+                (mobj-add-reloc! (mut (field g obj))
+                                 (if (icmp-eq (load (field r sect)) 1) sinfo sline)
+                                 (load (field r off)) (load (field r symidx))
+                                 (reloc-unsigned) false 3))
+              (store! i (iadd (load i) 1)))))))
     (let [bytes (macho-write (mut (field g obj)))
           fd (cga64.creat objpath 420)]
       (if (icmp-lt fd 0) (cga-fail "cannot create object file") 0)
@@ -2738,3 +2826,200 @@
                 (store! off (iadd (load off) wrote)))))))
       (cga64.close (cast i32 fd))
       0)))
+
+; ============================ DWARF collection ===============================
+; rendered, memo-stable name for a type's DIE
+(defn dw-ty-name [(g (ptr Cga)) (t (ptr Type))] (-> (slice u8))
+  (let [a (load (field g a))]
+    (match-else (load t)
+      (TInt [bits sg] (sconcat a (if sg "i" "u") (i64->str a bits)))
+      (TBool [] "bool")
+      (TFloat [bits] (sconcat a "f" (i64->str a bits)))
+      (TPtr [inner] (sconcat a "*" (dw-ty-name g inner)))
+      (TRef [_m inner] (sconcat a "*" (dw-ty-name g inner)))
+      (TSlice [elem] (sconcat a "slice$" (dw-ty-name g elem)))
+      (TStruct [nm] nm)
+      (TArray [elem n] (sconcat a (sconcat a "arr" (i64->str a n)) (sconcat a "$" (dw-ty-name g elem))))
+      (_ "?"))))
+
+(defn dw-find-ty [(g (ptr Cga)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [DwTy] (load (field g dwtys))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-at [DwTy] (field g dwtys) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; type -> DwTy index, or -1 when we deliberately don't describe it (sums,
+; fnptrs, vecs, non-C struct layouts — mirrors the Rust di_type policy:
+; never a wrong type).
+(defn dw-ty-of! [(g (ptr Cga)) (t (ptr Type))] (-> i64)
+  (let [a (load (field g a))
+        nm (dw-ty-name g t)
+        hit (dw-find-ty g nm)]
+    (if (icmp-ge hit 0)
+        hit
+      (match-else (load t)
+        (TInt [bits sg]
+          (let [e (alloc-stack DwTy)]
+            (store! (field e kind) 0) (store! (field e name) nm)
+            (store! (field e size) (ty-size g t))
+            (store! (field e enc) (if sg 5 7))
+            (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+            (store! (field e fields) (al-new [DwField] a))
+            (al-push! (mut (field g dwtys)) (load e))
+            (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+        (TBool []
+          (let [e (alloc-stack DwTy)]
+            (store! (field e kind) 0) (store! (field e name) nm)
+            (store! (field e size) 1) (store! (field e enc) 2)
+            (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+            (store! (field e fields) (al-new [DwField] a))
+            (al-push! (mut (field g dwtys)) (load e))
+            (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+        (TFloat [bits]
+          (let [e (alloc-stack DwTy)]
+            (store! (field e kind) 0) (store! (field e name) nm)
+            (store! (field e size) (idiv bits 8)) (store! (field e enc) 4)
+            (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+            (store! (field e fields) (al-new [DwField] a))
+            (al-push! (mut (field g dwtys)) (load e))
+            (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+        (TPtr [inner]
+          (let [ti (dw-ty-of! g inner)
+                e (alloc-stack DwTy)]
+            (store! (field e kind) 1) (store! (field e name) nm)
+            (store! (field e size) 8) (store! (field e enc) 0)
+            (store! (field e to) ti) (store! (field e count) 0) (store! (field e off) 0)
+            (store! (field e fields) (al-new [DwField] a))
+            (al-push! (mut (field g dwtys)) (load e))
+            (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+        (TRef [_m inner]
+          (let [ti (dw-ty-of! g inner)
+                e (alloc-stack DwTy)]
+            (store! (field e kind) 1) (store! (field e name) nm)
+            (store! (field e size) 8) (store! (field e enc) 0)
+            (store! (field e to) ti) (store! (field e count) 0) (store! (field e off) 0)
+            (store! (field e fields) (al-new [DwField] a))
+            (al-push! (mut (field g dwtys)) (load e))
+            (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+        (TSlice [elem]
+          (let [ep (alloc-stack Type)]
+            (store! ep (TPtr elem))
+            (let [pi (dw-ty-of! g ep)
+                  li (dw-ty-of! g (box-type a (TInt 64 true)))
+                  e (alloc-stack DwTy)
+                  (mut fs) (al-new [DwField] a)
+                  f0 (alloc-stack DwField) f1 (alloc-stack DwField)]
+              (store! (field f0 name) "data") (store! (field f0 tyidx) pi) (store! (field f0 off) 0)
+              (store! (field f1 name) "len")  (store! (field f1 tyidx) li) (store! (field f1 off) 8)
+              (al-push! (mut fs) (load f0)) (al-push! (mut fs) (load f1))
+              (store! (field e kind) 2) (store! (field e name) nm)
+              (store! (field e size) 16) (store! (field e enc) 0)
+              (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+              (store! (field e fields) (load fs))
+              (al-push! (mut (field g dwtys)) (load e))
+              (isub (al-len [DwTy] (load (field g dwtys))) 1))))
+        (TArray [elem n]
+          (let [ei (dw-ty-of! g elem)]
+            (if (icmp-lt ei 0) -1
+              (let [e (alloc-stack DwTy)]
+                (store! (field e kind) 3) (store! (field e name) nm)
+                (store! (field e size) (ty-size g t)) (store! (field e enc) 0)
+                (store! (field e to) ei) (store! (field e count) n) (store! (field e off) 0)
+                (store! (field e fields) (al-new [DwField] a))
+                (al-push! (mut (field g dwtys)) (load e))
+                (isub (al-len [DwTy] (load (field g dwtys))) 1)))))
+        (TStruct [snm]
+          (let [si (g-struct-idx g snm)]
+            (if (icmp-lt si 0)
+                -1   ; sums: deliberately undescribed
+              (let [sp (al-at [GStruct] (field g structs) si)]
+                (match-else (load (field sp layout))
+                  (LC []
+                    ; reserve the entry FIRST (recursion through pointers)
+                    (let [e (alloc-stack DwTy)]
+                      (store! (field e kind) 2) (store! (field e name) nm)
+                      (store! (field e size) (load (field sp size))) (store! (field e enc) 0)
+                      (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+                      (store! (field e fields) (al-new [DwField] a))
+                      (al-push! (mut (field g dwtys)) (load e))
+                      (let [idx (isub (al-len [DwTy] (load (field g dwtys))) 1)
+                            fs (load (field sp fields))
+                            nf (al-len [Field] (load fs))
+                            (mut i) 0]
+                        (loop (if (icmp-ge (load i) nf) (break)
+                          (do (let [fp (al-at [Field] fs (load i))
+                                    fi (dw-ty-of! g (field fp ty))]
+                                (if (icmp-ge fi 0)
+                                    (let [f (alloc-stack DwField)]
+                                      (store! (field f name) (load (field fp name)))
+                                      (store! (field f tyidx) fi)
+                                      (store! (field f off) (g-field-off g si (load i)))
+                                      (al-push! (mut (field (al-at [DwTy] (field g dwtys) idx) fields)) (load f))
+                                      0)
+                                  0))
+                              (store! i (iadd (load i) 1)))))
+                        ; refresh size (fields may have been dropped; header stays right)
+                        idx)))
+                  (LBits [backing _o]
+                    (let [e (alloc-stack DwTy)]
+                      (store! (field e kind) 0) (store! (field e name) nm)
+                      (store! (field e size) (idiv backing 8)) (store! (field e enc) 7)
+                      (store! (field e to) -1) (store! (field e count) 0) (store! (field e off) 0)
+                      (store! (field e fields) (al-new [DwField] a))
+                      (al-push! (mut (field g dwtys)) (load e))
+                      (isub (al-len [DwTy] (load (field g dwtys))) 1)))
+                  (_ -1))))))
+        (_ -1)))))
+
+; record a line-table row if the source position moved
+(defn dw-note-span! [(g (ptr Cga)) (e (ptr Expr))] (-> i64)
+  (let [src (load (field e source)) lo (load (field e lo))]
+    (if (or (icmp-lt src 0) (icmp-lt lo 0)) 0
+      (if (and (icmp-eq src (load (field g dwcursrc))) (icmp-eq lo (load (field g dwcurlo)))) 0
+        (let [ev (alloc-stack DwLineEv)]
+          (store! (field ev textoff) (a64-off (mut (field g asm))))
+          (store! (field ev source) src)
+          (store! (field ev lo) lo)
+          (store! (field ev pe) false)
+          (al-push! (mut (field g dwevs)) (load ev))
+          (store! (field g dwcursrc) src)
+          (store! (field g dwcurlo) lo)
+          0)))))
+
+; DWARF note for a let bind. `(mut x)` desugars to `x.slot` (the alloc) plus
+; `x` (a pointer to it): skip the internal `.slot` name and describe `x` as an
+; indirect variable of the POINTEE type (location: fbreg off, deref).
+(defn dw-note-bind! [(g (ptr Cga)) (name (slice u8)) (av AVal) (src i64) (lo i64)] (-> i64)
+  (let [n (slice-len name)
+        t (alloc-stack Type)]
+    (store! t (av-ty av))
+    (if (and (icmp-ge n 5) (str-eq (subslice name (isub n 5) n) ".slot"))
+        0
+      (let [slotname (sconcat (load (field g a)) name ".slot")]
+        (match (gscope-get (load (field g env)) slotname)
+          (Some [_sl]
+            ; mut variable: value lives behind the pointer
+            (match-else (load t)
+              (TPtr [inner]
+                (dw-note-var! g name inner (av-v av) true false src lo))
+              (_ (dw-note-var! g name t (av-v av) false false src lo))))
+          (None []
+            (dw-note-var! g name t (av-v av) false false src lo)))))))
+
+; record a variable/parameter DIE for the current function
+(defn dw-note-var! [(g (ptr Cga)) (name (slice u8)) (t (ptr Type)) (slot i64)
+                    (indirect bool) (param bool) (src i64) (lo i64)] (-> i64)
+  (let [ti (dw-ty-of! g t)]
+    (if (icmp-lt ti 0) 0
+      (if (or (icmp-lt src 0) (icmp-lt lo 0)) 0
+        (let [v (alloc-stack DwVar)]
+          (store! (field v name) name)
+          (store! (field v tyidx) ti)
+          (store! (field v slot) slot)
+          (store! (field v indirect) indirect)
+          (store! (field v param) param)
+          (store! (field v source) src)
+          (store! (field v lo) lo)
+          (al-push! (mut (field g dwvars)) (load v))
+          0)))))
