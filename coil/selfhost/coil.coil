@@ -6459,6 +6459,12 @@
    (args (ptr (ArrayList ArgAbiK)))
    (fn_ty (ptr i8))])
 (defstruct CSigEntry [(name (slice u8)) (sig (ptr CSig))])
+; One scalar leaf of a (possibly nested) struct, for the SysV field-walk (src/abi.rs
+; Leaf): its absolute byte offset, byte size, SysV class (0=None 1=Integer 2=Sse),
+; and whether the leaf is a 32-bit float. `AbiLeafBox` wraps the accumulator list so
+; it can be threaded by pointer (the established self-host push-through-pointer idiom).
+(defstruct AbiLeaf    [(offset i64) (size i64) (cls i64) (is_f32 bool)])
+(defstruct AbiLeafBox [(items (ArrayList AbiLeaf))])
 
 ; ---- Cg: codegen state (Rust `Cg<'ctx>` minus the debug-info fields). Maps are
 ;      ArrayLists keyed by name (the established self-host pattern; mono uses it).
@@ -7494,12 +7500,14 @@
   0)
 
 ; ======================== the module driver (compile_for_dbg, dbg=None) ======
-(defn codegen-module [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr i8))
+; `triple-override` = a NUL-terminated triple cstr to cross-compile for, or null to
+; use the host default (mirrors Rust `--target` defaulting to `codegen::target_triple`).
+(defn codegen-module [(a (ptr Allocator)) (p (ptr Program)) (triple-override (ptr i8))] (-> (ptr i8))
   (let [ctx (LLVMContextCreate)]
-    ; init targets so an arbitrary host triple resolves.
+    ; init targets so an arbitrary (possibly non-host) triple resolves.
     (LLVMInitializeAArch64TargetInfo) (LLVMInitializeAArch64Target) (LLVMInitializeAArch64TargetMC)
     (LLVMInitializeX86TargetInfo) (LLVMInitializeX86Target) (LLVMInitializeX86TargetMC)
-    (let [triple (LLVMGetDefaultTargetTriple)
+    (let [triple (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
           targetout (alloc-stack (ptr i8)) errout (alloc-stack (ptr i8))]
       (LLVMGetTargetFromTriple triple targetout errout)
       (let [tm (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 2 2 0)
@@ -7719,6 +7727,118 @@
   (let [a (load (field cg a)) (mut xs) (al-new [(ptr i8)] a)]
     (al-push! (mut xs) t) (box-al [(ptr i8)] a (load xs))))
 
+; ---- SysV AMD64: the byte-class flatten + eightbyte-coercion (src/abi.rs) ----
+; SysV "merge" rule for two classes covering the same byte: INTEGER dominates SSE,
+; SSE dominates NONE (0=None 1=Integer 2=Sse).
+(defn abi-merge [(x i64) (y i64)] (-> i64)
+  (if (or (icmp-eq x 1) (icmp-eq y 1)) 1
+    (if (or (icmp-eq x 2) (icmp-eq y 2)) 2 0)))
+(defn abi-align-up [(x i64) (al i64)] (-> i64)
+  (if (icmp-eq al 0) x (imul (udiv (iadd x (isub al 1)) al) al)))
+; Flatten `fields` into scalar leaves at absolute byte offsets, recursing into nested
+; structs and arrays (src/abi.rs::flatten). Field offsets mirror the C/LLVM struct
+; layout (natural alignment).
+(defn abi-flatten [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (base i64) (out (ptr AbiLeafBox))] (-> i64)
+  (let [td (load (field cg td)) n (al-len [Field] (load fields)) (mut acc) base (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Field] fields (load i)) fty (field fp ty)
+                lty (basic-ty cg fty)
+                falign (cast i64 (LLVMABIAlignmentOfType td lty))]
+            (store! acc (abi-align-up (load acc) falign))
+            (abi-flatten-type cg fty (load acc) out)
+            (store! acc (iadd (load acc) (LLVMABISizeOfType td lty))))
+          (store! i (iadd (load i) 1)))))
+    0))
+(defn abi-flatten-type [(cg (ptr Cg)) (ty (ptr Type)) (offset i64) (out (ptr AbiLeafBox))] (-> i64)
+  (let [a (load (field cg a)) td (load (field cg td))]
+    (match-else (load ty)
+      (TFloat [bits]
+        (let [lf (alloc-stack AbiLeaf)]
+          (store! (field lf offset) offset) (store! (field lf size) (udiv bits 8))
+          (store! (field lf cls) 2) (store! (field lf is_f32) (icmp-eq bits 32))
+          (al-push! (mut (field out items)) (load lf)) 0))
+      (TArray [elem n]
+        (let [esz (LLVMABISizeOfType td (basic-ty cg elem)) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (abi-flatten-type cg elem (iadd offset (imul (load i) esz)) out) (store! i (iadd (load i) 1)))))
+          0))
+      (TStruct [nm]
+        (let [fs (cg-resolve-fields cg nm)]
+          (if (icmp-eq (cast i64 fs) 0)
+              (do (unimplemented "SysV ABI: nested type is not a classifiable struct") 0)
+            (abi-flatten cg fs offset out))))
+      ; view/generic types have no C representation; the unreachable ones must NOT
+      ; fall through to the Integer arm below.
+      (TVec   [el n] (do (unimplemented "SysV ABI: passing a vec by value across the C boundary is not supported yet") 0))
+      (TSlice [el]   (do (unimplemented "SysV ABI: passing a slice by value across the C boundary is not supported") 0))
+      (TApp   [nm args] (do (unimplemented "SysV ABI: generic type survived to ABI classification (compiler bug)") 0))
+      (TNever [] (do (unimplemented "SysV ABI: Never type has no ABI representation") 0))
+      (TCode  [] (do (unimplemented "SysV ABI: Code type has no ABI representation") 0))
+      (TVoid  [] (do (unimplemented "SysV ABI: void is a return type only; never a field/by-value param") 0))
+      ; Int, Bool, Ptr, Ref, Fn -> a single INTEGER leaf.
+      (_ (let [lf (alloc-stack AbiLeaf)]
+           (store! (field lf offset) offset)
+           (store! (field lf size) (LLVMABISizeOfType td (basic-ty cg ty)))
+           (store! (field lf cls) 1) (store! (field lf is_f32) false)
+           (al-push! (mut (field out items)) (load lf)) 0)))))
+; true if any leaf is a 32-bit float starting exactly at byte `off`.
+(defn abi-leaves-has-f32-at [(leaves (ptr (ArrayList AbiLeaf))) (off i64)] (-> bool)
+  (let [n (al-len [AbiLeaf] (load leaves)) (mut i) 0 (mut r) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [lf (al-elem [AbiLeaf] leaves (load i))]
+            (if (and (load (field lf is_f32)) (icmp-eq (load (field lf offset)) off)) (do (store! r true) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn abi-classify-sysv [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
+  (let [a (load (field cg a)) ctx (cg-ctx cg)
+        p (unwrap-ptr [StructAbi] (create [StructAbi] a))]
+    (store! (field p llvm_ty) sty) (store! (field p size) size) (store! (field p align) align)
+    ; Structs larger than two eightbytes (16 bytes) are passed in memory.
+    (if (icmp-gt size 16)
+        (do (store! (field p arg) (ACIndirect align)) (store! (field p ret) (ACIndirect align)))
+      (let [lb (unwrap-ptr [AbiLeafBox] (create [AbiLeafBox] a))]
+        (store! (field lb items) (al-new [AbiLeaf] a))
+        (abi-flatten cg fields 0 lb)
+        (let [leaves (field lb items) nbytes size
+              (mut bytes) (al-new [i64] a) (mut bi) 0]
+          ; per-byte class array (None), then merge each leaf onto its byte range.
+          (loop (if (icmp-ge (load bi) nbytes) (break) (do (al-push! (mut bytes) 0) (store! bi (iadd (load bi) 1)))))
+          (let [nleaves (al-len [AbiLeaf] (load leaves)) (mut li) 0]
+            (loop (if (icmp-ge (load li) nleaves) (break)
+              (do (let [lf (al-elem [AbiLeaf] leaves (load li))
+                        lo (load (field lf offset)) hi (iadd (load (field lf offset)) (load (field lf size)))]
+                    (if (icmp-gt hi nbytes) (do (unimplemented "SysV ABI: scalar runs past struct size") 0) 0)
+                    (let [(mut b) lo]
+                      (loop (if (icmp-ge (load b) hi) (break)
+                        (do (al-set! [i64] (mut bytes) (load b) (abi-merge (al-get [i64] (load bytes) (load b)) (load (field lf cls))))
+                            (store! b (iadd (load b) 1)))))))
+                  (store! li (iadd (load li) 1)))))
+          ; collapse into eightbyte coerced slots.
+          (let [neb (udiv (iadd nbytes 7) 8) (mut slots) (al-new [(ptr i8)] a) (mut eb) 0]
+            (loop (if (icmp-ge (load eb) neb) (break)
+              (do (let [lo (imul (load eb) 8)
+                        hi (if (icmp-lt (iadd (imul (load eb) 8) 8) nbytes) (iadd (imul (load eb) 8) 8) nbytes)
+                        (mut cls) 0 (mut bb) 0]
+                    (store! bb lo)
+                    (loop (if (icmp-ge (load bb) hi) (break)
+                      (do (store! cls (abi-merge (load cls) (al-get [i64] (load bytes) (load bb)))) (store! bb (iadd (load bb) 1)))))
+                    (let [used (isub hi lo)
+                          slot (if (icmp-eq (load cls) 2)
+                                   ; SSE eightbyte: two distinct low/high 4-byte floats -> <2 x float>;
+                                   ; one double (or 5..8 SSE bytes) -> double; a single 4-byte float -> float.
+                                   (if (and (icmp-eq used 8) (and (abi-leaves-has-f32-at leaves lo) (abi-leaves-has-f32-at leaves (iadd lo 4))))
+                                       (LLVMVectorType (LLVMFloatTypeInContext ctx) 2)
+                                     (if (icmp-gt used 4) (LLVMDoubleTypeInContext ctx) (LLVMFloatTypeInContext ctx)))
+                                 ; INTEGER (or padding-only) eightbyte -> smallest pow2 int covering its data bytes.
+                                 (int-width ctx (abi-int-bits-for-bytes used)))]
+                      (al-push! (mut slots) slot)))
+                  (store! eb (iadd (load eb) 1)))))
+            ; SysV arg and ret coerce to the SAME slots.
+            (let [sp (box-al [(ptr i8)] a (load slots))]
+              (store! (field p arg) (ACDirect sp))
+              (store! (field p ret) (ACDirect sp))))))))
+    p))
+
 ; classify a struct for the C ABI (StructAbi by pointer).
 (defn abi-classify [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8))] (-> (ptr StructAbi))
   (let [td (load (field cg td))
@@ -7726,8 +7846,7 @@
         align (LLVMABIAlignmentOfType td sty)]
     (if (icmp-eq (load (field cg arch)) 1)
         (abi-classify-aapcs64 cg fields sty size align)
-      (do (unimplemented "abi: SysV (x86_64) classification not ported (self-host targets AArch64)")
-          (cast (ptr StructAbi) 0)))))
+      (abi-classify-sysv cg fields sty size align))))
 (defn abi-classify-aapcs64 [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
   (let [a (load (field cg a)) ctx (cg-ctx cg)
         p (unwrap-ptr [StructAbi] (create [StructAbi] a))
@@ -8546,8 +8665,8 @@
 
 ; Tail of the pipeline: mono'd Program -> codegen -> print -> normalize -> stdout.
 ; Mirrors src/lib.rs::dump_ir (emit_ir then normalize_ir::normalize).
-(defn emit-ir-normalized [(a (ptr Allocator)) (w (ptr Writer)) (mp (ptr Program))] (-> i64)
-  (let [m       (codegen-module a mp)
+(defn emit-ir-normalized [(a (ptr Allocator)) (w (ptr Writer)) (mp (ptr Program)) (triple (ptr i8))] (-> i64)
+  (let [m       (codegen-module a mp triple)
         ir-cstr (LLVMPrintModuleToString m)
         ir      (cstr->slice ir-cstr)
         norm    (normalize-ir a ir)]
@@ -8584,10 +8703,10 @@
                               (Err [d] (do (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)) (None [(ptr Program)])))
                               (Ok [mp] (do (sort-mono-program a mp) (Some mp))))))))))))))))
 
-(defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+(defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8))] (-> i64)
   (let [w (stdout)]
     (match (run-pipeline a src cwd w)
-      (Some [mp] (emit-ir-normalized a w mp))
+      (Some [mp] (emit-ir-normalized a w mp triple))
       (None []   0)))
   0)
 
@@ -8596,9 +8715,9 @@
 ; sets target + datalayout), create a host target machine (cpu "generic", no
 ; features, opt Aggressive=3, reloc PIC=2, codemodel Default=0), run the
 ; `default<O3>` pipeline through the new pass manager, then EmitToFile as an object.
-(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8))] (-> i64)
-  (let [m         (codegen-module a mp)
-        triple    (LLVMGetDefaultTargetTriple)
+(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8))] (-> i64)
+  (let [m         (codegen-module a mp triple-override)
+        triple    (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
         targetout (alloc-stack (ptr i8))
         errout    (alloc-stack (ptr i8))]
     ; AsmPrinter init (targets themselves were initialized inside codegen-module).
@@ -8621,16 +8740,17 @@
           0))
       0)))
 
-(defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8))] (-> i64)
+(defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8))] (-> i64)
   (let [w (stderr)]
     (match (run-pipeline a src cwd w)
-      (Some [mp] (build-object a mp obj-cstr))
+      (Some [mp] (build-object a mp obj-cstr triple))
       (None []   0)))
   0)
 
 ; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
 ; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
-(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8))])
+; `triple` = the `--target` override cstr (null = host default) for cross-compiling.
+(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8)) (triple (ptr i8))])
 
 ; pthread start_routine: unpack the context and run the real pipeline on the
 ; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
@@ -8638,8 +8758,8 @@
 (defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
   (let [ctx (cast (ptr DumpCtx) arg)]
     (if (icmp-eq (load (field ctx mode)) 1)
-        (build-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)))
-      (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd))))
+        (build-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)))
+      (dump-ir-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple))))
     (cast (ptr i8) 0)))
 
 ; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
@@ -8690,6 +8810,7 @@
         (store! (field ctx cwd)  (cwd-slice a))
         (store! (field ctx mode) 1)
         (store! (field ctx obj)  obj-cstr)
+        (store! (field ctx triple) (cast (ptr i8) 0))
         (run-on-big-stack ctx)
         ; link: cc <obj> -o <out> <flags...>
         (let [(mut cmdsb) (sb-new a)]
@@ -8717,12 +8838,20 @@
         (if (str-eq sub "build")
             (build-cmd a argc argv)
           (let [path (load (index argv 2))
-                ctx  (alloc-stack DumpCtx)]
+                ctx  (alloc-stack DumpCtx)
+                (mut trip) (cast (ptr i8) 0) (mut i) 3]
+            ; parse `--target <triple>` from argv[3..] (cross-compile override).
+            (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+              (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc))
+                       (str-eq (cstr->slice (load (index argv (load i)))) "--target"))
+                  (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                (do (store! i (iadd (load i) 1)) 0))))
             (store! (field ctx a)    a)
             (store! (field ctx src)  (read-file a path))
             (store! (field ctx cwd)  (cwd-slice a))
             (store! (field ctx mode) 0)
             (store! (field ctx obj)  (cast (ptr i8) 0))
+            (store! (field ctx triple) (load trip))
             (run-on-big-stack ctx)
             0)))))
   0);; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
