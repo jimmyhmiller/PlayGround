@@ -45,6 +45,9 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
         out_structs: HashMap::new(),
         out_sums: HashMap::new(),
         out_funcs: HashMap::new(),
+        struct_order: Vec::new(),
+        sum_order: Vec::new(),
+        func_order: Vec::new(),
         pending_structs: Vec::new(),
         pending_sums: Vec::new(),
         pending_funcs: Vec::new(),
@@ -61,7 +64,7 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             .iter()
             .map(|(n, t)| Ok((n.clone(), m.resolve_ty(t, &empty)?)))
             .collect::<Result<Vec<_>, String>>()?;
-        m.out_structs.insert(
+        m.insert_struct(
             sd.name.clone(),
             StructDef {
                 name: sd.name.clone(),
@@ -73,11 +76,11 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
     }
     for sd in program.sums.iter().filter(|s| s.type_params.is_empty()) {
         let sum = m.resolve_sum(sd, &empty, sd.name.clone())?;
-        m.out_sums.insert(sd.name.clone(), sum);
+        m.insert_sum(sd.name.clone(), sum);
     }
     for f in program.funcs.iter().filter(|f| f.type_params.is_empty()) {
         let nf = m.resolve_func(f, &empty, f.name.clone())?;
-        m.out_funcs.insert(f.name.clone(), nf);
+        m.insert_func(f.name.clone(), nf);
     }
 
     let asserts = program
@@ -96,9 +99,13 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
     Ok(Program {
         conventions: program.conventions,
         externs: program.externs,
-        structs: m.out_structs.into_values().collect(),
-        sums: m.out_sums.into_values().collect(),
-        funcs: m.out_funcs.into_values().collect(),
+        structs: m
+            .struct_order
+            .iter()
+            .map(|k| m.out_structs[k].clone())
+            .collect(),
+        sums: m.sum_order.iter().map(|k| m.out_sums[k].clone()).collect(),
+        funcs: m.func_order.iter().map(|k| m.out_funcs[k].clone()).collect(),
         asserts,
         // Consts were erased to literals during checking; nothing to monomorphize.
         consts: program.consts,
@@ -126,6 +133,17 @@ struct Mono<'a> {
     out_structs: HashMap<String, StructDef>,
     out_sums: HashMap<String, SumDef>,
     out_funcs: HashMap<String, Func>,
+    // Insertion order for the three output maps. `HashMap::into_values()` iterates
+    // in a RANDOM (per-process seeded) order, which would make raw codegen output —
+    // notably the `__coil_llvm_ir_N` helper counter, incremented per emitted
+    // function — non-deterministic. The self-host holds these outputs in
+    // insertion-ordered ArrayLists (concrete seeds first, then drained monos), so
+    // we mirror that here: record each key's first-insertion position and emit in
+    // that order. Later re-inserts (last-writer-wins, same as the HashMap) keep the
+    // original position, exactly like the self-host's in-place upsert.
+    struct_order: Vec<String>,
+    sum_order: Vec<String>,
+    func_order: Vec<String>,
     pending_structs: Vec<(String, Vec<Type>)>,
     pending_sums: Vec<(String, Vec<Type>)>,
     pending_funcs: Vec<(String, Vec<Type>)>,
@@ -135,6 +153,25 @@ struct Mono<'a> {
 }
 
 impl<'a> Mono<'a> {
+    // Insert-or-replace into an output map while recording first-insertion order,
+    // mirroring the self-host's `upsert_*` over an ArrayList (last-writer-wins on
+    // value, position fixed at first insert). See the `*_order` field comment.
+    fn insert_struct(&mut self, key: String, val: StructDef) {
+        if self.out_structs.insert(key.clone(), val).is_none() {
+            self.struct_order.push(key);
+        }
+    }
+    fn insert_sum(&mut self, key: String, val: SumDef) {
+        if self.out_sums.insert(key.clone(), val).is_none() {
+            self.sum_order.push(key);
+        }
+    }
+    fn insert_func(&mut self, key: String, val: Func) {
+        if self.out_funcs.insert(key.clone(), val).is_none() {
+            self.func_order.push(key);
+        }
+    }
+
     fn drain(&mut self) -> Result<(), String> {
         loop {
             if let Some((name, args)) = self.pending_structs.pop() {
@@ -146,7 +183,7 @@ impl<'a> Mono<'a> {
                     .iter()
                     .map(|(n, t)| Ok((n.clone(), self.resolve_ty(t, &map)?)))
                     .collect::<Result<Vec<_>, String>>()?;
-                self.out_structs.insert(
+                self.insert_struct(
                     mangled.clone(),
                     StructDef {
                         name: mangled,
@@ -162,7 +199,7 @@ impl<'a> Mono<'a> {
                 let map = subst_map(&gs.type_params, &args);
                 let mangled = mangle(&name, &args);
                 let sum = self.resolve_sum(gs, &map, mangled.clone())?;
-                self.out_sums.insert(mangled, sum);
+                self.insert_sum(mangled, sum);
                 continue;
             }
             if let Some((name, args)) = self.pending_funcs.pop() {
@@ -170,7 +207,7 @@ impl<'a> Mono<'a> {
                 let map = subst_map(&gf.type_params, &args);
                 let mangled = mangle(&name, &args);
                 let nf = self.resolve_func(gf, &map, mangled.clone())?;
-                self.out_funcs.insert(mangled, nf);
+                self.insert_func(mangled, nf);
                 continue;
             }
             return Ok(());

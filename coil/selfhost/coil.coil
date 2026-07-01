@@ -1113,6 +1113,26 @@
                 (char1 a b)))))))))))
           (store! i (iadd (load i) 1)))))
     (load acc)))
+; CStr Debug (Rust `{:?}` on a `&CStr`) — used by the llvm-ir parse-error path, where
+; inkwell's LLVMString Display is `{:?}` over its `Deref::Target = CStr`. Unlike str
+; Debug (dbg-escape), CStr Debug is `ascii::escape_default` per byte: it escapes `'`
+; as `\'` and renders any non-printable byte as `\xHH` (two lowercase hex digits),
+; NOT `\u{…}`. Distinct helper so dbg-escape's str-Debug callers stay unchanged.
+(defn cstr-dbg-escape [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [n (slice-len s) (mut acc) "" (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [b (cast i64 (slice-get s (load i)))]
+            (store! acc (sconcat a (load acc)
+              (if (icmp-eq b 9)  "\\t"
+              (if (icmp-eq b 13) "\\r"
+              (if (icmp-eq b 10) "\\n"
+              (if (icmp-eq b 92) "\\\\"
+              (if (icmp-eq b 39) "\\'"
+              (if (icmp-eq b 34) "\\\""
+              (if (and (icmp-ge b 32) (icmp-le b 126)) (char1 a b)
+                (sconcat a "\\x" (sconcat a (char1 a (hexd (iand (ishr b 4) 15))) (char1 a (hexd (iand b 15)))))))))))))))
+          (store! i (iadd (load i) 1)))))
+    (load acc)))
 ; ---- f64 Debug (Rust `{x:?}`), for error interpolation of float literals ----
 ; A string of `n` ASCII '0' characters.
 (defn nzeros [(a (ptr Allocator)) (n i64)] (-> (slice u8))
@@ -7842,7 +7862,20 @@
                   membuf (LLVMCreateMemoryBufferWithMemoryRangeCopy (cast (ptr i8) (slice-data [u8] mtext)) (slice-len mtext) (cg-bl cg "coil_llvm_ir"))
                   modout (alloc-stack (ptr i8)) errout (alloc-stack (ptr i8))]
               (if (icmp-ne (LLVMParseIRInContext (cg-ctx cg) membuf modout errout) 0)
-                  (do (unimplemented "llvm-ir: could not parse IR") (mk-tv (cast (ptr i8) 0) (load result)))
+                  ; Parse failure: render Rust's `emit_llvm_ir` map_err (src/codegen.rs)
+                  ; byte-for-byte. `{e}` there is inkwell LLVMString's Display, which is
+                  ; itself `{:?}` (Debug) over its `Deref::Target = CStr` — so the LLVM
+                  ; error message (read from the `errout` char** out-param) is CStr-Debug-
+                  ; escaped (quoted, `\n`, `\'`, `\xHH` …) via cstr-dbg-escape; the
+                  ; `--- generated module ---` section is the module text we just built
+                  ; (mtext). Rust returns this as an `Err(String)` rendered by main.rs
+                  ; `report`/`print_error` as `error: <body>` + exit 1; cg-fail matches.
+                  (do (cg-fail (sconcat a
+                                 (sconcat3 a "llvm-ir: could not parse IR: "
+                                   (sconcat3 a "\"" (cstr-dbg-escape a (cstr->slice (load errout))) "\"")
+                                   "\n--- generated module ---\n")
+                                 mtext))
+                      (mk-tv (cast (ptr i8) 0) (load result)))
                 (let [helper (load modout)]
                   (LLVMSetTarget helper (LLVMGetTarget (load (field cg module))))
                   (LLVMSetDataLayout helper (LLVMGetDataLayoutStr (load (field cg module))))

@@ -1,0 +1,7 @@
+; Same llvm-ir parse-failure path, but with an operand so the generated module text
+; carries a typed parameter (`i64 %0`) and the body exercises `$t0`/`$0` placeholder
+; substitution before the (still invalid) opcode. Verifies the self-host reproduces
+; the parameter list and substituted body verbatim in the `--- generated module ---`
+; section, not just the zero-arg case.
+(defn m [(x i64)] (-> i64) (llvm-ir i64 [x] "%r = bogusop $t0 $0, 1
+ret $ret %r"))

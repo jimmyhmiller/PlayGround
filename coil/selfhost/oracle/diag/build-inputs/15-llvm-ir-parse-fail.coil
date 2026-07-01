@@ -1,0 +1,12 @@
+; A `(llvm-ir …)` escape hatch whose body is not valid LLVM IR. Codegen builds an
+; `alwaysinline` helper module from the raw text and hands it to LLVMParseIRInContext,
+; which fails. Rust's src/codegen.rs `emit_llvm_ir` returns
+;   Err("llvm-ir: could not parse IR: <{:?}-escaped LLVM error>\n
+;        --- generated module ---\n<the generated module text>")
+; rendered by main.rs `report`/`print_error` as `error: <body>` + exit 1. The `{:?}`
+; escaping comes from inkwell LLVMString's Display (itself Debug over the &str). The
+; self-host used to SIGABRT here with `UNIMPLEMENTED: llvm-ir: could not parse IR`;
+; it must now render this byte-for-byte, including the helper name `@__coil_llvm_ir_0`
+; (the per-function helper counter — deterministic now that mono emits functions in
+; insertion order on both sides, so the malformed concrete helper is always seq 0).
+(defn m [] (-> i64) (llvm-ir i64 [] "not valid ir"))
