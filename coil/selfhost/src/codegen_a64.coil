@@ -216,7 +216,10 @@
           (load tot))
       (let [su (g-sum-idx g nm)]
         (if (icmp-ge su 0)
-            (iadd 8 (imul 8 (load (field (al-at [GSum] (field g sums) su) words))))
+            ; recompute from the definition (NOT the cached words): during
+            ; registration other sums' caches may not be filled yet, and sum
+            ; sizing must be order-independent (mirrors cg-sum-words-def).
+            (iadd 8 (imul 8 (g-sum-words-def g (load (field (al-at [GSum] (field g sums) su) variants)))))
           (cga-fail2 "g-type-bytes: unknown nominal " nm))))))
 ; payload words for a sum def: max over variants of sum of align8(type-bytes).
 (defn g-sum-words-def [(g (ptr Cga)) (variants (ptr (ArrayList Variant)))] (-> i64)
