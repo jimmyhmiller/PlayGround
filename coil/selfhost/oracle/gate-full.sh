@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # THE GATE (full integrated pipeline). Diff the self-hosted FULL compiler
-# (`selfhost/coil.coil emit-ir FILE` = read -> load -> expand-stage3 -> resolve ->
+# (`selfhost/src/main.coil emit-ir FILE` = read -> load -> expand-stage3 -> resolve ->
 # check -> mono -> codegen -> print -> normalize, on RAW source) against the Rust
 # reference snapshot (`coil dump-ir FILE`) across the corpus. Exit 0 iff
 # byte-identical for EVERY corpus file. Both sides are NORMALIZED textual LLVM IR

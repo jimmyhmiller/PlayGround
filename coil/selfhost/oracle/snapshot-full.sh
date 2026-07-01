@@ -3,7 +3,7 @@
 # expand-stage3 -> resolve -> check -> mono -> codegen -> print -> normalize).
 # Reference = Rust `coil dump-ir <RAW f>`, which is exactly `emit_ir` (textual LLVM
 # IR via LLVMPrintModuleToString) run through `normalize_ir::normalize`. The
-# self-host `selfhost/coil.coil emit-ir` prints with the SAME LLVMPrintModuleToString
+# self-host `selfhost/src/main.coil emit-ir` prints with the SAME LLVMPrintModuleToString
 # and the SAME normalization, so a byte-diff gate is meaningful.
 #
 # UNLIKE the codegen-only gate (snapshot-ir.sh), the corpus here is the RAW,
@@ -33,7 +33,7 @@ SEEDS=(
   lib/control.coil lib/derive.coil lib/dyn.coil lib/fmt.coil lib/hashmap.coil
   lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
   lib/slice.coil lib/thread.coil lib/try.coil
-  selfhost/coil.coil
+  selfhost/src/main.coil
   # --- feature corpora: each exercises a stubbed self-host feature so it becomes
   # part of the contract (currently failing on the self-host, green on Rust). ---
   examples/dyn_write.coil                     # trait objects / dyn dispatch (lib/dyn.coil)

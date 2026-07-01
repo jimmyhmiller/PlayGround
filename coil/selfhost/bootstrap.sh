@@ -24,7 +24,7 @@
 # matches the Rust reference), not merely byte-equal.
 set -uo pipefail
 cd "$(dirname "$0")/.."             # repo root
-SRC=selfhost/coil.coil
+SRC=selfhost/src/main.coil
 REF=./target/debug/coil
 LF=(--link-flag -L/opt/homebrew/opt/llvm/lib --link-flag -lLLVM)
 SAMPLE=examples/fib.coil
