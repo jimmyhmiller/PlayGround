@@ -1625,3 +1625,71 @@ fn mult_poly_unsound_instantiations_are_rejected() {
         badall : (1 xs : LList (Own Nat)) -> LList Unit\nfn badall(xs) { lmap(w, freeNat, xs) }\n";
     assert!(check_program(omega).is_err(), "m := w with a linear-consuming callback must reject");
 }
+
+// ---------------------------------------------------------------------------
+// NESTED PATTERNS — the pattern-matrix desugar
+// ---------------------------------------------------------------------------
+
+const NPAT_HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+    enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n";
+
+#[test]
+fn nested_patterns_desugar_and_check() {
+    // merged outer arms + inner matches; nested `%builtin Nat` patterns;
+    // constructor patterns in the first position; `Nil`-style nullary
+    // constructors inside a pattern (NOT silently a binder anymore).
+    let src = format!(
+        "{NPAT_HDR}second : LList Nat -> Nat\n\
+         fn second(xs) {{ match xs {{ LCons(h, LCons(h2, t)) => h2, LCons(h, LNil) => h, LNil => 0 }} }}\n\
+         pred2 : Nat -> Nat\n\
+         fn pred2(n) {{ match n {{ Succ(Succ(k)) => k, Succ(Zero) => 0, Zero => 0 }} }}\n\
+         swaps : LList Nat -> Nat\n\
+         fn swaps(xs) {{ match xs {{ LCons(Zero, r) => 100, LCons(Succ(k), r) => k, LNil => 7 }} }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn nested_pattern_coverage_and_reachability() {
+    // a missing INNER case is a coverage error…
+    let missing = format!(
+        "{NPAT_HDR}bad : LList Nat -> Nat\n\
+         fn bad(xs) {{ match xs {{ LCons(h, LCons(h2, t)) => h2, LNil => 0 }} }}\n"
+    );
+    let err = check_program(&missing).err().expect("missing inner case must reject");
+    assert!(err.iter().any(|e| e.contains("missing a case")), "got: {err:?}");
+    // …an arm no input can reach is rejected…
+    let dead = format!(
+        "{NPAT_HDR}red : LList Nat -> Nat\n\
+         fn red(xs) {{ match xs {{ LCons(a, r) => a, LCons(b, s) => b, LNil => 0 }} }}\n"
+    );
+    let err = check_program(&dead).err().expect("dead arm must reject");
+    assert!(err.iter().any(|e| e.contains("unreachable")), "got: {err:?}");
+    // …but a catch-all row below specific rows is fine (first match wins).
+    let mixed = format!(
+        "{NPAT_HDR}mixed : LList Nat -> Nat\n\
+         fn mixed(xs) {{ match xs {{ LCons(Zero, r) => 100, LCons(other, r) => other, LNil => 7 }} }}\n"
+    );
+    assert!(check_program(&mixed).is_ok(), "{:?}", check_program(&mixed).err());
+}
+
+#[test]
+fn nested_patterns_preserve_linearity() {
+    // destructuring two levels deep MOVES both Owns out — the correct body
+    // consumes each exactly once…
+    const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
+        freeRest : (1 r : OL) -> Nat\n\
+        fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }\n";
+    let ok = format!(
+        "{H}sum2 : (1 xs : OL) -> Nat\n\
+         fn sum2(xs) {{ match xs {{ OCons(a, OCons(b, ONil)) => let x = unbox(a); let y = unbox(b); x + y, OCons(a, r) => let u = free(a); freeRest(r), ONil => Zero }} }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+    // …and DROPPING the tail bound through a nested pattern is still a leak.
+    let leak = format!(
+        "{H}bad : (1 xs : OL) -> Nat\n\
+         fn bad(xs) {{ match xs {{ OCons(a, OCons(b, ONil)) => let x = unbox(a); Zero, OCons(a, r) => let u = free(a); Zero, ONil => Zero }} }}\n"
+    );
+    assert!(check_program(&leak).is_err(), "a leak through a nested pattern must reject");
+}

@@ -1,0 +1,24 @@
+// NESTED PATTERNS over LINEAR data: `sum2` destructures TWO levels deep
+// (`OCons(a, OCons(b, ONil))`), moving both owned pointers out — each consumed
+// exactly once, enforced by the same QTT checker as everything else. A body
+// that dropped `b` or the tail would be a compile error. Nested patterns are a
+// SURFACE desugar (the classic pattern matrix): arms sharing an outer
+// constructor merge into inner matches; a bare constructor name in a pattern
+// (`ONil`) is a constructor, not a binder; unreachable arms are rejected.
+//   tally run examples/nested_patterns.tal  → 7
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }
+freeRest : (1 r : OL) -> Nat
+fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }
+sum2 : (1 xs : OL) -> Nat
+fn sum2(xs) {
+    match xs {
+        OCons(a, OCons(b, ONil)) => let x = unbox(a); let y = unbox(b); x + y,
+        OCons(a, r)              => let u = free(a); freeRest(r),
+        ONil                     => Zero,
+    }
+}
+main : Nat
+fn main() { sum2(OCons(alloc(3), OCons(alloc(4), ONil))) }

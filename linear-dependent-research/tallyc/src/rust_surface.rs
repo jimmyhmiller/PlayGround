@@ -205,10 +205,23 @@ pub(crate) enum Tm {
     Let(String, Box<Tm>, Box<Tm>),
 }
 
+/// A surface match PATTERN: a variable, or a constructor applied to
+/// sub-patterns (`Cons(h, Cons(h2, t))`). A bare name that is a declared
+/// constructor is a NULLARY constructor pattern (`Cons(h, Nil)`), not a binder.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Pat {
+    Var(String),
+    Ctor(String, Vec<Pat>),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Arm {
     pub(crate) ctor: String,
     pub(crate) binders: Vec<String>,
+    /// the arm's argument patterns, parallel to `binders` (a nested pattern's
+    /// binder is a fresh placeholder until `desugar_patterns` flattens the
+    /// match). Empty after desugaring — the invariant every later pass assumes.
+    pub(crate) pats: Vec<Pat>,
     pub(crate) body: Tm,
 }
 
@@ -626,6 +639,25 @@ impl Parser {
         }
     }
 
+    /// A match-arm argument pattern: `name` or `Ctor(pat, …)` (recursive).
+    fn parse_pattern(&mut self) -> Result<Pat, String> {
+        let name = self.ident()?;
+        if self.peek() == Some(&Tok::LParen) {
+            self.next();
+            let mut subs = Vec::new();
+            while self.peek() != Some(&Tok::RParen) {
+                subs.push(self.parse_pattern()?);
+                if self.peek() == Some(&Tok::Comma) {
+                    self.next();
+                }
+            }
+            self.eat(&Tok::RParen)?;
+            Ok(Pat::Ctor(name, subs))
+        } else {
+            Ok(Pat::Var(name))
+        }
+    }
+
     fn parse_match(&mut self) -> Result<Tm, String> {
         self.eat(&Tok::KwMatch)?;
         // the scrutinee may be an EXPRESSION (a call / paren), not just a var; a
@@ -644,10 +676,22 @@ impl Parser {
         while self.peek() != Some(&Tok::RBrace) {
             let ctor = self.ident()?;
             let mut binders = Vec::new();
+            let mut pats = Vec::new();
             if self.peek() == Some(&Tok::LParen) {
                 self.next();
                 while self.peek() != Some(&Tok::RParen) {
-                    binders.push(self.ident()?);
+                    let pat = self.parse_pattern()?;
+                    // a NESTED pattern gets a fresh placeholder binder; the
+                    // pattern-matrix desugar (`desugar_patterns`) replaces it.
+                    binders.push(match &pat {
+                        Pat::Var(v) => v.clone(),
+                        Pat::Ctor(_, _) => {
+                            let n = format!("$p{}", self.fresh);
+                            self.fresh += 1;
+                            n
+                        }
+                    });
+                    pats.push(pat);
                     if self.peek() == Some(&Tok::Comma) {
                         self.next();
                     }
@@ -656,7 +700,7 @@ impl Parser {
             }
             self.eat(&Tok::FatArrow)?;
             let body = self.parse_tm()?;
-            arms.push(Arm { ctor, binders, body });
+            arms.push(Arm { ctor, binders, pats, body });
             if self.peek() == Some(&Tok::Comma) {
                 self.next();
             }
@@ -1086,6 +1130,26 @@ impl Elab {
                 }
                 if self.def_has_implicits(name) {
                     return Ok(self.solve_fn_call(name, args, None, cx, rec)?.0);
+                }
+                // A NO-implicit definition still has a KNOWN Π telescope: CHECK
+                // each argument against its domain (so a constructor-with-
+                // implicits argument — `mixed(LCons(5, LNil))` — elaborates),
+                // instead of blindly inferring it.
+                if let Some((_, fty)) = self.defs.get(name) {
+                    let mut fty = fty.clone();
+                    let mut dom_env: Vec<Value> = Vec::new();
+                    let mut eargs = Vec::with_capacity(args.len());
+                    for a in args {
+                        let Term::Pi(_, dom, cod) = fty else {
+                            return Err(format!("`{name}` is applied to too many arguments"));
+                        };
+                        let dom_val = dep::eval_rc(&self.rc, &dom_env, &dom);
+                        let ta = self.check(a, &dom_val, cx, rec)?;
+                        dom_env.push(self.eval(cx.len(), &ta));
+                        eargs.push(ta);
+                        fty = *cod;
+                    }
+                    return self.resolve(name, eargs, &cx.names, true);
                 }
                 let eargs = args.iter().map(|a| self.elab_tm(a, cx, rec)).collect::<Result<Vec<_>, _>>()?;
                 self.resolve(name, eargs, &cx.names, true)
@@ -1549,7 +1613,7 @@ impl Elab {
                 decl.ctors.len()
             ));
         }
-        let arm = Arm { ctor: decl.ctors[0].name.clone(), binders: names.to_vec(), body: body.clone() };
+        let arm = Arm { ctor: decl.ctors[0].name.clone(), binders: names.to_vec(), pats: vec![], body: body.clone() };
         self.elab_nested_match(&e_term, &dname, &dargs, std::slice::from_ref(&arm), expected, cx, rec)
     }
 
@@ -1566,6 +1630,13 @@ impl Elab {
         let n = cx.len();
         let sparam_tms: Vec<Term> = dargs[..np].iter().map(|v| dep::quote_at(n, v)).collect();
 
+        // COVERAGE HYGIENE: every arm must name a real constructor of the family
+        // (the per-constructor loop below would silently ignore an unknown one).
+        for a in arms {
+            if !decl.ctors.iter().any(|c| c.name == a.ctor) {
+                return Err(format!("`{}` is not a constructor of `{dname}`", a.ctor));
+            }
+        }
         let exp_tm = dep::quote_at(n, expected);
         let convoy = self.detect_convoy(e_term, &decl, dargs, &exp_tm, arms, cx);
         let motive = match &convoy {
@@ -1582,8 +1653,13 @@ impl Elab {
         let motive_tm = motive.clone();
 
         // In a `Fix` body (`in_fix`) the match lowers to a NON-recursive `Case` (no IH,
-        // recursion via the `Fix` self-call); otherwise the recursive `Elim`.
-        let as_case = self.in_fix.get();
+        // recursion via the `Fix` self-call). With NO recursion in scope at all
+        // (`rec` is None) a `Case` is also the right lowering — an `Elim` would
+        // bind (and its backend EAGERLY compute) induction hypotheses nobody can
+        // reference, which for a LINEAR recursive field would re-traverse a
+        // resource the body consumes directly. Only a genuine structural fold
+        // (`rec` Some) needs `Elim`.
+        let as_case = self.in_fix.get() || rec.is_none();
         let mut methods = Vec::with_capacity(decl.ctors.len());
         for (ci, ctor) in decl.ctors.iter().enumerate() {
             let info = &self.ctor_info[&ctor.name];
@@ -2079,6 +2155,7 @@ fn mono_rewrite_tm(
                     Ok(Arm {
                         ctor: a.ctor.clone(),
                         binders: a.binders.clone(),
+                        pats: a.pats.clone(),
                         body: mono_rewrite_tm(&a.body, polys, subst, queue)?,
                     })
                 })
@@ -2196,6 +2273,292 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
     }
     *items = out;
     Ok(())
+}
+
+// ===========================================================================
+// NESTED PATTERNS — the pattern-matrix desugar (classic column splitting)
+// ===========================================================================
+
+impl Elab {
+    /// A pattern normalized against the constructor table: a bare name that IS a
+    /// declared constructor is a (nullary) constructor pattern, not a binder.
+    fn norm_pat(&self, p: &Pat) -> Result<Pat, String> {
+        match p {
+            Pat::Var(v) if self.ctor_info.contains_key(v) || self.nat_ctor.contains_key(v) => {
+                let nexpl = self.pat_ctor_arity(v);
+                if nexpl != 0 {
+                    return Err(format!(
+                        "pattern `{v}` is a constructor with {nexpl} argument(s) — write \
+                         `{v}(…)`, or rename the binder (it shadows the constructor)"
+                    ));
+                }
+                Ok(Pat::Ctor(v.clone(), vec![]))
+            }
+            _ => Ok(p.clone()),
+        }
+    }
+
+    /// EXPLICIT-argument count of a constructor (what a pattern binds).
+    fn pat_ctor_arity(&self, c: &str) -> usize {
+        if let Some(role) = self.nat_ctor.get(c) {
+            return match role {
+                NatRole::Zero => 0,
+                NatRole::Succ => 1,
+            };
+        }
+        self.ctor_info
+            .get(c)
+            .map(|i| i.arg_implicit.iter().filter(|b| !**b).count())
+            .unwrap_or(0)
+    }
+
+    /// Rewrite every `match` in `t` so that all arms are FLAT (variable-only
+    /// patterns, one arm per constructor): nested patterns compile to nested
+    /// matches by the pattern-matrix algorithm; arms sharing an outer
+    /// constructor are merged. Runs once, after the constructor table exists
+    /// and before anything else consumes match arms.
+    fn desugar_patterns(&self, t: &Tm, fresh: &mut usize) -> Result<Tm, String> {
+        Ok(match t {
+            Tm::Var(_) | Tm::Lit(_) => t.clone(),
+            Tm::Call(n, args) => Tm::Call(
+                n.clone(),
+                args.iter().map(|a| self.desugar_patterns(a, fresh)).collect::<Result<_, _>>()?,
+            ),
+            Tm::Add(a, b) => Tm::Add(
+                Box::new(self.desugar_patterns(a, fresh)?),
+                Box::new(self.desugar_patterns(b, fresh)?),
+            ),
+            Tm::Let(n, e, b) => Tm::Let(
+                n.clone(),
+                Box::new(self.desugar_patterns(e, fresh)?),
+                Box::new(self.desugar_patterns(b, fresh)?),
+            ),
+            Tm::LetPair(ns, e, b) => Tm::LetPair(
+                ns.clone(),
+                Box::new(self.desugar_patterns(e, fresh)?),
+                Box::new(self.desugar_patterns(b, fresh)?),
+            ),
+            Tm::Match(scrut, arms) => {
+                let mut arms2 = Vec::with_capacity(arms.len());
+                for a in arms {
+                    let pats = a
+                        .pats
+                        .iter()
+                        .map(|p| self.norm_pat(p))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    arms2.push(Arm {
+                        ctor: a.ctor.clone(),
+                        binders: a.binders.clone(),
+                        pats,
+                        body: self.desugar_patterns(&a.body, fresh)?,
+                    });
+                }
+                self.compile_arms(scrut, arms2, fresh)?
+            }
+        })
+    }
+
+    /// One `match`: if every arm is already flat (variable patterns only, no
+    /// repeated constructor), pass it through untouched (binder names, arm
+    /// order, everything — zero behavior change for existing programs).
+    /// Otherwise group the arms by outer constructor and compile each group's
+    /// pattern matrix.
+    fn compile_arms(&self, scrut: &str, arms: Vec<Arm>, fresh: &mut usize) -> Result<Tm, String> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut needs = false;
+        for a in &arms {
+            if seen.contains(&a.ctor.as_str()) {
+                needs = true; // repeated outer ctor: merge via the matrix
+            }
+            seen.push(&a.ctor);
+            if a.pats.iter().any(|p| matches!(p, Pat::Ctor(_, _))) {
+                needs = true;
+            }
+        }
+        if !needs {
+            let flat = arms
+                .into_iter()
+                .map(|mut a| {
+                    a.pats = vec![];
+                    a
+                })
+                .collect();
+            return Ok(Tm::Match(scrut.to_string(), flat));
+        }
+        // outer constructors in first-appearance order
+        let mut order: Vec<String> = Vec::new();
+        for a in &arms {
+            if !order.contains(&a.ctor) {
+                order.push(a.ctor.clone());
+            }
+        }
+        let mut flat_arms = Vec::with_capacity(order.len());
+        // first-match-wins WITHIN a branch (a shadowed row is silently dropped
+        // there), but a source arm that wins in NO branch is genuinely dead —
+        // track which arms were ever used and reject the rest.
+        let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for c in order {
+            let rows: Vec<(usize, &Arm)> = arms
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.ctor == c)
+                .collect();
+            let k = rows[0].1.pats.len();
+            if rows.iter().any(|(_, r)| r.pats.len() != k) {
+                return Err(format!(
+                    "`match`: the arms for `{c}` bind different numbers of arguments"
+                ));
+            }
+            let binders = self.matrix_binders(
+                k,
+                &rows.iter().map(|(_, r)| r.pats.as_slice()).collect::<Vec<_>>(),
+                fresh,
+            );
+            let matrix: Vec<(Vec<Pat>, Tm, usize)> =
+                rows.iter().map(|(i, r)| (r.pats.clone(), r.body.clone(), *i)).collect();
+            let body = self.compile_matrix(&binders, matrix, fresh, &mut used)?;
+            flat_arms.push(Arm { ctor: c, binders, pats: vec![], body });
+        }
+        if let Some(i) = (0..arms.len()).find(|i| !used.contains(i)) {
+            return Err(format!(
+                "unreachable `match` arm for `{}`: earlier patterns already cover it",
+                arms[i].ctor
+            ));
+        }
+        Ok(Tm::Match(scrut.to_string(), flat_arms))
+    }
+
+    /// Column binder names: keep the user's name when a single row binds a plain
+    /// variable there; otherwise a fresh placeholder (user variables are then
+    /// re-bound by `let` inside `compile_matrix`).
+    fn matrix_binders(&self, k: usize, rows: &[&[Pat]], fresh: &mut usize) -> Vec<String> {
+        (0..k)
+            .map(|j| {
+                if rows.len() == 1 {
+                    if let Pat::Var(v) = &rows[0][j] {
+                        return v.clone();
+                    }
+                }
+                *fresh += 1;
+                format!("$q{fresh}")
+            })
+            .collect()
+    }
+
+    /// The pattern matrix: `cols` are the in-scope occurrence names, `rows` the
+    /// remaining (patterns, body) alternatives in source order. Splits on the
+    /// leftmost column holding a constructor pattern; variable rows join every
+    /// constructor group (their variable re-bound to the whole column value).
+    /// All-variable rows: the FIRST wins and any later row is an unreachable-arm
+    /// error (same redundancy discipline as flat matches).
+    fn compile_matrix(
+        &self,
+        cols: &[String],
+        rows: Vec<(Vec<Pat>, Tm, usize)>,
+        fresh: &mut usize,
+        used: &mut std::collections::HashSet<usize>,
+    ) -> Result<Tm, String> {
+        let split = (0..cols.len())
+            .find(|j| rows.iter().any(|(ps, _, _)| matches!(ps[*j], Pat::Ctor(_, _))));
+        let Some(j) = split else {
+            // all variables: the FIRST row wins; later rows are shadowed HERE
+            // (they may still win in another branch — `compile_arms` rejects the
+            // ones that never do).
+            let (ps, body, id) = rows.into_iter().next().expect("non-empty pattern matrix");
+            used.insert(id);
+            let mut b = body;
+            for (i, p) in ps.iter().enumerate().rev() {
+                if let Pat::Var(v) = p {
+                    if v != &cols[i] && !v.starts_with('$') {
+                        b = Tm::Let(v.clone(), Box::new(Tm::Var(cols[i].clone())), Box::new(b));
+                    }
+                }
+            }
+            return Ok(b);
+        };
+        // constructors split on, in first-appearance order — plus, when a
+        // variable row exists, every OTHER constructor of the same family (the
+        // variable covers them; the family is read off any named constructor).
+        let mut ctors: Vec<String> = Vec::new();
+        for (ps, _, _) in &rows {
+            if let Pat::Ctor(c, _) = &ps[j] {
+                if !ctors.contains(c) {
+                    ctors.push(c.clone());
+                }
+            }
+        }
+        let has_var_row = rows.iter().any(|(ps, _, _)| matches!(ps[j], Pat::Var(_)));
+        if has_var_row {
+            let named = ctors[0].clone();
+            let family: Vec<String> = if self.nat_ctor.contains_key(&named) {
+                self.nat_ctor.keys().cloned().collect()
+            } else if let Some(info) = self.ctor_info.get(&named) {
+                self.rc
+                    .data(&info.data)
+                    .map(|d| d.ctors.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+            for c in family {
+                if !ctors.contains(&c) {
+                    ctors.push(c);
+                }
+            }
+        }
+        let mut inner_arms = Vec::with_capacity(ctors.len());
+        for c in &ctors {
+            let k2 = self.pat_ctor_arity(c);
+            let mut sub_rows: Vec<(Vec<Pat>, Tm, usize)> = Vec::new();
+            for (ps, body, id) in &rows {
+                match &ps[j] {
+                    Pat::Ctor(c2, subs) if c2 == c => {
+                        if subs.len() != k2 {
+                            return Err(format!(
+                                "pattern `{c}`: expected {k2} argument(s), got {}",
+                                subs.len()
+                            ));
+                        }
+                        let mut nps = ps[..j].to_vec();
+                        nps.extend(subs.iter().map(|sp| self.norm_pat(sp)).collect::<Result<Vec<_>, _>>()?);
+                        nps.extend_from_slice(&ps[j + 1..]);
+                        sub_rows.push((nps, body.clone(), *id));
+                    }
+                    Pat::Ctor(_, _) => {}
+                    Pat::Var(v) => {
+                        // the variable covers this constructor too: wildcards for
+                        // the sub-positions, the variable re-bound to the column.
+                        let mut nps = ps[..j].to_vec();
+                        for _ in 0..k2 {
+                            *fresh += 1;
+                            nps.push(Pat::Var(format!("$w{fresh}")));
+                        }
+                        nps.extend_from_slice(&ps[j + 1..]);
+                        let b = if v.starts_with('$') {
+                            body.clone()
+                        } else {
+                            Tm::Let(v.clone(), Box::new(Tm::Var(cols[j].clone())), Box::new(body.clone()))
+                        };
+                        sub_rows.push((nps, b, *id));
+                    }
+                }
+            }
+            if sub_rows.is_empty() {
+                continue; // no row reaches this constructor: absent arm (coverage decides)
+            }
+            let sub_pats: Vec<&[Pat]> = sub_rows
+                .iter()
+                .map(|(ps, _, _)| &ps[j..j + k2])
+                .collect();
+            let binders = self.matrix_binders(k2, &sub_pats, fresh);
+            let mut ncols = cols[..j].to_vec();
+            ncols.extend(binders.iter().cloned());
+            ncols.extend_from_slice(&cols[j + 1..]);
+            let body = self.compile_matrix(&ncols, sub_rows, fresh, used)?;
+            inner_arms.push(Arm { ctor: c.clone(), binders, pats: vec![], body });
+        }
+        Ok(Tm::Match(cols[j].clone(), inner_arms))
+    }
 }
 
 /// Every identifier a surface term references (variables, callees, match
@@ -3867,6 +4230,17 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     }
     elab.rc = Rc::new(sig);
 
+    // pass C½ — NESTED PATTERNS: flatten every match's pattern matrix (needs the
+    // constructor table from pass C; must run before totality/elaboration, which
+    // assume flat arms).
+    let mut pat_fresh = 0usize;
+    for it in items.iter_mut() {
+        if let Item::Fn(_, _, body, _) = it {
+            *body = elab.desugar_patterns(body, &mut pat_fresh)?;
+        }
+    }
+    let items = items; // freeze
+
     // pass D: fns
     let mut sigs: HashMap<String, Ty> = HashMap::new();
     for it in &items {
@@ -4050,28 +4424,31 @@ impl Elab {
                 // body with NO self-call (a recursive convoy body would need
                 // dep-applied induction hypotheses — not yet built; such fns
                 // are `%partial` and take the `Fix` path above).
-                let fn_convoy = {
-                    let no_self_call = {
-                        let mut calls = Vec::new();
-                        collect_all_calls(body, &mut calls);
-                        calls.iter().all(|c| c.callee != *name)
-                    };
-                    no_self_call
-                        && fn_cx.debruijn(scrut).is_some()
-                        && match fn_cx.var_type(scrut) {
-                            Some(Value::VData(d, dargs)) => {
-                                let decl = self.rc.data(&d).unwrap().clone();
-                                let sidx = fn_cx.debruijn(scrut).unwrap();
-                                let ret_tm = self.elab_ty(ret, full_names)?;
-                                let exp_v = dep::eval_rc(&self.rc, &neutral_env(fn_cx.len()), &ret_tm);
-                                let exp_tm = dep::quote_at(fn_cx.len(), &exp_v);
-                                self.detect_convoy(&Term::Var(sidx), &decl, &dargs, &exp_tm, arms, &fn_cx)
-                                    .is_some()
-                            }
-                            _ => false,
-                        }
+                let no_self_call = {
+                    let mut calls = Vec::new();
+                    collect_all_calls(body, &mut calls);
+                    calls.iter().all(|c| c.callee != *name)
                 };
-                if fn_convoy {
+                // Route EVERY non-self-recursive match body (with arms — the
+                // zero-arm absurd discharge stays on `elab_match_body`'s
+                // `try_absurd_match`) through the nested-match elaborator: it
+                // builds the CONVOY motive when the index refines dependents,
+                // and lowers to a `Case` (no eager induction hypotheses — which
+                // for a linear recursive field would re-traverse a resource the
+                // body consumes directly, e.g. a nested-pattern inner match).
+                let route_nested = no_self_call
+                    && !arms.is_empty()
+                    && fn_cx.debruijn(scrut).is_some()
+                    // a CONCRETE literal index (e.g. `Fin Zero`) keeps the
+                    // `elab_match_body` path — its absurd-discharge machinery
+                    // (`try_absurd_match`) owns index-refuted matches there.
+                    && !matches!(
+                        fn_cx.var_type(scrut),
+                        Some(Value::VData(ref d, ref a))
+                            if self.rc.data(d).is_some_and(|decl| decl.indices.len() == 1)
+                                && matches!(a.last(), Some(Value::VNatLit(_))))
+                ;
+                if route_nested {
                     let expected = dep::eval_rc(&self.rc, &neutral_env(full_names.len()), &self.elab_ty(ret, full_names)?);
                     self.check(body, &expected, &fn_cx, None)?
                 } else {

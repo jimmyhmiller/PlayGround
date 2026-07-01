@@ -2427,6 +2427,40 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
     }
 
     #[test]
+    fn nested_patterns_run_natively() {
+        // the pattern-matrix desugar end-to-end: merged arms + inner matches
+        // (`second`), nested Nat patterns (`pred2`), constructor patterns in the
+        // first position (`swaps`); 9 + 3 + 2 = 14.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+            second : LList Nat -> Nat\n\
+            fn second(xs) { match xs { LCons(h, LCons(h2, t)) => h2, LCons(h, LNil) => h, LNil => 0 } }\n\
+            pred2 : Nat -> Nat\n\
+            fn pred2(n) { match n { Succ(Succ(k)) => k, Succ(Zero) => 0, Zero => 0 } }\n\
+            swaps : LList Nat -> Nat\n\
+            fn swaps(xs) { match xs { LCons(Zero, r) => 100, LCons(Succ(k), r) => k, LNil => 7 } }\n\
+            main : Nat\n\
+            fn main() { let a = second(LCons(4, LCons(9, LNil))); let b = pred2(5); let c = swaps(LCons(3, LNil)); a + b + c }\n";
+        assert_eq!(run(src), 14);
+    }
+
+    #[test]
+    fn nested_patterns_over_linear_data_run_natively() {
+        // a two-deep pattern MOVES both Owns out; each freed exactly once → 7.
+        // (Also exercises the Case-not-Elim lowering for IH-free matches: an
+        // eager eliminator IH would have re-traversed the linear tail.)
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
+            freeRest : (1 r : OL) -> Nat\n\
+            fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }\n\
+            sum2 : (1 xs : OL) -> Nat\n\
+            fn sum2(xs) { match xs { OCons(a, OCons(b, ONil)) => let x = unbox(a); let y = unbox(b); x + y, OCons(a, r) => let u = free(a); freeRest(r), ONil => Zero } }\n\
+            main : Nat\n\
+            fn main() { sum2(OCons(alloc(3), OCons(alloc(4), ONil))) }\n";
+        assert_eq!(run(src), 7);
+    }
+
+    #[test]
     fn convoy_vec_head_tail_run_natively() {
         // The index PROJECTIONS the convoy's Succ-inversion types: `vhead`/`vtail`
         // over `Vec Nat (Succ k)` with the impossible `Nil` arm OMITTED (refuted
