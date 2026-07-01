@@ -1471,3 +1471,84 @@ fn mult_variable_binder_parses_and_errors_cleanly() {
     let err = check_program(src).err().expect("mult-var must not yet check");
     assert!(err.iter().any(|e| e.contains("multiplicity variable")), "got: {err:?}");
 }
+
+// ---------------------------------------------------------------------------
+// THE CONVOY (docs/CONVOY_HANDOFF.md) — index refinement in dependent match
+// ---------------------------------------------------------------------------
+
+/// The shared header for the convoy tests: Nat, Vec, Fin, Void + exfalso + fzv.
+const CONVOY_HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+    enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+    enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+    enum Void { }\n\
+    exfalso : {0 a : Type} -> Void -> a\nfn exfalso(v) { match v { } }\n\
+    fzv : Fin Zero -> Void\nfn fzv(f) { match f { } }\n";
+
+#[test]
+fn convoy_dependent_lookup_type_checks() {
+    // THE dependent-types benchmark function: total-coverage, bounds-check-free
+    // vector lookup. The OUTER match refines `i : Fin n` per arm (`Fin Zero` in
+    // `Nil` — discharged as absurd; `Fin (Succ k)` in `Cons`); the INNER match
+    // on `i` re-binds `rest` through the motive's Succ-INVERSION (`NatCase`
+    // large elimination — J-free), so the recursive call's implicit is inferred
+    // consistently. The kernel re-checks everything (the convoy is untrusted).
+    let src = format!(
+        "{CONVOY_HDR}lookup : {{0 n : Nat}} -> Fin n -> Vec Nat n -> Nat\n\
+         fn lookup(i, env) {{ match env {{ Nil => exfalso(fzv(i)), Cons(v, rest) => match i {{ FZ => v, FS(j) => lookup(j, rest) }} }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}
+
+#[test]
+fn convoy_impossible_arm_must_be_omitted_and_reachable_arm_must_be_present() {
+    // vhead over `Vec Nat (Succ k)`: the `Nil` arm is REFUTED by the index —
+    // it may (must) be omitted...
+    let ok = format!(
+        "{CONVOY_HDR}vhead : {{0 k : Nat}} -> Vec Nat (Succ k) -> Nat\n\
+         fn vhead(v) {{ match v {{ Cons(h, t) => h }} }}\nmain : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+    // ...WRITING the impossible arm is rejected (it cannot be given a body)...
+    let written = format!(
+        "{CONVOY_HDR}vhead : {{0 k : Nat}} -> Vec Nat (Succ k) -> Nat\n\
+         fn vhead(v) {{ match v {{ Nil => 0, Cons(h, t) => h }} }}\nmain : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = check_program(&written).err().expect("impossible arm written must reject");
+    assert!(err.iter().any(|e| e.contains("impossible")), "got: {err:?}");
+    // ...and omitting a REACHABLE arm (unconstrained index `n`) is still a
+    // missing case — the refuted-arm relaxation never weakens coverage.
+    let missing = format!(
+        "{CONVOY_HDR}vhead : {{0 n : Nat}} -> Vec Nat n -> Nat\n\
+         fn vhead(v) {{ match v {{ Cons(h, t) => h }} }}\nmain : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = check_program(&missing).err().expect("omitting a reachable arm must reject");
+    assert!(err.iter().any(|e| e.contains("missing a case")), "got: {err:?}");
+}
+
+#[test]
+fn convoy_refinement_is_real_not_a_loophole() {
+    // RED-TEAM: the refinement must be the CONSTRUCTOR'S index, not a blanket
+    // coercion — using `i` at `Fin Zero` inside the `Cons` arm (where it is
+    // `Fin (Succ k)`) must fail the kernel re-check.
+    let src = format!(
+        "{CONVOY_HDR}bad : {{0 n : Nat}} -> Fin n -> Vec Nat n -> Nat\n\
+         fn bad(i, env) {{ match env {{ Nil => exfalso(fzv(i)), Cons(v, rest) => exfalso(fzv(i)) }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = check_program(&src).err().expect("misused refinement must reject");
+    assert!(err.iter().any(|e| e.contains("mismatch")), "got: {err:?}");
+}
+
+#[test]
+fn convoy_vtail_index_projection_type_checks() {
+    // The Succ-INVERSION in the motive types the classic index projections:
+    // `vtail : Vec Nat (Succ k) -> Vec Nat k` — the RESULT type mentions the
+    // predecessor of the scrutinee's index, computed back by the motive's
+    // NatCase. No equality eliminator anywhere.
+    let src = format!(
+        "{CONVOY_HDR}vtail : {{0 k : Nat}} -> Vec Nat (Succ k) -> Vec Nat k\n\
+         fn vtail(v) {{ match v {{ Cons(h, t) => t }} }}\nmain : Nat\nfn main() {{ Zero }}\n"
+    );
+    assert!(check_program(&src).is_ok(), "{:?}", check_program(&src).err());
+}

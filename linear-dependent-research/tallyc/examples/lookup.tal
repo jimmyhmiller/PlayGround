@@ -1,0 +1,54 @@
+// THE CONVOY (docs/CONVOY_HANDOFF.md): dependently-typed, TOTAL-COVERAGE vector
+// lookup — the function every dependent language is measured by — running
+// natively.  `tally run examples/lookup.tal` → 2.
+//
+//   lookup : {0 n : Nat} -> Fin n -> Vec Nat n -> Nat
+//
+// There is NO bounds check anywhere and NO possibility of an out-of-bounds
+// access: an index of type `Fin n` cannot exceed the vector's length by TYPING.
+// The `Nil` arm is genuinely impossible — the convoy refines `i : Fin n` to
+// `i : Fin Zero` inside it, which is uninhabited (`fzv` + `exfalso` discharge
+// it). In the `Cons` arm `i` is refined to `Fin (Succ k)`, and the inner match
+// on `i` re-binds `rest` at the type the predecessor determines — so the
+// recursive call's implicit is inferred consistently. Both `n` and the `Fin`
+// structure are erased: the compiled code is a bare loop over the list.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Vec (a : Type) : Nat -> Type {
+    Nil  : Vec a Zero,
+    Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
+}
+
+enum Fin : Nat -> Type {
+    FZ : {0 n : Nat} -> Fin (Succ n),
+    FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
+}
+
+enum Void { }
+
+exfalso : {0 a : Type} -> Void -> a
+fn exfalso(v) { match v { } }
+
+fzv : Fin Zero -> Void
+fn fzv(f) { match f { } }
+
+lookup : {0 n : Nat} -> Fin n -> Vec Nat n -> Nat
+fn lookup(i, env) {
+    match env {
+        Nil           => exfalso(fzv(i)),
+        Cons(v, rest) => match i { FZ => v, FS(j) => lookup(j, rest) },
+    }
+}
+
+env3 : Vec Nat (Succ (Succ (Succ Zero)))
+fn env3() { Cons(1, Cons(2, Cons(3, Nil))) }
+
+i1 : Fin (Succ (Succ (Succ Zero)))
+fn i1() { FS(FZ) }
+
+main : Nat
+fn main() {
+    lookup(i1, env3)
+}

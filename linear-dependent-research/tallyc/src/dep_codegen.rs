@@ -2311,4 +2311,42 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
                        let (x, vh) = vtake(p, v); let u = vfree(p, vh); x, } }\n";
         assert_eq!(run(src), 1);
     }
+
+    #[test]
+    fn convoy_dependent_lookup_runs_natively() {
+        // THE CONVOY end-to-end (docs/CONVOY_HANDOFF.md): total-coverage,
+        // bounds-check-free `lookup : {0 n} -> Fin n -> Vec Nat n -> Nat`,
+        // compiled and RUN. The typed term is `(Case …) applied to the deps`;
+        // codegen commutes the application into the arms and emits the ordinary
+        // tag-switch — `n`, the `Fin` bound, and the motive all erase.
+        // lookup [1,2,3] at index FS(FZ) = 2. (See examples/lookup.tal.)
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+            enum Void { }\n\
+            exfalso : {0 a : Type} -> Void -> a\nfn exfalso(v) { match v { } }\n\
+            fzv : Fin Zero -> Void\nfn fzv(f) { match f { } }\n\
+            lookup : {0 n : Nat} -> Fin n -> Vec Nat n -> Nat\n\
+            fn lookup(i, env) { match env { Nil => exfalso(fzv(i)), Cons(v, rest) => match i { FZ => v, FS(j) => lookup(j, rest) } } }\n\
+            env3 : Vec Nat (Succ (Succ (Succ Zero)))\nfn env3() { Cons(1, Cons(2, Cons(3, Nil))) }\n\
+            i1 : Fin (Succ (Succ (Succ Zero)))\nfn i1() { FS(FZ) }\n\
+            main : Nat\nfn main() { lookup(i1, env3) }\n";
+        assert_eq!(run(src), 2);
+    }
+
+    #[test]
+    fn convoy_vec_head_tail_run_natively() {
+        // The index PROJECTIONS the convoy's Succ-inversion types: `vhead`/`vtail`
+        // over `Vec Nat (Succ k)` with the impossible `Nil` arm OMITTED (refuted
+        // by the index — real dependent coverage). vhead(vtail [1,2,3]) = 2.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            vhead : {0 k : Nat} -> Vec Nat (Succ k) -> Nat\n\
+            fn vhead(v) { match v { Cons(h, t) => h } }\n\
+            vtail : {0 k : Nat} -> Vec Nat (Succ k) -> Vec Nat k\n\
+            fn vtail(v) { match v { Cons(h, t) => t } }\n\
+            v3 : Vec Nat (Succ (Succ (Succ Zero)))\nfn v3() { Cons(1, Cons(2, Cons(3, Nil))) }\n\
+            main : Nat\nfn main() { vhead(vtail(v3)) }\n";
+        assert_eq!(run(src), 2);
+    }
 }
