@@ -2651,6 +2651,71 @@ impl Elab {
     }
 }
 
+/// Stable topological sort of the `Item::Fn` entries by their call graph:
+/// callees first, original order preserved among independent definitions.
+/// Non-`Fn` items keep their positions (the `Fn`s permute among their own
+/// slots). On a cycle the remaining functions stay in source order.
+fn reorder_fns_by_calls(items: &mut [Item]) {
+    let slots: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| matches!(it, Item::Fn(_, _, _, _)))
+        .map(|(i, _)| i)
+        .collect();
+    if slots.len() < 2 {
+        return;
+    }
+    let fn_names: std::collections::HashSet<String> = slots
+        .iter()
+        .filter_map(|&i| match &items[i] {
+            Item::Fn(n, _, _, _) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    // per fn: the OTHER fns its body calls (self-calls excluded).
+    let deps: Vec<(String, std::collections::HashSet<String>)> = slots
+        .iter()
+        .map(|&i| {
+            let Item::Fn(n, _, body, _) = &items[i] else { unreachable!() };
+            let mut calls = Vec::new();
+            collect_all_calls(body, &mut calls);
+            let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for c in &calls {
+                if c.callee != *n && fn_names.contains(&c.callee) {
+                    names.insert(c.callee.clone());
+                }
+            }
+            // a bare `Var` reference to a fn (e.g. passing it as a value, or a
+            // zero-arg def used as a value) is a dependency too.
+            let mut refs = std::collections::HashSet::new();
+            collect_tm_names(body, &mut refs);
+            for r in refs {
+                if r != *n && fn_names.contains(&r) {
+                    names.insert(r);
+                }
+            }
+            (n.clone(), names)
+        })
+        .collect();
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut order: Vec<usize> = Vec::with_capacity(slots.len()); // indices into `deps`
+    let mut remaining: Vec<usize> = (0..deps.len()).collect();
+    while !remaining.is_empty() {
+        let pick = remaining
+            .iter()
+            .position(|&k| deps[k].1.iter().all(|d| emitted.contains(d) || !remaining.iter().any(|&r| deps[r].0 == *d)))
+            .unwrap_or(0); // cycle: earliest remaining, original order
+        let k = remaining.remove(pick);
+        emitted.insert(deps[k].0.clone());
+        order.push(k);
+    }
+    // permute the Fn items into the slots per `order`.
+    let originals: Vec<Item> = slots.iter().map(|&i| items[i].clone()).collect();
+    for (slot_pos, &k) in order.iter().enumerate() {
+        items[slots[slot_pos]] = originals[k].clone();
+    }
+}
+
 /// Every identifier a surface term references (variables, callees, match
 /// scrutinees — recursively). Shadowing is ignored: a shadowed name still
 /// counts as referenced, which over-approximates (safe — over-abstraction is
@@ -4336,6 +4401,13 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             *body = elab.desugar_patterns(body, &mut pat_fresh)?;
         }
     }
+    // pass C¾ — FORWARD REFERENCES: reorder the `fn` definitions so every
+    // callee precedes its callers (definitions elaborate in sequence, and a
+    // call inlines the already-elaborated callee — source order used to be a
+    // hard requirement). A dependency CYCLE (mutual recursion) keeps the
+    // original order and errors exactly as before, rather than silently
+    // changing behavior.
+    reorder_fns_by_calls(&mut items);
     let items = items; // freeze
 
     // pass D: fns

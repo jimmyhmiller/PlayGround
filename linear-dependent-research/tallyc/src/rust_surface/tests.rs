@@ -1742,3 +1742,23 @@ fn convoy_fold_certifies_lookup_total() {
     );
     assert!(check_program(&bad).is_err(), "a non-dep varying arg must not certify %total");
 }
+
+#[test]
+fn forward_references_between_fns() {
+    // definitions no longer need to precede their callers: the fn items are
+    // topologically reordered by the call graph (callees first, source order
+    // preserved among independent fns). `main` can come first.
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        main : Nat\nfn main() { let a = double(10); a + tag }\n\
+        double : Nat -> Nat\nfn double(n) { n + n }\n\
+        tag : Nat\nfn tag() { 22 }\n";
+    let prog = check_program(src).unwrap_or_else(|e| panic!("forward refs must check: {e:?}"));
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(42)));
+    // a genuine CYCLE (mutual recursion) still errors as before — the reorder
+    // must not silently accept what the language does not yet support.
+    let cyc = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        isEven : Nat -> Nat\nfn isEven(n) { match n { Zero => 1, Succ(k) => isOdd(k) } }\n\
+        isOdd : Nat -> Nat\nfn isOdd(n) { match n { Zero => 0, Succ(k) => isEven(k) } }\n\
+        main : Nat\nfn main() { isEven(4) }\n";
+    assert!(check_program(cyc).is_err(), "mutual recursion is still an (honest) error");
+}
