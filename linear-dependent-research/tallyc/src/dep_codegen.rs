@@ -619,6 +619,38 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*ptr); // free the Own cell; the payload was moved out
                 Ok(payload)
             }
+            // print : Nat -> Unit  — the one observable effect: write the number
+            // and a newline to stdout (`printf("%lld\n", n)`). Sequenced by the
+            // CBV `let` like any other effect; the kernel sees an opaque postulate
+            // (it can never reduce in a type). Unit is represented as 0.
+            "print" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [x] = rt.as_slice() else {
+                    return Err(format!(
+                        "print: expected 1 runtime argument (the Nat), got {}",
+                        rt.len()
+                    ));
+                };
+                let printf = self.module.get_function("printf").unwrap_or_else(|| {
+                    self.module.add_function(
+                        "printf",
+                        self.ctx.i32_type().fn_type(&[self.ptr.into()], true),
+                        None,
+                    )
+                });
+                let fmt = match self.module.get_global("tally.print.fmt") {
+                    Some(g) => g.as_pointer_value(),
+                    None => self
+                        .builder
+                        .build_global_string_ptr("%lld\n", "tally.print.fmt")
+                        .map_err(|e| format!("print: cannot emit format string: {e}"))?
+                        .as_pointer_value(),
+                };
+                self.builder
+                    .build_call(printf, &[fmt.into(), (*x).into()], "print")
+                    .unwrap();
+                Ok(self.i64t.const_zero())
+            }
             // new : {0 r} -> List r  — create an empty circular sentinel list.
             "new" => {
                 let s = self.malloc_cell(3, "sentinel");
@@ -1557,7 +1589,12 @@ fn add_c_main<'c>(ctx: &'c Context, module: &Module<'c>) {
     let ptr = ctx.ptr_type(AddressSpace::default());
     let builder = ctx.create_builder();
 
-    let printf = module.add_function("printf", i32t.fn_type(&[ptr.into()], true), None);
+    // `printf` may already be declared (the `print` postulate) — REUSE it, or a
+    // second `add_function` would silently create a renamed `printf.1` that fails
+    // to link.
+    let printf = module.get_function("printf").unwrap_or_else(|| {
+        module.add_function("printf", i32t.fn_type(&[ptr.into()], true), None)
+    });
     let dep_main = module
         .get_function("tally_dep_main")
         .expect("tally_dep_main must be built before add_c_main");
@@ -1835,6 +1872,45 @@ mod tests {
             .trim()
             .parse()
             .unwrap()
+    }
+
+    /// AOT-build + run, returning the FULL stdout (for `print`-effect tests).
+    fn aot_stdout(src: &str, label: &str) -> String {
+        use inkwell::OptimizationLevel;
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let stem = format!("tally_aot_{pid}_{label}");
+        let obj = dir.join(format!("{stem}.o"));
+        let exe = dir.join(&stem);
+        super::build_object(&prog.sig, body, &obj, OptimizationLevel::Default)
+            .unwrap_or_else(|e| panic!("build_object: {e}"));
+        let link = std::process::Command::new("cc")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .expect("invoke cc");
+        assert!(link.success(), "cc failed");
+        let out = std::process::Command::new(&exe).output().expect("run exe");
+        let _ = std::fs::remove_file(&obj);
+        let _ = std::fs::remove_file(exe.with_extension("o.ll"));
+        let _ = std::fs::remove_file(&exe);
+        assert!(out.status.success(), "exe exited non-zero");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn print_effect_writes_to_stdout() {
+        // `print : Nat -> Unit` — the first observable effect. CBV-`let`
+        // sequencing runs each print exactly once, in order; the process's
+        // stdout carries the numbers before the harness's own result line.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            main : Nat\nfn main() { let a = print(1); let b = print(2); let c = print(42); 0 }\n";
+        let out = aot_stdout(src, "print");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(&lines[..3], &["1", "2", "42"], "full stdout: {out:?}");
     }
 
     #[test]

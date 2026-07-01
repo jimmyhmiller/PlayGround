@@ -3633,6 +3633,20 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         merged.append(&mut items);
         items = merged;
     }
+    // `print : Nat -> Unit` — the one observable effect. Its type references the
+    // PROGRAM'S `Nat` (an enum or `%builtin`), so it is appended AFTER the user
+    // items (postulates are elaborated in source order); skipped when the program
+    // declares no `Nat`, owns the memory layer (no prelude `Unit`), or declares
+    // its own `print`.
+    let has_nat = items.iter().any(|it| {
+        item_name(it) == Some("Nat") || matches!(it, Item::BuiltinNat(n) if n == "Nat")
+    });
+    let has_print = items.iter().any(|it| item_name(it) == Some("print"));
+    if !collides && has_nat && !has_print {
+        let p2 = Parser { toks: lex("postulate print : Nat -> Unit\n")?, pos: 0, fresh: 0 }
+            .parse_program()?;
+        items.extend(p2);
+    }
 
     // MULT-POLY MONOMORPHIZATION (docs/MULT_POLY_PLAN.md slice 2) — a SURFACE
     // pre-pass: functions with an explicit `(m : Mult)` parameter are replaced
@@ -3897,6 +3911,18 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             // `%total` is a CERTIFICATE, not a hint: a `%total` fn that the checker
             // cannot certify (its own recursion, OR a partial callee) is a HARD
             // ERROR — annotation ≠ proof.
+            // `%partial` is a LOWERING DIRECTIVE as well as documentation: it forces
+            // the general-recursion (`Fix`) lowering even when the recursion is
+            // structurally total. The observable difference is EFFECT ORDER: a total
+            // fold is a call-by-value ELIMINATOR (the recursive result is computed
+            // before the step body runs — `print` in a fold emits bottom-up), while a
+            // `Fix` is direct recursion (source order). Effectful recursion should be
+            // `%partial` (FUTURE_WORK §8: effects live in the partial fragment).
+            let structural = if *annot == Some(TotAnnot::Partial) {
+                Totality::Partial("marked `%partial`".into())
+            } else {
+                structural
+            };
             if *annot == Some(TotAnnot::Total) {
                 if let Some(reason) = full.reason() {
                     return Err(format!("`%total fn {name}` is not total: {reason}"));

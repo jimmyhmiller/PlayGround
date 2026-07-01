@@ -1,0 +1,26 @@
+// `print : Nat -> Unit` — the first observable EFFECT (prelude postulate, lowered
+// to printf). Effects are ordinary values sequenced by the CBV `let` (each runs
+// exactly once, in order); the kernel sees an opaque postulate, so no effect can
+// ever fire during type-checking.  `tally run examples/print.tal` → 3 2 1 0, 99.
+//
+// `countdown` is `%partial` DELIBERATELY: effects belong in the partial fragment.
+// A TOTAL fold is a call-by-value ELIMINATOR — the recursive result is computed
+// before the step body, so its effects would emit bottom-up (0 1 2 3); `%partial`
+// forces the direct-recursion (`Fix`) lowering, giving source order (3 2 1 0).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+countdown : Nat -> Unit
+%partial fn countdown(n) {
+    match n {
+        Zero    => print(0),
+        Succ(k) => let u = print(Succ(k)); countdown(k),
+    }
+}
+
+main : Nat
+fn main() {
+    let u = countdown(3);
+    99
+}
