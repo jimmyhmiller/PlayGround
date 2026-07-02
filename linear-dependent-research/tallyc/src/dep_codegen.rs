@@ -103,6 +103,33 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
     })
 }
 
+/// A TRANSPARENT (newtype) datatype: exactly one constructor with exactly one
+/// non-erased field, and that field not recursive. Its runtime value IS the
+/// field — no cell, no tag, no allocation, no load (Phase B slice 1: a
+/// zero-cost wrapper, the first departure from the everything-is-a-boxed-cell
+/// representation). Returns the field's argument index.
+fn transparent_field(sig: &Signature, data: &str) -> Option<usize> {
+    let decl = sig.data(data)?;
+    if decl.ctors.len() != 1 {
+        return None;
+    }
+    let ctor = &decl.ctors[0];
+    let mut field = None;
+    for (i, (mult, aty)) in ctor.args.iter().enumerate() {
+        if *mult == Mult::Zero {
+            continue;
+        }
+        if field.is_some() {
+            return None; // two runtime fields: a real record, boxed
+        }
+        if matches!(aty, Term::Data(dn, _) if dn == data) {
+            return None; // recursive: needs indirection
+        }
+        field = Some(i);
+    }
+    field
+}
+
 struct DepCg<'c, 'a> {
     ctx: &'c Context,
     i64t: IntType<'c>,
@@ -1082,6 +1109,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
         }
 
+        // TRANSPARENT newtype: constructing the wrapper IS the field value.
+        if let Some(fi) = transparent_field(self.sig, &data) {
+            return self.compile(f, env, &args[np + fi]);
+        }
+
         let lay = ctor_layout(self.sig, &data, name)?;
 
         // A NULLARY constructor (no runtime fields, e.g. `Leaf`/`Nil`) is an
@@ -1155,6 +1187,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let zidx = decl.ctors.iter().position(|c| c.name == zero).unwrap();
             let sidx = 1 - zidx;
             return self.compile_fold(f, env, &methods[zidx], &methods[sidx], scrut);
+        }
+        // TRANSPARENT newtype: no recursion possible (transparency excludes
+        // recursive fields ⇒ no IHs), so the eliminator is the same in-place
+        // bind-and-go as a `Case`.
+        if let Some(fi) = transparent_field(self.sig, data) {
+            return self.compile_transparent_match(f, env, data, fi, &methods[0], scrut);
         }
 
         // Boxed eliminator: build a recursive helper that captures the live outer
@@ -1333,6 +1371,43 @@ impl<'c, 'a> DepCg<'c, 'a> {
         Ok(())
     }
 
+    /// A match on a TRANSPARENT newtype: the scrutinee IS the single runtime
+    /// field — bind it (erased siblings bind nothing) and compile the sole
+    /// method body in place. No switch, no loads, no helper.
+    fn compile_transparent_match(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        data: &str,
+        fi: usize,
+        method: &Term,
+        scrut: &Term,
+    ) -> Result<IntValue<'c>, String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("match on unknown datatype `{data}`"))?;
+        let ctor = &decl.ctors[0];
+        let scrut_val = self.compile(f, env, scrut)?;
+        let mut menv = env.to_vec();
+        for ai in 0..ctor.args.len() {
+            menv.push(if ai == fi { Some(scrut_val) } else { None });
+        }
+        let mut body = strip_ann(method);
+        for _ in 0..ctor.args.len() {
+            match body {
+                Term::Lam(inner) => body = strip_ann(inner),
+                _ => {
+                    return Err(format!(
+                        "match[{data}]: method is not a {}-argument function",
+                        ctor.args.len()
+                    ))
+                }
+            }
+        }
+        self.compile(f, &menv, body)
+    }
+
     /// Compile `Case` (non-recursive general case-split) IN PLACE: switch on the boxed
     /// scrutinee's tag, bind each constructor's runtime fields, β-reduce + compile the
     /// matched method (its args ONLY — NO induction hypotheses, NO recursive helper, NO
@@ -1358,6 +1433,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 decl.ctors.len(),
                 methods.len()
             ));
+        }
+        if let Some(fi) = transparent_field(self.sig, data) {
+            return self.compile_transparent_match(f, env, data, fi, &methods[0], scrut);
         }
         let scrut_val = self.compile(f, env, scrut)?;
         let scrut_ptr = self
@@ -2732,5 +2810,42 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             v3 : Vec Nat (Succ (Succ (Succ Zero)))\nfn v3() { Cons(1, Cons(2, Cons(3, Nil))) }\n\
             main : Nat\nfn main() { vhead(vtail(v3)) }\n";
         assert_eq!(run(src), 2);
+    }
+
+    #[test]
+    fn transparent_newtype_zero_alloc() {
+        // Phase B slice 1: a single-field wrapper (`struct Meters { v : Nat }`)
+        // is TRANSPARENT — constructing it is the field, matching it is a bind.
+        // Proven in the IR: the whole program compiles with ZERO `malloc`s
+        // (previously: one cell + tag per construction).
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            struct Meters { v : Nat }\n\
+            mk : Nat -> Meters\nfn mk(n) { Meters(n + 1) }\n\
+            get : Meters -> Nat\nfn get(m) { match m { Meters(v) => v } }\n\
+            main : Nat\nfn main() { get(mk(41)) }\n";
+        assert_eq!(run(src), 42);
+        let prog = rust_surface::check_program(src).unwrap();
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").unwrap();
+        let ir = super::emit_ir(&prog.sig, body).unwrap();
+        // (the module always DECLARES malloc; what must be absent is a CALL)
+        assert!(!ir.contains("call ptr @malloc"), "a transparent newtype must not allocate:\n{ir}");
+    }
+
+    #[test]
+    fn transparent_newtype_over_linear_payload() {
+        // transparency is representation-only: a wrapper around an `Own` is
+        // still linearity-checked (the wrapper IS the pointer at runtime).
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            struct Handle { h : Own Nat }\n\
+            open2 : Nat -> Handle\nfn open2(n) { Handle(alloc(n)) }\n\
+            close2 : (1 x : Handle) -> Nat\nfn close2(x) { match x { Handle(o) => unbox(o) } }\n\
+            main : Nat\nfn main() { close2(open2(9)) }\n";
+        assert_eq!(run(src), 9);
+        // dropping the wrapper leaks the Own inside — still rejected.
+        let leak = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            struct Handle { h : Own Nat }\n\
+            bad : (1 x : Handle) -> Nat\nfn bad(x) { 0 }\n\
+            main : Nat\nfn main() { 0 }\n";
+        assert!(rust_surface::check_program(leak).is_err(), "dropping a linear wrapper must reject");
     }
 }
