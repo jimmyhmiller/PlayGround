@@ -103,6 +103,38 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v2.1 — PHASE C first slice: zero-width VIEWS + zero-trace &mut BORROWS; 216 tests)
+
+The research-risk layer's first slice, landed behind the promised IR-trace bar:
+
+- **Views are ZERO-WIDTH values.** `PtsTo l a` (and the new `Loan l a`) are
+  linear permissions whose whole existence is the checker's accounting — at
+  runtime they are NOTHING (width-0 values; the address lives in the ω
+  `Ptr l`). `Cell a` collapses to a bare address. Separation (`⊗`) is
+  implicit: two live views are disjoint cells because locations are minted
+  fresh and views cannot be duplicated. The take/refill typestate now
+  carries its size (`Hole a`), so a refill can never overflow the slot.
+- **`&mut`, read-back style** (`examples/borrow.tal`):
+  `borrow : (1 o : Own a) -> Borrowed a` splits an Own into
+  {address, view, loan}; `restore` reunites them. Both compile to IDENTITY
+  on the address — a mutation through a borrow is a bare load/store into
+  the original cell. The example runs four in-place mutations (a scalar and
+  a struct field) over two owned cells: the whole program's IR is exactly
+  two mallocs (the `alloc`s) and two frees (the `unbox`es).
+- **The discipline is the existing QTT accounting — no bespoke borrow
+  checker.** Forgetting to restore is a leak (`0 ⋢ 1`); freeing the cell
+  while borrowed strands the loan (rejected); using a view twice or writing
+  through a stale one is rejected; and the non-consuming read is the
+  `vtake`+`vwrite` idiom, under which a LINEAR payload cannot be both kept
+  and written back (`ω ⋢ 1`) — duplication through a borrow is
+  unrepresentable. All red-teamed in the suite.
+- **Honest remainder of Phase C:** recursive views (inductive heap
+  predicates for UNBOUNDED linked structures under views — what the
+  in-language O(1)-remove DLL needs; the shadow-structure cost must erase
+  first), shared `&` borrows (fractions), and the `&mut { … }` lexical
+  sugar. The primitive DLL (linear cursors, measured C-identical) remains
+  the O(1)-remove story meanwhile.
+
 ## Status (v2.0 — PHASE A: constructors never allocate; 214 tests)
 
 **Every `malloc` in a tallyc program is one the programmer wrote.** The
@@ -752,7 +784,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (214 tests)
+cargo test                  # the ONE suite — frontend + native backend (216 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable

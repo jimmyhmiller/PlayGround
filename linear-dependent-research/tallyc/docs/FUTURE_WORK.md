@@ -549,9 +549,16 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
   (erased args never cross); `putc`/`getc` char I/O (`getc` returns
   `Succ(byte)`/`Zero`-at-EOF so one `match` is the whole control flow); `cat`
   roundtrips 10MB byte-exact.
-- **Phase C — views and borrows.** Points-to views, `⊗`, `&`/`&mut`, region-scoped
-  borrows, initialization typestate. *(Safe in-place mutation and linked structures
-  without canned intrinsics.)*
+- **Phase C — views and borrows. FIRST SLICE DONE (v2.1).** Points-to views are
+  now ZERO-WIDTH linear values (the §4.4 erasure bar, IR-tested); `⊗` is
+  implicit in linearity + fresh locations; init typestate is the size-carrying
+  `Hole a`; and `&mut` READ-BACK borrows landed: `borrow`/`restore` split an
+  `Own` into {ω address, 0-width view, 0-width loan} and compile to identity —
+  in-place mutation is a bare load/store, misuse is caught by the ordinary
+  rig (loan stranding covers free-under-borrow). *Remaining:* recursive views
+  (inductive heap predicates that ERASE — unbounded linked structures under
+  views, the in-language O(1)-remove DLL), shared `&` (fractions), lexical
+  `&mut { … }` sugar.
 - **Phase D — allocators.** First-class `Allocator`, `Arena`/`Pool`, region indices
   tying lifetimes to allocators (generalize the existing DLL regions).
 - **Phase E — a real totality checker.** Coverage via the pattern-match compiler;

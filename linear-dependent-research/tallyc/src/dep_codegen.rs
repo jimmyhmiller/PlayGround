@@ -465,6 +465,20 @@ fn type_shape(
                     (dn.as_str(), all)
                 }
                 Term::Var(_) => return (1, true),
+                // A VIEW is a ZERO-WIDTH value (Phase C): `PtsTo l a` / `Loan l a`
+                // are linear PERMISSIONS — the checker's accounting is their whole
+                // existence; at runtime they are NOTHING (the address lives in the
+                // ω `Ptr l`). This is the §4.4 erasure bar: a view leaves no trace.
+                Term::Const(c) if c == "PtsTo" || c == "Loan" => return (0, false),
+                // `Hole a` (the taken/uninitialized typestate) has `a`'s SIZE —
+                // the take-then-refill discipline must remember how big the slot
+                // is, or a wider refill would overflow the allocation.
+                Term::Const(c) if c == "Hole" => {
+                    return match args.first() {
+                        Some(a) => type_shape(sig, a, seen),
+                        None => (1, false),
+                    }
+                }
                 _ => return (1, false),
             }
         }
@@ -673,7 +687,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
     /// consecutive slots (loaded into registers — the record leaves the cell by
     /// value).
     fn load_field(&self, p: PointerValue<'c>, idx: u32, w: u32) -> Val<'c> {
-        if w <= 1 {
+        if w == 0 {
+            return Val::Agg(Vec::new()); // a zero-width view: nothing to load.
+        }
+        if w == 1 {
             return Val::Int(self.load(p, idx, "field"));
         }
         let mut comps = Vec::with_capacity(w as usize);
@@ -1788,12 +1805,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let comps = payload.components();
-                let cell = self.malloc_cell(comps.len() as u32, "cell");
+                let cell = self.malloc_cell(comps.len().max(1) as u32, "cell");
                 for (i, c) in comps.iter().enumerate() {
                     self.store(cell, i as u32, *c);
                 }
-                let addr = self.toint(cell, "addr");
-                self.box_single_ctor("Cell", "MkCell", &[addr, addr])
+                // `Cell a` = { Ptr l (the address), PtsTo l a (ZERO-WIDTH) }:
+                // the record collapses to the bare address. The view exists only
+                // in the checker.
+                Ok(Val::Int(self.toint(cell, "addr")))
             }
             // vwrite : ... -> Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b
             // STRONG UPDATE: store the new payload at the cell, hand back the
@@ -1813,19 +1832,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 }
                 let rt = self.runtime_args_v(f, env, cname, args)?;
-                let [_p, v, new] = rt.as_slice() else {
+                let [p, _v, new] = rt.as_slice() else {
                     return Err(format!(
                         "vwrite: expected 3 runtime arguments (ptr, view, value), got {}",
                         rt.len()
                     ));
                 };
-                let vv = v.as_int("vwrite view")?;
+                let pv = p.as_int("vwrite ptr")?;
                 let newv = self.expect_width(new.clone(), w_b, "vwrite payload")?;
-                let cell = self.toptr(vv, "cellp");
+                let cell = self.toptr(pv, "cellp");
                 for (i, c) in newv.components().iter().enumerate() {
                     self.store(cell, i as u32, *c);
                 }
-                Ok(Val::Int(vv))
+                // the new view: zero-width — the store above IS the whole runtime.
+                Ok(Val::Agg(Vec::new()))
             }
             // vtake : ... -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
             // MOVE the payload out, retyping the slot as `Hole` (the cell is NOT
@@ -1834,50 +1854,49 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // ANY payload — unlike a copying borrow, which would need `a` copyable.
             "vtake" => {
                 let w = self.spine_type_width(cname, args, 0)?;
-                let rt = self.runtime_args(f, env, cname, args)?;
-                let [_p, v] = rt.as_slice() else {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v] = rt.as_slice() else {
                     return Err(format!(
                         "vtake: expected 2 runtime arguments (ptr, view), got {}",
                         rt.len()
                     ));
                 };
-                let cell = self.toptr(*v, "cellp");
+                let cell = self.toptr(p.as_int("vtake ptr")?, "cellp");
                 // the slot's bits are now stale but UNTYPEABLE as `a` (the view is
-                // `PtsTo l Hole`); no store needed. Return (moved value, hole view)
-                // — `Taken` is a FLEX flat record: its payload field takes the
-                // value's actual width, split back out at the match.
-                let mut comps = self.load_field(cell, 0, w).components();
-                comps.push(*v);
-                Ok(if comps.len() == 1 { Val::Int(comps[0]) } else { Val::Agg(comps) })
+                // `PtsTo l (Hole a)`); no store needed. `Taken` = { payload,
+                // zero-width hole view } — collapses to the moved payload.
+                let payload = self.load_field(cell, 0, w);
+                Ok(payload)
             }
             // vread : ... -> Ptr l -> (1 v : PtsTo l a) -> a
             // Destructive read: load the payload, CONSUME the view, and reclaim
             // the cell. (A borrowing read that returns the view is a later slice.)
             "vread" => {
                 let w = self.spine_type_width(cname, args, 0)?;
-                let rt = self.runtime_args(f, env, cname, args)?;
-                let [_p, v] = rt.as_slice() else {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v] = rt.as_slice() else {
                     return Err(format!(
                         "vread: expected 2 runtime arguments (ptr, view), got {}",
                         rt.len()
                     ));
                 };
-                let cell = self.toptr(*v, "cellp");
+                let pv = p.as_int("vread ptr")?;
+                let cell = self.toptr(pv, "cellp");
                 let payload = self.load_field(cell, 0, w);
-                self.free_int(*v);
+                self.free_int(pv);
                 Ok(payload)
             }
             // vfree : ... -> Ptr l -> (1 v : PtsTo l a) -> Unit
             // consume the view and reclaim the cell; Unit is represented as 0.
             "vfree" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
-                let [_p, v] = rt.as_slice() else {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v] = rt.as_slice() else {
                     return Err(format!(
                         "vfree: expected 2 runtime arguments (ptr, view), got {}",
                         rt.len()
                     ));
                 };
-                self.free_int(*v);
+                self.free_int(p.as_int("vfree ptr")?);
                 Ok(Val::Int(self.i64t.const_zero()))
             }
             // ---- contiguous arrays (the C `a[i]` on a flat buffer) ----
@@ -2107,6 +2126,34 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .into_int_value();
                 Ok(Val::Int(ret))
             }
+            // borrow : {0 a} -> (1 o : Own a) -> Borrowed a — split an Own into
+            // {address, view, loan}. The view and loan are ZERO-WIDTH, so
+            // `Borrowed a` collapses to the address: borrow is the IDENTITY at
+            // runtime. The loan pins the obligation to `restore` (getting the
+            // Own back) — dropping it is a leak, and freeing the cell while
+            // borrowed strands the loan, so no accepted program can do either.
+            "borrow" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [o] = rt.as_slice() else {
+                    return Err(format!(
+                        "borrow: expected 1 runtime argument (the Own), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(*o))
+            }
+            // restore : {0 a} {0 l} -> Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a)
+            //         -> Own a — reunite the pieces: IDENTITY on the address.
+            "restore" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v, _ln] = rt.as_slice() else {
+                    return Err(format!(
+                        "restore: expected 3 runtime arguments (ptr, view, loan), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(p.as_int("restore ptr")?))
+            }
             // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
             // these only ever appear inside ERASED type annotations, so they must
             // never reach a runtime value position. If one does, that is a real bug.
@@ -2177,7 +2224,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     comps.extend(v.components());
                 }
             }
-            return Ok(Val::Agg(comps));
+            return Ok(match comps.len() {
+                1 => Val::Int(comps[0]),
+                _ => Val::Agg(comps),
+            });
         }
 
         // A VALUE ENUM: a flat tagged union in registers — [tag, payload…,
@@ -2751,6 +2801,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // tagged form of such an enum is always ≥ 2 slots) — compare
             // against 0 and bind the pointer in the non-null arm.
             let niche_shape = decl_es.payloads.len() == 2
+                && decl_es.width > 1
                 && d_nullary_ptr_shape(self.sig, data).is_some();
             if total == 1 && niche_shape {
                 let (nc, pc) = d_nullary_ptr_shape(self.sig, data).unwrap();
@@ -3186,7 +3237,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .try_as_basic_value()
             .left()
             .unwrap();
-        if ret_width <= 1 {
+        if ret_width == 0 {
+            // a zero-width (view-typed) result: the callee returned a dummy.
+            return Ok(Val::Agg(Vec::new()));
+        }
+        if ret_width == 1 {
             return Ok(Val::Int(ret.into_int_value()));
         }
         let agg = ret.into_struct_value();
@@ -3291,6 +3346,13 @@ impl<'c, 'a> DepCg<'c, 'a> {
         match (&result, ret_struct) {
             (Val::Int(v), None) => {
                 self.builder.build_return(Some(v)).unwrap();
+            }
+            (Val::Agg(comps), None) if comps.is_empty() => {
+                // zero-width (view-typed) result: return a dummy scalar; the
+                // call site reconstructs the (empty) value.
+                self.builder
+                    .build_return(Some(&self.i64t.const_zero()))
+                    .unwrap();
             }
             (Val::Agg(comps), Some(st)) => {
                 let mut agg = st.get_undef();
@@ -4527,6 +4589,30 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- Phase C: zero-width views + &mut borrows (zero runtime trace) ----
+
+    #[test]
+    fn borrows_mutate_in_place_with_zero_trace() {
+        // the §4.4 acceptance bar, verified in the IR: `borrow`/`restore` are
+        // identity on the address, views/loans are ZERO-WIDTH, and a mutation
+        // through a borrow is a bare load/store into the ORIGINAL cell. The
+        // whole program — four in-place mutations over two owned cells — is
+        // exactly two user mallocs and two user frees.
+        let src = std::fs::read_to_string("examples/borrow.tal").unwrap();
+        assert_eq!(run(&src), 51);
+        let ir = ir(&src);
+        assert_eq!(
+            ir.matches("call ptr @malloc").count(),
+            2,
+            "exactly the two allocs\n{ir}"
+        );
+        assert_eq!(
+            ir.matches("call void @free").count(),
+            2,
+            "exactly the two unboxes\n{ir}"
+        );
     }
 
     // ---- Phase A: value enums, explicit indirection, zero implicit cells ----

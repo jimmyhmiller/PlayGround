@@ -216,8 +216,14 @@ reachable channels (let / field / concrete param) are all closed.
    Real box/free code (match a linked structure, free per-branch) hits this.
 2. **Phase B — value layouts:** real size/align/offsets, by-value vs by-pointer,
    niche opts (the representation rewrite from "everything is a tagged i64").
-3. **Phase C — views & borrows:** `p↦v`, `⊗`, `&`/`&mut` (read-back), init typestate,
-   region-scoped borrows. The research-risk layer — land behind IR-trace + red-team.
+3. **Phase C — views & borrows: FIRST SLICE DONE (v2.1).** Views (`PtsTo`, `Loan`)
+   are ZERO-WIDTH linear values (IR-trace-tested: a view program is bare
+   loads/stores); `&mut` read-back borrows (`borrow`/`restore`) compile to
+   identity on the address; take/refill typestate is the size-carrying `Hole a`;
+   the misuse space (drop, double-use, free-under-borrow via loan stranding,
+   linear-payload duplication via the `vtake`+`vwrite` idiom) is closed by the
+   ordinary rig — red-teamed. *Remaining:* recursive views that ERASE (unbounded
+   linked structures under views), shared `&` fractions, `&mut { … }` sugar.
 4. **Phase D — allocators:** first-class `Arena`/`Pool`, region capabilities + bulk
    `release`, the two-discipline model (§4.2).
 

@@ -4411,14 +4411,18 @@ postulate unbox : {0 a : Type} -> (1 o : Own a) -> a
 postulate Loc   : Type
 postulate Ptr   : Loc -> Type
 linear postulate PtsTo : Loc -> Type -> Type
-postulate Hole  : Type
+postulate Hole  : Type -> Type
 enum Cell (a : Type) { MkCell : {0 l : Loc} -> (p : Ptr l) -> (1 v : PtsTo l a) -> Cell a }
-enum Taken (a : Type) (l : Loc) { MkTaken : a -> (1 v : PtsTo l Hole) -> Taken a l }
+enum Taken (a : Type) (l : Loc) { MkTaken : a -> (1 v : PtsTo l (Hole a)) -> Taken a l }
 postulate valloc : {0 a : Type} -> (1 x : a) -> Cell a
 postulate vwrite : {0 a : Type} -> {0 b : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b
 postulate vtake  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
 postulate vread  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> a
 postulate vfree  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Unit
+linear postulate Loan : Loc -> Type -> Type
+enum Borrowed (a : Type) { MkBorrowed : {0 l : Loc} -> (p : Ptr l) -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Borrowed a }
+postulate borrow  : {0 a : Type} -> (1 o : Own a) -> Borrowed a
+postulate restore : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Own a
 postulate Str    : Type
 postulate prints : Str -> Unit
 "#;

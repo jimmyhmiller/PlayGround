@@ -1904,3 +1904,33 @@ fn constructor_intro_consumes_linear_args_once() {
     );
     assert!(check_program(&dup).is_err(), "double-store must be rejected");
 }
+
+#[test]
+fn borrow_discipline_is_the_existing_accounting() {
+    // Phase C red-team: every misuse of a borrow is caught by the ordinary
+    // QTT rules — no bespoke borrow checker.
+    const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    let no = |body: &str, what: &str| {
+        let src = format!("{H}main : Nat\nfn main() {{\n    let o = alloc(40);\n{body}\n}}\n");
+        assert!(check_program(&src).is_err(), "{what} must be rejected:\n{src}");
+    };
+    // forget to restore (drop view + loan): leak.
+    no("    match borrow(o) { MkBorrowed(p, v, ln) => let (x, vh) = vtake(p, v); x }",
+       "dropping a borrow without restore");
+    // free the cell while borrowed: the loan is stranded.
+    no("    match borrow(o) { MkBorrowed(p, v, ln) => let u = vfree(p, v); 0 }",
+       "vfree under a borrow");
+    // use the view twice.
+    no("    match borrow(o) { MkBorrowed(p, v, ln) => let v1 = vwrite(p, v, 1); let v2 = vwrite(p, v, 2); let o2 = restore(p, v2, ln); unbox(o2) }",
+       "double use of a view");
+    // write through the view after restoring.
+    no("    match borrow(o) { MkBorrowed(p, v, ln) => let o2 = restore(p, v, ln); let v9 = vwrite(p, v, 99); unbox(o2) }",
+       "write after restore");
+    // the GOOD program checks.
+    let ok = format!(
+        "{H}bump : (1 o : Own Nat) -> Own Nat\n\
+         fn bump(o) {{ match borrow(o) {{ MkBorrowed(p, v, ln) => let (x, vh) = vtake(p, v); let v2 = vwrite(p, vh, x + 1); restore(p, v2, ln), }} }}\n\
+         main : Nat\nfn main() {{ let o = alloc(41); let o1 = bump(o); unbox(o1) }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+}
