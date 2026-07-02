@@ -162,3 +162,17 @@ fn fnptr_can_be_cast_to_another_signature() {
                    (cast :i64 (call-ptr fp (cast :i32 -7)))))";
     assert_eq!(build_and_run(src), 7);
 }
+
+#[test]
+fn malformed_extern_param_type_is_a_check_error() {
+    // `(s :i64)` where a bare type belongs parses as a type APPLICATION of the
+    // unknown type `s`. Unvalidated, that sailed through checking (externs never
+    // go through check_func) and panicked codegen with "generic type survived
+    // monomorphization" — found by the REPL, which validates definitions with
+    // check_source before ever reaching codegen.
+    let src = r#"(module app)
+(extern srand [(s :i64)] (-> void))
+(defn main [] (-> :i64) 0)"#;
+    let err = coil::check_source(src).unwrap_err();
+    assert!(err.contains("extern 'app.srand' parameter 1"), "got: {err}");
+}

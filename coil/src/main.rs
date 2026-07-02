@@ -2,6 +2,7 @@
 //!
 //!   coil build <file> [-o out]   compile + link a native executable (default: ./<stem>)
 //!   coil run   <file>            build to a temp executable and run it (exit code = result)
+//!   coil repl                    interactive session (inferior-lisp-compatible; src/repl.rs)
 //!   coil emit-obj <file> [-o o]  emit a native object file (default: ./<stem>.o)
 //!   coil emit-ir  <file>         print the generated LLVM IR
 //!   coil expand   <file>         print the program after macro expansion
@@ -41,6 +42,25 @@ fn main() -> ExitCode {
             Some(name) => cmd_new(name),
             None => usage(),
         };
+    }
+    // `coil repl [--isolate] [--link-flag <arg> | -l<lib>]…` — the interactive
+    // session (inferior-lisp-compatible; see emacs/coil-mode.el). Live by
+    // default: evals dlopen into the session process and `(def …)` bindings
+    // persist; `--isolate` runs each expression in a fresh process instead.
+    // Link flags apply to every expression's build, mirroring `coil run`.
+    if args.get(1).map(String::as_str) == Some("repl") {
+        let mut rest: Vec<String> = args[2..].to_vec();
+        let isolate = rest.iter().any(|a| a == "--isolate");
+        rest.retain(|a| a != "--isolate");
+        let opts = match Opts::parse(&rest) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return usage();
+            }
+        };
+        let code = coil::repl::run_stdio(coil::repl::Opts { link_flags: opts.link_flags, isolate });
+        return ExitCode::from(code as u8);
     }
     if args.len() < 3 {
         return usage();
@@ -378,6 +398,7 @@ fn default_out(file: &str, ext: &str) -> PathBuf {
 fn usage() -> ExitCode {
     eprintln!(
         "usage:\n  \
+         coil repl                                interactive session (Emacs: see emacs/coil-mode.el)\n  \
          coil new <name>                          scaffold a project (Coil.toml + src/main.coil)\n  \
          coil <build|run>                         build/run the ./Coil.toml project\n  \
          coil run -- <args…>                      … forwarding args to the program (else [run] args)\n  \

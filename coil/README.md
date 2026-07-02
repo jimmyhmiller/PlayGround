@@ -315,4 +315,62 @@ There is no `eval`/JIT: the only way to run a program is to AOT-compile it.
 `main` (i64, no args) is the process entry; its return value is the exit code
 (low 8 bits).
 
+## REPL (and Emacs)
+
+`coil repl` is an interactive session over the same AOT pipeline — no
+interpreter, no JIT, nothing that can drift from the compiled language. The
+session accumulates your top-level definitions as source; every other form is
+an expression, compiled (session definitions + a generated entry that prints
+the value) and run:
+
+```
+$ cargo run -- repl
+coil> (defn square [(x i64)] (-> i64) (imul x x))
+#'repl/square
+coil> (square 12)
+144
+coil> (def n (square 3))          ; bind a VALUE for later inputs
+n = 9
+coil> (iadd n 33)
+42
+```
+
+Definitions redefine by name (send an edited `defn` again to replace it).
+Evaluation is *live* by default — hot code loading, evcxr-style: each eval
+compiles to a dylib that is `dlopen`ed into the session process, so it's still
+the real compiled code, but the process persists. `(def name EXPR)` stores the
+value in a heap cell that later inputs read back, fully typed; malloc'd memory
+and FFI state (an open window, a socket) survive across inputs too. A binding
+is an immutable snapshot — rebind with another `def`; persistent *mutable*
+state is an explicit pointer, Coil's normal discipline:
+
+```
+coil> (def counter (alloc-heap i64))
+coil> (store! counter (iadd (load counter) 1))
+```
+
+The trade: a crashing eval takes the session down (it *is* the process).
+`coil repl --isolate` gives the old behavior instead — every expression runs
+in a fresh process; crash-proof, nothing persists.
+
+Values print by their *inferred* type (the real checker runs over a probe):
+scalars, quoted strings, `[…]` slices/arrays, `(Name :field v …)` structs,
+`(Variant …)` sums — recursively; a type with no honest rendering (function
+pointers, SIMD vectors) prints as `#<its-type>`. Commands: `:help`, `:type
+EXPR`, `:session`, `:load file.coil`, `:reset`, `:quit`. Externs that need
+libraries take the same link flags as `run`: `coil repl -lSDL2`.
+
+The REPL is wire-compatible with Emacs' stock `inferior-lisp`; `emacs/coil-mode.el`
+packages that up (a `lisp-mode` derivative for `.coil` plus `M-x run-coil`):
+
+```elisp
+(add-to-list 'load-path "/path/to/coil/emacs")
+(require 'coil-mode)
+;; (setq coil-program "/path/to/coil/target/release/coil") ; if not on PATH
+```
+
+Then from any `.coil` buffer: `C-x C-e` sends the sexp before point, `C-M-x`
+sends (and redefines) the enclosing definition, `C-c C-l` `:load`s the file,
+`C-c C-z` jumps to the REPL.
+
 [inkwell]: https://github.com/TheDan64/inkwell

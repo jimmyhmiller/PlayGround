@@ -47,6 +47,89 @@
       (write-byte w (cast :u8 48))   ; "0"
       (uhex-digits w n)))
 
+; UNSIGNED decimal over the FULL range (udiv/urem interpret the bits as unsigned),
+; so a u64 with the high bit set prints its true magnitude — print-i would show
+; the wrapped negative value. Recurses MSB-first, like uhex-digits.
+(defn udec-digits [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-eq n 0)
+      (Ok 0)
+      (match (udec-digits w (udiv n 10))
+        (Err [e] (Err e))
+        (Ok [_] (write-byte w (cast :u8 (iadd (urem n 10) 48)))))))
+(defn print-u [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-eq n 0)
+      (write-byte w (cast :u8 48))   ; "0"
+      (udec-digits w n)))
+
+; ---- floats ------------------------------------------------------------------
+; `print-f` writes an f64 in plain decimal: integer part, '.', then the fraction
+; rounded to six digits (half-up) with trailing zeros trimmed but at least one
+; digit kept — 1.5 -> "1.5", 42.0 -> "42.0", pi -> "3.141593". NaN -> "NaN", the
+; infinities -> "inf" / "-inf". A magnitude whose integer part doesn't fit i64
+; falls back to approximate scientific notation ("1.797693e+308"). This is a
+; DISPLAY convenience (fixed six-digit precision), NOT a shortest-roundtrip
+; serializer. Byte writes along the way are best-effort (an error on one digit
+; doesn't abort the rest); the final write's result is returned.
+
+; write `n` '0' bytes (returns the last write's result)
+(defn f--zeros [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
+  (if (icmp-le n 0)
+      (Ok 0)
+      (do (write-byte w (cast :u8 48)) (f--zeros w (isub n 1)))))
+
+(defn f--ndigits [(n :i64)] (-> :i64)
+  (if (icmp-lt n 10) 1 (iadd 1 (f--ndigits (idiv n 10)))))
+
+; the fraction part: '.', then fr6 (0..999999 — the fraction scaled by 1e6 and
+; rounded) with its leading zeros restored and trailing zeros trimmed (min one).
+(defn f--frac [(w (ptr Writer)) (fr6 :i64)] (-> (Result :i64 IoError))
+  (let [(mut v) fr6 (mut width) 6]
+    (while (and (icmp-gt (load width) 1) (icmp-eq (irem (load v) 10) 0))
+      (store! v (idiv (load v) 10))
+      (store! width (isub (load width) 1)))
+    (write-byte w (cast :u8 46))   ; '.'
+    (f--zeros w (isub (load width) (f--ndigits (load v))))
+    (print-int w (load v))))
+
+; x is finite and 0 <= x < 2^63: "<int>.<frac>" (watch the round-up carry:
+; 0.9999999 scales to 1000000, which is really "1.0")
+(defn f--fixed [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError))
+  (let [ip0   (cast :i64 x)
+        fr6-r (cast :i64 (fadd (fmul (fsub x (cast :f64 ip0)) 1000000.0) 0.5))
+        carry (icmp-eq fr6-r 1000000)
+        ip    (if carry (iadd ip0 1) ip0)
+        fr6   (if carry 0 fr6-r)]
+    (print-int w ip)
+    (f--frac w fr6)))
+
+; x >= 2^63 (huge finite): approximate scientific notation "m.mmmmmm" 'e' '+' NN
+(defn f--sci [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError))
+  (let [(mut m) x (mut e) 0]
+    (while (fcmp-ge (load m) 10.0)
+      (store! m (fdiv (load m) 10.0))
+      (store! e (iadd (load e) 1)))
+    (f--fixed w (load m))
+    (write-byte w (cast :u8 101))   ; 'e'
+    (write-byte w (cast :u8 43))    ; '+'
+    (print-int w (load e))))
+
+; x >= 0 (sign and NaN handled by print-f); inf iff x > 0 and 1/x == 0 — the
+; test needs no max-double literal
+(defn f--abs [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError))
+  (if (if (fcmp-gt x 0.0) (fcmp-eq (fdiv 1.0 x) 0.0) false)
+      (print-str w "inf")
+      (if (fcmp-lt x 9223372036854775808.0)   ; 2^63, exact as f64
+          (f--fixed w x)
+          (f--sci w x))))
+
+(defn print-f [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError))
+  (if (not (fcmp-eq x x))   ; only NaN differs from itself
+      (print-str w "NaN")
+      (if (fcmp-lt x 0.0)
+          (do (write-byte w (cast :u8 45))   ; '-'
+              (f--abs w (fsub 0.0 x)))
+          (f--abs w x))))
+
 (defn print-bool [(w (ptr Writer)) (b bool)] (-> (Result :i64 IoError))
   (print-str w (if b "true" "false")))
 
@@ -64,9 +147,10 @@
 
 ; ---- positional format strings (a MACRO over the printers + the str-bytes /
 ;      bytes->str compile-time builtins; the compiler knows nothing of formats) ----
-; `(fmt w "n={d} s={s}" a b)` — specs: {d} signed int, {s} C string, {x} hex (>=0),
-; {c} char, {b} bool; `{{`/`}}` are literal braces. Expands to a sequence of print-*
-; calls. Too few args for the specs is a compile error (no silent wrong).
+; `(fmt w "n={d} s={s}" a b)` — specs: {d} signed int, {s} string, {x} hex (>=0),
+; {c} char, {b} bool, {u} unsigned decimal (full range), {f} float (print-f);
+; `{{`/`}}` are literal braces. Expands to a sequence of print-* calls. Too few
+; args for the specs is a compile error (no silent wrong).
 
 ; The printer for a spec, as a FULLY-QUALIFIED head (`io.print-str`/`fmt.print-i`/…).
 ; The name is spliced into call-head position via `~unquote`, which bypasses the
@@ -79,7 +163,9 @@
   (if (icmp-eq spec 120) `fmt.print-hex
   (if (icmp-eq spec 99)  `fmt.print-char
   (if (icmp-eq spec 98)  `fmt.print-bool
-    (error "fmt: unknown spec; use {d} {s} {x} {c} {b}")))))))
+  (if (icmp-eq spec 117) `fmt.print-u
+  (if (icmp-eq spec 102) `fmt.print-f
+    (error "fmt: unknown spec; use {d} {s} {x} {c} {b} {u} {f}")))))))))
 
 ; flush the accumulated literal bytes as a single print-str (or nothing if empty)
 (defn fmt--flush [(w Code) (lit Code)] (-> Code)

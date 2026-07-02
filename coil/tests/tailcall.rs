@@ -47,7 +47,15 @@ fn non_self_tail_call_is_not_musttail() {
     let src = "(defn helper [(x i64)] (-> i64) (iadd x 1))\n\
                (defn main [] (-> i64) (helper 41))";
     let ir = coil::emit_ir(src).unwrap();
-    assert!(!ir.contains("musttail"), "a non-self call must not be musttail:\n{ir}");
+    // Scope the assertion to `main`'s body: the stdlib that rides along with
+    // the prelude has legitimately-musttail self-recursive printers (fmt's
+    // udec-digits and friends), so a whole-module scan would false-positive.
+    let main_body = ir
+        .split("define i64 @main")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .expect("main in IR");
+    assert!(!main_body.contains("musttail"), "a non-self call must not be musttail:\n{main_body}");
 }
 
 /// Behavior is unchanged: a deep accumulator recursion still computes correctly

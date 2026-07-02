@@ -24,6 +24,7 @@ pub mod mono;
 pub mod normalize_ir;
 pub mod parse;
 pub mod reader;
+pub mod repl;
 pub mod resolve;
 pub mod span;
 pub mod stdlib;
@@ -111,6 +112,28 @@ fn elaborate(src: &str, sm: &mut SourceMap) -> Result<ast::Program, Vec<Diag>> {
 
 /// The body of `elaborate`, run on a large stack (see `elaborate`).
 fn elaborate_on_stack(src: &str, main: u32, sm: &mut SourceMap) -> Result<ast::Program, Vec<Diag>> {
+    let (program, imports, exports) = front_end_on_stack(src, main, sm)?;
+    let mut checked = check::check_with(&program, &imports, &exports)?;
+    // Comptime-only functions (anything with a `Code` parameter or return — macros,
+    // generators, code helpers) have done their job during elaboration and have no
+    // runtime representation; drop them before mono/codegen.
+    checked.funcs.retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
+    Ok(checked)
+}
+
+/// The front end WITHOUT the final whole-program type-check: read → load →
+/// stage-3 expand → resolve, including the staged-macro elaboration loop (which
+/// internally checks the *generator* closure before running the metas). Returns
+/// the final resolved program plus the import/export tables the check needs.
+/// `elaborate_on_stack` = this + `check_with`; the REPL's type-inference probe
+/// (`repl_infer_tail`) runs `check::infer_tail_type` on the result instead — its
+/// probe function deliberately has no meaningful declared return type, so the
+/// whole-program check (which enforces declared returns) cannot run over it.
+fn front_end_on_stack(
+    src: &str,
+    main: u32,
+    sm: &mut SourceMap,
+) -> Result<(ast::Program, macros::ImportMap, macros::ExportMap), Vec<Diag>> {
     // The front-end pipeline up to the checker is fail-fast (single `Diag`); the
     // checker (`check_with`) returns *all* of one program's body errors, which flow
     // straight out as the multi-error `Vec<Diag>`.
@@ -124,33 +147,27 @@ fn elaborate_on_stack(src: &str, main: u32, sm: &mut SourceMap) -> Result<ast::P
     let program = one(resolve::resolve_program(tagged.clone(), &imports, &exports, !has_metas))?;
 
     // ---- top-level `(meta …)` staged macros (generate definitions) ----
-    let mut checked = if program.metas.is_empty() {
-        check::check_with(&program, &imports, &exports)?
-    } else {
-        let mut stack: Vec<String> = Vec::new();
-        let names: std::collections::HashSet<&str> =
-            program.funcs.iter().map(|f| f.name.as_str()).collect();
-        for m in &program.metas {
-            collect_calls(m, &names, &mut stack);
-        }
-        let wanted = closure_funcs(&program, stack);
-        let sub = closure_subprogram(&program, &wanted, true);
-        let checked_sub = check::check(&sub)?;
-        let gen = one(comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new))?;
-        let module = tagged.iter().find(|(f, _)| is_meta_form(f)).and_then(|(_, m)| m.clone());
-        let mut tagged2: Vec<macros::TaggedForm> =
-            tagged.into_iter().filter(|(f, _)| !is_meta_form(f)).collect();
-        for g in gen {
-            tagged2.push((g, module.clone()));
-        }
-        let program2 = one(resolve::resolve_program(tagged2, &imports, &exports, true))?;
-        check::check_with(&program2, &imports, &exports)?
-    };
-    // Comptime-only functions (anything with a `Code` parameter or return — macros,
-    // generators, code helpers) have done their job during elaboration and have no
-    // runtime representation; drop them before mono/codegen.
-    checked.funcs.retain(|f| f.ret != ast::Type::Code && f.params.iter().all(|p| p.ty != ast::Type::Code));
-    Ok(checked)
+    if program.metas.is_empty() {
+        return Ok((program, imports, exports));
+    }
+    let mut stack: Vec<String> = Vec::new();
+    let names: std::collections::HashSet<&str> =
+        program.funcs.iter().map(|f| f.name.as_str()).collect();
+    for m in &program.metas {
+        collect_calls(m, &names, &mut stack);
+    }
+    let wanted = closure_funcs(&program, stack);
+    let sub = closure_subprogram(&program, &wanted, true);
+    let checked_sub = check::check(&sub)?;
+    let gen = one(comptime::run_metas(&checked_sub).map_err(crate::span::Diag::new))?;
+    let module = tagged.iter().find(|(f, _)| is_meta_form(f)).and_then(|(_, m)| m.clone());
+    let mut tagged2: Vec<macros::TaggedForm> =
+        tagged.into_iter().filter(|(f, _)| !is_meta_form(f)).collect();
+    for g in gen {
+        tagged2.push((g, module.clone()));
+    }
+    let program2 = one(resolve::resolve_program(tagged2, &imports, &exports, true))?;
+    Ok((program2, imports, exports))
 }
 
 /// Keep a form for macro detection iff it parses without depending on macros being
@@ -1296,6 +1313,32 @@ pub fn build_shared_lib(
 /// Front end only: read → expand → parse → check. No codegen, no LLVM
 /// execution — just diagnostics. (Coil has no `eval`/JIT: the only way to run a
 /// program is to AOT-compile it.)
+/// REPL support (`coil repl`): run the front end on `src` and infer the type of
+/// the tail expression of the function named `probe`, with no expected type. No
+/// whole-program type-check runs — the REPL fully checks every definition as it
+/// enters the session, so only the probe body needs synthesis here (its errors
+/// carry the normal caret diagnostics). Returns the inferred type together with
+/// the resolved program, whose struct/sum tables drive the REPL's value display.
+pub fn repl_infer_tail(src: &str, probe: &str) -> Result<(ast::Type, ast::Program), String> {
+    let mut sm = SourceMap::new();
+    let main = sm.add("<source>", src);
+    // Same big-stack discipline as `elaborate`: the front end + `synth` recurse
+    // over expression nesting (and always pull in the prelude's macro engine).
+    let r = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || -> Result<(ast::Type, ast::Program), Vec<Diag>> {
+                let (program, imports, exports) = front_end_on_stack(src, main, &mut sm)?;
+                let ty = one(check::infer_tail_type(&program, &imports, &exports, probe))?;
+                Ok((ty, program))
+            })
+            .expect("spawn front-end thread")
+            .join()
+            .expect("front-end thread panicked")
+    });
+    reported(r, &sm)
+}
+
 pub fn check_source(src: &str) -> Result<(), String> {
     let mut sm = SourceMap::new();
     let program = reported(elaborate(src, &mut sm), &sm)?;

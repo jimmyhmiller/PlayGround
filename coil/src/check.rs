@@ -176,6 +176,40 @@ pub fn check(program: &Program) -> Result<Program, Vec<Diag>> {
     check_with(program, &HashMap::new(), &HashMap::new())
 }
 
+/// REPL support: infer the type of the TAIL expression of function `fname`'s body
+/// with NO expected type — the declared return type is ignored (the REPL's probe
+/// function is declared `(-> void)` precisely because the type is what we are
+/// trying to learn). Non-tail statements are synthesized in order exactly as
+/// `check_func` synthesizes them, so earlier `let` bindings shape the tail's type.
+/// Only phase-1 `setup` runs besides the probe body: the REPL fully checks every
+/// definition when it enters the session, so re-checking all bodies here would be
+/// pure latency.
+pub fn infer_tail_type(
+    program: &Program,
+    imports: &crate::macros::ImportMap,
+    exports: &crate::macros::ExportMap,
+    fname: &str,
+) -> Result<Type, Diag> {
+    let (cx, all_funcs) = setup(program, imports, exports)?;
+    let f = all_funcs
+        .iter()
+        .find(|f| f.name == fname)
+        .ok_or_else(|| Diag::new(format!("internal: probe function '{fname}' not found")))?;
+    let tps: HashSet<String> = f.type_params.iter().cloned().collect();
+    *cx.cur_bounds.borrow_mut() = f.bounds.iter().cloned().collect();
+    let mut env: HashMap<String, Type> = f
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), param_ref_type(&p.ty, &cx.structs, &cx.sums, &tps)))
+        .collect();
+    let mut ty = Type::Void;
+    for e in &f.body {
+        let (_, t) = synth(e, None, &mut env, &cx, &tps, &f.name)?;
+        ty = t;
+    }
+    Ok(ty)
+}
+
 /// `check`, with the program's import/export tables for scoping trait-method
 /// resolution to the caller's namespace. (Plain `check` passes empty tables — fine
 /// for single-module programs and the comptime sub-program checks.)
@@ -370,6 +404,24 @@ fn setup(
         cur_bounds: std::cell::RefCell::new(HashMap::new()),
         loops: std::cell::RefCell::new(Vec::new()),
     };
+
+    // ---- extern signature types ----------------------------------------------
+    // Externs never go through `check_func`, so their declared types are
+    // validated here — otherwise a malformed extern (e.g. a `(name type)` pair
+    // where a bare type belongs: `(extern f [(s :i64)] …)` parses `(s :i64)` as
+    // a type APPLICATION of the unknown type `s`) sails through checking and
+    // panics codegen with "generic type survived monomorphization".
+    let no_tps = HashSet::new();
+    for e in &program.externs {
+        for (i, p) in e.params.iter().enumerate() {
+            validate_type(p, &cx, &no_tps)
+                .map_err(|d| format!("extern '{}' parameter {}: {}", e.name, i + 1, d.msg))?;
+        }
+        if e.ret != Type::Void {
+            validate_type(&e.ret, &cx, &no_tps)
+                .map_err(|d| format!("extern '{}' return type: {}", e.name, d.msg))?;
+        }
+    }
 
     // ---- named constants ----------------------------------------------------
     // Each const becomes a (value Expr, reported Type) entry. A bare-literal value
@@ -3014,7 +3066,7 @@ fn arg_ok(got: &Type, want: &Type, is_extern: bool) -> bool {
     }
 }
 
-fn ty_str(t: &Type) -> String {
+pub fn ty_str(t: &Type) -> String {
     match t {
         Type::Never => "!".to_string(),
         Type::Code => "code".to_string(),

@@ -4,7 +4,8 @@
 ; everywhere, like Clojure's `println` in clojure.core).
 ;
 ; Format strings are `fmt`'s: {d} signed int, {s} string, {x} hex (>=0), {c} char,
-; {b} bool; `{{`/`}}` are literal braces. Too few args is a COMPILE error.
+; {b} bool, {u} unsigned decimal, {f} float; `{{`/`}}` are literal braces. Too few
+; args is a COMPILE error.
 ;
 ;   (println "x={d} ok={b}" 42 true)     ; -> stdout, with a trailing newline
 ;   (print   "loading {s}" name)         ; -> stdout, no newline
