@@ -1,0 +1,57 @@
+// FLAT MULTI-FIELD STRUCTS BY VALUE (Phase B2) — the C struct, safely.
+//
+//   tally run examples/structs.tal        →  70
+//
+// A single-constructor, non-recursive struct is a FLAT RECORD: its values live
+// in REGISTERS. Constructing `Point(3, 4)` is two SSA values — no malloc, no
+// tag; matching is projection; passing/returning through a real function
+// boundary is the two-register C convention (a `%partial` fn below compiles to
+// `define {i64,i64} @f(i64, i64)` — literally `struct Point f(struct Point)`).
+// Proven in the IR: this whole program contains ZERO calls to malloc except
+// the generic-list cells.
+//
+// Two representations, one value: in concretely-typed positions a record is
+// flat (registers); crossing into a GENERIC position (a `PList a` element, a
+// `{0 a} -> a` argument) it is boxed, and any match accepts either — so
+// containers of records, records inside records, and by-value calls compose
+// with no annotations. An `Own` field inside a record keeps its linear
+// obligation unchanged (freeing it twice is still `ω ⋢ 1`).
+//
+// C interop falls out: a flat record flattens into consecutive i64 arguments,
+// which IS the by-value ABI for a small integer C struct — `%foreign` functions
+// taking `struct { long long x, y; }` by value work with no glue.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+struct Point { x : Nat, y : Nat }
+struct Seg { from : Point, len : Nat }       // nested: flattens to width 3
+
+enum PList (a : Type) { PNil : PList a, PCons : a -> PList a -> PList a }
+
+norm1 : Point -> Nat
+fn norm1(p) { match p { Point(a, b) => a + b } }
+
+// by-value in, by-value out, through a native recursive function.
+step : Point -> Point
+%partial fn step(p) { match p { Point(a, b) => Point(a + b, b + 1) } }
+
+sumlist : PList Point -> Nat
+%partial fn sumlist(xs) {
+    match xs {
+        PNil => 0,
+        PCons(p, t) => norm1(p) + sumlist(t),
+    }
+}
+
+seglen : Seg -> Nat
+fn seglen(s) { match s { Seg(p, n) => norm1(p) + n } }
+
+main : Nat
+fn main() {
+    let p  = step(Point(3, 4));                                   // (7, 5)
+    let v1 = norm1(p);                                            // 12
+    let v2 = sumlist(PCons(Point(10, 20), PCons(Point(1, 2), PNil))); // 33
+    let v3 = seglen(Seg(Point(8, 9), 8));                         // 25
+    v1 + v2 + v3                                                  // 70
+}

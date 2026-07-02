@@ -531,10 +531,13 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
   0, solver-discharged, bare indexed load in the IR, C-parity measured on a
   10M-element sweep) — and the NAT CONVOY makes the loops writable (a `match`
   on a `Nat` refines and linearly threads the context values that depend on
-  it). Structure-of-arrays covers struct-heavy numeric code meanwhile. The
-  remaining core — flat multi-field structs BY VALUE + layout control — is
-  scoped honestly in `docs/PHASE_B2_VALUE_STRUCTS.md` (a typed-codegen
-  rewrite; the current backend is one-i64-per-value).
+  it). Structure-of-arrays covers struct-heavy numeric code meanwhile. **Flat multi-field
+  structs BY VALUE are now BUILT** (`docs/PHASE_B2_VALUE_STRUCTS.md`): records
+  live in registers, cross `Fix` boundaries as consecutive i64 params /
+  `{i64×w}` returns (the C convention), nest inline, box automatically at
+  generic boundaries (both representations always valid), and pass to
+  `%foreign` C functions by value (the small-struct ABI). Remaining: flat AoS
+  in `Arr` + `repr` layout control (need per-instantiation layouts).
 - **FFI + byte I/O (from Phase G, landed early).** `%foreign ["sym"] name : ty`
   — kernel-opaque postulates lowering to direct extern-C calls at the i64 ABI
   (erased args never cross); `putc`/`getc` char I/O (`getc` returns

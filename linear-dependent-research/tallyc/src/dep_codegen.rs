@@ -57,16 +57,20 @@ fn nat_like(sig: &Signature, data: &str) -> Option<(String, String)> {
     Some((zero?, succ?))
 }
 
-/// The runtime layout of one boxed constructor: which of its *arguments* occupy a
-/// runtime slot (the non-erased ones) and which are recursive occurrences of the
+/// The runtime layout of one boxed constructor: which of its *arguments* occupy
+/// runtime slots (the non-erased ones), how WIDE each is (a flat-record field
+/// spans several consecutive slots), and which are recursive occurrences of the
 /// family. `args` are the constructor's own arguments (NOT the family params);
 /// the index space here is the constructor's argument index `0..ctor.args.len()`.
 struct CtorLayout {
     /// constructor tag = its position in `decl.ctors`.
     tag: u64,
-    /// for each constructor argument: its runtime slot (1-based; slot 0 is the
-    /// tag), or `None` if it is erased (multiplicity 0) and therefore unstored.
+    /// for each constructor argument: its first runtime slot (1-based; slot 0 is
+    /// the tag), or `None` if it is erased (multiplicity 0) and therefore unstored.
     arg_slot: Vec<Option<u32>>,
+    /// for each constructor argument: how many consecutive slots it occupies
+    /// (1 for scalars/pointers/generic fields; a flat record's width inline).
+    arg_width: Vec<u32>,
     /// for each constructor argument: is it a recursive occurrence of the family?
     arg_recursive: Vec<bool>,
     /// number of runtime field slots (excluding the tag).
@@ -84,23 +88,145 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
         .ok_or_else(|| format!("`{cname}` is not a constructor of `{data}`"))? as u64;
     let ctor = &decl.ctors[tag as usize];
     let mut arg_slot = Vec::with_capacity(ctor.args.len());
+    let mut arg_width = Vec::with_capacity(ctor.args.len());
     let mut arg_recursive = Vec::with_capacity(ctor.args.len());
     let mut next: u32 = 1; // slot 0 is the tag
     for (mult, aty) in &ctor.args {
+        let recursive = matches!(aty, Term::Data(dn, _) if dn == data);
+        // a recursive field is always ONE slot (a pointer — a record cannot be
+        // recursive, so this only guards belt-and-suspenders).
+        let w = if recursive { 1 } else { type_width(sig, aty) };
         if *mult == Mult::Zero {
             arg_slot.push(None);
+            arg_width.push(0);
         } else {
             arg_slot.push(Some(next));
-            next += 1;
+            arg_width.push(w);
+            next += w;
         }
-        arg_recursive.push(matches!(aty, Term::Data(dn, _) if dn == data));
+        arg_recursive.push(recursive);
     }
     Ok(CtorLayout {
         tag,
         arg_slot,
+        arg_width,
         arg_recursive,
         nfields: next - 1,
     })
+}
+
+/// Is `data` a FLAT RECORD — a datatype whose values live in REGISTERS, never a
+/// heap cell? Criteria: exactly one constructor, at least TWO non-erased fields
+/// (one is the transparent-newtype path, zero the shared-constant path), no
+/// recursive field (recursion needs indirection). Returns the total width in
+/// scalar slots (fields of other record types flatten recursively; generic /
+/// pointer / scalar fields are one slot). This is Phase B2's core: constructing
+/// one is `insertvalue`-free SSA, matching is projection — zero malloc, no tag.
+fn record_width(sig: &Signature, data: &str) -> Option<u32> {
+    record_width_seen(sig, data, &mut std::collections::HashSet::new())
+}
+
+fn record_width_seen(
+    sig: &Signature,
+    data: &str,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<u32> {
+    if !seen.insert(data.to_string()) {
+        return None; // a cycle through record types needs indirection: boxed.
+    }
+    let d = sig.data(data)?;
+    if nat_like(sig, data).is_some() || d.ctors.len() != 1 {
+        return None;
+    }
+    let ctor = &d.ctors[0];
+    let mut nruntime = 0usize;
+    let mut width = 0u32;
+    for (mult, aty) in &ctor.args {
+        if matches!(aty, Term::Data(dn, _) if dn == data) {
+            return None; // recursive: needs indirection.
+        }
+        if *mult == Mult::Zero {
+            continue;
+        }
+        nruntime += 1;
+        width += type_width_seen(sig, aty, seen);
+    }
+    if nruntime < 2 {
+        return None; // nullary → shared constant; single → transparent newtype.
+    }
+    Some(width)
+}
+
+/// The runtime WIDTH (in i64 slots) of a value of this type term: flat records
+/// span their field widths; a transparent newtype is exactly its field; every
+/// other type — scalars, boxed pointers, and GENERIC (`Var`) positions — is one
+/// slot. A record flowing into a one-slot (generic/unknown) position is BOXED
+/// there and unboxed when matched; both representations are always valid, so
+/// this is a performance decision made locally, never a soundness one.
+fn type_width(sig: &Signature, t: &Term) -> u32 {
+    type_width_seen(sig, t, &mut std::collections::HashSet::new())
+}
+
+fn type_width_seen(
+    sig: &Signature,
+    t: &Term,
+    seen: &mut std::collections::HashSet<String>,
+) -> u32 {
+    let t = strip_ann(t);
+    let name = match t {
+        Term::Data(dn, _) => dn.as_str(),
+        // an APPLIED datatype head (e.g. quoted `Data` spines) — walk to the head.
+        Term::App(_, _) => {
+            let (head, _) = flatten_app(t);
+            match strip_ann(head) {
+                Term::Data(dn, _) => dn.as_str(),
+                _ => return 1,
+            }
+        }
+        _ => return 1,
+    };
+    if let Some(fi) = transparent_field(sig, name) {
+        // the wrapper IS its field: same width.
+        if let Some(d) = sig.data(name) {
+            return type_width_seen(sig, &d.ctors[0].args[fi].1, seen);
+        }
+        return 1;
+    }
+    record_width_seen(sig, name, seen).unwrap_or(1)
+}
+
+/// A runtime VALUE: one scalar `i64` (an integer or a pointer disguised as
+/// one — the representation of everything before Phase B2), or a FLAT RECORD
+/// by value — its fields as SSA scalars, in registers, never allocated.
+#[derive(Clone, Debug)]
+enum Val<'c> {
+    Int(IntValue<'c>),
+    Agg(Vec<IntValue<'c>>),
+}
+
+impl<'c> Val<'c> {
+    fn width(&self) -> u32 {
+        match self {
+            Val::Int(_) => 1,
+            Val::Agg(vs) => vs.len() as u32,
+        }
+    }
+    fn as_int(&self, what: &str) -> Result<IntValue<'c>, String> {
+        match self {
+            Val::Int(v) => Ok(*v),
+            Val::Agg(vs) => Err(format!(
+                "{what}: a {}-field flat record flowed where a scalar was required \
+                 (records are not yet supported in this position)",
+                vs.len()
+            )),
+        }
+    }
+    fn components(&self) -> Vec<IntValue<'c>> {
+        match self {
+            Val::Int(v) => vec![*v],
+            Val::Agg(vs) => vs.clone(),
+        }
+    }
 }
 
 /// A TRANSPARENT (newtype) datatype: exactly one constructor with exactly one
@@ -159,7 +285,13 @@ struct DepCg<'c, 'a> {
 struct FixSelf<'c> {
     level: usize,
     func: FunctionValue<'c>,
-    erased: Vec<bool>,
+    /// one entry per surface argument: `None` = erased (not passed), `Some(w)` =
+    /// a runtime argument of width `w` scalar slots (a flat record flattens into
+    /// `w` consecutive i64 parameters — for a small record this is exactly the
+    /// two-register C ABI).
+    params: Vec<Option<u32>>,
+    /// width of the return value (a `w > 1` fn returns an LLVM `{i64 × w}`).
+    ret_width: u32,
 }
 
 /// An accumulator-fold induction-hypothesis binding (Phase 1a′ native codegen): the
@@ -189,9 +321,44 @@ struct ElimFoldIh<'c> {
 /// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
 /// ERASED binder (a multiplicity-0 variable that has no runtime witness). Reading
 /// a `None` is a hard error — the kernel guarantees a checked term never does.
-type Slot<'c> = Option<IntValue<'c>>;
+type Slot<'c> = Option<Val<'c>>;
 
 impl<'c, 'a> DepCg<'c, 'a> {
+    /// Coerce a value to a target width. Same width: identity. A flat record
+    /// (`Agg`) entering a ONE-slot position (a generic field, an unknown-typed
+    /// boundary) is BOXED — one malloc of its components, the pointer is the
+    /// scalar. A scalar (a boxed record pointer) entering a `w > 1` position is
+    /// UNBOXED — its components loaded. Both representations are always valid
+    /// for a record, so a mismatch is impossible; only locality/perf differ.
+    fn coerce(&self, v: Val<'c>, w: u32) -> Result<Val<'c>, String> {
+        match (&v, w) {
+            (Val::Int(_), 1) => Ok(v),
+            (Val::Agg(vs), w) if vs.len() as u32 == w => Ok(v),
+            (Val::Agg(vs), 1) => {
+                // box: the record crosses into a one-slot (generic) position.
+                let cell = self.malloc_cell(vs.len() as u32, "rec.box");
+                for (i, c) in vs.iter().enumerate() {
+                    self.store(cell, i as u32, *c);
+                }
+                Ok(Val::Int(self.toint(cell, "rec.boxint")))
+            }
+            (Val::Int(p), w) => {
+                // unbox: a boxed record pointer meets a concrete record position.
+                let cell = self.toptr(*p, "rec.unbox");
+                let mut comps = Vec::with_capacity(w as usize);
+                for i in 0..w {
+                    comps.push(self.load(cell, i, "rec.fld"));
+                }
+                Ok(Val::Agg(comps))
+            }
+            (Val::Agg(vs), w) => Err(format!(
+                "flat-record width mismatch: a {}-field record flowed into a \
+                 {w}-slot position (this should be impossible for a kernel-checked \
+                 term)",
+                vs.len()
+            )),
+        }
+    }
     fn fresh(&self, base: &str) -> String {
         let mut id = self.next_id.borrow_mut();
         let s = format!("{base}.{}", *id);
@@ -213,15 +380,29 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .into_int_value()
     }
 
+    /// Load one constructor field: a scalar slot, or a flat record's `w`
+    /// consecutive slots (loaded into registers — the record leaves the cell by
+    /// value).
+    fn load_field(&self, p: PointerValue<'c>, idx: u32, w: u32) -> Val<'c> {
+        if w <= 1 {
+            return Val::Int(self.load(p, idx, "field"));
+        }
+        let mut comps = Vec::with_capacity(w as usize);
+        for k in 0..w {
+            comps.push(self.load(p, idx + k, "field"));
+        }
+        Val::Agg(comps)
+    }
+
     /// Read a runtime variable, erroring if it is erased (no runtime witness).
-    fn read_var(&self, env: &[Slot<'c>], i: usize) -> Result<IntValue<'c>, String> {
+    fn read_var(&self, env: &[Slot<'c>], i: usize) -> Result<Val<'c>, String> {
         let pos = env
             .len()
             .checked_sub(1)
             .and_then(|n| n.checked_sub(i))
             .ok_or_else(|| format!("unbound runtime variable #{i}"))?;
         match env.get(pos) {
-            Some(Some(v)) => Ok(*v),
+            Some(Some(v)) => Ok(v.clone()),
             Some(None) => Err(format!(
                 "runtime variable #{i} is ERASED (multiplicity 0): it has no runtime \
                  representation, yet codegen reached it in a value position \
@@ -231,28 +412,42 @@ impl<'c, 'a> DepCg<'c, 'a> {
         }
     }
 
-    /// Compile a term to an `i64`, given `env` (the value of each de Bruijn var,
-    /// innermost last; `None` = erased) and the enclosing function.
+    /// Compile a term to a SCALAR `i64` — the pre-B2 interface, used everywhere
+    /// a scalar is structurally required (arithmetic, tags, indices, pointers).
+    /// A flat record reaching such a position is a hard error, not a silent box.
     fn compile(
         &self,
         f: FunctionValue<'c>,
         env: &[Slot<'c>],
         t: &Term,
     ) -> Result<IntValue<'c>, String> {
+        self.compile_v(f, env, t)?.as_int("compile")
+    }
+
+    /// Compile a term to a runtime `Val` — a scalar `i64`, or a flat record's
+    /// fields as SSA scalars (Phase B2: records by VALUE, in registers). `env`
+    /// gives each de Bruijn var's value, innermost last; `None` = erased.
+    fn compile_v(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        t: &Term,
+    ) -> Result<Val<'c>, String> {
         match t {
-            Term::NatLit(n) => Ok(self.i64t.const_int(*n, false)),
-            Term::Zero => Ok(self.i64t.const_int(0, false)),
+            Term::NatLit(n) => Ok(Val::Int(self.i64t.const_int(*n, false))),
+            Term::Zero => Ok(Val::Int(self.i64t.const_int(0, false))),
             Term::Suc(x) => {
                 let v = self.compile(f, env, x)?;
-                Ok(self
-                    .builder
-                    .build_int_add(v, self.i64t.const_int(1, false), "suc")
-                    .unwrap())
+                Ok(Val::Int(
+                    self.builder
+                        .build_int_add(v, self.i64t.const_int(1, false), "suc")
+                        .unwrap(),
+                ))
             }
             Term::Add(a, b) => {
                 let x = self.compile(f, env, a)?;
                 let y = self.compile(f, env, b)?;
-                Ok(self.builder.build_int_add(x, y, "add").unwrap())
+                Ok(Val::Int(self.builder.build_int_add(x, y, "add").unwrap()))
             }
             Term::Var(i) => self.read_var(env, *i),
             // a string literal: the address of one shared NUL-terminated global.
@@ -266,25 +461,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .builder
                     .build_global_string_ptr(x, &format!("tally.str.{id}"))
                     .map_err(|e| format!("string literal: {e}"))?;
-                Ok(self
-                    .builder
-                    .build_ptr_to_int(g.as_pointer_value(), self.i64t, "strlit")
-                    .unwrap())
+                Ok(Val::Int(
+                    self.builder
+                        .build_ptr_to_int(g.as_pointer_value(), self.i64t, "strlit")
+                        .unwrap(),
+                ))
             }
             // `J(P, b, e)`: at runtime every closed equality proof is `refl`
             // (the kernel admits no equality axioms), so path induction ERASES
             // to its base case — the motive and the proof cost nothing.
-            Term::J(_, b, _) => self.compile(f, env, b),
-            Term::Ann(e, _) => self.compile(f, env, e),
+            Term::J(_, b, _) => self.compile_v(f, env, b),
+            Term::Ann(e, _) => self.compile_v(f, env, e),
             // CALL-BY-VALUE let: compile `e` ONCE (so its effects — e.g. `free` — run
             // exactly once), bind it, compile the body. (`ty` is 0-erased.)
             Term::Let(_sigma, _ty, e, body) => {
-                let ev = self.compile(f, env, e)?;
+                let ev = self.compile_v(f, env, e)?;
                 let mut env2 = env.to_vec();
                 env2.push(Some(ev));
-                self.compile(f, &env2, body)
+                self.compile_v(f, &env2, body)
             }
-            Term::NatElim(_p, z, s, scrut) => self.compile_fold(f, env, z, s, scrut),
+            Term::NatElim(_p, z, s, scrut) => {
+                Ok(Val::Int(self.compile_fold(f, env, z, s, scrut)?))
+            }
             Term::NatCase(_p, z, s, scrut) => self.compile_natcase(f, env, z, s, scrut),
             // a fully-applied `Fix` is handled in the `App` spine below; a bare one
             // (a function value with no call) has no runtime representation here.
@@ -304,7 +502,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 // function threading the accumulators (the IH is the fold on `k`).
                 if let Term::NatElim(p, z, s, scrut) = strip_ann(head) {
                     if !args.is_empty() {
-                        return self.compile_acc_fold(f, env, p, z, s, scrut, &args);
+                        return Ok(Val::Int(
+                            self.compile_acc_fold(f, env, p, z, s, scrut, &args)?,
+                        ));
                     }
                 }
                 // A postulate at the head of a spine (e.g. `alloc`, `free`,
@@ -335,27 +535,34 @@ impl<'c, 'a> DepCg<'c, 'a> {
                             ));
                         }
                         let fieldv = env[field_level]
-                            .ok_or("convoy-fold: the recursive field was erased")?;
+                            .clone()
+                            .ok_or("convoy-fold: the recursive field was erased")?
+                            .as_int("convoy-fold recursive field")?;
                         let mut ca: Vec<inkwell::values::BasicMetadataValueEnum> =
                             vec![fieldv.into()];
                         for a in &args {
-                            ca.push(self.compile(f, env, a)?.into());
+                            // dep positions are one-slot (box a record crossing in).
+                            let v = self.compile_v(f, env, a)?;
+                            ca.push(self.coerce(v, 1)?.as_int("convoy-fold dep")?.into());
                         }
                         for li in live_idx {
-                            ca.push(
-                                env[li]
-                                    .ok_or("convoy-fold: a captured value was erased")?
-                                    .into(),
-                            );
+                            for c in env[li]
+                                .clone()
+                                .ok_or("convoy-fold: a captured value was erased")?
+                                .components()
+                            {
+                                ca.push(c.into());
+                            }
                         }
-                        return Ok(self
-                            .builder
-                            .build_call(func, &ca, "foldih.call")
-                            .unwrap()
-                            .try_as_basic_value()
-                            .left()
-                            .unwrap()
-                            .into_int_value());
+                        return Ok(Val::Int(
+                            self.builder
+                                .build_call(func, &ca, "foldih.call")
+                                .unwrap()
+                                .try_as_basic_value()
+                                .left()
+                                .unwrap()
+                                .into_int_value(),
+                        ));
                     }
                     // copy the lookup OUT of the borrow before compiling args (which may
                     // re-enter and borrow `acc_ih_selves` again).
@@ -369,22 +576,26 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     if let Some((func, k_level)) = ih_hit {
                         // read the predecessor `k` from the CURRENT env by level — inside
                         // a boxed-match helper this is the helper's captured parameter.
-                        let k = env[k_level].ok_or_else(|| {
+                        let k = env[k_level].clone().ok_or_else(|| {
                             format!("recursive fold call to `{}`: predecessor is erased", func.get_name().to_str().unwrap_or("?"))
-                        })?;
+                        })?.as_int("accumulator-fold predecessor")?;
                         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
                             vec![k.into()];
                         for a in &args {
-                            call_args.push(self.compile(f, env, a)?.into());
+                            // accumulator slots are one-slot (box a record crossing in).
+                            let v = self.compile_v(f, env, a)?;
+                            call_args
+                                .push(self.coerce(v, 1)?.as_int("accumulator arg")?.into());
                         }
-                        return Ok(self
-                            .builder
-                            .build_call(func, &call_args, "ih.call")
-                            .unwrap()
-                            .try_as_basic_value()
-                            .left()
-                            .unwrap()
-                            .into_int_value());
+                        return Ok(Val::Int(
+                            self.builder
+                                .build_call(func, &call_args, "ih.call")
+                                .unwrap()
+                                .try_as_basic_value()
+                                .left()
+                                .unwrap()
+                                .into_int_value(),
+                        ));
                     }
                     let hit = self
                         .fix_selves
@@ -392,15 +603,15 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         .iter()
                         .rev()
                         .find(|fs| fs.level == lvl)
-                        .map(|fs| (fs.func, fs.erased.clone()));
-                    if let Some((func, erased)) = hit {
-                        return self.compile_call(f, env, func, &erased, &args);
+                        .map(|fs| (fs.func, fs.params.clone(), fs.ret_width));
+                    if let Some((func, params, retw)) = hit {
+                        return self.compile_call(f, env, func, &params, retw, &args);
                     }
                 }
                 // The head is itself a `Fix`: build (memoized) its function and call.
                 if let Term::Fix(ty, body) = strip_ann(head) {
-                    let (func, erased) = self.build_fix(strip_ann(head), ty, body)?;
-                    return self.compile_call(f, env, func, &erased, &args);
+                    let (func, params, retw) = self.build_fix(strip_ann(head), ty, body)?;
+                    return self.compile_call(f, env, func, &params, retw, &args);
                 }
                 // The CONVOY (a dependent match whose motive Π-abstracts the
                 // index-dependent context variables — rust_surface's
@@ -414,7 +625,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 match strip_ann(head) {
                     Term::Case(d, m, methods, sc) => {
                         let new = self.commute_apply_into_methods(d, methods, &args, false)?;
-                        return self.compile(
+                        return self.compile_v(
                             f,
                             env,
                             &Term::Case(d.clone(), m.clone(), new, sc.clone()),
@@ -425,10 +636,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         // recursive fold — deps vary per level, so they must be
                         // threaded as parameters, not substituted in.
                         if self.elim_methods_use_ih(d, methods, args.len())? {
-                            return self.compile_elim_dep_fold(f, env, d, methods, sc, &args);
+                            return Ok(Val::Int(
+                                self.compile_elim_dep_fold(f, env, d, methods, sc, &args)?,
+                            ));
                         }
                         let new = self.commute_apply_into_methods(d, methods, &args, true)?;
-                        return self.compile(
+                        return self.compile_v(
                             f,
                             env,
                             &Term::Elim(d.clone(), m.clone(), new, sc.clone()),
@@ -440,7 +653,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     Term::NatCase(p, z, s, sc) => {
                         let z2 = self.commute_apply_into_natcase_method(z, 0, &args)?;
                         let s2 = self.commute_apply_into_natcase_method(s, 1, &args)?;
-                        return self.compile(
+                        return self.compile_v(
                             f,
                             env,
                             &Term::NatCase(p.clone(), Box::new(z2), Box::new(s2), sc.clone()),
@@ -481,7 +694,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                                     env2.push(None);
                                 }
                                 _ => {
-                                    let v = self.compile(f, env, a)?;
+                                    // INLINE binding — no function boundary, so a
+                                    // flat record stays in registers even through
+                                    // generic (inlined) code.
+                                    let v = self.compile_v(f, env, a)?;
                                     env2.push(Some(v));
                                 }
                             }
@@ -495,7 +711,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         _ => return Err("application of a non-function in runtime code".into()),
                     }
                 }
-                self.compile(f, &env2, body)
+                self.compile_v(f, &env2, body)
             }
             Term::Const(c) => self.compile_postulate(f, env, c, &[]),
             other => Err(format!("not a runtime value: {other:?}")),
@@ -573,13 +789,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .clone();
         let nd = deps.len();
         let scrut_val = self.compile(f, env, scrut)?;
-        let dep_vals: Vec<IntValue<'c>> =
-            deps.iter().map(|a| self.compile(f, env, a)).collect::<Result<_, _>>()?;
-        let live: Vec<(usize, IntValue<'c>)> =
-            env.iter().enumerate().filter_map(|(i, s)| s.map(|v| (i, v))).collect();
+        // dep slots are one scalar each (a record dep crosses boxed).
+        let dep_vals: Vec<IntValue<'c>> = deps
+            .iter()
+            .map(|a| {
+                let v = self.compile_v(f, env, a)?;
+                self.coerce(v, 1)?.as_int("convoy-fold dep")
+            })
+            .collect::<Result<_, _>>()?;
+        let live: Vec<(usize, Val<'c>)> =
+            env.iter().enumerate().filter_map(|(i, s)| s.clone().map(|v| (i, v))).collect();
         let live_idx: Vec<usize> = live.iter().map(|(i, _)| *i).collect();
+        let flat_live: usize = live.iter().map(|(_, v)| v.width() as usize).sum();
 
-        let nparams = 1 + nd + live.len();
+        let nparams = 1 + nd + flat_live;
         let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
             vec![self.i64t.into(); nparams];
         let fname = self.fresh(&format!("tally_fold_{data}"));
@@ -591,9 +814,19 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // inner env: the outer SHAPE with live slots bound to helper params, so
         // every level-identified reference (markers, captured vars) threads.
         let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
-        for (k, (i, _)) in live.iter().enumerate() {
-            inner_env[*i] =
-                Some(helper.get_nth_param((1 + nd + k) as u32).unwrap().into_int_value());
+        let mut pk = (1 + nd) as u32;
+        for (i, v) in &live {
+            let w = v.width();
+            if w == 1 {
+                inner_env[*i] =
+                    Some(Val::Int(helper.get_nth_param(pk).unwrap().into_int_value()));
+            } else {
+                let comps: Vec<IntValue<'c>> = (0..w)
+                    .map(|k| helper.get_nth_param(pk + k).unwrap().into_int_value())
+                    .collect();
+                inner_env[*i] = Some(Val::Agg(comps));
+            }
+            pk += w;
         }
         let node = helper.get_nth_param(0).unwrap().into_int_value();
 
@@ -622,7 +855,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let lay = ctor_layout(self.sig, data, &ctor.name)?;
             let mut menv = inner_env.clone();
             for ai in 0..ctor.args.len() {
-                let v: Slot<'c> = lay.arg_slot[ai].map(|sl| self.load(node_ptr, sl, "fold.field"));
+                let v: Slot<'c> =
+                    lay.arg_slot[ai].map(|sl| self.load_field(node_ptr, sl, lay.arg_width[ai]));
                 menv.push(v);
             }
             // IH markers: level-identified recursion points (no eager fold).
@@ -668,11 +902,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 }
             }
             for j in 0..kdep {
-                menv.push(Some(
+                menv.push(Some(Val::Int(
                     helper.get_nth_param((1 + j) as u32).unwrap().into_int_value(),
-                ));
+                )));
             }
-            let result = self.compile(helper, &menv, body);
+            let result = self
+                .compile_v(helper, &menv, body)
+                .and_then(|v| self.coerce(v, 1))
+                .and_then(|v| v.as_int("convoy-fold result").map_err(|e| e));
             for _ in 0..nmarks {
                 self.elim_fold_ihs.borrow_mut().pop();
             }
@@ -686,7 +923,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
             ca.push((*v).into());
         }
         for (_, v) in &live {
-            ca.push((*v).into());
+            for c in v.components() {
+                ca.push(c.into());
+            }
         }
         Ok(self
             .builder
@@ -858,7 +1097,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         data: &str,
         cname: &str,
         field_vals: &[IntValue<'c>],
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         let lay = ctor_layout(self.sig, data, cname)?;
         if field_vals.len() as u32 != lay.nfields {
             return Err(format!(
@@ -866,6 +1105,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 field_vals.len(),
                 lay.nfields
             ));
+        }
+        // A FLAT RECORD (all these prelude pairs are): no cell, no tag — the
+        // fields ARE the value, in registers. The read-back pairs (`ARead`,
+        // `Cell`, `CL`, `VL`, `Taken`) stop costing a malloc even at -O0.
+        if record_width(self.sig, data).is_some() {
+            return Ok(Val::Agg(field_vals.to_vec()));
         }
         let raw = self.malloc_cell(1 + lay.nfields, "box");
         self.store(raw, 0, self.i64t.const_int(lay.tag, false));
@@ -878,7 +1123,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 fi += 1;
             }
         }
-        Ok(self.toint(raw, "boxint"))
+        Ok(Val::Int(self.toint(raw, "boxint")))
     }
 
     /// Collect the RUNTIME (non-erased) arguments of a postulate spine, in
@@ -903,7 +1148,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
             match cur {
                 Term::Pi(mult, _dom, cod) => {
                     if *mult != Mult::Zero {
-                        out.push(self.compile(f, env, a)?);
+                        // postulate payload slots are UNIFORMLY one scalar: a flat
+                        // record crossing in is boxed (generic postulates like
+                        // `alloc : {0 a} -> a -> Own a` cannot know a layout, so
+                        // the layout must not depend on the instantiation).
+                        let v = self.compile_v(f, env, a)?;
+                        out.push(self.coerce(v, 1)?.as_int(cname)?);
                     }
                     // else: erased argument — never compiled, never stored.
                     cur = strip_ann(cod);
@@ -928,7 +1178,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         env: &[Slot<'c>],
         cname: &str,
         args: &[&Term],
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         // DLL node layout: an intrusive CIRCULAR doubly-linked list with a
         // sentinel (reused from the non-dependent backend). slot 0 = next,
         // 1 = prev, 2 = elem. The list value IS the sentinel; a cursor IS a
@@ -950,7 +1200,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 };
                 let cell = self.malloc_cell(1, "own");
                 self.store(cell, 0, *payload);
-                Ok(self.toint(cell, "ownint"))
+                Ok(Val::Int(self.toint(cell, "ownint")))
             }
             // free : ... -> (1 o : Own a / List r) -> Unit  — libc free of the
             // (single) linear pointer argument; Unit is represented as 0.
@@ -963,7 +1213,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 self.free_int(*ptr);
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // unbox : {0 a} -> (1 o : Own a) -> a  — deref-and-CONSUME: load the
             // pointee from the cell, FREE the cell, return the pointee (moved out). The
@@ -981,7 +1231,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 let cell = self.toptr(*ptr, "ownp");
                 let payload = self.load(cell, 0, "unboxed");
                 self.free_int(*ptr); // free the Own cell; the payload was moved out
-                Ok(payload)
+                Ok(Val::Int(payload))
             }
             // print : Nat -> Unit  — the one observable effect: write the number
             // and a newline to stdout (`printf("%lld\n", n)`). Sequenced by the
@@ -1013,7 +1263,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.builder
                     .build_call(printf, &[fmt.into(), (*x).into()], "print")
                     .unwrap();
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // prints : Str -> Unit — write the string and a newline to stdout.
             "prints" => {
@@ -1043,7 +1293,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.builder
                     .build_call(printf, &[fmt.into(), sptr.into()], "prints")
                     .unwrap();
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // putc : Nat -> Unit — write ONE byte to stdout (libc putchar; the
             // Nat is truncated to the C int, i.e. the low byte of a char code).
@@ -1067,7 +1317,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.builder
                     .build_call(putchar, &[c32.into()], "putc")
                     .unwrap();
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // getc : Unit -> Nat — read ONE byte from stdin (libc getchar) and
             // return `Succ(byte)`, or `Zero` at EOF. Nat cannot be negative, so
@@ -1116,7 +1366,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .build_select(eof, self.i64t.const_zero(), succ, "getc.out")
                     .unwrap()
                     .into_int_value();
-                Ok(out)
+                Ok(Val::Int(out))
             }
             // new : {0 r} -> List r  — create an empty circular sentinel list.
             "new" => {
@@ -1124,7 +1374,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 let si = self.toint(s, "si");
                 self.store(s, NEXT, si); // s.next = s
                 self.store(s, PREV, si); // s.prev = s
-                Ok(si)
+                Ok(Val::Int(si))
             }
             // insert : {0 r} -> (1 l : List r) -> Nat -> CL r
             // append a node at the tail; return the boxed pair (cursor, list).
@@ -1202,7 +1452,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 };
                 let cell = self.toptr(*v, "cellp");
                 self.store(cell, 0, *new);
-                Ok(*v)
+                Ok(Val::Int(*v))
             }
             // vtake : ... -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
             // MOVE the payload out, retyping the slot as `Hole` (the cell is NOT
@@ -1237,7 +1487,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 let cell = self.toptr(*v, "cellp");
                 let payload = self.load(cell, 0, "read");
                 self.free_int(*v);
-                Ok(payload)
+                Ok(Val::Int(payload))
             }
             // vfree : ... -> Ptr l -> (1 v : PtsTo l a) -> Unit
             // consume the view and reclaim the cell; Unit is represented as 0.
@@ -1250,7 +1500,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 self.free_int(*v);
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // ---- contiguous arrays (the C `a[i]` on a flat buffer) ----
             // `Arr a n` IS one flat `n`-slot block: `malloc(n*8)`, no header, no
@@ -1307,7 +1557,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 i.add_incoming(&[(&inext, body)]);
                 self.builder.build_unconditional_branch(head).unwrap();
                 self.builder.position_at_end(done);
-                Ok(self.toint(raw, "arrint"))
+                Ok(Val::Int(self.toint(raw, "arrint")))
             }
             // aget : … -> (i : Nat) -> (0 p : Lt i n) -> (1 arr : Arr a n) -> ARead a n
             // THE C-level read: a bare indexed load. The bound is an ERASED proof
@@ -1354,7 +1604,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         .unwrap()
                 };
                 self.builder.build_store(slot, *v).unwrap();
-                Ok(*arr)
+                Ok(Val::Int(*arr))
             }
             // afree : … -> (1 arr : Arr a n) -> Unit — ONE libc free of the block.
             "afree" => {
@@ -1366,7 +1616,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 self.free_int(*arr);
-                Ok(self.i64t.const_zero())
+                Ok(Val::Int(self.i64t.const_zero()))
             }
             // `%foreign` — an extern C symbol at the i64 ABI: declare it with one
             // i64 parameter per RUNTIME argument (erased Π[0] binders are dropped,
@@ -1375,7 +1625,32 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // already checked every use against the declared tally type.
             other if self.sig.foreigns.contains_key(other) => {
                 let sym = self.sig.foreigns.get(other).unwrap().clone();
-                let rt = self.runtime_args(f, env, other, args)?;
+                // records FLATTEN into consecutive i64 arguments — on AArch64 and
+                // SysV x86-64 that is exactly the by-value ABI for a small
+                // (≤ 2-register) integer-class C struct, so `%foreign` functions
+                // taking such structs by value work directly.
+                let ty = self
+                    .sig
+                    .postulate(other)
+                    .ok_or_else(|| format!("unknown postulate `{other}`"))?;
+                let mut cur = strip_ann(ty);
+                let mut rt: Vec<IntValue<'c>> = Vec::new();
+                for a in args {
+                    match cur {
+                        Term::Pi(mult, _dom, cod) => {
+                            if *mult != Mult::Zero {
+                                let v = self.compile_v(f, env, a)?;
+                                rt.extend(v.components());
+                            }
+                            cur = strip_ann(cod);
+                        }
+                        _ => {
+                            return Err(format!(
+                                "postulate `{other}` applied to more arguments than its type allows"
+                            ))
+                        }
+                    }
+                }
                 let func = match self.module.get_function(&sym) {
                     Some(g) => g,
                     None => {
@@ -1404,7 +1679,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .left()
                     .ok_or_else(|| format!("%foreign `{other}`: call produced no value"))?
                     .into_int_value();
-                Ok(ret)
+                Ok(Val::Int(ret))
             }
             // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
             // these only ever appear inside ERASED type annotations, so they must
@@ -1424,34 +1699,52 @@ impl<'c, 'a> DepCg<'c, 'a> {
         env: &[Slot<'c>],
         name: &str,
         args: &[Term],
-    ) -> Result<IntValue<'c>, String> {
-        let (decl, _ctor) = self
+    ) -> Result<Val<'c>, String> {
+        let (decl, ctor) = self
             .sig
             .ctor(name)
             .ok_or_else(|| format!("unknown constructor `{name}`"))?;
         let data = decl.name.clone();
         let np = decl.params.len();
+        let ctor_args = ctor.args.clone();
 
         // Nat-like: keep the unboxed i64 representation.
         if let Some((zero, _succ)) = nat_like(self.sig, &data) {
             if name == zero {
-                return Ok(self.i64t.const_int(0, false));
+                return Ok(Val::Int(self.i64t.const_int(0, false)));
             } else {
                 // the successor's single argument is the predecessor.
                 let pred = self.compile(f, env, &args[args.len() - 1])?;
-                return Ok(self
-                    .builder
-                    .build_int_add(pred, self.i64t.const_int(1, false), "succ")
-                    .unwrap());
+                return Ok(Val::Int(
+                    self.builder
+                        .build_int_add(pred, self.i64t.const_int(1, false), "succ")
+                        .unwrap(),
+                ));
             }
         }
 
         // TRANSPARENT newtype: constructing the wrapper IS the field value.
         if let Some(fi) = transparent_field(self.sig, &data) {
-            return self.compile(f, env, &args[np + fi]);
+            return self.compile_v(f, env, &args[np + fi]);
         }
 
         let lay = ctor_layout(self.sig, &data, name)?;
+
+        // A FLAT RECORD: no malloc, no tag — the value is its fields' scalars,
+        // concatenated in declaration order (each coerced to its declared
+        // width; erased fields contribute nothing). This is Phase B2's
+        // by-value construction: `MkPoint(3, 4)` is two SSA values.
+        if record_width(self.sig, &data).is_some() {
+            let mut comps: Vec<IntValue<'c>> = Vec::with_capacity(lay.nfields as usize);
+            for (ai, slot) in lay.arg_slot.iter().enumerate() {
+                if slot.is_some() {
+                    let v = self.compile_v(f, env, &args[np + ai])?;
+                    comps.extend(self.coerce(v, lay.arg_width[ai])?.components());
+                }
+            }
+            return Ok(Val::Agg(comps));
+        }
+        let _ = &ctor_args;
 
         // A NULLARY constructor (no runtime fields, e.g. `Leaf`/`Nil`) is an
         // immutable, field-less value: it needs no per-use allocation. Represent it
@@ -1469,10 +1762,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 g.set_constant(true);
                 g
             });
-            return Ok(self
-                .builder
-                .build_ptr_to_int(global.as_pointer_value(), self.i64t, "nullary")
-                .unwrap());
+            return Ok(Val::Int(
+                self.builder
+                    .build_ptr_to_int(global.as_pointer_value(), self.i64t, "nullary")
+                    .unwrap(),
+            ));
         }
 
         // Boxed: malloc(8 * (1 + nfields)); store tag in slot 0; store each
@@ -1492,20 +1786,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.builder
             .build_store(self.gep(raw, 0, "tag"), self.i64t.const_int(lay.tag, false))
             .unwrap();
-        // ctor args are args[np..]
+        // ctor args are args[np..]; a flat-record field spans consecutive slots.
         for (ai, slot) in lay.arg_slot.iter().enumerate() {
             if let Some(s) = slot {
-                let v = self.compile(f, env, &args[np + ai])?;
-                self.builder
-                    .build_store(self.gep(raw, *s, "fld"), v)
-                    .unwrap();
+                let v = self.compile_v(f, env, &args[np + ai])?;
+                for (k, c) in self
+                    .coerce(v, lay.arg_width[ai])?
+                    .components()
+                    .into_iter()
+                    .enumerate()
+                {
+                    self.builder
+                        .build_store(self.gep(raw, *s + k as u32, "fld"), c)
+                        .unwrap();
+                }
             }
             // erased argument: not evaluated, not stored.
         }
-        Ok(self
-            .builder
-            .build_ptr_to_int(raw, self.i64t, "cellint")
-            .unwrap())
+        Ok(Val::Int(
+            self.builder
+                .build_ptr_to_int(raw, self.i64t, "cellint")
+                .unwrap(),
+        ))
     }
 
     /// Lower a dependent eliminator. Nat-like families fold with a native loop;
@@ -1518,12 +1820,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
         data: &str,
         methods: &[Term],
         scrut: &Term,
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         if let Some((zero, _succ)) = nat_like(self.sig, data) {
             let decl = self.sig.data(data).unwrap();
             let zidx = decl.ctors.iter().position(|c| c.name == zero).unwrap();
             let sidx = 1 - zidx;
-            return self.compile_fold(f, env, &methods[zidx], &methods[sidx], scrut);
+            return Ok(Val::Int(self.compile_fold(
+                f,
+                env,
+                &methods[zidx],
+                &methods[sidx],
+                scrut,
+            )?));
         }
         // TRANSPARENT newtype: no recursion possible (transparency excludes
         // recursive fields ⇒ no IHs), so the eliminator is the same in-place
@@ -1531,21 +1839,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
         if let Some(fi) = transparent_field(self.sig, data) {
             return self.compile_transparent_match(f, env, data, fi, &methods[0], scrut);
         }
+        // A FLAT RECORD has no recursive fields ⇒ its eliminator has no IHs: it
+        // is exactly the single-method in-place match.
+        if record_width(self.sig, data).is_some() {
+            return self.compile_case(f, env, data, methods, scrut);
+        }
 
         // Boxed eliminator: build a recursive helper that captures the live outer
         // environment (the non-erased slots), then call it on the scrutinee.
         let scrut_val = self.compile(f, env, scrut)?;
 
         // Which outer env slots are live (non-erased)? They become helper params
-        // (in addition to the scrutinee). We thread them through every recursive
-        // call unchanged — only the scrutinee shrinks.
-        let live: Vec<(usize, IntValue<'c>)> = env
+        // (in addition to the scrutinee) — a flat-record slot FLATTENS into its
+        // components. We thread them through every recursive call unchanged —
+        // only the scrutinee shrinks.
+        let live: Vec<(usize, Val<'c>)> = env
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.map(|v| (i, v)))
+            .filter_map(|(i, s)| s.clone().map(|v| (i, v)))
             .collect();
+        let flat_live: u32 = live.iter().map(|(_, v)| v.width()).sum();
 
-        let nparams = 1 + live.len();
+        let nparams = 1 + flat_live as usize;
         let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
             std::iter::repeat(self.i64t.into()).take(nparams).collect();
         let fname = self.fresh(&format!("tally_elim_{data}"));
@@ -1555,10 +1870,22 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
         // Reconstruct, INSIDE the helper, the env that the method bodies expect:
         // the same shape as the outer env (Nones preserved), but every live slot
-        // bound to the corresponding helper parameter.
+        // bound to the corresponding helper parameter(s) — an Agg slot rebuilt
+        // from its consecutive params.
         let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
-        for (k, (i, _)) in live.iter().enumerate() {
-            inner_env[*i] = Some(helper.get_nth_param((k + 1) as u32).unwrap().into_int_value());
+        let mut pk = 1u32;
+        for (i, v) in &live {
+            let w = v.width();
+            if w == 1 {
+                inner_env[*i] =
+                    Some(Val::Int(helper.get_nth_param(pk).unwrap().into_int_value()));
+            } else {
+                let comps: Vec<IntValue<'c>> = (0..w)
+                    .map(|k| helper.get_nth_param(pk + k).unwrap().into_int_value())
+                    .collect();
+                inner_env[*i] = Some(Val::Agg(comps));
+            }
+            pk += w;
         }
         let helper_scrut = helper.get_nth_param(0).unwrap().into_int_value();
 
@@ -1567,20 +1894,23 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.build_elim_helper(helper, data, methods, &inner_env, helper_scrut)?;
         self.builder.position_at_end(saved);
 
-        // call the helper on the scrutinee + captured live env.
+        // call the helper on the scrutinee + captured live env (Aggs flattened).
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::with_capacity(nparams);
         call_args.push(scrut_val.into());
         for (_, v) in &live {
-            call_args.push((*v).into());
+            for c in v.components() {
+                call_args.push(c.into());
+            }
         }
-        Ok(self
-            .builder
-            .build_call(helper, &call_args, "elim")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap()
-            .into_int_value())
+        Ok(Val::Int(
+            self.builder
+                .build_call(helper, &call_args, "elim")
+                .unwrap()
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_int_value(),
+        ))
     }
 
     /// Emit the body of a boxed-eliminator helper: switch on the scrutinee's tag,
@@ -1596,8 +1926,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
         scrut_val: IntValue<'c>,
     ) -> Result<(), String> {
         // The captured env values, as seen INSIDE the helper, are exactly the
-        // helper's own parameters #1.. (param #0 is the scrutinee). A recursive
-        // call must forward THESE, not the outer caller's values.
+        // helper's own parameters #1.. (param #0 is the scrutinee; flat-record
+        // slots were flattened into consecutive params by the caller). A
+        // recursive call must forward THESE, not the outer caller's values.
         let captured: Vec<IntValue<'c>> = helper
             .get_params()
             .iter()
@@ -1652,22 +1983,25 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let mut arg_vals: Vec<Slot<'c>> = Vec::with_capacity(ctor.args.len());
             for ai in 0..ctor.args.len() {
                 let arg_val: Slot<'c> = match lay.arg_slot[ai] {
-                    Some(s) => Some(self.load(scrut_ptr, s, "field")),
+                    Some(sl) => Some(self.load_field(scrut_ptr, sl, lay.arg_width[ai])),
                     None => None, // erased argument: no runtime witness.
                 };
-                menv.push(arg_val);
+                menv.push(arg_val.clone());
                 arg_vals.push(arg_val);
             }
             for ai in 0..ctor.args.len() {
                 if lay.arg_recursive[ai] {
                     // induction hypothesis: elim recursively on the (boxed) field.
-                    let field_ptr = arg_vals[ai].ok_or_else(|| {
-                        format!(
-                            "{}.{}: a recursive argument was erased — impossible for a \
+                    let field_ptr = arg_vals[ai]
+                        .clone()
+                        .ok_or_else(|| {
+                            format!(
+                                "{}.{}: a recursive argument was erased — impossible for a \
                              strictly-positive family",
-                            data, ctor.name
-                        )
-                    })?;
+                                data, ctor.name
+                            )
+                        })?
+                        .as_int("recursive field")?;
                     let mut rec_args: Vec<inkwell::values::BasicMetadataValueEnum> =
                         Vec::with_capacity(1 + captured.len());
                     rec_args.push(field_ptr.into());
@@ -1682,7 +2016,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         .left()
                         .unwrap()
                         .into_int_value();
-                    menv.push(Some(ih));
+                    menv.push(Some(Val::Int(ih)));
                 }
             }
 
@@ -1702,7 +2036,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     }
                 }
             }
-            let result = self.compile(helper, &menv, body)?;
+            // the helper's return slot is one scalar: a flat-record result is
+            // boxed here and unboxed at its eventual match (both reps are valid).
+            let result = self.compile_v(helper, &menv, body)?;
+            let result = self.coerce(result, 1)?.as_int("eliminator result")?;
             self.builder.build_return(Some(&result)).unwrap();
         }
         Ok(())
@@ -1719,16 +2056,16 @@ impl<'c, 'a> DepCg<'c, 'a> {
         fi: usize,
         method: &Term,
         scrut: &Term,
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         let decl = self
             .sig
             .data(data)
             .ok_or_else(|| format!("match on unknown datatype `{data}`"))?;
         let ctor = &decl.ctors[0];
-        let scrut_val = self.compile(f, env, scrut)?;
+        let scrut_val = self.compile_v(f, env, scrut)?;
         let mut menv = env.to_vec();
         for ai in 0..ctor.args.len() {
-            menv.push(if ai == fi { Some(scrut_val) } else { None });
+            menv.push(if ai == fi { Some(scrut_val.clone()) } else { None });
         }
         let mut body = strip_ann(method);
         for _ in 0..ctor.args.len() {
@@ -1742,7 +2079,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 }
             }
         }
-        self.compile(f, &menv, body)
+        self.compile_v(f, &menv, body)
     }
 
     /// Compile `Case` (non-recursive general case-split) IN PLACE: switch on the boxed
@@ -1759,7 +2096,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         data: &str,
         methods: &[Term],
         scrut: &Term,
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         let decl = self
             .sig
             .data(data)
@@ -1773,6 +2110,44 @@ impl<'c, 'a> DepCg<'c, 'a> {
         }
         if let Some(fi) = transparent_field(self.sig, data) {
             return self.compile_transparent_match(f, env, data, fi, &methods[0], scrut);
+        }
+        // A FLAT RECORD match: no tag, no switch, no loads — the scrutinee's
+        // components (unboxed here if it arrived as a boxed pointer from a
+        // generic boundary) ARE the fields; bind them and compile the single
+        // method in place.
+        if let Some(w) = record_width(self.sig, data) {
+            let sv = self.compile_v(f, env, scrut)?;
+            let comps = self.coerce(sv, w)?.components();
+            let lay = ctor_layout(self.sig, data, &decl.ctors[0].name)?;
+            let nargs = decl.ctors[0].args.len();
+            let mut menv = env.to_vec();
+            let mut off = 0usize;
+            for ai in 0..nargs {
+                if lay.arg_slot[ai].is_some() {
+                    let wi = lay.arg_width[ai] as usize;
+                    let v = if wi == 1 {
+                        Val::Int(comps[off])
+                    } else {
+                        Val::Agg(comps[off..off + wi].to_vec())
+                    };
+                    off += wi;
+                    menv.push(Some(v));
+                } else {
+                    menv.push(None);
+                }
+            }
+            let mut body = strip_ann(&methods[0]);
+            for _ in 0..nargs {
+                match body {
+                    Term::Lam(inner) => body = strip_ann(inner),
+                    _ => {
+                        return Err(format!(
+                            "case[{data}]: method is not a {nargs}-argument function"
+                        ))
+                    }
+                }
+            }
+            return self.compile_v(f, &menv, body);
         }
         let scrut_val = self.compile(f, env, scrut)?;
         let scrut_ptr = self
@@ -1799,8 +2174,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.builder.position_at_end(default);
         self.builder.build_unreachable().unwrap();
 
-        // each arm binds the ctor's fields, compiles the method, branches to `join`.
-        let mut incoming: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> =
+        // each arm binds the ctor's fields (a record field loads its consecutive
+        // slots) and compiles the method; the branch to `join` is deferred until
+        // every arm's result WIDTH is known, so mixed representations coerce to
+        // one width before the phi-join.
+        let mut arm_results: Vec<(Val<'c>, inkwell::basic_block::BasicBlock<'c>)> =
             Vec::with_capacity(decl.ctors.len());
         for (ci, ctor) in decl.ctors.iter().enumerate() {
             self.builder.position_at_end(arm_blocks[ci]);
@@ -1808,7 +2186,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let mut menv = env.to_vec();
             for ai in 0..ctor.args.len() {
                 let arg_val: Slot<'c> = match lay.arg_slot[ai] {
-                    Some(s) => Some(self.load(scrut_ptr, s, "field")),
+                    Some(sl) => Some(self.load_field(scrut_ptr, sl, lay.arg_width[ai])),
                     None => None, // erased argument: no runtime witness.
                 };
                 menv.push(arg_val);
@@ -1827,20 +2205,36 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     }
                 }
             }
-            let result = self.compile(f, &menv, body)?;
+            let result = self.compile_v(f, &menv, body)?;
             // the method body may have emitted its own control flow, so the phi's
             // predecessor is the CURRENT block, not necessarily `arm_blocks[ci]`.
             let pred = self.builder.get_insert_block().unwrap();
+            arm_results.push((result, pred));
+        }
+
+        // one common width for the join: the widest arm (record arms may mix the
+        // flat and the boxed representation; both coerce).
+        let w = arm_results.iter().map(|(v, _)| v.width()).max().unwrap_or(1);
+        let mut incoming: Vec<(Vec<IntValue<'c>>, inkwell::basic_block::BasicBlock<'c>)> =
+            Vec::with_capacity(arm_results.len());
+        for (v, bb) in arm_results {
+            self.builder.position_at_end(bb);
+            let comps = self.coerce(v, w)?.components();
+            let pred = self.builder.get_insert_block().unwrap();
             self.builder.build_unconditional_branch(join).unwrap();
-            incoming.push((result, pred));
+            incoming.push((comps, pred));
         }
 
         self.builder.position_at_end(join);
-        let phi = self.builder.build_phi(self.i64t, "case.result").unwrap();
-        for (v, bb) in &incoming {
-            phi.add_incoming(&[(v as &dyn inkwell::values::BasicValue, *bb)]);
+        let mut out: Vec<IntValue<'c>> = Vec::with_capacity(w as usize);
+        for k in 0..w as usize {
+            let phi = self.builder.build_phi(self.i64t, "case.result").unwrap();
+            for (comps, bb) in &incoming {
+                phi.add_incoming(&[(&comps[k] as &dyn inkwell::values::BasicValue, *bb)]);
+            }
+            out.push(phi.as_basic_value().into_int_value());
         }
-        Ok(phi.as_basic_value().into_int_value())
+        Ok(if w == 1 { Val::Int(out[0]) } else { Val::Agg(out) })
     }
 
     /// `elim z s n` (Nat-like) as a native loop:
@@ -1853,7 +2247,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
         s: &Term,
         scrut: &Term,
     ) -> Result<IntValue<'c>, String> {
-        let zv = self.compile(f, env, z)?;
+        // the loop-carried accumulator is one scalar: a record acc crosses boxed.
+        let zv0 = self.compile_v(f, env, z)?;
+        let zv = self.coerce(zv0, 1)?.as_int("fold accumulator")?;
         let nv = self.compile(f, env, scrut)?;
 
         // s = λk. λih. body
@@ -1888,9 +2284,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
         self.builder.position_at_end(body);
         let mut env2 = env.to_vec();
-        env2.push(Some(k_val)); // k
-        env2.push(Some(acc_val)); // ih
-        let next_acc = self.compile(f, &env2, s_body)?;
+        env2.push(Some(Val::Int(k_val))); // k
+        env2.push(Some(Val::Int(acc_val))); // ih
+        let next_acc0 = self.compile_v(f, &env2, s_body)?;
+        let next_acc = self.coerce(next_acc0, 1)?.as_int("fold accumulator")?;
         let next_k = self
             .builder
             .build_int_add(k_val, self.i64t.const_int(1, false), "k.next")
@@ -1913,7 +2310,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         z: &Term,
         s: &Term,
         scrut: &Term,
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         let nv = self.compile(f, env, scrut)?;
         let s_body = match strip_ann(s) {
             Term::Lam(b) => &**b,
@@ -1930,10 +2327,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .build_conditional_branch(is_zero, zero_bb, succ_bb)
             .unwrap();
 
+        // compile both arms first (branches deferred), then coerce to one common
+        // width — a record arm may be flat (Agg) or boxed (Int); both join.
         self.builder.position_at_end(zero_bb);
-        let zv = self.compile(f, env, z)?;
+        let zv = self.compile_v(f, env, z)?;
         let zero_end = self.builder.get_insert_block().unwrap();
-        self.builder.build_unconditional_branch(join_bb).unwrap();
 
         self.builder.position_at_end(succ_bb);
         let k = self
@@ -1941,104 +2339,186 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .build_int_sub(nv, self.i64t.const_int(1, false), "k")
             .unwrap();
         let mut env2 = env.to_vec();
-        env2.push(Some(k));
-        let sv = self.compile(f, &env2, s_body)?;
+        env2.push(Some(Val::Int(k)));
+        let sv = self.compile_v(f, &env2, s_body)?;
+        let succ_end = self.builder.get_insert_block().unwrap();
+
+        let w = zv.width().max(sv.width());
+        self.builder.position_at_end(zero_end);
+        let zc = self.coerce(zv, w)?.components();
+        let zero_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(join_bb).unwrap();
+        self.builder.position_at_end(succ_end);
+        let sc = self.coerce(sv, w)?.components();
         let succ_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(join_bb).unwrap();
 
         self.builder.position_at_end(join_bb);
-        let phi = self.builder.build_phi(self.i64t, "case").unwrap();
-        phi.add_incoming(&[(&zv, zero_end), (&sv, succ_end)]);
-        Ok(phi.as_basic_value().into_int_value())
+        let mut out: Vec<IntValue<'c>> = Vec::with_capacity(w as usize);
+        for kk in 0..w as usize {
+            let phi = self.builder.build_phi(self.i64t, "case").unwrap();
+            phi.add_incoming(&[(&zc[kk], zero_end), (&sc[kk], succ_end)]);
+            out.push(phi.as_basic_value().into_int_value());
+        }
+        Ok(if w == 1 { Val::Int(out[0]) } else { Val::Agg(out) })
     }
 
-    /// Compile a call to a `Fix` function: evaluate the NON-erased arguments and
-    /// emit the call. (Erased — multiplicity-0 — arguments are not passed.)
+    /// Compile a call to a `Fix` function: evaluate the NON-erased arguments —
+    /// each coerced to its DECLARED width and flattened (a flat record becomes
+    /// consecutive i64 arguments; erased — multiplicity-0 — arguments are not
+    /// passed) — and emit the call. A `ret_width > 1` callee returns an LLVM
+    /// `{i64 × w}` aggregate, unpacked back into registers here.
     fn compile_call(
         &self,
         f: FunctionValue<'c>,
         env: &[Slot<'c>],
         func: FunctionValue<'c>,
-        erased: &[bool],
+        params: &[Option<u32>],
+        ret_width: u32,
         args: &[&Term],
-    ) -> Result<IntValue<'c>, String> {
+    ) -> Result<Val<'c>, String> {
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            if !erased.get(i).copied().unwrap_or(false) {
-                call_args.push(self.compile(f, env, a)?.into());
+            match params.get(i).copied().unwrap_or(Some(1)) {
+                None => {} // erased: never compiled, never passed.
+                Some(w) => {
+                    let v = self.compile_v(f, env, a)?;
+                    for c in self.coerce(v, w)?.components() {
+                        call_args.push(c.into());
+                    }
+                }
             }
         }
-        Ok(self
+        let ret = self
             .builder
             .build_call(func, &call_args, "call")
             .unwrap()
             .try_as_basic_value()
             .left()
-            .unwrap()
-            .into_int_value())
+            .unwrap();
+        if ret_width <= 1 {
+            return Ok(Val::Int(ret.into_int_value()));
+        }
+        let agg = ret.into_struct_value();
+        let mut comps = Vec::with_capacity(ret_width as usize);
+        for k in 0..ret_width {
+            comps.push(
+                self.builder
+                    .build_extract_value(agg, k, "ret.fld")
+                    .unwrap()
+                    .into_int_value(),
+            );
+        }
+        Ok(Val::Agg(comps))
     }
 
     /// Build (once, memoized by term identity) the native function for a `Fix`.
     /// `Fix(ty, body)` with `body = λp₁…λpₙ. inner` becomes a recursive function of
     /// the non-erased parameters; self-references in `inner` compile to calls to it.
+    /// The `Fix` carries its full Π telescope, so each parameter's WIDTH is known:
+    /// a flat-record parameter flattens into consecutive i64 params (registers —
+    /// the by-value calling convention), and a record RETURN is an `{i64 × w}`.
     fn build_fix(
         &self,
         fix_term: &Term,
         ty: &Term,
         body: &Term,
-    ) -> Result<(FunctionValue<'c>, Vec<bool>), String> {
-        // erasure flags: pair each body lambda with its type's Π multiplicity.
-        let mut erased = Vec::new();
+    ) -> Result<(FunctionValue<'c>, Vec<Option<u32>>, u32), String> {
+        // per-parameter layout: pair each body lambda with its Π binder — `None`
+        // for an erased (multiplicity-0) binder, else the domain type's width.
+        let mut params: Vec<Option<u32>> = Vec::new();
         let mut t_ty = strip_ann(ty);
         let mut t_body = strip_ann(body);
-        while let (Term::Lam(inner), Term::Pi(m, _d, cod)) = (t_body, t_ty) {
-            erased.push(*m == Mult::Zero);
+        while let (Term::Lam(inner), Term::Pi(m, d, cod)) = (t_body, t_ty) {
+            if *m == Mult::Zero {
+                params.push(None);
+            } else {
+                params.push(Some(type_width(self.sig, d)));
+            }
             t_body = strip_ann(inner);
             t_ty = strip_ann(cod);
         }
         let inner = t_body;
+        let ret_width = type_width(self.sig, t_ty);
 
         let key = fix_term as *const Term;
         if let Some(&func) = self.fix_cache.borrow().get(&key) {
-            return Ok((func, erased));
+            return Ok((func, params, ret_width));
         }
 
-        let n_runtime = erased.iter().filter(|e| !**e).count();
+        let n_scalar: u32 = params.iter().filter_map(|p| *p).sum();
         let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
-            std::iter::repeat(self.i64t.into()).take(n_runtime).collect();
+            std::iter::repeat(self.i64t.into()).take(n_scalar as usize).collect();
         let fname = self.fresh("tally_fix");
-        let func = self
-            .module
-            .add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
+        let ret_struct = if ret_width > 1 {
+            Some(self.ctx.struct_type(
+                &vec![self.i64t.into(); ret_width as usize],
+                false,
+            ))
+        } else {
+            None
+        };
+        let fn_ty = match ret_struct {
+            Some(st) => st.fn_type(&param_tys, false),
+            None => self.i64t.fn_type(&param_tys, false),
+        };
+        let func = self.module.add_function(&fname, fn_ty, None);
         self.fix_cache.borrow_mut().insert(key, func);
 
-        // Fresh body env: [self, p₁, …, pₙ] (self at level 0; erased params are None).
+        // Fresh body env: [self, p₁, …, pₙ] (self at level 0; erased params are
+        // None; a width-w param rebuilds its Agg from w consecutive LLVM params).
         let saved = self.builder.get_insert_block();
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         let mut body_env: Vec<Slot<'c>> = vec![None]; // self
         let mut rt = 0u32;
-        for e in &erased {
-            if *e {
-                body_env.push(None);
-            } else {
-                body_env.push(Some(func.get_nth_param(rt).unwrap().into_int_value()));
-                rt += 1;
+        for pw in &params {
+            match pw {
+                None => body_env.push(None),
+                Some(1) => {
+                    body_env
+                        .push(Some(Val::Int(func.get_nth_param(rt).unwrap().into_int_value())));
+                    rt += 1;
+                }
+                Some(w) => {
+                    let comps: Vec<IntValue<'c>> = (0..*w)
+                        .map(|k| func.get_nth_param(rt + k).unwrap().into_int_value())
+                        .collect();
+                    body_env.push(Some(Val::Agg(comps)));
+                    rt += *w;
+                }
             }
         }
         self.fix_selves.borrow_mut().push(FixSelf {
             level: 0,
             func,
-            erased: erased.clone(),
+            params: params.clone(),
+            ret_width,
         });
-        let result = self.compile(func, &body_env, inner);
+        let result = self.compile_v(func, &body_env, inner);
         self.fix_selves.borrow_mut().pop();
-        let result = result?;
-        self.builder.build_return(Some(&result)).unwrap();
+        let result = self.coerce(result?, ret_width)?;
+        match (&result, ret_struct) {
+            (Val::Int(v), None) => {
+                self.builder.build_return(Some(v)).unwrap();
+            }
+            (Val::Agg(comps), Some(st)) => {
+                let mut agg = st.get_undef();
+                for (k, c) in comps.iter().enumerate() {
+                    agg = self
+                        .builder
+                        .build_insert_value(agg, *c, k as u32, "ret.agg")
+                        .unwrap()
+                        .into_struct_value();
+                }
+                self.builder.build_return(Some(&agg)).unwrap();
+            }
+            _ => return Err("fix: return width mismatch (impossible)".into()),
+        }
         if let Some(bb) = saved {
             self.builder.position_at_end(bb);
         }
-        Ok((func, erased))
+        Ok((func, params, ret_width))
     }
 
     /// Compile a function-typed-motive `NatElim` applied to its accumulators (Phase
@@ -2107,8 +2587,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
             // zero: `z a₁…a_K` — env = [a₁ … a_K] (de Bruijn 0 = a_K, the innermost).
             self.builder.position_at_end(zero_bb);
-            let zero_env: Vec<Slot<'c>> = acc_params.iter().map(|v| Some(*v)).collect();
-            let zr = self.compile(func, &zero_env, z_body)?;
+            let zero_env: Vec<Slot<'c>> =
+                acc_params.iter().map(|v| Some(Val::Int(*v))).collect();
+            let zr0 = self.compile_v(func, &zero_env, z_body)?;
+            let zr = self.coerce(zr0, 1)?.as_int("accumulator-fold result")?;
             self.builder.build_return(Some(&zr)).unwrap();
 
             // succ: k = i - 1; env = [k, ih, a₁ … a_K]; the IH self sits at level 1.
@@ -2117,10 +2599,13 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 .builder
                 .build_int_sub(i_param, self.i64t.const_int(1, false), "k")
                 .unwrap();
-            let mut succ_env: Vec<Slot<'c>> = vec![Some(k_val), None]; // k (level 0), ih (level 1)
-            succ_env.extend(acc_params.iter().map(|v| Some(*v)));
+            let mut succ_env: Vec<Slot<'c>> = vec![Some(Val::Int(k_val)), None]; // k (level 0), ih (level 1)
+            succ_env.extend(acc_params.iter().map(|v| Some(Val::Int(*v))));
             self.acc_ih_selves.borrow_mut().push(AccIhSelf { ih_level: 1, func, k_level: 0 });
-            let sr = self.compile(func, &succ_env, s_body);
+            let sr = self
+                .compile_v(func, &succ_env, s_body)
+                .and_then(|v| self.coerce(v, 1))
+                .and_then(|v| v.as_int("accumulator-fold result"));
             self.acc_ih_selves.borrow_mut().pop();
             let sr = sr?;
             self.builder.build_return(Some(&sr)).unwrap();
@@ -2133,11 +2618,13 @@ impl<'c, 'a> DepCg<'c, 'a> {
             func
         };
 
-        // call `g(scrut, args…)` with the accumulators evaluated in the CURRENT env.
+        // call `g(scrut, args…)` with the accumulators evaluated in the CURRENT env
+        // (accumulator slots are one scalar; a record acc crosses boxed).
         let scrut_v = self.compile(f, env, scrut)?;
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![scrut_v.into()];
         for a in args {
-            call_args.push(self.compile(f, env, a)?.into());
+            let v = self.compile_v(f, env, a)?;
+            call_args.push(self.coerce(v, 1)?.as_int("accumulator arg")?.into());
         }
         Ok(self
             .builder
@@ -2216,7 +2703,9 @@ fn build_module<'c>(
         acc_ih_selves: RefCell::new(Vec::new()),
         elim_fold_ihs: RefCell::new(Vec::new()),
     };
-    let result = cg.compile(f, &[], main)?;
+    let result = cg
+        .compile_v(f, &[], main)?
+        .as_int("main (a program's result must be a scalar)")?;
     builder.build_return(Some(&result)).unwrap();
 
     if let Err(e) = module.verify() {
@@ -3229,6 +3718,135 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
     }
 
+    // ---- Phase B2: flat multi-field structs BY VALUE ----
+
+    const POINT: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        struct Point { x : Nat, y : Nat }\n";
+
+    #[test]
+    fn flat_record_by_value_runs() {
+        // a two-field struct crossing a REAL function boundary (%partial ⇒ a
+        // native Fix function) by value, both as parameter and as return.
+        let src = format!(
+            "{POINT}\
+             step : Point -> Point\n\
+             %partial fn step(p) {{ match p {{ Point(a, b) => Point(a + b, b + 1) }} }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             main : Nat\n\
+             fn main() {{ let p0 = Point(3, 4); let p1 = step(p0); norm1(p1) }}\n"
+        );
+        assert_eq!(run(&src), 12);
+    }
+
+    #[test]
+    fn flat_record_ir_is_registers_no_malloc() {
+        let src = format!(
+            "{POINT}\
+             step : Point -> Point\n\
+             %partial fn step(p) {{ match p {{ Point(a, b) => Point(a + b, b + 1) }} }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             main : Nat\n\
+             fn main() {{ let p0 = Point(3, 4); let p1 = step(p0); norm1(p1) }}\n"
+        );
+        let ir = ir(&src);
+        // (1) constructing, passing, returning, and matching the record touches
+        // the heap NOWHERE — this is the whole point of Phase B2.
+        assert_eq!(
+            ir.matches("call ptr @malloc").count(),
+            0,
+            "a by-value record program must not allocate\n{ir}"
+        );
+        // (2) the function boundary is the two-register C convention: two i64
+        // params in, a {{ i64, i64 }} aggregate out.
+        assert!(
+            ir.contains("define { i64, i64 }"),
+            "the record-returning Fix must return an {{ i64, i64 }}\n{ir}"
+        );
+    }
+
+    #[test]
+    fn records_cross_generic_boundaries() {
+        // a record entering a GENERIC position (a container's `a` slot) takes
+        // the boxed representation and is unboxed at its eventual match — both
+        // representations are valid everywhere, so nesting containers, record
+        // fields of records (width 3), and by-value passing all compose.
+        let src = format!(
+            "{POINT}\
+             enum PBox (a : Type) {{ MkBox : a -> PBox a }}\n\
+             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
+             struct Seg {{ from : Point, len : Nat }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             unbox1 : PBox Point -> Nat\n\
+             fn unbox1(b) {{ match b {{ MkBox(p) => norm1(p) }} }}\n\
+             sumlist : PList Point -> Nat\n\
+             %partial fn sumlist(xs) {{ match xs {{ PNil => 0, PCons(p, t) => norm1(p) + sumlist(t), }} }}\n\
+             seglen : Seg -> Nat\n\
+             fn seglen(s) {{ match s {{ Seg(p, n) => norm1(p) + n }} }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let v1 = unbox1(MkBox(Point(10, 20)));\n\
+                 let v2 = sumlist(PCons(Point(1, 2), PCons(Point(3, 4), PNil)));\n\
+                 let v3 = seglen(Seg(Point(5, 6), 7));\n\
+                 v1 + v2 + v3\n\
+             }}\n"
+        );
+        assert_eq!(run(&src), 58);
+    }
+
+    #[test]
+    fn record_by_value_crosses_c_ffi() {
+        // THE C-interop payoff: a flat record flattens into consecutive i64
+        // arguments, which on AArch64/SysV is exactly the by-value ABI for a
+        // ≤ 2-register integer C struct — so a real C function receives a
+        // `struct { long long x, y; }` BY VALUE from tally, no glue.
+        let src = format!(
+            "{POINT}\
+             %foreign sumpt : Point -> Nat\n\
+             main : Nat\n\
+             fn main() {{ sumpt(Point(6, 7)) }}\n"
+        );
+        let prog = rust_surface::check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").unwrap();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let cfile = dir.join(format!("tally_sumpt_{pid}.c"));
+        let cobj = dir.join(format!("tally_sumpt_{pid}_c.o"));
+        let obj = dir.join(format!("tally_sumpt_{pid}.o"));
+        let exe = dir.join(format!("tally_sumpt_{pid}"));
+        std::fs::write(
+            &cfile,
+            "struct P { long long x, y; };\nlong long sumpt(struct P p) { return p.x * p.y + 1; }\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("cc")
+            .args(["-O2", "-c"])
+            .arg(&cfile)
+            .arg("-o")
+            .arg(&cobj)
+            .status()
+            .unwrap()
+            .success());
+        super::build_object_opts(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default, true)
+            .unwrap();
+        assert!(std::process::Command::new("cc")
+            .arg(&obj)
+            .arg(&cobj)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success());
+        let out = std::process::Command::new(&exe).output().unwrap();
+        for fpath in [&cfile, &cobj, &obj, &exe] {
+            let _ = std::fs::remove_file(fpath);
+        }
+        let _ = std::fs::remove_file(exe.with_extension("o.ll"));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "43"); // 6·7 + 1
+    }
+
     // ---- char I/O: getc/putc — a real program talks to the world ----
 
     #[test]
@@ -3353,15 +3971,16 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         );
         let ir = ir(&src);
 
-        // (1) The 3-element buffer is ONE malloc of exactly 3×8 = 24 bytes: no
-        // header, no stored length, no per-element cell — the length lives only
-        // in the erased index. (The second 24B cell is the `ARead` pair that
-        // threads the linear array back; -O2 scalarizes it away.)
+        // (1) The 3-element buffer is the ONLY malloc in the program — exactly
+        // 3×8 = 24 bytes: no header, no stored length, no per-element cell (the
+        // length lives only in the erased index), and the `ARead` pair that
+        // threads the linear array back is a FLAT RECORD — registers, not a
+        // cell, even at -O0 (Phase B2).
         let sizes = malloc_sizes(&ir);
         assert_eq!(
             sizes,
-            [(24u64, 2usize)].into_iter().collect(),
-            "array heap traffic must be the flat buffer + the ARead pair; got {sizes:?}\n{ir}"
+            [(24u64, 1usize)].into_iter().collect(),
+            "array heap traffic must be exactly the flat buffer; got {sizes:?}\n{ir}"
         );
 
         // (2) The ONLY compare/branch in the whole program is `anew`'s fill

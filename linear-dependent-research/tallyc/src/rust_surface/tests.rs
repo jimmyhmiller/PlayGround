@@ -1837,3 +1837,30 @@ fn array_linear_element_cannot_be_stored() {
     let err = check_program(&src).err().expect("a linear element must be rejected");
     assert!(format!("{err:?}").contains("ω ⋢ 1"), "expected ω ⋢ 1, got {err:?}");
 }
+
+#[test]
+fn linear_field_in_by_value_record_still_accounted() {
+    // Phase B2 changes the REPRESENTATION of a multi-field struct (registers,
+    // not a cell) but must not change the ACCOUNTING: an `Own` field inside a
+    // by-value record is still consumed exactly once.
+    let base = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        struct Handle { o : Own Nat, tag : Nat }\n";
+    let dbl = format!(
+        "{base}\
+         use2 : Handle -> Nat\n\
+         fn use2(h) {{ match h {{ Handle(o, t) => let u = free(o); let v = free(o); t }} }}\n\
+         main : Nat\n\
+         fn main() {{ use2(Handle(alloc(0), 9)) }}\n"
+    );
+    let err = check_program(&dbl).err().expect("double-free through a record must be rejected");
+    assert!(format!("{err:?}").contains("ω ⋢ 1"), "expected ω ⋢ 1, got {err:?}");
+
+    let ok = format!(
+        "{base}\
+         use1 : Handle -> Nat\n\
+         fn use1(h) {{ match h {{ Handle(o, t) => let u = free(o); t }} }}\n\
+         main : Nat\n\
+         fn main() {{ use1(Handle(alloc(0), 9)) }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+}

@@ -1,10 +1,31 @@
 # Phase B2 — flat multi-field structs BY VALUE (+ layout control)
 
-**STATUS: PLAN — design-first, not built.** This is the honest scoping of the two
-C-level gaps that remain after contiguous arrays, `%foreign`, and char I/O landed:
-flat multi-field structs by value, and layout control (`repr`, offsets, bit
-fields). It is the FULL Phase B of `FUTURE_WORK.md` §12 ("the big representation
-rewrite"), deliberately not attempted as a side effect of the array work.
+**STATUS: CORE BUILT (steps 1–2 + small-struct FFI).** Flat records now compile
+BY VALUE: `struct Point { x, y }` is two SSA registers — zero malloc, no tag
+(IR-tested); it crosses `Fix` function boundaries as consecutive i64 params and
+an `{i64 × w}` return (the two-register C convention); records nest (a record
+field of record type flattens inline); a record entering a GENERIC position
+(container element, abstract-typed argument) takes the BOXED representation and
+any match accepts either — the two-representation scheme below, implemented in
+`dep_codegen.rs` (`Val::{Int,Agg}`, `record_width`/`type_width`, `coerce`).
+`%foreign` flattens record arguments, which on AArch64/SysV IS the by-value ABI
+for a ≤2-register integer C struct — tested against a real C function taking
+`struct { long long x, y; }` by value. The prelude's read-back pairs (`ARead`,
+`Cell`, `CL`/`VL`, `Taken`) became flat records too: no malloc per read even at
+-O0. An `Own` field inside a record keeps its linear accounting unchanged.
+
+**Not yet (the honest remainder):** flat record ELEMENTS in `Arr` (AoS — `Arr`
+elements stay uniformly one slot, so record elements are boxed; flat AoS needs
+per-instantiation layouts, i.e. monomorphization — SoA remains the flat layout
+meanwhile); records as `Own`/`valloc` payloads inline (uniformly boxed, same
+reason); records as TOTAL-fold accumulators/results stay boxed at those loop
+boundaries (`%partial` Fix loops keep them in registers); `repr`/field-width/
+bit-field layout control (§4 below).
+
+The original plan follows; the key deviation from it is that no separate "typed
+lowering IR" was needed — the erased terms already carry enough type information
+locally (`Case`/`Constr` carry the datatype name, `Fix` carries its Π telescope),
+which is what made the two-representation scheme implementable in one pass.
 
 ## Where the line is today
 
