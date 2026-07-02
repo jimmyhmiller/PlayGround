@@ -233,6 +233,11 @@ pub struct Signature {
     /// as linear. This closes the silent-leak hole for resource types (memory
     /// views, file handles, …) and lets users declare their own linear types.
     pub linear_types: std::collections::HashSet<String>,
+    /// `%foreign` postulates: surface name → the extern C symbol its runtime
+    /// applications call (at the i64 ABI — one `i64` per non-erased argument,
+    /// an `i64` result). To the KERNEL these are ordinary opaque postulates
+    /// (also present in `postulates`, never reduced); only codegen reads this.
+    pub foreigns: std::collections::HashMap<String, String>,
 }
 
 impl Signature {

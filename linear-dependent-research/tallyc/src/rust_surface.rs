@@ -68,6 +68,7 @@ enum Tok {
     KwTotal,
     KwPartial,
     KwLinear,
+    KwForeign,
 }
 
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
@@ -101,6 +102,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "builtin" => out.push(Tok::KwBuiltin),
                 "total" => out.push(Tok::KwTotal),
                 "partial" => out.push(Tok::KwPartial),
+                "foreign" => out.push(Tok::KwForeign),
                 other => return Err(format!("unknown pragma `%{other}`")),
             }
             i = j;
@@ -299,6 +301,14 @@ enum Item {
     },
     /// `(name, type, linear?)` — `linear` marks a resource postulate type.
     Postulate(String, Ty, bool),
+    /// `%foreign ["c_symbol"] name : ty` — an opaque postulate whose native
+    /// lowering is a direct call to an extern C symbol (`c_symbol`, defaulting
+    /// to `name`) at the i64 ABI: one `i64` per RUNTIME (non-erased) argument,
+    /// an `i64` result. THE audited escape hatch (FUTURE_WORK §6/§8): the
+    /// kernel checks every use against the declared type, but the C side of
+    /// the boundary is trusted — like Rust's `extern`, wrap it in a safe,
+    /// honestly-typed declaration.
+    Foreign(String, String, Ty),
     /// `%builtin Nat <Type>` — opt `<Type>` into the packed integer
     /// representation (it must be a Nat-shaped enum). Holds the type name.
     BuiltinNat(String),
@@ -370,6 +380,21 @@ impl Parser {
             Some(Tok::KwStruct) => self.parse_struct(),
             Some(Tok::KwFn) => self.parse_fn(None),
             Some(Tok::KwPostulate) => self.parse_postulate(false),
+            // `%foreign ["c_symbol"] name : ty` — an extern-C postulate.
+            Some(Tok::KwForeign) => {
+                self.next();
+                let sym = match self.peek() {
+                    Some(Tok::Str(_)) => match self.next() {
+                        Some(Tok::Str(s)) => Some(s),
+                        _ => unreachable!(),
+                    },
+                    _ => None,
+                };
+                let name = self.ident()?;
+                self.eat(&Tok::Colon)?;
+                let ty = self.parse_ty()?;
+                Ok(Item::Foreign(name.clone(), sym.unwrap_or(name), ty))
+            }
             // `linear` prefixes a resource `postulate` or `enum` — a value of that
             // type may not be dropped or duplicated (an un-annotated binder of it
             // defaults to multiplicity 1). See `docs/VIEW_LAYER_PLAN.md`.
@@ -4395,6 +4420,7 @@ postulate afree : {0 a : Type} -> {0 n : Nat} -> (1 arr : Arr a n) -> Unit
 fn item_name(it: &Item) -> Option<&str> {
     match it {
         Item::Sig(n, _) | Item::Fn(n, _, _, _) | Item::Postulate(n, _, _) => Some(n),
+        Item::Foreign(n, _, _) => Some(n),
         Item::Enum { name, .. } | Item::Struct { name, .. } => Some(name),
         Item::BuiltinNat(_) => None,
     }
@@ -4669,6 +4695,19 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 if *linear {
                     sig.linear_types.insert(name.clone());
                 }
+            }
+            // `%foreign` — an ordinary opaque postulate to the kernel (every use
+            // is checked against the declared type; it can never reduce in a
+            // type), plus a registry entry telling codegen which extern C symbol
+            // its runtime applications call.
+            Item::Foreign(name, sym, pty) => {
+                let ty_term = elab.elab_ty(pty, &[])?;
+                let (arrows, _) = peel_arrows(pty);
+                let flags: Vec<bool> = arrows.iter().map(|(_, i, _, _)| *i).collect();
+                elab.defs.insert(name.clone(), (Term::Const(name.clone()), ty_term.clone()));
+                elab.def_implicit.insert(name.clone(), flags);
+                sig.postulates.push((name.clone(), ty_term));
+                sig.foreigns.insert(name.clone(), sym.clone());
             }
             _ => {}
         }

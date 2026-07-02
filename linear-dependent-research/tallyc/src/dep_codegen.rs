@@ -1295,6 +1295,44 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*arr);
                 Ok(self.i64t.const_zero())
             }
+            // `%foreign` — an extern C symbol at the i64 ABI: declare it with one
+            // i64 parameter per RUNTIME argument (erased Π[0] binders are dropped,
+            // as everywhere) returning i64, and emit a direct call. The C side of
+            // the boundary is trusted (the audited escape hatch); the kernel has
+            // already checked every use against the declared tally type.
+            other if self.sig.foreigns.contains_key(other) => {
+                let sym = self.sig.foreigns.get(other).unwrap().clone();
+                let rt = self.runtime_args(f, env, other, args)?;
+                let func = match self.module.get_function(&sym) {
+                    Some(g) => g,
+                    None => {
+                        let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                            rt.iter().map(|_| self.i64t.into()).collect();
+                        self.module
+                            .add_function(&sym, self.i64t.fn_type(&params, false), None)
+                    }
+                };
+                if func.count_params() as usize != rt.len() {
+                    return Err(format!(
+                        "%foreign `{other}` (symbol `{sym}`): called with {} runtime \
+                         argument(s) but the symbol was already declared with {} — one \
+                         extern declaration per symbol",
+                        rt.len(),
+                        func.count_params()
+                    ));
+                }
+                let call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    rt.iter().map(|v| (*v).into()).collect();
+                let ret = self
+                    .builder
+                    .build_call(func, &call_args, "ffi")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| format!("%foreign `{other}`: call produced no value"))?
+                    .into_int_value();
+                Ok(ret)
+            }
             // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
             // these only ever appear inside ERASED type annotations, so they must
             // never reach a runtime value position. If one does, that is a real bug.
@@ -3116,6 +3154,20 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- %foreign: FFI to arbitrary C functions at the i64 ABI ----
+
+    #[test]
+    fn foreign_ffi_calls_libc() {
+        // a real libc call, both the plain and the aliased ("C symbol") form. A
+        // Str literal is a NUL-terminated pointer, so `strlen` sees exactly a
+        // C string. 5 + 9 = 14.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            %foreign strlen : Str -> Nat\n\
+            %foreign \"strlen\" clen : Str -> Nat\n\
+            main : Nat\nfn main() { strlen(\"hello\") + clen(\"FFI works\") }\n";
+        assert_eq!(run(src), 14);
     }
 
     // ---- CONTIGUOUS ARRAYS: the C `a[i]` on a flat buffer, bounds erased ----
