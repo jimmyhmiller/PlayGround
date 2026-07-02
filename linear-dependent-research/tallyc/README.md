@@ -103,6 +103,42 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v1.8 — J, universes, the convoy fold, transparent newtypes, strings, nested patterns; 193 tests)
+
+On top of v1.7:
+
+- **`J` — the identity-type eliminator** (path induction) in the kernel: subst /
+  transport / cong are now derivable; ι-reduces on `refl` and ERASES to its base
+  case at codegen (every closed proof is a `refl`, so transport is free). The
+  prerequisite for the `natWf` accessibility lemma (well-founded recursion's
+  last missing library piece).
+- **Surface universe levels**: `Type 1`, `Type 2`, … in any type position;
+  `enum T : Type 1 { … }` declares where a family lives, and the kernel's
+  predicativity/Girard side-condition genuinely checks it — `Type`-storing
+  containers are writable, the paradox stays unrepresentable. Cumulativity
+  gives the practical direction of level polymorphism.
+- **THE CONVOY FOLD**: `lookup : {0 n} -> Fin n -> Vec Nat n -> Nat` is now
+  certified **`%total`** — its recursion varies `i`, but that is exactly the
+  index-dependent value the dependent motive abstracts, so it is an ordinary
+  KERNEL-CHECKED eliminator (the induction hypothesis is a function of the
+  refined index) — and it compiles to the same native recursion as before.
+- **NESTED PATTERNS**: `OCons(a, OCons(b, ONil)) => …` — the classic pattern
+  matrix as a surface desugar; arms sharing an outer constructor merge, bare
+  constructor names in patterns are constructors (not silently binders),
+  unreachable arms are rejected, and linearity flows through unchanged.
+- **Phase B slice 1 — transparent newtypes**: a single-field wrapper
+  (`struct Meters { v : Nat }`) costs NOTHING — construction is the field,
+  matching is a bind; zero `malloc`s, proven in the IR.
+- **Strings + effects**: `"…"` literals (`Str`), `prints`/`print`,
+  `main : Unit` programs whose stdout is exactly their effects
+  (`examples/hello.tal`); `%partial` doubles as a lowering directive so
+  effectful recursion runs in source order.
+- **Forward references**: definitions no longer need to precede their callers.
+- **Soundness kept ahead of features**: inferred LINEAR-CAPABILITY of type
+  parameters closed the generic-code-drops-a-linear-element hole; every new
+  elaboration facility (convoy, fold promotion) is gated on the kernel
+  re-check, never trusted.
+
 ## Status (v1.7 — REAL dependent pattern matching: the convoy; a proper linear type system; mult-poly; 179 tests)
 
 The release where the "dependent" half becomes real at the term level:
