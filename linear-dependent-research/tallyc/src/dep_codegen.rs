@@ -71,6 +71,12 @@ struct CtorLayout {
     /// for each constructor argument: how many consecutive slots it occupies
     /// (1 for scalars/pointers/generic fields; a flat record's width inline).
     arg_width: Vec<u32>,
+    /// for each constructor argument: is its WIDTH instantiation-dependent (a
+    /// parameter-typed field, or a record containing one)? A flex field of a
+    /// FLAT record takes its actual width from the value; a flex field of a
+    /// BOXED datatype has a fixed one-slot cell layout, so a record cannot be
+    /// stored there (hard error — box explicitly or use a concrete container).
+    arg_flex: Vec<bool>,
     /// for each constructor argument: is it a recursive occurrence of the family?
     arg_recursive: Vec<bool>,
     /// number of runtime field slots (excluding the tag).
@@ -87,21 +93,29 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
         .position(|c| c.name == cname)
         .ok_or_else(|| format!("`{cname}` is not a constructor of `{data}`"))? as u64;
     let ctor = &decl.ctors[tag as usize];
+    let np = decl.params.len();
     let mut arg_slot = Vec::with_capacity(ctor.args.len());
     let mut arg_width = Vec::with_capacity(ctor.args.len());
+    let mut arg_flex = Vec::with_capacity(ctor.args.len());
     let mut arg_recursive = Vec::with_capacity(ctor.args.len());
     let mut next: u32 = 1; // slot 0 is the tag
-    for (mult, aty) in &ctor.args {
+    for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
         let recursive = matches!(aty, Term::Data(dn, _) if dn == data);
         // a recursive field is always ONE slot (a pointer — a record cannot be
         // recursive, so this only guards belt-and-suspenders).
-        let w = if recursive { 1 } else { type_width(sig, aty) };
+        let (w, fx) = if recursive {
+            (1, false)
+        } else {
+            field_width(sig, aty, ai, np, &[], &mut std::collections::HashSet::new())
+        };
         if *mult == Mult::Zero {
             arg_slot.push(None);
             arg_width.push(0);
+            arg_flex.push(false);
         } else {
             arg_slot.push(Some(next));
             arg_width.push(w);
+            arg_flex.push(fx);
             next += w;
         }
         arg_recursive.push(recursive);
@@ -110,6 +124,7 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
         tag,
         arg_slot,
         arg_width,
+        arg_flex,
         arg_recursive,
         nfields: next - 1,
     })
@@ -123,76 +138,138 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
 /// pointer / scalar fields are one slot). This is Phase B2's core: constructing
 /// one is `insertvalue`-free SSA, matching is projection — zero malloc, no tag.
 fn record_width(sig: &Signature, data: &str) -> Option<u32> {
-    record_width_seen(sig, data, &mut std::collections::HashSet::new())
+    match record_shape(sig, data, &[], &mut std::collections::HashSet::new()) {
+        Some((w, _flex)) => Some(w),
+        None => None,
+    }
 }
 
-fn record_width_seen(
+/// The SHAPE of a flat record instantiated at `dargs` (the datatype's type
+/// arguments, possibly empty): `Some((width, flex))` where `width` is the total
+/// scalar-slot count with every parameter-typed field resolved through `dargs`,
+/// and `flex` is true when some field's width could not be resolved (an
+/// abstract `Var` survives) — the record's layout then varies by instantiation
+/// and only the VALUE knows its true width. `None` = not a flat record.
+fn record_shape(
     sig: &Signature,
     data: &str,
+    dargs: &[Term],
     seen: &mut std::collections::HashSet<String>,
-) -> Option<u32> {
+) -> Option<(u32, bool)> {
     if !seen.insert(data.to_string()) {
         return None; // a cycle through record types needs indirection: boxed.
     }
     let d = sig.data(data)?;
     if nat_like(sig, data).is_some() || d.ctors.len() != 1 {
+        seen.remove(data);
         return None;
     }
+    let np = d.params.len();
     let ctor = &d.ctors[0];
     let mut nruntime = 0usize;
     let mut width = 0u32;
-    for (mult, aty) in &ctor.args {
+    let mut flex = false;
+    for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
         if matches!(aty, Term::Data(dn, _) if dn == data) {
+            seen.remove(data);
             return None; // recursive: needs indirection.
         }
         if *mult == Mult::Zero {
             continue;
         }
         nruntime += 1;
-        width += type_width_seen(sig, aty, seen);
+        let (w, fx) = field_width(sig, aty, ai, np, dargs, seen);
+        width += w;
+        flex |= fx;
     }
+    seen.remove(data);
     if nruntime < 2 {
         return None; // nullary → shared constant; single → transparent newtype.
     }
-    Some(width)
+    Some((width, flex))
 }
 
-/// The runtime WIDTH (in i64 slots) of a value of this type term: flat records
-/// span their field widths; a transparent newtype is exactly its field; every
-/// other type — scalars, boxed pointers, and GENERIC (`Var`) positions — is one
-/// slot. A record flowing into a one-slot (generic/unknown) position is BOXED
-/// there and unboxed when matched; both representations are always valid, so
-/// this is a performance decision made locally, never a soundness one.
+/// Width of constructor-argument `ai`'s type, resolving a reference to the
+/// datatype's own parameters through the instantiation `dargs`. The context of
+/// a ctor arg type is `[params…, earlier ctor args…]`: `Var(j)` with
+/// `j >= ai` points into the params (param index `np - 1 - (j - ai)`).
+fn field_width(
+    sig: &Signature,
+    aty: &Term,
+    ai: usize,
+    np: usize,
+    dargs: &[Term],
+    seen: &mut std::collections::HashSet<String>,
+) -> (u32, bool) {
+    match strip_ann(aty) {
+        Term::Var(j) if *j >= ai && (*j - ai) < np => {
+            let pidx = np - 1 - (*j - ai);
+            match dargs.get(pidx) {
+                Some(arg) => type_shape(sig, arg, seen),
+                None => (1, true), // uninstantiated parameter: flexible.
+            }
+        }
+        Term::Var(_) => (1, true), // a dependent (non-param) type variable.
+        other => type_shape(sig, other, seen),
+    }
+}
+
+/// The runtime WIDTH (in i64 slots) of a value of this type term, plus a FLEX
+/// bit: flat records span their (instantiated) field widths; a transparent
+/// newtype is exactly its field; every other type — scalars, boxed pointers —
+/// is one slot. An abstract (`Var`-headed, or unresolved-parameter) width is
+/// `(1, flex = true)`: the layout varies by instantiation, and tallyc NEVER
+/// papers over that with a hidden box — width-sensitive consumers of a flex
+/// type are hard errors pointing at the explicit alternative.
 fn type_width(sig: &Signature, t: &Term) -> u32 {
-    type_width_seen(sig, t, &mut std::collections::HashSet::new())
+    type_shape(sig, t, &mut std::collections::HashSet::new()).0
 }
 
-fn type_width_seen(
+fn type_is_flex(sig: &Signature, t: &Term) -> bool {
+    type_shape(sig, t, &mut std::collections::HashSet::new()).1
+}
+
+fn type_shape(
     sig: &Signature,
     t: &Term,
     seen: &mut std::collections::HashSet<String>,
-) -> u32 {
+) -> (u32, bool) {
     let t = strip_ann(t);
-    let name = match t {
-        Term::Data(dn, _) => dn.as_str(),
-        // an APPLIED datatype head (e.g. quoted `Data` spines) — walk to the head.
+    let (name, dargs): (&str, Vec<Term>) = match t {
+        Term::Data(dn, da) => (dn.as_str(), da.clone()),
+        Term::Var(_) => return (1, true),
+        // an APPLIED head (quoted spines): `((Data …) a) n` or a Var head.
         Term::App(_, _) => {
-            let (head, _) = flatten_app(t);
+            let (head, args) = flatten_app(t);
             match strip_ann(head) {
-                Term::Data(dn, _) => dn.as_str(),
-                _ => return 1,
+                Term::Data(dn, da) => {
+                    let mut all = da.clone();
+                    all.extend(args.iter().map(|a| (*a).clone()));
+                    (dn.as_str(), all)
+                }
+                Term::Var(_) => return (1, true),
+                _ => return (1, false),
             }
         }
-        _ => return 1,
+        _ => return (1, false),
     };
     if let Some(fi) = transparent_field(sig, name) {
-        // the wrapper IS its field: same width.
+        // the wrapper IS its field: same width, resolved through the args.
         if let Some(d) = sig.data(name) {
-            return type_width_seen(sig, &d.ctors[0].args[fi].1, seen);
+            let np = d.params.len();
+            let aty = d.ctors[0].args[fi].1.clone();
+            return field_width(sig, &aty, fi, np, &dargs, seen);
         }
-        return 1;
+        return (1, false);
     }
-    record_width_seen(sig, name, seen).unwrap_or(1)
+    // avoid infinite recursion through record cycles.
+    if seen.contains(name) {
+        return (1, false);
+    }
+    match record_shape(sig, name, &dargs, seen) {
+        Some(shape) => shape,
+        None => (1, false),
+    }
 }
 
 /// A runtime VALUE: one scalar `i64` (an integer or a pointer disguised as
@@ -324,38 +401,29 @@ struct ElimFoldIh<'c> {
 type Slot<'c> = Option<Val<'c>>;
 
 impl<'c, 'a> DepCg<'c, 'a> {
-    /// Coerce a value to a target width. Same width: identity. A flat record
-    /// (`Agg`) entering a ONE-slot position (a generic field, an unknown-typed
-    /// boundary) is BOXED — one malloc of its components, the pointer is the
-    /// scalar. A scalar (a boxed record pointer) entering a `w > 1` position is
-    /// UNBOXED — its components loaded. Both representations are always valid
-    /// for a record, so a mismatch is impossible; only locality/perf differ.
-    fn coerce(&self, v: Val<'c>, w: u32) -> Result<Val<'c>, String> {
-        match (&v, w) {
-            (Val::Int(_), 1) => Ok(v),
-            (Val::Agg(vs), w) if vs.len() as u32 == w => Ok(v),
-            (Val::Agg(vs), 1) => {
-                // box: the record crosses into a one-slot (generic) position.
-                let cell = self.malloc_cell(vs.len() as u32, "rec.box");
-                for (i, c) in vs.iter().enumerate() {
-                    self.store(cell, i as u32, *c);
-                }
-                Ok(Val::Int(self.toint(cell, "rec.boxint")))
-            }
-            (Val::Int(p), w) => {
-                // unbox: a boxed record pointer meets a concrete record position.
-                let cell = self.toptr(*p, "rec.unbox");
-                let mut comps = Vec::with_capacity(w as usize);
-                for i in 0..w {
-                    comps.push(self.load(cell, i, "rec.fld"));
-                }
-                Ok(Val::Agg(comps))
-            }
-            (Val::Agg(vs), w) => Err(format!(
-                "flat-record width mismatch: a {}-field record flowed into a \
-                 {w}-slot position (this should be impossible for a kernel-checked \
-                 term)",
+    /// Require a value to occupy exactly `w` scalar slots. There is NO implicit
+    /// representation change here — tallyc NEVER boxes behind your back. A flat
+    /// record reaching a one-slot position (a generic field of a boxed
+    /// datatype, an abstract-typed `%partial` parameter, a fold accumulator the
+    /// lowering cannot widen) is a HARD ERROR naming the explicit alternatives;
+    /// any other mismatch is a compiler bug surfaced loudly.
+    fn expect_width(&self, v: Val<'c>, w: u32, what: &str) -> Result<Val<'c>, String> {
+        if v.width() == w {
+            return Ok(v);
+        }
+        match &v {
+            Val::Agg(vs) if w == 1 => Err(format!(
+                "{what}: a {}-field flat record cannot flow into this ONE-slot \
+                 position — its layout is instantiation-dependent there, and tallyc \
+                 never boxes implicitly. Box it explicitly (`alloc(…) : Own T`) or \
+                 make the container/function concrete (a monomorphic field/parameter \
+                 stores the record flat).",
                 vs.len()
+            )),
+            _ => Err(format!(
+                "{what}: layout width mismatch (value {} vs expected {w} slots) — \
+                 this should be impossible for a kernel-checked term",
+                v.width()
             )),
         }
     }
@@ -480,9 +548,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 env2.push(Some(ev));
                 self.compile_v(f, &env2, body)
             }
-            Term::NatElim(_p, z, s, scrut) => {
-                Ok(Val::Int(self.compile_fold(f, env, z, s, scrut)?))
-            }
+            Term::NatElim(_p, z, s, scrut) => self.compile_fold(f, env, z, s, scrut),
             Term::NatCase(_p, z, s, scrut) => self.compile_natcase(f, env, z, s, scrut),
             // a fully-applied `Fix` is handled in the `App` spine below; a bare one
             // (a function value with no call) has no runtime representation here.
@@ -543,7 +609,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         for a in &args {
                             // dep positions are one-slot (box a record crossing in).
                             let v = self.compile_v(f, env, a)?;
-                            ca.push(self.coerce(v, 1)?.as_int("convoy-fold dep")?.into());
+                            ca.push(
+                                self.expect_width(v, 1, "a convoy-fold dependent")?
+                                    .as_int("convoy-fold dep")?
+                                    .into(),
+                            );
                         }
                         for li in live_idx {
                             for c in env[li]
@@ -584,8 +654,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         for a in &args {
                             // accumulator slots are one-slot (box a record crossing in).
                             let v = self.compile_v(f, env, a)?;
-                            call_args
-                                .push(self.coerce(v, 1)?.as_int("accumulator arg")?.into());
+                            call_args.push(
+                                self.expect_width(v, 1, "a total-fold accumulator (make the \
+                                     function %partial — Fix supports records by value)")?
+                                    .as_int("accumulator arg")?
+                                    .into(),
+                            );
                         }
                         return Ok(Val::Int(
                             self.builder
@@ -789,12 +863,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .clone();
         let nd = deps.len();
         let scrut_val = self.compile(f, env, scrut)?;
-        // dep slots are one scalar each (a record dep crosses boxed).
+        // dep slots are one scalar each (index-refined Nat-family values); a
+        // record dependent is a guided hard error, never an implicit box.
         let dep_vals: Vec<IntValue<'c>> = deps
             .iter()
             .map(|a| {
                 let v = self.compile_v(f, env, a)?;
-                self.coerce(v, 1)?.as_int("convoy-fold dep")
+                self.expect_width(v, 1, "a convoy-fold dependent")?
+                    .as_int("convoy-fold dep")
             })
             .collect::<Result<_, _>>()?;
         let live: Vec<(usize, Val<'c>)> =
@@ -908,8 +984,15 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
             let result = self
                 .compile_v(helper, &menv, body)
-                .and_then(|v| self.coerce(v, 1))
-                .and_then(|v| v.as_int("convoy-fold result").map_err(|e| e));
+                .and_then(|v| {
+                    self.expect_width(
+                        v,
+                        1,
+                        "a convoy fold's result (make the function %partial — Fix \
+                         returns records by value)",
+                    )
+                })
+                .and_then(|v| v.as_int("convoy-fold result"));
             for _ in 0..nmarks {
                 self.elim_fold_ihs.borrow_mut().pop();
             }
@@ -1138,6 +1221,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
         cname: &str,
         args: &[&Term],
     ) -> Result<Vec<IntValue<'c>>, String> {
+        // the SCALAR collection, for primitives whose runtime arguments are all
+        // one slot (pointers, views, chars, list elements). A record reaching
+        // one is a guided hard error — never an implicit box.
+        self.runtime_args_v(f, env, cname, args)?
+            .into_iter()
+            .map(|v| {
+                self.expect_width(v, 1, &format!("`{cname}`'s argument"))?
+                    .as_int(cname)
+            })
+            .collect()
+    }
+
+    /// The runtime (non-erased) arguments as `Val`s, widths untouched — the
+    /// width-aware primitives (alloc/unbox, the view ops, the array ops) decide
+    /// their own layouts from the ERASED TYPE ARGUMENTS in the spine.
+    fn runtime_args_v(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        cname: &str,
+        args: &[&Term],
+    ) -> Result<Vec<Val<'c>>, String> {
         let ty = self
             .sig
             .postulate(cname)
@@ -1148,12 +1253,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             match cur {
                 Term::Pi(mult, _dom, cod) => {
                     if *mult != Mult::Zero {
-                        // postulate payload slots are UNIFORMLY one scalar: a flat
-                        // record crossing in is boxed (generic postulates like
-                        // `alloc : {0 a} -> a -> Own a` cannot know a layout, so
-                        // the layout must not depend on the instantiation).
-                        let v = self.compile_v(f, env, a)?;
-                        out.push(self.coerce(v, 1)?.as_int(cname)?);
+                        out.push(self.compile_v(f, env, a)?);
                     }
                     // else: erased argument — never compiled, never stored.
                     cur = strip_ann(cod);
@@ -1166,6 +1266,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
         }
         Ok(out)
+    }
+
+    /// The width of the erased TYPE argument at spine position `i` for a
+    /// width-sensitive primitive. A FLEX (instantiation-dependent) type here is
+    /// a hard error: the primitive is compiled once per call site, and inside a
+    /// generic `%partial` function the layout genuinely is not known — tallyc
+    /// will not guess and will not box behind your back.
+    fn spine_type_width(&self, cname: &str, args: &[&Term], i: usize) -> Result<u32, String> {
+        let t = args.get(i).ok_or_else(|| {
+            format!("`{cname}`: missing its erased type argument (spine too short)")
+        })?;
+        if type_is_flex(self.sig, t) {
+            return Err(format!(
+                "`{cname}`: the payload/element type here is ABSTRACT (a type \
+                 variable of a generic `%partial` function), so its layout is \
+                 unknown at compile time — and tallyc never boxes implicitly. \
+                 Specialize the function to a concrete payload type (a generic \
+                 fn that is NOT `%partial` is inlined per call site, where the \
+                 type is concrete, and works as-is).",
+            ));
+        }
+        Ok(type_width(self.sig, t))
     }
 
     /// Native implementations of the known memory postulates. Erased
@@ -1191,15 +1313,21 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // alloc : {0 a} -> a -> Own a  — Own is erased to a bare pointer:
             // malloc one slot, store the payload, hand back the pointer.
             "alloc" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
+                // `alloc` IS the explicit box: the Own cell holds the payload
+                // INLINE at its real width — `Own Point` is one 16-byte cell
+                // holding {x, y}, not a pointer to a second cell.
+                let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [payload] = rt.as_slice() else {
                     return Err(format!(
                         "alloc: expected 1 runtime argument (the payload), got {}",
                         rt.len()
                     ));
                 };
-                let cell = self.malloc_cell(1, "own");
-                self.store(cell, 0, *payload);
+                let comps = payload.components();
+                let cell = self.malloc_cell(comps.len() as u32, "own");
+                for (i, c) in comps.iter().enumerate() {
+                    self.store(cell, i as u32, *c);
+                }
                 Ok(Val::Int(self.toint(cell, "ownint")))
             }
             // free : ... -> (1 o : Own a / List r) -> Unit  — libc free of the
@@ -1221,6 +1349,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // Own) are moved to the caller (threaded onward by the eliminator). This is
             // the sound primitive for a consuming free-traversal of a linked structure.
             "unbox" => {
+                // the payload's width comes from the erased type argument (the
+                // spine's `a`); an abstract `a` is a hard error — the cell's
+                // layout is instantiation-dependent (`spine_type_width`).
+                let w = self.spine_type_width(cname, args, 0)?;
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [ptr] = rt.as_slice() else {
                     return Err(format!(
@@ -1229,9 +1361,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let cell = self.toptr(*ptr, "ownp");
-                let payload = self.load(cell, 0, "unboxed");
+                let payload = self.load_field(cell, 0, w);
                 self.free_int(*ptr); // free the Own cell; the payload was moved out
-                Ok(Val::Int(payload))
+                Ok(payload)
             }
             // print : Nat -> Unit  — the one observable effect: write the number
             // and a newline to stdout (`printf("%lld\n", n)`). Sequenced by the
@@ -1427,15 +1559,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // valloc : {0 a} -> a -> Cell a  = ∃l. (Ptr l ⊗ a@l). malloc one slot,
             // store the payload, pack the address as BOTH the pointer and the view.
             "valloc" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [payload] = rt.as_slice() else {
                     return Err(format!(
                         "valloc: expected 1 runtime argument (the payload), got {}",
                         rt.len()
                     ));
                 };
-                let cell = self.malloc_cell(1, "cell");
-                self.store(cell, 0, *payload);
+                let comps = payload.components();
+                let cell = self.malloc_cell(comps.len() as u32, "cell");
+                for (i, c) in comps.iter().enumerate() {
+                    self.store(cell, i as u32, *c);
+                }
                 let addr = self.toint(cell, "addr");
                 self.box_single_ctor("Cell", "MkCell", &[addr, addr])
             }
@@ -1443,16 +1578,33 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // STRONG UPDATE: store the new payload at the cell, hand back the
             // (same) address retyped as `b@l`. The old view is consumed.
             "vwrite" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
+                // strong update at real widths. The allocation's size is the
+                // ORIGINAL valloc width, which the view types don't carry — so a
+                // width-CHANGING strong update is rejected (it could overflow
+                // the cell); same-width retyping (incl. record → record) is fine.
+                let w_a = self.spine_type_width(cname, args, 0)?;
+                let w_b = self.spine_type_width(cname, args, 1)?;
+                if w_a != w_b {
+                    return Err(format!(
+                        "vwrite: a strong update must preserve the slot's LAYOUT \
+                         SIZE (old {w_a} slot(s), new {w_b}) — the cell was \
+                         allocated at the old width. valloc a new cell instead."
+                    ));
+                }
+                let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [_p, v, new] = rt.as_slice() else {
                     return Err(format!(
                         "vwrite: expected 3 runtime arguments (ptr, view, value), got {}",
                         rt.len()
                     ));
                 };
-                let cell = self.toptr(*v, "cellp");
-                self.store(cell, 0, *new);
-                Ok(Val::Int(*v))
+                let vv = v.as_int("vwrite view")?;
+                let newv = self.expect_width(new.clone(), w_b, "vwrite payload")?;
+                let cell = self.toptr(vv, "cellp");
+                for (i, c) in newv.components().iter().enumerate() {
+                    self.store(cell, i as u32, *c);
+                }
+                Ok(Val::Int(vv))
             }
             // vtake : ... -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
             // MOVE the payload out, retyping the slot as `Hole` (the cell is NOT
@@ -1460,6 +1612,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // which must be refilled by `vwrite` or reclaimed by `vfree`). Sound for
             // ANY payload — unlike a copying borrow, which would need `a` copyable.
             "vtake" => {
+                let w = self.spine_type_width(cname, args, 0)?;
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [_p, v] = rt.as_slice() else {
                     return Err(format!(
@@ -1468,15 +1621,19 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let cell = self.toptr(*v, "cellp");
-                let payload = self.load(cell, 0, "taken");
                 // the slot's bits are now stale but UNTYPEABLE as `a` (the view is
-                // `PtsTo l Hole`); no store needed. Return (moved value, hole view).
-                self.box_single_ctor("Taken", "MkTaken", &[payload, *v])
+                // `PtsTo l Hole`); no store needed. Return (moved value, hole view)
+                // — `Taken` is a FLEX flat record: its payload field takes the
+                // value's actual width, split back out at the match.
+                let mut comps = self.load_field(cell, 0, w).components();
+                comps.push(*v);
+                Ok(if comps.len() == 1 { Val::Int(comps[0]) } else { Val::Agg(comps) })
             }
             // vread : ... -> Ptr l -> (1 v : PtsTo l a) -> a
             // Destructive read: load the payload, CONSUME the view, and reclaim
             // the cell. (A borrowing read that returns the view is a later slice.)
             "vread" => {
+                let w = self.spine_type_width(cname, args, 0)?;
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [_p, v] = rt.as_slice() else {
                     return Err(format!(
@@ -1485,9 +1642,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let cell = self.toptr(*v, "cellp");
-                let payload = self.load(cell, 0, "read");
+                let payload = self.load_field(cell, 0, w);
                 self.free_int(*v);
-                Ok(Val::Int(payload))
+                Ok(payload)
             }
             // vfree : ... -> Ptr l -> (1 v : PtsTo l a) -> Unit
             // consume the view and reclaim the cell; Unit is represented as 0.
@@ -1509,16 +1666,24 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // anew : {0 a} -> (n : Nat) -> a -> Arr a n — one malloc, filled with
             // the initial element by a native counting loop.
             "anew" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
+                // the element width `w` comes from the erased type argument: an
+                // `Arr Point n` is one flat block of `n * w` slots — REAL AoS,
+                // records stored inline at stride `w`. (An abstract element
+                // type is a hard error — `spine_type_width`.)
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [n, init] = rt.as_slice() else {
                     return Err(format!(
                         "anew: expected 2 runtime arguments (length, initial element), got {}",
                         rt.len()
                     ));
                 };
+                let n = n.as_int("anew length")?;
+                let n = &n;
+                let init = self.expect_width(init.clone(), w, "anew initial element")?;
                 let sz = self
                     .builder
-                    .build_int_mul(*n, self.i64t.const_int(8, false), "arr.sz")
+                    .build_int_mul(*n, self.i64t.const_int(8 * w as u64, false), "arr.sz")
                     .unwrap();
                 let raw = self
                     .builder
@@ -1544,12 +1709,22 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .unwrap();
                 self.builder.build_conditional_branch(more, body, done).unwrap();
                 self.builder.position_at_end(body);
-                let slot = unsafe {
-                    self.builder
-                        .build_gep(self.i64t, raw, &[iv], "arr.slot")
-                        .unwrap()
-                };
-                self.builder.build_store(slot, *init).unwrap();
+                let base = self
+                    .builder
+                    .build_int_mul(iv, self.i64t.const_int(w as u64, false), "arr.base")
+                    .unwrap();
+                for (k, c) in init.components().iter().enumerate() {
+                    let off = self
+                        .builder
+                        .build_int_add(base, self.i64t.const_int(k as u64, false), "arr.off")
+                        .unwrap();
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.i64t, raw, &[off], "arr.slot")
+                            .unwrap()
+                    };
+                    self.builder.build_store(slot, *c).unwrap();
+                }
                 let inext = self
                     .builder
                     .build_int_add(iv, self.i64t.const_int(1, false), "arr.inext")
@@ -1565,6 +1740,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // bounds compare and no branch. The `ARead` pair threads the linear
             // array back to the caller; -O2 scalarizes it away.
             "aget" => {
+                let w = self.spine_type_width(cname, args, 0)?;
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [i, arr] = rt.as_slice() else {
                     return Err(format!(
@@ -1573,38 +1749,67 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let base = self.toptr(*arr, "arr.p");
-                let slot = unsafe {
-                    self.builder
-                        .build_gep(self.i64t, base, &[*i], "arr.slot")
-                        .unwrap()
-                };
-                let v = self
+                let off = self
                     .builder
-                    .build_load(self.i64t, slot, "arr.elem")
-                    .unwrap()
-                    .into_int_value();
-                self.box_single_ctor("ARead", "MkARead", &[v, *arr])
+                    .build_int_mul(*i, self.i64t.const_int(w as u64, false), "arr.off")
+                    .unwrap();
+                let mut comps: Vec<IntValue<'c>> = Vec::with_capacity(w as usize + 1);
+                for k in 0..w {
+                    let ko = self
+                        .builder
+                        .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                        .unwrap();
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.i64t, base, &[ko], "arr.slot")
+                            .unwrap()
+                    };
+                    comps.push(
+                        self.builder
+                            .build_load(self.i64t, slot, "arr.elem")
+                            .unwrap()
+                            .into_int_value(),
+                    );
+                }
+                // ARead is a FLEX flat record [element…, array]: build it at the
+                // element's true width; the match splits it back flexibly.
+                comps.push(*arr);
+                Ok(Val::Agg(comps))
             }
             // aset : … -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 arr : Arr a n) -> Arr a n
             // a bare indexed store; the array value (the base pointer) is returned
             // unchanged — in-place mutation, justified by linearity (the input
             // array was consumed; this result is its sole continuation).
             "aset" => {
-                let rt = self.runtime_args(f, env, cname, args)?;
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [i, v, arr] = rt.as_slice() else {
                     return Err(format!(
                         "aset: expected 3 runtime arguments (index, element, array), got {}",
                         rt.len()
                     ));
                 };
-                let base = self.toptr(*arr, "arr.p");
-                let slot = unsafe {
-                    self.builder
-                        .build_gep(self.i64t, base, &[*i], "arr.slot")
-                        .unwrap()
-                };
-                self.builder.build_store(slot, *v).unwrap();
-                Ok(Val::Int(*arr))
+                let i = i.as_int("aset index")?;
+                let arr = arr.as_int("aset array")?;
+                let v = self.expect_width(v.clone(), w, "aset element")?;
+                let base = self.toptr(arr, "arr.p");
+                let off = self
+                    .builder
+                    .build_int_mul(i, self.i64t.const_int(w as u64, false), "arr.off")
+                    .unwrap();
+                for (k, c) in v.components().iter().enumerate() {
+                    let ko = self
+                        .builder
+                        .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                        .unwrap();
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.i64t, base, &[ko], "arr.slot")
+                            .unwrap()
+                    };
+                    self.builder.build_store(slot, *c).unwrap();
+                }
+                Ok(Val::Int(arr))
             }
             // afree : … -> (1 arr : Arr a n) -> Unit — ONE libc free of the block.
             "afree" => {
@@ -1739,7 +1944,16 @@ impl<'c, 'a> DepCg<'c, 'a> {
             for (ai, slot) in lay.arg_slot.iter().enumerate() {
                 if slot.is_some() {
                     let v = self.compile_v(f, env, &args[np + ai])?;
-                    comps.extend(self.coerce(v, lay.arg_width[ai])?.components());
+                    // a FLEX (parameter-typed) field of a flat record takes the
+                    // value's ACTUAL width — the record's layout is whatever its
+                    // instantiation makes it, no boxing; a concrete field must
+                    // match its declared width exactly.
+                    let v = if lay.arg_flex[ai] {
+                        v
+                    } else {
+                        self.expect_width(v, lay.arg_width[ai], "record field")?
+                    };
+                    comps.extend(v.components());
                 }
             }
             return Ok(Val::Agg(comps));
@@ -1787,15 +2001,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .build_store(self.gep(raw, 0, "tag"), self.i64t.const_int(lay.tag, false))
             .unwrap();
         // ctor args are args[np..]; a flat-record field spans consecutive slots.
+        // A GENERIC (parameter-typed) field of a boxed datatype is one slot in a
+        // FIXED cell layout — a record cannot go there, and tallyc never boxes
+        // implicitly: `expect_width` errors with the explicit alternatives
+        // (store an `Own T`, or declare a concrete container, which inlines it).
         for (ai, slot) in lay.arg_slot.iter().enumerate() {
             if let Some(s) = slot {
                 let v = self.compile_v(f, env, &args[np + ai])?;
-                for (k, c) in self
-                    .coerce(v, lay.arg_width[ai])?
-                    .components()
-                    .into_iter()
-                    .enumerate()
-                {
+                let what = if lay.arg_flex[ai] {
+                    format!("`{name}`'s generic field")
+                } else {
+                    format!("`{name}`'s field")
+                };
+                let v = self.expect_width(v, lay.arg_width[ai], &what)?;
+                for (k, c) in v.components().into_iter().enumerate() {
                     self.builder
                         .build_store(self.gep(raw, *s + k as u32, "fld"), c)
                         .unwrap();
@@ -1825,13 +2044,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let decl = self.sig.data(data).unwrap();
             let zidx = decl.ctors.iter().position(|c| c.name == zero).unwrap();
             let sidx = 1 - zidx;
-            return Ok(Val::Int(self.compile_fold(
-                f,
-                env,
-                &methods[zidx],
-                &methods[sidx],
-                scrut,
-            )?));
+            return self.compile_fold(f, env, &methods[zidx], &methods[sidx], scrut);
         }
         // TRANSPARENT newtype: no recursion possible (transparency excludes
         // recursive fields ⇒ no IHs), so the eliminator is the same in-place
@@ -2036,10 +2249,19 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     }
                 }
             }
-            // the helper's return slot is one scalar: a flat-record result is
-            // boxed here and unboxed at its eventual match (both reps are valid).
+            // the helper's return slot is one scalar. A total fold over a boxed
+            // family producing a RECORD is not widened yet — and tallyc never
+            // boxes implicitly, so it is a guided hard error (`%partial` Fix
+            // recursion returns records by value today).
             let result = self.compile_v(helper, &menv, body)?;
-            let result = self.coerce(result, 1)?.as_int("eliminator result")?;
+            let result = self
+                .expect_width(
+                    result,
+                    1,
+                    "a total boxed-family fold's result (make the function \
+                     %partial — Fix returns records by value)",
+                )?
+                .as_int("eliminator result")?;
             self.builder.build_return(Some(&result)).unwrap();
         }
         Ok(())
@@ -2115,16 +2337,50 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // components (unboxed here if it arrived as a boxed pointer from a
         // generic boundary) ARE the fields; bind them and compile the single
         // method in place.
-        if let Some(w) = record_width(self.sig, data) {
+        if record_width(self.sig, data).is_some() {
             let sv = self.compile_v(f, env, scrut)?;
-            let comps = self.coerce(sv, w)?.components();
+            let comps = sv.components();
             let lay = ctor_layout(self.sig, data, &decl.ctors[0].name)?;
             let nargs = decl.ctors[0].args.len();
+            // FLEXIBLE split: concrete fields take their declared widths; when
+            // exactly ONE runtime field is flex (parameter-typed), it absorbs
+            // the value's surplus width — the layout is read off the VALUE, so
+            // generic flat records (`ARead a n`, `Taken a l`) work at every
+            // instantiation with no boxing. Ambiguity (two flex fields and a
+            // surplus) is a hard error, not a guess.
+            let total: u32 = comps.len() as u32;
+            let declared: u32 = lay.nfields;
+            let nflex = (0..nargs)
+                .filter(|&ai| lay.arg_slot[ai].is_some() && lay.arg_flex[ai])
+                .count();
+            let surplus = total.checked_sub(declared).ok_or_else(|| {
+                format!(
+                    "match[{data}]: this {total}-slot value cannot be a flat \
+                     `{data}` ({declared} slots) — it reached here through a \
+                     ONE-slot generic position (a generic container field or an \
+                     abstract-typed parameter), where a record's layout cannot \
+                     live and tallyc never boxes implicitly. Box it explicitly \
+                     (store `Own {data}` in the container and `unbox` it), or \
+                     declare a concrete container ({data}-typed fields store the \
+                     record flat)."
+                )
+            })?;
+            if surplus > 0 && nflex != 1 {
+                return Err(format!(
+                    "match[{data}]: cannot split a {total}-slot record over \
+                     {nflex} generic field(s) (declared width {declared}) — the \
+                     layout is ambiguous; make the record's fields concrete"
+                ));
+            }
             let mut menv = env.to_vec();
             let mut off = 0usize;
             for ai in 0..nargs {
                 if lay.arg_slot[ai].is_some() {
-                    let wi = lay.arg_width[ai] as usize;
+                    let wi = if lay.arg_flex[ai] && surplus > 0 {
+                        (lay.arg_width[ai] + surplus) as usize
+                    } else {
+                        lay.arg_width[ai] as usize
+                    };
                     let v = if wi == 1 {
                         Val::Int(comps[off])
                     } else {
@@ -2212,14 +2468,17 @@ impl<'c, 'a> DepCg<'c, 'a> {
             arm_results.push((result, pred));
         }
 
-        // one common width for the join: the widest arm (record arms may mix the
-        // flat and the boxed representation; both coerce).
+        // every arm has the same kernel type, and each type has exactly ONE
+        // representation (records are always flat) — so the arm widths must
+        // agree. A disagreement is a compiler bug, not something to paper over.
         let w = arm_results.iter().map(|(v, _)| v.width()).max().unwrap_or(1);
         let mut incoming: Vec<(Vec<IntValue<'c>>, inkwell::basic_block::BasicBlock<'c>)> =
             Vec::with_capacity(arm_results.len());
         for (v, bb) in arm_results {
             self.builder.position_at_end(bb);
-            let comps = self.coerce(v, w)?.components();
+            let comps = self
+                .expect_width(v, w, &format!("case[{data}] arm result"))?
+                .components();
             let pred = self.builder.get_insert_block().unwrap();
             self.builder.build_unconditional_branch(join).unwrap();
             incoming.push((comps, pred));
@@ -2239,6 +2498,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
     /// `elim z s n` (Nat-like) as a native loop:
     ///   acc = z; for k in 0..n { acc = s k acc }.
+    /// The accumulator may be a flat record — one phi per component.
     fn compile_fold(
         &self,
         f: FunctionValue<'c>,
@@ -2246,10 +2506,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
         z: &Term,
         s: &Term,
         scrut: &Term,
-    ) -> Result<IntValue<'c>, String> {
-        // the loop-carried accumulator is one scalar: a record acc crosses boxed.
-        let zv0 = self.compile_v(f, env, z)?;
-        let zv = self.coerce(zv0, 1)?.as_int("fold accumulator")?;
+    ) -> Result<Val<'c>, String> {
+        // the loop-carried accumulator is as wide as its value: a flat record
+        // accumulates in registers (one phi per component) — never boxed.
+        let zv = self.compile_v(f, env, z)?;
+        let aw = zv.width();
         let nv = self.compile(f, env, scrut)?;
 
         // s = λk. λih. body
@@ -2269,11 +2530,23 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
         self.builder.position_at_end(cond);
         let k_phi = self.builder.build_phi(self.i64t, "k").unwrap();
-        let acc_phi = self.builder.build_phi(self.i64t, "acc").unwrap();
+        let acc_phis: Vec<_> = (0..aw)
+            .map(|_| self.builder.build_phi(self.i64t, "acc").unwrap())
+            .collect();
         k_phi.add_incoming(&[(&self.i64t.const_int(0, false), entry)]);
-        acc_phi.add_incoming(&[(&zv, entry)]);
+        for (phi, c) in acc_phis.iter().zip(zv.components()) {
+            phi.add_incoming(&[(&c, entry)]);
+        }
         let k_val = k_phi.as_basic_value().into_int_value();
-        let acc_val = acc_phi.as_basic_value().into_int_value();
+        let acc_comps: Vec<IntValue<'c>> = acc_phis
+            .iter()
+            .map(|p| p.as_basic_value().into_int_value())
+            .collect();
+        let acc_val = if aw == 1 {
+            Val::Int(acc_comps[0])
+        } else {
+            Val::Agg(acc_comps.clone())
+        };
         let more = self
             .builder
             .build_int_compare(inkwell::IntPredicate::ULT, k_val, nv, "more")
@@ -2285,16 +2558,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.builder.position_at_end(body);
         let mut env2 = env.to_vec();
         env2.push(Some(Val::Int(k_val))); // k
-        env2.push(Some(Val::Int(acc_val))); // ih
+        env2.push(Some(acc_val.clone())); // ih
         let next_acc0 = self.compile_v(f, &env2, s_body)?;
-        let next_acc = self.coerce(next_acc0, 1)?.as_int("fold accumulator")?;
+        let next_acc = self.expect_width(next_acc0, aw, "fold accumulator")?;
         let next_k = self
             .builder
             .build_int_add(k_val, self.i64t.const_int(1, false), "k.next")
             .unwrap();
         let body_end = self.builder.get_insert_block().unwrap();
         k_phi.add_incoming(&[(&next_k, body_end)]);
-        acc_phi.add_incoming(&[(&next_acc, body_end)]);
+        for (phi, c) in acc_phis.iter().zip(next_acc.components()) {
+            phi.add_incoming(&[(&c, body_end)]);
+        }
         self.builder.build_unconditional_branch(cond).unwrap();
 
         self.builder.position_at_end(exit);
@@ -2345,11 +2620,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
         let w = zv.width().max(sv.width());
         self.builder.position_at_end(zero_end);
-        let zc = self.coerce(zv, w)?.components();
+        let zc = self.expect_width(zv, w, "natCase zero arm")?.components();
         let zero_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(join_bb).unwrap();
         self.builder.position_at_end(succ_end);
-        let sc = self.coerce(sv, w)?.components();
+        let sc = self.expect_width(sv, w, "natCase successor arm")?.components();
         let succ_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(join_bb).unwrap();
 
@@ -2383,7 +2658,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 None => {} // erased: never compiled, never passed.
                 Some(w) => {
                     let v = self.compile_v(f, env, a)?;
-                    for c in self.coerce(v, w)?.components() {
+                    // an abstract-typed (`Var`-domain) parameter is one slot: a
+                    // record argument here is the guided hard error — a single
+                    // compiled body cannot serve two layouts.
+                    let v = self.expect_width(v, w, "a %partial function argument")?;
+                    for c in v.components() {
                         call_args.push(c.into());
                     }
                 }
@@ -2497,7 +2776,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         });
         let result = self.compile_v(func, &body_env, inner);
         self.fix_selves.borrow_mut().pop();
-        let result = self.coerce(result?, ret_width)?;
+        let result = self.expect_width(result?, ret_width, "this function's result")?;
         match (&result, ret_struct) {
             (Val::Int(v), None) => {
                 self.builder.build_return(Some(v)).unwrap();
@@ -2590,7 +2869,13 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let zero_env: Vec<Slot<'c>> =
                 acc_params.iter().map(|v| Some(Val::Int(*v))).collect();
             let zr0 = self.compile_v(func, &zero_env, z_body)?;
-            let zr = self.coerce(zr0, 1)?.as_int("accumulator-fold result")?;
+            let zr = self
+                .expect_width(
+                    zr0,
+                    1,
+                    "a total accumulator-fold's result (make the function %partial)",
+                )?
+                .as_int("accumulator-fold result")?;
             self.builder.build_return(Some(&zr)).unwrap();
 
             // succ: k = i - 1; env = [k, ih, a₁ … a_K]; the IH self sits at level 1.
@@ -2604,7 +2889,13 @@ impl<'c, 'a> DepCg<'c, 'a> {
             self.acc_ih_selves.borrow_mut().push(AccIhSelf { ih_level: 1, func, k_level: 0 });
             let sr = self
                 .compile_v(func, &succ_env, s_body)
-                .and_then(|v| self.coerce(v, 1))
+                .and_then(|v| {
+                    self.expect_width(
+                        v,
+                        1,
+                        "a total accumulator-fold's result (make the function %partial)",
+                    )
+                })
                 .and_then(|v| v.as_int("accumulator-fold result"));
             self.acc_ih_selves.borrow_mut().pop();
             let sr = sr?;
@@ -2624,7 +2915,16 @@ impl<'c, 'a> DepCg<'c, 'a> {
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![scrut_v.into()];
         for a in args {
             let v = self.compile_v(f, env, a)?;
-            call_args.push(self.coerce(v, 1)?.as_int("accumulator arg")?.into());
+            call_args.push(
+                self.expect_width(
+                    v,
+                    1,
+                    "a total-fold accumulator (make the function %partial — Fix \
+                     takes records by value)",
+                )?
+                .as_int("accumulator arg")?
+                .into(),
+            );
         }
         Ok(self
             .builder
@@ -3766,34 +4066,144 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         );
     }
 
+    /// run a program EXPECTING codegen to reject it; returns the error text.
+    fn run_err(src: &str) -> String {
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
+        super::run_main(&prog.sig, body).expect_err("program was expected to be rejected")
+    }
+
     #[test]
-    fn records_cross_generic_boundaries() {
-        // a record entering a GENERIC position (a container's `a` slot) takes
-        // the boxed representation and is unboxed at its eventual match — both
-        // representations are valid everywhere, so nesting containers, record
-        // fields of records (width 3), and by-value passing all compose.
+    fn records_never_box_implicitly() {
+        // ZERO NON-EXPLICIT BOXING. A record flowing into a GENERIC container
+        // slot is a guided HARD ERROR — the compiler never inserts a hidden
+        // malloc. The two explicit alternatives both work (below).
+        let implicit = format!(
+            "{POINT}\
+             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             sumlist : PList Point -> Nat\n\
+             %partial fn sumlist(xs) {{ match xs {{ PNil => 0, PCons(p, t) => norm1(p) + sumlist(t), }} }}\n\
+             main : Nat\n\
+             fn main() {{ sumlist(PCons(Point(1, 2), PCons(Point(3, 4), PNil))) }}\n"
+        );
+        let err = run_err(&implicit);
+        assert!(
+            err.contains("never boxes implicitly"),
+            "expected the guided zero-implicit-boxing error, got: {err}"
+        );
+
+        // explicit alternative 1: a CONCRETE container — the record is stored
+        // FLAT INLINE in the cell ([tag, x, y, tail]), exactly the C struct-in-
+        // node layout, still no per-element box.
+        let concrete = format!(
+            "{POINT}\
+             enum PointList {{ PNil : PointList, PCons : Point -> PointList -> PointList }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             sumlist : PointList -> Nat\n\
+             %partial fn sumlist(xs) {{ match xs {{ PNil => 0, PCons(p, t) => norm1(p) + sumlist(t), }} }}\n\
+             main : Nat\n\
+             fn main() {{ sumlist(PCons(Point(1, 2), PCons(Point(3, 4), PNil))) }}\n"
+        );
+        assert_eq!(run(&concrete), 10);
+
+        // explicit alternative 2: the user writes the box — `Own Point`
+        // elements, `alloc` at insertion, `unbox` at use. Every malloc in this
+        // program is one the programmer wrote.
+        let explicit = format!(
+            "{POINT}\
+             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             sumlist : (1 xs : PList (Own Point)) -> Nat\n\
+             %partial fn sumlist(xs) {{ match xs {{ PNil => 0, PCons(o, t) => let v = unbox(o); norm1(v) + sumlist(t), }} }}\n\
+             main : Nat\n\
+             fn main() {{ sumlist(PCons(alloc(Point(1, 2)), PCons(alloc(Point(3, 4)), PNil))) }}\n"
+        );
+        assert_eq!(run(&explicit), 10);
+    }
+
+    #[test]
+    fn nested_records_and_transparent_wrappers_stay_flat() {
+        // nesting still composes with zero allocation: a record field of record
+        // type flattens inline (width 3), and a transparent single-field
+        // wrapper of a record IS the record (identity).
         let src = format!(
             "{POINT}\
              enum PBox (a : Type) {{ MkBox : a -> PBox a }}\n\
-             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
              struct Seg {{ from : Point, len : Nat }}\n\
              norm1 : Point -> Nat\n\
              fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
              unbox1 : PBox Point -> Nat\n\
              fn unbox1(b) {{ match b {{ MkBox(p) => norm1(p) }} }}\n\
-             sumlist : PList Point -> Nat\n\
-             %partial fn sumlist(xs) {{ match xs {{ PNil => 0, PCons(p, t) => norm1(p) + sumlist(t), }} }}\n\
              seglen : Seg -> Nat\n\
              fn seglen(s) {{ match s {{ Seg(p, n) => norm1(p) + n }} }}\n\
              main : Nat\n\
              fn main() {{\n\
                  let v1 = unbox1(MkBox(Point(10, 20)));\n\
-                 let v2 = sumlist(PCons(Point(1, 2), PCons(Point(3, 4), PNil)));\n\
                  let v3 = seglen(Seg(Point(5, 6), 7));\n\
-                 v1 + v2 + v3\n\
+                 v1 + v3\n\
              }}\n"
         );
-        assert_eq!(run(&src), 58);
+        assert_eq!(run(&src), 48);
+        let ir = ir(&src);
+        assert_eq!(
+            ir.matches("call ptr @malloc").count(),
+            0,
+            "nested/wrapped records must not allocate\n{ir}"
+        );
+    }
+
+    #[test]
+    fn abstract_layout_ops_are_rejected_not_guessed() {
+        // an `unbox` inside a GENERIC %partial function compiles once, but
+        // `Own Point` and `Own Nat` cells have different layouts — reading one
+        // slot of a two-slot payload would be silent corruption. tallyc
+        // rejects it with guidance instead of guessing or boxing.
+        let src = format!(
+            "{POINT}\
+             peel : {{0 a : Type}} -> (n : Nat) -> (1 o : Own a) -> Nat\n\
+             %partial fn peel(n, o) {{ let v = unbox(o); n }}\n\
+             main : Nat\n\
+             fn main() {{ peel(1, alloc(Point(3, 4))) }}\n"
+        );
+        let err = run_err(&src);
+        assert!(
+            err.contains("ABSTRACT") && err.contains("never boxes implicitly"),
+            "expected the abstract-layout guidance, got: {err}"
+        );
+    }
+
+    #[test]
+    fn aos_array_of_records_is_flat() {
+        // Arr Point n is REAL AoS: one flat buffer at stride 2 (48 bytes for 3
+        // Points), elements read/written by value; Own Point is ONE 16-byte
+        // cell holding the record INLINE. Every allocation is user-written.
+        let src = format!(
+            "{POINT}\
+             norm1 : Point -> Nat\n\
+             fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(3, Point(1, 2));\n\
+                 let a1 = aset(1, lt(1, 3), Point(30, 40), a0);\n\
+                 let (p, a2) = aget(1, lt(1, 3), a1);\n\
+                 let u = afree(a2);\n\
+                 let o = alloc(Point(5, 6));\n\
+                 let q = unbox(o);\n\
+                 norm1(p) + norm1(q)\n\
+             }}\n"
+        );
+        assert_eq!(run(&src), 81); // (30+40) + (5+6)
+        let ir = ir(&src);
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(48u64, 1usize), (16u64, 1usize)].into_iter().collect(),
+            "expected exactly the 3×16B AoS buffer and the inline Own cell; got {sizes:?}\n{ir}"
+        );
     }
 
     #[test]

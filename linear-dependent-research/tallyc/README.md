@@ -103,30 +103,39 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
-## Status (v1.9 — the C-level layer: FLAT STRUCTS BY VALUE, CONTIGUOUS ARRAYS, the NAT CONVOY, %foreign FFI, real I/O; 207 tests)
+## Status (v1.9 — the C-level layer: FLAT STRUCTS BY VALUE, CONTIGUOUS ARRAYS, the NAT CONVOY, %foreign FFI, real I/O; 210 tests)
 
 The release that closes the biggest "as low as C" gaps: structs in registers, a
 flat `a[i]` on a contiguous buffer, FFI to arbitrary C functions, and byte I/O.
 
-- **FLAT MULTI-FIELD STRUCTS BY VALUE** (`examples/structs.tal`,
-  `docs/PHASE_B2_VALUE_STRUCTS.md`): a single-constructor, non-recursive
-  `struct Point { x, y }` now lives in REGISTERS — construction is two SSA
-  values (zero malloc, no tag; IR-tested), matching is projection, and a
-  `%partial` function taking and returning one compiles to
-  `define {i64,i64} @f(i64, i64)` — literally C's
-  `struct Point f(struct Point)`. Records nest (a record field flattens
-  inline); crossing into a GENERIC position (a container element, an
-  abstract-typed argument) the record takes the boxed representation and any
-  match accepts either — two representations, one value, coercions decided
-  locally, both always valid. The prelude's read-back pairs (`ARead`/`Cell`/
-  `CL`/`VL`) became flat records too: **no malloc per array read even at
-  -O0**. And the C-interop falls out: a record flattens into consecutive i64
-  arguments — exactly the AArch64/SysV by-value ABI for a small integer
-  struct, so a `%foreign` C function taking `struct { long long x, y; }` by
-  value works with no glue (tested against real C). Linear accounting is
-  unchanged (`Own` inside a record: still exactly-once). Honest remainder:
-  flat AoS in `Arr` and `repr` control need per-instantiation layouts — see
-  the doc.
+- **FLAT MULTI-FIELD STRUCTS BY VALUE, with ZERO NON-EXPLICIT BOXING**
+  (`examples/structs.tal`, `docs/PHASE_B2_VALUE_STRUCTS.md`): a
+  single-constructor, non-recursive `struct Point { x, y }` lives in
+  REGISTERS — construction is two SSA values (zero malloc, no tag;
+  IR-tested), matching is projection, and a `%partial` function taking and
+  returning one compiles to `define {i64,i64} @f(i64, i64)` — literally C's
+  `struct Point f(struct Point)`. **The compiler never emits a malloc you
+  did not write.** Where a record lives, allocation is exactly what you
+  wrote: locals/params/returns are registers; a CONCRETE container field
+  stores it FLAT INLINE in the cell (`[tag, x, y, next]` — C's
+  struct-in-node); **`Arr Point n` is real AoS** — one flat buffer at stride
+  16, elements read/written by value, layout computed from the erased type
+  argument; `alloc(Point(…)) : Own Point` is ONE 16-byte cell with the
+  record inline (`alloc` IS the box you wrote). A record flowing into a
+  GENERIC container slot, or a layout-sensitive primitive over an ABSTRACT
+  type in a generic `%partial` fn, is a **guided compile error** — never a
+  hidden box, never a guessed layout (silent stride corruption is
+  unrepresentable). Generic FLAT records (`ARead a n`, `Taken a l`) need no
+  boxing either: their layout rides with the value (one-flexible-field
+  split), so the array read-back pair costs no malloc even at -O0. C-interop
+  falls out: a record flattens into consecutive i64 args — the AArch64/SysV
+  by-value ABI for a small integer struct — so `%foreign` C functions taking
+  `struct { long long x, y; }` by value work with no glue (tested against
+  real C). Linear accounting is representation-independent (`Own` inside a
+  record: still exactly-once). The one remaining IMPLICIT allocation in the
+  language is the multi-constructor/recursive datatype cell itself (the
+  constructor-allocates model) — making that explicit is FUTURE_WORK §5's
+  Phase A (value enums + explicit `Own` recursion).
 
 - **CONTIGUOUS ARRAYS** (`examples/arr.tal`): `Arr a n` IS one flat
   `malloc(n*8)` block — no header, no per-element cell, no stored length (the
@@ -700,7 +709,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (207 tests)
+cargo test                  # the ONE suite — frontend + native backend (210 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable

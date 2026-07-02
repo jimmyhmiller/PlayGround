@@ -1,25 +1,23 @@
-// FLAT MULTI-FIELD STRUCTS BY VALUE (Phase B2) — the C struct, safely.
+// FLAT MULTI-FIELD STRUCTS BY VALUE — the C struct, safely, with
+// ZERO NON-EXPLICIT BOXING: the compiler never emits a malloc you didn't write.
 //
-//   tally run examples/structs.tal        →  70
+//   tally run examples/structs.tal        →  151
 //
 // A single-constructor, non-recursive struct is a FLAT RECORD: its values live
 // in REGISTERS. Constructing `Point(3, 4)` is two SSA values — no malloc, no
 // tag; matching is projection; passing/returning through a real function
-// boundary is the two-register C convention (a `%partial` fn below compiles to
+// boundary is the two-register C convention (`step` below compiles to
 // `define {i64,i64} @f(i64, i64)` — literally `struct Point f(struct Point)`).
-// Proven in the IR: this whole program contains ZERO calls to malloc except
-// the generic-list cells.
 //
-// Two representations, one value: in concretely-typed positions a record is
-// flat (registers); crossing into a GENERIC position (a `PList a` element, a
-// `{0 a} -> a` argument) it is boxed, and any match accepts either — so
-// containers of records, records inside records, and by-value calls compose
-// with no annotations. An `Own` field inside a record keeps its linear
-// obligation unchanged (freeing it twice is still `ω ⋢ 1`).
-//
-// C interop falls out: a flat record flattens into consecutive i64 arguments,
-// which IS the by-value ABI for a small integer C struct — `%foreign` functions
-// taking `struct { long long x, y; }` by value work with no glue.
+// Where records LIVE, at every layer, allocation is exactly what you wrote:
+//   - locals / params / returns:      registers, zero allocation
+//   - a concrete container field:     FLAT INLINE in the cell ([tag, x, y, next])
+//   - `Arr Point n`:                  one flat buffer, stride 16 — real AoS
+//   - `alloc(Point(…)) : Own Point`:  ONE 16-byte cell, the record inline
+//   - a GENERIC container slot:       ⛔ compile error. A generic cell's layout
+//     cannot depend on its instantiation, and tallyc NEVER boxes implicitly —
+//     store `Own Point` (the box you wrote) or declare a concrete container.
+//     (Uncomment `bad` below to see the guided error.)
 
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
@@ -27,7 +25,8 @@ enum Nat { Zero : Nat, Succ : Nat -> Nat }
 struct Point { x : Nat, y : Nat }
 struct Seg { from : Point, len : Nat }       // nested: flattens to width 3
 
-enum PList (a : Type) { PNil : PList a, PCons : a -> PList a -> PList a }
+// a CONCRETE container: Point fields store flat inline — C's struct-in-node.
+enum PointList { PNil : PointList, PCons : Point -> PointList -> PointList }
 
 norm1 : Point -> Nat
 fn norm1(p) { match p { Point(a, b) => a + b } }
@@ -36,7 +35,7 @@ fn norm1(p) { match p { Point(a, b) => a + b } }
 step : Point -> Point
 %partial fn step(p) { match p { Point(a, b) => Point(a + b, b + 1) } }
 
-sumlist : PList Point -> Nat
+sumlist : PointList -> Nat
 %partial fn sumlist(xs) {
     match xs {
         PNil => 0,
@@ -47,11 +46,24 @@ sumlist : PList Point -> Nat
 seglen : Seg -> Nat
 fn seglen(s) { match s { Seg(p, n) => norm1(p) + n } }
 
+// ⛔ the implicit version is REJECTED — copy it in to see the guided error:
+//   enum PList (a : Type) { PNil2 : PList a, PCons2 : a -> PList a -> PList a }
+//   bad : PList Point -> Nat
+//   %partial fn bad(xs) { match xs { PNil2 => 0, PCons2(p, t) => norm1(p) + bad(t) } }
+
 main : Nat
 fn main() {
-    let p  = step(Point(3, 4));                                   // (7, 5)
-    let v1 = norm1(p);                                            // 12
+    let p  = step(Point(3, 4));                                       // (7, 5)
+    let v1 = norm1(p);                                                // 12
     let v2 = sumlist(PCons(Point(10, 20), PCons(Point(1, 2), PNil))); // 33
-    let v3 = seglen(Seg(Point(8, 9), 8));                         // 25
-    v1 + v2 + v3                                                  // 70
+    let v3 = seglen(Seg(Point(8, 9), 8));                             // 25
+    // real AoS: one flat 3-element, stride-16 buffer; element read by value.
+    let a0 = anew(3, Point(1, 2));
+    let a1 = aset(1, lt(1, 3), Point(30, 40), a0);
+    let (q, a2) = aget(1, lt(1, 3), a1);
+    let u  = afree(a2);
+    // the box YOU write: Own Point is one 16-byte cell, the record inline.
+    let o  = alloc(Point(5, 6));
+    let r  = unbox(o);
+    v1 + v2 + v3 + norm1(q) + norm1(r)                                // 70 + 70 + 11
 }

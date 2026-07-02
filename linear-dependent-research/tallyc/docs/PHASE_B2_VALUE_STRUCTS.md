@@ -4,23 +4,46 @@
 BY VALUE: `struct Point { x, y }` is two SSA registers — zero malloc, no tag
 (IR-tested); it crosses `Fix` function boundaries as consecutive i64 params and
 an `{i64 × w}` return (the two-register C convention); records nest (a record
-field of record type flattens inline); a record entering a GENERIC position
-(container element, abstract-typed argument) takes the BOXED representation and
-any match accepts either — the two-representation scheme below, implemented in
-`dep_codegen.rs` (`Val::{Int,Agg}`, `record_width`/`type_width`, `coerce`).
+field of record type flattens inline); implemented in `dep_codegen.rs`
+(`Val::{Int,Agg}`, `record_shape`/`type_shape`, `expect_width`). The initial
+pass auto-boxed records at generic boundaries; that is GONE — see the
+zero-non-explicit-boxing paragraph below.
 `%foreign` flattens record arguments, which on AArch64/SysV IS the by-value ABI
 for a ≤2-register integer C struct — tested against a real C function taking
 `struct { long long x, y; }` by value. The prelude's read-back pairs (`ARead`,
 `Cell`, `CL`/`VL`, `Taken`) became flat records too: no malloc per read even at
 -O0. An `Own` field inside a record keeps its linear accounting unchanged.
 
-**Not yet (the honest remainder):** flat record ELEMENTS in `Arr` (AoS — `Arr`
-elements stay uniformly one slot, so record elements are boxed; flat AoS needs
-per-instantiation layouts, i.e. monomorphization — SoA remains the flat layout
-meanwhile); records as `Own`/`valloc` payloads inline (uniformly boxed, same
-reason); records as TOTAL-fold accumulators/results stay boxed at those loop
-boundaries (`%partial` Fix loops keep them in registers); `repr`/field-width/
-bit-field layout control (§4 below).
+**ZERO NON-EXPLICIT BOXING (the follow-up pass, landed):** the boxed
+representation of records is GONE — a record has exactly one representation,
+flat — and with it every compiler-inserted malloc. What replaced each implicit
+box:
+
+- `Arr a n` is **real AoS**: element width from the erased type argument
+  (per-instantiation, computed by `type_shape`'s parameter substitution),
+  stride-w fills/loads/stores. `Own`/`valloc` payloads store INLINE at their
+  width (`alloc` IS the explicit box — `Own Point` is one 16-byte cell).
+- Generic FLAT records (`ARead a n`, `Taken a l`) carry their layout in the
+  value: construction concatenates actual widths, the match splits flexibly
+  (one flexible field absorbs the surplus; ambiguity is an error).
+- Total-fold (`NatElim`) accumulators widen — one phi per component.
+- Everything that genuinely cannot know a layout is a **guided hard error**,
+  never a hidden box: a record into a generic field of a BOXED datatype
+  (store `Own T`, or declare a concrete container — which inlines it flat); a
+  record into an abstract-typed `%partial` parameter; a width-sensitive
+  primitive (`unbox`/`aget`/`anew`/`aset`/`vread`/`vwrite`/`vtake`) over an
+  ABSTRACT type inside a generic `%partial` fn (one compiled body cannot
+  serve two layouts — specialize; non-`%partial` generics inline and are
+  fine); a width-CHANGING `vwrite` (the cell was allocated at the old width);
+  records as total-fold RESULTS of boxed-family/accumulator folds (make the
+  fn `%partial`).
+
+**The honest remainder:** `repr`/field-width/bit-field layout control (§4
+below), and the one implicit allocation left in the LANGUAGE: the
+multi-constructor / recursive datatype cell (the constructor-allocates model
+predating Phase A). Making that explicit — enums as flat tagged-union VALUES,
+recursion only through explicit `Own` — is FUTURE_WORK §5.1–5.2's Phase A and
+is a surface-language redesign, not a codegen pass.
 
 The original plan follows; the key deviation from it is that no separate "typed
 lowering IR" was needed — the erased terms already carry enough type information
