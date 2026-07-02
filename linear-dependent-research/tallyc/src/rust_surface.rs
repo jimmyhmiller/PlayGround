@@ -4460,6 +4460,20 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             .parse_program()?;
         items.extend(p2);
     }
+    // Char I/O, the same way: `putc n` writes one byte (n truncated to a char);
+    // `getc U` reads one byte from stdin and returns `Succ(byte)` — or `Zero` at
+    // EOF, so ONE ordinary `match` both tests for EOF and binds the character
+    // (its predecessor). Injected per-name so a program may own either.
+    for (nm, decl) in [
+        ("putc", "postulate putc : Nat -> Unit\n"),
+        ("getc", "postulate getc : Unit -> Nat\n"),
+    ] {
+        let taken = items.iter().any(|it| item_name(it) == Some(nm));
+        if !collides && has_nat && !taken {
+            let p = Parser { toks: lex(decl)?, pos: 0, fresh: 0 }.parse_program()?;
+            items.extend(p);
+        }
+    }
     // The contiguous-array prelude (see `ARR_PRELUDE`): appended AFTER the user
     // items because its types reference the program's `Nat`, and only for
     // `%builtin Nat` programs (the `Lt` bound elaborates through the linear-Nat

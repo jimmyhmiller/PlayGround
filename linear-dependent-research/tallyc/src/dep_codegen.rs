@@ -1045,6 +1045,79 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .unwrap();
                 Ok(self.i64t.const_zero())
             }
+            // putc : Nat -> Unit — write ONE byte to stdout (libc putchar; the
+            // Nat is truncated to the C int, i.e. the low byte of a char code).
+            "putc" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [c] = rt.as_slice() else {
+                    return Err(format!(
+                        "putc: expected 1 runtime argument (the char code), got {}",
+                        rt.len()
+                    ));
+                };
+                let i32t = self.ctx.i32_type();
+                let putchar = self.module.get_function("putchar").unwrap_or_else(|| {
+                    self.module
+                        .add_function("putchar", i32t.fn_type(&[i32t.into()], false), None)
+                });
+                let c32 = self
+                    .builder
+                    .build_int_truncate(*c, i32t, "putc.c")
+                    .unwrap();
+                self.builder
+                    .build_call(putchar, &[c32.into()], "putc")
+                    .unwrap();
+                Ok(self.i64t.const_zero())
+            }
+            // getc : Unit -> Nat — read ONE byte from stdin (libc getchar) and
+            // return `Succ(byte)`, or `Zero` at EOF. Nat cannot be negative, so
+            // C's `-1` sentinel becomes the `Zero` constructor and the byte is
+            // the predecessor: `match getc(U) { Zero => done, Succ(c) => … }`
+            // both tests for EOF and binds the character, in one native branch.
+            "getc" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [_u] = rt.as_slice() else {
+                    return Err(format!(
+                        "getc: expected 1 runtime argument (the Unit), got {}",
+                        rt.len()
+                    ));
+                };
+                let i32t = self.ctx.i32_type();
+                let getchar = self.module.get_function("getchar").unwrap_or_else(|| {
+                    self.module.add_function("getchar", i32t.fn_type(&[], false), None)
+                });
+                let r = self
+                    .builder
+                    .build_call(getchar, &[], "getc")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let r64 = self
+                    .builder
+                    .build_int_s_extend(r, self.i64t, "getc.w")
+                    .unwrap();
+                let eof = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::SLT,
+                        r64,
+                        self.i64t.const_zero(),
+                        "getc.eof",
+                    )
+                    .unwrap();
+                let succ = self
+                    .builder
+                    .build_int_add(r64, self.i64t.const_int(1, false), "getc.succ")
+                    .unwrap();
+                let out = self
+                    .builder
+                    .build_select(eof, self.i64t.const_zero(), succ, "getc.out")
+                    .unwrap()
+                    .into_int_value();
+                Ok(out)
+            }
             // new : {0 r} -> List r  — create an empty circular sentinel list.
             "new" => {
                 let s = self.malloc_cell(3, "sentinel");
@@ -3154,6 +3227,41 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- char I/O: getc/putc — a real program talks to the world ----
+
+    #[test]
+    fn char_io_cat_roundtrips_stdin() {
+        // THE identity filter: read every byte of stdin, write it to stdout.
+        // `getc` returns Succ(byte) / Zero-at-EOF, so one `match` is the whole
+        // control flow. AOT-built and run with a piped stdin; the output must be
+        // byte-exact.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            cat : Unit -> Unit\n\
+            %partial fn cat(u) { match getc(u) { Zero => U, Succ(c) => let v = putc(c); cat(v), } }\n\
+            main : Unit\nfn main() { cat(U) }\n";
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").unwrap();
+        let dir = std::env::temp_dir();
+        let obj = dir.join(format!("tally_cat_{}.o", std::process::id()));
+        let exe = dir.join(format!("tally_cat_{}", std::process::id()));
+        super::build_object_opts(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default, false)
+            .unwrap();
+        assert!(std::process::Command::new("cc").arg(&obj).arg("-o").arg(&exe).status().unwrap().success());
+        let input = "every byte, in order — π ≈ 3.14159\nsecond line\n";
+        let mut child = std::process::Command::new(&exe)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&obj);
+        let _ = std::fs::remove_file(exe.with_extension("o.ll"));
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), input);
     }
 
     // ---- %foreign: FFI to arbitrary C functions at the i64 ABI ----

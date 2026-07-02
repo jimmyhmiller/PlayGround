@@ -1,0 +1,30 @@
+// REAL I/O — `cat`, the identity filter over stdin/stdout.
+//
+//   tally build examples/cat.tal -o /tmp/cat -O2
+//   echo "hello" | /tmp/cat                      → hello        (byte-exact;
+//   /tmp/cat < any-file | cmp - any-file                          10MB verified)
+//
+// `getc U` reads one byte from stdin and returns `Succ(byte)` — or `Zero` at
+// EOF. A Nat cannot be negative, so C's `-1` sentinel becomes the `Zero`
+// constructor and the byte is the PREDECESSOR: one ordinary `match` both tests
+// for EOF and binds the character, compiling to a single native branch. `putc`
+// writes one byte. Effects are sequenced by the CBV `let` and `%partial`
+// recursion runs in source order; at -O2 the tail call is a loop (a 10MB file
+// does not grow the stack).
+//
+// For everything else there is `%foreign` (examples/ffi.tal) — fopen/fread/
+// socket calls are one declaration away.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+cat : Unit -> Unit
+%partial fn cat(u) {
+    match getc(u) {
+        Zero    => U,
+        Succ(c) => let v = putc(c); cat(v),
+    }
+}
+
+main : Unit
+fn main() { cat(U) }
