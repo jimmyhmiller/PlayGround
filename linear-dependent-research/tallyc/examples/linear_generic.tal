@@ -18,7 +18,7 @@
 // free — with the guarantees discharged by the ordinary QTT usage checker.
 
 enum Nat  { Zero : Nat, Succ : Nat -> Nat }
-enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
+boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
 
 // The body LET-SEQUENCES each linear consumption (`let y = f(h); …`) rather than
 // nesting it in the constructor: this is the form the LINEAR-CAPABILITY check

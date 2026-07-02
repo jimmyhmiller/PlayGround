@@ -238,6 +238,13 @@ pub struct Signature {
     /// an `i64` result). To the KERNEL these are ordinary opaque postulates
     /// (also present in `postulates`, never reduced); only codegen reads this.
     pub foreigns: std::collections::HashMap<String, String>,
+    /// datatypes declared `boxed enum` — the EXPLICIT opt-in to the heap-cell
+    /// representation: their constructors allocate one cell per value, visibly,
+    /// by declaration. Required for RECURSIVE families (`Vec`, `Tree`, …, whose
+    /// values would otherwise be infinitely sized); everything else is a flat
+    /// VALUE (records, tagged unions) and never allocates. Kernel semantics are
+    /// identical either way; only codegen reads this.
+    pub boxed_types: std::collections::HashSet<String>,
 }
 
 impl Signature {

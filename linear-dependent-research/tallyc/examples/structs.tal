@@ -26,7 +26,7 @@ struct Point { x : Nat, y : Nat }
 struct Seg { from : Point, len : Nat }       // nested: flattens to width 3
 
 // a CONCRETE container: Point fields store flat inline — C's struct-in-node.
-enum PointList { PNil : PointList, PCons : Point -> PointList -> PointList }
+boxed enum PointList { PNil : PointList, PCons : Point -> PointList -> PointList }
 
 norm1 : Point -> Nat
 fn norm1(p) { match p { Point(a, b) => a + b } }
@@ -46,10 +46,11 @@ sumlist : PointList -> Nat
 seglen : Seg -> Nat
 fn seglen(s) { match s { Seg(p, n) => norm1(p) + n } }
 
-// ⛔ the implicit version is REJECTED — copy it in to see the guided error:
+// ⛔ the implicit versions are REJECTED — copy either in for the guided error:
 //   enum PList (a : Type) { PNil2 : PList a, PCons2 : a -> PList a -> PList a }
-//   bad : PList Point -> Nat
-//   %partial fn bad(xs) { match xs { PNil2 => 0, PCons2(p, t) => norm1(p) + bad(t) } }
+//     — recursive without indirection: needs `boxed enum` or `Own` fields.
+//   boxed enum PList (a : Type) { … } with `PList Point` elements
+//     — a record in a generic cell slot: store `Own Point`, or a concrete list.
 
 main : Nat
 fn main() {

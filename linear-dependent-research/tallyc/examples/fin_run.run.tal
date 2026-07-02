@@ -9,7 +9,7 @@
 
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
-enum Fin : Nat -> Type {
+boxed enum Fin : Nat -> Type {
     FZ : {0 n : Nat} -> Fin (Succ n),
     FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
 }

@@ -518,10 +518,16 @@ eliminators + general recursion (`Fix`, opaque to the checker), erasure proven i
 IR, an LLVM backend, linear `Own`/region/DLL primitives, nullary-constructor
 unboxing, no GC, and a small re-checking kernel. The path to the design above:
 
-- **Phase A — explicit allocation of ADTs.** Typed `Own T`, `box`/`free`, `Opt`
-  with the null-pointer optimization, recursion via `Opt (Own T)`. Decouple
-  construction from allocation. *(Gets the Zig/C tree, C-identical, no implicit
-  malloc. Mostly backend; weeks.)*
+- **Phase A — explicit allocation of ADTs. DONE (v2.0, minus the null-pointer
+  niche).** Constructors never allocate: non-recursive enums are flat tagged-
+  union VALUES in registers; recursion names its indirection
+  (`Opt (Own Node)`, stored flat inline — every node an `alloc` you write);
+  a recursive enum without indirection is a declaration error, with
+  `boxed enum` as the explicit opt-in to cells for the inductive-family layer
+  (Vec/Fin/Tree keep kernel folds + the convoy, allocation declared in the
+  type). Remaining niceties: the null-pointer niche for `Opt (Own T)`
+  (currently 2 slots, could be 1), `box` as alloc+write sugar, allocator
+  parameters (Phase D).
 - **Phase B — value layouts.** ADTs as flat values: `sizeof`/alignment/offsets,
   by-value vs by-pointer passing, embedding, niche optimizations. *(The big
   representation rewrite — from "everything is a tagged i64 pointer" to real

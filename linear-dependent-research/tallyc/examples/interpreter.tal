@@ -12,7 +12,7 @@
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
-enum Expr {
+boxed enum Expr {
   lit : Nat -> Expr,
   add : Own Expr -> Own Expr -> Expr,
   mul : Own Expr -> Own Expr -> Expr,

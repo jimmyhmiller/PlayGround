@@ -14,11 +14,11 @@
 
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum Vec (a : Type) : Nat -> Type {
+boxed enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }
-enum Fin : Nat -> Type {
+boxed enum Fin : Nat -> Type {
     FZ : {0 n : Nat} -> Fin (Succ n),
     FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
 }
@@ -34,7 +34,7 @@ fn lookup(i, env) {
         Cons(v, rest) => match i { FZ => v, FS(j) => lookup(j, rest) },
     }
 }
-enum Expr : Nat -> Type {
+boxed enum Expr : Nat -> Type {
     lit : {0 d : Nat} -> Nat -> Expr d,
     var : {0 d : Nat} -> Fin d -> Expr d,
     add : {0 d : Nat} -> Own (Expr d) -> Own (Expr d) -> Expr d,

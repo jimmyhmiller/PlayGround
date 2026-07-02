@@ -9,7 +9,7 @@
 
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }
+boxed enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }
 freeRest : (1 r : OL) -> Nat
 fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }
 sum2 : (1 xs : OL) -> Nat

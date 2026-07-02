@@ -12,7 +12,7 @@ add : Nat -> Nat -> Nat
 fn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }
 
 // --- dependent: length-indexed vector -------------------------------------
-enum Vec (a : Type) : Nat -> Type {
+boxed enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }

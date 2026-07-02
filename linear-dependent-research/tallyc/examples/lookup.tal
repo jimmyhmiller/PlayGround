@@ -16,12 +16,12 @@
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
-enum Vec (a : Type) : Nat -> Type {
+boxed enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }
 
-enum Fin : Nat -> Type {
+boxed enum Fin : Nat -> Type {
     FZ : {0 n : Nat} -> Fin (Succ n),
     FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
 }

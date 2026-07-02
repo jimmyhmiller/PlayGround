@@ -9,7 +9,7 @@
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
 // `LT m n` is the proposition (and proof type) that m < n
-enum LT : Nat -> Nat -> Type {
+boxed enum LT : Nat -> Nat -> Type {
     LTZ : {0 n : Nat} -> LT Zero (Succ n),                         // 0 < n+1
     LTS : {0 m : Nat} -> {0 n : Nat} -> LT m n -> LT (Succ m) (Succ n),  // m<n ⟹ m+1<n+1
 }

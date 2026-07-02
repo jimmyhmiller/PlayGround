@@ -103,6 +103,36 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v2.0 — PHASE A: constructors never allocate; 213 tests)
+
+**Every `malloc` in a tallyc program is one the programmer wrote.** The
+constructor-allocates model is gone:
+
+- **VALUE ENUMS** (`examples/linked.tal`): a non-recursive multi-constructor
+  enum is a flat TAGGED UNION in registers — `[tag, payload…, padding]`, width
+  `1 + max(payload)`, layout per instantiation (`Opt Point` is `[tag, x, y]`).
+  Constructing `Some(x)` / `Rect(w, h)` allocates NOTHING (IR-tested: zero
+  mallocs); matching is a switch on the tag register. Nullary-only enums are
+  a bare scalar tag.
+- **Recursion names its own indirection, like C**:
+  `struct Node { v : Nat, next : Opt (Own Node) }` is the safe
+  `struct node { long v; struct node *next; }` — `Opt (Own Node)` stores FLAT
+  inline (`[tag, ptr]`, the nullable-pointer pattern), every node is an
+  `alloc` you wrote, `unbox` consumes it (leak / double-free / use-after-free
+  stay compile errors). The 3-node list program's IR is exactly three
+  24-byte user mallocs and nothing else.
+- **A recursive enum without indirection is a declaration error** — a value of
+  it would be infinitely sized, and tallyc won't allocate cells behind your
+  back. The error names both fixes: restructure with `Own`, or declare
+  **`boxed enum`** — the explicit opt-in to the heap-cell representation, for
+  the inductive-family layer (`Vec`, `Fin`, `Tree`, …) where the kernel's
+  total folds, index refinement, and the convoy live. The allocation is then
+  declared in the type, visibly, not hidden in codegen.
+- Layout validation runs on every checked program (`validate_layouts`):
+  value-recursion through any chain of records/value enums is caught with the
+  chain in the message; indirection (`Own`, postulate pointers, `boxed`
+  cells) is where the recursion legally lives.
+
 ## Status (v1.9 — the C-level layer: FLAT STRUCTS BY VALUE, CONTIGUOUS ARRAYS, the NAT CONVOY, %foreign FFI, real I/O; 210 tests)
 
 The release that closes the biggest "as low as C" gaps: structs in registers, a
@@ -709,7 +739,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (210 tests)
+cargo test                  # the ONE suite — frontend + native backend (213 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable

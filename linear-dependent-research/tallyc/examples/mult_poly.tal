@@ -10,7 +10,7 @@
 //   tally check examples/mult_poly.tal
 
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
+boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }
 lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b
 fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }
 freeNat : (1 o : Own Nat) -> Unit

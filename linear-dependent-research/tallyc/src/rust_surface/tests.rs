@@ -71,7 +71,7 @@ fn add(m, n) {
     }
 }
 
-enum Vec (a : Type) : Nat -> Type {
+boxed enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }
@@ -112,7 +112,7 @@ enum Nat {
     Succ : Nat -> Nat,
 }
 
-enum Fin : Nat -> Type {
+boxed enum Fin : Nat -> Type {
     FZ : {0 k : Nat} -> Fin (Succ k),
     FS : {0 k : Nat} -> Fin k -> Fin (Succ k),
 }
@@ -178,7 +178,7 @@ fn phase_1b_inductive_lt_constructs_explicit_and_implicit() {
     // ELIMINATED is the natWf prerequisite (a postulated `Lt` can't be analyzed).
     // EXPLICIT indices: `ltS(0,1,ltZ(0))` builds `Lt 1 2`.
     let explicit = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum Lt : Nat -> Nat -> Type {\n\
+        boxed enum Lt : Nat -> Nat -> Type {\n\
           ltZ : (n : Nat) -> Lt Zero (Succ n),\n\
           ltS : (m : Nat) -> (n : Nat) -> Lt m n -> Lt (Succ m) (Succ n),\n\
         }\n\
@@ -191,7 +191,7 @@ fn phase_1b_inductive_lt_constructs_explicit_and_implicit() {
     // `Lt Zero (Succ Zero)` solves `n = Zero`; `ltS(ltZ) : Lt 1 2` solves both. So
     // proofs read clean (no explicit indices) — natWf no longer needs them everywhere.
     let implicit = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum Lt : Nat -> Nat -> Type {\n\
+        boxed enum Lt : Nat -> Nat -> Type {\n\
           ltZ : {0 n : Nat} -> Lt Zero (Succ n),\n\
           ltS : {0 m : Nat} -> {0 n : Nat} -> Lt m n -> Lt (Succ m) (Succ n),\n\
         }\n\
@@ -212,7 +212,7 @@ fn phase_1b_value_correctness_guard_rejects_dropped_arg() {
     // `f(y, h(y, prf))` the new `y` matches `h`'s `y`, so it is accepted.)
     let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
         enum Bool { btrue : Bool, bfalse : Bool }\n\
-        enum Tree { leaf : Tree, node2 : (Bool -> Tree) -> Tree }\n\
+        boxed enum Tree { leaf : Tree, node2 : (Bool -> Tree) -> Tree }\n\
         g : Tree -> Nat -> Nat\n\
         fn g(t, acc) { match t { leaf => acc, node2(f) => g(f(btrue), Succ(acc)) } }\n";
     let err = match check_program(src) {
@@ -241,7 +241,7 @@ fn phase_1b_acc_indexed_higher_order_family_eliminates() {
     // value-correctness guard land with that infrastructure.
     let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
                postulate Lt : Nat -> Nat -> Type\n\
-               enum AccN : Nat -> Type {\n\
+               boxed enum AccN : Nat -> Type {\n\
                  accN : (x : Nat) -> ((y : Nat) -> Lt y x -> AccN y) -> AccN x,\n\
                }\n\
                depth : (x : Nat) -> AccN x -> Nat\n\
@@ -262,7 +262,7 @@ fn phase_1b_wtype_higher_order_recursive_fold() {
     let src = format!(
         "{NATB}\n\
          enum Bool {{ btrue : Bool, bfalse : Bool }}\n\
-         enum Tree {{ leaf : Tree, node2 : (Bool -> Tree) -> Tree }}\n\
+         boxed enum Tree {{ leaf : Tree, node2 : (Bool -> Tree) -> Tree }}\n\
          add : Nat -> Nat -> Nat\n\
          fn add(m, n) {{ match m {{ Zero => n, Succ(k) => Succ(add(k, n)) }} }}\n\
          kids : Bool -> Tree\nfn kids(b) {{ leaf }}\n\
@@ -419,8 +419,20 @@ fn phase_a_variance_aware_nested_positivity() {
     // ACCEPT — covariant nesting / pointer recursion (the memory model's shapes):
     ok(&format!("{P}struct Node {{ next : Own Node }}\nmain : Unit\nfn main() {{ U }}\n"));
     ok(&format!("{P}struct Node {{ next : Opt (Own Node) }}\nmain : Unit\nfn main() {{ U }}\n"));
-    ok(&format!("{P}struct Node {{ next : Opt Node }}\nmain : Unit\nfn main() {{ U }}\n"));
     ok(&format!("{P}struct Tree {{ l : Opt (Own Tree), v : Nat, r : Opt (Own Tree) }}\nmain : Unit\nfn main() {{ U }}\n"));
+
+    // `Opt Node` WITHOUT indirection is positivity-fine but LAYOUT-rejected
+    // under zero-implicit-allocation: as a VALUE it would be infinitely sized
+    // (it only ever "worked" because cells were allocated behind your back).
+    let err = check_program(&format!(
+        "{P}struct Node {{ next : Opt Node }}\nmain : Unit\nfn main() {{ U }}\n"
+    ))
+    .err()
+    .expect("value-recursion without indirection must be layout-rejected");
+    assert!(
+        format!("{err:?}").contains("RECURSIVE without indirection"),
+        "expected the layout guidance, got {err:?}"
+    );
 
     // REJECT — negative / contravariant occurrences (soundness):
     no(&format!("{P}struct Node {{ f : Own (Node -> Nat) }}\nmain : Unit\nfn main() {{ U }}\n"));      // negative inside Own
@@ -555,8 +567,8 @@ fn dependent_ast_makes_out_of_scope_variables_impossible_by_typing() {
     // RUNTIME; the dependent type ELIMINATES it by construction. (The `Own (Expr d)`
     // children declare via the (a)-positivity — `Own` of the indexed recursive family.)
     const HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
-        enum Expr : Nat -> Type { lit : {0 d : Nat} -> Nat -> Expr d, var : {0 d : Nat} -> Fin d -> Expr d, add : {0 d : Nat} -> Own (Expr d) -> Own (Expr d) -> Expr d }\n\
+        boxed enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+        boxed enum Expr : Nat -> Type { lit : {0 d : Nat} -> Nat -> Expr d, var : {0 d : Nat} -> Fin d -> Expr d, add : {0 d : Nat} -> Own (Expr d) -> Own (Expr d) -> Expr d }\n\
         main : Nat\nfn main() { Zero }\n";
     // IN scope (depth 1, variable 0) — type-checks.
     let in_scope = format!("{HDR}e0 : Expr (Succ Zero)\nfn e0() {{ var(FZ) }}\n");
@@ -651,7 +663,7 @@ const PROOFS: &str = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
 -- `LT m n` : a proof that m < n
-enum LT : Nat -> Nat -> Type {
+boxed enum LT : Nat -> Nat -> Type {
     LTZ : {0 n : Nat} -> LT Zero (Succ n),
     LTS : {0 m : Nat} -> {0 n : Nat} -> LT m n -> LT (Succ m) (Succ n),
 }
@@ -1107,7 +1119,7 @@ fn exhaustive_match_still_accepted_after_hygiene() {
 
 const FIN2: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
     enum Bool { T : Bool, F : Bool }\n\
-    enum Fin : Nat -> Type {\n\
+    boxed enum Fin : Nat -> Type {\n\
       FZ : {0 n : Nat} -> Fin (Succ n),\n\
       FS : {0 n : Nat} -> Fin n -> Fin (Succ n),\n\
     }\n";
@@ -1152,7 +1164,7 @@ fn missing_reachable_case_still_rejected_with_variable_index() {
 
 const ONEA: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
     enum Bool { T : Bool, F : Bool }\n\
-    enum Tree { leaf : Tree, node : Tree -> Tree -> Tree }\n\
+    boxed enum Tree { leaf : Tree, node : Tree -> Tree -> Tree }\n\
     add : Nat -> Nat -> Nat\n\
     %total fn add(a, b) { match a { Zero => b, Succ(k) => Succ(add(k, b)) } }\n";
 
@@ -1453,7 +1465,7 @@ fn generic_higher_order_over_linear_data() {
     // into an unrestricted constructor position) — that is also what the
     // LINEAR-CAPABILITY check verifies, so `lmap` may be instantiated at `Own Nat`.
     let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-               enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+               boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
                lmap : {0 a : Type} -> {0 b : Type} -> (w f : (1 x : a) -> b) -> (1 xs : LList a) -> LList b\n\
                fn lmap(f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(f, t); LCons(y, r), } }\n\
                freeNat : (1 o : Own Nat) -> Unit\n\
@@ -1471,7 +1483,7 @@ fn generic_code_cannot_leak_linear_elements() {
     // `drophead` silently leaked every `Own Nat` in the list (the use-site
     // rebind saw only the abstract `a`, never the linear instantiation).
     let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-               enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+               boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
                drophead : {0 a : Type} -> (1 xs : LList a) -> Nat\n\
                fn drophead(xs) { match xs { LNil => Zero, LCons(h, t) => drophead(t) } }\n\
                leak : (1 xs : LList (Own Nat)) -> Nat\n\
@@ -1480,7 +1492,7 @@ fn generic_code_cannot_leak_linear_elements() {
     assert!(err.iter().any(|e| e.contains("LINEAR type")), "got: {err:?}");
     // ...while the same generic function at a COPYABLE type stays fine.
     let ok = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-              enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+              boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
               drophead : {0 a : Type} -> (1 xs : LList a) -> Nat\n\
               fn drophead(xs) { match xs { LNil => Zero, LCons(h, t) => drophead(t) } }\n\
               use2 : (1 xs : LList Nat) -> Nat\n\
@@ -1506,8 +1518,8 @@ fn mult_variable_binder_parses_and_errors_cleanly() {
 
 /// The shared header for the convoy tests: Nat, Vec, Fin, Void + exfalso + fzv.
 const CONVOY_HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-    enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
-    enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+    boxed enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+    boxed enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
     enum Void { }\n\
     exfalso : {0 a : Type} -> Void -> a\nfn exfalso(v) { match v { } }\n\
     fzv : Fin Zero -> Void\nfn fzv(f) { match f { } }\n";
@@ -1592,7 +1604,7 @@ fn mult_poly_one_lmap_serves_linear_and_unrestricted_callbacks() {
     // `lmap(w, inc, xs)` maps a copyable list (m := w). The kernel only ever
     // sees the concrete instances (`lmap$1`, `lmap$w`).
     let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
         lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
         fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
         freeNat : (1 o : Own Nat) -> Unit\nfn freeNat(o) { free(o) }\n\
@@ -1608,7 +1620,7 @@ fn mult_poly_unsound_instantiations_are_rejected() {
     // `lmap$0` fails the linear-capability check and the instantiation at
     // `Own Nat` is rejected (the leak is a compile error).
     let zero = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
         lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
         fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
         dropNat : (0 o : Own Nat) -> Unit\nfn dropNat(o) { U }\n\
@@ -1618,7 +1630,7 @@ fn mult_poly_unsound_instantiations_are_rejected() {
     // m := w with a LINEAR-consuming callback: `(1 x) -> b` is not `(w x) -> b`
     // (the ω instance could call it many times on one value) — plain type error.
     let omega = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+        boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
         lmap : {0 a : Type} -> {0 b : Type} -> (m : Mult) -> (w f : (m x : a) -> b) -> (1 xs : LList a) -> LList b\n\
         fn lmap(m, f, xs) { match xs { LNil => LNil, LCons(h, t) => let y = f(h); let r = lmap(m, f, t); LCons(y, r), } }\n\
         freeNat : (1 o : Own Nat) -> Unit\nfn freeNat(o) { free(o) }\n\
@@ -1631,7 +1643,7 @@ fn mult_poly_unsound_instantiations_are_rejected() {
 // ---------------------------------------------------------------------------
 
 const NPAT_HDR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-    enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n";
+    boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n";
 
 #[test]
 fn nested_patterns_desugar_and_check() {
@@ -1678,7 +1690,7 @@ fn nested_patterns_preserve_linearity() {
     // destructuring two levels deep MOVES both Owns out — the correct body
     // consumes each exactly once…
     const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-        enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
+        boxed enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
         freeRest : (1 r : OL) -> Nat\n\
         fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }\n";
     let ok = format!(

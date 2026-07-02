@@ -102,7 +102,7 @@ fn datadecl(name: &str, params: Vec<(Mult, Term)>, indices: Vec<(Mult, Term)>, c
 /// A W-type-shaped family: `Tree` with a finitely-branching node whose children
 /// are a FUNCTION `Bool → Tree` — a HIGHER-ORDER recursive constructor argument.
 fn tree_sig() -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![
             datadecl("Bool", vec![], vec![], vec![ctor("btrue", vec![], vec![]), ctor("bfalse", vec![], vec![])]),
@@ -175,7 +175,7 @@ fn deeper_higher_order_recursion_computes() {
 #[test]
 fn strict_positivity_rejects_negative_and_double_negative_occurrences() {
     // single NEGATIVE: `mk : (Bad → Bad) → Bad` — Bad left of an arrow. REJECTED.
-    let neg = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let neg = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl(
             "Bad",
@@ -189,7 +189,7 @@ fn strict_positivity_rejects_negative_and_double_negative_occurrences() {
     // DOUBLE NEGATIVE: `mk : ((Bad → Nat) → Nat) → Bad` — Bad two arrows deep (a
     // strictly-positive checker conservatively REJECTS this; it is not strictly
     // positive even though it is "positive").
-    let dneg = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let dneg = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl(
             "Bad",
@@ -230,7 +230,7 @@ fn positivity_sees_through_natcase_and_fix_hiding_a_negative_occurrence() {
         b(NatLit(0)),                                 // scrutinee 0 ⇒ reduces to the Zero branch
     );
     let field = Pi(Omega, b(hidden), b(bad.clone())); // (Bad→Bad) → Bad, obfuscated
-    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field)], vec![])])],
     };
@@ -242,7 +242,7 @@ fn positivity_sees_through_natcase_and_fix_hiding_a_negative_occurrence() {
     // and the same hidden inside a `Fix` is likewise rejected.
     let fix_hidden = Fix(b(Type(0)), b(Pi(Omega, b(bad.clone()), b(bad.clone()))));
     let field2 = Pi(Omega, b(fix_hidden), b(bad));
-    let sig2 = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let sig2 = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field2)], vec![])])],
     };
@@ -251,7 +251,7 @@ fn positivity_sees_through_natcase_and_fix_hiding_a_negative_occurrence() {
 
 /// `data Bad { mk : <field> }` — for the positivity sibling-hunt.
 fn bad_with_field(field: Term) -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl("Bad", vec![], vec![], vec![ctor("mk", vec![(Omega, field)], vec![])])],
     }
@@ -418,7 +418,7 @@ fn m2_higher_order_eliminator_uses_both_telescope_arguments() {
         vec![],
         vec![ctor("tleaf", vec![], vec![]), ctor("tnode", vec![(Omega, field)], vec![])],
     );
-    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), postulates: vec![], datas: vec![bool_d, tri_d] };
+    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(), postulates: vec![], datas: vec![bool_d, tri_d] };
     assert!(check_signature(&sig).is_ok(), "{:?}", check_signature(&sig));
 
     let bt = Constr("bt".into(), vec![]);
@@ -464,7 +464,7 @@ fn indexed_higher_order_ih_uses_the_recursive_occurrences_own_index() {
             ),
         ],
     );
-    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), postulates: vec![], datas: vec![bool_d, g_d] };
+    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(), postulates: vec![], datas: vec![bool_d, g_d] };
     assert!(check_signature(&sig).is_ok(), "{:?}", check_signature(&sig));
 
     let btrue = Constr("btrue".into(), vec![]);
@@ -513,7 +513,7 @@ fn acc_accessibility_family_is_well_formed() {
             b(Data("Acc".into(), vec![Var(4), Var(3), Var(1)])), // Acc A R y (ctx […,proof])
         )),
     );
-    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let sig = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl(
             "Acc",
@@ -539,7 +539,7 @@ fn acc_accessibility_family_is_well_formed() {
             b(Data("Acc".into(), vec![Var(4), Var(3), Var(1)])),
         )),
     );
-    let bad = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let bad = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![datadecl(
             "Acc",
@@ -554,7 +554,7 @@ fn acc_accessibility_family_is_well_formed() {
 // ---- Nat as a user datatype "N" ------------------------------------------
 
 fn nat_sig() -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "N".into(),
@@ -612,7 +612,7 @@ fn nat_as_a_user_datatype_with_generic_elim() {
 // ---- length-indexed vectors as a user datatype ---------------------------
 
 fn vec_sig() -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Vec".into(),
@@ -715,7 +715,7 @@ fn append_via_generic_elim_tracks_length_and_computes() {
 // ---- Fin: a two-constructor indexed family with recursion ----------------
 
 fn fin_sig() -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Fin".into(),
@@ -768,7 +768,7 @@ fn fin_is_a_recursive_indexed_family() {
 #[test]
 fn strict_positivity_is_enforced() {
     // a non-strictly-positive "Bad" with ctor  mk : (Bad → Bad) → Bad  is rejected
-    let bad = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let bad = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Bad".into(),
@@ -842,7 +842,7 @@ fn pi_lives_in_the_max_of_its_parts() {
 /// if `U : Type 0`, then `U` is a `Type 0` that contains a code for every `Type
 /// 0` — including itself — and `False` becomes inhabited in the total fragment.
 fn universe_storing_sig(universe: usize) -> Signature {
-    Signature { linear_types: Default::default(), foreigns: Default::default(),
+    Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "U".into(),
@@ -945,7 +945,7 @@ fn a_parameter_ranging_over_a_universe_lifts_the_datatype_universe() {
     // `data Box (A : Type 1) where mk : Box`  — a PHANTOM parameter over `Type 1`.
     // The constructor stores nothing, so the ctor-arg check never fires; the
     // PARAMETER-telescope check must still force `Box` up to `Type 1`.
-    let mk_box = |universe: usize| Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let mk_box = |universe: usize| Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Box".into(),
@@ -970,7 +970,7 @@ fn an_index_ranging_over_a_universe_lifts_the_datatype_universe() {
     // `data Tag : Type 1 → Type`  with  `mk : Tag (Type 0)` — the index ranges
     // over `Type 1` and `mk` pins a genuine universe value into its type. The
     // INDEX-telescope check must force `Tag` up to `Type 1`.
-    let mk_tag = |universe: usize| Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let mk_tag = |universe: usize| Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Tag".into(),
@@ -996,7 +996,7 @@ fn vec_style_value_parameter_does_not_over_restrict() {
     assert!(check_signature(&vec_sig()).is_ok(), "{:?}", check_signature(&vec_sig()));
     assert!(check_signature(&fin_sig()).is_ok(), "{:?}", check_signature(&fin_sig()));
     // and a `Type 0` parameter explicitly stays at universe 0:
-    let box0 = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let box0 = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "Phantom".into(),
@@ -1013,7 +1013,7 @@ fn vec_style_value_parameter_does_not_over_restrict() {
 fn struct_predicativity_diagnostic_does_not_double_name() {
     // a struct's single constructor shares the type's name; the predicativity
     // error must read `SBox`, not `SBox.SBox`.
-    let sbox = Signature { linear_types: Default::default(), foreigns: Default::default(),
+    let sbox = Signature { linear_types: Default::default(), foreigns: Default::default(), boxed_types: Default::default(),
         postulates: vec![],
         datas: vec![DataDecl {
             name: "SBox".into(),

@@ -5,7 +5,7 @@
 //! ```text
 //! enum Nat { Zero : Nat, Succ : Nat -> Nat }
 //!
-//! enum Vec (a : Type) : Nat -> Type {
+//! boxed enum Vec (a : Type) : Nat -> Type {
 //!     Nil  : Vec a Zero,
 //!     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 //! }
@@ -68,6 +68,7 @@ enum Tok {
     KwTotal,
     KwPartial,
     KwLinear,
+    KwBoxed,
     KwForeign,
 }
 
@@ -161,6 +162,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "let" => Tok::KwLet,
                 "Type" => Tok::KwType,
                 "postulate" => Tok::KwPostulate,
+                "boxed" => Tok::KwBoxed,
                 "linear" => Tok::KwLinear,
                 _ => Tok::Ident(w.to_string()),
             });
@@ -293,6 +295,10 @@ enum Item {
         variants: Vec<(String, Ty)>,
         /// declared `linear`: values of this type are resources (no drop/dup).
         linear: bool,
+        /// `boxed enum` — the explicit opt-in to the heap-cell representation
+        /// (constructors allocate one cell per value). REQUIRED for recursive
+        /// families; without it an enum is a flat tagged-union VALUE.
+        boxed: bool,
     },
     Struct {
         name: String,
@@ -376,7 +382,7 @@ impl Parser {
                 self.next();
                 self.parse_fn(Some(TotAnnot::Partial))
             }
-            Some(Tok::KwEnum) => self.parse_enum(false),
+            Some(Tok::KwEnum) => self.parse_enum(false, false),
             Some(Tok::KwStruct) => self.parse_struct(),
             Some(Tok::KwFn) => self.parse_fn(None),
             Some(Tok::KwPostulate) => self.parse_postulate(false),
@@ -400,12 +406,34 @@ impl Parser {
             // defaults to multiplicity 1). See `docs/VIEW_LAYER_PLAN.md`.
             Some(Tok::KwLinear) => {
                 self.next();
+                let boxed = self.peek() == Some(&Tok::KwBoxed);
+                if boxed {
+                    self.next();
+                }
                 match self.peek() {
-                    Some(Tok::KwPostulate) => self.parse_postulate(true),
-                    Some(Tok::KwEnum) => self.parse_enum(true),
+                    Some(Tok::KwPostulate) if !boxed => self.parse_postulate(true),
+                    Some(Tok::KwEnum) => self.parse_enum(true, boxed),
                     other => Err(format!(
-                        "`linear` must be followed by `postulate` or `enum`, found {other:?}"
+                        "`linear` must be followed by `postulate` or `[boxed] enum`, found {other:?}"
                     )),
+                }
+            }
+            // `boxed enum` / `boxed linear enum` — the explicit opt-in to the
+            // heap-cell representation (constructors allocate).
+            Some(Tok::KwBoxed) => {
+                self.next();
+                match self.peek() {
+                    Some(Tok::KwEnum) => self.parse_enum(false, true),
+                    Some(Tok::KwLinear) => {
+                        self.next();
+                        match self.peek() {
+                            Some(Tok::KwEnum) => self.parse_enum(true, true),
+                            other => Err(format!(
+                                "`boxed linear` must be followed by `enum`, found {other:?}"
+                            )),
+                        }
+                    }
+                    _ => unreachable!(),
                 }
             }
             Some(Tok::Ident(_)) => {
@@ -568,7 +596,7 @@ impl Parser {
         Ok(Item::Postulate(name, ty, linear))
     }
 
-    fn parse_enum(&mut self, linear: bool) -> Result<Item, String> {
+    fn parse_enum(&mut self, linear: bool, boxed: bool) -> Result<Item, String> {
         self.eat(&Tok::KwEnum)?;
         let name = self.ident()?;
         let mut params = Vec::new();
@@ -593,7 +621,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::RBrace)?;
-        Ok(Item::Enum { name, params, index_ty, variants, linear })
+        Ok(Item::Enum { name, params, index_ty, variants, linear, boxed })
     }
 
     fn parse_struct(&mut self) -> Result<Item, String> {
@@ -4594,9 +4622,12 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     let mut sig = Signature::default();
     for it in &items {
         match it {
-            Item::Enum { name, params, index_ty, variants, linear } if !elab.nat_types.contains(name) => {
+            Item::Enum { name, params, index_ty, variants, linear, boxed } if !elab.nat_types.contains(name) => {
                 if *linear {
                     sig.linear_types.insert(name.clone());
+                }
+                if *boxed {
+                    sig.boxed_types.insert(name.clone());
                 }
                 let np = params.len();
                 // family parameters are always solved (implicit) at constructor use sites
@@ -5098,6 +5129,12 @@ pub fn check_program(src: &str) -> Result<Program, Vec<String>> {
     let mut diags = Vec::new();
     if let Err(e) = dep::check_signature(&prog.sig) {
         diags.push(format!("signature: {e}"));
+    }
+    // ZERO NON-EXPLICIT ALLOCATION: every datatype must have a finite VALUE
+    // layout unless it opts into the heap-cell representation (`boxed enum`) —
+    // a recursive family without indirection is rejected at declaration.
+    if let Err(e) = crate::dep_codegen::validate_layouts(&prog.sig) {
+        diags.push(format!("layout: {e}"));
     }
     for (name, ty, body) in &prog.defs {
         if let Err(e) = dep::check_closed_in(prog.sig.clone(), body, ty) {

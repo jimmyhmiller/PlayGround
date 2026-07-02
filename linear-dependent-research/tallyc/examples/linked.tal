@@ -1,0 +1,44 @@
+// THE C LINKED STRUCTURE, MADE SAFE — every malloc is one you wrote.
+//
+//   tally run examples/linked.tal        →  42
+//
+// tallyc constructors never allocate. A recursive type therefore names its own
+// indirection, exactly like C:
+//
+//     struct node { long v; struct node *next; };      // C (NULL-terminated)
+//     struct Node { v : Nat, next : Opt (Own Node) }   // tallyc
+//
+// `Opt` is a VALUE enum — a flat [tag, payload] pair in registers; `Own Node`
+// is a pointer you create with `alloc` and consume with `unbox` (linearity
+// makes leak / double-free / use-after-free compile errors). The whole `next`
+// field is stored FLAT inline in the node: this program's IR contains exactly
+// THREE mallocs — the three `alloc` calls below — 24 bytes each
+// (v + the two-slot Opt), and nothing else. `Some`/`None`/`Node` construct in
+// registers.
+//
+// A recursive enum WITHOUT indirection is a declaration error (an infinite-size
+// value); `boxed enum` is the explicit opt-in to cells for the inductive-family
+// layer (Vec, Fin, Tree — where the kernel's total folds and index refinement
+// live). Value types, explicit pointers, or declared cells — never a hidden box.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }
+struct Node { v : Nat, next : Opt (Own Node) }
+
+// consume the list: unbox each node (frees its cell), sum the values.
+sum : (1 o : Opt (Own Node)) -> Nat
+%partial fn sum(o) {
+    match o {
+        None => 0,
+        Some(p) =>
+            let n = unbox(p);
+            match n { Node(x, t) => x + sum(t) },
+    }
+}
+
+main : Nat
+fn main() {
+    sum(Some(alloc(Node(1, Some(alloc(Node(2, Some(alloc(Node(39, None))))))))))
+}

@@ -160,7 +160,7 @@ fn record_shape(
         return None; // a cycle through record types needs indirection: boxed.
     }
     let d = sig.data(data)?;
-    if nat_like(sig, data).is_some() || d.ctors.len() != 1 {
+    if sig.boxed_types.contains(data) || nat_like(sig, data).is_some() || d.ctors.len() != 1 {
         seen.remove(data);
         return None;
     }
@@ -211,6 +211,156 @@ fn field_width(
         }
         Term::Var(_) => (1, true), // a dependent (non-param) type variable.
         other => type_shape(sig, other, seen),
+    }
+}
+
+/// The shape of a VALUE ENUM instantiated at `dargs`: a multi-constructor,
+/// non-recursive, non-`boxed` datatype is a flat TAGGED UNION in registers —
+/// `[tag, payload…, zero-padding]`, width `1 + max(payload widths)`. No value
+/// of it ever allocates. Returns per-constructor payload widths + flex flags
+/// alongside the total. `None` = not a value enum (single-ctor, Nat-like,
+/// recursive, or declared `boxed`).
+struct EnumShape {
+    /// total width: 1 (tag) + the widest constructor payload.
+    width: u32,
+    /// per constructor: (payload width at this instantiation, has-flex-field).
+    payloads: Vec<(u32, bool)>,
+}
+
+fn enum_value_shape(
+    sig: &Signature,
+    data: &str,
+    dargs: &[Term],
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<EnumShape> {
+    if sig.boxed_types.contains(data) || nat_like(sig, data).is_some() {
+        return None;
+    }
+    let d = sig.data(data)?;
+    if d.ctors.len() < 2 {
+        return None;
+    }
+    if !seen.insert(data.to_string()) {
+        return None; // a cycle needs indirection: not a value.
+    }
+    let np = d.params.len();
+    let mut payloads = Vec::with_capacity(d.ctors.len());
+    let mut maxw = 0u32;
+    for ctor in &d.ctors {
+        let mut w = 0u32;
+        let mut flex = false;
+        for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
+            if matches!(aty, Term::Data(dn, _) if dn == data) {
+                seen.remove(data);
+                return None; // recursive: needs indirection.
+            }
+            if *mult == Mult::Zero {
+                continue;
+            }
+            let (fw, fx) = field_width(sig, aty, ai, np, dargs, seen);
+            w += fw;
+            flex |= fx;
+        }
+        maxw = maxw.max(w);
+        payloads.push((w, flex));
+    }
+    seen.remove(data);
+    Some(EnumShape { width: 1 + maxw, payloads })
+}
+
+/// LAYOUT VALIDATION — the zero-implicit-allocation gate, run on every checked
+/// program: a datatype that is neither `%builtin Nat`-shaped nor declared
+/// `boxed enum` must have a finite VALUE layout. A recursive occurrence (direct
+/// or through other value types) is rejected with the two explicit fixes.
+pub fn validate_layouts(sig: &Signature) -> Result<(), String> {
+    for decl in &sig.datas {
+        if sig.boxed_types.contains(&decl.name) || nat_like(sig, &decl.name).is_some() {
+            continue;
+        }
+        let mut path = vec![decl.name.clone()];
+        if inline_reaches(sig, &decl.name, &decl.name, &mut path) {
+            let chain = path.join(" → ");
+            return Err(format!(
+                "`{0}` is RECURSIVE without indirection ({chain}): a VALUE of it would be infinitely sized, and tallyc constructors never allocate implicitly. Either add explicit indirection — an `Own {0}` (or `Opt (Own {0})`) field, so every node is an `alloc` you write — or declare it `boxed enum {0}` to opt into the heap-cell representation (its constructors then allocate one cell per value, visibly, by declaration).",
+                decl.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Does `data`'s INLINE layout (fields stored by value, following value enums,
+/// records, and transparent wrappers, resolving parameter instantiations, but
+/// stopping at pointers — `Own`/postulate applications — and at `boxed`/
+/// Nat-like datatypes) reach `target`? `path` records the chain for the error.
+fn inline_reaches(sig: &Signature, data: &str, target: &str, path: &mut Vec<String>) -> bool {
+    let Some(d) = sig.data(data) else { return false };
+    let np = d.params.len();
+    for ctor in &d.ctors {
+        for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
+            if *mult == Mult::Zero {
+                continue; // erased: never stored.
+            }
+            if inline_ty_reaches(sig, aty, ai, np, &[], target, path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn inline_ty_reaches(
+    sig: &Signature,
+    t: &Term,
+    ai: usize,
+    np: usize,
+    dargs: &[Term],
+    target: &str,
+    path: &mut Vec<String>,
+) -> bool {
+    match strip_ann(t) {
+        // a parameter-typed field: resolve through the instantiation if known.
+        Term::Var(j) if *j >= ai && (*j - ai) < np => {
+            let pidx = np - 1 - (*j - ai);
+            match dargs.get(pidx) {
+                Some(arg) => inline_ty_reaches(sig, arg, 0, 0, &[], target, path),
+                None => false, // uninstantiated: nothing stored yet.
+            }
+        }
+        Term::Data(dn, da) => {
+            if dn == target {
+                return true;
+            }
+            // boxed / Nat-like datatypes are pointers/scalars: indirection.
+            if sig.boxed_types.contains(dn) || nat_like(sig, dn).is_some() {
+                return false;
+            }
+            if path.contains(dn) {
+                return false; // some other cycle; it gets its own diagnosis.
+            }
+            path.push(dn.clone());
+            let Some(d2) = sig.data(dn) else {
+                path.pop();
+                return false;
+            };
+            let np2 = d2.params.len();
+            for ctor in &d2.ctors {
+                for (ai2, (mult, aty)) in ctor.args.iter().enumerate() {
+                    if *mult == Mult::Zero {
+                        continue;
+                    }
+                    if inline_ty_reaches(sig, aty, ai2, np2, da, target, path) {
+                        return true;
+                    }
+                }
+            }
+            path.pop();
+            false
+        }
+        // Own/PtsTo/other postulate applications, Π, Σ, … : one slot, a pointer
+        // or opaque scalar — an INDIRECTION boundary, recursion behind it is the
+        // explicit kind.
+        _ => false,
     }
 }
 
@@ -266,10 +416,14 @@ fn type_shape(
     if seen.contains(name) {
         return (1, false);
     }
-    match record_shape(sig, name, &dargs, seen) {
-        Some(shape) => shape,
-        None => (1, false),
+    if let Some(shape) = record_shape(sig, name, &dargs, seen) {
+        return shape;
     }
+    if let Some(es) = enum_value_shape(sig, name, &dargs, seen) {
+        let flex = es.payloads.iter().any(|(_, fx)| *fx);
+        return (es.width, flex);
+    }
+    (1, false)
 }
 
 /// A runtime VALUE: one scalar `i64` (an integer or a pointer disguised as
@@ -313,7 +467,7 @@ impl<'c> Val<'c> {
 /// representation). Returns the field's argument index.
 fn transparent_field(sig: &Signature, data: &str) -> Option<usize> {
     let decl = sig.data(data)?;
-    if decl.ctors.len() != 1 {
+    if decl.ctors.len() != 1 || sig.boxed_types.contains(data) {
         return None;
     }
     let ctor = &decl.ctors[0];
@@ -596,7 +750,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     if let Some((func, field_level, live_idx, ndep)) = ef {
                         if args.len() != ndep {
                             return Err(format!(
-                                "convoy-fold recursive call: expected {ndep} varying                                  argument(s), got {}",
+                                "convoy-fold recursive call: expected {ndep} varying argument(s), got {}",
                                 args.len()
                             ));
                         }
@@ -1958,6 +2112,85 @@ impl<'c, 'a> DepCg<'c, 'a> {
             }
             return Ok(Val::Agg(comps));
         }
+
+        // A VALUE ENUM: a flat tagged union in registers — [tag, payload…,
+        // zero-padding to the enum's width]. The width comes from the
+        // INSTANTIATED parameters (args[..np] are the param terms), so
+        // `Opt Point` is [tag, x, y] and `Opt Nat` is [tag, n]. NO malloc.
+        if let Some(es) = enum_value_shape(
+            self.sig,
+            &data,
+            &args[..np].to_vec(),
+            &mut std::collections::HashSet::new(),
+        ) {
+            // an abstract instantiation cannot know its layout — guided error.
+            if args[..np].iter().any(|a| type_is_flex(self.sig, a) )
+                || es.payloads.iter().any(|(_, fx)| *fx)
+            {
+                return Err(format!(
+                    "`{name}`: constructing `{data}` at an ABSTRACT type \
+                     instantiation — its tagged-union layout is unknown at compile \
+                     time, and tallyc never boxes implicitly. Specialize the \
+                     function (non-%partial generics inline and work as-is), or \
+                     declare `boxed enum {data}`."
+                ));
+            }
+            // THE FLEX-RECOVERABILITY INVARIANT: a match compiles without the
+            // instantiation, so an arm recovers a parameter-typed field's width
+            // as (total − 1 − its concrete siblings) — valid only if that
+            // constructor's payload is the WIDEST at this instantiation.
+            // Enforced here, at construction, where the instantiation is known.
+            let decl_es = enum_value_shape(
+                self.sig,
+                &data,
+                &[],
+                &mut std::collections::HashSet::new(),
+            )
+            .ok_or_else(|| format!("`{data}`: lost its value-enum shape"))?;
+            for (ci, (dw, dfx)) in decl_es.payloads.iter().enumerate() {
+                let _ = dw;
+                if *dfx && es.payloads[ci].0 != es.width - 1 {
+                    return Err(format!(
+                        "`{data}` at this instantiation gives constructor \
+                         `{}` a parameter-typed payload NARROWER than the widest \
+                         constructor — a match could not recover its layout from \
+                         the value, and tallyc never boxes implicitly. Make the \
+                         payload concrete, box it (`Own …`), or declare \
+                         `boxed enum {data}`.",
+                        self.sig.data(&data).unwrap().ctors[ci].name
+                    ));
+                }
+            }
+            let lay = ctor_layout(self.sig, &data, name)?;
+            let mut comps: Vec<IntValue<'c>> = vec![self.i64t.const_int(lay.tag, false)];
+            for (ai, slot) in lay.arg_slot.iter().enumerate() {
+                if slot.is_some() {
+                    let v = self.compile_v(f, env, &args[np + ai])?;
+                    let v = if lay.arg_flex[ai] {
+                        v
+                    } else {
+                        self.expect_width(v, lay.arg_width[ai], "enum payload field")?
+                    };
+                    comps.extend(v.components());
+                }
+            }
+            while (comps.len() as u32) < es.width {
+                comps.push(self.i64t.const_zero());
+            }
+            if comps.len() as u32 != es.width {
+                return Err(format!(
+                    "`{name}`: payload wider than `{data}`'s tagged-union layout \
+                     ({} vs {} slots) — impossible for a kernel-checked term",
+                    comps.len(),
+                    es.width
+                ));
+            }
+            return Ok(if es.width == 1 {
+                Val::Int(comps[0])
+            } else {
+                Val::Agg(comps)
+            });
+        }
         let _ = &ctor_args;
 
         // A NULLARY constructor (no runtime fields, e.g. `Leaf`/`Nil`) is an
@@ -2055,6 +2288,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // A FLAT RECORD has no recursive fields ⇒ its eliminator has no IHs: it
         // is exactly the single-method in-place match.
         if record_width(self.sig, data).is_some() {
+            return self.compile_case(f, env, data, methods, scrut);
+        }
+        // A VALUE ENUM is non-recursive ⇒ no IHs either: same in-place switch.
+        if enum_value_shape(self.sig, data, &[], &mut std::collections::HashSet::new())
+            .is_some()
+        {
             return self.compile_case(f, env, data, methods, scrut);
         }
 
@@ -2404,6 +2643,121 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 }
             }
             return self.compile_v(f, &menv, body);
+        }
+
+        // A VALUE ENUM match: switch on the TAG COMPONENT (register, not a
+        // load), each arm binding its payload from the value's components —
+        // concrete fields at their declared widths, one parameter-typed field
+        // absorbing the surplus (sound by the construction-side invariant).
+        // No cell, no loads, no free. A refuted (absurd) arm's method is a
+        // binderless sentinel: its block is simply unreachable.
+        if enum_value_shape(self.sig, data, &[], &mut std::collections::HashSet::new())
+            .is_some()
+        {
+            let sv = self.compile_v(f, env, scrut)?;
+            let comps = sv.components();
+            let total = comps.len() as u32;
+            let tag = comps[0];
+
+            let default = self.ctx.append_basic_block(f, "vcase.default");
+            let join = self.ctx.append_basic_block(f, "vcase.join");
+            let arm_blocks: Vec<_> = decl
+                .ctors
+                .iter()
+                .map(|c| self.ctx.append_basic_block(f, &format!("vcase.{}", c.name)))
+                .collect();
+            let cases: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> = decl
+                .ctors
+                .iter()
+                .enumerate()
+                .map(|(ci, _)| (self.i64t.const_int(ci as u64, false), arm_blocks[ci]))
+                .collect();
+            self.builder.build_switch(tag, default, &cases).unwrap();
+            self.builder.position_at_end(default);
+            self.builder.build_unreachable().unwrap();
+
+            let mut arm_results: Vec<(Val<'c>, inkwell::basic_block::BasicBlock<'c>)> =
+                Vec::new();
+            for (ci, ctor) in decl.ctors.iter().enumerate() {
+                self.builder.position_at_end(arm_blocks[ci]);
+                let lay = ctor_layout(self.sig, data, &ctor.name)?;
+                // a refuted arm: the elaborator's sentinel has no binders for an
+                // argful constructor — the scrutinee's type already rules this
+                // tag out, so the block is dead.
+                let peeled = peel_n_lams(&methods[ci], ctor.args.len());
+                let Some(body) = peeled else {
+                    self.builder.build_unreachable().unwrap();
+                    continue;
+                };
+                let concrete: u32 = (0..ctor.args.len())
+                    .filter(|&ai| lay.arg_slot[ai].is_some() && !lay.arg_flex[ai])
+                    .map(|ai| lay.arg_width[ai])
+                    .sum();
+                let nflex = (0..ctor.args.len())
+                    .filter(|&ai| lay.arg_slot[ai].is_some() && lay.arg_flex[ai])
+                    .count();
+                let mut menv = env.to_vec();
+                let mut off = 1usize;
+                for ai in 0..ctor.args.len() {
+                    if lay.arg_slot[ai].is_none() {
+                        menv.push(None);
+                        continue;
+                    }
+                    let wi = if lay.arg_flex[ai] {
+                        if nflex != 1 {
+                            return Err(format!(
+                                "match[{data}]: constructor `{}` has {nflex} \
+                                 parameter-typed payload fields — the layout is \
+                                 ambiguous at the match; make them concrete or \
+                                 declare `boxed enum {data}`",
+                                ctor.name
+                            ));
+                        }
+                        (total - 1 - concrete) as usize
+                    } else {
+                        lay.arg_width[ai] as usize
+                    };
+                    let v = if wi == 1 {
+                        Val::Int(comps[off])
+                    } else {
+                        Val::Agg(comps[off..off + wi].to_vec())
+                    };
+                    off += wi;
+                    menv.push(Some(v));
+                }
+                let result = self.compile_v(f, &menv, body)?;
+                let pred = self.builder.get_insert_block().unwrap();
+                arm_results.push((result, pred));
+            }
+
+            if arm_results.is_empty() {
+                return Err(format!(
+                    "match[{data}]: every arm is refuted — an uninhabited match \
+                     should have been discharged upstream"
+                ));
+            }
+            let w = arm_results.iter().map(|(v, _)| v.width()).max().unwrap_or(1);
+            let mut incoming: Vec<(Vec<IntValue<'c>>, inkwell::basic_block::BasicBlock<'c>)> =
+                Vec::new();
+            for (v, bb) in arm_results {
+                self.builder.position_at_end(bb);
+                let cs = self
+                    .expect_width(v, w, &format!("case[{data}] arm result"))?
+                    .components();
+                let pred = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join).unwrap();
+                incoming.push((cs, pred));
+            }
+            self.builder.position_at_end(join);
+            let mut out: Vec<IntValue<'c>> = Vec::with_capacity(w as usize);
+            for k in 0..w as usize {
+                let phi = self.builder.build_phi(self.i64t, "vcase.result").unwrap();
+                for (cs, bb) in &incoming {
+                    phi.add_incoming(&[(&cs[k] as &dyn inkwell::values::BasicValue, *bb)]);
+                }
+                out.push(phi.as_basic_value().into_int_value());
+            }
+            return Ok(if w == 1 { Val::Int(out[0]) } else { Val::Agg(out) });
         }
         let scrut_val = self.compile(f, env, scrut)?;
         let scrut_ptr = self
@@ -3473,7 +3827,7 @@ fn mul(m, n) { match m { Zero => Zero, Succ(k) => add(n, mul(k, n)) } }
     const TREE: &str = r#"
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
+boxed enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
 build : Nat -> Nat -> Tree
 fn build(d, x) { match d { Zero => Leaf, Succ(k) => Node(build(k, x), x, build(k, x)) } }
 tsum : Tree -> Nat
@@ -3490,7 +3844,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
         const G: &str = r#"
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
+boxed enum Tree { Leaf : Tree, Node : Tree -> Nat -> Tree -> Tree }
 build : Nat -> Nat -> Tree
 fn build(d, label) { match d { Zero => Leaf, Succ(k) => Node(build(k, label + label), label, build(k, label + label + 1)) } }
 tsum : Tree -> Nat
@@ -3512,7 +3866,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
         // tree on the heap, walks + frees it, and returns 7. Memory-safe, zero-GC, the
         // differentiator applied to a genuinely complicated program.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum Expr { lit : Nat -> Expr, add : Own Expr -> Own Expr -> Expr, mul : Own Expr -> Own Expr -> Expr }\n\
+            boxed enum Expr { lit : Nat -> Expr, add : Own Expr -> Own Expr -> Expr, mul : Own Expr -> Own Expr -> Expr }\n\
             plus : Nat -> Nat -> Nat\nfn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }\n\
             times : Nat -> Nat -> Nat\nfn times(m, n) { match m { Zero => Zero, Succ(k) => plus(n, times(k, n)) } }\n\
             eval : Own Expr -> Nat\n\
@@ -3557,7 +3911,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
         // Now solve_fn_call resolves a not-in-defs callee as the in-scope (Fix self) binder
         // and infers the implicit. `vlast v3 0` = the last element = 3.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            boxed enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
             vlast : {0 n : Nat} -> Vec Nat n -> Nat -> Nat\n\
             fn vlast(v, acc) { match v { Nil => acc, Cons(h, t) => vlast(t, h) } }\n\
             v3 : Vec Nat (Succ (Succ (Succ Zero)))\nfn v3() { Cons(Succ(Zero), Cons(Succ(Succ(Zero)), Cons(Succ(Succ(Succ(Zero))), Nil))) }\n\
@@ -3576,7 +3930,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
         // sumAcc [1,2] 0 = 3. This is the unblock that lets the interpreter (eval over an
         // AST) run as `%partial`.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum List { nil : List, cons : Nat -> List -> List }\n\
+            boxed enum List { nil : List, cons : Nat -> List -> List }\n\
             add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
             sumAcc : List -> Nat -> Nat\n\
             fn sumAcc(l, acc) { match l { nil => acc, cons(h, t) => sumAcc(t, add(acc, h)) } }\n\
@@ -3713,7 +4067,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 add : Nat -> Nat -> Nat
 fn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }
-enum Vec (a : Type) : Nat -> Type {
+boxed enum Vec (a : Type) : Nat -> Type {
     Nil  : Vec a Zero,
     Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k),
 }
@@ -3766,7 +4120,7 @@ fn vsum(xs) { match xs { Nil => Zero, Cons(h, t) => add(h, vsum(t)) } }
 
     const FIN: &str = r#"
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum Fin : Nat -> Type {
+boxed enum Fin : Nat -> Type {
     FZ : {0 n : Nat} -> Fin (Succ n),
     FS : {0 n : Nat} -> Fin n -> Fin (Succ n),
 }
@@ -3874,8 +4228,8 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // tag-switch — `n`, the `Fin` bound, and the motive all erase.
         // lookup [1,2,3] at index FS(FZ) = 2. (See examples/lookup.tal.)
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
-            enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
+            boxed enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            boxed enum Fin : Nat -> Type { FZ : {0 n : Nat} -> Fin (Succ n), FS : {0 n : Nat} -> Fin n -> Fin (Succ n) }\n\
             enum Void { }\n\
             exfalso : {0 a : Type} -> Void -> a\nfn exfalso(v) { match v { } }\n\
             fzv : Fin Zero -> Void\nfn fzv(f) { match f { } }\n\
@@ -3909,7 +4263,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // (`second`), nested Nat patterns (`pred2`), constructor patterns in the
         // first position (`swaps`); 9 + 3 + 2 = 14.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
+            boxed enum LList (a : Type) { LNil : LList a, LCons : a -> LList a -> LList a }\n\
             second : LList Nat -> Nat\n\
             fn second(xs) { match xs { LCons(h, LCons(h2, t)) => h2, LCons(h, LNil) => h, LNil => 0 } }\n\
             pred2 : Nat -> Nat\n\
@@ -3927,7 +4281,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // (Also exercises the Case-not-Elim lowering for IH-free matches: an
         // eager eliminator IH would have re-traversed the linear tail.)
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
+            boxed enum OL { ONil : OL, OCons : Own Nat -> OL -> OL }\n\
             freeRest : (1 r : OL) -> Nat\n\
             fn freeRest(r) { match r { ONil => Zero, OCons(a, t) => let u = free(a); freeRest(t) } }\n\
             sum2 : (1 xs : OL) -> Nat\n\
@@ -3943,7 +4297,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // over `Vec Nat (Succ k)` with the impossible `Nil` arm OMITTED (refuted
         // by the index — real dependent coverage). vhead(vtail [1,2,3]) = 2.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
+            boxed enum Vec (a : Type) : Nat -> Type { Nil : Vec a Zero, Cons : {0 k : Nat} -> a -> Vec a k -> Vec a (Succ k) }\n\
             vhead : {0 k : Nat} -> Vec Nat (Succ k) -> Nat\n\
             fn vhead(v) { match v { Cons(h, t) => h } }\n\
             vtail : {0 k : Nat} -> Vec Nat (Succ k) -> Vec Nat k\n\
@@ -3998,7 +4352,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // per the effect-order rule: a total fold is a CBV eliminator and would
         // emit bottom-up; `%partial` forces direct recursion (source order).
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
-            enum SList { SNil : SList, SCons : Str -> SList -> SList }\n\
+            boxed enum SList { SNil : SList, SCons : Str -> SList -> SList }\n\
             printall : SList -> Unit\n\
             %partial fn printall(xs) { match xs { SNil => U, SCons(h, t) => let u = prints(h); printall(t) } }\n\
             main : Unit\n\
@@ -4016,6 +4370,78 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- Phase A: value enums, explicit indirection, zero implicit cells ----
+
+    #[test]
+    fn value_enums_are_flat_tagged_unions() {
+        // a non-recursive multi-ctor enum is a VALUE: [tag, payload…, padding]
+        // in registers — constructing, passing, and matching allocate NOTHING.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }\n\
+            enum Shape { Circle : Nat -> Shape, Rect : Nat -> Nat -> Shape }\n\
+            area : Shape -> Nat\n\
+            fn area(s) { match s { Circle(r) => r + r, Rect(w, h) => w + h } }\n\
+            grab : Opt Nat -> Nat\n\
+            fn grab(o) { match o { None => 0, Some(x) => x } }\n\
+            main : Nat\n\
+            fn main() { area(Rect(3, 4)) + area(Circle(5)) + grab(Some(25)) }\n";
+        assert_eq!(run(src), 42);
+        let ir = ir(src);
+        assert_eq!(
+            ir.matches("call ptr @malloc").count(),
+            0,
+            "value enums must never allocate\n{ir}"
+        );
+    }
+
+    #[test]
+    fn recursive_enum_requires_explicit_boxing() {
+        // a recursive enum without indirection would be an infinitely-sized
+        // value — and its cells used to be allocated implicitly. Now: a guided
+        // declaration error; `boxed enum` is the explicit opt-in.
+        let bare = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum L { LNil : L, LCons : Nat -> L -> L }\n\
+            main : Nat\nfn main() { 0 }\n";
+        let err = rust_surface::check_program(bare)
+            .err()
+            .expect("recursive enum without `boxed` must be rejected");
+        assert!(
+            format!("{err:?}").contains("RECURSIVE without indirection"),
+            "expected the layout guidance, got {err:?}"
+        );
+        let boxed = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum L { LNil : L, LCons : Nat -> L -> L }\n\
+            sum : L -> Nat\n\
+            %partial fn sum(l) { match l { LNil => 0, LCons(x, t) => x + sum(t) } }\n\
+            main : Nat\nfn main() { sum(LCons(40, LCons(2, LNil))) }\n";
+        assert_eq!(run(boxed), 42);
+    }
+
+    #[test]
+    fn own_linked_list_allocates_only_what_you_wrote() {
+        // THE C linked structure, made safe: recursion through an explicit
+        // `Own`, `Opt (Own Node)` stored FLAT inline ([tag, ptr] — the C
+        // nullable pointer pattern), every node an `alloc` the program wrote.
+        // The IR contains exactly the three user mallocs, 24 bytes each
+        // (v + the two-slot Opt), and nothing else.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }\n\
+            struct Node { v : Nat, next : Opt (Own Node) }\n\
+            sum : (1 o : Opt (Own Node)) -> Nat\n\
+            %partial fn sum(o) { match o { None => 0, Some(p) => \
+                let n = unbox(p); match n { Node(x, t) => x + sum(t) }, } }\n\
+            main : Nat\n\
+            fn main() { sum(Some(alloc(Node(1, Some(alloc(Node(2, Some(alloc(Node(39, None)))))))))) }\n";
+        assert_eq!(run(src), 42);
+        let ir = ir(&src);
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(24u64, 3usize)].into_iter().collect(),
+            "exactly the three user-written 24B node allocs; got {sizes:?}\n{ir}"
+        );
     }
 
     // ---- Phase B2: flat multi-field structs BY VALUE ----
@@ -4080,7 +4506,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // malloc. The two explicit alternatives both work (below).
         let implicit = format!(
             "{POINT}\
-             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
+             boxed enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
              norm1 : Point -> Nat\n\
              fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
              sumlist : PList Point -> Nat\n\
@@ -4099,7 +4525,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // node layout, still no per-element box.
         let concrete = format!(
             "{POINT}\
-             enum PointList {{ PNil : PointList, PCons : Point -> PointList -> PointList }}\n\
+             boxed enum PointList {{ PNil : PointList, PCons : Point -> PointList -> PointList }}\n\
              norm1 : Point -> Nat\n\
              fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
              sumlist : PointList -> Nat\n\
@@ -4114,7 +4540,7 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // program is one the programmer wrote.
         let explicit = format!(
             "{POINT}\
-             enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
+             boxed enum PList (a : Type) {{ PNil : PList a, PCons : a -> PList a -> PList a }}\n\
              norm1 : Point -> Nat\n\
              fn norm1(p) {{ match p {{ Point(a, b) => a + b }} }}\n\
              sumlist : (1 xs : PList (Own Point)) -> Nat\n\

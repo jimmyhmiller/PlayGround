@@ -15,7 +15,7 @@
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
-enum Tree {
+boxed enum Tree {
     Leaf : Tree,
     Node : Tree -> Nat -> Tree -> Tree,
 }
