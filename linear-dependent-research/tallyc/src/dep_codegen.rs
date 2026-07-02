@@ -2065,6 +2065,125 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*arr);
                 Ok(Val::Int(self.i64t.const_zero()))
             }
+            // ---- native integer arithmetic (the C instructions) ----
+            // Two-argument ops: one machine instruction each. Wrapping mod
+            // 2^64; comparisons yield 1/0. `div`/`mod` are zero-TOTAL (n/0 = 0,
+            // n%0 = n) with a branch-free guard — no UB, no trap, on every
+            // target. All KERNEL-OPAQUE: they never reduce in a type.
+            "sub" | "mul" | "div" | "mod" | "ltb" | "leb" | "eqb" | "band" | "bor"
+            | "bxor" | "shl" | "shr" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [a, b] = rt.as_slice() else {
+                    return Err(format!(
+                        "{cname}: expected 2 runtime arguments, got {}",
+                        rt.len()
+                    ));
+                };
+                let (a, b) = (*a, *b);
+                let bd = self.builder;
+                let out = match cname {
+                    // Nat subtraction is MONUS: a - b, floored at 0.
+                    "sub" => {
+                        let raw = bd.build_int_sub(a, b, "sub").unwrap();
+                        let ok = bd
+                            .build_int_compare(inkwell::IntPredicate::UGE, a, b, "sub.ok")
+                            .unwrap();
+                        bd.build_select(ok, raw, self.i64t.const_zero(), "sub.m")
+                            .unwrap()
+                            .into_int_value()
+                    }
+                    "mul" => bd.build_int_mul(a, b, "mul").unwrap(),
+                    "div" | "mod" => {
+                        // divisor 0 → substitute 1 (keeps the udiv/urem defined),
+                        // then select the total answer (n/0 = 0, n%0 = n).
+                        let z = bd
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                b,
+                                self.i64t.const_zero(),
+                                "dz",
+                            )
+                            .unwrap();
+                        let safe_b = bd
+                            .build_select(z, self.i64t.const_int(1, false), b, "dsafe")
+                            .unwrap()
+                            .into_int_value();
+                        if cname == "div" {
+                            let q = bd.build_int_unsigned_div(a, safe_b, "udiv").unwrap();
+                            bd.build_select(z, self.i64t.const_zero(), q, "div.t")
+                                .unwrap()
+                                .into_int_value()
+                        } else {
+                            let r = bd.build_int_unsigned_rem(a, safe_b, "urem").unwrap();
+                            bd.build_select(z, a, r, "mod.t").unwrap().into_int_value()
+                        }
+                    }
+                    "band" => bd.build_and(a, b, "band").unwrap(),
+                    "bor" => bd.build_or(a, b, "bor").unwrap(),
+                    "bxor" => bd.build_xor(a, b, "bxor").unwrap(),
+                    // shifts ≥ 64 are 0 (C leaves them undefined; we don't).
+                    "shl" | "shr" => {
+                        let big = bd
+                            .build_int_compare(
+                                inkwell::IntPredicate::UGE,
+                                b,
+                                self.i64t.const_int(64, false),
+                                "sh.big",
+                            )
+                            .unwrap();
+                        let raw = if cname == "shl" {
+                            bd.build_left_shift(a, b, "shl").unwrap()
+                        } else {
+                            bd.build_right_shift(a, b, false, "shr").unwrap()
+                        };
+                        bd.build_select(big, self.i64t.const_zero(), raw, "sh.t")
+                            .unwrap()
+                            .into_int_value()
+                    }
+                    cmp => {
+                        let pred = match cmp {
+                            "ltb" => inkwell::IntPredicate::ULT,
+                            "leb" => inkwell::IntPredicate::ULE,
+                            _ => inkwell::IntPredicate::EQ,
+                        };
+                        let c = bd.build_int_compare(pred, a, b, cmp).unwrap();
+                        bd.build_int_z_extend(c, self.i64t, "cmp.z").unwrap()
+                    }
+                };
+                Ok(Val::Int(out))
+            }
+            // dlt : (i n : Nat) -> DecLt i n — the runtime bounds DECISION: one
+            // compare whose Yes arm carries an ERASED `Lt i n` proof (fabricated
+            // by this audited primitive, and true exactly when the compare is).
+            // This is FUTURE_WORK §5.7's "runtime-checked index" clause: safe
+            // data-dependent indexing (sorts, searches) at one cmp — what
+            // correct C pays anyway. DecLt is a value enum of erased payloads:
+            // a bare tag (DYes = 0, DNo = 1).
+            "dlt" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [i, n] = rt.as_slice() else {
+                    return Err(format!(
+                        "dlt: expected 2 runtime arguments, got {}",
+                        rt.len()
+                    ));
+                };
+                let lt = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::ULT, *i, *n, "dlt")
+                    .unwrap();
+                let tag = self
+                    .builder
+                    .build_select(
+                        lt,
+                        self.i64t.const_zero(),
+                        self.i64t.const_int(1, false),
+                        "dlt.tag",
+                    )
+                    .unwrap()
+                    .into_int_value();
+                Ok(Val::Int(tag))
+            }
+
             // ---- Phase D: POOLS (regions/arenas) ----
             // Control block (4 slots): [0]=freelist head, [1]=block-list head,
             // [2]=bump cursor, [3]=bump end. Blocks: [0]=next block, then
@@ -3489,6 +3608,116 @@ impl<'c, 'a> DepCg<'c, 'a> {
         Ok(Val::Agg(comps))
     }
 
+    /// Compile a FIX BODY in TAIL POSITION: `let`-chains and Nat matches emit
+    /// their result as a `ret` PER ARM — no phi-join between a recursive call
+    /// and its return — so LLVM's tail-call elimination fires even for
+    /// AGGREGATE-returning recursions (a join-phi after the call otherwise
+    /// defeats it, and a deep tail loop overflows the stack). Covers the
+    /// dominant loop shapes (`let …; self(…)` under Nat matches, incl. the
+    /// convoy-applied form); anything else falls back to compile-and-return.
+    fn compile_tail(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        t: &Term,
+        ret_width: u32,
+        ret_struct: Option<inkwell::types::StructType<'c>>,
+    ) -> Result<(), String> {
+        match strip_ann(t) {
+            Term::Let(_sigma, _ty, e, body) => {
+                let ev = self.compile_v(f, env, e)?;
+                let mut env2 = env.to_vec();
+                env2.push(Some(ev));
+                self.compile_tail(f, &env2, body, ret_width, ret_struct)
+            }
+            Term::NatCase(_p, z, sm, scrut) => {
+                let nv = self.compile(f, env, scrut)?;
+                let s_body = match strip_ann(sm) {
+                    Term::Lam(b) => &**b,
+                    _ => return Err("natCase successor is not a function".into()),
+                };
+                let zero_bb = self.ctx.append_basic_block(f, "tcase.zero");
+                let succ_bb = self.ctx.append_basic_block(f, "tcase.succ");
+                let is_zero = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        nv,
+                        self.i64t.const_zero(),
+                        "tiszero",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_zero, zero_bb, succ_bb)
+                    .unwrap();
+                self.builder.position_at_end(zero_bb);
+                self.compile_tail(f, env, z, ret_width, ret_struct)?;
+                self.builder.position_at_end(succ_bb);
+                let k = self
+                    .builder
+                    .build_int_sub(nv, self.i64t.const_int(1, false), "tk")
+                    .unwrap();
+                let mut env2 = env.to_vec();
+                env2.push(Some(Val::Int(k)));
+                self.compile_tail(f, &env2, s_body, ret_width, ret_struct)
+            }
+            // a convoy-applied NatCase: commute the deps into the arms first.
+            Term::App(_, _) => {
+                let (head, args) = flatten_app(t);
+                if let Term::NatCase(p, z, sm, sc) = strip_ann(head) {
+                    if !args.is_empty() {
+                        let z2 = self.commute_apply_into_natcase_method(z, 0, &args)?;
+                        let s2 = self.commute_apply_into_natcase_method(sm, 1, &args)?;
+                        return self.compile_tail(
+                            f,
+                            env,
+                            &Term::NatCase(p.clone(), Box::new(z2), Box::new(s2), sc.clone()),
+                            ret_width,
+                            ret_struct,
+                        );
+                    }
+                }
+                self.compile_tail_default(f, env, t, ret_width, ret_struct)
+            }
+            _ => self.compile_tail_default(f, env, t, ret_width, ret_struct),
+        }
+    }
+
+    fn compile_tail_default(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        t: &Term,
+        ret_width: u32,
+        ret_struct: Option<inkwell::types::StructType<'c>>,
+    ) -> Result<(), String> {
+        let result = self.compile_v(f, env, t)?;
+        let result = self.expect_width(result, ret_width, "this function's result")?;
+        match (&result, ret_struct) {
+            (Val::Int(v), None) => {
+                self.builder.build_return(Some(v)).unwrap();
+            }
+            (Val::Agg(comps), None) if comps.is_empty() => {
+                self.builder
+                    .build_return(Some(&self.i64t.const_zero()))
+                    .unwrap();
+            }
+            (Val::Agg(comps), Some(st)) => {
+                let mut agg = st.get_undef();
+                for (k, c) in comps.iter().enumerate() {
+                    agg = self
+                        .builder
+                        .build_insert_value(agg, *c, k as u32, "ret.agg")
+                        .unwrap()
+                        .into_struct_value();
+                }
+                self.builder.build_return(Some(&agg)).unwrap();
+            }
+            _ => return Err("fix: return width mismatch (impossible)".into()),
+        }
+        Ok(())
+    }
+
     /// Build (once, memoized by term identity) the native function for a `Fix`.
     /// `Fix(ty, body)` with `body = λp₁…λpₙ. inner` becomes a recursive function of
     /// the non-erased parameters; self-references in `inner` compile to calls to it.
@@ -3572,33 +3801,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
             params: params.clone(),
             ret_width,
         });
-        let result = self.compile_v(func, &body_env, inner);
+        let result = self.compile_tail(func, &body_env, inner, ret_width, ret_struct);
         self.fix_selves.borrow_mut().pop();
-        let result = self.expect_width(result?, ret_width, "this function's result")?;
-        match (&result, ret_struct) {
-            (Val::Int(v), None) => {
-                self.builder.build_return(Some(v)).unwrap();
-            }
-            (Val::Agg(comps), None) if comps.is_empty() => {
-                // zero-width (view-typed) result: return a dummy scalar; the
-                // call site reconstructs the (empty) value.
-                self.builder
-                    .build_return(Some(&self.i64t.const_zero()))
-                    .unwrap();
-            }
-            (Val::Agg(comps), Some(st)) => {
-                let mut agg = st.get_undef();
-                for (k, c) in comps.iter().enumerate() {
-                    agg = self
-                        .builder
-                        .build_insert_value(agg, *c, k as u32, "ret.agg")
-                        .unwrap()
-                        .into_struct_value();
-                }
-                self.builder.build_return(Some(&agg)).unwrap();
-            }
-            _ => return Err("fix: return width mismatch (impossible)".into()),
-        }
+        result?;
         if let Some(bb) = saved {
             self.builder.position_at_end(bb);
         }
@@ -4821,6 +5026,66 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- native integer arithmetic + the runtime bounds decision ----
+
+    #[test]
+    fn native_arithmetic_is_single_instructions_and_total() {
+        // every op, including the totalized edges: monus floor, n/0 = 0,
+        // n%0 = n, shift ≥ 64 = 0.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            main : Nat\nfn main() {\n\
+                let a = mul(6, 7); let b = sub(10, 3); let c = sub(3, 10);\n\
+                let d = div(100, 7); let e = mod(100, 7); let g = div(5, 0);\n\
+                let h = mod(5, 0); let i = ltb(3, 4); let j = leb(4, 4);\n\
+                let k = eqb(4, 5); let l = band(12, 10); let m = bor(12, 10);\n\
+                let n = bxor(12, 10); let o = shl(1, 6); let p = shr(64, 3);\n\
+                let q = shl(1, 64);\n\
+                a + b + c + d + e + g + h + i + j + k + l + m + n + o + p + q\n\
+            }\n";
+        assert_eq!(run(src), 172);
+    }
+
+    #[test]
+    fn dlt_decides_data_dependent_bounds() {
+        // `dlt(i, n)`: one compare whose DYes arm carries the erased Lt proof —
+        // safe indexing when the index is runtime data. In-bounds reads the
+        // slot; out-of-bounds takes the (typed) fallback. 99 + 5.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            readat : (n : Nat) -> (i : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n\n\
+            fn readat(n, i, nz, arr) {\n\
+                match dlt(i, n) { DYes(p) => aget(i, p, arr), DNo => aget(0, nz, arr) }\n\
+            }\n\
+            main : Nat\nfn main() {\n\
+                let a0 = anew(4, 5);\n\
+                let a1 = aset(2, lt(2, 4), 99, a0);\n\
+                let (x, a2) = readat(4, 2, lt(0, 4), a1);\n\
+                let (y, a3) = readat(4, 77, lt(0, 4), a2);\n\
+                let u = afree(a3);\n\
+                x + y\n\
+            }\n";
+        assert_eq!(run(src), 104);
+    }
+
+    #[test]
+    fn quicksort_sorts_a_million_er_thirty_thousand() {
+        // the full in-place quicksort example (LCG fill, Lomuto partition with
+        // dlt-decided accesses, sorted-check × checksum), at 30k elements in
+        // the test (the 1M version is the measured bench vs bench/qsort.c).
+        // Also locks in the TAIL-POSITION fix-body compiler: `part` is a deep
+        // tail recursion returning an AGGREGATE (index, array) — per-arm rets
+        // keep LLVM's TCO applicable, where a phi-join once overflowed.
+        let src = std::fs::read_to_string("examples/qsort.tal")
+            .unwrap()
+            .replace("1000000", "30000");
+        let got = std::thread::Builder::new()
+            .stack_size(1 << 28)
+            .spawn(move || run(&src))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, 450_525_480);
     }
 
     // ---- Phase D: pools/regions — the in-language O(1)-remove DLL ----

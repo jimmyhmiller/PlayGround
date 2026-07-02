@@ -681,14 +681,14 @@ impl Parser {
                     }
                     self.eat(&Tok::RParen)?;
                     self.eat(&Tok::Eq)?;
-                    let rhs = self.parse_call()?;
+                    let rhs = self.parse_add()?;
                     self.eat(&Tok::Semi)?;
                     let body = self.parse_tm()?;
                     Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
                 } else {
                     let name = self.ident()?;
                     self.eat(&Tok::Eq)?;
-                    let rhs = self.parse_call()?;
+                    let rhs = self.parse_add()?;
                     self.eat(&Tok::Semi)?;
                     let body = self.parse_tm()?;
                     Ok(Tm::Let(name, Box::new(rhs), Box::new(body)))
@@ -4460,6 +4460,8 @@ postulate anew  : {0 a : Type} -> (n : Nat) -> a -> Arr a n
 postulate aget  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> (1 arr : Arr a n) -> ARead a n
 postulate aset  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 arr : Arr a n) -> Arr a n
 postulate afree : {0 a : Type} -> {0 n : Nat} -> (1 arr : Arr a n) -> Unit
+enum DecLt (i : Nat) (n : Nat) { DYes : (0 p : Lt i n) -> DecLt i n, DNo : DecLt i n }
+postulate dlt : (i : Nat) -> (n : Nat) -> DecLt i n
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
@@ -4510,12 +4512,43 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     // `getc U` reads one byte from stdin and returns `Succ(byte)` — or `Zero` at
     // EOF, so ONE ordinary `match` both tests for EOF and binds the character
     // (its predecessor). Injected per-name so a program may own either.
+    // NATIVE INTEGER ARITHMETIC — the C instructions, as KERNEL-OPAQUE
+    // postulates: they run as single machine ops (wrapping mod 2^64; div/mod
+    // are zero-TOTAL: n/0 = 0, n%0 = n — no UB, no trap) and never reduce in
+    // types. INDEX arithmetic in types stays the total, solver-decided
+    // fragment (`+`, `Lt`/`le`/`lt`); a fold-defined `mul` still reduces in
+    // types if you write one — these are the PARTIAL-fragment runtime ops.
+    // Injected per-name, so a program defining its own `mul` keeps it.
+    // a name is TAKEN if any item declares it — including as an enum
+    // CONSTRUCTOR (`enum Expr { mul : … }` must keep its `mul`).
+    let taken: std::collections::HashSet<String> = items
+        .iter()
+        .flat_map(|it| {
+            let mut ns: Vec<String> =
+                item_name(it).map(|n| n.to_string()).into_iter().collect();
+            if let Item::Enum { variants, .. } = it {
+                ns.extend(variants.iter().map(|(cn, _)| cn.clone()));
+            }
+            ns
+        })
+        .collect();
     for (nm, decl) in [
         ("putc", "postulate putc : Nat -> Unit\n"),
         ("getc", "postulate getc : Unit -> Nat\n"),
+        ("sub", "postulate sub : Nat -> Nat -> Nat\n"),
+        ("mul", "postulate mul : Nat -> Nat -> Nat\n"),
+        ("div", "postulate div : Nat -> Nat -> Nat\n"),
+        ("mod", "postulate mod : Nat -> Nat -> Nat\n"),
+        ("ltb", "postulate ltb : Nat -> Nat -> Nat\n"),
+        ("leb", "postulate leb : Nat -> Nat -> Nat\n"),
+        ("eqb", "postulate eqb : Nat -> Nat -> Nat\n"),
+        ("band", "postulate band : Nat -> Nat -> Nat\n"),
+        ("bor", "postulate bor : Nat -> Nat -> Nat\n"),
+        ("bxor", "postulate bxor : Nat -> Nat -> Nat\n"),
+        ("shl", "postulate shl : Nat -> Nat -> Nat\n"),
+        ("shr", "postulate shr : Nat -> Nat -> Nat\n"),
     ] {
-        let taken = items.iter().any(|it| item_name(it) == Some(nm));
-        if !collides && has_nat && !taken {
+        if !collides && has_nat && !taken.contains(nm) {
             let p = Parser { toks: lex(decl)?, pos: 0, fresh: 0 }.parse_program()?;
             items.extend(p);
         }
@@ -4528,7 +4561,8 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     let has_bnat = items
         .iter()
         .any(|it| matches!(it, Item::BuiltinNat(n) if n == "Nat"));
-    const ARR_NAMES: [&str; 6] = ["Arr", "ARead", "anew", "aget", "aset", "afree"];
+    const ARR_NAMES: [&str; 8] =
+        ["Arr", "ARead", "anew", "aget", "aset", "afree", "DecLt", "dlt"];
     let arr_collides = items
         .iter()
         .filter_map(item_name)

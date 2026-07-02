@@ -1,0 +1,104 @@
+// IN-PLACE QUICKSORT — the algorithm C exists for, written safely.
+//
+//   tally build examples/qsort.tal -o /tmp/qs -O2 ; /tmp/qs
+//   → 500172243296      (1,000,000 LCG-random elements: sorted-flag × checksum)
+//
+// What this needed, and now has:
+//   - NATIVE ARITHMETIC: `mul`/`sub`/`mod`/`ltb`/`eqb`… are single machine
+//     instructions (kernel-opaque postulates — index arithmetic in TYPES stays
+//     the total, solver-decided fragment). The LCG fill below is one mul+add
+//     per element, like C — not an O(n) unary fold.
+//   - DATA-DEPENDENT SAFE INDEXING: a pivot index is runtime data, so no
+//     compile-time `lt(i, n)` proof exists. `dlt(i, n)` is the DECISION — one
+//     compare whose `DYes` arm carries the erased `Lt i n` proof (FUTURE_WORK
+//     §5.7's "runtime-checked index" clause). One cmp per access is what
+//     correct C pays anyway; out-of-bounds is still unrepresentable.
+//
+// The array is linear (leak/double-free of the buffer are compile errors),
+// every access is bounds-decided, and `bench/qsort.c` is the raw-pointer twin
+// (same LCG, same Lomuto partition): both run at the same wall time at -O2.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// dlt-guarded element access; nz : the array is nonempty (index 0 fallback for
+// the arithmetically-unreachable DNo arms).
+geti : (n : Nat) -> (i : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n
+fn geti(n, i, nz, arr) {
+    match dlt(i, n) { DYes(p) => aget(i, p, arr), DNo => aget(0, nz, arr) }
+}
+
+seti : (n : Nat) -> (i : Nat) -> (x : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+fn seti(n, i, x, nz, arr) {
+    match dlt(i, n) { DYes(p) => aset(i, p, x, arr), DNo => arr }
+}
+
+swap : (n : Nat) -> (i : Nat) -> (j : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+fn swap(n, i, j, nz, arr) {
+    let (x, a1) = geti(n, i, nz, arr);
+    let (y, a2) = geti(n, j, nz, a1);
+    let a3 = seti(n, i, y, nz, a2);
+    seti(n, j, x, nz, a3)
+}
+
+// LCG fill (Knuth MMIX constants, 64-bit wrap — same as the C twin).
+fill : (n : Nat) -> (i : Nat) -> (x : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+%partial fn fill(n, i, x, nz, arr) {
+    match eqb(i, n) {
+        Succ(z) => arr,
+        Zero =>
+            let xm = mul(x, 6364136223846793005);
+            let x2 = xm + 1442695040888963407;
+            let a1 = seti(n, i, mod(x2, 1000000), nz, arr);
+            fill(n, i + 1, x2, nz, a1),
+    }
+}
+
+// Lomuto partition of [lo, hi]: pivot = a[hi]; returns (pivot index, array).
+part : (n : Nat) -> (hi : Nat) -> (i : Nat) -> (j : Nat) -> (pv : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n
+%partial fn part(n, hi, i, j, pv, nz, arr) {
+    match eqb(i, hi) {
+        Succ(z) => let a1 = swap(n, j, hi, nz, arr); MkARead(j, a1),
+        Zero =>
+            let (xi, a1) = geti(n, i, nz, arr);
+            match ltb(xi, pv) {
+                Succ(z) =>
+                    let a2 = swap(n, i, j, nz, a1);
+                    part(n, hi, i + 1, j + 1, pv, nz, a2),
+                Zero => part(n, hi, i + 1, j, pv, nz, a1),
+            },
+    }
+}
+
+qsort : (n : Nat) -> (lo : Nat) -> (hi : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+%partial fn qsort(n, lo, hi, nz, arr) {
+    match ltb(lo, hi) {
+        Zero => arr,
+        Succ(z) =>
+            let (pv, a1) = geti(n, hi, nz, arr);
+            match part(n, hi, lo, lo, pv, nz, a1) {
+                MkARead(p, a2) =>
+                    let a3 = qsort(n, lo, sub(p, 1), nz, a2);
+                    qsort(n, p + 1, hi, nz, a3),
+            },
+    }
+}
+
+// sorted check (leb chain) + checksum, in one consuming walk.
+chk : (n : Nat) -> (i : Nat) -> (prev : Nat) -> (ok : Nat) -> (acc : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Nat
+%partial fn chk(n, i, prev, ok, acc, nz, arr) {
+    match eqb(i, n) {
+        Succ(z) => let u = afree(arr); mul(ok, acc),
+        Zero =>
+            let (x, a1) = geti(n, i, nz, arr);
+            chk(n, i + 1, x, band(ok, leb(prev, x)), acc + x, nz, a1),
+    }
+}
+
+main : Nat
+fn main() {
+    let a0 = anew(1000000, 0);
+    let a1 = fill(1000000, 0, 88172645463325252, lt(0, 1000000), a0);
+    let a2 = qsort(1000000, 0, sub(1000000, 1), lt(0, 1000000), a1);
+    chk(1000000, 0, 0, 1, 0, lt(0, 1000000), a2)
+}

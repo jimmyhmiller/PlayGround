@@ -103,6 +103,36 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v2.3 — NATIVE ARITHMETIC + the runtime bounds DECISION: quicksort at C speed; 223 tests)
+
+The answer to "what can C do that we can't, at the same speed" was
+embarrassing: MULTIPLY. tallyc had native `+` and nothing else — `mul` was an
+O(n) fold, runtime comparison an O(min) loop. Closed:
+
+- **Native integer ops** (`sub` `mul` `div` `mod` `ltb` `leb` `eqb` `band`
+  `bor` `bxor` `shl` `shr`): single machine instructions, injected per-name
+  (your own `mul` fold still wins and still reduces in types). They are
+  KERNEL-OPAQUE postulates — the partial fragment's runtime arithmetic —
+  while INDEX arithmetic in types stays the total, solver-decided fragment.
+  All edges are total, no UB: monus subtraction, `n/0 = 0`, `n%0 = n`,
+  shifts ≥ 64 are 0; wrap-around is mod 2⁶⁴ like the machine's.
+- **`dlt(i, n)` — the runtime bounds DECISION** (FUTURE_WORK §5.7's
+  "runtime-checked index" clause): one compare whose `DYes` arm carries the
+  ERASED `Lt i n` proof (a zero-cost value-enum tag). Data-dependent
+  indexing — pivots, binary search, hash probes — is now writable safely at
+  the one cmp per access correct C pays anyway.
+- **The proof: in-place quicksort** (`examples/qsort.tal` vs
+  `bench/qsort.c`, same LCG fill, same Lomuto partition): 1,000,000
+  elements, identical output, **0.06s vs C's 0.05s** at `-O2` — full memory
+  safety (linear buffer, every access bounds-decided) for one hundredth of a
+  second per million elements.
+- **The TAIL-POSITION fix-body compiler**: `part` is a million-deep tail
+  recursion returning an AGGREGATE (index, array) — the old join-phi between
+  a recursive call and its `ret` defeated LLVM's tail-call elimination and
+  overflowed the stack. Fix bodies now compile `let`-chains and Nat matches
+  with PER-ARM returns, so TCO fires for aggregate returns too.
+- (Also: `let` right-hand sides now accept `+` — a parser gap.)
+
 ## Status (v2.2 — PHASE D: POOLS/REGIONS — the O(1)-remove DLL, IN THE LANGUAGE; 220 tests)
 
 The founding demo (docs/10 §10) is no longer a set of trusted primitives:
@@ -819,7 +849,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (220 tests)
+cargo test                  # the ONE suite — frontend + native backend (223 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable
