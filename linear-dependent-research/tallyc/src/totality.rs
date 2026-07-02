@@ -297,6 +297,7 @@ fn describe(t: &Tm) -> String {
         Tm::Var(v) => format!("the variable `{v}`"),
         Tm::Call(c, _) => format!("a constructor/call `{c}(…)`"),
         Tm::Lit(n) => format!("the literal `{n}`"),
+        Tm::Str(_) => "a string literal".into(),
         Tm::Add(_, _) => "an addition".into(),
         Tm::Match(_, _) => "a match".into(),
         Tm::LetPair(_, _, _) | Tm::Let(_, _, _) => "a let".into(),

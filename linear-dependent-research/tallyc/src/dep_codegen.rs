@@ -255,6 +255,22 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 Ok(self.builder.build_int_add(x, y, "add").unwrap())
             }
             Term::Var(i) => self.read_var(env, *i),
+            // a string literal: the address of one shared NUL-terminated global.
+            Term::StrLit(x) => {
+                let id = {
+                    let mut n = self.next_id.borrow_mut();
+                    *n += 1;
+                    *n
+                };
+                let g = self
+                    .builder
+                    .build_global_string_ptr(x, &format!("tally.str.{id}"))
+                    .map_err(|e| format!("string literal: {e}"))?;
+                Ok(self
+                    .builder
+                    .build_ptr_to_int(g.as_pointer_value(), self.i64t, "strlit")
+                    .unwrap())
+            }
             // `J(P, b, e)`: at runtime every closed equality proof is `refl`
             // (the kernel admits no equality axioms), so path induction ERASES
             // to its base case — the motive and the proof cost nothing.
@@ -932,6 +948,36 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 };
                 self.builder
                     .build_call(printf, &[fmt.into(), (*x).into()], "print")
+                    .unwrap();
+                Ok(self.i64t.const_zero())
+            }
+            // prints : Str -> Unit — write the string and a newline to stdout.
+            "prints" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [x] = rt.as_slice() else {
+                    return Err(format!(
+                        "prints: expected 1 runtime argument (the Str), got {}",
+                        rt.len()
+                    ));
+                };
+                let printf = self.module.get_function("printf").unwrap_or_else(|| {
+                    self.module.add_function(
+                        "printf",
+                        self.ctx.i32_type().fn_type(&[self.ptr.into()], true),
+                        None,
+                    )
+                });
+                let fmt = match self.module.get_global("tally.prints.fmt") {
+                    Some(g) => g.as_pointer_value(),
+                    None => self
+                        .builder
+                        .build_global_string_ptr("%s\n", "tally.prints.fmt")
+                        .map_err(|e| format!("prints: cannot emit format string: {e}"))?
+                        .as_pointer_value(),
+                };
+                let sptr = self.builder.build_int_to_ptr(*x, self.ptr, "prints.p").unwrap();
+                self.builder
+                    .build_call(printf, &[fmt.into(), sptr.into()], "prints")
                     .unwrap();
                 Ok(self.i64t.const_zero())
             }
@@ -1920,7 +1966,7 @@ pub fn run_main(sig: &Signature, main: &Term) -> Result<i64, String> {
 /// Add a C-ABI `int main()` that runs the compiled program once and prints its
 /// `i64` result to stdout, so the module links into a standalone native
 /// executable. This is just normal program entry: run `main`, print, exit 0.
-fn add_c_main<'c>(ctx: &'c Context, module: &Module<'c>) {
+fn add_c_main<'c>(ctx: &'c Context, module: &Module<'c>, print_result: bool) {
     let i32t = ctx.i32_type();
     let ptr = ctx.ptr_type(AddressSpace::default());
     let builder = ctx.create_builder();
@@ -1938,16 +1984,18 @@ fn add_c_main<'c>(ctx: &'c Context, module: &Module<'c>) {
     let main = module.add_function("main", i32t.fn_type(&[], false), None);
     let entry = ctx.append_basic_block(main, "entry");
     builder.position_at_end(entry);
-    let fmt = builder.build_global_string_ptr("%lld\n", "fmt").unwrap();
     let res = builder
         .build_call(dep_main, &[], "res")
         .unwrap()
         .try_as_basic_value()
         .left()
         .unwrap();
-    builder
-        .build_call(printf, &[fmt.as_pointer_value().into(), res.into()], "_")
-        .unwrap();
+    if print_result {
+        let fmt = builder.build_global_string_ptr("%lld\n", "fmt").unwrap();
+        builder
+            .build_call(printf, &[fmt.as_pointer_value().into(), res.into()], "_")
+            .unwrap();
+    }
     builder.build_return(Some(&i32t.const_zero())).unwrap();
 }
 
@@ -1980,9 +2028,22 @@ pub fn build_object(
     obj_path: &Path,
     opt: OptimizationLevel,
 ) -> Result<String, String> {
+    build_object_opts(sig, main, obj_path, opt, true)
+}
+
+/// `print_result: false` suppresses the C `main`'s result `printf` — used when
+/// the program's `main : Unit` (its output IS its `print`/`prints` effects; a
+/// trailing `0` would be noise).
+pub fn build_object_opts(
+    sig: &Signature,
+    main: &Term,
+    obj_path: &Path,
+    opt: OptimizationLevel,
+    print_result: bool,
+) -> Result<String, String> {
     let ctx = Context::create();
     let module = build_module(&ctx, sig, main)?;
-    add_c_main(&ctx, &module);
+    add_c_main(&ctx, &module, print_result);
 
     let machine = host_machine(opt)?;
     module.set_triple(&machine.get_triple());
@@ -2847,5 +2908,33 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             bad : (1 x : Handle) -> Nat\nfn bad(x) { 0 }\n\
             main : Nat\nfn main() { 0 }\n";
         assert!(rust_surface::check_program(leak).is_err(), "dropping a linear wrapper must reject");
+    }
+
+    #[test]
+    fn strings_print_and_flow_through_data() {
+        // string literals are Str values: passed to fns, stored in datatypes,
+        // printed via `prints`. main : Unit suppresses the result line, so the
+        // program's stdout IS its effects, in order. `printall` is `%partial`
+        // per the effect-order rule: a total fold is a CBV eliminator and would
+        // emit bottom-up; `%partial` forces direct recursion (source order).
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum SList { SNil : SList, SCons : Str -> SList -> SList }\n\
+            printall : SList -> Unit\n\
+            %partial fn printall(xs) { match xs { SNil => U, SCons(h, t) => let u = prints(h); printall(t) } }\n\
+            main : Unit\n\
+            fn main() { printall(SCons(\"alpha\", SCons(\"beta\", SNil))) }\n";
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").unwrap();
+        let dir = std::env::temp_dir();
+        let obj = dir.join(format!("tally_str_{}.o", std::process::id()));
+        let exe = dir.join(format!("tally_str_{}", std::process::id()));
+        super::build_object_opts(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default, false)
+            .unwrap();
+        assert!(std::process::Command::new("cc").arg(&obj).arg("-o").arg(&exe).status().unwrap().success());
+        let out = std::process::Command::new(&exe).output().unwrap();
+        let _ = std::fs::remove_file(&obj);
+        let _ = std::fs::remove_file(exe.with_extension("o.ll"));
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
     }
 }

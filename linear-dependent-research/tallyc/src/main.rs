@@ -137,13 +137,18 @@ fn run_native(src: &str, path: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some((_, _, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
+    let Some((_, mty, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
         eprintln!("{path}: no `main` to run");
         return ExitCode::FAILURE;
     };
+    let unit_main = matches!(mty, tally::dep::Term::Data(d, _) if d == "Unit");
     match tally::dep_codegen::run_main(&prog.sig, body) {
         Ok(v) => {
-            println!("{path}: type-checks, compiled to native, ran → {v}");
+            if unit_main {
+                println!("{path}: type-checks, compiled to native, ran ✓");
+            } else {
+                println!("{path}: type-checks, compiled to native, ran → {v}");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -165,7 +170,7 @@ fn build_native(src: &str, path: &str, out: &str, opt: u32) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some((_, _, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
+    let Some((_, mty, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
         eprintln!("{path}: no `main` to build");
         return ExitCode::FAILURE;
     };
@@ -177,7 +182,8 @@ fn build_native(src: &str, path: &str, out: &str, opt: u32) -> ExitCode {
     };
     let obj = format!("{out}.o");
     let obj_path = std::path::Path::new(&obj);
-    if let Err(e) = tally::dep_codegen::build_object(&prog.sig, body, obj_path, opt) {
+    let unit_main = matches!(mty, tally::dep::Term::Data(d, _) if d == "Unit");
+    if let Err(e) = tally::dep_codegen::build_object_opts(&prog.sig, body, obj_path, opt, !unit_main) {
         eprintln!("{path}: cannot compile to object: {e}");
         return ExitCode::FAILURE;
     }

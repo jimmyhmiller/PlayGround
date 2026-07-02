@@ -95,7 +95,7 @@ pub fn canon(t: &Term) -> Term {
         Term::Zero | Term::NatLit(_) | Term::Suc(_) | Term::Add(_, _) => emit(to_lin(t)),
 
         // Leaves with no subterms.
-        Term::Var(_) | Term::Type(_) | Term::Nat | Term::Const(_) => t.clone(),
+        Term::Var(_) | Term::Type(_) | Term::Nat | Term::Const(_) | Term::StrLit(_) => t.clone(),
 
         // Everything else: rebuild with canonicalized children.
         Term::Pi(m, a, b) => Term::Pi(*m, Box::new(canon(a)), Box::new(canon(b))),

@@ -45,6 +45,7 @@ const HOLE_BASE: usize = usize::MAX / 2;
 enum Tok {
     Ident(String),
     Num(u64),
+    Str(String),
     LParen,
     RParen,
     LBrace,
@@ -103,6 +104,38 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 other => return Err(format!("unknown pragma `%{other}`")),
             }
             i = j;
+        } else if c == '"' {
+            i += 1;
+            let mut lit = String::new();
+            loop {
+                if i >= b.len() {
+                    return Err("unterminated string literal".into());
+                }
+                match b[i] as char {
+                    '"' => {
+                        i += 1;
+                        break;
+                    }
+                    '\\' => {
+                        i += 1;
+                        let e = *b.get(i).ok_or("unterminated string escape")? as char;
+                        lit.push(match e {
+                            'n' => '\n',
+                            't' => '\t',
+                            '\\' => '\\',
+                            '"' => '"',
+                            '0' => '\0',
+                            other => return Err(format!("unknown string escape `\\{other}`")),
+                        });
+                        i += 1;
+                    }
+                    ch => {
+                        lit.push(ch);
+                        i += ch.len_utf8();
+                    }
+                }
+            }
+            out.push(Tok::Str(lit));
         } else if c.is_ascii_digit() {
             let s = i;
             while i < b.len() && (b[i] as char).is_ascii_digit() {
@@ -199,6 +232,8 @@ pub(crate) enum Tm {
     Match(String, Vec<Arm>),
     /// a built-in `Nat` literal, e.g. `0`, `5`, `1000000`.
     Lit(u64),
+    /// a string literal `"…"` — a value of the prelude postulate `Str`.
+    Str(String),
     /// built-in `Nat` addition `a + b`.
     Add(Box<Tm>, Box<Tm>),
     /// `let (a, b) = e; body` — destructure a single-constructor value
@@ -625,6 +660,7 @@ impl Parser {
         let name = match self.next() {
             Some(Tok::Ident(s)) => s,
             Some(Tok::Num(n)) => return Ok(Tm::Lit(n)),
+            Some(Tok::Str(x)) => return Ok(Tm::Str(x)),
             Some(Tok::LParen) => {
                 let t = self.parse_tm()?;
                 self.eat(&Tok::RParen)?;
@@ -1184,6 +1220,7 @@ impl Elab {
     fn elab_tm(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match t {
             Tm::Lit(n) => Ok(Term::NatLit(*n)),
+            Tm::Str(x) => Ok(Term::StrLit(x.clone())),
             Tm::Add(a, b) => Ok(Term::Add(
                 Box::new(self.elab_tm(a, cx, rec)?),
                 Box::new(self.elab_tm(b, cx, rec)?),
@@ -1235,6 +1272,10 @@ impl Elab {
             // built-in Nat: literals, addition, and the `%builtin Nat` intro forms
             // all have type `Nat` (packed), so they infer with no expected type.
             Tm::Lit(n) => Ok((Term::NatLit(*n), Value::VNat)),
+            Tm::Str(x) => Ok((
+                Term::StrLit(x.clone()),
+                Value::VNeu(dep::Neutral::NConst("Str".into())),
+            )),
             Tm::Add(a, b) => {
                 let ta = self.check(a, &Value::VNat, cx, rec)?;
                 let tb = self.check(b, &Value::VNat, cx, rec)?;
@@ -2206,7 +2247,7 @@ fn mono_rewrite_tm(
             "`{name}` is multiplicity-polymorphic — it must be applied to its `Mult` \
              argument(s) (a bare reference cannot be monomorphized)"
         )),
-        Tm::Var(_) | Tm::Lit(_) => Ok(t.clone()),
+        Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => Ok(t.clone()),
         Tm::Call(name, args) => {
             if let Some(pd) = polys.get(name) {
                 let mut mults = Vec::new();
@@ -2409,7 +2450,7 @@ impl Elab {
     /// and before anything else consumes match arms.
     fn desugar_patterns(&self, t: &Tm, fresh: &mut usize) -> Result<Tm, String> {
         Ok(match t {
-            Tm::Var(_) | Tm::Lit(_) => t.clone(),
+            Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
             Tm::Call(n, args) => Tm::Call(
                 n.clone(),
                 args.iter().map(|a| self.desugar_patterns(a, fresh)).collect::<Result<_, _>>()?,
@@ -2737,7 +2778,7 @@ fn collect_tm_names(t: &Tm, out: &mut std::collections::HashSet<String>) {
                 collect_tm_names(&a.body, out);
             }
         }
-        Tm::Lit(_) => {}
+        Tm::Lit(_) | Tm::Str(_) => {}
         Tm::Add(a, b) => {
             collect_tm_names(a, out);
             collect_tm_names(b, out);
@@ -2891,7 +2932,7 @@ fn value_has_hole(v: &Value) -> bool {
         V::VPair(a, b) => value_has_hole(a) || value_has_hole(b),
         V::VPi(_, a, _) | V::VSigma(_, a, _) => value_has_hole(a),
         V::VEq(a, b, c) => value_has_hole(a) || value_has_hole(b) || value_has_hole(c),
-        V::VType(_) | V::VNat | V::VNatLit(_) | V::VLam(_) | V::VLamNative(_) => false,
+        V::VType(_) | V::VNat | V::VNatLit(_) | V::VStr(_) | V::VLam(_) | V::VLamNative(_) => false,
     }
 }
 
@@ -4078,7 +4119,7 @@ fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
             collect_all_calls(e, out);
             collect_all_calls(body, out);
         }
-        Tm::Var(_) | Tm::Lit(_) => {}
+        Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => {}
     }
 }
 
@@ -4123,6 +4164,8 @@ postulate vwrite : {0 a : Type} -> {0 b : Type} -> {0 l : Loc} -> Ptr l -> (1 v 
 postulate vtake  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
 postulate vread  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> a
 postulate vfree  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Unit
+postulate Str    : Type
+postulate prints : Str -> Unit
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).

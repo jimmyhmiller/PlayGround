@@ -71,6 +71,11 @@ pub enum Term {
     /// treats it OPAQUELY (it never unfolds during type-checking, so normalization
     /// stays terminating); only the backend unfolds it, as a real native function.
     Fix(Box<Term>, Box<Term>),
+    /// a STRING literal — an opaque, unrestricted runtime value of the prelude
+    /// postulate type `Str` (compiled to a pointer into a shared global; no
+    /// allocation, no operations in the kernel — the type theory treats it like
+    /// any other opaque constant).
+    StrLit(String),
     // ---- the identity type ----
     Eq(Box<Term>, Box<Term>, Box<Term>),
     Refl(Box<Term>),
@@ -140,6 +145,7 @@ pub enum Value {
     VNat,
     VNatLit(u64),
     VSuc(Box<Value>), // suc of a neutral Nat
+    VStr(String),
     VEq(Box<Value>, Box<Value>, Box<Value>),
     VRefl(Box<Value>),
     VData(String, Vec<Value>),
@@ -306,6 +312,7 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
             (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
         },
+        Term::StrLit(x) => Value::VStr(x.clone()),
         Term::Eq(a, x, y) => Value::VEq(
             Box::new(eval(sig, env, a)),
             Box::new(eval(sig, env, x)),
@@ -611,6 +618,7 @@ fn quote(lvl: usize, v: &Value) -> Term {
         Value::VNat => Term::Nat,
         Value::VNatLit(n) => Term::NatLit(*n),
         Value::VSuc(k) => Term::Suc(Box::new(quote(lvl, k))),
+        Value::VStr(x) => Term::StrLit(x.clone()),
         Value::VEq(a, x, y) => Term::Eq(
             Box::new(quote(lvl, a)),
             Box::new(quote(lvl, x)),
@@ -710,7 +718,8 @@ pub(crate) fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term)
     let go1 = |t: &Term| map_vars(t, depth + 1, f);
     match t {
         Term::Var(i) => f(*i, depth),
-        Term::Type(_) | Term::Nat | Term::NatLit(_) | Term::Zero | Term::Const(_) => t.clone(),
+        Term::Type(_) | Term::Nat | Term::NatLit(_) | Term::Zero | Term::Const(_)
+        | Term::StrLit(_) => t.clone(),
         Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
         Term::Lam(b) => Term::Lam(Box::new(go1(b))),
@@ -1267,6 +1276,15 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
             check(ctx, y, &va)?;
             Ok((Value::VType(la), uzero(n)))
         }
+        // a string literal inhabits the prelude postulate `Str` (opaque; the
+        // program must have it in scope — the prelude provides it).
+        Term::StrLit(_) => {
+            if ctx.sig.postulate("Str").is_none() {
+                return Err("string literals need the prelude `Str` type (it was not                             injected — the program owns the memory layer)"
+                    .into());
+            }
+            Ok((Value::VNeu(Neutral::NConst("Str".into())), uzero(n)))
+        }
         Term::Refl(a) => {
             let (ta, _) = infer(ctx, a)?;
             let va = eval(&ctx.sig, &ctx.env(), a);
@@ -1573,6 +1591,7 @@ fn occurs(data: &str, t: &Term) -> bool {
         }
         // structural recursion over children
         match t {
+            Term::StrLit(_) => {}
             Term::Pi(_, a, b) | Term::Sigma(_, a, b) | Term::App(a, b) | Term::Add(a, b) => {
                 go(data, a, found);
                 go(data, b, found);
