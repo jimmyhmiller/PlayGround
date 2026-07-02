@@ -1356,8 +1356,22 @@ fn infer(ctx: &Ctx, t: &Term) -> Result<(Value, Usage), String> {
                 .ctor(name)
                 .map(|(d, c)| (d.clone(), c.clone()))
                 .ok_or_else(|| format!("unknown constructor `{name}`"))?;
-            let tele: Vec<(Mult, Term)> =
-                decl.params.iter().cloned().chain(ctor.args.iter().cloned()).collect();
+            // INTRO-SIDE usage: a constructor STORES each runtime argument
+            // exactly once — one slot per argument — so argument usage scales
+            // by 1 (erased args by 0), regardless of the field's declared
+            // multiplicity, which governs the ELIMINATION side (the method
+            // binder's budget when the value is matched). Without this, a
+            // linear variable could never be routed into a field (only
+            // anonymous sub-expressions), making linked structures
+            // unbuildable. Duplication through a constructor stays impossible:
+            // usages ADD across arguments, so `MkPair(o, o)` is still `ω ⋢ 1`.
+            let tele: Vec<(Mult, Term)> = decl
+                .params
+                .iter()
+                .cloned()
+                .chain(ctor.args.iter().cloned())
+                .map(|(m, ty)| (if m == Mult::Zero { Mult::Zero } else { Mult::One }, ty))
+                .collect();
             let (vals, usage) = check_spine(ctx, args, &tele)?;
             // result type: D params (idxs evaluated at the full arg environment)
             let p = decl.params.len();

@@ -1876,3 +1876,31 @@ fn linear_field_in_by_value_record_still_accounted() {
     );
     assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
 }
+
+#[test]
+fn constructor_intro_consumes_linear_args_once() {
+    // the INTRO-side rule: a constructor stores each runtime argument exactly
+    // once, so a linear VARIABLE can be routed into a field (building linked
+    // structures node by node) — while duplication through a constructor is
+    // still impossible (usages add across arguments).
+    const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }\n\
+        struct Node { v : Nat, next : Opt (Own Node) }\n";
+    let ok = format!(
+        "{H}cons : (n : Nat) -> (1 t : Opt (Own Node)) -> Opt (Own Node)\n\
+         fn cons(n, t) {{ Some(alloc(Node(n, t))) }}\n\
+         eat : (1 o : Opt (Own Node)) -> Nat\n\
+         %partial fn eat(o) {{ match o {{ None => 0, Some(p) => let x = unbox(p); match x {{ Node(v, t) => v + eat(t) }} }} }}\n\
+         main : Nat\n\
+         fn main() {{ let l = cons(7, None); eat(l) }}\n"
+    );
+    assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
+
+    // same linear variable into TWO fields: still ω ⋢ 1.
+    let dup = format!(
+        "{H}enum P {{ MkP : Own Nat -> Own Nat -> P }}\n\
+         main : Nat\n\
+         fn main() {{ let o = alloc(5); let p = MkP(o, o); 0 }}\n"
+    );
+    assert!(check_program(&dup).is_err(), "double-store must be rejected");
+}

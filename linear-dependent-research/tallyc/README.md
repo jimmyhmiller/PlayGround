@@ -103,7 +103,7 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
-## Status (v2.0 — PHASE A: constructors never allocate; 213 tests)
+## Status (v2.0 — PHASE A: constructors never allocate; 214 tests)
 
 **Every `malloc` in a tallyc program is one the programmer wrote.** The
 constructor-allocates model is gone:
@@ -132,6 +132,19 @@ constructor-allocates model is gone:
   value-recursion through any chain of records/value enums is caught with the
   chain in the message; indirection (`Own`, postulate pointers, `boxed`
   cells) is where the recursion legally lives.
+- **THE NULL-POINTER NICHE + the intrusive list, measured**
+  (`examples/intrusive.tal` vs `bench/intrusive.c`): `Opt (Own T)` is ONE
+  slot — `None` IS 0, `Some p` IS the pointer — so
+  `struct Node { p : Point, next : Opt (Own Node) }` is a 24-byte cell,
+  **byte-identical to** `struct node { long long x, y; struct node *next; }`.
+  Building, summing, and freeing a 4,000,000-node intrusive list runs in the
+  SAME wall time as the C twin at `-O2` (0.08s warm, both), with every malloc
+  the program's own `alloc` and leak / double-free / use-after-free still
+  compile errors. Two supporting rules landed with it: constructor
+  application consumes each runtime argument exactly ONCE (the intro side —
+  so a linear variable can be routed into a field, which linked structures
+  need; duplication still rejected since usages add), and `alloc`/`valloc`
+  take their payload at multiplicity 1 (they consume it into the cell).
 
 ## Status (v1.9 — the C-level layer: FLAT STRUCTS BY VALUE, CONTIGUOUS ARRAYS, the NAT CONVOY, %foreign FFI, real I/O; 210 tests)
 
@@ -739,7 +752,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (213 tests)
+cargo test                  # the ONE suite — frontend + native backend (214 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable

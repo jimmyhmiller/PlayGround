@@ -4405,7 +4405,7 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
 const PRELUDE: &str = r#"
 enum Unit { U : Unit }
 linear postulate Own : Type -> Type
-postulate alloc : {0 a : Type} -> a -> Own a
+postulate alloc : {0 a : Type} -> (1 x : a) -> Own a
 postulate free  : {0 a : Type} -> (1 o : Own a) -> Unit
 postulate unbox : {0 a : Type} -> (1 o : Own a) -> a
 postulate Loc   : Type
@@ -4414,7 +4414,7 @@ linear postulate PtsTo : Loc -> Type -> Type
 postulate Hole  : Type
 enum Cell (a : Type) { MkCell : {0 l : Loc} -> (p : Ptr l) -> (1 v : PtsTo l a) -> Cell a }
 enum Taken (a : Type) (l : Loc) { MkTaken : a -> (1 v : PtsTo l Hole) -> Taken a l }
-postulate valloc : {0 a : Type} -> a -> Cell a
+postulate valloc : {0 a : Type} -> (1 x : a) -> Cell a
 postulate vwrite : {0 a : Type} -> {0 b : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b
 postulate vtake  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> Taken a l
 postulate vread  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> a

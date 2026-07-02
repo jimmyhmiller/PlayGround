@@ -221,10 +221,17 @@ fn field_width(
 /// alongside the total. `None` = not a value enum (single-ctor, Nat-like,
 /// recursive, or declared `boxed`).
 struct EnumShape {
-    /// total width: 1 (tag) + the widest constructor payload.
+    /// total width: 1 (tag) + the widest constructor payload — or 1 for a
+    /// NULL-NICHE enum (see `niche`).
     width: u32,
     /// per constructor: (payload width at this instantiation, has-flex-field).
     payloads: Vec<(u32, bool)>,
+    /// THE NULL-POINTER NICHE: `(nullary_ci, ptr_ci)` when the enum is exactly
+    /// {one nullary ctor, one single-`Own`-pointer ctor} at this instantiation —
+    /// the C nullable-pointer pattern. The value is then ONE slot: the nullary
+    /// ctor is 0, the pointer ctor is the (non-null, malloc'd) pointer itself.
+    /// `Opt (Own Node)` costs nothing over C's `struct node *`.
+    niche: Option<(usize, usize)>,
 }
 
 fn enum_value_shape(
@@ -265,7 +272,67 @@ fn enum_value_shape(
         payloads.push((w, flex));
     }
     seen.remove(data);
-    Some(EnumShape { width: 1 + maxw, payloads })
+    // null-niche detection: exactly two constructors — one nullary, one with a
+    // single runtime field that RESOLVES (through the instantiation) to an
+    // `Own …` pointer.
+    let mut niche = None;
+    if d.ctors.len() == 2 {
+        let nullary = payloads.iter().position(|(w, _)| *w == 0);
+        if let Some(nc) = nullary {
+            let pc = 1 - nc;
+            let ctor = &d.ctors[pc];
+            let runtime: Vec<usize> = ctor
+                .args
+                .iter()
+                .enumerate()
+                .filter(|(_, (m, _))| *m != Mult::Zero)
+                .map(|(i, _)| i)
+                .collect();
+            if runtime.len() == 1 {
+                let ai = runtime[0];
+                let aty = &ctor.args[ai].1;
+                // resolve a parameter-typed field through dargs.
+                let resolved: Option<&Term> = match strip_ann(aty) {
+                    Term::Var(j) if *j >= ai && (*j - ai) < np => {
+                        dargs.get(np - 1 - (*j - ai))
+                    }
+                    other => Some(other),
+                };
+                let is_own = resolved.is_some_and(|t| {
+                    let (head, _) = flatten_app(strip_ann(t));
+                    matches!(strip_ann(head), Term::Const(c) if c == "Own")
+                });
+                if is_own {
+                    niche = Some((nc, pc));
+                }
+            }
+        }
+    }
+    let width = if niche.is_some() { 1 } else { 1 + maxw };
+    Some(EnumShape { width, payloads, niche })
+}
+
+/// Is `data` a {one nullary ctor, one single-runtime-field ctor} enum — the
+/// null-niche CANDIDATE shape? Returns (nullary_ci, ptr_ci). Whether a given
+/// VALUE actually uses the niche representation is decided by its width
+/// (niche = 1 slot; the tagged form of this shape is always ≥ 2 slots).
+fn d_nullary_ptr_shape(sig: &Signature, data: &str) -> Option<(usize, usize)> {
+    let d = sig.data(data)?;
+    if d.ctors.len() != 2 {
+        return None;
+    }
+    let nruntime = |ci: usize| {
+        d.ctors[ci]
+            .args
+            .iter()
+            .filter(|(m, _)| *m != Mult::Zero)
+            .count()
+    };
+    match (nruntime(0), nruntime(1)) {
+        (0, 1) => Some((0, 1)),
+        (1, 0) => Some((1, 0)),
+        _ => None,
+    }
 }
 
 /// LAYOUT VALIDATION — the zero-implicit-allocation gate, run on every checked
@@ -2123,6 +2190,27 @@ impl<'c, 'a> DepCg<'c, 'a> {
             &args[..np].to_vec(),
             &mut std::collections::HashSet::new(),
         ) {
+            // THE NULL-POINTER NICHE: the nullary constructor IS 0; the pointer
+            // constructor IS its (non-null, malloc'd) pointer. One slot, zero
+            // instructions of overhead — C's nullable pointer.
+            if let Some((nc, pc)) = es.niche {
+                let lay0 = ctor_layout(self.sig, &data, name)?;
+                let ci = lay0.tag as usize;
+                if ci == nc {
+                    return Ok(Val::Int(self.i64t.const_zero()));
+                }
+                if ci == pc {
+                    // the single runtime argument is the pointer.
+                    let lay = ctor_layout(self.sig, &data, name)?;
+                    for (ai, slot) in lay.arg_slot.iter().enumerate() {
+                        if slot.is_some() {
+                            let v = self.compile_v(f, env, &args[np + ai])?;
+                            return Ok(Val::Int(v.as_int("niche pointer payload")?));
+                        }
+                    }
+                    return Err(format!("`{name}`: niche constructor has no runtime field"));
+                }
+            }
             // an abstract instantiation cannot know its layout — guided error.
             if args[..np].iter().any(|a| type_is_flex(self.sig, a) )
                 || es.payloads.iter().any(|(_, fx)| *fx)
@@ -2651,12 +2739,81 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // absorbing the surplus (sound by the construction-side invariant).
         // No cell, no loads, no free. A refuted (absurd) arm's method is a
         // binderless sentinel: its block is simply unreachable.
-        if enum_value_shape(self.sig, data, &[], &mut std::collections::HashSet::new())
-            .is_some()
+        if let Some(decl_es) =
+            enum_value_shape(self.sig, data, &[], &mut std::collections::HashSet::new())
         {
             let sv = self.compile_v(f, env, scrut)?;
             let comps = sv.components();
             let total = comps.len() as u32;
+
+            // THE NULL-POINTER NICHE at the match: a one-slot value of a
+            // {nullary, single-field} enum is the niche representation (the
+            // tagged form of such an enum is always ≥ 2 slots) — compare
+            // against 0 and bind the pointer in the non-null arm.
+            let niche_shape = decl_es.payloads.len() == 2
+                && d_nullary_ptr_shape(self.sig, data).is_some();
+            if total == 1 && niche_shape {
+                let (nc, pc) = d_nullary_ptr_shape(self.sig, data).unwrap();
+                let pv = comps[0];
+                let null_bb = self.ctx.append_basic_block(f, "niche.null");
+                let ptr_bb = self.ctx.append_basic_block(f, "niche.ptr");
+                let join_bb = self.ctx.append_basic_block(f, "niche.join");
+                let is_null = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        pv,
+                        self.i64t.const_zero(),
+                        "niche.isnull",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_null, null_bb, ptr_bb)
+                    .unwrap();
+
+                self.builder.position_at_end(null_bb);
+                let nz = peel_n_lams(&methods[nc], decl.ctors[nc].args.len())
+                    .ok_or_else(|| format!("match[{data}]: nullary method shape"))?;
+                let zv = self.compile_v(f, env, nz)?;
+                let null_end = self.builder.get_insert_block().unwrap();
+
+                self.builder.position_at_end(ptr_bb);
+                let lay = ctor_layout(self.sig, data, &decl.ctors[pc].name)?;
+                let mut menv = env.to_vec();
+                for ai in 0..decl.ctors[pc].args.len() {
+                    if lay.arg_slot[ai].is_some() {
+                        menv.push(Some(Val::Int(pv)));
+                    } else {
+                        menv.push(None);
+                    }
+                }
+                let pb = peel_n_lams(&methods[pc], decl.ctors[pc].args.len())
+                    .ok_or_else(|| format!("match[{data}]: pointer method shape"))?;
+                let pvr = self.compile_v(f, &menv, pb)?;
+                let ptr_end = self.builder.get_insert_block().unwrap();
+
+                let w = zv.width().max(pvr.width());
+                self.builder.position_at_end(null_end);
+                let zc = self.expect_width(zv, w, "niche null arm")?.components();
+                let null_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join_bb).unwrap();
+                self.builder.position_at_end(ptr_end);
+                let pc2 = self.expect_width(pvr, w, "niche pointer arm")?.components();
+                let ptr_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join_bb).unwrap();
+
+                self.builder.position_at_end(join_bb);
+                let mut out: Vec<IntValue<'c>> = Vec::with_capacity(w as usize);
+                for k in 0..w as usize {
+                    let phi = self.builder.build_phi(self.i64t, "niche.result").unwrap();
+                    phi.add_incoming(&[
+                        (&zc[k] as &dyn inkwell::values::BasicValue, null_end),
+                        (&pc2[k] as &dyn inkwell::values::BasicValue, ptr_end),
+                    ]);
+                    out.push(phi.as_basic_value().into_int_value());
+                }
+                return Ok(if w == 1 { Val::Int(out[0]) } else { Val::Agg(out) });
+            }
             let tag = comps[0];
 
             let default = self.ctx.append_basic_block(f, "vcase.default");
@@ -4422,10 +4579,11 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
     #[test]
     fn own_linked_list_allocates_only_what_you_wrote() {
         // THE C linked structure, made safe: recursion through an explicit
-        // `Own`, `Opt (Own Node)` stored FLAT inline ([tag, ptr] — the C
-        // nullable pointer pattern), every node an `alloc` the program wrote.
-        // The IR contains exactly the three user mallocs, 24 bytes each
-        // (v + the two-slot Opt), and nothing else.
+        // `Own`, `Opt (Own Node)` stored via the NULL-POINTER NICHE — one slot,
+        // None IS 0, Some IS the pointer, exactly C's nullable `struct node *`.
+        // Every node is an `alloc` the program wrote: the IR contains exactly
+        // the three user mallocs, 16 bytes each (v + the niched pointer), and
+        // nothing else — byte-identical to the C struct.
         let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
             enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }\n\
             struct Node { v : Nat, next : Opt (Own Node) }\n\
@@ -4439,8 +4597,8 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let sizes = malloc_sizes(&ir);
         assert_eq!(
             sizes,
-            [(24u64, 3usize)].into_iter().collect(),
-            "exactly the three user-written 24B node allocs; got {sizes:?}\n{ir}"
+            [(16u64, 3usize)].into_iter().collect(),
+            "exactly the three user-written 16B node allocs (niched pointer); got {sizes:?}\n{ir}"
         );
     }
 
