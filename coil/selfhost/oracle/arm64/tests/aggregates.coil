@@ -1,0 +1,79 @@
+; Big-aggregate paths: >64B and >256B copies (unrolled vs loop code paths),
+; array-of-structs by value, sret of large structs, sums with big payloads.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defstruct Big [(arr (array i64 40)) (tag i64)])       ; 328 bytes -> loop copy
+(defstruct Mid [(arr (array i32 20)) (tag i64)])       ; 88 bytes  -> unrolled
+(defsum Carrier
+  (CEmpty [])
+  (CMid   [(m Mid)])
+  (CPair  [(a i64) (b i64)]))
+
+(defn fill-big [(k i64)] (-> Big)
+  (let [p (alloc-stack Big) (mut i) 0]
+    (loop (if (icmp-ge (load i) 40) (break)
+      (do (store! (index (cast (ptr i64) (field p arr)) (load i)) (imul (load i) k))
+          (store! i (iadd (load i) 1)))))
+    (store! (field p tag) k)
+    (load p)))
+
+(defn sum-big [(b Big)] (-> i64)
+  (let [p (alloc-stack Big)]
+    (store! p b)
+    (let [(mut tot) (load (field p tag)) (mut i) 0]
+      (loop (if (icmp-ge (load i) 40) (break)
+        (do (store! tot (iadd (load tot) (load (index (cast (ptr i64) (field p arr)) (load i)))))
+            (store! i (iadd (load i) 1)))))
+      (load tot))))
+
+(defn fill-mid [(k i64)] (-> Mid)
+  (let [p (alloc-stack Mid) (mut i) 0]
+    (loop (if (icmp-ge (load i) 20) (break)
+      (do (store! (index (cast (ptr i32) (field p arr)) (load i)) (cast i32 (iadd (load i) k)))
+          (store! i (iadd (load i) 1)))))
+    (store! (field p tag) (imul k 1000))
+    (load p)))
+
+(defn sum-mid [(m Mid)] (-> i64)
+  (let [p (alloc-stack Mid)]
+    (store! p m)
+    (let [(mut tot) (load (field p tag)) (mut i) 0]
+      (loop (if (icmp-ge (load i) 20) (break)
+        (do (store! tot (iadd (load tot) (cast i64 (load (index (cast (ptr i32) (field p arr)) (load i))))))
+            (store! i (iadd (load i) 1)))))
+      (load tot))))
+
+(defn carrier-val [(c Carrier)] (-> i64)
+  (match c
+    (CEmpty [] -1)
+    (CMid [m] (sum-mid m))
+    (CPair [a b] (imul a b))))
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    ; big struct: build in one call, copy by value TWICE, sum in another
+    (let [b (fill-big 3)
+          b2 b]                       ; whole-struct binding copy
+      (out w "big" (sum-big b2))
+      (out w "bigtag" (let [p (alloc-stack Big)] (store! p b2) (load (field p tag)))))
+    (out w "mid" (sum-mid (fill-mid 5)))
+    ; sums carrying aggregates through match
+    (out w "cmid" (carrier-val (CMid (fill-mid 2))))
+    (out w "cpair" (carrier-val (CPair 6 7)))
+    (out w "cempty" (carrier-val (CEmpty)))
+    ; array of structs on the heap
+    (let [a (malloc-allocator)
+          arr (cast (ptr Mid) (unwrap-ptr (raw-alloc a (imul 5 (sizeof Mid)) 8)))
+          (mut i) 0]
+      (loop (if (icmp-ge (load i) 5) (break)
+        (do (store! (index arr (load i)) (fill-mid (load i)))
+            (store! i (iadd (load i) 1)))))
+      (out w "arr3" (sum-mid (load (index arr 3))))
+      (out w "arr0" (sum-mid (load (index arr 0)))))
+    0))

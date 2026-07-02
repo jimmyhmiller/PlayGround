@@ -1,0 +1,112 @@
+; ABI stress: >8 integer args (stack), >8 float args, mixed int+float,
+; struct sizes across every AAPCS64 class (1..24 bytes), HFA structs,
+; nested struct passing/returning, sret returns.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defn sum10 [(a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64) (j i64)] (-> i64)
+  (iadd a (iadd (imul b 2) (iadd (imul c 3) (iadd (imul d 4) (iadd (imul e 5)
+    (iadd (imul f 6) (iadd (imul g 7) (iadd (imul h 8) (iadd (imul i 9) (imul j 10)))))))))))
+
+(defn fsum10 [(a f64) (b f64) (c f64) (d f64) (e f64) (f f64) (g f64) (h f64) (i f64) (j f64)] (-> f64)
+  (fadd a (fadd (fmul b 2.0) (fadd (fmul c 3.0) (fadd (fmul d 4.0) (fadd (fmul e 5.0)
+    (fadd (fmul f 6.0) (fadd (fmul g 7.0) (fadd (fmul h 8.0) (fadd (fmul i 9.0) (fmul j 10.0)))))))))))
+
+(defn mixed [(a i64) (x f64) (b i64) (y f64) (c i64) (z f64) (d i64) (e i64) (f i64) (g i64) (h i64) (i2 i64) (q f64)] (-> i64)
+  (iadd (iadd a (iadd b (iadd c (iadd d (iadd e (iadd f (iadd g (iadd h i2))))))))
+        (cast i64 (fadd x (fadd y (fadd z q))))))
+
+(defstruct S1 [(a u8)])
+(defstruct S3 [(a u8) (b u8) (c u8)])
+(defstruct S8 [(a i32) (b i32)])
+(defstruct S12 [(a i64) (b i32)])
+(defstruct S16 [(a i64) (b i64)])
+(defstruct S17 [(a i64) (b i64) (c u8)])
+(defstruct S24 [(a i64) (b i64) (c i64)])
+(defstruct HFA2 [(x f64) (y f64)])
+(defstruct HFA4 [(a f32) (b f32) (c f32) (d f32)])
+(defstruct Nest [(p S8) (q S12)])
+
+(defn take-s1 [(s S1)] (-> i64)
+  (let [p (alloc-stack S1)] (store! p s) (cast i64 (load (field p a)))))
+(defn take-s3 [(s S3)] (-> i64)
+  (let [p (alloc-stack S3)]
+    (store! p s)
+    (iadd (cast i64 (load (field p a)))
+          (iadd (imul (cast i64 (load (field p b))) 10)
+                (imul (cast i64 (load (field p c))) 100)))))
+(defn take-s8 [(s S8)] (-> i64)
+  (let [p (alloc-stack S8)]
+    (store! p s)
+    (iadd (cast i64 (load (field p a))) (imul (cast i64 (load (field p b))) 1000))))
+(defn take-s12 [(s S12)] (-> i64)
+  (let [p (alloc-stack S12)]
+    (store! p s)
+    (iadd (load (field p a)) (imul (cast i64 (load (field p b))) 7))))
+(defn take-s16 [(s S16)] (-> i64)
+  (let [p (alloc-stack S16)] (store! p s) (isub (load (field p a)) (load (field p b)))))
+(defn take-s17 [(s S17)] (-> i64)
+  (let [p (alloc-stack S17)]
+    (store! p s)
+    (iadd (load (field p a)) (iadd (load (field p b)) (cast i64 (load (field p c)))))))
+(defn take-s24 [(s S24)] (-> i64)
+  (let [p (alloc-stack S24)]
+    (store! p s)
+    (iadd (load (field p a)) (imul (load (field p b)) (load (field p c))))))
+(defn take-hfa2 [(s HFA2)] (-> f64)
+  (let [p (alloc-stack HFA2)]
+    (store! p s)
+    (fadd (load (field p x)) (fmul (load (field p y)) 3.0))))
+(defn take-hfa4 [(s HFA4)] (-> f32)
+  (let [p (alloc-stack HFA4)]
+    (store! p s)
+    (fadd (load (field p a))
+          (fadd (load (field p b))
+                (fadd (load (field p c)) (load (field p d)))))))
+(defn take-nest [(n Nest)] (-> i64)
+  (let [p (alloc-stack Nest)]
+    (store! p n)
+    (iadd (take-s8 (load (field p p))) (take-s12 (load (field p q))))))
+
+(defn make-s16 [(k i64)] (-> S16)
+  (let [p (alloc-stack S16)]
+    (store! (field p a) (imul k 100)) (store! (field p b) k) (load p)))
+(defn make-s24 [(k i64)] (-> S24)
+  (let [p (alloc-stack S24)]
+    (store! (field p a) k) (store! (field p b) (iadd k 1)) (store! (field p c) (iadd k 2)) (load p)))
+(defn make-hfa2 [(x f64)] (-> HFA2)
+  (let [p (alloc-stack HFA2)]
+    (store! (field p x) x) (store! (field p y) (fmul x 2.0)) (load p)))
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    (out w "sum10" (sum10 1 2 3 4 5 6 7 8 9 10))
+    (out w "fsum10" (cast i64 (fsum10 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0)))
+    (out w "mixed" (mixed 1 0.5 2 1.5 3 2.5 4 5 6 7 8 9 3.5))
+    (let [s1 (alloc-stack S1) s3 (alloc-stack S3) s8 (alloc-stack S8)
+          s12 (alloc-stack S12) s17 (alloc-stack S17) hfa4 (alloc-stack HFA4)
+          nest (alloc-stack Nest)]
+      (store! (field s1 a) (cast u8 42))
+      (store! (field s3 a) (cast u8 1)) (store! (field s3 b) (cast u8 2)) (store! (field s3 c) (cast u8 3))
+      (store! (field s8 a) (cast i32 5)) (store! (field s8 b) (cast i32 -6))
+      (store! (field s12 a) 1000) (store! (field s12 b) (cast i32 -3))
+      (store! (field s17 a) 10) (store! (field s17 b) 20) (store! (field s17 c) (cast u8 30))
+      (store! (field hfa4 a) (cast f32 1.5)) (store! (field hfa4 b) (cast f32 2.5))
+      (store! (field hfa4 c) (cast f32 3.5)) (store! (field hfa4 d) (cast f32 4.5))
+      (store! (field nest p) (load s8)) (store! (field nest q) (load s12))
+      (out w "s1" (take-s1 (load s1)))
+      (out w "s3" (take-s3 (load s3)))
+      (out w "s8" (take-s8 (load s8)))
+      (out w "s12" (take-s12 (load s12)))
+      (out w "s16" (take-s16 (make-s16 9)))
+      (out w "s17" (take-s17 (load s17)))
+      (out w "s24" (take-s24 (make-s24 7)))
+      (out w "hfa2" (cast i64 (take-hfa2 (make-hfa2 2.5))))
+      (out w "hfa4" (cast i64 (take-hfa4 (load hfa4))))
+      (out w "nest" (take-nest (load nest)))
+      0)))

@@ -1,0 +1,85 @@
+; Sum-type torture: nesting (Option of Result of struct), 8-variant tags,
+; sums built inside loops, matches storing aggregates, recursive sums.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/result.coil" :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/control.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defstruct Info [(a i64) (b i64)])
+(defsum Eight
+  (E0 []) (E1 [(x i64)]) (E2 [(x i64) (y i64)]) (E3 [(s Info)])
+  (E4 []) (E5 [(f f64)]) (E6 [(p (ptr i8))]) (E7 [(x i64)]))
+(defsum Tree
+  (Leaf [(v i64)])
+  (Node [(kids (ptr (ArrayList Tree)))]))
+
+(defn eight-val [(e Eight)] (-> i64)
+  (match e
+    (E0 [] 0)
+    (E1 [x] x)
+    (E2 [x y] (iadd x (imul y 100)))
+    (E3 [s] (let [p (alloc-stack Info)] (store! p s) (isub (load (field p a)) (load (field p b)))))
+    (E4 [] 44)
+    (E5 [f] (cast i64 (fmul f 10.0)))
+    (E6 [p] (cast i64 p))
+    (E7 [x] (imul x -1))))
+
+(defn pick [(k i64)] (-> Eight)
+  (if (icmp-eq k 0) (E0)
+    (if (icmp-eq k 1) (E1 11)
+      (if (icmp-eq k 2) (E2 5 7)
+        (if (icmp-eq k 3) (E3 (let [p (alloc-stack Info)]
+                                (store! (field p a) 50) (store! (field p b) 8) (load p)))
+          (if (icmp-eq k 4) (E4)
+            (if (icmp-eq k 5) (E5 2.5)
+              (if (icmp-eq k 6) (E6 (cast (ptr i8) 0)) (E7 9)))))))))
+
+(defn tree-sum [(t Tree)] (-> i64)
+  (match t
+    (Leaf [v] v)
+    (Node [kids]
+      (let [n (al-len [Tree] (load kids)) (mut i) 0 (mut tot) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! tot (iadd (load tot) (tree-sum (al-get [Tree] (load kids) (load i)))))
+              (store! i (iadd (load i) 1)))))
+        (load tot)))))
+
+(defn main [] (-> i64)
+  (let [w (stdout) a (malloc-allocator)]
+    ; all 8 variants through one dispatcher, built in a loop
+    (let [(mut k) 0 (mut acc) 0]
+      (loop (if (icmp-ge (load k) 8) (break)
+        (do (store! acc (iadd (load acc) (eight-val (pick (load k)))))
+            (store! k (iadd (load k) 1)))))
+      (out w "eight" (load acc)))
+    ; Option<Result<Info,i64>> nesting
+    (let [r (Some (Ok [Info i64] (let [p (alloc-stack Info)]
+                                   (store! (field p a) 30) (store! (field p b) 12) (load p))))]
+      (out w "nest"
+        (match r
+          (None [] -1)
+          (Some [inner]
+            (match inner
+              (Err [e] (isub 0 e))
+              (Ok [s] (let [p (alloc-stack Info)] (store! p s)
+                        (iadd (load (field p a)) (load (field p b))))))))))
+    ; recursive sum: ((1 2) (3 (4 5)))
+    (let [(mut l1) (al-new [Tree] a)]
+      (al-push! (mut l1) (Leaf 1)) (al-push! (mut l1) (Leaf 2))
+      (let [n1 (Node (box-al-tree a (load l1))) (mut l2) (al-new [Tree] a)]
+        (al-push! (mut l2) (Leaf 4)) (al-push! (mut l2) (Leaf 5))
+        (let [n2 (Node (box-al-tree a (load l2))) (mut l3) (al-new [Tree] a)]
+          (al-push! (mut l3) (Leaf 3)) (al-push! (mut l3) n2)
+          (let [n3 (Node (box-al-tree a (load l3))) (mut l4) (al-new [Tree] a)]
+            (al-push! (mut l4) n1) (al-push! (mut l4) n3)
+            (out w "tree" (tree-sum (Node (box-al-tree a (load l4)))))))))
+    0))
+
+(defn box-al-tree [(a (ptr Allocator)) (l (ArrayList Tree))] (-> (ptr (ArrayList Tree)))
+  (let [p (unwrap-ptr [(ArrayList Tree)] (create [(ArrayList Tree)] a))] (store! p l) p))

@@ -1,0 +1,49 @@
+; Adversarial integer semantics: narrow-width wraparound, signed/unsigned
+; div/rem with negatives, arbitrary widths (u2/i3/u7), shift behavior.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    ; u8 wraparound
+    (out w "u8add" (cast i64 (iadd (cast u8 250) (cast u8 10))))
+    (out w "u8mul" (cast i64 (imul (cast u8 20) (cast u8 20))))
+    (out w "i8add" (cast i64 (iadd (cast i8 127) (cast i8 1))))
+    (out w "i8sub" (cast i64 (isub (cast i8 -128) (cast i8 1))))
+    (out w "u16mul" (cast i64 (imul (cast u16 300) (cast u16 300))))
+    (out w "i16neg" (cast i64 (isub (cast i16 0) (cast i16 -32768))))
+    (out w "u32add" (cast i64 (iadd (cast u32 4294967295) (cast u32 2))))
+    ; signed division/remainder with negatives (truncated toward zero)
+    (out w "sdiv1" (idiv -7 2))
+    (out w "srem1" (irem -7 2))
+    (out w "sdiv2" (idiv 7 -2))
+    (out w "srem2" (irem 7 -2))
+    (out w "sdiv3" (idiv -7 -2))
+    (out w "srem3" (irem -7 -2))
+    ; unsigned division on values with the high bit set
+    (out w "udiv1" (cast i64 (udiv (cast u64 -2) (cast u64 3))))
+    (out w "urem1" (cast i64 (urem (cast u64 -1) (cast u64 10))))
+    ; narrow signed division: i8 -100 / 3
+    (out w "i8div" (cast i64 (idiv (cast i8 -100) (cast i8 3))))
+    (out w "i8rem" (cast i64 (irem (cast i8 -100) (cast i8 3))))
+    (out w "u8div" (cast i64 (udiv (cast u8 200) (cast u8 3))))
+    ; arbitrary widths
+    (out w "u2" (cast i64 (cast u2 6)))
+    (out w "u2add" (cast i64 (iadd (cast u2 3) (cast u2 3))))
+    (out w "i3" (cast i64 (cast i3 5)))          ; 5 mod 8 -> 101 -> -3
+    (out w "u7" (cast i64 (cast u7 200)))        ; 200 mod 128 = 72
+    (out w "i3mul" (cast i64 (imul (cast i3 3) (cast i3 3))))  ; 9 -> 001 -> 1
+    ; shifts within width
+    (out w "shl" (ishl 1 62))
+    (out w "shrs" (ishr -16 2))
+    (out w "shru" (cast i64 (ishr (cast u64 -16) (cast u64 2))))
+    (out w "u8shl" (cast i64 (ishl (cast u8 129) (cast u8 1))))
+    (out w "i8shr" (cast i64 (ishr (cast i8 -64) (cast i8 3))))
+    ; bitwise on mixed patterns
+    (out w "and" (iand -252645136 65535))
+    0))

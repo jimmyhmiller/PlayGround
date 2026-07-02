@@ -1,0 +1,45 @@
+; Bit-struct fields at every container size, odd widths, signed bitfields,
+; set/get roundtrips that must not clobber neighbors.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defstruct Flags :layout bits :backing :u8
+  [(lo :bits 1) (mid :bits 3) (hi :bits 4)])
+(defstruct Wide :layout bits :backing :u32
+  [(a :bits 12) (b :bits 9) (c :bits 11)])
+
+(defn main [] (-> i64)
+  (let [w (stdout) f (alloc-stack Flags) g (alloc-stack Wide)]
+    (set! f lo (cast u1 1))
+    (set! f mid (cast u3 5))
+    (set! f hi (cast u4 12))
+    (out w "lo" (cast i64 (get f lo)))
+    (out w "mid" (cast i64 (get f mid)))
+    (out w "hi" (cast i64 (get f hi)))
+    (out w "raw8" (cast i64 (load (cast (ptr u8) f))))
+    ; overwrite the middle field only; neighbors must survive
+    (set! f mid (cast u3 2))
+    (out w "lo2" (cast i64 (get f lo)))
+    (out w "mid2" (cast i64 (get f mid)))
+    (out w "hi2" (cast i64 (get f hi)))
+    ; 32-bit container, odd widths
+    (set! g a (cast u12 4095))
+    (set! g b (cast u9 257))
+    (set! g c (cast u11 1024))
+    (out w "a" (cast i64 (get g a)))
+    (out w "b" (cast i64 (get g b)))
+    (out w "c" (cast i64 (get g c)))
+    (set! g b (cast u9 0))
+    (out w "a2" (cast i64 (get g a)))
+    (out w "c2" (cast i64 (get g c)))
+    ; width masking through set: 300 mod 512 = 300, 5000 mod 4096 = 904
+    (set! g b (cast u9 300))
+    (set! g a (cast u12 5000))
+    (out w "amask" (cast i64 (get g a)))
+    (out w "bmask" (cast i64 (get g b)))
+    0))

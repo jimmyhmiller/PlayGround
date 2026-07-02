@@ -1,0 +1,54 @@
+; Variadic externs with many/mixed args (Apple: variadic -> stack), qsort
+; with a Coil comparator called back from C, fnptr tables.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/control.coil" :use *)
+
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern qsort :cc c [(ptr i8) i64 i64 (fnptr c [(ptr i8) (ptr i8)] i32)] (-> void))
+(extern strlen :cc c [(ptr i8)] (-> i64))
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defn cmp-i64 [(pa (ptr i8)) (pb (ptr i8))] (-> i32)
+  (let [a (load (cast (ptr i64) pa)) b (load (cast (ptr i64) pb))]
+    (if (icmp-lt a b) (cast i32 -1) (if (icmp-gt a b) (cast i32 1) (cast i32 0)))))
+
+(defn dub [(x i64)] (-> i64) (imul x 2))
+(defn sqr [(x i64)] (-> i64) (imul x x))
+(defn neg [(x i64)] (-> i64) (isub 0 x))
+
+(defn main [] (-> i64)
+  (let [w (stdout) a (malloc-allocator)
+        buf (cast (ptr i8) (unwrap-ptr (raw-alloc a 256 8)))]
+    ; variadic with 6 anonymous args (all on the stack on Apple arm64)
+    (let [n (snprintf buf 256 c"%lld|%s|%lld|%lld|%lld|%lld" 42 c"mid" -7 1000000007 5 6)]
+      (out w "len" (cast i64 n))
+      (print-str w "str=") (print-cstr w buf) (print-nl w))
+    ; qsort calls our fnptr from C land
+    (let [arr (cast (ptr i64) (unwrap-ptr (raw-alloc a 64 8)))]
+      (store! (index arr 0) 42) (store! (index arr 1) -3)
+      (store! (index arr 2) 17) (store! (index arr 3) 0)
+      (store! (index arr 4) -100) (store! (index arr 5) 8)
+      (store! (index arr 6) 99) (store! (index arr 7) 1)
+      (qsort (cast (ptr i8) arr) 8 8 (fnptr-of cmp-i64))
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) 8) (break)
+          (do (print-i w (load (index arr (load i))) )
+              (write-byte w (cast u8 44))
+              (store! i (iadd (load i) 1))))))
+      (print-nl w))
+    ; a table of function pointers dispatched in a loop
+    (let [tbl (cast (ptr (fnptr c [i64] i64)) (unwrap-ptr (raw-alloc a 24 8)))]
+      (store! (index tbl 0) (fnptr-of dub))
+      (store! (index tbl 1) (fnptr-of sqr))
+      (store! (index tbl 2) (fnptr-of neg))
+      (let [(mut i) 0 (mut acc) 0]
+        (loop (if (icmp-ge (load i) 3) (break)
+          (do (store! acc (iadd (load acc) (call-ptr (load (index tbl (load i))) 7)))
+              (store! i (iadd (load i) 1)))))
+        (out w "tbl" (load acc))))
+    0))

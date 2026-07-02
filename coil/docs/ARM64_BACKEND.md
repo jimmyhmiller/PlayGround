@@ -69,6 +69,19 @@ dsymutil).
 
 ## Gates (behavioral — runtime equality, not IR equality)
 `selfhost/oracle/arm64/`:
+- `tests/*.coil` — 10 adversarial feature tests beyond the examples corpus:
+  narrow-width wraparound + signed div/rem negatives + u2/i3/u7 arithmetic,
+  NaN-aware float comparisons + frem + f32 rounding, ABI stress (10 stack
+  args, mixed int/float, struct sizes 1..24B across every AAPCS64 class,
+  HFA2/HFA4, nested structs, sret), 328-byte loop-path aggregate copies +
+  sums carrying aggregates, labeled break/continue with aggregate break
+  values, odd-width bitfields (u1/u3/u4/u9/u11/u12 across u8/u32 backings),
+  6-arg variadic snprintf + qsort-callback fnptrs + fnptr tables, 4000-deep
+  mutual recursion + ackermann + hashmap stress (200 string keys),
+  8-variant sums + Option<Result<struct>> nesting + recursive trees,
+  atomic old-value semantics + static globals. All THREE-WAY verified:
+  Rust reference == self-host LLVM == arm64, byte-for-byte. Teeth re-proven:
+  compiling signed `<` as unsigned fails 8/54.
 - `snapshot-run.sh <bin>` — builds the corpus with the **LLVM** backend and
   records stdout+exit per program.
 - `gate-run.sh <bin>` — builds the same corpus with `--backend arm64`, runs,
