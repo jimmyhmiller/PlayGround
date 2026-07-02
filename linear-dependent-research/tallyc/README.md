@@ -103,6 +103,41 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v2.2 — PHASE D: POOLS/REGIONS — the O(1)-remove DLL, IN THE LANGUAGE; 220 tests)
+
+The founding demo (docs/10 §10) is no longer a set of trusted primitives:
+`examples/pooldll.tal` is the intrusive circular sentinel DLL with
+**O(1) remove-by-cursor written as ordinary tallyc functions**, running the
+same 1,000,000-transaction workload as `bench/bench.c` — same result, same
+wall time as its C twin (`bench/pooldll.c`, the same freelist+block pool in C).
+
+- **The pool discipline** (MEMORY_MODEL_DESIGN §4.2's second allocator model):
+  a DLL needs ALIASING — `node.next` and `node.next.prev` name the same cell,
+  a cursor is a third name — which unique `Own` can never express. In a
+  `Pool r a`, pointers (`RPtr r`) are **ω, freely copyable**; the single
+  LINEAR authority is the pool token, threaded read-back through every
+  `pget`/`pset`/`palloc`/`pfree`. Soundness is by SCOPE: `prelease` consumes
+  the token, so **use-after-release is a compile error** (surviving pointers
+  are inert); the `r` index makes **cross-region dereference a compile
+  error**; the pool is homogeneous, so even a logically-stale pointer reads a
+  well-typed value — **type confusion is unrepresentable**; leaking the pool
+  is a compile error. `pfree` is the O(1) reclaim (freelist push, reused by
+  the next `palloc` — proven by `peq` in the suite). Regions are created
+  first (`rnew` → a zero-width capability), so self-referential element types
+  (`Node r` containing `Opt (RPtr r)` links, one niched slot each — a 24-byte
+  node, byte-identical to C) tie the knot naturally.
+- **The allocator is real codegen** — a bump-block (256 cells) + freelist
+  pool emitted as IR, not libc-per-node; `prelease` frees whole blocks.
+- **A soundness hole found & closed while red-teaming**: an ANONYMOUS linear
+  value (`anew(3, alloc(0))`) slipped the ω-parameter gate (nothing binds it,
+  nothing over-counts) — double-`aget` would then double-free. The
+  copying-container gate now rejects LINEAR ELEMENT TYPES on `Arr`/`Pool` at
+  check time, on the elaborated terms where solved implicits are visible.
+- The documented pool trade: reading a cell after `pfree` is logical
+  staleness (memory-safe, type-stable — like indexing a Rust `Vec` after a
+  logical removal); linear payloads are rejected, so no resource can be
+  duplicated through it.
+
 ## Status (v2.1 — PHASE C first slice: zero-width VIEWS + zero-trace &mut BORROWS; 216 tests)
 
 The research-risk layer's first slice, landed behind the promised IR-trace bar:
@@ -784,7 +819,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (216 tests)
+cargo test                  # the ONE suite — frontend + native backend (220 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable

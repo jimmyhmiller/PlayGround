@@ -1,0 +1,113 @@
+// THE INTRUSIVE DOUBLY-LINKED LIST WITH O(1) REMOVE — WRITTEN IN TALLYC.
+//
+//   tally run examples/pooldll.tal        →  499999500000
+//
+// This is the language's founding demo (docs/10 §10) implemented IN THE
+// LANGUAGE, not as trusted primitives: a circular sentinel DLL whose
+// `insert`/`remove` below are ordinary tallyc functions doing pointer surgery.
+//
+// The enabler is Phase D's POOL discipline (MEMORY_MODEL_DESIGN §4.2): a DLL
+// needs ALIASING — node.next and node.next.prev address the same cell, and a
+// cursor is a third name for it — which unique `Own` can never express. In a
+// pool, the POINTERS (`RPtr r`) are ω (copy them freely); the single LINEAR
+// authority is the pool token, threaded read-back through every access:
+//
+//   - use-after-release is a COMPILE ERROR: `prelease` consumes the token, and
+//     no `pget`/`pset` can run without it — the surviving pointers are inert;
+//   - cross-region confusion is a COMPILE ERROR: the `r` index ties every
+//     pointer to its pool;
+//   - the pool is HOMOGENEOUS, so even a logically-stale pointer reads a
+//     well-typed Node — type confusion is unrepresentable;
+//   - leaking the pool is a COMPILE ERROR (the token is linear);
+//   - `pfree` is the O(1) reclaim: the cell goes on the pool's freelist and
+//     the next `palloc` reuses it.
+//
+// A Node is {prev, next, elem} — the links are `Opt (RPtr r)`, and the
+// null-pointer niche makes each link ONE slot (None IS 0), so a node is a
+// 24-byte cell: byte-identical to C's { node *prev; node *next; long elem; }.
+//
+// The workload mirrors bench/bench.c and examples/bench.tal: 1,000,000
+// transactions, each inserting a node after the sentinel and REMOVING IT BY
+// CURSOR (O(1) unlink + O(1) pfree), summing the round-tripped values.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+struct Node (0 r : Region) { prev : Opt (RPtr r), next : Opt (RPtr r), elem : Nat }
+enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }
+enum RM (r : Region) { MkRM : Nat -> (1 P : Pool r (Node r)) -> RM r }
+
+mkpool : {0 r : Region} -> (1 cap : RegionCap r) -> Pool r (Node r)
+fn mkpool(cap) { pnew(cap) }
+
+// a link, or the fallback cursor (the None arm is dead once the ring is tied).
+orc : {0 r : Region} -> Opt (RPtr r) -> RPtr r -> RPtr r
+fn orc(o, c) { match o { None => c, Some(p) => p } }
+
+// O(1) INSERT after node c: one palloc + two link fixups.
+insert : {0 r : Region} -> (1 P : Pool r (Node r)) -> (c : RPtr r) -> (x : Nat) -> PAlloc (Node r) r
+fn insert(P, c, x) {
+    let (cn, P1) = pget(P, c);
+    match cn {
+        Node(cp, cnx, ce) =>
+            let nx = orc(cnx, c);
+            let (n, P2) = palloc(P1, Node(Some(c), Some(nx), x));
+            let P3 = pset(P2, c, Node(cp, Some(n), ce));
+            let (xn, P4) = pget(P3, nx);
+            match xn {
+                Node(xp, xnx, xe) =>
+                    let P5 = pset(P4, nx, Node(Some(n), xnx, xe));
+                    MkPAlloc(n, P5),
+            },
+    }
+}
+
+// O(1) REMOVE by cursor: two link fixups + pfree (freelist push). The removed
+// node's memory is REUSED by the next palloc — no walk, no leak.
+remove : {0 r : Region} -> (1 P : Pool r (Node r)) -> (c : RPtr r) -> RM r
+fn remove(P, c) {
+    let (cn, P1) = pget(P, c);
+    match cn {
+        Node(cp, cnx, ce) =>
+            let pv = orc(cp, c);
+            let nx = orc(cnx, c);
+            let (pn, P2) = pget(P1, pv);
+            match pn {
+                Node(pp, pnx, pe) =>
+                    let P3 = pset(P2, pv, Node(pp, Some(nx), pe));
+                    let (xn, P4) = pget(P3, nx);
+                    match xn {
+                        Node(xp, xnx, xe) =>
+                            let P5 = pset(P4, nx, Node(Some(pv), xnx, xe));
+                            let P6 = pfree(P5, c);
+                            MkRM(ce, P6),
+                    },
+            },
+    }
+}
+
+// one transaction: insert k after the sentinel, remove it again by cursor.
+tx : {0 r : Region} -> (1 P : Pool r (Node r)) -> (s : RPtr r) -> (k : Nat) -> RM r
+fn tx(P, s, k) {
+    match insert(P, s, k) { MkPAlloc(c, P1) => remove(P1, c) }
+}
+
+run : {0 r : Region} -> (n : Nat) -> (acc : Nat) -> (s : RPtr r) -> (1 P : Pool r (Node r)) -> Nat
+%partial fn run(n, acc, s, P) {
+    match n {
+        Zero => let u = prelease(P); acc,
+        Succ(k) =>
+            match tx(P, s, k) { MkRM(v, P2) => run(k, acc + v, s, P2) },
+    }
+}
+
+main : Nat
+fn main() {
+    match rnew(U) {
+        MkRegionPack(cap) =>
+            let P0 = mkpool(cap);
+            let (s, P1) = palloc(P0, Node(None, None, 0));
+            let P2 = pset(P1, s, Node(Some(s), Some(s), 0));  // tie the ring
+            run(1000000, 0, s, P2),                            // Σ k = 499999500000
+    }
+}

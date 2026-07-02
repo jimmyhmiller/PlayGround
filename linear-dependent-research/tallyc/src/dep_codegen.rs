@@ -300,7 +300,7 @@ fn enum_value_shape(
                 };
                 let is_own = resolved.is_some_and(|t| {
                     let (head, _) = flatten_app(strip_ann(t));
-                    matches!(strip_ann(head), Term::Const(c) if c == "Own")
+                    matches!(strip_ann(head), Term::Const(c) if c == "Own" || c == "RPtr")
                 });
                 if is_own {
                     niche = Some((nc, pc));
@@ -469,7 +469,9 @@ fn type_shape(
                 // are linear PERMISSIONS — the checker's accounting is their whole
                 // existence; at runtime they are NOTHING (the address lives in the
                 // ω `Ptr l`). This is the §4.4 erasure bar: a view leaves no trace.
-                Term::Const(c) if c == "PtsTo" || c == "Loan" => return (0, false),
+                Term::Const(c) if c == "PtsTo" || c == "Loan" || c == "RegionCap" => {
+                    return (0, false)
+                }
                 // `Hole a` (the taken/uninitialized typestate) has `a`'s SIZE —
                 // the take-then-refill discipline must remember how big the slot
                 // is, or a wider refill would overflow the allocation.
@@ -2063,6 +2065,236 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.free_int(*arr);
                 Ok(Val::Int(self.i64t.const_zero()))
             }
+            // ---- Phase D: POOLS (regions/arenas) ----
+            // Control block (4 slots): [0]=freelist head, [1]=block-list head,
+            // [2]=bump cursor, [3]=bump end. Blocks: [0]=next block, then
+            // 256 cells of `w` slots each. `pfree` threads cells onto the
+            // freelist through their own slot 0; `prelease` frees whole blocks.
+            //
+            // pnew : {0 a} -> Unit -> PoolPack a — one malloc'd control block.
+            "pnew" => {
+                let w = self.spine_type_width(cname, args, 1)?;
+                if w == 0 {
+                    return Err("pnew: a pool of zero-width elements is meaningless".into());
+                }
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [_cap] = rt.as_slice() else {
+                    return Err(format!("pnew: expected 1 runtime argument, got {}", rt.len()));
+                };
+                let ctrl = self.malloc_cell(4, "pool");
+                for i in 0..4 {
+                    self.store(ctrl, i, self.i64t.const_zero());
+                }
+                Ok(Val::Int(self.toint(ctrl, "poolint")))
+            }
+            // rnew : Unit -> RegionPack — a region is a pure NAME; its capability
+            // is zero-width. Nothing happens at runtime.
+            "rnew" => {
+                let _rt = self.runtime_args(f, env, cname, args)?;
+                Ok(Val::Agg(Vec::new()))
+            }
+            // peq : {0 r} -> RPtr r -> RPtr r -> Nat — pointer equality (1/0).
+            // Both pointers are ω addresses into the SAME region; comparing them
+            // is safe and is how a circular traversal terminates.
+            "peq" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [a, b] = rt.as_slice() else {
+                    return Err(format!(
+                        "peq: expected 2 runtime arguments (the pointers), got {}",
+                        rt.len()
+                    ));
+                };
+                let eq = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, *a, *b, "peq")
+                    .unwrap();
+                Ok(Val::Int(
+                    self.builder
+                        .build_int_z_extend(eq, self.i64t, "peq.z")
+                        .unwrap(),
+                ))
+            }
+            // palloc : … -> (1 P : Pool r a) -> a -> PAlloc a r — pop the
+            // freelist, else bump, else grab a fresh block.
+            "palloc" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                if w == 0 {
+                    return Err("palloc: zero-width pool elements are not supported".into());
+                }
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [pool, x] = rt.as_slice() else {
+                    return Err(format!(
+                        "palloc: expected 2 runtime arguments (pool, payload), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = pool.as_int("palloc pool")?;
+                let xval = self.expect_width(x.clone(), w, "palloc payload")?;
+                let ctrl = self.toptr(pv, "pool.p");
+
+                let use_fl = self.ctx.append_basic_block(f, "palloc.freelist");
+                let try_bump = self.ctx.append_basic_block(f, "palloc.bump");
+                let use_bump = self.ctx.append_basic_block(f, "palloc.bump.use");
+                let new_blk = self.ctx.append_basic_block(f, "palloc.block");
+                let got = self.ctx.append_basic_block(f, "palloc.got");
+
+                let fl = self.load(ctrl, 0, "fl");
+                let has_fl = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, fl, self.i64t.const_zero(), "hasfl")
+                    .unwrap();
+                self.builder.build_conditional_branch(has_fl, use_fl, try_bump).unwrap();
+
+                self.builder.position_at_end(use_fl);
+                let flp = self.toptr(fl, "fl.p");
+                let fl_next = self.load(flp, 0, "fl.next");
+                self.store(ctrl, 0, fl_next);
+                self.builder.build_unconditional_branch(got).unwrap();
+
+                self.builder.position_at_end(try_bump);
+                let cur = self.load(ctrl, 2, "cur");
+                let endv = self.load(ctrl, 3, "end");
+                let ncur = self
+                    .builder
+                    .build_int_add(cur, self.i64t.const_int(w as u64 * 8, false), "ncur")
+                    .unwrap();
+                let fits = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::ULE, ncur, endv, "fits")
+                    .unwrap();
+                self.builder.build_conditional_branch(fits, use_bump, new_blk).unwrap();
+
+                self.builder.position_at_end(use_bump);
+                self.store(ctrl, 2, ncur);
+                self.builder.build_unconditional_branch(got).unwrap();
+
+                self.builder.position_at_end(new_blk);
+                let blk_bytes = 8 + 256 * w as u64 * 8;
+                let blk = self.malloc_cell((1 + 256 * w) as u32, "blk");
+                let blk_i = self.toint(blk, "blk.i");
+                let old_blocks = self.load(ctrl, 1, "blocks");
+                self.store(blk, 0, old_blocks);
+                self.store(ctrl, 1, blk_i);
+                let cell0 = self
+                    .builder
+                    .build_int_add(blk_i, self.i64t.const_int(8, false), "cell0")
+                    .unwrap();
+                let cell0_next = self
+                    .builder
+                    .build_int_add(cell0, self.i64t.const_int(w as u64 * 8, false), "cell0n")
+                    .unwrap();
+                self.store(ctrl, 2, cell0_next);
+                let blk_end = self
+                    .builder
+                    .build_int_add(blk_i, self.i64t.const_int(blk_bytes, false), "blk.end")
+                    .unwrap();
+                self.store(ctrl, 3, blk_end);
+                self.builder.build_unconditional_branch(got).unwrap();
+
+                self.builder.position_at_end(got);
+                let cell = self.builder.build_phi(self.i64t, "cell").unwrap();
+                cell.add_incoming(&[(&fl, use_fl), (&cur, use_bump), (&cell0, new_blk)]);
+                let cell_i = cell.as_basic_value().into_int_value();
+                let cellp = self.toptr(cell_i, "cell.p");
+                for (k, c) in xval.components().iter().enumerate() {
+                    self.store(cellp, k as u32, *c);
+                }
+                // PAlloc a r = { p : RPtr r, P : Pool r a } — a flat pair.
+                Ok(Val::Agg(vec![cell_i, pv]))
+            }
+            // pget : … -> (1 P) -> RPtr r -> PGot a r — copy the cell out,
+            // hand the token back.
+            "pget" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [pool, ptr] = rt.as_slice() else {
+                    return Err(format!(
+                        "pget: expected 2 runtime arguments (pool, ptr), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = pool.as_int("pget pool")?;
+                let cellp = self.toptr(ptr.as_int("pget ptr")?, "cell.p");
+                let mut comps = self.load_field(cellp, 0, w).components();
+                comps.push(pv);
+                Ok(if comps.len() == 1 { Val::Int(comps[0]) } else { Val::Agg(comps) })
+            }
+            // pset : … -> (1 P) -> RPtr r -> a -> Pool r a — write the cell.
+            "pset" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [pool, ptr, x] = rt.as_slice() else {
+                    return Err(format!(
+                        "pset: expected 3 runtime arguments (pool, ptr, payload), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = pool.as_int("pset pool")?;
+                let cellp = self.toptr(ptr.as_int("pset ptr")?, "cell.p");
+                let xval = self.expect_width(x.clone(), w, "pset payload")?;
+                for (k, c) in xval.components().iter().enumerate() {
+                    self.store(cellp, k as u32, *c);
+                }
+                Ok(Val::Int(pv))
+            }
+            // pfree : … -> (1 P) -> RPtr r -> Pool r a — O(1): push the cell
+            // onto the freelist through its own slot 0.
+            "pfree" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [pool, ptr] = rt.as_slice() else {
+                    return Err(format!(
+                        "pfree: expected 2 runtime arguments (pool, ptr), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = pool.as_int("pfree pool")?;
+                let pt = ptr.as_int("pfree ptr")?;
+                let ctrl = self.toptr(pv, "pool.p");
+                let cellp = self.toptr(pt, "cell.p");
+                let head = self.load(ctrl, 0, "fl.head");
+                self.store(cellp, 0, head);
+                self.store(ctrl, 0, pt);
+                Ok(Val::Int(pv))
+            }
+            // prelease : … -> (1 P) -> Unit — free every block, then the
+            // control block. All cells (live, freed, or bump-unused) live
+            // inside the blocks, so this reclaims the whole region.
+            "prelease" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [pool] = rt.as_slice() else {
+                    return Err(format!(
+                        "prelease: expected 1 runtime argument (the pool), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = pool.as_int("prelease pool")?;
+                let ctrl = self.toptr(pv, "pool.p");
+                let entry = self.builder.get_insert_block().unwrap();
+                let head_bb = self.ctx.append_basic_block(f, "prel.loop");
+                let body_bb = self.ctx.append_basic_block(f, "prel.body");
+                let done_bb = self.ctx.append_basic_block(f, "prel.done");
+                let first = self.load(ctrl, 1, "blocks");
+                self.builder.build_unconditional_branch(head_bb).unwrap();
+                self.builder.position_at_end(head_bb);
+                let b = self.builder.build_phi(self.i64t, "blk").unwrap();
+                b.add_incoming(&[(&first, entry)]);
+                let bv = b.as_basic_value().into_int_value();
+                let more = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, bv, self.i64t.const_zero(), "more")
+                    .unwrap();
+                self.builder.build_conditional_branch(more, body_bb, done_bb).unwrap();
+                self.builder.position_at_end(body_bb);
+                let bp = self.toptr(bv, "blk.p");
+                let nb = self.load(bp, 0, "blk.next");
+                self.free_int(bv);
+                b.add_incoming(&[(&nb, body_bb)]);
+                self.builder.build_unconditional_branch(head_bb).unwrap();
+                self.builder.position_at_end(done_bb);
+                self.free_int(pv);
+                Ok(Val::Int(self.i64t.const_zero()))
+            }
+
             // `%foreign` — an extern C symbol at the i64 ABI: declare it with one
             // i64 parameter per RUNTIME argument (erased Π[0] binders are dropped,
             // as everywhere) returning i64, and emit a direct call. The C side of
@@ -4589,6 +4821,56 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- Phase D: pools/regions — the in-language O(1)-remove DLL ----
+
+    #[test]
+    fn pool_freelist_reuses_cells() {
+        // alloc two, free one, alloc again: `peq` proves the freed cell came
+        // back (O(1) reclaim). 40 + 2 + 100 + 1(same) = 143.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            mk : {0 r : Region} -> (1 cap : RegionCap r) -> Pool r Nat\n\
+            fn mk(cap) { pnew(cap) }\n\
+            main : Nat\n\
+            fn main() {\n\
+                match rnew(U) {\n\
+                    MkRegionPack(cap) =>\n\
+                        let pool = mk(cap);\n\
+                        let (c1, p1) = palloc(pool, 40);\n\
+                        let (c2, p2) = palloc(p1, 2);\n\
+                        let (x, p3) = pget(p2, c1);\n\
+                        let (y, p4) = pget(p3, c2);\n\
+                        let p5 = pfree(p4, c2);\n\
+                        let (c3, p6) = palloc(p5, 100);\n\
+                        let (z, p7) = pget(p6, c3);\n\
+                        let same = peq(c2, c3);\n\
+                        let u = prelease(p7);\n\
+                        x + y + z + same,\n\
+                }\n\
+            }\n";
+        assert_eq!(run(src), 143);
+    }
+
+    #[test]
+    fn pool_dll_in_language_runs() {
+        // THE founding demo, in the language: the circular sentinel DLL with
+        // O(1) remove-by-cursor, written as ordinary tallyc functions over a
+        // pool — same program as the 1,000,000-transaction example/bench, at
+        // 20,000 transactions here (the test JIT is unoptimized, so the tail
+        // recursion is real frames; the CLI runs on a 1 GiB stack and -O2
+        // turns it into a loop — see bench/pooldll.c for the measured twin).
+        let src = std::fs::read_to_string("examples/pooldll.tal")
+            .unwrap()
+            .replace("1000000", "20000");
+        // unoptimized JIT frames are large; run on a CLI-sized stack.
+        let got = std::thread::Builder::new()
+            .stack_size(1 << 28)
+            .spawn(move || run(&src))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, 199_990_000); // Σ k, k < 20000
     }
 
     // ---- Phase C: zero-width views + &mut borrows (zero runtime trace) ----

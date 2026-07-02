@@ -559,8 +559,16 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
   (inductive heap predicates that ERASE — unbounded linked structures under
   views, the in-language O(1)-remove DLL), shared `&` (fractions), lexical
   `&mut { … }` sugar.
-- **Phase D — allocators.** First-class `Allocator`, `Arena`/`Pool`, region indices
-  tying lifetimes to allocators (generalize the existing DLL regions).
+- **Phase D — allocators. CORE DONE (v2.2).** Pools/regions landed: `rnew`
+  (a region = a pure name + zero-width capability), `Pool r a` (the single
+  linear authority; ω `RPtr r` pointers — aliasing), read-back `pget`/`pset`,
+  O(1) `pfree` (freelist) and bulk `prelease` (block frees), a real
+  bump-block allocator in codegen. Use-after-release / leak / cross-region
+  are compile errors; linear element types rejected (the copying-container
+  gate). The O(1)-remove DLL is now written IN THE LANGUAGE
+  (examples/pooldll.tal) at C parity. *Remaining:* first-class `Allocator`
+  values / allocator-polymorphic `box`, multiple pools per region, stack
+  placement.
 - **Phase E — a real totality checker.** Coverage via the pattern-match compiler;
   termination via structural + well-founded recursion (`Acc`); strict positivity;
   `%total` certificates. *(Upgrades the current "simple fold" heuristic into a real

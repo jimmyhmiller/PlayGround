@@ -4425,6 +4425,20 @@ postulate borrow  : {0 a : Type} -> (1 o : Own a) -> Borrowed a
 postulate restore : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Own a
 postulate Str    : Type
 postulate prints : Str -> Unit
+postulate Region : Type
+linear postulate RegionCap : Region -> Type
+enum RegionPack { MkRegionPack : {0 r : Region} -> (1 cap : RegionCap r) -> RegionPack }
+postulate rnew : Unit -> RegionPack
+linear postulate Pool : Region -> Type -> Type
+postulate RPtr : Region -> Type
+enum PAlloc (a : Type) (r : Region) { MkPAlloc : (p : RPtr r) -> (1 P : Pool r a) -> PAlloc a r }
+enum PGot (a : Type) (r : Region) { MkPGot : a -> (1 P : Pool r a) -> PGot a r }
+postulate pnew : {0 r : Region} -> {0 a : Type} -> (1 cap : RegionCap r) -> Pool r a
+postulate palloc : {0 a : Type} -> {0 r : Region} -> (1 P : Pool r a) -> a -> PAlloc a r
+postulate pget : {0 a : Type} -> {0 r : Region} -> (1 P : Pool r a) -> RPtr r -> PGot a r
+postulate pset : {0 a : Type} -> {0 r : Region} -> (1 P : Pool r a) -> RPtr r -> a -> Pool r a
+postulate pfree : {0 a : Type} -> {0 r : Region} -> (1 P : Pool r a) -> RPtr r -> Pool r a
+postulate prelease : {0 a : Type} -> {0 r : Region} -> (1 P : Pool r a) -> Unit
 "#;
 
 /// The CONTIGUOUS-ARRAY prelude — the C `a[i]` on a flat buffer, made safe by an
@@ -4522,6 +4536,20 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     if !collides && has_bnat && !arr_collides {
         let p3 = Parser { toks: lex(ARR_PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
         items.extend(p3);
+    }
+    // `peq : RPtr equality` references the program's `Nat`, so like `print` it
+    // is APPENDED (the rest of the pool layer lives in the main prelude, which
+    // user declarations may reference).
+    let has_peq = items.iter().any(|it| item_name(it) == Some("peq"));
+    if !collides && has_nat && !has_peq {
+        let p4 = Parser {
+            toks: lex("postulate peq : {0 r : Region} -> RPtr r -> RPtr r -> Nat
+")?,
+            pos: 0,
+            fresh: 0,
+        }
+        .parse_program()?;
+        items.extend(p4);
     }
 
     // MULT-POLY MONOMORPHIZATION (docs/MULT_POLY_PLAN.md slice 2) — a SURFACE
@@ -5128,6 +5156,100 @@ impl Elab {
     }
 }
 
+/// The COPYING-CONTAINER gate: `Arr` and `Pool` hand copies of their elements
+/// out (`aget`/`pget`) while the container keeps them — sound only for
+/// unrestricted elements. The ω element parameters reject linear VARIABLES,
+/// but an ANONYMOUS linear value (`anew(3, alloc(0))`) binds nothing and slips
+/// the usage accounting — so the element TYPE itself is checked here, on the
+/// fully-elaborated terms (where solved implicits are real spine arguments).
+/// Generic (`Var`-typed) elements are covered elsewhere: non-`%partial`
+/// generic fns inline with substituted types (checked here in the caller),
+/// and `%partial` ones hit the abstract-layout error in codegen.
+const COPYING_CONTAINER_OPS: [&str; 10] = [
+    "anew", "aget", "aset", "afree", "pnew", "palloc", "pget", "pset", "pfree", "prelease",
+];
+
+fn validate_copying_containers(sig: &Rc<Signature>, t: &Term) -> Result<(), String> {
+    // the element-type argument is always the FIRST argument of the op:
+    // `App(Const(op), elem_ty)` at the bottom of the spine.
+    if let Term::App(f, a) = t {
+        if let Term::Const(c) = strip_walk(f) {
+            if COPYING_CONTAINER_OPS.contains(&c.as_str()) && type_is_linear(a, sig) {
+                return Err(format!(
+                    "`{c}`: the element type here is LINEAR — a copying container \
+                     (`Arr`, `Pool`) hands copies of its elements out while keeping \
+                     them, which would duplicate the resource (double-free). Store \
+                     linear values in a concrete datatype, an `Own`, or a `Cell` \
+                     instead."
+                ));
+            }
+        }
+    }
+    walk_children(t, &mut |child| validate_copying_containers(sig, child))
+}
+
+fn strip_walk(t: &Term) -> &Term {
+    match t {
+        Term::Ann(e, _) => strip_walk(e),
+        other => other,
+    }
+}
+
+/// Apply `f` to every immediate child term (full coverage of the Term shape).
+fn walk_children(
+    t: &Term,
+    f: &mut dyn FnMut(&Term) -> Result<(), String>,
+) -> Result<(), String> {
+    match t {
+        Term::Var(_)
+        | Term::Type(_)
+        | Term::Nat
+        | Term::NatLit(_)
+        | Term::Zero
+        | Term::Const(_)
+        | Term::StrLit(_) => Ok(()),
+        Term::Pi(_, a, b) | Term::Sigma(_, a, b) | Term::App(a, b) | Term::Add(a, b)
+        | Term::Pair(a, b) => {
+            f(a)?;
+            f(b)
+        }
+        Term::Lam(a) | Term::Suc(a) | Term::Fst(a) | Term::Snd(a) | Term::Refl(a) => f(a),
+        Term::Ann(a, b) | Term::Fix(b, a) => {
+            f(a)?;
+            f(b)
+        }
+        Term::Let(_, ty, e, body) => {
+            f(ty)?;
+            f(e)?;
+            f(body)
+        }
+        Term::Eq(a, b, c) | Term::J(a, b, c) => {
+            f(a)?;
+            f(b)?;
+            f(c)
+        }
+        Term::NatElim(a, b, c, d) | Term::NatCase(a, b, c, d) => {
+            f(a)?;
+            f(b)?;
+            f(c)?;
+            f(d)
+        }
+        Term::Data(_, args) | Term::Constr(_, args) => {
+            for a in args {
+                f(a)?;
+            }
+            Ok(())
+        }
+        Term::Case(_, m, methods, sc) | Term::Elim(_, m, methods, sc) => {
+            f(m)?;
+            for x in methods {
+                f(x)?;
+            }
+            f(sc)
+        }
+    }
+}
+
 pub fn check_program(src: &str) -> Result<Program, Vec<String>> {
     let prog = elaborate(src).map_err(|e| vec![e])?;
     let mut diags = Vec::new();
@@ -5139,6 +5261,13 @@ pub fn check_program(src: &str) -> Result<Program, Vec<String>> {
     // a recursive family without indirection is rejected at declaration.
     if let Err(e) = crate::dep_codegen::validate_layouts(&prog.sig) {
         diags.push(format!("layout: {e}"));
+    }
+    // the copying-container gate (linear element types) — see above.
+    let rc = Rc::new(prog.sig.clone());
+    for (name, _, body) in &prog.defs {
+        if let Err(e) = validate_copying_containers(&rc, body) {
+            diags.push(format!("fn {name}: {e}"));
+        }
     }
     for (name, ty, body) in &prog.defs {
         if let Err(e) = dep::check_closed_in(prog.sig.clone(), body, ty) {

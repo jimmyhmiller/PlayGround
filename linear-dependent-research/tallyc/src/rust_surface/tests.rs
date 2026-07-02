@@ -1934,3 +1934,66 @@ fn borrow_discipline_is_the_existing_accounting() {
     );
     assert!(check_program(&ok).is_ok(), "{:?}", check_program(&ok).err());
 }
+
+#[test]
+fn pool_discipline_red_team() {
+    // Phase D: the pool token is the single linear authority — misuse is
+    // caught by scope/accounting, never at runtime.
+    const H: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        mk : {0 r : Region} -> (1 cap : RegionCap r) -> Pool r Nat\n\
+        fn mk(cap) { pnew(cap) }\n";
+    // use-after-release: the token was consumed by prelease.
+    let uar = format!(
+        "{H}main : Nat\nfn main() {{ match rnew(U) {{ MkRegionPack(cap) => \
+         let P = mk(cap); let (c, p1) = palloc(P, 7); let u = prelease(p1); \
+         let (x, p2) = pget(p1, c); x, }} }}\n"
+    );
+    assert!(check_program(&uar).is_err(), "use-after-release must reject");
+    // leaking the pool.
+    let leak = format!(
+        "{H}main : Nat\nfn main() {{ match rnew(U) {{ MkRegionPack(cap) => \
+         let P = mk(cap); let (c, p1) = palloc(P, 7); 0, }} }}\n"
+    );
+    assert!(check_program(&leak).is_err(), "a leaked pool must reject");
+    // cross-region dereference: r indices don't unify.
+    let cross = format!(
+        "{H}main : Nat\nfn main() {{ match rnew(U) {{ MkRegionPack(cap) => \
+         match rnew(U) {{ MkRegionPack(cap2) => \
+         let pa = mk(cap); let pb = mk(cap2); \
+         let (c, pa1) = palloc(pa, 7); let (x, pb1) = pget(pb, c); \
+         let ua = prelease(pa1); let ub = prelease(pb1); x, }}, }} }}\n"
+    );
+    assert!(check_program(&cross).is_err(), "cross-region deref must reject");
+    // a LINEAR element type is rejected by the copying-container gate.
+    let lin = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        mk : {0 r : Region} -> (1 cap : RegionCap r) -> Pool r (Own Nat)\n\
+        fn mk(cap) { pnew(cap) }\n\
+        main : Nat\nfn main() { match rnew(U) { MkRegionPack(cap) => \
+        let P = mk(cap); let (c, p1) = palloc(P, alloc(0)); \
+        let (o, p2) = pget(p1, c); let a = unbox(o); \
+        let u = prelease(p2); a, } }\n";
+    let err = check_program(lin).err().expect("linear pool elements must reject");
+    assert!(
+        format!("{err:?}").contains("LINEAR"),
+        "expected the copying-container gate, got {err:?}"
+    );
+}
+
+#[test]
+fn arr_anonymous_linear_element_is_rejected() {
+    // the hole the copying-container gate closed: an ANONYMOUS linear value
+    // has no binder to over-count, so the ω-parameter gate alone missed it —
+    // double-aget would then double-free. Now the element TYPE is checked.
+    let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        main : Nat\nfn main() {\n\
+            let a0 = anew(3, alloc(0));\n\
+            let (o1, a1) = aget(0, lt(0, 3), a0);\n\
+            let (o2, a2) = aget(0, lt(0, 3), a1);\n\
+            let x = unbox(o1);\n\
+            let y = unbox(o2);\n\
+            let u = afree(a2);\n\
+            x + y\n\
+        }\n";
+    let err = check_program(src).err().expect("anonymous linear element must reject");
+    assert!(format!("{err:?}").contains("LINEAR"), "got {err:?}");
+}
