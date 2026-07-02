@@ -3330,6 +3330,15 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
     }
 
     #[test]
+    fn soa_dot_product_threads_two_linear_arrays() {
+        // the structure-of-arrays pattern (examples/arr_soa.tal): TWO linear
+        // arrays abstracted by the same Nat convoy, each refined and consumed
+        // exactly once per arm.
+        let src = std::fs::read_to_string("examples/arr_soa.tal").unwrap();
+        assert_eq!(run(&src), 75);
+    }
+
+    #[test]
     fn arr_ir_is_bare_indexed_load_no_bounds_check() {
         let src = format!(
             "{BNAT_ARR}\

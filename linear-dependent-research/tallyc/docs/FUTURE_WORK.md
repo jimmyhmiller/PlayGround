@@ -525,7 +525,21 @@ unboxing, no GC, and a small re-checking kernel. The path to the design above:
 - **Phase B — value layouts.** ADTs as flat values: `sizeof`/alignment/offsets,
   by-value vs by-pointer passing, embedding, niche optimizations. *(The big
   representation rewrite — from "everything is a tagged i64 pointer" to real
-  layouts.)*
+  layouts.)* **Partial:** transparent newtypes (slice 1) and **contiguous
+  arrays** are done — `Arr a n` is one flat `malloc(n*8)` buffer with
+  bounds-erased `aget`/`aset` (§5.7 realized: a `Lt i n` proof at multiplicity
+  0, solver-discharged, bare indexed load in the IR, C-parity measured on a
+  10M-element sweep) — and the NAT CONVOY makes the loops writable (a `match`
+  on a `Nat` refines and linearly threads the context values that depend on
+  it). Structure-of-arrays covers struct-heavy numeric code meanwhile. The
+  remaining core — flat multi-field structs BY VALUE + layout control — is
+  scoped honestly in `docs/PHASE_B2_VALUE_STRUCTS.md` (a typed-codegen
+  rewrite; the current backend is one-i64-per-value).
+- **FFI + byte I/O (from Phase G, landed early).** `%foreign ["sym"] name : ty`
+  — kernel-opaque postulates lowering to direct extern-C calls at the i64 ABI
+  (erased args never cross); `putc`/`getc` char I/O (`getc` returns
+  `Succ(byte)`/`Zero`-at-EOF so one `match` is the whole control flow); `cat`
+  roundtrips 10MB byte-exact.
 - **Phase C — views and borrows.** Points-to views, `⊗`, `&`/`&mut`, region-scoped
   borrows, initialization typestate. *(Safe in-place mutation and linked structures
   without canned intrinsics.)*

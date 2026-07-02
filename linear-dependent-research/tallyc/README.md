@@ -103,6 +103,55 @@ matching C's NULL-for-leaf (see `bench/README.md`).
 (`Fix`) building distinct trees, the boxed-eliminator binder-order fix, the
 elaborator regression, the memory prelude, and `aot_*_executable` (link + run).
 
+## Status (v1.9 — the C-level layer: CONTIGUOUS ARRAYS, the NAT CONVOY, %foreign FFI, real I/O; 202 tests)
+
+The release that closes the biggest "as low as C" gaps: a flat `a[i]` on a
+contiguous buffer, FFI to arbitrary C functions, and byte I/O.
+
+- **CONTIGUOUS ARRAYS** (`examples/arr.tal`): `Arr a n` IS one flat
+  `malloc(n*8)` block — no header, no per-element cell, no stored length (the
+  length lives only in the erased index). `anew`/`aget`/`aset`/`afree` are
+  prelude postulates (injected for `%builtin Nat` programs); `aget`/`aset` take
+  a machine-integer index plus a **multiplicity-0 `Lt i n` proof** the
+  stratum-(A) solver discharges (`lt(i, n)`), so the emitted access is a bare
+  `gep`+`load`/`store` with **no bounds branch** — proven by an IR test
+  (exactly one `icmp` in the whole program: `anew`'s fill loop). Out-of-bounds
+  is *unrepresentable* (`lt(3,3)` has no proof), leak and double-free are
+  compile errors (the array is linear), and a linear element cannot be stored
+  (the ω element positions reject it, `ω ⋢ 1`).
+- **THE NAT CONVOY** — what makes real array *loops* writable. A `match` on a
+  `Nat` variable `b` now λ-abstracts into a function-typed motive every context
+  variable whose type mentions `b` (refined per arm: `arr : Arr Nat (b + m)`
+  becomes `Arr Nat (Succ k + m)` in the `Succ k` arm) or whose type is linear
+  (consumed exactly once *per arm* — branch join — instead of ω-scaled). Same
+  discipline as the boxed convoy: the elaborator is untrusted, the kernel
+  re-checks, codegen commutes the application into the arms. The loop shape it
+  unlocks: descend on the remaining count `b` with the cursor `m` ascending and
+  the array typed `Arr Nat (b + m)` — every bound is then a *closed universal*
+  (`m < Succ k + m`) the solver discharges, so **no proof is ever threaded**.
+- **Measured C parity, again**: `examples/arr_bench.tal` (fill 10M elements,
+  set one, sum) vs `bench/arr.c` at `-O2` — identical 0.16s; the tally IR is
+  one malloc + `memset_pattern16` + a **vectorized** reduce + one free, and the
+  `ARead` read-back pairs scalarize away entirely. The safe loop IS the C loop.
+  Struct-heavy numeric loops are expressible flat *today* as structure-of-arrays
+  (`examples/arr_soa.tal` — a dot product threading two linear arrays through
+  one convoy); flat multi-field structs **by value** are the honest remaining
+  gap (`docs/PHASE_B2_VALUE_STRUCTS.md` — the typed-codegen rewrite, planned,
+  not faked).
+- **`%foreign` FFI** (`examples/ffi.tal`): `%foreign ["c_symbol"] name : ty`
+  declares an opaque postulate (kernel-checked at every use, never reduces)
+  that lowers to a direct extern-C call at the i64 ABI — one `i64` per
+  non-erased argument. `Str` literals are NUL-terminated pointers, so
+  `strlen("hello")` just works (JIT and AOT). The audited escape hatch of
+  FUTURE_WORK §6/§8: the C side is trusted, so declare honestly (a consuming C
+  function should be typed linear).
+- **Real I/O** (`examples/cat.tal`): `putc : Nat -> Unit` writes a byte;
+  `getc : Unit -> Nat` reads one and returns `Succ(byte)` — or `Zero` at EOF,
+  so one ordinary `match` both tests for EOF and binds the character (its
+  predecessor) in a single native branch. `cat` roundtrips a 10MB file
+  byte-exact at `-O2` (the tail call is a loop). Everything past chars is one
+  `%foreign` declaration away.
+
 ## Status (v1.8 — J, universes, the convoy fold, transparent newtypes, strings, nested patterns; 193 tests)
 
 On top of v1.7:
@@ -631,7 +680,7 @@ mode and no feature flag. A plain `cargo` invocation builds the whole compiler a
 the whole suite (frontend + native backend together):
 
 ```
-cargo test                  # the ONE suite — frontend + native backend (118 tests)
+cargo test                  # the ONE suite — frontend + native backend (202 tests)
 cargo run -- check <file.tal>   # type-check (dependent + linear, no leaks/use-after-free)
 cargo run -- run   <file.tal>   # type-check + JIT-compile main to native, run it
 cargo run -- build <file.tal>   # type-check + AOT-compile to a native executable
