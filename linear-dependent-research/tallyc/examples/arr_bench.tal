@@ -1,0 +1,31 @@
+// The array benchmark: fill a 10,000,000-element contiguous array, overwrite one
+// slot, and sum it — the memory-bandwidth loop C is bread-and-butter at.
+// `bench/arr.c` is the hand-written twin. Build both at -O2 and compare:
+//
+//   tally build examples/arr_bench.tal -o /tmp/arr_tally -O2
+//   cc -O2 bench/arr.c -o /tmp/arr_c
+//   time /tmp/arr_tally ; time /tmp/arr_c      → parity (same malloc/fill/sum/free)
+//
+// The safety is all erased: `sum`'s bounds are solver-discharged `Lt` proofs
+// (multiplicity 0 — no bounds branch in the IR), the linear array is freed
+// exactly once, and the tail recursion compiles to the counting loop.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+sum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 arr : Arr Nat (b + m)) -> Nat
+%partial fn sum(m, b, acc, arr) {
+    match b {
+        Zero => let u = afree(arr); acc,
+        Succ(k) =>
+            let (x, arr2) = aget(m, lt(m, Succ(k) + m), arr);
+            sum(Succ(m), k, acc + x, arr2),
+    }
+}
+
+main : Nat
+fn main() {
+    let a0 = anew(10000000, 1);
+    let a1 = aset(1234567, lt(1234567, 10000000), 42, a0);
+    sum(0, 10000000, 0, a1)   // 9,999,999 × 1 + 42 = 10000041
+}

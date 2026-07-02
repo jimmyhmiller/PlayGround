@@ -1762,3 +1762,78 @@ fn forward_references_between_fns() {
         main : Nat\nfn main() { isEven(4) }\n";
     assert!(check_program(cyc).is_err(), "mutual recursion is still an (honest) error");
 }
+
+// ---- CONTIGUOUS ARRAYS: the safety half (rejections at compile time) ----
+
+const BNAT_ARR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+
+#[test]
+fn array_out_of_bounds_is_rejected_at_compile_time() {
+    // reading a[3] of a length-3 array: `lt(3, 3)` has no proof — the read
+    // cannot be written. No runtime check exists to fall back on.
+    let src = format!(
+        "{BNAT_ARR}\
+         main : Nat\n\
+         fn main() {{\n\
+             let a0 = anew(3, 0);\n\
+             let (x, a1) = aget(3, lt(3, 3), a0);\n\
+             let u = afree(a1);\n\
+             x\n\
+         }}\n"
+    );
+    let err = check_program(&src).err().expect("out-of-bounds must be a type error");
+    assert!(
+        format!("{err:?}").contains("cannot prove"),
+        "expected the solver's bound failure, got {err:?}"
+    );
+}
+
+#[test]
+fn array_leak_and_double_free_are_rejected() {
+    // dropping the array (no afree) is a leak: 0 ⋢ 1.
+    let leak = format!(
+        "{BNAT_ARR}\
+         main : Nat\n\
+         fn main() {{\n\
+             let a0 = anew(3, 0);\n\
+             let (x, a1) = aget(1, lt(1, 3), a0);\n\
+             x\n\
+         }}\n"
+    );
+    let err = check_program(&leak).err().expect("leaking an Arr must be rejected");
+    assert!(format!("{err:?}").contains("0 ⋢ 1"), "expected a leak error, got {err:?}");
+
+    // freeing it twice is a double-free: ω ⋢ 1.
+    let dfree = format!(
+        "{BNAT_ARR}\
+         main : Nat\n\
+         fn main() {{\n\
+             let a0 = anew(3, 0);\n\
+             let u = afree(a0);\n\
+             let v = afree(a0);\n\
+             0\n\
+         }}\n"
+    );
+    let err = check_program(&dfree).err().expect("double-freeing an Arr must be rejected");
+    assert!(format!("{err:?}").contains("ω ⋢ 1"), "expected a double-free error, got {err:?}");
+}
+
+#[test]
+fn array_linear_element_cannot_be_stored() {
+    // `anew(n, init)` conceptually copies `init` into every slot, and `aget`
+    // copies an element out — sound only for unrestricted elements. The element
+    // positions in the array API are ω, so an `Own` cannot be smuggled in: the
+    // duplication is rejected at the call, not discovered at runtime.
+    let src = format!(
+        "{BNAT_ARR}\
+         main : Nat\n\
+         fn main() {{\n\
+             let o = alloc(Zero);\n\
+             let a0 = anew(3, o);\n\
+             let u = afree(a0);\n\
+             0\n\
+         }}\n"
+    );
+    let err = check_program(&src).err().expect("a linear element must be rejected");
+    assert!(format!("{err:?}").contains("ω ⋢ 1"), "expected ω ⋢ 1, got {err:?}");
+}

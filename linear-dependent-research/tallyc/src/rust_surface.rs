@@ -1693,8 +1693,16 @@ impl Elab {
         if succ_arm.binders.len() != 1 {
             return Err("the successor case binds exactly one predecessor".into());
         }
-        // constant motive λ_. expected; methods checked at the same expected type.
         let n = cx.len();
+        // THE NAT CONVOY: a context variable whose type mentions the scrutinee, or
+        // a linear variable consumed inside the arms, needs the dependent lowering.
+        let exp_tm = dep::quote_at(n, expected);
+        if let Some(t) =
+            self.try_nat_convoy_case(scrut_tm, &exp_tm, zero_arm, succ_arm, cx, rec)?
+        {
+            return Ok(t);
+        }
+        // constant motive λ_. expected; methods checked at the same expected type.
         let motive = Term::Lam(Box::new(dep::shift_term(1, &dep::quote_at(n, expected))));
         let z = self.check(&zero_arm.body, expected, cx, rec)?;
         let mut succ_cx = cx.clone();
@@ -1706,6 +1714,185 @@ impl Elab {
             Box::new(Term::Lam(Box::new(s_body))),
             Box::new(scrut_tm.clone()),
         ))
+    }
+
+    /// THE NAT CONVOY — a dependent `NatCase` over a *variable* scrutinee.
+    ///
+    /// Two things go wrong when a `match` on a `Nat` variable `b` is lowered with
+    /// the constant motive: (1) an in-scope value whose TYPE mentions `b`
+    /// (`arr : Arr Nat (b + m)`) is stuck at the unrefined type inside the arms —
+    /// the `Succ` arm never learns `b = Succ k`; and (2) the kernel's `NatCase`
+    /// usage rule ω-scales the methods, so a LINEAR value consumed inside an arm
+    /// is rejected (`ω ⋢ 1`) even though exactly one arm runs. Both are the
+    /// problem the boxed CONVOY solves (docs/CONVOY_HANDOFF.md), and this is the
+    /// same fix at the `Nat` scrutinee: λ-abstract those context variables into a
+    /// FUNCTION-TYPED motive `λb'. Π(π₁ d₁ : T₁[b'])… Π(π_K d_K : T_K[b']). R[b']`,
+    /// check each arm as a function of the re-bound variables at their REFINED
+    /// types (`b' := Zero` / `Succ k`), and apply the whole `NatCase` to the
+    /// original variables ONCE — a linear dep is consumed exactly once at the
+    /// application, and each method binder carries the per-arm obligation (so
+    /// consuming a linear exactly once per arm is accepted, and missing an arm's
+    /// consumption is still `0 ⋢ 1`). The elaborator stays untrusted: the kernel
+    /// re-checks the result, so a wrong convoy can only be rejected. Codegen
+    /// commutes the application back into the arms (the same case-commuting
+    /// conversion as `Case`/`Elim`).
+    ///
+    /// Returns `None` when there is nothing to abstract (the constant-motive
+    /// paths are unchanged) or the scrutinee is not a context variable.
+    fn try_nat_convoy_case(
+        &self,
+        scrut_tm: &Term,
+        exp_tm: &Term, // the expected/return type, in cx-space
+        zero_arm: &Arm,
+        succ_arm: &Arm,
+        cx: &Cx,
+        rec: Option<&Rec>,
+    ) -> Result<Option<Term>, String> {
+        let n = cx.len();
+        let mut sv = scrut_tm;
+        while let Term::Ann(inner, _) = sv {
+            sv = inner;
+        }
+        let Term::Var(si) = sv else { return Ok(None) };
+        if *si >= n {
+            return Ok(None);
+        }
+        let scrut_lvl = n - 1 - *si;
+
+        // Candidate dependents: referenced by some arm (an unreferenced linear was
+        // consumed before the match — re-applying it would double-use it), the
+        // innermost binding of their name (an outer shadowed binding cannot be
+        // re-bound by a method lambda without capturing the inner one), and the
+        // type either mentions the scrutinee (transitively through other
+        // dependents) or is linear (the ω-scaling fix).
+        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        collect_tm_names(&zero_arm.body, &mut referenced);
+        collect_tm_names(&succ_arm.body, &mut referenced);
+        let mut dep_lvls: Vec<usize> = vec![scrut_lvl];
+        let mut deps: Vec<ConvoyDep> = Vec::new();
+        for l in 0..n {
+            if l == scrut_lvl {
+                continue;
+            }
+            let name = &cx.names[l];
+            if !referenced.contains(name) && !name.starts_with("$ih") {
+                continue;
+            }
+            if cx.names.iter().rposition(|s2| s2 == name) != Some(l) {
+                continue;
+            }
+            let ty = dep::quote_at(n, &cx.types[l]);
+            let linear =
+                type_is_linear_in(&ty, &self.rc, &self.pess_linear.borrow(), &cx.names, n);
+            if !linear && !term_mentions_levels(&ty, n, &dep_lvls) {
+                continue;
+            }
+            let mult = if linear { Mult::One } else { Mult::Omega };
+            dep_lvls.push(l);
+            deps.push(ConvoyDep { lvl: l, name: name.clone(), ty, mult });
+        }
+        if deps.is_empty() {
+            return Ok(None);
+        }
+        let k = deps.len();
+
+        // motive = λb'. Π deps[b := b']. R[b := b'] — re-target the cx-space terms
+        // under the inserted binders (the same arithmetic as `Convoy::remap`, with
+        // the scrutinee itself as the index variable).
+        let remap = |t: &Term, d: usize, repl: usize, j: usize| -> Term {
+            dep::map_vars(t, 0, &|i, depth| {
+                if i < depth {
+                    return Term::Var(i);
+                }
+                let outer = i - depth;
+                if outer < n {
+                    let l = n - 1 - outer;
+                    if l == scrut_lvl {
+                        return Term::Var(repl + depth);
+                    }
+                    if let Some(m) = deps[..j].iter().position(|dp| dp.lvl == l) {
+                        return Term::Var(j - 1 - m + depth);
+                    }
+                }
+                Term::Var(i + d)
+            })
+        };
+        let mut mbody = remap(exp_tm, 1 + k, k, k);
+        for j in (0..k).rev() {
+            let ty = remap(&deps[j].ty, 1 + j, j, j);
+            mbody = Term::Pi(deps[j].mult, Box::new(ty), Box::new(mbody));
+        }
+        let motive = Term::Lam(Box::new(mbody));
+
+        // zero method: peel the motive's Πs at b' := Zero, re-binding each dep
+        // under its original name (shadowing the outer binding) at the refined type.
+        let mut z_cx = cx.clone();
+        let mut z_exp = dep::eval_rc(
+            &self.rc,
+            &neutral_env(n),
+            &Term::App(Box::new(motive.clone()), Box::new(Term::NatLit(0))),
+        );
+        for d in &deps {
+            match z_exp {
+                Value::VPi(_, dom, clo) => {
+                    z_cx.push(d.name.clone(), *dom);
+                    z_exp = clo.apply(dep::nvar(z_cx.len() - 1));
+                }
+                _ => {
+                    return Err("internal: nat-convoy zero method type did not reduce \
+                                to a Π over the abstracted dependents"
+                        .into())
+                }
+            }
+        }
+        let mut z = self.check(&zero_arm.body, &z_exp, &z_cx, rec)?;
+        for _ in 0..k {
+            z = Term::Lam(Box::new(z));
+        }
+
+        // succ method: λk. λd₁…λd_K. body, deps re-bound at b' := Succ k.
+        let pred_name = succ_arm.binders[0].clone();
+        let mut s_cx = cx.clone();
+        s_cx.push(pred_name, Value::VNat);
+        let mut env_s = neutral_env(n);
+        env_s.push(dep::nvar(n));
+        let mut s_exp = dep::eval_rc(
+            &self.rc,
+            &env_s,
+            &Term::App(
+                Box::new(dep::shift_term(1, &motive)),
+                Box::new(Term::Suc(Box::new(Term::Var(0)))),
+            ),
+        );
+        for d in &deps {
+            match s_exp {
+                Value::VPi(_, dom, clo) => {
+                    s_cx.push(d.name.clone(), *dom);
+                    s_exp = clo.apply(dep::nvar(s_cx.len() - 1));
+                }
+                _ => {
+                    return Err("internal: nat-convoy succ method type did not reduce \
+                                to a Π over the abstracted dependents"
+                        .into())
+                }
+            }
+        }
+        let mut s_body = self.check(&succ_arm.body, &s_exp, &s_cx, rec)?;
+        for _ in 0..k {
+            s_body = Term::Lam(Box::new(s_body));
+        }
+        let s = Term::Lam(Box::new(s_body));
+
+        let mut out = Term::NatCase(
+            Box::new(motive),
+            Box::new(z),
+            Box::new(s),
+            Box::new(scrut_tm.clone()),
+        );
+        for d in &deps {
+            out = Term::App(Box::new(out), Box::new(Term::Var(n - 1 - d.lvl)));
+        }
+        Ok(Some(out))
     }
 
     fn elab_let_pair(&self, names: &[String], e: &Tm, body: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
@@ -3651,6 +3838,21 @@ impl Elab {
         }
         let pred_name = succ_arm.binders[0].clone();
 
+        // THE NAT CONVOY: if a context variable's type mentions the scrutinee, or a
+        // linear variable is consumed inside the arms, lower to a dependent
+        // `NatCase` with a function-typed motive (see `try_nat_convoy_case`).
+        let ret_cx_tm = self.elab_ty(ret, scope)?;
+        if let Some(t) = self.try_nat_convoy_case(
+            &Term::Var(scrut_idx),
+            &ret_cx_tm,
+            zero_arm,
+            succ_arm,
+            cx,
+            None,
+        )? {
+            return Ok(t);
+        }
+
         let mut motive_scope = scope.to_vec();
         motive_scope.push(scrut.to_string());
         let ret_term = self.elab_ty(ret, &motive_scope)?;
@@ -4168,6 +4370,27 @@ postulate Str    : Type
 postulate prints : Str -> Unit
 "#;
 
+/// The CONTIGUOUS-ARRAY prelude — the C `a[i]` on a flat buffer, made safe by an
+/// ERASED bound. `Arr a n` lowers to ONE `malloc(n*8)` flat block (no header, no
+/// per-element cell, no stored length — the length lives only in the erased
+/// index). `aget`/`aset` take a machine-integer index plus a multiplicity-0
+/// `Lt i n` proof (dischargeable by the stratum-(A) solver's `lt(i, n)`), so the
+/// emitted code is a bare indexed load/store with NO bounds branch — out-of-
+/// bounds is unrepresentable, not checked. The array itself is linear: it must
+/// be freed exactly once (`afree`), reads thread it back (`ARead`), and the
+/// element type is only ever used at ω positions, so a linear element type
+/// cannot be smuggled in (`anew`/`aset` would duplicate it — the checker
+/// rejects `ω ⋢ 1` at the call). Injected only for `%builtin Nat` programs:
+/// the index domain and the `Lt` elaboration are the packed machine `Nat`.
+const ARR_PRELUDE: &str = r#"
+linear postulate Arr : Type -> Nat -> Type
+enum ARead (a : Type) (n : Nat) { MkARead : a -> (1 arr : Arr a n) -> ARead a n }
+postulate anew  : {0 a : Type} -> (n : Nat) -> a -> Arr a n
+postulate aget  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> (1 arr : Arr a n) -> ARead a n
+postulate aset  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 arr : Arr a n) -> Arr a n
+postulate afree : {0 a : Type} -> {0 n : Nat} -> (1 arr : Arr a n) -> Unit
+"#;
+
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
 fn item_name(it: &Item) -> Option<&str> {
     match it {
@@ -4210,6 +4433,23 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         let p2 = Parser { toks: lex("postulate print : Nat -> Unit\n")?, pos: 0, fresh: 0 }
             .parse_program()?;
         items.extend(p2);
+    }
+    // The contiguous-array prelude (see `ARR_PRELUDE`): appended AFTER the user
+    // items because its types reference the program's `Nat`, and only for
+    // `%builtin Nat` programs (the `Lt` bound elaborates through the linear-Nat
+    // solver, which needs the packed index domain). ALL-OR-NOTHING on its own
+    // names: a program declaring any of them owns its array layer.
+    let has_bnat = items
+        .iter()
+        .any(|it| matches!(it, Item::BuiltinNat(n) if n == "Nat"));
+    const ARR_NAMES: [&str; 6] = ["Arr", "ARead", "anew", "aget", "aset", "afree"];
+    let arr_collides = items
+        .iter()
+        .filter_map(item_name)
+        .any(|n| ARR_NAMES.contains(&n));
+    if !collides && has_bnat && !arr_collides {
+        let p3 = Parser { toks: lex(ARR_PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
+        items.extend(p3);
     }
 
     // MULT-POLY MONOMORPHIZATION (docs/MULT_POLY_PLAN.md slice 2) — a SURFACE

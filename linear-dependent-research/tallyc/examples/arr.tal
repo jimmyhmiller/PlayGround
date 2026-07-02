@@ -1,0 +1,45 @@
+// CONTIGUOUS ARRAYS — the C `a[i]` on a flat buffer, made safe by erased bounds.
+//
+//   tally run examples/arr.tal        →  128
+//
+// `Arr a n` IS one flat `malloc(n*8)` block: no header, no per-element cell, no
+// stored length (the length lives only in the erased index). `aget`/`aset` take a
+// machine-integer index plus a multiplicity-0 `Lt i n` proof discharged by the
+// stratum-(A) solver (`lt(i, n)`), so the emitted access is a bare indexed
+// load/store — NO bounds branch. Out-of-bounds is unrepresentable, not checked:
+// change an index to `aget(3, lt(3, 3), …)` and the program does not compile.
+//
+// The array is LINEAR: forgetting `afree` is a compile error (leak, 0 ⋢ 1),
+// freeing twice is a compile error (ω ⋢ 1), and reads thread the array back.
+//
+// At -O2 the whole `sum` below compiles to: one malloc, a memset, a VECTORIZED
+// reduce (<2 x i64> lanes), one free — the safe loop is the C loop.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// The C loop `for (i = 0; i < n; i++) acc += a[i]`, written as structural descent
+// on the REMAINING count `b` with the cursor `m` ascending; the array's type
+// `Arr Nat (b + m)` ties them to the real length. Every bound is then a CLOSED
+// universal — `m < Succ k + m` holds for all k, m — so the solver discharges each
+// `lt(...)` at compile time and NO proof is ever threaded or materialized.
+//
+// The `match` on `b` is a dependent NatCase (the NAT CONVOY): inside the `Succ k`
+// arm, `arr` is re-bound at the REFINED type `Arr Nat (Succ k + m)`, and the
+// linear `arr` is consumed exactly once per arm.
+sum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 arr : Arr Nat (b + m)) -> Nat
+%partial fn sum(m, b, acc, arr) {
+    match b {
+        Zero => let u = afree(arr); acc,
+        Succ(k) =>
+            let (x, arr2) = aget(m, lt(m, Succ(k) + m), arr);
+            sum(Succ(m), k, acc + x, arr2),
+    }
+}
+
+main : Nat
+fn main() {
+    let a0 = anew(5, 7);                 // [7, 7, 7, 7, 7]
+    let a1 = aset(2, lt(2, 5), 100, a0); // [7, 7, 100, 7, 7]
+    sum(0, 5, 0, a1)                     // 4×7 + 100 = 128
+}

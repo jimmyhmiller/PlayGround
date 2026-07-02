@@ -434,6 +434,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
                             &Term::Elim(d.clone(), m.clone(), new, sc.clone()),
                         );
                     }
+                    // The NAT CONVOY: `(NatCase …) dep₁ … dep_k` — same conversion.
+                    // The zero method has no telescope binders; the successor method
+                    // keeps its one predecessor binder.
+                    Term::NatCase(p, z, s, sc) => {
+                        let z2 = self.commute_apply_into_natcase_method(z, 0, &args)?;
+                        let s2 = self.commute_apply_into_natcase_method(s, 1, &args)?;
+                        return self.compile(
+                            f,
+                            env,
+                            &Term::NatCase(p.clone(), Box::new(z2), Box::new(s2), sc.clone()),
+                        );
+                    }
                     _ => {}
                 }
                 // The head is an annotated function `(λ…. body : Π…. _)` (defs are
@@ -756,6 +768,58 @@ impl<'c, 'a> DepCg<'c, 'a> {
             out.push(m);
         }
         Ok(out)
+    }
+
+    /// Commute an application into one `NatCase` method (the Nat convoy — see
+    /// `commute_apply_into_methods` for the datatype version): peel the method's
+    /// `nb` telescope binders (0 for zero, 1 — the predecessor — for successor)
+    /// and its dep-lambdas, substitute the applied dep VARIABLES into the body,
+    /// and re-wrap the telescope binders. Sound because exactly one arm runs and
+    /// the deps are already-computed values.
+    fn commute_apply_into_natcase_method(
+        &self,
+        method: &Term,
+        nb: usize,
+        args: &[&Term],
+    ) -> Result<Term, String> {
+        let mut body = strip_ann(method);
+        for _ in 0..nb {
+            match body {
+                Term::Lam(inner) => body = strip_ann(inner),
+                _ => {
+                    return Err(format!(
+                        "NatCase convoy: method is not a {nb}-argument function"
+                    ))
+                }
+            }
+        }
+        let k = args.len();
+        let mut kp = 0;
+        while kp < k {
+            match body {
+                Term::Lam(inner) => {
+                    body = strip_ann(inner);
+                    kp += 1;
+                }
+                _ => break,
+            }
+        }
+        let new_body = crate::dep::map_vars(body, 0, &|i, depth| {
+            if i < depth {
+                return Term::Var(i);
+            }
+            let rel = i - depth;
+            if rel < kp {
+                crate::dep::shift_term(nb + depth, args[kp - 1 - rel])
+            } else {
+                Term::Var(i - kp)
+            }
+        });
+        let mut m = new_body;
+        for _ in 0..nb {
+            m = Term::Lam(Box::new(m));
+        }
+        Ok(m)
     }
 
     /// `malloc(nslots * 8)` and return the raw pointer.
@@ -1113,6 +1177,122 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 self.free_int(*v);
+                Ok(self.i64t.const_zero())
+            }
+            // ---- contiguous arrays (the C `a[i]` on a flat buffer) ----
+            // `Arr a n` IS one flat `n`-slot block: `malloc(n*8)`, no header, no
+            // per-element cell, no stored length (the length is the erased index).
+            //
+            // anew : {0 a} -> (n : Nat) -> a -> Arr a n — one malloc, filled with
+            // the initial element by a native counting loop.
+            "anew" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [n, init] = rt.as_slice() else {
+                    return Err(format!(
+                        "anew: expected 2 runtime arguments (length, initial element), got {}",
+                        rt.len()
+                    ));
+                };
+                let sz = self
+                    .builder
+                    .build_int_mul(*n, self.i64t.const_int(8, false), "arr.sz")
+                    .unwrap();
+                let raw = self
+                    .builder
+                    .build_call(self.malloc, &[sz.into()], "arr")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_pointer_value();
+                // for i in 0..n { arr[i] = init }
+                let entry = self.builder.get_insert_block().unwrap();
+                let head = self.ctx.append_basic_block(f, "arr.fill");
+                let body = self.ctx.append_basic_block(f, "arr.fill.body");
+                let done = self.ctx.append_basic_block(f, "arr.fill.done");
+                self.builder.build_unconditional_branch(head).unwrap();
+                self.builder.position_at_end(head);
+                let i = self.builder.build_phi(self.i64t, "arr.i").unwrap();
+                i.add_incoming(&[(&self.i64t.const_zero(), entry)]);
+                let iv = i.as_basic_value().into_int_value();
+                let more = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::ULT, iv, *n, "arr.more")
+                    .unwrap();
+                self.builder.build_conditional_branch(more, body, done).unwrap();
+                self.builder.position_at_end(body);
+                let slot = unsafe {
+                    self.builder
+                        .build_gep(self.i64t, raw, &[iv], "arr.slot")
+                        .unwrap()
+                };
+                self.builder.build_store(slot, *init).unwrap();
+                let inext = self
+                    .builder
+                    .build_int_add(iv, self.i64t.const_int(1, false), "arr.inext")
+                    .unwrap();
+                i.add_incoming(&[(&inext, body)]);
+                self.builder.build_unconditional_branch(head).unwrap();
+                self.builder.position_at_end(done);
+                Ok(self.toint(raw, "arrint"))
+            }
+            // aget : … -> (i : Nat) -> (0 p : Lt i n) -> (1 arr : Arr a n) -> ARead a n
+            // THE C-level read: a bare indexed load. The bound is an ERASED proof
+            // (multiplicity 0 — `runtime_args` never compiles it), so there is no
+            // bounds compare and no branch. The `ARead` pair threads the linear
+            // array back to the caller; -O2 scalarizes it away.
+            "aget" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [i, arr] = rt.as_slice() else {
+                    return Err(format!(
+                        "aget: expected 2 runtime arguments (index, array), got {}",
+                        rt.len()
+                    ));
+                };
+                let base = self.toptr(*arr, "arr.p");
+                let slot = unsafe {
+                    self.builder
+                        .build_gep(self.i64t, base, &[*i], "arr.slot")
+                        .unwrap()
+                };
+                let v = self
+                    .builder
+                    .build_load(self.i64t, slot, "arr.elem")
+                    .unwrap()
+                    .into_int_value();
+                self.box_single_ctor("ARead", "MkARead", &[v, *arr])
+            }
+            // aset : … -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 arr : Arr a n) -> Arr a n
+            // a bare indexed store; the array value (the base pointer) is returned
+            // unchanged — in-place mutation, justified by linearity (the input
+            // array was consumed; this result is its sole continuation).
+            "aset" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [i, v, arr] = rt.as_slice() else {
+                    return Err(format!(
+                        "aset: expected 3 runtime arguments (index, element, array), got {}",
+                        rt.len()
+                    ));
+                };
+                let base = self.toptr(*arr, "arr.p");
+                let slot = unsafe {
+                    self.builder
+                        .build_gep(self.i64t, base, &[*i], "arr.slot")
+                        .unwrap()
+                };
+                self.builder.build_store(slot, *v).unwrap();
+                Ok(*arr)
+            }
+            // afree : … -> (1 arr : Arr a n) -> Unit — ONE libc free of the block.
+            "afree" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [arr] = rt.as_slice() else {
+                    return Err(format!(
+                        "afree: expected 1 runtime argument (the array), got {}",
+                        rt.len()
+                    ));
+                };
+                self.free_int(*arr);
                 Ok(self.i64t.const_zero())
             }
             // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
@@ -2936,5 +3116,98 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let _ = std::fs::remove_file(exe.with_extension("o.ll"));
         let _ = std::fs::remove_file(&exe);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "alpha\nbeta\n");
+    }
+
+    // ---- CONTIGUOUS ARRAYS: the C `a[i]` on a flat buffer, bounds erased ----
+
+    const BNAT_ARR: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+
+    #[test]
+    fn contiguous_array_runs() {
+        // anew/aset/aget/afree on a flat 3-slot buffer; the `Lt` bounds are
+        // solver-discharged, erased proofs.
+        let src = format!(
+            "{BNAT_ARR}\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(3, 0);\n\
+                 let a1 = aset(1, lt(1, 3), 41, a0);\n\
+                 let (x, a2) = aget(1, lt(1, 3), a1);\n\
+                 let u = afree(a2);\n\
+                 x + 1\n\
+             }}\n"
+        );
+        assert_eq!(run(&src), 42);
+    }
+
+    #[test]
+    fn contiguous_array_sum_loop_runs() {
+        // THE C loop over an array, written safely: structural descent on `b`
+        // with the array typed `Arr Nat (b + m)` — every index bound is a CLOSED
+        // universal (`m < Succ k + m`) the stratum-(A) solver discharges, so no
+        // proof is ever threaded. The `match` on `b` needs the NAT CONVOY: `arr`'s
+        // type mentions the scrutinee (refined to `Succ k + m` in the arm) and
+        // `arr` is linear (consumed exactly once per arm, joined — not ω-scaled).
+        let src = format!(
+            "{BNAT_ARR}\
+             sum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 arr : Arr Nat (b + m)) -> Nat\n\
+             %partial fn sum(m, b, acc, arr) {{\n\
+                 match b {{\n\
+                     Zero => let u = afree(arr); acc,\n\
+                     Succ(k) =>\n\
+                         let (x, arr2) = aget(m, lt(m, Succ(k) + m), arr);\n\
+                         sum(Succ(m), k, acc + x, arr2),\n\
+                 }}\n\
+             }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(5, 7);\n\
+                 let a1 = aset(2, lt(2, 5), 100, a0);\n\
+                 sum(0, 5, 0, a1)\n\
+             }}\n"
+        );
+        assert_eq!(run(&src), 128); // 4×7 + 100
+    }
+
+    #[test]
+    fn arr_ir_is_bare_indexed_load_no_bounds_check() {
+        let src = format!(
+            "{BNAT_ARR}\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(3, 0);\n\
+                 let a1 = aset(1, lt(1, 3), 41, a0);\n\
+                 let (x, a2) = aget(1, lt(1, 3), a1);\n\
+                 let u = afree(a2);\n\
+                 x + 1\n\
+             }}\n"
+        );
+        let ir = ir(&src);
+
+        // (1) The 3-element buffer is ONE malloc of exactly 3×8 = 24 bytes: no
+        // header, no stored length, no per-element cell — the length lives only
+        // in the erased index. (The second 24B cell is the `ARead` pair that
+        // threads the linear array back; -O2 scalarizes it away.)
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(24u64, 2usize)].into_iter().collect(),
+            "array heap traffic must be the flat buffer + the ARead pair; got {sizes:?}\n{ir}"
+        );
+
+        // (2) The ONLY compare/branch in the whole program is `anew`'s fill
+        // loop. `aget`/`aset` carry their bounds as ERASED `Lt` proofs, so the
+        // emitted access is a bare gep+load / gep+store — no bounds check.
+        assert_eq!(
+            ir.matches("icmp").count(),
+            1,
+            "expected exactly one compare (the fill loop) — a second would be a \
+             bounds check that should not exist\n{ir}"
+        );
+        assert_eq!(
+            ir.matches("br i1").count(),
+            1,
+            "expected exactly one conditional branch (the fill loop)\n{ir}"
+        );
     }
 }
