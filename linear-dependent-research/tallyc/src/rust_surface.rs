@@ -268,6 +268,10 @@ pub(crate) enum Ty {
     Var(String),
     /// a Nat literal at the INDEX level, e.g. `Slice Nat 4` / `Arr U8 16`.
     Lit(u64),
+    /// `Type l` with a LEVEL VARIABLE `l` — exists only between parsing and
+    /// the level-monomorphization pre-pass (PHASE B2), which replaces it with
+    /// a concrete `Ty::Type(n)` per instantiation.
+    TypeV(String),
     /// `Type` (level 0) or `Type i` — the i-th universe. The kernel's hierarchy
     /// (`Type i : Type (i+1)`, cumulative, predicative) is now surface-reachable.
     Type(usize),
@@ -632,11 +636,26 @@ impl Parser {
         match self.peek() {
             Some(Tok::KwType) => {
                 self.next();
-                // an optional LEVEL literal: `Type 1`, `Type 2`, … (default 0).
+                // an optional LEVEL literal: `Type 1`, `Type 2`, … (default 0),
+                // or a LEVEL VARIABLE `Type l` (an enclosing `(l : Level)`
+                // parameter, resolved by monomorphization — Phase B2).
                 if let Some(Tok::Num(l)) = self.peek() {
                     let l = *l as usize;
                     self.next();
                     Ok(Ty::Type(l))
+                } else if let Some(Tok::Ident(v)) = self.peek() {
+                    // only a LOWERCASE single name reads as a level variable —
+                    // `Type` followed by a datatype/ctor application must not
+                    // swallow it. Levels are conventionally `l`, `l1`, …
+                    if v.starts_with(|c: char| c.is_ascii_lowercase())
+                        && self.toks.get(self.pos + 1) != Some(&Tok::Colon)
+                    {
+                        let v = v.clone();
+                        self.next();
+                        Ok(Ty::TypeV(v))
+                    } else {
+                        Ok(Ty::Type(0))
+                    }
                 } else {
                     Ok(Ty::Type(0))
                 }
@@ -1264,6 +1283,10 @@ impl Elab {
                 Box::new(self.elab_ty(b, scope)?),
             )),
             Ty::Lit(n) => Ok(Term::NatLit(*n)),
+            Ty::TypeV(v) => Err(format!(
+                "unresolved level variable `{v}` — a `Type {v}` may only mention an \
+                 enclosing `(l : Level)` parameter (instantiated per call site)"
+            )),
         }
     }
 
@@ -2611,7 +2634,7 @@ fn subst_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
         Ty::Add(a, b) => {
             Ty::Add(Box::new(subst_mult_ty(a, subst)), Box::new(subst_mult_ty(b, subst)))
         }
-        Ty::Var(_) | Ty::Type(_) | Ty::Lit(_) => t.clone(),
+        Ty::Var(_) | Ty::Type(_) | Ty::Lit(_) | Ty::TypeV(_) => t.clone(),
     }
 }
 
@@ -2805,6 +2828,281 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
         ));
     }
     // splice: drop each poly Sig/Fn, inserting its instances at the Fn's position
+    let mut out: Vec<Item> = Vec::with_capacity(items.len() + made.len());
+    for it in items.drain(..) {
+        match &it {
+            Item::Sig(n, _) if polys.contains_key(n) => {}
+            Item::Fn(n, _, _, _) if polys.contains_key(n) => {
+                for (orig, s, f) in &made {
+                    if orig == n {
+                        out.push(s.clone());
+                        out.push(f.clone());
+                    }
+                }
+            }
+            _ => out.push(it),
+        }
+    }
+    *items = out;
+    Ok(())
+}
+
+// ===========================================================================
+// PHASE B2 — UNIVERSE (LEVEL) POLYMORPHISM by surface monomorphization.
+// `def`s may take explicit `(l : Level)` parameters and mention `Type l`;
+// each call site passes a LITERAL level and gets a per-level instance
+// (`id$L1`), exactly like the mult-poly pre-pass. The kernel's rig of
+// universes stays concrete and strict — the hierarchy cannot collapse, and
+// the Girard/Hurkens guard is untouched (each instance is checked at its
+// concrete levels).
+// ===========================================================================
+
+fn is_level_sort(t: &Ty) -> bool {
+    matches!(t, Ty::Var(n) if n == "Level")
+}
+
+fn level_params_of(sig: &Ty) -> Result<Vec<(usize, String)>, String> {
+    let (arrows, _) = peel_arrows(sig);
+    let mut out = Vec::new();
+    let mut expl = 0usize;
+    for (_, imp, name, dom) in &arrows {
+        if *imp {
+            if is_level_sort(dom) {
+                return Err("an implicit `{l : Level}` parameter is not supported yet — \
+                            make it explicit: `(l : Level)`"
+                    .into());
+            }
+            continue;
+        }
+        if is_level_sort(dom) {
+            let n =
+                name.clone().ok_or("a `Level` parameter must be named: `(l : Level)`")?;
+            out.push((expl, n));
+        }
+        expl += 1;
+    }
+    Ok(out)
+}
+
+fn subst_level_ty(t: &Ty, subst: &HashMap<String, usize>) -> Ty {
+    match t {
+        Ty::TypeV(v) => match subst.get(v) {
+            Some(l) => Ty::Type(*l),
+            None => Ty::TypeV(v.clone()),
+        },
+        Ty::Arrow(m, imp, n, a, b) => Ty::Arrow(
+            m.clone(),
+            *imp,
+            n.clone(),
+            Box::new(subst_level_ty(a, subst)),
+            Box::new(subst_level_ty(b, subst)),
+        ),
+        Ty::App(f, a) => {
+            Ty::App(Box::new(subst_level_ty(f, subst)), Box::new(subst_level_ty(a, subst)))
+        }
+        Ty::Add(a, b) => {
+            Ty::Add(Box::new(subst_level_ty(a, subst)), Box::new(subst_level_ty(b, subst)))
+        }
+        Ty::Var(_) | Ty::Type(_) | Ty::Lit(_) => t.clone(),
+    }
+}
+
+/// An instance's signature: the original with the explicit `(l : Level)`
+/// arrows REMOVED and every level variable substituted concretely.
+fn strip_level_arrows(t: &Ty, subst: &HashMap<String, usize>) -> Ty {
+    match t {
+        Ty::Arrow(_, false, _, dom, cod) if is_level_sort(dom) => strip_level_arrows(cod, subst),
+        Ty::Arrow(m, imp, n, a, b) => Ty::Arrow(
+            m.clone(),
+            *imp,
+            n.clone(),
+            Box::new(subst_level_ty(a, subst)),
+            Box::new(strip_level_arrows(b, subst)),
+        ),
+        other => subst_level_ty(other, subst),
+    }
+}
+
+struct LevelPolyDef {
+    sig: Ty,
+    params: Vec<String>,
+    body: Tm,
+    annot: Option<TotAnnot>,
+    level_params: Vec<(usize, String)>,
+}
+
+fn resolve_level_arg(t: &Tm, subst: &HashMap<String, usize>) -> Result<usize, String> {
+    match t {
+        Tm::Lit(n) => Ok(*n as usize),
+        Tm::Var(v) => subst.get(v).copied().ok_or_else(|| {
+            format!(
+                "`{v}` is not a universe level — a `Level` argument must be a literal \
+                 (`0`, `1`, …) or an enclosing `(l : Level)` parameter"
+            )
+        }),
+        _ => Err("a `Level` argument must be a literal level".into()),
+    }
+}
+
+fn level_mono_name(base: &str, levels: &[usize]) -> String {
+    let suffix: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
+    format!("{base}$L{}", suffix.join("_"))
+}
+
+/// rewrite level-poly calls in a term, substituting the enclosing instance's
+/// own level parameters in `Ann` types along the way.
+fn level_rewrite_tm(
+    t: &Tm,
+    polys: &HashMap<String, LevelPolyDef>,
+    subst: &HashMap<String, usize>,
+    queue: &mut Vec<(String, Vec<usize>)>,
+) -> Result<Tm, String> {
+    Ok(match t {
+        Tm::Var(name) if polys.contains_key(name) => {
+            return Err(format!(
+                "`{name}` is level-polymorphic — it must be applied to its `Level` \
+                 argument(s) (a bare reference cannot be monomorphized)"
+            ))
+        }
+        Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
+        Tm::Ann(e, ty) => Tm::Ann(
+            Box::new(level_rewrite_tm(e, polys, subst, queue)?),
+            Box::new(subst_level_ty(ty, subst)),
+        ),
+        Tm::Call(name, args) => {
+            if let Some(pd) = polys.get(name) {
+                let np = pd.level_params.len();
+                if args.len() < np {
+                    return Err(format!(
+                        "`{name}` needs {np} `Level` argument(s) first"
+                    ));
+                }
+                let mut levels = Vec::with_capacity(np);
+                for (k, (pos, _)) in pd.level_params.iter().enumerate() {
+                    let _ = pos;
+                    levels.push(resolve_level_arg(&args[k], subst)?);
+                }
+                let rest = args[np..]
+                    .iter()
+                    .map(|a| level_rewrite_tm(a, polys, subst, queue))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !queue.iter().any(|(n, ls)| n == name && *ls == levels) {
+                    queue.push((name.clone(), levels.clone()));
+                }
+                Tm::Call(level_mono_name(name, &levels), rest)
+            } else {
+                Tm::Call(
+                    name.clone(),
+                    args.iter()
+                        .map(|a| level_rewrite_tm(a, polys, subst, queue))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+        }
+        Tm::Add(a, b) => Tm::Add(
+            Box::new(level_rewrite_tm(a, polys, subst, queue)?),
+            Box::new(level_rewrite_tm(b, polys, subst, queue)?),
+        ),
+        Tm::Let(n, e, b) => Tm::Let(
+            n.clone(),
+            Box::new(level_rewrite_tm(e, polys, subst, queue)?),
+            Box::new(level_rewrite_tm(b, polys, subst, queue)?),
+        ),
+        Tm::LetPair(ns, e, b) => Tm::LetPair(
+            ns.clone(),
+            Box::new(level_rewrite_tm(e, polys, subst, queue)?),
+            Box::new(level_rewrite_tm(b, polys, subst, queue)?),
+        ),
+        Tm::Match(s, arms) => Tm::Match(
+            s.clone(),
+            arms.iter()
+                .map(|a| {
+                    Ok(Arm {
+                        ctor: a.ctor.clone(),
+                        binders: a.binders.clone(),
+                        pats: a.pats.clone(),
+                        body: level_rewrite_tm(&a.body, polys, subst, queue)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Tm::MatchN(cols, rows) => Tm::MatchN(
+            cols.clone(),
+            rows.iter()
+                .map(|(ps, b)| Ok((ps.clone(), level_rewrite_tm(b, polys, subst, queue)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+    })
+}
+
+fn monomorphize_level_poly(items: &mut Vec<Item>) -> Result<(), String> {
+    let mut sigs: HashMap<String, Ty> = HashMap::new();
+    for it in items.iter() {
+        if let Item::Sig(n, t) = it {
+            sigs.insert(n.clone(), t.clone());
+        }
+    }
+    let mut polys: HashMap<String, LevelPolyDef> = HashMap::new();
+    for it in items.iter() {
+        if let Item::Fn(name, params, body, annot) = it {
+            let Some(sig) = sigs.get(name) else { continue };
+            let lps = level_params_of(sig)?;
+            if !lps.is_empty() {
+                polys.insert(
+                    name.clone(),
+                    LevelPolyDef {
+                        sig: sig.clone(),
+                        params: params.clone(),
+                        body: body.clone(),
+                        annot: *annot,
+                        level_params: lps,
+                    },
+                );
+            }
+        }
+    }
+    if polys.is_empty() {
+        return Ok(());
+    }
+    let mut queue: Vec<(String, Vec<usize>)> = Vec::new();
+    for it in items.iter_mut() {
+        if let Item::Fn(name, _, body, _) = it {
+            if !polys.contains_key(name) {
+                *body = level_rewrite_tm(body, &polys, &HashMap::new(), &mut queue)?;
+            }
+        }
+    }
+    let mut made: Vec<(String, Item, Item)> = Vec::new();
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut qi = 0;
+    while qi < queue.len() {
+        let (orig, levels) = queue[qi].clone();
+        qi += 1;
+        let iname = level_mono_name(&orig, &levels);
+        if !done.insert(iname.clone()) {
+            continue;
+        }
+        let pd = &polys[&orig];
+        let subst: HashMap<String, usize> = pd
+            .level_params
+            .iter()
+            .zip(&levels)
+            .map(|((_, n), l)| (n.clone(), *l))
+            .collect();
+        let isig = strip_level_arrows(&pd.sig, &subst);
+        let iparams: Vec<String> = pd
+            .params
+            .iter()
+            .filter(|p| !pd.level_params.iter().any(|(_, n)| n == *p))
+            .cloned()
+            .collect();
+        let ibody = level_rewrite_tm(&pd.body, &polys, &subst, &mut queue)?;
+        made.push((
+            orig.clone(),
+            Item::Sig(iname.clone(), isig),
+            Item::Fn(iname, iparams, ibody, pd.annot),
+        ));
+    }
     let mut out: Vec<Item> = Vec::with_capacity(items.len() + made.len());
     for it in items.drain(..) {
         match &it {
@@ -4764,6 +5062,7 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
             Box::new(rename_ty(b, from, to)),
         ),
         Ty::Lit(n) => Ty::Lit(*n),
+        Ty::TypeV(v) => Ty::TypeV(v.clone()),
     }
 }
 
@@ -5104,6 +5403,9 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     // stays `{0,1,ω}` and every checked instance is concrete (its usage-validity
     // is decided by the ordinary checker — no symbolic-rig reasoning, no new
     // trusted code). Behavior-neutral for programs with no `Mult` parameters.
+    // LEVEL-POLY MONOMORPHIZATION (Phase B2) first — a level instance may
+    // itself be mult-polymorphic; then the mult pass sees concrete levels.
+    monomorphize_level_poly(&mut items)?;
     monomorphize_mult_poly(&mut items)?;
 
     let mut elab = Elab {

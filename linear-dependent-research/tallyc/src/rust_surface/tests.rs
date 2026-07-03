@@ -2572,3 +2572,72 @@ fn a4_slices_split_disjoint_and_cannot_free() {
     );
     assert!(check_program(&no_rejoin).is_err(), "stranding the Rejoin obligation must reject");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE B2 (docs/PHASE_SAFETY_PLAN.md) — universe polymorphism: explicit
+// `(l : Level)` parameters + `Type l`, monomorphized per call site (like the
+// mult-poly pre-pass). The kernel's hierarchy stays concrete and strict —
+// every instance is checked at its concrete levels, so predicativity and the
+// Girard guard are untouched.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn b2_level_polymorphic_id_checks_at_several_levels() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // ONE definition of `id`, used at level 0 (on runtime data) and level 2
+    // (on a TYPE, in an erased position) in the same program.
+    let src = format!(
+        "{BN}id : (l : Level) -> {{0 a : Type l}} -> a -> a\n\
+         fn id(l, x) {{ x }}\n\
+         tf : (0 T : Type 1) -> Nat -> Nat\n\
+         fn tf(T, n) {{ n }}\n\
+         main : Nat\n\
+         fn main() {{\n\
+             let v = id(0, 5);\n\
+             tf(id(2, Nat), v + 2)\n\
+         }}\n"
+    );
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("level-poly id must check: {e:?}"));
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(7)));
+
+    // a level argument must be a literal (or an enclosing Level param)
+    let bad = format!(
+        "{BN}id : (l : Level) -> {{0 a : Type l}} -> a -> a\nfn id(l, x) {{ x }}\n\
+         main : Nat\nfn main() {{ id(main, 5) }}\n"
+    );
+    assert!(check_program(&bad).is_err(), "a non-literal level must reject");
+
+    // a level-poly fn can call another at its own level parameter
+    let chain = format!(
+        "{BN}id : (l : Level) -> {{0 a : Type l}} -> a -> a\nfn id(l, x) {{ x }}\n\
+         twice : (l : Level) -> {{0 a : Type l}} -> a -> a\nfn twice(l, x) {{ id(l, id(l, x)) }}\n\
+         main : Nat\nfn main() {{ twice(0, 5) }}\n"
+    );
+    let prog = check_program(&chain).unwrap_or_else(|e| panic!("level chaining must check: {e:?}"));
+    assert_eq!(prog.normalize("main"), Some(Term::NatLit(5)));
+}
+
+#[test]
+fn b2_hierarchy_stays_strict_with_level_poly_present() {
+    // the Girard-guard is untouched: a datatype storing a type from its own
+    // universe is REJECTED even in a program that uses level polymorphism,
+    // and cumulativity lifts ONLY upward.
+    let src = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        id : (l : Level) -> {0 a : Type l} -> a -> a\nfn id(l, x) { x }\n\
+        boxed enum Bad : Type {\n\
+            MkBad : ({0 a : Type} -> a -> a) -> Bad,\n\
+        }\n\
+        main : Nat\nfn main() { id(0, Zero) }\n";
+    let err = check_program(src).err().expect("the impredicative datatype must reject");
+    assert!(
+        format!("{err:?}").contains("predicativity") || format!("{err:?}").contains("universe"),
+        "got {err:?}"
+    );
+    // downward coercion (Type 1 where Type 0 is expected) still fails
+    let down = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        f : (0 T : Type) -> Nat\nfn f(T) { Zero }\n\
+        g : (0 U : Type 1) -> Nat\nfn g(U) { f(U) }\n\
+        main : Nat\nfn main() { Zero }\n";
+    let err = check_program(down).err().expect("downward level coercion must reject");
+    assert!(format!("{err:?}").contains("universe") || format!("{err:?}").contains("Type"), "got {err:?}");
+}
