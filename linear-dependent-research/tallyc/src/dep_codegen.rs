@@ -1023,6 +1023,36 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.widen_from(iv, false, name)
     }
 
+    /// TOTAL float→int conversion: `llvm.fptosi.sat` / `llvm.fptoui.sat`.
+    /// A bare `fptosi`/`fptoui` is POISON on NaN and out-of-range inputs —
+    /// UB reachable from safe code, which the scalar layer's "total edges"
+    /// contract forbids (Phase 0 audit finding). The saturating intrinsics
+    /// define every input: NaN → 0, ±∞/out-of-range → the type's min/max.
+    fn fptoint_sat(
+        &self,
+        fv: inkwell::values::FloatValue<'c>,
+        ity: inkwell::types::IntType<'c>,
+        signed: bool,
+        name: &str,
+    ) -> IntValue<'c> {
+        let intr = inkwell::intrinsics::Intrinsic::find(if signed {
+            "llvm.fptosi.sat"
+        } else {
+            "llvm.fptoui.sat"
+        })
+        .expect("fptosi/fptoui.sat intrinsics exist in LLVM ≥ 12");
+        let decl = intr
+            .get_declaration(self.module, &[ity.into(), fv.get_type().into()])
+            .expect("declare fpto*i.sat");
+        self.builder
+            .build_call(decl, &[fv.into()], name)
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_int_value()
+    }
+
     fn expect_width(&self, v: Val<'c>, w: u32, what: &str) -> Result<Val<'c>, String> {
         if v.width() == w {
             return Ok(v);
@@ -2286,11 +2316,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
             (true, false) => {
                 let fv = self.bits_to_float(x, ab, "cast.f");
                 let ity = self.scalar_int_ty(bb);
-                let iv = if bsg {
-                    bd.build_float_to_signed_int(fv, ity, "fptosi").unwrap()
-                } else {
-                    bd.build_float_to_unsigned_int(fv, ity, "fptoui").unwrap()
-                };
+                // SATURATING (total) conversion — a bare fptosi/fptoui is poison
+                // on NaN/out-of-range (UB from safe code; Phase 0 audit).
+                let iv = self.fptoint_sat(fv, ity, bsg, "cast.fi");
                 self.widen_from(iv, bsg, "cast.iw")
             }
             (true, true) => {
@@ -3461,13 +3489,15 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         let fv = bd.build_signed_int_to_float(x, self.ctx.f32_type(), "n2f").unwrap();
                         self.float_to_bits(fv, 4, "n2f.e")
                     }
+                    // SATURATING — bare fptosi is poison on NaN/out-of-range
+                    // (UB from safe code; Phase 0 audit). NaN → 0, ±∞ → min/max.
                     "nat_of_f64" => {
                         let fv = self.bits_to_float(x, 8, "f2n.d");
-                        bd.build_float_to_signed_int(fv, self.i64t, "f2n").unwrap()
+                        self.fptoint_sat(fv, self.i64t, true, "f2n")
                     }
                     _ => {
                         let fv = self.bits_to_float(x, 4, "f2n.d");
-                        bd.build_float_to_signed_int(fv, self.i64t, "f2n").unwrap()
+                        self.fptoint_sat(fv, self.i64t, true, "f2n")
                     }
                 };
                 Ok(Val::Int(out))
@@ -4142,11 +4172,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // {nullary, single-field} enum is the niche representation (the
             // tagged form of such an enum is always ≥ 2 slots) — compare
             // against 0 and bind the pointer in the non-null arm.
-            let niche_shape = decl_es.payloads.len() == 2
-                && decl_es.width > 1
-                && d_nullary_ptr_shape(self.sig, data).is_some();
-            if total == 1 && niche_shape {
-                let (nc, pc) = d_nullary_ptr_shape(self.sig, data).unwrap();
+            // Two ways a niche VALUE reaches a match: (a) the field is a
+            // direct `Own …`, so the shape itself resolves the niche
+            // (decl_es.niche is Some, width 1); (b) the field is a DATATYPE
+            // PARAMETER instantiated at `Own …` — the uninstantiated shape
+            // here says tagged (width ≥ 2) but the value arrived as ONE slot,
+            // and that width mismatch is the niche signal. Case (a) missing
+            // was a Phase 0 audit find (comps[off] OOB panic).
+            let niche_pair = decl_es.niche.or_else(|| {
+                (decl_es.payloads.len() == 2 && decl_es.width > 1)
+                    .then(|| d_nullary_ptr_shape(self.sig, data))
+                    .flatten()
+            });
+            if total == 1 && niche_pair.is_some() {
+                let (nc, pc) = niche_pair.unwrap();
                 let pv = comps[0];
                 let null_bb = self.ctx.append_basic_block(f, "niche.null");
                 let ptr_bb = self.ctx.append_basic_block(f, "niche.ptr");
@@ -6938,5 +6977,145 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             "Own Outer{{Inner{{I32,U8}},U8}} must be fully packed to 6 bytes; {nir}"
         );
         assert_eq!(run(&nested), 1014, "1000 + 5 + 9");
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 0 (docs/PHASE_SAFETY_PLAN.md §0.2) — the erasure invariant,
+    // extended to every construct added since the Vec/DLL tests: views/loans,
+    // the null niche, `dlt` proofs, and packed-scalar erased witnesses. One
+    // test per construct: THE ERASED WITNESS NEVER BECOMES AN INSTRUCTION.
+    // Ledger: docs/TRUSTED_BASE.md §8.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn phase0_views_loans_holes_fully_erased() {
+        // examples/borrow.tal exercises PtsTo (views), Loan (borrows), and
+        // Hole (vtake) across two owned cells. None of those zero-width
+        // permissions may leave ANY trace: no symbol, no eliminator helper,
+        // no extra heap slot. (The malloc/free counts are pinned by
+        // `borrows_mutate_in_place_with_zero_trace`; this pins the SYMBOLS.)
+        let src = std::fs::read_to_string("examples/borrow.tal").unwrap();
+        let ir = ir(&src);
+        for ghost in ["PtsTo", "Loan", "Hole", "@Loc", "tally_elim_PtsTo", "tally_elim_Loan"] {
+            assert!(
+                !ir.contains(ghost),
+                "zero-width permission `{ghost}` leaked into the runtime IR\n{ir}"
+            );
+        }
+        // borrow/restore are identity on the address: no call to any borrow
+        // machinery survives — the only calls are malloc/free.
+        for call in ["call ptr @borrow", "call ptr @restore", "@tally_borrow"] {
+            assert!(!ir.contains(call), "`{call}` must not exist — borrow/restore are erased\n{ir}");
+        }
+    }
+
+    #[test]
+    fn phase0_null_niche_is_bare_pointer_compare() {
+        // a {nullary, single-pointer-field} enum is the NICHE: one slot, the
+        // null pointer IS the nullary tag. Matching must be a bare
+        // compare-against-0 — no tag cell, no extra malloc, no switch.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum OptP { NoneP : OptP, SomeP : Own Nat -> OptP }\n\
+            f : (1 o : OptP) -> Nat\n\
+            fn f(o) { match o { NoneP => Zero, SomeP(p) => unbox(p) } }\n\
+            main : Nat\n\
+            fn main() { f(SomeP(alloc(7))) + f(NoneP) }\n";
+        assert_eq!(run(src), 7);
+        let ir = ir(src);
+        // the niche match compiles to the two-way null test, NOT a tag switch.
+        assert!(ir.contains("niche.isnull"), "expected the niche null-compare\n{ir}");
+        // the ONLY heap traffic is the one alloc(7) payload cell — the enum
+        // value itself (both variants) is registers.
+        assert_eq!(
+            malloc_sizes(&ir).values().sum::<usize>(),
+            1,
+            "the niche enum must add NO cell beyond the alloc'd payload\n{ir}"
+        );
+    }
+
+    #[test]
+    fn phase0_dlt_proof_leaves_no_trace() {
+        // `dlt(i, n)` decides a bound at runtime: ONE compare. The `DYes` arm
+        // carries a multiplicity-0 `Lt i n` proof — the proof must never be
+        // materialized: DecLt is a one-register value (its tag), there is no
+        // proof slot, no extra allocation, no call.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            readat : (n : Nat) -> (i : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n\n\
+            fn readat(n, i, nz, arr) {\n\
+                match dlt(i, n) { DYes(p) => aget(i, p, arr), DNo => aget(0, nz, arr) }\n\
+            }\n\
+            main : Nat\nfn main() {\n\
+                let a0 = anew(4, 5);\n\
+                let a1 = aset(2, lt(2, 4), 99, a0);\n\
+                let (x, a2) = readat(4, 2, lt(0, 4), a1);\n\
+                let (y, a3) = readat(4, 77, lt(0, 4), a2);\n\
+                let u = afree(a3);\n\
+                x + y\n\
+            }\n";
+        assert_eq!(run(src), 104);
+        let ir = ir(src);
+        // dlt is a bare unsigned compare...
+        assert!(ir.contains("icmp ult"), "dlt must lower to one icmp ult\n{ir}");
+        // ...and the only heap cell in the program is the array itself: the
+        // DecLt value (and its erased proof payload) lives in a register.
+        assert_eq!(
+            malloc_sizes(&ir).values().sum::<usize>(),
+            1,
+            "DecLt/Lt must not allocate — only the Arr may malloc\n{ir}"
+        );
+        assert!(!ir.contains("@dlt"), "dlt must inline to a compare, not a call\n{ir}");
+    }
+
+    #[test]
+    fn phase0_packed_scalar_erased_witnesses_leave_no_trace() {
+        // packed-scalar leaves ride erased witnesses twice: the scalar TYPE
+        // argument `{0 a}` of every `s*` op (directs width/signedness at
+        // compile time) and the erased Arr bound `{0 n}`. Neither may become
+        // an instruction: `sadd` at U8 is a bare add+mask on registers (no
+        // call, no type tag), and the byte buffer is malloc(4) with the
+        // length appearing nowhere else.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            main : Nat\nfn main() {\n\
+                let a0 = anew(4, u8(250));\n\
+                let (x, a1) = aget(1, lt(1, 4), a0);\n\
+                let y = sadd(x, u8(10));\n\
+                let u = afree(a1);\n\
+                nat_u8(y)\n\
+            }\n";
+        assert_eq!(run(src), 4, "250 + 10 wraps to 4 at U8");
+        let ir = ir(src);
+        assert_eq!(
+            malloc_sizes(&ir),
+            [(4u64, 1usize)].into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+            "Arr U8 4 must be ONE malloc(4) — dense bytes, erased length\n{ir}"
+        );
+        for ghost in ["@sadd", "@U8", "call i64 @sadd", "tally_elim_U8"] {
+            assert!(!ir.contains(ghost), "erased scalar witness `{ghost}` leaked\n{ir}");
+        }
+        assert!(ir.contains("load i8"), "U8 element loads at its true width\n{ir}");
+    }
+
+    #[test]
+    fn phase0_cast_float_to_int_saturates_no_poison() {
+        // THE Phase 0 audit fix: float->int was a bare fptosi/fptoui — POISON
+        // on NaN and out-of-range inputs (UB reachable from safe code, against
+        // the scalar layer's total-edges contract). Now the saturating
+        // intrinsics define every input: NaN -> 0, out-of-range -> min/max.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            main : Nat\nfn main() {\n\
+                let nan : F64 = fdiv(0.0, 0.0);\n\
+                let inf : F64 = fdiv(1.0, 0.0);\n\
+                let neg : F64 = fneg(1.5);\n\
+                let a = nat_of_f64(nan);\n\
+                let bi : U8 = cast(inf);\n\
+                let ci : U8 = cast(neg);\n\
+                a + nat_u8(bi) + nat_u8(ci)\n\
+            }\n";
+        // NaN -> 0, +inf at U8 -> 255, -1.5 at U8 -> 0 (clamped, not wrapped).
+        assert_eq!(run(src), 255);
+        let ir = ir(src);
+        assert!(
+            ir.contains("fptosi.sat") || ir.contains("fptoui.sat"),
+            "float->int must use the saturating intrinsics\n{ir}"
+        );
     }
 }

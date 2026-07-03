@@ -1997,3 +1997,127 @@ fn arr_anonymous_linear_element_is_rejected() {
     let err = check_program(src).err().expect("anonymous linear element must reject");
     assert!(format!("{err:?}").contains("LINEAR"), "got {err:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 0 (docs/PHASE_SAFETY_PLAN.md §0.1) — the adversarial coverage corpus.
+// THE P0 INVARIANT: any non-exhaustive match that COMPILES is a memory-safety
+// bug (an unhandled tag would reach the backend's switch-default
+// `unreachable` = UB). Every bad program here must be REJECTED at
+// elaboration; every good one must CHECK. The ledger of the guarded
+// `unreachable` sites lives in docs/TRUSTED_BASE.md §7.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn phase0_adversarial_coverage_corpus() {
+    let rejects = |src: &str, why: &str, needle: &str| {
+        let err = check_program(src).err().unwrap_or_else(|| {
+            panic!("P0 BUG — a non-exhaustive/ill-formed match COMPILED ({why}):\n{src}")
+        });
+        let msg = format!("{err:?}");
+        assert!(msg.contains(needle), "{why}: expected error containing `{needle}`, got {msg}");
+    };
+    let accepts = |src: &str, why: &str| {
+        check_program(src).unwrap_or_else(|e| panic!("{why} must CHECK, got {e:?}\n{src}"));
+    };
+
+    const COLOR: &str = "enum Color { Red : Color, Green : Color, Blue : Color }\n\
+                         enum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    const LIST: &str = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                        boxed enum List { Nil : List, Cons : Nat -> List -> List }\n";
+    const FIN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+                       boxed enum Fin : Nat -> Type {\n\
+                           FZ : {0 n : Nat} -> Fin (Succ n),\n\
+                           FS : {0 n : Nat} -> Fin n -> Fin (Succ n),\n\
+                       }\n";
+
+    // ---- flat matches ----
+    rejects(
+        &format!("{COLOR}f : Color -> Nat\nfn f(c) {{ match c {{ Red => Zero, Green => Zero }} }}\nmain : Nat\nfn main() {{ f(Blue) }}\n"),
+        "flat missing arm",
+        "missing a case for `Blue`",
+    );
+    // %partial must NOT skip coverage — partiality is about termination only.
+    rejects(
+        &format!("{COLOR}f : Color -> Nat\n%partial\nfn f(c) {{ match c {{ Red => Zero, Green => Zero }} }}\nmain : Nat\nfn main() {{ f(Blue) }}\n"),
+        "flat missing arm under %partial",
+        "missing a case for `Blue`",
+    );
+    rejects(
+        &format!("{COLOR}f : Color -> Nat\nfn f(c) {{ match c {{ Red => Zero, Green => Zero, Zero => Zero }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "cross-family constructor arm",
+        "not a constructor of `Color`",
+    );
+    // a VALUE enum (flat tagged union) — same discipline, different lowering.
+    rejects(
+        "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+         enum Opt { None : Opt, Some : Nat -> Opt }\n\
+         f : Opt -> Nat\nfn f(o) { match o { Some(x) => x } }\nmain : Nat\nfn main() { f(Some(3)) }\n",
+        "value-enum missing arm",
+        "missing a case for `None`",
+    );
+    // %builtin Nat matches lower to native compare-and-branch — still gated.
+    rejects(
+        "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+         f : Nat -> Nat\nfn f(n) { match n { Zero => Zero } }\nmain : Nat\nfn main() { f(Zero) }\n",
+        "%builtin Nat missing successor",
+        "missing the successor case",
+    );
+
+    // ---- nested patterns (the pattern-matrix path) ----
+    rejects(
+        &format!("{LIST}f : List -> Nat\nfn f(l) {{ match l {{ Cons(x, Cons(y, t)) => x, Nil => Zero }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "nested missing Cons(_, Nil)",
+        "missing a case",
+    );
+    rejects(
+        "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+         f : Nat -> Nat\nfn f(n) { match n { Succ(Succ(Succ(k))) => k, Zero => Zero, Succ(Zero) => Zero } }\nmain : Nat\nfn main() { Zero }\n",
+        "3-deep nested missing Succ(Succ(Zero))",
+        "missing a case",
+    );
+    rejects(
+        &format!("{LIST}f : List -> Nat\nfn f(l) {{ match l {{ Nil => Zero, Cons(x, t) => match t {{ Cons(y, Cons(z, r)) => z, Nil => x }} }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "nested match inside an arm, inner missing",
+        "missing a case",
+    );
+    rejects(
+        &format!("{LIST}f : List -> Nat\nfn f(l) {{ match l {{ Cons(x) => x, Nil => Zero }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "wrong-arity pattern",
+        "expected 2 binder(s)",
+    );
+    rejects(
+        &format!("{LIST}f : List -> Nat\nfn f(l) {{ match l {{ Cons(x, t) => x, Cons(x, Nil) => Zero, Nil => Zero }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "shadowed (unreachable) arm",
+        "unreachable `match` arm",
+    );
+
+    // ---- absurd discharge (indexed families) ----
+    // mixed absurd+reachable: at index Succ n BOTH ctors are live — FS required.
+    rejects(
+        &format!("{FIN}f : {{0 n : Nat}} -> Fin (Succ n) -> Nat\nfn f(x) {{ match x {{ FZ => Zero }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "mixed absurd+reachable missing the reachable arm",
+        "missing a case for `FS`",
+    );
+    // claiming absurdity at a NON-empty index must be rejected, not trusted.
+    rejects(
+        &format!("{FIN}f : {{0 n : Nat}} -> Fin n -> Nat\nfn f(x) {{ match x {{ }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "zero-arm match at a possibly-inhabited index",
+        "missing a case",
+    );
+    // genuinely absurd: Fin Zero has no inhabitants — zero arms CHECK.
+    accepts(
+        &format!("{FIN}f : Fin Zero -> Nat\nfn f(x) {{ match x {{ }} }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+        "the absurd Fin Zero match",
+    );
+
+    // ---- valid programs stay valid (rejection is not the cheap way out) ----
+    accepts(
+        &format!("{LIST}f : List -> Nat\nfn f(l) {{ match l {{ Cons(x, Cons(y, t)) => y, Cons(x, Nil) => x, Nil => Zero }} }}\nmain : Nat\nfn main() {{ f(Cons(Succ(Zero), Cons(Zero, Nil))) }}\n"),
+        "the exhaustive nested match",
+    );
+    accepts(
+        "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+         f : Nat -> Nat\nfn f(n) { match n { Succ(Succ(Succ(k))) => k, Succ(Succ(Zero)) => Zero, Succ(Zero) => Zero, Zero => Zero } }\nmain : Nat\nfn main() { f(Zero) }\n",
+        "the exhaustive 3-deep nested match",
+    );
+}
