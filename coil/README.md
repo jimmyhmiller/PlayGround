@@ -339,6 +339,20 @@ There is no `eval`/JIT: the only way to run a program is to AOT-compile it.
 `main` (i64, no args) is the process entry; its return value is the exit code
 (low 8 bits).
 
+## Bootstrap without Rust
+
+The compiler is self-hosted (`selfhost/src/*.coil`) and a prebuilt seed is committed,
+so a fresh checkout can rebuild a fully verified compiler with no Rust toolchain:
+
+```sh
+selfhost/rebootstrap.sh          # seed -> build -> verify (fixpoint + gates) -> ./coil
+selfhost/refresh-seed.sh         # after changing the compiler's own source, update the seed
+```
+
+Only `libLLVM.dylib` (`brew install llvm`) + `cc` are needed — no cargo/rustc/inkwell.
+The seed is re-derived from source and proven faithful on every run. See
+[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md).
+
 ## REPL (and Emacs)
 
 `coil repl` is an interactive session over the same AOT pipeline — no
