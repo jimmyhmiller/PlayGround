@@ -67,6 +67,7 @@ unmisusable, and the lowering computes what the type says.
 | `aset` | like `aget`, storing | same; store is at the element's true width (packed layout). |
 | `afree` | `{0 a}{0 n} -> (1 arr) -> Unit` | frees the unique token. |
 | `dlt` | `(i : Nat) -> (n : Nat) -> DecLt i n` | ONE `icmp`; `DYes` carries the erased proof. Sound because the compare's truth IS the proposition; the proof payload is zero-width (IR-tested). |
+| mutual-recursion certification (Phase B3) | an SCC is `%total` when EVERY call into the cycle passes a strict subterm of the caller's scrutinee into the CALLEE's matched position (size-change v1) | any infinite chain through the SCC would strictly descend a structural measure forever. Like wf-recursion this is analyzer-backed (the lowering is forward-call-unrolled `Fix`, not an eliminator); the same honest trusted-base delta. |
 | `dlt` as a TERMINATION witness (Phase B1/E3) | a self-call whose measure argument is the `e1` of an enclosing `match dlt(e1, m)` `DYes` arm, `m` the matched measure parameter, is certified `%total` | dlt's `DYes` IS the machine compare, so the measure strictly decreased whenever the recursive branch runs, and `<` on the packed machine Nat is well-founded (a `u64` cannot decrease forever). UNLIKE structural totality (kernel-eliminator-backed), this certificate rests on the dlt lowering + the analyzer's shape check (facts are dropped when any mentioned variable is rebound) — the honest trusted-base delta of wf recursion; the LOWERING is the same `Fix` either way. |
 
 ## 4b. Concurrency (Phase A4) and slices

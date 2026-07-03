@@ -7712,4 +7712,21 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         assert!(out.status.success(), "tsan binary failed ({:?}): {stderr}", out.status);
         assert_eq!(stdout.trim(), "110", "wrong answer under TSan: {stdout}");
     }
+    #[test]
+    fn b3_mutual_recursion_runs_natively() {
+        // PHASE B3 runtime gate: mutual definitions LOWER (forward-call
+        // unrolling into Fix) and compute correctly at depth.
+        let evenodd = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Bool { False : Bool, True : Bool }\n\
+            even : Nat -> Bool\n%total\nfn even(n) { match n { Zero => True, Succ(k) => odd(k) } }\n\
+            odd : Nat -> Bool\n%total\nfn odd(n) { match n { Zero => False, Succ(k) => even(k) } }\n\
+            main : Nat\nfn main() { match even(10000) { True => 1, False => 0 } }\n";
+        assert_eq!(run(evenodd), 1);
+        let three = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            r3 : Nat -> Nat\nfn r3(n) { match n { Zero => 0, Succ(k) => s3(k) } }\n\
+            s3 : Nat -> Nat\nfn s3(n) { match n { Zero => 1, Succ(k) => t3(k) } }\n\
+            t3 : Nat -> Nat\nfn t3(n) { match n { Zero => 2, Succ(k) => r3(k) } }\n\
+            main : Nat\nfn main() { r3(7) + r3(8) + r3(9) }\n";
+        assert_eq!(run(three), 3);
+    }
 }

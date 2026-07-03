@@ -15,8 +15,10 @@
 //!     every other argument must be passed verbatim — accumulator-varying
 //!     recursion is terminating but not yet lowerable, so it is honestly
 //!     reported `Partial` (Phase E2/E3), never silently called total;
-//!   * mutual recursion (a call-graph cycle through ≥2 functions) is not yet
-//!     lowerable to a single eliminator, so it is `Partial` (Phase E2);
+//!   * mutual recursion (a call-graph cycle through ≥2 functions) is certified
+//!     when EVERY call into the cycle passes a strict subterm of the caller's
+//!     scrutinee into the callee's matched position (Phase B3 size-change v1);
+//!     verdict `TotalWf`, lowered by forward-call unrolling into `Fix`;
 //!   * a `Total` verdict also requires every function it CALLS to be `Total`
 //!     (partiality is contagious) — so a `%total` certificate is airtight.
 
@@ -143,8 +145,12 @@ pub(crate) fn analyze(fns: &[FnClauses]) -> HashMap<String, TotInfo> {
     let reach = transitive_closure(&edges);
 
     // --- step 1: each function's STRUCTURAL verdict (own recursion only) ---
+    // the matched-argument position of every fn, for the mutual (SCC) rule:
+    // a cross-cycle call must decrease at the CALLEE's matched position.
+    let spos: HashMap<String, Option<usize>> =
+        fns.iter().map(|f| (f.name.clone(), f.scrut_pos)).collect();
     let structural: HashMap<String, Totality> =
-        fns.iter().map(|f| (f.name.clone(), structural_verdict(f, &reach))).collect();
+        fns.iter().map(|f| (f.name.clone(), structural_verdict(f, &reach, &spos))).collect();
 
     // --- step 2: the END-TO-END verdict — partiality is contagious. A function
     // whose own recursion is fine but which CALLS a non-total function is itself
@@ -186,7 +192,11 @@ pub(crate) fn analyze(fns: &[FnClauses]) -> HashMap<String, TotInfo> {
 }
 
 /// The structural verdict for one function, considering only its OWN recursion.
-fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -> Totality {
+fn structural_verdict(
+    f: &FnClauses,
+    reach: &HashMap<String, HashSet<String>>,
+    spos: &HashMap<String, Option<usize>>,
+) -> Totality {
     let reaches_self = reach.get(&f.name).map(|s| s.contains(&f.name)).unwrap_or(false);
     if !reaches_self {
         // not part of any recursive cycle ⇒ terminates (no self-dependence).
@@ -194,23 +204,78 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
     }
 
     // Is the cycle MUTUAL (goes through another function) or a direct self-loop?
-    // This is a CONSERVATIVE reachability-symmetry test, not a precise Tarjan SCC:
-    // if `f` reaches some other `g` that reaches `f` back, treat `f` as mutually
-    // recursive ⇒ `Partial`. It can over-approximate (a `g` reachable from `f`
-    // that is only coincidentally in a cycle with `f` still trips it), which only
-    // ever errs toward REJECTING — sound for the certificate, never accepting a
-    // non-terminating set. A real SCC would be more precise; not needed yet.
+    // The SCC members: every g that f reaches which reaches f back.
     let empty = HashSet::new();
     let r = reach.get(&f.name).unwrap_or(&empty);
-    let mutual = r
+    let scc: HashSet<&str> = r
         .iter()
-        .any(|g| g != &f.name && reach.get(g).map(|s| s.contains(&f.name)).unwrap_or(false));
-    if mutual {
-        return Totality::Partial(format!(
-            "`{}` is part of a mutual-recursion cycle, which is not yet certifiable \
-             as total (only direct structural self-recursion is — Phase E2)",
-            f.name
-        ));
+        .filter(|g| {
+            g.as_str() != f.name
+                && reach.get(g.as_str()).map(|s| s.contains(&f.name)).unwrap_or(false)
+        })
+        .map(|s| s.as_str())
+        .collect();
+    if !scc.is_empty() {
+        // PHASE B3 — MUTUAL RECURSION, size-change style (the v1 lexicographic
+        // rule): certify the member if EVERY call it makes into the SCC
+        // (including self-calls) passes, in the CALLEE's matched position, a
+        // strict subterm of THIS function's matched scrutinee. Then any
+        // infinite call chain through the SCC would strictly descend a
+        // structural measure forever — impossible. Verdict `TotalWf`: the
+        // lowering is the (mutually-unrolled) `Fix`, not an eliminator, so
+        // like wf-recursion this certificate rests on this analyzer
+        // (docs/TRUSTED_BASE.md). The callee's matched position is not known
+        // here, so the v1 rule requires the SAME position as the caller's —
+        // even/odd-style mutual folds, honest decline otherwise.
+        let sp = match f.scrut_pos {
+            Some(p) => p,
+            None => {
+                return Totality::Partial(format!(
+                    "`{}` is in a mutual-recursion cycle but does not pattern-match \
+                     an argument, so there is no structural measure to decrease on",
+                    f.name
+                ))
+            }
+        };
+        for c in &f.body_calls {
+            if c.callee == f.name || scc.contains(c.callee.as_str()) {
+                return Totality::Partial(format!(
+                    "`{}` calls into its mutual-recursion cycle outside of any \
+                     pattern-match arm, so the call cannot decrease",
+                    f.name
+                ));
+            }
+        }
+        for arm in &f.arms {
+            for c in &arm.calls {
+                if c.callee != f.name && !scc.contains(c.callee.as_str()) {
+                    continue;
+                }
+                // the arg must be a strict subterm of THIS fn's scrutinee, at
+                // the CALLEE's own matched position (else its measure would
+                // not be the thing that shrank).
+                let callee_sp = if c.callee == f.name {
+                    Some(sp)
+                } else {
+                    spos.get(&c.callee).copied().flatten()
+                };
+                let ok = callee_sp.is_some_and(|csp| {
+                    c.args
+                        .get(csp)
+                        .is_some_and(|a| matches!(a, Tm::Var(v) if arm.smaller.contains(v)))
+                });
+                if !ok {
+                    return Totality::Partial(format!(
+                        "`{}` is mutually recursive with `{}`, and this call into the \
+                         cycle does not pass a strict subterm of `{}` into the \
+                         callee's matched position — the mutual descent is not \
+                         certified",
+                        f.name, c.callee, f.params[sp]
+                    ));
+                }
+            }
+        }
+        return Totality::TotalWf;
     }
 
     // direct self-recursion: every self-call must structurally descend AND pass

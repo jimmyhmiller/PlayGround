@@ -1015,15 +1015,23 @@ fn phase_1a_prime_verbatim_fold_unchanged_no_regression() {
 
 #[test]
 fn total_certificate_rejects_mutual_recursion() {
-    // a mutual-recursion cycle is not yet certifiable as total; `%total` on a
-    // member is a hard error citing the cycle (never silently accepted).
+    // Phase B3: a DESCENDING mutual cycle is now certified `%total` (SCC
+    // size-change); a NON-descending one is still a hard error citing the
+    // cycle (never silently accepted).
     let src = format!(
         "{NATB}\n\
          %total fn iseven(m) {{ match m {{ Zero => Zero, Succ(k) => isodd(k) }} }}\niseven : Nat -> Nat\n\
          fn isodd(m) {{ match m {{ Zero => Succ(Zero), Succ(k) => iseven(k) }} }}\nisodd : Nat -> Nat\n\
          main : Nat\nfn main() {{ iseven(2) }}\n"
     );
-    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
+    check_program(&src).unwrap_or_else(|e| panic!("descending mutual %total must check (B3): {e:?}"));
+    let bad = format!(
+        "{NATB}\n\
+         %total fn iseven(m) {{ match m {{ Zero => Zero, Succ(k) => isodd(m) }} }}\niseven : Nat -> Nat\n\
+         fn isodd(m) {{ match m {{ Zero => Succ(Zero), Succ(k) => iseven(k) }} }}\nisodd : Nat -> Nat\n\
+         main : Nat\nfn main() {{ iseven(2) }}\n"
+    );
+    let err = match check_program(&bad) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
     assert!(err.contains("mutual"), "must cite the mutual-recursion cycle, got: {err}");
 }
 
@@ -1769,13 +1777,13 @@ fn forward_references_between_fns() {
         tag : Nat\nfn tag() { 22 }\n";
     let prog = check_program(src).unwrap_or_else(|e| panic!("forward refs must check: {e:?}"));
     assert_eq!(prog.normalize("main"), Some(Term::NatLit(42)));
-    // a genuine CYCLE (mutual recursion) still errors as before — the reorder
-    // must not silently accept what the language does not yet support.
+    // a genuine CYCLE (mutual recursion) now CHECKS (Phase B3: forward-call
+    // unrolling + SCC size-change certification).
     let cyc = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
         isEven : Nat -> Nat\nfn isEven(n) { match n { Zero => 1, Succ(k) => isOdd(k) } }\n\
         isOdd : Nat -> Nat\nfn isOdd(n) { match n { Zero => 0, Succ(k) => isEven(k) } }\n\
         main : Nat\nfn main() { isEven(4) }\n";
-    assert!(check_program(cyc).is_err(), "mutual recursion is still an (honest) error");
+    check_program(cyc).unwrap_or_else(|e| panic!("descending mutual recursion must check (B3): {e:?}"));
 }
 
 // ---- CONTIGUOUS ARRAYS: the safety half (rejections at compile time) ----
@@ -2640,4 +2648,83 @@ fn b2_hierarchy_stays_strict_with_level_poly_present() {
         main : Nat\nfn main() { Zero }\n";
     let err = check_program(down).err().expect("downward level coercion must reject");
     assert!(format!("{err:?}").contains("universe") || format!("{err:?}").contains("Type"), "got {err:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE B3 (docs/PHASE_SAFETY_PLAN.md) — strict positivity corpus + mutual
+// recursion: SCC size-change certification (every call into the cycle passes
+// a strict subterm into the callee's matched position) + forward-call
+// unrolling so mutual definitions LOWER (previously `unbound name`).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn b3_mutual_even_odd_certified_total_and_runs() {
+    const SRC: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Bool { False : Bool, True : Bool }\n\
+        even : Nat -> Bool\n%total\nfn even(n) { match n { Zero => True, Succ(k) => odd(k) } }\n\
+        odd : Nat -> Bool\n%total\nfn odd(n) { match n { Zero => False, Succ(k) => even(k) } }\n\
+        main : Nat\nfn main() { match even(10) { True => 1, False => 0 } }\n";
+    let prog = check_program(SRC).unwrap_or_else(|e| panic!("mutual even/odd must check: {e:?}"));
+    for f in ["even", "odd"] {
+        let (_, total, reason) =
+            prog.totality.iter().find(|(n, _, _)| n == f).expect("in totality report");
+        assert!(*total, "`{f}` must be certified total, got {reason:?}");
+    }
+    // (mutual fns lower to an opaque `Fix`, which the kernel never unfolds —
+    // the native run is dep_codegen::tests::b3_mutual_recursion_runs_natively.)
+
+    // a mutual NON-descent (passing the whole scrutinee onward) is rejected —
+    // annotation is not proof.
+    const BAD: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Bool { False : Bool, True : Bool }\n\
+        even : Nat -> Bool\n%total\nfn even(n) { match n { Zero => True, Succ(k) => odd(n) } }\n\
+        odd : Nat -> Bool\n%total\nfn odd(n) { match n { Zero => False, Succ(k) => even(k) } }\n\
+        main : Nat\nfn main() { 0 }\n";
+    let err = check_program(BAD).err().expect("mutual non-descent must reject");
+    assert!(format!("{err:?}").contains("mutual"), "got {err:?}");
+
+    // a THREE-function cycle certifies and runs too.
+    const THREE: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        r3 : Nat -> Nat\nfn r3(n) { match n { Zero => 0, Succ(k) => s3(k) } }\n\
+        s3 : Nat -> Nat\nfn s3(n) { match n { Zero => 1, Succ(k) => t3(k) } }\n\
+        t3 : Nat -> Nat\nfn t3(n) { match n { Zero => 2, Succ(k) => r3(k) } }\n\
+        main : Nat\nfn main() { r3(7) + r3(8) + r3(9) }\n";
+    let prog = check_program(THREE).unwrap_or_else(|e| panic!("3-cycle must check: {e:?}"));
+    for f in ["r3", "s3", "t3"] {
+        let (_, total, _) =
+            prog.totality.iter().find(|(n, _, _)| n == f).expect("in report");
+        assert!(*total, "`{f}` must be certified total");
+    }
+}
+
+#[test]
+fn b3_strict_positivity_corpus_splits_correctly() {
+    let no = |src: &str, why: &str| {
+        let err = check_program(src).err().unwrap_or_else(|| panic!("must REJECT ({why}):\n{src}"));
+        assert!(
+            format!("{err:?}").contains("strictly positive") || format!("{err:?}").contains("positiv"),
+            "{why}: expected a positivity error, got {err:?}"
+        );
+    };
+    let ok = |src: &str, why: &str| {
+        check_program(src).unwrap_or_else(|e| panic!("must ACCEPT ({why}): {e:?}"));
+    };
+    const N: &str = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // BAD: direct negative occurrence
+    no(&format!("{N}boxed enum Neg {{ MkNeg : (Neg -> Nat) -> Neg }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+       "direct negative");
+    // BAD: negative through a PARAMETERIZED type's contravariant slot
+    no(&format!("{N}enum F (a : Type) {{ MkF : (a -> Nat) -> F a }}\n\
+                 boxed enum Bad2 {{ MkBad2 : F Bad2 -> Bad2 }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+       "parameterized contravariant nesting");
+    // BAD: double negation is still not STRICTLY positive
+    no(&format!("{N}boxed enum DN {{ MkDN : ((DN -> Nat) -> Nat) -> DN }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+       "double negation");
+    // GOOD: W-type shape — recursion in an arrow CODOMAIN
+    ok(&format!("{N}boxed enum W {{ Sup : Nat -> (Nat -> W) -> W }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+       "codomain recursion (W-type)");
+    // GOOD: covariant nesting through a parameterized container + pointer
+    ok(&format!("{N}enum Opt (a : Type) {{ NoneO : Opt a, SomeO : a -> Opt a }}\n\
+                 struct Rose {{ v : Nat, kids : Opt (Own Rose) }}\nmain : Nat\nfn main() {{ Zero }}\n"),
+       "covariant nested pointer recursion");
 }

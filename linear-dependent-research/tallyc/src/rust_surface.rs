@@ -4947,6 +4947,93 @@ fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     collect_calls_wf(t, &HashMap::new(), &[], out)
 }
 
+/// PHASE B3 — inline the bodies of FORWARD-referenced mutual-recursion
+/// members: a call `g(args…)` where `g` is in `defining`'s SCC and appears
+/// later in item order becomes `let p1 = a1; …; <g's body, itself unrolled>`
+/// (let-scoping does the hygiene; calls back to `defining` remain and become
+/// the `Fix` self-reference). A member repeating on the inline path means the
+/// cycle is not a simple loop — declined honestly.
+fn unroll_forward_scc_calls(
+    defining: &str,
+    t: &Tm,
+    scc: &std::collections::HashSet<String>,
+    order: &HashMap<String, usize>,
+    defs: &HashMap<String, (Vec<String>, Tm)>,
+    path: &mut Vec<String>,
+) -> Result<Tm, String> {
+    let go = |t: &Tm, path: &mut Vec<String>| -> Result<Tm, String> {
+        unroll_forward_scc_calls(defining, t, scc, order, defs, path)
+    };
+    Ok(match t {
+        Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
+        Tm::Ann(e, ty) => Tm::Ann(Box::new(go(e, path)?), ty.clone()),
+        Tm::Call(g, args) => {
+            let forward = scc.contains(g)
+                && order.get(g).zip(order.get(defining)).is_some_and(|(og, od)| og > od);
+            let args2 = args
+                .iter()
+                .map(|a| go(a, path))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !forward {
+                return Ok(Tm::Call(g.clone(), args2));
+            }
+            if path.iter().any(|p| p == g) {
+                return Err(format!(
+                    "the mutual-recursion cycle through `{defining}` re-enters `{g}` \
+                     while inlining — only simple mutual cycles can be lowered so \
+                     far (Phase B3 v1); mark the group `%partial` and restructure, \
+                     or break the cycle"
+                ));
+            }
+            let (gparams, gbody) = defs
+                .get(g)
+                .ok_or_else(|| format!("unknown mutual-recursion member `{g}`"))?;
+            if gparams.len() != args2.len() {
+                return Err(format!(
+                    "`{g}` expects {} argument(s), got {} (mutual-recursion inlining)",
+                    gparams.len(),
+                    args2.len()
+                ));
+            }
+            path.push(g.clone());
+            let inlined = go(gbody, path)?;
+            path.pop();
+            // let-bind right-to-left so evaluation order matches the call.
+            let mut out = inlined;
+            for (p, a) in gparams.iter().zip(args2).rev() {
+                out = Tm::Let(p.clone(), Box::new(a), Box::new(out));
+            }
+            out
+        }
+        Tm::Add(a, b) => Tm::Add(Box::new(go(a, path)?), Box::new(go(b, path)?)),
+        Tm::Let(n, e, b) => {
+            Tm::Let(n.clone(), Box::new(go(e, path)?), Box::new(go(b, path)?))
+        }
+        Tm::LetPair(ns, e, b) => {
+            Tm::LetPair(ns.clone(), Box::new(go(e, path)?), Box::new(go(b, path)?))
+        }
+        Tm::Match(s, arms) => Tm::Match(
+            s.clone(),
+            arms.iter()
+                .map(|a| {
+                    Ok(Arm {
+                        ctor: a.ctor.clone(),
+                        binders: a.binders.clone(),
+                        pats: a.pats.clone(),
+                        body: go(&a.body, path)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Tm::MatchN(cols, rows) => Tm::MatchN(
+            cols.clone(),
+            rows.iter()
+                .map(|(ps, b)| Ok((ps.clone(), go(b, path)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+    })
+}
+
 /// Does `t` mention the variable `v` anywhere (shadowing-unaware — an
 /// over-approximation, used only to CONSERVATIVELY drop `dlt` facts)?
 fn tm_mentions(t: &Tm, v: &str) -> bool {
@@ -5679,6 +5766,81 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     }
     let verdicts = totality::analyze(&clauses);
 
+    // PHASE B3 — MUTUAL RECURSION lowering by FORWARD-CALL UNROLLING: within
+    // a call-graph SCC, a call to a member that appears LATER in item order
+    // (a forward reference, which per-definition inlining cannot resolve) is
+    // replaced by that member's body with its explicit parameters let-bound
+    // to the call's arguments (scoping does the hygiene). Back-edges to the
+    // fn being defined remain as calls, which the `Fix` machinery turns into
+    // the self-reference. Backward calls (already-elaborated members) inline
+    // as ordinary defs.
+    let fn_order: HashMap<String, usize> = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Fn(n, _, _, _) => Some(n.clone()),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
+    let fn_defs: HashMap<String, (Vec<String>, Tm)> = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Fn(n, ps, b, _) => Some((n.clone(), (ps.clone(), b.clone()))),
+            _ => None,
+        })
+        .collect();
+    // reachability over fn names for SCC membership.
+    let fn_reach: HashMap<String, std::collections::HashSet<String>> = {
+        let mut edges: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (n, (_, b)) in &fn_defs {
+            let mut calls = Vec::new();
+            collect_all_calls(b, &mut calls);
+            let e = edges.entry(n.clone()).or_default();
+            for c in calls {
+                if fn_defs.contains_key(&c.callee) {
+                    e.insert(c.callee);
+                }
+            }
+        }
+        // naive transitive closure (small graphs).
+        loop {
+            let mut changed = false;
+            let keys: Vec<String> = edges.keys().cloned().collect();
+            for k in &keys {
+                let succs: Vec<String> = edges[k].iter().cloned().collect();
+                for s in succs {
+                    let add: Vec<String> =
+                        edges.get(&s).map(|x| x.iter().cloned().collect()).unwrap_or_default();
+                    let e = edges.get_mut(k).unwrap();
+                    for a in add {
+                        if e.insert(a) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        edges
+    };
+    let scc_of = |f: &str| -> std::collections::HashSet<String> {
+        fn_reach
+            .get(f)
+            .map(|r| {
+                r.iter()
+                    .filter(|g| {
+                        g.as_str() != f
+                            && fn_reach.get(g.as_str()).is_some_and(|rg| rg.contains(f))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let mut out_defs = Vec::new();
     let mut totality_status: Vec<(String, bool, Option<String>)> = Vec::new();
     // fns whose recursion was certified by a kernel-checked CONVOY FOLD after the
@@ -5686,6 +5848,17 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     let mut promoted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for it in &items {
         if let Item::Fn(name, params, body, annot) = it {
+            // unroll forward SCC calls in this body (no-op outside a cycle).
+            let scc = scc_of(name);
+            let unrolled_body;
+            let body: &Tm = if scc.is_empty() {
+                body
+            } else {
+                let mut path = vec![name.clone()];
+                unrolled_body =
+                    unroll_forward_scc_calls(name, body, &scc, &fn_order, &fn_defs, &mut path)?;
+                &unrolled_body
+            };
             let sig = sigs.get(name).ok_or_else(|| format!("`fn {name}` has no type signature"))?.clone();
             let ty_term = elab.elab_ty(&sig, &[])?;
             let (full_names, full_imps, full_tys, ret) = split_signature(&sig, params)?;
