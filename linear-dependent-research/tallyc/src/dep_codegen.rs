@@ -81,6 +81,59 @@ struct CtorLayout {
     arg_recursive: Vec<bool>,
     /// number of runtime field slots (excluding the tag).
     nfields: u32,
+    /// the FULLY-PACKED cell layout `[tag, field…]`, present ONLY when the
+    /// datatype has a sub-word scalar field (Phase Scalars, S3′) — then the cell
+    /// is byte-packed with a minimal discriminant and no padding (`boxed enum
+    /// { Bar : I32 -> I32 -> IL }` is `[tag@0(1B), i32@1, i32@5, next@9]`, 17
+    /// bytes). `None` ⇒ every field is an 8-byte word, so the cell keeps the
+    /// legacy 8-byte-slot image (byte-identical IR).
+    cell_pack: Option<CellPack>,
+}
+
+/// The fully-packed image of a boxed cell (see `CtorLayout::cell_pack`): the
+/// total malloc `size`, the discriminant `tag_bytes` (minimal width) at offset
+/// 0, and per constructor argument the field's leaves at their ABSOLUTE
+/// (cell-relative) byte offsets — or `None` for an erased arg. Fields follow the
+/// tag with NO padding, so they can be unaligned (loaded/stored `align 1`).
+struct CellPack {
+    size: u32,
+    tag_bytes: u32,
+    fields: Vec<Option<Vec<(u32, Leaf)>>>,
+}
+
+/// Minimal discriminant width (bytes) for a datatype with `nctors` constructors:
+/// enough to hold the largest tag `nctors - 1`. One byte covers ≤ 256 ctors.
+fn tag_bytes_for(nctors: usize) -> u32 {
+    let max = nctors.saturating_sub(1) as u64;
+    let bits = 64 - max.leading_zeros(); // bits to represent `max` (0 → 0)
+    (bits.div_ceil(8)).max(1)
+}
+
+/// Does `data` (a boxed datatype) have ANY sub-word scalar field in ANY of its
+/// constructors? If so the WHOLE datatype packs — every cell gets the minimal
+/// discriminant and no-padding field layout, so the tag stays at a single,
+/// uniform width/offset the match can read without knowing the constructor.
+fn data_uses_packing(sig: &Signature, data: &str) -> bool {
+    let Some(decl) = sig.data(data) else {
+        return false;
+    };
+    let np = decl.params.len();
+    for ctor in &decl.ctors {
+        for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
+            if *mult == Mult::Zero {
+                continue;
+            }
+            if matches!(aty, Term::Data(dn, _) if dn == data) {
+                continue; // recursive: a word pointer, never sub-word.
+            }
+            if field_mem_layout(sig, aty, ai, np, &[], &mut std::collections::HashSet::new())
+                .is_packed()
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, String> {
@@ -120,6 +173,40 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
         }
         arg_recursive.push(recursive);
     }
+    // FULLY-PACKED cell layout `[tag, field…]`: a minimal-width discriminant at
+    // offset 0, then every field IMMEDIATELY after the previous — no alignment
+    // gaps, no tail padding. A datatype packs iff SOME constructor has a sub-word
+    // scalar field (then ALL its cells pack, so the tag width is uniform);
+    // otherwise the cell keeps the legacy 8-byte-slot image (byte-identical IR).
+    // Computed at the FIXED (uninstantiated) layout — generic fields are words,
+    // never packed behind an abstract type.
+    let cell_pack = if data_uses_packing(sig, data) {
+        let tag_bytes = tag_bytes_for(decl.ctors.len());
+        let mut fields: Vec<Option<Vec<(u32, Leaf)>>> = Vec::with_capacity(ctor.args.len());
+        let mut off = tag_bytes;
+        for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
+            if *mult == Mult::Zero {
+                fields.push(None);
+                continue;
+            }
+            let recursive = matches!(aty, Term::Data(dn, _) if dn == data);
+            let fl = if recursive {
+                MemLayout::words(1)
+            } else {
+                field_mem_layout(sig, aty, ai, np, &[], &mut std::collections::HashSet::new())
+            };
+            let leaves = fl.leaves.iter().map(|(o, l)| (off + o, *l)).collect();
+            off += fl.size;
+            fields.push(Some(leaves));
+        }
+        Some(CellPack {
+            size: off, // no tail padding
+            tag_bytes,
+            fields,
+        })
+    } else {
+        None
+    };
     Ok(CtorLayout {
         tag,
         arg_slot,
@@ -127,6 +214,7 @@ fn ctor_layout(sig: &Signature, data: &str, cname: &str) -> Result<CtorLayout, S
         arg_flex,
         arg_recursive,
         nfields: next - 1,
+        cell_pack,
     })
 }
 
@@ -569,6 +657,169 @@ fn type_shape(
     (1, false)
 }
 
+/// One runtime LEAF of a value's MEMORY image: a primitive scalar at its true
+/// byte width, or an 8-byte machine word (`Nat`, a pointer, a generic/opaque
+/// field, a value-enum component). There is exactly one leaf per runtime
+/// register component (`Val::components()`), in the same order — so a value's
+/// components map 1:1 onto its memory leaves.
+#[derive(Clone, Copy)]
+struct Leaf {
+    bytes: u32,
+    signed: bool,
+    #[allow(dead_code)]
+    is_float: bool,
+}
+
+/// The FULLY-PACKED memory layout of a type's runtime image (Phase Scalars,
+/// S3′): total `size` in bytes and each leaf's byte `offset` in component order.
+/// Every scalar field sits at its true width IMMEDIATELY after the previous
+/// field — NO alignment padding, NO tail padding (`repr(packed)` semantics, not
+/// C's natural alignment). `Nat`/pointer/generic/value-enum leaves stay 8-byte
+/// machine words, so an all-word type still reproduces the legacy 8-byte-slot
+/// image EXACTLY (offset = k·8, size = width·8); only a genuine sub-word scalar
+/// makes a layout `packed` and shrinks it. Packed fields can land at unaligned
+/// offsets, so their loads/stores are emitted `align 1`.
+struct MemLayout {
+    size: u32,
+    leaves: Vec<(u32, Leaf)>,
+}
+
+impl MemLayout {
+    /// Does this layout PACK — i.e. hold a sub-word scalar, differing from the
+    /// legacy one-8-byte-slot-per-component image? When false, callers keep the
+    /// untouched slot path, so every pre-scalar program's IR is byte-identical.
+    fn is_packed(&self) -> bool {
+        self.leaves.iter().any(|(_, l)| l.bytes != 8)
+    }
+    /// `n` consecutive 8-byte machine words — the legacy slot image, expressed
+    /// as a `MemLayout`. Used for `Nat`/pointer/generic/value-enum components.
+    fn words(n: u32) -> MemLayout {
+        let leaves = (0..n)
+            .map(|k| {
+                (
+                    k * 8,
+                    Leaf {
+                        bytes: 8,
+                        signed: false,
+                        is_float: false,
+                    },
+                )
+            })
+            .collect();
+        MemLayout {
+            size: n * 8,
+            leaves,
+        }
+    }
+}
+
+/// The fully-packed memory layout of `t`. A primitive scalar is a leaf of its
+/// byte width; a FLAT RECORD lays its fields out in declaration order with NO
+/// padding (nested records inline their packed leaves, no interior padding); a
+/// transparent newtype IS its field; everything else (`Nat`, pointer, generic,
+/// value enum) is a run of 8-byte words, one per component. The leaf count
+/// always equals `type_width(t)`.
+fn mem_layout_term(
+    sig: &Signature,
+    t: &Term,
+    seen: &mut std::collections::HashSet<String>,
+) -> MemLayout {
+    let t = strip_ann(t);
+    // a primitive scalar: one leaf at its true width.
+    if let Some((bytes, signed, is_float)) = scalar_full(t) {
+        return MemLayout {
+            size: bytes,
+            leaves: vec![(
+                0,
+                Leaf {
+                    bytes,
+                    signed,
+                    is_float,
+                },
+            )],
+        };
+    }
+    // recover (datatype name, instantiation args) — quoted spines included.
+    let (name, dargs): (String, Vec<Term>) = match t {
+        Term::Data(dn, da) => (dn.clone(), da.clone()),
+        Term::App(_, _) => {
+            let (head, hargs) = flatten_app(t);
+            match strip_ann(head) {
+                Term::Data(dn, da) => {
+                    let mut all = da.clone();
+                    all.extend(hargs.iter().map(|a| (*a).clone()));
+                    (dn.clone(), all)
+                }
+                _ => return MemLayout::words(type_width(sig, t)),
+            }
+        }
+        _ => return MemLayout::words(type_width(sig, t)),
+    };
+    // a transparent newtype's memory image IS its single field's.
+    if let Some(fi) = transparent_field(sig, &name) {
+        if let Some(d) = sig.data(&name) {
+            let np = d.params.len();
+            let aty = d.ctors[0].args[fi].1.clone();
+            return field_mem_layout(sig, &aty, fi, np, &dargs, seen);
+        }
+        return MemLayout::words(1);
+    }
+    if seen.contains(&name) {
+        return MemLayout::words(type_width(sig, t));
+    }
+    // a FLAT RECORD: pack its fields C-style. (Confirm the shape with the same
+    // predicate the width path uses, then lay the fields out with offsets.)
+    if record_shape(sig, &name, &dargs, &mut std::collections::HashSet::new()).is_some() {
+        seen.insert(name.clone());
+        let d = sig.data(&name).unwrap();
+        let np = d.params.len();
+        let ctor = &d.ctors[0];
+        let mut leaves: Vec<(u32, Leaf)> = Vec::new();
+        let mut off = 0u32;
+        for (ai, (mult, aty)) in ctor.args.iter().enumerate() {
+            if *mult == Mult::Zero {
+                continue;
+            }
+            // fully packed: each field's leaves land immediately after the
+            // previous field — no alignment gap, no interior padding.
+            let fl = field_mem_layout(sig, aty, ai, np, &dargs, seen);
+            for (o, l) in &fl.leaves {
+                leaves.push((off + o, *l));
+            }
+            off += fl.size;
+        }
+        seen.remove(&name);
+        return MemLayout { size: off, leaves }; // no tail padding
+    }
+    // a value enum, or any other pointer/opaque datatype: 8-byte words.
+    MemLayout::words(type_width(sig, t))
+}
+
+/// Memory layout of constructor-argument `ai`'s type, resolving a reference to
+/// the datatype's own parameters through `dargs` (mirrors `field_width`). An
+/// unresolved parameter is a single 8-byte word (a generic field is a fixed
+/// slot — records never pack behind an abstract type).
+fn field_mem_layout(
+    sig: &Signature,
+    aty: &Term,
+    ai: usize,
+    np: usize,
+    dargs: &[Term],
+    seen: &mut std::collections::HashSet<String>,
+) -> MemLayout {
+    match strip_ann(aty) {
+        Term::Var(j) if *j >= ai && (*j - ai) < np => {
+            let pidx = np - 1 - (*j - ai);
+            match dargs.get(pidx) {
+                Some(arg) => mem_layout_term(sig, arg, seen),
+                None => MemLayout::words(1),
+            }
+        }
+        Term::Var(_) => MemLayout::words(1),
+        other => mem_layout_term(sig, other, seen),
+    }
+}
+
 /// A runtime VALUE: one scalar `i64` (an integer or a pointer disguised as
 /// one — the representation of everything before Phase B2), or a FLAT RECORD
 /// by value — its fields as SSA scalars, in registers, never allocated.
@@ -813,6 +1064,98 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .into_int_value()
     }
 
+    /// A GEP by raw BYTE offset (`getelementptr i8`), for the C-packed layout —
+    /// scalar fields at their natural byte offset, not an 8-byte slot index.
+    fn gep_bytes(&self, p: PointerValue<'c>, off: u32, name: &str) -> PointerValue<'c> {
+        unsafe {
+            self.builder
+                .build_gep(
+                    self.ctx.i8_type(),
+                    p,
+                    &[self.i64t.const_int(off as u64, false)],
+                    name,
+                )
+                .unwrap()
+        }
+    }
+
+    /// Address of AoS element `i` at byte `stride`: `base + i*stride` (a
+    /// `getelementptr i8` on a runtime index) — the packed-record array element.
+    fn arr_elem_ptr(&self, base: PointerValue<'c>, i: IntValue<'c>, stride: u32, name: &str) -> PointerValue<'c> {
+        let off = self
+            .builder
+            .build_int_mul(i, self.i64t.const_int(stride as u64, false), "arr.eoff")
+            .unwrap();
+        unsafe {
+            self.builder
+                .build_gep(self.ctx.i8_type(), base, &[off], name)
+                .unwrap()
+        }
+    }
+
+    /// Store one leaf (an i64 working-register component) at its byte offset:
+    /// a sub-word scalar truncates to `iN`; a word stores the full `i64`. Emitted
+    /// `align 1` — a fully-packed field can sit at an unaligned offset.
+    fn store_leaf(&self, base: PointerValue<'c>, off: u32, leaf: Leaf, v: IntValue<'c>) {
+        let dst = self.gep_bytes(base, off, "pf");
+        let val = if leaf.bytes >= 8 {
+            v
+        } else {
+            self.trunc_to(v, self.scalar_int_ty(leaf.bytes), "pf.t")
+        };
+        let st = self.builder.build_store(dst, val).unwrap();
+        st.set_alignment(1).unwrap();
+    }
+
+    /// Load one leaf at its byte offset into the i64 working register: a sub-word
+    /// scalar loads `iN` and widens (sext for signed, zext for unsigned). Emitted
+    /// `align 1` — a fully-packed field can sit at an unaligned offset.
+    fn load_leaf(&self, base: PointerValue<'c>, off: u32, leaf: Leaf) -> IntValue<'c> {
+        let src = self.gep_bytes(base, off, "pf");
+        let ty = if leaf.bytes >= 8 {
+            self.i64t
+        } else {
+            self.scalar_int_ty(leaf.bytes)
+        };
+        let raw = self.builder.build_load(ty, src, "pf").unwrap().into_int_value();
+        raw.as_instruction().unwrap().set_alignment(1).unwrap();
+        if leaf.bytes >= 8 {
+            raw
+        } else {
+            self.widen_from(raw, leaf.signed, "pf.w")
+        }
+    }
+
+    /// Store a value's components into `base + base_off` per the packed layout.
+    fn store_packed(
+        &self,
+        base: PointerValue<'c>,
+        base_off: u32,
+        ml: &MemLayout,
+        comps: &[IntValue<'c>],
+    ) -> Result<(), String> {
+        if comps.len() != ml.leaves.len() {
+            return Err(format!(
+                "packed store: {} components vs {} layout leaves — impossible for a \
+                 kernel-checked term",
+                comps.len(),
+                ml.leaves.len()
+            ));
+        }
+        for ((off, leaf), c) in ml.leaves.iter().zip(comps) {
+            self.store_leaf(base, base_off + off, *leaf, *c);
+        }
+        Ok(())
+    }
+
+    /// Load a value's components from `base + base_off` per the packed layout.
+    fn load_packed(&self, base: PointerValue<'c>, base_off: u32, ml: &MemLayout) -> Vec<IntValue<'c>> {
+        ml.leaves
+            .iter()
+            .map(|(off, leaf)| self.load_leaf(base, base_off + off, *leaf))
+            .collect()
+    }
+
     /// Load one constructor field: a scalar slot, or a flat record's `w`
     /// consecutive slots (loaded into registers — the record leaves the cell by
     /// value).
@@ -828,6 +1171,60 @@ impl<'c, 'a> DepCg<'c, 'a> {
             comps.push(self.load(p, idx + k, "field"));
         }
         Val::Agg(comps)
+    }
+
+    /// Load constructor argument `ai` from a boxed cell `p`, honoring a DENSE
+    /// (`cell_pack`) layout — byte-packed leaves — or the legacy 8-byte slots.
+    /// `None` for an erased argument (no runtime witness).
+    fn load_ctor_field(&self, p: PointerValue<'c>, lay: &CtorLayout, ai: usize) -> Slot<'c> {
+        if let Some(leaves) = lay.cell_pack.as_ref().and_then(|cp| cp.fields[ai].as_ref()) {
+            let comps = leaves
+                .iter()
+                .map(|(off, leaf)| self.load_leaf(p, *off, *leaf))
+                .collect();
+            return Some(self.val_of_comps(comps));
+        }
+        lay.arg_slot[ai].map(|sl| self.load_field(p, sl, lay.arg_width[ai]))
+    }
+
+    /// Store the constructor discriminant into a fresh cell at offset 0: a
+    /// packed cell uses its minimal `tag_bytes` width, a legacy cell a full i64.
+    fn store_tag(&self, raw: PointerValue<'c>, lay: &CtorLayout) {
+        match &lay.cell_pack {
+            Some(cp) => {
+                let ity = self.scalar_int_ty(cp.tag_bytes);
+                self.builder
+                    .build_store(self.gep_bytes(raw, 0, "tag"), ity.const_int(lay.tag, false))
+                    .unwrap();
+            }
+            None => self.store(raw, 0, self.i64t.const_int(lay.tag, false)),
+        }
+    }
+
+    /// Load the constructor discriminant (at offset 0) as an i64, honoring a
+    /// packed datatype's minimal `tag_bytes` width (loaded then zero-extended).
+    fn load_tag(&self, p: PointerValue<'c>, data: &str) -> IntValue<'c> {
+        if data_uses_packing(self.sig, data) {
+            let tb = tag_bytes_for(self.sig.data(data).map_or(0, |d| d.ctors.len()));
+            let raw = self
+                .builder
+                .build_load(self.scalar_int_ty(tb), self.gep_bytes(p, 0, "tag"), "tag")
+                .unwrap()
+                .into_int_value();
+            self.widen_from(raw, false, "tag.z")
+        } else {
+            self.load(p, 0, "tag")
+        }
+    }
+
+    /// Package loaded components as a runtime `Val`: a single scalar, or a flat
+    /// record's fields (a zero-width view is the empty aggregate).
+    fn val_of_comps(&self, comps: Vec<IntValue<'c>>) -> Val<'c> {
+        if comps.len() == 1 {
+            Val::Int(comps[0])
+        } else {
+            Val::Agg(comps)
+        }
     }
 
     /// Read a runtime variable, erroring if it is erased (no runtime witness).
@@ -1277,7 +1674,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         let entry = self.ctx.append_basic_block(helper, "entry");
         self.builder.position_at_end(entry);
         let node_ptr = self.builder.build_int_to_ptr(node, self.ptr, "fold.node").unwrap();
-        let tag = self.load(node_ptr, 0, "fold.tag");
+        let tag = self.load_tag(node_ptr, data);
         let default = self.ctx.append_basic_block(helper, "fold.default");
         let arm_blocks: Vec<_> = decl
             .ctors
@@ -1299,8 +1696,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let lay = ctor_layout(self.sig, data, &ctor.name)?;
             let mut menv = inner_env.clone();
             for ai in 0..ctor.args.len() {
-                let v: Slot<'c> =
-                    lay.arg_slot[ai].map(|sl| self.load_field(node_ptr, sl, lay.arg_width[ai]));
+                let v: Slot<'c> = self.load_ctor_field(node_ptr, &lay, ai);
                 menv.push(v);
             }
             // IH markers: level-identified recursion points (no eager fold).
@@ -1514,7 +1910,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
     /// `malloc(nslots * 8)` and return the raw pointer.
     fn malloc_cell(&self, nslots: u32, name: &str) -> PointerValue<'c> {
-        let sz = self.i64t.const_int(nslots as u64 * 8, false);
+        self.malloc_bytes(nslots * 8, name)
+    }
+    /// `malloc(nbytes)` and return the raw pointer — the C-packed cell size.
+    fn malloc_bytes(&self, nbytes: u32, name: &str) -> PointerValue<'c> {
+        let sz = self.i64t.const_int(nbytes as u64, false);
         self.builder
             .build_call(self.malloc, &[sz.into()], name)
             .unwrap()
@@ -1563,14 +1963,22 @@ impl<'c, 'a> DepCg<'c, 'a> {
         if record_width(self.sig, data).is_some() {
             return Ok(Val::Agg(field_vals.to_vec()));
         }
-        let raw = self.malloc_cell(1 + lay.nfields, "box");
-        self.store(raw, 0, self.i64t.const_int(lay.tag, false));
+        let nbytes = lay.cell_pack.as_ref().map_or((1 + lay.nfields) * 8, |cp| cp.size);
+        let raw = self.malloc_bytes(nbytes, "box");
+        self.store_tag(raw, &lay);
         // arg_slot lists slots for ALL ctor args (None = erased); the i-th
-        // non-erased slot gets field_vals[i].
+        // non-erased slot gets field_vals[i] — byte-packed in a DENSE cell, or a
+        // plain 8-byte slot otherwise. (Every prelude pair reaching here has
+        // single-word fields, so this only ever takes the slot path today.)
         let mut fi = 0usize;
-        for slot in &lay.arg_slot {
-            if let Some(s) = slot {
-                self.store(raw, *s, field_vals[fi]);
+        for (ai, slot) in lay.arg_slot.iter().enumerate() {
+            if slot.is_some() {
+                if let Some(leaves) = lay.cell_pack.as_ref().and_then(|cp| cp.fields[ai].as_ref()) {
+                    let (off, leaf) = leaves[0];
+                    self.store_leaf(raw, off, leaf, field_vals[fi]);
+                } else {
+                    self.store(raw, slot.unwrap(), field_vals[fi]);
+                }
                 fi += 1;
             }
         }
@@ -1935,6 +2343,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let comps = payload.components();
+                // DENSE `Own`: when the payload has sub-word scalar fields, the
+                // cell is the C struct — `Own Point{x:I32,y:I32}` is 8 bytes, not
+                // two 8-byte slots. All-word payloads keep the legacy slot image.
+                let elem_ty = args
+                    .first()
+                    .ok_or_else(|| "alloc: missing payload type argument".to_string())?;
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                if ml.is_packed() {
+                    let cell = self.malloc_bytes(ml.size, "own");
+                    self.store_packed(cell, 0, &ml, &comps)?;
+                    return Ok(Val::Int(self.toint(cell, "ownint")));
+                }
                 let cell = self.malloc_cell(comps.len() as u32, "own");
                 for (i, c) in comps.iter().enumerate() {
                     self.store(cell, i as u32, *c);
@@ -1972,7 +2392,16 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let cell = self.toptr(*ptr, "ownp");
-                let payload = self.load_field(cell, 0, w);
+                // symmetric to the DENSE `alloc`: read the C-packed payload back.
+                let elem_ty = args
+                    .first()
+                    .ok_or_else(|| "unbox: missing payload type argument".to_string())?;
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                let payload = if ml.is_packed() {
+                    self.val_of_comps(self.load_packed(cell, 0, &ml))
+                } else {
+                    self.load_field(cell, 0, w)
+                };
                 self.free_int(*ptr); // free the Own cell; the payload was moved out
                 Ok(payload)
             }
@@ -2297,11 +2726,16 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 };
                 let n = n.as_int("anew length")?;
                 let n = &n;
-                // a scalar element is a single i64 register value stored at its
-                // byte width; a record element is `w` i64 slots.
+                // a scalar element is a single i64 register stored at its byte
+                // width; a PACKED record element is the C struct at its dense
+                // stride (`Arr Point n`, `Point{x:I32,y:I32}` → stride 8); an
+                // all-word record keeps the legacy `w`-slot AoS (stride `w*8`).
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                let packed = sc.is_none() && ml.is_packed();
                 let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
                 let elem_bytes = match sc {
                     Some((bytes, _)) => bytes as u64,
+                    None if packed => ml.size as u64,
                     None => 8 * w as u64,
                 };
                 let init = self.expect_width(init.clone(), w, "anew initial element")?;
@@ -2341,6 +2775,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     };
                     let byte = self.trunc_to(init.as_int("anew scalar init")?, ity, "arr.st");
                     self.builder.build_store(slot, byte).unwrap();
+                } else if packed {
+                    // packed AoS: element `i` at `raw + i*size`, each leaf at its
+                    // byte offset (truncated to its scalar width).
+                    let ep = self.arr_elem_ptr(raw, iv, ml.size, "arr.elem");
+                    self.store_packed(ep, 0, &ml, &init.components())?;
                 } else {
                     let base = self
                         .builder
@@ -2378,6 +2817,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .first()
                     .ok_or_else(|| "aget: missing element type argument".to_string())?;
                 let sc = scalar_desc(elem_ty);
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                let packed = sc.is_none() && ml.is_packed();
                 let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [i, arr] = rt.as_slice() else {
@@ -2396,6 +2837,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         unsafe { self.builder.build_gep(ity, base, &[*i], "arr.slot").unwrap() };
                     let raw = self.builder.build_load(ity, slot, "arr.elem").unwrap().into_int_value();
                     comps.push(self.widen_from(raw, signed, "arr.w"));
+                } else if packed {
+                    // packed AoS: read each leaf of element `i` at its byte offset.
+                    let ep = self.arr_elem_ptr(base, *i, ml.size, "arr.elem");
+                    comps.extend(self.load_packed(ep, 0, &ml));
                 } else {
                     let off = self
                         .builder
@@ -2433,6 +2878,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .first()
                     .ok_or_else(|| "aset: missing element type argument".to_string())?;
                 let sc = scalar_desc(elem_ty);
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                let packed = sc.is_none() && ml.is_packed();
                 let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
                 let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [i, v, arr] = rt.as_slice() else {
@@ -2453,6 +2900,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         unsafe { self.builder.build_gep(ity, base, &[i], "arr.slot").unwrap() };
                     let byte = self.trunc_to(v.as_int("aset scalar element")?, ity, "arr.st");
                     self.builder.build_store(slot, byte).unwrap();
+                } else if packed {
+                    // packed AoS: write each leaf of element `i` at its byte offset.
+                    let ep = self.arr_elem_ptr(base, i, ml.size, "arr.elem");
+                    self.store_packed(ep, 0, &ml, &v.components())?;
                 } else {
                     let off = self
                         .builder
@@ -3220,14 +3671,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // the eliminator still reads the tag the same way.
         if lay.nfields == 0 {
             let gname = format!("tally_nullary_{name}");
+            // the shared cell holds just the discriminant, at the datatype's tag
+            // width (minimal for a packed datatype, i64 otherwise) — so a match's
+            // `load_tag` reads it identically to a heap cell's tag.
             let global = self.module.get_global(&gname).unwrap_or_else(|| {
-                let arr_ty = self.i64t.array_type(1);
-                let g = self.module.add_global(arr_ty, None, &gname);
-                g.set_initializer(
-                    &self.i64t.const_array(&[self.i64t.const_int(lay.tag, false)]),
-                );
-                g.set_constant(true);
-                g
+                match &lay.cell_pack {
+                    Some(cp) => {
+                        let ity = self.scalar_int_ty(cp.tag_bytes);
+                        let g = self.module.add_global(ity, None, &gname);
+                        g.set_initializer(&ity.const_int(lay.tag, false));
+                        g.set_constant(true);
+                        g
+                    }
+                    None => {
+                        let arr_ty = self.i64t.array_type(1);
+                        let g = self.module.add_global(arr_ty, None, &gname);
+                        g.set_initializer(
+                            &self.i64t.const_array(&[self.i64t.const_int(lay.tag, false)]),
+                        );
+                        g.set_constant(true);
+                        g
+                    }
+                }
             });
             return Ok(Val::Int(
                 self.builder
@@ -3236,24 +3701,15 @@ impl<'c, 'a> DepCg<'c, 'a> {
             ));
         }
 
-        // Boxed: malloc(8 * (1 + nfields)); store tag in slot 0; store each
-        // non-erased ctor argument in its slot. Params and erased args store
-        // NOTHING (erasure = zero overhead).
-        let nslots = 1 + lay.nfields;
-        let sz = self.i64t.const_int(nslots as u64 * 8, false);
-        let raw = self
-            .builder
-            .build_call(self.malloc, &[sz.into()], "cell")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap()
-            .into_pointer_value();
-        // slot 0: constructor tag
-        self.builder
-            .build_store(self.gep(raw, 0, "tag"), self.i64t.const_int(lay.tag, false))
-            .unwrap();
-        // ctor args are args[np..]; a flat-record field spans consecutive slots.
+        // Boxed: malloc the cell; store the tag in slot 0; store each non-erased
+        // ctor argument. With a DENSE cell (`cell_pack`, some sub-word scalar
+        // field) the fields are byte-packed like the C struct; otherwise every
+        // field is an 8-byte slot (the legacy image, byte-identical IR). Params
+        // and erased args store NOTHING (erasure = zero overhead).
+        let nbytes = lay.cell_pack.as_ref().map_or((1 + lay.nfields) * 8, |cp| cp.size);
+        let raw = self.malloc_bytes(nbytes, "cell");
+        // offset 0: constructor discriminant (minimal width in a packed cell).
+        self.store_tag(raw, &lay);
         // A GENERIC (parameter-typed) field of a boxed datatype is one slot in a
         // FIXED cell layout — a record cannot go there, and tallyc never boxes
         // implicitly: `expect_width` errors with the explicit alternatives
@@ -3267,10 +3723,17 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     format!("`{name}`'s field")
                 };
                 let v = self.expect_width(v, lay.arg_width[ai], &what)?;
-                for (k, c) in v.components().into_iter().enumerate() {
-                    self.builder
-                        .build_store(self.gep(raw, *s + k as u32, "fld"), c)
-                        .unwrap();
+                let comps = v.components();
+                if let Some(leaves) = lay.cell_pack.as_ref().and_then(|cp| cp.fields[ai].as_ref()) {
+                    for ((off, leaf), c) in leaves.iter().zip(&comps) {
+                        self.store_leaf(raw, *off, *leaf, *c);
+                    }
+                } else {
+                    for (k, c) in comps.into_iter().enumerate() {
+                        self.builder
+                            .build_store(self.gep(raw, *s + k as u32, "fld"), c)
+                            .unwrap();
+                    }
                 }
             }
             // erased argument: not evaluated, not stored.
@@ -3422,7 +3885,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .builder
             .build_int_to_ptr(scrut_val, self.ptr, "scrut")
             .unwrap();
-        let tag = self.load(scrut_ptr, 0, "tag");
+        let tag = self.load_tag(scrut_ptr, data);
 
         // one block per constructor + an unreachable default.
         let default = self.ctx.append_basic_block(helper, "elim.default");
@@ -3454,10 +3917,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let mut menv = env.to_vec();
             let mut arg_vals: Vec<Slot<'c>> = Vec::with_capacity(ctor.args.len());
             for ai in 0..ctor.args.len() {
-                let arg_val: Slot<'c> = match lay.arg_slot[ai] {
-                    Some(sl) => Some(self.load_field(scrut_ptr, sl, lay.arg_width[ai])),
-                    None => None, // erased argument: no runtime witness.
-                };
+                let arg_val: Slot<'c> = self.load_ctor_field(scrut_ptr, &lay, ai);
                 menv.push(arg_val.clone());
                 arg_vals.push(arg_val);
             }
@@ -3854,7 +4314,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .builder
             .build_int_to_ptr(scrut_val, self.ptr, "case.scrut")
             .unwrap();
-        let tag = self.load(scrut_ptr, 0, "case.tag");
+        let tag = self.load_tag(scrut_ptr, data);
 
         let default = self.ctx.append_basic_block(f, "case.default");
         let join = self.ctx.append_basic_block(f, "case.join");
@@ -3885,10 +4345,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             let lay = ctor_layout(self.sig, data, &ctor.name)?;
             let mut menv = env.to_vec();
             for ai in 0..ctor.args.len() {
-                let arg_val: Slot<'c> = match lay.arg_slot[ai] {
-                    Some(sl) => Some(self.load_field(scrut_ptr, sl, lay.arg_width[ai])),
-                    None => None, // erased argument: no runtime witness.
-                };
+                let arg_val: Slot<'c> = self.load_ctor_field(scrut_ptr, &lay, ai);
                 menv.push(arg_val);
             }
             // β-reduce the method: strip exactly `#args` lambdas — NO IH binders.
@@ -6345,5 +6802,141 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             ir.contains("sext i16"),
             "expected the I16 load to SIGN-extend (signed scalar)\n{ir}"
         );
+    }
+
+    // ---- Phase Scalars S3′: dense mixed-width struct field PACKING ----
+
+    #[test]
+    fn dense_struct_own_cell_is_byte_packed() {
+        // `Own Point{x:I32,y:I32}` is the C struct: ONE 8-byte cell (two i32 at
+        // byte offsets 0 and 4), not two 8-byte slots (16). The store truncates
+        // each i32; the `unbox` load reads i32 and sign-extends.
+        let src = format!(
+            "{BNAT_ARR}\
+             struct Point {{ x : I32, y : I32 }}\n\
+             main : Nat\n\
+             fn main() {{ let o = alloc(Point(30i32, 40i32)); let r = unbox(o); \
+                 match r {{ Point(a, b) => nat_i32(a) + nat_i32(b) }} }}\n"
+        );
+        let ir = ir(&src);
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(8u64, 1usize)].into_iter().collect(),
+            "Own Point{{I32,I32}} must be a dense 8-byte cell, not 16; got {sizes:?}\n{ir}"
+        );
+        assert!(ir.contains("store i32"), "expected a 4-byte field store\n{ir}");
+        assert!(ir.contains("i32"), "expected i32 field traffic\n{ir}");
+        assert_eq!(run(&src), 70, "packed Point round-trip: 30 + 40");
+    }
+
+    #[test]
+    fn dense_boxed_enum_cell_packs_scalar_fields() {
+        // a boxed linked node `ICons : I32 -> I32 -> IL -> IL` is FULLY PACKED:
+        // a 1-byte discriminant then no-padding fields — `[tag@0, i32@1, i32@5,
+        // next@9]` = 17 bytes, NOT `1 + 3` 8-byte slots (32) and NOT the
+        // C-aligned 24. `INil` is nullary → a shared constant, zero allocation.
+        let src = format!(
+            "{BNAT_ARR}\
+             boxed enum IL {{ INil : IL, ICons : I32 -> I32 -> IL -> IL }}\n\
+             sumIL : IL -> Nat\n\
+             %partial fn sumIL(xs) {{ match xs {{ INil => 0, \
+                 ICons(a, b, t) => nat_i32(a) + nat_i32(b) + sumIL(t), }} }}\n\
+             main : Nat\n\
+             fn main() {{ sumIL(ICons(10i32, 20i32, ICons(1i32, 2i32, INil))) }}\n"
+        );
+        let ir = ir(&src);
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(17u64, 2usize)].into_iter().collect(),
+            "each ICons cell must be a fully-packed 17-byte struct (1B tag + 4 + 4 + 8); got {sizes:?}\n{ir}"
+        );
+        assert!(ir.contains("store i32"), "expected packed i32 field stores\n{ir}");
+        assert!(ir.contains("store i8"), "expected the 1-byte discriminant store\n{ir}");
+        assert_eq!(run(&src), 33, "10 + 20 + 1 + 2");
+    }
+
+    #[test]
+    fn dense_struct_arr_is_packed_aos() {
+        // `Arr Point n` with `Point{x:I32,y:I32}` is a true AoS at the C stride
+        // (8 bytes/element, not 16): the element is read/written by value at byte
+        // offsets, so the traffic is `store i32`/`load i32` over a `getelementptr
+        // i8` element base — no per-field 8-byte slot.
+        let src = format!(
+            "{BNAT_ARR}\
+             struct Point {{ x : I32, y : I32 }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(3, Point(1i32, 2i32));\n\
+                 let a1 = aset(1, lt(1, 3), Point(30i32, 40i32), a0);\n\
+                 let (q, a2) = aget(1, lt(1, 3), a1);\n\
+                 let u = afree(a2);\n\
+                 match q {{ Point(a, b) => nat_i32(a) + nat_i32(b) }}\n\
+             }}\n"
+        );
+        let ir = ir(&src);
+        assert!(ir.contains("store i32"), "expected a packed 4-byte element store\n{ir}");
+        assert!(ir.contains("load i32"), "expected a packed 4-byte element load\n{ir}");
+        assert!(
+            ir.contains("getelementptr i8"),
+            "expected byte-offset element addressing (packed AoS)\n{ir}"
+        );
+        assert_eq!(run(&src), 70, "Arr Point round-trip: 30 + 40");
+    }
+
+    #[test]
+    fn dense_struct_mixed_width_and_nested_are_fully_packed() {
+        // FULLY PACKED (no padding): `M{a:U8, b:I32, c:U16}` is u8@0, i32@1,
+        // u16@5 — size 7, NOT C's naturally-aligned 12. The value round-trips
+        // through BOTH an `Own` cell and an `Arr` element.
+        let mixed = format!(
+            "{BNAT_ARR}\
+             struct M {{ a : U8, b : I32, c : U16 }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let o = alloc(M(200u8, 1000000i32, 40000u16));\n\
+                 let r = unbox(o);\n\
+                 let a0 = anew(2, M(0u8, 0i32, 0u16));\n\
+                 let a1 = aset(0, lt(0, 2), M(7u8, 9i32, 11u16), a0);\n\
+                 let (q, a2) = aget(0, lt(0, 2), a1);\n\
+                 let u = afree(a2);\n\
+                 match r {{ M(a, b, c) => match q {{ M(a2, b2, c2) =>\n\
+                   nat_u8(a) + nat_i32(b) + nat_u16(c) + nat_u8(a2) + nat_i32(b2) + nat_u16(c2)\n\
+                 }} }}\n\
+             }}\n"
+        );
+        let mir = ir(&mixed);
+        // two mallocs: the `Own M` cell (7 bytes) and the 2-element `Arr M`
+        // (2 × packed stride 7 = 14) — both prove the 7-byte packed size.
+        assert_eq!(
+            malloc_sizes(&mir),
+            [(7u64, 1usize), (14u64, 1usize)].into_iter().collect(),
+            "Own M and Arr M must use the fully-packed 7-byte layout (no padding); {mir}"
+        );
+        assert_eq!(run(&mixed), 1_040_227, "200+1000000+40000 + 7+9+11");
+
+        // a NESTED record inlines its packed leaves with NO interior padding:
+        // `Outer{ Inner{a:I32,b:U8}, c:U8 }` is i32@0, u8@4, u8@5 — size 6, NOT
+        // 12 (which would pad `Inner` to its own 8-byte size).
+        let nested = format!(
+            "{BNAT_ARR}\
+             struct Inner {{ a : I32, b : U8 }}\n\
+             struct Outer {{ i : Inner, c : U8 }}\n\
+             main : Nat\n\
+             fn main() {{\n\
+                 let o = alloc(Outer(Inner(1000i32, 5u8), 9u8));\n\
+                 let r = unbox(o);\n\
+                 match r {{ Outer(inn, c) =>\n\
+                   match inn {{ Inner(a, b) => nat_i32(a) + nat_u8(b) + nat_u8(c) }} }}\n\
+             }}\n"
+        );
+        let nir = ir(&nested);
+        assert_eq!(
+            malloc_sizes(&nir),
+            [(6u64, 1usize)].into_iter().collect(),
+            "Own Outer{{Inner{{I32,U8}},U8}} must be fully packed to 6 bytes; {nir}"
+        );
+        assert_eq!(run(&nested), 1014, "1000 + 5 + 9");
     }
 }

@@ -114,19 +114,34 @@ Records-in-arrays keep AoS but at the **C offset table**, not 8-byte slots, so
   register (LLVM `fN`, decoded from its i64 bits), a sized integer at its width
   (`iN`), records still flatten to i64 components. So calling C math works —
   `%foreign "sqrt" c_sqrt : F64 -> F64` runs (`foreign_float_abi_calls_libm`).
-- **S3′ — mixed-width record field PACKING. NOT DONE (the honest remaining gap).**
-  Dense C struct memory layout (`struct { x : I32, y : I32 }` = 8 bytes, not 16;
-  `Arr Point n` at the packed stride) requires converting the codegen's layout
-  from **8-byte SLOTS** (`ctor_layout`/`store`/`load_field`/`malloc_cell`, the
-  value-enum tag, the null-pointer niche, the `ARead` flex-split, struct-by-value
-  FFI — all slot-based, with many exact IR tests) to a **byte-offset table with
-  per-field widths**. This is the large "Phase B representation rewrite" (§12) —
-  a separate, carefully-validated effort, not an op-arm addition. Today structs
-  are correct but use one 8-byte slot per field in memory; **structure-of-arrays**
-  (dense `Arr I32`/`Arr F64` per component) covers density-critical numeric code
-  and is the idiomatic hot-loop layout, so this gap is about exact C struct
-  *memory* layout / small-field struct interop, not expressiveness or speed of
-  the common case.
+- **S3′ — mixed-width record field PACKING. DONE (v2.7).** A record's scalar
+  fields pack in memory **fully — `repr(packed)`, zero padding**, not C's natural
+  alignment: every field sits immediately after the previous, no alignment gaps,
+  no tail padding. `struct { x : I32, y : I32 }` is **8 bytes, not 16**; `Arr
+  Point n` is a real AoS at **stride 8**; a boxed node `ICons : I32 -> I32 -> IL
+  -> IL` is `[tag@0(1B), i32@1, i32@5, next@9]` = **17 bytes** (a *minimal-width*
+  discriminant + no-padding fields, not 24 and not 32); mixed widths pack tight
+  (`{a:U8,b:I32,c:U16}` = **7**, not C's 12) and NESTED records inline their
+  packed leaves with **no interior padding** (`Outer{Inner{I32,U8},U8}` = **6**,
+  not 12). The mechanism is a `MemLayout` (`mem_layout_term`) — a byte-offset
+  table over each value's runtime *leaves* (one per register component) — that
+  **degenerates to the legacy 8-byte-slot image exactly when every leaf is a
+  word** (`Nat`/pointer/generic/value-enum), so all pre-scalar programs keep
+  byte-identical IR; only a genuine sub-word scalar switches on the packed path.
+  A datatype packs iff SOME constructor has a sub-word field — then ALL its cells
+  get the minimal discriminant (`tag_bytes_for`) so the tag stays a single
+  uniform width the match reads blind. Packed fields can be unaligned, so their
+  loads/stores are emitted `align 1` (verified correct at `-O2`). Threaded
+  through `alloc`/`unbox` (Own cells), `ctor_layout`'s `cell_pack` + the boxed
+  store/load and tag (`compile_constr`/`compile_case`/`compile_elim`/convoy
+  fold/`box_single_ctor`/nullary global, via `store_tag`/`load_tag`), and
+  `anew`/`aget`/`aset` (packed AoS). Tests: `dense_struct_own_cell_is_byte_packed`,
+  `dense_boxed_enum_cell_packs_scalar_fields`, `dense_struct_arr_is_packed_aos`,
+  `dense_struct_mixed_width_and_nested_are_fully_packed`; example
+  `examples/dense_structs.tal`. **Still on the 8-byte-word path (a correct,
+  non-dense follow-up):** value-enum payloads, POOL elements, and the `%foreign`
+  by-value ABI for small packed-int structs (a `struct{int x,y;}` still crosses
+  FFI as two i64s rather than one packed 64-bit register).
 - **S4 — floats (f32/f64). DONE (v2.5, minus the FFI FP-register ABI).** Floats
   ride the i64 register as their bit pattern, decoded only at the op — so no
   `Val` variant. `fadd`/`fsub`/`fmul`/`fdiv`/`fneg`, ordered `flt`/`fle`/`feq`,

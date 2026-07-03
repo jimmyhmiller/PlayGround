@@ -1,0 +1,69 @@
+// FULLY-PACKED MIXED-WIDTH STRUCTS (Phase Scalars, S3′) — the record MEMORY
+// layout, safely: a record's scalar fields pack at their true byte width with
+// ZERO PADDING (`repr(packed)`, not C's natural alignment) — no more one-8-byte-
+// slot per field, and no alignment gaps.
+//
+//   tally run examples/dense_structs.tal      →  1
+//
+// Where a record LIVES in memory, its fields are byte-packed:
+//   - `Own Point{x:I32,y:I32}`:  ONE 8-byte cell {i32@0, i32@4}, not 16.
+//   - `Arr Point n`:             a true AoS at stride 8, not 16.
+//   - a boxed node's fields:     `[tag@0(1B), i32@1, i32@5, next@9]` = 17, not 32.
+//   - mixed widths:              `{a:U8,b:I32,c:U16}` = 7 bytes (no padding).
+//   - nested records:            inlined with no interior padding.
+//
+// `Nat`/pointer/generic fields stay 8-byte machine words, so an all-word record
+// keeps its previous layout exactly — only genuine sub-word scalars pack.
+// (Packed fields can be unaligned; their loads/stores are emitted `align 1`.)
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// two i32 pack into 8 bytes (C `struct { int32_t x, y; }`).
+struct Point { x : I32, y : I32 }
+
+// mixed widths: u8@0, i32@4 (aligned), u16@8 — size 12 with C padding.
+struct Rec { a : U8, b : I32, c : U16 }
+
+// a boxed linked list of packed nodes; each cell is 24 bytes.
+boxed enum IL { INil : IL, ICons : I32 -> I32 -> IL -> IL }
+
+sumIL : IL -> Nat
+%partial fn sumIL(xs) {
+    match xs {
+        INil => 0,
+        ICons(a, b, t) => nat_i32(a) + nat_i32(b) + sumIL(t),
+    }
+}
+
+normPt : Point -> Nat
+fn normPt(p) { match p { Point(a, b) => nat_i32(a) + nat_i32(b) } }
+
+sumRec : Rec -> Nat
+fn sumRec(r) { match r { Rec(a, b, c) => nat_u8(a) + nat_i32(b) + nat_u16(c) } }
+
+main : Nat
+fn main() {
+    // (1) Own Point — one dense 8-byte cell, the record inline, read back by value.
+    let o  = alloc(Point(30i32, 40i32));
+    let p  = unbox(o);
+    let ok1 = eqb(normPt(p), 70);                                   // 1
+
+    // (2) Arr Point — a real AoS at stride 8; mutate one element, read it back.
+    let a0 = anew(3, Point(1i32, 2i32));
+    let a1 = aset(1, lt(1, 3), Point(11i32, 22i32), a0);
+    let (q, a2) = aget(1, lt(1, 3), a1);
+    let u  = afree(a2);
+    let ok2 = eqb(normPt(q), 33);                                   // 1
+
+    // (3) a packed boxed linked list — 24-byte nodes.
+    let ok3 = eqb(sumIL(ICons(10i32, 20i32, ICons(1i32, 2i32, INil))), 33);
+
+    // (4) mixed widths with C alignment + tail padding, round-tripped.
+    let ro = alloc(Rec(200u8, 1000000i32, 40000u16));
+    let r  = unbox(ro);
+    let ok4 = eqb(sumRec(r), 1040200);
+
+    // all four must hold (1*1*1*1 = 1)
+    mul(mul(ok1, ok2), mul(ok3, ok4))
+}
