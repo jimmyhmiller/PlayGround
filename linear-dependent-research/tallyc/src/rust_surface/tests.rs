@@ -2396,3 +2396,90 @@ fn a2_shared_borrows_coexist_and_reunify() {
     let err = check_program(&linear).err().expect("sharing a linear payload must reject");
     assert!(format!("{err:?}").contains("LINEAR"), "got {err:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE B1 / E3 (docs/PHASE_SAFETY_PLAN.md) — well-founded recursion by
+// RUNTIME WITNESS: a self-call whose measure argument is guarded by the
+// `DYes` arm of `match dlt(new, m)` (m the matched measure parameter) is
+// certified `%total` — dlt IS the machine compare, so the measure strictly
+// decreased whenever the branch runs, and `<` on the packed machine Nat is
+// well-founded. Lowered as `Fix` (verdict `TotalWf`).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn b1_wf_recursion_gcd_certified_total() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    const GCD: &str = "gcd : Nat -> Nat -> Nat\n%total\nfn gcd(a, b) {\n\
+        match b {\n\
+            Zero => a,\n\
+            Succ(k) =>\n\
+                match dlt(mod(a, b), b) {\n\
+                    DYes(p) => gcd(b, mod(a, b)),\n\
+                    DNo => Succ(k),\n\
+                },\n\
+        }\n\
+    }\n";
+    let src = format!("{BN}{GCD}main : Nat\nfn main() {{ gcd(48, 18) }}\n");
+    let prog = check_program(&src).unwrap_or_else(|e| panic!("wf gcd must check as %total: {e:?}"));
+    let (_, total, reason) = prog
+        .totality
+        .iter()
+        .find(|(n, _, _)| n == "gcd")
+        .expect("gcd in totality report");
+    assert!(*total, "gcd must be CERTIFIED total, got: {reason:?}");
+
+    // annotation is NOT proof: a non-decreasing call under the same dlt guard
+    // (measure argument is `b` itself, not the dlt-witnessed smaller value).
+    let bad = format!(
+        "{BN}bad : Nat -> Nat -> Nat\n%total\nfn bad(a, b) {{\n\
+            match b {{ Zero => a, Succ(k) => match dlt(mod(a, b), b) {{ DYes(p) => bad(b, b), DNo => Succ(k) }} }}\n\
+        }}\nmain : Nat\nfn main() {{ bad(1, 2) }}\n"
+    );
+    let err = check_program(&bad).err().expect("non-decreasing wf call must be rejected");
+    assert!(format!("{err:?}").contains("does not decrease"), "got {err:?}");
+
+    // SHADOWING kills the fact: rebinding a variable the witnessed expression
+    // mentions between the guard and the call must drop the certificate.
+    let shadow = format!(
+        "{BN}bad : Nat -> Nat -> Nat\n%total\nfn bad(a, b) {{\n\
+            match b {{ Zero => a, Succ(k) =>\n\
+                match dlt(mod(a, b), b) {{\n\
+                    DYes(p) => let a = b + b; bad(b, mod(a, b)),\n\
+                    DNo => Succ(k),\n\
+                }} }}\n\
+        }}\nmain : Nat\nfn main() {{ bad(1, 2) }}\n"
+    );
+    let err = check_program(&shadow).err().expect("a shadowed witness must not certify");
+    assert!(format!("{err:?}").contains("does not decrease"), "got {err:?}");
+
+    // the guard must witness the MATCHED measure parameter — dlt against some
+    // other variable proves nothing about the measure.
+    let wrong_bound = format!(
+        "{BN}bad : Nat -> Nat -> Nat\n%total\nfn bad(a, b) {{\n\
+            match b {{ Zero => a, Succ(k) => match dlt(mod(a, b), a) {{ DYes(p) => bad(a, mod(a, b)), DNo => Succ(k) }} }}\n\
+        }}\nmain : Nat\nfn main() {{ bad(1, 2) }}\n"
+    );
+    let err = check_program(&wrong_bound).err().expect("a wrong-bound dlt must not certify");
+    assert!(format!("{err:?}").contains("does not decrease"), "got {err:?}");
+}
+
+#[test]
+fn b1_qsort_total_example_fully_certified() {
+    // THE B1 GATE: the full in-place quicksort — fill, Lomuto partition,
+    // divide-and-conquer driver, sorted-check — every function CERTIFIED
+    // %total via dlt-witnessed descent. (The native 30k run + answer parity
+    // with the %partial twin is dep_codegen::tests::b1_qsort_total_runs.)
+    // the 1M literals make the kernel recurse deeply — use a CLI-sized stack.
+    let prog = std::thread::Builder::new()
+        .stack_size(1 << 28)
+        .spawn(|| {
+            let src = std::fs::read_to_string("examples/qsort_total.tal").unwrap();
+            check_program(&src).unwrap_or_else(|e| panic!("qsort_total must check: {e:?}"))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    for (name, total, reason) in &prog.totality {
+        assert!(total, "`{name}` must be certified total, got: {reason:?}");
+    }
+}

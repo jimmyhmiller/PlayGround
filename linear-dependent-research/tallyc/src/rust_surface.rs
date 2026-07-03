@@ -4635,31 +4635,104 @@ fn rebind_linear_fields(
 }
 
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
+    collect_calls_wf(t, &HashMap::new(), &[], out)
+}
+
+/// Does `t` mention the variable `v` anywhere (shadowing-unaware — an
+/// over-approximation, used only to CONSERVATIVELY drop `dlt` facts)?
+fn tm_mentions(t: &Tm, v: &str) -> bool {
+    let mut found = false;
+    let mut names = std::collections::HashSet::new();
+    collect_tm_names(t, &mut names);
+    if names.contains(v) {
+        found = true;
+    }
+    found
+}
+
+/// `collect_all_calls`, threading the RUNTIME-WITNESSED `Lt` facts (Phase
+/// E3/B1): inside the `DYes` arm of a `match` on a `let`-bound `dlt(e1, e2)`,
+/// the fact `e1 < e2` holds whenever that arm runs (dlt IS the machine
+/// compare). Facts and dlt-bindings are dropped conservatively when any
+/// variable they mention is rebound.
+fn collect_calls_wf(
+    t: &Tm,
+    dlt_binds: &HashMap<String, (Tm, Tm)>,
+    facts: &[(Tm, Tm)],
+    out: &mut Vec<TCall>,
+) {
+    // remove every binding/fact that mentions (or is) a rebound name.
+    let shadow = |names: &[&String],
+                  db: &HashMap<String, (Tm, Tm)>,
+                  fs: &[(Tm, Tm)]|
+     -> (HashMap<String, (Tm, Tm)>, Vec<(Tm, Tm)>) {
+        let db2 = db
+            .iter()
+            .filter(|(k, (e1, e2))| {
+                !names.iter().any(|n| {
+                    *n == *k || tm_mentions(e1, n) || tm_mentions(e2, n)
+                })
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let fs2 = fs
+            .iter()
+            .filter(|(e1, e2)| !names.iter().any(|n| tm_mentions(e1, n) || tm_mentions(e2, n)))
+            .cloned()
+            .collect();
+        (db2, fs2)
+    };
     match t {
-        Tm::Ann(e, _) => collect_all_calls(e, out),
+        Tm::Ann(e, _) => collect_calls_wf(e, dlt_binds, facts, out),
         Tm::Call(n, args) => {
-            out.push(TCall { callee: n.clone(), args: args.clone() });
+            out.push(TCall { callee: n.clone(), args: args.clone(), lt_facts: facts.to_vec() });
             for a in args {
-                collect_all_calls(a, out);
+                collect_calls_wf(a, dlt_binds, facts, out);
             }
         }
         Tm::Add(a, b) => {
-            collect_all_calls(a, out);
-            collect_all_calls(b, out);
+            collect_calls_wf(a, dlt_binds, facts, out);
+            collect_calls_wf(b, dlt_binds, facts, out);
         }
-        Tm::Match(_, arms) => {
+        Tm::Match(s, arms) => {
             for a in arms {
-                collect_all_calls(&a.body, out);
+                let binders: Vec<&String> = a.binders.iter().collect();
+                let (db, mut fs) = shadow(&binders, dlt_binds, facts);
+                if a.ctor == "DYes" {
+                    if let Some((e1, e2)) = dlt_binds.get(s) {
+                        if !a.binders.iter().any(|b| tm_mentions(e1, b) || tm_mentions(e2, b)) {
+                            fs.push((e1.clone(), e2.clone()));
+                        }
+                    }
+                }
+                collect_calls_wf(&a.body, &db, &fs, out);
             }
         }
         Tm::MatchN(_, rows) => {
+            // pattern binders shadow; no fact survives conservatively.
             for (_, b) in rows {
-                collect_all_calls(b, out);
+                collect_calls_wf(b, &HashMap::new(), &[], out);
             }
         }
-        Tm::LetPair(_, e, body) | Tm::Let(_, e, body) => {
-            collect_all_calls(e, out);
-            collect_all_calls(body, out);
+        Tm::LetPair(ns, e, body) => {
+            collect_calls_wf(e, dlt_binds, facts, out);
+            let binders: Vec<&String> = ns.iter().collect();
+            let (db, fs) = shadow(&binders, dlt_binds, facts);
+            collect_calls_wf(body, &db, &fs, out);
+        }
+        Tm::Let(n, e, body) => {
+            collect_calls_wf(e, dlt_binds, facts, out);
+            let (mut db, fs) = shadow(&[n], dlt_binds, facts);
+            let mut rhs = &**e;
+            while let Tm::Ann(inner, _) = rhs {
+                rhs = inner;
+            }
+            if let Tm::Call(c, args) = rhs {
+                if c == "dlt" && args.len() == 2 {
+                    db.insert(n.clone(), (args[0].clone(), args[1].clone()));
+                }
+            }
+            collect_calls_wf(body, &db, &fs, out);
         }
         Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => {}
     }
@@ -5354,7 +5427,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                 &full_names,
                 &full_tys,
                 &ret,
-                structural.is_total(),
+                matches!(structural, Totality::Total),
             )?;
 
             // LINEAR-CAPABILITY inference (see `def_linear_capable`): for each
@@ -5376,7 +5449,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                             &full_names,
                             &full_tys,
                             &ret,
-                            structural.is_total(),
+                            matches!(structural, Totality::Total),
                         )
                         .and_then(|t| {
                             dep::check_closed_in((*elab.rc).clone(), &t, &ty_term)

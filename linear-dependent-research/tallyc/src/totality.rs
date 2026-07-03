@@ -28,18 +28,28 @@ use std::collections::{HashMap, HashSet};
 pub(crate) enum Totality {
     /// Structurally terminating AND lowerable to a kernel eliminator.
     Total,
+    /// Terminating by RUNTIME-WITNESSED well-founded descent (Phase E3/B1):
+    /// every self-call's measure argument is guarded by a `dlt`-decided
+    /// `Lt new old` fact — dlt's `DYes` arm IS the machine compare, so when
+    /// the recursive branch runs, the measure has strictly decreased, and
+    /// `<` on the packed machine Nat is well-founded (a `u64` cannot
+    /// decrease forever). CERTIFIED total, but lowered as `Fix` (there is no
+    /// eliminator for this shape) — so unlike `Total`, this certificate
+    /// rests on the dlt lowering + this analyzer, not on a kernel re-check
+    /// (documented in docs/TRUSTED_BASE.md).
+    TotalWf,
     /// Not certifiable as total (with a clear, actionable reason).
     Partial(String),
 }
 
 impl Totality {
     pub(crate) fn is_total(&self) -> bool {
-        matches!(self, Totality::Total)
+        matches!(self, Totality::Total | Totality::TotalWf)
     }
     pub(crate) fn reason(&self) -> Option<&str> {
         match self {
             Totality::Partial(r) => Some(r),
-            Totality::Total => None,
+            Totality::Total | Totality::TotalWf => None,
         }
     }
 }
@@ -49,6 +59,11 @@ impl Totality {
 pub(crate) struct Call {
     pub callee: String,
     pub args: Vec<Tm>,
+    /// the RUNTIME-WITNESSED `Lt` facts in scope at this call site: `(e1, e2)`
+    /// means the call sits inside the `DYes` arm of a `match dlt(e1, e2)`,
+    /// so `e1 < e2` holds whenever this call runs. Facts whose variables are
+    /// rebound between the match and the call are dropped by the collector.
+    pub lt_facts: Vec<(Tm, Tm)>,
 }
 
 /// One `match` arm, distilled for the analysis.
@@ -222,6 +237,9 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             ));
         }
     }
+    // did any self-call descend by a RUNTIME-WITNESSED `dlt` decrease (Phase
+    // E3/B1)? Such a fn is certified total but must lower as `Fix`.
+    let mut wf_used = false;
     for arm in &f.arms {
         for c in &arm.calls {
             if c.callee != f.name {
@@ -242,13 +260,26 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             // recursive field — well-founded recursion) rather than first-order?
             let ho_descent =
                 matches!(&c.args[sp], Tm::Call(g, _) if arm.ho_smaller.contains(g));
+            // WELL-FOUNDED descent by runtime witness (Phase E3/B1): the call's
+            // measure argument is exactly the `e1` of an in-scope `dlt(e1, e2)`
+            // `DYes` fact whose `e2` is the matched parameter itself — so when
+            // this branch runs, the measure strictly decreased in `<`, which is
+            // well-founded on the packed machine Nat.
+            let wf_descent = c.lt_facts.iter().any(|(e1, e2)| {
+                c.args[sp] == *e1 && matches!(e2, Tm::Var(v) if v == &f.params[sp])
+            });
+            if wf_descent {
+                wf_used = true;
+            }
             match &c.args[sp] {
+                _ if wf_descent => {}
                 Tm::Var(v) if arm.smaller.contains(v) => {}
                 Tm::Call(g, _) if arm.ho_smaller.contains(g) => {}
                 other => {
                     return Totality::Partial(format!(
                         "recursive call to `{}` does not decrease: the argument in the \
-                         matched position is {}, not a sub-structure of `{}`",
+                         matched position is {}, not a sub-structure of `{}` (and no \
+                         in-scope `dlt` fact witnesses it smaller)",
                         f.name,
                         describe(other),
                         f.params[sp]
@@ -266,7 +297,7 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             // argument, so a wrong-value lowering is rejected. For a first-order BOXED
             // descent the accumulator lowering isn't available, so verbatim is still
             // required (honest decline).
-            if !f.scrut_is_nat && !ho_descent {
+            if !f.scrut_is_nat && !ho_descent && !wf_descent {
                 for (i, a) in c.args.iter().enumerate() {
                     if i == sp {
                         continue;
@@ -289,7 +320,11 @@ fn structural_verdict(f: &FnClauses, reach: &HashMap<String, HashSet<String>>) -
             }
         }
     }
-    Totality::Total
+    if wf_used {
+        Totality::TotalWf
+    } else {
+        Totality::Total
+    }
 }
 
 fn describe(t: &Tm) -> String {

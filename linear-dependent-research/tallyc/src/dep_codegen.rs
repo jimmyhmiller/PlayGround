@@ -4195,72 +4195,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // generic boundary) ARE the fields; bind them and compile the single
         // method in place.
         if record_width(self.sig, data).is_some() {
-            let sv = self.compile_v(f, env, scrut)?;
-            let comps = sv.components();
-            let lay = ctor_layout(self.sig, data, &decl.ctors[0].name)?;
-            let nargs = decl.ctors[0].args.len();
-            // FLEXIBLE split: concrete fields take their declared widths; when
-            // exactly ONE runtime field is flex (parameter-typed), it absorbs
-            // the value's surplus width — the layout is read off the VALUE, so
-            // generic flat records (`ARead a n`, `Taken a l`) work at every
-            // instantiation with no boxing. Ambiguity (two flex fields and a
-            // surplus) is a hard error, not a guess.
-            let total: u32 = comps.len() as u32;
-            let declared: u32 = lay.nfields;
-            let nflex = (0..nargs)
-                .filter(|&ai| lay.arg_slot[ai].is_some() && lay.arg_flex[ai])
-                .count();
-            let surplus = total.checked_sub(declared).ok_or_else(|| {
-                format!(
-                    "match[{data}]: this {total}-slot value cannot be a flat \
-                     `{data}` ({declared} slots) — it reached here through a \
-                     ONE-slot generic position (a generic container field or an \
-                     abstract-typed parameter), where a record's layout cannot \
-                     live and tallyc never boxes implicitly. Box it explicitly \
-                     (store `Own {data}` in the container and `unbox` it), or \
-                     declare a concrete container ({data}-typed fields store the \
-                     record flat)."
-                )
-            })?;
-            if surplus > 0 && nflex != 1 {
-                return Err(format!(
-                    "match[{data}]: cannot split a {total}-slot record over \
-                     {nflex} generic field(s) (declared width {declared}) — the \
-                     layout is ambiguous; make the record's fields concrete"
-                ));
-            }
-            let mut menv = env.to_vec();
-            let mut off = 0usize;
-            for ai in 0..nargs {
-                if lay.arg_slot[ai].is_some() {
-                    let wi = if lay.arg_flex[ai] && surplus > 0 {
-                        (lay.arg_width[ai] + surplus) as usize
-                    } else {
-                        lay.arg_width[ai] as usize
-                    };
-                    let v = if wi == 1 {
-                        Val::Int(comps[off])
-                    } else {
-                        Val::Agg(comps[off..off + wi].to_vec())
-                    };
-                    off += wi;
-                    menv.push(Some(v));
-                } else {
-                    menv.push(None);
-                }
-            }
-            let mut body = strip_ann(&methods[0]);
-            for _ in 0..nargs {
-                match body {
-                    Term::Lam(inner) => body = strip_ann(inner),
-                    _ => {
-                        return Err(format!(
-                            "case[{data}]: method is not a {nargs}-argument function"
-                        ))
-                    }
-                }
-            }
-            return self.compile_v(f, &menv, body);
+            let (menv, body) = self.record_match_parts(f, env, data, &methods[0], scrut)?;
+            return self.compile_v(f, &menv, &body);
         }
 
         // A VALUE ENUM match: switch on the TAG COMPONENT (register, not a
@@ -4743,6 +4679,91 @@ impl<'c, 'a> DepCg<'c, 'a> {
         Ok(Val::Agg(comps))
     }
 
+    /// Bind a FLAT-RECORD match's fields (the tagless single-ctor path of a
+    /// `Case`): evaluate the scrutinee, split its components over the ctor's
+    /// runtime fields (one flex field absorbing any surplus), and β-peel the
+    /// single method. Shared by `compile`'s `Case` and by `compile_tail` (so
+    /// tail position propagates through `let (x, a) = …` destructuring).
+    fn record_match_parts(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        data: &str,
+        method: &Term,
+        scrut: &Term,
+    ) -> Result<(Vec<Slot<'c>>, Term), String> {
+        let decl = self
+            .sig
+            .data(data)
+            .ok_or_else(|| format!("case on unknown datatype `{data}`"))?;
+        let sv = self.compile_v(f, env, scrut)?;
+        let comps = sv.components();
+        let lay = ctor_layout(self.sig, data, &decl.ctors[0].name)?;
+        let nargs = decl.ctors[0].args.len();
+        // FLEXIBLE split: concrete fields take their declared widths; when
+        // exactly ONE runtime field is flex (parameter-typed), it absorbs
+        // the value's surplus width — the layout is read off the VALUE, so
+        // generic flat records (`ARead a n`, `Taken a l`) work at every
+        // instantiation with no boxing. Ambiguity (two flex fields and a
+        // surplus) is a hard error, not a guess.
+        let total: u32 = comps.len() as u32;
+        let declared: u32 = lay.nfields;
+        let nflex = (0..nargs)
+            .filter(|&ai| lay.arg_slot[ai].is_some() && lay.arg_flex[ai])
+            .count();
+        let surplus = total.checked_sub(declared).ok_or_else(|| {
+            format!(
+                "match[{data}]: this {total}-slot value cannot be a flat \
+                 `{data}` ({declared} slots) — it reached here through a \
+                 ONE-slot generic position (a generic container field or an \
+                 abstract-typed parameter), where a record's layout cannot \
+                 live and tallyc never boxes implicitly. Box it explicitly \
+                 (store `Own {data}` in the container and `unbox` it), or \
+                 declare a concrete container ({data}-typed fields store the \
+                 record flat)."
+            )
+        })?;
+        if surplus > 0 && nflex != 1 {
+            return Err(format!(
+                "match[{data}]: cannot split a {total}-slot record over \
+                 {nflex} generic field(s) (declared width {declared}) — the \
+                 layout is ambiguous; make the record's fields concrete"
+            ));
+        }
+        let mut menv = env.to_vec();
+        let mut off = 0usize;
+        for ai in 0..nargs {
+            if lay.arg_slot[ai].is_some() {
+                let wi = if lay.arg_flex[ai] && surplus > 0 {
+                    (lay.arg_width[ai] + surplus) as usize
+                } else {
+                    lay.arg_width[ai] as usize
+                };
+                let v = if wi == 1 {
+                    Val::Int(comps[off])
+                } else {
+                    Val::Agg(comps[off..off + wi].to_vec())
+                };
+                off += wi;
+                menv.push(Some(v));
+            } else {
+                menv.push(None);
+            }
+        }
+        let mut body = strip_ann(method);
+        for _ in 0..nargs {
+            match body {
+                Term::Lam(inner) => body = strip_ann(inner),
+                _ => {
+                    return Err(format!(
+                        "case[{data}]: method is not a {nargs}-argument function"
+                    ))
+                }
+            }
+        }
+        Ok((menv, body.clone()))
+    }
+
     /// Compile a FIX BODY in TAIL POSITION: `let`-chains and Nat matches emit
     /// their result as a `ret` PER ARM — no phi-join between a recursive call
     /// and its return — so LLVM's tail-call elimination fires even for
@@ -4813,6 +4834,105 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     }
                 }
                 self.compile_tail_default(f, env, t, ret_width, ret_struct)
+            }
+            // a FLAT-RECORD destructuring (`let (x, a) = …` / a single-ctor
+            // match) in tail position: bind the fields, stay in tail mode.
+            Term::Case(data, _m, methods, scrut)
+                if methods.len() == 1
+                    && transparent_field(self.sig, data).is_none()
+                    && record_width(self.sig, data).is_some() =>
+            {
+                let (menv, body) = self.record_match_parts(f, env, data, &methods[0], scrut)?;
+                self.compile_tail(f, &menv, &body, ret_width, ret_struct)
+            }
+            // a VALUE-ENUM `Case` in tail position (e.g. the `dlt` DecLt guard
+            // in a wf-certified loop, Phase B1): compile each arm AS TAIL, so
+            // every arm ends in its own `ret` — the phi-join otherwise defeats
+            // LLVM's TCO and a deep certified loop overflows the stack. The
+            // payload binding mirrors the ordinary vcase path exactly; boxed
+            // families and ANY niche-candidate shape (whose values may arrive
+            // as the one-slot null-niche form, detected only at the match)
+            // keep the default path.
+            Term::Case(data, _m, methods, scrut)
+                if enum_value_shape(self.sig, data, &[], &mut std::collections::HashSet::new())
+                    .is_some_and(|es| es.niche.is_none())
+                    && d_nullary_ptr_shape(self.sig, data).is_none() =>
+            {
+                let decl = self
+                    .sig
+                    .data(data)
+                    .ok_or_else(|| format!("unknown datatype `{data}`"))?
+                    .clone();
+                let sv = self.compile_v(f, env, scrut)?;
+                let comps = sv.components();
+                let total = comps.len() as u32;
+                if total < 1 {
+                    return self.compile_tail_default(f, env, t, ret_width, ret_struct);
+                }
+                let tag = comps[0];
+                let default = self.ctx.append_basic_block(f, "tvcase.default");
+                let arm_blocks: Vec<_> = decl
+                    .ctors
+                    .iter()
+                    .map(|c| self.ctx.append_basic_block(f, &format!("tvcase.{}", c.name)))
+                    .collect();
+                let cases: Vec<(IntValue<'c>, inkwell::basic_block::BasicBlock<'c>)> = decl
+                    .ctors
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, _)| (self.i64t.const_int(ci as u64, false), arm_blocks[ci]))
+                    .collect();
+                self.builder.build_switch(tag, default, &cases).unwrap();
+                self.builder.position_at_end(default);
+                self.builder.build_unreachable().unwrap();
+                for (ci, ctor) in decl.ctors.iter().enumerate() {
+                    self.builder.position_at_end(arm_blocks[ci]);
+                    let lay = ctor_layout(self.sig, data, &ctor.name)?;
+                    let peeled = peel_n_lams(&methods[ci], ctor.args.len());
+                    let Some(body) = peeled else {
+                        // refuted arm: kernel-proven dead.
+                        self.builder.build_unreachable().unwrap();
+                        continue;
+                    };
+                    let concrete: u32 = (0..ctor.args.len())
+                        .filter(|&ai| lay.arg_slot[ai].is_some() && !lay.arg_flex[ai])
+                        .map(|ai| lay.arg_width[ai])
+                        .sum();
+                    let nflex = (0..ctor.args.len())
+                        .filter(|&ai| lay.arg_slot[ai].is_some() && lay.arg_flex[ai])
+                        .count();
+                    let mut menv = env.to_vec();
+                    let mut off = 1usize;
+                    for ai in 0..ctor.args.len() {
+                        if lay.arg_slot[ai].is_none() {
+                            menv.push(None);
+                            continue;
+                        }
+                        let wi = if lay.arg_flex[ai] {
+                            if nflex != 1 {
+                                return Err(format!(
+                                    "match[{data}]: constructor `{}` has {nflex} \
+                                     parameter-typed payload fields — the layout is \
+                                     ambiguous at the match; make them concrete or \
+                                     declare `boxed enum {data}`",
+                                    ctor.name
+                                ));
+                            }
+                            (total - 1 - concrete) as usize
+                        } else {
+                            lay.arg_width[ai] as usize
+                        };
+                        let v = if wi == 1 {
+                            Val::Int(comps[off])
+                        } else {
+                            Val::Agg(comps[off..off + wi].to_vec())
+                        };
+                        off += wi;
+                        menv.push(Some(v));
+                    }
+                    self.compile_tail(f, &menv, body, ret_width, ret_struct)?;
+                }
+                Ok(())
             }
             _ => self.compile_tail_default(f, env, t, ret_width, ret_struct),
         }
@@ -7331,5 +7451,37 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         for ghost in ["SRead", "SLoan", "@share", "@sdup", "@sjoin", "@unshare", "refcount"] {
             assert!(!ir.contains(ghost), "shared-borrow ghost `{ghost}` leaked into IR\n{ir}");
         }
+    }
+    #[test]
+    fn b1_qsort_total_runs() {
+        // PHASE B1 runtime gate: the fully-%total quicksort computes the same
+        // answer as the %partial twin (same LCG, same Lomuto partition), and
+        // the dlt-guarded certified loops run as native code at depth (the
+        // per-arm tail rets keep LLVM's TCO applicable through the value-enum
+        // `dlt` guard and record destructurings).
+        let src = std::fs::read_to_string("examples/qsort_total.tal")
+            .unwrap()
+            .replace("1000000", "30000");
+        let got = std::thread::Builder::new()
+            .stack_size(1 << 28)
+            .spawn(move || run(&src))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, 450_525_480, "same checksum as the %partial twin at 30k");
+    }
+
+    #[test]
+    fn b1_wf_gcd_runs_natively() {
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            gcd : Nat -> Nat -> Nat\n%total\nfn gcd(a, b) {\n\
+                match b {\n\
+                    Zero => a,\n\
+                    Succ(k) => match dlt(mod(a, b), b) { DYes(p) => gcd(b, mod(a, b)), DNo => Succ(k) },\n\
+                }\n\
+            }\n\
+            main : Nat\nfn main() { gcd(48, 18) + gcd(17, 5) + gcd(0, 7) + gcd(1071, 462) }\n";
+        // 6 + 1 + 7 + 21
+        assert_eq!(run(src), 35);
     }
 }
