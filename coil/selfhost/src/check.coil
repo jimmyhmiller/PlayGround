@@ -12,11 +12,19 @@
 (import "match.coil" :use *)
 (import "ast.coil" :use *)
 (import "astdump.coil" :use *)
-(import "codegen.coil" :use *)
 (import "comptime.coil" :use *)
 (import "loader.coil" :use *)
 (import "parser.coil" :use *)
 (import "resolve.coil" :use *)
+
+; the last `.`-separated component of a qualified name (the link/C symbol).
+; Lives here (not in codegen.coil) so check has no codegen/LLVM dependency and
+; the frontend can be built LLVM-free; codegen imports check and reuses it.
+(defn last-component [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len s) (mut i) (isub n 1) (mut start) 0]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! start (iadd (load i) 1)) (store! i -1)) (store! i (isub (load i) 1)))))
+    (substr s (load start) n)))
 
 (defstruct Sig
   [(name (slice u8))

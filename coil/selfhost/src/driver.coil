@@ -1,0 +1,604 @@
+; selfhost/src/driver.coil — self-host Coil compiler DRIVER (CLI dispatch +
+; pipeline orchestration + object emit/link), shared by both compiler builds:
+;   * selfhost/src/main.coil      — full compiler (LLVM + native arm64 backends)
+;   * selfhost/src/main_a64.coil  — LLVM-free build (native arm64 backend only)
+; This module is backend-AGNOSTIC: it never imports codegen.coil / normalize.coil
+; (the LLVM backend). The two LLVM entry points (`build` via LLVM, `emit-ir`) and
+; `__normalize` are injected as function pointers by the top file (see driver-main),
+; so a build that omits the LLVM backend simply passes hard-error stubs and never
+; references libLLVM. The native arm64 backend (build-arm64-program) is always here.
+; Imports resolve relative to CWD = repo root; ALWAYS build from repo root.
+(module driver)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+; sibling selfhost modules import by bare name (resolved relative to this file's
+; dir), matching the convention in codegen.coil/check.coil/etc. Only the top-level
+; entry files (main.coil / main_a64.coil) use CWD-relative "selfhost/src/…" paths.
+(import "ffi.coil" :use *)
+(import "reader.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "parser.coil" :use *)
+(import "loader.coil" :use *)
+(import "resolve.coil" :use *)
+(import "check.coil" :use *)
+(import "mono.coil" :use *)
+(import "diag.coil" :use *)
+(import "comptime.coil" :use *)
+(import "expander.coil" :use *)
+(import "codegen_a64.coil" :use *)
+
+(defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (match (parse-program a forms)
+          (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+          (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp a)))))))
+  0)
+
+; ============================ file IO + entry ===============================
+(defn dump-mono-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Ok [cp]
+                    (do (drop-code-funcs a cp)
+                        (match (monomorphize a cp)
+                          (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                          (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a))))))))))))))
+  0)
+
+; dump-checked: read -> load -> resolve -> check -> checked Program dump (NO mono).
+(defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Ok [cp] (d-program w cp a))))))))))
+  0)
+
+; dump-resolved: read -> load -> resolve -> resolved Program dump.
+(defn dump-resolved-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog] (d-program w prog a))))))))
+  0)
+
+; dump-read: raw read -> canonical Sexp forms (reader oracle). sx-node's
+; @source:lo:hi:ctxt is byte-identical to the standalone reader dumper for raw
+; single-file input (source=0, ctxt=0, no dummy spans).
+(defn dump-read-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (let [(mut i) 0 n (al-len [Sexp] (load forms))]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (if (icmp-gt (load i) 0) (wb w 10) 0)
+                (let [child (alloc-stack Sexp)]
+                  (store! child (al-get [Sexp] (load forms) (load i)))
+                  (sx-node w child))
+                (store! i (iadd (load i) 1)))))))))
+  0)
+
+; ---- loader-dump helpers ported verbatim from selfhost/loader.coil ----
+; (imp-elem/exp-elem/d-strs/d-opt-str/dstr already defined above.)
+(defn alias-key [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p alias))))
+(defn alias-tgt [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p target))))
+(defn use-tgt  [(x Use)]   (-> (slice u8)) (let [p (alloc-stack Use)]   (store! p x) (load (field p target))))
+(defn use-spec [(x Use)]   (-> UseSpec)    (let [p (alloc-stack Use)]   (store! p x) (load (field p spec))))
+
+; selection-sort a COPY of a slice list ascending by str-cmp.
+(defn sorted-strs [(a (ptr Allocator)) (l (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [(slice u8)] (load l)) (mut c) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut c) (al-get [(slice u8)] (load l) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load c) (load q))
+                                (al-get [(slice u8)] (load c) (load m)))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [(slice u8)] (load c) (load p))
+                    tm (al-get [(slice u8)] (load c) (load m))]
+                (al-set! (mut c) (load p) tm)
+                (al-set! (mut c) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! bp (load c)) bp)))
+
+; sorted index permutation of 0..n by the parallel key strings (selection sort).
+(defn sort-idx [(a (ptr Allocator)) (keys (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList i64)))
+  (let [n (al-len [(slice u8)] (load keys)) (mut idx) (al-new [i64] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut idx) (load i)) (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load q)))
+                                (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load m))))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [i64] (load idx) (load p))
+                    tm (al-get [i64] (load idx) (load m))]
+                (al-set! (mut idx) (load p) tm)
+                (al-set! (mut idx) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList i64)] (create [(ArrayList i64)] a))]
+      (store! bp (load idx)) bp)))
+
+; `(aliases [(al "k" "v") …]) (uses [(use "t" SPEC) …]) (reexports [...])`.
+(defn d-modimports [(w (ptr Writer)) (a (ptr Allocator)) (m (mut ModImports))] (-> i64)
+  (ps w "(aliases [")
+  (let [na (al-len [Alias] (load (field m aliases)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) na) (break)
+      (do (al-push! (mut keys) (alias-key (al-get [Alias] (load (field m aliases)) (load i))))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) na) (break)
+          (do (if (icmp-gt (load j) 0) (wb w 32) 0)
+              (let [e (al-get [Alias] (load (field m aliases)) (al-get [i64] (load idx) (load j)))]
+                (ps w "(al ") (dstr w (alias-key e)) (wb w 32)
+                (dstr w (alias-tgt e)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (ps w "]) (uses [")
+  (let [nu (al-len [Use] (load (field m uses))) (mut i) 0]
+    (loop (if (icmp-ge (load i) nu) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [u (al-get [Use] (load (field m uses)) (load i))]
+            (ps w "(use ") (dstr w (use-tgt u)) (wb w 32)
+            (match (use-spec u)
+              (UAll   []      (ps w "(all)"))
+              (UNames [names] (do (ps w "(names ") (d-strs w names) (wb w 41))))
+            (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (ps w "]) (reexports ")
+  (let [rp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+    (store! rp (load (field m reexports)))
+    (d-strs w rp))
+  (wb w 41))
+
+; dump-load: read -> load -> canonical loaded-forms/imports/exports dump.
+(defn dump-loaded [(w (ptr Writer)) (a (ptr Allocator)) (s (mut LS))] (-> i64)
+  (ps w "(forms")
+  (let [n (al-len [TaggedForm] (load (field s out))) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (ps w " (tf ")
+          (let [tf (alloc-stack TaggedForm)]
+            (store! tf (al-get [TaggedForm] (load (field s out)) (load i)))
+            (d-opt-str w (load (field tf module)))
+            (wb w 32)
+            (let [fp (alloc-stack Sexp)] (store! fp (load (field tf form))) (sx-node w fp)))
+          (wb w 41)
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (wb w 10) (ps w "(imports")
+  (let [n (al-len [ImpEntry] (load (field s imports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (imp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (imp-elem (mut s) (al-get [i64] (load idx) (load j)))]
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-modimports w a (mut (field e imp))) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  (wb w 10) (ps w "(exports")
+  (let [n (al-len [ExpEntry] (load (field s exports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (exp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (exp-elem (mut s) (al-get [i64] (load idx) (load j)))
+                    namesp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+                (store! namesp (load (field e names)))
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-strs w (sorted-strs a namesp)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  0)
+
+(defn dump-load-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+            (dump-loaded w a (mut s))))))
+  0)
+
+; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).
+; Each line must match exactly what src/dump_ast.rs would emit for the same node.
+(defn smoke [(a (ptr Allocator))] (-> i64)
+  (let [w (stdout)]
+    ; (staticref@1:2 "foo")
+    (let [e (alloc-stack Expr)] (store! e (mk-expr (EStaticRef "foo") 1 2 0 0)) (d-expr w e)) (wb w 10)
+    ; (spillref@5:6 (eint@3:4 7))
+    (let [inner (box-expr a (mk-expr (EInt 7) 3 4 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (ESpillRef inner) 5 6 0 0)) (d-expr w e)) (wb w 10)
+    ; (construct@9:10 "Opt" "Some" [(eint@7:8 9)])
+    (let [(mut xs) (al-new [Expr] a)]
+      (al-push! (mut xs) (mk-expr (EInt 9) 7 8 0 0))
+      (let [args (box-al [Expr] a (load xs)) e (alloc-stack Expr)]
+        (store! e (mk-expr (EConstruct "Opt" "Some" args) 9 10 0 0)) (d-expr w e))) (wb w 10)
+    ; (traitcall@11:12 "Eq" "eq" "T" [])
+    (let [args (box-al [Expr] a (al-new [Expr] a)) e (alloc-stack Expr)]
+      (store! e (mk-expr (ETraitCall "Eq" "eq" "T" args) 11 12 0 0)) (d-expr w e)) (wb w 10)
+    ; (makedyn@13:14 "Dyn" "VT" ["m0" "m1"] (var@15:16 "x"))
+    (let [(mut ms) (al-new [(slice u8)] a)]
+      (al-push! (mut ms) "m0") (al-push! (mut ms) "m1")
+      (let [methods (box-al [(slice u8)] a (load ms))
+            inner (box-expr a (mk-expr (EVar "x") 15 16 0 0)) e (alloc-stack Expr)]
+        (store! e (mk-expr (EMakeDyn "Dyn" "VT" methods inner) 13 14 0 0)) (d-expr w e))) (wb w 10)
+    ; (dyndispatch@17:18 "Dyn" "VT" 2 "c" [] void (var@19:20 "r") [])
+    (let [params (box-al [Type] a (al-new [Type] a))
+          args (box-al [Expr] a (al-new [Expr] a))
+          recv (box-expr a (mk-expr (EVar "r") 19 20 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18 0 0)) (d-expr w e)) (wb w 10)
+    ; ---- ty-str byte-exact checks (vs src/check.rs::ty_str) ----
+    (let [t (alloc-stack Type)] (store! t (TInt 64 true))  (ps w (ty-str a t))) (wb w 10)  ; i64
+    (let [t (alloc-stack Type)] (store! t (TInt 8 false))  (ps w (ty-str a t))) (wb w 10)  ; u8
+    (let [t (alloc-stack Type)] (store! t (TPtr (box-type a (TInt 8 false)))) (ps w (ty-str a t))) (wb w 10)  ; (ptr u8)
+    (let [t (alloc-stack Type)] (store! t (TRef true (box-type a (TStruct "Foo")))) (ps w (ty-str a t))) (wb w 10)  ; (mut Foo)
+    (let [(mut ps2) (al-new [Type] a)]
+      (al-push! (mut ps2) (TInt 64 true)) (al-push! (mut ps2) (TInt 64 true))
+      (let [t (alloc-stack Type)] (store! t (TApp "Pair" (box-al [Type] a (load ps2)))) (ps w (ty-str a t)))) (wb w 10)  ; (Pair i64 i64)
+    (let [(mut ps3) (al-new [Type] a)]
+      (al-push! (mut ps3) (TPtr (box-type a (TInt 8 true))))
+      (let [t (alloc-stack Type)] (store! t (TFn "c" (box-al [Type] a (load ps3)) (box-type a (TInt 64 true)))) (ps w (ty-str a t)))) (wb w 10)  ; (fnptr c [(ptr i8)] i64)
+    0))
+
+; ============================ codegen (the frontier) =========================
+; src/codegen.rs (3496 lines): monomorphized Program -> LLVM module, built via the
+; LLVM-C FFI surface above. FAITHFUL, call-for-call port of `compile_for_dbg` with
+; dbg=None (every debug-info path skipped). The corpus has no shims / no struct-by-
+; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
+
+; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
+(defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))
+                    (srcpaths (ptr (ArrayList (slice u8)))) (srctexts (ptr (ArrayList (slice u8))))] (-> (Option (ptr Program)))
+  (let [s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) path src)
+    (match (read-all a src 0)
+      (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (do (report-diag w (mut s) (load (field s loaderr))) (None [(ptr Program)]))
+            (match (expand-stage3 (mut s))
+              (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+              (Ok [_]
+                (match (resolve-program a (mut s) (not (ls-has-meta (mut s))))
+                  (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                  (Ok [prog]
+                    (match (frontend-check a (mut s) prog)
+                      (Err [d] (do (report-check-diags w (mut s) d) (None [(ptr Program)])))
+                      (Ok [cp]
+                        (do (drop-code-funcs a cp)
+                            (match (monomorphize a cp)
+                              (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                              (Ok [mp]
+                                (do (sort-mono-program a mp)
+                                    ; export the source registry (for DWARF)
+                                    (let [ns (al-len [Source] (load (field s sources))) (mut i) 0]
+                                      (loop (if (icmp-ge (load i) ns) (break)
+                                        (do (let [sp (al-elem [Source] (field s sources) (load i))]
+                                              (al-push! (mut srcpaths) (load (field sp name)))
+                                              (al-push! (mut srctexts) (load (field sp text))))
+                                            (store! i (iadd (load i) 1))))))
+                                    (Some mp)))))))))))))))))
+
+; The LLVM entry points (dump-ir-program / build-object / build-ir-program) live in
+; selfhost/src/main.coil and are injected here as function pointers (see driver-main /
+; DumpCtx), so this module carries no LLVM dependency.
+
+; arm64 native backend: mono Program -> Mach-O object, no LLVM anywhere.
+(defn build-arm64-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (cga64-build-object a mp obj-cstr path cwd
+                                         (box-al [(slice u8)] a (load sp0))
+                                         (box-al [(slice u8)] a (load st0)))
+                     1))
+      (None []   0))))
+
+; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
+; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
+; `triple` = the `--target` override cstr (null = host default) for cross-compiling.
+; `ok` is the pipeline result the thread writes back so the caller (main / build-cmd)
+; can HALT and exit nonzero on a compile error — mirroring Rust, where a failed
+; `build_executable_*` / `emit_ir` returns Err and `main` prints + exits FAILURE
+; BEFORE any link step. 1 = pipeline succeeded, 0 = a diagnostic was reported.
+;
+; `build-fn` / `emitir-fn` are the LLVM-backend entry points, injected by the top
+; file (main.coil supplies the real ones; main_a64.coil supplies hard-error stubs).
+; dump-thread-entry calls through them for modes 1/0, so the LLVM backend is fully
+; decoupled from this module. Their signatures mirror the (removed) build-ir-program
+; and dump-ir-program.
+(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8)) (triple (ptr i8)) (path (slice u8)) (ok i64)
+                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))])
+
+; pthread start_routine: unpack the context and run the real pipeline on the
+; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
+; overflow the default ~8MB stack.
+(defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
+  (let [ctx (cast (ptr DumpCtx) arg)
+        r   (if (icmp-eq (load (field ctx mode)) 2)
+                (build-arm64-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 1)
+                (call-ptr (load (field ctx build-fn))  (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
+              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path)))))]
+    (store! (field ctx ok) r)
+    (cast (ptr i8) 0)))
+
+; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
+; DumpCtx. Shared by the `emit-ir` and `build` subcommands.
+(defn run-on-big-stack [(ctx (ptr DumpCtx))] (-> i64)
+  (let [attr (alloc-stack (array i8 64))
+        tid  (alloc-stack (ptr i8))]
+    (pthread_attr_init (cast (ptr i8) attr))
+    ; 32 MiB: the recursive pipeline (parser/checker/codegen/comptime) compiles
+    ; the whole self-host source (coil.coil) with headroom to spare — the measured
+    ; floor is under 2 MiB now that compiler-internal spill/temp allocas live in
+    ; the entry block (see cg-entry-alloca) instead of growing the stack per loop
+    ; iteration. Was 512 MiB before that fix.
+    (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB
+    (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
+                    (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
+    (pthread_join (load tid) (cast (ptr i8) 0))
+    ; the thread wrote its pipeline result (1 ok / 0 failed) into ctx.ok.
+    (load (field ctx ok))))
+
+; The intermediate object path for output `out`, mirroring Rust's
+; `out_path.with_extension("o")`: REPLACE the final path-component extension with
+; `o` (`a.out` -> `a.o`, `foo.coil` -> `foo.o`), or APPEND `.o` when the basename
+; has none (`foo` -> `foo.o`). A `.` in a parent directory doesn't count; a leading
+; dot (`.foo`) is not an extension. This keeps the `.o` name — hence any linker
+; diagnostic that prints it — byte-identical to the Rust reference for ANY `-o`.
+(defn obj-path [(a (ptr Allocator)) (out (slice u8))] (-> (slice u8))
+  (let [n (slice-len out) (mut slash) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get out (load i))) 47) (store! slash (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (let [(mut dot) -1 (mut j) (iadd (load slash) 1)]
+      (loop (if (icmp-ge (load j) n) (break)
+        (do (if (icmp-eq (cast i64 (slice-get out (load j))) 46) (store! dot (load j)) 0)
+            (store! j (iadd (load j) 1)))))
+      (let [(mut sb) (sb-new a)]
+        (if (icmp-gt (load dot) (iadd (load slash) 1))
+            (do (sb-push-str! (mut sb) (subslice out 0 (load dot))) (sb-push-str! (mut sb) ".o"))
+          (do (sb-push-str! (mut sb) out) (sb-push-str! (mut sb) ".o")))
+        (sb-str (load sb))))))
+
+; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
+; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
+; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
+(defn build-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
+                 (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                 (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                 (default-backend i64)] (-> i64)
+  (let [file (load (index argv 2))
+        (mut outp)  (cast (ptr i8) 0)
+        (mut flags) (al-new [(slice u8)] a)
+        (mut backend) default-backend
+        (mut i)     3]
+    ; parse -o / --link-flag / --backend from argv[3..].
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (str-eq arg "-o")
+                (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+              (if (str-eq arg "--link-flag")
+                  (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
+                (if (str-eq arg "--backend")
+                    (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
+                            (store! backend 2)
+                          (store! backend 1))
+                        (store! i (iadd (load i) 2)) 0)
+                  (do (store! i (iadd (load i) 1)) 0))))))))
+    (if (icmp-eq (cast i64 (load outp)) 0)
+        (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
+      0)
+    (let [out-slice (cstr->slice (load outp))
+          obj-slice (obj-path a out-slice)]
+      (let [obj-cstr  (slice->cstr a obj-slice)
+            ctx       (alloc-stack DumpCtx)]
+        (store! (field ctx a)    a)
+        (store! (field ctx src)  (read-file a file))
+        (store! (field ctx cwd)  (cwd-slice a))
+        (store! (field ctx path) (cstr->slice file))
+        (store! (field ctx mode) (load backend))
+        (store! (field ctx obj)  obj-cstr)
+        (store! (field ctx triple) (cast (ptr i8) 0))
+        (store! (field ctx ok) 0)
+        (store! (field ctx build-fn)  build-fn)
+        (store! (field ctx emitir-fn) emitir-fn)
+        ; HALT on a compile error: run-on-big-stack returns 0 when the pipeline
+        ; reported a diagnostic. Mirror Rust — the diagnostic was already printed;
+        ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
+        ; file` / undefined-symbol junk is ever emitted.
+        (if (icmp-eq (run-on-big-stack ctx) 0) 1
+          ; link: cc <obj> -o <out> <flags...>
+          (let [(mut cmdsb) (sb-new a)]
+            (sb-push-str! (mut cmdsb) "cc ")
+            (sb-push-str! (mut cmdsb) obj-slice)
+            (sb-push-str! (mut cmdsb) " -o ")
+            (sb-push-str! (mut cmdsb) out-slice)
+            (let [(mut k) 0 nf (al-len [(slice u8)] (load flags))]
+              (loop (if (icmp-ge (load k) nf) (break)
+                (do (sb-push-str! (mut cmdsb) " ")
+                    (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
+                    (store! k (iadd (load k) 1))))))
+            (let [rc (system (slice->cstr a (sb-str (load cmdsb))))]
+              ; On a link failure mirror Rust's `Err("linker (cc) failed with
+              ; {status}")` → `error: linker (cc) failed with exit status: N`,
+              ; where N is the child's exit code (WEXITSTATUS of `system`'s wait
+              ; status, i.e. the high byte). Then exit FAILURE (1), not SIGABRT.
+              (if (icmp-ne rc 0)
+                  (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
+                    (ps w "error: linker (cc) failed with exit status: ") (dump-dec w code) (wb w 10) 1)
+                ; success: mirror Rust `report(Ok("wrote {out}"))` → `wrote <out>`
+                ; on stdout, exit 0.
+                (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))))))
+
+; The CLI entry, parameterized by the backend hooks the top file injects:
+;   build-fn     — LLVM `build` (mode 1); a64 build passes a hard-error stub
+;   emitir-fn    — `emit-ir` / `dump-ir` (mode 0); a64 build passes a hard-error stub
+;   normalize-fn — `__normalize` debug subcommand; a64 build passes a hard-error stub
+;   default-backend — 1 (LLVM) for the full build, 2 (arm64) for the LLVM-free build
+; The top file's `main` just forwards argc/argv here with its fn-ptrs.
+(defn driver-main [(argc i32) (argv (ptr (ptr i8)))
+                   (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                   (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                   (normalize-fn (fnptr c [(ptr Allocator) (slice u8)] i64))
+                   (default-backend i64)] (-> i64)
+  (let [a    (malloc-allocator)
+        sub  (cstr->slice (load (index argv 1)))]
+    (if (str-eq sub "__smoke")
+        (smoke a)
+      (if (str-eq sub "__normalize")
+          (let [path (load (index argv 2)) src (read-file a path)]
+            (call-ptr normalize-fn a src))
+        (if (str-eq sub "build")
+            (build-cmd a argc argv build-fn emitir-fn default-backend)
+         (if (str-eq sub "dump-read")
+             (let [path (load (index argv 2))] (dump-read-program a (read-file a path)))
+          (if (str-eq sub "dump-ast")
+              (let [path (load (index argv 2))] (dump-ast-program a (read-file a path)))
+           (if (str-eq sub "dump-load")
+               (let [path (load (index argv 2))] (dump-load-program a (read-file a path) (cwd-slice a)))
+            (if (str-eq sub "dump-expand")
+                (let [path (load (index argv 2))] (dump-expand-program a (read-file a path) (cwd-slice a)))
+             (if (str-eq sub "dump-resolved")
+                 (let [path (load (index argv 2))] (dump-resolved-program a (read-file a path) (cwd-slice a)))
+              (if (str-eq sub "dump-checked")
+                  (let [path (load (index argv 2))] (dump-checked-program a (read-file a path) (cwd-slice a)))
+               (if (str-eq sub "dump-mono")
+                   (let [path (load (index argv 2))] (dump-mono-program a (read-file a path) (cwd-slice a)))
+          (let [path (load (index argv 2))
+                ctx  (alloc-stack DumpCtx)
+                (mut trip) (cast (ptr i8) 0) (mut i) 3]
+            ; parse `--target <triple>` from argv[3..] (cross-compile override).
+            (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+              (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc))
+                       (str-eq (cstr->slice (load (index argv (load i)))) "--target"))
+                  (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                (do (store! i (iadd (load i) 1)) 0))))
+            (store! (field ctx a)    a)
+            (store! (field ctx src)  (read-file a path))
+            (store! (field ctx cwd)  (cwd-slice a))
+            (store! (field ctx path) (cstr->slice path))
+            (store! (field ctx mode) 0)
+            (store! (field ctx obj)  (cast (ptr i8) 0))
+            (store! (field ctx triple) (load trip))
+            (store! (field ctx ok) 0)
+            (store! (field ctx build-fn)  build-fn)
+            (store! (field ctx emitir-fn) emitir-fn)
+            ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
+            ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))
+  );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

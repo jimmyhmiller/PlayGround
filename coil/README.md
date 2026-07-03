@@ -341,16 +341,22 @@ There is no `eval`/JIT: the only way to run a program is to AOT-compile it.
 
 ## Bootstrap without Rust
 
-The compiler is self-hosted (`selfhost/src/*.coil`) and a prebuilt seed is committed,
-so a fresh checkout can rebuild a fully verified compiler with no Rust toolchain:
+The compiler is self-hosted (`selfhost/src/*.coil`) and prebuilt seeds are committed,
+so a fresh checkout can rebuild a fully verified compiler with no Rust toolchain — and
+in the LLVM-free flavor, with no LLVM at all:
 
 ```sh
-selfhost/rebootstrap.sh          # seed -> build -> verify (fixpoint + gates) -> ./coil
-selfhost/refresh-seed.sh         # after changing the compiler's own source, update the seed
+selfhost/rebootstrap-nollvm.sh   # LLVM-free: needs only `cc`  -> ./coil-nollvm
+selfhost/rebootstrap.sh          # full (LLVM + arm64): needs cc + libLLVM -> ./coil
+selfhost/refresh-seed.sh         # after changing the compiler's own source, update the seeds
 ```
 
-Only `libLLVM.dylib` (`brew install llvm`) + `cc` are needed — no cargo/rustc/inkwell.
-The seed is re-derived from source and proven faithful on every run. See
+The LLVM-free build (`selfhost/src/main_a64.coil`, arm64 backend only) links no
+libLLVM — a fresh machine needs only a C compiler. The full build additionally has
+the LLVM backend and `emit-ir`/`dump-ir`, so it links `libLLVM.dylib`
+(`brew install llvm`). Both share one backend-agnostic driver (`driver.coil`) with the
+LLVM entry points injected as function pointers; each seed is re-derived from source
+and proven faithful (fixpoint + gates) on every run. See
 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md).
 
 ## REPL (and Emacs)

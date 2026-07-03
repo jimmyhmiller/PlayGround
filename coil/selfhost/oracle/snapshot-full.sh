@@ -34,6 +34,7 @@ SEEDS=(
   lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
   lib/slice.coil lib/thread.coil lib/try.coil
   selfhost/src/main.coil
+  selfhost/src/main_a64.coil                  # LLVM-free top file (shares driver.coil); guards drift vs main.coil
   # --- feature corpora: each exercises a stubbed self-host feature so it becomes
   # part of the contract (currently failing on the self-host, green on Rust). ---
   examples/dyn_write.coil                     # trait objects / dyn dispatch (lib/dyn.coil)

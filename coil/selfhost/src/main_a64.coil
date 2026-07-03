@@ -1,0 +1,58 @@
+; selfhost/src/main_a64.coil — self-host Coil compiler ENTRY, LLVM-FREE build.
+; Identical to main.coil except it OMITS the LLVM backend: it does not import
+; codegen.coil / normalize.coil, so the produced binary links NO libLLVM and needs
+; no LLVM at build or run time (only `cc` to link the native object). Its only
+; supported build path is the native arm64 backend; the LLVM entry points are
+; injected into the shared driver as hard-error stubs. Use main.coil for the full
+; (LLVM + arm64) compiler. ALWAYS build from repo root.
+(module maina64)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "selfhost/src/ffi.coil" :use *)
+(import "selfhost/src/reader.coil" :use *)
+(import "selfhost/src/ast.coil" :use *)
+(import "selfhost/src/astdump.coil" :use *)
+(import "selfhost/src/parser.coil" :use *)
+(import "selfhost/src/loader.coil" :use *)
+(import "selfhost/src/resolve.coil" :use *)
+(import "selfhost/src/check.coil" :use *)
+(import "selfhost/src/mono.coil" :use *)
+(import "selfhost/src/diag.coil" :use *)
+(import "selfhost/src/comptime.coil" :use *)
+(import "selfhost/src/expander.coil" :use *)
+(import "selfhost/src/codegen_a64.coil" :use *)
+(import "selfhost/src/driver.coil" :use *)
+
+; ---- hard-error stubs for the (excluded) LLVM backend ----
+; This build has no LLVM backend; these fail loudly rather than silently no-op, so
+; a caller that reaches them (e.g. `build` without --backend arm64, or `emit-ir`)
+; gets a clear diagnostic instead of mysterious behavior. Signatures mirror the real
+; build-ir-program / dump-ir-program / do-normalize in main.coil.
+(defn no-llvm-build [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
+  (ps (stderr) "error: this coil was built without the LLVM backend; `build` requires `--backend arm64`\n")
+  (abort) 1)
+
+(defn no-llvm-emitir [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
+  (ps (stderr) "error: this coil was built without the LLVM backend; `emit-ir` / `dump-ir` are unavailable (no textual LLVM IR without libLLVM)\n")
+  (abort) 1)
+
+(defn no-normalize [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (ps (stderr) "error: this coil was built without the LLVM backend; `__normalize` is unavailable\n")
+  (abort) 1)
+
+; default-backend = 2 (arm64): a bare `build` uses the native backend; there is no
+; LLVM backend to fall back to.
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (driver-main argc argv
+               (fnptr-of no-llvm-build)
+               (fnptr-of no-llvm-emitir)
+               (fnptr-of no-normalize)
+               2))

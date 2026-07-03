@@ -1515,12 +1515,10 @@
 (defn cg-add-func [(cg (ptr Cg)) (name (slice u8)) (fv (ptr i8))] (-> i64)
   (let [r (alloc-stack CgFunc)] (store! (field r name) name) (store! (field r val) fv) (al-push! (mut (field cg funcs)) (load r))) 0)
 
-; the last `.`-separated component of a qualified name (the link/C symbol).
-(defn last-component [(s (slice u8))] (-> (slice u8))
-  (let [n (slice-len s) (mut i) (isub n 1) (mut start) 0]
-    (loop (if (icmp-lt (load i) 0) (break)
-      (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! start (iadd (load i) 1)) (store! i -1)) (store! i (isub (load i) 1)))))
-    (substr s (load start) n)))
+; `last-component` moved to check.coil (a pure path/string helper used by both
+; check and codegen); codegen imports check, so it resolves here unchanged. This
+; keeps check.coil free of any codegen (LLVM) dependency so the frontend can be
+; built into an LLVM-free (arm64-only) compiler. See selfhost/src/main_a64.coil.
 (defn ty-list-has-struct [(cg (ptr Cg)) (l (ptr (ArrayList Type)))] (-> bool)
   (let [n (al-len [Type] (load l)) (mut i) 0 (mut r) false]
     (loop (if (icmp-ge (load i) n) (break)
