@@ -618,7 +618,12 @@ fn type_shape(
                 // existence; at runtime they are NOTHING (the address lives in the
                 // ω `Ptr l`). This is the §4.4 erasure bar: a view leaves no trace.
                 Term::Const(c)
-                    if c == "PtsTo" || c == "Loan" || c == "RegionCap" || c == "RawTo" =>
+                    if c == "PtsTo"
+                        || c == "Loan"
+                        || c == "RegionCap"
+                        || c == "RawTo"
+                        || c == "SRead"
+                        || c == "SLoan" =>
                 {
                     return (0, false)
                 }
@@ -3483,6 +3488,60 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 Ok(Val::Int(*o))
+            }
+            // PHASE A2 — SHARED READ-ONLY BORROWS. All permission plumbing is
+            // zero-width; only `sread` emits an instruction (the bare load).
+            //   share   : identity on the address (like `borrow`)
+            //   sdup    : split one read token into two — returns the address
+            //             (the tokens are nothing)
+            //   sjoin   : merge two tokens — pure accounting, emits NOTHING
+            //   sread   : the bare load through the ω address
+            //   unshare : identity on the address (like `restore`)
+            "share" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [o] = rt.as_slice() else {
+                    return Err(format!(
+                        "share: expected 1 runtime argument (the Own), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(*o))
+            }
+            "sdup" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _s] = rt.as_slice() else {
+                    return Err(format!(
+                        "sdup: expected 2 runtime arguments (ptr, token), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(p.as_int("sdup ptr")?))
+            }
+            "sjoin" => {
+                let _rt = self.runtime_args_v(f, env, cname, args)?;
+                Ok(Val::Agg(Vec::new()))
+            }
+            "sread" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _s] = rt.as_slice() else {
+                    return Err(format!(
+                        "sread: expected 2 runtime arguments (ptr, token), got {}",
+                        rt.len()
+                    ));
+                };
+                let cell = self.toptr(p.as_int("sread ptr")?, "cellp");
+                Ok(self.load_field(cell, 0, w))
+            }
+            "unshare" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _s, _ln] = rt.as_slice() else {
+                    return Err(format!(
+                        "unshare: expected 3 runtime arguments (ptr, token, loan), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(p.as_int("unshare ptr")?))
             }
             // restore : {0 a} {0 l} -> Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a)
             //         -> Own a — reunite the pieces: IDENTITY on the address.
@@ -7245,5 +7304,32 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         assert_eq!(ir_rf.matches("call ptr @malloc").count(), 1, "one malloc\n{ir_rf}");
         assert_eq!(ir_rf.matches("call void @free").count(), 1, "one free\n{ir_rf}");
         assert_eq!(ir_rf.matches("store i64").count(), 0, "no store ever touches a raw cell\n{ir_rf}");
+    }
+    #[test]
+    fn a2_shared_read_is_bare_load_zero_trace() {
+        // PHASE A2 IR gate: a shared read is a BARE LOAD through the ω
+        // address — no refcount, no permission trace, share/sdup/sjoin/
+        // unshare all compile to nothing (identity on the address). The
+        // whole program is ONE malloc, ONE free, and loads.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            main : Nat\n\
+            fn main() {\n\
+                let o = alloc(21);\n\
+                match share(o) { MkShared(p, s, ln) =>\n\
+                    match sdup(p, s) { MkSPair(p2, s1, s2) =>\n\
+                        let (x, s1b) = sread(p2, s1);\n\
+                        let (y, s2b) = sread(p2, s2);\n\
+                        let s = sjoin(s1b, s2b);\n\
+                        let o2 = unshare(p2, s, ln);\n\
+                        let z = unbox(o2);\n\
+                        x + y + z, }, }\n\
+            }\n";
+        assert_eq!(run(src), 63);
+        let ir = ir(src);
+        assert_eq!(ir.matches("call ptr @malloc").count(), 1, "one alloc only\n{ir}");
+        assert_eq!(ir.matches("call void @free").count(), 1, "one free only\n{ir}");
+        for ghost in ["SRead", "SLoan", "@share", "@sdup", "@sjoin", "@unshare", "refcount"] {
+            assert!(!ir.contains(ghost), "shared-borrow ghost `{ghost}` leaked into IR\n{ir}");
+        }
     }
 }

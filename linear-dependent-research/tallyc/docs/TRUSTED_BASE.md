@@ -42,6 +42,10 @@ unmisusable, and the lowering computes what the type says.
 | `vfree` | `… Ptr l -> (1 v : PtsTo l a) -> Unit` | free requires the whole permission; a borrowed/split cell cannot be freed. **Rejected at a LINEAR payload type** (Phase A3 dropping-destructor gate) — use `vread` to extract the payload first. |
 | `borrow` | `{0 a} -> (1 o : Own a) -> Borrowed a` (`= ∃l. Ptr l ⊗ PtsTo l a ⊗ Loan l a`) | identity on the address (zero-cost, IR-tested); the loan is the linear obligation to reunite. |
 | `restore` | `… Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Own a` | only the matching view+loan pair (same `l`) reunifies — a swapped or stale pair is a type error. |
+| `share` | `{0 a} -> (1 o : Own a) -> Shared a` (`= ∃l. Ptr l ⊗ SRead l a ⊗ SLoan l a`) | Phase A2 shared borrows by COUNTING: identity on the address; the read token and the loan are linear and zero-width. Rejected at a LINEAR payload type (`sread` copies). |
+| `sdup` / `sjoin` | split one `SRead` into two / merge two back | pure accounting, compile to nothing; because every token is linear, `unshare` is only typable once every split has been rejoined — no reader survives reunification. |
+| `sread` | `… Ptr l -> (1 s : SRead l a) -> SGot a l` | the bare load through the ω address (IR-tested); returns the token, so reads don't consume the borrow. |
+| `unshare` | `… Ptr l -> (1 s : SRead l a) -> (1 ln : SLoan l a) -> Own a` | identity on the address; needs the single remaining token + loan, so `free`/`&mut` are unrepresentable while any reader is live. |
 
 ## 3. Regions / pools
 

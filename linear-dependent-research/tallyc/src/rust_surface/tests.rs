@@ -2327,3 +2327,72 @@ fn a3_dropping_destructor_gate_closes_deep_leaks() {
     );
     check_program(&ok).unwrap_or_else(|e| panic!("unbox-then-consume must check: {e:?}"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE A2 (docs/PHASE_SAFETY_PLAN.md) — shared read-only borrows. The
+// counting discipline: `share` splits an Own into ω address + linear SRead
+// token + linear SLoan; `sdup`/`sjoin` split/merge tokens; `sread` reads and
+// hands the token back; `unshare` needs the SINGLE remaining token + loan.
+// So no reader survives reunification, and &mut/free are unrepresentable
+// while any token is outstanding — by the ordinary QTT accounting.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a2_shared_borrows_coexist_and_reunify() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // many & coexist: two split tokens read the same cell, rejoin, reunify.
+    let ok = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let o = alloc(21);\n\
+            match share(o) {{ MkShared(p, s, ln) =>\n\
+                match sdup(p, s) {{ MkSPair(p2, s1, s2) =>\n\
+                    let (x, s1b) = sread(p2, s1);\n\
+                    let (y, s2b) = sread(p2, s2);\n\
+                    let s = sjoin(s1b, s2b);\n\
+                    let o2 = unshare(p2, s, ln);\n\
+                    let z = unbox(o2);\n\
+                    x + y + z, }}, }}\n\
+        }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("shared reads + reunify must check: {e:?}"));
+
+    // free (or any &mut path needing the Own) cannot coexist with a live share
+    let free_under = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let o = alloc(21);\n\
+            match share(o) {{ MkShared(p, s, ln) =>\n\
+                let u = free(o);\n\
+                let o2 = unshare(p, s, ln); unbox(o2), }}\n\
+        }}\n"
+    );
+    let err = check_program(&free_under).err().expect("free under a live share must reject");
+    assert!(format!("{err:?}").contains("ω"), "expected a double-use error, got {err:?}");
+
+    // unshare with an OUTSTANDING token strands it: 0 ⋢ 1
+    let outstanding = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let o = alloc(21);\n\
+            match share(o) {{ MkShared(p, s, ln) =>\n\
+                match sdup(p, s) {{ MkSPair(p2, s1, s2) =>\n\
+                    let o2 = unshare(p2, s1, ln); unbox(o2), }}, }}\n\
+        }}\n"
+    );
+    let err = check_program(&outstanding)
+        .err()
+        .expect("unshare while a second token is outstanding must reject");
+    assert!(format!("{err:?}").contains("0 ⋢ 1") || format!("{err:?}").contains("0 time"),
+        "expected a stranded-token error, got {err:?}");
+
+    // a LINEAR payload cannot be shared (sread would duplicate it)
+    let linear = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let o = alloc(alloc(3));\n\
+            match share(o) {{ MkShared(p, s, ln) =>\n\
+                let (x, s2) = sread(p, s);\n\
+                let o2 = unshare(p, s2, ln);\n\
+                let inner = unbox(o2); let v = unbox(inner); let w = unbox(x); v + w, }}\n\
+        }}\n"
+    );
+    let err = check_program(&linear).err().expect("sharing a linear payload must reject");
+    assert!(format!("{err:?}").contains("LINEAR"), "got {err:?}");
+}

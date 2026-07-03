@@ -4715,6 +4715,16 @@ enum RawCell (a : Type) { MkRawCell : {0 l : Loc} -> (p : Ptr l) -> (1 v : RawTo
 postulate ralloc : {0 a : Type} -> Unit -> RawCell a
 postulate winit  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : RawTo l a) -> a -> PtsTo l a
 postulate rfree  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : RawTo l a) -> Unit
+linear postulate SRead : Loc -> Type -> Type
+linear postulate SLoan : Loc -> Type -> Type
+enum Shared (a : Type) { MkShared : {0 l : Loc} -> (p : Ptr l) -> (1 s : SRead l a) -> (1 ln : SLoan l a) -> Shared a }
+enum SPair (a : Type) (l : Loc) { MkSPair : (p : Ptr l) -> (1 s1 : SRead l a) -> (1 s2 : SRead l a) -> SPair a l }
+enum SGot (a : Type) (l : Loc) { MkSGot : a -> (1 s : SRead l a) -> SGot a l }
+postulate share   : {0 a : Type} -> (1 o : Own a) -> Shared a
+postulate sdup    : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) -> SPair a l
+postulate sjoin   : {0 a : Type} -> {0 l : Loc} -> (1 s1 : SRead l a) -> (1 s2 : SRead l a) -> SRead l a
+postulate sread   : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) -> SGot a l
+postulate unshare : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) -> (1 ln : SLoan l a) -> Own a
 postulate Str    : Type
 postulate prints : Str -> Unit
 postulate Region : Type
@@ -5608,6 +5618,12 @@ const COPYING_CONTAINER_OPS: [&str; 10] = [
 /// consume — so no expressiveness is lost.
 const DROPPING_OPS: [&str; 2] = ["free", "vfree"];
 
+/// The COPYING-READ gate (Phase A2): `sread` hands out a COPY of the payload
+/// while the cell keeps it — sound only for unrestricted payloads (a linear
+/// payload would be duplicated). `share` is gated too, so the mistake is
+/// reported where the sharing starts, not at the first read.
+const SHARING_OPS: [&str; 2] = ["share", "sread"];
+
 fn validate_copying_containers(sig: &Rc<Signature>, t: &Term) -> Result<(), String> {
     // the element-type argument is always the FIRST argument of the op:
     // `App(Const(op), elem_ty)` at the bottom of the spine.
@@ -5628,6 +5644,14 @@ fn validate_copying_containers(sig: &Rc<Signature>, t: &Term) -> Result<(), Stri
                      would silently LEAK the resource inside it. Consume the \
                      payload first: `unbox`/`vread` return it (and free the cell), \
                      then dispose of the inner resource explicitly."
+                ));
+            }
+            if SHARING_OPS.contains(&c.as_str()) && type_is_linear(a, sig) {
+                return Err(format!(
+                    "`{c}`: the payload type here is LINEAR — a shared read-only \
+                     borrow hands COPIES of the payload out (`sread`), which would \
+                     duplicate the resource (double-free). Share unrestricted data \
+                     only; keep linear payloads behind the unique `borrow`."
                 ));
             }
         }
