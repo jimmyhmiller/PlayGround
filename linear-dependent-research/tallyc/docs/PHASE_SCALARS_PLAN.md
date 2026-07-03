@@ -109,8 +109,24 @@ Records-in-arrays keep AoS but at the **C offset table**, not 8-byte slots, so
   `sshr`/`sneg`/`slt`/`sle`/`seq` with C wrapping + signedness; the universal
   `cast`; typed literals (`200u8`, `3.14`, `2.0f32`) via a bit-reinterpret
   postulate; type-annotated `let` to drive inference. `examples/scalars.tal`.
-- **S3 — mixed-width record fields + FFI ABI.** C struct layout (`{i32,i32,f64}`
-  at real offsets), `%foreign` at the true small-struct ABI.
+- **S3 — FFI scalar/float ABI. DONE (v2.6).** `%foreign` now crosses the
+  boundary at the REAL C ABI: an `F32`/`F64` argument/return goes in an FP
+  register (LLVM `fN`, decoded from its i64 bits), a sized integer at its width
+  (`iN`), records still flatten to i64 components. So calling C math works —
+  `%foreign "sqrt" c_sqrt : F64 -> F64` runs (`foreign_float_abi_calls_libm`).
+- **S3′ — mixed-width record field PACKING. NOT DONE (the honest remaining gap).**
+  Dense C struct memory layout (`struct { x : I32, y : I32 }` = 8 bytes, not 16;
+  `Arr Point n` at the packed stride) requires converting the codegen's layout
+  from **8-byte SLOTS** (`ctor_layout`/`store`/`load_field`/`malloc_cell`, the
+  value-enum tag, the null-pointer niche, the `ARead` flex-split, struct-by-value
+  FFI — all slot-based, with many exact IR tests) to a **byte-offset table with
+  per-field widths**. This is the large "Phase B representation rewrite" (§12) —
+  a separate, carefully-validated effort, not an op-arm addition. Today structs
+  are correct but use one 8-byte slot per field in memory; **structure-of-arrays**
+  (dense `Arr I32`/`Arr F64` per component) covers density-critical numeric code
+  and is the idiomatic hot-loop layout, so this gap is about exact C struct
+  *memory* layout / small-field struct interop, not expressiveness or speed of
+  the common case.
 - **S4 — floats (f32/f64). DONE (v2.5, minus the FFI FP-register ABI).** Floats
   ride the i64 register as their bit pattern, decoded only at the op — so no
   `Val` variant. `fadd`/`fsub`/`fmul`/`fdiv`/`fneg`, ordered `flt`/`fle`/`feq`,

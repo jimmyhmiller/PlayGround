@@ -46,6 +46,28 @@ needs no boilerplate:
 fn main() { free(alloc(Zero)) }   // alloc + free, checked by linearity
 ```
 
+## Status (v2.6 — FFI at the real C ABI: `%foreign` calls libm; 230 tests)
+
+Phase Scalars S3: `%foreign` now crosses the boundary at the **real C ABI**, not
+a uniform i64. Each runtime argument is classified from the foreign type: an
+`F32`/`F64` goes in an **FP register** (LLVM `fN`, decoded from its i64 bit
+pattern), a sized integer at its width (`iN`), and records still flatten to i64
+components (the small integer-struct by-value ABI, unchanged). The result is
+re-encoded the same way. So calling C's math library just works:
+
+```
+%foreign "sqrt" c_sqrt : F64 -> F64
+%foreign "pow"  c_pow  : F64 -> F64 -> F64
+fn main() { nat_of_f64(fadd(c_sqrt(144.0), c_pow(2.0, 10.0))) }   // 12 + 1024 = 1036
+```
+
+The extern is declared `declare double @sqrt(double)` — the FP-register ABI —
+verified in `foreign_float_abi_calls_libm`. **Honest remaining gap:** dense
+mixed-width struct *field packing* (`struct { x : I32, y : I32 }` as 8 bytes) is
+the large Phase-B layout rewrite (slots → byte offsets); today structs are
+correct at one 8-byte slot per field, and structure-of-arrays (`Arr I32`/`Arr
+F64`) gives dense layout for numeric hot loops. See `docs/PHASE_SCALARS_PLAN.md`.
+
 ## Status (v2.5 — SCALAR ARITHMETIC + FLOATS: the full C number ladder, safely; 229 tests)
 
 Phase Scalars S2+S4: the runtime numbers become first-class. Scalar values ride

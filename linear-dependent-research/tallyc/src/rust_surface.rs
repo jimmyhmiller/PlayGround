@@ -4624,6 +4624,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
             ns
         })
         .collect();
+    let mut scalar_type_decls: Vec<Item> = Vec::new();
     for (nm, decl) in [
         // PRIMITIVE SCALAR TYPES (Phase Scalars, S1) — opaque `Type` constants,
         // kernel never reduces them. In S1 they are STORAGE annotations: a value
@@ -4727,8 +4728,26 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     ] {
         if !collides && has_nat && !taken.contains(nm) {
             let p = Parser { toks: lex(decl)?, pos: 0, fresh: 0 }.parse_program()?;
-            items.extend(p);
+            // The scalar TYPE declarations (`U8`…`F64` : Type) are PREPENDED — a
+            // user `postulate`/`%foreign` signature may reference them (e.g.
+            // `%foreign "sqrt" : F64 -> F64`), and postulate signatures are
+            // registered in source order (no forward reference), so the type must
+            // already be in scope. The ops/conversions stay appended (they are
+            // called from fn bodies, elaborated in a later pass).
+            if matches!(
+                nm,
+                "U8" | "U16" | "U32" | "U64" | "I8" | "I16" | "I32" | "I64" | "F32" | "F64"
+            ) {
+                scalar_type_decls.extend(p);
+            } else {
+                items.extend(p);
+            }
         }
+    }
+    if !scalar_type_decls.is_empty() {
+        let mut merged = std::mem::take(&mut scalar_type_decls);
+        merged.append(&mut items);
+        items = merged;
     }
     // The contiguous-array prelude (see `ARR_PRELUDE`): appended AFTER the user
     // items because its types reference the program's `Nat`, and only for

@@ -2850,13 +2850,43 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .postulate(other)
                     .ok_or_else(|| format!("unknown postulate `{other}`"))?;
                 let mut cur = strip_ann(ty);
-                let mut rt: Vec<IntValue<'c>> = Vec::new();
+                // Build the call at the REAL C ABI: a `F32`/`F64` argument goes in
+                // an FP register (LLVM `fN`, decoded from its i64 bits), a sized
+                // integer at its width (`iN`), and any other value (records,
+                // pointers, `Nat`) flattens to i64 components as before.
+                let mut call_vals: Vec<inkwell::values::BasicValueEnum<'c>> = Vec::new();
+                let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum<'c>> = Vec::new();
                 for a in args {
                     match cur {
-                        Term::Pi(mult, _dom, cod) => {
+                        Term::Pi(mult, dom, cod) => {
                             if *mult != Mult::Zero {
                                 let v = self.compile_v(f, env, a)?;
-                                rt.extend(v.components());
+                                match scalar_full(strip_ann(dom)) {
+                                    Some((bytes, _s, true)) => {
+                                        let fv = self.bits_to_float(
+                                            v.as_int("%foreign float arg")?,
+                                            bytes,
+                                            "ffi.f",
+                                        );
+                                        call_vals.push(fv.into());
+                                        param_tys.push(self.float_ty(bytes).into());
+                                    }
+                                    Some((bytes, _s, false)) => {
+                                        let iv = self.trunc_to(
+                                            v.as_int("%foreign int arg")?,
+                                            self.scalar_int_ty(bytes),
+                                            "ffi.i",
+                                        );
+                                        call_vals.push(iv.into());
+                                        param_tys.push(self.scalar_int_ty(bytes).into());
+                                    }
+                                    None => {
+                                        for c in v.components() {
+                                            call_vals.push(c.into());
+                                            param_tys.push(self.i64t.into());
+                                        }
+                                    }
+                                }
                             }
                             cur = strip_ann(cod);
                         }
@@ -2867,35 +2897,48 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         }
                     }
                 }
+                // the C RESULT type: float → `fN`, sized int → `iN`, else i64.
+                let ret_sc = scalar_full(cur);
+                let fn_ty = match ret_sc {
+                    Some((bytes, _s, true)) => self.float_ty(bytes).fn_type(&param_tys, false),
+                    Some((bytes, _s, false)) => {
+                        self.scalar_int_ty(bytes).fn_type(&param_tys, false)
+                    }
+                    None => self.i64t.fn_type(&param_tys, false),
+                };
                 let func = match self.module.get_function(&sym) {
                     Some(g) => g,
-                    None => {
-                        let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            rt.iter().map(|_| self.i64t.into()).collect();
-                        self.module
-                            .add_function(&sym, self.i64t.fn_type(&params, false), None)
-                    }
+                    None => self.module.add_function(&sym, fn_ty, None),
                 };
-                if func.count_params() as usize != rt.len() {
+                if func.count_params() as usize != call_vals.len() {
                     return Err(format!(
                         "%foreign `{other}` (symbol `{sym}`): called with {} runtime \
                          argument(s) but the symbol was already declared with {} — one \
                          extern declaration per symbol",
-                        rt.len(),
+                        call_vals.len(),
                         func.count_params()
                     ));
                 }
                 let call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
-                    rt.iter().map(|v| (*v).into()).collect();
+                    call_vals.iter().map(|v| (*v).into()).collect();
                 let ret = self
                     .builder
                     .build_call(func, &call_args, "ffi")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
-                    .ok_or_else(|| format!("%foreign `{other}`: call produced no value"))?
-                    .into_int_value();
-                Ok(Val::Int(ret))
+                    .ok_or_else(|| format!("%foreign `{other}`: call produced no value"))?;
+                // re-encode the C result into the i64 working register.
+                let out = match ret_sc {
+                    Some((bytes, _s, true)) => {
+                        self.float_to_bits(ret.into_float_value(), bytes, "ffi.rf")
+                    }
+                    Some((_bytes, signed, false)) => {
+                        self.widen_from(ret.into_int_value(), signed, "ffi.ri")
+                    }
+                    None => ret.into_int_value(),
+                };
+                Ok(Val::Int(out))
             }
             // borrow : {0 a} -> (1 o : Own a) -> Borrowed a — split an Own into
             // {address, view, loan}. The view and loan are ZERO-WIDTH, so
@@ -6254,6 +6297,25 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let ir = ir(&src);
         assert!(ir.contains("fadd double"), "expected a real double add\n{ir}");
         assert_eq!(run(&src), 5, "2.5 + 2.5 = 5.0");
+    }
+
+    #[test]
+    fn foreign_float_abi_calls_libm() {
+        // `%foreign` to C's `sqrt` at the REAL ABI: the extern is declared taking
+        // and returning a `double` (FP register), not an i64 — so calling libm
+        // works. sqrt(144.0) = 12.0.
+        let src = format!(
+            "{BNAT_ARR}\
+             %foreign \"sqrt\" c_sqrt : F64 -> F64\n\
+             main : Nat\n\
+             fn main() {{ nat_of_f64(c_sqrt(144.0)) }}\n"
+        );
+        let ir = ir(&src);
+        assert!(
+            ir.contains("call double @sqrt(double") || ir.contains("@sqrt(double"),
+            "sqrt must cross the FFI boundary at the double (FP-register) ABI, not i64\n{ir}"
+        );
+        assert_eq!(run(&src), 12, "sqrt(144.0) = 12.0");
     }
 
     #[test]
