@@ -623,7 +623,8 @@ fn type_shape(
                         || c == "RegionCap"
                         || c == "RawTo"
                         || c == "SRead"
-                        || c == "SLoan" =>
+                        || c == "SLoan"
+                        || c == "Rejoin" =>
                 {
                     return (0, false)
                 }
@@ -2894,7 +2895,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // (multiplicity 0 — `runtime_args` never compiles it), so there is no
             // bounds compare and no branch. The `ARead` pair threads the linear
             // array back to the caller; -O2 scalarizes it away.
-            "aget" => {
+            "aget" | "sget" => {
                 let elem_ty = *args
                     .first()
                     .ok_or_else(|| "aget: missing element type argument".to_string())?;
@@ -2955,7 +2956,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // a bare indexed store; the array value (the base pointer) is returned
             // unchanged — in-place mutation, justified by linearity (the input
             // array was consumed; this result is its sole continuation).
-            "aset" => {
+            "aset" | "sset" => {
                 let elem_ty = *args
                     .first()
                     .ok_or_else(|| "aset: missing element type argument".to_string())?;
@@ -3497,6 +3498,170 @@ impl<'c, 'a> DepCg<'c, 'a> {
             //   sjoin   : merge two tokens — pure accounting, emits NOTHING
             //   sread   : the bare load through the ω address
             //   unshare : identity on the address (like `restore`)
+            // PHASE A4 — CONCURRENCY. `spawn` MOVES a one-slot linear env into
+            // a fresh OS thread running a CLOSED single-parameter function
+            // (the surface has no lambdas, so the work is always an inlined
+            // top-level fn — nothing can be captured; ALL state crosses
+            // through the env, linearly). `join` recovers the linear result.
+            // Data-race freedom is the ordinary QTT accounting: the env is
+            // consumed at 1 (the parent cannot touch it again), a unique
+            // &mut/Own can be held by only one thread, and A2's read tokens
+            // split/rejoin linearly.
+            "spawn" => {
+                let [_e_ty, _a_ty, work, envt] = args else {
+                    return Err(format!("spawn: expected 4 spine arguments, got {}", args.len()));
+                };
+                let ew = self.spine_type_width(cname, args, 0)?;
+                if ew != 1 {
+                    return Err(format!(
+                        "spawn: the moved env must be ONE slot (an `Own`, an `Arr`, a \
+                         scalar, or a one-slot struct) — this env is {ew} slots; box it \
+                         (`alloc(…)`)"
+                    ));
+                }
+                let aw = self.spine_type_width(cname, args, 1)?;
+                if aw != 1 {
+                    return Err(format!(
+                        "spawn: the thread result must be ONE slot — this result is {aw} \
+                         slots; box it (`alloc(…)`)"
+                    ));
+                }
+                let env_v = self.compile_v(f, env, envt)?.as_int("spawn env")?;
+                // the worker function: a closed λ — compile it into a fresh
+                // `ptr worker(ptr)` with the pthread ABI.
+                let body = match strip_ann(work) {
+                    Term::Lam(b) => &**b,
+                    _ => {
+                        return Err(
+                            "spawn: the work argument must be a function (pass a \
+                             top-level `fn` name)"
+                                .to_string(),
+                        )
+                    }
+                };
+                let fname = self.fresh("tally_spawn_worker");
+                let helper = self.module.add_function(
+                    &fname,
+                    self.ptr.fn_type(&[self.ptr.into()], false),
+                    None,
+                );
+                let saved = self.builder.get_insert_block().unwrap();
+                let entry = self.ctx.append_basic_block(helper, "entry");
+                self.builder.position_at_end(entry);
+                let raw = helper.get_nth_param(0).unwrap().into_pointer_value();
+                let arg = self.builder.build_ptr_to_int(raw, self.i64t, "env").unwrap();
+                // the work term is CLOSED (an inlined top-level fn): outer
+                // slots are poisoned to None, so any capture attempt fails
+                // loudly instead of smuggling a raced pointer.
+                let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
+                inner_env.push(Some(Val::Int(arg)));
+                let rv = self
+                    .compile_v(helper, &inner_env, body)?
+                    .as_int("spawn: the worker's result")?;
+                let rp = self.builder.build_int_to_ptr(rv, self.ptr, "ret").unwrap();
+                self.builder.build_return(Some(&rp)).unwrap();
+                self.builder.position_at_end(saved);
+
+                let i32t = self.ctx.i32_type();
+                let pthread_create = self.module.get_function("pthread_create").unwrap_or_else(|| {
+                    self.module.add_function(
+                        "pthread_create",
+                        i32t.fn_type(
+                            &[self.ptr.into(), self.ptr.into(), self.ptr.into(), self.ptr.into()],
+                            false,
+                        ),
+                        None,
+                    )
+                });
+                let tid = self.builder.build_alloca(self.i64t, "tid").unwrap();
+                let envp = self.builder.build_int_to_ptr(env_v, self.ptr, "envp").unwrap();
+                self.builder
+                    .build_call(
+                        pthread_create,
+                        &[
+                            tid.into(),
+                            self.ptr.const_null().into(),
+                            helper.as_global_value().as_pointer_value().into(),
+                            envp.into(),
+                        ],
+                        "spawn",
+                    )
+                    .unwrap();
+                let h = self.builder.build_load(self.i64t, tid, "handle").unwrap();
+                Ok(Val::Int(h.into_int_value()))
+            }
+            "join" => {
+                let aw = self.spine_type_width(cname, args, 0)?;
+                if aw != 1 {
+                    return Err(format!("join: the thread result must be ONE slot, got {aw}"));
+                }
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [h] = rt.as_slice() else {
+                    return Err(format!("join: expected 1 runtime argument (the handle), got {}", rt.len()));
+                };
+                let i32t = self.ctx.i32_type();
+                let pthread_join = self.module.get_function("pthread_join").unwrap_or_else(|| {
+                    self.module.add_function(
+                        "pthread_join",
+                        i32t.fn_type(&[self.ptr.into(), self.ptr.into()], false),
+                        None,
+                    )
+                });
+                let hv = self
+                    .builder
+                    .build_int_to_ptr(h.as_int("join handle")?, self.ptr, "h")
+                    .unwrap();
+                let slot = self.builder.build_alloca(self.ptr, "join.ret").unwrap();
+                self.builder
+                    .build_call(pthread_join, &[hv.into(), slot.into()], "join")
+                    .unwrap();
+                let rp = self.builder.build_load(self.ptr, slot, "join.val").unwrap();
+                let rv = self
+                    .builder
+                    .build_ptr_to_int(rp.into_pointer_value(), self.i64t, "join.res")
+                    .unwrap();
+                Ok(Val::Int(rv))
+            }
+            // asplit : split `Arr a (k+m)` at element k into two DISJOINT
+            // sub-arrays (base and base + k·stride) plus the zero-width linear
+            // Rejoin obligation; ajoin reunites them (identity on the base).
+            "asplit" => {
+                let elem_ty = *args.first().ok_or("asplit: missing element type")?;
+                let sc = scalar_desc(elem_ty);
+                let ml = mem_layout_term(self.sig, elem_ty, &mut std::collections::HashSet::new());
+                let packed = sc.is_none() && ml.is_packed();
+                let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
+                let elem_bytes = match sc {
+                    Some((bytes, _)) => bytes as u64,
+                    None if packed => ml.size as u64,
+                    None => 8 * w as u64,
+                };
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [k, arr] = rt.as_slice() else {
+                    return Err(format!("asplit: expected 2 runtime arguments (k, arr), got {}", rt.len()));
+                };
+                let base = arr.as_int("asplit arr")?;
+                let off = self
+                    .builder
+                    .build_int_mul(
+                        k.as_int("asplit k")?,
+                        self.i64t.const_int(elem_bytes, false),
+                        "asplit.off",
+                    )
+                    .unwrap();
+                let hi = self.builder.build_int_add(base, off, "asplit.hi").unwrap();
+                Ok(Val::Agg(vec![base, hi]))
+            }
+            "ajoin" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [lo, _hi, _rj] = rt.as_slice() else {
+                    return Err(format!(
+                        "ajoin: expected 3 runtime arguments (lo, hi, rejoin), got {}",
+                        rt.len()
+                    ));
+                };
+                Ok(Val::Int(lo.as_int("ajoin lo")?))
+            }
             "share" => {
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [o] = rt.as_slice() else {
@@ -5593,7 +5758,7 @@ mod tests {
         let stem = format!("tally_aot_{pid}_{label}");
         let obj = dir.join(format!("{stem}.o"));
         let exe = dir.join(&stem);
-        super::build_object(&prog.sig, body, &obj, OptimizationLevel::Default)
+        super::build_object(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default)
             .unwrap_or_else(|e| panic!("build_object: {e}"));
         let link = std::process::Command::new("cc")
             .arg(&obj)
@@ -5626,7 +5791,7 @@ mod tests {
         let stem = format!("tally_aot_{pid}_{label}");
         let obj = dir.join(format!("{stem}.o"));
         let exe = dir.join(&stem);
-        super::build_object(&prog.sig, body, &obj, OptimizationLevel::Default)
+        super::build_object(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default)
             .unwrap_or_else(|e| panic!("build_object: {e}"));
         let link = std::process::Command::new("cc")
             .arg(&obj)
@@ -7483,5 +7648,68 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             main : Nat\nfn main() { gcd(48, 18) + gcd(17, 5) + gcd(0, 7) + gcd(1071, 462) }\n";
         // 6 + 1 + 7 + 21
         assert_eq!(run(src), 35);
+    }
+    #[test]
+    fn a4_par_over_disjoint_halves_runs() {
+        // PHASE A4 runtime gate: examples/par.tal — split one linear Arr into
+        // two disjoint Slices, move one into each OS thread, join the linear
+        // results, reunite, free once. 1+2+3+4 + 10+20+30+40 = 110.
+        let src = std::fs::read_to_string("examples/par.tal").unwrap();
+        for _ in 0..5 {
+            assert_eq!(run(&src), 110);
+        }
+    }
+
+    #[test]
+    fn a4_par_binary_is_threadsanitizer_clean() {
+        // THE A4 TSAN GATE: compile the par program, hand its emitted LLVM IR
+        // to the SYSTEM clang with -fsanitize=thread (version-matched
+        // instrumentation + runtime — the LLVM-18 in-process tsan pass emits
+        // code this macOS's TSan runtime faults on), run it, and require
+        // ZERO reported races and the right answer. The disjointness is
+        // static (linear slices); TSan dynamically confirms the two threads
+        // never touch the same address.
+        let src = std::fs::read_to_string("examples/par.tal").unwrap();
+        let prog = rust_surface::check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
+        let dir = std::env::temp_dir();
+        let obj = dir.join(format!("tally_tsan_{}.o", std::process::id()));
+        let ll = dir.join(format!("tally_tsan_{}.o.ll", std::process::id()));
+        let exe = dir.join(format!("tally_tsan_{}", std::process::id()));
+        super::build_object(&prog.sig, body, &obj, inkwell::OptimizationLevel::Default).unwrap();
+        // cargo test's environment perturbs cc's TSan linking (deterministic
+        // SIGSEGV in the produced binary); a clean env produces the same
+        // binary a shell invocation does.
+        let link = std::process::Command::new("/usr/bin/cc")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .arg("-fsanitize=thread")
+            .arg("-O1")
+            .arg(&ll)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("clang -fsanitize=thread over the emitted IR");
+        assert!(
+            link.status.success(),
+            "tsan build failed: {}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        let out = std::process::Command::new(&exe).output().expect("run tsan binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() {
+            let _ = std::fs::remove_file(&obj);
+            let _ = std::fs::remove_file(&ll);
+            let _ = std::fs::remove_file(&exe);
+        } else {
+            eprintln!("TSAN DEBUG kept artifacts: {}", exe.display());
+        }
+        assert!(
+            !stderr.contains("ThreadSanitizer"),
+            "TSan reported a race in the linearly-typed par program:\n{stderr}"
+        );
+        assert!(out.status.success(), "tsan binary failed ({:?}): {stderr}", out.status);
+        assert_eq!(stdout.trim(), "110", "wrong answer under TSan: {stdout}");
     }
 }

@@ -266,6 +266,8 @@ impl SMult {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Ty {
     Var(String),
+    /// a Nat literal at the INDEX level, e.g. `Slice Nat 4` / `Arr U8 16`.
+    Lit(u64),
     /// `Type` (level 0) or `Type i` — the i-th universe. The kernel's hierarchy
     /// (`Type i : Type (i+1)`, cumulative, predicative) is now surface-reachable.
     Type(usize),
@@ -611,7 +613,10 @@ impl Parser {
 
     fn parse_ty_app(&mut self) -> Result<Ty, String> {
         let mut e = self.parse_ty_atom()?;
-        while matches!(self.peek(), Some(Tok::Ident(_)) | Some(Tok::LParen) | Some(Tok::KwType)) {
+        while matches!(
+            self.peek(),
+            Some(Tok::Ident(_)) | Some(Tok::LParen) | Some(Tok::KwType) | Some(Tok::Num(_))
+        ) {
             // stop before a new top-level signature `Ident :` (no statement
             // terminator, so an application would otherwise swallow it)
             if matches!(self.peek(), Some(Tok::Ident(_))) && self.toks.get(self.pos + 1) == Some(&Tok::Colon) {
@@ -637,6 +642,11 @@ impl Parser {
                 }
             }
             Some(Tok::Ident(_)) => Ok(Ty::Var(self.ident()?)),
+            Some(Tok::Num(n)) => {
+                let n = *n;
+                self.next();
+                Ok(Ty::Lit(n))
+            }
             Some(Tok::LParen) => {
                 self.next();
                 let t = self.parse_ty()?;
@@ -1253,6 +1263,7 @@ impl Elab {
                 Box::new(self.elab_ty(a, scope)?),
                 Box::new(self.elab_ty(b, scope)?),
             )),
+            Ty::Lit(n) => Ok(Term::NatLit(*n)),
         }
     }
 
@@ -2600,7 +2611,7 @@ fn subst_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
         Ty::Add(a, b) => {
             Ty::Add(Box::new(subst_mult_ty(a, subst)), Box::new(subst_mult_ty(b, subst)))
         }
-        Ty::Var(_) | Ty::Type(_) => t.clone(),
+        Ty::Var(_) | Ty::Type(_) | Ty::Lit(_) => t.clone(),
     }
 }
 
@@ -4752,6 +4763,7 @@ fn rename_ty(t: &Ty, from: &str, to: &str) -> Ty {
             Box::new(rename_ty(a, from, to)),
             Box::new(rename_ty(b, from, to)),
         ),
+        Ty::Lit(n) => Ty::Lit(*n),
     }
 }
 
@@ -4798,6 +4810,9 @@ postulate sdup    : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) ->
 postulate sjoin   : {0 a : Type} -> {0 l : Loc} -> (1 s1 : SRead l a) -> (1 s2 : SRead l a) -> SRead l a
 postulate sread   : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) -> SGot a l
 postulate unshare : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 s : SRead l a) -> (1 ln : SLoan l a) -> Own a
+linear postulate JoinHandle : Type -> Type
+postulate spawn : {0 e : Type} -> {0 a : Type} -> (1 work : (1 x : e) -> a) -> (1 env : e) -> JoinHandle a
+postulate join  : {0 a : Type} -> (1 h : JoinHandle a) -> a
 postulate Str    : Type
 postulate prints : Str -> Unit
 postulate Region : Type
@@ -4837,6 +4852,14 @@ postulate aset  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> 
 postulate afree : {0 a : Type} -> {0 n : Nat} -> (1 arr : Arr a n) -> Unit
 enum DecLt (i : Nat) (n : Nat) { DYes : (0 p : Lt i n) -> DecLt i n, DNo : DecLt i n }
 postulate dlt : (i : Nat) -> (n : Nat) -> DecLt i n
+linear postulate Slice : Type -> Nat -> Type
+enum SliceRead (a : Type) (n : Nat) { MkSliceRead : a -> (1 s : Slice a n) -> SliceRead a n }
+postulate sget : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> (1 s : Slice a n) -> SliceRead a n
+postulate sset : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 s : Slice a n) -> Slice a n
+linear postulate Rejoin : Type -> Nat -> Nat -> Type
+enum ASplit (a : Type) (k : Nat) (m : Nat) { MkASplit : (1 lo : Slice a k) -> (1 hi : Slice a m) -> (1 rj : Rejoin a k m) -> ASplit a k m }
+postulate asplit : {0 a : Type} -> (k : Nat) -> (0 m : Nat) -> (1 arr : Arr a (k + m)) -> ASplit a k m
+postulate ajoin  : {0 a : Type} -> {0 k : Nat} -> {0 m : Nat} -> (1 lo : Slice a k) -> (1 hi : Slice a m) -> (1 rj : Rejoin a k m) -> Arr a (k + m)
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
@@ -5040,15 +5063,25 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
     let has_bnat = items
         .iter()
         .any(|it| matches!(it, Item::BuiltinNat(n) if n == "Nat"));
-    const ARR_NAMES: [&str; 8] =
-        ["Arr", "ARead", "anew", "aget", "aset", "afree", "DecLt", "dlt"];
+    const ARR_NAMES: [&str; 16] = [
+        "Arr", "ARead", "anew", "aget", "aset", "afree", "DecLt", "dlt",
+        "Slice", "SliceRead", "sget", "sset", "Rejoin", "ASplit", "asplit", "ajoin",
+    ];
     let arr_collides = items
         .iter()
         .filter_map(item_name)
         .any(|n| ARR_NAMES.contains(&n));
     if !collides && has_bnat && !arr_collides {
         let p3 = Parser { toks: lex(ARR_PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
-        items.extend(p3);
+        // insert right AFTER the `%builtin Nat` enum declaration (the first
+        // item the prelude's types reference), NOT at the end — so USER
+        // datatypes and signatures below can hold `Arr`/`Slice` fields.
+        let nat_pos = items
+            .iter()
+            .position(|it| matches!(it, Item::Enum { name, .. } if name == "Nat"))
+            .map(|i| i + 1)
+            .unwrap_or(items.len());
+        items.splice(nat_pos..nat_pos, p3);
     }
     // `peq : RPtr equality` references the program's `Nat`, so like `print` it
     // is APPENDED (the rest of the pool layer lives in the main prelude, which
@@ -5678,8 +5711,9 @@ impl Elab {
 /// Generic (`Var`-typed) elements are covered elsewhere: non-`%partial`
 /// generic fns inline with substituted types (checked here in the caller),
 /// and `%partial` ones hit the abstract-layout error in codegen.
-const COPYING_CONTAINER_OPS: [&str; 10] = [
+const COPYING_CONTAINER_OPS: [&str; 14] = [
     "anew", "aget", "aset", "afree", "pnew", "palloc", "pget", "pset", "pfree", "prelease",
+    "sget", "sset", "asplit", "ajoin",
 ];
 
 /// The DROPPING-DESTRUCTOR gate (Phase A3): `free` and `vfree` dispose of a

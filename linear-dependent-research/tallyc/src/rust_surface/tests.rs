@@ -2483,3 +2483,92 @@ fn b1_qsort_total_example_fully_certified() {
         assert!(total, "`{name}` must be certified total, got: {reason:?}");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE A4 (docs/PHASE_SAFETY_PLAN.md) — concurrency as a linear-typed
+// library. `spawn` MOVES a one-slot linear env into a fresh OS thread (the
+// work fn is a closed top-level fn — the surface has no lambdas, so nothing
+// can be captured); `join` recovers the linear result. Data-race freedom is
+// the ordinary QTT accounting: no new checker, no new kernel rule.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a4_spawn_linearity_makes_races_unwritable() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    const WORKER: &str = "worker : (1 o : Own Nat) -> Own Nat\n\
+                          fn worker(o) { let x = unbox(o); alloc(x + x) }\n";
+    // the safe move-in/join-out program CHECKS
+    let ok = format!(
+        "{BN}{WORKER}main : Nat\nfn main() {{\n\
+            let env = alloc(21);\n\
+            let h : JoinHandle (Own Nat) = spawn(worker, env);\n\
+            let r = join(h);\n\
+            unbox(r)\n\
+        }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("spawn/join must check: {e:?}"));
+
+    // touching the env after it was MOVED into the thread: ω ⋢ 1
+    let use_after_move = format!(
+        "{BN}{WORKER}main : Nat\nfn main() {{\n\
+            let env = alloc(21);\n\
+            let h : JoinHandle (Own Nat) = spawn(worker, env);\n\
+            let x = unbox(env);\n\
+            let r = join(h);\n\
+            unbox(r) + x\n\
+        }}\n"
+    );
+    let err = check_program(&use_after_move).err().expect("env use-after-move must reject");
+    assert!(format!("{err:?}").contains("ω"), "got {err:?}");
+
+    // giving the SAME moved state to two threads: ω ⋢ 1
+    let two_threads_one_env = format!(
+        "{BN}{WORKER}main : Nat\nfn main() {{\n\
+            let env = alloc(21);\n\
+            let h1 : JoinHandle (Own Nat) = spawn(worker, env);\n\
+            let h2 : JoinHandle (Own Nat) = spawn(worker, env);\n\
+            let r1 = join(h1); let r2 = join(h2);\n\
+            unbox(r1) + unbox(r2)\n\
+        }}\n"
+    );
+    let err = check_program(&two_threads_one_env)
+        .err()
+        .expect("one env into two threads must reject");
+    assert!(format!("{err:?}").contains("ω"), "got {err:?}");
+
+    // a JoinHandle is linear: never joining (losing the thread's resource) leaks
+    let dropped = format!(
+        "{BN}{WORKER}main : Nat\nfn main() {{\n\
+            let env = alloc(21);\n\
+            let h : JoinHandle (Own Nat) = spawn(worker, env);\n\
+            7\n\
+        }}\n"
+    );
+    let err = check_program(&dropped).err().expect("a dropped JoinHandle must reject");
+    assert!(format!("{err:?}").contains("0 time"), "got {err:?}");
+}
+
+#[test]
+fn a4_slices_split_disjoint_and_cannot_free() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // afree on a HALF is a type error (Slice has no free — freeing a
+    // non-base pointer would corrupt the heap; the only way out is ajoin).
+    let free_half = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let a0 = anew(8, 5);\n\
+            match asplit(4, 4, a0) {{ MkASplit(lo, hi, rj) => let u = afree(hi); 0 }}\n\
+        }}\n"
+    );
+    let err = check_program(&free_half).err().expect("afree of a slice must reject");
+    assert!(format!("{err:?}").contains("Slice"), "got {err:?}");
+    // dropping the Rejoin obligation (never reuniting) leaks: 0 ⋢ 1 — the
+    // whole allocation would be lost (slices cannot free it).
+    let no_rejoin = format!(
+        "{BN}sink : (1 s : Slice Nat 4) -> Nat\n%partial fn sink(s) {{ match sget(0, lt(0, 4), s) {{ MkSliceRead(x, s2) => x + sink(s2) }} }}\n\
+         main : Nat\nfn main() {{\n\
+            let a0 = anew(8, 5);\n\
+            match asplit(4, 4, a0) {{ MkASplit(lo, hi, rj) => sink(lo) + sink(hi) }}\n\
+        }}\n"
+    );
+    assert!(check_program(&no_rejoin).is_err(), "stranding the Rejoin obligation must reject");
+}

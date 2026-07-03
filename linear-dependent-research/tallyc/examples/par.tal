@@ -1,0 +1,56 @@
+// STRUCTURED PARALLELISM OVER DISJOINT ARRAY HALVES — Phase A4.
+//
+//   tally run examples/par.tal      → 110
+//
+// `asplit` divides one linear `Arr` into two DISJOINT linear `Slice`s (plus
+// the zero-width linear `Rejoin` obligation that forces reunification —
+// slices have `sget`/`sset` but NO free, so a half can never free the base
+// allocation). `spawn` MOVES one slice into each OS thread (the env is
+// consumed at multiplicity 1 — the parent cannot touch it, the other thread
+// cannot see it); `join` recovers each worker's linear result. Data-race
+// freedom is the ordinary QTT accounting — there is no way to write a race:
+//   • giving BOTH threads the same slice   → ω ⋢ 1 (double use)
+//   • touching the env after spawning it   → ω ⋢ 1
+//   • dropping a JoinHandle (never joining) → 0 ⋢ 1 (leak)
+//   • freeing a half (`afree(hi)`)          → type error (Slice ≠ Arr)
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum WRes (k : Nat) { MkWRes : Nat -> (1 s : Slice Nat k) -> WRes k }
+
+sum4 : (1 s : Slice Nat 4) -> Own (WRes 4)
+fn sum4(s) {
+    let (a, s1) = sget(0, lt(0, 4), s);
+    let (b, s2) = sget(1, lt(1, 4), s1);
+    let (c, s3) = sget(2, lt(2, 4), s2);
+    let (d, s4) = sget(3, lt(3, 4), s3);
+    alloc(MkWRes(a + b + c + d, s4))
+}
+
+main : Nat
+fn main() {
+    let a0 = anew(8, 0);
+    let a1 = aset(0, lt(0, 8), 1, a0);
+    let a2 = aset(1, lt(1, 8), 2, a1);
+    let a3 = aset(2, lt(2, 8), 3, a2);
+    let a4 = aset(3, lt(3, 8), 4, a3);
+    let a5 = aset(4, lt(4, 8), 10, a4);
+    let a6 = aset(5, lt(5, 8), 20, a5);
+    let a7 = aset(6, lt(6, 8), 30, a6);
+    let a8 = aset(7, lt(7, 8), 40, a7);
+    match asplit(4, 4, a8) {
+        MkASplit(lo, hi, rj) =>
+            let h1 : JoinHandle (Own (WRes 4)) = spawn(sum4, lo);
+            let h2 : JoinHandle (Own (WRes 4)) = spawn(sum4, hi);
+            let r1 = join(h1);
+            let r2 = join(h2);
+            match unbox(r1) {
+                MkWRes(s1, lo2) =>
+                    match unbox(r2) {
+                        MkWRes(s2, hi2) =>
+                            let whole = ajoin(lo2, hi2, rj);
+                            let u = afree(whole);
+                            s1 + s2,
+                    },
+            },
+    }
+}

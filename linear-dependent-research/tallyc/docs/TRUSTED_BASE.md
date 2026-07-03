@@ -69,6 +69,16 @@ unmisusable, and the lowering computes what the type says.
 | `dlt` | `(i : Nat) -> (n : Nat) -> DecLt i n` | ONE `icmp`; `DYes` carries the erased proof. Sound because the compare's truth IS the proposition; the proof payload is zero-width (IR-tested). |
 | `dlt` as a TERMINATION witness (Phase B1/E3) | a self-call whose measure argument is the `e1` of an enclosing `match dlt(e1, m)` `DYes` arm, `m` the matched measure parameter, is certified `%total` | dlt's `DYes` IS the machine compare, so the measure strictly decreased whenever the recursive branch runs, and `<` on the packed machine Nat is well-founded (a `u64` cannot decrease forever). UNLIKE structural totality (kernel-eliminator-backed), this certificate rests on the dlt lowering + the analyzer's shape check (facts are dropped when any mentioned variable is rebound) — the honest trusted-base delta of wf recursion; the LOWERING is the same `Fix` either way. |
 
+## 4b. Concurrency (Phase A4) and slices
+
+| primitive | safe type | why sound |
+|---|---|---|
+| `spawn` | `{0 e}{0 a} -> (1 work : (1 x : e) -> a) -> (1 env : e) -> JoinHandle a` | `pthread_create` running a CLOSED top-level fn (the surface has no lambdas — nothing can be captured; ALL state crosses through the one-slot linear env). The env is consumed at `1`: the parent cannot touch it again, so no two threads ever hold the same unique resource. Codegen poisons every outer slot in the worker, so even a compiler bug cannot smuggle a raced pointer. |
+| `join` | `{0 a} -> (1 h : JoinHandle a) -> a` | `pthread_join`; the handle is linear (never joining = leak = rejected), the result comes back linearly. Data-race freedom is the ordinary QTT accounting — no new checker. TSan-gated (`a4_par_binary_is_threadsanitizer_clean`). |
+| `asplit` | `{0 a} -> (k : Nat) -> (0 m : Nat) -> (1 arr : Arr a (k + m)) -> ASplit a k m` | splits one linear Arr into two DISJOINT linear `Slice`s (base, base + k·stride) plus a zero-width linear `Rejoin` obligation. Disjointness is by construction. |
+| `sget`/`sset` | as `aget`/`aset` over `Slice` | same erased-bound bare load/store; a Slice deliberately has NO free (freeing a half would `free()` a non-base pointer — the hole the Arr-halves design would have had), so the only exits are `ajoin` or moving it onward. |
+| `ajoin` | `… (1 lo : Slice a k) -> (1 hi : Slice a m) -> (1 rj : Rejoin a k m) -> Arr a (k + m)` | identity on the base; the Rejoin token forces reunification. HONEST CAVEAT: provenance is not typed (Slice carries no location index), so joining two same-typed slices from DIFFERENT splits is typable — the consequence is a leak of one allocation (never a UAF/double-free); a `Loc`-indexed Slice would close it. |
+
 ## 5. Scalars, casts, floats, native arithmetic
 
 | primitive | safe type | why sound |
