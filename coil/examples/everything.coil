@@ -259,8 +259,8 @@
 ; 20. Bitfields: by-value get/set! on a packed backing integer.
 (defn feat-bits [] (-> :i64)
   (let [c (alloc-stack Rgb565)]
-    (set! c r (cast :u5 20)) (set! c g (cast :u6 10)) (set! c b (cast :u5 12))
-    (iadd (cast :i64 (get c r)) (iadd (cast :i64 (get c g)) (cast :i64 (get c b))))))
+    (bit-set! c r (cast :u5 20)) (bit-set! c g (cast :u6 10)) (bit-set! c b (cast :u5 12))
+    (iadd (cast :i64 (bit-get c r)) (iadd (cast :i64 (bit-get c g)) (cast :i64 (bit-get c b))))))
 
 ; 21. Explicit layout + union: byte-offset field access into a blob.
 (defn feat-explicit [] (-> :i64)

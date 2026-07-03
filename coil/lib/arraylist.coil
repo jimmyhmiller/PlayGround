@@ -114,3 +114,18 @@
   (if (not (icmp-eq (code-count binding) 2))
       (error "al-for: binding must be [x arraylist]")
       `(slice-for [~(code-nth binding 0) (al-slice ~(code-nth binding 1))] ~@body)))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len xs)` / `(get xs i)` / `(set! (mut xs) i v)` / `(push! (mut xs) v)` /
+; `(pop! (mut xs))` on any (ArrayList T) — the al-* functions remain the named
+; API these delegate to.
+(impl [T] Len (ArrayList T)
+  (len [(xs (ArrayList T))] (-> i64) (al-len xs)))
+(impl [T] Get (ArrayList T)
+  (get [(xs (ArrayList T)) (i i64)] (-> T) (al-get xs i)))
+(impl [T] Set (ArrayList T)
+  (set! [(xs (mut (ArrayList T))) (i i64) (v T)] (-> i64) (al-set! (mut xs) i v)))
+(impl [T] Push (ArrayList T)
+  (push! [(xs (mut (ArrayList T))) (v T)] (-> i64) (al-push! (mut xs) v)))
+(impl [T] Pop (ArrayList T)
+  (pop! [(xs (mut (ArrayList T)))] (-> (Option T)) (al-pop! (mut xs))))

@@ -53,6 +53,14 @@ public struct Analysis: Sendable, Equatable {
     public var logsPredictedChangeLb: Double?
     public var scaleChangeLb: Double?
 
+    // Calorie bank (the headline): how far AHEAD of the goal pace you are, in calories.
+    // Positive = you've lost more than your plan required and have banked calories to spend;
+    // negative = you're behind and "owe" calories. This is `aheadOfPlanLb * kcalPerLb`, i.e.
+    // the cumulative deficit minus what the goal alone would have banked by now.
+    public var earnedCaloriesKcal: Double
+    public var earnedCaloriesSE: Double
+    public var earnedCaloriesSeries: [DatedValue]
+
     // Series for charts
     public var trendSeries: [WeightPoint]
     public var cumulativeDeficitSeries: [DatedValue]
@@ -183,6 +191,19 @@ public enum Analyzer {
                                                 effective: effective,
                                                 dailyDeficitTarget: dailyDeficitTarget,
                                                 firstIdx: firstIdx, lastIdx: lastIdx)
+
+        // --- Calorie bank: cumulative deficit MINUS what the goal pace alone would bank. ---
+        // earned = (actualLoss - plannedLoss) * kcalPerLb, computed day-by-day so the sparkline
+        // shows the bank filling (ahead) or draining (behind) over the diet.
+        let earnedKcal = aheadOfPlan * kcalPerLb
+        var earnedSeries: [DatedValue] = []
+        if let fi = firstIdx {
+            for dv in cumSeries {
+                let elapsedDays = max(0.0, dv.date.timeIntervalSince(records[fi].date) / 86400.0)
+                let plannedKcal = goal.ratePerWeek * (elapsedDays / 7.0) * kcalPerLb
+                earnedSeries.append(DatedValue(date: dv.date, value: dv.value - plannedKcal))
+            }
+        }
         let (tdeeSeries, biasSeries) = rollingModelSeries(records: records, points: points,
                                                           goal: goal, config: config)
 
@@ -207,6 +228,9 @@ public enum Analyzer {
             etaDate: eta,
             logsPredictedChangeLb: logsPredicted,
             scaleChangeLb: scaleChange,
+            earnedCaloriesKcal: earnedKcal,
+            earnedCaloriesSE: cumDeficitSE,
+            earnedCaloriesSeries: earnedSeries,
             trendSeries: trendSeries,
             cumulativeDeficitSeries: cumSeries,
             effectiveTDEESeries: tdeeSeries,

@@ -85,16 +85,24 @@
 ; `(for-in [x COLL] body...)` — iterate a collection, binding x to each element.
 ; A macro over `for`, dispatching on the collection FORM (the expander has no
 ; types): `(range LO HI)` yields the ints LO..HI-1; `(over ARR LEN)` yields the
-; elements of a fixed array ARR of length LEN. User collection types ride the
+; elements of a fixed array ARR of length LEN; `(in COLL)` yields the elements
+; of ANY type with Len + Get impls (ArrayList, slice — including strings, …) via
+; the coil.core collection traits. User collection types ride the
 ; iterator-value protocol (`for-each`, below) instead. No core support.
 (defn for-in [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2)) (error "for-in: binding must be [x COLL]")
   (let [x    (code-nth binding 0)
         coll (code-nth binding 1)]
-    (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (range lo hi) or (over arr len)")
+    (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (range lo hi), (in coll), or (over arr len)")
     (let [h (code-nth coll 0)]
       (if (code-eq h `range)
           `(for [~x ~(code-nth coll 1) ~(code-nth coll 2)] ~@body)
+          (if (code-eq h `in)
+              (let [c (gensym)
+                    i (gensym)]
+                `(let [~c ~(code-nth coll 1)]
+                   (for [~i 0 (len ~c)]
+                     (let [~x (get ~c ~i)] ~@body))))
           (if (code-eq h `over)
               (let [arr (code-nth coll 1)
                     len (code-nth coll 2)
@@ -113,7 +121,7 @@
                          (match (call-ptr ~nfv ~stv)
                            (None [] (break))
                            (Some [~x] ~@body)))))
-                  (error "for-in: unsupported collection; use (range lo hi), (over arr len), or (iter next state)")))))))))
+                  (error "for-in: unsupported collection; use (range lo hi), (in coll), (over arr len), or (iter next state)"))))))))))
 
 ; ---- threading ------------------------------------------------------------
 ; Spelled `|>`/`|>>` (F#/Elixir/OCaml) rather than Clojure's `->`/`->>`: `->`

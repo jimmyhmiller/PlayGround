@@ -353,6 +353,18 @@ fn closure_funcs(p: &ast::Program, mut stack: Vec<String>) -> std::collections::
     let names: std::collections::HashSet<&str> = p.funcs.iter().map(|f| f.name.as_str()).collect();
     let by_name: std::collections::HashMap<&str, &ast::Func> =
         p.funcs.iter().map(|f| (f.name.as_str(), f)).collect();
+    // The sub-program keeps every impl (generators use trait methods — the
+    // operators are impls), and checking lowers each impl's METHODS, whose
+    // bodies call ordinary library functions (`(len xs)` on a slice calls
+    // `slice-len`). Those callees must ride along or the sub-program's check
+    // reports them undefined.
+    for im in &p.impls {
+        for m in &im.methods {
+            for e in &m.body {
+                collect_calls(e, &names, &mut stack);
+            }
+        }
+    }
     let mut wanted = std::collections::HashSet::new();
     while let Some(n) = stack.pop() {
         if wanted.insert(n.clone()) {

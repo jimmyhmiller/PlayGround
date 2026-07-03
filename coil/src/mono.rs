@@ -42,6 +42,14 @@ pub fn monomorphize(program: Program) -> Result<Program, String> {
             .map(|s| (s.name.clone(), s))
             .collect(),
         variant_to_sum,
+        impls: program
+            .impls
+            .iter()
+            .map(|im| {
+                ((im.trait_name.clone(), im.for_type.clone()), (im.type_params.clone(), im.self_type.clone()))
+            })
+            .collect(),
+        inst_origin: HashMap::new(),
         out_structs: HashMap::new(),
         out_sums: HashMap::new(),
         out_funcs: HashMap::new(),
@@ -130,6 +138,17 @@ struct Mono<'a> {
     gstructs: HashMap<String, &'a StructDef>,
     gsums: HashMap<String, &'a SumDef>,
     variant_to_sum: HashMap<String, String>,
+    /// `(trait, dispatch base) → (impl type params, implementing type)`, for
+    /// resolving a deferred `TraitCall` whose impl is GENERIC: the lowered
+    /// method is a generic function, so the call needs explicit type arguments
+    /// matched out of the receiver type.
+    impls: HashMap<(String, String), (Vec<String>, Type)>,
+    /// Mangled instantiation name → the (base, args) it was mangled from —
+    /// `arraylist.ArrayList__i64 → (arraylist.ArrayList, [i64])`. Lets a
+    /// `TraitCall` receiver that resolved to a mangled struct recover its base
+    /// (the impl dispatch key) and args (the impl pattern's bindings) without
+    /// parsing names.
+    inst_origin: HashMap<String, (String, Vec<Type>)>,
     out_structs: HashMap<String, StructDef>,
     out_sums: HashMap<String, SumDef>,
     out_funcs: HashMap<String, Func>,
@@ -237,13 +256,17 @@ impl<'a> Mono<'a> {
     }
 
     fn queue_struct(&mut self, name: String, args: Vec<Type>) {
-        if self.queued_structs.insert(mangle(&name, &args)) {
+        let mangled = mangle(&name, &args);
+        self.inst_origin.entry(mangled.clone()).or_insert_with(|| (name.clone(), args.clone()));
+        if self.queued_structs.insert(mangled) {
             self.pending_structs.push((name, args));
         }
     }
 
     fn queue_sum(&mut self, name: String, args: Vec<Type>) {
-        if self.queued_sums.insert(mangle(&name, &args)) {
+        let mangled = mangle(&name, &args);
+        self.inst_origin.entry(mangled.clone()).or_insert_with(|| (name.clone(), args.clone()));
+        if self.queued_sums.insert(mangled) {
             self.pending_sums.push((name, args));
         }
     }
@@ -556,15 +579,60 @@ impl<'a> Mono<'a> {
             // checker verified an impl exists at the instantiation site.
             ExprKind::TraitCall { trait_name, method, self_tp, args } => {
                 let self_ty = self.resolve_ty(&Type::Struct(self_tp.clone()), map)?;
-                let type_name = type_impl_name(&self_ty).ok_or_else(|| {
-                    format!(
-                        "trait call '{trait_name}.{method}': Self resolved to a type that can't carry an impl: {self_ty:?}"
-                    )
-                })?;
-                ExprKind::Call {
-                    func: trait_method_fn(trait_name, &type_name, method),
-                    type_args: vec![],
-                    args: args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?,
+                // A receiver that resolved to a mangled instantiation
+                // (`ArrayList__i64`) dispatches by its BASE name, and its args
+                // feed the impl pattern below.
+                let (type_name, match_ty) = match &self_ty {
+                    Type::Struct(n) => match self.inst_origin.get(n) {
+                        Some((base, targs)) => {
+                            (base.clone(), Type::App(base.clone(), targs.clone()))
+                        }
+                        None => (n.clone(), self_ty.clone()),
+                    },
+                    _ => (
+                        type_impl_name(&self_ty).ok_or_else(|| {
+                            format!(
+                                "trait call '{trait_name}.{method}': Self resolved to a type that can't carry an impl: {self_ty:?}"
+                            )
+                        })?,
+                        self_ty.clone(),
+                    ),
+                };
+                // A GENERIC impl's lowered method is a generic function —
+                // instantiate it by matching the impl's implementing type
+                // against the concrete receiver.
+                let type_args = match self.impls.get(&(trait_name.clone(), type_name.clone())) {
+                    Some((params, pattern)) if !params.is_empty() => {
+                        let (params, pattern) = (params.clone(), pattern.clone());
+                        let mut binds: HashMap<String, Type> = HashMap::new();
+                        if !match_impl_pattern(&pattern, &match_ty, &params, &mut binds) {
+                            return Err(format!(
+                                "trait call '{trait_name}.{method}': receiver {match_ty:?} doesn't match the impl's implementing type {pattern:?}"
+                            ));
+                        }
+                        params
+                            .iter()
+                            .map(|p| {
+                                binds.remove(p).ok_or_else(|| {
+                                    format!(
+                                        "trait call '{trait_name}.{method}': impl type parameter '{p}' not determined by the receiver"
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                    _ => vec![],
+                };
+                let base_fn = trait_method_fn(trait_name, &type_name, method);
+                let args = args.iter().map(|a| go(self, a)).collect::<Result<_, _>>()?;
+                if type_args.is_empty() {
+                    ExprKind::Call { func: base_fn, type_args: vec![], args }
+                } else {
+                    // Instantiate the generic lowered method, exactly as the
+                    // Call arm does (the matched args are already concrete).
+                    let mangled = mangle(&base_fn, &type_args);
+                    self.queue_func(base_fn, type_args);
+                    ExprKind::Call { func: mangled, type_args: vec![], args }
                 }
             }
         }, e.span))
@@ -573,6 +641,38 @@ impl<'a> Mono<'a> {
 
 fn subst_map(params: &[String], args: &[Type]) -> Subst {
     params.iter().cloned().zip(args.iter().cloned()).collect()
+}
+
+/// Match a generic impl's implementing-type pattern (`(ArrayList T)`,
+/// `(slice T)`) against a concrete receiver type, binding the impl's type
+/// params. First binding wins; a repeated param must match consistently.
+fn match_impl_pattern(
+    pat: &Type,
+    actual: &Type,
+    params: &[String],
+    binds: &mut HashMap<String, Type>,
+) -> bool {
+    match (pat, actual) {
+        (Type::Struct(n), _) if params.iter().any(|p| p == n) => match binds.get(n) {
+            Some(bound) => bound == actual,
+            None => {
+                binds.insert(n.clone(), actual.clone());
+                true
+            }
+        },
+        (Type::App(a, pa), Type::App(b, ba)) => {
+            a == b
+                && pa.len() == ba.len()
+                && pa.iter().zip(ba).all(|(p, c)| match_impl_pattern(p, c, params, binds))
+        }
+        (Type::Ptr(p), Type::Ptr(c))
+        | (Type::Slice(p), Type::Slice(c)) => match_impl_pattern(p, c, params, binds),
+        (Type::Ref(mp, p), Type::Ref(mc, c)) => mp == mc && match_impl_pattern(p, c, params, binds),
+        (Type::Array(p, np), Type::Array(c, nc)) | (Type::Vec(p, np), Type::Vec(c, nc)) => {
+            np == nc && match_impl_pattern(p, c, params, binds)
+        }
+        _ => pat == actual,
+    }
 }
 
 /// A unique concrete name for an instantiation, e.g. `Pair__i64__i64`.

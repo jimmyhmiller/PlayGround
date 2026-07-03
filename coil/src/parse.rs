@@ -125,11 +125,21 @@ fn parse_export_c(rest: &[Sexp], out: &mut Vec<ExportC>) -> Result<(), Diag> {
 
 /// `(deftrait Name [Self] (method [(a Self) …] (-> ret)) …)` — a trait: the
 /// implementing-type parameter `Self`, then one signature per method.
+///
+/// `(deftrait Name [Self K E] …)` declares EXTRA type parameters that `Self`
+/// determines (read off the receiver type's impl at each call) — the element
+/// type of a collection, the key/value of a map.
 fn parse_deftrait(rest: &[Sexp]) -> Result<TraitDef, Diag> {
     let name = sym(rest.first().ok_or("deftrait: missing name")?, "trait name")?;
-    let self_param = match rest.get(1).map(|s| &s.kind) {
-        Some(SexpKind::Vector(v)) if v.len() == 1 => sym(&v[0], "Self parameter")?,
-        _ => return Err(Diag::new("deftrait: expected [Self] after the name")),
+    let (self_param, type_params) = match rest.get(1).map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) if !v.is_empty() => {
+            let mut names = Vec::with_capacity(v.len());
+            for p in v {
+                names.push(sym(p, "trait type parameter")?);
+            }
+            (names.remove(0), names)
+        }
+        _ => return Err(Diag::new("deftrait: expected [Self …] after the name")),
     };
     let mut methods = Vec::new();
     for m in &rest[2..] {
@@ -154,23 +164,64 @@ fn parse_deftrait(rest: &[Sexp]) -> Result<TraitDef, Diag> {
         let ret = parse_type(ret_l.get(1).ok_or("(-> ) missing type")?)?;
         methods.push(TraitMethod { name: mname, params, ret });
     }
-    Ok(TraitDef { name, self_param, methods })
+    Ok(TraitDef { name, self_param, type_params, methods })
 }
 
 /// `(impl Trait Type (method [params] (-> ret) body…) …)` — implement `Trait`
 /// for `Type`. Each method is parsed as a `defn` (concrete `Type`/`Self` types in
 /// its signature); naming/`Self`-checking happens in the checker.
+///
+/// The GENERIC form `(impl [T] Trait (ArrayList T) …)` implements the trait for
+/// every instance of a type constructor (`(slice T)` works too): the leading
+/// vector declares type parameters, and the target is the full type pattern.
+/// Each method carries the impl's type params as its own — the lowered
+/// functions are ordinary generic functions.
 fn parse_impl(rest: &[Sexp], span: Span) -> Result<ImplDef, Diag> {
+    // Optional leading [T …] type-parameter vector.
+    let (type_params, rest) = match rest.first().map(|s| &s.kind) {
+        Some(SexpKind::Vector(v)) => {
+            let mut names = Vec::with_capacity(v.len());
+            for p in v {
+                names.push(sym(p, "impl type parameter")?);
+            }
+            if names.is_empty() {
+                return Err(Diag::new("impl: the type-parameter vector may not be empty"));
+            }
+            (names, &rest[1..])
+        }
+        _ => (Vec::new(), rest),
+    };
     let trait_name = sym(rest.first().ok_or("impl: missing trait name")?, "trait name")?;
-    let for_type = sym(rest.get(1).ok_or("impl: missing type name")?, "impl type")?;
+    let target = rest.get(1).ok_or("impl: missing implementing type")?;
+    let self_type = parse_type(target)?;
+    let for_type = crate::ast::type_impl_name(&self_type).ok_or_else(|| {
+        Diag::at(target.span, "impl: this type can't carry an impl (pointers/arrays/fnptrs can't — name a struct, sum, scalar, generic instance, or (slice T))")
+    })?;
+    // Dispatch instantiates the impl's params from the receiver type alone, so
+    // every declared param must be inferable from the implementing type.
+    for p in &type_params {
+        if !crate::ast::type_mentions_name(&self_type, p) {
+            return Err(Diag::at(
+                target.span,
+                format!("impl: type parameter '{p}' must appear in the implementing type"),
+            ));
+        }
+    }
     let mut methods = Vec::new();
     for m in &rest[2..] {
         let ml = as_list(m, "impl method must be (name [params] (-> ret) body…)")?;
         let mut f = parse_defn(ml)?; // (name [params] (-> ret) body…) parses like a defn body
+        if !f.type_params.is_empty() {
+            return Err(Diag::at(
+                m.span,
+                format!("impl method '{}': declare type parameters on the impl, not the method", f.name),
+            ));
+        }
+        f.type_params = type_params.clone();
         f.span = span;
         methods.push(f);
     }
-    Ok(ImplDef { trait_name, for_type, methods })
+    Ok(ImplDef { trait_name, for_type, type_params, self_type, methods })
 }
 
 /// `(const NAME VALUE)` or `(const NAME TYPE VALUE)` — a named scalar constant.
@@ -939,18 +990,18 @@ fn parse_list_expr(items: &[Sexp], span: Span) -> Result<ExprKind, Diag> {
                 field: name,
             })
         }
-        "get" => {
-            let p = parse_expr(args.first().ok_or("get: missing pointer")?)?;
-            let name = sym(args.get(1).ok_or("get: missing field name")?, "field name")?;
+        "bit-get" => {
+            let p = parse_expr(args.first().ok_or("bit-get: missing pointer")?)?;
+            let name = sym(args.get(1).ok_or("bit-get: missing field name")?, "field name")?;
             Ok(ExprKind::BitGet {
                 ptr: Box::new(p),
                 field: name,
             })
         }
-        "set!" => {
-            let p = parse_expr(args.first().ok_or("set!: missing pointer")?)?;
-            let name = sym(args.get(1).ok_or("set!: missing field name")?, "field name")?;
-            let v = parse_expr(args.get(2).ok_or("set!: missing value")?)?;
+        "bit-set!" => {
+            let p = parse_expr(args.first().ok_or("bit-set!: missing pointer")?)?;
+            let name = sym(args.get(1).ok_or("bit-set!: missing field name")?, "field name")?;
+            let v = parse_expr(args.get(2).ok_or("bit-set!: missing value")?)?;
             Ok(ExprKind::BitSet {
                 ptr: Box::new(p),
                 field: name,

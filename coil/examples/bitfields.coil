@@ -1,5 +1,5 @@
 ; Bitfields: a :layout bits struct packs sub-byte fields into one backing int.
-; Fields are accessed by value with get/set! (bits have no address), and each
+; Fields are accessed by value with bit-get/bit-set! (bits have no address), and each
 ; field reads/writes as its uN type -- composing with the arbitrary-width ints.
 ;   coil run examples/bitfields.coil; echo $?   => 42
 
@@ -13,9 +13,9 @@
 
 (defn main [] (-> :i64)
   (let [c (alloc-stack Rgb565)]
-    (set! c r (cast :u5 20))
-    (set! c g (cast :u6 10))     ; setting g must not disturb r
-    (set! c b (cast :u5 12))
-    (iadd (imul (cast :i64 (get c r)) 1)    ; 20
-          (iadd (cast :i64 (get c g))       ; 10
-                (cast :i64 (get c b))))))    ; 12  -> 42
+    (bit-set! c r (cast :u5 20))
+    (bit-set! c g (cast :u6 10))     ; setting g must not disturb r
+    (bit-set! c b (cast :u5 12))
+    (iadd (imul (cast :i64 (bit-get c r)) 1)    ; 20
+          (iadd (cast :i64 (bit-get c g))       ; 10
+                (cast :i64 (bit-get c b))))))    ; 12  -> 42

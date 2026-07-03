@@ -484,16 +484,65 @@
     (box-al [Type] a (load out))))
 (defn impl-prefix [(a (ptr Allocator)) (tr (slice u8)) (forty (slice u8))] (-> (slice u8))
   (sconcat a (sconcat3 a "impl " tr " for ") (sconcat a forty ": ")))
+
+; ---- trait-extras unification (src/check.rs unify_trait_extras) --------------
+; Match a trait-declared type (`want`, the trait's EXTRA type parameters open)
+; against an impl method's declared type (`got`): bind each extra on first
+; sight, require consistency after; everything else must match exactly. The
+; impl's own type params appear as plain nominal names on both sides.
+(defn extras-has [(extras (ptr (ArrayList (slice u8)))) (n (slice u8))] (-> bool)
+  (let [k (al-len [(slice u8)] (load extras)) (mut i) 0 (mut r) false]
+    (loop (if (icmp-ge (load i) k) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load extras) (load i)) n) (do (store! r true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn unify-extras-list [(a (ptr Allocator)) (w (ptr (ArrayList Type))) (g (ptr (ArrayList Type))) (extras (ptr (ArrayList (slice u8)))) (binds (ptr (ArrayList SubstEntry)))] (-> bool)
+  (let [nw (al-len [Type] (load w)) ng (al-len [Type] (load g)) (mut i) 0 (mut ok) (icmp-eq nw ng)]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) nw)) (break)
+      (do (if (unify-trait-extras a (al-elem [Type] w (load i)) (al-elem [Type] g (load i)) extras binds) 0 (do (store! ok false) 0))
+          (store! i (iadd (load i) 1)))))
+    (load ok)))
+(defn unify-trait-extras [(a (ptr Allocator)) (want (ptr Type)) (got (ptr Type)) (extras (ptr (ArrayList (slice u8)))) (binds (ptr (ArrayList SubstEntry)))] (-> bool)
+  (match-else (load want)
+    (TStruct [n]
+      (if (extras-has extras n)
+          (let [b (subst-get binds n)]
+            (if (icmp-eq (cast i64 b) 0)
+                (do (subst-insert! binds n got) true)
+                (type-eq b got)))
+          (type-eq want got)))
+    (TRef [mw pw] (match-else (load got)
+      (TRef [mg pg] (and (if mw mg (not mg)) (unify-trait-extras a pw pg extras binds)))
+      (_ false)))
+    (TPtr [pw] (match-else (load got) (TPtr [pg] (unify-trait-extras a pw pg extras binds)) (_ false)))
+    (TSlice [pw] (match-else (load got) (TSlice [pg] (unify-trait-extras a pw pg extras binds)) (_ false)))
+    (TArray [pw nw] (match-else (load got) (TArray [pg ng] (and (icmp-eq nw ng) (unify-trait-extras a pw pg extras binds))) (_ false)))
+    (TVec [pw nw] (match-else (load got) (TVec [pg ng] (and (icmp-eq nw ng) (unify-trait-extras a pw pg extras binds))) (_ false)))
+    (TApp [nw aw] (match-else (load got)
+      (TApp [ng ag] (and (str-eq nw ng) (unify-extras-list a aw ag extras binds)))
+      (_ false)))
+    (TFn [cw pw rw] (match-else (load got)
+      (TFn [cg pg rg] (and (str-eq cw cg) (and (unify-extras-list a pw pg extras binds) (unify-trait-extras a rw rg extras binds))))
+      (_ false)))
+    (_ (type-eq want got))))
+(defn unify-extras-params [(a (ptr Allocator)) (want (ptr (ArrayList Type))) (m (ptr Func)) (extras (ptr (ArrayList (slice u8)))) (binds (ptr (ArrayList SubstEntry)))] (-> bool)
+  (let [got (param-types a (load (field m params)))]
+    (unify-extras-list a want got extras binds)))
+
 (defn check-impl-methods [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (td (ptr TraitDef)) (cty (ptr Type))] (-> (Result i64 Diag))
   (let [tr (load (field im trait_name)) forty (load (field im for_type)) selfp (load (field td self_param))
+        extras (load (field td type_params))
+        (mut binds) (al-new [SubstEntry] a)
         tms (load (field td methods)) n (al-len [TraitMethod] (load tms)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [tm (al-elem [TraitMethod] tms (load i)) tmn (load (field tm name)) m (impl-find-method im tmn)]
             (if (icmp-eq (cast i64 m) 0)
                 (do (store! err (derr (sconcat a (impl-prefix a tr forty) (sconcat3 a "missing method '" tmn "'")))) (store! failed true) (break))
-                (let [want (subst-self-params a tm selfp cty) got (param-types a (load (field m params)))
-                      wantret (subst-self a (field tm ret) selfp cty) gotret (field m ret)]
-                  (if (or (not (type-list-eq want got)) (not (type-eq (box-type a wantret) gotret)))
+                (let [want (subst-self-params a tm selfp cty)
+                      wantret (subst-self a (field tm ret) selfp cty)
+                      ok-params (unify-extras-params a want m extras (mut binds))
+                      ok-ret (unify-trait-extras a (box-type a wantret) (field m ret) extras (mut binds))]
+                  (if (or (not ok-params) (not ok-ret))
                       (do (store! err (derr (sconcat a (impl-prefix a tr forty) (sconcat3 a "method '" tmn "' signature doesn't match the trait")))) (store! failed true) (break))
                       0))))
           (store! i (iadd (load i) 1)))))
@@ -516,7 +565,7 @@
       (if (impl-has cx tr forty)
           (return-from :try (Err [i64 Diag] (derr (sconcat a (sconcat3 a "duplicate impl of '" tr "' for '") (sconcat a forty "'"))))) 0)
       (let [ip (alloc-stack ImplPair)] (store! (field ip trait) tr) (store! (field ip for_type) forty) (al-push! (mut (field cx impls)) (load ip)))
-      (let [td (trait-find cx tr) cty (box-type a (typename-to-type forty))]
+      (let [td (trait-find cx tr) cty (box-type a (load (field im self_type)))]
         (try! (check-impl-methods a cx im td cty)))
       (append-impl-methods a im fb)
       (Ok 0)))))
@@ -861,14 +910,15 @@
     (if (icmp-eq tg 11) (icmp-ne (cast i64 (struct-find cx (t-app-name t))) 0)
     (if (icmp-eq tg 7) true false)))))
 (defn has-impl-name [(t (ptr Type))] (-> bool)
-  (let [tg (type-tag t)] (or (icmp-eq tg 6) (or (icmp-eq tg 11) (or (icmp-eq tg 0) (or (icmp-eq tg 2) (icmp-eq tg 1)))))))
+  (let [tg (type-tag t)] (or (icmp-eq tg 6) (or (icmp-eq tg 11) (or (icmp-eq tg 0) (or (icmp-eq tg 2) (or (icmp-eq tg 1) (icmp-eq tg 8))))))))
 (defn type-impl-name [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
     (if (or (icmp-eq tg 6) (icmp-eq tg 11)) (struct-name t)
     (if (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
     (if (icmp-eq tg 2) "bool"
     (if (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
-    ""))))))
+    (if (icmp-eq tg 8) "slice"
+    "")))))))
 
 (defn subst-apply-list [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (subst (ptr (ArrayList SubstEntry)))] (-> (ptr (ArrayList Type)))
   (let [(mut out) (al-new [Type] a) n (al-len [Type] (load v)) (mut i) 0]
@@ -1051,6 +1101,12 @@
               (do (subst-insert! subst p act) (Ok [i64 Diag] 0))))
       (let [dt (type-tag decl) at2 (type-tag actual)]
         (if (and (icmp-eq dt 4) (icmp-eq at2 4)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+        ; a (ptr T) argument satisfies a (mut T)/(ref T) parameter — see through
+        ; BOTH wrappers (src/check.rs); a BARE type-parameter pointee keeps the
+        ; general Ref-arm reading below (T := the whole pointer)
+        (if (and (and (icmp-eq dt 5) (icmp-eq at2 4))
+                 (not (and (icmp-eq (type-tag (t-inner decl)) 6) (set-contains tpset (type-struct-name (t-inner decl))))))
+            (unify a (t-inner decl) (t-inner actual) tpset subst fname)
         (if (icmp-eq dt 5) (unify a (t-inner decl) actual tpset subst fname)
         (if (icmp-eq at2 5) (unify a decl (t-inner actual) tpset subst fname)
         (if (and (icmp-eq dt 7) (icmp-eq at2 7)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
@@ -1060,7 +1116,7 @@
         (if (and (and (icmp-eq dt 10) (icmp-eq at2 10)) (icmp-eq (al-len [Type] (load (t-fn-params decl))) (al-len [Type] (load (t-fn-params actual)))))
             (match (unify-list a (t-fn-params decl) (t-fn-params actual) tpset subst fname)
               (Err [d] (Err [i64 Diag] d)) (Ok [_] (unify a (t-fn-ret decl) (t-fn-ret actual) tpset subst fname)))
-          (Ok [i64 Diag] 0))))))))))))
+          (Ok [i64 Diag] 0)))))))))))))
 (defn unify-list [(a (ptr Allocator)) (xs (ptr (ArrayList Type))) (ys (ptr (ArrayList Type))) (tpset (ptr (ArrayList (slice u8)))) (subst (ptr (ArrayList SubstEntry))) (fname (slice u8))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load xs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1542,7 +1598,10 @@
             (let [new_args (try! (ca-final-coerce a argl sig subst args func fname))
                   out_targs (subst-targs a (load (field sig type_params)) subst)
                   ret (subst-apply a (field sig ret) subst)]
-              (ok-ep (mk-expr (ECall func out_targs new_args) elo ehi esrc ectxt) ret)))))))))
+              ; call_func, not func: a trait-method call on a concrete receiver
+              ; was rewritten to the impl's lowered function — GENERIC for a
+              ; generic impl, so it lands here (src/check.rs).
+              (ok-ep (mk-expr (ECall call_func out_targs new_args) elo ehi esrc ectxt) ret)))))))))
 
 (defn synth-call [(a (ptr Allocator)) (func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try
@@ -1565,12 +1624,17 @@
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
                         (return-from :try (synth-dyn-dispatch a cx func self_name self_idx td tm args env tps fname elo ehi esrc ectxt)) 0)
                     (if (set-contains tps self_name)
+                        (do
+                          ; a parameterized trait's extra types are read off the
+                          ; receiver's impl — unknown while Self is a type param
+                          (if (icmp-gt (al-len [(slice u8)] (load (load (field td type_params)))) 0)
+                              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait '" (sconcat a (display-name trait_name) "' takes type parameters — bounds over ")) "parameterized traits aren't supported yet; call '") func) "' on a concrete receiver instead")))) 0)
                         (if (not (bounds-has (field cx cur_bounds) self_name trait_name))
                             (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a func "')")))))
                           (let [self_as_ty (box-type a (TStruct self_name))
                                 new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname func))
                                 ret (subst-self a (field tm ret) self_pname self_as_ty)]
-                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi esrc ectxt) ret))))
+                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi esrc ectxt) ret)))))
                       (do (if (not (impl-has cx trait_name self_name))
                               (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (display-name self_name) "' does not implement '") (display-name trait_name)) "'")))) 0)
                           (store! call_func (tmfn a trait_name self_name func)) 0)))))))
@@ -1873,7 +1937,7 @@
             (return-from :try (err-ep (derr (sconcat a (sconcat3 a "in '" fname "': field access needs a pointer to a struct, got (ptr ") (sconcat a (ty-str a pointee) ")"))))) 0)
         (let [sname (struct-name pointee) si (struct-find cx sname)]
           (if (and (icmp-ne (cast i64 si) 0) (load (field si is_bits)))
-              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" sname "' is a :layout bits struct; use (get p ") ffld) ") / (set! p ") ffld) " v)")))) 0)
+              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" sname "' is a :layout bits struct; use (bit-get p ") ffld) ") / (bit-set! p ") ffld) " v)")))) 0)
           (match (struct-fields a pointee cx)
             (Err [d] (return-from :try (err-ep (prefix-diag a d (sconcat4 a "in '" fname "': " "")))))
             (Ok [fs]

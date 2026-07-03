@@ -93,13 +93,32 @@ public struct TrendFilter: Sendable {
             return sigma * sigma
         }
 
-        // Marginal: residuals vs a stiff trend.
-        let stiff = smooth(records, measurementVar: 8).points
-        var resid: [Double] = []
+        // Marginal: residuals vs the best-fit straight line through the readings.
+        //
+        // A steady diet's true weight loss is (locally) a constant slope. We must NOT count
+        // that slope as water noise, or R inflates and the main filter smooths the real loss
+        // away. A least-squares line removes a constant slope *exactly*, while a slow hydration
+        // swing (which is not linear over the window) stays in the residuals — which is exactly
+        // the slow correlated component we want R to include. (A Kalman "stiff trend" fails here:
+        // with tiny slope-process noise it stays near-flat and aliases the diet slope into R.)
+        var xs: [Double] = []
+        var ys: [Double] = []
         for i in records.indices {
-            if let z = records[i].weightLb, z.isFinite, let t = stiff[i].trend { resid.append(z - t) }
+            if let z = records[i].weightLb, z.isFinite { xs.append(Double(i)); ys.append(z) }
         }
-        let marginal = robust(resid)
+        let marginal: Double? = {
+            let m = Double(xs.count)
+            guard xs.count >= 5 else { return nil }
+            let sx = xs.reduce(0, +), sy = ys.reduce(0, +)
+            let sxx = zip(xs, xs).reduce(0) { $0 + $1.0 * $1.1 }
+            let sxy = zip(xs, ys).reduce(0) { $0 + $1.0 * $1.1 }
+            let denom = m * sxx - sx * sx
+            guard abs(denom) > 1e-9 else { return robust(ys) }
+            let slope = (m * sxy - sx * sy) / denom
+            let intercept = (sy - slope * sx) / m
+            let resid = zip(xs, ys).map { $0.1 - (intercept + slope * $0.0) }
+            return robust(resid)
+        }()
 
         // Fast floor: ½·Var(consecutive-day difference) ≈ R.
         var diffs: [Double] = []

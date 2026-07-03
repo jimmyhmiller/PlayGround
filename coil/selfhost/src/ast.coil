@@ -160,10 +160,16 @@
 (defstruct Const [(name (slice u8)) (ty (Option Type)) (value Expr)])
 
 (defstruct TraitMethod [(name (slice u8)) (params (ptr (ArrayList Param))) (ret Type)])
+; `type_params` = the EXTRA trait type parameters beyond Self (src/ast.rs):
+; `(deftrait Get [Self K E] …)` — Self determines them (one impl per type).
 (defstruct TraitDef
-  [(name (slice u8)) (self_param (slice u8)) (methods (ptr (ArrayList TraitMethod)))])
+  [(name (slice u8)) (self_param (slice u8)) (type_params (ptr (ArrayList (slice u8)))) (methods (ptr (ArrayList TraitMethod)))])
+; A GENERIC impl `(impl [T] Push (ArrayList T) …)` carries its type params and
+; the full implementing-type pattern in `self_type`; `for_type` is the dispatch
+; BASE name derived from it (kept in sync by the resolver after qualification).
 (defstruct ImplDef
-  [(trait_name (slice u8)) (for_type (slice u8)) (methods (ptr (ArrayList Func)))])
+  [(trait_name (slice u8)) (for_type (slice u8)) (type_params (ptr (ArrayList (slice u8)))) (self_type Type) (methods (ptr (ArrayList Func)))])
+
 
 (defstruct ExportC
   [(name (slice u8)) (symbol (Option (slice u8))) (params (ptr (ArrayList Type)))

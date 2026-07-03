@@ -262,6 +262,30 @@ runs identically (`tests/llvm_ir.rs` embeds the murmur3 finalizer). See
 
 `add` compiles to a `fastcc` LLVM function and is invoked with `call fastcc`.
 
+## Collection traits
+
+The everyday collection vocabulary is traits in `coil.core`, dispatched by the
+receiver's type (statically — monomorphized, no vtables): `(len xs)`,
+`(get xs k)`, `(set! (mut xs) k v)`, `(push! (mut xs) v)`, `(pop! (mut xs))`,
+`(empty? xs)`, and `(for-in [x (in xs)] …)` work on `ArrayList`, slices
+(strings are `(slice u8)`), `HashMap` (`get` returns `(Option V)`), and
+`StrBuf`. Two pieces of trait machinery make that possible, and user types get
+both:
+
+```lisp
+(deftrait Get [Self K E]           ; extra type params, DETERMINED by Self
+  (get [(xs Self) (k K)] (-> E)))  ; (one impl per type: K/E read off the impl)
+
+(impl [T] Get (ArrayList T)        ; a GENERIC impl: every (ArrayList T) at once
+  (get [(xs (ArrayList T)) (i i64)] (-> T) (al-get xs i)))
+```
+
+`(slice T)` is a valid impl target too. Single-parameter traits (`Len`, `Eq`,
+…) also work through bounded generics — `(defn empty? [(C Len)] [(xs C)] …)`
+is how the prelude defines `empty?`. (The `:bits` struct field accessors,
+which previously owned the `get`/`set!` spellings, are now `bit-get` /
+`bit-set!`.)
+
 ## Build & run
 
 Needs Rust and **LLVM 18** with `llvm-config` on `PATH`. On Debian/Ubuntu the

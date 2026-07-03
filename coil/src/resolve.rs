@@ -264,10 +264,13 @@ fn qualify_program(
         qualify_expr(meta, m, imps, table, &empty, exports, bare_ok)?;
     }
     // Traits: rename the trait to `module.Trait` and qualify the types in each
-    // method signature (Self stays unqualified, an in-scope type parameter).
+    // method signature (Self and any extra trait type parameters stay
+    // unqualified — they're in-scope parameters, not module types).
     for t in &mut p.traits {
         t.name = format!("{m}.{}", t.name);
-        let tps: HashSet<String> = std::iter::once(t.self_param.clone()).collect();
+        let tps: HashSet<String> = std::iter::once(t.self_param.clone())
+            .chain(t.type_params.iter().cloned())
+            .collect();
         for meth in &mut t.methods {
             for param in &mut meth.params {
                 qualify_type(&mut param.ty, m, imps, table, &tps, exports)?;
@@ -281,14 +284,14 @@ fn qualify_program(
     for im in &mut p.impls {
         // Resolve the trait reference (`(impl Eq i64 …)` → `coil.core.Eq`).
         im.trait_name = resolve(&im.trait_name, m, imps, table, exports, |d| &d.traits)?;
-        // A scalar impl target (`(impl Eq i64 …)`) keeps its spelling; a nominal
-        // one resolves to its qualified type name.
-        if !crate::ast::is_scalar_typename(&im.for_type) {
-            let mut for_ty = Type::Struct(im.for_type.clone());
-            qualify_type(&mut for_ty, m, imps, table, &empty, exports)?;
-            if let Type::Struct(n) = for_ty {
-                im.for_type = n;
-            }
+        // Qualify the implementing type (the impl's own type params stay
+        // unqualified), then re-derive the dispatch base name from it —
+        // scalars/`slice` keep their spelling, nominal names qualify.
+        {
+            let itps: HashSet<String> = im.type_params.iter().cloned().collect();
+            qualify_type(&mut im.self_type, m, imps, table, &itps, exports)?;
+            im.for_type = crate::ast::type_impl_name(&im.self_type)
+                .expect("impl target validated at parse");
         }
         for meth in &mut im.methods {
             let tps: HashSet<String> = meth.type_params.iter().cloned().collect();

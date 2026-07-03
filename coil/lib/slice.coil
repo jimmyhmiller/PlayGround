@@ -64,3 +64,15 @@ ret $ret %d"))
         `(let [~sv ~s]
            (for [~i 0 (slice-len ~sv)]
              (let [~x (slice-get ~sv ~i)] ~@body))))))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len s)` / `(get s i)` on any (slice T) — including strings, which are
+; (slice u8). `set!` writes through the view (a slice borrows its elements);
+; the (mut Self) receiver is the trait's shape, so rebind a slice as
+; (mut s) to write. No Push/Pop: a slice can't grow.
+(impl [T] Len (slice T)
+  (len [(s (slice T))] (-> i64) (slice-len s)))
+(impl [T] Get (slice T)
+  (get [(s (slice T)) (i i64)] (-> T) (slice-get s i)))
+(impl [T] Set (slice T)
+  (set! [(s (mut (slice T))) (i i64) (v T)] (-> i64) (slice-set! (load s) i v)))

@@ -312,17 +312,29 @@ fn setup(
         if !impl_set.insert((im.trait_name.clone(), im.for_type.clone())) {
             return Err(format!("duplicate impl of '{}' for '{}'", im.trait_name, im.for_type).into());
         }
-        // Every trait method must be implemented, with a matching signature
-        // (Self := the implementing type) — the impl conforms to the trait.
-        let cty = typename_to_type(&im.for_type);
+        // Every trait method must be implemented, with a matching signature —
+        // the impl conforms to the trait. Self := the full implementing type
+        // (`(ArrayList T)` for a generic impl); the trait's EXTRA type
+        // parameters (`(deftrait Get [Self K E] …)`) are unification variables
+        // the impl's signatures pin, consistently across all methods (that
+        // binding is what a call on a concrete receiver reads back).
+        let cty = im.self_type.clone();
+        let extras: HashSet<&str> = td.type_params.iter().map(String::as_str).collect();
+        let mut esubst: HashMap<String, Type> = HashMap::new();
         for tm in &td.methods {
             let m = im.methods.iter().find(|m| m.name == tm.name).ok_or_else(|| {
                 format!("impl {} for {}: missing method '{}'", im.trait_name, im.for_type, tm.name)
             })?;
-            let want: Vec<Type> =
-                tm.params.iter().map(|p| subst_self(&p.ty, &td.self_param, &cty)).collect();
-            let got: Vec<Type> = m.params.iter().map(|p| p.ty.clone()).collect();
-            if want != got || subst_self(&tm.ret, &td.self_param, &cty) != m.ret {
+            let mut ok = tm.params.len() == m.params.len();
+            if ok {
+                for (tp, mp) in tm.params.iter().zip(&m.params) {
+                    let want = subst_self(&tp.ty, &td.self_param, &cty);
+                    ok &= unify_trait_extras(&want, &mp.ty, &extras, &mut esubst);
+                }
+                let wret = subst_self(&tm.ret, &td.self_param, &cty);
+                ok &= unify_trait_extras(&wret, &m.ret, &extras, &mut esubst);
+            }
+            if !ok {
                 return Err(format!(
                     "impl {} for {}: method '{}' signature doesn't match the trait",
                     im.trait_name, im.for_type, tm.name
@@ -1458,6 +1470,17 @@ fn synth_inner(
                     ));
                 }
                 if tps.contains(&self_name) {
+                    // A parameterized trait's extra types are read off the
+                    // receiver's impl — unknown while Self is still a type
+                    // parameter, so this method's own signature is unknown too.
+                    if !td.type_params.is_empty() {
+                        return Err(format!(
+                            "in '{fname}': trait '{}' takes type parameters — bounds over \
+                             parameterized traits aren't supported yet; call '{func}' on a \
+                             concrete receiver instead",
+                            display_name(&trait_name)
+                        ).into());
+                    }
                     // Deferred: definition-time bound check, then emit a TraitCall.
                     let bounded = cx
                         .cur_bounds
@@ -1673,7 +1696,10 @@ fn synth_inner(
             let ret = subst_apply(&sig.ret, &subst);
             Ok((
                 Expr::new(ExprKind::Call {
-                    func: func.clone(),
+                    // `call_func`, not `func`: a trait-method call on a concrete
+                    // receiver was rewritten to the impl's lowered function —
+                    // which is GENERIC for a generic impl, so it lands here.
+                    func: call_func.clone(),
                     type_args: out_type_args,
                     args: new_args,
                 }, e.span),
@@ -1709,7 +1735,7 @@ fn synth_inner(
                 &fty,
                 false,
                 fname,
-                &format!("set! into bitfield '{field}'"),
+                &format!("bit-set! into bitfield '{field}'"),
             )?;
             Ok((
                 Expr::new(ExprKind::BitSet {
@@ -1736,7 +1762,7 @@ fn synth_inner(
             })?;
             if cx.structs.get(sname).is_some_and(|s| s.is_bits) {
                 return Err(format!(
-                    "in '{fname}': '{sname}' is a :layout bits struct; use (get p {field}) / (set! p {field} v)"
+                    "in '{fname}': '{sname}' is a :layout bits struct; use (bit-get p {field}) / (bit-set! p {field} v)"
                 ).into());
             }
             let fields = struct_fields(&pointee, cx)
@@ -2308,6 +2334,18 @@ fn unify(
     }
     match (decl, actual) {
         (Type::Ptr(a), Type::Ptr(b)) => unify(a, b, tpset, subst, fname),
+        // A `(ptr T)` argument satisfies a `(mut T)`/`(ref T)` parameter (same
+        // representation; the coercion step accepts it), so inference sees
+        // through BOTH wrappers — `(pop! xs)` with xs : (ptr (ArrayList i64))
+        // binds the impl's T from a (mut (ArrayList T)) parameter. A BARE
+        // type-parameter pointee is exempt: there `T := the whole pointer` is
+        // the established reading (the general Ref arm below), and both
+        // peelings are plausible.
+        (Type::Ref(_, a), Type::Ptr(b))
+            if !matches!(a.as_ref(), Type::Struct(n) if tpset.contains(n)) =>
+        {
+            unify(a, b, tpset, subst, fname)
+        }
         // A reference on either side — a by-reference parameter, or a place
         // argument — unifies its pointee against the other side. So a by-ref
         // aggregate parameter matches a value, a place, or a raw-pointer
@@ -2349,32 +2387,47 @@ fn type_mentions(t: &Type, name: &str) -> bool {
     }
 }
 
-/// Parse a type-name string (an impl's `for_type`) back to a `Type`: builtin
-/// scalars to their real type (`"i64"` -> `Int(64,true)`), everything else a
-/// nominal `Struct`. The inverse of `type_impl_name` for the cases that round-trip.
-fn typename_to_type(name: &str) -> Type {
-    match name {
-        "bool" => Type::Bool,
-        "f32" => Type::Float(32),
-        "f64" => Type::Float(64),
-        _ => {
-            if let Some(rest) = name.strip_prefix('i') {
-                if let Ok(b) = rest.parse::<u32>() {
-                    return Type::Int(b, true);
-                }
+/// Replace the Self parameter `self_param` with the concrete type `concrete`
+/// throughout `t` (used to specialize a trait method signature for an impl).
+/// Match a trait-declared type (`want`, with the trait's extra type parameters
+/// as open variables) against an impl method's declared type (`got`). Binds
+/// each extra on first sight and requires consistency after; everything else
+/// must match structurally/exactly. The impl's own type params appear as plain
+/// nominal names on both sides, so ordinary equality covers them.
+fn unify_trait_extras(
+    want: &Type,
+    got: &Type,
+    extras: &HashSet<&str>,
+    subst: &mut HashMap<String, Type>,
+) -> bool {
+    match (want, got) {
+        (Type::Struct(n), _) if extras.contains(n.as_str()) => match subst.get(n) {
+            Some(bound) => bound == got,
+            None => {
+                subst.insert(n.clone(), got.clone());
+                true
             }
-            if let Some(rest) = name.strip_prefix('u') {
-                if let Ok(b) = rest.parse::<u32>() {
-                    return Type::Int(b, false);
-                }
-            }
-            Type::Struct(name.to_string())
+        },
+        (Type::Ref(mw, pw), Type::Ref(mg, pg)) => mw == mg && unify_trait_extras(pw, pg, extras, subst),
+        (Type::Ptr(pw), Type::Ptr(pg)) => unify_trait_extras(pw, pg, extras, subst),
+        (Type::Slice(pw), Type::Slice(pg)) => unify_trait_extras(pw, pg, extras, subst),
+        (Type::Array(pw, nw), Type::Array(pg, ng)) => nw == ng && unify_trait_extras(pw, pg, extras, subst),
+        (Type::Vec(pw, nw), Type::Vec(pg, ng)) => nw == ng && unify_trait_extras(pw, pg, extras, subst),
+        (Type::App(nw, aw), Type::App(ng, ag)) => {
+            nw == ng
+                && aw.len() == ag.len()
+                && aw.iter().zip(ag).all(|(w, g)| unify_trait_extras(w, g, extras, subst))
         }
+        (Type::Fn(cw, pw, rw), Type::Fn(cg, pg, rg)) => {
+            cw == cg
+                && pw.len() == pg.len()
+                && pw.iter().zip(pg).all(|(w, g)| unify_trait_extras(w, g, extras, subst))
+                && unify_trait_extras(rw, rg, extras, subst)
+        }
+        _ => want == got,
     }
 }
 
-/// Replace the Self parameter `self_param` with the concrete type `concrete`
-/// throughout `t` (used to specialize a trait method signature for an impl).
 fn subst_self(t: &Type, self_param: &str, concrete: &Type) -> Type {
     match t {
         Type::Struct(n) if n == self_param => concrete.clone(),

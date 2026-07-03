@@ -1188,6 +1188,17 @@
     (store! (field wantedb items) (al-new [(slice u8)] a))
     (let [ns (al-len [(slice u8)] (load seeds)) (mut si) 0]
       (loop (if (icmp-ge (load si) ns) (break) (do (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si))) (store! si (iadd (load si) 1))))))
+    ; The sub-program keeps every impl, and checking lowers each impl's METHODS,
+    ; whose bodies call ordinary library functions — those callees must ride
+    ; along or the sub-program's check reports them undefined (src/lib.rs).
+    (let [is (load (field p impls)) ni (al-len [ImplDef] (load is)) (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni) (break)
+        (do (let [ip (al-elem [ImplDef] is (load ii))
+                  ms (load (field ip methods)) nm2 (al-len [Func] (load ms)) (mut mi) 0]
+              (loop (if (icmp-ge (load mi) nm2) (break)
+                (do (cc-list (load (field (al-elem [Func] ms (load mi)) body)) names stackb)
+                    (store! mi (iadd (load mi) 1))))))
+            (store! ii (iadd (load ii) 1))))))
     (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0) (break)
       (do (let [sl (load (field stackb items)) top (al-len [(slice u8)] sl) nm (al-get [(slice u8)] sl (isub top 1))]
             ; pop

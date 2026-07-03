@@ -550,6 +550,11 @@ pub struct Func {
 pub struct TraitDef {
     pub name: String,
     pub self_param: String,
+    /// Extra trait type parameters beyond Self — `(deftrait Get [Self K E] …)`.
+    /// `Self` DETERMINES them (one impl per type): a call on a concrete
+    /// receiver reads them off that type's impl, so they act like associated
+    /// types with a lighter surface. Empty for an ordinary single-param trait.
+    pub type_params: Vec<String>,
     pub methods: Vec<TraitMethod>,
 }
 
@@ -561,9 +566,11 @@ pub struct TraitMethod {
 }
 
 /// The canonical name a type uses as an impl's `for_type` / in trait resolution —
-/// nominal types by name, scalars by their spelling (`i64`, `u32`, `bool`, `f64`),
-/// so `(impl Eq i64 …)` and a `(eq 1 2)` call agree. `None` for types that can't
-/// (yet) carry an impl (pointers, slices, arrays, …).
+/// nominal types by name (a generic instance by its BASE name), scalars by their
+/// spelling (`i64`, `u32`, `bool`, `f64`), slices by the pseudo-name `slice` (a
+/// generic impl `(impl [T] Len (slice T) …)` covers every element type — strings
+/// are `(slice u8)`). `None` for types that can't (yet) carry an impl (pointers,
+/// arrays, function pointers, SIMD vectors).
 pub fn type_impl_name(ty: &Type) -> Option<String> {
     match ty {
         Type::Struct(n) | Type::App(n, _) => Some(n.clone()),
@@ -571,7 +578,25 @@ pub fn type_impl_name(ty: &Type) -> Option<String> {
         Type::Int(b, false) => Some(format!("u{b}")),
         Type::Bool => Some("bool".to_string()),
         Type::Float(w) => Some(format!("f{w}")),
+        Type::Slice(_) => Some("slice".to_string()),
         _ => None,
+    }
+}
+
+/// Does `t` mention `name` as a nominal type reference — a bare `Struct(name)`
+/// or an application head — anywhere in its structure? (Type parameters parse
+/// as `Struct` references, so this answers "does this type use param `name`".)
+pub fn type_mentions_name(t: &Type, name: &str) -> bool {
+    match t {
+        Type::Struct(n) => n == name,
+        Type::App(n, args) => n == name || args.iter().any(|a| type_mentions_name(a, name)),
+        Type::Ptr(p) | Type::Ref(_, p) | Type::Slice(p) | Type::Array(p, _) | Type::Vec(p, _) => {
+            type_mentions_name(p, name)
+        }
+        Type::Fn(_, ps, r) => {
+            ps.iter().any(|p| type_mentions_name(p, name)) || type_mentions_name(r, name)
+        }
+        _ => false,
     }
 }
 
@@ -591,13 +616,28 @@ pub fn trait_method_fn(trait_name: &str, type_name: &str, method: &str) -> Strin
     format!("{trait_name}${type_name}${method}")
 }
 
-/// An implementation of `trait_name` for the concrete type `for_type`. Each
-/// method is lowered to an ordinary `Func` named `<Trait>$<Type>$<method>` with
-/// `Self` substituted to `for_type`, so codegen/mono see plain functions.
+/// An implementation of `trait_name` for a type. Each method is lowered to an
+/// ordinary `Func` named `<Trait>$<Type>$<method>` with `Self` substituted to
+/// the implementing type, so codegen/mono see plain functions.
+///
+/// A GENERIC impl — `(impl [T] Push (ArrayList T) …)` — implements the trait
+/// for every instance of a type constructor: `type_params` are in scope in
+/// `self_type` (the full implementing-type pattern) and the method signatures,
+/// and each method carries them as its own type params (the lowered functions
+/// are generic; monomorphization instantiates them per concrete use). Dispatch
+/// is by `for_type`, the pattern's BASE name (`ArrayList`, `slice`, `i64`) —
+/// one impl of a trait per base.
 #[derive(Debug, Clone)]
 pub struct ImplDef {
     pub trait_name: String,
+    /// The dispatch key: `type_impl_name` of `self_type`. Kept in sync by the
+    /// resolver when it qualifies `self_type`.
     pub for_type: String,
+    /// Generic-impl type parameters (empty for a plain impl). Every one must
+    /// appear in `self_type`, so dispatch can infer them from the receiver.
+    pub type_params: Vec<String>,
+    /// The full implementing type: `(ArrayList T)`, `(slice T)`, `i64`, `Point`.
+    pub self_type: Type,
     pub methods: Vec<Func>,
 }
 
@@ -647,7 +687,7 @@ pub enum Layout {
     /// the field list). Realized as a byte blob; overlapping offsets = a union.
     Explicit(ExplicitLayout),
     /// Bitfields: every field is a sub-byte run of bits packed (LSB-first) into a
-    /// single backing integer. Fields are accessed by value via `get`/`set!`.
+    /// single backing integer. Fields are accessed by value via `bit-get`/`bit-set!`.
     Bits(BitsLayout),
 }
 

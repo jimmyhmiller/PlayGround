@@ -21,8 +21,8 @@
   (let [(mut x) 0]
     (store! x (cast i64 (load p)))
     (field p tag)
-    (get p flag)
-    (set! p flag 1)
+    (bit-get p flag)
+    (bit-set! p flag 1)
     (fnptr-of ops)
     (call-ptr (fnptr-of ops) p r m)
     (make-dyn Show p)

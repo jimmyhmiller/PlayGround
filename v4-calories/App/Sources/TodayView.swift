@@ -20,7 +20,7 @@ struct TodayView: View {
                 header
                 caloriesIn.padding(.top, 26)
                 SectionDivider().pagePadding()
-                cumulativeDeficit
+                calorieBank
                 if showModel {
                     SectionDivider().pagePadding()
                     modelSection
@@ -97,32 +97,37 @@ struct TodayView: View {
         .pagePadding()
     }
 
-    // MARK: Cumulative deficit (the headline)
+    // MARK: Calorie bank (the headline) — how far ahead of your goal pace, in calories.
 
-    private var cumulativeDeficit: some View {
+    private var earned: Double { a?.earnedCaloriesKcal ?? 0 }
+    private var isAhead: Bool { earned >= 0 }
+
+    private var calorieBank: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                CapsLabel(text: "CUMULATIVE DEFICIT · \(a?.daysCount ?? 0) DAYS", color: Theme.green.opacity(0.85))
+                CapsLabel(text: "CALORIE BANK · \(a?.daysCount ?? 0) DAYS", color: Theme.green.opacity(0.85))
                 Spacer()
                 if matchesScale {
                     Text("✓ MATCHES SCALE").font(.mono(9)).tracking(0.5)
                         .foregroundStyle(Theme.green.opacity(0.75))
                 }
             }
-            Text(deficitText).font(.mono(54, .heavy)).tracking(-2).padding(.top, 10)
-            Text("KCAL BANKED · ±\(Fmt.int(a?.cumulativeDeficitSE ?? 0))")
+            Text(bankText).font(.mono(54, .heavy)).tracking(-2)
+                .foregroundStyle(isAhead ? Theme.green : Theme.amber)
+                .padding(.top, 10)
+            Text("\(isAhead ? "AHEAD OF" : "BEHIND") YOUR \(Fmt.f(store.state.goal.ratePerWeek, 2)) LB/WK PLAN · ±\(Fmt.int(a?.earnedCaloriesSE ?? 0))")
                 .font(.mono(11)).tracking(0.5).foregroundStyle(Theme.textDim(0.42)).padding(.top, 6)
 
-            if let series = a?.cumulativeDeficitSeries, series.count > 2 {
+            if let series = a?.earnedCaloriesSeries, series.count > 2 {
                 DeficitSparkline(series: series).frame(height: 46).padding(.vertical, 12)
             }
 
             HStack(spacing: 40) {
-                StatBlock(label: "PROJECTED LOSS",
+                StatBlock(label: "LOST SO FAR",
                           value: "\(Fmt.signed(-(a?.lossSoFarLb ?? 0))) lb", color: Theme.green)
                 StatBlock(label: "VS PLAN",
                           value: "\(Fmt.signed(a?.aheadOfPlanLb ?? 0)) lb",
-                          color: (a?.aheadOfPlanLb ?? 0) >= 0 ? Theme.green : Theme.amber)
+                          color: isAhead ? Theme.green : Theme.amber)
             }
             .padding(.top, 12)
 
@@ -135,21 +140,23 @@ struct TodayView: View {
 
     private var matchesScale: Bool { (a?.daysSinceLastWeighIn ?? 99) <= 1 }
 
-    private var deficitText: String {
-        let d = a?.cumulativeDeficitKcal ?? 0
-        if d > 0 { return "\u{2212}" + Fmt.int(d) }      // banked deficit shows as removed calories
-        if d < 0 { return "+" + Fmt.int(-d) }
+    /// Positive bank = calories you've earned to spend; negative = calories you owe.
+    private var bankText: String {
+        let d = earned
+        if d > 0 { return "+" + Fmt.int(d) }
+        if d < 0 { return "\u{2212}" + Fmt.int(-d) }
         return "0"
     }
 
     private var planSentence: String {
         guard let a, a.daysCount > 0 else {
-            return "Log a few days and weigh in — the scale anchors your real deficit and the running total never resets."
+            return "Log a few days and weigh in — once the scale anchors your trend, this shows the calories you've banked by staying ahead of your goal."
         }
-        let banked = Fmt.int(max(0, a.cumulativeDeficitKcal))
         let ahead = a.aheadOfPlanLb
-        let dir = ahead >= 0 ? "ahead of" : "behind"
-        return "Banked \(banked) kcal over \(a.daysCount) days — about \(Fmt.signed(ahead)) lb \(dir) your \(Fmt.f(store.state.goal.ratePerWeek, 2)) lb/wk plan. Miss a day and the scale fills the gap; the running total never resets."
+        if isAhead {
+            return "You're \(Fmt.signed(ahead)) lb ahead of your \(Fmt.f(store.state.goal.ratePerWeek, 2)) lb/wk plan over \(a.daysCount) days — about \(Fmt.int(earned)) kcal you could spend and still be on track. Miss a day and the scale fills the gap."
+        }
+        return "You're \(Fmt.f(abs(ahead), 1)) lb behind your \(Fmt.f(store.state.goal.ratePerWeek, 2)) lb/wk plan over \(a.daysCount) days — about \(Fmt.int(-earned)) kcal to make up. Miss a day and the scale fills the gap."
     }
 
     // MARK: The model

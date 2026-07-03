@@ -458,6 +458,13 @@
         prelude-id (load (field s srccount))
         _ignore (store! (field s srccount) (iadd prelude-id 1))
         _reg (register-source! (mut s) "<prelude>" prelude-text)]
+    ; Pre-register the MAIN file's module as loaded (src/macros.rs): compiling a
+    ; stdlib file directly must not ALSO pull the bundled copy of the same
+    ; module in through the prelude's import chain (the module would collect
+    ; twice — "duplicate impl", silent last-wins for functions).
+    (match (declared-module forms)
+      (Some [main-mod] (do (loaded-insert! (mut s) main-mod) 0))
+      (None [] 0))
     (match (read-all a prelude-text prelude-id)
       (Err [d] (do (loader-abort "read error in prelude") 0))
       (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))

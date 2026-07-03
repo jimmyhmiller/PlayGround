@@ -80,3 +80,29 @@
   (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b))
   (>  [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
   (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
+
+; ---- collections, as traits -------------------------------------------------
+; The everyday collection vocabulary — `(len xs)`, `(get xs k)`, `(push! xs v)`
+; — dispatched by the receiver's type, like the operators above. These traits
+; are PARAMETERIZED: after `Self`, the extra type parameters (an element type, a
+; map's key/value) are DETERMINED by Self — one impl per type, so a call on a
+; concrete receiver reads them off that type's impl (associated types with a
+; lighter surface). Impls live with their types: lib/arraylist.coil,
+; lib/slice.coil ((slice T) covers strings), lib/hashmap.coil, lib/str.coil.
+(deftrait Len [Self]
+  (len [(xs Self)] (-> i64)))
+; K = how you address an element (i64 for lists/slices, the key type for maps);
+; E = what you get back (a map returns (Option V) — absence is in the type).
+(deftrait Get [Self K E]
+  (get [(xs Self) (k K)] (-> E)))
+(deftrait Set [Self K E]
+  (set! [(xs (mut Self)) (k K) (v E)] (-> i64)))
+(deftrait Push [Self E]
+  (push! [(xs (mut Self)) (v E)] (-> i64)))
+(deftrait Pop [Self E]
+  (pop! [(xs (mut Self))] (-> (Option E))))
+
+; Emptiness, generically: any type with a Len impl gets `empty?` for free (a
+; bounded generic over a trait — the pattern user code can copy).
+(defn empty? [(C Len)] [(xs C)] (-> bool)
+  (icmp-eq (len xs) 0))

@@ -550,6 +550,11 @@
 (defn qualify-one-trait [(c (ptr Ctx)) (tp (ptr TraitDef))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) (mut tl) (al-new [(slice u8)] a)]
     (al-push! (mut tl) (load (field tp self_param)))
+    ; extra trait type parameters are in scope in method signatures too
+    (let [xs (load (field tp type_params)) nx (al-len [(slice u8)] (load xs)) (mut xi) 0]
+      (loop (if (icmp-ge (load xi) nx) (break)
+        (do (al-push! (mut tl) (al-get [(slice u8)] (load xs) (load xi)))
+            (store! xi (iadd (load xi) 1))))))
     (let [tlb (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
       (store! tlb (load tl))
       (store! (field tp name) (sconcat3 a m "." (load (field tp name))))
@@ -572,11 +577,12 @@
   (let [a (load (field c a))]
     (try
       (do (store! (field ip trait_name) (try! (resolve c (load (field ip trait_name)) 2)))
-          (if (not (is-scalar-typename (load (field ip for_type))))
-              (let [tp (alloc-stack Type)] (store! tp (TStruct (load (field ip for_type))))
-                (try! (qualify-type c tp empty))
-                (store! (field ip for_type) (type-struct-name tp)) 0)
-              0)
+          ; Qualify the implementing type (the impl's own type params stay
+          ; unqualified — scalars and `slice` are structurally exempt), then
+          ; re-derive the dispatch base name from the qualified type
+          ; (src/resolve.rs).
+          (try! (qualify-type c (field ip self_type) (load (field ip type_params))))
+          (store! (field ip for_type) (impl-base-name a (field ip self_type)))
           (try! (qualify-impl-methods c (load (field ip methods))))
           (Ok 0)))))
 

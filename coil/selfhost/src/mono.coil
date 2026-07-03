@@ -37,7 +37,14 @@
    (pending-funcs   (ArrayList PendInst))
    (queued-structs (ArrayList (slice u8)))
    (queued-sums    (ArrayList (slice u8)))
-   (queued-funcs   (ArrayList (slice u8)))])
+   (queued-funcs   (ArrayList (slice u8)))
+   ; the program's impls (for resolving a deferred TraitCall against a GENERIC
+   ; impl), and the instantiation-origin map: mangled name -> (base, args), so
+   ; a TraitCall receiver that resolved to a mangled struct recovers its base
+   ; (the impl dispatch key) and args (the impl pattern's bindings).
+   (impls (ptr (ArrayList ImplDef)))
+   (io-mangled (ArrayList (slice u8)))
+   (io-origin  (ArrayList PendInst))])
 
 ; ---- small constructors -----------------------------------------------------
 (defn mk-field [(name (slice u8)) (ty Type)] (-> Field)
@@ -103,7 +110,57 @@
     (if (icmp-eq tg 0) (Some (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
     (if (icmp-eq tg 2) (Some "bool")
     (if (icmp-eq tg 1) (Some (sconcat a "f" (i64->str a (t-int-bits t))))
-      (None [(slice u8)]))))))))
+    (if (icmp-eq tg 8) (Some "slice")
+      (None [(slice u8)])))))))))
+
+; ---- generic-impl resolution for deferred trait calls (src/mono.rs) ----------
+(defn impl-lookup [(m (ptr MonoCtx)) (tr (slice u8)) (base (slice u8))] (-> (ptr ImplDef))
+  (let [is (load (field m impls)) n (al-len [ImplDef] (load is)) (mut i) 0 (mut r) (cast (ptr ImplDef) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ip (al-elem [ImplDef] is (load i))]
+            (if (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) base))
+                (do (store! r ip) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn binds-find [(bn (ptr (ArrayList (slice u8)))) (nm (slice u8))] (-> i64)
+  (let [n (al-len [(slice u8)] (load bn)) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load bn) (load i)) nm) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; Match a generic impl's implementing-type pattern against a concrete receiver,
+; binding the impl's type params (parallel bn/bt lists). First binding wins; a
+; repeated param must match consistently (equality via type-key).
+(defn mip-list [(a (ptr Allocator)) (pa (ptr (ArrayList Type))) (ca (ptr (ArrayList Type))) (params (ptr (ArrayList (slice u8)))) (bn (ptr (ArrayList (slice u8)))) (bt (ptr (ArrayList Type)))] (-> bool)
+  (let [np (al-len [Type] (load pa)) nc (al-len [Type] (load ca)) (mut i) 0 (mut ok) (icmp-eq np nc)]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) np)) (break)
+      (do (if (match-impl-pattern a (al-elem [Type] pa (load i)) (al-elem [Type] ca (load i)) params bn bt) 0 (do (store! ok false) 0))
+          (store! i (iadd (load i) 1)))))
+    (load ok)))
+(defn match-impl-pattern [(a (ptr Allocator)) (pat (ptr Type)) (actual (ptr Type)) (params (ptr (ArrayList (slice u8)))) (bn (ptr (ArrayList (slice u8)))) (bt (ptr (ArrayList Type)))] (-> bool)
+  (match-else (load pat)
+    (TStruct [n]
+      (if (set-contains params n)
+          (let [bi (binds-find bn n)]
+            (if (icmp-ge bi 0)
+                (str-eq (type-key a (al-elem [Type] bt bi)) (type-key a actual))
+                (do (al-push! bn n) (al-push! bt (load actual)) true)))
+          (str-eq (type-key a pat) (type-key a actual))))
+    (TApp [nw aw] (match-else (load actual)
+      (TApp [ng ag] (and (str-eq nw ng) (mip-list a aw ag params bn bt)))
+      (_ false)))
+    (TPtr [pw] (match-else (load actual) (TPtr [pg] (match-impl-pattern a pw pg params bn bt)) (_ false)))
+    (TSlice [pw] (match-else (load actual) (TSlice [pg] (match-impl-pattern a pw pg params bn bt)) (_ false)))
+    (TRef [mw pw] (match-else (load actual)
+      (TRef [mg pg] (and (if mw mg (not mg)) (match-impl-pattern a pw pg params bn bt)))
+      (_ false)))
+    (TArray [pw nw] (match-else (load actual)
+      (TArray [pg ng] (and (icmp-eq nw ng) (match-impl-pattern a pw pg params bn bt)))
+      (_ false)))
+    (TVec [pw nw] (match-else (load actual)
+      (TVec [pg ng] (and (icmp-eq nw ng) (match-impl-pattern a pw pg params bn bt)))
+      (_ false)))
+    (_ (str-eq (type-key a pat) (type-key a actual)))))
 
 ; ---- generic-template lookups (the gfuncs/gstructs/gsums HashMaps) -----------
 (defn find-struct-named [(lst (ptr (ArrayList StructDef))) (nm (slice u8))] (-> i64)
@@ -139,12 +196,24 @@
     (load r)))
 
 ; ---- queues (src/mono.rs::queue_*) — dedup via the queued set ----------------
+(defn io-record! [(m (ptr MonoCtx)) (mng (slice u8)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
+  (if (set-contains (field m io-mangled) mng) 0
+      (do (al-push! (mut (field m io-mangled)) mng)
+          (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args)) 0)))
+(defn io-find [(m (ptr MonoCtx)) (mng (slice u8))] (-> i64)
+  (let [n (al-len [(slice u8)] (load (field m io-mangled))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load (field m io-mangled)) (load i)) mng) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
 (defn queue-struct [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
+    (io-record! m mng nm args)
     (if (set-contains (field m queued-structs) mng) 0
         (do (al-push! (mut (field m queued-structs)) mng) (al-push! (mut (field m pending-structs)) (mk-pend a nm args)) 0))))
 (defn queue-sum [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
+    (io-record! m mng nm args)
     (if (set-contains (field m queued-sums) mng) 0
         (do (al-push! (mut (field m queued-sums)) mng) (al-push! (mut (field m pending-sums)) (mk-pend a nm args)) 0))))
 (defn queue-func [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
@@ -369,13 +438,51 @@
           (let [rp (alloc-stack Type)] (store! rp ret)
             (Ok (EDynDispatch dyn_struct vtable_struct method_index cc (try! (resolve-ty-list m params map)) (try! (resolve-ty m rp map)) (box-expr a (try! (resolve-expr m recv map))) (try! (resolve-expr-list m args map))))))
         (EStaticRef [nm] (Ok (EStaticRef nm)))
-        ; trait call: substitute Self -> concrete, call the implementing fn directly.
+        ; trait call: substitute Self -> concrete, call the implementing fn
+        ; directly. A receiver that resolved to a MANGLED instantiation
+        ; (ArrayList__i64) dispatches by its BASE name, and its recorded args
+        ; feed the impl pattern; a GENERIC impl's lowered method is a generic
+        ; function, instantiated by matching that pattern (src/mono.rs).
         (ETraitCall [trait_name method self_tp args]
           (let [tp (alloc-stack Type)] (store! tp (TStruct self_tp))
             (let [styp (alloc-stack Type)] (store! styp (try! (resolve-ty m tp map)))
-              (match (mono-impl-name a styp)
-                (None [] (do (unimplemented "mono/trait-call: Self resolved to a type with no impl name") (Err [ExprKind Diag] (derr ""))))
-                (Some [tn] (Ok (ECall (trait-method-fn a trait_name tn method) (box-items-type a) (try! (resolve-expr-list m args map)))))))))
+              (let [(mut base) "" (mut mty) (load styp)]
+                (if (icmp-eq (type-tag styp) 6)
+                    (let [ioi (io-find m (type-struct-name styp))]
+                      (if (icmp-ge ioi 0)
+                          (let [orig (al-elem [PendInst] (field m io-origin) ioi)]
+                            (store! base (load (field orig name)))
+                            (store! mty (TApp (load (field orig name)) (load (field orig args))))
+                            0)
+                          (do (store! base (type-struct-name styp)) 0)))
+                    (match (mono-impl-name a styp)
+                      (None [] (do (unimplemented "mono/trait-call: Self resolved to a type with no impl name") 0))
+                      (Some [tn] (do (store! base tn) 0))))
+                (let [ip (impl-lookup m trait_name (load base))
+                      (mut targs) (box-items-type a)]
+                  (if (if (icmp-ne (cast i64 ip) 0) (icmp-gt (al-len [(slice u8)] (load (load (field ip type_params)))) 0) false)
+                      (let [(mut bn) (al-new [(slice u8)] a) (mut bt) (al-new [Type] a)
+                            mtyp (alloc-stack Type)]
+                        (store! mtyp (load mty))
+                        (if (not (match-impl-pattern a (field ip self_type) mtyp (load (field ip type_params)) (mut bn) (mut bt)))
+                            (return-from :try (Err [ExprKind Diag] (derr (sconcat3 a "trait call '" method "': receiver doesn't match the impl's implementing type")))) 0)
+                        (let [ps (load (field ip type_params)) np (al-len [(slice u8)] (load ps)) (mut k) 0 (mut ta) (al-new [Type] a)]
+                          (loop (if (icmp-ge (load k) np) (break)
+                            (let [pn (al-get [(slice u8)] (load ps) (load k)) bi (binds-find (mut bn) pn)]
+                              (if (icmp-lt bi 0)
+                                  (return-from :try (Err [ExprKind Diag] (derr (sconcat a (sconcat3 a "trait call '" method "': impl type parameter '") (sconcat a pn "' not determined by the receiver"))))) 0)
+                              (al-push! (mut ta) (al-get [Type] (load bt) bi))
+                              (store! k (iadd (load k) 1)))))
+                          (store! targs (box-al [Type] a (load ta)))
+                          0))
+                      0)
+                  (let [basefn (trait-method-fn a trait_name (load base) method)
+                        rargs (try! (resolve-expr-list m args map))]
+                    (if (icmp-gt (al-len [Type] (load (load targs))) 0)
+                        (let [mng (mangle a basefn (load targs))]
+                          (queue-func m basefn (load targs))
+                          (Ok (ECall mng (box-items-type a) rargs)))
+                        (Ok (ECall basefn (box-items-type a) rargs)))))))))
         ; comptime-only / unresolved nodes: a compiler bug if they reach mono.
         (EComptime  [inner] (Err [ExprKind Diag] (derr "mono: unresolved comptime node (compiler bug)")))
         (ETypeQuery [q t] (Err [ExprKind Diag] (derr "mono: unresolved type-query (compiler bug)")))
@@ -575,6 +682,9 @@
     (store! (field m queued-structs) (al-new [(slice u8)] a))
     (store! (field m queued-sums) (al-new [(slice u8)] a))
     (store! (field m queued-funcs) (al-new [(slice u8)] a))
+    (store! (field m impls) (load (field p impls)))
+    (store! (field m io-mangled) (al-new [(slice u8)] a))
+    (store! (field m io-origin) (al-new [PendInst] a))
     (let [empty (subst-empty a)]
       (match (build-vsum m p)
         (Err [d] (Err [(ptr Program) Diag] d))

@@ -115,11 +115,11 @@ fn bitfields_pack_and_mask() {
         (static-assert (icmp-eq (sizeof Reg) 4) "Reg is 4 bytes")
         (defn main [] (-> :i64)
           (let [r (alloc-stack Reg)]
-            (set! r channel (cast :u4 10))
-            (set! r mode    (cast :u3 2))
-            (set! r enable  (cast :u1 1))
-            (iadd (imul (cast :i64 (get r channel)) 4)
-                  (iadd (cast :i64 (get r mode)) (cast :i64 (get r enable))))))
+            (bit-set! r channel (cast :u4 10))
+            (bit-set! r mode    (cast :u3 2))
+            (bit-set! r enable  (cast :u1 1))
+            (iadd (imul (cast :i64 (bit-get r channel)) 4)
+                  (iadd (cast :i64 (bit-get r mode)) (cast :i64 (bit-get r enable))))))
     "#;
     assert_eq!(build_and_run(src), 43); // 40 + 2 + 1
 }
@@ -132,9 +132,9 @@ fn bitfield_default_backing() {
         (static-assert (icmp-eq (sizeof Flags) 2) "12 bits -> 2 bytes")
         (defn main [] (-> :i64)
           (let [f (alloc-stack Flags)]
-            (set! f b (cast :u8 200))
-            (set! f a (cast :u4 2))
-            (cast :i64 (get f b))))   ; 200 (a doesn't disturb b)
+            (bit-set! f b (cast :u8 200))
+            (bit-set! f a (cast :u4 2))
+            (cast :i64 (bit-get f b))))   ; 200 (a doesn't disturb b)
     "#;
     assert_eq!(build_and_run(src), 200);
 }

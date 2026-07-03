@@ -113,3 +113,13 @@
 
 (defn sb-free! [(sb (mut StrBuf))] (-> :i64)
   (al-free! (mut (field sb bytes))))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; A StrBuf is a byte collection: `(len sb)` / `(get sb i)` / `(push! (mut sb) b)`.
+; (Strings themselves are (slice u8) — their Len/Get impls are lib/slice.coil's.)
+(impl Len StrBuf
+  (len [(sb StrBuf)] (-> i64) (al-len (load (field sb bytes)))))
+(impl Get StrBuf
+  (get [(sb StrBuf) (i i64)] (-> :u8) (al-get (load (field sb bytes)) i)))
+(impl Push StrBuf
+  (push! [(sb (mut StrBuf)) (b :u8)] (-> i64) (sb-push-byte! (mut sb) b)))

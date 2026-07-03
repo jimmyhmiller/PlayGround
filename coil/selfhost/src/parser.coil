@@ -523,9 +523,9 @@
     (if (str-eq head "alloc-heap") (alloc-form a args 2)
     (if (str-eq head "field")
         (Ok (EField (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "field: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "field: missing field name")) "field name"))))
-    (if (str-eq head "get")
+    (if (str-eq head "bit-get")
         (Ok (EBitGet (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "get: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "get: missing field name")) "field name"))))
-    (if (str-eq head "set!")
+    (if (str-eq head "bit-set!")
         (Ok (EBitSet (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "set!: missing pointer"))))) (try! (sym-of a (try! (need [Sexp] (sx-get args 1) "set!: missing field name")) "field name")) (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 2) "set!: missing value")))))))
     (if (str-eq head "fnptr-of") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "fnptr-of: expects (fnptr-of name)")) (Ok (EFnPtrOf (try! (sym-of a (sx-at args 0) "function name")))))
     (if (str-eq head "call-ptr")
@@ -821,12 +821,56 @@
                       (store! (field f cc) (load cc)) (store! (field f params) (box-al [Param] a (load params))) (store! (field f ret) ret)
                       (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0) (load f))))))))))))
 
+; ---- impl-target helpers (src/ast.rs type_impl_name / type_mentions_name) ----
+; The dispatch base name a type carries an impl under: nominal types by (base)
+; name, scalars by spelling, (slice T) by the pseudo-name "slice". "" = the
+; type can't carry an impl (pointers, arrays, fnptrs, vectors).
+(defn impl-base-name [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
+  (match-else (load t)
+    (TStruct [n] n)
+    (TApp [n _args] n)
+    (TInt [b s] (sconcat a (if s "i" "u") (i64->str a b)))
+    (TBool [] "bool")
+    (TFloat [b] (sconcat a "f" (i64->str a b)))
+    (TSlice [_e] "slice")
+    (_ "")))
+
+; Does `t` mention `nm` as a nominal type reference (a type parameter is a bare
+; TStruct reference)?
+(defn type-list-mentions-name [(v (ptr (ArrayList Type))) (nm (slice u8))] (-> bool)
+  (let [n (al-len [Type] (load v)) (mut i) 0 (mut r) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [tv (alloc-stack Type)]
+            (store! tv (al-get [Type] (load v) (load i)))
+            (if (type-mentions-name tv nm) (do (store! r true) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn type-mentions-name [(t (ptr Type)) (nm (slice u8))] (-> bool)
+  (match-else (load t)
+    (TStruct [n] (str-eq n nm))
+    (TApp [n args] (or (str-eq n nm) (type-list-mentions-name args nm)))
+    (TPtr [p] (type-mentions-name p nm))
+    (TRef [_m p] (type-mentions-name p nm))
+    (TSlice [p] (type-mentions-name p nm))
+    (TArray [p _n] (type-mentions-name p nm))
+    (TVec [p _n] (type-mentions-name p nm))
+    (TFn [_cc ps r] (or (type-list-mentions-name ps nm) (type-mentions-name r nm)))
+    (_ false)))
+
 (defn parse-deftrait [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result TraitDef Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "deftrait: missing name")) "trait name"))
-             self-param (if (and (opt-is-vec (sx-get rest 1)) (icmp-eq (sx-len (sx-items (opt-get (sx-get rest 1)))) 1))
-                            (try! (sym-of a (sx-at (sx-items (opt-get (sx-get rest 1))) 0) "Self parameter"))
-                            (return-from :try (Err [TraitDef Diag] (derr "deftrait: expected [Self] after the name"))))
+             ; [Self …]: the first entry is Self; any further entries are EXTRA
+             ; trait type parameters, determined by Self (src/parse.rs).
+             tp-items (if (and (opt-is-vec (sx-get rest 1)) (icmp-gt (sx-len (sx-items (opt-get (sx-get rest 1)))) 0))
+                          (sx-items (opt-get (sx-get rest 1)))
+                          (return-from :try (Err [TraitDef Diag] (derr "deftrait: expected [Self …] after the name"))))
+             self-param (try! (sym-of a (sx-at tp-items 0) "trait type parameter"))
+             (mut type-params) (al-new [(slice u8)] a)
+             ntp (sx-len tp-items) (mut tpi) 1
              (mut methods) (al-new [TraitMethod] a) nr (sx-len rest) (mut mi) 2]
+    (loop (if (icmp-ge (load tpi) ntp) (break)
+      (do (al-push! (mut type-params) (try! (sym-of a (sx-at tp-items (load tpi)) "trait type parameter")))
+          (store! tpi (iadd (load tpi) 1)))))
     (loop (if (icmp-ge (load mi) nr) (break)
       (let [m (sx-at rest (load mi))]
         (store! mi (iadd (load mi) 1))
@@ -845,19 +889,56 @@
             (if (not (str-eq (try! (head-sym a ret-l)) "->")) (return-from :try (Err [TraitDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "trait method '" mname "': expected (-> ret)")))) 0)
             (let [ret (try! (parse-type a (try! (need [Sexp] (sx-get ret-l 1) "(-> ) missing type"))))]
               (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
-    (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
+    (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t type_params) (box-al [(slice u8)] a (load type-params))) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
 
-(defn parse-impl [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef Diag))
-  (try (let [trait-name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "impl: missing trait name")) "trait name"))
-             for-type (try! (sym-of a (try! (need [Sexp] (sx-get rest 1) "impl: missing type name")) "impl type"))
-             (mut methods) (al-new [Func] a) nr (sx-len rest) (mut mi) 2]
-    (loop (if (icmp-ge (load mi) nr) (break)
-      (let [m (sx-at rest (load mi))]
-        (store! mi (iadd (load mi) 1))
-        (let [ml (try! (as-list m "impl method must be (name [params] (-> ret) body…)"))
-              f0 (try! (parse-defn a ml))]
-          (let [fp (alloc-stack Func)] (store! fp f0) (store! (field fp lo) slo) (store! (field fp hi) shi) (store! (field fp source) ssrc) (store! (field fp ctxt) sctxt) (al-push! (mut methods) (load fp)))))))
-    (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im))))))
+; `(impl Trait Type …)` or the GENERIC form `(impl [T] Trait (ArrayList T) …)`
+; (src/parse.rs parse_impl): an optional leading type-parameter vector, then the
+; full implementing type. Each method carries the impl's type params as its own
+; (the lowered functions are ordinary generic functions); every declared param
+; must appear in the implementing type (dispatch infers them from the receiver).
+(defn parse-impl [(a (ptr Allocator)) (rest0 (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef Diag))
+  (try (let [has-tps (opt-is-vec (sx-get rest0 0))
+             (mut type-params) (al-new [(slice u8)] a)
+             base (if has-tps 1 0)]
+    ; optional leading [T …] type-parameter vector
+    (if has-tps
+        (let [v (sx-items (opt-get (sx-get rest0 0))) nv (sx-len v) (mut vi) 0]
+          (if (icmp-eq nv 0) (return-from :try (Err [ImplDef Diag] (derr "impl: the type-parameter vector may not be empty"))) 0)
+          (loop (if (icmp-ge (load vi) nv) (break)
+            (do (al-push! (mut type-params) (try! (sym-of a (sx-at v (load vi)) "impl type parameter")))
+                (store! vi (iadd (load vi) 1)))))
+          0)
+        0)
+    (let [trait-name (try! (sym-of a (try! (need [Sexp] (sx-get rest0 base) "impl: missing trait name")) "trait name"))
+          target (try! (need [Sexp] (sx-get rest0 (iadd base 1)) "impl: missing implementing type"))
+          self-type (try! (parse-type a target))
+          stp (alloc-stack Type)]
+      (store! stp self-type)
+      (let [for-type (impl-base-name a stp)]
+        (if (icmp-eq (slice-len for-type) 0)
+            (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo target) (sx-hi target) "impl: this type can't carry an impl (pointers/arrays/fnptrs can't — name a struct, sum, scalar, generic instance, or (slice T))")))
+            0)
+        ; every impl type param must be inferable from the implementing type
+        (let [ntp2 (al-len [(slice u8)] (load type-params)) (mut ck) 0]
+          (loop (if (icmp-ge (load ck) ntp2) (break)
+            (let [pn (al-get [(slice u8)] (load type-params) (load ck))]
+              (if (not (type-mentions-name stp pn))
+                  (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo target) (sx-hi target) (sconcat3 a "impl: type parameter '" pn "' must appear in the implementing type"))))
+                  0)
+              (store! ck (iadd (load ck) 1))))))
+        (let [(mut methods) (al-new [Func] a) nr (sx-len rest0) (mut mi) (iadd base 2)]
+          (loop (if (icmp-ge (load mi) nr) (break)
+            (let [m (sx-at rest0 (load mi))]
+              (store! mi (iadd (load mi) 1))
+              (let [ml (try! (as-list m "impl method must be (name [params] (-> ret) body…)"))
+                    f0 (try! (parse-defn a ml))]
+                (let [fp (alloc-stack Func)] (store! fp f0)
+                  (if (icmp-gt (al-len [(slice u8)] (load (load (field fp type_params)))) 0)
+                      (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "impl method '" (load (field fp name)) "': declare type parameters on the impl, not the method"))))
+                      0)
+                  (store! (field fp type_params) (box-al [(slice u8)] a (load type-params)))
+                  (store! (field fp lo) slo) (store! (field fp hi) shi) (store! (field fp source) ssrc) (store! (field fp ctxt) sctxt) (al-push! (mut methods) (load fp)))))))
+          (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im type_params) (box-al [(slice u8)] a (load type-params))) (store! (field im self_type) self-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im)))))))))
 
 (defn parse-export-c [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList ExportC)) Diag))
   (try (let [(mut out) (al-new [ExportC] a) n (sx-len rest) (mut i) 0]

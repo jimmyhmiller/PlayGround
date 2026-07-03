@@ -13,9 +13,9 @@ struct TrendsView: View {
                 goalSection.padding(.top, 24)
 
                 SectionDivider().pagePadding()
-                chartSection(title: "CUMULATIVE DEFICIT",
-                             value: deficitText, valueColor: Theme.green) {
-                    if let s = a?.cumulativeDeficitSeries, s.count > 2 {
+                chartSection(title: "CALORIE BANK · VS GOAL PACE",
+                             value: bankText, valueColor: (a?.earnedCaloriesKcal ?? 0) >= 0 ? Theme.green : Theme.amber) {
+                    if let s = a?.earnedCaloriesSeries, s.count > 2 {
                         DeficitAreaChart(series: s).frame(height: 120)
                     }
                 }
@@ -82,9 +82,9 @@ struct TrendsView: View {
         return "\(Fmt.f(abs(toGo), 1)) lb to target · holding \(Fmt.signed(rate, 2)) lb/wk"
     }
 
-    private var deficitText: String {
-        let d = a?.cumulativeDeficitKcal ?? 0
-        return (d > 0 ? "\u{2212}" : (d < 0 ? "+" : "")) + Fmt.int(abs(d))
+    private var bankText: String {
+        let d = a?.earnedCaloriesKcal ?? 0
+        return (d > 0 ? "+" : (d < 0 ? "\u{2212}" : "")) + Fmt.int(abs(d))
     }
 
     private var tdeeText: String {

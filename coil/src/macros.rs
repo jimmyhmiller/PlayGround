@@ -92,6 +92,15 @@ pub fn load_program(
     const PRELUDE: &str = include_str!("prelude.coil");
     let prelude_id = sm.add("<prelude>", PRELUDE);
     let prelude_forms = crate::reader::read_all(PRELUDE, prelude_id)?;
+    // The MAIN file's module is pre-registered as loaded: compiling a stdlib
+    // file directly (`coil dump-ir lib/slice.coil`) must not ALSO pull the
+    // bundled copy of the same module in through the prelude's import chain —
+    // the module would collect twice (visible as "duplicate impl", silent
+    // last-wins for functions). The main file is that module's one definition,
+    // consistent with "a real file wins over the bundle".
+    if let Some(main_mod) = declared_module(forms) {
+        loaded.insert(main_mod);
+    }
     process_forms(&prelude_forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports, sm)?;
     process_forms(forms, &mut out, &base, &mut loaded, None, &mut imports, &mut exports, sm)?;
     Ok((out, imports, exports))

@@ -246,3 +246,14 @@
                (if (icmp-eq (load (field ~e state)) 1)
                    (let [~k (load (field ~e key)) ~v (load (field ~e val))] ~@body)
                    0)))))))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len m)` / `(get m k)` / `(set! (mut m) k v)` on any (HashMap K V). `get`
+; returns (Option V) — a map's E is optional by nature; `set!` is hm-put!
+; (insert-or-update).
+(impl [K V] Len (HashMap K V)
+  (len [(m (HashMap K V))] (-> i64) (hm-len m)))
+(impl [K V] Get (HashMap K V)
+  (get [(m (HashMap K V)) (k K)] (-> (Option V)) (hm-get m k)))
+(impl [K V] Set (HashMap K V)
+  (set! [(m (mut (HashMap K V))) (k K) (v V)] (-> i64) (hm-put! (mut m) k v)))
