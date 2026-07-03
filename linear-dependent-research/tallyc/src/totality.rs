@@ -301,6 +301,7 @@ fn describe(t: &Tm) -> String {
         Tm::Add(_, _) => "an addition".into(),
         Tm::Match(_, _) => "a match".into(),
         Tm::LetPair(_, _, _) | Tm::Let(_, _, _) => "a let".into(),
+        Tm::Ann(_, _) => "a type ascription".into(),
     }
 }
 

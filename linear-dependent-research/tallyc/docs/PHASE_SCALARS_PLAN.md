@@ -103,14 +103,23 @@ Records-in-arrays keep AoS but at the **C offset table**, not 8-byte slots, so
   `bench/bytes.c` compile to the same `<16 x i64>` SIMD reduce over `<16 x i8>`
   loads. IR tests: `bytes_arr_is_dense_u8_storage`, `..._signed_i16_sign_extends`.
   *Delivered: dense strings/buffers/parsing/hashing storage.*
-- **S2 — first-class scalar values + C arithmetic.** The `Scalar` Val variant,
-  wrapping/signed/unsigned ops, typed literals, casts. C-twin: a checksum /
-  bit-twiddling kernel.
+- **S2 — first-class scalar values + C arithmetic. DONE (v2.5).** No `Val`
+  variant was needed: values ride the i64 register (ints masked to width) and the
+  width/signedness is recovered at each op from the erased spine type. `sadd`…
+  `sshr`/`sneg`/`slt`/`sle`/`seq` with C wrapping + signedness; the universal
+  `cast`; typed literals (`200u8`, `3.14`, `2.0f32`) via a bit-reinterpret
+  postulate; type-annotated `let` to drive inference. `examples/scalars.tal`.
 - **S3 — mixed-width record fields + FFI ABI.** C struct layout (`{i32,i32,f64}`
   at real offsets), `%foreign` at the true small-struct ABI.
-- **S4 — floats (f32/f64).** `Float`/`Scalar(is_float)` values, `fadd`/…,
-  int↔float casts, the **FP-register by-value ABI** (AAPCS/SysV — floats in `v`
-  registers) for `%foreign` and `Fix` boundaries. Reuses all of S1–S3.
+- **S4 — floats (f32/f64). DONE (v2.5, minus the FFI FP-register ABI).** Floats
+  ride the i64 register as their bit pattern, decoded only at the op — so no
+  `Val` variant. `fadd`/`fsub`/`fmul`/`fdiv`/`fneg`, ordered `flt`/`fle`/`feq`,
+  `f64_of_nat`/`nat_of_f64`, float literals, and `cast` for int↔float.
+  `Arr F64/F32 n` are dense for free (S1). Measured C-parity: `float_bench.tal`
+  vs `bench/float.c` → same ordered vectorized `fadd` reduction, 0.08s.
+  *Remaining:* the FP-register by-value ABI so `%foreign` can call C math
+  (`double sin(double)`) — currently floats cross FFI as i64 (GP register),
+  wrong for the C ABI. Tracked in S3.
 
 ## 5. Trusted-base note
 

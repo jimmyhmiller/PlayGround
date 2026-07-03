@@ -1,0 +1,28 @@
+// FLOAT ARRAY BENCHMARK — Arr F64 at C's `double[]` speed (Phase Scalars, S4).
+//
+//   tally build examples/float_bench.tal -o /tmp/fb -O2 && /tmp/fb   → 50000000
+//
+// Fill a 50,000,000-element F64 buffer with 1.0, sum with `fadd`. The twin is
+// bench/float.c (`double[]`). `Arr F64 n` is dense (8 bytes/elem via S1), and
+// the safe convoy sum lowers to the same vectorized `fadd` reduction as C — full
+// memory safety (linear buffer, bounds-decided) at floating-point C speed.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+sum : (m : Nat) -> (b : Nat) -> (acc : F64) -> (1 arr : Arr F64 (b + m)) -> F64
+%partial fn sum(m, b, acc, arr) {
+    match b {
+        Zero => let u = afree(arr); acc,
+        Succ(k) =>
+            let (x, arr2) = aget(m, lt(m, Succ(k) + m), arr);
+            sum(Succ(m), k, fadd(acc, x), arr2),
+    }
+}
+
+main : Nat
+fn main() {
+    let a = anew(50000000, 1.0);                 // 50M doubles = 1.0
+    let s = sum(0, 50000000, 0.0, a);
+    nat_of_f64(s)                                // 50000000.0 -> 50000000
+}

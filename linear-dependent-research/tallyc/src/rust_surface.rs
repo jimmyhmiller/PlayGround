@@ -45,6 +45,12 @@ const HOLE_BASE: usize = usize::MAX / 2;
 enum Tok {
     Ident(String),
     Num(u64),
+    /// a suffixed integer literal `123u8` / `-` handled separately — carries the
+    /// magnitude and the scalar type name (`u8`…`i64`). Desugars to `u8(123)`.
+    NumSuffixed(u64, String),
+    /// a float literal `3.14` / `3.14f32` — carries the IEEE bit pattern and
+    /// whether it is single precision. Desugars to `f64_bits(<bits>)`.
+    FloatLit(u64, bool),
     Str(String),
     LParen,
     RParen,
@@ -144,7 +150,50 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             while i < b.len() && (b[i] as char).is_ascii_digit() {
                 i += 1;
             }
-            out.push(Tok::Num(src[s..i].parse().map_err(|_| "bad number")?));
+            // FLOAT literal: `digits '.' digits`, optional `f32`/`f64` suffix.
+            if i + 1 < b.len() && b[i] as char == '.' && (b[i + 1] as char).is_ascii_digit() {
+                i += 1; // consume '.'
+                while i < b.len() && (b[i] as char).is_ascii_digit() {
+                    i += 1;
+                }
+                let numstr = &src[s..i];
+                let is_f32 = if src[i..].starts_with("f32") {
+                    i += 3;
+                    true
+                } else if src[i..].starts_with("f64") {
+                    i += 3;
+                    false
+                } else {
+                    false
+                };
+                let v: f64 = numstr.parse().map_err(|_| "bad float literal")?;
+                let bits = if is_f32 {
+                    (v as f32).to_bits() as u64
+                } else {
+                    v.to_bits()
+                };
+                out.push(Tok::FloatLit(bits, is_f32));
+            } else {
+                // integer, with an optional scalar suffix `u8`…`i64` (no space).
+                let mut j = i;
+                while j < b.len() && {
+                    let ch = b[j] as char;
+                    ch.is_alphanumeric() || ch == '_'
+                } {
+                    j += 1;
+                }
+                let suffix = &src[i..j];
+                if matches!(
+                    suffix,
+                    "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64"
+                ) {
+                    let n: u64 = src[s..i].parse().map_err(|_| "bad number")?;
+                    out.push(Tok::NumSuffixed(n, suffix.to_string()));
+                    i = j;
+                } else {
+                    out.push(Tok::Num(src[s..i].parse().map_err(|_| "bad number")?));
+                }
+            }
         } else if c.is_alphabetic() || c == '_' {
             let s = i;
             while i < b.len() && {
@@ -195,7 +244,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
 /// concrete `Mult` at each call site before elaboration — the kernel never sees a
 /// multiplicity variable (see `docs/MULT_POLY_PLAN.md`).
 #[derive(Clone, Debug, PartialEq)]
-enum SMult {
+pub(crate) enum SMult {
     Lit(Mult),
     Var(String),
 }
@@ -214,8 +263,8 @@ impl SMult {
     }
 }
 
-#[derive(Clone, Debug)]
-enum Ty {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Ty {
     Var(String),
     /// `Type` (level 0) or `Type i` — the i-th universe. The kernel's hierarchy
     /// (`Type i : Type (i+1)`, cumulative, predicative) is now surface-reachable.
@@ -244,6 +293,10 @@ pub(crate) enum Tm {
     LetPair(Vec<String>, Box<Tm>, Box<Tm>),
     /// `let x = e; body` — bind a single value (1a surface expressiveness).
     Let(String, Box<Tm>, Box<Tm>),
+    /// `(e : T)` type ASCRIPTION — check `e` against `T`. Surfaces via the
+    /// type-annotated `let x : T = e` (drives inference for `cast` and other
+    /// context-typed forms).
+    Ann(Box<Tm>, Box<Ty>),
 }
 
 /// A surface match PATTERN: a variable, or a constructor applied to
@@ -687,10 +740,22 @@ impl Parser {
                     Ok(Tm::LetPair(names, Box::new(rhs), Box::new(body)))
                 } else {
                     let name = self.ident()?;
+                    // optional type ascription: `let x : T = e` checks `e` at `T`
+                    // (drives `cast`/context-typed inference).
+                    let ann = if self.peek() == Some(&Tok::Colon) {
+                        self.next();
+                        Some(self.parse_ty_app()?)
+                    } else {
+                        None
+                    };
                     self.eat(&Tok::Eq)?;
                     let rhs = self.parse_add()?;
                     self.eat(&Tok::Semi)?;
                     let body = self.parse_tm()?;
+                    let rhs = match ann {
+                        Some(ty) => Tm::Ann(Box::new(rhs), Box::new(ty)),
+                        None => rhs,
+                    };
                     Ok(Tm::Let(name, Box::new(rhs), Box::new(body)))
                 }
             }
@@ -713,6 +778,15 @@ impl Parser {
         let name = match self.next() {
             Some(Tok::Ident(s)) => s,
             Some(Tok::Num(n)) => return Ok(Tm::Lit(n)),
+            // `123u8` ⇒ `u8(123)`; `3.14` ⇒ `f64_bits(<bits>)` (reinterpret the
+            // Nat's bit pattern as a float — codegen identity, floats ARE i64 bits).
+            Some(Tok::NumSuffixed(n, suf)) => {
+                return Ok(Tm::Call(suf, vec![Tm::Lit(n)]))
+            }
+            Some(Tok::FloatLit(bits, is_f32)) => {
+                let f = if is_f32 { "f32_bits" } else { "f64_bits" };
+                return Ok(Tm::Call(f.to_string(), vec![Tm::Lit(bits)]));
+            }
             Some(Tok::Str(x)) => return Ok(Tm::Str(x)),
             Some(Tok::LParen) => {
                 let t = self.parse_tm()?;
@@ -1272,6 +1346,8 @@ impl Elab {
     /// Plain (no-implicit) elaboration; used for vars, functions, explicit ctors.
     fn elab_tm(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         match t {
+            // a type ascription infers via `infer_arg` (checks against the annotation).
+            Tm::Ann(_, _) => self.infer_arg(t, cx, rec).map(|(tm, _)| tm),
             Tm::Lit(n) => Ok(Term::NatLit(*n)),
             Tm::Str(x) => Ok(Term::StrLit(x.clone())),
             Tm::Add(a, b) => Ok(Term::Add(
@@ -1322,6 +1398,15 @@ impl Elab {
     /// or a call/constructor that can itself be solved). Returns `(term, type)`.
     fn infer_arg(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
         match t {
+            // `(e : T)` — elaborate the annotation, CHECK `e` against it, and
+            // report `T` as the inferred type (the ascription IS the inference
+            // for a context-typed form like `cast`).
+            Tm::Ann(e, ty) => {
+                let ty_tm = self.elab_ty(ty, &cx.names)?;
+                let ty_val = self.eval(cx.len(), &ty_tm);
+                let e_tm = self.check(e, &ty_val, cx, rec)?;
+                Ok((e_tm, ty_val))
+            }
             // built-in Nat: literals, addition, and the `%builtin Nat` intro forms
             // all have type `Nat` (packed), so they infer with no expected type.
             Tm::Lit(n) => Ok((Term::NatLit(*n), Value::VNat)),
@@ -2488,6 +2573,10 @@ fn mono_rewrite_tm(
              argument(s) (a bare reference cannot be monomorphized)"
         )),
         Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => Ok(t.clone()),
+        Tm::Ann(e, ty) => Ok(Tm::Ann(
+            Box::new(mono_rewrite_tm(e, polys, subst, queue)?),
+            ty.clone(),
+        )),
         Tm::Call(name, args) => {
             if let Some(pd) = polys.get(name) {
                 let mut mults = Vec::new();
@@ -2691,6 +2780,7 @@ impl Elab {
     fn desugar_patterns(&self, t: &Tm, fresh: &mut usize) -> Result<Tm, String> {
         Ok(match t {
             Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
+            Tm::Ann(e, ty) => Tm::Ann(Box::new(self.desugar_patterns(e, fresh)?), ty.clone()),
             Tm::Call(n, args) => Tm::Call(
                 n.clone(),
                 args.iter().map(|a| self.desugar_patterns(a, fresh)).collect::<Result<_, _>>()?,
@@ -3003,6 +3093,7 @@ fn reorder_fns_by_calls(items: &mut [Item]) {
 /// caught by the kernel; the filter's job is only to skip CLEARLY-unused deps).
 fn collect_tm_names(t: &Tm, out: &mut std::collections::HashSet<String>) {
     match t {
+        Tm::Ann(e, _) => collect_tm_names(e, out),
         Tm::Var(nm) => {
             out.insert(nm.clone());
         }
@@ -4355,6 +4446,7 @@ fn rebind_linear_fields(
 
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     match t {
+        Tm::Ann(e, _) => collect_all_calls(e, out),
         Tm::Call(n, args) => {
             out.push(TCall { callee: n.clone(), args: args.clone() });
             for a in args {
@@ -4548,6 +4640,8 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         ("I16", "postulate I16 : Type\n"),
         ("I32", "postulate I32 : Type\n"),
         ("I64", "postulate I64 : Type\n"),
+        ("F32", "postulate F32 : Type\n"),
+        ("F64", "postulate F64 : Type\n"),
         ("putc", "postulate putc : Nat -> Unit\n"),
         ("getc", "postulate getc : Unit -> Nat\n"),
         ("sub", "postulate sub : Nat -> Nat -> Nat\n"),
@@ -4582,6 +4676,54 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         ("nat_i16", "postulate nat_i16 : I16 -> Nat\n"),
         ("nat_i32", "postulate nat_i32 : I32 -> Nat\n"),
         ("nat_i64", "postulate nat_i64 : I64 -> Nat\n"),
+        // FIRST-CLASS SCALAR ARITHMETIC (S2) — the C machine ops, polymorphic
+        // over ANY scalar type `a` (width + signedness recovered at codegen from
+        // the erased `a`). Semantics are C's, NOT Nat's: `ssub` WRAPS (two's
+        // complement), not monus; `sdiv`/`smod`/`sshr`/`slt`/`sle` are
+        // signedness-directed by `a` (I* signed, U* unsigned). Total edges:
+        // `/0 = 0`, `%0 = x`, shift ≥ width = 0. `slt`/`sle`/`seq` return Nat
+        // 0/1 (match as `Zero`/`Succ`). Using them at a non-scalar `a` (e.g.
+        // `Nat`) is a guided compile error — use `+`/`sub`/`mul` for `Nat`.
+        ("sadd", "postulate sadd : {0 a : Type} -> a -> a -> a\n"),
+        ("ssub", "postulate ssub : {0 a : Type} -> a -> a -> a\n"),
+        ("smul", "postulate smul : {0 a : Type} -> a -> a -> a\n"),
+        ("sdiv", "postulate sdiv : {0 a : Type} -> a -> a -> a\n"),
+        ("smod", "postulate smod : {0 a : Type} -> a -> a -> a\n"),
+        ("sand", "postulate sand : {0 a : Type} -> a -> a -> a\n"),
+        ("sor", "postulate sor : {0 a : Type} -> a -> a -> a\n"),
+        ("sxor", "postulate sxor : {0 a : Type} -> a -> a -> a\n"),
+        ("sshl", "postulate sshl : {0 a : Type} -> a -> a -> a\n"),
+        ("sshr", "postulate sshr : {0 a : Type} -> a -> a -> a\n"),
+        ("sneg", "postulate sneg : {0 a : Type} -> a -> a\n"),
+        ("slt", "postulate slt : {0 a : Type} -> a -> a -> Nat\n"),
+        ("sle", "postulate sle : {0 a : Type} -> a -> a -> Nat\n"),
+        ("seq", "postulate seq : {0 a : Type} -> a -> a -> Nat\n"),
+        // CASTS (S2/S4) — one polymorphic conversion between ANY two scalars
+        // (int↔int width change, int↔float, float↔float). The target `b` is
+        // inferred from context (an annotated `let` or a typed argument).
+        ("cast", "postulate cast : {0 a : Type} -> {0 b : Type} -> a -> b\n"),
+        // FLOATS (S4) — IEEE-754 `F32`/`F64`, riding the i64 register as their
+        // bit pattern (decoded only at these ops). `flt`/`fle`/`feq` are ORDERED
+        // comparisons → Nat 0/1. Build a float from a Nat with `f64_of_nat`
+        // (`sitofp`) and read it back with `nat_of_f64` (`fptosi`); `cast`
+        // covers every int↔float and float↔float conversion.
+        ("fadd", "postulate fadd : {0 a : Type} -> a -> a -> a\n"),
+        ("fsub", "postulate fsub : {0 a : Type} -> a -> a -> a\n"),
+        ("fmul", "postulate fmul : {0 a : Type} -> a -> a -> a\n"),
+        ("fdiv", "postulate fdiv : {0 a : Type} -> a -> a -> a\n"),
+        ("fneg", "postulate fneg : {0 a : Type} -> a -> a\n"),
+        ("flt", "postulate flt : {0 a : Type} -> a -> a -> Nat\n"),
+        ("fle", "postulate fle : {0 a : Type} -> a -> a -> Nat\n"),
+        ("feq", "postulate feq : {0 a : Type} -> a -> a -> Nat\n"),
+        // float LITERAL desugaring targets: reinterpret a Nat's bit pattern as a
+        // float (`3.14` ⇒ `f64_bits(<bits>)`). Codegen identity — floats ride the
+        // i64 register as their bits.
+        ("f64_bits", "postulate f64_bits : Nat -> F64\n"),
+        ("f32_bits", "postulate f32_bits : Nat -> F32\n"),
+        ("f64_of_nat", "postulate f64_of_nat : Nat -> F64\n"),
+        ("f32_of_nat", "postulate f32_of_nat : Nat -> F32\n"),
+        ("nat_of_f64", "postulate nat_of_f64 : F64 -> Nat\n"),
+        ("nat_of_f32", "postulate nat_of_f32 : F32 -> Nat\n"),
     ] {
         if !collides && has_nat && !taken.contains(nm) {
             let p = Parser { toks: lex(decl)?, pos: 0, fresh: 0 }.parse_program()?;

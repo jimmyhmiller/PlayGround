@@ -46,6 +46,35 @@ needs no boilerplate:
 fn main() { free(alloc(Zero)) }   // alloc + free, checked by linearity
 ```
 
+## Status (v2.5 — SCALAR ARITHMETIC + FLOATS: the full C number ladder, safely; 229 tests)
+
+Phase Scalars S2+S4: the runtime numbers become first-class. Scalar values ride
+the i64 register (integers masked to width, floats as their bit pattern), and the
+width/signedness/float-ness is recovered at each op from the ERASED type argument
+in the spine — so **no representation rewrite** was needed (the `Val` enum is
+untouched; the blast radius is new op arms only).
+
+- **First-class integer arithmetic** (`sadd ssub smul sdiv smod sand sor sxor
+  sshl sshr sneg`, compares `slt sle seq` → Nat 0/1) — polymorphic over ANY
+  scalar type, with **C semantics, not Nat's**: `ssub` WRAPS (two's complement)
+  rather than monus, and `sdiv`/`smod`/`sshr`/`slt`/`sle` are signedness-directed
+  (`I*` signed, `U*` unsigned). Total edges match the Nat ops (`/0 = 0`, `%0 = x`,
+  shift ≥ width = 0). Using them at `Nat` or an abstract type is a guided error.
+- **Floats `F32`/`F64`** (`fadd fsub fmul fdiv fneg`, ordered compares
+  `flt fle feq`) — real IEEE-754, decoded from the register's bit pattern only at
+  the op. `f64_of_nat`/`nat_of_f64` bridge to `Nat`.
+- **The universal `cast`** (`{0 a b} -> a -> b`) — int↔int (re-mask), int↔float
+  (`(u/s)itofp`, `fpto(u/s)i`), float↔float (`fptrunc`/`fpext`), target inferred
+  from context.
+- **Typed literals**: `200u8`, `-` via `sneg`, and real **float literals**
+  `3.14`, `2.0f32` (desugared to a bit-reinterpreting postulate — no kernel
+  change). Plus **type-annotated `let`** (`let x : F64 = …`) to drive inference.
+- **Measured float C-parity** (`examples/float_bench.tal` vs `bench/float.c`):
+  sum a **50M-element `Arr F64`** (400 MB dense). Both compile to the SAME
+  vectorized `<2 x double>` loads + **ordered** `llvm.vector.reduce.fadd.v2f64`
+  (no fast-math — bit-identical IEEE to C), same 0.08s. `examples/scalars.tal`
+  (→ 1) and `examples/floats.tal` (Newton `sqrt(81)` → 9) are the runnable demos.
+
 ## Status (v2.4 — SIZED-ELEMENT ARRAYS: real C byte buffers, `zext`-identical to `unsigned char[]`; 225 tests)
 
 The biggest "as expressive/dense as C" gap after the memory model was the

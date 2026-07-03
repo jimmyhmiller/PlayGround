@@ -455,7 +455,10 @@ fn scalar_desc(t: &Term) -> Option<(u32, bool)> {
     None
 }
 
-/// `(byte_size, signed)` for a scalar type NAME (`U8`…`I64`), else `None`.
+/// `(byte_size, signed)` for a scalar type NAME (`U8`…`I64`, `F32`/`F64`), else
+/// `None`. Floats report `signed = false` because for STORAGE they are just
+/// bit-preserving N-byte values (dense `Arr F64 n` falls out of the S1 path for
+/// free); their float-ness matters only at ARITHMETIC (`scalar_is_float`).
 fn scalar_bytes_signed(name: &str) -> Option<(u32, bool)> {
     match name {
         "U8" => Some((1, false)),
@@ -466,8 +469,25 @@ fn scalar_bytes_signed(name: &str) -> Option<(u32, bool)> {
         "I16" => Some((2, true)),
         "I32" => Some((4, true)),
         "I64" => Some((8, true)),
+        "F32" => Some((4, false)),
+        "F64" => Some((8, false)),
         _ => None,
     }
+}
+
+/// Whether a scalar type NAME is a floating-point type (`F32`/`F64`).
+fn scalar_is_float(name: &str) -> bool {
+    matches!(name, "F32" | "F64")
+}
+
+/// The `(byte_size, signed, is_float)` of the scalar TERM in a spine position,
+/// or an error naming the abstract/non-scalar type. Used by the arithmetic and
+/// cast primitives, which need the full descriptor (not just storage width).
+fn scalar_full(t: &Term) -> Option<(u32, bool, bool)> {
+    if let Term::Const(c) = strip_ann(t) {
+        return scalar_bytes_signed(c).map(|(b, s)| (b, s, scalar_is_float(c)));
+    }
+    None
 }
 
 /// A scalar CONVERSION postulate: `(byte_size, signed, to_scalar)`.
@@ -711,6 +731,45 @@ impl<'c, 'a> DepCg<'c, 'a> {
         } else {
             self.builder.build_int_z_extend(v, self.i64t, name).unwrap()
         }
+    }
+
+    /// Re-canonicalize an i64 working register to a scalar's width+signedness
+    /// (truncate to `iN`, then sign/zero-extend back). This IS the wrapping: an
+    /// N-bit mask is arithmetic mod 2^N. A no-op at 64 bits.
+    fn mask_scalar(&self, v: IntValue<'c>, bytes: u32, signed: bool, name: &str) -> IntValue<'c> {
+        let ity = self.scalar_int_ty(bytes);
+        let t = self.trunc_to(v, ity, name);
+        self.widen_from(t, signed, name)
+    }
+
+    /// The LLVM float type for a scalar of `bytes` (f32 or f64).
+    fn float_ty(&self, bytes: u32) -> inkwell::types::FloatType<'c> {
+        if bytes == 4 {
+            self.ctx.f32_type()
+        } else {
+            self.ctx.f64_type()
+        }
+    }
+
+    /// Decode a float carried as i64 BITS in the working register back to a real
+    /// `fN` value (floats ride the i64 machinery as their bit pattern, decoded
+    /// only at arithmetic — so no `Val` variant is needed).
+    fn bits_to_float(&self, v: IntValue<'c>, bytes: u32, name: &str) -> inkwell::values::FloatValue<'c> {
+        let iv = self.trunc_to(v, self.scalar_int_ty(bytes), name);
+        self.builder
+            .build_bit_cast(iv, self.float_ty(bytes), name)
+            .unwrap()
+            .into_float_value()
+    }
+
+    /// Encode a real `fN` value back to i64 bits for the working register.
+    fn float_to_bits(&self, v: inkwell::values::FloatValue<'c>, bytes: u32, name: &str) -> IntValue<'c> {
+        let iv = self
+            .builder
+            .build_bit_cast(v, self.scalar_int_ty(bytes), name)
+            .unwrap()
+            .into_int_value();
+        self.widen_from(iv, false, name)
     }
 
     fn expect_width(&self, v: Val<'c>, w: u32, what: &str) -> Result<Val<'c>, String> {
@@ -1597,6 +1656,249 @@ impl<'c, 'a> DepCg<'c, 'a> {
             ));
         }
         Ok(type_width(self.sig, t))
+    }
+
+    /// First-class SCALAR INTEGER arithmetic (S2): `sadd`…`sshr`, `sneg`,
+    /// `slt`/`sle`/`seq`. The width + signedness come from the erased type
+    /// argument `a` (spine `args[0]`); the operands ride the i64 register and
+    /// results are re-masked to `a`'s width (that mask IS the two's-complement
+    /// wrap). Total edges match the Nat ops: `/0 = 0`, `%0 = x`, shift ≥ width
+    /// = 0. Comparisons return Nat `0`/`1`.
+    fn compile_scalar_op(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        cname: &str,
+        args: &[&Term],
+    ) -> Result<Val<'c>, String> {
+        let ty = *args
+            .first()
+            .ok_or_else(|| format!("`{cname}`: missing its scalar type argument"))?;
+        let (bytes, signed, is_float) = scalar_full(ty).ok_or_else(|| {
+            format!(
+                "`{cname}`: needs a CONCRETE scalar operand (`U8`…`I64`). `Nat` uses \
+                 `+`/`sub`/`mul`; an abstract type in a generic `%partial` fn must be \
+                 specialized."
+            )
+        })?;
+        if is_float {
+            return Err(format!(
+                "`{cname}` is an INTEGER op — use `fadd`/`fsub`/`fmul`/`fdiv`/`fneg`/\
+                 `flt`/`fle`/`feq` for floats"
+            ));
+        }
+        let bits = (bytes * 8) as u64;
+        let rt = self.runtime_args(f, env, cname, args)?;
+        let bd = self.builder;
+        let i64t = self.i64t;
+        if cname == "sneg" {
+            let [x] = rt.as_slice() else {
+                return Err(format!("sneg: expected 1 runtime argument, got {}", rt.len()));
+            };
+            let neg = bd.build_int_neg(*x, "sneg").unwrap();
+            return Ok(Val::Int(self.mask_scalar(neg, bytes, signed, "sneg.m")));
+        }
+        let [a, b] = rt.as_slice() else {
+            return Err(format!("{cname}: expected 2 runtime arguments, got {}", rt.len()));
+        };
+        let (a, b) = (*a, *b);
+        use inkwell::IntPredicate as P;
+        let m = |v: IntValue<'c>| self.mask_scalar(v, bytes, signed, "s.m");
+        let out = match cname {
+            "sadd" => m(bd.build_int_add(a, b, "sadd").unwrap()),
+            "ssub" => m(bd.build_int_sub(a, b, "ssub").unwrap()),
+            "smul" => m(bd.build_int_mul(a, b, "smul").unwrap()),
+            "sand" => m(bd.build_and(a, b, "sand").unwrap()),
+            "sor" => m(bd.build_or(a, b, "sor").unwrap()),
+            "sxor" => m(bd.build_xor(a, b, "sxor").unwrap()),
+            "sdiv" | "smod" => {
+                let z = bd
+                    .build_int_compare(P::EQ, b, i64t.const_zero(), "sdz")
+                    .unwrap();
+                let safe_b = bd
+                    .build_select(z, i64t.const_int(1, false), b, "sdsafe")
+                    .unwrap()
+                    .into_int_value();
+                if cname == "sdiv" {
+                    let q = if signed {
+                        bd.build_int_signed_div(a, safe_b, "sdiv").unwrap()
+                    } else {
+                        bd.build_int_unsigned_div(a, safe_b, "udiv").unwrap()
+                    };
+                    let q = bd
+                        .build_select(z, i64t.const_zero(), q, "sdiv.t")
+                        .unwrap()
+                        .into_int_value();
+                    m(q)
+                } else {
+                    let r = if signed {
+                        bd.build_int_signed_rem(a, safe_b, "srem").unwrap()
+                    } else {
+                        bd.build_int_unsigned_rem(a, safe_b, "urem").unwrap()
+                    };
+                    let r = bd.build_select(z, a, r, "smod.t").unwrap().into_int_value();
+                    m(r)
+                }
+            }
+            "sshl" | "sshr" => {
+                let big = bd
+                    .build_int_compare(P::UGE, b, i64t.const_int(bits, false), "sh.big")
+                    .unwrap();
+                let raw = if cname == "sshl" {
+                    bd.build_left_shift(a, b, "sshl").unwrap()
+                } else {
+                    // arithmetic (sign-propagating) shift for signed scalars.
+                    bd.build_right_shift(a, b, signed, "sshr").unwrap()
+                };
+                let r = bd
+                    .build_select(big, i64t.const_zero(), raw, "sh.t")
+                    .unwrap()
+                    .into_int_value();
+                m(r)
+            }
+            "slt" | "sle" | "seq" => {
+                let pred = match cname {
+                    "slt" => {
+                        if signed {
+                            P::SLT
+                        } else {
+                            P::ULT
+                        }
+                    }
+                    "sle" => {
+                        if signed {
+                            P::SLE
+                        } else {
+                            P::ULE
+                        }
+                    }
+                    _ => P::EQ,
+                };
+                let c = bd.build_int_compare(pred, a, b, cname).unwrap();
+                return Ok(Val::Int(bd.build_int_z_extend(c, i64t, "s.cmpz").unwrap()));
+            }
+            _ => return Err(format!("compile_scalar_op: unexpected op `{cname}`")),
+        };
+        Ok(Val::Int(out))
+    }
+
+    /// First-class FLOAT arithmetic (S4): `fadd`/`fsub`/`fmul`/`fdiv`/`fneg` and
+    /// `flt`/`fle`/`feq` (ordered comparisons → Nat `0`/`1`). Operands are
+    /// decoded from their i64 bit pattern, operated on as real `fN`, re-encoded.
+    fn compile_float_op(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        cname: &str,
+        args: &[&Term],
+    ) -> Result<Val<'c>, String> {
+        let ty = *args
+            .first()
+            .ok_or_else(|| format!("`{cname}`: missing its float type argument"))?;
+        let (bytes, _s, is_float) = scalar_full(ty).ok_or_else(|| {
+            format!("`{cname}`: needs a CONCRETE float operand (`F32`/`F64`)")
+        })?;
+        if !is_float {
+            return Err(format!(
+                "`{cname}` is a FLOAT op — use the `s…` ops for integer scalars"
+            ));
+        }
+        let rt = self.runtime_args(f, env, cname, args)?;
+        let bd = self.builder;
+        if cname == "fneg" {
+            let [x] = rt.as_slice() else {
+                return Err(format!("fneg: expected 1 runtime argument, got {}", rt.len()));
+            };
+            let r = bd.build_float_neg(self.bits_to_float(*x, bytes, "f.d"), "fneg").unwrap();
+            return Ok(Val::Int(self.float_to_bits(r, bytes, "f.e")));
+        }
+        let [a, b] = rt.as_slice() else {
+            return Err(format!("{cname}: expected 2 runtime arguments, got {}", rt.len()));
+        };
+        let fa = self.bits_to_float(*a, bytes, "f.a");
+        let fb = self.bits_to_float(*b, bytes, "f.b");
+        use inkwell::FloatPredicate as FP;
+        match cname {
+            "fadd" | "fsub" | "fmul" | "fdiv" => {
+                let r = match cname {
+                    "fadd" => bd.build_float_add(fa, fb, "fadd").unwrap(),
+                    "fsub" => bd.build_float_sub(fa, fb, "fsub").unwrap(),
+                    "fmul" => bd.build_float_mul(fa, fb, "fmul").unwrap(),
+                    _ => bd.build_float_div(fa, fb, "fdiv").unwrap(),
+                };
+                Ok(Val::Int(self.float_to_bits(r, bytes, "f.e")))
+            }
+            "flt" | "fle" | "feq" => {
+                let pred = match cname {
+                    "flt" => FP::OLT,
+                    "fle" => FP::OLE,
+                    _ => FP::OEQ,
+                };
+                let c = bd.build_float_compare(pred, fa, fb, cname).unwrap();
+                Ok(Val::Int(bd.build_int_z_extend(c, self.i64t, "f.cmpz").unwrap()))
+            }
+            _ => Err(format!("compile_float_op: unexpected op `{cname}`")),
+        }
+    }
+
+    /// The universal scalar CAST (S2/S4): `cast : {0 a b} -> a -> b`, spine
+    /// `[a, b, x]`. int→int re-masks to the target; int→float is `(u/s)itofp`;
+    /// float→int is `fpto(u/s)i`; float→float is `fptrunc`/`fpext`. Nat↔scalar
+    /// is NOT a `cast` (Nat is not a scalar) — use `u8`…/`nat_u8`…/`f64_of_nat`.
+    fn compile_cast(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        args: &[&Term],
+    ) -> Result<Val<'c>, String> {
+        let a_ty = *args.first().ok_or("cast: missing source type argument")?;
+        let b_ty = *args.get(1).ok_or("cast: missing target type argument")?;
+        let (ab, asg, af) =
+            scalar_full(a_ty).ok_or("cast: SOURCE is not a concrete scalar type")?;
+        let (bb, bsg, bf) =
+            scalar_full(b_ty).ok_or("cast: TARGET is not a concrete scalar type")?;
+        let rt = self.runtime_args(f, env, "cast", args)?;
+        let [x] = rt.as_slice() else {
+            return Err(format!("cast: expected 1 runtime argument, got {}", rt.len()));
+        };
+        let x = *x;
+        let bd = self.builder;
+        let out = match (af, bf) {
+            (false, false) => self.mask_scalar(x, bb, bsg, "cast.ii"),
+            (false, true) => {
+                let src = self.mask_scalar(x, ab, asg, "cast.src");
+                let fty = self.float_ty(bb);
+                let fv = if asg {
+                    bd.build_signed_int_to_float(src, fty, "sitofp").unwrap()
+                } else {
+                    bd.build_unsigned_int_to_float(src, fty, "uitofp").unwrap()
+                };
+                self.float_to_bits(fv, bb, "cast.fb")
+            }
+            (true, false) => {
+                let fv = self.bits_to_float(x, ab, "cast.f");
+                let ity = self.scalar_int_ty(bb);
+                let iv = if bsg {
+                    bd.build_float_to_signed_int(fv, ity, "fptosi").unwrap()
+                } else {
+                    bd.build_float_to_unsigned_int(fv, ity, "fptoui").unwrap()
+                };
+                self.widen_from(iv, bsg, "cast.iw")
+            }
+            (true, true) => {
+                let fv = self.bits_to_float(x, ab, "cast.f");
+                let fty = self.float_ty(bb);
+                let r = if bb < ab {
+                    bd.build_float_trunc(fv, fty, "fptrunc").unwrap()
+                } else if bb > ab {
+                    bd.build_float_ext(fv, fty, "fpext").unwrap()
+                } else {
+                    fv
+                };
+                self.float_to_bits(r, bb, "cast.fb2")
+            }
+        };
+        Ok(Val::Int(out))
     }
 
     /// Native implementations of the known memory postulates. Erased
@@ -2629,6 +2931,53 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // `nat_i64` : T -> Nat reinterpret back — identity, since the register
             // already holds the width-correct value (from the intro or a widening
             // `aget`). Both are runtime-cheap; the width/signedness is in the name.
+            // first-class scalar/float arithmetic + the universal cast (S2/S4).
+            "sadd" | "ssub" | "smul" | "sdiv" | "smod" | "sand" | "sor" | "sxor"
+            | "sshl" | "sshr" | "sneg" | "slt" | "sle" | "seq" => {
+                self.compile_scalar_op(f, env, cname, args)
+            }
+            "fadd" | "fsub" | "fmul" | "fdiv" | "fneg" | "flt" | "fle" | "feq" => {
+                self.compile_float_op(f, env, cname, args)
+            }
+            "cast" => self.compile_cast(f, env, args),
+            // float literal reinterpretation: the Nat's bit pattern IS the float
+            // (identity — floats ride the i64 register as their bits). For f32 the
+            // low 32 bits carry the pattern.
+            "f64_bits" | "f32_bits" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [x] = rt.as_slice() else {
+                    return Err(format!("{cname}: expected 1 runtime argument, got {}", rt.len()));
+                };
+                Ok(Val::Int(*x))
+            }
+            // Nat ↔ float bridges (Nat is not a scalar, so `cast` can't do it).
+            "f64_of_nat" | "f32_of_nat" | "nat_of_f64" | "nat_of_f32" => {
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [x] = rt.as_slice() else {
+                    return Err(format!("{cname}: expected 1 runtime argument, got {}", rt.len()));
+                };
+                let x = *x;
+                let bd = self.builder;
+                let out = match cname {
+                    "f64_of_nat" => {
+                        let fv = bd.build_signed_int_to_float(x, self.ctx.f64_type(), "n2f").unwrap();
+                        self.float_to_bits(fv, 8, "n2f.e")
+                    }
+                    "f32_of_nat" => {
+                        let fv = bd.build_signed_int_to_float(x, self.ctx.f32_type(), "n2f").unwrap();
+                        self.float_to_bits(fv, 4, "n2f.e")
+                    }
+                    "nat_of_f64" => {
+                        let fv = self.bits_to_float(x, 8, "f2n.d");
+                        bd.build_float_to_signed_int(fv, self.i64t, "f2n").unwrap()
+                    }
+                    _ => {
+                        let fv = self.bits_to_float(x, 4, "f2n.d");
+                        bd.build_float_to_signed_int(fv, self.i64t, "f2n").unwrap()
+                    }
+                };
+                Ok(Val::Int(out))
+            }
             name if scalar_conv(name).is_some() => {
                 let (bytes, signed, to_scalar) = scalar_conv(name).unwrap();
                 let rt = self.runtime_args(f, env, cname, args)?;
@@ -5808,18 +6157,103 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         );
 
         // and it runs: buf[1] = 41, read back and +1 → 42.
-        let val = super::run_main(
-            &rust_surface::check_program(&src).unwrap().sig,
-            &rust_surface::check_program(&src)
-                .unwrap()
-                .defs
-                .iter()
-                .find(|(n, _, _)| n == "main")
-                .unwrap()
-                .2,
-        )
-        .unwrap();
-        assert_eq!(val, 42, "byte buffer round-trip");
+        assert_eq!(run(&src), 42, "byte buffer round-trip");
+    }
+
+    #[test]
+    fn scalar_int_ops_wrap_and_respect_signedness() {
+        let bn = BNAT_ARR;
+        // U8 wrapping add: 200 + 100 = 300 mod 256 = 44.
+        assert_eq!(
+            run(&format!("{bn}main : Nat\nfn main() {{ nat_u8(sadd(200u8, 100u8)) }}\n")),
+            44
+        );
+        // U8 wrapping sub (NOT Nat monus): 3 - 5 = -2 mod 256 = 254.
+        assert_eq!(
+            run(&format!("{bn}main : Nat\nfn main() {{ nat_u8(ssub(3u8, 5u8)) }}\n")),
+            254
+        );
+        // signed I32 division + negation: -(7/2) = -3.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ nat_i32(sneg(sdiv(7i32, 2i32))) }}\n"
+            )),
+            -3
+        );
+        // signed compare: -1 : I8 < 1 is true (1); the same bits as U8 (255) are not.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ slt(sneg(1i8), 1i8) }}\n"
+            )),
+            1
+        );
+        assert_eq!(
+            run(&format!("{bn}main : Nat\nfn main() {{ slt(255u8, 1u8) }}\n")),
+            0
+        );
+    }
+
+    #[test]
+    fn casts_between_scalars_and_floats() {
+        let bn = BNAT_ARR;
+        // int width change via cast: U8 255 -> I32 255 -> I64 255.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ let up : I32 = cast(255u8); let w : I64 = cast(up); nat_i64(w) }}\n"
+            )),
+            255
+        );
+        // int -> float -> int: U32 10 -> F64 10.0, /4 = 2.5, -> I32 2.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ let n : F64 = cast(u32(10)); let t : I32 = cast(fdiv(n, 4.0)); nat_i32(t) }}\n"
+            )),
+            2
+        );
+    }
+
+    #[test]
+    fn floats_compute_and_literals_work() {
+        let bn = BNAT_ARR;
+        // 3.14 * 2.0 = 6.28 -> truncates to 6.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ nat_of_f64(fmul(3.14, 2.0)) }}\n"
+            )),
+            6
+        );
+        // f32 literal + arithmetic: (1.5f32 + 0.5f32) * 4 = 8.
+        assert_eq!(
+            run(&format!(
+                "{bn}main : Nat\nfn main() {{ nat_of_f32(fmul(fadd(1.5f32, 0.5f32), f32_of_nat(4))) }}\n"
+            )),
+            8
+        );
+        // ordered float compare: 1.0 < 2.0 is 1.
+        assert_eq!(
+            run(&format!("{bn}main : Nat\nfn main() {{ flt(1.0, 2.0) }}\n")),
+            1
+        );
+    }
+
+    #[test]
+    fn float_arr_is_dense_f64_with_vector_fadd() {
+        // `Arr F64 n` stores 8 bytes/element (like Nat here) but the loaded
+        // element is a real double the float ops consume; a small sum uses `fadd`.
+        let src = format!(
+            "{BNAT_ARR}\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(4, 2.5);\n\
+                 let (x, a1) = aget(0, lt(0, 4), a0);\n\
+                 let (y, a2) = aget(1, lt(1, 4), a1);\n\
+                 let u = afree(a2);\n\
+                 nat_of_f64(fadd(x, y))\n\
+             }}\n"
+        );
+        let ir = ir(&src);
+        assert!(ir.contains("fadd double"), "expected a real double add\n{ir}");
+        assert_eq!(run(&src), 5, "2.5 + 2.5 = 5.0");
     }
 
     #[test]
