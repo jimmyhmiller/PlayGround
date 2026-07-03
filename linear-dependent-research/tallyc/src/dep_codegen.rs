@@ -442,6 +442,46 @@ fn type_width(sig: &Signature, t: &Term) -> u32 {
     type_shape(sig, t, &mut std::collections::HashSet::new()).0
 }
 
+/// A PRIMITIVE SCALAR type (Phase Scalars, S1): `(byte_size, signed)` for the
+/// opaque `U8`/…/`I64` postulate types, else `None`. In registers a scalar value
+/// is a Nat-compatible `i64` (width 1 — see `type_shape`'s `_ => (1, …)` arm);
+/// its byte size matters ONLY for dense storage inside an `Arr`, where the load
+/// widens (zext for `U`, sext for `I`) and the store truncates. `Nat` is NOT a
+/// scalar here — `Arr Nat n` keeps the 8-byte-slot path unchanged.
+fn scalar_desc(t: &Term) -> Option<(u32, bool)> {
+    if let Term::Const(c) = strip_ann(t) {
+        return scalar_bytes_signed(c);
+    }
+    None
+}
+
+/// `(byte_size, signed)` for a scalar type NAME (`U8`…`I64`), else `None`.
+fn scalar_bytes_signed(name: &str) -> Option<(u32, bool)> {
+    match name {
+        "U8" => Some((1, false)),
+        "U16" => Some((2, false)),
+        "U32" => Some((4, false)),
+        "U64" => Some((8, false)),
+        "I8" => Some((1, true)),
+        "I16" => Some((2, true)),
+        "I32" => Some((4, true)),
+        "I64" => Some((8, true)),
+        _ => None,
+    }
+}
+
+/// A scalar CONVERSION postulate: `(byte_size, signed, to_scalar)`.
+/// `u8`…`i64` are Nat→scalar (`to_scalar = true`); `nat_u8`…`nat_i64` are
+/// scalar→Nat (`to_scalar = false`). The width/signedness rides in the name.
+fn scalar_conv(name: &str) -> Option<(u32, bool, bool)> {
+    if let Some(rest) = name.strip_prefix("nat_") {
+        // `nat_u8` : U8 -> Nat — the type name is the uppercased suffix.
+        return scalar_bytes_signed(&rest.to_uppercase()).map(|(b, s)| (b, s, false));
+    }
+    // `u8` : Nat -> U8 — the lowercased scalar type name.
+    scalar_bytes_signed(&name.to_uppercase()).map(|(b, s)| (b, s, true))
+}
+
 fn type_is_flex(sig: &Signature, t: &Term) -> bool {
     type_shape(sig, t, &mut std::collections::HashSet::new()).1
 }
@@ -644,6 +684,35 @@ impl<'c, 'a> DepCg<'c, 'a> {
     /// datatype, an abstract-typed `%partial` parameter, a fold accumulator the
     /// lowering cannot widen) is a HARD ERROR naming the explicit alternatives;
     /// any other mismatch is a compiler bug surfaced loudly.
+    /// The LLVM integer type for a scalar of `bytes` byte width (i8/i16/i32/i64).
+    fn scalar_int_ty(&self, bytes: u32) -> inkwell::types::IntType<'c> {
+        self.ctx.custom_width_int_type(bytes * 8)
+    }
+
+    /// Narrow the i64 working register down to a scalar's storage width for a
+    /// dense `Arr` store; a no-op at 64 bits (`build_int_truncate` requires a
+    /// strictly narrower target).
+    fn trunc_to(&self, v: IntValue<'c>, ity: inkwell::types::IntType<'c>, name: &str) -> IntValue<'c> {
+        if v.get_type().get_bit_width() <= ity.get_bit_width() {
+            v
+        } else {
+            self.builder.build_int_truncate(v, ity, name).unwrap()
+        }
+    }
+
+    /// Widen a scalar loaded from dense `Arr` storage back to the i64 working
+    /// register — sign-extend for signed scalars, zero-extend for unsigned; a
+    /// no-op at 64 bits.
+    fn widen_from(&self, v: IntValue<'c>, signed: bool, name: &str) -> IntValue<'c> {
+        if v.get_type().get_bit_width() >= self.i64t.get_bit_width() {
+            v
+        } else if signed {
+            self.builder.build_int_s_extend(v, self.i64t, name).unwrap()
+        } else {
+            self.builder.build_int_z_extend(v, self.i64t, name).unwrap()
+        }
+    }
+
     fn expect_width(&self, v: Val<'c>, w: u32, what: &str) -> Result<Val<'c>, String> {
         if v.width() == w {
             return Ok(v);
@@ -1908,11 +1977,15 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // anew : {0 a} -> (n : Nat) -> a -> Arr a n — one malloc, filled with
             // the initial element by a native counting loop.
             "anew" => {
-                // the element width `w` comes from the erased type argument: an
-                // `Arr Point n` is one flat block of `n * w` slots — REAL AoS,
-                // records stored inline at stride `w`. (An abstract element
-                // type is a hard error — `spine_type_width`.)
-                let w = self.spine_type_width(cname, args, 0)?;
+                // element type → storage: a PRIMITIVE SCALAR (`U8`…`I64`) stores
+                // DENSE at its true byte width (`Arr U8 n` = `malloc(n)`, stride
+                // 1); anything else keeps the flat `w`-slot AoS (`Arr Point n`,
+                // stride `w*8`). (An abstract element type is a hard error —
+                // `spine_type_width`.)
+                let elem_ty = *args
+                    .first()
+                    .ok_or_else(|| "anew: missing element type argument".to_string())?;
+                let sc = scalar_desc(elem_ty);
                 let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [n, init] = rt.as_slice() else {
                     return Err(format!(
@@ -1922,10 +1995,17 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 };
                 let n = n.as_int("anew length")?;
                 let n = &n;
+                // a scalar element is a single i64 register value stored at its
+                // byte width; a record element is `w` i64 slots.
+                let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
+                let elem_bytes = match sc {
+                    Some((bytes, _)) => bytes as u64,
+                    None => 8 * w as u64,
+                };
                 let init = self.expect_width(init.clone(), w, "anew initial element")?;
                 let sz = self
                     .builder
-                    .build_int_mul(*n, self.i64t.const_int(8 * w as u64, false), "arr.sz")
+                    .build_int_mul(*n, self.i64t.const_int(elem_bytes, false), "arr.sz")
                     .unwrap();
                 let raw = self
                     .builder
@@ -1951,21 +2031,31 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .unwrap();
                 self.builder.build_conditional_branch(more, body, done).unwrap();
                 self.builder.position_at_end(body);
-                let base = self
-                    .builder
-                    .build_int_mul(iv, self.i64t.const_int(w as u64, false), "arr.base")
-                    .unwrap();
-                for (k, c) in init.components().iter().enumerate() {
-                    let off = self
-                        .builder
-                        .build_int_add(base, self.i64t.const_int(k as u64, false), "arr.off")
-                        .unwrap();
+                if let Some((bytes, _)) = sc {
+                    // dense scalar store: one `iN` at element index `i`.
+                    let ity = self.scalar_int_ty(bytes);
                     let slot = unsafe {
-                        self.builder
-                            .build_gep(self.i64t, raw, &[off], "arr.slot")
-                            .unwrap()
+                        self.builder.build_gep(ity, raw, &[iv], "arr.slot").unwrap()
                     };
-                    self.builder.build_store(slot, *c).unwrap();
+                    let byte = self.trunc_to(init.as_int("anew scalar init")?, ity, "arr.st");
+                    self.builder.build_store(slot, byte).unwrap();
+                } else {
+                    let base = self
+                        .builder
+                        .build_int_mul(iv, self.i64t.const_int(w as u64, false), "arr.base")
+                        .unwrap();
+                    for (k, c) in init.components().iter().enumerate() {
+                        let off = self
+                            .builder
+                            .build_int_add(base, self.i64t.const_int(k as u64, false), "arr.off")
+                            .unwrap();
+                        let slot = unsafe {
+                            self.builder
+                                .build_gep(self.i64t, raw, &[off], "arr.slot")
+                                .unwrap()
+                        };
+                        self.builder.build_store(slot, *c).unwrap();
+                    }
                 }
                 let inext = self
                     .builder
@@ -1982,7 +2072,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // bounds compare and no branch. The `ARead` pair threads the linear
             // array back to the caller; -O2 scalarizes it away.
             "aget" => {
-                let w = self.spine_type_width(cname, args, 0)?;
+                let elem_ty = *args
+                    .first()
+                    .ok_or_else(|| "aget: missing element type argument".to_string())?;
+                let sc = scalar_desc(elem_ty);
+                let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
                 let rt = self.runtime_args(f, env, cname, args)?;
                 let [i, arr] = rt.as_slice() else {
                     return Err(format!(
@@ -1991,27 +2085,37 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 let base = self.toptr(*arr, "arr.p");
-                let off = self
-                    .builder
-                    .build_int_mul(*i, self.i64t.const_int(w as u64, false), "arr.off")
-                    .unwrap();
                 let mut comps: Vec<IntValue<'c>> = Vec::with_capacity(w as usize + 1);
-                for k in 0..w {
-                    let ko = self
+                if let Some((bytes, signed)) = sc {
+                    // dense scalar load: one `iN` at element index `i`, widened
+                    // (sext/zext) back to the i64 working register.
+                    let ity = self.scalar_int_ty(bytes);
+                    let slot =
+                        unsafe { self.builder.build_gep(ity, base, &[*i], "arr.slot").unwrap() };
+                    let raw = self.builder.build_load(ity, slot, "arr.elem").unwrap().into_int_value();
+                    comps.push(self.widen_from(raw, signed, "arr.w"));
+                } else {
+                    let off = self
                         .builder
-                        .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                        .build_int_mul(*i, self.i64t.const_int(w as u64, false), "arr.off")
                         .unwrap();
-                    let slot = unsafe {
-                        self.builder
-                            .build_gep(self.i64t, base, &[ko], "arr.slot")
-                            .unwrap()
-                    };
-                    comps.push(
-                        self.builder
-                            .build_load(self.i64t, slot, "arr.elem")
-                            .unwrap()
-                            .into_int_value(),
-                    );
+                    for k in 0..w {
+                        let ko = self
+                            .builder
+                            .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                            .unwrap();
+                        let slot = unsafe {
+                            self.builder
+                                .build_gep(self.i64t, base, &[ko], "arr.slot")
+                                .unwrap()
+                        };
+                        comps.push(
+                            self.builder
+                                .build_load(self.i64t, slot, "arr.elem")
+                                .unwrap()
+                                .into_int_value(),
+                        );
+                    }
                 }
                 // ARead is a FLEX flat record [element…, array]: build it at the
                 // element's true width; the match splits it back flexibly.
@@ -2023,7 +2127,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // unchanged — in-place mutation, justified by linearity (the input
             // array was consumed; this result is its sole continuation).
             "aset" => {
-                let w = self.spine_type_width(cname, args, 0)?;
+                let elem_ty = *args
+                    .first()
+                    .ok_or_else(|| "aset: missing element type argument".to_string())?;
+                let sc = scalar_desc(elem_ty);
+                let w = if sc.is_some() { 1 } else { self.spine_type_width(cname, args, 0)? };
                 let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [i, v, arr] = rt.as_slice() else {
                     return Err(format!(
@@ -2035,21 +2143,31 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 let arr = arr.as_int("aset array")?;
                 let v = self.expect_width(v.clone(), w, "aset element")?;
                 let base = self.toptr(arr, "arr.p");
-                let off = self
-                    .builder
-                    .build_int_mul(i, self.i64t.const_int(w as u64, false), "arr.off")
-                    .unwrap();
-                for (k, c) in v.components().iter().enumerate() {
-                    let ko = self
+                if let Some((bytes, _)) = sc {
+                    // dense scalar store: truncate the register to `iN`, store at
+                    // element index `i`.
+                    let ity = self.scalar_int_ty(bytes);
+                    let slot =
+                        unsafe { self.builder.build_gep(ity, base, &[i], "arr.slot").unwrap() };
+                    let byte = self.trunc_to(v.as_int("aset scalar element")?, ity, "arr.st");
+                    self.builder.build_store(slot, byte).unwrap();
+                } else {
+                    let off = self
                         .builder
-                        .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                        .build_int_mul(i, self.i64t.const_int(w as u64, false), "arr.off")
                         .unwrap();
-                    let slot = unsafe {
-                        self.builder
-                            .build_gep(self.i64t, base, &[ko], "arr.slot")
-                            .unwrap()
-                    };
-                    self.builder.build_store(slot, *c).unwrap();
+                    for (k, c) in v.components().iter().enumerate() {
+                        let ko = self
+                            .builder
+                            .build_int_add(off, self.i64t.const_int(k as u64, false), "arr.ko")
+                            .unwrap();
+                        let slot = unsafe {
+                            self.builder
+                                .build_gep(self.i64t, base, &[ko], "arr.slot")
+                                .unwrap()
+                        };
+                        self.builder.build_store(slot, *c).unwrap();
+                    }
                 }
                 Ok(Val::Int(arr))
             }
@@ -2504,6 +2622,27 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     ));
                 };
                 Ok(Val::Int(p.as_int("restore ptr")?))
+            }
+            // SCALAR CONVERSIONS (Phase Scalars, S1). `u8`…`i64` : Nat -> T mask
+            // a Nat into the scalar's width (trunc then re-extend by signedness),
+            // giving the honest in-register value (`u8(300)` = 44). `nat_u8`…
+            // `nat_i64` : T -> Nat reinterpret back — identity, since the register
+            // already holds the width-correct value (from the intro or a widening
+            // `aget`). Both are runtime-cheap; the width/signedness is in the name.
+            name if scalar_conv(name).is_some() => {
+                let (bytes, signed, to_scalar) = scalar_conv(name).unwrap();
+                let rt = self.runtime_args(f, env, cname, args)?;
+                let [x] = rt.as_slice() else {
+                    return Err(format!("{cname}: expected 1 runtime argument, got {}", rt.len()));
+                };
+                let x = *x;
+                if to_scalar {
+                    let ity = self.scalar_int_ty(bytes);
+                    let t = self.trunc_to(x, ity, "conv.t");
+                    Ok(Val::Int(self.widen_from(t, signed, "conv.w")))
+                } else {
+                    Ok(Val::Int(x))
+                }
             }
             // type-level postulates (Own/Region/List/Cursor/Arr/Loc/Ptr/PtsTo):
             // these only ever appear inside ERASED type annotations, so they must
@@ -5623,6 +5762,92 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             ir.matches("br i1").count(),
             1,
             "expected exactly one conditional branch (the fill loop)\n{ir}"
+        );
+    }
+
+    #[test]
+    fn bytes_arr_is_dense_u8_storage() {
+        // `Arr U8 3` is a DENSE 3-byte buffer (stride 1), not 3×8 = 24. The store
+        // truncates the i64 register to i8; the load reads i8 and zero-extends
+        // (U8 is unsigned) back to the working register. Bounds stay the erased
+        // `Lt` proof — still no bounds branch (Phase Scalars, S1).
+        let src = format!(
+            "{BNAT_ARR}\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(3, u8(0));\n\
+                 let a1 = aset(1, lt(1, 3), u8(41), a0);\n\
+                 let (x, a2) = aget(1, lt(1, 3), a1);\n\
+                 let u = afree(a2);\n\
+                 nat_u8(x) + 1\n\
+             }}\n"
+        );
+        let ir = ir(&src);
+
+        // (1) exactly one malloc, of 3 BYTES — the dense byte buffer. A 24-byte
+        // malloc would mean the U8 element still occupied a full 8-byte slot.
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(3u64, 1usize)].into_iter().collect(),
+            "Arr U8 3 must be a dense 3-byte buffer, not 24; got {sizes:?}\n{ir}"
+        );
+
+        // (2) storage traffic is at BYTE width: `store i8` (the `aset`/fill
+        // truncating store) and `load i8` (the `aget` byte load), widened by a
+        // `zext` (unsigned U8).
+        assert!(ir.contains("store i8"), "expected a byte-width store\n{ir}");
+        assert!(ir.contains("load i8"), "expected a byte-width load\n{ir}");
+        assert!(ir.contains("zext i8"), "expected the U8 load to zero-extend\n{ir}");
+
+        // (3) still no bounds branch — the fill loop is the only compare.
+        assert_eq!(
+            ir.matches("icmp").count(),
+            1,
+            "byte indexing must carry its bound as an erased proof, no runtime check\n{ir}"
+        );
+
+        // and it runs: buf[1] = 41, read back and +1 → 42.
+        let val = super::run_main(
+            &rust_surface::check_program(&src).unwrap().sig,
+            &rust_surface::check_program(&src)
+                .unwrap()
+                .defs
+                .iter()
+                .find(|(n, _, _)| n == "main")
+                .unwrap()
+                .2,
+        )
+        .unwrap();
+        assert_eq!(val, 42, "byte buffer round-trip");
+    }
+
+    #[test]
+    fn bytes_arr_signed_i16_sign_extends() {
+        // `Arr I16 n`: a store truncates to i16; a load SIGN-extends (I16 is
+        // signed). Storing `u? -1 masked to 16 bits` and reading it back yields a
+        // negative i64 (two's complement), proving signedness rides the load.
+        let src = format!(
+            "{BNAT_ARR}\
+             main : Nat\n\
+             fn main() {{\n\
+                 let a0 = anew(2, i16(7));\n\
+                 let (x, a2) = aget(0, lt(0, 2), a0);\n\
+                 let u = afree(a2);\n\
+                 nat_i16(x)\n\
+             }}\n"
+        );
+        let ir = ir(&src);
+        let sizes = malloc_sizes(&ir);
+        assert_eq!(
+            sizes,
+            [(4u64, 1usize)].into_iter().collect(),
+            "Arr I16 2 must be a dense 4-byte buffer (2×2); got {sizes:?}\n{ir}"
+        );
+        assert!(ir.contains("store i16"), "expected a 2-byte store\n{ir}");
+        assert!(
+            ir.contains("sext i16"),
+            "expected the I16 load to SIGN-extend (signed scalar)\n{ir}"
         );
     }
 }

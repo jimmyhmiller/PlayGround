@@ -4533,6 +4533,21 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         })
         .collect();
     for (nm, decl) in [
+        // PRIMITIVE SCALAR TYPES (Phase Scalars, S1) — opaque `Type` constants,
+        // kernel never reduces them. In S1 they are STORAGE annotations: a value
+        // of a scalar type lives as an i64 in registers (Nat-compatible, so the
+        // native ops work on it) but is stored at its true byte width inside an
+        // `Arr` — so `Arr U8 n` is a real `malloc(n)` byte buffer, load widens
+        // (zext for U-, sext for I-), store truncates. Injected per-name so a
+        // program may declare its own.
+        ("U8", "postulate U8 : Type\n"),
+        ("U16", "postulate U16 : Type\n"),
+        ("U32", "postulate U32 : Type\n"),
+        ("U64", "postulate U64 : Type\n"),
+        ("I8", "postulate I8 : Type\n"),
+        ("I16", "postulate I16 : Type\n"),
+        ("I32", "postulate I32 : Type\n"),
+        ("I64", "postulate I64 : Type\n"),
         ("putc", "postulate putc : Nat -> Unit\n"),
         ("getc", "postulate getc : Unit -> Nat\n"),
         ("sub", "postulate sub : Nat -> Nat -> Nat\n"),
@@ -4547,6 +4562,26 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         ("bxor", "postulate bxor : Nat -> Nat -> Nat\n"),
         ("shl", "postulate shl : Nat -> Nat -> Nat\n"),
         ("shr", "postulate shr : Nat -> Nat -> Nat\n"),
+        // SCALAR CONVERSIONS (S1): Nat -> T (mask to width) and T -> Nat
+        // (reinterpret). The only way to make/observe a scalar VALUE in S1 —
+        // arithmetic still happens in the Nat register (C's integer promotion,
+        // made explicit). Codegen: trunc/extend by the width in the name.
+        ("u8", "postulate u8 : Nat -> U8\n"),
+        ("u16", "postulate u16 : Nat -> U16\n"),
+        ("u32", "postulate u32 : Nat -> U32\n"),
+        ("u64", "postulate u64 : Nat -> U64\n"),
+        ("i8", "postulate i8 : Nat -> I8\n"),
+        ("i16", "postulate i16 : Nat -> I16\n"),
+        ("i32", "postulate i32 : Nat -> I32\n"),
+        ("i64", "postulate i64 : Nat -> I64\n"),
+        ("nat_u8", "postulate nat_u8 : U8 -> Nat\n"),
+        ("nat_u16", "postulate nat_u16 : U16 -> Nat\n"),
+        ("nat_u32", "postulate nat_u32 : U32 -> Nat\n"),
+        ("nat_u64", "postulate nat_u64 : U64 -> Nat\n"),
+        ("nat_i8", "postulate nat_i8 : I8 -> Nat\n"),
+        ("nat_i16", "postulate nat_i16 : I16 -> Nat\n"),
+        ("nat_i32", "postulate nat_i32 : I32 -> Nat\n"),
+        ("nat_i64", "postulate nat_i64 : I64 -> Nat\n"),
     ] {
         if !collides && has_nat && !taken.contains(nm) {
             let p = Parser { toks: lex(decl)?, pos: 0, fresh: 0 }.parse_program()?;

@@ -46,6 +46,38 @@ needs no boilerplate:
 fn main() { free(alloc(Zero)) }   // alloc + free, checked by linearity
 ```
 
+## Status (v2.4 — SIZED-ELEMENT ARRAYS: real C byte buffers, `zext`-identical to `unsigned char[]`; 225 tests)
+
+The biggest "as expressive/dense as C" gap after the memory model was the
+**scalar vocabulary**: tallyc had exactly one runtime number, `Nat` = `i64`, so
+`Arr Nat n` cost 8 bytes *per byte*. Phase Scalars (S1, `docs/PHASE_SCALARS_PLAN.md`)
+closes the first slice — **sized-element arrays**:
+
+- **Primitive scalar types** `U8 U16 U32 U64 I8 I16 I32 I64` — opaque, kernel-
+  never-reduces `Type` constants (the partial-fragment runtime numbers), kept
+  cleanly separate from the total, solver-decided `Nat` index domain. The design
+  keeps the two roles of `Nat` apart along the existing total/partial line.
+- **`Arr <scalar> n` is DENSE storage at true byte width.** `Arr U8 n` is one
+  `malloc(n)` (stride 1, not 8); `Arr I16 n` is `malloc(2n)`, etc. A store
+  **truncates** the i64 working register to the storage width; a load reads it
+  and **widens back** — `zext` for the unsigned `U*`, `sext` for the signed `I*`
+  (proven in the IR: `bytes_arr_is_dense_u8_storage`, `..._signed_i16_sign_extends`).
+  Bounds stay the erased `Lt` proof (no bounds branch), the buffer stays linear
+  (leak / double-free are compile errors), and out-of-bounds is unrepresentable.
+- **Scalar values are i64 in registers** (C's integer promotion, made explicit):
+  `u8 : Nat -> U8` masks a Nat into a byte, `nat_u8 : U8 -> Nat` reads it back,
+  and arithmetic happens in the Nat register — exactly `acc += buf[i]` on
+  `unsigned char[]`. (First-class scalar arithmetic ops + typed literals + the
+  full cast matrix are S2; floats are S4.)
+- **Measured C parity, byte-for-byte** (`examples/bytes_bench.tal` vs
+  `bench/bytes.c`): fill a **100 MB** byte buffer, overwrite one slot, sum every
+  byte. The safe, dependently-typed, linearity-checked tally program and the
+  raw-pointer C twin compile to the **same SIMD loop** — a `<16 x i64>`
+  vectorized reduce over `<16 x i8>` wide loads with `zext <16 x i8> to <16 x i64>`
+  (the widening load IS C's `unsigned char` promotion), `llvm.vector.reduce.add`,
+  identical `memset` fill — 100 MB dense (not the 800 MB the old layout used),
+  same wall time. `examples/bytes.tal` is the small runnable demo (→ 220).
+
 ## Status (v1.6 — one Rust surface, `%builtin Nat`, a memory prelude, AOT vs C)
 
 The compiler was cut down to a single surface (`rust_surface`) over the QTT kernel
