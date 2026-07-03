@@ -2728,3 +2728,48 @@ fn b3_strict_positivity_corpus_splits_correctly() {
                  struct Rose {{ v : Nat, kids : Opt (Own Rose) }}\nmain : Nat\nfn main() {{ Zero }}\n"),
        "covariant nested pointer recursion");
 }
+
+#[test]
+fn a4_slice_provenance_makes_bad_joins_untypable() {
+    // THE PROVENANCE FIX: slices carry an erased location, and `Rejoin llo
+    // lhi` demands EXACTLY the split's pair, in order. Without this, at
+    // k == m a swapped join produced an Arr based at an INTERIOR pointer,
+    // whose afree was heap corruption — found re-auditing the A4 ledger.
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // swapped halves of ONE split: rejected (llo ≠ lhi)
+    let swapped = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let a0 = anew(8, 5);\n\
+            match asplit(4, 4, a0) {{ MkASplit(lo, hi, rj) =>\n\
+                let whole = ajoin(hi, lo, rj);\n\
+                let u = afree(whole); 0 }}\n\
+        }}\n"
+    );
+    let err = check_program(&swapped).err().expect("P0 BUG: swapped-halves join compiled");
+    assert!(format!("{err:?}").contains("Rejoin") || format!("{err:?}").contains("Slice"), "got {err:?}");
+    // halves of DIFFERENT splits: rejected (locations from different packs)
+    let crossed = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let a0 = anew(8, 5);\n\
+            let b0 = anew(8, 7);\n\
+            match asplit(4, 4, a0) {{ MkASplit(lo1, hi1, rj1) =>\n\
+                match asplit(4, 4, b0) {{ MkASplit(lo2, hi2, rj2) =>\n\
+                    let w1 = ajoin(lo1, hi2, rj1);\n\
+                    let w2 = ajoin(lo2, hi1, rj2);\n\
+                    let u1 = afree(w1); let u2 = afree(w2); 0 }} }}\n\
+        }}\n"
+    );
+    let err = check_program(&crossed).err().expect("P0 BUG: cross-split join compiled");
+    assert!(format!("{err:?}").contains("Rejoin") || format!("{err:?}").contains("Slice"), "got {err:?}");
+    // the CORRECT join still checks, with the existential locations OPENED BY
+    // NAME in the full-arity pattern.
+    let ok = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let a0 = anew(8, 5);\n\
+            match asplit(4, 4, a0) {{ MkASplit(llo, lhi, lo, hi, rj) =>\n\
+                let whole = ajoin(lo, hi, rj);\n\
+                let u = afree(whole); 0 }}\n\
+        }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("the correct join must still check: {e:?}"));
+}

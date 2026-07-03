@@ -2,23 +2,29 @@
 //
 //   tally run examples/par.tal      → 110
 //
-// `asplit` divides one linear `Arr` into two DISJOINT linear `Slice`s (plus
-// the zero-width linear `Rejoin` obligation that forces reunification —
-// slices have `sget`/`sset` but NO free, so a half can never free the base
-// allocation). `spawn` MOVES one slice into each OS thread (the env is
-// consumed at multiplicity 1 — the parent cannot touch it, the other thread
-// cannot see it); `join` recovers each worker's linear result. Data-race
-// freedom is the ordinary QTT accounting — there is no way to write a race:
-//   • giving BOTH threads the same slice   → ω ⋢ 1 (double use)
-//   • touching the env after spawning it   → ω ⋢ 1
-//   • dropping a JoinHandle (never joining) → 0 ⋢ 1 (leak)
-//   • freeing a half (`afree(hi)`)          → type error (Slice ≠ Arr)
+// `asplit` divides one linear `Arr` into two DISJOINT linear `Slice`s, each
+// tagged with a fresh ERASED location (the existentials open with USER NAMES
+// in the full-arity pattern `MkASplit(llo, lhi, lo, hi, rj)`), plus the
+// zero-width linear `Rejoin llo lhi` obligation that forces reunification of
+// EXACTLY that pair, in that order. Slices have `sget`/`sset` but NO free.
+// `spawn` MOVES one slice into each OS thread (the worker is instantiated at
+// the slice's location: `spawn(sum4(llo), lo)` — the application is erased);
+// `join` recovers each worker's linear result. Data-race freedom and
+// join-correctness are the ordinary QTT accounting — there is no way to
+// write a race OR a bad join:
+//   • giving BOTH threads the same slice     → ω ⋢ 1 (double use)
+//   • touching the env after spawning it     → ω ⋢ 1
+//   • dropping a JoinHandle (never joining)  → 0 ⋢ 1 (leak)
+//   • freeing a half (`afree(hi)`)           → type error (Slice ≠ Arr)
+//   • joining SWAPPED or CROSS-SPLIT halves  → type error (Rejoin's locations
+//     don't match — this closes what would otherwise be an interior-pointer
+//     free, i.e. heap corruption)
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
-enum WRes (k : Nat) { MkWRes : Nat -> (1 s : Slice Nat k) -> WRes k }
+enum WRes (l : Loc) (k : Nat) { MkWRes : Nat -> (1 s : Slice l Nat k) -> WRes l k }
 
-sum4 : (1 s : Slice Nat 4) -> Own (WRes 4)
-fn sum4(s) {
+sum4 : (0 l : Loc) -> (1 s : Slice l Nat 4) -> Own (WRes l 4)
+fn sum4(l, s) {
     let (a, s1) = sget(0, lt(0, 4), s);
     let (b, s2) = sget(1, lt(1, 4), s1);
     let (c, s3) = sget(2, lt(2, 4), s2);
@@ -38,9 +44,9 @@ fn main() {
     let a7 = aset(6, lt(6, 8), 30, a6);
     let a8 = aset(7, lt(7, 8), 40, a7);
     match asplit(4, 4, a8) {
-        MkASplit(lo, hi, rj) =>
-            let h1 : JoinHandle (Own (WRes 4)) = spawn(sum4, lo);
-            let h2 : JoinHandle (Own (WRes 4)) = spawn(sum4, hi);
+        MkASplit(llo, lhi, lo, hi, rj) =>
+            let h1 : JoinHandle (Own (WRes llo 4)) = spawn(sum4(llo), lo);
+            let h2 : JoinHandle (Own (WRes lhi 4)) = spawn(sum4(lhi), hi);
             let r1 = join(h1);
             let r2 = join(h2);
             match unbox(r1) {

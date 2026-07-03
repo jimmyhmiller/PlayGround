@@ -13,8 +13,11 @@
 > (`TotalWf`, Fix-lowered) rather than a kernel `Acc` eliminator; B2 is
 > per-call-site level monomorphization (kernel levels stay concrete); B3's
 > mutual lowering is forward-call unrolling (simple cycles). A4's `par`
-> splits one `Arr` into free-less `Slice` halves (an `Arr`-halves design
-> would have made `afree(hi)` heap corruption) and is TSan-gated.
+> splits one `Arr` into free-less, LOCATION-INDEXED `Slice` halves (an
+> `Arr`-halves design would have made `afree(hi)` heap corruption, and an
+> unindexed-Slice design let a SWAPPED join at `k = m` free an interior
+> pointer — both found and closed by re-audit); full-arity patterns open the
+> packed `Loc` existentials by name. TSan-gated.
 
 *tallyc's thesis is that one mechanism (QTT `0/1/ω`) delivers C's machine model,
 Idris's types, and Rust's safety with no GC. The performance pillar is proven

@@ -3528,9 +3528,31 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 }
                 let env_v = self.compile_v(f, env, envt)?.as_int("spawn env")?;
                 // the worker function: a closed λ — compile it into a fresh
-                // `ptr worker(ptr)` with the pthread ABI.
+                // `ptr worker(ptr)` with the pthread ABI. A PARTIALLY-APPLIED
+                // worker (an erased instantiation like `sum4(llo)`, used to
+                // pin a Slice's location) is β-normalized first to expose the
+                // Lam — the applied arguments are erased, so the residual
+                // body is still runtime-closed.
+                let normalized;
                 let body = match strip_ann(work) {
                     Term::Lam(b) => &**b,
+                    Term::App(_, _) => {
+                        let d = env.len();
+                        let nenv: Vec<crate::dep::Value> = (0..d).map(crate::dep::nvar).collect();
+                        let rc = std::rc::Rc::new(self.sig.clone());
+                        normalized = crate::dep::quote_at(d, &crate::dep::eval_rc(&rc, &nenv, work));
+                        match strip_ann(&normalized) {
+                            Term::Lam(b) => &**b,
+                            _ => {
+                                return Err(
+                                    "spawn: the work argument must be a function (pass a \
+                                     top-level `fn` name, optionally applied to erased \
+                                     arguments)"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
                     _ => {
                         return Err(
                             "spawn: the work argument must be a function (pass a \
@@ -5750,7 +5772,6 @@ mod tests {
     /// run it, and return its stdout's first line as an i64 — exactly what a user
     /// gets from `tally build` then running the executable.
     fn aot_run(src: &str, label: &str) -> i64 {
-        use inkwell::OptimizationLevel;
         let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
         let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
         let dir = std::env::temp_dir();
@@ -5783,7 +5804,6 @@ mod tests {
 
     /// AOT-build + run, returning the FULL stdout (for `print`-effect tests).
     fn aot_stdout(src: &str, label: &str) -> String {
-        use inkwell::OptimizationLevel;
         let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
         let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
         let dir = std::env::temp_dir();
@@ -7655,9 +7675,13 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // two disjoint Slices, move one into each OS thread, join the linear
         // results, reunite, free once. 1+2+3+4 + 10+20+30+40 = 110.
         let src = std::fs::read_to_string("examples/par.tal").unwrap();
-        for _ in 0..5 {
-            assert_eq!(run(&src), 110);
-        }
+        let got = std::thread::Builder::new()
+            .stack_size(1 << 28)
+            .spawn(move || (0..5).map(|_| run(&src)).collect::<Vec<_>>())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, vec![110; 5]);
     }
 
     #[test]
@@ -7670,7 +7694,13 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         // static (linear slices); TSan dynamically confirms the two threads
         // never touch the same address.
         let src = std::fs::read_to_string("examples/par.tal").unwrap();
-        let prog = rust_surface::check_program(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        // the elaboration recurses deeply — use a CLI-sized stack.
+        let prog = std::thread::Builder::new()
+            .stack_size(1 << 28)
+            .spawn(move || rust_surface::check_program(&src).unwrap_or_else(|e| panic!("{e:?}")))
+            .unwrap()
+            .join()
+            .unwrap();
         let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
         let dir = std::env::temp_dir();
         let obj = dir.join(format!("tally_tsan_{}.o", std::process::id()));

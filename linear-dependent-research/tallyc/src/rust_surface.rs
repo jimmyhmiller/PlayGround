@@ -2237,9 +2237,15 @@ impl Elab {
                 .find(|a| a.ctor == ctor.name)
                 .ok_or_else(|| format!("missing a case for `{}`", ctor.name))?;
             let nexplicit = info.arg_implicit.iter().filter(|b| !**b).count();
-            if arm.binders.len() != nexplicit {
+            // FULL-ARITY patterns may NAME the implicit binders too (Phase A4
+            // provenance fix): `MkASplit(llo, lhi, lo, hi, rj)` binds the two
+            // erased `Loc`s, so annotations in the arm can mention them (the
+            // existential OPENS with a user name — the Idris/ATS idiom).
+            let full_arity = nargs != nexplicit && arm.binders.len() == nargs;
+            if arm.binders.len() != nexplicit && !full_arity {
                 return Err(format!(
-                    "pattern `{}`: expected {nexplicit} binder(s), got {}",
+                    "pattern `{}`: expected {nexplicit} binder(s) (or all {nargs} to \
+                     bind the implicits too), got {}",
                     ctor.name,
                     arm.binders.len()
                 ));
@@ -2247,7 +2253,9 @@ impl Elab {
             let mut binder_names = Vec::new();
             let mut next_pat = 0;
             for j in 0..nargs {
-                if info.arg_implicit[j] {
+                if full_arity {
+                    binder_names.push(arm.binders[j].clone());
+                } else if info.arg_implicit[j] {
                     binder_names.push(info.arg_names[j].clone().unwrap_or_else(|| format!("$imp{j}")));
                 } else {
                     binder_names.push(arm.binders[next_pat].clone());
@@ -4646,9 +4654,13 @@ impl Elab {
             // build the method-binder scope: each ctor arg (implicit→its name,
             // explicit→the pattern's name), then one IH per recursive arg
             let nexplicit = info.arg_implicit.iter().filter(|b| !**b).count();
-            if arm.binders.len() != nexplicit {
+            // FULL-ARITY patterns may NAME the implicit binders too (open the
+            // existentials — see the nested elaborator's twin).
+            let full_arity = nargs != nexplicit && arm.binders.len() == nargs;
+            if arm.binders.len() != nexplicit && !full_arity {
                 return Err(format!(
-                    "case `{}`: expected {nexplicit} pattern binder(s), got {}",
+                    "case `{}`: expected {nexplicit} pattern binder(s) (or all \
+                     {nargs} to bind the implicits too), got {}",
                     ctor.name,
                     arm.binders.len()
                 ));
@@ -4660,7 +4672,9 @@ impl Elab {
             let mut binder_names: Vec<String> = Vec::new();
             let mut next_pat = 0;
             for j in 0..nargs {
-                if info.arg_implicit[j] {
+                if full_arity {
+                    binder_names.push(arm.binders[j].clone());
+                } else if info.arg_implicit[j] {
                     binder_names.push(info.arg_names[j].clone().unwrap_or_else(|| format!("$imp{j}")));
                 } else {
                     binder_names.push(arm.binders[next_pat].clone());
@@ -5238,14 +5252,14 @@ postulate aset  : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> 
 postulate afree : {0 a : Type} -> {0 n : Nat} -> (1 arr : Arr a n) -> Unit
 enum DecLt (i : Nat) (n : Nat) { DYes : (0 p : Lt i n) -> DecLt i n, DNo : DecLt i n }
 postulate dlt : (i : Nat) -> (n : Nat) -> DecLt i n
-linear postulate Slice : Type -> Nat -> Type
-enum SliceRead (a : Type) (n : Nat) { MkSliceRead : a -> (1 s : Slice a n) -> SliceRead a n }
-postulate sget : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> (1 s : Slice a n) -> SliceRead a n
-postulate sset : {0 a : Type} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 s : Slice a n) -> Slice a n
-linear postulate Rejoin : Type -> Nat -> Nat -> Type
-enum ASplit (a : Type) (k : Nat) (m : Nat) { MkASplit : (1 lo : Slice a k) -> (1 hi : Slice a m) -> (1 rj : Rejoin a k m) -> ASplit a k m }
+linear postulate Slice : Loc -> Type -> Nat -> Type
+enum SliceRead (l : Loc) (a : Type) (n : Nat) { MkSliceRead : a -> (1 s : Slice l a n) -> SliceRead l a n }
+postulate sget : {0 a : Type} -> {0 l : Loc} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> (1 s : Slice l a n) -> SliceRead l a n
+postulate sset : {0 a : Type} -> {0 l : Loc} -> {0 n : Nat} -> (i : Nat) -> (0 p : Lt i n) -> a -> (1 s : Slice l a n) -> Slice l a n
+linear postulate Rejoin : Loc -> Loc -> Type -> Nat -> Nat -> Type
+enum ASplit (a : Type) (k : Nat) (m : Nat) { MkASplit : {0 llo : Loc} -> {0 lhi : Loc} -> (1 lo : Slice llo a k) -> (1 hi : Slice lhi a m) -> (1 rj : Rejoin llo lhi a k m) -> ASplit a k m }
 postulate asplit : {0 a : Type} -> (k : Nat) -> (0 m : Nat) -> (1 arr : Arr a (k + m)) -> ASplit a k m
-postulate ajoin  : {0 a : Type} -> {0 k : Nat} -> {0 m : Nat} -> (1 lo : Slice a k) -> (1 hi : Slice a m) -> (1 rj : Rejoin a k m) -> Arr a (k + m)
+postulate ajoin  : {0 a : Type} -> {0 llo : Loc} -> {0 lhi : Loc} -> {0 k : Nat} -> {0 m : Nat} -> (1 lo : Slice llo a k) -> (1 hi : Slice lhi a m) -> (1 rj : Rejoin llo lhi a k m) -> Arr a (k + m)
 "#;
 
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
