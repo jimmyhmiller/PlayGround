@@ -2121,3 +2121,130 @@ fn phase0_adversarial_coverage_corpus() {
         "the exhaustive 3-deep nested match",
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE A1 (docs/PHASE_SAFETY_PLAN.md) — the real coverage checker: multi-
+// scrutinee matches, top-level wildcards/catch-alls, generalized absurd
+// discharge. Everything lowers through the pattern matrix to kernel
+// Case/Elim, which RE-CHECKS coverage (one method per constructor) — the
+// elaborator stays untrusted.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a1_multi_scrutinee_coverage_and_dead_arms() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // a complete two-scrutinee match CHECKS
+    let ok = format!(
+        "{BN}f : Nat -> Nat -> Nat\nfn f(a, b) {{\n\
+             match a, b {{ Zero, Zero => 1, Zero, Succ(y) => 2, Succ(x), Zero => 3, Succ(x), Succ(y) => x + y }}\n\
+         }}\nmain : Nat\nfn main() {{ f(5, 7) }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("complete multi-scrutinee match must check: {e:?}"));
+
+    // a missing COMBINATION is a coverage error, not UB
+    let missing = format!(
+        "{BN}f : Nat -> Nat -> Nat\nfn f(a, b) {{\n\
+             match a, b {{ Zero, Zero => 1, Succ(x), Zero => 2, Succ(x), Succ(y) => 3 }}\n\
+         }}\nmain : Nat\nfn main() {{ f(0, 1) }}\n"
+    );
+    let err = check_program(&missing).err().expect("P0 BUG: missing combination compiled");
+    assert!(format!("{err:?}").contains("missing"), "got {err:?}");
+
+    // an arm shadowed by an earlier catch-all row is DEAD — rejected
+    let dead = format!(
+        "{BN}f : Nat -> Nat -> Nat\nfn f(a, b) {{\n\
+             match a, b {{ x, y => 1, Zero, Zero => 2 }}\n\
+         }}\nmain : Nat\nfn main() {{ f(0, 1) }}\n"
+    );
+    let err = check_program(&dead).err().expect("dead multi-scrutinee arm must reject");
+    assert!(format!("{err:?}").contains("unreachable"), "got {err:?}");
+
+    // wrong pattern count in a row
+    let arity = format!(
+        "{BN}f : Nat -> Nat -> Nat\nfn f(a, b) {{ match a, b {{ Zero => 1, Succ(x), y => 2 }} }}\n\
+         main : Nat\nfn main() {{ f(0, 1) }}\n"
+    );
+    assert!(check_program(&arity).is_err(), "row with 1 pattern over 2 scrutinees must reject");
+}
+
+#[test]
+fn a1_top_level_wildcards_and_catch_all() {
+    const SETUP: &str = "enum Color { Red : Color, Green : Color, Blue : Color }\n\
+                         enum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // `_` and named catch-alls cover the rest of the family
+    for arm in ["_ => Zero", "other => Zero"] {
+        let src = format!(
+            "{SETUP}f : Color -> Nat\nfn f(c) {{ match c {{ Red => Succ(Zero), {arm} }} }}\n\
+             main : Nat\nfn main() {{ f(Blue) }}\n"
+        );
+        check_program(&src).unwrap_or_else(|e| panic!("catch-all `{arm}` must check: {e:?}"));
+    }
+    // the catch-all BINDS the scrutinee (usable in the body)
+    let bind = format!(
+        "{SETUP}g : Color -> Color\nfn g(c) {{ match c {{ Red => Green, other => other }} }}\n\
+         main : Nat\nfn main() {{ match g(Blue) {{ Blue => Zero, Red => Zero, Green => Zero }} }}\n"
+    );
+    check_program(&bind).unwrap_or_else(|e| panic!("catch-all binder must be usable: {e:?}"));
+    // a catch-all FIRST makes later arms dead — rejected
+    let dead = format!(
+        "{SETUP}f : Color -> Nat\nfn f(c) {{ match c {{ x => Zero, Red => Zero }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = check_program(&dead).err().expect("arm after catch-all must reject");
+    assert!(format!("{err:?}").contains("unreachable"), "got {err:?}");
+    // an ARGFUL unknown name is a typo, never a binder
+    let typo = format!(
+        "{SETUP}f : Nat -> Nat\nfn f(n) {{ match n {{ Zero => Zero, Sucx(k) => k }} }}\n\
+         main : Nat\nfn main() {{ Zero }}\n"
+    );
+    let err = check_program(&typo).err().expect("argful unknown ctor must reject");
+    assert!(format!("{err:?}").contains("not a declared constructor"), "got {err:?}");
+}
+
+#[test]
+fn a1_absurd_discharge_generalized() {
+    // (a) boxed-Nat-indexed Fin Zero: no %builtin required anymore
+    let boxed_nat = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        boxed enum Fin : Nat -> Type {\n\
+            FZ : {0 n : Nat} -> Fin (Succ n),\n\
+            FS : {0 n : Nat} -> Fin n -> Fin (Succ n),\n\
+        }\n\
+        f : Fin Zero -> Nat\nfn f(x) { match x { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    check_program(boxed_nat)
+        .unwrap_or_else(|e| panic!("boxed-Nat-indexed absurd match must check: {e:?}"));
+
+    // (b) a simple-enum index (Color) via the large-eliminating Case sentinel
+    let color = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Color { Red : Color, Green : Color, Blue : Color }\n\
+        boxed enum OnlyRed : Color -> Type { MkRed : OnlyRed Red }\n\
+        f : OnlyRed Green -> Nat\nfn f(x) { match x { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    check_program(color).unwrap_or_else(|e| panic!("Color-indexed absurd match must check: {e:?}"));
+
+    // (c) a TWO-index family where the SECOND index refutes
+    let two = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        boxed enum Pairy : Nat -> Nat -> Type { MkP : {0 n : Nat} -> Pairy n (Succ n) }\n\
+        f : {0 n : Nat} -> Pairy n Zero -> Nat\nfn f(x) { match x { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    check_program(two).unwrap_or_else(|e| panic!("second-index refutation must check: {e:?}"));
+
+    // (d) the INHABITED index with zero arms is REJECTED (missing case), and
+    // (e) a variable index can never discharge
+    let inhabited = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        enum Color { Red : Color, Green : Color, Blue : Color }\n\
+        boxed enum OnlyRed : Color -> Type { MkRed : OnlyRed Red }\n\
+        f : OnlyRed Red -> Nat\nfn f(x) { match x { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    let err = check_program(inhabited).err().expect("P0 BUG: inhabited zero-arm match compiled");
+    assert!(format!("{err:?}").contains("missing"), "got {err:?}");
+    let varidx = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+        boxed enum Fin : Nat -> Type {\n\
+            FZ : {0 n : Nat} -> Fin (Succ n),\n\
+            FS : {0 n : Nat} -> Fin n -> Fin (Succ n),\n\
+        }\n\
+        f : {0 n : Nat} -> Fin n -> Nat\nfn f(x) { match x { } }\n\
+        main : Nat\nfn main() { Zero }\n";
+    let err = check_program(varidx).err().expect("P0 BUG: variable-index zero-arm match compiled");
+    assert!(format!("{err:?}").contains("missing"), "got {err:?}");
+}

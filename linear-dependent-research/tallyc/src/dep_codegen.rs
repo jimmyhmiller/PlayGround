@@ -7118,4 +7118,37 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             "float->int must use the saturating intrinsics\n{ir}"
         );
     }
+    #[test]
+    fn a1_multi_scrutinee_and_catch_all_run_natively() {
+        // PHASE A1 runtime gate: the pattern-matrix lowering of multi-
+        // scrutinee matches and top-level catch-alls computes the right
+        // answers through real native code (nested kernel Case/Elim — no new
+        // unreachable is reachable on a non-absurd tag).
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            enum Color { Red : Color, Green : Color, Blue : Color }\n\
+            both : Nat -> Nat -> Nat\n\
+            fn both(a, b) {\n\
+                match a, b {\n\
+                    Zero, Zero => 1,\n\
+                    Zero, Succ(y) => 2,\n\
+                    Succ(x), Zero => 3,\n\
+                    Succ(x), Succ(y) => x + y,\n\
+                }\n\
+            }\n\
+            wild : Color -> Nat\n\
+            fn wild(c) { match c { Red => 10, _ => 20 } }\n\
+            mixed : Color -> Color -> Nat\n\
+            fn mixed(a, b) {\n\
+                match a, b {\n\
+                    Red, Red => 1,\n\
+                    Red, other => 2,\n\
+                    x, Blue => 3,\n\
+                    x, y => 4,\n\
+                }\n\
+            }\n\
+            main : Nat\n\
+            fn main() { both(5, 7) + wild(Green) + mixed(Green, Blue) }\n";
+        // both(5,7) = 4+6 = 10; wild(Green) = 20; mixed(Green, Blue) = 3.
+        assert_eq!(run(src), 33);
+    }
 }

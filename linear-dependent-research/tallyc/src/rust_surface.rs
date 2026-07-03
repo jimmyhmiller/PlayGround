@@ -283,6 +283,12 @@ pub(crate) enum Tm {
     Var(String),
     Call(String, Vec<Tm>),
     Match(String, Vec<Arm>),
+    /// a MULTI-SCRUTINEE match, `match a, b { p, q => e, … }` (Phase A1). Each
+    /// row holds one full pattern per scrutinee. Exists only between parsing
+    /// and `desugar_patterns`, which compiles it through the pattern matrix
+    /// into nested single-scrutinee `Match`es (so coverage, dead-arm
+    /// rejection, and kernel re-checking all come from the existing paths).
+    MatchN(Vec<String>, Vec<(Vec<Pat>, Tm)>),
     /// a built-in `Nat` literal, e.g. `0`, `5`, `1000000`.
     Lit(u64),
     /// a string literal `"…"` — a value of the prelude postulate `Str`.
@@ -834,7 +840,17 @@ impl Parser {
         self.eat(&Tok::KwMatch)?;
         // the scrutinee may be an EXPRESSION (a call / paren), not just a var; a
         // non-var scrutinee is desugared to `let $s = <expr>; match $s { … }`.
-        let scrut_tm = self.parse_call()?;
+        // MULTIPLE comma-separated scrutinees (Phase A1) parse to `MatchN`, whose
+        // arms are full pattern ROWS compiled by the pattern matrix.
+        let mut scrut_tms = vec![self.parse_call()?];
+        while self.peek() == Some(&Tok::Comma) {
+            self.next();
+            scrut_tms.push(self.parse_call()?);
+        }
+        if scrut_tms.len() > 1 {
+            return self.parse_match_n(scrut_tms);
+        }
+        let scrut_tm = scrut_tms.pop().unwrap();
         let (scrut, bind): (String, Option<Tm>) = match scrut_tm {
             Tm::Var(v) => (v, None),
             other => {
@@ -884,6 +900,56 @@ impl Parser {
             Some(e) => Ok(Tm::Let(scrut, Box::new(e), Box::new(m))),
             None => Ok(m),
         }
+    }
+
+    /// The MULTI-SCRUTINEE match body (Phase A1): each arm is a row of exactly
+    /// one full pattern per scrutinee, `p, q => body`. Non-var scrutinees are
+    /// let-bound left-to-right (evaluation order preserved).
+    fn parse_match_n(&mut self, scrut_tms: Vec<Tm>) -> Result<Tm, String> {
+        let mut binds: Vec<(String, Tm)> = Vec::new();
+        let mut cols: Vec<String> = Vec::new();
+        for t in scrut_tms {
+            match t {
+                Tm::Var(v) => cols.push(v),
+                other => {
+                    let s = format!("$m{}", self.fresh);
+                    self.fresh += 1;
+                    binds.push((s.clone(), other));
+                    cols.push(s);
+                }
+            }
+        }
+        self.eat(&Tok::LBrace)?;
+        let n = cols.len();
+        let mut rows = Vec::new();
+        while self.peek() != Some(&Tok::RBrace) {
+            let mut pats = Vec::with_capacity(n);
+            for k in 0..n {
+                pats.push(self.parse_pattern()?);
+                if k + 1 < n {
+                    self.eat(&Tok::Comma)?;
+                }
+            }
+            self.eat(&Tok::FatArrow)?;
+            let body = self.parse_tm()?;
+            rows.push((pats, body));
+            if self.peek() == Some(&Tok::Comma) {
+                self.next();
+            }
+        }
+        self.eat(&Tok::RBrace)?;
+        if rows.is_empty() {
+            return Err(
+                "a multi-scrutinee `match` needs at least one arm (write an absurd \
+                 match on the single empty scrutinee instead)"
+                    .into(),
+            );
+        }
+        let mut m = Tm::MatchN(cols, rows);
+        for (s, e) in binds.into_iter().rev() {
+            m = Tm::Let(s, Box::new(e), Box::new(m));
+        }
+        Ok(m)
     }
 }
 
@@ -1348,6 +1414,11 @@ impl Elab {
         match t {
             // a type ascription infers via `infer_arg` (checks against the annotation).
             Tm::Ann(_, _) => self.infer_arg(t, cx, rec).map(|(tm, _)| tm),
+            Tm::MatchN(_, _) => Err(
+                "internal error: a multi-scrutinee `match` survived pattern \
+                 desugaring — this is a compiler bug, please report it"
+                    .into(),
+            ),
             Tm::Lit(n) => Ok(Term::NatLit(*n)),
             Tm::Str(x) => Ok(Term::StrLit(x.clone())),
             Tm::Add(a, b) => Ok(Term::Add(
@@ -2622,6 +2693,13 @@ fn mono_rewrite_tm(
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(Tm::Match(s.clone(), arms2))
         }
+        Tm::MatchN(cols, rows) => {
+            let rows2 = rows
+                .iter()
+                .map(|(ps, b)| Ok((ps.clone(), mono_rewrite_tm(b, polys, subst, queue)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Tm::MatchN(cols.clone(), rows2))
+        }
         Tm::Add(a, b) => Ok(Tm::Add(
             Box::new(mono_rewrite_tm(a, polys, subst, queue)?),
             Box::new(mono_rewrite_tm(b, polys, subst, queue)?),
@@ -2816,6 +2894,36 @@ impl Elab {
                 }
                 self.compile_arms(scrut, arms2, fresh)?
             }
+            // a MULTI-SCRUTINEE match: straight into the pattern matrix over
+            // all scrutinee columns at once — coverage then falls out of the
+            // flat exhaustiveness check on every produced single-scrutinee
+            // match (and the kernel's method-count re-check backstops it).
+            Tm::MatchN(cols, rows) => {
+                let mut rows2: Vec<(Vec<Pat>, Tm, usize)> = Vec::with_capacity(rows.len());
+                for (i, (ps, b)) in rows.iter().enumerate() {
+                    if ps.len() != cols.len() {
+                        return Err(format!(
+                            "`match` over {} scrutinees: arm {} has {} pattern(s)",
+                            cols.len(),
+                            i + 1,
+                            ps.len()
+                        ));
+                    }
+                    let nps =
+                        ps.iter().map(|p| self.norm_pat(p)).collect::<Result<Vec<_>, _>>()?;
+                    rows2.push((nps, self.desugar_patterns(b, fresh)?, i));
+                }
+                let nrows = rows2.len();
+                let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let out = self.compile_matrix(cols, rows2, fresh, &mut used)?;
+                if let Some(i) = (0..nrows).find(|i| !used.contains(i)) {
+                    return Err(format!(
+                        "unreachable `match` arm (arm {}): earlier patterns already cover it",
+                        i + 1
+                    ));
+                }
+                out
+            }
         })
     }
 
@@ -2825,6 +2933,8 @@ impl Elab {
     /// Otherwise group the arms by outer constructor and compile each group's
     /// pattern matrix.
     fn compile_arms(&self, scrut: &str, arms: Vec<Arm>, fresh: &mut usize) -> Result<Tm, String> {
+        let is_ctor =
+            |n: &str| self.ctor_info.contains_key(n) || self.nat_ctor.contains_key(n);
         let mut seen: Vec<&str> = Vec::new();
         let mut needs = false;
         for a in &arms {
@@ -2834,6 +2944,22 @@ impl Elab {
             seen.push(&a.ctor);
             if a.pats.iter().any(|p| matches!(p, Pat::Ctor(_, _))) {
                 needs = true;
+            }
+            // a TOP-LEVEL catch-all arm (`x => …` / `_ => …`, Phase A1): a
+            // non-constructor name with no arguments is a variable row —
+            // route through the matrix, which expands it over the rest of
+            // the family. An ARGFUL unknown name stays a hard error (it can
+            // only be a typo, never a binder).
+            if !is_ctor(&a.ctor) {
+                if a.binders.is_empty() {
+                    needs = true;
+                } else {
+                    return Err(format!(
+                        "`{}` is not a declared constructor (a pattern with \
+                         arguments must name one)",
+                        a.ctor
+                    ));
+                }
             }
         }
         if !needs {
@@ -2846,47 +2972,39 @@ impl Elab {
                 .collect();
             return Ok(Tm::Match(scrut.to_string(), flat));
         }
-        // outer constructors in first-appearance order
-        let mut order: Vec<String> = Vec::new();
-        for a in &arms {
-            if !order.contains(&a.ctor) {
-                order.push(a.ctor.clone());
-            }
+        // ONE-COLUMN pattern matrix over the scrutinee: each source arm is a
+        // row whose single pattern is its (top-level) constructor pattern, or
+        // a variable for a catch-all arm. First-match-wins WITHIN a branch (a
+        // shadowed row is silently dropped there), but a source arm that wins
+        // in NO branch is genuinely dead — track which arms were ever used
+        // and reject the rest.
+        let mut rows: Vec<(Vec<Pat>, Tm, usize)> = Vec::with_capacity(arms.len());
+        for (i, a) in arms.iter().enumerate() {
+            let pat = if is_ctor(&a.ctor) {
+                let want = self.pat_ctor_arity(&a.ctor);
+                if a.pats.len() != want {
+                    return Err(format!(
+                        "pattern `{}`: expected {} binder(s), got {}",
+                        a.ctor,
+                        want,
+                        a.pats.len()
+                    ));
+                }
+                Pat::Ctor(a.ctor.clone(), a.pats.clone())
+            } else {
+                Pat::Var(a.ctor.clone())
+            };
+            rows.push((vec![pat], a.body.clone(), i));
         }
-        let mut flat_arms = Vec::with_capacity(order.len());
-        // first-match-wins WITHIN a branch (a shadowed row is silently dropped
-        // there), but a source arm that wins in NO branch is genuinely dead —
-        // track which arms were ever used and reject the rest.
         let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for c in order {
-            let rows: Vec<(usize, &Arm)> = arms
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| a.ctor == c)
-                .collect();
-            let k = rows[0].1.pats.len();
-            if rows.iter().any(|(_, r)| r.pats.len() != k) {
-                return Err(format!(
-                    "`match`: the arms for `{c}` bind different numbers of arguments"
-                ));
-            }
-            let binders = self.matrix_binders(
-                k,
-                &rows.iter().map(|(_, r)| r.pats.as_slice()).collect::<Vec<_>>(),
-                fresh,
-            );
-            let matrix: Vec<(Vec<Pat>, Tm, usize)> =
-                rows.iter().map(|(i, r)| (r.pats.clone(), r.body.clone(), *i)).collect();
-            let body = self.compile_matrix(&binders, matrix, fresh, &mut used)?;
-            flat_arms.push(Arm { ctor: c, binders, pats: vec![], body });
-        }
+        let out = self.compile_matrix(&[scrut.to_string()], rows, fresh, &mut used)?;
         if let Some(i) = (0..arms.len()).find(|i| !used.contains(i)) {
             return Err(format!(
                 "unreachable `match` arm for `{}`: earlier patterns already cover it",
                 arms[i].ctor
             ));
         }
-        Ok(Tm::Match(scrut.to_string(), flat_arms))
+        Ok(out)
     }
 
     /// Column binder names: keep the user's name when a single row binds a plain
@@ -3107,6 +3225,14 @@ fn collect_tm_names(t: &Tm, out: &mut std::collections::HashSet<String>) {
             out.insert(s.clone());
             for a in arms {
                 collect_tm_names(&a.body, out);
+            }
+        }
+        Tm::MatchN(cols, rows) => {
+            for c in cols {
+                out.insert(c.clone());
+            }
+            for (_, b) in rows {
+                collect_tm_names(b, out);
             }
         }
         Tm::Lit(_) | Tm::Str(_) => {}
@@ -3365,8 +3491,9 @@ impl Elab {
         arms: &[Arm],
     ) -> Result<Option<Term>, String> {
         let np = decl.params.len();
-        if decl.indices.len() != 1 {
-            return Ok(None); // v1: single-index families only
+        let ni = decl.indices.len();
+        if ni == 0 {
+            return Ok(None);
         }
         let p = full_params.len();
         // scrutinee parameter + index values, in the function-parameter context.
@@ -3374,24 +3501,35 @@ impl Elab {
             .iter()
             .map(|a| Ok(dep::eval_rc(&self.rc, &neutral_env(p), &self.elab_ty(a, full_params)?)))
             .collect::<Result<_, String>>()?;
-        let sidx_tm = self.elab_ty(dargs[np], full_params)?;
-        let sidx_nf = dep::quote_at(p, &dep::eval_rc(&self.rc, &neutral_env(p), &sidx_tm));
-        let s_head = match ctor_head(&sidx_nf) {
-            Some(h) => h,
-            None => return Ok(None), // index not a known constructor ⇒ reachable
-        };
-        // every constructor's result index must be decidably disjoint from it.
-        for ctor in &decl.ctors {
-            let mut env = sparam_vals.clone();
-            for j in 0..ctor.args.len() {
-                env.push(dep::nvar(p + j));
+        // v2 (Phase A1): find ANY index position `k` that REFUTES the whole
+        // family — the scrutinee's index-k value has a constructor head and
+        // EVERY constructor's result index at k has a decidably different
+        // head. (v1 was the single-index Nat-only special case.)
+        let mut refuting: Option<(usize, String)> = None;
+        'positions: for k in 0..ni {
+            let sidx_tm = self.elab_ty(dargs[np + k], full_params)?;
+            let sidx_nf = dep::quote_at(p, &dep::eval_rc(&self.rc, &neutral_env(p), &sidx_tm));
+            let Some(s_head) = ctor_head(&sidx_nf) else {
+                continue; // index not a known constructor: not refuting here
+            };
+            for ctor in &decl.ctors {
+                let mut env = sparam_vals.clone();
+                for j in 0..ctor.args.len() {
+                    env.push(dep::nvar(p + j));
+                }
+                let cidx_nf =
+                    dep::quote_at(p + ctor.args.len(), &dep::eval_rc(&self.rc, &env, &ctor.idxs[k]));
+                let disjoint = matches!(ctor_head(&cidx_nf), Some(h) if h != s_head);
+                if !disjoint {
+                    continue 'positions; // some constructor may be reachable at k
+                }
             }
-            let cidx_nf = dep::quote_at(p + ctor.args.len(), &dep::eval_rc(&self.rc, &env, &ctor.idxs[0]));
-            let disjoint = matches!(ctor_head(&cidx_nf), Some(h) if h != s_head);
-            if !disjoint {
-                return Ok(None); // some constructor may be reachable ⇒ ordinary coverage
-            }
+            refuting = Some((k, s_head));
+            break;
         }
+        let Some((k, s_head)) = refuting else {
+            return Ok(None); // no refuting index ⇒ ordinary coverage
+        };
         // ALL constructors absurd ⇒ the type is empty. Reject any arms (the cases
         // are impossible and cannot be written), then synthesize the discharge.
         if !arms.is_empty() {
@@ -3401,40 +3539,92 @@ impl Elab {
                 arms[0].ctor
             ));
         }
-        // The discharge below builds a `NatCase` over the index, so it requires a
-        // `%builtin Nat` index. For a family indexed by a BOXED type the derived
-        // term would fail the kernel re-check with a cryptic `expected Nat, found
-        // Data(..)`; give the honest message instead (sound either way — this is a
-        // completeness limit, not an unsoundness).
-        if !matches!(decl.indices[0].1, Term::Nat) {
-            return Err(format!(
-                "`match` on `{data}` here is an absurd (empty) case, but absurd \
-                 discharge currently requires the family to be indexed by a \
-                 `%builtin Nat` — this one is indexed by a boxed type. Mark the index \
-                 type `%builtin Nat`, or wait for the general Phase E2 discharge."
-            ));
-        }
         let t_term = self.elab_ty(ret, full_params)?;
         // ⚠️ BACKSTOP CAVEAT (read before extending to MIXED / per-constructor
-        // absurd discharge): the Nat sentinel below makes the kernel-rejection
+        // absurd discharge): the sentinel below makes the kernel-rejection
         // backstop T-DEPENDENT. At a mis-classified-REACHABLE index the discharge
         // term has type `Nat`, so the kernel rejects it ONLY when the match's
-        // result type `T ≠ Nat`. That is SOUND HERE because v1 fires *only* when
-        // EVERY constructor is decidably absurd (the loop above returns `None`
-        // otherwise), so there is no reachable case to mis-classify and the
+        // result type `T ≠ Nat`. That is SOUND HERE because this path fires *only*
+        // when EVERY constructor is decidably absurd (the loop above returns
+        // `None` otherwise), so there is no reachable case to mis-classify and the
         // verdict does not lean on the backstop at all. But a per-constructor /
         // mixed discharge, where a reachable constructor COULD be wrongly called
         // absurd, would SILENTLY accept the mistake when `T = Nat`. Before that
         // extension, switch to a for-all-T sentinel (a fresh uninhabited type via
         // the two-step `→ Void`, `elim Void`), or prove the classifier sound
         // independently. Do NOT carry the Nat sentinel into mixed coverage.
-        // motive = λ idx. λ _scrut. NatCase[λ_.Type] idx (shift² T) (λ_. Nat) idx
-        let motive = Term::Lam(Box::new(Term::Lam(Box::new(Term::NatCase(
-            Box::new(Term::Lam(Box::new(Term::Type(0)))),
-            Box::new(dep::shift_term(2, &t_term)),
-            Box::new(Term::Lam(Box::new(Term::Nat))),
-            Box::new(Term::Var(1)), // the index binder
-        )))));
+        //
+        // THE SENTINEL, generalized (v2): a type function over index k that
+        // computes `T` exactly at the scrutinee's (refuting) head and `Nat` at
+        // every other head. Under the motive's `ni+1` lambdas the index-k
+        // binder is Var(ni - k); `T` shifts by `ni+1` (+ any sentinel-local
+        // binders). For a `%builtin Nat` index it is the v1 `NatCase`; for a
+        // SIMPLE datatype index (no params, no indices) it is a LARGE-
+        // ELIMINATING kernel `Case` (allowed — the kernel validates the
+        // motive at any level), which the kernel re-checks like everything
+        // else.
+        let t_shift = dep::shift_term(ni + 1, &t_term);
+        let e = Term::Var(ni - k);
+        let sentinel = match &decl.indices[k].1 {
+            Term::Nat => Term::NatCase(
+                Box::new(Term::Lam(Box::new(Term::Type(0)))),
+                Box::new(if s_head == "Zero" { t_shift.clone() } else { Term::Nat }),
+                Box::new(Term::Lam(Box::new(if s_head == "Succ" {
+                    dep::shift_term(1, &t_shift)
+                } else {
+                    Term::Nat
+                }))),
+                Box::new(e),
+            ),
+            Term::Data(iname, iargs) if iargs.is_empty() => {
+                let idecl = self
+                    .rc
+                    .data(iname)
+                    .ok_or_else(|| format!("unknown index datatype `{iname}`"))?
+                    .clone();
+                if !idecl.params.is_empty() || !idecl.indices.is_empty() {
+                    return Err(format!(
+                        "`match` on `{data}` here is an absurd (empty) case, but absurd \
+                         discharge over an index of the PARAMETERIZED/INDEXED type \
+                         `{iname}` is not supported yet — only `Nat` and simple enum \
+                         indices are (this is a completeness limit, not an unsoundness)."
+                    ));
+                }
+                let methods: Vec<Term> = idecl
+                    .ctors
+                    .iter()
+                    .map(|c| {
+                        let mut m = if c.name == s_head {
+                            dep::shift_term(c.args.len(), &t_shift)
+                        } else {
+                            Term::Nat
+                        };
+                        for _ in 0..c.args.len() {
+                            m = Term::Lam(Box::new(m));
+                        }
+                        m
+                    })
+                    .collect();
+                Term::Case(
+                    iname.clone(),
+                    Box::new(Term::Lam(Box::new(Term::Type(0)))),
+                    methods,
+                    Box::new(e),
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "`match` on `{data}` here is an absurd (empty) case, but its \
+                     refuting index has a type absurd discharge cannot case on \
+                     (only `Nat` and simple enum indices are supported)."
+                ));
+            }
+        };
+        // motive = λ idx_0 … λ idx_{ni-1}. λ _scrut. sentinel
+        let mut motive = sentinel;
+        for _ in 0..(ni + 1) {
+            motive = Term::Lam(Box::new(motive));
+        }
         // one method per constructor: λ(args)…λ(IHs). 0   (: Nat = the Succ branch)
         let methods: Vec<Term> = decl
             .ctors
@@ -4460,6 +4650,11 @@ fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
         Tm::Match(_, arms) => {
             for a in arms {
                 collect_all_calls(&a.body, out);
+            }
+        }
+        Tm::MatchN(_, rows) => {
+            for (_, b) in rows {
+                collect_all_calls(b, out);
             }
         }
         Tm::LetPair(_, e, body) | Tm::Let(_, e, body) => {

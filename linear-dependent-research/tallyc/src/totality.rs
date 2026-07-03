@@ -299,7 +299,7 @@ fn describe(t: &Tm) -> String {
         Tm::Lit(n) => format!("the literal `{n}`"),
         Tm::Str(_) => "a string literal".into(),
         Tm::Add(_, _) => "an addition".into(),
-        Tm::Match(_, _) => "a match".into(),
+        Tm::Match(_, _) | Tm::MatchN(_, _) => "a match".into(),
         Tm::LetPair(_, _, _) | Tm::Let(_, _, _) => "a let".into(),
         Tm::Ann(_, _) => "a type ascription".into(),
     }
