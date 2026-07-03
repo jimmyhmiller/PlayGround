@@ -1,5 +1,21 @@
 # Phase Safety — perfect safety: completing the surface, hardening the core
 
+> **STATUS: ALL PHASES LANDED** (0, A1, A3, A2, B1, A4, B2, B3 — in the plan's
+> order). Gates are in the test suite (`phase0_*`, `a1_*`, `a2_*`, `a3_*`,
+> `a4_*`, `b1_*`, `b2_*`, `b3_*`); the TCB + unreachable ledgers live in
+> `docs/TRUSTED_BASE.md`. The audit found and closed three real defects:
+> float→int poison UB (now saturating intrinsics), a non-parameterized
+> niche-match compiler panic, and the deep-leak hole (`free(alloc(alloc(0)))`
+> compiled — now the dropping-destructor gate). Honest deviations from the
+> sketches below: A2's shared borrows COUNT splits (linear `SRead` tokens,
+> `sdup`/`sjoin`) instead of ω-copyable tokens — same gate guarantees, no
+> lifetime machinery; B1 certifies via RUNTIME-WITNESSED `dlt` descent
+> (`TotalWf`, Fix-lowered) rather than a kernel `Acc` eliminator; B2 is
+> per-call-site level monomorphization (kernel levels stay concrete); B3's
+> mutual lowering is forward-call unrolling (simple cycles). A4's `par`
+> splits one `Arr` into free-less `Slice` halves (an `Arr`-halves design
+> would have made `afree(hi)` heap corruption) and is TSan-gated.
+
 *tallyc's thesis is that one mechanism (QTT `0/1/ω`) delivers C's machine model,
 Idris's types, and Rust's safety with no GC. The performance pillar is proven
 pointwise (DLL, tree, quicksort, byte/float sweeps, intrusive list, pool DLL all
