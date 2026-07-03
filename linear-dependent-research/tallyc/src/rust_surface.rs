@@ -4710,6 +4710,11 @@ linear postulate Loan : Loc -> Type -> Type
 enum Borrowed (a : Type) { MkBorrowed : {0 l : Loc} -> (p : Ptr l) -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Borrowed a }
 postulate borrow  : {0 a : Type} -> (1 o : Own a) -> Borrowed a
 postulate restore : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Own a
+linear postulate RawTo : Loc -> Type -> Type
+enum RawCell (a : Type) { MkRawCell : {0 l : Loc} -> (p : Ptr l) -> (1 v : RawTo l a) -> RawCell a }
+postulate ralloc : {0 a : Type} -> Unit -> RawCell a
+postulate winit  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : RawTo l a) -> a -> PtsTo l a
+postulate rfree  : {0 a : Type} -> {0 l : Loc} -> Ptr l -> (1 v : RawTo l a) -> Unit
 postulate Str    : Type
 postulate prints : Str -> Unit
 postulate Region : Type
@@ -5594,6 +5599,15 @@ const COPYING_CONTAINER_OPS: [&str; 10] = [
     "anew", "aget", "aset", "afree", "pnew", "palloc", "pget", "pset", "pfree", "prelease",
 ];
 
+/// The DROPPING-DESTRUCTOR gate (Phase A3): `free` and `vfree` dispose of a
+/// cell WITHOUT running any destructor on its contents — sound only for
+/// unrestricted payloads. At a LINEAR payload type the inner resource would
+/// be silently leaked (the Phase 0/A3 audit found `free(alloc(alloc(0)))`
+/// compiled). The discipline: consume the payload FIRST — `unbox`/`vread`
+/// return it (and free the cell), after which the inner token is yours to
+/// consume — so no expressiveness is lost.
+const DROPPING_OPS: [&str; 2] = ["free", "vfree"];
+
 fn validate_copying_containers(sig: &Rc<Signature>, t: &Term) -> Result<(), String> {
     // the element-type argument is always the FIRST argument of the op:
     // `App(Const(op), elem_ty)` at the bottom of the spine.
@@ -5606,6 +5620,14 @@ fn validate_copying_containers(sig: &Rc<Signature>, t: &Term) -> Result<(), Stri
                      them, which would duplicate the resource (double-free). Store \
                      linear values in a concrete datatype, an `Own`, or a `Cell` \
                      instead."
+                ));
+            }
+            if DROPPING_OPS.contains(&c.as_str()) && type_is_linear(a, sig) {
+                return Err(format!(
+                    "`{c}`: the payload type here is LINEAR — dropping the cell \
+                     would silently LEAK the resource inside it. Consume the \
+                     payload first: `unbox`/`vread` return it (and free the cell), \
+                     then dispose of the inner resource explicitly."
                 ));
             }
         }

@@ -365,12 +365,15 @@ fn differentiator_demo_linked_list_is_type_safe_and_red_teamed() {
         enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
         struct Node { head : Nat, tail : Opt (Own Node) }\n\
         add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+        freeNode : (1 o : Own Node) -> Unit\n\
+        %partial\n\
+        fn freeNode(o) { match unbox(o) { Node(h, t) => match t { none => U, some(o2) => freeNode(o2) } } }\n\
         main : Nat\n";
     // SAFE: every Own consumed once (live path unboxes both; dead arms free their owns).
     let safe = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
         Node(h1, t1) => match t1 {{ none => Zero, \
           some(o2) => match unbox(o2) {{ Node(h2, t2) => match t2 {{ \
-            none => add(h1, h2), some(o3) => match free(o3) {{ U => Zero }} }} }} }} }} }}\n");
+            none => add(h1, h2), some(o3) => match freeNode(o3) {{ U => Zero }} }} }} }} }} }}\n");
     assert!(check_program(&safe).is_ok(), "the safe owned-list demo must type-check: {:?}", check_program(&safe).err());
     // LEAK: the dead `some(o3)` arm DROPS o3 (an Own) instead of freeing it ⇒ 0⋢1.
     let leak = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
@@ -382,7 +385,7 @@ fn differentiator_demo_linked_list_is_type_safe_and_red_teamed() {
     let dbl = format!("{HDR}fn main() {{ match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) {{ \
         Node(h1, t1) => match t1 {{ none => Zero, \
           some(o2) => match unbox(o2) {{ Node(h2, t2) => match t2 {{ \
-            none => match free(o2) {{ U => add(h1, h2) }}, some(o3) => match free(o3) {{ U => Zero }} }} }} }} }} }}\n");
+            none => match free(o2) {{ U => add(h1, h2) }}, some(o3) => match freeNode(o3) {{ U => Zero }} }} }} }} }} }}\n");
     assert!(check_program(&dbl).is_err(), "using an owned binder twice (double-free) must be REJECTED");
 }
 
@@ -2247,4 +2250,80 @@ fn a1_absurd_discharge_generalized() {
         main : Nat\nfn main() { Zero }\n";
     let err = check_program(varidx).err().expect("P0 BUG: variable-index zero-arm match compiled");
     assert!(format!("{err:?}").contains("missing"), "got {err:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE A3 (docs/PHASE_SAFETY_PLAN.md) — the Raw/Init initialization
+// typestate, and the dropping-destructor gate that closes the deep-leak
+// hole the A3 audit found.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a3_raw_init_typestate() {
+    const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // the safe path: ralloc (no store) -> winit (first write) -> vread
+    let ok = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let c : RawCell Nat = ralloc(U);\n\
+            match c {{ MkRawCell(p, v) => let v2 = winit(p, v, 41); vread(p, v2) + 1 }}\n\
+        }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("ralloc/winit/vread must check: {e:?}"));
+    // a never-initialized cell can be reclaimed
+    let free_raw = format!(
+        "{BN}main : Nat\nfn main() {{\n\
+            let c : RawCell Nat = ralloc(U);\n\
+            match c {{ MkRawCell(p, v) => let u = rfree(p, v); 7 }}\n\
+        }}\n"
+    );
+    check_program(&free_raw).unwrap_or_else(|e| panic!("rfree on a raw cell must check: {e:?}"));
+
+    // READING RAW IS A TYPE ERROR: no read/write op accepts `RawTo`.
+    for bad_body in [
+        "match c { MkRawCell(p, v) => vread(p, v) }",                    // read raw
+        "match c { MkRawCell(p, v) => let (x, vh) = vtake(p, v); x }",   // take raw
+        "match c { MkRawCell(p, v) => let u = vfree(p, v); 0 }",         // vfree wants PtsTo
+        "match c { MkRawCell(p, v) => let v2 = vwrite(p, v, 3); vread(p, v2) }", // vwrite wants PtsTo
+    ] {
+        let bad = format!(
+            "{BN}main : Nat\nfn main() {{ let c : RawCell Nat = ralloc(U);\n {bad_body} }}\n"
+        );
+        let err = check_program(&bad).err().unwrap_or_else(|| {
+            panic!("P0 BUG: an op consumed a RAW (uninitialized) cell:\n{bad_body}")
+        });
+        assert!(format!("{err:?}").contains("RawTo"), "expected a RawTo type clash, got {err:?}");
+    }
+
+    // the raw permission is LINEAR: dropping it leaks, double-init double-uses.
+    let leak = format!(
+        "{BN}main : Nat\nfn main() {{ let c : RawCell Nat = ralloc(U); match c {{ MkRawCell(p, v) => 7 }} }}\n"
+    );
+    assert!(check_program(&leak).is_err(), "dropping a RawTo must be rejected (leak)");
+    let dbl = format!(
+        "{BN}main : Nat\nfn main() {{ let c : RawCell Nat = ralloc(U);\n\
+            match c {{ MkRawCell(p, v) => let a = winit(p, v, 1); let b = winit(p, v, 2); vread(p, a) + vread(p, b) }} }}\n"
+    );
+    assert!(check_program(&dbl).is_err(), "initializing twice through one RawTo must be rejected");
+}
+
+#[test]
+fn a3_dropping_destructor_gate_closes_deep_leaks() {
+    const BN: &str = "enum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+    // `free` on a cell whose PAYLOAD is linear would silently leak the inner
+    // resource — the A3 audit found this compiled. Now rejected.
+    let nested = format!(
+        "{BN}main : Nat\nfn main() {{ let o = alloc(alloc(Zero)); let u = free(o); Zero }}\n"
+    );
+    let err = check_program(&nested).err().expect("free of Own (Own _) must be rejected");
+    assert!(format!("{err:?}").contains("LEAK"), "got {err:?}");
+    let vnested = format!(
+        "{BN}main : Nat\nfn main() {{ match valloc(alloc(Zero)) {{ MkCell(p, v) => let u = vfree(p, v); Zero }} }}\n"
+    );
+    let err = check_program(&vnested).err().expect("vfree of a linear payload must be rejected");
+    assert!(format!("{err:?}").contains("LEAK"), "got {err:?}");
+    // the CORRECT pattern stays accepted: consume the payload first.
+    let ok = format!(
+        "{BN}main : Nat\nfn main() {{ let o = alloc(alloc(Zero)); let inner = unbox(o); let x = unbox(inner); x }}\n"
+    );
+    check_program(&ok).unwrap_or_else(|e| panic!("unbox-then-consume must check: {e:?}"));
 }

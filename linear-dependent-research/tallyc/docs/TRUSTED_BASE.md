@@ -22,8 +22,11 @@ unmisusable, and the lowering computes what the type says.
 | primitive | safe type (as exposed) | why the safe type is sound |
 |---|---|---|
 | `Own` | `linear Type -> Type` | abstract linear box; only mintable by `alloc`, only disposable by `free`/`unbox` — linearity makes exactly one disposal reachable on every path. |
-| `alloc` | `{0 a} -> (1 x : a) -> Own a` | `malloc` + store of an already-constructed value: no uninitialized cell is ever observable (there is NO raw-alloc primitive; a `Raw`/`Init` typestate would refine this, Phase A3). |
-| `free` | `{0 a} -> (1 o : Own a) -> Unit` | libc `free` of the unique token; linearity = no double-free, no dangling survivor. |
+| `alloc` | `{0 a} -> (1 x : a) -> Own a` | `malloc` + store of an already-constructed value: no uninitialized cell is ever observable on the common path. |
+| `free` | `{0 a} -> (1 o : Own a) -> Unit` | libc `free` of the unique token; linearity = no double-free, no dangling survivor. **Rejected at a LINEAR payload type** (the dropping-destructor gate, Phase A3): dropping the cell would leak the resource inside — consume it first via `unbox`. |
+| `ralloc` | `{0 a} -> Unit -> RawCell a` (`= ∃l. Ptr l ⊗ RawTo l a`) | Phase A3 raw allocation: `malloc` with NO store. Sound because the returned permission `RawTo l a` is UNREADABLE BY TYPE — no read/write/free op accepts it; only `winit` and `rfree` do. Zero-width, erased (IR-tested). |
+| `winit` | `{0 a}{0 l} -> Ptr l -> (1 v : RawTo l a) -> a -> PtsTo l a` | the first write: consumes the raw permission, yields the ordinary initialized view. Same machine code as `vwrite`; the cell was sized by the same erased `a`. |
+| `rfree` | `{0 a}{0 l} -> Ptr l -> (1 v : RawTo l a) -> Unit` | reclaim a never-initialized cell; nothing was stored, nothing can have been read. |
 | `unbox` | `{0 a} -> (1 o : Own a) -> a` | load + `free`; the payload is moved out (the box token is consumed), never aliased. |
 
 ## 2. Views (address/permission split — L3/ATS)
@@ -36,7 +39,7 @@ unmisusable, and the lowering computes what the type says.
 | `vwrite` | `… Ptr l -> (1 v : PtsTo l a) -> b -> PtsTo l b` | strong update: consuming the only `PtsTo l a` means no reader of the old type survives — type-changing store is sound. |
 | `vread` | `… Ptr l -> (1 v : PtsTo l a) -> a` | destructive read + free of the cell (move out, not copy). |
 | `vtake` | `… Ptr l -> (1 v : PtsTo l a) -> Taken a l` | moves the payload out, retyping the slot `PtsTo l (Hole a)`; the hole is unreadable by type until `vwrite` refills it. |
-| `vfree` | `… Ptr l -> (1 v : PtsTo l a) -> Unit` | free requires the whole permission; a borrowed/split cell cannot be freed. |
+| `vfree` | `… Ptr l -> (1 v : PtsTo l a) -> Unit` | free requires the whole permission; a borrowed/split cell cannot be freed. **Rejected at a LINEAR payload type** (Phase A3 dropping-destructor gate) — use `vread` to extract the payload first. |
 | `borrow` | `{0 a} -> (1 o : Own a) -> Borrowed a` (`= ∃l. Ptr l ⊗ PtsTo l a ⊗ Loan l a`) | identity on the address (zero-cost, IR-tested); the loan is the linear obligation to reunite. |
 | `restore` | `… Ptr l -> (1 v : PtsTo l a) -> (1 ln : Loan l a) -> Own a` | only the matching view+loan pair (same `l`) reunifies — a swapped or stale pair is a type error. |
 

@@ -617,7 +617,9 @@ fn type_shape(
                 // are linear PERMISSIONS — the checker's accounting is their whole
                 // existence; at runtime they are NOTHING (the address lives in the
                 // ω `Ptr l`). This is the §4.4 erasure bar: a view leaves no trace.
-                Term::Const(c) if c == "PtsTo" || c == "Loan" || c == "RegionCap" => {
+                Term::Const(c)
+                    if c == "PtsTo" || c == "Loan" || c == "RegionCap" || c == "RawTo" =>
+                {
                     return (0, false)
                 }
                 // `Hole a` (the taken/uninitialized typestate) has `a`'s SIZE —
@@ -2626,6 +2628,53 @@ impl<'c, 'a> DepCg<'c, 'a> {
             //
             // valloc : {0 a} -> a -> Cell a  = ∃l. (Ptr l ⊗ a@l). malloc one slot,
             // store the payload, pack the address as BOTH the pointer and the view.
+            // ralloc : {0 a} -> Unit -> RawCell a — PHASE A3: malloc WITHOUT a
+            // store. The memory is uninitialized but UNREADABLE BY TYPE: the
+            // returned permission is `RawTo l a`, which no read/write op
+            // accepts — only `winit` (which initializes it, yielding the
+            // ordinary `PtsTo l a`) and `rfree` (which reclaims it). So an
+            // uninitialized read stays unrepresentable even with raw
+            // allocation exposed. Sized by the erased payload type, exactly
+            // like `valloc`'s cell.
+            "ralloc" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                let _rt = self.runtime_args_v(f, env, cname, args)?; // the Unit
+                let cell = self.malloc_cell(w.max(1), "rawcell");
+                Ok(Val::Int(self.toint(cell, "addr")))
+            }
+            // winit : ... Ptr l -> (1 v : RawTo l a) -> a -> PtsTo l a — the
+            // FIRST write: store the payload, turning Raw into Init. Same
+            // machine code as `vwrite` (the typestate is zero-width).
+            "winit" => {
+                let w = self.spine_type_width(cname, args, 0)?;
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v, x] = rt.as_slice() else {
+                    return Err(format!(
+                        "winit: expected 3 runtime arguments (ptr, raw view, value), got {}",
+                        rt.len()
+                    ));
+                };
+                let pv = p.as_int("winit ptr")?;
+                let xv = self.expect_width(x.clone(), w, "winit payload")?;
+                let cell = self.toptr(pv, "cellp");
+                for (i, c) in xv.components().iter().enumerate() {
+                    self.store(cell, i as u32, *c);
+                }
+                Ok(Val::Agg(Vec::new()))
+            }
+            // rfree : ... Ptr l -> (1 v : RawTo l a) -> Unit — reclaim a
+            // never-initialized cell (same machine code as `vfree`).
+            "rfree" => {
+                let rt = self.runtime_args_v(f, env, cname, args)?;
+                let [p, _v] = rt.as_slice() else {
+                    return Err(format!(
+                        "rfree: expected 2 runtime arguments (ptr, raw view), got {}",
+                        rt.len()
+                    ));
+                };
+                self.free_int(p.as_int("rfree ptr")?);
+                Ok(Val::Int(self.i64t.const_zero()))
+            }
             "valloc" => {
                 let rt = self.runtime_args_v(f, env, cname, args)?;
                 let [payload] = rt.as_slice() else {
@@ -5645,6 +5694,9 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             enum Opt (a : Type) { none : Opt a, some : a -> Opt a }\n\
             struct Node { head : Nat, tail : Opt (Own Node) }\n\
             add : Nat -> Nat -> Nat\nfn add(m, n) { match m { Zero => n, Succ(k) => Succ(add(k, n)) } }\n\
+            freeNode : (1 o : Own Node) -> Unit\n\
+            %partial\n\
+            fn freeNode(o) { match unbox(o) { Node(h, t) => match t { none => U, some(o2) => freeNode(o2) } } }\n\
             main : Nat\n\
             fn main() { \
               match unbox(alloc(Node(Succ(Zero), some(alloc(Node(Succ(Succ(Zero)), none)))))) { \
@@ -5652,7 +5704,7 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
                   none => Zero, \
                   some(o2) => match unbox(o2) { Node(h2, t2) => match t2 { \
                     none => add(h1, h2), \
-                    some(o3) => match free(o3) { U => Zero } \
+                    some(o3) => match freeNode(o3) { U => Zero } \
                   } } \
                 } \
               } \
@@ -7150,5 +7202,48 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             fn main() { both(5, 7) + wild(Green) + mixed(Green, Blue) }\n";
         // both(5,7) = 4+6 = 10; wild(Green) = 20; mixed(Green, Blue) = 3.
         assert_eq!(run(src), 33);
+    }
+    #[test]
+    fn a3_raw_init_ir_identical_to_valloc_and_fully_erased() {
+        // PHASE A3 IR gate: (1) `ralloc` then `winit` emits exactly the same
+        // machine shape as `valloc` — one malloc, one store, no extra
+        // instruction for the typestate; (2) the `RawTo` permission leaves NO
+        // trace; (3) `ralloc`+`rfree` is a store-free malloc/free pair.
+        const BN: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n";
+        let via_raw = format!(
+            "{BN}main : Nat\nfn main() {{\n\
+                let c : RawCell Nat = ralloc(U);\n\
+                match c {{ MkRawCell(p, v) => let v2 = winit(p, v, 41); vread(p, v2) + 1 }}\n\
+            }}\n"
+        );
+        let via_valloc = format!(
+            "{BN}main : Nat\nfn main() {{\n\
+                match valloc(41) {{ MkCell(p, v) => vread(p, v) + 1 }}\n\
+            }}\n"
+        );
+        assert_eq!(run(&via_raw), 42);
+        assert_eq!(run(&via_valloc), 42);
+        let ir_raw = ir(&via_raw);
+        let ir_val = ir(&via_valloc);
+        for (label, i) in [("raw", &ir_raw), ("valloc", &ir_val)] {
+            assert_eq!(i.matches("call ptr @malloc").count(), 1, "{label}: one malloc\n{i}");
+            assert_eq!(i.matches("store i64").count(), 1, "{label}: one payload store\n{i}");
+            assert_eq!(i.matches("call void @free").count(), 1, "{label}: one free\n{i}");
+        }
+        assert!(!ir_raw.contains("RawTo"), "the RawTo permission must be fully erased\n{ir_raw}");
+
+        // ralloc + rfree: malloc and free with NO store at all — the raw cell
+        // is never written, and (by type) never read.
+        let raw_free = format!(
+            "{BN}main : Nat\nfn main() {{\n\
+                let c : RawCell Nat = ralloc(U);\n\
+                match c {{ MkRawCell(p, v) => let u = rfree(p, v); 7 }}\n\
+            }}\n"
+        );
+        assert_eq!(run(&raw_free), 7);
+        let ir_rf = ir(&raw_free);
+        assert_eq!(ir_rf.matches("call ptr @malloc").count(), 1, "one malloc\n{ir_rf}");
+        assert_eq!(ir_rf.matches("call void @free").count(), 1, "one free\n{ir_rf}");
+        assert_eq!(ir_rf.matches("store i64").count(), 0, "no store ever touches a raw cell\n{ir_rf}");
     }
 }
