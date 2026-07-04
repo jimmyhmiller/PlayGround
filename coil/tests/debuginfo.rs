@@ -70,7 +70,10 @@ fn debug_build_emits_dwarf_subprograms_at_source_lines() {
     let out = String::from_utf8_lossy(&dump.stdout);
 
     assert!(out.contains("DW_TAG_subprogram"), "no subprograms in DWARF:\n{out}");
-    assert!(out.contains("\"main\""), "main subprogram missing:\n{out}");
+    // `main` is qualified like every function now (`app.main`); its DWARF name
+    // matches the source module, consistent with `app.square`. The LINKER symbol
+    // is still `main`, so `break main` in lldb/gdb continues to work.
+    assert!(out.contains("\"app.main\""), "main subprogram missing:\n{out}");
     assert!(out.contains("\"app.square\""), "square subprogram missing:\n{out}");
     // square is defined on line 3, main on line 6 of PROG.
     assert!(out.contains("DW_AT_decl_line\t(3)") || out.contains("DW_AT_decl_line (3)"), "square line:\n{out}");

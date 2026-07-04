@@ -24,6 +24,35 @@ fn string_literal_is_a_slice_with_compile_time_length() {
 }
 
 #[test]
+fn string_literal_backing_global_is_nul_terminated_for_c_apis() {
+    // Regression: a "…" literal's backing global must carry a trailing NUL so its
+    // `data` pointer is safe to hand to a C string API. Before the fix the global
+    // was a bare [N x i8]; adjacent literals with no alignment padding ran into
+    // one another, so `printf` on a 7-byte "g %lld\n" printed the NEXT literal too
+    // (and ate a garbage vararg). `slice-len` still reports N — the NUL is not part
+    // of the slice's extent.
+    let src = r#"
+        (module app)
+        (extern printf :cc c [(ptr i8) ...] (-> :i32))
+        (defn cstr [(s (slice u8))] (-> (ptr u8))
+          (llvm-ir (ptr u8) [s] "%d = extractvalue $t0 $0, 0
+ret $ret %d"))
+        (defn go [(n :i64) (i :i64)] (-> :i64)
+          (if (icmp-ge i n)
+              (cast :i64 (printf (cstr "done\n")))
+              (do (printf (cstr "g %lld\n") i)
+                  (go n (iadd i 1)))))
+        (defn main [] (-> :i64) (do (go 3 0) 0))
+    "#;
+    let (code, out) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out, "g 0\ng 1\ng 2\ndone\n",
+        "a string literal bled into its neighbor — missing NUL terminator:\n{out}"
+    );
+}
+
+#[test]
 fn content_equality_and_starts_with() {
     let code = run_with(
         r#"(defn main [] (-> :i64)

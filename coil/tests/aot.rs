@@ -10,6 +10,17 @@ fn aot_arithmetic() {
 }
 
 #[test]
+fn aot_main_is_a_callable_function_and_the_c_entry() {
+    // A non-entry function calls `(main)` directly; `main` returns 42, so the
+    // program (whose C entry IS `main`) exits 42. Proves `(main)` resolves as an
+    // ordinary call while `main` still carries the external C entry symbol.
+    let src = "(module app)\n\
+        (defn helper [] (-> i64) (main))\n\
+        (defn main [] (-> i64) 42)\n";
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
 fn aot_shim_trampoline_natively_linked() {
     // A calling convention LLVM can't express, compiled to a native object and
     // resolved by the real assembler + linker.

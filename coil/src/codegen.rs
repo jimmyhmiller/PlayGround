@@ -636,7 +636,14 @@ pub fn compile_for_dbg<'ctx>(
     let exports: HashMap<&str, &crate::ast::ExportC> =
         program.exports.iter().map(|e| (e.name.as_str(), e)).collect();
     let needs_thunk = |e: &crate::ast::ExportC| e.params.iter().any(|t| matches!(t, Type::Struct(_)));
-    let has_anchor = program.funcs.iter().any(|f| f.name == "main") || !exports.is_empty();
+    // The C entry point. `main` is qualified like any function (`module.main`) so
+    // Coil can call it; codegen maps the entry function back to the external C
+    // symbol `main`. An explicit `(export-c … :as "main")` claims that symbol
+    // instead (the REPL does this for its own generated entry), leaving the user's
+    // `module.main` an ordinary internal function.
+    let main_via_export = program.exports.iter().any(|e| e.symbol.as_deref() == Some("main"));
+    let is_entry = |name: &str| !main_via_export && (name == "main" || name.ends_with(".main"));
+    let has_anchor = program.funcs.iter().any(|f| is_entry(&f.name)) || !exports.is_empty();
     for f in &program.funcs {
         let conv = program
             .conventions
@@ -663,7 +670,12 @@ pub fn compile_for_dbg<'ctx>(
                 // calls are unaffected by the symbol rename.
                 let exp = exports.get(f.name.as_str()).copied();
                 let direct_sym = exp.and_then(|e| (!needs_thunk(e)).then(|| e.symbol.as_deref()).flatten());
-                let llvm_name = direct_sym.unwrap_or(f.name.as_str());
+                // The entry function is emitted under the C symbol `main`; a
+                // thunk-free export under its C symbol; everything else under its
+                // qualified Coil name. Coil call sites resolve by Coil name through
+                // `cg.funcs`, so `(main)` → `module.main` calls the same
+                // FunctionValue regardless of its external symbol.
+                let llvm_name = if is_entry(&f.name) { "main" } else { direct_sym.unwrap_or(f.name.as_str()) };
                 // A function that returns (or, in principle, takes) a struct by
                 // value across the C ABI is lowered the same way as an extern, so
                 // a C caller — or a Coil call site — agrees on the wire format.
@@ -700,7 +712,7 @@ pub fn compile_for_dbg<'ctx>(
                 // keeps everything external (back-compat). Taking an internal function's
                 // address (`fnptr-of`, a C callback) still works — only calling it *by
                 // symbol* from C needs an export.
-                let external = f.name == "main" || direct_sym.is_some() || !has_anchor;
+                let external = is_entry(&f.name) || direct_sym.is_some() || !has_anchor;
                 if !external {
                     fv.set_linkage(inkwell::module::Linkage::Internal);
                 }
@@ -2333,10 +2345,15 @@ impl<'ctx> Cg<'ctx> {
                 Ok((slot.into(), Type::Ptr(Box::new(t))))
             }
             ExprKind::Str(s) => {
-                // "…" is a (slice u8) VIEW: a private [N x i8] global (no NUL —
-                // the length carries the extent) plus a {ptr, len} fat-pointer
-                // constant. No allocation, no copy.
-                let bytes = self.ctx.const_string(s.as_bytes(), false);
+                // "…" is a (slice u8) VIEW: a private byte global plus a
+                // {ptr, len} fat-pointer constant. No allocation, no copy.
+                // The global is a NUL-terminated [N+1 x i8] (like clang), but
+                // `len` is N — the NUL is NOT part of the slice's extent. The
+                // trailing NUL is only there so the `data` pointer is safe to
+                // hand to a C string API (a bare printf/snprintf format); Coil
+                // code sees exactly N bytes. Without it, adjacent literals with
+                // no alignment padding bleed into one another.
+                let bytes = self.ctx.const_string(s.as_bytes(), true);
                 let n = self.globals.get();
                 self.globals.set(n + 1);
                 let g = self.module.add_global(bytes.get_type(), None, &format!("str.{n}"));
@@ -3108,7 +3125,10 @@ impl<'ctx> Cg<'ctx> {
             (ConstInit::Float(x), Type::Float(_)) => Ok(self.ctx.f64_type().const_float(*x).into()),
             (ConstInit::Str(s), Type::Slice(_)) => {
                 // a (slice u8): a private byte global + a {ptr,len} constant.
-                let bytes = self.ctx.const_string(s.as_bytes(), false);
+                // NUL-terminated [N+1 x i8] (like clang) so `data` is safe to
+                // pass to a C string API; `len` stays N (the NUL is not part of
+                // the slice). See the ExprKind::Str site for the full rationale.
+                let bytes = self.ctx.const_string(s.as_bytes(), true);
                 let n = self.globals.get();
                 self.globals.set(n + 1);
                 let g = self.module.add_global(bytes.get_type(), None, &format!("str.{n}"));

@@ -164,33 +164,28 @@ fn slices_display_elementwise() {
 }
 
 #[test]
-fn isolate_mode_keeps_main_but_excludes_it_from_expressions() {
+fn isolate_mode_main_is_callable_and_coexists_with_expressions() {
+    // `main` is an ordinary function (`repl.main`) that can be CALLED like any
+    // other, while still being the program's C entry point. The REPL's generated
+    // per-expression entry claims the `main` C symbol via `export-c`, so the
+    // user's `main` and the entry never collide — even in isolate mode.
     let t = repl_isolate(
-        "(defn main [] (-> i64) 0)\n\
+        "(defn main [] (-> i64) 7)\n\
          (iadd 2 2)\n\
          (main)\n",
     );
     assert_result(&t, "#'repl/main");
-    assert_result(&t, "4"); // expressions still evaluate with a session main
-    assert!(
-        t.contains("excluded from expression programs"),
-        "calling the excluded main should explain itself:\n{t}"
-    );
+    assert_result(&t, "4"); // ordinary expressions still evaluate
+    assert_result(&t, "7"); // (main) actually runs main
 }
 
 #[test]
-fn live_mode_session_main_coexists_with_expressions() {
-    // Live evals have their own entry symbol, so a session `main` needs no
-    // exclusion — expressions evaluate normally alongside it. (Calling `(main)`
-    // by name is a LANGUAGE-level error in any Coil program — the resolver
-    // keeps `main` as the bare entry symbol — not a REPL restriction.)
-    let t = repl("(defn main [] (-> i64) 41)\n(iadd 2 2)\n");
+fn live_mode_main_is_callable() {
+    // Same in live mode: define a `main`, then call it by name.
+    let t = repl("(defn main [] (-> i64) 41)\n(iadd 2 2)\n(main)\n");
     assert_result(&t, "#'repl/main");
     assert_result(&t, "4");
-    assert!(
-        !t.contains("excluded from expression programs"),
-        "live mode should not exclude main:\n{t}"
-    );
+    assert_result(&t, "41");
 }
 
 // ---- live mode: persistent bindings + state --------------------------------
@@ -312,4 +307,53 @@ fn load_command_adds_a_file() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(t.contains("loaded 1 form(s)"), "load ack expected:\n{t}");
     assert_result(&t, "42");
+}
+
+#[test]
+fn run_command_executes_the_session_main() {
+    // `:run` builds the whole session as a fresh executable and runs it,
+    // reporting `main`'s exit code (which examples use as their answer). This is
+    // distinct from calling `(main)` inline: `:run` is a clean process, like
+    // `coil run`.
+    let dir = std::env::temp_dir().join(format!("coil_repl_run_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("prog.coil");
+    std::fs::write(&path, "(module x)\n(defn main [] (-> i64) (iadd 40 5))\n").unwrap();
+    let t = repl(&format!(":load {}\n:run\n", path.display()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(t.contains("main exited with code 45"), "run should exec main:\n{t}");
+}
+
+#[test]
+fn run_command_without_main_is_explained() {
+    let t = repl(":run\n");
+    assert!(t.contains("no `main` in the session"), "empty :run should explain:\n{t}");
+}
+
+#[test]
+fn stdlib_is_available_bare_with_no_imports() {
+    // slice / str ops work in a fresh session without a manual import — the REPL
+    // brings them in. `p` is a live heap cell; `slice-new`/`slice-len` are bare.
+    let t = repl("(def p (alloc-heap i64))\n(slice-len (slice-new p 3))\n");
+    assert_result(&t, "3");
+    let t = repl("(str-len \"hello\")\n");
+    assert_result(&t, "5");
+}
+
+#[test]
+fn redefining_a_stdlib_name_wins_and_does_not_break_value_printing() {
+    // No shadowing downside: a session `defn` of an imported name wins for the
+    // user (999), yet the value-printer still uses the REAL slice-len (via its
+    // private alias) — a 3-element slice prints as 3 elements, not 999.
+    let t = repl(concat!(
+        "(defn slice-len [(x i64)] (-> i64) 999)\n",
+        "(slice-len 1)\n",
+        "(def p (alloc-heap (array i64 3)))\n",
+        "(store! (index (cast (ptr i64) p) 0) 8)\n",
+        "(store! (index (cast (ptr i64) p) 1) 8)\n",
+        "(store! (index (cast (ptr i64) p) 2) 8)\n",
+        "(slice-new (cast (ptr i64) p) 3)\n",
+    ));
+    assert_result(&t, "999"); // user's definition wins
+    assert!(t.contains("[8 8 8]"), "value-printer must use the real slice-len:\n{t}");
 }

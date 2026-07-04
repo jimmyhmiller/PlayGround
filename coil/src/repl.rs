@@ -47,6 +47,20 @@ use crate::reader::{self, Sexp, SexpKind};
 /// namespace prefix; defining these yourself in a session is unsupported.
 const PROBE: &str = "coil-repl--probe";
 
+/// The stdlib the REPL brings into every session so the everyday API — slices
+/// and strings (`slice-new`/`slice-len`/`str-len`/…) and formatting (`printf`/
+/// `print-u`/…) — works BARE, with no manual imports. Each is imported BOTH
+/// aliased (`coil-repl-*`, which the generated value-printing helpers use — so
+/// they stay correct even if you redefine `slice-len` in your session) AND with
+/// `:use *` (which exposes the bare names to you). A same-named session `defn`
+/// cleanly wins over the `:use *` name — no shadowing error. Keep the aliases in
+/// sync with the `coil-repl-*` references in the show-helper generator.
+const REPL_IMPORTS: &str = "\
+(import \"fmt.coil\"   :as coil-repl-fmt   :use *)\n\
+(import \"io.coil\"    :as coil-repl-io    :use *)\n\
+(import \"slice.coil\" :as coil-repl-slice :use *)\n\
+(import \"str.coil\"   :as coil-repl-str   :use *)\n";
+
 /// Options for a REPL session (mirrors the `coil run` link surface — an extern
 /// against a C library needs its `-l` at every expression's link step).
 pub struct Opts {
@@ -306,6 +320,8 @@ fn handle_command<W: Write>(cmd: &str, session: &mut Session, out: &mut W) -> bo
                  \x20           :type EXPR    infer and print EXPR's type (nothing runs)\n\
                  \x20           :session      print the accumulated program (and bindings)\n\
                  \x20           :load FILE    add FILE's top-level forms to the session\n\
+                 \x20           :run          build the session's `main` and run it (like\n\
+                 \x20                         `coil run`) — how you drive a loaded example\n\
                  \x20           :reset        forget every definition and binding\n\
                  \x20           :quit         exit (C-d also works)\n\
                  notes:      live mode (the default) loads each eval into THIS process, so\n\
@@ -351,6 +367,9 @@ fn handle_command<W: Write>(cmd: &str, session: &mut Session, out: &mut W) -> bo
                 return false;
             }
             load_file(rest.trim_matches('"'), session, out);
+        }
+        "run" => {
+            run_session_main(session, out);
         }
         _ => {
             let _ = writeln!(out, "unknown command :{name} (:help lists them)");
@@ -650,9 +669,17 @@ fn infer(session: &Session, expr: &str) -> Result<(Type, Program), String> {
         }
         _ => (String::new(), String::new()),
     };
+    // The probe is checked with the same bare stdlib the eval programs get, so
+    // inference of `(slice-len …)`/`(str-len …)`/`(printf …)` resolves here too
+    // (this is where "undefined function" errors would otherwise surface).
+    // Always INCLUDE the session's `main`: it's an ordinary `repl.main` function
+    // now, so `(main)` type-checks. The probe defines `PROBE`, not `main`, so
+    // there is no entry-point collision in either mode.
+    let defs = session.source(false);
+    let with_imports =
+        format!("(module repl)\n{REPL_IMPORTS}{}", &defs["(module repl)\n".len()..]);
     let probe_src = format!(
-        "{}(defn {PROBE} [(env (ptr i8))] (-> void)\n{pro_open}{expr}\n{pro_close})\n",
-        session.source(session.host.is_none())
+        "{with_imports}(defn {PROBE} [(env (ptr i8))] (-> void)\n{pro_open}{expr}\n{pro_close})\n",
     );
     // The resolver namespaces definitions to their module: the probe's checked
     // name is `repl.<probe>`.
@@ -710,9 +737,7 @@ fn eval_live<W: Write>(
     let n_slots = new_slot + usize::from(is_def);
 
     let mut src = String::from("(module repl)\n");
-    src.push_str("(import \"fmt.coil\"   :as coil-repl-fmt)\n");
-    src.push_str("(import \"io.coil\"    :as coil-repl-io)\n");
-    src.push_str("(import \"slice.coil\" :as coil-repl-slice)\n");
+    src.push_str(REPL_IMPORTS);
     src.push_str(&session.source(false)["(module repl)\n".len()..]);
 
     // A Ref-typed expression (a place) is loaded explicitly when its target is
@@ -797,17 +822,7 @@ fn eval_live<W: Write>(
 /// PROCESS — infer its type, generate a `main` that prints its value, build,
 /// run, report a nonzero exit.
 fn handle_expr<W: Write>(expr: &str, session: &mut Session, out: &mut W) -> Result<(), String> {
-    let has_user_main = session.defs.iter().any(|d| d.key.as_deref() == Some("defn main"));
-    let (ty, program) = infer(session, expr).map_err(|e| {
-        if has_user_main && e.contains("undefined function 'main'") {
-            format!(
-                "{e}\n(the session's `main` is excluded from expression programs — the REPL \
-                 generates its own entry point; call your other functions directly)"
-            )
-        } else {
-            e
-        }
-    })?;
+    let (ty, program) = infer(session, expr)?;
     let shown = strip_refs(&ty);
     if shown == Type::Code {
         return Err(
@@ -818,10 +833,12 @@ fn handle_expr<W: Write>(expr: &str, session: &mut Session, out: &mut W) -> Resu
     }
 
     let mut src = String::from("(module repl)\n");
-    src.push_str("(import \"fmt.coil\"   :as coil-repl-fmt)\n");
-    src.push_str("(import \"io.coil\"    :as coil-repl-io)\n");
-    src.push_str("(import \"slice.coil\" :as coil-repl-slice)\n");
-    src.push_str(&session.source(true)[ "(module repl)\n".len() ..]);
+    src.push_str(REPL_IMPORTS);
+    // INCLUDE the session's `main` (an ordinary `repl.main` now). The generated
+    // entry is named `coil-repl--main` and claims the C `main` symbol via
+    // `export-c`, so it doesn't collide with the user's `repl.main` — and the
+    // expression can call `(main)`.
+    src.push_str(&session.source(false)[ "(module repl)\n".len() ..]);
 
     let mut main_body = String::new();
     match shown {
@@ -846,7 +863,8 @@ fn handle_expr<W: Write>(expr: &str, session: &mut Session, out: &mut W) -> Resu
             main_body.push_str(&format!("    ({show}\n{arg}\n)\n    (print \"{{c}}\" 10)\n"));
         }
     }
-    src.push_str(&format!("(defn main [] (-> i64)\n  (do\n{main_body}    0))\n"));
+    src.push_str(&format!("(defn coil-repl--main [] (-> i64)\n  (do\n{main_body}    0))\n"));
+    src.push_str("(export-c [coil-repl--main :as \"main\"])\n");
 
     session.evals += 1;
     let exe: PathBuf = std::env::temp_dir().join(format!(
@@ -873,6 +891,54 @@ fn handle_expr<W: Write>(expr: &str, session: &mut Session, out: &mut W) -> Resu
             Ok(())
         }
         Err(e) => Err(format!("running compiled expression: {e}")),
+    }
+}
+
+/// `:run` — build the WHOLE session (including the user's `main`) as a real
+/// executable and run it, exactly like `coil run file`. This is how you drive
+/// an example whose entry point is `main`: `main` is otherwise uncallable from
+/// the REPL (the resolver keeps it bare, and expression programs generate their
+/// own entry point that excludes it). The process's exit code is reported —
+/// many examples use it as the program's answer.
+fn run_session_main<W: Write>(session: &mut Session, out: &mut W) {
+    let has_main = session.defs.iter().any(|d| d.key.as_deref() == Some("defn main"));
+    if !has_main {
+        let _ = writeln!(
+            out,
+            "no `main` in the session — :load a file that defines one, or just \
+             evaluate an expression directly"
+        );
+        return;
+    }
+    let src = session.source(false);
+    session.evals += 1;
+    let exe: PathBuf = std::env::temp_dir().join(format!(
+        "coil_repl_main_{}_{}",
+        std::process::id(),
+        session.evals
+    ));
+    let triple = crate::codegen::target_triple();
+    if let Err(e) = crate::build_executable_linked_dbg(&src, &exe, triple, &session.link_flags, None)
+    {
+        print_err(out, &e.replace("<source>", "repl"));
+        return;
+    }
+    // Flush the REPL's own chatter before the child writes to the same fd.
+    let _ = out.flush();
+    let status = std::process::Command::new(&exe).status();
+    let _ = std::fs::remove_file(&exe);
+    match status {
+        Ok(s) => match s.code() {
+            Some(code) => {
+                let _ = writeln!(out, "; main exited with code {code}");
+            }
+            None => {
+                let _ = writeln!(out, "; main killed by a signal");
+            }
+        },
+        Err(e) => {
+            let _ = writeln!(out, "; failed to run: {e}");
+        }
     }
 }
 

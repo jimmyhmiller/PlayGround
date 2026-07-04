@@ -57,9 +57,11 @@ pub fn resolve_program(
         if let Some(m) = module {
             let d = table.entry(m.clone()).or_default();
             for f in &p.funcs {
-                if f.name != "main" {
-                    d.callables.insert(f.name.clone());
-                }
+                // `main` qualifies like any callable, so `(main)` resolves to
+                // `module.main` and is callable from Coil. It still becomes the C
+                // entry point: codegen gives the `…​.main` function the external
+                // symbol `main` (unless an `(export-c … :as "main")` claims it).
+                d.callables.insert(f.name.clone());
             }
             for s in &p.structs {
                 d.types.insert(s.name.clone());
@@ -189,9 +191,9 @@ fn qualify_program(
     let empty = HashSet::new();
     for f in &mut p.funcs {
         let tps: HashSet<String> = f.type_params.iter().cloned().collect();
-        if f.name != "main" {
-            f.name = format!("{m}.{}", f.name);
-        }
+        // `main` is qualified like everything else (`module.main`); codegen maps
+        // the entry function back to the external C symbol `main`.
+        f.name = format!("{m}.{}", f.name);
         f.cc = resolve(&f.cc, m, imps, table, exports, |d| &d.convs)?;
         // Resolve each trait name in the bounds (`(T Eq)` → `coil.core.Eq`).
         for (_, traits) in &mut f.bounds {
