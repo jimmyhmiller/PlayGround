@@ -7944,4 +7944,39 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         }
         assert!(d.contains("Fix"), "the genuine dynamic recursion must be PRESERVED:\n{d}");
     }
+    #[test]
+    fn pe_specialises_static_config_to_fresh_recursive_residual() {
+        // PHASE PE-D (full memoisation): a recursion applied to a GROUND static
+        // configuration but decreasing on a DYNAMIC argument (`pow(3, n)`) is
+        // specialised into a FRESH recursive residual (`pow$3`) — the static
+        // parameter substituted in, the recursion tied to a new `Fix` binder,
+        // the static parameter dropped. Sound by the static-argument-transform
+        // condition: valid only when the config is passed VERBATIM through the
+        // recursion (checked); otherwise it falls back.
+        let pow = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            pow : Nat -> Nat -> Nat\n%partial\n\
+            fn pow(base, exp) { match exp { Zero => Succ(Zero), Succ(k) => mul(base, pow(base, k)) } }\n\
+            cube : Nat -> Nat\nfn cube(n) { pow(Succ(Succ(Succ(Zero))), n) }\n\
+            main : Nat\nfn main() { cube(0) + cube(2) + cube(3) }\n";
+        assert_eq!(run(pow), 37); // 1 + 9 + 27
+        let prog = rust_surface::check_program(pow).unwrap();
+        let cube = &prog.defs.iter().find(|(n, _, _)| n == "cube").unwrap().2;
+        let d = format!("{cube:?}");
+        // a fresh Fix specialised on base=3 (`mul(3, ...)`), with NO base
+        // parameter left (the residual fix takes only the dynamic exp).
+        assert!(d.contains("Fix"), "expected a fresh specialised recursion:\n{d}");
+        assert!(d.contains("NatLit(3)"), "the static base must be substituted in:\n{d}");
+
+        // SOUNDNESS: an accumulator whose config CHANGES across the recursion
+        // (`addup(Succ(acc), k)`) must NOT be specialised — it falls back to the
+        // generic recursion and computes correctly (a type-only re-check would
+        // miss a wrong-but-well-typed residual, so the verbatim check is the
+        // guard).
+        let acc = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            addup : Nat -> Nat -> Nat\n%partial\n\
+            fn addup(acc, n) { match n { Zero => acc, Succ(k) => addup(Succ(acc), k) } }\n\
+            g : Nat -> Nat\nfn g(n) { addup(Zero, n) }\n\
+            main : Nat\nfn main() { g(0) + g(3) + g(5) }\n";
+        assert_eq!(run(acc), 8); // g(n) = n
+    }
 }

@@ -2061,9 +2061,146 @@ thread_local! {
     /// zero, `fix_value` stops unfolding and leaves a `<pe-timeout>` marker,
     /// which `pe_reduce_body` detects and reverts to the un-specialised term.
     static PE_FUEL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// set when a specialisation attempt (`try_specialise_static_param`) finds a
+    /// recursive self-call that does NOT pass the static argument verbatim — so
+    /// the static configuration is not constant across the recursion and this
+    /// simple (single fresh `Fix`) specialisation does not apply.
+    static PE_SPEC_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 const PE_TIMEOUT_MARKER: &str = "<pe-timeout>";
+
+/// Count the leading `Lam`s of a (fix) body — its arity.
+fn count_leading_lams(t: &Term) -> usize {
+    match t {
+        Term::Lam(b) => 1 + count_leading_lams(b),
+        Term::Ann(e, _) => count_leading_lams(e),
+        _ => 0,
+    }
+}
+
+/// Is `t` a GROUND static value — a closed constructor / Nat term with no free
+/// variables (so it can be a constant specialisation configuration)?
+fn is_ground(t: &Term) -> bool {
+    fn go(t: &Term, depth: usize) -> bool {
+        match t {
+            Term::Var(i) => *i < depth, // bound locally only
+            Term::Zero | Term::NatLit(_) => true,
+            Term::Suc(k) => go(k, depth),
+            Term::Ann(e, _) => go(e, depth),
+            Term::Constr(_, args) => args.iter().all(|a| go(a, depth)),
+            _ => false,
+        }
+    }
+    go(t, 0)
+}
+
+/// Structural value equality (by read-back at a common, high level so a neutral
+/// variable's `lvl - 1 - level` never underflows).
+fn values_equal(a: &Value, b: &Value) -> bool {
+    const L: usize = 1 << 40;
+    quote(L, a) == quote(L, b)
+}
+
+/// A specialising SELF marker: collects `n` arguments, then (a) checks the
+/// static-position argument still equals the specialisation value `val` — if
+/// not, the config is not constant across the recursion, so the specialisation
+/// is abandoned (`PE_SPEC_FAIL`) — and (b) emits a call to the NEW fix's self
+/// (a neutral `NVar(self_lvl)` applied to the DYNAMIC arguments only). This
+/// ties the recursive knot to the fresh residual `Fix`.
+fn spec_self(
+    self_lvl: usize,
+    p: usize,
+    val: Value,
+    n: usize,
+    collected: Vec<Value>,
+) -> Value {
+    Value::VLamNative(Rc::new(move |arg| {
+        let mut c = collected.clone();
+        c.push(arg);
+        if c.len() < n {
+            return spec_self(self_lvl, p, val.clone(), n, c);
+        }
+        if !values_equal(&c[p], &val) {
+            PE_SPEC_FAIL.with(|f| f.set(true));
+        }
+        let mut neu = Neutral::NVar(self_lvl);
+        for (i, a) in c.iter().enumerate() {
+            if i != p {
+                neu = Neutral::NApp(Box::new(neu), Box::new(a.clone()));
+            }
+        }
+        Value::VNeu(neu)
+    }))
+}
+
+/// Drop the `p`-th leading `Π` of a fix type (the removed static parameter),
+/// leaving the residual function's type over the remaining (dynamic) params.
+fn drop_pi(t: &Term, p: usize) -> Term {
+    match t {
+        Term::Pi(m, a, b) if p == 0 => {
+            let _ = (m, a);
+            (**b).clone()
+        }
+        Term::Pi(m, a, b) => Term::Pi(*m, a.clone(), Box::new(drop_pi(b, p - 1))),
+        other => other.clone(),
+    }
+}
+
+/// FULL MEMOISATION (single-config): specialise a recursive `Fix` to a GROUND
+/// static argument at position `p`, producing a FRESH residual `Fix` (the
+/// recursion tied to its own new binder) — e.g. `pow(3, n)` ⟶ a `pow$3` fix.
+/// Returns the residual fix term (to be applied to the remaining arguments), or
+/// `None` if the static configuration is not constant across the recursion.
+fn try_specialise_static_param(
+    sig: &Rc<Signature>,
+    fixty: &Term,
+    fixbody: &Term,
+    p: usize,
+    val_term: &Term,
+    depth: usize,
+) -> Option<Term> {
+    let n = count_leading_lams(fixbody);
+    if p >= n || n == 0 {
+        return None;
+    }
+    PE_SPEC_FAIL.with(|f| f.set(false));
+    PE_FUEL.with(|f| f.set(2_000_000));
+    // levels: enclosing context is 0..depth; the new fix's self is at `depth`;
+    // the dynamic parameters are at depth+1, depth+2, …
+    let self_lvl = depth;
+    let val = peval(sig, &(0..depth).map(nvar).collect::<Vec<_>>(), val_term);
+    let self_val = spec_self(self_lvl, p, val.clone(), n, vec![]);
+    let mut cur = peval(sig, &[self_val], fixbody);
+    let mut dyn_lvl = depth + 1;
+    for i in 0..n {
+        let pv = if i == p {
+            val.clone()
+        } else {
+            let v = nvar(dyn_lvl);
+            dyn_lvl += 1;
+            v
+        };
+        cur = pvapp(sig, cur, pv);
+    }
+    // `quote` eta-expands the (stuck) match arms, which is where the recursive
+    // self-calls actually fire and `spec_self` verifies the static argument is
+    // passed verbatim — so the `PE_SPEC_FAIL` check MUST come after the quote.
+    let inner = quote(dyn_lvl, &cur);
+    if PE_SPEC_FAIL.with(|f| f.get()) {
+        return None; // static config changes across the recursion — cannot specialise
+    }
+    if mentions_const(&inner, PE_TIMEOUT_MARKER) {
+        return None;
+    }
+    // wrap: (n-1) λ for the dynamic params, then a `Fix` for the new self.
+    let mut body = inner;
+    for _ in 0..(n - 1) {
+        body = Term::Lam(Box::new(body));
+    }
+    let newty = drop_pi(fixty, p);
+    Some(Term::Fix(Box::new(newty), Box::new(body)))
+}
 
 /// Is a value a CONSTRUCTOR (so unfolding a recursion against it makes static
 /// progress — the fix body's `match` will reduce)? A neutral (dynamic) value is
@@ -2435,6 +2572,40 @@ fn pe_reduce(sig: &Rc<Signature>, t: &Term, depth: usize) -> Term {
             let resid = quote(depth, &cur);
             if !mentions_const(&resid, PE_TIMEOUT_MARKER) {
                 return resid;
+            }
+        }
+        // FULL MEMOISATION (static-config specialisation): a `Fix` applied to a
+        // GROUND static argument at some position `p`, with the recursion
+        // decreasing on a DIFFERENT (dynamic) argument — e.g. `pow(3, n)`. The
+        // interpreter-unfold path above does not apply (the ground arg is not
+        // the scrutinee), so instead build a fresh specialised `Fix` (`pow$3`)
+        // with `p` fixed and the recursion tied to the new binder, and call it
+        // on the remaining (dynamic) arguments.
+        if is_fix(head) && args.len() >= 1 {
+            let head_fix = match head {
+                Term::Ann(e, _) => &**e,
+                other => other,
+            };
+            if let Term::Fix(fixty, fixbody) = head_fix {
+                for p in 0..args.len() {
+                    // p must be GROUND static, and there must be a dynamic arg.
+                    if is_ground(args[p]) && args.iter().enumerate().any(|(i, a)| i != p && !is_ground(a)) {
+                        if let Some(spec) =
+                            try_specialise_static_param(sig, fixty, fixbody, p, args[p], depth)
+                        {
+                            let mut out = spec;
+                            for (i, a) in args.iter().enumerate() {
+                                if i != p {
+                                    out = Term::App(Box::new(out), Box::new(pe_reduce(sig, a, depth)));
+                                }
+                            }
+                            // re-process: fold any REMAINING static parameters
+                            // into the residual too (each step drops one param,
+                            // so this terminates).
+                            return pe_reduce(sig, &out, depth);
+                        }
+                    }
+                }
             }
         }
     }
