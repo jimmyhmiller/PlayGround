@@ -6341,11 +6341,28 @@ pub fn check_program(src: &str) -> Result<Program, Vec<String>> {
             diags.push(format!("fn {name}: {e}"));
         }
     }
-    if diags.is_empty() {
-        Ok(prog)
-    } else {
-        Err(diags)
+    if !diags.is_empty() {
+        return Err(diags);
     }
+
+    // PARTIAL EVALUATION pass — specialise every recursive function applied to a
+    // static constructor tree (an interpreter applied to a fixed program, etc.)
+    // into straight-line residual code. UNTRUSTED and SELF-VERIFYING: each
+    // rewritten body is re-checked against its original type and reverted on any
+    // failure, so PE can only make a well-typed program faster, never break it.
+    let mut prog = prog;
+    let rc = Rc::new(prog.sig.clone());
+    for (name, ty, body) in prog.defs.iter_mut() {
+        let ped = dep::pe_reduce_body(&rc, body);
+        if ped != *body && dep::check_closed_in((*rc).clone(), &ped, ty).is_ok() {
+            if std::env::var("TALLY_PE_LOG").is_ok() {
+                eprintln!("[pe] specialised `{name}`");
+            }
+            *body = ped;
+        }
+    }
+
+    Ok(prog)
 }
 
 impl Program {

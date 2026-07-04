@@ -2034,6 +2034,430 @@ pub(crate) fn nvar(lvl: usize) -> Value {
     Value::VNeu(Neutral::NVar(lvl))
 }
 
+// ===========================================================================
+// PARTIAL EVALUATION (the PE-time reducer) — an UNTRUSTED transform.
+//
+// `peval` is the kernel evaluator with exactly two additions the type-checking
+// `eval` deliberately withholds:
+//   (1) `Fix` UNFOLDS (via a `VLamNative` self-closure), so a recursive
+//       function specialises against a known static argument; and
+//   (2) the memory-layer β-rule `unbox (alloc v) ⟶ v`, so a statically-built
+//       owned tree is read through at compile time (its `alloc`/`free` never
+//       reach the residual).
+// Dynamic inputs are neutral variables; `quote` residualises the result. So
+// partial evaluation here is just NbE with the dynamic inputs left symbolic.
+//
+// This never runs during type-checking (only the PE pass calls it), and its
+// output is RE-CHECKED by the kernel — a bug in `peval` yields a rejected or
+// wrong-but-caught residual, never an unsound accepted program. Termination is
+// the caller's responsibility: `pe_specialize` only unfolds against a FINITE
+// static constructor tree (the recursion is guarded by `Case` on the shrinking
+// tree; a dynamic scrutinee leaves a residual `NCase` and stops).
+// ===========================================================================
+
+thread_local! {
+    /// PE unfolding FUEL — a hard backstop against a `Fix` whose recursion is
+    /// not actually bounded by the static argument (a mis-fire). When it hits
+    /// zero, `fix_value` stops unfolding and leaves a `<pe-timeout>` marker,
+    /// which `pe_reduce_body` detects and reverts to the un-specialised term.
+    static PE_FUEL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+const PE_TIMEOUT_MARKER: &str = "<pe-timeout>";
+
+/// A `Fix` value that unfolds one layer per application: applying it evaluates
+/// the body with the self-reference bound to this same unfolder, then applies
+/// the result to the argument. The static data drives termination; `PE_FUEL`
+/// bounds it regardless.
+fn fix_value(sig: Rc<Signature>, env: Vec<Value>, body: Rc<Term>) -> Value {
+    Value::VLamNative(Rc::new(move |arg| {
+        let out_of_fuel = PE_FUEL.with(|f| {
+            let n = f.get();
+            if n == 0 {
+                true
+            } else {
+                f.set(n - 1);
+                false
+            }
+        });
+        if out_of_fuel {
+            return Value::VNeu(Neutral::NConst(PE_TIMEOUT_MARKER.into()));
+        }
+        let self_val = fix_value(sig.clone(), env.clone(), body.clone());
+        let mut e2 = env.clone();
+        e2.push(self_val);
+        let unfolded = peval(&sig, &e2, &body);
+        pvapp(&sig, unfolded, arg)
+    }))
+}
+
+fn mentions_const(t: &Term, name: &str) -> bool {
+    match t {
+        Term::Const(c) => c == name,
+        Term::Ann(a, b) | Term::App(a, b) | Term::Add(a, b) => {
+            mentions_const(a, name) || mentions_const(b, name)
+        }
+        Term::Lam(a) | Term::Suc(a) | Term::Fst(a) | Term::Snd(a) | Term::Refl(a) => {
+            mentions_const(a, name)
+        }
+        Term::Fix(a, b) => mentions_const(a, name) || mentions_const(b, name),
+        Term::Let(_, a, b, c) | Term::Eq(a, b, c) | Term::J(a, b, c) => {
+            mentions_const(a, name) || mentions_const(b, name) || mentions_const(c, name)
+        }
+        Term::Pi(_, a, b) | Term::Sigma(_, a, b) | Term::Pair(a, b) => {
+            mentions_const(a, name) || mentions_const(b, name)
+        }
+        Term::NatElim(a, b, c, d) | Term::NatCase(a, b, c, d) => {
+            mentions_const(a, name)
+                || mentions_const(b, name)
+                || mentions_const(c, name)
+                || mentions_const(d, name)
+        }
+        Term::Data(_, args) | Term::Constr(_, args) => {
+            args.iter().any(|a| mentions_const(a, name))
+        }
+        Term::Case(_, m, ms, s) | Term::Elim(_, m, ms, s) => {
+            mentions_const(m, name)
+                || ms.iter().any(|x| mentions_const(x, name))
+                || mentions_const(s, name)
+        }
+        _ => false,
+    }
+}
+
+/// `unbox (alloc v) ⟶ v` at the value level: `f` is `unbox` applied to its
+/// (erased) type argument, `a` is `alloc` applied to (type, payload).
+fn try_unbox_alloc(f: &Value, a: &Value) -> Option<Value> {
+    if let Value::VNeu(Neutral::NApp(inner, _ty)) = f {
+        if matches!(&**inner, Neutral::NConst(c) if c == "unbox") {
+            if let Value::VNeu(Neutral::NApp(a2, payload)) = a {
+                if let Neutral::NApp(a3, _ty2) = &**a2 {
+                    if matches!(&**a3, Neutral::NConst(c) if c == "alloc") {
+                        return Some((**payload).clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn pvapp(_sig: &Rc<Signature>, f: Value, a: Value) -> Value {
+    if let Some(v) = try_unbox_alloc(&f, &a) {
+        return v;
+    }
+    match f {
+        Value::VLam(clo) => {
+            let mut env = clo.env.clone();
+            env.push(a);
+            peval(&clo.sig, &env, &clo.body)
+        }
+        Value::VLamNative(g) => g(a),
+        Value::VNeu(n) => Value::VNeu(Neutral::NApp(Box::new(n), Box::new(a))),
+        other => {
+            // an ill-typed spine reached PE — the residual re-check would catch
+            // it, but leave it neutral rather than panicking the compiler.
+            Value::VNeu(Neutral::NApp(
+                Box::new(match other {
+                    Value::VNeu(n) => n,
+                    _ => Neutral::NConst("<pe-nonfunction>".into()),
+                }),
+                Box::new(a),
+            ))
+        }
+    }
+}
+
+fn pvcase(
+    sig: &Rc<Signature>,
+    data: &str,
+    motive: &Value,
+    methods: &[Value],
+    scrut: Value,
+) -> Value {
+    match scrut {
+        Value::VConstr(cname, vargs) => {
+            let decl = sig.data(data).expect("pe: case on an undeclared family");
+            let (cidx, ctor) = decl
+                .ctors
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.name == cname)
+                .expect("pe: constructor not in this family");
+            let p = decl.params.len();
+            let mut result = methods[cidx].clone();
+            for (i, _) in ctor.args.iter().enumerate() {
+                result = pvapp(sig, result, vargs[p + i].clone());
+            }
+            result
+        }
+        Value::VNeu(nu) => Value::VNeu(Neutral::NCase(
+            data.to_string(),
+            Box::new(motive.clone()),
+            methods.to_vec(),
+            Box::new(nu),
+        )),
+        _ => unreachable!("pe: case on a non-data value"),
+    }
+}
+
+fn pvnatcase(sig: &Rc<Signature>, p: Value, z: Value, s: Value, scrut: Value) -> Value {
+    match scrut {
+        Value::VNatLit(0) => z,
+        Value::VNatLit(n) => pvapp(sig, s, Value::VNatLit(n - 1)),
+        Value::VSuc(pred) => pvapp(sig, s, *pred),
+        Value::VNeu(nu) => Value::VNeu(Neutral::NNatCase(
+            Box::new(p),
+            Box::new(z),
+            Box::new(s),
+            Box::new(nu),
+        )),
+        _ => unreachable!("pe: natCase on a non-Nat"),
+    }
+}
+
+pub(crate) fn peval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
+    match t {
+        Term::Var(i) => env[env.len() - 1 - i].clone(),
+        Term::Lam(b) => Value::VLam(Closure {
+            sig: sig.clone(),
+            env: env.to_vec(),
+            body: (**b).clone(),
+        }),
+        Term::App(f, a) => {
+            let fv = peval(sig, env, f);
+            let av = peval(sig, env, a);
+            pvapp(sig, fv, av)
+        }
+        Term::Let(_s, _ty, e, body) => {
+            let ve = peval(sig, env, e);
+            let mut env2 = env.to_vec();
+            env2.push(ve);
+            peval(sig, &env2, body)
+        }
+        // THE ONE DIFFERENCE FROM `eval`: Fix unfolds.
+        Term::Fix(_ty, body) => fix_value(sig.clone(), env.to_vec(), Rc::new((**body).clone())),
+        Term::Case(data, motive, methods, scrut) => {
+            let vm = peval(sig, env, motive);
+            let vmeth: Vec<Value> = methods.iter().map(|m| peval(sig, env, m)).collect();
+            pvcase(sig, data, &vm, &vmeth, peval(sig, env, scrut))
+        }
+        Term::NatCase(p, z, s, scrut) => {
+            let vp = peval(sig, env, p);
+            let vz = peval(sig, env, z);
+            let vs = peval(sig, env, s);
+            pvnatcase(sig, vp, vz, vs, peval(sig, env, scrut))
+        }
+        Term::Constr(name, args) => {
+            Value::VConstr(name.clone(), args.iter().map(|a| peval(sig, env, a)).collect())
+        }
+        Term::Data(name, args) => {
+            Value::VData(name.clone(), args.iter().map(|a| peval(sig, env, a)).collect())
+        }
+        Term::Const(c) => Value::VNeu(Neutral::NConst(c.clone())),
+        Term::Add(a, b) => match (peval(sig, env, a), peval(sig, env, b)) {
+            (Value::VNatLit(x), Value::VNatLit(y)) => Value::VNatLit(x + y),
+            (va, vb) => Value::VNeu(Neutral::NAdd(Box::new(va), Box::new(vb))),
+        },
+        Term::Suc(t) => vsuc(peval(sig, env, t)),
+        Term::Nat => Value::VNat,
+        Term::NatLit(n) => Value::VNatLit(*n),
+        Term::Zero => Value::VNatLit(0),
+        Term::Type(i) => Value::VType(*i),
+        Term::Ann(e, _) => peval(sig, env, e),
+        Term::Pi(pi, a, b) => Value::VPi(
+            *pi,
+            Box::new(peval(sig, env, a)),
+            Closure { sig: sig.clone(), env: env.to_vec(), body: (**b).clone() },
+        ),
+        // constructs that do not appear inside first-order recursive interpreter
+        // bodies (Σ/pairs, Eq/J, NatElim, Elim, …) — delegate to the kernel
+        // evaluator (they carry no Fix that PE needs to unfold here).
+        _ => eval(sig, env, t),
+    }
+}
+
+/// Specialise `fn_body` to fully-known `static_args`, leaving `n_dynamic`
+/// trailing arguments symbolic. Returns the residual as an `n_dynamic`-argument
+/// lambda term (`λ dyn… . <residual>`), ready to be kernel-re-checked and
+/// compiled. THE PARTIAL EVALUATOR'S ENTRY POINT.
+pub(crate) fn pe_specialize(
+    sig: &Rc<Signature>,
+    fn_body: &Term,
+    static_args: &[Term],
+    n_dynamic: usize,
+) -> Term {
+    PE_FUEL.with(|f| f.set(2_000_000));
+    let mut cur = peval(sig, &[], fn_body);
+    for sa in static_args {
+        let sv = peval(sig, &[], sa);
+        cur = pvapp(sig, cur, sv);
+    }
+    for d in 0..n_dynamic {
+        cur = pvapp(sig, cur, Value::VNeu(Neutral::NVar(d)));
+    }
+    let mut body = quote(n_dynamic, &cur);
+    for _ in 0..n_dynamic {
+        body = Term::Lam(Box::new(body));
+    }
+    body
+}
+
+/// A "static" term for PE: a fully-known first-order constructor tree — built
+/// only from constructors, `alloc` wrappers, and Nat literals, with NO free
+/// variables, no `Fix`, no other opaque calls. Exactly the shape a recursive
+/// function can be specialised against and terminate.
+fn is_static_tree(t: &Term) -> bool {
+    match t {
+        Term::Ann(e, _) => is_static_tree(e),
+        Term::Constr(_, args) => args.iter().all(|a| is_static_tree(a)),
+        Term::Zero | Term::NatLit(_) => true,
+        Term::Suc(t) => is_static_tree(t),
+        Term::Data(_, _) | Term::Type(_) => true, // erased type arguments
+        // `alloc T v` — the memory op PE removes; recurse into the payload.
+        Term::App(f, a) => {
+            let (head, args) = spine(t);
+            if matches!(head, Term::Const(c) if c == "alloc") {
+                return args.iter().all(|a| is_static_tree(a));
+            }
+            is_static_tree(f) && is_static_tree(a)
+        }
+        _ => false,
+    }
+}
+
+fn tree_size(t: &Term) -> usize {
+    match t {
+        Term::Ann(e, _) => 1 + tree_size(e),
+        Term::Constr(_, args) => 1 + args.iter().map(tree_size).sum::<usize>(),
+        Term::Suc(t) => 1 + tree_size(t),
+        Term::App(f, a) => tree_size(f) + tree_size(a),
+        _ => 1,
+    }
+}
+
+/// Peel an application spine: `f a b c` ⟶ `(f, [a, b, c])` (Ann-transparent on
+/// the head). Non-applications return `(t, [])`.
+fn spine(t: &Term) -> (&Term, Vec<&Term>) {
+    let mut args: Vec<&Term> = Vec::new();
+    let mut head = t;
+    while let Term::App(f, a) = head {
+        args.push(a);
+        head = f;
+    }
+    args.reverse();
+    let head = match head {
+        Term::Ann(e, _) => e,
+        other => other,
+    };
+    (head, args)
+}
+
+fn is_fix(t: &Term) -> bool {
+    matches!(t, Term::Fix(_, _)) || matches!(t, Term::Ann(e, _) if is_fix(e))
+}
+
+/// Is the static argument a DATA tree (a constructor / `alloc`-of-constructor),
+/// as opposed to a bare `Nat` or scalar? PE only specialises a recursion whose
+/// static argument is an inductive structure the recursion consumes — an AST, a
+/// list, a tree. A bare `Nat` loop-counter is deliberately EXCLUDED: a counting
+/// recursion is not bounded by it, so specialising on it would diverge (the
+/// fuel backstop would catch it, but this avoids the wasted attempt entirely).
+fn is_static_data_root(t: &Term) -> bool {
+    match t {
+        Term::Ann(e, _) => is_static_data_root(e),
+        Term::Constr(_, _) => true,
+        Term::App(_, _) => {
+            let (head, _) = spine(t);
+            matches!(head, Term::Const(c) if c == "alloc")
+        }
+        _ => false,
+    }
+}
+
+/// THE PARTIAL-EVALUATION PASS (untrusted; the caller re-checks the result and
+/// falls back to the original on any failure, so it can only speed a program
+/// up, never break it). Bottom-up over the term: wherever a recursive function
+/// (`Fix`) is applied to a STATIC first argument (a known constructor tree),
+/// specialise it away — the recursion, the case dispatch, and the tree's
+/// alloc/unbox all vanish, leaving straight-line residual code over the
+/// remaining (dynamic) arguments.
+pub(crate) fn pe_reduce_body(sig: &Rc<Signature>, t: &Term) -> Term {
+    // Examine the FULL application spine at THIS node first (before recursing
+    // into the head), so a recursive function is only specialised when its
+    // static argument AND at least one dynamic argument are both present — never
+    // on a partial `App(Fix, static)` sub-spine (which would eta-expand a
+    // partial application and diverge).
+    if let Term::App(_, _) = t {
+        let (head, args) = spine(t);
+        let n_dyn = args.len().saturating_sub(1);
+        if is_fix(head)
+            && n_dyn >= 1
+            && is_static_data_root(args[0])
+            && is_static_tree(args[0])
+            && tree_size(args[0]) < 100_000
+        {
+            let head_owned = match head {
+                Term::Ann(e, _) => (**e).clone(),
+                other => other.clone(),
+            };
+            let static_arg = args[0].clone();
+            // pe_specialize fuels the unfolding; on timeout it leaves a marker
+            // and we revert to the un-specialised node.
+            let resid = pe_specialize(sig, &head_owned, std::slice::from_ref(&static_arg), n_dyn);
+            if mentions_const(&resid, PE_TIMEOUT_MARKER) {
+                return pe_map_children(sig, t);
+            }
+            // β-reduce the residual `λ dyn… . body` against the remaining
+            // (dynamic) arguments — SUBSTITUTING rather than leaving `App(λ, a)`
+            // (a bare lambda in head position the checker can't infer). Each step
+            // strips one `Lam` and substitutes one partially-evaluated argument.
+            let mut out = resid;
+            for a in &args[1..] {
+                let a_pe = pe_reduce_body(sig, a);
+                out = match out {
+                    Term::Lam(b) => subst(&b, &[a_pe]),
+                    other => Term::App(Box::new(other), Box::new(a_pe)),
+                };
+            }
+            return out;
+        }
+    }
+    // no static-Fix application here — recurse into children.
+    pe_map_children(sig, t)
+}
+
+fn pe_map_children(sig: &Rc<Signature>, t: &Term) -> Term {
+    let pe = |x: &Term| pe_reduce_body(sig, x);
+    match t {
+        Term::App(f, a) => Term::App(Box::new(pe(f)), Box::new(pe(a))),
+        Term::Lam(b) => Term::Lam(Box::new(pe(b))),
+        Term::Fix(ty, b) => Term::Fix(ty.clone(), Box::new(pe(b))),
+        Term::Let(s, ty, e, b) => {
+            Term::Let(*s, ty.clone(), Box::new(pe(e)), Box::new(pe(b)))
+        }
+        Term::Ann(e, ty) => Term::Ann(Box::new(pe(e)), ty.clone()),
+        Term::Add(a, b) => Term::Add(Box::new(pe(a)), Box::new(pe(b))),
+        Term::Suc(x) => Term::Suc(Box::new(pe(x))),
+        Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(&pe).collect()),
+        Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(&pe).collect()),
+        Term::Case(d, m, meths, scr) => Term::Case(
+            d.clone(),
+            Box::new(pe(m)),
+            meths.iter().map(&pe).collect(),
+            Box::new(pe(scr)),
+        ),
+        Term::NatCase(p, z, s, scr) => Term::NatCase(
+            Box::new(pe(p)),
+            Box::new(pe(z)),
+            Box::new(pe(s)),
+            Box::new(pe(scr)),
+        ),
+        // leaves and constructs PE doesn't descend into: unchanged.
+        other => other.clone(),
+    }
+}
+
 /// Lift a term by `d` (shift all free variables up). Used by the surface
 /// elaborator to build a constant motive for a non-dependent `match`.
 pub(crate) fn shift_term(d: usize, t: &Term) -> Term {

@@ -117,9 +117,46 @@ fn run_cli() -> ExitCode {
             });
             build_native(&src, path, &out, opt)
         }
+        Some("dump") => {
+            // tally dump <file> [name]  — print the elaborated Term of each def
+            // (or just `name`), as pretty-printed source and as the raw AST. A
+            // development aid for the partial-evaluation work.
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: tally dump <file> [def-name]");
+                return ExitCode::FAILURE;
+            };
+            let only = args.get(3).cloned();
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match tally::rust_surface::check_program(&src) {
+                Ok(prog) => {
+                    for (n, ty, body) in &prog.defs {
+                        if only.as_deref().is_some_and(|o| o != n) {
+                            continue;
+                        }
+                        println!("── {n} : {}", tally::rust_surface::pretty(ty));
+                        println!("   pretty: {}", tally::rust_surface::pretty(body));
+                        println!("   ast:    {body:?}\n");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(diags) => {
+                    eprintln!("{path}: rejected:");
+                    for d in &diags {
+                        eprintln!("  - {d}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!(
-                "lambda-Tally compiler\nusage:\n  tally check <file>   (type-check: dependent + linear, no leaks/use-after-free)\n  tally run <file>     (type-check + JIT-compile main to native, run it)\n  tally build <file>   (type-check + AOT-compile to a native executable)\n     [-o out] [-O0|-O1|-O2|-O3]"
+                "lambda-Tally compiler\nusage:\n  tally check <file>   (type-check: dependent + linear, no leaks/use-after-free)\n  tally run <file>     (type-check + JIT-compile main to native, run it)\n  tally build <file>   (type-check + AOT-compile to a native executable)\n     [-o out] [-O0|-O1|-O2|-O3]\n  tally dump <file> [name]  (print elaborated Term(s) — dev aid)"
             );
             ExitCode::FAILURE
         }

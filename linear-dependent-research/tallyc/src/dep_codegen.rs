@@ -7759,4 +7759,88 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             main : Nat\nfn main() { r3(7) + r3(8) + r3(9) }\n";
         assert_eq!(run(three), 3);
     }
+    #[test]
+    fn pe_specialises_interpreter_to_straight_line_code() {
+        // PHASE PE-M1: specialise the first-order interpreter `eval` to the
+        // static program `prog` (1 + 2*x), leaving x dynamic. The residual
+        // must be straight-line arithmetic — no Fix, no Case dispatch, no
+        // unbox/alloc, no Expr/Own at all.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum Expr { Var : Expr, Lit : Nat -> Expr,\n\
+                Add : Own Expr -> Own Expr -> Expr, Mul : Own Expr -> Own Expr -> Expr }\n\
+            eval : Own Expr -> Nat -> Nat\n%partial\n\
+            fn eval(e, x) {\n\
+              match unbox(e) {\n\
+                Var => x, Lit(n) => n,\n\
+                Add(a, b) => let va = eval(a, x); let vb = eval(b, x); va + vb,\n\
+                Mul(a, b) => let va = eval(a, x); let vb = eval(b, x); mul(va, vb),\n\
+              }\n\
+            }\n\
+            prog : Own Expr\n\
+            fn prog() { alloc(Add(alloc(Lit(Succ(Zero))),\n\
+                                  alloc(Mul(alloc(Lit(Succ(Succ(Zero)))), alloc(Var))))) }\n\
+            main : Nat\nfn main() { Zero }\n";
+        let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let sig = std::rc::Rc::new(prog.sig.clone());
+        let eval_body = &prog.defs.iter().find(|(n, _, _)| n == "eval").unwrap().2;
+        let prog_body = &prog.defs.iter().find(|(n, _, _)| n == "prog").unwrap().2;
+        let residual =
+            crate::dep::pe_specialize(&sig, eval_body, std::slice::from_ref(prog_body), 1);
+        let p = format!("{residual:?}");
+        eprintln!("PE RESIDUAL (ast): {p}");
+        // the interpretive machinery is GONE: no recursion, no dispatch, no
+        // constructors (the AST is consumed), no memory ops.
+        for bad in ["Fix", "Case", "Constr(", "unbox", "alloc", "Own", "Data(\"Expr\""] {
+            assert!(!p.contains(bad), "residual still contains `{bad}`:\n{p}");
+        }
+        // it MUST keep the dynamic parts: the multiply op and the input variable.
+        assert!(p.contains("Const(\"mul\")"), "residual lost the dynamic multiply:\n{p}");
+        assert!(p.contains("Var(0)"), "residual lost the dynamic input x:\n{p}");
+    }
+    #[test]
+    fn pe_end_to_end_interpreter_overhead_removed() {
+        // PHASE PE-M2/M3: the interpreter applied to a FIXED program at a
+        // DYNAMIC input is automatically specialised to overhead-free
+        // straight-line code — kernel-verified, no annotation. This is the
+        // Idris "specialising interpreters" result, end to end.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum Expr { Var : Expr, Lit : Nat -> Expr,\n\
+                Add : Own Expr -> Own Expr -> Expr, Mul : Own Expr -> Own Expr -> Expr }\n\
+            eval : Own Expr -> Nat -> Nat\n%partial\n\
+            fn eval(e, x) {\n\
+              match unbox(e) {\n\
+                Var => x, Lit(n) => n,\n\
+                Add(a, b) => let va = eval(a, x); let vb = eval(b, x); va + vb,\n\
+                Mul(a, b) => let va = eval(a, x); let vb = eval(b, x); mul(va, vb),\n\
+              }\n\
+            }\n\
+            prog : Own Expr\n\
+            fn prog() { alloc(Add(alloc(Lit(Succ(Zero))),\n\
+                                  alloc(Mul(alloc(Lit(Succ(Succ(Zero)))), alloc(Var))))) }\n\
+            run : Nat -> Nat\nfn run(x) { eval(prog(), x) }\n\
+            main : Nat\nfn main() { run(0) + run(5) + run(10) }\n";
+        // EQUIVALENCE: the residual computes 1 + 2*x for each input.
+        //   run(0)=1, run(5)=11, run(10)=21  →  33
+        assert_eq!(run(src), 33);
+
+        // OVERHEAD REMOVED: no heap traffic (the AST tree is never built), no
+        // unbox/free, and no recursive dispatch anywhere in the hot path.
+        let ir = ir(src);
+        assert!(
+            !ir.contains("call ptr @malloc"),
+            "PE must eliminate all AST allocation, but a malloc remains:\n{ir}"
+        );
+        assert!(
+            !ir.contains("call void @free"),
+            "PE must eliminate all AST frees:\n{ir}"
+        );
+
+        // and the specialised `run` really is `\\x. 1 + mul(2, x)`.
+        let prog = rust_surface::check_program(src).unwrap();
+        let run_body = &prog.defs.iter().find(|(n, _, _)| n == "run").unwrap().2;
+        let d = format!("{run_body:?}");
+        for gone in ["Fix", "Case", "unbox", "alloc", "Constr("] {
+            assert!(!d.contains(gone), "specialised `run` still has `{gone}`:\n{d}");
+        }
+    }
 }
