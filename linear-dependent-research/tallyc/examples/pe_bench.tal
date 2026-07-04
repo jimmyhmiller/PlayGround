@@ -12,11 +12,15 @@
 //   xorLoop(k, bxor(acc, 7*k^3 + 5*k^2 + 3*k + 11))
 // a tight tail-recursive loop LLVM turns into vectorised arithmetic.
 //
-// Measured (100M iterations, best of 5, Apple arm64):
-//   tally interpreter, NO PE (tree-walk) : 2.67 s   (14 mallocs, 1 dispatch)
-//   tally interpreter, + PE (specialised): 0.04 s   ( 0 mallocs, 0 dispatch)
-//   hand-written C (bench/pe_bench.c)    : 0.04 s
-// PE removes a ~67x interpretive overhead and lands EXACTLY on hand-written C.
+// Measured (100M iterations, best of 5, Apple arm64, -O2):
+//   C     interpreter, tree-walk  (bench/pe_bench_interp.c): 3.06 s   <- interpreter
+//   tally interpreter, NO PE      (tree-walk)              : 2.93 s   <- interpreter
+//   tally interpreter, + PE       (specialised)            : 0.05 s   <- specialised
+//   C     specialised, direct     (bench/pe_bench.c)       : 0.05 s   <- specialised
+// The two INTERPRETERS (C and tally) are at parity — the ~60x cost is genuine,
+// language-independent interpretive overhead, not a strawman. PE takes the
+// tree-walking interpreter and AUTOMATICALLY produces the specialised artifact,
+// matching hand-written specialised C (0 mallocs, 0 dispatch in the hot loop).
 
 %builtin Nat Nat
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
