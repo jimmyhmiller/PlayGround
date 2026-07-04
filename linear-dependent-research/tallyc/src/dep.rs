@@ -2065,12 +2065,46 @@ thread_local! {
 
 const PE_TIMEOUT_MARKER: &str = "<pe-timeout>";
 
-/// A `Fix` value that unfolds one layer per application: applying it evaluates
-/// the body with the self-reference bound to this same unfolder, then applies
-/// the result to the argument. The static data drives termination; `PE_FUEL`
-/// bounds it regardless.
-fn fix_value(sig: Rc<Signature>, env: Vec<Value>, body: Rc<Term>) -> Value {
+/// Is a value a CONSTRUCTOR (so unfolding a recursion against it makes static
+/// progress — the fix body's `match` will reduce)? A neutral (dynamic) value is
+/// NOT: unfolding against it would get stuck and, worse, re-reference the fix,
+/// so it must be residualised as a call instead.
+fn is_ctor_value(v: &Value) -> bool {
+    match v {
+        Value::VConstr(_, _) | Value::VNatLit(_) | Value::VSuc(_) => true,
+        // `alloc T payload` where `payload` is a constructor: the fix body's
+        // `unbox` will expose it, so this IS static progress (an owned AST cell).
+        Value::VNeu(Neutral::NApp(inner, payload)) => {
+            if let Neutral::NApp(inner2, _ty) = &**inner {
+                if matches!(&**inner2, Neutral::NConst(c) if c == "alloc") {
+                    return is_ctor_value(payload);
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// A `Fix` value that unfolds one layer per application — but ONLY when its
+/// argument is a constructor (static progress). Applied to a DYNAMIC (neutral)
+/// argument it does NOT unfold; it residualises as a call to the original
+/// recursive function (`App(Fix ty body, arg)`), so a recursion over runtime
+/// data is preserved as a residual call rather than inlined forever. This is
+/// the online-PE termination rule; `PE_FUEL` bounds the rest.
+fn fix_value(sig: Rc<Signature>, ty: Rc<Term>, env: Vec<Value>, body: Rc<Term>) -> Value {
     Value::VLamNative(Rc::new(move |arg| {
+        // dynamic argument ⇒ keep the recursive call; do not unfold.
+        if !is_ctor_value(&arg) {
+            let fix_tm = Term::Fix(Box::new((*ty).clone()), Box::new((*body).clone()));
+            return Value::VNeu(Neutral::NApp(
+                Box::new(match eval(&sig, &[], &fix_tm) {
+                    Value::VNeu(n) => n,
+                    _ => Neutral::NFix(Box::new((*ty).clone()), Box::new((*body).clone())),
+                }),
+                Box::new(arg),
+            ));
+        }
         let out_of_fuel = PE_FUEL.with(|f| {
             let n = f.get();
             if n == 0 {
@@ -2083,7 +2117,7 @@ fn fix_value(sig: Rc<Signature>, env: Vec<Value>, body: Rc<Term>) -> Value {
         if out_of_fuel {
             return Value::VNeu(Neutral::NConst(PE_TIMEOUT_MARKER.into()));
         }
-        let self_val = fix_value(sig.clone(), env.clone(), body.clone());
+        let self_val = fix_value(sig.clone(), ty.clone(), env.clone(), body.clone());
         let mut e2 = env.clone();
         e2.push(self_val);
         let unfolded = peval(&sig, &e2, &body);
@@ -2236,7 +2270,7 @@ pub(crate) fn peval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
             peval(sig, &env2, body)
         }
         // THE ONE DIFFERENCE FROM `eval`: Fix unfolds.
-        Term::Fix(_ty, body) => fix_value(sig.clone(), env.to_vec(), Rc::new((**body).clone())),
+        Term::Fix(_ty, body) => fix_value(sig.clone(), Rc::new((**_ty).clone()), env.to_vec(), Rc::new((**body).clone())),
         Term::Case(data, motive, methods, scrut) => {
             let vm = peval(sig, env, motive);
             let vmeth: Vec<Value> = methods.iter().map(|m| peval(sig, env, m)).collect();

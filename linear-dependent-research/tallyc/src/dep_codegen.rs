@@ -7909,4 +7909,39 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let mallocs = ir.matches("call ptr @malloc").count();
         assert!(mallocs <= 4, "HO interpreter overhead not removed: {mallocs} mallocs\n{ir}");
     }
+    #[test]
+    fn pe_preserves_recursion_over_dynamic_data() {
+        // PHASE PE-D (online-PE termination): an interpreter whose object
+        // program recurses over DYNAMIC runtime data. PE specialises the
+        // interpreter's dispatch away, but the genuine dynamic recursion is
+        // PRESERVED as a residual call to the recursive function — it is NOT
+        // inlined forever (which previously diverged). This is the online-PE
+        // rule: unfold a recursion on a static constructor, residualise it on
+        // a dynamic argument.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum Expr { EVar : Expr, ELit : Nat -> Expr,\n\
+                EAdd : Expr -> Expr -> Expr, ESumTo : Expr -> Expr }\n\
+            sumTo : Nat -> Nat\n%partial\n\
+            fn sumTo(n) { match n { Zero => Zero, Succ(k) => n + sumTo(k) } }\n\
+            eval : Expr -> Nat -> Nat\n%partial\n\
+            fn eval(e, x) {\n\
+              match e { EVar => x, ELit(n) => n,\n\
+                EAdd(a, b) => eval(a, x) + eval(b, x), ESumTo(a) => sumTo(eval(a, x)) }\n\
+            }\n\
+            prog : Expr\nfn prog() { EAdd(ESumTo(EVar), ELit(Succ(Zero))) }\n\
+            run : Nat -> Nat\nfn run(x) { eval(prog(), x) }\n\
+            main : Nat\nfn main() { run(0) + run(3) + run(5) }\n";
+        // run(x) = sumTo(x) + 1 ;  (0+1) + (6+1) + (15+1) = 1 + 7 + 16 = 24
+        assert_eq!(run(src), 24);
+        let prog = rust_surface::check_program(src).unwrap();
+        let rb = &prog.defs.iter().find(|(n, _, _)| n == "run").unwrap().2;
+        let d = format!("{rb:?}");
+        // the interpreter dispatch is gone (no ESumTo/EAdd/EVar constructors,
+        // no Case on Expr), but ONE Fix remains — the preserved dynamic
+        // recursion (sumTo), as a residual call.
+        for gone in ["Constr(\"ESumTo\"", "Constr(\"EAdd\"", "Case(\"Expr\""] {
+            assert!(!d.contains(gone), "interpreter dispatch not specialised away:\n{d}");
+        }
+        assert!(d.contains("Fix"), "the genuine dynamic recursion must be PRESERVED:\n{d}");
+    }
 }
