@@ -7882,4 +7882,31 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
         let err = rust_surface::check_program(bad).err().expect("unspecialisable erased call must reject");
         assert!(format!("{err:?}").contains("bad"), "the un-specialised interpreter use must be rejected:\n{err:?}");
     }
+    #[test]
+    fn pe_specialises_higher_order_defunctionalized_interpreter() {
+        // PHASE PE-C: a HIGHER-ORDER interpreter (first-class functions via a
+        // defunctionalized closure `Val`, mutually-recursive eval/apply, a
+        // runtime environment) is specialised to a fixed program at a dynamic
+        // input. PE handles the mutual recursion, builds and applies closures at
+        // compile time, and sees through the environment list (static spine,
+        // dynamic leaf). The interpretive CONTROL overhead (recursion, AST +
+        // closure dispatch) is fully removed.
+        let src = std::fs::read_to_string("examples/pe_higher_order.tal").unwrap();
+        // runD(x) = 4*x ;  runD 0 + runD 3 + runD 10 = 0 + 12 + 40 = 52
+        assert_eq!(run(&src), 52);
+        let prog = rust_surface::check_program(&src).unwrap();
+        let rd = &prog.defs.iter().find(|(n, _, _)| n == "runD").unwrap().2;
+        let d = format!("{rd:?}");
+        // the recursion and AST/closure dispatch are gone from the residual:
+        // no Fix, no EApp/ELam/EVar constructors, no Expr/Env recursion.
+        for gone in ["Fix", "Constr(\"EApp\"", "Constr(\"ELam\"", "Constr(\"CloV\"", "Data(\"Expr\""] {
+            assert!(!d.contains(gone), "HO residual still contains `{gone}`:\n{d}");
+        }
+        // and the interpretive heap traffic is nearly gone (down from ~39
+        // mallocs for the un-specialised interpreter to a small boundary
+        // residual — the untyped Val boxing).
+        let ir = ir(&src);
+        let mallocs = ir.matches("call ptr @malloc").count();
+        assert!(mallocs <= 4, "HO interpreter overhead not removed: {mallocs} mallocs\n{ir}");
+    }
 }

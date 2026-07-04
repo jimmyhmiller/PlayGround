@@ -2281,6 +2281,7 @@ pub(crate) fn peval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
 /// trailing arguments symbolic. Returns the residual as an `n_dynamic`-argument
 /// lambda term (`λ dyn… . <residual>`), ready to be kernel-re-checked and
 /// compiled. THE PARTIAL EVALUATOR'S ENTRY POINT.
+#[allow(dead_code)]
 pub(crate) fn pe_specialize(
     sig: &Rc<Signature>,
     fn_body: &Term,
@@ -2301,29 +2302,6 @@ pub(crate) fn pe_specialize(
         body = Term::Lam(Box::new(body));
     }
     body
-}
-
-/// A "static" term for PE: a fully-known first-order constructor tree — built
-/// only from constructors, `alloc` wrappers, and Nat literals, with NO free
-/// variables, no `Fix`, no other opaque calls. Exactly the shape a recursive
-/// function can be specialised against and terminate.
-fn is_static_tree(t: &Term) -> bool {
-    match t {
-        Term::Ann(e, _) => is_static_tree(e),
-        Term::Constr(_, args) => args.iter().all(|a| is_static_tree(a)),
-        Term::Zero | Term::NatLit(_) => true,
-        Term::Suc(t) => is_static_tree(t),
-        Term::Data(_, _) | Term::Type(_) => true, // erased type arguments
-        // `alloc T v` — the memory op PE removes; recurse into the payload.
-        Term::App(f, a) => {
-            let (head, args) = spine(t);
-            if matches!(head, Term::Const(c) if c == "alloc") {
-                return args.iter().all(|a| is_static_tree(a));
-            }
-            is_static_tree(f) && is_static_tree(a)
-        }
-        _ => false,
-    }
 }
 
 fn tree_size(t: &Term) -> usize {
@@ -2357,6 +2335,7 @@ fn is_fix(t: &Term) -> bool {
     matches!(t, Term::Fix(_, _)) || matches!(t, Term::Ann(e, _) if is_fix(e))
 }
 
+
 /// Is the static argument a DATA tree (a constructor / `alloc`-of-constructor),
 /// as opposed to a bare `Nat` or scalar? PE only specialises a recursion whose
 /// static argument is an inductive structure the recursion consumes — an AST, a
@@ -2377,72 +2356,80 @@ fn is_static_data_root(t: &Term) -> bool {
 
 /// THE PARTIAL-EVALUATION PASS (untrusted; the caller re-checks the result and
 /// falls back to the original on any failure, so it can only speed a program
-/// up, never break it). Bottom-up over the term: wherever a recursive function
-/// (`Fix`) is applied to a STATIC first argument (a known constructor tree),
-/// specialise it away — the recursion, the case dispatch, and the tree's
-/// alloc/unbox all vanish, leaving straight-line residual code over the
-/// remaining (dynamic) arguments.
+/// up, never break it). Over the term: wherever a recursive function (`Fix`) is
+/// applied to a static-STRUCTURE first argument (a constructor tree, possibly
+/// with dynamic leaves), specialise it away — the recursion, the case dispatch,
+/// and the tree's alloc/unbox all vanish.
+///
+/// `depth` = the number of enclosing binders in scope at this node. Those
+/// variables are treated as neutral during specialisation, so a static argument
+/// with DYNAMIC LEAVES (a free variable — an interpreter's runtime environment,
+/// a symbolic input) is handled correctly: the leaf stays symbolic and the
+/// residual is quoted back into the enclosing context.
 pub(crate) fn pe_reduce_body(sig: &Rc<Signature>, t: &Term) -> Term {
+    pe_reduce(sig, t, 0)
+}
+
+fn pe_reduce(sig: &Rc<Signature>, t: &Term, depth: usize) -> Term {
     // Examine the FULL application spine at THIS node first (before recursing
     // into the head), so a recursive function is only specialised when its
-    // static argument AND at least one dynamic argument are both present — never
+    // static argument AND at least one further argument are both present — never
     // on a partial `App(Fix, static)` sub-spine (which would eta-expand a
     // partial application and diverge).
     if let Term::App(_, _) = t {
         let (head, args) = spine(t);
-        let n_dyn = args.len().saturating_sub(1);
+        // Fire when a recursive function (`Fix`) is applied to a static-
+        // STRUCTURE argument (a constructor tree, possibly with dynamic leaves)
+        // plus at least one further argument — the interpreter case.
         if is_fix(head)
-            && n_dyn >= 1
+            && args.len() >= 2
             && is_static_data_root(args[0])
-            && is_static_tree(args[0])
             && tree_size(args[0]) < 100_000
         {
-            let head_owned = match head {
-                Term::Ann(e, _) => (**e).clone(),
-                other => other.clone(),
-            };
-            let static_arg = args[0].clone();
-            // pe_specialize fuels the unfolding; on timeout it leaves a marker
-            // and we revert to the un-specialised node.
-            let resid = pe_specialize(sig, &head_owned, std::slice::from_ref(&static_arg), n_dyn);
-            if mentions_const(&resid, PE_TIMEOUT_MARKER) {
-                return pe_map_children(sig, t);
+            // Specialise by NbE: set up the `depth` enclosing variables as
+            // neutrals, evaluate the whole application (the target `Fix` unfolds
+            // against the static structure; free variables — dynamic leaves and
+            // the further arguments — stay neutral), and quote back into the
+            // enclosing context. Fuel-bounded; on timeout revert to the
+            // un-specialised node.
+            PE_FUEL.with(|f| f.set(2_000_000));
+            let neu: Vec<Value> = (0..depth).map(nvar).collect();
+            let mut cur = peval(sig, &neu, head);
+            for a in &args {
+                cur = pvapp(sig, cur, peval(sig, &neu, a));
             }
-            // β-reduce the residual `λ dyn… . body` against the remaining
-            // (dynamic) arguments — SUBSTITUTING rather than leaving `App(λ, a)`
-            // (a bare lambda in head position the checker can't infer). Each step
-            // strips one `Lam` and substitutes one partially-evaluated argument.
-            let mut out = resid;
-            for a in &args[1..] {
-                let a_pe = pe_reduce_body(sig, a);
-                out = match out {
-                    Term::Lam(b) => subst(&b, &[a_pe]),
-                    other => Term::App(Box::new(other), Box::new(a_pe)),
-                };
+            let resid = quote(depth, &cur);
+            if !mentions_const(&resid, PE_TIMEOUT_MARKER) {
+                return resid;
             }
-            return out;
         }
     }
-    // no static-Fix application here — recurse into children.
-    pe_map_children(sig, t)
+    // no static-Fix application here — recurse into children, tracking depth.
+    pe_map_children(sig, t, depth)
 }
 
-fn pe_map_children(sig: &Rc<Signature>, t: &Term) -> Term {
-    let pe = |x: &Term| pe_reduce_body(sig, x);
+fn pe_map_children(sig: &Rc<Signature>, t: &Term, d: usize) -> Term {
+    let pe = |x: &Term| pe_reduce(sig, x, d);
+    let pe1 = |x: &Term| pe_reduce(sig, x, d + 1);
     match t {
         Term::App(f, a) => Term::App(Box::new(pe(f)), Box::new(pe(a))),
-        Term::Lam(b) => Term::Lam(Box::new(pe(b))),
-        Term::Fix(ty, b) => Term::Fix(ty.clone(), Box::new(pe(b))),
+        Term::Lam(b) => Term::Lam(Box::new(pe1(b))),
+        Term::Fix(ty, b) => Term::Fix(ty.clone(), Box::new(pe1(b))),
         Term::Let(s, ty, e, b) => {
-            Term::Let(*s, ty.clone(), Box::new(pe(e)), Box::new(pe(b)))
+            Term::Let(*s, ty.clone(), Box::new(pe(e)), Box::new(pe1(b)))
         }
         Term::Ann(e, ty) => Term::Ann(Box::new(pe(e)), ty.clone()),
         Term::Add(a, b) => Term::Add(Box::new(pe(a)), Box::new(pe(b))),
         Term::Suc(x) => Term::Suc(Box::new(pe(x))),
         Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(&pe).collect()),
         Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(&pe).collect()),
-        Term::Case(d, m, meths, scr) => Term::Case(
-            d.clone(),
+        // a `Case`/`NatCase` method is a lambda over the constructor's fields,
+        // but its de Bruijn binders are peeled inside the method term itself
+        // (each method is `λfields. body`), so the method sub-terms are at the
+        // same `d` here — the extra binders are counted when `pe` descends into
+        // the method's own `Lam`s.
+        Term::Case(dn, m, meths, scr) => Term::Case(
+            dn.clone(),
             Box::new(pe(m)),
             meths.iter().map(&pe).collect(),
             Box::new(pe(scr)),
