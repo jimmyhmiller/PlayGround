@@ -100,18 +100,37 @@ argument is a static constructor (incl. `alloc`-of-constructor for owned ASTs);
 on a dynamic argument it residualises `App(Fix, arg)`. This ties the recursive
 knot to the *existing* definition.
 
+## Static-argument specialisation (full memoisation)
+
+A recursion applied to a **ground static configuration** but decreasing on a
+**dynamic** argument (`pow(3, n)`, `examples/pe_specialize.tal`) is specialised
+into a **fresh recursive residual** — `pow` with `base = 3` becomes `pow$3`: the
+static parameter is substituted in (`mul(3, …)`), the recursion is tied to a
+*new* `Fix` binder, and the static parameter is dropped entirely. Multiple static
+arguments fold in (the pass re-processes its own output). The residual is a
+`Fix` term (self-reference by de Bruijn), not a named definition, so it inlines
+with no memo table across calls and no new global defs.
+
+It is the classic **static-argument transformation**, sound exactly when the
+configuration is passed **verbatim** through every recursive call (so dropping it
+is safe). A specialising self-marker (`spec_self`) checks this at each self-call;
+a configuration that *changes* across the recursion (an accumulator like
+`addup(Succ(acc), k)`) is detected and left as the generic recursive function
+(correct, just not specialised). This check is load-bearing: the kernel re-check
+is type-only and would not catch a wrong-but-well-typed residual.
+
 ## What it does not do yet
 
-- **Fresh residual recursive definitions (full memoisation).** Recursion is
-  preserved as a call to the *original* function, and "static-config + dynamic-
-  recursion" specialisation (e.g. `pow(3, n)` ⟶ a fresh `pow_3`) is not
-  generated — the automatic trigger deliberately skips a bare-`Nat` config to
-  stay safe; enabling it safely needs a memo table + fresh-definition generation
-  (the classic online-PE knot-tying to *new* defs). Such cases fall back to the
-  generic recursive function today (correct, just not specialised).
 - **Value-representation overhead in higher-order residuals.** The untyped `Val`
-  union leaves a little boundary boxing; a dependently-typed tagless interpreter
-  (values unboxed by type) removes it.
+  union in a defunctionalized higher-order interpreter leaves a little boundary
+  boxing (~3 mallocs); a dependently-typed tagless interpreter (values unboxed
+  by type — the `interpTy : Ty -> Type` shape) removes it, and needs the
+  dependent-motive convoy over non-`Nat` indices.
+- **Polyvariant specialisation of a non-constant config.** Only a *constant*
+  static configuration (passed verbatim) is specialised. A config that shrinks
+  across the recursion but is still statically known (a genuinely
+  polyvariant recursion) would need a cross-call memo table with generalisation
+  to converge — the heavier online-PE machinery.
 
 ## Key code
 
