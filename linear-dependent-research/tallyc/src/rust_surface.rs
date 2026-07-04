@@ -6336,30 +6336,62 @@ pub fn check_program(src: &str) -> Result<Program, Vec<String>> {
             diags.push(format!("fn {name}: {e}"));
         }
     }
-    for (name, ty, body) in &prog.defs {
-        if let Err(e) = dep::check_closed_in(prog.sig.clone(), body, ty) {
-            diags.push(format!("fn {name}: {e}"));
-        }
-    }
-    if !diags.is_empty() {
-        return Err(diags);
-    }
 
-    // PARTIAL EVALUATION pass — specialise every recursive function applied to a
-    // static constructor tree (an interpreter applied to a fixed program, etc.)
-    // into straight-line residual code. UNTRUSTED and SELF-VERIFYING: each
-    // rewritten body is re-checked against its original type and reverted on any
-    // failure, so PE can only make a well-typed program faster, never break it.
+    // PARTIAL EVALUATION pass — runs BEFORE the usage check, so specialising a
+    // recursive function applied to a static tree (an interpreter applied to a
+    // fixed program) removes it from every caller's body before that body is
+    // usage-checked. UNTRUSTED and SELF-VERIFYING: each rewritten body is
+    // re-checked (against its type, or — for a template — the erased-params-
+    // bumped type) and reverted on failure. So PE can only make a well-typed
+    // program faster, never break it.
     let mut prog = prog;
     let rc = Rc::new(prog.sig.clone());
     for (name, ty, body) in prog.defs.iter_mut() {
         let ped = dep::pe_reduce_body(&rc, body);
-        if ped != *body && dep::check_closed_in((*rc).clone(), &ped, ty).is_ok() {
+        if ped == *body {
+            continue;
+        }
+        let ok = dep::check_closed_in((*rc).clone(), &ped, ty).is_ok()
+            || (dep::has_leading_zero_pi(ty)
+                && dep::check_closed_in(
+                    (*rc).clone(),
+                    &dep::bump_template_body(&ped),
+                    &dep::bump_leading_zero_pis(ty),
+                )
+                .is_ok());
+        if ok {
             if std::env::var("TALLY_PE_LOG").is_ok() {
                 eprintln!("[pe] specialised `{name}`");
             }
             *body = ped;
         }
+    }
+
+    // Type/usage-check every (possibly specialised) def. A function that FAILS
+    // ONLY because it matches on an ERASED (`0`) parameter is not an error — it
+    // is a PARTIAL-EVALUATION TEMPLATE (`0` on the argument IS the binding-time
+    // annotation): it checks exactly when its static parameters are available,
+    // and PE specialises every *use* of it away. So an interpreter over an
+    // erased program type-checks as a template, and any call that PE could NOT
+    // specialise is correctly rejected here (the erased `match` survives) — you
+    // cannot run an interpreter over a program that does not exist at runtime.
+    for (name, ty, body) in &prog.defs {
+        if let Err(e) = dep::check_closed_in(prog.sig.clone(), body, ty) {
+            if dep::has_leading_zero_pi(ty)
+                && dep::check_closed_in(
+                    prog.sig.clone(),
+                    &dep::bump_template_body(body),
+                    &dep::bump_leading_zero_pis(ty),
+                )
+                .is_ok()
+            {
+                continue; // a static template — legal (PE specialises every use)
+            }
+            diags.push(format!("fn {name}: {e}"));
+        }
+    }
+    if !diags.is_empty() {
+        return Err(diags);
     }
 
     Ok(prog)

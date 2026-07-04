@@ -7843,4 +7843,43 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
             assert!(!d.contains(gone), "specialised `run` still has `{gone}`:\n{d}");
         }
     }
+    #[test]
+    fn pe_erased_program_is_a_specialisation_template() {
+        // PHASE PE-B (binding-time via 0): the interpreter's program argument is
+        // ERASED (`0`) — a pure compile-time value with NO runtime existence.
+        // Matching on it is legal because the function is a PARTIAL-EVALUATION
+        // TEMPLATE (`0` = the static/dynamic annotation); PE specialises every
+        // use away, and erasure guarantees it happened (there is nothing to
+        // dispatch on at runtime). The AST never exists — zero heap traffic.
+        let src = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum Expr { Var : Expr, Lit : Nat -> Expr,\n\
+                Add : Expr -> Expr -> Expr, Mul : Expr -> Expr -> Expr }\n\
+            eval : (0 e : Expr) -> Nat -> Nat\n%partial\n\
+            fn eval(e, x) {\n\
+              match e { Var => x, Lit(n) => n,\n\
+                Add(a, b) => eval(a, x) + eval(b, x),\n\
+                Mul(a, b) => mul(eval(a, x), eval(b, x)) }\n\
+            }\n\
+            prog : Expr\nfn prog() { Add(Lit(Succ(Zero)), Mul(Lit(Succ(Succ(Zero))), Var)) }\n\
+            run : Nat -> Nat\nfn run(x) { eval(prog(), x) }\n\
+            main : Nat\nfn main() { run(0) + run(5) + run(10) }\n";
+        assert_eq!(run(src), 33);
+        let ir = ir(src);
+        assert!(!ir.contains("call ptr @malloc"), "erased AST must never allocate:\n{ir}");
+
+        // THE GUARANTEE: an interpreter over a program that is NOT statically
+        // known (a dynamic erased argument) cannot be specialised, so the erased
+        // `match` survives the usage check and the program is REJECTED — you
+        // cannot run an interpreter over a program that does not exist at runtime.
+        let bad = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum Expr { Var : Expr, Lit : Nat -> Expr,\n\
+                Add : Expr -> Expr -> Expr, Mul : Expr -> Expr -> Expr }\n\
+            eval : (0 e : Expr) -> Nat -> Nat\n%partial\n\
+            fn eval(e, x) { match e { Var => x, Lit(n) => n,\n\
+                Add(a, b) => eval(a, x) + eval(b, x), Mul(a, b) => mul(eval(a, x), eval(b, x)) } }\n\
+            bad : (0 e : Expr) -> Nat -> Nat\nfn bad(e, x) { eval(e, x) }\n\
+            main : Nat\nfn main() { Zero }\n";
+        let err = rust_surface::check_program(bad).err().expect("unspecialisable erased call must reject");
+        assert!(format!("{err:?}").contains("bad"), "the un-specialised interpreter use must be rejected:\n{err:?}");
+    }
 }

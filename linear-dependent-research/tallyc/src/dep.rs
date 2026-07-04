@@ -2464,6 +2464,48 @@ pub(crate) fn shift_term(d: usize, t: &Term) -> Term {
     shift(d, 0, t)
 }
 
+/// Bump every LEADING `Π[0]` (an erased parameter) to `Π[ω]`. Used to check a
+/// PARTIAL-EVALUATION TEMPLATE: a function that matches on an erased (`0`)
+/// argument is unusable at runtime (there is nothing to dispatch on), but is a
+/// valid *specialisation template* — it type-checks exactly when its static
+/// parameters are treated as available. `0` on the argument IS the binding-time
+/// annotation; specialisation is then demanded, not optional (an un-specialised
+/// call would try to match erased data and cannot be compiled).
+pub(crate) fn bump_leading_zero_pis(t: &Term) -> Term {
+    match t {
+        Term::Pi(m, a, b) => {
+            let m2 = if *m == Mult::Zero { Mult::Omega } else { *m };
+            Term::Pi(m2, a.clone(), Box::new(bump_leading_zero_pis(b)))
+        }
+        other => other.clone(),
+    }
+}
+
+/// Does `t`'s type have at least one leading erased (`Π[0]`) parameter? (Only
+/// such a function can be a static template — otherwise the bump is a no-op and
+/// a genuine error must not be masked.)
+pub(crate) fn has_leading_zero_pi(t: &Term) -> bool {
+    match t {
+        Term::Pi(Mult::Zero, _, _) => true,
+        Term::Pi(_, _, b) => has_leading_zero_pi(b),
+        _ => false,
+    }
+}
+
+/// Bump the leading erased parameters INSIDE a template's body too: a `%partial`
+/// template lowers to a `Fix` whose EMBEDDED type carries the `0`, and the
+/// parameter-binder multiplicities are read from there (not from the def's
+/// exposed type). So checking a template as-if-static requires bumping both.
+pub(crate) fn bump_template_body(body: &Term) -> Term {
+    match body {
+        Term::Fix(fixty, b) => {
+            Term::Fix(Box::new(bump_leading_zero_pis(fixty)), b.clone())
+        }
+        Term::Ann(e, t) => Term::Ann(Box::new(bump_template_body(e)), t.clone()),
+        other => other.clone(),
+    }
+}
+
 /// The eliminator method telescope for `ctor`: the types of its binders (the
 /// constructor's arguments, then one induction hypothesis per recursive
 /// argument) and the method's return type, all in the eliminator's context
