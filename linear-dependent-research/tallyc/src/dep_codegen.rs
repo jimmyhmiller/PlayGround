@@ -1591,6 +1591,24 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 self.compile_v(f, &env2, body)
             }
             Term::Const(c) => self.compile_postulate(f, env, c, &[]),
+            // A bare function VALUE (a `λ`) reaching value position means a
+            // first-class function is being STORED or PASSED (not directly
+            // applied). The native backend compiles higher-order code by inlining
+            // functions at their call sites; it has no representation for a
+            // function held as a runtime value, so a genuinely higher-order use —
+            // e.g. `filter(isBig, xs)` where the callback is applied inside a
+            // recursive callee — cannot yet be lowered. It still TYPE-CHECKS; only
+            // `run`/`build` need the (not-yet-implemented) first-class-function
+            // codegen. (A bare recursive `Fix` value is caught by its own arm
+            // above.) Keep the higher-order call out of the code you run, or
+            // specialise the callee by hand.
+            Term::Lam(_) => Err(
+                "higher-order functions are not yet compiled to native — a function \
+                 passed as a value and applied inside a (recursive) callee cannot be \
+                 lowered yet (it type-checks; `run`/`build` need first-class-function \
+                 codegen). Inline the call or specialise the callee to run it."
+                    .into(),
+            ),
             other => Err(format!("not a runtime value: {other:?}")),
         }
     }

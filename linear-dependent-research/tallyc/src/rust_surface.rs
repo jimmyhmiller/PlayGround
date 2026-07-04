@@ -1309,7 +1309,13 @@ impl Elab {
                 if self.ctor_has_implicits(name) {
                     return self.solve_ctor(name, args, expected, cx, rec);
                 }
-                if self.def_has_implicits(name) {
+                // A LOCAL BINDER shadows a global def (see `elab_tm`): don't route
+                // a shadowed name through the implicit solver — e.g. `foldr`'s
+                // param `f` must win over a top-level `f : {0 n} -> …` (which would
+                // otherwise be solved with the wrong arity). The self-binder
+                // (registered implicits, absent from `defs`) still solves here.
+                let shadowed = cx.debruijn(name).is_some();
+                if self.def_has_implicits(name) && (!shadowed || !self.defs.contains_key(name)) {
                     return Ok(self.solve_fn_call(name, args, Some(expected), cx, rec)?.0);
                 }
                 self.elab_tm(tm, cx, rec)
@@ -1466,14 +1472,25 @@ impl Elab {
                         return self.ih_for(r, args, cx);
                     }
                 }
-                if self.def_has_implicits(name) {
+                // A LOCAL BINDER shadows a global def of the same name — an
+                // ordinary parameter `f` must win over a top-level `f`. Both the
+                // implicit-solver and known-Π-telescope branches below resolve
+                // the GLOBAL def, so gate them on the context: skip when `name` is
+                // bound locally (unless it is the in-flight self-binder, which
+                // carries registered implicits and is absent from `defs`). Without
+                // this, `foldr`'s param `f` (applied to 2 args) resolved to a
+                // top-level `f : Nat -> Nat` ⇒ "`f` is applied to too many
+                // arguments". Falls through to `resolve`, which builds the
+                // context-variable application.
+                let shadowed = cx.debruijn(name).is_some();
+                if self.def_has_implicits(name) && (!shadowed || !self.defs.contains_key(name)) {
                     return Ok(self.solve_fn_call(name, args, None, cx, rec)?.0);
                 }
                 // A NO-implicit definition still has a KNOWN Π telescope: CHECK
                 // each argument against its domain (so a constructor-with-
                 // implicits argument — `mixed(LCons(5, LNil))` — elaborates),
                 // instead of blindly inferring it.
-                if let Some((_, fty)) = self.defs.get(name) {
+                if let Some((_, fty)) = self.defs.get(name).filter(|_| !shadowed) {
                     let mut fty = fty.clone();
                     let mut dom_env: Vec<Value> = Vec::new();
                     let mut eargs = Vec::with_capacity(args.len());
@@ -1568,9 +1585,22 @@ impl Elab {
             // context-variable path below, which never solves implicits — it consumed
             // the explicit args against the IMPLICIT Πs and built a wrong partial
             // application the kernel then rejected.
+            //
+            // A LOCAL BINDER SHADOWS A GLOBAL DEF of the same name: an ordinary
+            // parameter `p` must win over a top-level `p`, so both disjuncts are
+            // gated on the context — the first fires only when `name` is NOT in
+            // scope as a local, the second only for the self-binder (registered
+            // implicits, in the context, and NOT a def — the in-flight function is
+            // absent from `defs`). Without this, elaborating e.g. `filter`'s body
+            // `match p(h) { … }` when a global `p : Nat -> Unit` exists resolved
+            // `p` to the global (so `p(h) : Unit`, and `True`/`False` were rejected
+            // as non-constructors of `Unit`). The `check` path already prefers the
+            // local binder; this brings the INFER path to parity.
             Tm::Call(name, args)
-                if self.defs.contains_key(name)
-                    || (self.def_has_implicits(name) && cx.var_type(name).is_some()) =>
+                if (self.defs.contains_key(name) && cx.var_type(name).is_none())
+                    || (!self.defs.contains_key(name)
+                        && self.def_has_implicits(name)
+                        && cx.var_type(name).is_some()) =>
             {
                 self.solve_fn_call(name, args, None, cx, rec)
             }
@@ -3648,6 +3678,20 @@ fn solve(holes: &mut Holes, pat: &Value, target: &Value) {
         // `n = Zero`). Exact (peels one `Succ` per step); never over-infers.
         (Value::VSuc(a), Value::VNatLit(k)) if *k > 0 => solve(holes, a, &Value::VNatLit(k - 1)),
         (Value::VNatLit(k), Value::VSuc(b)) if *k > 0 => solve(holes, &Value::VNatLit(k - 1), b),
+        // FUNCTION types — descend into both the domain and the codomain so an
+        // implicit that appears ONLY in a higher-order argument's type is pinned
+        // (e.g. `map`'s result-element `b` from the callback `f : a -> b` when it
+        // is passed `dbl : Nat -> Nat`). The codomain is a closure; instantiate
+        // both sides at one shared RIGID sentinel (a level ≥ `HOLE_BASE` that no
+        // block owns, so it acts as a foreign hole: it never mis-binds this
+        // block's slots, and if it ever leaked into a solution `value_has_hole`
+        // rejects it cleanly). Non-dependent arrows — every stdlib signature —
+        // ignore the sentinel entirely, so the codomain bodies compare directly.
+        (Value::VPi(_, d1, c1), Value::VPi(_, d2, c2)) => {
+            solve(holes, d1, d2);
+            let fresh = crate::dep::nvar(HOLE_BASE + (usize::MAX / 4));
+            solve(holes, &c1.apply(fresh.clone()), &c2.apply(fresh));
+        }
         (Value::VNeu(n1), Value::VNeu(n2)) => solve_neu(holes, n1, n2),
         _ => {}
     }
@@ -5262,6 +5306,122 @@ postulate asplit : {0 a : Type} -> (k : Nat) -> (0 m : Nat) -> (1 arr : Arr a (k
 postulate ajoin  : {0 a : Type} -> {0 llo : Loc} -> {0 lhi : Loc} -> {0 k : Nat} -> {0 m : Nat} -> (1 lo : Slice llo a k) -> (1 hi : Slice lhi a m) -> (1 rj : Rejoin llo lhi a k m) -> Arr a (k + m)
 "#;
 
+/// `Nat`, auto-provided as the packed machine integer (Idris 2's default). A
+/// program that declares its OWN `Nat` — or uses `Zero`/`Succ` for its own
+/// constructors — opts out entirely and keeps its representation choice (a plain
+/// Peano `enum Nat` for type-level `Succ`-towers / proofs, say). Only injected
+/// when none of `Nat`/`Zero`/`Succ` is already a user-declared name.
+const NAT_PRELUDE: &str = r#"
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+"#;
+
+/// The Core standard prelude — a faithful, lean slice of the Idris 2 `Prelude`
+/// (`Bool`, `Maybe`, `Either`, `Ordering`, `Pair`, `List`, plus the usual
+/// combinators). Auto-provided like the memory layer, ALL-OR-NOTHING: a program
+/// that declares any of these names owns that layer and gets none of the block
+/// (so every pre-stdlib program keeps compiling unchanged). The two `Nat`-typed
+/// helpers (`length`, `compareNat`) name `Zero`/`Succ`, so the block is injected
+/// only when those constructors are in scope (they always are once `Nat` is —
+/// injected or user-declared with the standard shape). NOTE: the higher-order
+/// members (`map`/`filter`/`foldr`/…) type-check and are correct, but running
+/// them needs first-class-function codegen (see `dep_codegen`'s clear error);
+/// the first-order members compile and run today.
+const STD_PRELUDE: &str = r#"
+enum Bool { False : Bool, True : Bool }
+not : Bool -> Bool
+fn not(b) { match b { False => True, True => False } }
+and : Bool -> Bool -> Bool
+fn and(x, y) { match x { False => False, True => y } }
+or : Bool -> Bool -> Bool
+fn or(x, y) { match x { False => y, True => True } }
+ifThenElse : {0 a : Type} -> Bool -> a -> a -> a
+fn ifThenElse(c, t, e) { match c { True => t, False => e } }
+
+enum Ordering { LT : Ordering, EQ : Ordering, GT : Ordering }
+compareNat : Nat -> Nat -> Ordering
+fn compareNat(m, n) {
+  match m {
+    Zero    => match n { Zero => EQ, Succ(k) => LT },
+    Succ(j) => match n { Zero => GT, Succ(k) => compareNat(j, k) },
+  }
+}
+
+enum Maybe (a : Type) { Nothing : Maybe a, Just : a -> Maybe a }
+maybe : {0 a : Type} -> {0 b : Type} -> b -> (f : a -> b) -> Maybe a -> b
+fn maybe(dflt, f, m) { match m { Nothing => dflt, Just(x) => f(x) } }
+fromMaybe : {0 a : Type} -> a -> Maybe a -> a
+fn fromMaybe(dflt, m) { match m { Nothing => dflt, Just(x) => x } }
+isJust : {0 a : Type} -> Maybe a -> Bool
+fn isJust(m) { match m { Nothing => False, Just(x) => True } }
+isNothing : {0 a : Type} -> Maybe a -> Bool
+fn isNothing(m) { match m { Nothing => True, Just(x) => False } }
+mapMaybe : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> Maybe a -> Maybe b
+fn mapMaybe(f, m) { match m { Nothing => Nothing, Just(x) => Just(f(x)) } }
+
+enum Either (a : Type) (b : Type) { Left : a -> Either a b, Right : b -> Either a b }
+either : {0 a : Type} -> {0 b : Type} -> {0 c : Type} -> (f : a -> c) -> (g : b -> c) -> Either a b -> c
+fn either(f, g, e) { match e { Left(x) => f(x), Right(y) => g(y) } }
+mirror : {0 a : Type} -> {0 b : Type} -> Either a b -> Either b a
+fn mirror(e) { match e { Left(x) => Right(x), Right(y) => Left(y) } }
+
+enum Pair (a : Type) (b : Type) { MkPair : a -> b -> Pair a b }
+fst : {0 a : Type} -> {0 b : Type} -> Pair a b -> a
+fn fst(p) { match p { MkPair(x, y) => x } }
+snd : {0 a : Type} -> {0 b : Type} -> Pair a b -> b
+fn snd(p) { match p { MkPair(x, y) => y } }
+swap : {0 a : Type} -> {0 b : Type} -> Pair a b -> Pair b a
+fn swap(p) { match p { MkPair(x, y) => MkPair(y, x) } }
+
+boxed enum List (a : Type) { Nil : List a, Cons : a -> List a -> List a }
+map : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> List a -> List b
+fn map(f, xs) { match xs { Nil => Nil, Cons(h, t) => Cons(f(h), map(f, t)) } }
+append : {0 a : Type} -> List a -> List a -> List a
+fn append(xs, ys) { match xs { Nil => ys, Cons(h, t) => Cons(h, append(t, ys)) } }
+length : {0 a : Type} -> List a -> Nat
+fn length(xs) { match xs { Nil => Zero, Cons(h, t) => Succ(length(t)) } }
+foldr : {0 a : Type} -> {0 b : Type} -> (f : a -> b -> b) -> b -> List a -> b
+fn foldr(f, z, xs) { match xs { Nil => z, Cons(h, t) => f(h, foldr(f, z, t)) } }
+foldl : {0 a : Type} -> {0 b : Type} -> (f : b -> a -> b) -> b -> List a -> b
+fn foldl(f, z, xs) { match xs { Nil => z, Cons(h, t) => foldl(f, f(z, h), t) } }
+reverseOnto : {0 a : Type} -> List a -> List a -> List a
+fn reverseOnto(acc, xs) { match xs { Nil => acc, Cons(h, t) => reverseOnto(Cons(h, acc), t) } }
+reverse : {0 a : Type} -> List a -> List a
+fn reverse(xs) { reverseOnto(Nil, xs) }
+filter : {0 a : Type} -> (p : a -> Bool) -> List a -> List a
+fn filter(p, xs) {
+  match xs {
+    Nil => Nil,
+    Cons(h, t) => match p(h) { True => Cons(h, filter(p, t)), False => filter(p, t) },
+  }
+}
+
+id : {0 a : Type} -> a -> a
+fn id(x) { x }
+const : {0 a : Type} -> {0 b : Type} -> a -> b -> a
+fn const(x, y) { x }
+flip : {0 a : Type} -> {0 b : Type} -> {0 c : Type} -> (f : a -> b -> c) -> b -> a -> c
+fn flip(f, y, x) { f(x, y) }
+compose : {0 a : Type} -> {0 b : Type} -> {0 c : Type} -> (g : b -> c) -> (f : a -> b) -> a -> c
+fn compose(g, f, x) { g(f(x)) }
+the : (0 a : Type) -> a -> a
+fn the(a, x) { x }
+"#;
+
+/// Every type/constructor/function/postulate name the stdlib block introduces —
+/// the collision set that all-or-nothing gates `STD_PRELUDE` (a user declaring
+/// any of these owns that layer, and the block is skipped).
+const STD_NAMES: &[&str] = &[
+    "Bool", "False", "True", "not", "and", "or", "ifThenElse",
+    "Ordering", "LT", "EQ", "GT", "compareNat",
+    "Maybe", "Nothing", "Just", "maybe", "fromMaybe", "isJust", "isNothing", "mapMaybe",
+    "Either", "Left", "Right", "either", "mirror",
+    "Pair", "MkPair", "fst", "snd", "swap",
+    "List", "Nil", "Cons", "map", "append", "length", "foldr", "foldl",
+    "reverseOnto", "reverse", "filter",
+    "id", "const", "flip", "compose", "the",
+];
+
 /// The primary name a top-level item declares (`None` for a `%builtin` pragma).
 fn item_name(it: &Item) -> Option<&str> {
     match it {
@@ -5275,6 +5435,60 @@ fn item_name(it: &Item) -> Option<&str> {
 pub fn elaborate(src: &str) -> Result<Program, String> {
     let toks = lex(src)?;
     let mut items = Parser { toks, pos: 0, fresh: 0 }.parse_program()?;
+
+    // ---- AUTO-INJECTED STANDARD PRELUDE (Nat + Core Idris-2 Prelude) --------
+    // Everything the USER declared: item names PLUS enum CONSTRUCTOR names (a
+    // constructor `Zero`/`Cons`/… is as much a "taken" name as a type or fn).
+    // Used to decide, all-or-nothing per layer, whether an auto-injected block
+    // would collide — so any explicit user (re)declaration wins and every
+    // pre-stdlib program keeps compiling byte-for-byte unchanged.
+    let user_names: std::collections::HashSet<String> = items
+        .iter()
+        .flat_map(|it| {
+            let mut ns: Vec<String> = item_name(it).map(str::to_string).into_iter().collect();
+            if let Item::Enum { variants, .. } = it {
+                ns.extend(variants.iter().map(|(cn, _)| cn.clone()));
+            }
+            ns
+        })
+        .collect();
+
+    // `Nat`, packed (Idris 2's default). Skipped if the program declares its own
+    // `Nat` — or uses `Zero`/`Succ` for its own constructors — so it keeps its
+    // representation choice (a plain Peano `enum Nat` for `Succ`-towers / proofs).
+    let nat_taken = ["Nat", "Zero", "Succ"].iter().any(|n| user_names.contains(*n))
+        || items.iter().any(|it| matches!(it, Item::BuiltinNat(_)));
+    if !nat_taken {
+        let nat_items = Parser { toks: lex(NAT_PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
+        let mut merged = nat_items;
+        merged.append(&mut items);
+        items = merged;
+    }
+
+    // The Core prelude — injected only when NONE of its names collide AND the
+    // Nat constructors its `length`/`compareNat` name (`Zero`/`Succ`) are in
+    // scope (always true once Nat is, with the standard shape; a program with an
+    // oddly-shaped `Nat` is left alone rather than broken). Spliced right AFTER
+    // the `Nat` enum so its types precede any user signature that uses them.
+    let std_collides = STD_NAMES.iter().any(|n| user_names.contains(*n));
+    let (mut has_zero, mut has_succ) = (false, false);
+    for it in &items {
+        if let Item::Enum { variants, .. } = it {
+            for (cn, _) in variants {
+                has_zero |= cn == "Zero";
+                has_succ |= cn == "Succ";
+            }
+        }
+    }
+    if !std_collides && has_zero && has_succ {
+        let std_items = Parser { toks: lex(STD_PRELUDE)?, pos: 0, fresh: 0 }.parse_program()?;
+        let nat_pos = items
+            .iter()
+            .position(|it| matches!(it, Item::Enum { name, .. } if name == "Nat"))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        items.splice(nat_pos..nat_pos, std_items);
+    }
 
     // Prepend the memory prelude — but ALL-OR-NOTHING: if the program declares any
     // of the prelude's own names (Unit/Own/alloc/free), it is managing the memory
