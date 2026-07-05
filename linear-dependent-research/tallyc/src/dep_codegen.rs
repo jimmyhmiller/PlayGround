@@ -6362,6 +6362,17 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
             fn gauss(n, acc){ match n { Zero => acc, Succ(k) => gauss(k, acc + n) } }\n\
             main : Nat\nfn main(){ gauss(10, 0) }\n";
         assert_eq!(run(accumulator), 55, "accumulator fold referencing the scrutinee: gauss(10,0) = 55");
+        // the same bug in a GENERAL datatype (`Elim`) fold: `weird xs = len xs +
+        // weird (tail xs)` summed the WHOLE list's length at every level (9)
+        // instead of 3+2+1 = 6. In a `cons(h,t)` arm the scrutinee is `cons h t`.
+        let general = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            boxed enum List { nil : List, cons : Nat -> List -> List }\n\
+            add : Nat -> Nat -> Nat\nfn add(a,b){ match a { Zero => b, Succ(k) => Succ(add(k,b)) } }\n\
+            len : List -> Nat\nfn len(xs){ match xs { nil => Zero, cons(h,t) => Succ(len(t)) } }\n\
+            weird : List -> Nat\nfn weird(xs){ match xs { nil => Zero, cons(h,t) => add(len(xs), weird(t)) } }\n\
+            mk : List\nfn mk(){ cons(Succ(Zero), cons(Succ(Zero), cons(Succ(Zero), nil))) }\n\
+            main : Nat\nfn main(){ weird(mk) }\n";
+        assert_eq!(run(general), 6, "general Elim fold referencing the scrutinee: weird [1,1,1] = 3+2+1");
     }
 
     #[test]

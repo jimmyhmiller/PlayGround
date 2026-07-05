@@ -5374,6 +5374,15 @@ impl Elab {
             // are untouched, so copyable fields stay ω/multi-usable.)
             let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc, &self.pess_linear.borrow(), &arm_cx.names, fn_cx.len());
             let mut body = self.check(&arm_body, &expected, &arm_cx, Some(&r))?;
+            // the scrutinee equals `C(fields…)` in this arm; refine references to
+            // it (consumed by the fold) to that reconstruction, so a body that
+            // mentions the whole scrutinee sees the CURRENT value, not the outer
+            // fold-constant one. The `nargs` fields sit atop the fn params (then
+            // the IHs); field `j` is at de Bruijn `total-1-j`.
+            let total = nargs + rec_fields.len();
+            let scrut_db_arm = Self::debruijn(full_params, scrut).unwrap() + total;
+            let field_dbs: Vec<usize> = (0..nargs).map(|j| total - 1 - j).collect();
+            body = refine_scrut_ctor(&body, scrut_db_arm, &ctor.name, &field_dbs);
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
             }
@@ -5633,6 +5642,24 @@ fn refine_scrut_succ(body: &Term, scrut_db: usize, pred_db: usize) -> Term {
     dep::map_vars(body, 0, &move |i, depth| {
         if i == scrut_db + depth {
             Term::Suc(Box::new(Term::Var(pred_db + depth)))
+        } else {
+            Term::Var(i)
+        }
+    })
+}
+/// The general-datatype twin of `refine_scrut_succ`: in a `C(f₁…f_m)` arm of an
+/// `Elim` fold the scrutinee equals `C f₁ … f_m`, so replace references to it
+/// with that reconstruction. `field_dbs` are the de Bruijn indices of the
+/// constructor's fields (in the method body's context). Same latent bug as the
+/// `Nat` fold: `weird xs = len xs + weird (tail xs)` summed the WHOLE list's
+/// length at every level.
+fn refine_scrut_ctor(body: &Term, scrut_db: usize, ctor: &str, field_dbs: &[usize]) -> Term {
+    dep::map_vars(body, 0, &move |i, depth| {
+        if i == scrut_db + depth {
+            Term::Constr(
+                ctor.to_string(),
+                field_dbs.iter().map(|&d| Term::Var(d + depth)).collect(),
+            )
         } else {
             Term::Var(i)
         }
