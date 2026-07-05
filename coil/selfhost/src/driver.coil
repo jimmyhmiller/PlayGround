@@ -487,7 +487,15 @@
         (mut flags) (al-new [(slice u8)] a)
         (mut backend) default-backend
         (mut trip)  (cast (ptr i8) 0)
+        (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
         (mut i)     3]
+    ; second pass: --lib / --shared (a C library from export-c symbols).
+    (let [(mut j) 3]
+      (loop (if (icmp-ge (load j) (cast i64 argc)) (break)
+        (do (let [arg (cstr->slice (load (index argv (load j))))]
+              (if (str-eq arg "--lib") (store! libmode 1)
+                (if (str-eq arg "--shared") (store! libmode 2) 0)))
+            (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
       (do (let [arg (cstr->slice (load (index argv (load i))))]
@@ -527,27 +535,25 @@
         ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
         ; file` / undefined-symbol junk is ever emitted.
         (if (icmp-eq (run-on-big-stack ctx) 0) 1
-          ; link: cc <obj> -o <out> <flags...>
+          ; final step depends on libmode: exe = `cc obj -o out flags`,
+          ; static = `ar rcs out obj`, shared = `cc -dynamiclib obj -o out flags`.
           (let [(mut cmdsb) (sb-new a)]
-            (sb-push-str! (mut cmdsb) "cc ")
-            (sb-push-str! (mut cmdsb) obj-slice)
-            (sb-push-str! (mut cmdsb) " -o ")
-            (sb-push-str! (mut cmdsb) out-slice)
-            (let [(mut k) 0 nf (al-len [(slice u8)] (load flags))]
-              (loop (if (icmp-ge (load k) nf) (break)
-                (do (sb-push-str! (mut cmdsb) " ")
-                    (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
-                    (store! k (iadd (load k) 1))))))
+            (if (icmp-eq (load libmode) 1)
+                (do (sb-push-str! (mut cmdsb) "ar rcs ") (sb-push-str! (mut cmdsb) out-slice)
+                    (sb-push-str! (mut cmdsb) " ") (sb-push-str! (mut cmdsb) obj-slice) 0)
+              (do (sb-push-str! (mut cmdsb) (if (icmp-eq (load libmode) 2) "cc -dynamiclib " "cc "))
+                  (sb-push-str! (mut cmdsb) obj-slice)
+                  (sb-push-str! (mut cmdsb) " -o ")
+                  (sb-push-str! (mut cmdsb) out-slice)
+                  (let [(mut k) 0 nf (al-len [(slice u8)] (load flags))]
+                    (loop (if (icmp-ge (load k) nf) (break)
+                      (do (sb-push-str! (mut cmdsb) " ")
+                          (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
+                          (store! k (iadd (load k) 1)))))) 0))
             (let [rc (system (slice->cstr a (sb-str (load cmdsb))))]
-              ; On a link failure mirror Rust's `Err("linker (cc) failed with
-              ; {status}")` → `error: linker (cc) failed with exit status: N`,
-              ; where N is the child's exit code (WEXITSTATUS of `system`'s wait
-              ; status, i.e. the high byte). Then exit FAILURE (1), not SIGABRT.
               (if (icmp-ne rc 0)
                   (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
-                    (ps w "error: linker (cc) failed with exit status: ") (dump-dec w code) (wb w 10) 1)
-                ; success: mirror Rust `report(Ok("wrote {out}"))` → `wrote <out>`
-                ; on stdout, exit 0.
+                    (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
                 (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))))))
 
 ; ============================ Coil.toml manifest ============================
