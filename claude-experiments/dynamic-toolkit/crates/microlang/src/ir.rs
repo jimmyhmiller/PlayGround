@@ -35,6 +35,9 @@ pub enum Prim {
     Record,
     /// `(field r i)` -> the i-th field of a record.
     Field,
+    /// `(%callec f)` — call `f` with a fresh escape continuation. Backend-handled
+    /// (needs to invoke a closure and catch a non-local exit), like `Gc`.
+    CallEc,
 }
 
 #[derive(Clone)]

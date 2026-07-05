@@ -41,6 +41,12 @@ pub trait CodeSpace<M: ValueModel> {
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64;
 }
 
+/// The panic payload carrying a non-local escape back to its `%callec`.
+struct EscapeSignal {
+    tag: u64,
+    value: u64,
+}
+
 /// The interpreter tier.
 pub struct TreeWalk;
 
@@ -151,6 +157,33 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.collect(locals);
                 rt.encode(Val::Nil)
             }
+            // `(%callec f)`: call f with a fresh escape continuation. Invoking
+            // the continuation unwinds (a panic carrying the tag) back here; f
+            // returning normally is the result. Escape-only (one-shot upward);
+            // full multi-shot continuations would need CPS or stack copying.
+            Ir::Prim(Prim::CallEc, args) => {
+                let f = top.eval_ir(top, rt, &args[0], locals);
+                let tag = rt.fresh_escape_tag();
+                let kid = rt.alloc(Obj::Escape { tag });
+                let kref = M::R::enc_ref(kid);
+                let prev = std::panic::take_hook();
+                std::panic::set_hook(Box::new(|_| {})); // escapes are not errors
+                let res = {
+                    let rt2 = &mut *rt;
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        top.invoke(top, rt2, f, &[kref])
+                    }))
+                };
+                std::panic::set_hook(prev);
+                match res {
+                    Ok(v) => v,
+                    Err(payload) => match payload.downcast::<EscapeSignal>() {
+                        Ok(sig) if sig.tag == tag => sig.value, // caught our escape
+                        Ok(sig) => std::panic::resume_unwind(sig), // a different escape
+                        Err(other) => std::panic::resume_unwind(other), // a real panic
+                    },
+                }
+            }
             Ir::Prim(op, args) => {
                 let argv: Vec<u64> = args
                     .iter()
@@ -209,6 +242,14 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     body,
                     env,
                 } => (*nparams, *variadic, body.clone(), env.clone()),
+                Obj::Escape { tag } => {
+                    // Invoking an escape continuation: unwind to its `%callec`.
+                    let sig = EscapeSignal {
+                        tag: *tag,
+                        value: args.first().copied().unwrap_or_else(M::R::enc_nil),
+                    };
+                    std::panic::panic_any(sig);
+                }
                 _ => panic!("value not callable: {}", rt.print(callee)),
             };
             let frame = rt.build_call_frame(nparams, variadic, &args, env);

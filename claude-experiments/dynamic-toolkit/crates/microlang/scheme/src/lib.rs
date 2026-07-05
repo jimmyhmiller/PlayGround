@@ -464,6 +464,10 @@ fn alias(name: &str) -> Option<&'static str> {
         "cdr" => "rest",
         "null?" => "nil?",
         "equal?" => "=", // the core's `=` is structural equality
+        // Scheme's call/cc maps to the core's escape-continuation mechanism
+        // (escape-only for now — full multi-shot is a separate frontier).
+        "call/cc" => "%callec",
+        "call-with-current-continuation" => "%callec",
         _ => return None,
     })
 }

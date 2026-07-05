@@ -72,6 +72,8 @@ pub struct Runtime<M: ValueModel> {
     pub(crate) dispatch: Box<dyn Dispatch>,
     /// Monotonic call-site id counter, assigned at analyze time.
     next_site: usize,
+    /// Monotonic tag for escape continuations.
+    escape_tags: u64,
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -105,6 +107,7 @@ impl<M: ValueModel> Runtime<M> {
             method_names: HashSet::new(),
             dispatch: Box::new(Megamorphic::new()),
             next_site: 0,
+            escape_tags: 0,
             _pd: PhantomData,
         };
         rt.sf = Specials {
@@ -135,6 +138,7 @@ impl<M: ValueModel> Runtime<M> {
             ("gc", Gc),
             ("record", Record),
             ("field", Field),
+            ("%callec", CallEc),
         ] {
             let s = rt.intern(name);
             rt.prims.insert(s, p);
@@ -315,6 +319,12 @@ impl<M: ValueModel> Runtime<M> {
                 // reaching here means a caller invoked the prim without one.
                 panic!("gc must be evaluated at a safepoint with a live environment");
             }
+            Prim::CallEc => {
+                // Escape continuations need to invoke a closure and catch a
+                // non-local exit, which only a backend can do; backends that
+                // support it intercept `CallEc` before reaching here.
+                panic!("%callec requires a backend that supports escape continuations");
+            }
             Prim::Record => {
                 let Val::Sym(type_id) = self.decode(args[0]) else {
                     panic!("record: first arg must be a (quoted) type symbol");
@@ -372,6 +382,12 @@ impl<M: ValueModel> Runtime<M> {
         let s = self.next_site;
         self.next_site += 1;
         s
+    }
+
+    /// A fresh tag for an escape continuation.
+    pub fn fresh_escape_tag(&mut self) -> u64 {
+        self.escape_tags += 1;
+        self.escape_tags
     }
 
     /// The generic arithmetic path. Written ONCE, correct for every model:
@@ -435,6 +451,7 @@ impl<M: ValueModel> Runtime<M> {
                     let inner: Vec<String> = fields.iter().map(|&x| self.print(x)).collect();
                     format!("#{}[{}]", self.sym_name(*type_id), inner.join(" "))
                 }
+                Obj::Escape { .. } => "#<continuation>".to_string(),
                 Obj::Moved(_) => "#<moved>".to_string(),
             },
         }

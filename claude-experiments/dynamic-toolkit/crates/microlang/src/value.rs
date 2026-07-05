@@ -75,6 +75,13 @@ pub enum Obj {
         type_id: Sym,
         fields: Vec<u64>,
     },
+    /// An escape continuation: invoking it does a non-local exit back to the
+    /// `call-with-escaping-continuation` that created it (matched by `tag`).
+    /// One-shot, upward-only — enough for early exit and generators-lite; full
+    /// multi-shot continuations would need CPS or stack copying.
+    Escape {
+        tag: u64,
+    },
     /// Forwarding marker left in from-space by the copying collector: the object
     /// now lives at index `.0` (or `u32::MAX` for reclaimed garbage). Any
     /// attempt to dereference a stale from-space pointer hits this and errors

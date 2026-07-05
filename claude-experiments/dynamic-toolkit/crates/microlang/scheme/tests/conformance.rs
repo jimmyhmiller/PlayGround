@@ -82,10 +82,17 @@ const CASES: &[Case] = &[
     c("vectors",      "", "(vector-ref (vector 10 20 30) 1)", "20",    false),
     c("tail-calls",   "(define (loop n) (if (= n 0) 'done (loop (- n 1))))", "(loop 1000000)", "done", true),
     c("numeric-tower","", "(* 100000000000 100000000000)", "10000000000000000000000", false),
-    c("call/cc",      "", "(call/cc (lambda (k) (+ 1 (k 10))))", "10", false),
+    c("call/cc",      "", "(call/cc (lambda (k) (+ 1 (k 10))))", "10", true),
+    c("call/cc-search", "(define (find-neg lst) (call/cc (lambda (return) (letrec ((loop (lambda (l) (if (null? l) 'none (if (< (car l) 0) (return (car l)) (loop (cdr l))))))) (loop lst)))))", "(find-neg (list 1 2 -3 4))", "-3", true),
     c("dynamic-wind", "", "(let ((r '())) (dynamic-wind (lambda () (set! r (cons 'in r))) (lambda () 'body) (lambda () (set! r (cons 'out r)))) (reverse r))", "(in out)", false),
     c("values",       "", "(call-with-values (lambda () (values 1 2)) +)", "3", false),
-    c("syntax-rules", "(define-syntax swap (syntax-rules () ((_ a b) (list b a))))", "(swap 1 2)", "(2 1)", false),
+    c("syntax-rules", "(define-syntax swap (syntax-rules () ((_ a b) (list b a))))", "(swap 1 2)", "(2 1)", true),
+    c("syntax-rules-ellipsis", "(define-syntax my-list (syntax-rules () ((_ x ...) (list x ...))))", "(my-list 1 2 3)", "(1 2 3)", true),
+    c("syntax-rules-nested", "(define-syntax unless2 (syntax-rules () ((_ c body) (if c (quote skip) body)))) (define-syntax my-list (syntax-rules () ((_ x ...) (list x ...))))", "(unless2 #f (my-list 1 2 3))", "(1 2 3)", true),
+    // HYGIENE (pending): the macro's `t` must not capture the user's `t`. A
+    // hygienic Scheme returns 5; our unhygienic engine returns #f. This is the
+    // marker for the remaining hard piece.
+    c("hygiene", "(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))", "(let ((t 5)) (my-or #f t))", "5", false),
 ];
 
 fn our_output(setup: &str, expr: &str) -> Option<String> {
