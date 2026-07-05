@@ -625,7 +625,10 @@
       (EBool  [bv] (mk-tv (LLVMConstInt (LLVMInt1TypeInContext ctx) (if bv 1 0) 0) (TBool)))
       (EFloat [bits] (mk-tv (LLVMConstReal (LLVMDoubleTypeInContext ctx)
                               (let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p)))) (TFloat 64)))
-      (EStr   [s] (let [bytes (LLVMConstStringInContext ctx (cast (ptr i8) (slice-data [u8] s)) (cast i32 (slice-len s)) 1)
+      ; NUL-terminate the backing constant (last arg = DontNullTerminate = 0), matching
+      ; the Rust reference. The slice's length (below) is unchanged; the extra \0 only
+      ; makes the pointer safe to hand to C string APIs (snprintf format, etc.).
+      (EStr   [s] (let [bytes (LLVMConstStringInContext ctx (cast (ptr i8) (slice-data [u8] s)) (cast i32 (slice-len s)) 0)
                         n (cg-next-global cg)
                         g (LLVMAddGlobal (load (field cg module)) (LLVMTypeOf bytes) (cg-gname cg "str." n))]
                     (LLVMSetInitializer g bytes) (LLVMSetGlobalConstant g 1) (LLVMSetLinkage g 9)

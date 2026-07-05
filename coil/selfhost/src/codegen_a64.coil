@@ -1273,7 +1273,7 @@
     (EFloat [bits] (mk-aval 2 bits (TFloat 64)))
     (EBool [b] (mk-aval 0 (if b 1 0) (TBool)))
     (EStr [sv]
-      (let [sym (g-intern-str! g sv false)
+      (let [sym (g-intern-str! g sv true)   ; NUL-terminate the backing bytes (slice len below is separate)
             a (load (field g a))
             slot (slot-new! g 16 8)]
         (emit-sym-addr! g 9 sym)
