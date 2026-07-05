@@ -274,7 +274,13 @@ Named so the omission is a decision, not an oversight:
   abstract boundary as a uniform word (tallyc never boxes an abstract-typed value
   by value), and each concrete `code` unboxes it. Linear discipline: the linear
   consumption must be `let`-sequenced (`let v = unbox…; code…`), not nested in the
-  call. Region/borrowed variants still to do.
+  call. **Region variant ✅ (by composition):** a flat closure is a value, so the
+  existing `Pool`/`Region` vocabulary stores closures in an arena and frees them
+  all at once with `prelease` — no new closure machinery, the "closures are data"
+  thesis. `examples/closures_region.tal` → 27 (two closures arena-allocated,
+  applied, the whole region released). The **borrowed** variant composes the same
+  way from the `borrow`/`SRead` API, but the closure is incidental to the borrow
+  ceremony, so it is a documented pattern rather than a headline example.
 - **P4 — monomorphisation of HOFs over closures (§5/§8-5). ✅ DONE (both shapes).**
   A statically-known function argument is inlined into its recursive HOF — **no
   indirect call, no function-value pointer** in the hot loop (proven with the new

@@ -1,0 +1,44 @@
+// REGION (arena) CLOSURES — closures whose environments live in a `Pool`, freed
+// all at once when the region is released. No new closure machinery: a flat
+// closure is a value, and the existing region vocabulary stores values in an
+// arena — the "closures are data" thesis (docs/FIRST_CLASS_FUNCTIONS.md §3) means
+// any memory representation backs a closure by composition.
+//
+//   tally run examples/closures_region.tal        →  27
+//
+// `prelease` frees every arena-allocated closure at once; use-after-release is a
+// compile error (it consumes the pool token). Contrast examples/closures_owned.tal
+// (each closure heap-allocated and freed individually).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+struct FlatClo (e : Type) (a : Type) (b : Type) { env : e, code : e -> a -> b }
+applyFlat : {0 e : Type} -> {0 a : Type} -> {0 b : Type} -> FlatClo e a b -> a -> b
+fn applyFlat(c, x) { match c { FlatClo(env, code) => code(env, x) } }
+
+addK : Nat -> Nat -> Nat
+fn addK(env, x) { x + env }
+mulK : Nat -> Nat -> Nat
+fn mulK(env, x) { mul(env, x) }
+
+// the pool's element type is fixed here (a typed helper pins `pnew`'s inference).
+mkpool : {0 r : Region} -> (1 cap : RegionCap r) -> Pool r (FlatClo Nat Nat Nat)
+fn mkpool(cap) { pnew(cap) }
+
+// allocate two closures with different captures in the arena, apply them, then
+// free the whole region in one `prelease`.
+prog : {0 r : Region} -> (1 cap : RegionCap r) -> Nat
+fn prog(cap) {
+  let P0 = mkpool(cap);
+  match palloc(P0, FlatClo(10, addK)) { MkPAlloc(p1, P1) =>
+  match palloc(P1, FlatClo(3, mulK))  { MkPAlloc(p2, P2) =>
+  match pget(P2, p1) { MkPGot(c1, P3) =>
+  match pget(P3, p2) { MkPGot(c2, P4) =>
+    let result = applyFlat(c1, 5) + applyFlat(c2, 4);   // (5+10) + (3*4) = 27
+    let done = prelease(P4);                            // free the whole arena
+    result } } } }
+}
+
+main : Nat
+fn main() { match rnew(U) { MkRegionPack(cap) => prog(cap) } }
