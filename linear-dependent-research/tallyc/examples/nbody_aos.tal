@@ -1,0 +1,69 @@
+// PARTICLE SIM — a dense array-of-structs at C speed, with tallyc's memory +
+// type machinery: `Arr Body n` is a true AoS (stride 32, four F64 packed, no
+// boxing), read-modify-written in place through ERASED `Lt` bounds proofs; the
+// buffer is LINEAR (freed exactly once, no GC); `sqrt` crosses the FP-register C
+// ABI via `%foreign`. Each of N bodies is advanced under softened gravity toward
+// the origin for `steps` steps (`steps` from stdin, so nothing folds).
+//
+//   tally build examples/nbody_aos.tal -o /tmp/nb -O2
+//   cc -O2 bench/nbody_aos.c -o /tmp/nbc
+//   echo A | /tmp/nb ; echo A | /tmp/nbc          -> same checksum; compare time
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+%foreign "sqrt" fsqrt : F64 -> F64
+
+struct Body { x : F64, y : F64, vx : F64, vy : F64 }
+
+// advance particles m .. m+b one step (softened gravity toward origin, dt=0.01).
+stepAll : (m : Nat) -> (b : Nat) -> (1 arr : Arr Body (b + m)) -> Arr Body (b + m)
+%partial fn stepAll(m, b, arr) {
+  match b {
+    Zero => arr,
+    Succ(k) =>
+      let (p, arr2) = aget(m, lt(m, Succ(k) + m), arr);
+      match p {
+        Body(x, y, vx, vy) =>
+          let r2   = fadd(fadd(fmul(x, x), fmul(y, y)), 0.01);
+          let inv  = fdiv(1.0, fmul(r2, fsqrt(r2)));
+          let nvx  = fadd(vx, fmul(fneg(fmul(x, inv)), 0.01));
+          let nvy  = fadd(vy, fmul(fneg(fmul(y, inv)), 0.01));
+          let nx   = fadd(x, fmul(nvx, 0.01));
+          let ny   = fadd(y, fmul(nvy, 0.01));
+          let arr3 = aset(m, lt(m, Succ(k) + m), Body(nx, ny, nvx, nvy), arr2);
+          stepAll(Succ(m), k, arr3),
+      },
+  }
+}
+
+// run `s` steps over an N-body buffer.
+run : (n : Nat) -> (s : Nat) -> (1 arr : Arr Body n) -> Arr Body n
+%partial fn run(n, s, arr) {
+  match s {
+    Zero => arr,
+    Succ(k) => let arr2 = stepAll(0, n, arr); run(n, k, arr2),
+  }
+}
+
+// checksum: sum floor(x) over all bodies, then free the buffer.
+checksum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 arr : Arr Body (b + m)) -> Nat
+%partial fn checksum(m, b, acc, arr) {
+  match b {
+    Zero => let u = afree(arr); acc,
+    Succ(k) =>
+      let (p, arr2) = aget(m, lt(m, Succ(k) + m), arr);
+      match p {
+        Body(x, y, vx, vy) => checksum(Succ(m), k, acc + nat_of_f64(fadd(x, 1000.0)), arr2),
+      },
+  }
+}
+
+main : Nat
+fn main() {
+  let d  = getc(U);
+  let s  = d + 8000;                              // runtime step count
+  let a0 = anew(50000, Body(1.5, 0.0, 0.0, 0.8)); // 50k identical bodies
+  let a1 = run(50000, s, a0);
+  checksum(0, 50000, 0, a1)
+}
