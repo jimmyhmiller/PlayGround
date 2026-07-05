@@ -4206,6 +4206,16 @@ fn solve(holes: &mut Holes, pat: &Value, target: &Value) {
             let fresh = crate::dep::nvar(HOLE_BASE + (usize::MAX / 4));
             solve(holes, &c1.apply(fresh.clone()), &c2.apply(fresh));
         }
+        // IDENTITY types — structural, like `VData`: unify the carrier and the two
+        // endpoints. This lets a proof combinator recover its implicit endpoints
+        // (`cong`/`sym`/`trans`'s `{0 x}{0 y}`) from the `Eq A x y` type of the
+        // equality argument it is given — so they read like Idris (the endpoints
+        // are inferred, not written).
+        (Value::VEq(a1, x1, y1), Value::VEq(a2, x2, y2)) => {
+            solve(holes, a1, a2);
+            solve(holes, x1, x2);
+            solve(holes, y1, y2);
+        }
         (Value::VNeu(n1), Value::VNeu(n2)) => solve_neu(holes, n1, n2),
         _ => {}
     }

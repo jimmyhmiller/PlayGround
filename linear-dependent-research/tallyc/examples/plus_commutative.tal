@@ -1,0 +1,70 @@
+// plusCommutative — a NON-TRIVIAL proof ported from Idris 2.
+//
+//   tally check examples/plus_commutative.tal
+//
+// This is the canonical Idris/Coq induction proof: `plus n m = plus m n` for a
+// user-defined `plus` (recursing on its first argument, so neither side reduces
+// on a variable). It needs two lemmas and induction with cong/sym/trans — the
+// full equational-reasoning toolkit, all built on `J` (path induction).
+//
+// Idris 2 writes the successor case of `plusCommutative` with `rewrite`:
+//     plusCommutative (S k) m = rewrite plusSuccRightSucc m k in
+//                               cong S (plusCommutative k m)
+// tallyc has no `rewrite` sugar yet, so the rewrite is spelled out as an explicit
+// `trans` (that is exactly what `rewrite` elaborates to). Everything else is a
+// line-for-line port. All proofs are erased (multiplicity 0) — zero runtime cost.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// ── the equality toolkit, derived from J (endpoints written explicitly) ─────
+cong : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> (x : a) -> (y : a)
+     -> Eq a x y -> Eq b (f x) (f y)
+fn cong(f, x, y, p) { J(\z e => Eq(b, f(x), f(z)), refl(f(x)), p) }
+
+sym : {0 a : Type} -> (x : a) -> (y : a) -> Eq a x y -> Eq a y x
+fn sym(x, y, p) { J(\z e => Eq(a, z, x), refl(x), p) }
+
+trans : {0 a : Type} -> (x : a) -> (y : a) -> (c : a) -> Eq a x y -> Eq a y c -> Eq a x c
+fn trans(x, y, c, p, q) { J(\z e => Eq(a, x, z), p, q) }
+
+// ── the function under proof, and a helper ──────────────────────────────────
+plus : Nat -> Nat -> Nat
+fn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }
+succF : Nat -> Nat
+fn succF(n) { Succ(n) }
+
+// ── lemma 1: plus n Zero = n  (plusZeroRightNeutral) ────────────────────────
+plusZeroR : (n : Nat) -> Eq Nat (plus n Zero) n
+fn plusZeroR(n) {
+  match n {
+    Zero    => refl(Zero),
+    Succ(k) => cong(succF, plus(k, Zero), k, plusZeroR(k)),
+  }
+}
+
+// ── lemma 2: Succ (plus n m) = plus n (Succ m)  (plusSuccRightSucc) ──────────
+plusSuccR : (n : Nat) -> (m : Nat) -> Eq Nat (Succ (plus n m)) (plus n (Succ m))
+fn plusSuccR(n, m) {
+  match n {
+    Zero    => refl(Succ(m)),
+    Succ(k) => cong(succF, Succ(plus(k, m)), plus(k, Succ(m)), plusSuccR(k, m)),
+  }
+}
+
+// ── the theorem: plus n m = plus m n  (plusCommutative) ──────────────────────
+plusComm : (n : Nat) -> (m : Nat) -> Eq Nat (plus n m) (plus m n)
+fn plusComm(n, m) {
+  match n {
+    // plus Zero m = m,  and  m = plus m Zero  by lemma 1 (flipped with sym)
+    Zero    => sym(plus(m, Zero), m, plusZeroR(m)),
+    // plus (Succ k) m = Succ (plus k m).  Chain, via trans:
+    //   Succ (plus k m)  =  Succ (plus m k)   [cong Succ on the IH]
+    //                    =  plus m (Succ k)    [lemma 2]
+    Succ(k) => trans(Succ(plus(k, m)), Succ(plus(m, k)), plus(m, Succ(k)),
+                     cong(succF, plus(k, m), plus(m, k), plusComm(k, m)),
+                     plusSuccR(m, k)),
+  }
+}
+
+main : Nat
+fn main() { Zero }
