@@ -1,0 +1,50 @@
+// EQUALITY PROOFS via J (path induction) — Idris-2-style equational reasoning.
+// The identity type `Eq A x y`, `refl`, and `J` are the kernel's; `J` is now
+// surfaced, so the standard combinators are ORDINARY tallyc functions, and you
+// can prove equations about your OWN recursive functions by induction.
+//
+//   tally check examples/equality_proofs.tal
+//
+// `J(\z e => P, base, proof)`: `proof : Eq A x y`, the motive `\z e => P`
+// abstracts the varying endpoint `z : A` and the proof `e : Eq A x z`, `base :
+// P x (refl x)`, and the result has type `P y proof`. The kernel re-checks every
+// `J`, so a false equation or a bogus motive is a rejected program, never
+// unsound. All proofs are erased (multiplicity 0) — they cost nothing at runtime.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// ── the standard equality combinators, each derived from J ──────────────────
+sym : {0 a : Type} -> (x : a) -> (y : a) -> Eq a x y -> Eq a y x
+fn sym(x, y, p) { J(\z e => Eq(a, z, x), refl(x), p) }
+
+trans : {0 a : Type} -> (x : a) -> (y : a) -> (c : a) -> Eq a x y -> Eq a y c -> Eq a x c
+fn trans(x, y, c, p, q) { J(\z e => Eq(a, x, z), p, q) }
+
+cong : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> (x : a) -> (y : a)
+     -> Eq a x y -> Eq b (f x) (f y)
+fn cong(f, x, y, p) { J(\z e => Eq(b, f(x), f(z)), refl(f(x)), p) }
+
+// transport a proof of `p x` along `x = y` to a proof of `p y`:
+subst : {0 a : Type} -> (p : a -> Type) -> (x : a) -> (y : a) -> Eq a x y -> p x -> p y
+fn subst(p, x, y, eq, px) { J(\z e => p(z), px, eq) }
+
+// ── an INDUCTIVE proof about a USER function ────────────────────────────────
+// `plus n Zero = n` does NOT hold definitionally (plus recurses on its first
+// argument, so `plus k Zero` is stuck on the variable `k`). It needs induction:
+// the successor case rewrites the hypothesis `plus k Zero = k` under `Succ` via
+// `cong`. This is exactly the Idris-2 `plusZeroRightNeutral`.
+plus : Nat -> Nat -> Nat
+fn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }
+succF : Nat -> Nat
+fn succF(x) { Succ(x) }
+
+plusZeroR : (n : Nat) -> Eq Nat (plus n Zero) n
+fn plusZeroR(n) {
+  match n {
+    Zero    => refl(Zero),                                    // plus Zero Zero = Zero, by computation
+    Succ(k) => cong(succF, plus(k, Zero), k, plusZeroR(k)),   // Succ (plus k Zero) = Succ k, from the IH
+  }
+}
+
+main : Nat
+fn main() { Zero }

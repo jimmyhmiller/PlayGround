@@ -357,7 +357,7 @@ fn eval(sig: &Rc<Signature>, env: &[Value], t: &Term) -> Value {
     }
 }
 
-fn vapp(f: Value, a: Value) -> Value {
+pub(crate) fn vapp(f: Value, a: Value) -> Value {
     match f {
         Value::VLam(clo) => clo.apply(a),
         Value::VLamNative(f) => f(a),

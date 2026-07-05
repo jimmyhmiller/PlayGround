@@ -1562,6 +1562,9 @@ impl Elab {
             )),
             Tm::Var(name) => self.resolve(name, vec![], &cx.names, true),
             Tm::Call(name, args) => {
+                if name == "J" && args.len() == 3 {
+                    return self.elab_j(&args[0], &args[1], &args[2], cx, rec).map(|(tm, _)| tm);
+                }
                 if let Some(r) = rec {
                     if name == r.fnname {
                         return self.ih_for(r, args, cx);
@@ -1630,8 +1633,60 @@ impl Elab {
 
     /// Infer the type of a simple argument (a variable or a definition reference,
     /// or a call/constructor that can itself be solved). Returns `(term, type)`.
+    /// `J(\z e => P, base, proof)` — path induction (the eliminator of `Eq`),
+    /// surfaced here (the kernel implements `Term::J`; this is the elaboration).
+    /// `proof : Eq A x y`; the MOTIVE `\z e => P` abstracts the varying endpoint
+    /// `z : A` and the proof `e : Eq A x z` — so it may mention the enclosing
+    /// context (it is a type-level, erased abstraction, elaborated UNDER `cx`, not
+    /// in a fresh one like a runtime lambda). `base : P x (refl x)`, and the whole
+    /// thing has type `P y proof`. `cong`/`sym`/`trans`/`subst`/`rewrite` are all
+    /// this. The kernel re-checks the emitted `Term::J`, so a wrong motive is a
+    /// rejected program, never unsound.
+    fn elab_j(&self, motive: &Tm, base: &Tm, proof: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
+        let (proof_tm, proof_ty) = self.infer_arg(proof, cx, rec)?;
+        let (a, x, y) = match &proof_ty {
+            Value::VEq(a, x, y) => ((**a).clone(), (**x).clone(), (**y).clone()),
+            _ => return Err("`J`: the third argument must be an equality proof `Eq A x y`".into()),
+        };
+        let (params, body) = match motive {
+            Tm::Lam(ps, b) => (ps, b),
+            _ => return Err("`J`: the first argument must be a motive lambda `\\z e => <type>`".into()),
+        };
+        if params.len() != 2 {
+            return Err(
+                "`J`: the motive lambda takes two parameters `\\z e => <type>` — the varying \
+                 endpoint and the proof"
+                    .into(),
+            );
+        }
+        // elaborate the motive body under `z : A`, `e : Eq A x z` (extending `cx`,
+        // so it may reference the enclosing context).
+        let n = cx.len();
+        let mut mcx = cx.clone();
+        mcx.push(params[0].clone(), a.clone());
+        let z_val = dep::nvar(n);
+        mcx.push(
+            params[1].clone(),
+            Value::VEq(Box::new(a.clone()), Box::new(x.clone()), Box::new(z_val)),
+        );
+        let body_tm = self.elab_tm(body, &mcx, None)?;
+        let motive_tm = Term::Lam(Box::new(Term::Lam(Box::new(body_tm))));
+        // base : P x (refl x)
+        let vp = self.eval(cx.len(), &motive_tm);
+        let base_ty = dep::vapp(dep::vapp(vp.clone(), x.clone()), Value::VRefl(Box::new(x.clone())));
+        let base_tm = self.check(base, &base_ty, cx, rec)?;
+        // result : P y proof
+        let proof_val = self.eval(cx.len(), &proof_tm);
+        let result_ty = dep::vapp(dep::vapp(vp, y), proof_val);
+        Ok((Term::J(Box::new(motive_tm), Box::new(base_tm), Box::new(proof_tm)), result_ty))
+    }
+
     fn infer_arg(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
         match t {
+            // `J(motive, base, proof)` — path induction (see `elab_j`).
+            Tm::Call(name, args) if name == "J" && args.len() == 3 => {
+                self.elab_j(&args[0], &args[1], &args[2], cx, rec)
+            }
             // `(e : T)` — elaborate the annotation, CHECK `e` against it, and
             // report `T` as the inferred type (the ascription IS the inference
             // for a context-typed form like `cast`).
