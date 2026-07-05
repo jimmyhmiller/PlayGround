@@ -10,6 +10,11 @@ use std::rc::Rc;
 
 use crate::value::Sym;
 
+/// Index into the runtime constant pool. Literals are indirected through the
+/// pool (which is a GC root) so `Ir` itself holds NO heap pointers — a moving
+/// collector could not rewrite pointers embedded in an immutable `Rc<Ir>`.
+pub type ConstId = u32;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Prim {
     Add,
@@ -23,14 +28,21 @@ pub enum Prim {
     Rest,
     IsNil,
     Println,
+    /// Force a garbage collection. A safepoint you can place explicitly, so the
+    /// GC-during-macro hazard is deterministic to demonstrate.
+    Gc,
+    /// `(record 'Type f0 f1 ...)` -> a record value.
+    Record,
+    /// `(field r i)` -> the i-th field of a record.
+    Field,
 }
 
 #[derive(Clone)]
 pub enum Ir {
-    /// Pre-encoded literal (already boxed/immediate per the model).
-    Const(u64),
-    /// A quoted datum: literal code-as-data.
-    Quote(u64),
+    /// A literal, held in the constant pool (no embedded heap pointer).
+    Const(ConstId),
+    /// A quoted datum, held in the constant pool.
+    Quote(ConstId),
     /// Lexical variable, resolved to a slot at analyze time: `up` frames out,
     /// slot `idx`. No name, no search — a pointer walk plus an index.
     Local { up: u16, idx: u16 },
@@ -56,4 +68,17 @@ pub enum Ir {
     },
     Call(Box<Ir>, Vec<Ir>),
     Prim(Prim, Vec<Ir>),
+    /// `(defmethod name Type impl)`: register an impl for `(name, Type)`.
+    DefMethod {
+        name: Sym,
+        ty: Sym,
+        imp: Box<Ir>,
+    },
+    /// A polymorphic call site: `(method recv args...)`. `site` is a stable id
+    /// used as the inline-cache key; the dispatch strategy resolves it.
+    Dispatch {
+        site: usize,
+        method: Sym,
+        args: Vec<Ir>,
+    },
 }

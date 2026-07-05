@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::code::CodeSpace;
-use crate::ir::Ir;
+use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
 use crate::value::{frame_get, Frame, Locals, Obj, Val};
@@ -64,9 +64,9 @@ impl<M: ValueModel> ClosureComp<M> {
     fn compile(&self, ir: &Ir) -> Compiled<M> {
         self.compiles.set(self.compiles.get() + 1);
         match ir {
-            Ir::Const(b) | Ir::Quote(b) => {
-                let b = *b;
-                Rc::new(move |_rt, _env, _top| b)
+            Ir::Const(id) | Ir::Quote(id) => {
+                let id = *id;
+                Rc::new(move |rt, _env, _top| rt.get_const(id))
             }
             Ir::Local { up, idx } => {
                 let (up, idx) = (*up, *idx);
@@ -121,17 +121,20 @@ impl<M: ValueModel> ClosureComp<M> {
                 let cinits: Vec<Compiled<M>> = inits.iter().map(|ie| self.compile(ie)).collect();
                 let cbody = self.compile(body);
                 Rc::new(move |rt, env, top| {
-                    // let is one pushed frame: first init already sees it.
-                    let mut slots: Vec<u64> = Vec::new();
+                    // Rebuild each frame from the previous frame's current cell
+                    // values, so a GC during an init keeps earlier bindings sound.
                     let mut cur: Locals = Some(Rc::new(Frame {
                         slots: Vec::new(),
                         parent: env.clone(),
                     }));
                     for ci in &cinits {
                         let v = ci(rt, &cur, top);
-                        slots.push(v);
+                        let prev = cur.as_ref().unwrap();
+                        let mut slots: Vec<Cell<u64>> =
+                            prev.slots.iter().map(|c| Cell::new(c.get())).collect();
+                        slots.push(Cell::new(v));
                         cur = Some(Rc::new(Frame {
-                            slots: slots.clone(),
+                            slots,
                             parent: env.clone(),
                         }));
                     }
@@ -169,6 +172,13 @@ impl<M: ValueModel> ClosureComp<M> {
                     top.invoke(top, rt, callee, &argv)
                 })
             }
+            Ir::Prim(Prim::Gc, _) => {
+                // Safepoint: pass the live env (this closure's `env`) to collect.
+                Rc::new(move |rt: &mut Runtime<M>, env: &Locals, _top| {
+                    rt.collect(env);
+                    rt.encode(Val::Nil)
+                })
+            }
             Ir::Prim(op, args) => {
                 let op = *op;
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
@@ -178,6 +188,36 @@ impl<M: ValueModel> ClosureComp<M> {
                         argv.push(c(rt, env, top));
                     }
                     rt.prim(op, &argv)
+                })
+            }
+            Ir::DefMethod { name, ty, imp } => {
+                let (name, ty) = (*name, *ty);
+                let ci = self.compile(imp);
+                Rc::new(move |rt, env, top| {
+                    let c = ci(rt, env, top);
+                    rt.register_method(name, ty, c);
+                    rt.encode(Val::Nil)
+                })
+            }
+            Ir::Dispatch { site, method, args } => {
+                let (site, method) = (*site, *method);
+                let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
+                Rc::new(move |rt, env, top| {
+                    let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
+                    for c in &cargs {
+                        argv.push(c(rt, env, top));
+                    }
+                    let ty = rt
+                        .type_of(argv[0])
+                        .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));
+                    let imp = rt.resolve_method(site, method, ty).unwrap_or_else(|| {
+                        panic!(
+                            "no method '{}' for type '{}'",
+                            rt.sym_name(method),
+                            rt.sym_name(ty)
+                        )
+                    });
+                    top.invoke(top, rt, imp, &argv)
                 })
             }
         }

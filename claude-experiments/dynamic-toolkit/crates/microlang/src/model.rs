@@ -239,3 +239,84 @@ pub struct NanBoxModel;
 impl ValueModel for NanBoxModel {
     type R = NanBox;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// HighBit: a THIRD representation, to test that the value axis is genuinely
+// free. Tag in the TOP 3 bits, payload in the low 61 — the mirror image of
+// LowBit, and a completely different layout from NaN-boxing. Integer-primary
+// (ints immediate, floats boxed). Added with ZERO changes to the collector,
+// the interpreter, the compiler, or either backend: everything reaches the
+// representation only through the `Repr` trait.
+// ─────────────────────────────────────────────────────────────────────────
+
+const HB_SHIFT: u64 = 61;
+const HB_MASK: u64 = (1 << 61) - 1;
+const HB_INT: u64 = 0;
+const HB_REF: u64 = 1 << HB_SHIFT;
+const HB_BOOL: u64 = 2 << HB_SHIFT;
+const HB_NIL: u64 = 3 << HB_SHIFT;
+const HB_SYM: u64 = 4 << HB_SHIFT;
+
+#[derive(Copy, Clone)]
+pub struct HighBit;
+
+impl Repr for HighBit {
+    const NAME: &'static str = "HighBit";
+
+    fn is_immediate(cat: Cat) -> bool {
+        matches!(cat, Cat::Int | Cat::Bool | Cat::Nil | Cat::Sym | Cat::Ref)
+    }
+
+    fn tag_of(bits: u64) -> RawTag {
+        match bits >> HB_SHIFT {
+            HB_INT => RawTag::Int,
+            1 => RawTag::Ref,
+            2 => RawTag::Bool,
+            3 => RawTag::Nil,
+            4 => RawTag::Sym,
+            other => panic!("HighBit: bad tag {other}"),
+        }
+    }
+
+    fn imm_int(bits: u64) -> i64 {
+        // sign-extend the low 61 bits
+        let v = bits & HB_MASK;
+        ((v << 3) as i64) >> 3
+    }
+    fn imm_float(_bits: u64) -> f64 {
+        unreachable!("HighBit boxes floats")
+    }
+    fn as_bool(bits: u64) -> bool {
+        (bits & 1) == 1
+    }
+    fn as_sym(bits: u64) -> Sym {
+        (bits & HB_MASK) as Sym
+    }
+    fn as_ref(bits: u64) -> HeapId {
+        (bits & HB_MASK) as HeapId
+    }
+
+    fn enc_int(i: i64) -> u64 {
+        (i as u64) & HB_MASK // top 3 bits cleared => tag 0
+    }
+    fn enc_float(_f: f64) -> u64 {
+        unreachable!("HighBit boxes floats; runtime allocates")
+    }
+    fn enc_bool(b: bool) -> u64 {
+        HB_BOOL | (b as u64)
+    }
+    fn enc_nil() -> u64 {
+        HB_NIL
+    }
+    fn enc_sym(s: Sym) -> u64 {
+        HB_SYM | (s as u64 & HB_MASK)
+    }
+    fn enc_ref(id: HeapId) -> u64 {
+        HB_REF | (id as u64 & HB_MASK)
+    }
+}
+
+pub struct HighBitModel;
+impl ValueModel for HighBitModel {
+    type R = HighBit;
+}

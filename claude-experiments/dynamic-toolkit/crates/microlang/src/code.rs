@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::ir::Ir;
+use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
 use crate::value::{frame_get, Frame, Locals, Obj, Val};
@@ -53,7 +53,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         locals: &Locals,
     ) -> u64 {
         match ir {
-            Ir::Const(b) | Ir::Quote(b) => *b,
+            Ir::Const(id) | Ir::Quote(id) => rt.get_const(*id),
             Ir::Local { up, idx } => frame_get(locals, *up, *idx),
             Ir::Global(s) => match rt.globals.get(s) {
                 Some(v) => v.val,
@@ -90,18 +90,21 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.encode(Val::Sym(*name))
             }
             Ir::Let(inits, body) => {
-                // The let is one pushed frame (matching `analyze`), so even the
-                // first init evaluates with the let frame already innermost.
-                let mut slots: Vec<u64> = Vec::new();
+                // One growing frame (matching `analyze`), rebuilt each binding
+                // from the PREVIOUS frame's current cell values (not a bare
+                // Vec) so a GC during an init leaves the earlier bindings sound.
                 let mut cur: Locals = Some(Rc::new(Frame {
                     slots: Vec::new(),
                     parent: locals.clone(),
                 }));
                 for iexpr in inits {
                     let v = top.eval_ir(top, rt, iexpr, &cur);
-                    slots.push(v);
+                    let prev = cur.as_ref().unwrap();
+                    let mut slots: Vec<Cell<u64>> =
+                        prev.slots.iter().map(|c| Cell::new(c.get())).collect();
+                    slots.push(Cell::new(v));
                     cur = Some(Rc::new(Frame {
-                        slots: slots.clone(),
+                        slots,
                         parent: locals.clone(),
                     }));
                 }
@@ -128,12 +131,41 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     .collect();
                 top.invoke(top, rt, fv, &argv)
             }
+            // The GC safepoint: the backend holds the live env, so it passes it
+            // to `collect`. Frames are `Rc` with `Cell` slots, so `locals` stays
+            // valid across the move and variable reads see relocated addresses.
+            Ir::Prim(Prim::Gc, _) => {
+                rt.collect(locals);
+                rt.encode(Val::Nil)
+            }
             Ir::Prim(op, args) => {
                 let argv: Vec<u64> = args
                     .iter()
                     .map(|a| top.eval_ir(top, rt, a, locals))
                     .collect();
                 rt.prim(*op, &argv)
+            }
+            Ir::DefMethod { name, ty, imp } => {
+                let c = top.eval_ir(top, rt, imp, locals);
+                rt.register_method(*name, *ty, c);
+                rt.encode(Val::Nil)
+            }
+            Ir::Dispatch { site, method, args } => {
+                let argv: Vec<u64> = args
+                    .iter()
+                    .map(|a| top.eval_ir(top, rt, a, locals))
+                    .collect();
+                let ty = rt
+                    .type_of(argv[0])
+                    .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));
+                let imp = rt.resolve_method(*site, *method, ty).unwrap_or_else(|| {
+                    panic!(
+                        "no method '{}' for type '{}'",
+                        rt.sym_name(*method),
+                        rt.sym_name(ty)
+                    )
+                });
+                top.invoke(top, rt, imp, &argv)
             }
         }
     }

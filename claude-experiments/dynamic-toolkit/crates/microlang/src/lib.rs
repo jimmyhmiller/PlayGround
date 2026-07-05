@@ -17,15 +17,27 @@
 //!   * `calc_fixnum` / `calc_float` — same generic engine, two value models.
 //!   * `microlisp` — macros, `defmacro`, incremental eval on the fixnum model.
 
+pub mod bytecode;
 pub mod code;
 pub mod compiled;
+pub mod dispatch;
+pub mod gc;
 pub mod ir;
 pub mod model;
 pub mod runtime;
+pub mod speculation;
 pub mod value;
 
+pub use bytecode::{BytecodeVm, ModelEmit};
 pub use code::{CodeSpace, Traced, TreeWalk};
 pub use compiled::ClosureComp;
-pub use model::{LowBit, LowBitModel, NanBox, NanBoxModel, Repr, ValueModel};
+pub use dispatch::{Dispatch, DispatchStats, Megamorphic, MonomorphicIc, PolymorphicIc};
+pub use speculation::{
+    AlwaysMonomorphic, BlacklistAfter, Decision, NeverSpeculate, SpecCounters, SpecStats,
+    Speculative, SpeculationPolicy,
+};
+pub use model::{
+    HighBit, HighBitModel, LowBit, LowBitModel, NanBox, NanBoxModel, Repr, ValueModel,
+};
 pub use runtime::Runtime;
 pub use value::{Cat, Obj, Val};
