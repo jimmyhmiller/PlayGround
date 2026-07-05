@@ -29,7 +29,7 @@
 
 use crate::dep::{self, Constructor, DataDecl, Signature, Term, Value};
 use crate::mult::Mult;
-use crate::totality::{self, ArmInfo, Call as TCall, FnClauses, Totality};
+use crate::totality::{self, ArmInfo, Call as TCall, FnClauses, Rel as ScRel, ScCall, Totality};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -4712,6 +4712,7 @@ impl Elab {
                     arms: arm_infos,
                     body_calls: Vec::new(),
                     scrut_is_nat,
+                    sc_calls: sc_calls_of(params, body),
                 }
             }
             other => {
@@ -4724,6 +4725,7 @@ impl Elab {
                     arms: Vec::new(),
                     body_calls: calls,
                     scrut_is_nat: false,
+                    sc_calls: sc_calls_of(params, other),
                 }
             }
         }
@@ -5596,6 +5598,128 @@ fn rebind_linear_fields(
 
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     collect_calls_wf(t, &HashMap::new(), &[], out)
+}
+
+/// Distil a fn body into SIZE-CHANGE calls (see `totality::ScCall`): walk it
+/// threading, for each in-scope variable, its relation to the fn's PARAMETERS
+/// (`Lt` = strict subterm, `Le` = equal / a reconstruction). At every call, emit
+/// the size-change edges. This captures deep/nested descent and reconstruction
+/// (`Succ(p) == m`) that the single-position structural rule cannot.
+fn sc_calls_of(params: &[String], body: &Tm) -> Vec<ScCall> {
+    let sized: HashMap<String, (usize, ScRel)> =
+        params.iter().enumerate().map(|(i, p)| (p.clone(), (i, ScRel::Le))).collect();
+    let mut out = Vec::new();
+    sc_walk(body, &sized, &[], &mut out);
+    out
+}
+
+/// The relation of a call ARGUMENT to some caller parameter: a bound variable
+/// carries its tracked relation; anything provably equal to a param (a
+/// reconstruction such as `Succ(p) == m`) is `Le`.
+fn sc_measure(
+    arg: &Tm,
+    sized: &HashMap<String, (usize, ScRel)>,
+    eq: &[(Tm, String)],
+) -> Option<(usize, ScRel)> {
+    match arg {
+        Tm::Var(v) => sized.get(v).copied(),
+        _ => eq.iter().find(|(t, _)| t == arg).and_then(|(_, s)| sized.get(s).copied()),
+    }
+}
+
+fn sc_walk(
+    t: &Tm,
+    sized: &HashMap<String, (usize, ScRel)>,
+    eq: &[(Tm, String)],
+    out: &mut Vec<ScCall>,
+) {
+    match t {
+        Tm::Call(n, args) => {
+            let edges = args
+                .iter()
+                .enumerate()
+                .filter_map(|(j, a)| sc_measure(a, sized, eq).map(|(i, r)| (i, j, r)))
+                .collect();
+            out.push(ScCall { callee: n.clone(), edges });
+            for a in args {
+                sc_walk(a, sized, eq, out);
+            }
+        }
+        Tm::Match(s, arms) => {
+            let scrut_rel = sized.get(s).copied();
+            for a in arms {
+                let mut sized2 = sized.clone();
+                // a constructor field binder is a STRICT subterm of the scrutinee;
+                // if the scrutinee descends from parameter `i`, so does the binder.
+                for b in &a.binders {
+                    match scrut_rel {
+                        Some((pi, _)) => {
+                            sized2.insert(b.clone(), (pi, ScRel::Lt));
+                        }
+                        None => {
+                            sized2.remove(b);
+                        }
+                    }
+                }
+                // reconstruction: `Ctor(binders…) == scrutinee`. Drop facts a
+                // rebound binder would invalidate.
+                let mut eq2: Vec<(Tm, String)> = eq
+                    .iter()
+                    .filter(|(term, v)| {
+                        !a.binders.iter().any(|b| tm_mentions(term, b) || b == v) && v != s
+                    })
+                    .cloned()
+                    .collect();
+                let recon =
+                    Tm::Call(a.ctor.clone(), a.binders.iter().map(|b| Tm::Var(b.clone())).collect());
+                eq2.push((recon, s.clone()));
+                sc_walk(&a.body, &sized2, &eq2, out);
+            }
+        }
+        Tm::Let(n, e, body) => {
+            sc_walk(e, sized, eq, out);
+            let mut sized2 = sized.clone();
+            match sc_measure(e, sized, eq) {
+                Some(r) => {
+                    sized2.insert(n.clone(), r);
+                }
+                None => {
+                    sized2.remove(n);
+                }
+            }
+            let eq2: Vec<(Tm, String)> =
+                eq.iter().filter(|(term, v)| !tm_mentions(term, n) && v != n).cloned().collect();
+            sc_walk(body, &sized2, &eq2, out);
+        }
+        Tm::LetPair(ns, e, body) => {
+            sc_walk(e, sized, eq, out);
+            let mut sized2 = sized.clone();
+            for n in ns {
+                sized2.remove(n);
+            }
+            let eq2: Vec<(Tm, String)> = eq
+                .iter()
+                .filter(|(term, v)| !ns.iter().any(|n| tm_mentions(term, n) || n == v))
+                .cloned()
+                .collect();
+            sc_walk(body, &sized2, &eq2, out);
+        }
+        // A `%builtin Nat` literal match: recurse without extending the context
+        // (its packed recursion is certified by the accumulator/`dlt` paths, not
+        // SCT). Conservative — never unsound.
+        Tm::MatchN(_, rows) => {
+            for (_, b) in rows {
+                sc_walk(b, sized, eq, out);
+            }
+        }
+        Tm::Add(a, b) => {
+            sc_walk(a, sized, eq, out);
+            sc_walk(b, sized, eq, out);
+        }
+        Tm::Ann(e, _) => sc_walk(e, sized, eq, out),
+        Tm::Lam(_, b) => sc_walk(b, sized, eq, out),
+        Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => {}
+    }
 }
 
 /// PHASE B3 — inline the bodies of FORWARD-referenced mutual-recursion

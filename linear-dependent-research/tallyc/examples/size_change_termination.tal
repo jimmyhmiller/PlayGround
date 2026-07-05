@@ -1,0 +1,47 @@
+// SIZE-CHANGE TERMINATION — recursion the single-position structural rule
+// cannot see, certified %total automatically (no %partial, no dlt guard).
+//
+//   tally check examples/size_change_termination.tal   -- all four: total
+//   tally run   examples/size_change_termination.tal   -- 1
+//
+// The structural rule certifies only a self-call that passes a strict subterm of
+// the ONE matched scrutinee. Size-change termination (Lee-Jones-Ben-Amram) builds
+// a graph of how EVERY argument changes across EVERY call, composes them, and
+// certifies the cycle if every idempotent loop strictly decreases some measure.
+// That subsumes lexicographic descent, argument permutation, and mutual cycles.
+// These lower as `Fix` (no eliminator for the shape), so — like well-founded
+// (`dlt`) recursion — the certificate rests on the analyzer (docs/TRUSTED_BASE.md).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Bool { False : Bool, True : Bool }
+
+// LEXICOGRAPHIC: the Ackermann function. No single argument decreases on every
+// call (the inner call keeps `m` and shrinks `n`; the outer shrinks `m`), but the
+// PAIR (m, n) descends lexicographically — SCT sees it.
+ack : Nat -> Nat -> Nat
+fn ack(m, n) {
+  match m {
+    Zero    => Succ(n),
+    Succ(p) => match n {
+      Zero    => ack(p, Succ(Zero)),
+      Succ(q) => ack(p, ack(Succ(p), q)),
+    },
+  }
+}
+
+// MUTUAL: neither function decreases alone, but every cycle through the pair
+// strips one `Succ` — SCT certifies the whole SCC.
+isEven : Nat -> Bool
+fn isEven(n) { match n { Zero => True, Succ(k) => isOdd(k) } }
+isOdd : Nat -> Bool
+fn isOdd(n) { match n { Zero => False, Succ(k) => isEven(k) } }
+
+main : Nat
+fn main() {
+  // ack(2,3) = 9, which is odd; isEven(9) = False → 1.
+  match isEven(ack(Succ(Succ(Zero)), Succ(Succ(Succ(Zero))))) {
+    True  => 0,
+    False => 1,
+  }
+}

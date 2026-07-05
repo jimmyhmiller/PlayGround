@@ -983,20 +983,26 @@ fn phase_1a_prime_red_team_non_descending_accumulator_still_rejected() {
 }
 
 #[test]
-fn phase_1a_prime_red_team_boxed_accumulator_still_partial() {
-    // the accumulator fold is implemented ONLY for a `%builtin Nat` scrutinee. The
-    // SAME accumulator recursion over a BOXED datatype is terminating but not yet
-    // lowerable, so `%total` still declines it — with a message that says BOXED and
-    // points at the later phase. (No regression: boxed verbatim folds stay total.)
+fn boxed_accumulator_certified_total_by_size_change() {
+    // A boxed-`Nat` accumulator fold (scrutinee `m` strictly decreases, `n`
+    // varies) terminates. The single-position structural rule declined it (the
+    // accumulator eliminator is only wired for `%builtin Nat`), but SIZE-CHANGE
+    // termination certifies it — `m` shrinks on every self-call — and it lowers
+    // as `Fix`. So `%total` now ACCEPTS it (and it runs).
     let src = format!(
         "{NAT}\n%total fn addacc(m, n) {{ match m {{ Zero => n, Succ(k) => addacc(k, Succ(n)) }} }}\n\
-         addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(2, 3) }}\n"
+         addacc : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ addacc(Succ(Succ(Zero)), Zero) }}\n"
     );
-    let err = match check_program(&src) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
-    assert!(
-        err.contains("accumulator") && err.contains("BOXED") && (err.contains("E2") || err.contains("E3")),
-        "boxed accumulator must be declined as BOXED + point at the later phase, got: {err}"
+    assert!(is_total(&check_program(&src).unwrap(), "addacc"), "SCT must certify the accumulator fold");
+
+    // SOUNDNESS red-team: an accumulator fold that does NOT decrease its
+    // scrutinee (passes `m` onward unchanged) is genuinely non-terminating and is
+    // still a hard `%total` error.
+    let bad = format!(
+        "{NAT}\n%total fn spin(m, n) {{ match m {{ Zero => n, Succ(k) => spin(m, Succ(n)) }} }}\n\
+         spin : Nat -> Nat -> Nat\nmain : Nat\nfn main() {{ spin(Succ(Succ(Zero)), Zero) }}\n"
     );
+    assert!(check_program(&bad).is_err(), "a non-decreasing accumulator must not certify %total");
 }
 
 #[test]
@@ -1025,14 +1031,18 @@ fn total_certificate_rejects_mutual_recursion() {
          main : Nat\nfn main() {{ iseven(2) }}\n"
     );
     check_program(&src).unwrap_or_else(|e| panic!("descending mutual %total must check (B3): {e:?}"));
+    // a GENUINELY non-terminating cycle — BOTH directions pass the whole
+    // scrutinee onward, so nothing ever decreases — is still a hard error (SCT
+    // finds an idempotent loop with no strict self-edge). (`isodd(m)` alone would
+    // still terminate, since `iseven` keeps descending — so both must stall.)
     let bad = format!(
         "{NATB}\n\
          %total fn iseven(m) {{ match m {{ Zero => Zero, Succ(k) => isodd(m) }} }}\niseven : Nat -> Nat\n\
-         fn isodd(m) {{ match m {{ Zero => Succ(Zero), Succ(k) => iseven(k) }} }}\nisodd : Nat -> Nat\n\
+         fn isodd(m) {{ match m {{ Zero => Succ(Zero), Succ(k) => iseven(m) }} }}\nisodd : Nat -> Nat\n\
          main : Nat\nfn main() {{ iseven(2) }}\n"
     );
     let err = match check_program(&bad) { Err(d) => format!("{d:?}"), Ok(_) => panic!("expected rejection") };
-    assert!(err.contains("mutual"), "must cite the mutual-recursion cycle, got: {err}");
+    assert!(err.contains("mutual") || err.contains("decrease"), "must reject the non-descending cycle, got: {err}");
 }
 
 #[test]
@@ -1755,15 +1765,18 @@ fn convoy_fold_certifies_lookup_total() {
     );
     let prog = check_program(&src).unwrap_or_else(|e| panic!("total lookup must certify: {e:?}"));
     assert!(is_total(&prog, "lookup"), "lookup must be certified total via the convoy fold");
-    // red-team: varying an argument that is NOT index-dependent still falls back
-    // (the fold's verbatim guard rejects it; the fn stays honest %partial-style)
-    // — and `%total` on it is a hard error, not a silent acceptance.
+    // (`wander`, which varies `acc` but DESCENDS on `env`, terminates — the
+    // convoy fold declines it for want of the index-dependent-eliminator lowering,
+    // but size-change certifies it as `TotalWf` and it lowers as `Fix`. Not tested
+    // here.) SOUNDNESS red-team: a fold that does NOT descend its scrutinee
+    // (passes `env` onward unchanged) is genuinely non-terminating and is still a
+    // hard `%total` error, never silently accepted.
     let bad = format!(
         "{CONVOY_HDR}wander : {{0 n : Nat}} -> Nat -> Vec Nat n -> Nat\n\
-         %total fn wander(acc, env) {{ match env {{ Nil => acc, Cons(v, rest) => wander(v, rest) }} }}\n\
+         %total fn wander(acc, env) {{ match env {{ Nil => acc, Cons(v, rest) => wander(v, env) }} }}\n\
          main : Nat\nfn main() {{ Zero }}\n"
     );
-    assert!(check_program(&bad).is_err(), "a non-dep varying arg must not certify %total");
+    assert!(check_program(&bad).is_err(), "a non-descending fold must not certify %total");
 }
 
 #[test]
@@ -2673,15 +2686,17 @@ fn b3_mutual_even_odd_certified_total_and_runs() {
     // (mutual fns lower to an opaque `Fix`, which the kernel never unfolds —
     // the native run is dep_codegen::tests::b3_mutual_recursion_runs_natively.)
 
-    // a mutual NON-descent (passing the whole scrutinee onward) is rejected —
-    // annotation is not proof.
+    // a GENUINELY non-terminating mutual cycle — BOTH directions pass the whole
+    // scrutinee onward, so nothing decreases — is rejected (annotation is not
+    // proof). (`odd(n)` alone would still terminate via `even`'s descent, so both
+    // must stall for the cycle to actually diverge.)
     const BAD: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
         enum Bool { False : Bool, True : Bool }\n\
         even : Nat -> Bool\n%total\nfn even(n) { match n { Zero => True, Succ(k) => odd(n) } }\n\
-        odd : Nat -> Bool\n%total\nfn odd(n) { match n { Zero => False, Succ(k) => even(k) } }\n\
+        odd : Nat -> Bool\n%total\nfn odd(n) { match n { Zero => False, Succ(k) => even(n) } }\n\
         main : Nat\nfn main() { 0 }\n";
     let err = check_program(BAD).err().expect("mutual non-descent must reject");
-    assert!(format!("{err:?}").contains("mutual"), "got {err:?}");
+    assert!(format!("{err:?}").contains("mutual") || format!("{err:?}").contains("decrease"), "got {err:?}");
 
     // a THREE-function cycle certifies and runs too.
     const THREE: &str = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\

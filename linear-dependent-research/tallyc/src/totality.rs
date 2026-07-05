@@ -68,6 +68,29 @@ pub(crate) struct Call {
     pub lt_facts: Vec<(Tm, Tm)>,
 }
 
+/// A size-change relation between a caller parameter and a callee argument:
+/// `Lt` = the argument is a strict structural subterm of the parameter (a
+/// guaranteed decrease); `Le` = equal, or a reconstruction of it (non-increase).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Rel {
+    Lt,
+    Le,
+}
+
+/// One call occurrence distilled for SIZE-CHANGE TERMINATION: the callee and the
+/// size-change graph relating this function's parameters to the callee's
+/// arguments. Edge `(i, j, rel)` means callee argument `j` is `rel` than caller
+/// parameter `i`. Computed with full nested-pattern / reconstruction context, so
+/// it captures deep, lexicographic, and mutual descent that the single-position
+/// structural rule misses. Sound by construction: `Lt` only for a genuine strict
+/// subterm, `Le` only for provable equality — so the graph UNDER-approximates
+/// decrease and SCT can never wrongly certify.
+#[derive(Clone, Debug)]
+pub(crate) struct ScCall {
+    pub callee: String,
+    pub edges: Vec<(usize, usize, Rel)>,
+}
+
 /// One `match` arm, distilled for the analysis.
 #[derive(Clone, Debug)]
 pub(crate) struct ArmInfo {
@@ -103,6 +126,9 @@ pub(crate) struct FnClauses {
     /// 1a′). For a boxed datatype that lowering isn't available yet, so a varying
     /// argument is still declined (`Partial`).
     pub scrut_is_nat: bool,
+    /// every call in the body, each with its SIZE-CHANGE graph vs this function's
+    /// parameters (for the SCT fallback — see `sct_certifies`).
+    pub sc_calls: Vec<ScCall>,
 }
 
 impl FnClauses {
@@ -149,8 +175,39 @@ pub(crate) fn analyze(fns: &[FnClauses]) -> HashMap<String, TotInfo> {
     // a cross-cycle call must decrease at the CALLEE's matched position.
     let spos: HashMap<String, Option<usize>> =
         fns.iter().map(|f| (f.name.clone(), f.scrut_pos)).collect();
-    let structural: HashMap<String, Totality> =
+    let mut structural: HashMap<String, Totality> =
         fns.iter().map(|f| (f.name.clone(), structural_verdict(f, &reach, &spos))).collect();
+
+    // --- step 1b: SIZE-CHANGE TERMINATION fallback. The single-position
+    // structural rule declines deep/nested descent (`half (S (S k))`),
+    // lexicographic descent (Ackermann), and general mutual recursion. For each
+    // still-`Partial` function, run SCT over its whole SCC; if every idempotent
+    // loop strictly decreases some parameter, the SCC terminates — certify its
+    // members `TotalWf` (like wf/mutual: lowered as `Fix`, the certificate rests
+    // on this analyzer, docs/TRUSTED_BASE.md). SOUND: the graphs under-approximate
+    // decrease, so SCT never wrongly certifies. ---
+    for f in fns {
+        if structural[&f.name].is_total() {
+            continue;
+        }
+        let empty = HashSet::new();
+        let mut scc: HashSet<String> = reach
+            .get(&f.name)
+            .unwrap_or(&empty)
+            .iter()
+            .filter(|g| reach.get(g.as_str()).map(|s| s.contains(&f.name)).unwrap_or(false))
+            .cloned()
+            .collect();
+        scc.insert(f.name.clone());
+        if sct_certifies(&scc, fns) {
+            for m in &scc {
+                if !structural[m].is_total() {
+                    structural.insert(m.clone(), Totality::TotalWf);
+                }
+            }
+        }
+    }
+    let structural = structural;
 
     // --- step 2: the END-TO-END verdict — partiality is contagious. A function
     // whose own recursion is fine but which CALLS a non-total function is itself
@@ -390,6 +447,103 @@ fn structural_verdict(
     } else {
         Totality::Total
     }
+}
+
+// --- size-change termination (Lee–Jones–Ben-Amram) ------------------------
+
+/// A size-change graph for one call edge `from → to`: for each `(caller_i,
+/// callee_j)` the strongest relation known (`Lt` beats `Le`).
+#[derive(Clone, PartialEq, Eq)]
+struct ScGraph {
+    from: String,
+    to: String,
+    edges: HashMap<(usize, usize), Rel>,
+}
+
+fn rel_lub(a: Rel, b: Rel) -> Rel {
+    if a == Rel::Lt || b == Rel::Lt {
+        Rel::Lt
+    } else {
+        Rel::Le
+    }
+}
+
+fn edge_map(edges: &[(usize, usize, Rel)]) -> HashMap<(usize, usize), Rel> {
+    let mut m: HashMap<(usize, usize), Rel> = HashMap::new();
+    for &(i, j, r) in edges {
+        m.entry((i, j)).and_modify(|e| *e = rel_lub(*e, r)).or_insert(r);
+    }
+    m
+}
+
+/// Compose `g1 : A→B` with `g2 : B→C` into `A→C`: a path `i →(r1) k →(r2) j`
+/// decreases strictly if EITHER hop does.
+fn compose(g1: &ScGraph, g2: &ScGraph) -> ScGraph {
+    let mut edges: HashMap<(usize, usize), Rel> = HashMap::new();
+    for (&(i, k1), &r1) in &g1.edges {
+        for (&(k2, j), &r2) in &g2.edges {
+            if k1 == k2 {
+                let r = rel_lub(r1, r2);
+                edges.entry((i, j)).and_modify(|e| *e = rel_lub(*e, r)).or_insert(r);
+            }
+        }
+    }
+    ScGraph { from: g1.from.clone(), to: g2.to.clone(), edges }
+}
+
+/// Does the SCC terminate by size-change? Close the base call graphs under
+/// composition; the SCC terminates iff every IDEMPOTENT loop graph (`G∘G = G`,
+/// `from = to`) has a strictly-decreasing self-edge `(i, i, Lt)`.
+fn sct_certifies(scc: &HashSet<String>, fns: &[FnClauses]) -> bool {
+    let mut all: Vec<ScGraph> = Vec::new();
+    for f in fns {
+        if !scc.contains(&f.name) {
+            continue;
+        }
+        for c in &f.sc_calls {
+            if scc.contains(&c.callee) {
+                all.push(ScGraph {
+                    from: f.name.clone(),
+                    to: c.callee.clone(),
+                    edges: edge_map(&c.edges),
+                });
+            }
+        }
+    }
+    if all.is_empty() {
+        return false; // no analyzable calls in the cycle ⇒ cannot certify
+    }
+    // closure under composition (bounded — bail conservatively if it explodes).
+    let mut i = 0;
+    while i < all.len() {
+        let mut fresh: Vec<ScGraph> = Vec::new();
+        for g2 in &all {
+            if all[i].to == g2.from {
+                let c = compose(&all[i], g2);
+                if !all.iter().chain(fresh.iter()).any(|g| *g == c) {
+                    fresh.push(c);
+                }
+            }
+            if g2.to == all[i].from {
+                let c = compose(g2, &all[i]);
+                if !all.iter().chain(fresh.iter()).any(|g| *g == c) {
+                    fresh.push(c);
+                }
+            }
+        }
+        all.extend(fresh);
+        if all.len() > 4096 {
+            return false; // pathological: decline rather than loop
+        }
+        i += 1;
+    }
+    // every idempotent loop must strictly decrease some parameter.
+    all.iter().all(|g| {
+        if g.from != g.to || compose(g, g) != *g {
+            return true;
+        }
+        g.edges.iter().any(|(&(i, j), &r)| i == j && r == Rel::Lt)
+    })
 }
 
 fn describe(t: &Tm) -> String {
