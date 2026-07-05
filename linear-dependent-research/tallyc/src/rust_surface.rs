@@ -1088,6 +1088,13 @@ struct Elab {
     nat_types: std::collections::HashSet<String>,
     /// constructor name → its `Nat` role, for the `%builtin Nat` types.
     nat_ctor: HashMap<String, NatRole>,
+    /// BASE constructor names of mult-poly datatype families: a family
+    /// `FlatClo (m : Mult) …` is monomorphised to `FlatClo$1`/`FlatClo$w`, so the
+    /// base name `FlatClo` (what the user writes) is not itself a constructor.
+    /// It resolves to an instance constructor via the expected/scrutinee type
+    /// (`resolve_mono_ctor`); this set lets `match` desugaring accept the base
+    /// name instead of rejecting it as an unknown constructor.
+    poly_ctor_base: std::collections::HashSet<String>,
     /// set while elaborating the body of a `%partial` `Fix` (general recursion). In
     /// this mode a boxed `match` lowers to a NON-recursive `Term::Case` (recursion is
     /// the `Fix` self-call), not the recursive `Term::Elim` (whose implicit IHs would
@@ -1299,15 +1306,21 @@ impl Elab {
             // split (non-recursive — the recursive fold is the fn body, handled in
             // pass D). Lower it to a non-dependent eliminator via elab_nested_match.
             Tm::Match(scrut, arms) => self.elab_case(scrut, arms, expected, cx, rec),
-            Tm::Var(name) if self.ctor_has_implicits(name) => self.solve_ctor(name, &[], expected, cx, rec),
+            Tm::Var(name) if self.ctor_has_implicits(&self.resolve_ctor_expected(name, expected)) => {
+                let rn = self.resolve_ctor_expected(name, expected);
+                self.solve_ctor(&rn, &[], expected, cx, rec)
+            }
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
                     if name == r.fnname {
                         return self.ih_for(r, args, cx);
                     }
                 }
-                if self.ctor_has_implicits(name) {
-                    return self.solve_ctor(name, args, expected, cx, rec);
+                // A mult-poly BASE constructor (`FlatClo`) resolves to the
+                // instance (`FlatClo$1`) named by the expected datatype.
+                let rn = self.resolve_ctor_expected(name, expected);
+                if self.ctor_has_implicits(&rn) {
+                    return self.solve_ctor(&rn, args, expected, cx, rec);
                 }
                 // A LOCAL BINDER shadows a global def (see `elab_tm`): don't route
                 // a shadowed name through the implicit solver — e.g. `foldr`'s
@@ -1654,6 +1667,32 @@ impl Elab {
 
     /// Solve a constructor's implicit arguments by matching its result type
     /// against `expected`, then elaborate the explicit arguments.
+    /// Resolve a possibly-BASE constructor name against a target datatype NAME.
+    /// A mult-poly datatype instance `D$k` has mangled constructors `C$k`, but
+    /// the user writes the base `C`; if `cname` is not itself a registered
+    /// constructor and `data` carries a mult suffix (`…$k`), retry `C$k`.
+    fn resolve_mono_ctor(&self, cname: &str, data: &str) -> String {
+        if self.ctor_info.contains_key(cname) {
+            return cname.to_string();
+        }
+        if let Some(idx) = data.rfind('$') {
+            let mangled = format!("{cname}{}", &data[idx..]);
+            if self.ctor_info.contains_key(&mangled) {
+                return mangled;
+            }
+        }
+        cname.to_string()
+    }
+
+    /// As `resolve_mono_ctor`, taking the datatype name from an EXPECTED value
+    /// (the check-position constructor case).
+    fn resolve_ctor_expected(&self, cname: &str, expected: &Value) -> String {
+        match expected {
+            Value::VData(dname, _) => self.resolve_mono_ctor(cname, dname),
+            _ => cname.to_string(),
+        }
+    }
+
     fn solve_ctor(&self, cname: &str, user_args: &[Tm], expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
         let info = self.ctor_info[cname].clone();
         let decl = self.rc.data(&info.data).unwrap().clone();
@@ -1960,6 +1999,20 @@ impl Elab {
         match &e_ty {
             Value::VData(d, a) => {
                 let a = a.clone();
+                // Resolve mult-poly BASE constructor patterns (`FlatClo`) to the
+                // instance (`FlatClo$w`) named by the scrutinee datatype `d`.
+                let resolved: Vec<Arm>;
+                let arms: &[Arm] = if self.poly_ctor_base.contains(&arms[0].ctor)
+                    || arms.iter().any(|arm| self.poly_ctor_base.contains(&arm.ctor))
+                {
+                    resolved = arms
+                        .iter()
+                        .map(|arm| Arm { ctor: self.resolve_mono_ctor(&arm.ctor, d), ..arm.clone() })
+                        .collect();
+                    &resolved
+                } else {
+                    arms
+                };
                 self.elab_nested_match(&e_term, d, &a, arms, expected, cx, rec, None)
             }
             // a nested/expression case split on a built-in `Nat` ⇒ a non-recursive
@@ -2673,6 +2726,16 @@ fn mono_name(base: &str, mults: &[Mult]) -> String {
     format!("{base}${suffix}")
 }
 
+/// If `name` is a mult-poly INSTANCE constructor `base$<mults>` (a non-empty
+/// suffix all in `{0,1,w}`), return its base name — the inverse of `mono_name`.
+fn mono_ctor_base(name: &str) -> Option<&str> {
+    let (base, suffix) = name.rsplit_once('$')?;
+    (!base.is_empty()
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| matches!(c, '0' | '1' | 'w')))
+    .then_some(base)
+}
+
 /// Substitute concrete multiplicities for `SMult::Var`s throughout a type.
 fn subst_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Ty {
     match t {
@@ -2815,6 +2878,182 @@ fn mono_rewrite_tm(
     }
 }
 
+// --- MULT-POLY DATATYPES (slice: closures over linearity) ------------------
+// A datatype declared with a `(m : Mult)` parameter — e.g.
+//   struct FlatClo (m : Mult) (e : Type) (a : Type) (b : Type) { code : (m x : a) -> b }
+// is monomorphised the same way a function is: each concrete reference
+// `FlatClo 1 e a b` becomes `FlatClo$1 e a b` (a fresh datatype with `m := 1`
+// substituted through the constructor field arrows), so the kernel's rig stays
+// concrete. This is the datatype counterpart of `monomorphize_mult_poly`; it
+// runs in the same pass because a *function's* own `(m : Mult)` parameter flows
+// into a datatype reference (`applyFlat : (m : Mult) -> FlatClo m e a b -> …`),
+// so the datatype instance is only pinned once the function's `m` is resolved.
+
+/// The parameter positions of a datatype declared as `(m : Mult)`.
+fn data_mult_positions(params: &[Binder]) -> Vec<usize> {
+    params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| is_mult_sort(&b.ty).then_some(i))
+        .collect()
+}
+
+/// Flatten a left-nested type application `App(App(App(D, x), y), z)` into its
+/// head `D` and argument list `[x, y, z]`.
+fn flatten_ty_app(t: &Ty) -> (&Ty, Vec<&Ty>) {
+    let mut head = t;
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, a) = head {
+        args.push(a);
+        head = f;
+    }
+    args.reverse();
+    (head, args)
+}
+
+/// Decode a `Mult` written as a TYPE-application argument: `1`/`0` parse as a
+/// `Ty::Lit` (the index-literal), `w` and an enclosing `(x : Mult)` parameter as
+/// a `Ty::Var` (resolved through `subst`).
+fn resolve_mult_ty(t: &Ty, subst: &HashMap<String, Mult>) -> Result<Mult, String> {
+    match t {
+        Ty::Lit(0) => Ok(Mult::Zero),
+        Ty::Lit(1) => Ok(Mult::One),
+        Ty::Var(v) if v == "w" => Ok(Mult::Omega),
+        Ty::Var(v) => subst.get(v).copied().ok_or_else(|| {
+            format!(
+                "`{v}` is not a multiplicity — a datatype's `Mult` argument must be \
+                 `0`, `1`, `w`, or an enclosing `(x : Mult)` parameter"
+            )
+        }),
+        _ => Err("a datatype's `Mult` argument must be `0`, `1`, or `w`".into()),
+    }
+}
+
+/// Rewrite every reference to a mult-poly datatype in a type: `D <mults…> args…`
+/// ⟶ `D$<mults> args…`, dropping the `Mult` arguments and queuing the needed
+/// instance. `poly` maps a datatype name to its `Mult` parameter positions.
+fn mangle_ty(
+    t: &Ty,
+    poly: &HashMap<String, Vec<usize>>,
+    subst: &HashMap<String, Mult>,
+    queue: &mut Vec<(String, Vec<Mult>)>,
+) -> Result<Ty, String> {
+    match t {
+        Ty::App(_, _) => {
+            let (head, args) = flatten_ty_app(t);
+            if let Ty::Var(name) = head {
+                if let Some(positions) = poly.get(name).cloned() {
+                    let mut mults: Vec<Mult> = Vec::new();
+                    let mut rest: Vec<Ty> = Vec::new();
+                    for (i, a) in args.iter().enumerate() {
+                        if positions.contains(&i) {
+                            mults.push(resolve_mult_ty(a, subst)?);
+                        } else {
+                            rest.push(mangle_ty(a, poly, subst, queue)?);
+                        }
+                    }
+                    if mults.len() != positions.len() {
+                        return Err(format!(
+                            "`{name}` is multiplicity-polymorphic and must be applied to \
+                             its `Mult` argument(s) at every reference"
+                        ));
+                    }
+                    if !queue.iter().any(|(n, ms)| n == name && *ms == mults) {
+                        queue.push((name.clone(), mults.clone()));
+                    }
+                    let mut out = Ty::Var(mono_name(name, &mults));
+                    for r in rest {
+                        out = Ty::App(Box::new(out), Box::new(r));
+                    }
+                    return Ok(out);
+                }
+            }
+            // not a mult-poly head: recurse into both halves.
+            if let Ty::App(f, a) = t {
+                return Ok(Ty::App(
+                    Box::new(mangle_ty(f, poly, subst, queue)?),
+                    Box::new(mangle_ty(a, poly, subst, queue)?),
+                ));
+            }
+            unreachable!()
+        }
+        Ty::Arrow(m, imp, n, a, b) => Ok(Ty::Arrow(
+            m.clone(),
+            *imp,
+            n.clone(),
+            Box::new(mangle_ty(a, poly, subst, queue)?),
+            Box::new(mangle_ty(b, poly, subst, queue)?),
+        )),
+        Ty::Add(a, b) => Ok(Ty::Add(
+            Box::new(mangle_ty(a, poly, subst, queue)?),
+            Box::new(mangle_ty(b, poly, subst, queue)?),
+        )),
+        Ty::Var(_) | Ty::Lit(_) | Ty::Type(_) | Ty::TypeV(_) => Ok(t.clone()),
+    }
+}
+
+/// Build the concrete instance of a mult-poly datatype at `mults`: substitute the
+/// `Mult` parameters through the field/variant arrows, mangle datatype references
+/// in them, drop the `Mult` parameters, and mangle each constructor name.
+fn generate_data_instance(
+    item: &Item,
+    positions: &[usize],
+    mults: &[Mult],
+    poly: &HashMap<String, Vec<usize>>,
+    queue: &mut Vec<(String, Vec<Mult>)>,
+) -> Result<Item, String> {
+    // subst: the datatype's own `Mult` parameter names ⟶ the concrete mults.
+    let subst_of = |params: &[Binder]| -> HashMap<String, Mult> {
+        positions
+            .iter()
+            .zip(mults)
+            .map(|(&p, m)| (params[p].name.clone(), *m))
+            .collect()
+    };
+    // rewrite a field/variant type: substitute arrow mults, then mangle refs.
+    let rewrite = |ty: &Ty, subst: &HashMap<String, Mult>, q: &mut Vec<(String, Vec<Mult>)>| {
+        mangle_ty(&subst_mult_ty(ty, subst), poly, subst, q)
+    };
+    match item {
+        Item::Struct { name, params, fields } => {
+            let subst = subst_of(params);
+            let nparams: Vec<Binder> = params
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !positions.contains(i))
+                .map(|(_, b)| b.clone())
+                .collect();
+            let nfields: Vec<(String, Ty)> = fields
+                .iter()
+                .map(|(fna, fty)| Ok((fna.clone(), rewrite(fty, &subst, queue)?)))
+                .collect::<Result<_, String>>()?;
+            Ok(Item::Struct { name: mono_name(name, mults), params: nparams, fields: nfields })
+        }
+        Item::Enum { name, params, index_ty, variants, linear, boxed } => {
+            let subst = subst_of(params);
+            let nparams: Vec<Binder> = params
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !positions.contains(i))
+                .map(|(_, b)| b.clone())
+                .collect();
+            let nvariants: Vec<(String, Ty)> = variants
+                .iter()
+                .map(|(cn, cty)| Ok((mono_name(cn, mults), rewrite(cty, &subst, queue)?)))
+                .collect::<Result<_, String>>()?;
+            Ok(Item::Enum {
+                name: mono_name(name, mults),
+                params: nparams,
+                index_ty: index_ty.clone(),
+                variants: nvariants,
+                linear: *linear,
+                boxed: *boxed,
+            })
+        }
+        _ => Err("internal: a mult-poly datatype instance of a non-datatype".into()),
+    }
+}
+
 /// The slice-2 pre-pass: pull out every `fn` with a `(m : Mult)` parameter,
 /// rewrite all remaining bodies (queuing needed instances), instantiate each
 /// requested (function × multiplicities) pair ONCE — a poly body's own calls
@@ -2847,19 +3086,63 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
             }
         }
     }
-    if polys.is_empty() {
+    // mult-poly DATATYPES: name -> (original Item, `Mult`-parameter positions).
+    let mut data_polys: HashMap<String, (Item, Vec<usize>)> = HashMap::new();
+    for it in items.iter() {
+        let (name, params) = match it {
+            Item::Struct { name, params, .. } => (name, params),
+            Item::Enum { name, params, .. } => (name, params),
+            _ => continue,
+        };
+        let pos = data_mult_positions(params);
+        if !pos.is_empty() {
+            data_polys.insert(name.clone(), (it.clone(), pos));
+        }
+    }
+    if polys.is_empty() && data_polys.is_empty() {
         return Ok(());
     }
-    // rewrite every non-poly body, queuing the needed instances
+    let poly_map: HashMap<String, Vec<usize>> =
+        data_polys.iter().map(|(n, (_, p))| (n.clone(), p.clone())).collect();
+    let mut data_queue: Vec<(String, Vec<Mult>)> = Vec::new();
+    let empty: HashMap<String, Mult> = HashMap::new();
+
+    // Mangle mult-poly datatype references in every RETAINED item's types
+    // (literal-mult references). Skip poly `fn` sigs — their datatype refs use
+    // the fn's own `Mult` parameter, resolved per-instance below — and the poly
+    // datatypes themselves (replaced by their instances).
+    for it in items.iter_mut() {
+        match it {
+            Item::Sig(n, t) if !polys.contains_key(n) => {
+                *t = mangle_ty(t, &poly_map, &empty, &mut data_queue)?;
+            }
+            Item::Postulate(_, t, _) => *t = mangle_ty(t, &poly_map, &empty, &mut data_queue)?,
+            Item::Foreign(_, _, t) => *t = mangle_ty(t, &poly_map, &empty, &mut data_queue)?,
+            Item::Struct { name, fields, .. } if !data_polys.contains_key(name) => {
+                for (_, ft) in fields.iter_mut() {
+                    *ft = mangle_ty(ft, &poly_map, &empty, &mut data_queue)?;
+                }
+            }
+            Item::Enum { name, variants, .. } if !data_polys.contains_key(name) => {
+                for (_, vt) in variants.iter_mut() {
+                    *vt = mangle_ty(vt, &poly_map, &empty, &mut data_queue)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // rewrite every non-poly body, queuing the needed FUNCTION instances
     let mut queue: Vec<(String, Vec<Mult>)> = Vec::new();
     for it in items.iter_mut() {
         if let Item::Fn(name, _, body, _) = it {
             if !polys.contains_key(name) {
-                *body = mono_rewrite_tm(body, &polys, &HashMap::new(), &mut queue)?;
+                *body = mono_rewrite_tm(body, &polys, &empty, &mut queue)?;
             }
         }
     }
-    // instantiate (a poly body may queue further instances — drain to fixpoint)
+    // instantiate function polys (drain to fixpoint), MANGLING each instance's
+    // sig so a datatype reference at the fn's own `Mult` parameter is resolved.
     let mut made: Vec<(String, Item, Item)> = Vec::new(); // (original, Sig, Fn)
     let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut qi = 0;
@@ -2877,7 +3160,8 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
             .zip(&mults)
             .map(|((_, n), m)| (n.clone(), *m))
             .collect();
-        let isig = strip_mult_arrows(&pd.sig, &subst);
+        let isig =
+            mangle_ty(&strip_mult_arrows(&pd.sig, &subst), &poly_map, &subst, &mut data_queue)?;
         let iparams: Vec<String> = pd
             .params
             .iter()
@@ -2891,8 +3175,29 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
             Item::Fn(iname, iparams, ibody, pd.annot),
         ));
     }
-    // splice: drop each poly Sig/Fn, inserting its instances at the Fn's position
-    let mut out: Vec<Item> = Vec::with_capacity(items.len() + made.len());
+
+    // instantiate DATATYPE polys (fixpoint — an instance's fields may reference
+    // further mult-poly datatypes, which `generate_data_instance` queues).
+    let mut data_made: Vec<(String, Item)> = Vec::new();
+    let mut data_done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut di = 0;
+    while di < data_queue.len() {
+        let (orig, mults) = data_queue[di].clone();
+        di += 1;
+        if !data_done.insert(mono_name(&orig, &mults)) {
+            continue;
+        }
+        let (item, positions) = data_polys
+            .get(&orig)
+            .ok_or_else(|| format!("internal: mult-poly datatype `{orig}` not found"))?
+            .clone();
+        let inst = generate_data_instance(&item, &positions, &mults, &poly_map, &mut data_queue)?;
+        data_made.push((orig.clone(), inst));
+    }
+
+    // splice: drop each poly fn Sig/Fn AND each poly datatype, inserting its
+    // instances at the original definition's position (which precedes every use).
+    let mut out: Vec<Item> = Vec::with_capacity(items.len() + made.len() + data_made.len());
     for it in items.drain(..) {
         match &it {
             Item::Sig(n, _) if polys.contains_key(n) => {}
@@ -2901,6 +3206,13 @@ fn monomorphize_mult_poly(items: &mut Vec<Item>) -> Result<(), String> {
                     if orig == n {
                         out.push(s.clone());
                         out.push(f.clone());
+                    }
+                }
+            }
+            Item::Struct { name, .. } | Item::Enum { name, .. } if data_polys.contains_key(name) => {
+                for (orig, inst) in &data_made {
+                    if orig == name {
+                        out.push(inst.clone());
                     }
                 }
             }
@@ -3306,8 +3618,11 @@ impl Elab {
     /// Otherwise group the arms by outer constructor and compile each group's
     /// pattern matrix.
     fn compile_arms(&self, scrut: &str, arms: Vec<Arm>, fresh: &mut usize) -> Result<Tm, String> {
-        let is_ctor =
-            |n: &str| self.ctor_info.contains_key(n) || self.nat_ctor.contains_key(n);
+        let is_ctor = |n: &str| {
+            self.ctor_info.contains_key(n)
+                || self.nat_ctor.contains_key(n)
+                || self.poly_ctor_base.contains(n)
+        };
         let mut seen: Vec<&str> = Vec::new();
         let mut needs = false;
         for a in &arms {
@@ -5758,6 +6073,7 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
         def_implicit: HashMap::new(),
         nat_types: std::collections::HashSet::new(),
         nat_ctor: HashMap::new(),
+        poly_ctor_base: std::collections::HashSet::new(),
         in_fix: std::cell::Cell::new(false),
         mult_env: std::cell::RefCell::new(HashMap::new()),
         pess_linear: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -5890,6 +6206,9 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                         arg_implicit,
                         arg_names,
                     });
+                    if let Some(base) = mono_ctor_base(&cn) {
+                        elab.poly_ctor_base.insert(base.to_string());
+                    }
                     ctors.push(Constructor { name: cn.clone(), args, idxs });
                 }
                 // The datatype's UNIVERSE is what it declares (`enum T : Type 1
@@ -5940,6 +6259,9 @@ pub fn elaborate(src: &str) -> Result<Program, String> {
                     arg_implicit: vec![false; fields.len()],
                     arg_names,
                 });
+                if let Some(base) = mono_ctor_base(name) {
+                    elab.poly_ctor_base.insert(base.to_string());
+                }
                 let ctor = Constructor { name: name.clone(), args, idxs: vec![] };
                 sig.datas.push(DataDecl {
                     name: name.clone(),

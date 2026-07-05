@@ -294,6 +294,17 @@ Named so the omission is a decision, not an oversight:
     calls**. The materialised code pointer becomes an unused capture that `-O2`
     deletes. A DYNAMIC closure value (a `code` field, a runtime callback) stays a
     `Slot::Val` and takes the P1 indirect path, unchanged.
+- **P1.5 — multiplicity-polymorphic closures. ✅ DONE.** A datatype may take a
+  `(m : Mult)` parameter (`struct FlatClo (m : Mult) (e)(a)(b) { code : e -> (m x
+  : a) -> b }`); it is monomorphised to `FlatClo$1`/`FlatClo$w` in the same pass
+  as mult-poly *functions* (a function's own `m` flows into a datatype ref, so
+  `mangle_ty` resolves it at instantiation), and the user-written base
+  constructor `FlatClo`/`match FlatClo(…)` resolves to the instance via the
+  expected/scrutinee type (`resolve_mono_ctor`, gated by a `poly_ctor_base` set
+  so `match` desugaring accepts the base name). So flat/owned closures get the
+  multiplicity-polymorphism the defunctionalised representation already had — ONE
+  `applyC` serves both an ω callback and a linear (arg-consuming) one; passing
+  the linear closure at ω is a type error. `examples/closures_linearity.tal` → 156.
 - **P5 — lambda sugar with named representation (§7), if adopted.**
 
 Each phase is usable on its own; P1 alone makes the current stdlib run.
