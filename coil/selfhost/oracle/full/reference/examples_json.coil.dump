@@ -67,21 +67,21 @@ target triple = "arm64-apple-darwin25.5.0"
 
 @g.7 = global %hashmap.KeyOps zeroinitializer
 
-@str.0 = private constant [3 x i8] c"inf"
+@str.0 = private constant [4 x i8] c"inf\00"
 
-@str.1 = private constant [4 x i8] c"true"
+@str.1 = private constant [5 x i8] c"true\00"
 
-@str.2 = private constant [5 x i8] c"false"
+@str.2 = private constant [6 x i8] c"false\00"
 
-@str.3 = private constant [3 x i8] c"NaN"
+@str.3 = private constant [4 x i8] c"NaN\00"
 
-@str.4 = private constant [41 x i8] c"{\22nums\22: [10, 20, 12], \22meta\22: {\22k\22: 40}}"
+@str.4 = private constant [42 x i8] c"{\22nums\22: [10, 20, 12], \22meta\22: {\22k\22: 40}}\00"
 
-@str.5 = private constant [4 x i8] c"nums"
+@str.5 = private constant [5 x i8] c"nums\00"
 
-@str.6 = private constant [4 x i8] c"meta"
+@str.6 = private constant [5 x i8] c"meta\00"
 
-@str.7 = private constant [1 x i8] c"k"
+@str.7 = private constant [2 x i8] c"k\00"
 
 declare i64 @abort()
 

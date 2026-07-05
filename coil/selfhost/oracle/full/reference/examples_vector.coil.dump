@@ -37,27 +37,27 @@ target triple = "arm64-apple-darwin25.5.0"
 
 @g.6 = global %io.Writer zeroinitializer
 
-@str.0 = private constant [1 x i8] c" "
+@str.0 = private constant [2 x i8] c" \00"
 
-@str.1 = private constant [2 x i8] c"v["
+@str.1 = private constant [3 x i8] c"v[\00"
 
-@str.10 = private constant [2 x i8] c"]\0A"
+@str.10 = private constant [3 x i8] c"]\0A\00"
 
-@str.2 = private constant [4 x i8] c"] = "
+@str.2 = private constant [5 x i8] c"] = \00"
 
-@str.3 = private constant [12 x i8] c"out of range"
+@str.3 = private constant [13 x i8] c"out of range\00"
 
-@str.4 = private constant [1 x i8] c"\0A"
+@str.4 = private constant [2 x i8] c"\0A\00"
 
-@str.5 = private constant [3 x i8] c"inf"
+@str.5 = private constant [4 x i8] c"inf\00"
 
-@str.6 = private constant [4 x i8] c"true"
+@str.6 = private constant [5 x i8] c"true\00"
 
-@str.7 = private constant [5 x i8] c"false"
+@str.7 = private constant [6 x i8] c"false\00"
 
-@str.8 = private constant [3 x i8] c"NaN"
+@str.8 = private constant [4 x i8] c"NaN\00"
 
-@str.9 = private constant [8 x i8] c"vec = [ "
+@str.9 = private constant [9 x i8] c"vec = [ \00"
 
 declare i64 @abort()
 

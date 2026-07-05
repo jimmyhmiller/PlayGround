@@ -29,21 +29,21 @@ target triple = "arm64-apple-darwin25.5.0"
 
 @g.3 = global %io.Writer zeroinitializer
 
-@str.0 = private constant [7 x i8] c"Hello, "
+@str.0 = private constant [8 x i8] c"Hello, \00"
 
-@str.1 = private constant [2 x i8] c"!\0A"
+@str.1 = private constant [3 x i8] c"!\0A\00"
 
-@str.2 = private constant [3 x i8] c"inf"
+@str.2 = private constant [4 x i8] c"inf\00"
 
-@str.3 = private constant [4 x i8] c"true"
+@str.3 = private constant [5 x i8] c"true\00"
 
-@str.4 = private constant [5 x i8] c"false"
+@str.4 = private constant [6 x i8] c"false\00"
 
-@str.5 = private constant [3 x i8] c"NaN"
+@str.5 = private constant [4 x i8] c"NaN\00"
 
-@str.6 = private constant [5 x i8] c"world"
+@str.6 = private constant [6 x i8] c"world\00"
 
-@str.7 = private constant [6 x i8] c"memory"
+@str.7 = private constant [7 x i8] c"memory\00"
 
 @vtable.dyn_write.Write-dyn = constant %dyn_write.Write-vtable { ptr @"dyn_write.Write$dyn_write.File$emit" }
 

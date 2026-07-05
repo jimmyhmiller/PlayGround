@@ -21,13 +21,13 @@ target triple = "arm64-apple-darwin25.5.0"
 
 @g.3 = global %io.Writer zeroinitializer
 
-@str.0 = private constant [3 x i8] c"inf"
+@str.0 = private constant [4 x i8] c"inf\00"
 
-@str.1 = private constant [4 x i8] c"true"
+@str.1 = private constant [5 x i8] c"true\00"
 
-@str.2 = private constant [5 x i8] c"false"
+@str.2 = private constant [6 x i8] c"false\00"
 
-@str.3 = private constant [3 x i8] c"NaN"
+@str.3 = private constant [4 x i8] c"NaN\00"
 
 declare ptr @memcpy(ptr, ptr, i64)
 
