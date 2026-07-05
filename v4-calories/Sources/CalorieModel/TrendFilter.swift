@@ -192,6 +192,18 @@ public struct TrendFilter: Sendable {
             out[i].slopePerDay = mSm[i].y
             out[i].variance = max(0, pSm[i].a)
         }
+
+        // The first weigh-in is the fixed anchor. The RTS backward pass otherwise revises
+        // this level using *later* readings, so a real early drop gets partly "explained
+        // away": the anchor slides down to meet the decline, under-reporting the loss the
+        // user actually sees on the scale and starting the trend line below their first
+        // reading. Pin the anchor to the causal (filtered) estimate — which at the first
+        // index is exactly the observed reading — and carry its full single-reading
+        // variance so the uncertainty band stays honest. The slope stays smoothed, so
+        // rate/TDEE estimates are unaffected.
+        out[first].trend = mFilt[first].x
+        out[first].variance = max(pSm[first].a, pFilt[first].a)
+
         return (out, ())
     }
 
