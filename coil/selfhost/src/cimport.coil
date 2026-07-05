@@ -7,11 +7,10 @@
 ; constructs with a clear skip — NEVER emit a silent-wrong binding.
 ;
 ; Coverage mirrors the reference: functions, scalars, pointers, structs, unions
-; (→ :layout explicit, overlapping storage), typedefs (clang desugaring), enums
+; (→ :layout explicit, overlapping storage), bitfield structs (all-bitfield, one
+; storage unit → :layout bits :backing :iN), typedefs (clang desugaring), enums
 ; (type → integer width; constants → `const`), and object-like `#define` integer
-; constants (a second `clang -dM` pass). Known divergence: float-valued #defines
-; are skipped here (byte-exact float formatting is not reproduced); no gated
-; header exercises them.
+; AND float constants (a second `clang -dM` pass; floats emitted verbatim).
 ;
 ; Run standalone via the self-hosted compiler:
 ;   coil build selfhost/src/cimport.coil -o /tmp/cimport <llvm-link-flags>
@@ -376,12 +375,72 @@
 
 ; A RecordDecl → (Ok (Some text)) emitted / (Ok (None)) skip-silently (fwd/anon) /
 ; (Err reason) refuse-with-note. Unions map to :layout explicit (every field :at 0).
+(defn has-any-bitfield [(d Json)] (-> bool)
+  (match (jinner d) (None [] false)
+    (Some [inner]
+      (let [(mut i) 0 n (al-len [Json] (load inner)) (mut r) false]
+        (loop (if (icmp-ge (load i) n) (break)
+          (let [f (al-get [Json] (load inner) (load i))]
+            (if (and (str-eq (jkind f) "FieldDecl") (jbool-true? f "isBitfield"))
+                (do (store! r true) (break)) (store! i (iadd (load i) 1))))))
+        (load r)))))
+
+; An all-bitfield struct in one storage unit → :layout bits :backing :iN. Refuses
+; mixed/multi-unit/differing-width (needs clang record layout), mirroring the Rust ref.
+(defn bitfield-defstruct [(a (ptr Allocator)) (d Json) (ctx (ptr Ctx))] (-> (Result (Option (slice u8)) (slice u8)))
+  (let [name (jstr-or (jgets d "name") "")
+        (mut out) (sb-new a) (mut first) true
+        (mut backing) -1 (mut sum) 0 (mut err) (None [(slice u8)])]
+    (match (jinner d) (None [] 0)
+      (Some [inner]
+        (let [(mut i) 0 n (al-len [Json] (load inner))]
+          (loop (if (icmp-ge (load i) n) (break)
+            (let [f (al-get [Json] (load inner) (load i))]
+              (if (str-eq (jkind f) "FieldDecl")
+                  (if (not (jbool-true? f "isBitfield"))
+                      (do (store! err (Some "mixed bitfield and normal fields (packed layout — Phase 2+ — needs record layout)")) (break))
+                    (match (jgets f "name")
+                      (None [] (do (store! err (Some "an unnamed bitfield (padding — Phase 2+)")) (break)))
+                      (Some [fname]
+                        (let [width (find-value f)]
+                          (if (icmp-eq width -9999999999)
+                              (do (store! err (Some "a bitfield with no foldable width")) (break))
+                            (match (jgets (jget f "type") "qualType")
+                              (None [] (do (store! err (Some "a field has no type")) (break)))
+                              (Some [fty]
+                                (match (map-type a fty ctx)
+                                  (Err [e] (do (store! err (Some e)) (break)))
+                                  (Ok [mt]
+                                    (match (scalar-size-align mt)
+                                      (None [] (do (store! err (Some "a bitfield of non-scalar type (Phase 2+)")) (break)))
+                                      (Some [sa]
+                                        (let [bits (imul (szal-size sa) 8)]
+                                          (if (and (icmp-ge (load backing) 0) (icmp-ne (load backing) bits))
+                                              (do (store! err (Some "bitfields of differing storage widths (Phase 2+ — needs record layout)")) (break))
+                                            (do (store! backing bits)
+                                                (store! sum (iadd (load sum) width))
+                                                (if (load first) (do (store! first false) 0) (sb-push-str! (mut out) " "))
+                                                (sb-push-str! (mut out) (cat3 a (cat3 a "(" fname " :bits ") (i64->dec a width) ")"))))))))))))))))
+                0)
+              (store! i (iadd (load i) 1))))))))
+    (match (load err)
+      (Some [e] (Err e))
+      (None []
+        (if (icmp-lt (load backing) 0) (Err "empty bitfield struct")
+          (if (icmp-gt (load sum) (load backing)) (Err "bitfields span multiple storage units (packed layout — Phase 2+ — needs record layout)")
+            (Ok (Some (cat3 a (cat3 a (cat3 a "(defstruct " name " :layout bits :backing :i")
+                                    (i64->dec a (load backing)) " [")
+                              (sb-str (load out)) "])\n")))))))))
+
 (defn record-defstruct [(a (ptr Allocator)) (d Json) (ctx (ptr Ctx))] (-> (Result (Option (slice u8)) (slice u8)))
   (let [is-union (str-eq (jstr-or (jgets d "tagUsed") "") "union")]
     (match (jgets d "name")
       (None [] (Ok (None [(slice u8)])))
       (Some [name]
         (if (not (jbool-true? d "completeDefinition")) (Ok (None [(slice u8)]))
+          (if (has-any-bitfield d)
+              (if is-union (Err "union with a bitfield member (Phase 2+ — needs record layout)")
+                (bitfield-defstruct a d ctx))
           (let [(mut fields) (sb-new a) (mut first) true
                 (mut max-size) 0 (mut max-align) 1
                 (mut err) (None [(slice u8)])]
@@ -426,7 +485,7 @@
                       (Ok (Some (cat3 a (cat3 a (cat3 a "(defstruct " name " :layout explicit :size ")
                                               (i64->dec a size) (cat3 a " :align " (i64->dec a algn) " ["))
                                         (sb-str (load fields)) "])\n"))))
-                  (Ok (Some (cat3 a (cat3 a "(defstruct " name " [") (sb-str (load fields)) "])\n"))))))))))))
+                  (Ok (Some (cat3 a (cat3 a "(defstruct " name " [") (sb-str (load fields)) "])\n")))))))))))))
 
 ; SzAl is returned by value; read its fields through a stack copy.
 (defn szal-size  [(sa SzAl)] (-> i64) (let [p (alloc-stack SzAl)] (store! p sa) (load (field p size))))
@@ -534,12 +593,43 @@
           (if (and (icmp-gt (slice-len [u8] after) 0) (icmp-eq (slice-get [u8] after 0) (cast u8 40))) (None [Define])
             (let [d (alloc-stack Define)] (store! (field d name) name) (store! (field d body) (trim after)) (Some (load d)))))))))
 
-; Interpret a #define body as an integer literal (decimal/hex/octal, sign, u/l
-; suffixes) → its decimal text. Floats/strings/expressions → None (skip).
+; Strip a trailing float suffix (f/F/l/L).
+(defn strip-float-suffix [(s (slice u8))] (-> (slice u8))
+  (let [(mut hi) (slice-len [u8] s)]
+    (loop (if (icmp-le (load hi) 0) (break)
+      (let [c (slice-get [u8] s (isub (load hi) 1))]
+        (if (or (icmp-eq c (cast u8 102)) (or (icmp-eq c (cast u8 70)) (or (icmp-eq c (cast u8 108)) (icmp-eq c (cast u8 76)))))
+            (store! hi (isub (load hi) 1)) (break)))))
+    (subslice [u8] s 0 (load hi))))
+
+; Chars valid in a decimal float literal, at most one '.'; approximates the Rust
+; reference's f64-parse validation (real headers only carry clean literals).
+(defn float-valid? [(s (slice u8))] (-> bool)
+  (let [n (slice-len [u8] s) (mut i) 0 (mut dots) 0 (mut ok) (icmp-gt n 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (let [c (slice-get [u8] s (load i))]
+        (if (and (icmp-ge c (cast u8 48)) (icmp-le c (cast u8 57))) (store! i (iadd (load i) 1))
+          (if (icmp-eq c (cast u8 46)) (do (store! dots (iadd (load dots) 1)) (store! i (iadd (load i) 1)))
+            (if (or (icmp-eq c (cast u8 101)) (or (icmp-eq c (cast u8 69)) (or (icmp-eq c (cast u8 43)) (icmp-eq c (cast u8 45)))))
+                (store! i (iadd (load i) 1))
+              (do (store! ok false) (break))))))))
+    (and (load ok) (icmp-le (load dots) 1))))
+
+; A float #define body → its verbatim literal text (suffix stripped, `.0` appended
+; if it degenerated to an integer). Mirrors the Rust reference byte-for-byte.
+(defn float-literal [(a (ptr Allocator)) (b (slice u8))] (-> (Option (slice u8)))
+  (let [s (strip-float-suffix b)]
+    (if (not (float-valid? s)) (None [(slice u8)])
+      (if (or (has-byte? s (cast u8 46)) (or (has-byte? s (cast u8 101)) (has-byte? s (cast u8 69))))
+          (Some s)
+        (Some (cat a s ".0"))))))
+
+; Interpret a #define body as an integer OR float literal → its coil text.
+; Strings / identifiers / expressions → None (skip).
 (defn c-literal [(a (ptr Allocator)) (body (slice u8))] (-> (Option (slice u8)))
   (let [b (trim body)]
     (if (icmp-eq (slice-len [u8] b) 0) (None [(slice u8)])
-      (if (float-ish? b) (None [(slice u8)])        ; known divergence: floats skipped
+      (if (float-ish? b) (float-literal a b)
         (let [(mut neg) false (mut digits) b]
           (if (icmp-eq (slice-get [u8] b 0) (cast u8 45)) (do (store! neg true) (store! digits (trim (subslice [u8] b 1 (slice-len [u8] b)))) 0) 0)
           (if (and (icmp-gt (slice-len [u8] (load digits)) 0) (icmp-eq (slice-get [u8] (load digits) 0) (cast u8 43)))

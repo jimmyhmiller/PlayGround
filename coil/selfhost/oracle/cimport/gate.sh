@@ -34,9 +34,10 @@ emit typedef 'typedef unsigned long size_t;\ntypedef size_t mysize;\ntypedef str
 emit consts  'enum E { A, B = 10, C };\n#define WIDTH 4\n#define NAME "coil"\n#define DOUBLE(x) ((x)+(x))\n'
 emit union   'union U { int i; float f; double d; };\nstruct Bad { union U u; int tag; };\nint ok(int x);\n'
 emit refuse  'struct S { int a; int b; };\nunion V { struct S s; long l; };\nint ok(int x);\n'
-# real system headers (parser-at-scale). math.h omitted: float-valued #defines are
-# a documented divergence (coil skips them; byte-exact float formatting unmatched).
-for sys in ctype.h string.h stdlib.h; do printf '#include <%s>\n' "$sys" > "$TMP/sys_${sys%.h}.h"; done
+emit bitfield 'struct Rgb { unsigned b:5; unsigned g:6; unsigned r:5; };\nstruct Mixed { int a:3; int b:5; int c; };\n'
+emit floats   '#define HALF 3.5\n#define BIG 3.14159265358979323846\n#define WHOLE 4.0f\n'
+# real system headers (parser-at-scale), incl. math.h (float #defines: M_PI etc.).
+for sys in ctype.h string.h stdlib.h math.h; do printf '#include <%s>\n' "$sys" > "$TMP/sys_${sys%.h}.h"; done
 
 pass=0; fail=0
 check() {
@@ -50,8 +51,8 @@ check() {
   fi
 }
 echo "=== byte-identical vs rust reference ==="
-for h in types libc redteam typedef consts union refuse; do check "$h" "$TMP/$h.h"; done
-for sys in ctype string stdlib; do check "sys_$sys" "$TMP/sys_$sys.h"; done
+for h in types libc redteam typedef consts union refuse bitfield floats; do check "$h" "$TMP/$h.h"; done
+for sys in ctype string stdlib math; do check "sys_$sys" "$TMP/sys_$sys.h"; done
 
 echo ""
 echo "cimport gate: $pass passed, $fail failed"

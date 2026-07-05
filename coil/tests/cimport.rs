@@ -85,6 +85,73 @@ fn cimport_red_team_refuses_silent_wrong_bindings() {
 }
 
 #[test]
+fn cimport_maps_pure_bitfield_struct_to_layout_bits() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // An all-bitfield struct sharing one storage unit → coil's `:layout bits`
+    // (a backing int with per-field bit widths). A struct MIXING bitfields with a
+    // normal field needs clang's full record layout and is refused, not mis-laid-out.
+    let h = write_header(
+        "coil_ci_bitfield.h",
+        "struct Rgb { unsigned b:5; unsigned g:6; unsigned r:5; };\n\
+         struct Mixed { int a:3; int b:5; int c; };\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    // unsigned-int bitfields → 32-bit backing (sizeof 4), widths preserved LSB-first.
+    assert!(
+        b.contains("(defstruct Rgb :layout bits :backing :i32 [(b :bits 5) (g :bits 6) (r :bits 5)])"),
+        "pure bitfield struct → :layout bits:\n{b}"
+    );
+    assert!(!b.contains("(defstruct Mixed"), "mixed bitfield+normal must be refused:\n{b}");
+    assert!(b.contains("SKIPPED"), "refusal noted:\n{b}");
+
+    // End-to-end: the bitfields read/write their own ranges without disturbing
+    // neighbours, and sizeof is the C storage unit.
+    let bpath = std::env::temp_dir().join("coil_ci_bitfield_bindings.coil");
+    std::fs::write(&bpath, &b).unwrap();
+    let prog = format!(
+        "(module app)\n(import \"{}\" :use *)\n\
+         (static-assert (icmp-eq (sizeof Rgb) 4) \"one int unit\")\n\
+         (defn main [] (-> i64)\n\
+           (let [c (alloc-stack Rgb)]\n\
+             (bit-set! c r (cast :u5 20)) (bit-set! c g (cast :u6 10)) (bit-set! c b (cast :u5 12))\n\
+             (iadd (cast i64 (bit-get c r)) (iadd (cast i64 (bit-get c g)) (cast i64 (bit-get c b))))))",
+        bpath.display()
+    );
+    assert_eq!(build_and_run(&prog), 42, "cimported bitfields: 20+10+12 = 42, ranges independent");
+}
+
+#[test]
+fn cimport_float_defines_are_emitted_verbatim() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // Object-like float #defines become `const` floats, emitted verbatim (the exact
+    // C constant), so a real `<math.h>`-style header's M_PI etc. are usable.
+    let h = write_header(
+        "coil_ci_float.h",
+        "#define HALF 3.5\n#define BIG 3.14159265358979323846\n#define WHOLE 4.0f\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    assert!(b.contains("(const HALF 3.5)"), "float define:\n{b}");
+    assert!(b.contains("(const BIG 3.14159265358979323846)"), "verbatim precision:\n{b}");
+    assert!(b.contains("(const WHOLE 4.0)"), "float suffix stripped:\n{b}");
+
+    let bpath = std::env::temp_dir().join("coil_ci_float_bindings.coil");
+    std::fs::write(&bpath, &b).unwrap();
+    let prog = format!(
+        "(module app)\n(import \"{}\" :use *)\n\
+         (defn main [] (-> i64) (cast i64 (fadd HALF (fadd BIG WHOLE))))",
+        bpath.display()
+    );
+    // 3.5 + 3.14159… + 4.0 = 10.64… → trunc 10
+    assert_eq!(build_and_run(&prog), 10, "cimported float consts usable");
+}
+
+#[test]
 fn cimport_resolves_typedefs_abi_faithfully() {
     if !have_clang() {
         eprintln!("SKIP: clang not found");

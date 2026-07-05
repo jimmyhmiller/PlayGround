@@ -229,23 +229,30 @@ fn record_defstruct(d: &Value, ctx: &Ctx) -> Result<Option<String>, String> {
         return Ok(None); // forward declaration — nothing to emit
     }
     let empty = Vec::new();
+    let field_decls: Vec<&Value> = d["inner"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|f| f["kind"].as_str() == Some("FieldDecl"))
+        .collect();
+    // Bitfields pack into sub-byte ranges — coil's `:layout bits` models exactly
+    // that (a backing int with per-field bit widths). A struct whose fields are ALL
+    // bitfields sharing one storage unit maps faithfully; anything else (mixed with
+    // normal fields, multi-unit, in a union) still needs clang's record layout and
+    // is refused rather than mis-laid-out.
+    if field_decls.iter().any(|f| f.get("isBitfield").and_then(|b| b.as_bool()) == Some(true)) {
+        if is_union {
+            return Err("union with a bitfield member (Phase 2+ — needs record layout)".to_string());
+        }
+        return bitfield_defstruct(name, &field_decls, ctx);
+    }
     let mut fields = Vec::new();
     // Union layout is computed from the members (standard C rules): sizeof =
     // round_up(max member size, max member align), align = max member align.
     let mut max_size: i64 = 0;
     let mut max_align: i64 = 1;
-    for f in d["inner"].as_array().unwrap_or(&empty) {
-        if f["kind"].as_str() == Some("FieldDecl") {
-            // A bitfield packs into sub-byte bit ranges — emitting it as a
-            // full-width field would corrupt the layout (silent-wrong). Refuse it
-            // (faithful bitfield import needs clang's record-layout — next stage).
-            if f.get("isBitfield").and_then(|b| b.as_bool()) == Some(true) {
-                return Err(if is_union {
-                    "union with a bitfield member (Phase 2+ — needs record layout)".to_string()
-                } else {
-                    "contains a bitfield (packed layout — Phase 2+ — needs record layout)".to_string()
-                });
-            }
+    for &f in &field_decls {
+        {
             let fname = f["name"].as_str().ok_or("an unnamed field (anon struct/union)")?;
             let fty = f["type"]["qualType"].as_str().ok_or("a field has no type")?;
             let mapped = map_type(fty, ctx)?;
@@ -326,25 +333,72 @@ fn enum_consts(d: &Value, seen: &mut HashSet<String>) -> Result<String, String> 
     Ok(out)
 }
 
-/// The folded integer value of an enumerator's explicit initializer, if any.
-fn enumerator_value(c: &Value) -> Option<i64> {
-    fn find(node: &Value) -> Option<i64> {
-        if let Some(v) = node.get("value").and_then(|v| v.as_str()) {
-            if let Ok(n) = v.parse::<i64>() {
-                return Some(n);
-            }
+/// The first foldable integer `value` in a node's subtree (clang stores a folded
+/// integer literal's value as a decimal string).
+fn find_int_value(node: &Value) -> Option<i64> {
+    if let Some(v) = node.get("value").and_then(|v| v.as_str()) {
+        if let Ok(n) = v.parse::<i64>() {
+            return Some(n);
         }
-        for child in node.get("inner").and_then(|i| i.as_array())? {
-            if let Some(n) = find(child) {
-                return Some(n);
-            }
-        }
-        None
     }
-    // Only the initializer subtree counts (an EnumConstantDecl with no inner is
-    // implicit); scan it for the first foldable integer value.
-    let inner = c.get("inner")?.as_array()?;
-    inner.iter().find_map(find)
+    for child in node.get("inner").and_then(|i| i.as_array())? {
+        if let Some(n) = find_int_value(child) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// The folded integer value of an enumerator's explicit initializer, if any.
+/// Only the initializer subtree counts (an EnumConstantDecl with no inner is
+/// implicit); scan it for the first foldable integer value.
+fn enumerator_value(c: &Value) -> Option<i64> {
+    c.get("inner")?.as_array()?.iter().find_map(find_int_value)
+}
+
+/// A struct whose fields are all bitfields sharing one storage unit → coil's
+/// `:layout bits` (a backing integer with per-field bit widths, packed LSB-first,
+/// exactly as C packs on little-endian). Refuses anything that would need clang's
+/// full record layout (mixed with normal fields, differing storage widths, or bits
+/// that overflow one unit) rather than emit a wrong layout.
+fn bitfield_defstruct(name: &str, fields: &[&Value], ctx: &Ctx) -> Result<Option<String>, String> {
+    let mut backing_bits: Option<i64> = None;
+    let mut sum: i64 = 0;
+    let mut out = Vec::new();
+    for f in fields {
+        if f.get("isBitfield").and_then(|b| b.as_bool()) != Some(true) {
+            return Err("mixed bitfield and normal fields (packed layout — Phase 2+ — needs record layout)".to_string());
+        }
+        let fname = f["name"].as_str().ok_or("an unnamed bitfield (padding — Phase 2+)")?;
+        let width = bitfield_width(f).ok_or("a bitfield with no foldable width")?;
+        let fty = f["type"]["qualType"].as_str().ok_or("a field has no type")?;
+        let mapped = map_type(fty, ctx)?;
+        // The storage unit is the field's declared-type width (int → 32-bit unit).
+        let (sz, _al) = scalar_size_align(&mapped).ok_or("a bitfield of non-scalar type (Phase 2+)")?;
+        let bits = sz * 8;
+        match backing_bits {
+            None => backing_bits = Some(bits),
+            Some(b) if b != bits => {
+                return Err("bitfields of differing storage widths (Phase 2+ — needs record layout)".to_string())
+            }
+            _ => {}
+        }
+        sum += width;
+        out.push(format!("({fname} :bits {width})"));
+    }
+    let backing = backing_bits.ok_or("empty bitfield struct")?;
+    if sum > backing {
+        return Err("bitfields span multiple storage units (packed layout — Phase 2+ — needs record layout)".to_string());
+    }
+    Ok(Some(format!(
+        "(defstruct {name} :layout bits :backing :i{backing} [{}])\n",
+        out.join(" ")
+    )))
+}
+
+/// A bitfield's width = the first foldable integer in its declarator subtree.
+fn bitfield_width(f: &Value) -> Option<i64> {
+    f.get("inner")?.as_array()?.iter().find_map(find_int_value)
 }
 
 /// Return-type mapping (allows `void`, which `map_type` rejects as a value type).
@@ -499,9 +553,12 @@ fn c_literal(body: &str) -> Option<String> {
         && (b.contains('.') || lower.contains('e'))
         && lower.trim_end_matches(['f', 'l']).parse::<f64>().is_ok();
     if looks_float {
-        let x: f64 = lower.trim_end_matches(['f', 'l']).parse().ok()?;
-        let mut s = format!("{x}");
-        if !s.contains('.') && !s.contains('e') {
+        // Emit the VERBATIM literal (float suffix stripped), not a reparsed value —
+        // this preserves the exact C constant AND lets the self-hosted coil port
+        // reproduce it byte-for-byte without matching Rust's float formatter.
+        let stripped = b.trim_end_matches(['f', 'F', 'l', 'L']);
+        let mut s = stripped.to_string();
+        if !s.contains('.') && !s.to_ascii_lowercase().contains('e') {
             s.push_str(".0");
         }
         return Some(s);
