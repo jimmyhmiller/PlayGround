@@ -51,4 +51,7 @@ echo "  arm64 gate-run: PASS (programs run identically)"
 
 DEST="${1:-./coil}"
 cp /tmp/coil-rb2 "$DEST"
+# Re-sign after copy: macOS invalidates a Mach-O's ad-hoc signature on cp, and the
+# kernel SIGKILLs a mis-signed binary. Re-sign so the installed compiler runs.
+codesign -s - --force "$DEST" >/dev/null 2>&1 || true
 echo "=== VERIFIED self-host compiler installed -> $DEST ==="
