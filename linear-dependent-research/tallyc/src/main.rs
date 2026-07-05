@@ -154,9 +154,50 @@ fn run_cli() -> ExitCode {
                 }
             }
         }
+        Some("ir") => {
+            // tally ir <file>  — print the generated (unoptimized) LLVM IR for
+            // `main`. The IR is the ground truth for the zero-overhead claims:
+            // erased indices/proofs never materialize, and a specialised
+            // higher-order call (P4) has no indirect call / function-value pointer.
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: tally ir <file>");
+                return ExitCode::FAILURE;
+            };
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let prog = match tally::rust_surface::check_program(&src) {
+                Ok(p) => p,
+                Err(diags) => {
+                    eprintln!("{path}: rejected:");
+                    for d in &diags {
+                        eprintln!("  - {d}");
+                    }
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some((_, _, body)) = prog.defs.iter().find(|(n, _, _)| n == "main") else {
+                eprintln!("{path}: no `main`");
+                return ExitCode::FAILURE;
+            };
+            match tally::dep_codegen::emit_ir(&prog.sig, body) {
+                Ok(ir) => {
+                    println!("{ir}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{path}: cannot compile to native: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!(
-                "lambda-Tally compiler\nusage:\n  tally check <file>   (type-check: dependent + linear, no leaks/use-after-free)\n  tally run <file>     (type-check + JIT-compile main to native, run it)\n  tally build <file>   (type-check + AOT-compile to a native executable)\n     [-o out] [-O0|-O1|-O2|-O3]\n  tally dump <file> [name]  (print elaborated Term(s) — dev aid)"
+                "lambda-Tally compiler\nusage:\n  tally check <file>   (type-check: dependent + linear, no leaks/use-after-free)\n  tally run <file>     (type-check + JIT-compile main to native, run it)\n  tally build <file>   (type-check + AOT-compile to a native executable)\n     [-o out] [-O0|-O1|-O2|-O3]\n  tally dump <file> [name]  (print elaborated Term(s) — dev aid)\n  tally ir <file>      (print generated LLVM IR for main — dev aid)"
             );
             ExitCode::FAILURE
         }

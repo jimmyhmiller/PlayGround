@@ -2152,7 +2152,7 @@ fn drop_pi(t: &Term, p: usize) -> Term {
 /// recursion tied to its own new binder) — e.g. `pow(3, n)` ⟶ a `pow$3` fix.
 /// Returns the residual fix term (to be applied to the remaining arguments), or
 /// `None` if the static configuration is not constant across the recursion.
-fn try_specialise_static_param(
+pub(crate) fn try_specialise_static_param(
     sig: &Rc<Signature>,
     fixty: &Term,
     fixbody: &Term,

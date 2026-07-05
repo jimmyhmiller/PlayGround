@@ -275,8 +275,22 @@ Named so the omission is a decision, not an oversight:
   by value), and each concrete `code` unboxes it. Linear discipline: the linear
   consumption must be `let`-sequenced (`let v = unbox…; code…`), not nested in the
   call. Region/borrowed variants still to do.
-- **P4 — monomorphisation of HOFs over closures (§5/§8-5).** Zero-cost specialised
-  `map`/`filter`/`foldr`.
+- **P4 — monomorphisation of HOFs over closures (§5/§8-5). ◐ PARTIAL.**
+  - *`%partial` (`Fix`) HOFs: ✅ zero-cost.* A recursive `Fix` applied to a static
+    function value is specialised via the static-argument transform (reusing PE's
+    `try_specialise_static_param`, with its verbatim-passing soundness check): the
+    callback is substituted in (inlined), the parameter dropped, the recursion tied
+    to a fresh residual `Fix`. Proven with the new `tally ir` command —
+    `applyN(inc, 5, 0)` lowers to a 2-param `tally_fix` with `inc` inlined as
+    `add i64, 1`, **no indirect call, no function-value pointer**. In `dep_codegen`
+    the App-arm `Fix`-head handling tries this first, falling back to the P1
+    indirect path on decline.
+  - *Total (eliminator-based) HOFs — the stdlib `map`/`filter`/`foldr`: ✗ still
+    indirect.* They compile to List **eliminators**, and the callback is captured
+    into the shared eliminator function rather than passed as a `Fix` argument, so
+    the `Fix` transform does not reach them. Specialising them means threading
+    "this captured variable is the static function `dbl`" through `compile_elim`
+    and inlining it — the remaining P4 work.
 - **P5 — lambda sugar with named representation (§7), if adopted.**
 
 Each phase is usable on its own; P1 alone makes the current stdlib run.

@@ -898,6 +898,10 @@ struct DepCg<'c, 'a> {
     malloc: FunctionValue<'c>,
     free: FunctionValue<'c>,
     sig: &'a Signature,
+    /// an owned `Rc` of the same signature, for the PE transforms (P4 zero-cost
+    /// higher-order): `try_specialise_static_param` needs `&Rc<Signature>` (peval
+    /// clones it into `VLamNative` closures). Cloned once at construction.
+    sig_rc: std::rc::Rc<Signature>,
     /// monotonically-increasing counter for unique generated-function names.
     next_id: RefCell<u32>,
     /// one compiled native function per `Fix` term (memoized by its address), so a
@@ -1510,6 +1514,40 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         .read_var(env, *i)?
                         .as_int("a first-class function value")?;
                     return self.compile_indirect_call(f, env, fv, &args);
+                }
+                // P4 — ZERO-COST HIGHER-ORDER. If this `Fix` is applied to a STATIC
+                // function VALUE (a top-level `fn` — `Ann(λ/Fix, Π)`), SPECIALISE
+                // the recursion to it: the static-argument transformation, reusing
+                // PE's `try_specialise_static_param` with its verbatim-passing
+                // soundness check. The callback is substituted into the body — so
+                // `f(h)` becomes the inlined `inc(h)`, with NO indirect call and NO
+                // function value materialised — the parameter is dropped, and the
+                // recursion is tied to a fresh residual `Fix`. On success, compile
+                // the residual applied to the REMAINING arguments (which folds any
+                // further static callbacks); on failure (a non-verbatim self-call, or
+                // PE timeout) fall through to the P1 indirect path below.
+                if let Term::Fix(fixty, fixbody) = strip_ann(head) {
+                    for p in 0..args.len() {
+                        if !matches!(strip_ann(args[p]), Term::Lam(_) | Term::Fix(_, _)) {
+                            continue;
+                        }
+                        if let Some(spec) = crate::dep::try_specialise_static_param(
+                            &self.sig_rc,
+                            fixty,
+                            fixbody,
+                            p,
+                            args[p],
+                            0,
+                        ) {
+                            let mut out = spec;
+                            for (i, a) in args.iter().enumerate() {
+                                if i != p {
+                                    out = Term::App(Box::new(out), Box::new((*a).clone()));
+                                }
+                            }
+                            return self.compile_v(f, env, &out);
+                        }
+                    }
                 }
                 // The head is itself a `Fix`: build (memoized) its function and call.
                 if let Term::Fix(ty, body) = strip_ann(head) {
@@ -5607,6 +5645,7 @@ fn build_module<'c>(
         malloc,
         free,
         sig,
+        sig_rc: std::rc::Rc::new(sig.clone()),
         next_id: RefCell::new(0),
         fix_cache: RefCell::new(std::collections::HashMap::new()),
         fix_selves: RefCell::new(Vec::new()),
