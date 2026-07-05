@@ -43,6 +43,7 @@
 (extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose :cc c [(ptr i8)] (-> i32))
+(extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 
 ; ============================ small helpers =================================
 
@@ -904,6 +905,150 @@
     (if (icmp-ne (load r) 0) (load r) (if (icmp-lt nx ny) -1 (if (icmp-gt nx ny) 1 0)))))
 
 ; Generate bindings for `header` → write to `out` file (Some) or stdout (None).
+; ============================ probe (compute ABI VALUES) ====================
+; The toolchain as a value oracle: evaluate C integer expressions / bitfield
+; positions with the REAL flags, emit each as a `(const …)`. Tiers, cheapest first:
+;   0 = expression: fold via `enum … : long long { n = (long long)(EXPR) }` read
+;       from the AST (no link); if it isn't constant, compile+link+run a printf.
+;   1 = bitfield:   clang -fdump-record-layouts gives byte:startbit-endbit.
+(defstruct Probe [(name (slice u8)) (kind i64) (expr (slice u8)) (sname (slice u8)) (fname (slice u8))])
+(defn probe-list-new [(a (ptr Allocator))] (-> (ptr (ArrayList Probe)))
+  (box a (ArrayList Probe) (al-new [Probe] a)))
+(defn probe-push! [(a (ptr Allocator)) (lst (ptr (ArrayList Probe))) (name (slice u8)) (kind i64) (expr (slice u8)) (sname (slice u8)) (fname (slice u8))] (-> i64)
+  (let [p (alloc-stack Probe)]
+    (store! (field p name) name) (store! (field p kind) kind) (store! (field p expr) expr)
+    (store! (field p sname) sname) (store! (field p fname) fname)
+    (al-push! [Probe] lst (load p)) 0))
+(defn pget [(p Probe) (which i64)] (-> (slice u8))
+  (let [q (alloc-stack Probe)] (store! q p)
+    (if (icmp-eq which 0) (load (field q name)) (if (icmp-eq which 1) (load (field q expr)) (if (icmp-eq which 2) (load (field q sname)) (load (field q fname)))))))
+(defn pkind [(p Probe)] (-> i64) (let [q (alloc-stack Probe)] (store! q p) (load (field q kind))))
+
+(defn abspath [(a (ptr Allocator)) (header (slice u8))] (-> (slice u8))
+  (let [r (realpath (s->cstr a header) (cast (ptr i8) 0))]
+    (if (icmp-eq (cast i64 r) 0) header (cstr->slice r))))
+
+; put every EnumConstantDecl's folded value into `m` (used for the probe enum).
+(defn ee-one [(a (ptr Allocator)) (d Json) (m (ptr (HashMap (slice u8) i64)))] (-> i64)
+  (if (not (str-eq (jkind d) "EnumDecl")) 0
+    (match (jinner d) (None [] 0)
+      (Some [inner]
+        (let [(mut k) 0 nk (al-len [Json] (load inner))]
+          (loop (if (icmp-ge (load k) nk) (break)
+            (do (let [c (al-get [Json] (load inner) (load k))]
+                  (if (str-eq (jkind c) "EnumConstantDecl")
+                      (let [v (enumerator-value c)]
+                        (if (icmp-ne v -9999999999) (do (hm-put! [(slice u8) i64] m (jname c) v) 0) 0)) 0))
+                (store! k (iadd (load k) 1)))))
+          0)))))
+(defn extract-enum-values [(a (ptr Allocator)) (ast Json) (m (ptr (HashMap (slice u8) i64)))] (-> i64)
+  (let [top (match (jinner ast) (Some [t] t) (None [] (box a (ArrayList Json) (al-new [Json] a))))
+        (mut i) 0 n (al-len [Json] (load top))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (ee-one a (al-get [Json] (load top) (load i)) m)
+          (store! i (iadd (load i) 1)))))
+    0))
+
+; tier 0a: fold ONE expression via a single-member long-long enum; sentinel if it
+; isn't a constant expression (clang errors) → caller falls to tier 0b.
+(defn probe-fold-one [(a (ptr Allocator)) (abs (slice u8)) (flags (slice u8)) (expr (slice u8))] (-> i64)
+  (let [(mut sb) (sb-new a)]
+    (sb-push-str! (mut sb) "#include \"") (sb-push-str! (mut sb) abs) (sb-push-str! (mut sb) "\"\n")
+    (sb-push-str! (mut sb) "enum __coilprobe : long long { __v = (long long)(") (sb-push-str! (mut sb) expr) (sb-push-str! (mut sb) ") };\n")
+    (let [cf (tmp-path a "foldone")]
+      (write-file a cf (sb-str (load sb)))
+      (match (run-clang-ast a cf flags)
+        (Err [_] -9999999999)
+        (Ok [ast]
+          (let [m (box a (HashMap (slice u8) i64) (hm-new [(slice u8) i64] a (str-keyops)))]
+            (extract-enum-values a ast m)
+            (match (hm-get [(slice u8) i64] (load m) "__v") (Some [x] x) (None [] -9999999999))))))))
+
+; tier 0b: compile+link+run a printf of the expression (for non-constant values,
+; e.g. a global's link-time address). `link` = extra linker args (objects/libs).
+(defn probe-run [(a (ptr Allocator)) (abs (slice u8)) (flags (slice u8)) (expr (slice u8)) (link (slice u8))] (-> i64)
+  (let [(mut prog) (sb-new a)]
+    (sb-push-str! (mut prog) "#include \"") (sb-push-str! (mut prog) abs) (sb-push-str! (mut prog) "\"\n#include <stdio.h>\n")
+    (sb-push-str! (mut prog) "int main(void){printf(\"%lld\\n\",(long long)(") (sb-push-str! (mut prog) expr) (sb-push-str! (mut prog) "));return 0;}\n")
+    (let [cf (tmp-path a "probec") exe (tmp-path a "probeexe") outf (tmp-path a "probeout")]
+      (write-file a cf (sb-str (load prog)))
+      (let [(mut cc) (sb-new a)]
+        ; -x c applies to the generated source; -x none resets so the linked objects
+        ; (link args) are detected by extension, not compiled as C.
+        (sb-push-str! (mut cc) "clang") (sb-push-str! (mut cc) flags)
+        (sb-push-str! (mut cc) " -x c '") (sb-push-str! (mut cc) cf) (sb-push-str! (mut cc) "' -x none ") (sb-push-str! (mut cc) link)
+        (sb-push-str! (mut cc) " -o '") (sb-push-str! (mut cc) exe) (sb-push-str! (mut cc) "' 2>/dev/null")
+        (if (icmp-ne (run-cmd a (sb-str (load cc))) 0) -9999999999
+          (let [(mut rc) (sb-new a)]
+            (sb-push-str! (mut rc) "'") (sb-push-str! (mut rc) exe) (sb-push-str! (mut rc) "' > '") (sb-push-str! (mut rc) outf) (sb-push-str! (mut rc) "' 2>/dev/null")
+            (run-cmd a (sb-str (load rc)))
+            (parse-signed (trim (slurp a (s->cstr a outf))))))))))
+
+; last whitespace-token of a slice.
+(defn last-token [(s (slice u8))] (-> (slice u8))
+  (let [t (trim s) n (slice-len [u8] t) (mut cut) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (ws-byte? (slice-get [u8] t (load i))) (store! cut (iadd (load i) 1)) 0) (store! i (iadd (load i) 1)))))
+    (subslice [u8] t (load cut) n)))
+
+; parse a `-fdump-record-layouts` dump for a bitfield field; emit
+; (const NAME_byte B)(const NAME_bit s)(const NAME_width w), or "" if not found.
+(defn parse-layout-field [(a (ptr Allocator)) (dump (slice u8)) (name (slice u8)) (fname (slice u8))] (-> (slice u8))
+  (let [lines (each-line a dump) (mut i) 0 n (al-len [(slice u8)] (load lines)) (mut out) (sb-new a) (mut done) false]
+    (loop (if (or (icmp-ge (load i) n) (load done)) (break)
+      (do (let [line (al-get [(slice u8)] (load lines) (load i))
+                bar (index-of line (cast u8 124) 0)]   ; '|'
+            (if (icmp-ge bar 0)
+                (let [left (trim (subslice [u8] line 0 bar))
+                      right (subslice [u8] line (iadd bar 1) (slice-len [u8] line))
+                      colon (index-of left (cast u8 58) 0)]   ; ':'
+                  (if (and (icmp-ge colon 0) (str-eq (last-token right) fname))
+                      (let [byte (subslice [u8] left 0 colon)
+                            rest (subslice [u8] left (iadd colon 1) (slice-len [u8] left))
+                            dash (index-of rest (cast u8 45) 0)]   ; '-'
+                        (if (icmp-ge dash 0)
+                            (let [sbit (parse-signed (subslice [u8] rest 0 dash))
+                                  ebit (parse-signed (subslice [u8] rest (iadd dash 1) (slice-len [u8] rest)))]
+                              (sb-push-str! (mut out) (cat3 a (cat3 a "(const " name "_byte ") (trim byte) ")\n"))
+                              (sb-push-str! (mut out) (cat3 a (cat3 a "(const " name "_bit ") (i64->dec a sbit) ")\n"))
+                              (sb-push-str! (mut out) (cat3 a (cat3 a "(const " name "_width ") (i64->dec a (iadd (isub ebit sbit) 1)) ")\n"))
+                              (store! done true) 0)
+                          0))
+                    0))
+              0))
+          (store! i (iadd (load i) 1)))))
+    (sb-str (load out))))
+
+(defn probe-bits [(a (ptr Allocator)) (abs (slice u8)) (flags (slice u8)) (name (slice u8)) (sname (slice u8)) (fname (slice u8))] (-> (slice u8))
+  (let [(mut force) (sb-new a)]
+    (sb-push-str! (mut force) "#include \"") (sb-push-str! (mut force) abs) (sb-push-str! (mut force) "\"\n")
+    (sb-push-str! (mut force) sname) (sb-push-str! (mut force) " __coil_force;\n")
+    (let [cf (tmp-path a "force") outf (tmp-path a "layout")]
+      (write-file a cf (sb-str (load force)))
+      (let [(mut cc) (sb-new a)]
+        (sb-push-str! (mut cc) "clang -Xclang -fdump-record-layouts -x c") (sb-push-str! (mut cc) flags)
+        (sb-push-str! (mut cc) " -c '") (sb-push-str! (mut cc) cf) (sb-push-str! (mut cc) "' -o /dev/null > '") (sb-push-str! (mut cc) outf) (sb-push-str! (mut cc) "' 2>&1")
+        (run-cmd a (sb-str (load cc)))
+        (parse-layout-field a (slurp a (s->cstr a outf)) name fname)))))
+
+; Emit `(const …)` for every probe (routing each to the cheapest tier). "" if none.
+(defn cimport-probe [(a (ptr Allocator)) (header (slice u8)) (flags (slice u8)) (probes (ptr (ArrayList Probe))) (link (slice u8))] (-> (slice u8))
+  (let [n (al-len [Probe] (load probes))]
+    (if (icmp-eq n 0) ""
+      (let [abs (abspath a header) (mut out) (sb-new a) (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (let [p (al-get [Probe] (load probes) (load i))]
+                (if (icmp-eq (pkind p) 1)
+                    (sb-push-str! (mut out) (probe-bits a abs flags (pget p 0) (pget p 2) (pget p 3)))
+                  (let [nm (pget p 0) e (pget p 1)
+                        v0 (probe-fold-one a abs flags e)
+                        v  (if (icmp-ne v0 -9999999999) v0 (probe-run a abs flags e link))]
+                    (if (icmp-ne v -9999999999)
+                        (sb-push-str! (mut out) (cat3 a (cat3 a "(const " nm " ") (i64->dec a v) ")\n"))
+                      (sb-push-str! (mut out) (cat3 a "; PROBE FAILED (not constant, and no runtime link): " nm "\n"))))))
+              (store! i (iadd (load i) 1)))))
+        (sb-str (load out))))))
+
 (defn cimport-run [(a (ptr Allocator)) (header (slice u8)) (out (Option (slice u8))) (flags (slice u8))] (-> i64)
   (match (cimport-header a header flags)
     (Err [e] (do (ewrite (cat3 a "error: " e "\n")) 1))

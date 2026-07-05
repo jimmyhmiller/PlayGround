@@ -432,13 +432,13 @@
 ; Join the string elements of a `:flags ["-I…" "-D…"]` option into one clang
 ; flags string (each space-prefixed), or "" if absent. Forwarded to clang so
 ; headers that need include paths / feature defines can be parsed correctly.
-(defn cimport-flags [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64)] (-> (slice u8))
+(defn cimport-kwstr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64) (kw (slice u8))] (-> (slice u8))
   (let [(mut out) (sb-new a) (mut j) 2]
     (loop (if (icmp-ge (load j) nit) (break)
-      (let [kw (alloc-stack Sexp)] (store! kw (al-get [Sexp] (load items) (load j)))
-        (match-else (load (field kw kind))
+      (let [kwt (alloc-stack Sexp)] (store! kwt (al-get [Sexp] (load items) (load j)))
+        (match-else (load (field kwt kind))
           (KKw [k]
-            (if (and (str-eq k "flags") (icmp-lt (iadd (load j) 1) nit))
+            (if (and (str-eq k kw) (icmp-lt (iadd (load j) 1) nit))
                 (do (let [vec (alloc-stack Sexp)] (store! vec (al-get [Sexp] (load items) (iadd (load j) 1)))
                       (match-else (load (field vec kind))
                         (KVec [vit]
@@ -453,9 +453,54 @@
           (_ (store! j (iadd (load j) 1)))))))
     (sb-str (load out))))
 
-; `(cimport "header.h" [:flags ["-I…" "-D…"]])` — generate C bindings via clang AT
-; LOAD TIME and splice the externs/defstructs/consts into the CURRENT module
-; (dropping the generated `(module cbindings)` header). The seamless header import.
+; parse one `:probe` entry: `(name "C-expr")` (tier 0) or `(name :bits "struct X" "f")`
+; (tier 1) → push a Probe. Malformed entries are ignored.
+(defn parse-probe-entry [(a (ptr Allocator)) (plist (ptr (ArrayList ci/Probe))) (entry (ptr Sexp))] (-> i64)
+  (let [it (l-as-list entry) n (al-len [Sexp] (load it))]
+    (if (icmp-lt n 2) 0
+      (let [e0 (alloc-stack Sexp)]
+        (store! e0 (al-get [Sexp] (load it) 0))
+        (match (l-sym-name e0) (None [] 0)
+          (Some [name]
+            (let [e1 (alloc-stack Sexp)]
+              (store! e1 (al-get [Sexp] (load it) 1))
+              (match-else (load (field e1 kind))
+                (KStr  [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                (KCStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                (KKw   [k]
+                  (if (and (str-eq k "bits") (icmp-ge n 4))
+                      (let [e2 (alloc-stack Sexp) e3 (alloc-stack Sexp)]
+                        (store! e2 (al-get [Sexp] (load it) 2)) (store! e3 (al-get [Sexp] (load it) 3))
+                        (match (l-as-str e2) (None [] 0)
+                          (Some [sn] (match (l-as-str e3) (None [] 0) (Some [fnm] (ci/probe-push! a plist name 1 "" sn fnm))))))
+                    0))
+                (_ 0)))))))))
+
+; collect the `:probe [ … ]` entries into a Probe list.
+(defn cimport-probes [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64)] (-> (ptr (ArrayList ci/Probe)))
+  (let [plist (ci/probe-list-new a) (mut j) 2]
+    (loop (if (icmp-ge (load j) nit) (break)
+      (let [kwt (alloc-stack Sexp)] (store! kwt (al-get [Sexp] (load items) (load j)))
+        (match-else (load (field kwt kind))
+          (KKw [k]
+            (if (and (str-eq k "probe") (icmp-lt (iadd (load j) 1) nit))
+                (do (let [vec (alloc-stack Sexp)] (store! vec (al-get [Sexp] (load items) (iadd (load j) 1)))
+                      (match-else (load (field vec kind))
+                        (KVec [vit]
+                          (let [(mut vi) 0 vn (al-len [Sexp] (load vit))]
+                            (loop (if (icmp-ge (load vi) vn) (break)
+                              (do (let [el (alloc-stack Sexp)] (store! el (al-get [Sexp] (load vit) (load vi)))
+                                    (parse-probe-entry a plist el))
+                                  (store! vi (iadd (load vi) 1)))))))
+                        (_ 0)))
+                    (store! j (iadd (load j) 2)))
+              (store! j (iadd (load j) 1))))
+          (_ (store! j (iadd (load j) 1)))))))
+    plist))
+
+; `(cimport "header.h" [:flags […]] [:probe […]] [:link […]])` — generate C bindings
+; via clang AT LOAD TIME and splice the externs/defstructs/consts + probe consts
+; into the CURRENT module (dropping the generated `(module cbindings)` header).
 (defn process-cimport [(s (mut LS)) (form (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
   (let [a (load (field s a))
         items (l-as-list form) nit (al-len [Sexp] (load items))]
@@ -466,10 +511,12 @@
         (match (l-as-str it)
           (None [] (ls-set-err! (mut s) (diag-at-form form "cimport: expected a string header path")))
           (Some [path]
-            (match (ci/cimport-header a path (cimport-flags a items nit))
+            (let [flags (cimport-kwstr a items nit "flags")]
+            (match (ci/cimport-header a path flags)
               (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
-              (Ok [text]
-                (let [sid (load (field s srccount))
+              (Ok [hdr]
+                (let [text (sconcat a hdr (ci/cimport-probe a path flags (cimport-probes a items nit) (cimport-kwstr a items nit "link")))
+                      sid (load (field s srccount))
                       _1 (store! (field s srccount) (iadd sid 1))
                       _2 (register-source! (mut s) (sconcat a "<cimport " path) text)]
                   (match (read-all a text sid)
@@ -483,7 +530,7 @@
                                   (Some [gh] (if (str-eq gh "module") 0 (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
                                   (None []    (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
                               (store! k (iadd (load k) 1)))))
-                        0))))))))))))
+                        0)))))))))))))
 
 (defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
   (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
