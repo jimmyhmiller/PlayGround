@@ -15,6 +15,7 @@
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)
 (import "io.coil" :use *)
 (import "control.coil" :use *)
 (import "try.coil" :use *)
@@ -488,13 +489,16 @@
         (mut backend) default-backend
         (mut trip)  (cast (ptr i8) 0)
         (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
+        (mut ehdr) (None [(slice u8)])
         (mut i)     3]
-    ; second pass: --lib / --shared (a C library from export-c symbols).
+    ; second pass: --lib / --shared / --emit-header <h>.
     (let [(mut j) 3]
       (loop (if (icmp-ge (load j) (cast i64 argc)) (break)
         (do (let [arg (cstr->slice (load (index argv (load j))))]
               (if (str-eq arg "--lib") (store! libmode 1)
-                (if (str-eq arg "--shared") (store! libmode 2) 0)))
+                (if (str-eq arg "--shared") (store! libmode 2)
+                  (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
+                      (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0))))
             (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
@@ -554,7 +558,176 @@
               (if (icmp-ne rc 0)
                   (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
-                (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))))))
+                (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
+                    (match ehdr
+                      (Some [h] (cheader-program a (read-file a file) (cwd-slice a) (Some h)))
+                      (None [] 0)))))))))))
+
+; ============================ cheader (export-c → C header) =================
+; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +
+; typedef structs) for a program's (export-c …) set.
+
+(defn ch-cname [(a (ptr Allocator)) (qualified (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] qualified) (mut cut) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (slice-get [u8] qualified (load i)) (cast u8 46)) (store! cut (iadd (load i) 1)) 0)
+          (store! i (iadd (load i) 1)))))
+    (let [(mut out) (sb-new a) (mut k) (load cut)]
+      (loop (if (icmp-ge (load k) n) (break)
+        (do (let [c (slice-get [u8] qualified (load k))]
+              (sb-push-byte! (mut out) (if (icmp-eq c (cast u8 45)) (cast u8 95) c)))
+            (store! k (iadd (load k) 1)))))
+      (sb-str (load out)))))
+
+(defn ch-ctype [(a (ptr Allocator)) (t Type) (is-return bool)] (-> (Result (slice u8) (slice u8)))
+  (match-else t
+    (TInt [bits signed]
+      (if (or (icmp-eq bits 8) (or (icmp-eq bits 16) (or (icmp-eq bits 32) (icmp-eq bits 64))))
+          (Ok (cat3-d a (if signed "int" "uint") (cat3-d a (i64->str a bits) "_t")))
+        (Err (cat3-d a "cheader: i" (cat3-d a (i64->str a bits) " has no standard C type (use 8/16/32/64-bit)")))))
+    (TFloat [bits] (Ok (if (icmp-eq bits 32) "float" "double")))
+    (TBool [] (Ok "bool"))
+    (TVoid [] (if is-return (Ok "void") (Err "cheader: void has no C representation")))
+    (TPtr [inner] (match (ch-ctype a (load inner) false) (Ok [s] (Ok (cat3-d a s " *"))) (Err [e] (Err e))))
+    (TStruct [name] (Ok (ch-cname a name)))
+    (_ (Err "cheader: type has no C representation"))))
+
+(defn ch-find-struct [(p (ptr Program)) (name (slice u8))] (-> (ptr StructDef))
+  (let [ss (load (field p structs)) n (al-len [StructDef] ss) (mut i) 0 (mut r) (cast (ptr StructDef) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [StructDef] ss (load i)) name)) name) (do (store! r (al-elem [StructDef] ss (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; collect reachable structs (dependency-first): by-value fields recurse before the
+; containing struct; pointer fields only need the forward decl.
+(defn ch-collect [(a (ptr Allocator)) (t Type) (p (ptr Program)) (order (ptr (ArrayList (slice u8)))) (seen (ptr (HashMap (slice u8) i64)))] (-> i64)
+  (match-else t
+    (TStruct [name]
+      (match (hm-get [(slice u8) i64] (load seen) name) (Some [_] 0)
+        (None []
+          (do (hm-put! [(slice u8) i64] seen name 1)
+              (let [sd (ch-find-struct p name)]
+                (if (icmp-eq (cast i64 sd) 0) 0
+                  (let [fs (load (field sd fields)) n (al-len [Field] fs) (mut i) 0]
+                    (loop (if (icmp-ge (load i) n) (break)
+                      (do (match-else (load (field (al-elem [Field] fs (load i)) ty))
+                            (TPtr [_] 0)
+                            (TArray [elem _] (ch-collect a (load elem) p order seen))
+                            (_ (ch-collect a (load (field (al-elem [Field] fs (load i)) ty)) p order seen)))
+                          (store! i (iadd (load i) 1))))))))
+              (al-push! [(slice u8)] order name) 0))))
+    (TPtr [inner] (ch-collect a (load inner) p order seen))
+    (TArray [inner _] (ch-collect a (load inner) p order seen))
+    (_ 0)))
+
+(defn ch-render-struct [(a (ptr Allocator)) (sd (ptr StructDef))] (-> (Result (slice u8) (slice u8)))
+  (let [tag (ch-cname a (load (field sd name)))
+        attr (match-else (load (field sd layout)) (LPacked [] " __attribute__((__packed__))") (LC [] "") (LAligned [_] "") (_ "BAD"))]
+    (if (str-eq attr "BAD")
+        (Err (cat3-d a "cheader: struct '" (cat3-d a tag "' has an :explicit/:bits layout the header generator can't emit; export a :c-layout struct")))
+      (let [(mut out) (sb-new a) (mut err) (None [(slice u8)])]
+        (sb-push-str! (mut out) (cat3-d a (cat3-d a "struct" attr) (cat3-d a " " (cat3-d a tag " {\n"))))
+        (let [fs (load (field sd fields)) n (al-len [Field] fs) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (let [fp (al-elem [Field] fs (load i)) fn2 (ch-cname a (load (field fp name)))]
+              (match-else (load (field fp ty))
+                (TArray [elem k]
+                  (match (ch-ctype a (load elem) false)
+                    (Err [e] (do (store! err (Some e)) (break)))
+                    (Ok [ct] (sb-push-str! (mut out) (cat3-d a (cat3-d a "    " ct) (cat3-d a " " (cat3-d a fn2 (cat3-d a "[" (cat3-d a (i64->str a k) "];\n"))))))) ))
+                (_ (match (ch-ctype a (load (field fp ty)) false)
+                     (Err [e] (do (store! err (Some e)) (break)))
+                     (Ok [ct] (sb-push-str! (mut out) (cat3-d a (cat3-d a "    " ct) (cat3-d a " " (cat3-d a fn2 ";\n"))))))))
+              (store! i (iadd (load i) 1)))))
+        (match (load err) (Some [e] (Err e)) (None [] (do (sb-push-str! (mut out) "};\n") (Ok (sb-str (load out)))))))))))
+
+; Render the full C header for the program's exports (Result text/err).
+(defn cheader-render [(a (ptr Allocator)) (p (ptr Program))] (-> (Result (slice u8) (slice u8)))
+  (let [order (box a (ArrayList (slice u8)) (al-new [(slice u8)] a))
+        seen  (box a (HashMap (slice u8) i64) (hm-new [(slice u8) i64] a (str-keyops)))
+        es (load (field p exports)) ne (al-len [ExportC] es)
+        (mut protos) (sb-new a) (mut err) (None [(slice u8)]) (mut i) 0]
+    ; collect structs + build prototypes
+    (loop (if (icmp-ge (load i) ne) (break)
+      (let [ep (al-elem [ExportC] es (load i))
+            sym (match (load (field ep symbol)) (Some [s] s) (None [] (load (field ep name))))
+            fp (ch-find-func p (load (field ep name)))]
+        (if (icmp-eq (cast i64 fp) 0) (do (store! err (Some (cat3-d a "cheader: exported function not found: " (load (field ep name))))) (break))
+          (do (ch-collect a (load (field fp ret)) p order seen)
+              (let [ps (load (field ep params)) np (al-len [Type] ps) (mut j) 0]
+                (loop (if (icmp-ge (load j) np) (break) (do (ch-collect a (al-get [Type] ps (load j)) p order seen) (store! j (iadd (load j) 1))))))
+              (match (ch-ctype a (load (field fp ret)) true)
+                (Err [e] (do (store! err (Some e)) (break)))
+                (Ok [rt]
+                  (do (sb-push-str! (mut protos) rt) (sb-push-str! (mut protos) " ") (sb-push-str! (mut protos) sym) (sb-push-str! (mut protos) "(")
+                      (let [ps (load (field ep params)) np (al-len [Type] ps) (mut j) 0]
+                        (if (icmp-eq np 0) (sb-push-str! (mut protos) "void") 0)
+                        (loop (if (icmp-ge (load j) np) (break)
+                          (match (ch-ctype a (al-get [Type] ps (load j)) false)
+                            (Err [e] (do (store! err (Some e)) (break)))
+                            (Ok [pt] (do (if (icmp-gt (load j) 0) (sb-push-str! (mut protos) ", ") 0) (sb-push-str! (mut protos) pt) (store! j (iadd (load j) 1))))))))
+                      (sb-push-str! (mut protos) ");\n"))))))))
+      (store! i (iadd (load i) 1)))
+    (match (load err) (Some [e] (Err e))
+      (None []
+        (let [(mut out) (sb-new a) no (al-len [(slice u8)] (load order))]
+          (sb-push-str! (mut out) "/* Generated by `coil cheader`. */\n#pragma once\n#include <stdint.h>\n#include <stdbool.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
+          (if (icmp-gt no 0)
+              (let [(mut k) 0 (mut serr) (None [(slice u8)])]
+                (loop (if (icmp-ge (load k) no) (break)
+                  (let [tag (ch-cname a (al-get [(slice u8)] (load order) (load k)))]
+                    (sb-push-str! (mut out) (cat3-d a (cat3-d a "typedef struct " tag) (cat3-d a " " (cat3-d a tag ";\n")))) (store! k (iadd (load k) 1)))))
+                (sb-push-str! (mut out) "\n")
+                (store! k 0)
+                (loop (if (icmp-ge (load k) no) (break)
+                  (match (ch-render-struct a (ch-find-struct p (al-get [(slice u8)] (load order) (load k))))
+                    (Err [e] (do (store! serr (Some e)) (break)))
+                    (Ok [sbody] (do (sb-push-str! (mut out) sbody) (sb-push-str! (mut out) "\n") (store! k (iadd (load k) 1)))))))
+                (match (load serr) (Some [e] (Err [(slice u8) (slice u8)] e))
+                  (None [] (do (sb-push-str! (mut out) (sb-str (load protos))) (sb-push-str! (mut out) "\n#ifdef __cplusplus\n}\n#endif\n") (Ok (sb-str (load out)))))))
+            (do (sb-push-str! (mut out) (sb-str (load protos))) (sb-push-str! (mut out) "\n#ifdef __cplusplus\n}\n#endif\n") (Ok (sb-str (load out))))))))))
+
+(defn ch-find-func [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs)) n (al-len [Func] fs) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [Func] fs (load i)) name)) name) (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; run the pipeline to a checked Program, render its C header, write to `out`
+; (Some file) or stdout (None). Returns 0 on success, 1 on error.
+(defn cheader-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (out (Option (slice u8)))] (-> i64)
+  (let [s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error (stderr) dp) 1)
+            (match (resolve-program a (mut s) true)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+                  (Ok [cp]
+                    (match (cheader-render a cp)
+                      (Err [e] (do (ps (stderr) "error: ") (ps (stderr) e) (wb (stderr) 10) 1))
+                      (Ok [hdr]
+                        (match out
+                          (None [] (do (ps (stdout) hdr) 0))
+                          (Some [o] (do (d-write-file a o hdr) (let [w (stdout)] (ps w "wrote ") (ps w o) (wb w 10)) 0)))))))))))))))
 
 ; ============================ Coil.toml manifest ============================
 ; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
@@ -798,6 +971,17 @@
       (if (icmp-eq (run-on-big-stack ctx) 0) 1
         (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))
 
+; `cheader <file.coil> [-o out.h]` — generate the C header for export-c.
+(defn cheader-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (icmp-lt (cast i64 argc) 3)
+      (do (ps (stderr) "usage: coil cheader <file.coil> [-o out.h]\n") 1)
+    (let [file (load (index argv 2)) (mut outp) (None [(slice u8)]) (mut i) 3]
+      (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+        (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc)) (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
+                (do (store! outp (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
+              (do (store! i (iadd (load i) 1)) 0)))))
+      (cheader-program a (read-file a file) (cwd-slice a) (load outp)))))
+
 (defn driver-main [(argc i32) (argv (ptr (ptr i8)))
                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
@@ -819,6 +1003,8 @@
             (new-cmd a argc argv)
         (if (str-eq sub "emit-obj")
             (emit-obj-cmd a argc argv build-fn emitir-fn default-backend)
+        (if (str-eq sub "cheader")
+            (cheader-cmd a argc argv)
         (if (str-eq sub "build")
             (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
          (if (str-eq sub "dump-read")
@@ -856,5 +1042,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
