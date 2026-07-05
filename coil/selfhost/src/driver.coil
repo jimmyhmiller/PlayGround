@@ -491,14 +491,16 @@
         (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
         (mut ehdr) (None [(slice u8)])
         (mut i)     3]
-    ; second pass: --lib / --shared / --emit-header <h>.
+    ; second pass: --lib / --shared / --emit-header <h> / -g (DWARF via the arm64
+    ; debug backend, which always emits DWARF).
     (let [(mut j) 3]
       (loop (if (icmp-ge (load j) (cast i64 argc)) (break)
         (do (let [arg (cstr->slice (load (index argv (load j))))]
               (if (str-eq arg "--lib") (store! libmode 1)
                 (if (str-eq arg "--shared") (store! libmode 2)
-                  (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
-                      (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0))))
+                  (if (or (str-eq arg "-g") (str-eq arg "--debug")) (store! backend 2)
+                    (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
+                        (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0)))))
             (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
@@ -971,6 +973,59 @@
       (if (icmp-eq (run-on-big-stack ctx) 0) 1
         (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))
 
+; ============================ repl ==========================================
+; A subprocess REPL: accumulate top-level definitions as SOURCE, and compile+run
+; each expression as a tiny program (like the Rust repl's model, minus its dlopen
+; live-state and typed value printing). An expression's value is cast to i64 and
+; printed; a build/type error is shown. `(def …)`/`(defn …)`/imports persist.
+
+(defn repl-head? [(s (slice u8)) (h (slice u8))] (-> bool) (starts-with s h))
+(defn repl-is-def? [(s (slice u8))] (-> bool)
+  (or (repl-head? s "(defn") (or (repl-head? s "(defstruct") (or (repl-head? s "(defsum")
+  (or (repl-head? s "(def ") (or (repl-head? s "(def(") (or (repl-head? s "(import")
+  (or (repl-head? s "(extern") (or (repl-head? s "(deftrait") (or (repl-head? s "(definst")
+  (or (repl-head? s "(const") (or (repl-head? s "(export-c") (or (repl-head? s "(defcc")
+  (repl-head? s "(derive"))))))))))))))
+
+; read one line from fd 0 (byte at a time); None at EOF with no data.
+(defn repl-read-line [(a (ptr Allocator)) (buf (ptr i8))] (-> (Option (slice u8)))
+  (let [(mut out) (sb-new a) (mut got) false]
+    (loop
+      (let [n (read 0 buf 1)]
+        (if (icmp-le n 0) (break)
+          (do (store! got true)
+              (if (icmp-eq (load buf) (cast i8 10)) (break)
+                (sb-push-byte! (mut out) (cast u8 (load buf))))))))
+    (if (load got) (Some (sb-str (load out))) (None [(slice u8)]))))
+
+; compile+run `<defs> (defn main [] (-> i64) (printf "%ld\n" (cast i64 <expr>)))`.
+(defn repl-eval [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (expr (slice u8))] (-> i64)
+  (let [prog (cat3-d a (cat3-d a "(module replsession)\n(extern printf :cc c [(ptr i8) ...] (-> i32))\n" defs)
+                       (cat3-d a "\n(defn main [] (-> i64) (do (printf c\"%ld\\n\" (cast i64 " (cat3-d a expr ")) 0))\n")))]
+    (d-write-file a "/tmp/coil-repl-eval.coil" prog)
+    (system (slice->cstr a (cat3-d a self " run /tmp/coil-repl-eval.coil")))
+    0))
+
+(defn repl-cmd [(a (ptr Allocator)) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        (mut defs) (sb-new a)
+        buf (unwrap-ptr [i8] (raw-alloc a 4 1))]
+    (ps (stdout) "coil repl — define with (defn …)/(def …); evaluate an expr (i64). Ctrl-D to exit.\n")
+    (loop
+      (ps (stdout) "coil> ")
+      (match (repl-read-line a buf)
+        (None [] (break))
+        (Some [line]
+          (let [t (m-trim line)]
+            (if (icmp-eq (slice-len [u8] t) 0) 0
+              (if (and (repl-is-def? t) (not (repl-head? t "(module")))
+                  (do (if (repl-head? t "(def ")   ; (def name v) is repl sugar for a coil (const …)
+                          (do (sb-push-str! (mut defs) "(const ") (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t))) 0)
+                        (sb-push-str! (mut defs) t))
+                      (sb-push-byte! (mut defs) (cast u8 10)) (ps (stdout) "; ok\n") 0)
+                (repl-eval a self (sb-str (load defs)) t)))))))
+    (ps (stdout) "\n") 0))
+
 ; `cheader <file.coil> [-o out.h]` — generate the C header for export-c.
 (defn cheader-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (if (icmp-lt (cast i64 argc) 3)
@@ -997,6 +1052,8 @@
             (call-ptr normalize-fn a src))
        (if (str-eq sub "cimport")
            (call-ptr cimport-fn a argc argv)
+        (if (str-eq sub "repl")
+            (repl-cmd a argv)
         (if (str-eq sub "run")
             (if (manifest-mode? argc argv) (manifest-cmd a "run" argc argv) (run-cmd a argc argv))
         (if (str-eq sub "new")
@@ -1042,5 +1099,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
