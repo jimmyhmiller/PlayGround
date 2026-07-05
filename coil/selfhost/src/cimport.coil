@@ -526,11 +526,12 @@
                         ; with an initializer present → refuse; without → running counter.
                         (if (and (icmp-eq ev -9999999999) has-init)
                             (do (store! err (Some (cat3 a "enumerator '" cname "' has a non-integer value"))) (break))
-                          (let [value (if (icmp-eq ev -9999999999) (load next) ev)]
+                          (let [value (if (icmp-eq ev -9999999999) (load next) ev)
+                                skey (cat a "const:" cname)]   ; SAME keyspace as the #define pass
                             (do (store! next (iadd value 1))
-                                (match (hm-get [(slice u8) i64] (load seen) cname)
+                                (match (hm-get [(slice u8) i64] (load seen) skey)
                                   (Some [_] 0)
-                                  (None [] (do (hm-put! [(slice u8) i64] seen cname 1)
+                                  (None [] (do (hm-put! [(slice u8) i64] seen skey 1)
                                                (sb-push-str! (mut out) (cat3 a (cat3 a "(const " cname " ") (i64->dec a value) ")\n")))))))))))
                 0)
               (store! i (iadd (load i) 1))))))))

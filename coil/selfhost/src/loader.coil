@@ -476,6 +476,15 @@
                     0))
                 (_ 0)))))))))
 
+; is a bare keyword `:kw` present anywhere in the form's tail?
+(defn has-kw? [(items (ptr (ArrayList Sexp))) (nit i64) (kw (slice u8))] (-> bool)
+  (let [(mut j) 2 (mut r) false]
+    (loop (if (or (icmp-ge (load j) nit) (load r)) (break)
+      (do (let [k (alloc-stack Sexp)] (store! k (al-get [Sexp] (load items) (load j)))
+            (match-else (load (field k kind)) (KKw [n] (if (str-eq n kw) (do (store! r true) 0) 0)) (_ 0)))
+          (store! j (iadd (load j) 1)))))
+    (load r)))
+
 ; collect the `:probe [ … ]` entries into a Probe list.
 (defn cimport-probes [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64)] (-> (ptr (ArrayList ci/Probe)))
   (let [plist (ci/probe-list-new a) (mut j) 2]
@@ -511,26 +520,33 @@
         (match (l-as-str it)
           (None [] (ls-set-err! (mut s) (diag-at-form form "cimport: expected a string header path")))
           (Some [path]
-            (let [flags (cimport-kwstr a items nit "flags")]
-            (match (ci/cimport-header a path flags)
-              (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
-              (Ok [hdr]
-                (let [text (sconcat a hdr (ci/cimport-probe a path flags (cimport-probes a items nit) (cimport-kwstr a items nit "link")))
-                      sid (load (field s srccount))
-                      _1 (store! (field s srccount) (iadd sid 1))
-                      _2 (register-source! (mut s) (sconcat a "<cimport " path) text)]
-                  (match (read-all a text sid)
-                    (Err [d] (ls-set-err! (mut s) (diag-at-form form "cimport: generated bindings failed to parse")))
-                    (Ok [gforms]
-                      (let [(mut k) 0 gn (al-len [Sexp] (load gforms))]
-                        (loop (if (icmp-ge (load k) gn) (break)
-                          (do (let [gf (alloc-stack Sexp)]
-                                (store! gf (al-get [Sexp] (load gforms) (load k)))
-                                (match (l-list-head gf)
-                                  (Some [gh] (if (str-eq gh "module") 0 (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
-                                  (None []    (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
-                              (store! k (iadd (load k) 1)))))
-                        0)))))))))))))
+            (let [flags (cimport-kwstr a items nit "flags")
+                  probe-out (ci/cimport-probe a path flags (cimport-probes a items nit) (cimport-kwstr a items nit "link"))
+                  ; :probe-only skips the whole header dump (structs/externs/#defines)
+                  ; and emits ONLY the probe consts — the ABI-extraction workflow.
+                  rtext (if (has-kw? items nit "probe-only")
+                            (Ok [(slice u8) (slice u8)] (sconcat a "(module cbindings)\n" probe-out))
+                          (match (ci/cimport-header a path flags)
+                            (Err [e] (Err [(slice u8) (slice u8)] e))
+                            (Ok [hdr] (Ok [(slice u8) (slice u8)] (sconcat a hdr probe-out)))))]
+              (match rtext
+                (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
+                (Ok [text]
+                  (let [sid (load (field s srccount))
+                        _1 (store! (field s srccount) (iadd sid 1))
+                        _2 (register-source! (mut s) (sconcat a "<cimport " path) text)]
+                    (match (read-all a text sid)
+                      (Err [d] (ls-set-err! (mut s) (diag-at-form form "cimport: generated bindings failed to parse")))
+                      (Ok [gforms]
+                        (let [(mut k) 0 gn (al-len [Sexp] (load gforms))]
+                          (loop (if (icmp-ge (load k) gn) (break)
+                            (do (let [gf (alloc-stack Sexp)]
+                                  (store! gf (al-get [Sexp] (load gforms) (load k)))
+                                  (match (l-list-head gf)
+                                    (Some [gh] (if (str-eq gh "module") 0 (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
+                                    (None []    (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
+                                (store! k (iadd (load k) 1)))))
+                          0)))))))))))))
 
 (defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
   (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
