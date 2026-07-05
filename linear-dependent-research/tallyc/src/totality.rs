@@ -402,6 +402,7 @@ fn describe(t: &Tm) -> String {
         Tm::Match(_, _) | Tm::MatchN(_, _) => "a match".into(),
         Tm::LetPair(_, _, _) | Tm::Let(_, _, _) => "a let".into(),
         Tm::Ann(_, _) => "a type ascription".into(),
+        Tm::Lam(_, _) => "a lambda".into(),
     }
 }
 

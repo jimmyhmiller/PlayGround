@@ -63,6 +63,7 @@ enum Tok {
     Plus,
     FatArrow,
     Arrow,
+    Backslash,
     KwLet,
     KwFn,
     KwEnum,
@@ -226,6 +227,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 ':' => Tok::Colon,
                 '=' => Tok::Eq,
                 '+' => Tok::Plus,
+                '\\' => Tok::Backslash,
                 _ => return Err(format!("unexpected character {c:?}")),
             };
             out.push(t);
@@ -309,6 +311,14 @@ pub(crate) enum Tm {
     /// type-annotated `let x : T = e` (drives inference for `cast` and other
     /// context-typed forms).
     Ann(Box<Tm>, Box<Ty>),
+    /// an anonymous function `\x => e` / `\x, y => e` (P5 lambda sugar). Checked
+    /// against an expected function type (its parameter types come from context);
+    /// the body is elaborated with ONLY the lambda's parameters in scope, so a
+    /// reference to an enclosing LOCAL (a capture) is a clear "unbound name"
+    /// error — capturing closures use the explicit representation types (§3),
+    /// pending the `->`/`=>` surface decision. A non-capturing lambda is a closed
+    /// function value, so it inlines/specialises exactly like a named `fn` (P1/P4).
+    Lam(Vec<String>, Box<Tm>),
 }
 
 /// A surface match PATTERN: a variable, or a constructor applied to
@@ -754,6 +764,22 @@ impl Parser {
 
     fn parse_tm(&mut self) -> Result<Tm, String> {
         match self.peek() {
+            // an anonymous function `\x => e` / `\x y => e` (space-separated
+            // parameters, so it needs no parentheses inside a comma-separated
+            // argument list — `map(\x => x + x, xs)`).
+            Some(Tok::Backslash) => {
+                self.next();
+                let mut params = Vec::new();
+                while let Some(Tok::Ident(_)) = self.peek() {
+                    params.push(self.ident()?);
+                }
+                if params.is_empty() {
+                    return Err("a lambda `\\… => …` needs at least one parameter".into());
+                }
+                self.eat(&Tok::FatArrow)?;
+                let body = self.parse_tm()?;
+                Ok(Tm::Lam(params, Box::new(body)))
+            }
             Some(Tok::KwMatch) => self.parse_match(),
             Some(Tok::KwLet) => {
                 self.next();
@@ -1333,6 +1359,39 @@ impl Elab {
                 }
                 self.elab_tm(tm, cx, rec)
             }
+            // an anonymous function `\x => e` (P5): elaborate against the expected
+            // function type, binding each parameter in a FRESH context (only the
+            // lambda's own parameters). A reference to an enclosing LOCAL is thus
+            // an "unbound name" error — capturing needs the explicit closure
+            // representations (§3); a non-capturing lambda is a CLOSED function
+            // value, wrapped in its type so P1 `fn_value`/P4 treat it exactly like
+            // a named `fn` (materialise + specialise, zero-cost).
+            Tm::Lam(params, body) => {
+                let mut lam_cx = Cx { names: Vec::new(), types: Vec::new() };
+                let mut ety = expected.clone();
+                for p in params {
+                    match ety {
+                        Value::VPi(_m, dom, cod) => {
+                            let lvl = lam_cx.len();
+                            lam_cx.push(p.clone(), (*dom).clone());
+                            ety = cod.apply(dep::nvar(lvl));
+                        }
+                        _ => {
+                            return Err(format!(
+                                "a lambda with {} parameter(s) is checked against a \
+                                 non-function type — the call/annotation must give it an \
+                                 expected function type",
+                                params.len()
+                            ))
+                        }
+                    }
+                }
+                let mut out = self.check(body, &ety, &lam_cx, None)?;
+                for _ in params {
+                    out = Term::Lam(Box::new(out));
+                }
+                Ok(Term::Ann(Box::new(out), Box::new(dep::quote_at(cx.len(), expected))))
+            }
             _ => self.elab_tm(tm, cx, rec),
         }
     }
@@ -1467,6 +1526,13 @@ impl Elab {
         match t {
             // a type ascription infers via `infer_arg` (checks against the annotation).
             Tm::Ann(_, _) => self.infer_arg(t, cx, rec).map(|(tm, _)| tm),
+            // a lambda in INFER position: its parameter types are unknown. Use it
+            // where a function type is expected (a HOF argument, or annotated).
+            Tm::Lam(_, _) => Err(
+                "a lambda `\\… => …` needs an expected function type — pass it where \
+                 a function is expected (e.g. a higher-order argument) or annotate it"
+                    .into(),
+            ),
             Tm::MatchN(_, _) => Err(
                 "internal error: a multi-scrutinee `match` survived pattern \
                  desugaring — this is a compiler bug, please report it"
@@ -2875,6 +2941,9 @@ fn mono_rewrite_tm(
             Box::new(mono_rewrite_tm(e, polys, subst, queue)?),
             Box::new(mono_rewrite_tm(b, polys, subst, queue)?),
         )),
+        Tm::Lam(ps, b) => {
+            Ok(Tm::Lam(ps.clone(), Box::new(mono_rewrite_tm(b, polys, subst, queue)?)))
+        }
     }
 }
 
@@ -3408,6 +3477,7 @@ fn level_rewrite_tm(
                 .map(|(ps, b)| Ok((ps.clone(), level_rewrite_tm(b, polys, subst, queue)?)))
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        Tm::Lam(ps, b) => Tm::Lam(ps.clone(), Box::new(level_rewrite_tm(b, polys, subst, queue)?)),
     })
 }
 
@@ -3544,6 +3614,7 @@ impl Elab {
         Ok(match t {
             Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
             Tm::Ann(e, ty) => Tm::Ann(Box::new(self.desugar_patterns(e, fresh)?), ty.clone()),
+            Tm::Lam(ps, b) => Tm::Lam(ps.clone(), Box::new(self.desugar_patterns(b, fresh)?)),
             Tm::Call(n, args) => Tm::Call(
                 n.clone(),
                 args.iter().map(|a| self.desugar_patterns(a, fresh)).collect::<Result<_, _>>()?,
@@ -3900,6 +3971,7 @@ fn reorder_fns_by_calls(items: &mut [Item]) {
 fn collect_tm_names(t: &Tm, out: &mut std::collections::HashSet<String>) {
     match t {
         Tm::Ann(e, _) => collect_tm_names(e, out),
+        Tm::Lam(_, b) => collect_tm_names(b, out),
         Tm::Var(nm) => {
             out.insert(nm.clone());
         }
@@ -5366,6 +5438,7 @@ fn unroll_forward_scc_calls(
     Ok(match t {
         Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => t.clone(),
         Tm::Ann(e, ty) => Tm::Ann(Box::new(go(e, path)?), ty.clone()),
+        Tm::Lam(ps, b) => Tm::Lam(ps.clone(), Box::new(go(b, path)?)),
         Tm::Call(g, args) => {
             let forward = scc.contains(g)
                 && order.get(g).zip(order.get(defining)).is_some_and(|(og, od)| og > od);
@@ -5529,6 +5602,7 @@ fn collect_calls_wf(
             }
             collect_calls_wf(body, &db, &fs, out);
         }
+        Tm::Lam(_, b) => collect_calls_wf(b, dlt_binds, facts, out),
         Tm::Var(_) | Tm::Lit(_) | Tm::Str(_) => {}
     }
 }

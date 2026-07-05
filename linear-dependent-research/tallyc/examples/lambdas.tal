@@ -1,0 +1,36 @@
+// ANONYMOUS FUNCTIONS (P5 lambda sugar) — `\x => e` / `\x y => e`. A lambda is a
+// first-class function VALUE, so it flows through the SAME machinery as a named
+// `fn`: passed to a higher-order function it is materialised (P1) and, when the
+// callee is a recursive HOF, SPECIALISED into the loop (P4) — zero indirect
+// calls, C-speed. See docs/FIRST_CLASS_FUNCTIONS.md §P5.
+//
+//   tally run examples/lambdas.tal        →  39
+//
+// A lambda is checked against an EXPECTED function type (from the HOF argument
+// position), so its parameter types are inferred. It may reference top-level
+// names and its own parameters; a reference to an enclosing LOCAL (a capture) is
+// a clear "unbound name" error — capturing closures use the explicit
+// representation types (examples/closures_linearity.tal, closures_owned.tal),
+// pending the `->`/`=>` surface decision (§5).
+
+sample : List Nat
+fn sample() { Cons(1, Cons(5, Cons(2, Cons(9, Nil)))) }
+
+pair : List Nat
+fn pair() { Cons(1, Cons(2, Nil)) }
+
+addNat : Nat -> Nat -> Nat
+fn addNat(a, b) { a + b }
+
+isBig : Nat -> Bool
+fn isBig(n) { match compareNat(n, 5) { GT => True, EQ => False, LT => False } }
+
+main : Nat
+fn main() {
+  // map an anonymous doubler, keep the big ones, count them:
+  length(filter(isBig, map(\x => x + x, sample)))          // [2,10,4,18] → >5 [10,18] → 2
+    // fold with a multi-parameter lambda that has a `let` body:
+    + foldr(\x acc => let s = x + x; s + acc, 0, sample)   // (1+1)+(5+5)+(2+2)+(9+9) = 34
+    // a lambda referencing a top-level function is fine (not a capture):
+    + foldr(\x acc => addNat(x, acc), 0, pair)               // 1 + 2 = 3
+}                                                          // 2 + 34 + 3 = 39

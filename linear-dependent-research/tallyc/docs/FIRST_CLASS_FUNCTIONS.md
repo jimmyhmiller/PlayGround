@@ -311,7 +311,21 @@ Named so the omission is a decision, not an oversight:
   multiplicity-polymorphism the defunctionalised representation already had — ONE
   `applyC` serves both an ω callback and a linear (arg-consuming) one; passing
   the linear closure at ω is a type error. `examples/closures_linearity.tal` → 156.
-- **P5 — lambda sugar with named representation (§7), if adopted.**
+- **P5 — anonymous (non-capturing) lambda sugar. ✅ DONE.** `\x => e` / `\x y =>
+  e` (space-separated params, so it needs no parentheses inside a comma-separated
+  argument list). A lambda is elaborated against the EXPECTED function type,
+  binding its parameters in a FRESH context — so it is a CLOSED function value and
+  flows through the same P1/P4 machinery as a named `fn`: `map(\x => x + x, xs)`
+  is materialised and specialised into the loop (0 indirect calls, C-speed). A
+  reference to an enclosing LOCAL (a capture) is a clear "unbound name" error;
+  capturing lambdas want the explicit closure types + the `->`/`=>` surface
+  decision (§5) still to be made — so this first cut deliberately covers the
+  non-capturing case, which already gives anonymous-function ergonomics at zero
+  cost. `examples/lambdas.tal` → 39 (JIT + AOT). Implementation: a `\` lexer
+  token, a `Tm::Lam(params, body)` surface node parsed in `parse_tm`, and a
+  `check`-position arm that peels the expected Π and produces `Ann(Lam…, Π)`.
+  *Capturing* lambda sugar (the `\[flat]`/`\[own]` named-representation form of
+  §7) remains for when §5 is settled.
 
 Each phase is usable on its own; P1 alone makes the current stdlib run.
 
