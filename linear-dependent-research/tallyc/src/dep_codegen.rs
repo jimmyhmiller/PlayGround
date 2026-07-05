@@ -4534,6 +4534,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 methods.len()
             ));
         }
+        // A NAT-LIKE datatype (`{Zero, Succ(Self)}`) is represented as a PACKED
+        // machine integer — construction (`Succ(Zero)` → `1`) and the eliminator
+        // (`NatElim`) both use it. A `Case` on it (the `%partial`/`Fix` lowering
+        // path) must match it the SAME way: `n == 0` is `Zero`, else the
+        // predecessor is `n - 1`. Without this it fell through to the boxed path
+        // (`inttoptr` + tag load), dereferencing a small integer as a pointer — a
+        // crash for any non-eliminator recursion over a boxed Nat. Route it to the
+        // packed matcher, selecting methods by constructor NAME (declaration order
+        // need not put `Zero` first).
+        if let Some((zc, sc)) = nat_like(self.sig, data) {
+            let zi = decl.ctors.iter().position(|c| c.name == zc).unwrap();
+            let si = decl.ctors.iter().position(|c| c.name == sc).unwrap();
+            return self.compile_natcase(f, env, &methods[zi], &methods[si], scrut);
+        }
         if let Some(fi) = transparent_field(self.sig, data) {
             return self.compile_transparent_match(f, env, data, fi, &methods[0], scrut);
         }

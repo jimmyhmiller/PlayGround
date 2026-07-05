@@ -36,8 +36,26 @@ cargo run --example dispatch    # dispatch axis: megamorphic vs mono/poly inline
 cargo run --example speculation # speculation/deopt axis: never/always/blacklist policies
 cargo run --example bytecode    # THE EMIT TIER: value model emits model-specific bytecode
 cargo run --example matrix      # PROOF: all 45 axis combinations run and agree
+cargo run --example standard_ir # one axis-neutral IR, run by interpreter AND JIT
 cargo test                      # locks all seven axes + the grand matrix
 ```
+
+## One standard IR for interpretation and JIT
+
+`Ir` is the standard, **axis-neutral** IR: it says `Prim(Add)`, `Call`,
+`Global`, `Dispatch{site,method}` — semantic operations, not `AddRawLowBit` or a
+resolved pointer. A frontend lowers to it once, and every execution strategy
+consumes the same `Ir`: an interpreter (`TreeWalk`) and two compilers
+(`ClosureComp`, `BytecodeVm`). `CodeSpace` is the formal name for "a way to
+execute the IR," so interpreter and JIT are simply two `CodeSpace`s over it (the
+`standard_ir` example hands the *same* `Ir` value to both).
+
+The neutrality is load-bearing: because the IR commits to no value layout, no
+dispatch, and no execution strategy — those are applied by the executor through
+`ModelEmit`/`Dispatch`/the collector — one IR serves every axis combination. A
+lower, per-configuration IR (the bytecode) sits *below* it as the shared
+interpreter+JIT input for a given configuration; the axis-neutral standard IR
+sits *above* the axis choices.
 
 ## Orthogonality: the grand matrix
 

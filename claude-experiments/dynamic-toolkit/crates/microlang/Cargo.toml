@@ -7,5 +7,8 @@ description = "Trait sketch for a dynamic-language toolkit re-cut at the value-m
 [lib]
 path = "src/lib.rs"
 
-# Detach from the big parent workspace so this sketch builds on its own.
+# Detach from the big parent workspace; `microlang` is the reusable CORE, and
+# the frontends (`scheme`, `clojure-stub`) are members that may only use its
+# public API. The live second consumer keeps the library/language split honest.
 [workspace]
+members = ["scheme", "clojure-stub"]

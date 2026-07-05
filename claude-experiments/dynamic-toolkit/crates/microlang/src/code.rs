@@ -29,7 +29,7 @@ use std::rc::Rc;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_get, Frame, Locals, Obj, Val};
+use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Val};
 
 pub trait CodeSpace<M: ValueModel> {
     /// Evaluate one IR node. `top` is the outermost backend to recurse through.
@@ -59,6 +59,19 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 Some(v) => v.val,
                 None => panic!("Unable to resolve symbol: {}", rt.sym_name(*s)),
             },
+            Ir::SetLocal { up, idx, val } => {
+                let v = top.eval_ir(top, rt, val, locals);
+                frame_set(locals, *up, *idx, v);
+                v
+            }
+            Ir::SetGlobal { name, val } => {
+                let v = top.eval_ir(top, rt, val, locals);
+                match rt.globals.get_mut(name) {
+                    Some(var) => var.val = v,
+                    None => panic!("set!: unbound variable: {}", rt.sym_name(*name)),
+                }
+                v
+            }
             Ir::If(c, t, e) => {
                 let cv = top.eval_ir(top, rt, c, locals);
                 if M::truthy(rt.decode(cv)) {
@@ -177,20 +190,112 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         callee: u64,
         args: &[u64],
     ) -> u64 {
-        let Val::Ref(id) = rt.decode(callee) else {
-            panic!("value not callable: {}", rt.print(callee));
-        };
-        let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
-            Obj::Closure {
-                nparams,
-                variadic,
-                body,
-                env,
-            } => (*nparams, *variadic, body.clone(), env.clone()),
-            _ => panic!("value not callable: {}", rt.print(callee)),
-        };
-        let frame = rt.build_call_frame(nparams, variadic, args, env);
-        top.eval_ir(top, rt, &body, &frame)
+        // Trampoline for proper tail calls: a tail call bounces back here and
+        // loops, reusing this Rust frame, instead of recursing. Deep tail
+        // recursion runs in O(1) native stack. Non-tail calls still recurse
+        // (through `top`, so composition/GC-safepoints are preserved), and a
+        // tail call's args are consumed into the new frame before the next
+        // body runs, so no bare pointer is held across a collection.
+        let mut callee = callee;
+        let mut args: Vec<u64> = args.to_vec();
+        loop {
+            let Val::Ref(id) = rt.decode(callee) else {
+                panic!("value not callable: {}", rt.print(callee));
+            };
+            let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
+                Obj::Closure {
+                    nparams,
+                    variadic,
+                    body,
+                    env,
+                } => (*nparams, *variadic, body.clone(), env.clone()),
+                _ => panic!("value not callable: {}", rt.print(callee)),
+            };
+            let frame = rt.build_call_frame(nparams, variadic, &args, env);
+            match eval_tail(top, rt, &body, &frame) {
+                Bounce::Done(v) => return v,
+                Bounce::Tail(next, next_args) => {
+                    callee = next;
+                    args = next_args;
+                }
+            }
+        }
+    }
+}
+
+/// The result of evaluating an expression in TAIL position: either a finished
+/// value, or a tail call the `invoke` trampoline should bounce to.
+enum Bounce {
+    Done(u64),
+    Tail(u64, Vec<u64>),
+}
+
+/// Evaluate in tail position. Tail-transparent forms (`if`, `do`, `let`) recurse
+/// structurally (bounded by static nesting), a tail `Call`/`Dispatch` returns a
+/// `Tail` for the trampoline, and everything else is a finished value. Non-tail
+/// subexpressions go through `top` so composition and GC safepoints hold.
+fn eval_tail<M: ValueModel>(
+    top: &dyn CodeSpace<M>,
+    rt: &mut Runtime<M>,
+    ir: &Ir,
+    locals: &Locals,
+) -> Bounce {
+    match ir {
+        Ir::If(c, t, e) => {
+            let cv = top.eval_ir(top, rt, c, locals);
+            if M::truthy(rt.decode(cv)) {
+                eval_tail(top, rt, t, locals)
+            } else {
+                eval_tail(top, rt, e, locals)
+            }
+        }
+        Ir::Do(xs) => match xs.split_last() {
+            None => Bounce::Done(rt.encode(Val::Nil)),
+            Some((last, init)) => {
+                for x in init {
+                    top.eval_ir(top, rt, x, locals);
+                }
+                eval_tail(top, rt, last, locals)
+            }
+        },
+        Ir::Let(inits, body) => {
+            let mut cur: Locals = Some(Rc::new(Frame {
+                slots: Vec::new(),
+                parent: locals.clone(),
+            }));
+            for iexpr in inits {
+                let v = top.eval_ir(top, rt, iexpr, &cur);
+                let prev = cur.as_ref().unwrap();
+                let mut slots: Vec<Cell<u64>> =
+                    prev.slots.iter().map(|c| Cell::new(c.get())).collect();
+                slots.push(Cell::new(v));
+                cur = Some(Rc::new(Frame {
+                    slots,
+                    parent: locals.clone(),
+                }));
+            }
+            eval_tail(top, rt, body, &cur)
+        }
+        Ir::Call(f, args) => {
+            let callee = top.eval_ir(top, rt, f, locals);
+            let argv: Vec<u64> = args.iter().map(|a| top.eval_ir(top, rt, a, locals)).collect();
+            Bounce::Tail(callee, argv)
+        }
+        Ir::Dispatch { site, method, args } => {
+            let argv: Vec<u64> = args.iter().map(|a| top.eval_ir(top, rt, a, locals)).collect();
+            let ty = rt
+                .type_of(argv[0])
+                .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));
+            let imp = rt.resolve_method(*site, *method, ty).unwrap_or_else(|| {
+                panic!(
+                    "no method '{}' for type '{}'",
+                    rt.sym_name(*method),
+                    rt.sym_name(ty)
+                )
+            });
+            Bounce::Tail(imp, argv)
+        }
+        _ => Bounce::Done(top.eval_ir(top, rt, ir, locals)),
     }
 }
 

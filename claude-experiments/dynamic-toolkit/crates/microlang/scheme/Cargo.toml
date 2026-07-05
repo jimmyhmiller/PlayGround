@@ -1,0 +1,15 @@
+[package]
+name = "scheme"
+version = "0.0.1"
+edition = "2021"
+description = "An R7RS-flavored Scheme frontend, built entirely on the core public API."
+
+[dependencies]
+microlang = { path = ".." }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scheme"
+path = "src/main.rs"

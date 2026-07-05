@@ -34,6 +34,7 @@ struct Specials {
     defmethod: Sym,
     fn_: Sym,
     let_: Sym,
+    set_: Sym,
     amp: Sym,
 }
 
@@ -95,6 +96,7 @@ impl<M: ValueModel> Runtime<M> {
                 defmethod: 0,
                 fn_: 0,
                 let_: 0,
+                set_: 0,
                 amp: 0,
             },
             prims: HashMap::new(),
@@ -114,6 +116,7 @@ impl<M: ValueModel> Runtime<M> {
             defmethod: rt.intern("defmethod"),
             fn_: rt.intern("fn"),
             let_: rt.intern("let"),
+            set_: rt.intern("set!"),
             amp: rt.intern("&"),
         };
         use Prim::*;
@@ -646,6 +649,18 @@ impl<M: ValueModel> Runtime<M> {
             }
             if hs == self.sf.let_ {
                 return self.analyze_let(cs, slot);
+            }
+            if hs == self.sf.set_ {
+                // (set! name val) — assign an existing local or global binding.
+                let Val::Sym(name) = self.decode(self.child(slot, 1)) else {
+                    panic!("set!: target must be a symbol");
+                };
+                let vform = self.child(slot, 2);
+                let val = Box::new(self.analyze(cs, vform));
+                return match self.resolve_local(name) {
+                    Some((up, idx)) => Ir::SetLocal { up, idx, val },
+                    None => Ir::SetGlobal { name, val },
+                };
             }
             if let Some(&p) = self.prims.get(&hs) {
                 let n = self.child_count(slot);

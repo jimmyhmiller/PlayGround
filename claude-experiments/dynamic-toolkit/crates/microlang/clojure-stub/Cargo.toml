@@ -1,0 +1,15 @@
+[package]
+name = "clojure-stub"
+version = "0.0.1"
+edition = "2021"
+description = "A skeletal second frontend. Its only job is to keep the core library/language split honest by compiling against the same public interfaces."
+
+[dependencies]
+microlang = { path = ".." }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clojure-stub"
+path = "src/main.rs"

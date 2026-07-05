@@ -49,6 +49,10 @@ pub enum Ir {
     /// Global variable: resolved through the Var table at RUN time, so a
     /// reference can precede the definition (late binding).
     Global(Sym),
+    /// Assign an existing lexical slot (`set!` on a local). Returns the value.
+    SetLocal { up: u16, idx: u16, val: Box<Ir> },
+    /// Assign an existing global Var. Returns the value.
+    SetGlobal { name: Sym, val: Box<Ir> },
     If(Box<Ir>, Box<Ir>, Box<Ir>),
     Do(Vec<Ir>),
     /// `def` / `defmacro`. The `is_macro` flag rides through to the Var.

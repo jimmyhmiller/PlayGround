@@ -29,7 +29,7 @@ use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_get, Frame, Locals, Obj, Val};
+use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Val};
 
 /// A compiled expression: run it with the runtime, a lexical frame, and the
 /// outermost backend (for re-entrant, composable calls). Captures only owned
@@ -78,6 +78,27 @@ impl<M: ValueModel> ClosureComp<M> {
                 Rc::new(move |rt, _env, _top| match rt.globals.get(&s) {
                     Some(v) => v.val,
                     None => panic!("Unable to resolve symbol: {}", rt.sym_name(s)),
+                })
+            }
+            Ir::SetLocal { up, idx, val } => {
+                let (up, idx) = (*up, *idx);
+                let cv = self.compile(val);
+                Rc::new(move |rt, env, top| {
+                    let v = cv(rt, env, top);
+                    frame_set(env, up, idx, v);
+                    v
+                })
+            }
+            Ir::SetGlobal { name, val } => {
+                let name = *name;
+                let cv = self.compile(val);
+                Rc::new(move |rt, env, top| {
+                    let v = cv(rt, env, top);
+                    match rt.globals.get_mut(&name) {
+                        Some(var) => var.val = v,
+                        None => panic!("set!: unbound variable: {}", rt.sym_name(name)),
+                    }
+                    v
                 })
             }
             Ir::If(c, t, e) => {

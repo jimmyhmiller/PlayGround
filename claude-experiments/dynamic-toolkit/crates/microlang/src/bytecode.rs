@@ -233,6 +233,9 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 ops.push(Op::Slow(*p, args.len() as u8));
             }
             Ir::Let(..) => panic!("bytecode tier: `let` not supported; run on the tree-walker"),
+            Ir::SetLocal { .. } | Ir::SetGlobal { .. } => {
+                panic!("bytecode tier: `set!` not supported; run on the tree-walker")
+            }
             Ir::DefMethod { .. } | Ir::Dispatch { .. } => {
                 panic!("bytecode tier: dispatch not supported; run on the tree-walker")
             }

@@ -101,3 +101,13 @@ pub fn frame_get(env: &Locals, up: u16, idx: u16) -> u64 {
     }
     f.slots[idx as usize].get()
 }
+
+/// Mutate slot `idx` in the frame `up` levels out. The slots are already `Cell`s
+/// (for GC), so local assignment is just a cell write.
+pub fn frame_set(env: &Locals, up: u16, idx: u16, v: u64) {
+    let mut f = env.as_ref().expect("assignment in empty environment");
+    for _ in 0..up {
+        f = f.parent.as_ref().expect("assignment past root frame");
+    }
+    f.slots[idx as usize].set(v);
+}
