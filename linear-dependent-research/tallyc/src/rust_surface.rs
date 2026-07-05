@@ -5374,15 +5374,37 @@ impl Elab {
             // are untouched, so copyable fields stay ω/multi-usable.)
             let arm_body = rebind_linear_fields(&arm.body, &binder_names, &info.arg_implicit, &binder_tys, nargs, &self.rc, &self.pess_linear.borrow(), &arm_cx.names, fn_cx.len());
             let mut body = self.check(&arm_body, &expected, &arm_cx, Some(&r))?;
-            // the scrutinee equals `C(fields…)` in this arm; refine references to
-            // it (consumed by the fold) to that reconstruction, so a body that
-            // mentions the whole scrutinee sees the CURRENT value, not the outer
-            // fold-constant one. The `nargs` fields sit atop the fn params (then
-            // the IHs); field `j` is at de Bruijn `total-1-j`.
-            let total = nargs + rec_fields.len();
-            let scrut_db_arm = Self::debruijn(full_params, scrut).unwrap() + total;
-            let field_dbs: Vec<usize> = (0..nargs).map(|j| total - 1 - j).collect();
-            body = refine_scrut_ctor(&body, scrut_db_arm, &ctor.name, &field_dbs);
+            // the scrutinee equals `C params… fields…` in this arm; refine
+            // references to it (consumed by the fold) to that reconstruction, so a
+            // body that mentions the whole scrutinee sees the CURRENT value, not
+            // the outer fold-constant one. The `nargs` fields sit atop the fn
+            // params (then the IHs), field `j` at de Bruijn `total-1-j`; the
+            // datatype PARAMS precede them (shifted into the arm context).
+            if dargs.len() > np {
+                // INDEXED datatype: the reconstruction has a CONCRETE index
+                // (`Succ k`) but a reference to the scrutinee expects the ABSTRACT
+                // one (`n`) — equating them needs the convoy refinement. Not yet
+                // supported: fail LOUD rather than miscompile (`%partial`/`Fix`
+                // handles it correctly, since there the scrutinee stays in scope).
+                let mut names = std::collections::HashSet::new();
+                collect_tm_names(&arm.body, &mut names);
+                if names.contains(scrut) {
+                    return Err(format!(
+                        "referencing the scrutinee `{scrut}` (of the indexed datatype \
+                         `{data}`) inside a total recursive fold is not supported: its \
+                         value would need reconstruction at the abstract index. Use the \
+                         constructor's fields, or mark the function `%partial`."
+                    ));
+                }
+            } else {
+                let total = nargs + rec_fields.len();
+                let scrut_db_arm = Self::debruijn(full_params, scrut).unwrap() + total;
+                let mut recon_args: Vec<Term> =
+                    sparam_tms.iter().map(|t| dep::shift_term(total, t)).collect();
+                recon_args.extend((0..nargs).map(|j| Term::Var(total - 1 - j)));
+                let recon = Term::Constr(ctor.name.clone(), recon_args);
+                body = refine_scrut_term(&body, scrut_db_arm, &recon);
+            }
             for _ in 0..(nargs + rec_fields.len()) {
                 body = Term::Lam(Box::new(body));
             }
@@ -5647,19 +5669,17 @@ fn refine_scrut_succ(body: &Term, scrut_db: usize, pred_db: usize) -> Term {
         }
     })
 }
-/// The general-datatype twin of `refine_scrut_succ`: in a `C(f₁…f_m)` arm of an
-/// `Elim` fold the scrutinee equals `C f₁ … f_m`, so replace references to it
-/// with that reconstruction. `field_dbs` are the de Bruijn indices of the
-/// constructor's fields (in the method body's context). Same latent bug as the
-/// `Nat` fold: `weird xs = len xs + weird (tail xs)` summed the WHOLE list's
-/// length at every level.
-fn refine_scrut_ctor(body: &Term, scrut_db: usize, ctor: &str, field_dbs: &[usize]) -> Term {
+/// The general twin of `refine_scrut_succ`: replace references to the scrutinee
+/// with an arbitrary reconstruction term `recon` (built at the body's depth 0),
+/// shifting it under each binder crossed. For a datatype fold `recon` is
+/// `C params… fields…` (a parameterised constructor carries the datatype's
+/// parameters BEFORE its own arguments, e.g. `Cons Nat k x xs`). Same latent bug
+/// as the `Nat` fold: `weird xs = len xs + weird (tail xs)` summed the WHOLE
+/// list's length at every level.
+fn refine_scrut_term(body: &Term, scrut_db: usize, recon: &Term) -> Term {
     dep::map_vars(body, 0, &move |i, depth| {
         if i == scrut_db + depth {
-            Term::Constr(
-                ctor.to_string(),
-                field_dbs.iter().map(|&d| Term::Var(d + depth)).collect(),
-            )
+            dep::shift_term(depth, recon)
         } else {
             Term::Var(i)
         }
