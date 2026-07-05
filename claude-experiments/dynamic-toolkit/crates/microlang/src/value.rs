@@ -73,35 +73,32 @@ pub enum Obj {
     /// A boxed float: allocated by a model where `Float` is not immediate
     /// (e.g. `LowBit`).
     BoxFloat(f64),
-    /// A user closure. Captures its defining lexical frame (`env`). The
-    /// `is_macro` flag is carried by the *Var*, not the closure, so this is
-    /// just a callable.
+    /// A user closure. Captures its defining lexical frame (`env`). Locals are
+    /// slot-resolved at analyze time, so the callable only needs arity, not
+    /// param names.
     Closure {
-        params: Vec<Sym>,
-        variadic: Option<Sym>,
+        nparams: usize,
+        variadic: bool,
         body: Rc<Ir>,
         env: Locals,
     },
 }
 
-/// A lexical frame: name -> value bindings, linked to a parent. Persistent via
-/// `Rc` so closures can capture it cheaply. A real toolkit would resolve these
-/// to slots at analyze time; the sketch keeps name lookup for legibility.
+/// A lexical frame: a flat array of slot values, linked to a parent. Names were
+/// resolved to `(up, idx)` at analyze time, so the runtime never searches by
+/// name — `frame_get` is a pointer walk plus an index.
 pub struct Frame {
-    pub vars: Vec<(Sym, u64)>,
+    pub slots: Vec<u64>,
     pub parent: Locals,
 }
 
 pub type Locals = Option<Rc<Frame>>;
 
-pub fn frame_lookup(mut locals: &Locals, sym: Sym) -> Option<u64> {
-    while let Some(fr) = locals {
-        for &(s, v) in fr.vars.iter().rev() {
-            if s == sym {
-                return Some(v);
-            }
-        }
-        locals = &fr.parent;
+/// Read the slot `idx` in the frame `up` levels out from the innermost.
+pub fn frame_get(env: &Locals, up: u16, idx: u16) -> u64 {
+    let mut f = env.as_ref().expect("local reference in empty environment");
+    for _ in 0..up {
+        f = f.parent.as_ref().expect("local reference past root frame");
     }
-    None
+    f.slots[idx as usize]
 }

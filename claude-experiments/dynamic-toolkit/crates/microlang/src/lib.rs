@@ -18,12 +18,14 @@
 //!   * `microlisp` — macros, `defmacro`, incremental eval on the fixnum model.
 
 pub mod code;
+pub mod compiled;
 pub mod ir;
 pub mod model;
 pub mod runtime;
 pub mod value;
 
-pub use code::{CodeSpace, TreeWalk};
+pub use code::{CodeSpace, Traced, TreeWalk};
+pub use compiled::ClosureComp;
 pub use model::{LowBit, LowBitModel, NanBox, NanBoxModel, Repr, ValueModel};
 pub use runtime::Runtime;
 pub use value::{Cat, Obj, Val};

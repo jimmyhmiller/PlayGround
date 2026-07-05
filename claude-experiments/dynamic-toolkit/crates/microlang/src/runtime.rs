@@ -9,11 +9,12 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
-use crate::code::{CodeSpace, TreeWalk};
+use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::value::{Cat, HeapId, Obj, RawTag, Sym, Val};
+use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 
 /// A global binding. `is_macro` is what makes `macroexpand` treat a call head
 /// specially — the single resolution table the compiler and runtime share.
@@ -33,7 +34,7 @@ struct Specials {
     amp: Sym,
 }
 
-pub struct Runtime<M: ValueModel, C: CodeSpace<M> = TreeWalk> {
+pub struct Runtime<M: ValueModel> {
     pub heap: Vec<Obj>,
     /// Count of heap allocations. Instrumentation so the value axis is visible.
     pub allocs: u64,
@@ -42,10 +43,13 @@ pub struct Runtime<M: ValueModel, C: CodeSpace<M> = TreeWalk> {
     pub globals: HashMap<Sym, Var>,
     sf: Specials,
     prims: HashMap<Sym, Prim>,
-    _pd: PhantomData<(fn() -> M, fn() -> C)>,
+    /// Compile-time lexical scope, innermost frame last. Used only during
+    /// `analyze` to resolve names to `(up, idx)` slots; empty between forms.
+    scope: Vec<Vec<Sym>>,
+    _pd: PhantomData<fn() -> M>,
 }
 
-impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
+impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
         let mut rt = Runtime {
             heap: Vec::new(),
@@ -64,6 +68,7 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
                 amp: 0,
             },
             prims: HashMap::new(),
+            scope: Vec::new(),
             _pd: PhantomData,
         };
         rt.sf = Specials {
@@ -368,7 +373,11 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
     }
 
     // ── macroexpand: re-enters compiled code mid-compile ────
-    pub fn macroexpand(&mut self, mut form: u64) -> u64 {
+    //
+    // The backend `cs` is passed as a value, not baked into `Runtime`'s type.
+    // `cs` and `self` are disjoint borrows, so `cs.invoke(self, ...)` type-
+    // checks with any backend — including a wrapping one (see `code::Traced`).
+    pub fn macroexpand(&mut self, cs: &dyn CodeSpace<M>, mut form: u64) -> u64 {
         loop {
             let Some((head, _)) = self.as_cons(form) else {
                 return form;
@@ -385,22 +394,25 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
             }
             let args = self.list_to_vec(form);
             // args[0] is the macro symbol; pass the UNEVALUATED argument forms.
-            // C::invoke runs a closure while we are mid-compilation. This is
+            // `invoke` runs a closure while we are mid-compilation. This is
             // the re-entrancy the batch "declare-all-then-define-all" model
             // structurally forbids.
-            form = C::invoke(self, mfn, &args[1..]);
+            form = cs.invoke(cs, self, mfn, &args[1..]);
         }
     }
 
     // ── analyze: macroexpanded Val -> Ir ────────────────────
-    pub fn analyze(&mut self, form: u64) -> Ir {
-        let form = self.macroexpand(form);
+    pub fn analyze(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> Ir {
+        let form = self.macroexpand(cs, form);
         match self.decode(form) {
             Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::Nil => Ir::Const(form),
-            Val::Sym(s) => Ir::Var(s),
+            Val::Sym(s) => match self.resolve_local(s) {
+                Some((up, idx)) => Ir::Local { up, idx },
+                None => Ir::Global(s),
+            },
             Val::Ref(_) => {
                 if self.as_cons(form).is_some() {
-                    self.analyze_list(form)
+                    self.analyze_list(cs, form)
                 } else {
                     Ir::Const(form)
                 }
@@ -408,7 +420,7 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
         }
     }
 
-    fn analyze_list(&mut self, form: u64) -> Ir {
+    fn analyze_list(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> Ir {
         let items = self.list_to_vec(form);
         let head = items[0];
         if let Val::Sym(hs) = self.decode(head) {
@@ -416,24 +428,24 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
                 return Ir::Quote(items[1]);
             }
             if hs == self.sf.if_ {
-                let c = self.analyze(items[1]);
-                let t = self.analyze(items[2]);
+                let c = self.analyze(cs, items[1]);
+                let t = self.analyze(cs, items[2]);
                 let e = if items.len() > 3 {
-                    self.analyze(items[3])
+                    self.analyze(cs, items[3])
                 } else {
                     Ir::Const(self.enc_nil())
                 };
                 return Ir::If(Box::new(c), Box::new(t), Box::new(e));
             }
             if hs == self.sf.do_ {
-                let body: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(f)).collect();
+                let body: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(cs, f)).collect();
                 return Ir::Do(body);
             }
             if hs == self.sf.def {
                 let Val::Sym(name) = self.decode(items[1]) else {
                     panic!("def: name must be a symbol");
                 };
-                let init = self.analyze(items[2]);
+                let init = self.analyze(cs, items[2]);
                 return Ir::Def {
                     name,
                     init: Box::new(init),
@@ -444,13 +456,7 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
                 let Val::Sym(name) = self.decode(items[1]) else {
                     panic!("defmacro: name must be a symbol");
                 };
-                let (params, variadic) = self.parse_params(items[2]);
-                let body: Vec<Ir> = items[3..].iter().map(|&f| self.analyze(f)).collect();
-                let lam = Ir::Lambda {
-                    params,
-                    variadic,
-                    body: std::rc::Rc::new(Ir::Do(body)),
-                };
+                let lam = self.analyze_fn(cs, items[2], &items[3..]);
                 return Ir::Def {
                     name,
                     init: Box::new(lam),
@@ -458,37 +464,65 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
                 };
             }
             if hs == self.sf.fn_ {
-                let (params, variadic) = self.parse_params(items[1]);
-                let body: Vec<Ir> = items[2..].iter().map(|&f| self.analyze(f)).collect();
-                return Ir::Lambda {
-                    params,
-                    variadic,
-                    body: std::rc::Rc::new(Ir::Do(body)),
-                };
+                return self.analyze_fn(cs, items[1], &items[2..]);
             }
             if hs == self.sf.let_ {
                 let bl = self.list_to_vec(items[1]);
-                let mut binds = Vec::new();
+                // Open a fresh let frame; each binding occupies the next slot
+                // and becomes visible to later inits and the body (let*).
+                self.scope.push(Vec::new());
+                let mut inits = Vec::new();
                 let mut i = 0;
                 while i + 1 < bl.len() {
                     let Val::Sym(s) = self.decode(bl[i]) else {
                         panic!("let: binding name must be a symbol");
                     };
-                    let iexpr = self.analyze(bl[i + 1]);
-                    binds.push((s, iexpr));
+                    inits.push(self.analyze(cs, bl[i + 1]));
+                    self.scope.last_mut().unwrap().push(s);
                     i += 2;
                 }
-                let body: Vec<Ir> = items[2..].iter().map(|&f| self.analyze(f)).collect();
-                return Ir::Let(binds, Box::new(Ir::Do(body)));
+                let body: Vec<Ir> = items[2..].iter().map(|&f| self.analyze(cs, f)).collect();
+                self.scope.pop();
+                return Ir::Let(inits, Box::new(Ir::Do(body)));
             }
             if let Some(&p) = self.prims.get(&hs) {
-                let a: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(f)).collect();
+                let a: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(cs, f)).collect();
                 return Ir::Prim(p, a);
             }
         }
-        let f = self.analyze(head);
-        let a: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(f)).collect();
+        let f = self.analyze(cs, head);
+        let a: Vec<Ir> = items[1..].iter().map(|&f| self.analyze(cs, f)).collect();
         Ir::Call(Box::new(f), a)
+    }
+
+    /// Resolve a name to `(up, idx)` against the compile-time scope, innermost
+    /// frame first (so inner bindings shadow outer). `None` => it is a global.
+    fn resolve_local(&self, sym: Sym) -> Option<(u16, u16)> {
+        for (up, frame) in self.scope.iter().rev().enumerate() {
+            if let Some(idx) = frame.iter().rposition(|&s| s == sym) {
+                return Some((up as u16, idx as u16));
+            }
+        }
+        None
+    }
+
+    /// Analyze an `fn`/`defmacro` body under a fresh param frame. Params occupy
+    /// slots `0..nparams`; a variadic rest param is the slot after them.
+    fn analyze_fn(&mut self, cs: &dyn CodeSpace<M>, params_form: u64, body_forms: &[u64]) -> Ir {
+        let (params, variadic) = self.parse_params(params_form);
+        let nparams = params.len();
+        let mut frame = params;
+        if let Some(rest) = variadic {
+            frame.push(rest);
+        }
+        self.scope.push(frame);
+        let body: Vec<Ir> = body_forms.iter().map(|&f| self.analyze(cs, f)).collect();
+        self.scope.pop();
+        Ir::Lambda {
+            nparams,
+            variadic: variadic.is_some(),
+            body: std::rc::Rc::new(Ir::Do(body)),
+        }
     }
 
     fn parse_params(&self, form: u64) -> (Vec<Sym>, Option<Sym>) {
@@ -515,17 +549,49 @@ impl<M: ValueModel, C: CodeSpace<M>> Runtime<M, C> {
         (params, variadic)
     }
 
-    // ── top-level eval ──────────────────────────────────────
-    pub fn eval_top(&mut self, form: u64) -> u64 {
-        let ir = self.analyze(form);
-        C::eval_ir(self, &ir, &None)
+    /// Build a callee's slot frame from evaluated args. Slots `0..nparams` are
+    /// the positional args; a variadic rest arg is the slot after them, holding
+    /// the collected list. Shared by every backend so the frame layout has one
+    /// definition matching what `analyze` assigned.
+    pub fn build_call_frame(
+        &mut self,
+        nparams: usize,
+        variadic: bool,
+        args: &[u64],
+        env: Locals,
+    ) -> Locals {
+        let mut slots: Vec<u64> = Vec::with_capacity(nparams + variadic as usize);
+        if variadic {
+            assert!(
+                args.len() >= nparams,
+                "arity: expected at least {nparams}, got {}",
+                args.len()
+            );
+            slots.extend_from_slice(&args[..nparams]);
+            let restlist = self.vec_to_list(&args[nparams..]);
+            slots.push(restlist);
+        } else {
+            assert!(
+                args.len() == nparams,
+                "arity: expected {nparams}, got {}",
+                args.len()
+            );
+            slots.extend_from_slice(args);
+        }
+        Some(Rc::new(Frame { slots, parent: env }))
     }
 
-    pub fn eval_str(&mut self, src: &str) -> u64 {
+    // ── top-level eval ──────────────────────────────────────
+    pub fn eval_top(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> u64 {
+        let ir = self.analyze(cs, form);
+        cs.eval_ir(cs, self, &ir, &None)
+    }
+
+    pub fn eval_str(&mut self, cs: &dyn CodeSpace<M>, src: &str) -> u64 {
         let forms = self.read_all(src);
         let mut last = self.enc_nil();
         for f in forms {
-            last = self.eval_top(f);
+            last = self.eval_top(cs, f);
         }
         last
     }

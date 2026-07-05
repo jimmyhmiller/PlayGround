@@ -30,6 +30,7 @@
 (import "selfhost/src/expander.coil" :use *)
 (import "selfhost/src/codegen_a64.coil" :use *)
 (import "selfhost/src/driver.coil" :use *)
+(import "selfhost/src/cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
 
 ; ---- hard-error stubs for the (excluded) LLVM backend ----
 ; This build has no LLVM backend; these fail loudly rather than silently no-op, so
@@ -50,9 +51,13 @@
 
 ; default-backend = 2 (arm64): a bare `build` uses the native backend; there is no
 ; LLVM backend to fall back to.
+(defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (ci/cimport-cli a argc argv 2))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (driver-main argc argv
                (fnptr-of no-llvm-build)
                (fnptr-of no-llvm-emitir)
                (fnptr-of no-normalize)
+               (fnptr-of do-cimport)
                2))

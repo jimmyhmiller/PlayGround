@@ -15,23 +15,34 @@
 ; Run standalone via the self-hosted compiler:
 ;   coil build selfhost/src/cimport.coil -o /tmp/cimport <llvm-link-flags>
 ;   /tmp/cimport <header.h>          # bindings printed to stdout
-(module app)
-(import "lib/alloc.coil"     :use *)
-(import "lib/result.coil"    :use *)
-(import "lib/slice.coil"     :use *)
-(import "lib/str.coil"       :use *)
-(import "lib/arraylist.coil" :use *)
-(import "lib/hashmap.coil"   :use *)
-(import "lib/control.coil"   :use *)
-(import "lib/match.coil"     :use *)
+; A `(module cimport)` so it can be imported into the self-hosted compiler `:as ci`
+; (its internal names stay module-local; only cimport-cli/cimport-header are called).
+; `selfhost/src/cimport_main.coil` wraps it as a standalone `main` for the gate.
+(module cimport)
+; Bundled stdlib module names (bare), matching the compiler's own imports, so when
+; this module is pulled into the compiler they share ONE module identity (no dual
+; lib/alloc-vs-alloc `Allocator` type).
+(import "alloc.coil"     :use *)
+(import "result.coil"    :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil"   :use *)
+(import "control.coil"   :use *)
+(import "match.coil"     :use *)
 
-; ---- externs (libc: subprocess + file IO + stdout) -------------------------
+; ---- externs (libc: subprocess + file IO + stdout). Externs are global C symbols
+; (not namespaced); these signatures MATCH the compiler's ffi.coil/io.coil so the
+; duplicate declarations coincide harmlessly when imported into the compiler. -----
 (extern system :cc c [(ptr i8)] (-> i32))
 (extern open   :cc c [(ptr i8) i32] (-> i32))
 (extern read   :cc c [i64 (ptr i8) i64] (-> i64))
 (extern close  :cc c [i32] (-> i32))
 (extern write  :cc c [i64 (ptr i8) i64] (-> i64))
 (extern getpid :cc c [] (-> i32))
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
 
 ; ============================ small helpers =================================
 
@@ -66,6 +77,13 @@
   (write 1 (cast (ptr i8) (slice-data [u8] s)) (slice-len [u8] s)) 0)
 (defn ewrite [(s (slice u8))] (-> i64)
   (write 2 (cast (ptr i8) (slice-data [u8] s)) (slice-len [u8] s)) 0)
+
+; Write a slice to a file (truncating). Returns 0 on success, -1 on open failure.
+(defn write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
+  (let [f (fopen (s->cstr a path) (s->cstr a "w"))]
+    (if (icmp-eq (cast i64 f) 0) -1
+      (do (fwrite (cast (ptr i8) (slice-data [u8] content)) 1 (slice-len [u8] content) f)
+          (fclose f) 0))))
 
 ; str-concat is fallible only on OOM; unwrap to the left operand as a fallback.
 (defn cat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
@@ -867,14 +885,29 @@
           (if (icmp-gt cx cy) (do (store! r 1) (break)) (store! i (iadd (load i) 1)))))))
     (if (icmp-ne (load r) 0) (load r) (if (icmp-lt nx ny) -1 (if (icmp-gt nx ny) 1 0)))))
 
-(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
-  (if (icmp-lt (cast i64 argc) 2)
-      (do (ewrite "usage: cimport <header.h>\n") 1)
-    (let [a (malloc-allocator)
-          header (cstr->slice (load (index argv 1)))]
-      (match (cimport-header a header)
-        (Ok [body] (do (emit body) 0))
-        (Err [e] (do (ewrite (cat3 a "error: " e "\n")) 1))))))
+; Generate bindings for `header` → write to `out` file (Some) or stdout (None).
+(defn cimport-run [(a (ptr Allocator)) (header (slice u8)) (out (Option (slice u8)))] (-> i64)
+  (match (cimport-header a header)
+    (Err [e] (do (ewrite (cat3 a "error: " e "\n")) 1))
+    (Ok [body]
+      (match out
+        (None [] (do (emit body) 0))
+        (Some [o] (do (write-file a o body) (emit (cat3 a "wrote " o "\n")) 0))))))
+
+; CLI entry shared by the standalone tool (base=1: `cimport <hdr>`) and the
+; compiler subcommand (base=2: `coil cimport <hdr>`). Parses the header at
+; argv[base] plus an optional `-o <out>`.
+(defn cimport-cli [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8))) (base i64)] (-> i64)
+  (if (icmp-lt (cast i64 argc) (iadd base 1))
+      (do (ewrite "usage: cimport <header.h> [-o out.coil]\n") 1)
+    (let [header (cstr->slice (load (index argv base)))
+          (mut out) (None [(slice u8)]) (mut i) (iadd base 1)]
+      (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+        (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc))
+                     (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
+                (do (store! out (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
+              (do (store! i (iadd (load i) 1)) 0)))))
+      (cimport-run a header (load out)))))
 
 ; strlen-scan a C string into a slice.
 (defn cstr->slice [(p (ptr i8))] (-> (slice u8))

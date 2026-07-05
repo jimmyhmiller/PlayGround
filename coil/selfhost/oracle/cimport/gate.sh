@@ -22,7 +22,7 @@ command -v clang >/dev/null 2>&1 || { echo "SKIP: clang not found"; exit 0; }
 [ -x "$RUST" ] || { echo "no rust coil (cargo build): $RUST"; exit 2; }
 
 echo "=== building selfhost/src/cimport.coil with $SELF ==="
-"$SELF" build selfhost/src/cimport.coil -o "$TMP/cimport" "${LF[@]}" || { echo "BUILD FAILED"; exit 1; }
+"$SELF" build selfhost/src/cimport_main.coil -o "$TMP/cimport" "${LF[@]}" || { echo "BUILD FAILED"; exit 1; }
 
 # Corpus mirrors tests/cimport.rs (functions, scalars, structs, unions, typedefs,
 # enums, object-like #defines, and the red-team refusals).
@@ -43,7 +43,7 @@ pass=0; fail=0
 check() {
   local name="$1" hdr="$2"
   "$RUST" cimport "$hdr" -o "$TMP/$name.rust" 2>/dev/null
-  "$TMP/cimport" "$hdr" > "$TMP/$name.coil" 2>/dev/null
+  "$TMP/cimport" "$hdr" -o "$TMP/$name.coil" >/dev/null 2>/dev/null
   if diff -q "$TMP/$name.rust" "$TMP/$name.coil" >/dev/null; then
     echo "  PASS  $name"; pass=$((pass+1))
   else

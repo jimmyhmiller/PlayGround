@@ -31,8 +31,12 @@ pub enum Ir {
     Const(u64),
     /// A quoted datum: literal code-as-data.
     Quote(u64),
-    /// Variable reference: resolved lexically first, then via a global Var.
-    Var(Sym),
+    /// Lexical variable, resolved to a slot at analyze time: `up` frames out,
+    /// slot `idx`. No name, no search — a pointer walk plus an index.
+    Local { up: u16, idx: u16 },
+    /// Global variable: resolved through the Var table at RUN time, so a
+    /// reference can precede the definition (late binding).
+    Global(Sym),
     If(Box<Ir>, Box<Ir>, Box<Ir>),
     Do(Vec<Ir>),
     /// `def` / `defmacro`. The `is_macro` flag rides through to the Var.
@@ -41,10 +45,13 @@ pub enum Ir {
         init: Box<Ir>,
         is_macro: bool,
     },
-    Let(Vec<(Sym, Ir)>, Box<Ir>),
+    /// `let*`: binding inits in order (each occupies the next slot of a single
+    /// frame and can see earlier ones), then the body.
+    Let(Vec<Ir>, Box<Ir>),
+    /// A closure: arity only; the body's locals are already slot-resolved.
     Lambda {
-        params: Vec<Sym>,
-        variadic: Option<Sym>,
+        nparams: usize,
+        variadic: bool,
         body: Rc<Ir>,
     },
     Call(Box<Ir>, Vec<Ir>),

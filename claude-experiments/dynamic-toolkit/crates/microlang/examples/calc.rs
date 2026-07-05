@@ -9,15 +9,16 @@
 //! in its authoring layer, so an integer-primary language got the slow column
 //! below no matter what.
 
-use microlang::{LowBitModel, NanBoxModel, Runtime, Val, ValueModel};
+use microlang::{LowBitModel, NanBoxModel, Runtime, TreeWalk, Val, ValueModel};
 
 fn run<M: ValueModel>(label: &str, src: &str) {
     let mut rt = Runtime::<M>::new();
+    let cs = TreeWalk;
     let forms = rt.read_all(src);
     let before = rt.allocs;
     let mut res = rt.encode(Val::Nil);
     for f in forms {
-        res = rt.eval_top(f);
+        res = rt.eval_top(&cs, f);
     }
     println!(
         "  [{label:6}] {src:<28} => {:<6}  ({} heap allocs during eval)",

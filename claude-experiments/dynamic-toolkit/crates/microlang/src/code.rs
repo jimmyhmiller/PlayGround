@@ -1,64 +1,76 @@
 //! The execution axis: `CodeSpace`.
 //!
-//! `CodeSpace` is the seam that decouples *what your language means* (the `Ir`
-//! it consumes) from *how it runs*. `TreeWalk` below is the interpreter tier:
-//! it exists from form zero, needs no compiler backend, and is what boots a
-//! bootstrapping language (you must be able to run macros while still
-//! compiling). A JIT tier would be a second `impl CodeSpace` over the same
-//! `Ir`, with the SAME `invoke` contract — the crucial hard part being that
-//! its `define`/`invoke` must be incremental and support calling functions not
-//! yet defined (late binding through Vars). Nothing above this trait changes
-//! when you swap tiers.
+//! `CodeSpace` decouples *what your language means* (the `Ir` it consumes) from
+//! *how it runs*. Two design choices make backends genuinely composable, not
+//! just swappable:
 //!
-//! `invoke` is deliberately re-entrant: `Runtime::macroexpand` calls it in the
-//! middle of `analyze`. In a tree-walker that is just a recursive Rust call;
-//! in a JIT it is "enter native code, which may re-enter the compiler." Both
-//! satisfy one contract.
+//!   1. The backend is a **value you pass**, not a type parameter baked into
+//!      `Runtime`. `Runtime<M>` has no backend in its type, so one runtime can
+//!      be handed to different backends, and a wrapping backend can hold
+//!      another as a `Box<dyn CodeSpace<M>>`. Under the old `Runtime<M, C>`
+//!      design that did not typecheck.
+//!
+//!   2. **Open recursion.** Every method also receives `top`, the OUTERMOST
+//!      backend, and recurses through `top` rather than `self`. Without this a
+//!      wrapper only sees the calls `Runtime` initiates; the inner backend's
+//!      own nested calls bypass it. Threading `top` makes composition total —
+//!      `Traced` below counts *every* call, including ones made deep inside
+//!      `eval_ir`. This is the fixpoint that stops "almost composes" from
+//!      rotting into a hardcode.
+//!
+//! `TreeWalk` is the interpreter tier: it exists from form zero and boots a
+//! bootstrapping language. A JIT tier is another `impl` over the same `Ir` and
+//! the same re-entrant contract; mutable JIT state lives behind interior
+//! mutability so `&self` still holds.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::ir::Ir;
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_lookup, Frame, Locals, Obj, Val};
+use crate::value::{frame_get, Frame, Locals, Obj, Val};
 
-pub trait CodeSpace<M: ValueModel>: Sized {
-    /// Evaluate one IR node under a lexical frame.
-    fn eval_ir(rt: &mut Runtime<M, Self>, ir: &Ir, locals: &Locals) -> u64;
+pub trait CodeSpace<M: ValueModel> {
+    /// Evaluate one IR node. `top` is the outermost backend to recurse through.
+    fn eval_ir(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, ir: &Ir, locals: &Locals)
+        -> u64;
 
-    /// Call a callable value with already-evaluated (or, for macros,
-    /// unevaluated) argument bits. Re-entrant.
-    fn invoke(rt: &mut Runtime<M, Self>, callee: u64, args: &[u64]) -> u64;
+    /// Call a callable value. For macros the args are unevaluated forms.
+    /// Re-entrant: `Runtime::macroexpand` calls this mid-compilation.
+    fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64;
 }
 
 /// The interpreter tier.
 pub struct TreeWalk;
 
 impl<M: ValueModel> CodeSpace<M> for TreeWalk {
-    fn eval_ir(rt: &mut Runtime<M, Self>, ir: &Ir, locals: &Locals) -> u64 {
+    fn eval_ir(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        ir: &Ir,
+        locals: &Locals,
+    ) -> u64 {
         match ir {
             Ir::Const(b) | Ir::Quote(b) => *b,
-            Ir::Var(s) => {
-                if let Some(v) = frame_lookup(locals, *s) {
-                    return v;
-                }
-                match rt.globals.get(s) {
-                    Some(v) => v.val,
-                    None => panic!("Unable to resolve symbol: {}", rt.sym_name(*s)),
-                }
-            }
+            Ir::Local { up, idx } => frame_get(locals, *up, *idx),
+            Ir::Global(s) => match rt.globals.get(s) {
+                Some(v) => v.val,
+                None => panic!("Unable to resolve symbol: {}", rt.sym_name(*s)),
+            },
             Ir::If(c, t, e) => {
-                let cv = Self::eval_ir(rt, c, locals);
+                let cv = top.eval_ir(top, rt, c, locals);
                 if M::truthy(rt.decode(cv)) {
-                    Self::eval_ir(rt, t, locals)
+                    top.eval_ir(top, rt, t, locals)
                 } else {
-                    Self::eval_ir(rt, e, locals)
+                    top.eval_ir(top, rt, e, locals)
                 }
             }
             Ir::Do(xs) => {
                 let mut r = rt.encode(Val::Nil);
                 for x in xs {
-                    r = Self::eval_ir(rt, x, locals);
+                    r = top.eval_ir(top, rt, x, locals);
                 }
                 r
             }
@@ -67,7 +79,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 init,
                 is_macro,
             } => {
-                let v = Self::eval_ir(rt, init, locals);
+                let v = top.eval_ir(top, rt, init, locals);
                 rt.globals.insert(
                     *name,
                     Var {
@@ -77,26 +89,31 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 );
                 rt.encode(Val::Sym(*name))
             }
-            Ir::Let(binds, body) => {
-                let mut vars: Vec<(u32, u64)> = Vec::new();
-                let mut cur: Locals = locals.clone();
-                for (s, iexpr) in binds {
-                    let v = Self::eval_ir(rt, iexpr, &cur);
-                    vars.push((*s, v));
+            Ir::Let(inits, body) => {
+                // The let is one pushed frame (matching `analyze`), so even the
+                // first init evaluates with the let frame already innermost.
+                let mut slots: Vec<u64> = Vec::new();
+                let mut cur: Locals = Some(Rc::new(Frame {
+                    slots: Vec::new(),
+                    parent: locals.clone(),
+                }));
+                for iexpr in inits {
+                    let v = top.eval_ir(top, rt, iexpr, &cur);
+                    slots.push(v);
                     cur = Some(Rc::new(Frame {
-                        vars: vars.clone(),
+                        slots: slots.clone(),
                         parent: locals.clone(),
                     }));
                 }
-                Self::eval_ir(rt, body, &cur)
+                top.eval_ir(top, rt, body, &cur)
             }
             Ir::Lambda {
-                params,
+                nparams,
                 variadic,
                 body,
             } => {
                 let id = rt.alloc(Obj::Closure {
-                    params: params.clone(),
+                    nparams: *nparams,
                     variadic: *variadic,
                     body: body.clone(),
                     env: locals.clone(),
@@ -104,59 +121,88 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 M::R::enc_ref(id)
             }
             Ir::Call(f, args) => {
-                let fv = Self::eval_ir(rt, f, locals);
-                let argv: Vec<u64> = args.iter().map(|a| Self::eval_ir(rt, a, locals)).collect();
-                Self::invoke(rt, fv, &argv)
+                let fv = top.eval_ir(top, rt, f, locals);
+                let argv: Vec<u64> = args
+                    .iter()
+                    .map(|a| top.eval_ir(top, rt, a, locals))
+                    .collect();
+                top.invoke(top, rt, fv, &argv)
             }
             Ir::Prim(op, args) => {
-                let argv: Vec<u64> = args.iter().map(|a| Self::eval_ir(rt, a, locals)).collect();
+                let argv: Vec<u64> = args
+                    .iter()
+                    .map(|a| top.eval_ir(top, rt, a, locals))
+                    .collect();
                 rt.prim(*op, &argv)
             }
         }
     }
 
-    fn invoke(rt: &mut Runtime<M, Self>, callee: u64, args: &[u64]) -> u64 {
+    fn invoke(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        callee: u64,
+        args: &[u64],
+    ) -> u64 {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (params, variadic, body, env) = match &rt.heap[id as usize] {
+        let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
             Obj::Closure {
-                params,
+                nparams,
                 variadic,
                 body,
                 env,
-            } => (params.clone(), *variadic, body.clone(), env.clone()),
+            } => (*nparams, *variadic, body.clone(), env.clone()),
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
+        let frame = rt.build_call_frame(nparams, variadic, args, env);
+        top.eval_ir(top, rt, &body, &frame)
+    }
+}
 
-        let mut vars: Vec<(u32, u64)> = Vec::new();
-        match variadic {
-            Some(rest) => {
-                assert!(
-                    args.len() >= params.len(),
-                    "arity: expected at least {}, got {}",
-                    params.len(),
-                    args.len()
-                );
-                for (i, p) in params.iter().enumerate() {
-                    vars.push((*p, args[i]));
-                }
-                let restlist = rt.vec_to_list(&args[params.len()..]);
-                vars.push((rest, restlist));
-            }
-            None => {
-                assert!(
-                    args.len() == params.len(),
-                    "arity: expected {}, got {}",
-                    params.len(),
-                    args.len()
-                );
-                for (i, p) in params.iter().enumerate() {
-                    vars.push((*p, args[i]));
-                }
-            }
+/// A wrapping backend: instruments any inner `CodeSpace` and delegates. Because
+/// it passes `top` (itself) down, the inner backend recurses back through it,
+/// so it observes EVERY call — runtime and macro-expansion, top-level and
+/// deeply nested. That totality is the proof the seam composes.
+pub struct Traced<M: ValueModel> {
+    inner: Box<dyn CodeSpace<M>>,
+    invokes: Cell<u64>,
+}
+
+impl<M: ValueModel> Traced<M> {
+    pub fn new(inner: impl CodeSpace<M> + 'static) -> Self {
+        Traced {
+            inner: Box::new(inner),
+            invokes: Cell::new(0),
         }
-        let frame = Some(Rc::new(Frame { vars, parent: env }));
-        Self::eval_ir(rt, &body, &frame)
+    }
+    /// How many calls (runtime + macro-expansion, at every depth) flowed
+    /// through the wrapper.
+    pub fn invoke_count(&self) -> u64 {
+        self.invokes.get()
+    }
+}
+
+impl<M: ValueModel> CodeSpace<M> for Traced<M> {
+    fn eval_ir(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        ir: &Ir,
+        locals: &Locals,
+    ) -> u64 {
+        self.inner.eval_ir(top, rt, ir, locals)
+    }
+    fn invoke(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        callee: u64,
+        args: &[u64],
+    ) -> u64 {
+        self.invokes.set(self.invokes.get() + 1);
+        self.inner.invoke(top, rt, callee, args)
     }
 }

@@ -32,6 +32,7 @@
 (import "selfhost/src/expander.coil" :use *)
 (import "selfhost/src/codegen_a64.coil" :use *)
 (import "selfhost/src/driver.coil" :use *)
+(import "selfhost/src/cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
 
 ; ---- LLVM backend entry points (the only libLLVM-dependent code) ----
 
@@ -90,9 +91,13 @@
 ; Inject the LLVM backend entry points into the shared driver as function pointers.
 ; default-backend = 1 (LLVM) — a bare `build` uses the LLVM backend, `--backend arm64`
 ; switches to the native backend.
+(defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (ci/cimport-cli a argc argv 2))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (driver-main argc argv
                (fnptr-of build-ir-program)
                (fnptr-of dump-ir-program)
                (fnptr-of do-normalize)
+               (fnptr-of do-cimport)
                1))
