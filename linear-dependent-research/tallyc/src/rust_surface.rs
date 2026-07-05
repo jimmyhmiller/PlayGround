@@ -1190,6 +1190,22 @@ impl Elab {
     }
 
     /// Resolve a name applied to elaborated args (no implicit solving).
+    /// Would applying a first-class function VALUE of type `vty` to `nargs`
+    /// arguments leave a `Π` result — a PARTIAL application, or one that returns a
+    /// function? The native backend has no currying and cannot form such a
+    /// closure, so this is a codegen-soundness gate (see the `elab_tm` call site).
+    /// `level` is the context depth, for the fresh vars that peel dependent codomains.
+    fn value_app_is_partial(&self, vty: &Value, nargs: usize, level: usize) -> bool {
+        let mut t = vty.clone();
+        for i in 0..nargs {
+            match t {
+                Value::VPi(_, _, cod) => t = cod.apply(dep::nvar(level + i)),
+                _ => return false, // over-applied — the kernel/other paths handle it
+            }
+        }
+        matches!(t, Value::VPi(_, _, _))
+    }
+
     fn resolve(&self, name: &str, args: Vec<Term>, scope: &[String], prefer_ctor: bool) -> Result<Term, String> {
         // `%builtin Nat` types alias the kernel's packed `Nat`: the type name → the
         // `Nat` type, its nullary ctor → `Zero`, its successor ctor → `Suc`.
@@ -1551,6 +1567,23 @@ impl Elab {
                         return self.ih_for(r, args, cx);
                     }
                 }
+                // SOUNDNESS: a first-class function VALUE (a local binder of function
+                // type) applied so that the RESULT is still a `Π` — a partial
+                // application, or one that returns a function — cannot be lowered:
+                // the native backend has no currying, so it would emit an indirect
+                // call with the wrong arity (a wild call / memory fault), and codegen
+                // is trusted (not kernel-re-checked). Reject it. Saturated and
+                // over-applied calls fall through unchanged.
+                if let Some(vty) = cx.var_type(name) {
+                    if !args.is_empty() && self.value_app_is_partial(&vty, args.len(), cx.len()) {
+                        return Err(format!(
+                            "partial application of the first-class function `{name}`: it \
+                             is applied to fewer arguments than its type takes (or returns \
+                             a function), which the native backend cannot form. Apply it \
+                             to all its arguments, or build an explicit closure."
+                        ));
+                    }
+                }
                 // A LOCAL BINDER shadows a global def of the same name — an
                 // ordinary parameter `f` must win over a top-level `f`. Both the
                 // implicit-solver and known-Π-telescope branches below resolve
@@ -1724,6 +1757,19 @@ impl Elab {
                     let arg_v = self.eval(cx.len(), &arg_tm);
                     head = Term::App(Box::new(head), Box::new(arg_tm));
                     head_ty = cod.apply(arg_v);
+                }
+                // SOUNDNESS: a first-class function VALUE applied to FEWER arguments
+                // than its arity (result still a `Π`) is a PARTIAL application. The
+                // native backend has no currying — it would emit an indirect call
+                // with the wrong number of arguments (a wild call / memory fault),
+                // and codegen is trusted (not re-checked). Reject it here.
+                if matches!(head_ty, Value::VPi(_, _, _)) {
+                    return Err(format!(
+                        "partial application of the first-class function `{name}`: it is \
+                         applied to fewer arguments than its type takes, which would need \
+                         currying / a closure the native backend cannot form. Apply it to \
+                         all its arguments, or build an explicit closure."
+                    ));
                 }
                 Ok((head, head_ty))
             }
