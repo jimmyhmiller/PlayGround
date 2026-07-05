@@ -1342,6 +1342,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // (the kernel admits no equality axioms), so path induction ERASES
             // to its base case — the motive and the proof cost nothing.
             Term::J(_, b, _) => self.compile_v(f, env, b),
+            // A closed FUNCTION used as a VALUE (not applied): materialise it and
+            // take its code address. Recognised HERE, before the annotation is
+            // stripped, because the Π type is what gives the parameter widths; a
+            // `%partial` `Fix` or a plain `λ` both qualify. This is the
+            // first-class-function primitive (P1) — the thing that lets `addK`
+            // flow into a closure's `code` field or a `map` callback.
+            Term::Ann(e, ty)
+                if matches!(strip_ann(e), Term::Lam(_) | Term::Fix(_, _))
+                    && matches!(strip_ann(ty), Term::Pi(_, _, _)) =>
+            {
+                self.fn_value(ty, e)
+            }
             Term::Ann(e, _) => self.compile_v(f, env, e),
             // CALL-BY-VALUE let: compile `e` ONCE (so its effects — e.g. `free` — run
             // exactly once), bind it, compile the body. (`ty` is 0-erased.)
@@ -1484,6 +1496,20 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     if let Some((func, params, retw)) = hit {
                         return self.compile_call(f, env, func, &params, retw, &args);
                     }
+                    // NONE of the recursion registries matched: `head` is a
+                    // first-class FUNCTION VALUE bound in the environment (a
+                    // closure's `code` field, a callback parameter). Read its
+                    // code pointer and INDIRECT-call it. A well-typed `App` whose
+                    // variable head is not a recursion self can only be a function
+                    // value — applying a non-function does not type-check — so the
+                    // former "application of a non-function" error here is now a
+                    // real first-class call. (P1: the value carries no arity, so a
+                    // PARTIAL application is not yet supported; `flatten_app` has
+                    // already collapsed a curried full application into one spine.)
+                    let fv = self
+                        .read_var(env, *i)?
+                        .as_int("a first-class function value")?;
+                    return self.compile_indirect_call(f, env, fv, &args);
                 }
                 // The head is itself a `Fix`: build (memoized) its function and call.
                 if let Term::Fix(ty, body) = strip_ann(head) {
@@ -5268,6 +5294,120 @@ impl<'c, 'a> DepCg<'c, 'a> {
             self.builder.position_at_end(bb);
         }
         Ok((func, params, ret_width))
+    }
+
+    /// Materialise a NON-recursive closed function (a top-level `fn` used as a
+    /// VALUE, not applied) as a real LLVM function whose address can be taken.
+    /// Identical to `build_fix` EXCEPT there is no self-binder: a plain `fn` body
+    /// is elaborated with the parameters alone in scope (only `%partial` recursion
+    /// introduces the `Fix` self slot), so `body_env` starts empty and de Bruijn 0
+    /// is the last parameter. Cached by `key` (the λ node's address).
+    fn build_closed_fn(
+        &self,
+        key: *const Term,
+        ty: &Term,
+        body: &Term,
+    ) -> Result<FunctionValue<'c>, String> {
+        let mut params: Vec<Option<u32>> = Vec::new();
+        let mut t_ty = strip_ann(ty);
+        let mut t_body = strip_ann(body);
+        while let (Term::Lam(inner), Term::Pi(m, d, cod)) = (t_body, t_ty) {
+            params.push(if *m == Mult::Zero { None } else { Some(type_width(self.sig, d)) });
+            t_body = strip_ann(inner);
+            t_ty = strip_ann(cod);
+        }
+        let inner = t_body;
+        let ret_width = type_width(self.sig, t_ty);
+        if ret_width != 1 {
+            return Err(
+                "a first-class function value with a multi-word return is not yet \
+                 lowered (P1 supports a scalar/pointer result); return a boxed or \
+                 scalar value, or apply the function directly".into(),
+            );
+        }
+        if let Some(&func) = self.fix_cache.borrow().get(&key) {
+            return Ok(func);
+        }
+        let n_scalar: u32 = params.iter().filter_map(|p| *p).sum();
+        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            std::iter::repeat(self.i64t.into()).take(n_scalar as usize).collect();
+        let fname = self.fresh("tally_fnval");
+        let func = self.module.add_function(&fname, self.i64t.fn_type(&param_tys, false), None);
+        self.fix_cache.borrow_mut().insert(key, func);
+
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        let mut body_env: Vec<Slot<'c>> = Vec::new();
+        let mut rt = 0u32;
+        for pw in &params {
+            match pw {
+                None => body_env.push(None),
+                Some(1) => {
+                    body_env
+                        .push(Some(Val::Int(func.get_nth_param(rt).unwrap().into_int_value())));
+                    rt += 1;
+                }
+                Some(w) => {
+                    let comps: Vec<IntValue<'c>> = (0..*w)
+                        .map(|k| func.get_nth_param(rt + k).unwrap().into_int_value())
+                        .collect();
+                    body_env.push(Some(Val::Agg(comps)));
+                    rt += *w;
+                }
+            }
+        }
+        let result = self.compile_tail(func, &body_env, inner, 1, None);
+        result?;
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        Ok(func)
+    }
+
+    /// The runtime VALUE of a closed function `Ann(λ…, Π…)` / `Ann(Fix…, Π…)`: its
+    /// code address as an `i64`. THE first-class-function primitive — a function
+    /// held as a value (a closure's `code` field, a callback argument), applied
+    /// later by `compile_indirect_call`.
+    fn fn_value(&self, ty: &Term, body: &Term) -> Result<Val<'c>, String> {
+        let func = match strip_ann(body) {
+            fx @ Term::Fix(fty, fbody) => self.build_fix(fx, fty, fbody)?.0,
+            lam => self.build_closed_fn(lam as *const Term, ty, lam)?,
+        };
+        let p = func.as_global_value().as_pointer_value();
+        Ok(Val::Int(self.builder.build_ptr_to_int(p, self.i64t, "fnval").unwrap()))
+    }
+
+    /// Apply a first-class FUNCTION VALUE (an `i64` code pointer) to runtime
+    /// arguments: flatten each argument to its `i64` components (the same by-value
+    /// flattening `build_fix`/`build_closed_fn` use for parameters) and emit an
+    /// INDIRECT call. Signature `i64 (i64 × N)` where N is the total component
+    /// count — fixed by the arguments, and equal to the callee's flattened
+    /// parameter count for a well-typed full application.
+    fn compile_indirect_call(
+        &self,
+        f: FunctionValue<'c>,
+        env: &[Slot<'c>],
+        fnptr: IntValue<'c>,
+        args: &[&Term],
+    ) -> Result<Val<'c>, String> {
+        let mut metas: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for a in args {
+            for c in self.compile_v(f, env, a)?.components() {
+                metas.push(c.into());
+            }
+        }
+        let fn_ty = self
+            .i64t
+            .fn_type(&vec![self.i64t.into(); metas.len()], false);
+        let fp = self.builder.build_int_to_ptr(fnptr, self.ptr, "fnval.p").unwrap();
+        let call = self
+            .builder
+            .build_indirect_call(fn_ty, fp, &metas, "indirect")
+            .unwrap();
+        Ok(Val::Int(
+            call.try_as_basic_value().left().unwrap().into_int_value(),
+        ))
     }
 
     /// Compile a function-typed-motive `NatElim` applied to its accumulators (Phase
