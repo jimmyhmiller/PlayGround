@@ -1,0 +1,37 @@
+// ZERO-COST HIGHER-ORDER (P4) — a first-class function passed to a higher-order
+// fold runs at HAND-WRITTEN-C SPEED. The callback `f` is a runtime function
+// VALUE (not a special form); P4 specialises the recursion to it, inlining the
+// callback into the loop with NO indirect call and NO function-value pointer
+// (`tally ir examples/hof_bench.tal` shows `%indirect = call` count 0).
+//
+//   tally build examples/hof_bench.tal -o /tmp/hb -O2
+//   echo d | /tmp/hb            # a run count from stdin, so the loop is NOT
+//                               # constant-folded away
+//
+// Compare bench/hof_bench.c (the same polynomial XOR-fold, by hand).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// the kernel: a degree-3 polynomial 7k³ + 5k² + 3k + 11, an ORDINARY function…
+poly : Nat -> Nat
+fn poly(k) {
+  mul(7, mul(k, mul(k, k))) + mul(5, mul(k, k)) + mul(3, k) + 11
+}
+
+// …passed by VALUE to a higher-order XOR-fold. `f(k)` is a first-class call;
+// after P4 it is the inlined polynomial, so `xorFold` is a tight arithmetic loop.
+xorFold : (Nat -> Nat) -> Nat -> Nat -> Nat
+%partial
+fn xorFold(f, n, acc) {
+  match n {
+    Zero    => acc,
+    Succ(k) => xorFold(f, k, bxor(acc, f(k))),
+  }
+}
+
+main : Nat
+fn main() {
+  let b = getc(U);                    // a byte from stdin ⇒ a RUNTIME loop count
+  xorFold(poly, mul(b, 1000000), 0)   // XOR-reduce poly(k) over k = count-1 … 0
+}

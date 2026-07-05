@@ -298,6 +298,16 @@ Named so the omission is a decision, not an oversight:
 
 Each phase is usable on its own; P1 alone makes the current stdlib run.
 
+### Validation — C parity
+
+`examples/hof_bench.tal` passes a degree-3 polynomial kernel as a **first-class
+function value** to a `%partial` higher-order XOR-fold, over a stdin-controlled
+(so not constant-folded) run count. `tally ir` shows **0 indirect calls** — P4
+specialises the callback into the loop — and against the hand-written
+`bench/hof_bench.c` (callback inlined by hand): identical output, **tally 0.12s
+vs C 0.12s over 251M iterations** (arm64, `-O2`, best of 5). A higher-order
+function over a first-class function runs at hand-written-C speed.
+
 ## 12. Prior art, mapped to this design's axis (does it *force* a representation, or *offer the family*?)
 
 - **C / Zig** — offer only R5 (fn ptr + explicit context); no closures. Maximally
