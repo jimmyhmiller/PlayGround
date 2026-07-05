@@ -15,6 +15,7 @@
 (import "parser.coil" :use *)
 (import "reader.coil" :use *)
 (import "resolve.coil" :use *)
+(import "cimport.coil" :as ci)   ; the (cimport "h.h") source form generates bindings at load time
 
 (defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
   (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
@@ -428,6 +429,38 @@
                   0)
               0))))))))
 
+; `(cimport "header.h")` — generate C bindings via clang AT LOAD TIME and splice
+; the externs/defstructs/consts into the CURRENT module (dropping the generated
+; `(module cbindings)` header). The seamless, no-CLI-step header import.
+(defn process-cimport [(s (mut LS)) (form (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
+  (let [a (load (field s a))
+        items (l-as-list form) nit (al-len [Sexp] (load items))]
+    (if (icmp-lt nit 2)
+        (ls-set-err! (mut s) (diag-at-form form "cimport: expected (cimport \"header.h\")"))
+      (let [it (alloc-stack Sexp)]
+        (store! it (al-get [Sexp] (load items) 1))
+        (match (l-as-str it)
+          (None [] (ls-set-err! (mut s) (diag-at-form form "cimport: expected a string header path")))
+          (Some [path]
+            (match (ci/cimport-header a path)
+              (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
+              (Ok [text]
+                (let [sid (load (field s srccount))
+                      _1 (store! (field s srccount) (iadd sid 1))
+                      _2 (register-source! (mut s) (sconcat a "<cimport " path) text)]
+                  (match (read-all a text sid)
+                    (Err [d] (ls-set-err! (mut s) (diag-at-form form "cimport: generated bindings failed to parse")))
+                    (Ok [gforms]
+                      (let [(mut k) 0 gn (al-len [Sexp] (load gforms))]
+                        (loop (if (icmp-ge (load k) gn) (break)
+                          (do (let [gf (alloc-stack Sexp)]
+                                (store! gf (al-get [Sexp] (load gforms) (load k)))
+                                (match (l-list-head gf)
+                                  (Some [gh] (if (str-eq gh "module") 0 (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
+                                  (None []    (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
+                              (store! k (iadd (load k) 1)))))
+                        0))))))))))))
+
 (defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
   (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
     (store! cur cur0)
@@ -446,7 +479,9 @@
                         (match (load cur)
                           (Some [m] (process-import (mut s) f base (load cur)))
                           (None []  (ls-set-err! (mut s) (diag-at-form f "import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved"))))
-                      (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))))
+                      (if (str-eq h "cimport")
+                          (process-cimport (mut s) f (load cur))
+                        (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))))
               (None []
                 (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))
           (store! i (iadd (load i) 1)))))
