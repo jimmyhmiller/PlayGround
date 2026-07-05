@@ -6344,6 +6344,27 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
     }
 
     #[test]
+    fn eliminator_scrutinee_reference_refined_runs_natively() {
+        // REGRESSION: a recursive FOLD whose arm body references the SCRUTINEE
+        // directly read the ORIGINAL top-level value at every fold level — the
+        // eliminator method binds only the predecessor `k`, so `n` resolved to the
+        // outer parameter (constant across the fold). `f n = n + f (n-1)` summed
+        // the outer `n` (`f 3 = 3+3+3 = 9`) instead of `3+2+1 = 6`; the accumulator
+        // `gauss(10,0)` gave 4, not 55. Fix: the arm body refines the scrutinee to
+        // `Zero` / `Succ k`. (Non-recursive `NatCase` needs no refinement.)
+        let structural = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            add : Nat -> Nat -> Nat\nfn add(a,b){ match a { Zero => b, Succ(k) => Succ(add(k,b)) } }\n\
+            f : Nat -> Nat\nfn f(n){ match n { Zero => Zero, Succ(k) => add(n, f(k)) } }\n\
+            main : Nat\nfn main(){ f(3) }\n";
+        assert_eq!(run(structural), 6, "structural fold referencing the scrutinee: f(3) = 3+2+1");
+        let accumulator = "%builtin Nat Nat\nenum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            gauss : Nat -> Nat -> Nat\n\
+            fn gauss(n, acc){ match n { Zero => acc, Succ(k) => gauss(k, acc + n) } }\n\
+            main : Nat\nfn main(){ gauss(10, 0) }\n";
+        assert_eq!(run(accumulator), 55, "accumulator fold referencing the scrutinee: gauss(10,0) = 55");
+    }
+
+    #[test]
     fn differentiator_demo_owned_linked_list_runs_natively() {
         // THE DIFFERENTIATOR DEMO — the first safe manual-memory linked structure in
         // surface Tally. A 2-node OWNED linked list `[1, 2]` (`struct Node { head : Nat,

@@ -4794,9 +4794,11 @@ impl Elab {
             dep::eval_rc(&self.rc, &env, &ret_term)
         };
 
-        // zero method : P Zero
+        let scrut_idx = Self::debruijn(full_params, scrut).unwrap();
+        // zero method : P Zero — the scrutinee is `Zero` here.
         let z_expected = p_at(Value::VNatLit(0));
         let z_method = self.check(&zero_arm.body, &z_expected, fn_cx, None)?;
+        let z_method = refine_scrut_zero(&z_method, scrut_idx);
 
         // succ method : λk. λih. body  with body : P (Suc k), ih : P k
         let k_val = dep::nvar(n); // the predecessor, a fresh neutral at level n
@@ -4811,9 +4813,10 @@ impl Elab {
         fields.insert(pred_name, ih_name);
         let r = Rec { fnname, scrut_pos: explicit_pos, fields: &fields, acc_tys: None, result_ty: p_at(Value::VNeu(dep::Neutral::NVar(succ_cx.len()))) , fold: None };
         let body = self.check(&succ_arm.body, &s_expected, &succ_cx, Some(&r))?;
+        // the scrutinee equals `Succ k` in this arm; `pred` sits at de Bruijn 1
+        // (`ih` at 0), and the scrutinee at `scrut_idx + 2` (both pushed).
+        let body = refine_scrut_succ(&body, scrut_idx + 2, 1);
         let s_method = Term::Lam(Box::new(Term::Lam(Box::new(body))));
-
-        let scrut_idx = Self::debruijn(full_params, scrut).unwrap();
         Ok(Term::NatElim(
             Box::new(motive),
             Box::new(z_method),
@@ -4975,7 +4978,11 @@ impl Elab {
         for (an, av) in acc_names.iter().zip(&acc_ty_vals) {
             z_cx.push(an.clone(), av.clone());
         }
+        let scrut_db = fn_cx.debruijn(scrut).expect("scrutinee param in scope");
         let mut z_method = self.check(&zero_arm.body, &r_val, &z_cx, None)?;
+        // scrutinee = `Zero` here; it sits at `scrut_db + k` (the `k` accumulators
+        // were pushed atop the fn params).
+        z_method = refine_scrut_zero(&z_method, scrut_db + k);
         for _ in 0..k {
             z_method = Term::Lam(Box::new(z_method));
         }
@@ -4993,6 +5000,9 @@ impl Elab {
         fields.insert(pred_name, ih_name);
         let r = Rec { fnname, scrut_pos: full_pos, fields: &fields, acc_tys: Some(&acc_ty_vals), result_ty: r_val.clone() , fold: None };
         let mut s_method = self.check(&succ_arm.body, &r_val, &succ_cx, Some(&r))?;
+        // scrutinee = `Succ pred` here. succ_cx = [fn params…, pred, ih, a₁…a_K], so
+        // `pred` is at de Bruijn `k + 1` and the scrutinee at `scrut_db + k + 2`.
+        s_method = refine_scrut_succ(&s_method, scrut_db + k + 2, k + 1);
         for _ in 0..k {
             s_method = Term::Lam(Box::new(s_method)); // a_K … a₁
         }
@@ -5598,6 +5608,35 @@ fn rebind_linear_fields(
 
 fn collect_all_calls(t: &Tm, out: &mut Vec<TCall>) {
     collect_calls_wf(t, &HashMap::new(), &[], out)
+}
+
+/// In an eliminator METHOD body the scrutinee variable has been CONSUMED by the
+/// fold, so it no longer tracks the current value — a reference to it must be
+/// replaced by the value reconstructed for this arm (`Zero` in the zero method,
+/// `Succ pred` in the successor method). Without this, a body that mentions the
+/// scrutinee reads the ORIGINAL (top-level) value at every fold level: e.g.
+/// `f n = n + f (n-1)` summed the outer `n` each step (`f 3 = 3+3+3`) instead of
+/// `n, n-1, …` (`3+2+1`). `scrut_db` is the scrutinee's de Bruijn index in the
+/// method body's context; `pred_db` the predecessor's. (Non-recursive `NatCase`
+/// needs no refinement — there is a single level, so the outer variable already
+/// holds the scrutinee's value.)
+fn refine_scrut_zero(body: &Term, scrut_db: usize) -> Term {
+    dep::map_vars(body, 0, &move |i, depth| {
+        if i == scrut_db + depth {
+            Term::Zero
+        } else {
+            Term::Var(i)
+        }
+    })
+}
+fn refine_scrut_succ(body: &Term, scrut_db: usize, pred_db: usize) -> Term {
+    dep::map_vars(body, 0, &move |i, depth| {
+        if i == scrut_db + depth {
+            Term::Suc(Box::new(Term::Var(pred_db + depth)))
+        } else {
+            Term::Var(i)
+        }
+    })
 }
 
 /// Distil a fn body into SIZE-CHANGE calls (see `totality::ScCall`): walk it
