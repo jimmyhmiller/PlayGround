@@ -275,22 +275,25 @@ Named so the omission is a decision, not an oversight:
   by value), and each concrete `code` unboxes it. Linear discipline: the linear
   consumption must be `let`-sequenced (`let v = unbox…; code…`), not nested in the
   call. Region/borrowed variants still to do.
-- **P4 — monomorphisation of HOFs over closures (§5/§8-5). ◐ PARTIAL.**
-  - *`%partial` (`Fix`) HOFs: ✅ zero-cost.* A recursive `Fix` applied to a static
-    function value is specialised via the static-argument transform (reusing PE's
-    `try_specialise_static_param`, with its verbatim-passing soundness check): the
-    callback is substituted in (inlined), the parameter dropped, the recursion tied
-    to a fresh residual `Fix`. Proven with the new `tally ir` command —
-    `applyN(inc, 5, 0)` lowers to a 2-param `tally_fix` with `inc` inlined as
-    `add i64, 1`, **no indirect call, no function-value pointer**. In `dep_codegen`
-    the App-arm `Fix`-head handling tries this first, falling back to the P1
-    indirect path on decline.
-  - *Total (eliminator-based) HOFs — the stdlib `map`/`filter`/`foldr`: ✗ still
-    indirect.* They compile to List **eliminators**, and the callback is captured
-    into the shared eliminator function rather than passed as a `Fix` argument, so
-    the `Fix` transform does not reach them. Specialising them means threading
-    "this captured variable is the static function `dbl`" through `compile_elim`
-    and inlining it — the remaining P4 work.
+- **P4 — monomorphisation of HOFs over closures (§5/§8-5). ✅ DONE (both shapes).**
+  A statically-known function argument is inlined into its recursive HOF — **no
+  indirect call, no function-value pointer** in the hot loop (proven with the new
+  `tally ir`).
+  - *`%partial` (`Fix`) HOFs.* The App-arm `Fix`-head handling specialises via the
+    static-argument transform (PE's `try_specialise_static_param`, verbatim-check):
+    the callback is substituted in, the parameter dropped, the recursion tied to a
+    fresh residual `Fix`. `applyN(inc, 5, 0)` → a 2-param `tally_fix` with `inc`
+    inlined as `add i64, 1`.
+  - *Total (eliminator-based) HOFs — the stdlib `map`/`filter`/`foldr`.* A binder
+    bound to a static function is carried as a `Slot::StaticFn(term, ptr)` in the
+    runtime env (it rides WITH the env, so scoping is automatic and it survives
+    capture into an eliminator helper via `rebind_live`); at an application site the
+    callback is inlined from its term instead of calling the captured pointer.
+    `map`/`filter`/`foldr` chained lower to eliminator loops of pure inlined
+    arithmetic — `add i64` for `dbl`, `add i64` for the fold — with **0 indirect
+    calls**. The materialised code pointer becomes an unused capture that `-O2`
+    deletes. A DYNAMIC closure value (a `code` field, a runtime callback) stays a
+    `Slot::Val` and takes the P1 indirect path, unchanged.
 - **P5 — lambda sugar with named representation (§7), if adopted.**
 
 Each phase is usable on its own; P1 alone makes the current stdlib run.

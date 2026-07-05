@@ -955,10 +955,42 @@ struct ElimFoldIh<'c> {
     ndep: usize,
 }
 
-/// A runtime environment slot: `Some(v)` for a live runtime value, `None` for an
-/// ERASED binder (a multiplicity-0 variable that has no runtime witness). Reading
-/// a `None` is a hard error — the kernel guarantees a checked term never does.
-type Slot<'c> = Option<Val<'c>>;
+/// The payload of a LIVE environment slot.
+#[derive(Clone, Debug)]
+enum SlotVal<'c> {
+    /// an ordinary live runtime value.
+    Val(Val<'c>),
+    /// a binder statically known to be a specific closed FUNCTION: its term (to
+    /// INLINE at application sites — the P4 zero-cost path) plus its materialised
+    /// code pointer (so a value-READ, i.e. passing it on, still works). Arises
+    /// only from inlining a def applied to a static function argument. It rides
+    /// WITH the env, so it is correctly scoped to that function's compilation and
+    /// carried into an eliminator helper (whose inner env preserves positions),
+    /// which is what lets a TOTAL higher-order function (`map`/`filter`/`foldr`)
+    /// inline its callback instead of calling it indirectly.
+    StaticFn(Term, Val<'c>),
+}
+
+impl<'c> SlotVal<'c> {
+    /// the runtime value (the code pointer for a `StaticFn`).
+    fn val(&self) -> &Val<'c> {
+        match self {
+            SlotVal::Val(v) | SlotVal::StaticFn(_, v) => v,
+        }
+    }
+    fn as_int(&self, what: &str) -> Result<IntValue<'c>, String> {
+        self.val().as_int(what)
+    }
+    fn components(&self) -> Vec<IntValue<'c>> {
+        self.val().components()
+    }
+}
+
+/// A runtime environment slot: `None` for an ERASED binder (multiplicity 0, no
+/// runtime witness), `Some(sv)` for a live value (or a statically-known
+/// function). Reading a `None` is a hard error — the kernel guarantees a checked
+/// term never does.
+type Slot<'c> = Option<SlotVal<'c>>;
 
 impl<'c, 'a> DepCg<'c, 'a> {
     /// Require a value to occupy exactly `w` scalar slots. There is NO implicit
@@ -1224,9 +1256,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 .iter()
                 .map(|(off, leaf)| self.load_leaf(p, *off, *leaf))
                 .collect();
-            return Some(self.val_of_comps(comps));
+            return Some(SlotVal::Val(self.val_of_comps(comps)));
         }
-        lay.arg_slot[ai].map(|sl| self.load_field(p, sl, lay.arg_width[ai]))
+        lay.arg_slot[ai].map(|sl| SlotVal::Val(self.load_field(p, sl, lay.arg_width[ai])))
     }
 
     /// Store the constructor discriminant into a fresh cell at offset 0: a
@@ -1277,7 +1309,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .and_then(|n| n.checked_sub(i))
             .ok_or_else(|| format!("unbound runtime variable #{i}"))?;
         match env.get(pos) {
-            Some(Some(v)) => Ok(v.clone()),
+            Some(Some(sv)) => Ok(sv.val().clone()),
             Some(None) => Err(format!(
                 "runtime variable #{i} is ERASED (multiplicity 0): it has no runtime \
                  representation, yet codegen reached it in a value position \
@@ -1285,6 +1317,36 @@ impl<'c, 'a> DepCg<'c, 'a> {
             )),
             None => Err(format!("unbound runtime variable #{i}")),
         }
+    }
+
+    /// Rebind a live OUTER env slot INSIDE an eliminator helper: bind it to the
+    /// helper parameter(s) starting at `*pk` (the width comes from the captured
+    /// value), advancing `*pk`. Crucially it PRESERVES `StaticFn`-ness — a
+    /// captured static callback stays inlinable inside the helper (its term is
+    /// closed, so valid there), which is what makes a TOTAL higher-order function
+    /// specialise: `f(h)` in the eliminator body inlines instead of calling the
+    /// captured code pointer indirectly.
+    fn rebind_live(
+        &self,
+        helper: FunctionValue<'c>,
+        sv: &SlotVal<'c>,
+        pk: &mut u32,
+    ) -> Slot<'c> {
+        let w = sv.val().width();
+        let pv = if w == 1 {
+            Val::Int(helper.get_nth_param(*pk).unwrap().into_int_value())
+        } else {
+            Val::Agg(
+                (0..w)
+                    .map(|k| helper.get_nth_param(*pk + k).unwrap().into_int_value())
+                    .collect(),
+            )
+        };
+        *pk += w;
+        Some(match sv {
+            SlotVal::StaticFn(t, _) => SlotVal::StaticFn(t.clone(), pv),
+            SlotVal::Val(_) => SlotVal::Val(pv),
+        })
     }
 
     /// Compile a term to a SCALAR `i64` — the pre-B2 interface, used everywhere
@@ -1364,7 +1426,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Let(_sigma, _ty, e, body) => {
                 let ev = self.compile_v(f, env, e)?;
                 let mut env2 = env.to_vec();
-                env2.push(Some(ev));
+                env2.push(Some(SlotVal::Val(ev)));
                 self.compile_v(f, &env2, body)
             }
             Term::NatElim(_p, z, s, scrut) => self.compile_fold(f, env, z, s, scrut),
@@ -1510,6 +1572,28 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     // real first-class call. (P1: the value carries no arity, so a
                     // PARTIAL application is not yet supported; `flatten_app` has
                     // already collapsed a curried full application into one spine.)
+                    //
+                    // P4 (total HOFs): if this variable is a `StaticFn` — a binder
+                    // known to be a specific closed function — INLINE it instead:
+                    // compile `App(fn-term, args)`, which re-enters the App arm with
+                    // a λ/Fix head and inlines/specialises it. This is what erases
+                    // the indirect call in `map`/`filter`/`foldr`, whose callback
+                    // was captured (as a `StaticFn`, preserved by `rebind_live`)
+                    // into the eliminator body.
+                    let static_term = {
+                        let pos = env.len().checked_sub(1).and_then(|n| n.checked_sub(*i));
+                        match pos.and_then(|p| env.get(p)) {
+                            Some(Some(SlotVal::StaticFn(t, _))) => Some(t.clone()),
+                            _ => None,
+                        }
+                    };
+                    if let Some(t) = static_term {
+                        let mut out = t;
+                        for a in &args {
+                            out = Term::App(Box::new(out), Box::new((**a).clone()));
+                        }
+                        return self.compile_v(f, env, &out);
+                    }
                     let fv = self
                         .read_var(env, *i)?
                         .as_int("a first-class function value")?;
@@ -1639,7 +1723,21 @@ impl<'c, 'a> DepCg<'c, 'a> {
                                     // flat record stays in registers even through
                                     // generic (inlined) code.
                                     let v = self.compile_v(f, env, a)?;
-                                    env2.push(Some(v));
+                                    // A STATIC function VALUE argument (a top-level
+                                    // `fn` — a λ or `Fix` under its Π annotation) is
+                                    // remembered as a `StaticFn`, so its APPLICATIONS
+                                    // inline (P4) instead of calling the materialised
+                                    // pointer indirectly — and, via `rebind_live`,
+                                    // the inlining survives capture into an
+                                    // eliminator helper, which is what specialises a
+                                    // TOTAL higher-order function (`map`/`filter`/…).
+                                    let at: &Term = a;
+                                    let slot = if matches!(strip_ann(at), Term::Lam(_) | Term::Fix(_, _)) {
+                                        SlotVal::StaticFn(at.clone(), v)
+                                    } else {
+                                        SlotVal::Val(v)
+                                    };
+                                    env2.push(Some(slot));
                                 }
                             }
                             // advance the type's telescope alongside the body.
@@ -1758,10 +1856,10 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .as_int("convoy-fold dep")
             })
             .collect::<Result<_, _>>()?;
-        let live: Vec<(usize, Val<'c>)> =
-            env.iter().enumerate().filter_map(|(i, s)| s.clone().map(|v| (i, v))).collect();
+        let live: Vec<(usize, SlotVal<'c>)> =
+            env.iter().enumerate().filter_map(|(i, s)| s.clone().map(|sv| (i, sv))).collect();
         let live_idx: Vec<usize> = live.iter().map(|(i, _)| *i).collect();
-        let flat_live: usize = live.iter().map(|(_, v)| v.width() as usize).sum();
+        let flat_live: usize = live.iter().map(|(_, sv)| sv.val().width() as usize).sum();
 
         let nparams = 1 + nd + flat_live;
         let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -1776,18 +1874,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // every level-identified reference (markers, captured vars) threads.
         let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
         let mut pk = (1 + nd) as u32;
-        for (i, v) in &live {
-            let w = v.width();
-            if w == 1 {
-                inner_env[*i] =
-                    Some(Val::Int(helper.get_nth_param(pk).unwrap().into_int_value()));
-            } else {
-                let comps: Vec<IntValue<'c>> = (0..w)
-                    .map(|k| helper.get_nth_param(pk + k).unwrap().into_int_value())
-                    .collect();
-                inner_env[*i] = Some(Val::Agg(comps));
-            }
-            pk += w;
+        for (i, sv) in &live {
+            inner_env[*i] = self.rebind_live(helper, sv, &mut pk);
         }
         let node = helper.get_nth_param(0).unwrap().into_int_value();
 
@@ -1862,9 +1950,9 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 }
             }
             for j in 0..kdep {
-                menv.push(Some(Val::Int(
+                menv.push(Some(SlotVal::Val(Val::Int(
                     helper.get_nth_param((1 + j) as u32).unwrap().into_int_value(),
-                )));
+                ))));
             }
             let result = self
                 .compile_v(helper, &menv, body)
@@ -3658,7 +3746,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 // slots are poisoned to None, so any capture attempt fails
                 // loudly instead of smuggling a raced pointer.
                 let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
-                inner_env.push(Some(Val::Int(arg)));
+                inner_env.push(Some(SlotVal::Val(Val::Int(arg))));
                 let rv = self
                     .compile_v(helper, &inner_env, body)?
                     .as_int("spawn: the worker's result")?;
@@ -4195,12 +4283,12 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // (in addition to the scrutinee) — a flat-record slot FLATTENS into its
         // components. We thread them through every recursive call unchanged —
         // only the scrutinee shrinks.
-        let live: Vec<(usize, Val<'c>)> = env
+        let live: Vec<(usize, SlotVal<'c>)> = env
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.clone().map(|v| (i, v)))
+            .filter_map(|(i, s)| s.clone().map(|sv| (i, sv)))
             .collect();
-        let flat_live: u32 = live.iter().map(|(_, v)| v.width()).sum();
+        let flat_live: u32 = live.iter().map(|(_, sv)| sv.val().width()).sum();
 
         let nparams = 1 + flat_live as usize;
         let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -4216,18 +4304,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // from its consecutive params.
         let mut inner_env: Vec<Slot<'c>> = env.iter().map(|_| None).collect();
         let mut pk = 1u32;
-        for (i, v) in &live {
-            let w = v.width();
-            if w == 1 {
-                inner_env[*i] =
-                    Some(Val::Int(helper.get_nth_param(pk).unwrap().into_int_value()));
-            } else {
-                let comps: Vec<IntValue<'c>> = (0..w)
-                    .map(|k| helper.get_nth_param(pk + k).unwrap().into_int_value())
-                    .collect();
-                inner_env[*i] = Some(Val::Agg(comps));
-            }
-            pk += w;
+        for (i, sv) in &live {
+            inner_env[*i] = self.rebind_live(helper, sv, &mut pk);
         }
         let helper_scrut = helper.get_nth_param(0).unwrap().into_int_value();
 
@@ -4355,7 +4433,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         .left()
                         .unwrap()
                         .into_int_value();
-                    menv.push(Some(Val::Int(ih)));
+                    menv.push(Some(SlotVal::Val(Val::Int(ih))));
                 }
             }
 
@@ -4413,7 +4491,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
         let scrut_val = self.compile_v(f, env, scrut)?;
         let mut menv = env.to_vec();
         for ai in 0..ctor.args.len() {
-            menv.push(if ai == fi { Some(scrut_val.clone()) } else { None });
+            menv.push(if ai == fi { Some(SlotVal::Val(scrut_val.clone())) } else { None });
         }
         let mut body = strip_ann(method);
         for _ in 0..ctor.args.len() {
@@ -4527,7 +4605,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 let mut menv = env.to_vec();
                 for ai in 0..decl.ctors[pc].args.len() {
                     if lay.arg_slot[ai].is_some() {
-                        menv.push(Some(Val::Int(pv)));
+                        menv.push(Some(SlotVal::Val(Val::Int(pv))));
                     } else {
                         menv.push(None);
                     }
@@ -4625,7 +4703,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                         Val::Agg(comps[off..off + wi].to_vec())
                     };
                     off += wi;
-                    menv.push(Some(v));
+                    menv.push(Some(SlotVal::Val(v)));
                 }
                 let result = self.compile_v(f, &menv, body)?;
                 let pred = self.builder.get_insert_block().unwrap();
@@ -4810,8 +4888,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
 
         self.builder.position_at_end(body);
         let mut env2 = env.to_vec();
-        env2.push(Some(Val::Int(k_val))); // k
-        env2.push(Some(acc_val.clone())); // ih
+        env2.push(Some(SlotVal::Val(Val::Int(k_val)))); // k
+        env2.push(Some(SlotVal::Val(acc_val.clone()))); // ih
         let next_acc0 = self.compile_v(f, &env2, s_body)?;
         let next_acc = self.expect_width(next_acc0, aw, "fold accumulator")?;
         let next_k = self
@@ -4867,7 +4945,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             .build_int_sub(nv, self.i64t.const_int(1, false), "k")
             .unwrap();
         let mut env2 = env.to_vec();
-        env2.push(Some(Val::Int(k)));
+        env2.push(Some(SlotVal::Val(Val::Int(k))));
         let sv = self.compile_v(f, &env2, s_body)?;
         let succ_end = self.builder.get_insert_block().unwrap();
 
@@ -5014,7 +5092,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     Val::Agg(comps[off..off + wi].to_vec())
                 };
                 off += wi;
-                menv.push(Some(v));
+                menv.push(Some(SlotVal::Val(v)));
             } else {
                 menv.push(None);
             }
@@ -5052,7 +5130,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             Term::Let(_sigma, _ty, e, body) => {
                 let ev = self.compile_v(f, env, e)?;
                 let mut env2 = env.to_vec();
-                env2.push(Some(ev));
+                env2.push(Some(SlotVal::Val(ev)));
                 self.compile_tail(f, &env2, body, ret_width, ret_struct)
             }
             Term::NatCase(_p, z, sm, scrut) => {
@@ -5083,7 +5161,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     .build_int_sub(nv, self.i64t.const_int(1, false), "tk")
                     .unwrap();
                 let mut env2 = env.to_vec();
-                env2.push(Some(Val::Int(k)));
+                env2.push(Some(SlotVal::Val(Val::Int(k))));
                 self.compile_tail(f, &env2, s_body, ret_width, ret_struct)
             }
             // a convoy-applied NatCase: commute the deps into the arms first.
@@ -5197,7 +5275,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
                             Val::Agg(comps[off..off + wi].to_vec())
                         };
                         off += wi;
-                        menv.push(Some(v));
+                        menv.push(Some(SlotVal::Val(v)));
                     }
                     self.compile_tail(f, &menv, body, ret_width, ret_struct)?;
                 }
@@ -5307,14 +5385,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 None => body_env.push(None),
                 Some(1) => {
                     body_env
-                        .push(Some(Val::Int(func.get_nth_param(rt).unwrap().into_int_value())));
+                        .push(Some(SlotVal::Val(Val::Int(func.get_nth_param(rt).unwrap().into_int_value()))));
                     rt += 1;
                 }
                 Some(w) => {
                     let comps: Vec<IntValue<'c>> = (0..*w)
                         .map(|k| func.get_nth_param(rt + k).unwrap().into_int_value())
                         .collect();
-                    body_env.push(Some(Val::Agg(comps)));
+                    body_env.push(Some(SlotVal::Val(Val::Agg(comps))));
                     rt += *w;
                 }
             }
@@ -5383,14 +5461,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 None => body_env.push(None),
                 Some(1) => {
                     body_env
-                        .push(Some(Val::Int(func.get_nth_param(rt).unwrap().into_int_value())));
+                        .push(Some(SlotVal::Val(Val::Int(func.get_nth_param(rt).unwrap().into_int_value()))));
                     rt += 1;
                 }
                 Some(w) => {
                     let comps: Vec<IntValue<'c>> = (0..*w)
                         .map(|k| func.get_nth_param(rt + k).unwrap().into_int_value())
                         .collect();
-                    body_env.push(Some(Val::Agg(comps)));
+                    body_env.push(Some(SlotVal::Val(Val::Agg(comps))));
                     rt += *w;
                 }
             }
@@ -5515,7 +5593,7 @@ impl<'c, 'a> DepCg<'c, 'a> {
             // zero: `z a₁…a_K` — env = [a₁ … a_K] (de Bruijn 0 = a_K, the innermost).
             self.builder.position_at_end(zero_bb);
             let zero_env: Vec<Slot<'c>> =
-                acc_params.iter().map(|v| Some(Val::Int(*v))).collect();
+                acc_params.iter().map(|v| Some(SlotVal::Val(Val::Int(*v)))).collect();
             let zr0 = self.compile_v(func, &zero_env, z_body)?;
             let zr = self
                 .expect_width(
@@ -5532,8 +5610,8 @@ impl<'c, 'a> DepCg<'c, 'a> {
                 .builder
                 .build_int_sub(i_param, self.i64t.const_int(1, false), "k")
                 .unwrap();
-            let mut succ_env: Vec<Slot<'c>> = vec![Some(Val::Int(k_val)), None]; // k (level 0), ih (level 1)
-            succ_env.extend(acc_params.iter().map(|v| Some(Val::Int(*v))));
+            let mut succ_env: Vec<Slot<'c>> = vec![Some(SlotVal::Val(Val::Int(k_val))), None]; // k (level 0), ih (level 1)
+            succ_env.extend(acc_params.iter().map(|v| Some(SlotVal::Val(Val::Int(*v)))));
             self.acc_ih_selves.borrow_mut().push(AccIhSelf { ih_level: 1, func, k_level: 0 });
             let sr = self
                 .compile_v(func, &succ_env, s_body)
