@@ -1690,6 +1690,32 @@ impl Elab {
         let result = Value::VData(info.data.clone(), result_args);
         solve(&mut holes, &result, expected);
 
+        // PRE-SOLVE from the explicit arguments' inferred types. `solve(result,
+        // expected)` above only pins implicits that appear in the RESULT; an
+        // EXISTENTIAL constructor implicit — `{0 e}` in
+        // `MkOwnClo : {0 e} -> (1 env : Own e) -> (code : e -> a -> b) -> OwnClo a b`
+        // — appears only in a LATER explicit argument's type (`Own e`, `e -> a -> b`),
+        // never in the result, so the expected type cannot determine it. Recover it
+        // the way `solve_fn_call` does: infer each explicit argument's type and unify
+        // it against its (hole-)domain. Each domain is evaluated with holes for the
+        // EARLIER positions only (`hole_env[0..pos]`), matching the de Bruijn depth of
+        // the incremental walk below. Purely additive — it can only BIND MORE holes,
+        // and the kernel re-check remains the backstop for any mis-inference.
+        {
+            let mut nu = 0;
+            for pos in 0..total {
+                if implicit_of(pos) {
+                    continue;
+                }
+                let dom_tm = if pos < np { &decl.params[pos].1 } else { &ctor.args[pos - np].1 };
+                let dom_val = dep::eval_rc(&self.rc, &hole_env[0..pos], dom_tm);
+                if let Ok((_, arg_ty)) = self.infer_arg(&user_args[nu], cx, rec) {
+                    solve(&mut holes, &dom_val, &arg_ty);
+                }
+                nu += 1;
+            }
+        }
+
         // walk positions left to right, filling values + terms
         let mut env: Vec<Value> = Vec::with_capacity(total);
         let mut terms: Vec<Term> = Vec::with_capacity(total);

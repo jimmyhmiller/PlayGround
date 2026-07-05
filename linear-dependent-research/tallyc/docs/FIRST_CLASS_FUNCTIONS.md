@@ -262,8 +262,19 @@ Named so the omission is a decision, not an oversight:
     so currying/partial closures are a later phase, not a codegen hazard.
 - **P2 — flat closures as blessed stdlib types (§3 flat).** `FlatClo` + `applyFlat`
   in the prelude; capturing works with zero heap.
-- **P3 — owned/region/borrowed closures (§3).** `OwnClo`/`box`/`freeC` (+ the `Type
-  1` ergonomics), region and borrowed variants. The explicit-heap path.
+- **P3 — owned/region/borrowed closures (§3). ✅ (owned) DONE.** The existential
+  heap closure `OwnClo a b : Type 1` runs, including a heterogeneous `List` of
+  closures with different capture shapes folded over a seed, each freed once — see
+  `examples/closures_owned.tal` (→ 31). Two things this pinned down:
+  (1) **existential-constructor inference** — `MkOwnClo`'s hidden `{0 e}` is now
+  recovered from the explicit arguments' types (a pre-pass in `solve_ctor`
+  mirroring `solve_fn_call`), fixing `cannot infer implicit argument of MkOwnClo`;
+  (2) **representation** — the `code` field takes its environment BY POINTER
+  (`(1 o : Own e) -> a -> b`), so the existential `e` crosses a generic caller's
+  abstract boundary as a uniform word (tallyc never boxes an abstract-typed value
+  by value), and each concrete `code` unboxes it. Linear discipline: the linear
+  consumption must be `let`-sequenced (`let v = unbox…; code…`), not nested in the
+  call. Region/borrowed variants still to do.
 - **P4 — monomorphisation of HOFs over closures (§5/§8-5).** Zero-cost specialised
   `map`/`filter`/`foldr`.
 - **P5 — lambda sugar with named representation (§7), if adopted.**
