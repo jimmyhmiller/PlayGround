@@ -6,10 +6,14 @@
 //! with a clear skip — NEVER emit a silent-wrong binding (a wrong width/layout
 //! silently corrupts the ABI).
 //!
-//! Phase 1: functions, scalars, pointers, simple structs (refuse unions/bitfields).
-//! Phase 2 (here): typedefs (resolved through clang's desugaring), enums (the type
-//! → its integer width; the constants → `const` defs), and object-like `#define`
+//! Phase 1: functions, scalars, pointers, simple structs.
+//! Phase 2: typedefs (resolved through clang's desugaring), enums (the type → its
+//! integer width; the constants → `const` defs), and object-like `#define`
 //! constant macros (a second `clang -dM` pass — they aren't in the AST).
+//! Unions: mapped to `:layout explicit` (every member `:at 0`) — coil's own
+//! overlapping-storage representation, so a union is a REAL ABI-faithful binding
+//! with named/typed member access, not a blob or a refusal. Bitfields are still
+//! refused (faithful bit-offset import needs clang's `-fdump-record-layouts`).
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -211,33 +215,85 @@ fn function_extern(d: &Value, ctx: &Ctx) -> Result<String, String> {
 }
 
 fn record_defstruct(d: &Value, ctx: &Ctx) -> Result<Option<String>, String> {
-    // A union has OVERLAPPING fields — emitting it as a sequential-layout
-    // defstruct would be a silent-wrong binding (the cardinal failure). Refuse it.
-    if d.get("tagUsed").and_then(|t| t.as_str()) == Some("union") {
-        return Err("union (overlapping layout — not a struct)".to_string());
-    }
+    // A C union is OVERLAPPING storage: every member sits at offset 0, sizeof is
+    // the widest member (rounded to the max alignment). Coil expresses exactly this
+    // with `:layout explicit` — every field `:at 0` — so a union maps to a REAL,
+    // ABI-faithful binding with named + typed member access (not a blob, not a
+    // refusal). See examples/explicit-layout.coil: "overlapping offsets make a union".
+    let is_union = d.get("tagUsed").and_then(|t| t.as_str()) == Some("union");
     let name = match d["name"].as_str() {
         Some(n) => n,
-        None => return Ok(None), // anonymous struct — Phase 2+
+        None => return Ok(None), // anonymous struct/union — Phase 2+
     };
     if d.get("completeDefinition").and_then(|c| c.as_bool()) != Some(true) {
         return Ok(None); // forward declaration — nothing to emit
     }
     let empty = Vec::new();
     let mut fields = Vec::new();
+    // Union layout is computed from the members (standard C rules): sizeof =
+    // round_up(max member size, max member align), align = max member align.
+    let mut max_size: i64 = 0;
+    let mut max_align: i64 = 1;
     for f in d["inner"].as_array().unwrap_or(&empty) {
         if f["kind"].as_str() == Some("FieldDecl") {
             // A bitfield packs into sub-byte bit ranges — emitting it as a
-            // full-width field would corrupt the layout (silent-wrong). Refuse it.
+            // full-width field would corrupt the layout (silent-wrong). Refuse it
+            // (faithful bitfield import needs clang's record-layout — next stage).
             if f.get("isBitfield").and_then(|b| b.as_bool()) == Some(true) {
-                return Err("contains a bitfield (packed layout — Phase 2+)".to_string());
+                return Err(if is_union {
+                    "union with a bitfield member (Phase 2+ — needs record layout)".to_string()
+                } else {
+                    "contains a bitfield (packed layout — Phase 2+ — needs record layout)".to_string()
+                });
             }
             let fname = f["name"].as_str().ok_or("an unnamed field (anon struct/union)")?;
             let fty = f["type"]["qualType"].as_str().ok_or("a field has no type")?;
-            fields.push(format!("({fname} {})", map_type(fty, ctx)?));
+            let mapped = map_type(fty, ctx)?;
+            if is_union {
+                // We compute the union's layout ourselves, so we must know each
+                // member's size/align. Scalars + pointers: known. Aggregate members
+                // (nested struct/union/array) need clang's record layout — refuse
+                // rather than guess (the cardinal: never a wrong layout).
+                let (sz, al) = scalar_size_align(&mapped).ok_or_else(|| {
+                    format!("union member '{fname}' has aggregate type '{mapped}' (Phase 2 — needs record layout)")
+                })?;
+                if sz > max_size {
+                    max_size = sz;
+                }
+                if al > max_align {
+                    max_align = al;
+                }
+                fields.push(format!("({fname} {mapped} :at 0)"));
+            } else {
+                fields.push(format!("({fname} {mapped})"));
+            }
         }
     }
-    Ok(Some(format!("(defstruct {name} [{}])\n", fields.join(" "))))
+    if is_union {
+        let size = ((max_size + max_align - 1) / max_align) * max_align;
+        Ok(Some(format!(
+            "(defstruct {name} :layout explicit :size {size} :align {max_align} [{}])\n",
+            fields.join(" ")
+        )))
+    } else {
+        Ok(Some(format!("(defstruct {name} [{}])\n", fields.join(" "))))
+    }
+}
+
+/// Size and alignment (bytes) of a mapped Coil scalar/pointer type, for computing
+/// union layout. `None` for aggregate/unknown types (whose layout we don't compute
+/// — those unions are refused rather than mis-bound).
+fn scalar_size_align(t: &str) -> Option<(i64, i64)> {
+    if t.starts_with("(ptr") || t.starts_with("(fnptr") {
+        return Some((8, 8)); // all target pointers are 8 bytes
+    }
+    match t {
+        "i8" | "u8" => Some((1, 1)),
+        "i16" | "u16" => Some((2, 2)),
+        "i32" | "u32" | "f32" => Some((4, 4)),
+        "i64" | "u64" | "f64" => Some((8, 8)),
+        _ => None,
+    }
 }
 
 /// Emit `(const NAME VALUE)` for each enumerator. Values follow C rules: an
@@ -340,6 +396,11 @@ fn map_type_d(c: &str, ctx: &Ctx, depth: usize) -> Result<String, String> {
         "_Bool" | "bool" => "u8",
         other if other.starts_with("struct ") => {
             return Ok(other.trim_start_matches("struct ").trim().to_string());
+        }
+        // A `union X` names an emitted `:layout explicit` binding (see
+        // record_defstruct) — resolve to its name, exactly like `struct X`.
+        other if other.starts_with("union ") => {
+            return Ok(other.trim_start_matches("union ").trim().to_string());
         }
         other if other.starts_with("enum ") => {
             let tag = other.trim_start_matches("enum ").trim();

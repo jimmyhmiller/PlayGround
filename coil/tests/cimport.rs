@@ -179,21 +179,63 @@ fn cimport_plus_link_flag_calls_a_custom_c_library() {
 }
 
 #[test]
+fn cimport_maps_unions_to_explicit_layout_abi_faithfully() {
+    if !have_clang() {
+        eprintln!("SKIP: clang not found");
+        return;
+    }
+    // A C union is overlapping storage. Coil expresses exactly that with
+    // `:layout explicit` (every member `:at 0`), so a union maps to a REAL,
+    // ABI-faithful binding with named + typed member access — NOT a blob, NOT a
+    // refusal. sizeof = widest member; a struct containing the union resolves too.
+    let h = write_header(
+        "coil_ci_union.h",
+        "union U { int i; float f; double d; };\nstruct Bad { union U u; int tag; };\nint ok(int x);\n",
+    );
+    let b = coil::cimport::cimport_header(&h).expect("cimport");
+    // Widest member is `double` → size 8, align 8; every member overlaps at :at 0.
+    assert!(
+        b.contains("(defstruct U :layout explicit :size 8 :align 8 [(i i32 :at 0) (f f32 :at 0) (d f64 :at 0)])"),
+        "union → explicit overlapping layout:\n{b}"
+    );
+    // A struct holding the union is now emitted (its member type `union U` → U).
+    assert!(b.contains("(defstruct Bad [(u U) (tag i32)])"), "struct-with-union emitted:\n{b}");
+    assert!(b.contains("(extern ok :cc c [i32] (-> i32))"), "mappable decl emitted:\n{b}");
+
+    // End-to-end: the union binding compiles and its members read/write the SAME
+    // storage (real overlap), and sizeof is correct.
+    let bpath = std::env::temp_dir().join("coil_ci_union_bindings.coil");
+    std::fs::write(&bpath, &b).unwrap();
+    let prog = format!(
+        "(module app)\n(import \"{}\" :use *)\n\
+         (static-assert (icmp-eq (sizeof U) 8) \"union U is 8 bytes\")\n\
+         (defn main [] (-> i64)\n\
+           (let [u (alloc-stack U)]\n\
+             (store! (field u i) (cast i32 20))\n\
+             (let [a (cast i64 (load (field u i)))]\n\
+               (store! (field u d) 0.0)\n\
+               (store! (field u i) (cast i32 22))\n\
+               (iadd a (cast i64 (load (field u i)))))))",
+        bpath.display()
+    );
+    assert_eq!(build_and_run(&prog), 42, "cimported union: overlapping member access is ABI-correct");
+}
+
+#[test]
 fn cimport_refuses_unmappable_never_mis_binds() {
     if !have_clang() {
         eprintln!("SKIP: clang not found");
         return;
     }
-    // a union (overlapping layout) must NOT be emitted as a sequential defstruct — that
-    // would be a silent-wrong binding (the cardinal failure). It's refused; mappable
-    // decls in the same header still come through.
+    // The cardinal still holds for what we genuinely can't lay out: a union with an
+    // AGGREGATE member (whose size/align needs clang's record layout — next stage)
+    // is refused, not guessed. Mappable decls in the same header still come through.
     let h = write_header(
         "coil_ci_refuse.h",
-        "union U { int i; float f; };\nstruct Bad { union U u; };\nint ok(int x);\n",
+        "struct S { int a; int b; };\nunion V { struct S s; long l; };\nint ok(int x);\n",
     );
     let b = coil::cimport::cimport_header(&h).expect("cimport");
     assert!(b.contains("(extern ok :cc c [i32] (-> i32))"), "mappable decl emitted:\n{b}");
-    assert!(!b.contains("(defstruct U"), "union must NOT be mis-bound as a struct:\n{b}");
-    assert!(!b.contains("(defstruct Bad"), "struct containing a union must be refused:\n{b}");
+    assert!(!b.contains("(defstruct V"), "aggregate-membered union must be refused, not mis-laid-out:\n{b}");
     assert!(b.contains("SKIPPED"), "refusals must be noted in the bindings:\n{b}");
 }

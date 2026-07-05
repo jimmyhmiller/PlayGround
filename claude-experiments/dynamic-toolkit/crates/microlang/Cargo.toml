@@ -1,0 +1,11 @@
+[package]
+name = "microlang"
+version = "0.0.1"
+edition = "2021"
+description = "Trait sketch for a dynamic-language toolkit re-cut at the value-model and eval axes, plus three micro-languages that exercise it."
+
+[lib]
+path = "src/lib.rs"
+
+# Detach from the big parent workspace so this sketch builds on its own.
+[workspace]
