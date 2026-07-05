@@ -486,20 +486,25 @@
         (mut outp)  (cast (ptr i8) 0)
         (mut flags) (al-new [(slice u8)] a)
         (mut backend) default-backend
+        (mut trip)  (cast (ptr i8) 0)
         (mut i)     3]
-    ; parse -o / --link-flag / --backend from argv[3..].
+    ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
       (do (let [arg (cstr->slice (load (index argv (load i))))]
             (if (str-eq arg "-o")
                 (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
               (if (str-eq arg "--link-flag")
                   (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
-                (if (str-eq arg "--backend")
-                    (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
-                            (store! backend 2)
-                          (store! backend 1))
-                        (store! i (iadd (load i) 2)) 0)
-                  (do (store! i (iadd (load i) 1)) 0))))))))
+                (if (str-eq arg "--target")
+                    (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                  (if (and (icmp-ge (slice-len [u8] arg) 2) (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45)) (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
+                      (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)   ; -l<lib>
+                    (if (str-eq arg "--backend")
+                        (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
+                                (store! backend 2)
+                              (store! backend 1))
+                            (store! i (iadd (load i) 2)) 0)
+                      (do (store! i (iadd (load i) 1)) 0))))))))))
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
       0)
@@ -513,7 +518,7 @@
         (store! (field ctx path) (cstr->slice file))
         (store! (field ctx mode) (load backend))
         (store! (field ctx obj)  obj-cstr)
-        (store! (field ctx triple) (cast (ptr i8) 0))
+        (store! (field ctx triple) (load trip))
         (store! (field ctx ok) 0)
         (store! (field ctx build-fn)  build-fn)
         (store! (field ctx emitir-fn) emitir-fn)
@@ -544,6 +549,145 @@
                 ; success: mirror Rust `report(Ok("wrote {out}"))` → `wrote <out>`
                 ; on stdout, exit 0.
                 (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))))))
+
+; ============================ Coil.toml manifest ============================
+; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
+; into the flags the CLI already accepts (port of src/manifest.rs). Deliberately
+; tiny: a line-based reader for [package]/[build]/[link]/[run].
+
+(defn m-ws? [(c u8)] (-> bool)
+  (or (icmp-eq c (cast u8 32)) (or (icmp-eq c (cast u8 9)) (or (icmp-eq c (cast u8 10)) (icmp-eq c (cast u8 13))))))
+(defn m-trim [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s) (mut lo) 0 (mut hi) n]
+    (loop (if (and (icmp-lt (load lo) (load hi)) (m-ws? (slice-get [u8] s (load lo)))) (store! lo (iadd (load lo) 1)) (break)))
+    (loop (if (and (icmp-lt (load lo) (load hi)) (m-ws? (slice-get [u8] s (isub (load hi) 1)))) (store! hi (isub (load hi) 1)) (break)))
+    (subslice [u8] s (load lo) (load hi))))
+(defn m-unquote [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)]
+    (if (and (icmp-ge n 2) (and (icmp-eq (slice-get [u8] s 0) (cast u8 34)) (icmp-eq (slice-get [u8] s (isub n 1)) (cast u8 34))))
+        (subslice [u8] s 1 (isub n 1)) s)))
+
+; lines of a text (split on \n).
+(defn m-lines [(a (ptr Allocator)) (text (slice u8))] (-> (ptr (ArrayList (slice u8))))
+  (let [out (box a (ArrayList (slice u8)) (al-new [(slice u8)] a))
+        n (slice-len [u8] text) (mut start) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (slice-get [u8] text (load i)) (cast u8 10))
+              (do (al-push! [(slice u8)] out (subslice [u8] text (load start) (load i))) (store! start (iadd (load i) 1)) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-lt (load start) n) (al-push! [(slice u8)] out (subslice [u8] text (load start) n)) 0)
+    out))
+
+; append the string elements of a TOML array literal `["a", "b"]` to `dst`.
+(defn m-parse-array [(a (ptr Allocator)) (val (slice u8)) (dst (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [n (slice-len [u8] val)
+        inner (if (icmp-ge n 2) (subslice [u8] val 1 (isub n 1)) val)   ; strip [ ]
+        (mut start) 0 (mut j) 0 m (slice-len [u8] inner)]
+    (loop (if (icmp-gt (load j) m) (break)
+      (if (or (icmp-eq (load j) m) (icmp-eq (slice-get [u8] inner (load j)) (cast u8 44)))   ; ',' or end
+          (let [piece (m-trim (subslice [u8] inner (load start) (load j)))]
+            (if (icmp-gt (slice-len [u8] piece) 0) (al-push! [(slice u8)] dst (m-unquote piece)) 0)
+            (store! start (iadd (load j) 1)) (store! j (iadd (load j) 1)))
+        (store! j (iadd (load j) 1)))))
+    0))
+
+(defstruct Manifest
+  [(name (slice u8)) (entry (slice u8)) (out (slice u8)) (target (slice u8)) (has-target bool) (debug bool)
+   (frameworks (ptr (ArrayList (slice u8)))) (libs (ptr (ArrayList (slice u8))))
+   (flags (ptr (ArrayList (slice u8)))) (rargs (ptr (ArrayList (slice u8))))])
+
+(defn parse-manifest [(a (ptr Allocator)) (text (slice u8))] (-> (ptr Manifest))
+  (let [m (box a Manifest (zeroed Manifest))]
+    (store! (field m name) "") (store! (field m entry) "") (store! (field m out) "")
+    (store! (field m target) "") (store! (field m has-target) false) (store! (field m debug) false)
+    (store! (field m frameworks) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m libs)       (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m flags)      (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m rargs)      (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (let [lines (m-lines a text) (mut section) "" (mut i) 0 n (al-len [(slice u8)] (load lines))]
+      (loop (if (icmp-ge (load i) n) (break)
+        (let [line (m-trim (al-get [(slice u8)] (load lines) (load i)))]
+          (if (or (icmp-eq (slice-len [u8] line) 0) (icmp-eq (slice-get [u8] line 0) (cast u8 35))) 0   ; blank/#
+            (if (icmp-eq (slice-get [u8] line 0) (cast u8 91))                                          ; [section]
+                (do (store! section (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))) 0)
+              (let [eq (m-index line (cast u8 61))]                                                     ; key = value
+                (if (icmp-lt eq 0) 0
+                  (let [key (m-trim (subslice [u8] line 0 eq))
+                        val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))]
+                    (if (str-eq (load section) "package")
+                        (if (str-eq key "name") (do (store! (field m name) (m-unquote val)) 0)
+                          (if (str-eq key "entry") (do (store! (field m entry) (m-unquote val)) 0) 0))
+                      (if (str-eq (load section) "build")
+                          (if (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
+                            (if (str-eq key "target") (do (store! (field m target) (m-unquote val)) (store! (field m has-target) true) 0)
+                              (if (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0) 0)))
+                        (if (str-eq (load section) "link")
+                            (if (str-eq key "frameworks") (do (m-parse-array a val (load (field m frameworks))) 0)
+                              (if (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
+                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0) 0)))
+                          (if (str-eq (load section) "run")
+                              (if (str-eq key "args") (do (m-parse-array a val (load (field m rargs))) 0) 0)
+                            0)))))))))
+          (store! i (iadd (load i) 1)))))
+      m)))
+
+(defn m-index [(s (slice u8)) (b u8)] (-> i64)
+  (let [n (slice-len [u8] s) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (if (icmp-eq (slice-get [u8] s (load i)) b) (do (store! r (load i)) (break)) (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; append the manifest's link flags to a command string builder, each as
+; `--link-flag <token>` (frameworks -> two tokens, libs -> -lX, then raw flags).
+(defn m-emit-link [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
+  (let [fw (load (field m frameworks)) (mut i) 0 nf (al-len [(slice u8)] fw)]
+    (loop (if (icmp-ge (load i) nf) (break)
+      (do (sb-push-str! (mut b) " --link-flag -framework --link-flag ") (sb-push-str! (mut b) (al-get [(slice u8)] fw (load i))) (store! i (iadd (load i) 1))))))
+  (let [lb (load (field m libs)) (mut i) 0 nl (al-len [(slice u8)] lb)]
+    (loop (if (icmp-ge (load i) nl) (break)
+      (do (sb-push-str! (mut b) " --link-flag -l") (sb-push-str! (mut b) (al-get [(slice u8)] lb (load i))) (store! i (iadd (load i) 1))))))
+  (let [fl (load (field m flags)) (mut i) 0 nx (al-len [(slice u8)] fl)]
+    (loop (if (icmp-ge (load i) nx) (break)
+      (do (sb-push-str! (mut b) " --link-flag ") (sb-push-str! (mut b) (al-get [(slice u8)] fl (load i))) (store! i (iadd (load i) 1))))))
+  0)
+
+; `coil build`/`coil run` with no file: read Coil.toml, build the equivalent
+; `<self> build|run <entry> …` command, and run it (propagating exit).
+(defn manifest-cmd [(a (ptr Allocator)) (sub (slice u8)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (do (ps (stderr) "error: no Coil.toml in the current directory (pass a <file> to build directly)\n") 1)
+      (let [m (parse-manifest a text)
+            entry (if (icmp-gt (slice-len [u8] (load (field m entry))) 0) (load (field m entry)) "src/main.coil")
+            out   (if (icmp-gt (slice-len [u8] (load (field m out))) 0) (load (field m out)) (load (field m name)))
+            (mut b) (sb-new a)]
+        (sb-push-str! (mut b) self) (sb-push-str! (mut b) " ") (sb-push-str! (mut b) sub)
+        (sb-push-str! (mut b) " ") (sb-push-str! (mut b) entry)
+        (if (str-eq sub "build") (do (sb-push-str! (mut b) " -o ") (sb-push-str! (mut b) out) 0) 0)
+        (m-emit-link a (mut b) m)
+        (if (load (field m has-target)) (do (sb-push-str! (mut b) " --target ") (sb-push-str! (mut b) (load (field m target))) 0) 0)
+        ; run: forward CLI args after `--`, else the manifest's [run] args.
+        (if (str-eq sub "run")
+            (let [(mut i) 2 (mut sawdd) false]
+              (sb-push-str! (mut b) " --")
+              (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+                (do (if (str-eq (cstr->slice (load (index argv (load i)))) "--") (do (store! sawdd true) 0)
+                      (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) (cstr->slice (load (index argv (load i))))) 0))
+                    (store! i (iadd (load i) 1)))))
+              (if (not (load sawdd))
+                  (let [ra (load (field m rargs)) (mut k) 0 nr (al-len [(slice u8)] ra)]
+                    (loop (if (icmp-ge (load k) nr) (break)
+                      (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) (al-get [(slice u8)] ra (load k))) (store! k (iadd (load k) 1))))))
+                0))
+          0)
+        (let [rc (system (slice->cstr a (sb-str (load b))))]
+          (iand (udiv (cast i64 rc) 256) 255))))))
+
+; manifest mode = `build`/`run` with no file (argv[2] missing or a flag).
+(defn manifest-mode? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
+  (if (icmp-lt (cast i64 argc) 3) true
+    (icmp-eq (slice-get [u8] (cstr->slice (load (index argv 2))) 0) (cast u8 45))))
 
 ; The CLI entry, parameterized by the backend hooks the top file injects:
 ;   build-fn     — LLVM `build` (mode 1); a64 build passes a hard-error stub
@@ -587,6 +731,67 @@
 (defn cat3-d [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
   (match (str-concat a x y) (Some [s] s) (None [] x)))
 
+; ---- file output + project scaffold (new) ----------------------------------
+; externs are global C symbols; these coincide harmlessly with cimport.coil's.
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
+
+(defn d-write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
+  (let [f (fopen (slice->cstr a path) (slice->cstr a "w"))]
+    (if (icmp-eq (cast i64 f) 0)
+        (do (ps (stderr) "error: cannot write ") (ps (stderr) path) (wb (stderr) 10) 1)
+      (do (fwrite (cast (ptr i8) (slice-data [u8] content)) 1 (slice-len [u8] content) f)
+          (fclose f) 0))))
+
+; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
+(defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (icmp-lt (cast i64 argc) 3)
+      (do (ps (stderr) "usage: coil new <name>\n") 1)
+    (let [name (cstr->slice (load (index argv 2)))]
+      (system (slice->cstr a (cat3-d a "mkdir -p " (cat3-d a name "/src"))))
+      (d-write-file a (cat3-d a name "/Coil.toml")
+        (cat3-d a "[package]\nname  = \"" (cat3-d a name "\"\nentry = \"src/main.coil\"\n")))
+      (d-write-file a (cat3-d a name "/src/main.coil")
+        "(module app)\n\n(defn main [] (-> i64)\n  42)\n")
+      (let [w (stdout)] (ps w "created ") (ps w name) (ps w "/ — cd in and `coil run`\n") 0))))
+
+; `emit-obj <file> [-o out.o] [--target T] [--backend arm64]` — build the object,
+; no link. Mirrors build-cmd's pipeline minus the cc step.
+(defn emit-obj-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
+                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                    (default-backend i64)] (-> i64)
+  (let [file (load (index argv 2))
+        (mut outp) (cast (ptr i8) 0)
+        (mut backend) default-backend
+        (mut trip) (cast (ptr i8) 0)
+        (mut i) 3]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "-o")
+            (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+          (if (str-eq arg "--target")
+              (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+            (if (str-eq arg "--backend")
+                (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64") (store! backend 2) (store! backend 1)) (store! i (iadd (load i) 2)) 0)
+              (do (store! i (iadd (load i) 1)) 0)))))))
+    (let [out-slice (if (icmp-eq (cast i64 (load outp)) 0) (obj-path a (cstr->slice file)) (cstr->slice (load outp)))
+          obj-cstr  (slice->cstr a out-slice)
+          ctx       (alloc-stack DumpCtx)]
+      (store! (field ctx a)    a)
+      (store! (field ctx src)  (read-file a file))
+      (store! (field ctx cwd)  (cwd-slice a))
+      (store! (field ctx path) (cstr->slice file))
+      (store! (field ctx mode) (load backend))
+      (store! (field ctx obj)  obj-cstr)
+      (store! (field ctx triple) (load trip))
+      (store! (field ctx ok) 0)
+      (store! (field ctx build-fn)  build-fn)
+      (store! (field ctx emitir-fn) emitir-fn)
+      (if (icmp-eq (run-on-big-stack ctx) 0) 1
+        (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))
+
 (defn driver-main [(argc i32) (argv (ptr (ptr i8)))
                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
@@ -603,9 +808,13 @@
        (if (str-eq sub "cimport")
            (call-ptr cimport-fn a argc argv)
         (if (str-eq sub "run")
-            (run-cmd a argc argv)
+            (if (manifest-mode? argc argv) (manifest-cmd a "run" argc argv) (run-cmd a argc argv))
+        (if (str-eq sub "new")
+            (new-cmd a argc argv)
+        (if (str-eq sub "emit-obj")
+            (emit-obj-cmd a argc argv build-fn emitir-fn default-backend)
         (if (str-eq sub "build")
-            (build-cmd a argc argv build-fn emitir-fn default-backend)
+            (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
          (if (str-eq sub "dump-read")
              (let [path (load (index argv 2))] (dump-read-program a (read-file a path)))
           (if (str-eq sub "dump-ast")
@@ -641,5 +850,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
