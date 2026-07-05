@@ -429,9 +429,33 @@
                   0)
               0))))))))
 
-; `(cimport "header.h")` — generate C bindings via clang AT LOAD TIME and splice
-; the externs/defstructs/consts into the CURRENT module (dropping the generated
-; `(module cbindings)` header). The seamless, no-CLI-step header import.
+; Join the string elements of a `:flags ["-I…" "-D…"]` option into one clang
+; flags string (each space-prefixed), or "" if absent. Forwarded to clang so
+; headers that need include paths / feature defines can be parsed correctly.
+(defn cimport-flags [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64)] (-> (slice u8))
+  (let [(mut out) (sb-new a) (mut j) 2]
+    (loop (if (icmp-ge (load j) nit) (break)
+      (let [kw (alloc-stack Sexp)] (store! kw (al-get [Sexp] (load items) (load j)))
+        (match-else (load (field kw kind))
+          (KKw [k]
+            (if (and (str-eq k "flags") (icmp-lt (iadd (load j) 1) nit))
+                (do (let [vec (alloc-stack Sexp)] (store! vec (al-get [Sexp] (load items) (iadd (load j) 1)))
+                      (match-else (load (field vec kind))
+                        (KVec [vit]
+                          (let [(mut vi) 0 vn (al-len [Sexp] (load vit))]
+                            (loop (if (icmp-ge (load vi) vn) (break)
+                              (do (let [el (alloc-stack Sexp)] (store! el (al-get [Sexp] (load vit) (load vi)))
+                                    (match (l-as-str el) (Some [fs] (do (sb-push-str! (mut out) " ") (sb-push-str! (mut out) fs) 0)) (None [] 0)))
+                                  (store! vi (iadd (load vi) 1)))))))
+                        (_ 0)))
+                    (store! j (iadd (load j) 2)))
+              (store! j (iadd (load j) 1))))
+          (_ (store! j (iadd (load j) 1)))))))
+    (sb-str (load out))))
+
+; `(cimport "header.h" [:flags ["-I…" "-D…"]])` — generate C bindings via clang AT
+; LOAD TIME and splice the externs/defstructs/consts into the CURRENT module
+; (dropping the generated `(module cbindings)` header). The seamless header import.
 (defn process-cimport [(s (mut LS)) (form (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
   (let [a (load (field s a))
         items (l-as-list form) nit (al-len [Sexp] (load items))]
@@ -442,7 +466,7 @@
         (match (l-as-str it)
           (None [] (ls-set-err! (mut s) (diag-at-form form "cimport: expected a string header path")))
           (Some [path]
-            (match (ci/cimport-header a path)
+            (match (ci/cimport-header a path (cimport-flags a items nit))
               (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
               (Ok [text]
                 (let [sid (load (field s srccount))

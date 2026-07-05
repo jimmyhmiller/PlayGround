@@ -709,9 +709,9 @@
   (system (s->cstr a cmd)))
 
 ; clang JSON AST of `header` → parsed Json (top-level TranslationUnitDecl).
-(defn run-clang-ast [(a (ptr Allocator)) (header (slice u8))] (-> (Result Json (slice u8)))
+(defn run-clang-ast [(a (ptr Allocator)) (header (slice u8)) (flags (slice u8))] (-> (Result Json (slice u8)))
   (let [out (tmp-path a "ast")
-        cmd (cat3 a (cat3 a "clang -Xclang -ast-dump=json -fsyntax-only -x c '" header "' > '") out "' 2>/dev/null")
+        cmd (cat3 a (cat3 a "clang -Xclang -ast-dump=json -fsyntax-only" flags " -x c '") (cat3 a header "' > '" out) "' 2>/dev/null")
         rc (run-cmd a cmd)]
     (if (icmp-ne rc 0) (Err "clang failed to parse the header")
       (let [txt (slurp a (s->cstr a out))]
@@ -719,12 +719,12 @@
           (Ok (json-parse a txt)))))))
 
 ; clang -dM macro dump for `header` (empty header path = the empty-TU baseline).
-(defn dump-macros [(a (ptr Allocator)) (header (slice u8)) (tag (slice u8))] (-> (slice u8))
+(defn dump-macros [(a (ptr Allocator)) (header (slice u8)) (tag (slice u8)) (flags (slice u8))] (-> (slice u8))
   (let [out (tmp-path a tag)
         src (if (icmp-eq (slice-len [u8] header) 0) "-" (cat3 a "'" header "'"))
-        cmd (cat3 a (cat3 a "clang -dM -E -x c " src " > '") out "' 2>/dev/null")]
+        cmd (cat3 a (cat3 a "clang -dM -E -x c" flags " ") (cat3 a src " > '" out) "' 2>/dev/null")]
     (if (icmp-eq (slice-len [u8] header) 0)
-        (run-cmd a (cat3 a "printf '' | clang -dM -E -x c - > '" out "' 2>/dev/null"))
+        (run-cmd a (cat3 a (cat3 a "printf '' | clang -dM -E -x c" flags " - > '") out "' 2>/dev/null"))
         (run-cmd a cmd))
     (slurp a (s->cstr a out))))
 
@@ -745,8 +745,26 @@
 (defn same-file [(file (slice u8)) (header (slice u8))] (-> bool)
   (or (str-eq file header) (str-eq (basename file) (basename header))))
 
-(defn cimport-header [(a (ptr Allocator)) (header (slice u8))] (-> (Result (slice u8) (slice u8)))
-  (match (run-clang-ast a header)
+(defn contains-str? [(hay (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find hay needle) (Some [_] true) (None [] false)))
+
+; A system/SDK/toolchain header (by path) whose decls we DON'T emit — vs the
+; target header + the project's own (e.g. -I…) includes, which we DO emit. This
+; is what lets a wrapper header (`#include "dispextern.h"` with the build's -I/-D)
+; bring the project's structs through, while <stdio.h> etc. stay out.
+(defn sys-path? [(f (slice u8))] (-> bool)
+  (or (contains-str? f "/usr/")
+  (or (contains-str? f ".sdk")
+  (or (contains-str? f "/lib/clang")
+  (or (contains-str? f "/Library/Developer")
+      (contains-str? f "/Applications/Xcode"))))))
+
+; Emit a decl from file `f` if it's the target header OR a non-system header.
+(defn emit-file? [(f (slice u8)) (header (slice u8))] (-> bool)
+  (or (same-file f header) (not (sys-path? f))))
+
+(defn cimport-header [(a (ptr Allocator)) (header (slice u8)) (flags (slice u8))] (-> (Result (slice u8) (slice u8)))
+  (match (run-clang-ast a header flags)
     (Err [e] (Err e))
     (Ok [ast]
       (let [top (match (jinner ast) (Some [t] t) (None [] (box a (ArrayList Json) (al-new [Json] a))))
@@ -764,7 +782,7 @@
           (loop (if (icmp-ge (load i) n) (break)
             (let [d (al-get [Json] (load top) (load i))]
               (match (jgets (jget d "loc") "file")
-                (Some [f] (do (store! from-header (same-file f header)) 0))
+                (Some [f] (do (store! from-header (emit-file? f header)) 0))
                 (None [] 0))
               (if (not (load from-header)) 0
                 (let [k (jkind d)]
@@ -800,7 +818,7 @@
                         0)))))
               (store! i (iadd (load i) 1)))))
           ; #define pass
-          (let [baseline (each-line a (dump-macros a "" "base"))
+          (let [baseline (each-line a (dump-macros a "" "base" flags))
                 bset (box a (HashMap (slice u8) i64) (hm-new [(slice u8) i64] a (str-keyops)))]
             (let [(mut bi) 0 bn (al-len [(slice u8)] (load baseline))]
               (loop (if (icmp-ge (load bi) bn) (break)
@@ -808,7 +826,7 @@
                       (Some [d] (do (hm-put! [(slice u8) i64] bset (def-name d) 1) 0))
                       (None [] 0))
                     (store! bi (iadd (load bi) 1))))))
-            (let [hlines (each-line a (dump-macros a header "hdr"))
+            (let [hlines (each-line a (dump-macros a header "hdr" flags))
                   (mut defs) (al-new [Define] a)]
               (let [(mut hi) 0 hn (al-len [(slice u8)] (load hlines))]
                 (loop (if (icmp-ge (load hi) hn) (break)
@@ -886,8 +904,8 @@
     (if (icmp-ne (load r) 0) (load r) (if (icmp-lt nx ny) -1 (if (icmp-gt nx ny) 1 0)))))
 
 ; Generate bindings for `header` → write to `out` file (Some) or stdout (None).
-(defn cimport-run [(a (ptr Allocator)) (header (slice u8)) (out (Option (slice u8)))] (-> i64)
-  (match (cimport-header a header)
+(defn cimport-run [(a (ptr Allocator)) (header (slice u8)) (out (Option (slice u8))) (flags (slice u8))] (-> i64)
+  (match (cimport-header a header flags)
     (Err [e] (do (ewrite (cat3 a "error: " e "\n")) 1))
     (Ok [body]
       (match out
@@ -896,18 +914,19 @@
 
 ; CLI entry shared by the standalone tool (base=1: `cimport <hdr>`) and the
 ; compiler subcommand (base=2: `coil cimport <hdr>`). Parses the header at
-; argv[base] plus an optional `-o <out>`.
+; argv[base], an optional `-o <out>`, and any other args as clang flags
+; (`-I…`, `-D…`, …) forwarded to the clang invocation.
 (defn cimport-cli [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8))) (base i64)] (-> i64)
   (if (icmp-lt (cast i64 argc) (iadd base 1))
-      (do (ewrite "usage: cimport <header.h> [-o out.coil]\n") 1)
+      (do (ewrite "usage: cimport <header.h> [-o out.coil] [clang flags…]\n") 1)
     (let [header (cstr->slice (load (index argv base)))
-          (mut out) (None [(slice u8)]) (mut i) (iadd base 1)]
+          (mut out) (None [(slice u8)]) (mut flags) (sb-new a) (mut i) (iadd base 1)]
       (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
-        (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc))
-                     (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
-                (do (store! out (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
-              (do (store! i (iadd (load i) 1)) 0)))))
-      (cimport-run a header (load out)))))
+        (let [arg (cstr->slice (load (index argv (load i))))]
+          (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc)) (str-eq arg "-o"))
+              (do (store! out (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
+            (do (sb-push-str! (mut flags) " ") (sb-push-str! (mut flags) arg) (store! i (iadd (load i) 1)) 0)))))
+      (cimport-run a header (load out) (sb-str (load flags))))))
 
 ; strlen-scan a C string into a slice.
 (defn cstr->slice [(p (ptr i8))] (-> (slice u8))
