@@ -64,6 +64,8 @@ enum Tok {
     FatArrow,
     Arrow,
     Backslash,
+    KwRewrite,
+    KwIn,
     KwLet,
     KwFn,
     KwEnum,
@@ -210,6 +212,8 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 "struct" => Tok::KwStruct,
                 "match" => Tok::KwMatch,
                 "let" => Tok::KwLet,
+                "rewrite" => Tok::KwRewrite,
+                "in" => Tok::KwIn,
                 "Type" => Tok::KwType,
                 "postulate" => Tok::KwPostulate,
                 "boxed" => Tok::KwBoxed,
@@ -779,6 +783,17 @@ impl Parser {
                 self.eat(&Tok::FatArrow)?;
                 let body = self.parse_tm()?;
                 Ok(Tm::Lam(params, Box::new(body)))
+            }
+            // `rewrite <prf> in <expr>` (Idris-style) — rewrite the expected goal
+            // along the equality `prf`, then check `expr` against the rewritten
+            // goal. Desugared to a reserved call `@rewrite(prf, expr)`, handled in
+            // `check` (it needs the expected type).
+            Some(Tok::KwRewrite) => {
+                self.next();
+                let prf = self.parse_add()?;
+                self.eat(&Tok::KwIn)?;
+                let body = self.parse_tm()?;
+                Ok(Tm::Call("@rewrite".to_string(), vec![prf, body]))
             }
             Some(Tok::KwMatch) => self.parse_match(),
             Some(Tok::KwLet) => {
@@ -1352,6 +1367,11 @@ impl Elab {
                 let rn = self.resolve_ctor_expected(name, expected);
                 self.solve_ctor(&rn, &[], expected, cx, rec)
             }
+            // `rewrite prf in expr` (desugared to `@rewrite(prf, expr)`) — needs the
+            // expected goal, so it is a CHECK-position form (see `elab_rewrite`).
+            Tm::Call(name, args) if name == "@rewrite" && args.len() == 2 => {
+                self.elab_rewrite(&args[0], &args[1], expected, cx, rec)
+            }
             Tm::Call(name, args) => {
                 if let Some(r) = rec {
                     if name == r.fnname {
@@ -1565,6 +1585,12 @@ impl Elab {
                 if name == "J" && args.len() == 3 {
                     return self.elab_j(&args[0], &args[1], &args[2], cx, rec).map(|(tm, _)| tm);
                 }
+                if name == "@rewrite" {
+                    return Err("`rewrite … in …` needs an expected type — use it where the \
+                                goal is known (a function body, a `let` with an annotation, \
+                                or an argument position), not in an inferred position"
+                        .into());
+                }
                 if let Some(r) = rec {
                     if name == r.fnname {
                         return self.ih_for(r, args, cx);
@@ -1681,6 +1707,34 @@ impl Elab {
         Ok((Term::J(Box::new(motive_tm), Box::new(base_tm), Box::new(proof_tm)), result_ty))
     }
 
+    /// `rewrite prf in expr` — Idris-style equational rewriting, in CHECK
+    /// position (it needs the goal). `prf : Eq A x y`; the goal `G` is rewritten
+    /// by ABSTRACTING the right-hand side `y` — motive `M w = G[y := w]` — so
+    /// `expr` is checked against `M x = G[y := x]` (the goal with `y` replaced by
+    /// `x`), and the result `J(M, expr, prf) : M y = G` is the original goal. This
+    /// is the motive inference `rewrite` gives you: you write neither the motive
+    /// nor `J`. The kernel re-checks the `Term::J`, so it is sound.
+    fn elab_rewrite(&self, prf: &Tm, expr: &Tm, expected: &Value, cx: &Cx, rec: Option<&Rec>) -> Result<Term, String> {
+        let (prf_tm, prf_ty) = self.infer_arg(prf, cx, rec)?;
+        let (x, y) = match &prf_ty {
+            Value::VEq(_, x, y) => ((**x).clone(), (**y).clone()),
+            _ => return Err("`rewrite`: the proof must be an equality `Eq A x y`".into()),
+        };
+        let n = cx.len();
+        // motive body = `goal[y := w]` (abstract the RHS out of the goal),
+        // shifted under the two motive binders `\w e => …`; `w` is `Var(1)`.
+        let gt = dep::shift_term(2, &dep::quote_at(n, expected));
+        let yt = dep::shift_term(2, &dep::quote_at(n, &y));
+        let body = dep::abstract_subterm(&gt, &yt, 1, 0);
+        let motive_tm = Term::Lam(Box::new(Term::Lam(Box::new(body))));
+        // expr : `M x (refl x)` — the goal with the RHS replaced by the LHS.
+        let vp = self.eval(cx.len(), &motive_tm);
+        let base_ty = dep::vapp(dep::vapp(vp, x.clone()), Value::VRefl(Box::new(x)));
+        let expr_tm = self.check(expr, &base_ty, cx, rec)?;
+        // `J(M, expr, prf) : M y prf = goal`.
+        Ok(Term::J(Box::new(motive_tm), Box::new(expr_tm), Box::new(prf_tm)))
+    }
+
     fn infer_arg(&self, t: &Tm, cx: &Cx, rec: Option<&Rec>) -> Result<(Term, Value), String> {
         match t {
             // `J(motive, base, proof)` — path induction (see `elab_j`).
@@ -1742,7 +1796,22 @@ impl Elab {
             Tm::Call(name, args) if rec.is_some_and(|r| r.fnname == name) => {
                 let r = rec.unwrap();
                 let t = self.ih_for(r, args, cx)?;
-                Ok((t, r.result_ty.clone()))
+                // For a DIRECT structural IH (verbatim fold), the hypothesis
+                // variable already carries its correctly-SUBSTITUTED dependent type
+                // in the context (`P k` for the actual predecessor `k`), whereas
+                // `r.result_ty` is only the motive at a fresh NEUTRAL — good enough
+                // to CHECK against a known expected type, but it mis-informs a
+                // caller that must INFER an implicit endpoint from this call's type
+                // (e.g. `cong(f, plusZeroR(k))`). Prefer the context type.
+                let ty = match (r.acc_tys, r.fold, args.get(r.scrut_pos)) {
+                    (None, None, Some(Tm::Var(v))) => r
+                        .fields
+                        .get(v)
+                        .and_then(|f| cx.var_type(f))
+                        .unwrap_or_else(|| r.result_ty.clone()),
+                    _ => r.result_ty.clone(),
+                };
+                Ok((t, ty))
             }
             // a call to a def — or to a CONTEXT VARIABLE WITH REGISTERED IMPLICITS
             // (the `Fix` self-binder of the function being defined): both go through

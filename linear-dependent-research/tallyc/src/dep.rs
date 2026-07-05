@@ -782,6 +782,60 @@ pub(crate) fn map_vars(t: &Term, depth: usize, f: &dyn Fn(usize, usize) -> Term)
     }
 }
 
+/// Replace every occurrence of the subterm `sub` in `t` with the de Bruijn
+/// variable `Var(w + depth)` (a fresh binder `w` below the base context),
+/// tracking binder depth so `sub` is matched shifted into each subcontext. Used
+/// by `rewrite`: build the motive body `goal[rhs := w]`. Both `t` and `sub` are
+/// terms in the same base context; `depth` starts at 0.
+pub(crate) fn abstract_subterm(t: &Term, sub: &Term, w: usize, depth: usize) -> Term {
+    if *t == shift_term(depth, sub) {
+        return Term::Var(w + depth);
+    }
+    let go = |t: &Term| abstract_subterm(t, sub, w, depth);
+    let go1 = |t: &Term| abstract_subterm(t, sub, w, depth + 1);
+    match t {
+        Term::Var(_) | Term::Type(_) | Term::Nat | Term::NatLit(_) | Term::Zero
+        | Term::Const(_) | Term::StrLit(_) => t.clone(),
+        Term::Pi(m, a, b) => Term::Pi(*m, Box::new(go(a)), Box::new(go1(b))),
+        Term::Sigma(m, a, b) => Term::Sigma(*m, Box::new(go(a)), Box::new(go1(b))),
+        Term::Lam(b) => Term::Lam(Box::new(go1(b))),
+        Term::Let(m, ty, e, body) => {
+            Term::Let(*m, Box::new(go(ty)), Box::new(go(e)), Box::new(go1(body)))
+        }
+        Term::App(f0, a) => Term::App(Box::new(go(f0)), Box::new(go(a))),
+        Term::Pair(a, b) => Term::Pair(Box::new(go(a)), Box::new(go(b))),
+        Term::Fst(p) => Term::Fst(Box::new(go(p))),
+        Term::Snd(p) => Term::Snd(Box::new(go(p))),
+        Term::Suc(k) => Term::Suc(Box::new(go(k))),
+        Term::NatCase(p, z, s, sc) => {
+            Term::NatCase(Box::new(go(p)), Box::new(go(z)), Box::new(go(s)), Box::new(go(sc)))
+        }
+        Term::Fix(ty, body) => Term::Fix(Box::new(go(ty)), Box::new(go1(body))),
+        Term::NatElim(p, z, s, sc) => {
+            Term::NatElim(Box::new(go(p)), Box::new(go(z)), Box::new(go(s)), Box::new(go(sc)))
+        }
+        Term::Add(a, b) => Term::Add(Box::new(go(a)), Box::new(go(b))),
+        Term::Eq(a, x, y) => Term::Eq(Box::new(go(a)), Box::new(go(x)), Box::new(go(y))),
+        Term::Refl(a) => Term::Refl(Box::new(go(a))),
+        Term::J(pm, b, e) => Term::J(Box::new(go(pm)), Box::new(go(b)), Box::new(go(e))),
+        Term::Data(n, args) => Term::Data(n.clone(), args.iter().map(|a| go(a)).collect()),
+        Term::Constr(n, args) => Term::Constr(n.clone(), args.iter().map(|a| go(a)).collect()),
+        Term::Elim(data, m, methods, sc) => Term::Elim(
+            data.clone(),
+            Box::new(go(m)),
+            methods.iter().map(|x| go(x)).collect(),
+            Box::new(go(sc)),
+        ),
+        Term::Case(data, m, methods, sc) => Term::Case(
+            data.clone(),
+            Box::new(go(m)),
+            methods.iter().map(|x| go(x)).collect(),
+            Box::new(go(sc)),
+        ),
+        Term::Ann(e, ty) => Term::Ann(Box::new(go(e)), Box::new(go(ty))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // usage contexts: one multiplicity per variable (indexed by level)
 // ---------------------------------------------------------------------------

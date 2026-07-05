@@ -14,19 +14,21 @@
 enum Nat { Zero : Nat, Succ : Nat -> Nat }
 
 // ── the standard equality combinators, each derived from J ──────────────────
-sym : {0 a : Type} -> (x : a) -> (y : a) -> Eq a x y -> Eq a y x
-fn sym(x, y, p) { J(\z e => Eq(a, z, x), refl(x), p) }
+// The endpoints `{0 x}{0 y}` are IMPLICIT — inferred from the `Eq` type of the
+// proof argument, exactly like Idris (a VEq case in the unifier recovers them).
+sym : {0 a : Type} -> {0 x : a} -> {0 y : a} -> Eq a x y -> Eq a y x
+fn sym(p) { J(\z e => Eq(a, z, x), refl(x), p) }
 
-trans : {0 a : Type} -> (x : a) -> (y : a) -> (c : a) -> Eq a x y -> Eq a y c -> Eq a x c
-fn trans(x, y, c, p, q) { J(\z e => Eq(a, x, z), p, q) }
+trans : {0 a : Type} -> {0 x : a} -> {0 y : a} -> {0 c : a} -> Eq a x y -> Eq a y c -> Eq a x c
+fn trans(p, q) { J(\z e => Eq(a, x, z), p, q) }
 
-cong : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> (x : a) -> (y : a)
+cong : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> {0 x : a} -> {0 y : a}
      -> Eq a x y -> Eq b (f x) (f y)
-fn cong(f, x, y, p) { J(\z e => Eq(b, f(x), f(z)), refl(f(x)), p) }
+fn cong(f, p) { J(\z e => Eq(b, f(x), f(z)), refl(f(x)), p) }
 
 // transport a proof of `p x` along `x = y` to a proof of `p y`:
-subst : {0 a : Type} -> (p : a -> Type) -> (x : a) -> (y : a) -> Eq a x y -> p x -> p y
-fn subst(p, x, y, eq, px) { J(\z e => p(z), px, eq) }
+subst : {0 a : Type} -> (p : a -> Type) -> {0 x : a} -> {0 y : a} -> Eq a x y -> p x -> p y
+fn subst(p, eq, px) { J(\z e => p(z), px, eq) }
 
 // ── an INDUCTIVE proof about a USER function ────────────────────────────────
 // `plus n Zero = n` does NOT hold definitionally (plus recurses on its first
@@ -41,8 +43,8 @@ fn succF(x) { Succ(x) }
 plusZeroR : (n : Nat) -> Eq Nat (plus n Zero) n
 fn plusZeroR(n) {
   match n {
-    Zero    => refl(Zero),                                    // plus Zero Zero = Zero, by computation
-    Succ(k) => cong(succF, plus(k, Zero), k, plusZeroR(k)),   // Succ (plus k Zero) = Succ k, from the IH
+    Zero    => refl(Zero),               // plus Zero Zero = Zero, by computation
+    Succ(k) => cong(succF, plusZeroR(k)), // Succ (plus k Zero) = Succ k, from the IH
   }
 }
 
