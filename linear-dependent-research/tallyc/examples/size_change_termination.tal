@@ -37,11 +37,24 @@ fn isEven(n) { match n { Zero => True, Succ(k) => isOdd(k) } }
 isOdd : Nat -> Bool
 fn isOdd(n) { match n { Zero => False, Succ(k) => isEven(k) } }
 
+// NESTED / DEEP DESCENT: the recursive argument `k` is TWO constructors below the
+// scrutinee (`Succ(Succ(k))`), so the single-position rule (direct subterm only)
+// declined it; SCT sees `k` is still a strict subterm of `n`.
+half : Nat -> Nat
+fn half(n) {
+  match n {
+    Zero          => Zero,
+    Succ(Zero)    => Zero,
+    Succ(Succ(k)) => Succ(half(k)),
+  }
+}
+
 main : Nat
 fn main() {
-  // ack(2,3) = 9, which is odd; isEven(9) = False → 1.
+  // ack(2,3) = 9 (odd → isEven False → take the False branch);
+  // half(8) = 4.
   match isEven(ack(Succ(Succ(Zero)), Succ(Succ(Succ(Zero))))) {
     True  => 0,
-    False => 1,
+    False => half(Succ(Succ(Succ(Succ(Succ(Succ(Succ(Succ(Zero))))))))),
   }
 }

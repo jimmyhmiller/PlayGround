@@ -6325,6 +6325,25 @@ fn tsum(t) { match t { Leaf => 0, Node(l, x, r) => tsum(l) + x + tsum(r) } }
     }
 
     #[test]
+    fn boxed_nat_fix_case_packed_match_runs_natively() {
+        // REGRESSION: a `%partial`/`Fix` recursion over a NAT-LIKE enum lowered its
+        // `match` (a `Term::Case`) via the BOXED path — `inttoptr` + tag load + GEP
+        // — but a nat-like enum is PACKED (`BS(BZ)` = 1, like the eliminator and
+        // construction sides use). It thus dereferenced a small integer as a
+        // pointer → SIGSEGV, for ANY non-eliminator recursion over a boxed Nat
+        // (a bare 1-arg `dec2`, or nested patterns). `compile_case` now routes a
+        // `nat_like` datatype to the packed matcher. `dec2` strips two `BS` at a
+        // time: dec2(5) = 1.
+        let src = "%builtin Nat Nat\nenum BN { BZ : BN, BS : BN -> BN }\n\
+            dec2 : BN -> BN\n\
+            %partial fn dec2(n) { match n { BZ => BZ, BS(BZ) => BS(BZ), BS(BS(k)) => dec2(k) } }\n\
+            enum Nat { Zero : Nat, Succ : Nat -> Nat }\n\
+            count : BN -> Nat\nfn count(n) { match n { BZ => Zero, BS(k) => Succ(count(k)) } }\n\
+            main : Nat\nfn main() { count(dec2(BS(BS(BS(BS(BS(BZ))))))) }\n";
+        assert_eq!(run(src), 1);
+    }
+
+    #[test]
     fn differentiator_demo_owned_linked_list_runs_natively() {
         // THE DIFFERENTIATOR DEMO — the first safe manual-memory linked structure in
         // surface Tally. A 2-node OWNED linked list `[1, 2]` (`struct Node { head : Nat,
