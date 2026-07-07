@@ -5947,10 +5947,97 @@ pub fn build_object_opts(
     if let Some(ll) = obj_path.to_str().map(|s| format!("{s}.ll")) {
         let _ = std::fs::write(&ll, &ir);
     }
-    machine
-        .write_to_file(&module, FileType::Object, obj_path)
-        .map_err(|e| e.to_string())?;
+
+    // On Apple Silicon, retrofit vector FP-register copies (see
+    // `retrofit_apple_fp_moves`): emit assembly, rewrite scalar `fmov d,d` copies
+    // to the zero-cycle `mov.16b`, and assemble that with `cc` (already our linker).
+    // Everywhere else, emit the object directly.
+    let triple = machine.get_triple();
+    let ts = triple.as_str().to_string_lossy();
+    let is_apple_aarch64 = (ts.contains("aarch64") || ts.contains("arm64"))
+        && (ts.contains("apple") || ts.contains("darwin"));
+    if is_apple_aarch64 {
+        let buf = machine
+            .write_to_memory_buffer(&module, FileType::Assembly)
+            .map_err(|e| e.to_string())?;
+        let asm = retrofit_apple_fp_moves(&String::from_utf8_lossy(buf.as_slice()));
+        let spath = format!("{}.s", obj_path.display());
+        std::fs::write(&spath, &asm).map_err(|e| e.to_string())?;
+        let status = std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&spath)
+            .arg("-o")
+            .arg(obj_path)
+            .status()
+            .map_err(|e| format!("cannot invoke assembler `cc -c`: {e}"))?;
+        let _ = std::fs::remove_file(&spath);
+        if !status.success() {
+            return Err(format!("assembler (cc -c) failed with {status}"));
+        }
+    } else {
+        machine
+            .write_to_file(&module, FileType::Object, obj_path)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(ir)
+}
+
+/// Work around an llvm-18 AArch64 codegen pessimization on Apple Silicon. The
+/// `apple-mN` subtarget advertises the `zcm` feature ("has zero-cycle register
+/// moves"), so LLVM copies FP registers with a scalar `fmov dX, dY` believing it
+/// is free. On real M-series silicon only the *vector* form (`mov.16b vX, vY`, an
+/// ORR) is rename-eliminated; scalar `fmov d,d` still takes an FP-pipe cycle. When
+/// such a copy lands on a tight loop-carried recurrence (e.g. mandelbrot's
+/// `zx := nzx`) it costs ~20% of wall-clock versus the C twin. Newer LLVM already
+/// emits the vector form; we retrofit it in the emitted assembly.
+///
+/// `fmov dX, dY` and `fmov sX, sY` are pure register copies whose destination is
+/// only ever read as a scalar float, so widening the copy to all 128 bits is
+/// semantically inert. Immediate loads (`fmov d4, #4.0`) and GPR<->FP bitcasts
+/// (`fmov dX, xY` / `fmov xX, dY`) do NOT match the register-to-register pattern
+/// (mismatched register class) and are left untouched.
+fn retrofit_apple_fp_moves(asm: &str) -> String {
+    let mut out = String::with_capacity(asm.len());
+    for line in asm.split_inclusive('\n') {
+        match rewrite_fmov_copy(line) {
+            Some(rw) => out.push_str(&rw),
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// Rewrite a single `fmov d,d` / `fmov s,s` register-copy line to `mov.16b`,
+/// preserving indentation and the trailing newline. Returns `None` for anything
+/// that is not exactly a same-class FP-register-to-FP-register move.
+fn rewrite_fmov_copy(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, body) = line.split_at(indent_len);
+    let (content, nl) = match body.strip_suffix('\n') {
+        Some(c) => (c, "\n"),
+        None => (body, ""),
+    };
+    // `fmov` followed by at least one space/tab, then two operands.
+    let rest = content.strip_prefix("fmov")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let (op1, op2) = rest.trim_start().split_once(',')?;
+    // guard against a trailing comment / extra operand on op2.
+    let reg1 = op1.trim();
+    let reg2 = op2.trim().split_whitespace().next()?;
+    let cls1 = reg1.strip_prefix('d').map(|n| ('v', n)).or_else(|| reg1.strip_prefix('s').map(|n| ('v', n)));
+    let cls2 = reg2.strip_prefix('d').map(|n| ('v', n)).or_else(|| reg2.strip_prefix('s').map(|n| ('v', n)));
+    let ((_, n1), (_, n2)) = (cls1?, cls2?);
+    // both operands must share the same scalar FP class (d,d or s,s) …
+    if reg1.as_bytes()[0] != reg2.as_bytes()[0] {
+        return None;
+    }
+    // … and be plain register numbers.
+    if n1.is_empty() || n2.is_empty() || !n1.bytes().all(|b| b.is_ascii_digit()) || !n2.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{indent}mov.16b\tv{n1}, v{n2}{nl}"))
 }
 
 #[cfg(test)]
@@ -5967,6 +6054,24 @@ mod tests {
         let prog = rust_surface::check_program(src).unwrap_or_else(|e| panic!("{e:?}"));
         let (_, _, body) = prog.defs.iter().find(|(n, _, _)| n == "main").expect("no main");
         super::emit_ir(&prog.sig, body).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn apple_fp_move_retrofit_only_touches_reg_copies() {
+        use super::rewrite_fmov_copy;
+        // same-class register copies → widened to the zero-cycle vector move.
+        assert_eq!(rewrite_fmov_copy("\tfmov\td2, d5\n").as_deref(), Some("\tmov.16b\tv2, v5\n"));
+        assert_eq!(rewrite_fmov_copy("    fmov s0, s31\n").as_deref(), Some("    mov.16b\tv0, v31\n"));
+        assert_eq!(rewrite_fmov_copy("\tfmov\td10, d0").as_deref(), Some("\tmov.16b\tv10, v0")); // no newline
+        // things that must be left ALONE:
+        assert_eq!(rewrite_fmov_copy("\tfmov\td4, #4.00000000\n"), None); // immediate load
+        assert_eq!(rewrite_fmov_copy("\tfmov\td0, x11\n"), None); // GPR->FP bitcast
+        assert_eq!(rewrite_fmov_copy("\tfmov\tx8, d0\n"), None); // FP->GPR bitcast
+        assert_eq!(rewrite_fmov_copy("\tfmul\td5, d2, d2\n"), None); // not an fmov
+        assert_eq!(rewrite_fmov_copy("\tfmov\td2, s5\n"), None); // mixed class
+        // whole-buffer pass keeps non-matching lines verbatim.
+        let asm = "_f:\n\tfmov\td4, #4.0\n\tfmov\td2, d5\n\tret\n";
+        assert_eq!(super::retrofit_apple_fp_moves(asm), "_f:\n\tfmov\td4, #4.0\n\tmov.16b\tv2, v5\n\tret\n");
     }
 
     #[test]
