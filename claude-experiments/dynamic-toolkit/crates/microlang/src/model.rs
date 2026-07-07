@@ -21,6 +21,13 @@ pub trait Repr: Copy + 'static {
     /// thing that flips between LowBit and NanBox.
     fn is_immediate(cat: Cat) -> bool;
 
+    /// Does this integer fit the immediate fixnum encoding? Only consulted when
+    /// `is_immediate(Int)`; an integer that does not fit is promoted to a boxed
+    /// `BigInt`. This is the value axis's contribution to the numeric tower.
+    fn imm_fits(_i: i64) -> bool {
+        false
+    }
+
     /// What is physically in this word?
     fn tag_of(bits: u64) -> RawTag;
 
@@ -87,6 +94,11 @@ impl Repr for LowBit {
     fn is_immediate(cat: Cat) -> bool {
         // Integers are immediate; floats are not.
         matches!(cat, Cat::Int | Cat::Bool | Cat::Nil | Cat::Sym | Cat::Ref)
+    }
+
+    fn imm_fits(i: i64) -> bool {
+        // value is stored as `i << 3`, so it must fit 61 bits (signed).
+        i >= -(1 << 60) && i < (1 << 60)
     }
 
     fn tag_of(bits: u64) -> RawTag {
@@ -265,6 +277,11 @@ impl Repr for HighBit {
 
     fn is_immediate(cat: Cat) -> bool {
         matches!(cat, Cat::Int | Cat::Bool | Cat::Nil | Cat::Sym | Cat::Ref)
+    }
+
+    fn imm_fits(i: i64) -> bool {
+        // value occupies the low 61 bits (sign-extended from bit 60).
+        i >= -(1 << 60) && i < (1 << 60)
     }
 
     fn tag_of(bits: u64) -> RawTag {

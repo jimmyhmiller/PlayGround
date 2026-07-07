@@ -44,7 +44,9 @@ pub fn write_value<M: ValueModel>(rt: &Runtime<M>, bits: u64) -> String {
                 let inner: Vec<String> = items.iter().map(|&x| write_value(rt, x)).collect();
                 format!("({})", inner.join(" "))
             } else {
-                "#<object>".to_string()
+                // Strings, chars, vectors, huge integers, …: the core printer
+                // knows every heap object.
+                rt.print(bits)
             }
         }
     }
@@ -66,11 +68,63 @@ pub fn read<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Vec<u64> {
 /// Read, macro-expand (`syntax-rules`), desugar, and evaluate a program on the
 /// given core execution tier. Macro expansion is a pure frontend pass; the core
 /// never sees a `syntax-rules` macro.
+/// Standard-library procedures defined in Scheme itself, on the core's list
+/// primitives — the "language as a library" discipline. Auto-injected before
+/// every program so they are always in scope.
+const PRELUDE: &str = "
+(define (map f xs)
+  (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))
+(define (for-each f xs)
+  (if (null? xs) '() (begin (f (car xs)) (for-each f (cdr xs)))))
+(define (append a b)
+  (if (null? a) b (cons (car a) (append (cdr a) b))))
+(define (reverse xs)
+  (if (null? xs) '() (append (reverse (cdr xs)) (list (car xs)))))
+(define (length xs)
+  (if (null? xs) 0 (+ 1 (length (cdr xs)))))
+(define (not x) (if x #f #t))
+;; First-class (callable-value) versions of the operators that otherwise only
+;; exist as head-position folds. In head position the fold/prim still wins
+;; (analyze checks prims first), so these are used only when an operator is
+;; passed as a value, e.g. (apply + (list 1 2)).
+(define (+ a b) (%add a b))
+(define (- a b) (%sub a b))
+(define (* a b) (%mul a b))
+(define (< a b) (%lt a b))
+(define (= a b) (%num-eq a b))
+(define (cadr xs) (car (cdr xs)))
+(define (caddr xs) (car (cdr (cdr xs))))
+(define (list-tail xs n) (if (= n 0) xs (list-tail (cdr xs) (- n 1))))
+(define (list-ref xs n) (car (list-tail xs n)))
+(define (call-with-values producer consumer)
+  (apply consumer (%values->list (producer))))
+;; NOTE: this dynamic-wind runs `after` on normal completion only. It does NOT
+;; yet re-run `before`/`after` across continuation jumps (needs a wind stack in
+;; the CEK machine); correct for non-escaping use, which is all we claim.
+(define (dynamic-wind before thunk after)
+  (before)
+  (let ((result (thunk)))
+    (after)
+    result))
+";
+
 pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str) -> u64 {
-    let forms = read(rt, src);
+    let forms = read(rt, &format!("{PRELUDE}\n{src}"));
+    // Root the whole read buffer: a program may force a garbage collection (an
+    // explicit `(gc)`, or — on the CEK tier — a collection while continuations
+    // are live) during an early form, and the later, not-yet-desugared source
+    // forms are live heap data the collector will relocate. Re-read each form
+    // through its shadow slot so we see its post-collection address. Same
+    // discipline `Runtime::eval_str` uses, one level out.
+    let base = rt.root_depth();
+    for &f in &forms {
+        rt.push_root(f);
+    }
     let mut macros: HashMap<u32, SyntaxRules> = HashMap::new();
-    let mut last = rt.encode(Val::Nil);
-    for f in forms {
+    let nil = rt.encode(Val::Nil);
+    let last_slot = rt.push_root(nil);
+    for i in 0..forms.len() {
+        let f = rt.root_get(base + i);
         // `(define-syntax name (syntax-rules ...))` registers a macro; it is a
         // compile-time definition with no runtime form.
         if let Some((name, sr_form)) = as_define_syntax(rt, f) {
@@ -80,8 +134,11 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
         }
         let expanded = expand(rt, &macros, f);
         let core = desugar(rt, expanded);
-        last = rt.eval_top(cs, core);
+        let v = rt.eval_top(cs, core);
+        rt.set_root(last_slot, v);
     }
+    let last = rt.root_get(last_slot);
+    rt.truncate_roots(base);
     last
 }
 
@@ -127,6 +184,10 @@ enum Tok {
     L,
     R,
     Quote,
+    Quasi,
+    Unquote,
+    UnquoteSplicing,
+    Str(String),
     Atom(String),
 }
 
@@ -155,11 +216,44 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 out.push(Tok::Quote);
                 i += 1;
             }
+            '`' => {
+                out.push(Tok::Quasi);
+                i += 1;
+            }
+            ',' => {
+                if cs.get(i + 1) == Some(&'@') {
+                    out.push(Tok::UnquoteSplicing);
+                    i += 2;
+                } else {
+                    out.push(Tok::Unquote);
+                    i += 1;
+                }
+            }
+            '"' => {
+                i += 1; // opening quote
+                let mut s = String::new();
+                while i < cs.len() && cs[i] != '"' {
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        i += 1;
+                        s.push(match cs[i] {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            other => other, // covers \" and \\
+                        });
+                    } else {
+                        s.push(cs[i]);
+                    }
+                    i += 1;
+                }
+                i += 1; // closing quote
+                out.push(Tok::Str(s));
+            }
             _ => {
                 let start = i;
                 while i < cs.len()
                     && !cs[i].is_whitespace()
-                    && !matches!(cs[i], '(' | ')' | '[' | ']' | '\'' | ';')
+                    && !matches!(cs[i], '(' | ')' | '[' | ']' | '\'' | '`' | ',' | '"' | ';')
                 {
                     i += 1;
                 }
@@ -184,24 +278,47 @@ fn read_form<M: ValueModel>(rt: &mut Runtime<M>, toks: &[Tok], p: usize) -> (u64
             (rt.vec_to_list(&items), q + 1)
         }
         Tok::R => panic!("scheme reader: unexpected )"),
-        Tok::Quote => {
-            let (v, nq) = read_form(rt, toks, p + 1);
-            let q = rt.intern("quote");
-            let qs = rt.encode(Val::Sym(q));
-            (rt.vec_to_list(&[qs, v]), nq)
-        }
+        Tok::Quote => reader_wrap(rt, toks, p, "quote"),
+        Tok::Quasi => reader_wrap(rt, toks, p, "quasiquote"),
+        Tok::Unquote => reader_wrap(rt, toks, p, "unquote"),
+        Tok::UnquoteSplicing => reader_wrap(rt, toks, p, "unquote-splicing"),
+        Tok::Str(s) => (rt.alloc_str(s.clone()), p + 1),
         Tok::Atom(a) => (read_atom(rt, a), p + 1),
     }
 }
 
+/// Read the following form and wrap it: `'x`->`(quote x)`, `` `x ``->`(quasiquote x)`, etc.
+fn reader_wrap<M: ValueModel>(rt: &mut Runtime<M>, toks: &[Tok], p: usize, tag: &str) -> (u64, usize) {
+    let (v, nq) = read_form(rt, toks, p + 1);
+    let t = rt.intern(tag);
+    let ts = rt.encode(Val::Sym(t));
+    (rt.vec_to_list(&[ts, v]), nq)
+}
+
 fn read_atom<M: ValueModel>(rt: &mut Runtime<M>, a: &str) -> u64 {
+    // Character literals: `#\A`, `#\space`, `#\newline`, ...
+    if let Some(rest) = a.strip_prefix("#\\") {
+        let c = match rest {
+            "space" => ' ',
+            "newline" => '\n',
+            "tab" => '\t',
+            "return" => '\r',
+            _ => {
+                let mut chars = rest.chars();
+                let c = chars.next().unwrap_or_else(|| panic!("scheme reader: bad char literal {a:?}"));
+                assert!(chars.next().is_none(), "scheme reader: bad char literal {a:?}");
+                c
+            }
+        };
+        return rt.alloc_char(c);
+    }
     let v = if a == "#t" {
         Val::Bool(true)
     } else if a == "#f" {
         Val::Bool(false)
     } else if a == "nil" || a == "'()" {
         Val::Nil
-    } else if let Ok(i) = a.parse::<i64>() {
+    } else if let Ok(i) = a.parse::<i128>() {
         Val::Int(i)
     } else if let Ok(f) = a.parse::<f64>() {
         Val::Float(f)
@@ -264,6 +381,10 @@ pub fn desugar<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         "set!" => rebuild_head(rt, "set!", form), // core has `set!`; only the value desugars
         "cond" => desugar_cond(rt, form),
         "quote" => form, // keep the datum verbatim
+        "quasiquote" => {
+            let template = nth(rt, form, 1);
+            quasi(rt, template)
+        }
         // variadic arithmetic folds into the core's binary prims
         "+" => fold(rt, form, "+", 0),
         "*" => fold(rt, form, "*", 1),
@@ -288,8 +409,74 @@ pub fn desugar<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         "when" => desugar_when(rt, form, true),
         "unless" => desugar_when(rt, form, false),
         "case" => desugar_case(rt, form),
+        // Delimited control, lowered to the core's native `%reset`/`%shift`
+        // primitives (the stackless CEK tier implements them).
+        //   (reset body...)   -> (%reset (do body'...))
+        //   (shift k body...) -> (%shift (fn (k) body'...))
+        "reset" => {
+            let items = rt.list_to_vec(form);
+            let mut body = vec![sym(rt, "do")];
+            for &b in &items[1..] {
+                body.push(desugar(rt, b));
+            }
+            let body = rt.vec_to_list(&body);
+            let r = sym(rt, "%reset");
+            list(rt, &[r, body])
+        }
+        "shift" => {
+            let items = rt.list_to_vec(form);
+            let kvar = items[1]; // the continuation binder (a symbol)
+            let params = list(rt, &[kvar]);
+            let mut lam = vec![sym(rt, "fn"), params];
+            for &b in &items[2..] {
+                lam.push(desugar(rt, b));
+            }
+            let lam = rt.vec_to_list(&lam);
+            let s = sym(rt, "%shift");
+            list(rt, &[s, lam])
+        }
         _ => desugar_app(rt, form),
     }
+}
+
+/// Expand a quasiquote template into an expression that builds it: literal parts
+/// are quoted, `(unquote x)` parts are evaluated, `(unquote-splicing x)` parts are
+/// spliced with `append`. Depth-1 (does not handle nested quasiquote).
+fn quasi<M: ValueModel>(rt: &mut Runtime<M>, t: u64) -> u64 {
+    // Not a pair: a literal datum -> (quote t).
+    if rt.as_cons(t).is_none() {
+        let q = sym(rt, "quote");
+        return list(rt, &[q, t]);
+    }
+    // (unquote x) -> evaluate x.
+    if tagged_as(rt, t, "unquote") {
+        let x = nth(rt, t, 1);
+        return desugar(rt, x);
+    }
+    // A list: process the head element, cons onto the expanded tail. A head that
+    // is (unquote-splicing x) appends x instead of consing.
+    let head = nth(rt, t, 0);
+    let (_, tail) = rt.as_cons(t).unwrap();
+    let rest = quasi(rt, tail);
+    if tagged_as(rt, head, "unquote-splicing") {
+        let x = nth(rt, head, 1);
+        let sx = desugar(rt, x);
+        let append = sym(rt, "append");
+        return list(rt, &[append, sx, rest]);
+    }
+    let qh = quasi(rt, head);
+    let cons = sym(rt, "cons");
+    list(rt, &[cons, qh, rest])
+}
+
+/// Is `form` a two-element list `(tag …)` whose head is the symbol `tag`?
+fn tagged_as<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> bool {
+    if let Some((h, _)) = rt.as_cons(form) {
+        if let Val::Sym(s) = rt.decode(h) {
+            return rt.sym_name(s) == tag;
+        }
+    }
+    false
 }
 
 // ── small builders ──────────────────────────────────────────
@@ -308,7 +495,7 @@ fn desugared_args<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Vec<u64> {
 fn fold<M: ValueModel>(rt: &mut Runtime<M>, form: u64, op: &str, identity: i64) -> u64 {
     let args = desugared_args(rt, form);
     if args.is_empty() {
-        return rt.encode(Val::Int(identity));
+        return rt.encode(Val::Int(identity as i128));
     }
     let mut acc = args[0];
     for &a in &args[1..] {
@@ -464,10 +651,12 @@ fn alias(name: &str) -> Option<&'static str> {
         "cdr" => "rest",
         "null?" => "nil?",
         "equal?" => "=", // the core's `=` is structural equality
-        // Scheme's call/cc maps to the core's escape-continuation mechanism
-        // (escape-only for now — full multi-shot is a separate frontier).
-        "call/cc" => "%callec",
-        "call-with-current-continuation" => "%callec",
+        "eq?" => "%eq",  // identity (bit equality)
+        "eqv?" => "%eq",
+        // Scheme's call/cc maps to the core's FULL continuation mechanism,
+        // which only the stackless `CekMachine` supports.
+        "call/cc" => "%callcc",
+        "call-with-current-continuation" => "%callcc",
         _ => return None,
     })
 }

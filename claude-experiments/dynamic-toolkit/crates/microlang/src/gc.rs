@@ -22,6 +22,9 @@
 //! relocation semantics — copy, forward, rewrite roots, re-read via handle — are
 //! faithful.
 
+use std::rc::Rc;
+
+use crate::cek::Kont;
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
 use crate::value::{Locals, Obj, RawTag};
@@ -47,8 +50,15 @@ impl<M: ValueModel> Runtime<M> {
     pub fn root_get(&self, slot: usize) -> u64 {
         self.shadow[slot]
     }
+    pub fn set_root(&mut self, slot: usize, v: u64) {
+        self.shadow[slot] = v;
+    }
     pub fn root_depth(&self) -> usize {
         self.shadow.len()
+    }
+    /// Drop all roots at or above `depth` (a non-LIFO bulk `pop_root`).
+    pub fn truncate_roots(&mut self, depth: usize) {
+        self.shadow.truncate(depth);
     }
 
     /// Root a value and get a handle back. Caller balances with `pop_root`.
@@ -59,6 +69,19 @@ impl<M: ValueModel> Runtime<M> {
     /// A moving collection. `live_env` is the currently executing environment
     /// (the safepoint's live frame chain); its cells are rewritten in place.
     pub fn collect(&mut self, live_env: &Locals) {
+        self.collect_inner(live_env, None);
+    }
+
+    /// A moving collection from a `CekMachine` safepoint: additionally roots the
+    /// live continuation `live_kont` (its `done` cells and captured frames), so a
+    /// collection that happens while a continuation is live or captured relocates
+    /// it correctly. This is the moving GC composed with the full-continuation
+    /// tier — the combination the 45-way matrix deliberately left out.
+    pub fn collect_cek(&mut self, live_env: &Locals, live_kont: &Rc<Kont>) {
+        self.collect_inner(live_env, Some(live_kont));
+    }
+
+    fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Rc<Kont>>) {
         let from_len = self.heap.len();
         let real_before = self
             .heap
@@ -94,6 +117,11 @@ impl<M: ValueModel> Runtime<M> {
             }
             // The live environment: rewrite the cells of its frame chain.
             update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);
+            // The live continuation, if we are at a CEK safepoint: forward the
+            // `done` cells and captured frames along its whole chain.
+            if let Some(k) = live_kont {
+                walk_kont::<M>(heap, from_len, &mut to, &mut reloc, k);
+            }
 
             // 2. Cheney scan: forward the internal pointers of copied objects
             //    (which may copy more), until the scan pointer catches up.
@@ -184,6 +212,67 @@ fn scan_obj<M: ValueModel>(
         if let Obj::Record { fields, .. } = &mut to[i] {
             *fields = forwarded;
         }
+        return;
+    }
+    // Vector / multiple-values packet: forward each element.
+    if let Obj::Vector(elems) | Obj::Values(elems) = &to[i] {
+        let es = elems.clone();
+        let forwarded: Vec<u64> = es
+            .into_iter()
+            .map(|e| fw::<M>(heap, from_len, to, reloc, e))
+            .collect();
+        if let Obj::Vector(elems) | Obj::Values(elems) = &mut to[i] {
+            *elems = forwarded;
+        }
+        return;
+    }
+    // A reified continuation (full or delimited): walk its whole `Kont` chain,
+    // forwarding the `done` cells and captured frames it holds. `Ir` inside the
+    // chain holds no heap pointers (const pool), so only cells and frames move.
+    if let Obj::Cont(k) | Obj::PartialCont(k) = &to[i] {
+        let k = k.clone();
+        walk_kont::<M>(heap, from_len, to, reloc, &k);
+    }
+}
+
+/// Trace a `Kont` chain: forward every `done`-slot cell in place and rewrite the
+/// cells of every captured frame. In-place and idempotent (like `update_env`), so
+/// shared continuation tails and multi-shot resumptions need no visited set.
+fn walk_kont<M: ValueModel>(
+    heap: &mut Vec<Obj>,
+    from_len: usize,
+    to: &mut Vec<Obj>,
+    reloc: &mut u64,
+    k: &Rc<Kont>,
+) {
+    let mut cur = k.clone();
+    loop {
+        let next = match &*cur {
+            Kont::Done => return,
+            Kont::CallK { done, env, next, .. } | Kont::PrimK { done, env, next, .. } => {
+                for cell in done {
+                    cell.set(fw::<M>(heap, from_len, to, reloc, cell.get()));
+                }
+                update_env::<M>(heap, from_len, to, reloc, env);
+                next.clone()
+            }
+            Kont::If { env, next, .. }
+            | Kont::Seq { env, next, .. }
+            | Kont::SetLoc { env, next, .. } => {
+                update_env::<M>(heap, from_len, to, reloc, env);
+                next.clone()
+            }
+            Kont::LetSlot { frame, next, .. } => {
+                update_env::<M>(heap, from_len, to, reloc, frame);
+                next.clone()
+            }
+            Kont::Def { next, .. }
+            | Kont::SetGlob { next, .. }
+            | Kont::CallCc { next, .. }
+            | Kont::Prompt { next, .. }
+            | Kont::ShiftK { next, .. } => next.clone(),
+        };
+        cur = next;
     }
 }
 

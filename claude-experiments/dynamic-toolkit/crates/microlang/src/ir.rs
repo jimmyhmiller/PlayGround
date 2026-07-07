@@ -38,6 +38,46 @@ pub enum Prim {
     /// `(%callec f)` — call `f` with a fresh escape continuation. Backend-handled
     /// (needs to invoke a closure and catch a non-local exit), like `Gc`.
     CallEc,
+    /// `(string-length s)` -> the character count of a string.
+    StrLen,
+    /// `(char->integer c)` -> the Unicode scalar value of a char.
+    CharToInt,
+    /// `(integer->char n)` -> the char with Unicode scalar value `n`.
+    IntToChar,
+    /// `(vector e ...)` -> a fresh vector of the arguments.
+    Vector,
+    /// `(vector-ref v i)` -> the i-th element.
+    VectorRef,
+    /// `(vector-set! v i x)` -> set the i-th element to `x`; returns nil.
+    VectorSet,
+    /// `(vector-length v)` -> the element count.
+    VectorLen,
+    /// `(values e ...)` -> a multiple-values packet.
+    Values,
+    /// `(%values->list v)` -> the list of values in a packet (a lone non-packet
+    /// value becomes a one-element list). Bridges `values` to `apply`.
+    ValuesToList,
+    /// `(apply f a ... lst)` -> apply `f` to the leading args followed by the
+    /// elements of the final list. Requires a backend that can invoke closures
+    /// (intercepted by the `CekMachine`), like `%callcc`.
+    Apply,
+    /// `(%eq a b)` — object identity (`eq?`/`eqv?`): equal iff the encoded bits
+    /// are equal. For immediates that is value equality; for heap values it is
+    /// pointer identity. (Contrast `Eq`, which is structural `equal?`.)
+    Identical,
+    /// `(%callcc f)` — full call-with-current-continuation. Only the stackless
+    /// `CekMachine` supports it (the continuation is a first-class, multi-shot,
+    /// re-installable value); host-stack tiers cannot.
+    CallCc,
+    /// `(%reset body)` — install a continuation delimiter (prompt) and evaluate
+    /// `body` under it. A NATIVE delimited-control primitive; only the stackless
+    /// `CekMachine` supports it.
+    Reset,
+    /// `(%shift f)` — capture the continuation from here up to the nearest
+    /// enclosing `%reset`, reify it as a COMPOSABLE (re-delimited, multi-shot)
+    /// procedure, and apply `f` to it under a re-established prompt. Native
+    /// delimited control; `CekMachine` only.
+    Shift,
 }
 
 #[derive(Clone)]

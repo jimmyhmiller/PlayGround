@@ -13,9 +13,15 @@
 //! Hygiene is the genuinely hard remaining piece; a hygiene-requiring case is
 //! kept pending in the conformance suite to mark it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use microlang::{Runtime, Val, ValueModel};
+
+/// Monotonic source of fresh identifiers for hygienic renaming. Deterministic
+/// (no randomness); only uniqueness matters, since renamed names name macro-
+/// introduced bindings that never escape into output.
+static GENSYM: AtomicU32 = AtomicU32::new(0);
 
 pub struct SyntaxRules {
     literals: Vec<u32>,
@@ -57,10 +63,215 @@ pub fn apply<M: ValueModel>(rt: &mut Runtime<M>, sr: &SyntaxRules, form: u64) ->
         let mut binds = HashMap::new();
         // The pattern's first element is the macro keyword — ignore it.
         if match_seq(rt, &pv[1..], &input[1..], &sr.literals, &mut binds) {
-            return Some(instantiate(rt, *tmpl, &binds));
+            // HYGIENE: rename identifiers the template itself BINDS (via let /
+            // let* / letrec / lambda / named let) to fresh names, so they cannot
+            // capture identifiers the caller passed in. Pattern variables (which
+            // carry the caller's identifiers) and free references (`let`, `if`,
+            // `+`, …) are left untouched. Done before `instantiate` so it sees
+            // only template identifiers, never spliced-in user code.
+            let mut patvars = HashSet::new();
+            pattern_var_set(rt, *pat, &sr.literals, &mut patvars);
+            let renames = HashMap::new();
+            let htmpl = hygienic_rename(rt, *tmpl, &patvars, &renames);
+            return Some(instantiate(rt, htmpl, &binds));
         }
     }
     None
+}
+
+/// The set of pattern-variable symbols in a pattern (so hygiene never renames a
+/// caller-supplied identifier).
+fn pattern_var_set<M: ValueModel>(rt: &Runtime<M>, pat: u64, literals: &[u32], out: &mut HashSet<u32>) {
+    let mut v = Vec::new();
+    pattern_vars(rt, pat, literals, &mut v);
+    out.extend(v);
+}
+
+/// Intern a fresh identifier derived from `orig` (kept readable for debugging;
+/// the marker char cannot appear in source identifiers, so no collision).
+fn fresh<M: ValueModel>(rt: &mut Runtime<M>, orig: &str) -> u64 {
+    let n = GENSYM.fetch_add(1, Ordering::Relaxed);
+    let s = rt.intern(&format!("{orig}\u{2063}{n}"));
+    rt.encode(Val::Sym(s))
+}
+
+/// Alpha-rename template-introduced bindings. `renames` maps an original symbol
+/// to its fresh replacement value for the current scope; it grows as we descend
+/// into binding forms and is copied per child scope so siblings don't leak.
+fn hygienic_rename<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    form: u64,
+    patvars: &HashSet<u32>,
+    renames: &HashMap<u32, u64>,
+) -> u64 {
+    // A bare identifier: replace if it is bound by an enclosing template form.
+    if let Val::Sym(s) = rt.decode(form) {
+        return renames.get(&s).copied().unwrap_or(form);
+    }
+    if rt.as_cons(form).is_none() {
+        return form; // literal datum
+    }
+    let items = rt.list_to_vec(form);
+    let head = head_name(rt, &items);
+    match head.as_deref() {
+        // Quoted data is literal — never rename inside it.
+        Some("quote") => form,
+        Some("let") if items.len() >= 2 && matches!(rt.decode(items[1]), Val::Sym(_)) => {
+            rename_named_let(rt, &items, patvars, renames)
+        }
+        Some("let") | Some("letrec") => rename_let(rt, &items, patvars, renames, head.as_deref() == Some("letrec")),
+        Some("let*") => rename_let_star(rt, &items, patvars, renames),
+        Some("lambda") => rename_lambda(rt, &items, patvars, renames),
+        // Not a binding form: recurse into every element with the same scope.
+        _ => {
+            let out: Vec<u64> = items
+                .iter()
+                .map(|&e| hygienic_rename(rt, e, patvars, renames))
+                .collect();
+            rt.vec_to_list(&out)
+        }
+    }
+}
+
+fn head_name<M: ValueModel>(rt: &Runtime<M>, items: &[u64]) -> Option<String> {
+    match items.first().map(|&h| rt.decode(h)) {
+        Some(Val::Sym(s)) => Some(rt.sym_name(s).to_string()),
+        _ => None,
+    }
+}
+
+/// Fresh-name a binder unless it is a pattern variable; record the rename.
+fn bind_fresh<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    v: u64,
+    patvars: &HashSet<u32>,
+    scope: &mut HashMap<u32, u64>,
+) -> u64 {
+    if let Val::Sym(s) = rt.decode(v) {
+        if !patvars.contains(&s) {
+            let name = rt.sym_name(s).to_string();
+            let f = fresh(rt, &name);
+            scope.insert(s, f);
+            return f;
+        }
+    }
+    v
+}
+
+// `(let ((v e) ...) body ...)` — inits in the OUTER scope, body in the child.
+// `letrec` — inits AND body in the child scope.
+fn rename_let<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    items: &[u64],
+    patvars: &HashSet<u32>,
+    renames: &HashMap<u32, u64>,
+    rec: bool,
+) -> u64 {
+    let pairs = rt.list_to_vec(items[1]);
+    let mut child = renames.clone();
+    // First pass: allocate fresh names for all binders (needed up-front for letrec).
+    let mut binders = Vec::new();
+    for &p in &pairs {
+        let pv = rt.list_to_vec(p);
+        let nv = bind_fresh(rt, pv[0], patvars, &mut child);
+        binders.push((nv, pv.get(1).copied()));
+    }
+    let init_scope = if rec { &child } else { renames };
+    let mut new_pairs = Vec::new();
+    for (nv, init) in binders {
+        let ne = init.map(|e| hygienic_rename(rt, e, patvars, init_scope));
+        new_pairs.push(match ne {
+            Some(e) => rt.vec_to_list(&[nv, e]),
+            None => rt.vec_to_list(&[nv]),
+        });
+    }
+    let binds_list = rt.vec_to_list(&new_pairs);
+    let mut out = vec![items[0], binds_list];
+    for &b in &items[2..] {
+        let nb = hygienic_rename(rt, b, patvars, &child);
+        out.push(nb);
+    }
+    rt.vec_to_list(&out)
+}
+
+// `(let* ((v e) ...) body)` — each init sees the previous binders.
+fn rename_let_star<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    items: &[u64],
+    patvars: &HashSet<u32>,
+    renames: &HashMap<u32, u64>,
+) -> u64 {
+    let pairs = rt.list_to_vec(items[1]);
+    let mut scope = renames.clone();
+    let mut new_pairs = Vec::new();
+    for &p in &pairs {
+        let pv = rt.list_to_vec(p);
+        let ne = pv.get(1).map(|&e| hygienic_rename(rt, e, patvars, &scope));
+        let nv = bind_fresh(rt, pv[0], patvars, &mut scope);
+        new_pairs.push(match ne {
+            Some(e) => rt.vec_to_list(&[nv, e]),
+            None => rt.vec_to_list(&[nv]),
+        });
+    }
+    let binds_list = rt.vec_to_list(&new_pairs);
+    let mut out = vec![items[0], binds_list];
+    for &b in &items[2..] {
+        let nb = hygienic_rename(rt, b, patvars, &scope);
+        out.push(nb);
+    }
+    rt.vec_to_list(&out)
+}
+
+// `(let name ((v e) ...) body)` — `name` and the `v`s are bound in the body.
+fn rename_named_let<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    items: &[u64],
+    patvars: &HashSet<u32>,
+    renames: &HashMap<u32, u64>,
+) -> u64 {
+    let mut child = renames.clone();
+    let nname = bind_fresh(rt, items[1], patvars, &mut child);
+    let pairs = rt.list_to_vec(items[2]);
+    let mut new_pairs = Vec::new();
+    for &p in &pairs {
+        let pv = rt.list_to_vec(p);
+        // init in outer scope; binder in child
+        let ne = pv.get(1).map(|&e| hygienic_rename(rt, e, patvars, renames));
+        let nv = bind_fresh(rt, pv[0], patvars, &mut child);
+        new_pairs.push(match ne {
+            Some(e) => rt.vec_to_list(&[nv, e]),
+            None => rt.vec_to_list(&[nv]),
+        });
+    }
+    let binds_list = rt.vec_to_list(&new_pairs);
+    let mut out = vec![items[0], nname, binds_list];
+    for &b in &items[3..] {
+        let nb = hygienic_rename(rt, b, patvars, &child);
+        out.push(nb);
+    }
+    rt.vec_to_list(&out)
+}
+
+// `(lambda (params ...) body ...)` — params bound in the body.
+fn rename_lambda<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    items: &[u64],
+    patvars: &HashSet<u32>,
+    renames: &HashMap<u32, u64>,
+) -> u64 {
+    let mut child = renames.clone();
+    let params = rt.list_to_vec(items[1]);
+    let new_params: Vec<u64> = params
+        .iter()
+        .map(|&p| bind_fresh(rt, p, patvars, &mut child))
+        .collect();
+    let params_list = rt.vec_to_list(&new_params);
+    let mut out = vec![items[0], params_list];
+    for &b in &items[2..] {
+        let nb = hygienic_rename(rt, b, patvars, &child);
+        out.push(nb);
+    }
+    rt.vec_to_list(&out)
 }
 
 fn is_named<M: ValueModel>(rt: &Runtime<M>, form: u64, name: &str) -> bool {

@@ -17,7 +17,9 @@
 //!   * `calc_fixnum` / `calc_float` — same generic engine, two value models.
 //!   * `microlisp` — macros, `defmacro`, incremental eval on the fixnum model.
 
+pub mod bigint;
 pub mod bytecode;
+pub mod cek;
 pub mod code;
 pub mod compiled;
 pub mod dispatch;
@@ -29,6 +31,7 @@ pub mod speculation;
 pub mod value;
 
 pub use bytecode::{BytecodeVm, ModelEmit};
+pub use cek::CekMachine;
 pub use code::{CodeSpace, Traced, TreeWalk};
 pub use compiled::ClosureComp;
 pub use dispatch::{Dispatch, DispatchStats, Megamorphic, MonomorphicIc, PolymorphicIc};

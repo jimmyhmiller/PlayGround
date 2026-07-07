@@ -42,7 +42,11 @@ pub enum RawTag {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Val {
-    Int(i64),
+    /// The neutral integer is `i128`-backed: small values ride in an immediate
+    /// fixnum, larger ones are promoted to a boxed `BigInt`. (`i128` is a bounded
+    /// stand-in for arbitrary precision — the promotion MECHANISM is the point;
+    /// swapping the storage for a real bignum is orthogonal.)
+    Int(i128),
     Float(f64),
     Bool(bool),
     Nil,
@@ -61,7 +65,20 @@ pub enum Obj {
         tail: u64,
     },
     Str(String),
-    BoxInt(i64),
+    /// A character (R7RS `char?`), disjoint from integers and strings.
+    Char(char),
+    /// A vector: a fixed, mutable, index-addressed sequence of values.
+    Vector(Vec<u64>),
+    /// A multiple-values packet produced by `(values …)` and consumed by
+    /// `call-with-values`. Distinct from a list so `(values (list 1 2))` (one
+    /// value that is a list) differs from `(values 1 2)` (two values).
+    Values(Vec<u64>),
+    /// A promoted integer that did not fit the immediate fixnum range (but still
+    /// fits `i128` — the common promotion).
+    BigInt(i128),
+    /// An integer beyond `i128`: true arbitrary precision. Reached only when the
+    /// `i128` arithmetic path overflows.
+    HugeInt(crate::bigint::BigInt),
     BoxFloat(f64),
     Closure {
         nparams: usize,
@@ -82,6 +99,19 @@ pub enum Obj {
     Escape {
         tag: u64,
     },
+    /// A FULL, multi-shot continuation: a reified `CekMachine` continuation.
+    /// Because it is an immutable `Rc`-linked structure, invoking it re-installs
+    /// the captured continuation any number of times — enabling generators,
+    /// coroutines, and backtracking. Only the stackless machine produces these.
+    Cont(Rc<crate::cek::Kont>),
+    /// A COMPOSABLE (delimited) continuation: the slice of a `CekMachine`
+    /// continuation between a `%shift` and its enclosing `%reset`. Unlike `Cont`,
+    /// invoking it does NOT abort — it splices the captured slice onto the
+    /// caller's continuation under a fresh prompt and RETURNS, so it composes and
+    /// can be invoked any number of times. Only the stackless machine produces
+    /// these. Its captured frames are traced by the moving GC (see `gc.rs`), so
+    /// it survives collection like any other heap value.
+    PartialCont(Rc<crate::cek::Kont>),
     /// Forwarding marker left in from-space by the copying collector: the object
     /// now lives at index `.0` (or `u32::MAX` for reclaimed garbage). Any
     /// attempt to dereference a stale from-space pointer hits this and errors

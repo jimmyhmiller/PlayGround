@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+use crate::bigint::BigInt;
 use crate::code::CodeSpace;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
 use crate::ir::{ConstId, Ir, Prim};
@@ -138,7 +139,29 @@ impl<M: ValueModel> Runtime<M> {
             ("gc", Gc),
             ("record", Record),
             ("field", Field),
+            ("%eq", Identical),
+            // Binary aliases so arithmetic/comparison operators can be given
+            // first-class prelude bindings (the surface `+`/`<`/… fold in head
+            // position, but must also be callable values, e.g. `(apply + xs)`).
+            ("%add", Add),
+            ("%sub", Sub),
+            ("%mul", Mul),
+            ("%lt", Lt),
+            ("%num-eq", Eq),
+            ("string-length", StrLen),
+            ("char->integer", CharToInt),
+            ("integer->char", IntToChar),
+            ("vector", Vector),
+            ("vector-ref", VectorRef),
+            ("vector-set!", VectorSet),
+            ("vector-length", VectorLen),
+            ("values", Values),
+            ("%values->list", ValuesToList),
+            ("apply", Apply),
             ("%callec", CallEc),
+            ("%callcc", CallCc),
+            ("%reset", Reset),
+            ("%shift", Shift),
         ] {
             let s = rt.intern(name);
             rt.prims.insert(s, p);
@@ -183,10 +206,14 @@ impl<M: ValueModel> Runtime<M> {
     pub fn encode(&mut self, v: Val) -> u64 {
         match v {
             Val::Int(i) => {
-                if M::R::is_immediate(Cat::Int) {
-                    M::R::enc_int(i)
+                let fixnum = M::R::is_immediate(Cat::Int)
+                    && i >= i64::MIN as i128
+                    && i <= i64::MAX as i128
+                    && M::R::imm_fits(i as i64);
+                if fixnum {
+                    M::R::enc_int(i as i64)
                 } else {
-                    let id = self.alloc(Obj::BoxInt(i));
+                    let id = self.alloc(Obj::BigInt(i)); // promoted to a boxed bignum
                     M::R::enc_ref(id)
                 }
             }
@@ -207,7 +234,7 @@ impl<M: ValueModel> Runtime<M> {
 
     pub fn decode(&self, bits: u64) -> Val {
         match M::R::tag_of(bits) {
-            RawTag::Int => Val::Int(M::R::imm_int(bits)),
+            RawTag::Int => Val::Int(M::R::imm_int(bits) as i128),
             RawTag::Float => Val::Float(M::R::imm_float(bits)),
             RawTag::Bool => Val::Bool(M::R::as_bool(bits)),
             RawTag::Nil => Val::Nil,
@@ -215,7 +242,7 @@ impl<M: ValueModel> Runtime<M> {
             RawTag::Ref => {
                 let id = M::R::as_ref(bits);
                 match &self.heap[id as usize] {
-                    Obj::BoxInt(i) => Val::Int(*i),
+                    Obj::BigInt(i) => Val::Int(*i),
                     Obj::BoxFloat(f) => Val::Float(*f),
                     Obj::Moved(_) => panic!(
                         "use-after-move: 0x{bits:x} is a stale pointer into from-space; \
@@ -225,6 +252,17 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
         }
+    }
+
+    /// Allocate a string value (used by the frontend reader for string literals).
+    pub fn alloc_str(&mut self, s: String) -> u64 {
+        let id = self.alloc(Obj::Str(s));
+        M::R::enc_ref(id)
+    }
+    /// Allocate a character value (used by the frontend reader for `#\c` literals).
+    pub fn alloc_char(&mut self, c: char) -> u64 {
+        let id = self.alloc(Obj::Char(c));
+        M::R::enc_ref(id)
     }
 
     // ── lists ───────────────────────────────────────────────
@@ -263,6 +301,11 @@ impl<M: ValueModel> Runtime<M> {
 
     // ── equality / compare ──────────────────────────────────
     pub fn equal(&self, a: u64, b: u64) -> bool {
+        // Huge integers decode to opaque refs; compare them by value (two equal
+        // huge results live at different heap addresses).
+        if let (Some(x), Some(y)) = (self.as_huge(a), self.as_huge(b)) {
+            return x == y;
+        }
         match (self.decode(a), self.decode(b)) {
             (Val::Int(x), Val::Int(y)) => x == y,
             (Val::Float(x), Val::Float(y)) => x == y,
@@ -277,20 +320,22 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
     fn num_lt(&self, a: u64, b: u64) -> bool {
-        let f = |v: Val| match v {
-            Val::Int(i) => i as f64,
-            Val::Float(x) => x,
-            _ => panic!("< on non-number"),
-        };
-        f(self.decode(a)) < f(self.decode(b))
+        // Exact when both are integers of any size; falls back to f64 only when a
+        // float is involved.
+        if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
+            return x.cmp(&y) == std::cmp::Ordering::Less;
+        }
+        let x = self.num_as_f64(a).expect("< on non-number");
+        let y = self.num_as_f64(b).expect("< on non-number");
+        x < y
     }
 
     // ── primitives (value-model fast paths live here) ───────
     pub fn prim(&mut self, op: Prim, args: &[u64]) -> u64 {
         match op {
-            Prim::Add => self.arith(args[0], args[1], |a, b| a.wrapping_add(b), |a, b| a + b),
-            Prim::Sub => self.arith(args[0], args[1], |a, b| a.wrapping_sub(b), |a, b| a - b),
-            Prim::Mul => self.arith(args[0], args[1], |a, b| a.wrapping_mul(b), |a, b| a * b),
+            Prim::Add => self.arith(args[0], args[1], i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
+            Prim::Sub => self.arith(args[0], args[1], i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
+            Prim::Mul => self.arith(args[0], args[1], i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
             Prim::Lt => {
                 let r = self.num_lt(args[0], args[1]);
                 self.encode(Val::Bool(r))
@@ -298,6 +343,103 @@ impl<M: ValueModel> Runtime<M> {
             Prim::Eq => {
                 let r = self.equal(args[0], args[1]);
                 self.encode(Val::Bool(r))
+            }
+            // Identity (`eq?`/`eqv?`): equal encoded bits. Immediates compare by
+            // value; heap objects by pointer.
+            Prim::Identical => {
+                let r = args[0] == args[1];
+                self.encode(Val::Bool(r))
+            }
+            Prim::StrLen => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("string-length: not a string");
+                };
+                let Obj::Str(s) = &self.heap[id as usize] else {
+                    panic!("string-length: not a string");
+                };
+                let n = s.chars().count() as i128;
+                self.encode(Val::Int(n))
+            }
+            Prim::CharToInt => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("char->integer: not a char");
+                };
+                let Obj::Char(c) = &self.heap[id as usize] else {
+                    panic!("char->integer: not a char");
+                };
+                self.encode(Val::Int(*c as i128))
+            }
+            Prim::IntToChar => {
+                let Val::Int(n) = self.decode(args[0]) else {
+                    panic!("integer->char: not an integer");
+                };
+                let c = char::from_u32(n as u32)
+                    .unwrap_or_else(|| panic!("integer->char: {n} is not a Unicode scalar value"));
+                let id = self.alloc(Obj::Char(c));
+                M::R::enc_ref(id)
+            }
+            Prim::Vector => {
+                let id = self.alloc(Obj::Vector(args.to_vec()));
+                M::R::enc_ref(id)
+            }
+            Prim::VectorRef => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("vector-ref: not a vector");
+                };
+                let Val::Int(i) = self.decode(args[1]) else {
+                    panic!("vector-ref: index must be an int");
+                };
+                let Obj::Vector(elems) = &self.heap[id as usize] else {
+                    panic!("vector-ref: not a vector");
+                };
+                *elems
+                    .get(i as usize)
+                    .unwrap_or_else(|| panic!("vector-ref: index {i} out of range"))
+            }
+            Prim::VectorSet => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("vector-set!: not a vector");
+                };
+                let Val::Int(i) = self.decode(args[1]) else {
+                    panic!("vector-set!: index must be an int");
+                };
+                let Obj::Vector(elems) = &mut self.heap[id as usize] else {
+                    panic!("vector-set!: not a vector");
+                };
+                let slot = elems
+                    .get_mut(i as usize)
+                    .unwrap_or_else(|| panic!("vector-set!: index {i} out of range"));
+                *slot = args[2];
+                self.enc_nil()
+            }
+            Prim::VectorLen => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("vector-length: not a vector");
+                };
+                let Obj::Vector(elems) = &self.heap[id as usize] else {
+                    panic!("vector-length: not a vector");
+                };
+                self.encode(Val::Int(elems.len() as i128))
+            }
+            Prim::Values => {
+                let id = self.alloc(Obj::Values(args.to_vec()));
+                M::R::enc_ref(id)
+            }
+            Prim::ValuesToList => {
+                // Unpack a `values` packet into a list; a lone value becomes a
+                // one-element list so single-valued producers work too.
+                if let Val::Ref(id) = self.decode(args[0]) {
+                    if let Obj::Values(vals) = &self.heap[id as usize] {
+                        let vals = vals.clone();
+                        return self.vec_to_list(&vals);
+                    }
+                }
+                self.vec_to_list(&[args[0]])
+            }
+            Prim::Apply => {
+                // `apply` must invoke a closure, which only a backend can do; the
+                // CekMachine intercepts it before reaching here.
+                panic!("apply requires a backend that can invoke closures (CekMachine)");
             }
             Prim::List => self.vec_to_list(args),
             Prim::Cons => self.cons(args[0], args[1]),
@@ -324,6 +466,12 @@ impl<M: ValueModel> Runtime<M> {
                 // non-local exit, which only a backend can do; backends that
                 // support it intercept `CallEc` before reaching here.
                 panic!("%callec requires a backend that supports escape continuations");
+            }
+            Prim::CallCc => {
+                panic!("%callcc requires the stackless CekMachine (full continuations)");
+            }
+            Prim::Reset | Prim::Shift => {
+                panic!("%reset/%shift require the stackless CekMachine (delimited continuations)");
             }
             Prim::Record => {
                 let Val::Sym(type_id) = self.decode(args[0]) else {
@@ -390,22 +538,43 @@ impl<M: ValueModel> Runtime<M> {
         self.escape_tags
     }
 
-    /// The generic arithmetic path. Written ONCE, correct for every model:
-    /// it tries each immediate numeric category in turn, and only falls to the
-    /// boxing slow path when neither operand pair is an immediate number.
+    /// The generic arithmetic path with a numeric tower. The immediate-int fast
+    /// path uses a CHECKED op and the model's fixnum-range check; on overflow it
+    /// PROMOTES to a boxed `BigInt` (computed in `i128`) instead of wrapping.
+    /// That is the value axis's contribution to the tower — the fast path stays
+    /// alloc-free for small ints, and big results box automatically.
     ///
-    ///   LowBit + ints  -> integer fast path fires,  0 allocations
-    ///   NanBox + ints  -> no immediate int, slow path, boxes the result
-    ///   NanBox + floats-> float fast path fires,     0 allocations
-    ///   LowBit + floats-> no immediate float, slow path, boxes the result
-    ///
-    /// This is the exact shape of the toolkit's `dyn_add`, minus IR emission.
-    fn arith(&mut self, a: u64, b: u64, iop: fn(i64, i64) -> i64, fop: fn(f64, f64) -> f64) -> u64 {
+    ///   LowBit small ints -> fixnum fast path,     0 allocations
+    ///   LowBit big result -> checked op overflows -> promote to boxed BigInt
+    ///   NanBox floats      -> float fast path,      0 allocations
+    ///   NanBox ints        -> no immediate int, slow path, boxes (BigInt)
+    fn arith(
+        &mut self,
+        a: u64,
+        b: u64,
+        iop64: fn(i64, i64) -> Option<i64>,
+        iop128: fn(i128, i128) -> Option<i128>,
+        fop: fn(f64, f64) -> f64,
+        bigop: fn(&BigInt, &BigInt) -> BigInt,
+    ) -> u64 {
         if M::R::is_immediate(Cat::Int)
             && M::R::tag_of(a) == RawTag::Int
             && M::R::tag_of(b) == RawTag::Int
         {
-            return M::R::enc_int(iop(M::R::imm_int(a), M::R::imm_int(b)));
+            let (x, y) = (M::R::imm_int(a), M::R::imm_int(b));
+            if let Some(r) = iop64(x, y) {
+                if M::R::imm_fits(r) {
+                    return M::R::enc_int(r); // stays a fixnum, no allocation
+                }
+            }
+            // Overflowed the fixnum: promote. Stay in i128 if it fits, else go to
+            // true arbitrary precision.
+            if let Some(r) = iop128(x as i128, y as i128) {
+                let id = self.alloc(Obj::BigInt(r));
+                return M::R::enc_ref(id);
+            }
+            let big = bigop(&BigInt::from_i128(x as i128), &BigInt::from_i128(y as i128));
+            return self.alloc_bigint(big);
         }
         if M::R::is_immediate(Cat::Float)
             && M::R::tag_of(a) == RawTag::Float
@@ -413,14 +582,62 @@ impl<M: ValueModel> Runtime<M> {
         {
             return M::R::enc_float(fop(M::R::imm_float(a), M::R::imm_float(b)));
         }
-        let r = match (self.decode(a), self.decode(b)) {
-            (Val::Int(x), Val::Int(y)) => Val::Int(iop(x, y)),
-            (Val::Float(x), Val::Float(y)) => Val::Float(fop(x, y)),
-            (Val::Int(x), Val::Float(y)) => Val::Float(fop(x as f64, y)),
-            (Val::Float(x), Val::Int(y)) => Val::Float(fop(x, y as f64)),
-            (va, vb) => panic!("arith on non-numbers: {va:?} {vb:?}"),
+        // Both operands are integers of any size (fixnum, i128-boxed, or huge):
+        // do the whole operation in arbitrary precision, staying in i128 when it
+        // fits so small results do not carry a BigInt.
+        if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
+            if let (Some(xi), Some(yi)) = (x.to_i128(), y.to_i128()) {
+                if let Some(r) = iop128(xi, yi) {
+                    let id = self.alloc(Obj::BigInt(r));
+                    return M::R::enc_ref(id);
+                }
+            }
+            return self.alloc_bigint(bigop(&x, &y));
+        }
+        // A float is involved: compute in f64 (huge ints degrade to an f64).
+        let r = match (self.num_as_f64(a), self.num_as_f64(b)) {
+            (Some(x), Some(y)) => Val::Float(fop(x, y)),
+            _ => panic!("arith on non-numbers"),
         };
         self.encode(r)
+    }
+
+    /// The integer value of `bits` as a `BigInt`, if it is any kind of integer
+    /// (fixnum, `i128`-boxed, or huge). `None` for non-integers.
+    fn as_int_big(&self, bits: u64) -> Option<BigInt> {
+        if let Val::Int(i) = self.decode(bits) {
+            return Some(BigInt::from_i128(i));
+        }
+        self.as_huge(bits).cloned()
+    }
+
+    /// The `BigInt` behind a `HugeInt` heap value, if `bits` is one.
+    fn as_huge(&self, bits: u64) -> Option<&BigInt> {
+        if let RawTag::Ref = M::R::tag_of(bits) {
+            if let Obj::HugeInt(b) = &self.heap[M::R::as_ref(bits) as usize] {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Any number (int of any size, or float) as an `f64`; `None` if not a number.
+    fn num_as_f64(&self, bits: u64) -> Option<f64> {
+        match self.decode(bits) {
+            Val::Int(i) => Some(i as f64),
+            Val::Float(x) => Some(x),
+            _ => self.as_huge(bits).map(|b| b.to_f64()),
+        }
+    }
+
+    /// Store a `BigInt`, normalizing down to a fixnum / `i128` box when it fits so
+    /// only genuinely-huge values carry the arbitrary-precision representation.
+    fn alloc_bigint(&mut self, b: BigInt) -> u64 {
+        if let Some(i) = b.to_i128() {
+            return self.encode(Val::Int(i));
+        }
+        let id = self.alloc(Obj::HugeInt(b));
+        M::R::enc_ref(id)
     }
 
     // ── printing ────────────────────────────────────────────
@@ -444,14 +661,26 @@ impl<M: ValueModel> Runtime<M> {
                     format!("({})", inner.join(" "))
                 }
                 Obj::Str(s) => format!("\"{s}\""),
+                Obj::Char(c) => c.to_string(),
+                Obj::Vector(elems) => {
+                    let inner: Vec<String> = elems.iter().map(|&x| self.print(x)).collect();
+                    format!("#({})", inner.join(" "))
+                }
+                Obj::Values(vals) => {
+                    let inner: Vec<String> = vals.iter().map(|&x| self.print(x)).collect();
+                    inner.join(" ")
+                }
                 Obj::Closure { .. } => "#<closure>".to_string(),
-                Obj::BoxInt(i) => i.to_string(),
+                Obj::BigInt(i) => i.to_string(),
+                Obj::HugeInt(b) => b.to_string(),
                 Obj::BoxFloat(f) => format!("{f}"),
                 Obj::Record { type_id, fields } => {
                     let inner: Vec<String> = fields.iter().map(|&x| self.print(x)).collect();
                     format!("#{}[{}]", self.sym_name(*type_id), inner.join(" "))
                 }
                 Obj::Escape { .. } => "#<continuation>".to_string(),
+                Obj::Cont(_) => "#<continuation>".to_string(),
+                Obj::PartialCont(_) => "#<partial-continuation>".to_string(),
                 Obj::Moved(_) => "#<moved>".to_string(),
             },
         }
@@ -504,7 +733,7 @@ impl<M: ValueModel> Runtime<M> {
             Val::Bool(true)
         } else if a == "false" {
             Val::Bool(false)
-        } else if let Ok(i) = a.parse::<i64>() {
+        } else if let Ok(i) = a.parse::<i128>() {
             Val::Int(i)
         } else if let Ok(f) = a.parse::<f64>() {
             Val::Float(f)

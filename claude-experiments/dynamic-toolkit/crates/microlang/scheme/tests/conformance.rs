@@ -14,7 +14,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use microlang::{LowBitModel, Runtime, TreeWalk};
+use microlang::{CekMachine, LowBitModel, Runtime};
 
 struct Case {
     area: &'static str,
@@ -27,6 +27,25 @@ struct Case {
 const fn c(area: &'static str, setup: &'static str, expr: &'static str, expect: &'static str, live: bool) -> Case {
     Case { area, setup, expr, expect, live }
 }
+
+/// Delimited continuations (`shift`/`reset`) as a LIBRARY, not a core primitive:
+/// Filinski's derivation of `shift*`/`reset*` from undelimited multi-shot
+/// `call/cc` plus one mutable cell (1994). It runs verbatim on both our
+/// `CekMachine` and the Chicken oracle, so the oracle cross-checks our multi-shot
+/// `call/cc` against an independent `call/cc`. That it works at all is the point:
+/// the core needed nothing added — delimited control falls out of the multi-shot
+/// continuations the machine already reifies.
+const DELIM: &str = "
+(define meta-k (lambda (t) (error \"missing top-level reset\")))
+(define (reset* t)
+  (let ((saved meta-k))
+    (call/cc (lambda (k)
+      (set! meta-k (lambda (r) (set! meta-k saved) (k r)))
+      (let ((v (t))) (meta-k v))))))
+(define (shift* h)
+  (call/cc (lambda (k)
+    (meta-k (h (lambda (x) (reset* (lambda () (k x)))))))))
+";
 
 #[rustfmt::skip]
 const CASES: &[Case] = &[
@@ -73,26 +92,39 @@ const CASES: &[Case] = &[
     c("named-let",    "", "(let loop ((i 0) (acc 0)) (if (< i 5) (loop (+ i 1) (+ acc i)) acc))", "10", true),
 
     // ── pending (roadmap) ───────────────────────────────────
-    c("higher-order", "", "(map (lambda (x) (* x x)) (list 1 2 3))", "(1 4 9)", false),
-    c("lists",        "", "(append (list 1 2) (list 3 4))", "(1 2 3 4)", false),
-    c("equality",     "", "(eq? 'a 'a)",                   "#t",      false),
-    c("quasiquote",   "", "`(1 ,(+ 1 1) 3)",               "(1 2 3)", false),
-    c("strings",      "", "(string-length \"hello\")",     "5",       false),
-    c("chars",        "", "(char->integer #\\A)",          "65",      false),
-    c("vectors",      "", "(vector-ref (vector 10 20 30) 1)", "20",    false),
+    c("higher-order", "", "(map (lambda (x) (* x x)) (list 1 2 3))", "(1 4 9)", true),
+    c("lists",        "", "(append (list 1 2) (list 3 4))", "(1 2 3 4)", true),
+    c("equality",     "", "(eq? 'a 'a)",                   "#t",      true),
+    c("quasiquote",   "", "`(1 ,(+ 1 1) 3)",               "(1 2 3)", true),
+    c("strings",      "", "(string-length \"hello\")",     "5",       true),
+    c("chars",        "", "(char->integer #\\A)",          "65",      true),
+    c("vectors",      "", "(vector-ref (vector 10 20 30) 1)", "20",    true),
     c("tail-calls",   "(define (loop n) (if (= n 0) 'done (loop (- n 1))))", "(loop 1000000)", "done", true),
-    c("numeric-tower","", "(* 100000000000 100000000000)", "10000000000000000000000", false),
+    c("numeric-tower","", "(* 100000000000 100000000000)", "10000000000000000000000", true),
+    c("bignum-add",   "", "(+ 4611686018427387904 4611686018427387904)", "9223372036854775808", true),
+    // beyond i128 — true arbitrary precision (hand-rolled BigInt, no deps).
+    c("bignum-huge",  "", "(* 100000000000000000000 100000000000000000000)", "10000000000000000000000000000000000000000", true),
     c("call/cc",      "", "(call/cc (lambda (k) (+ 1 (k 10))))", "10", true),
     c("call/cc-search", "(define (find-neg lst) (call/cc (lambda (return) (letrec ((loop (lambda (l) (if (null? l) 'none (if (< (car l) 0) (return (car l)) (loop (cdr l))))))) (loop lst)))))", "(find-neg (list 1 2 -3 4))", "-3", true),
-    c("dynamic-wind", "", "(let ((r '())) (dynamic-wind (lambda () (set! r (cons 'in r))) (lambda () 'body) (lambda () (set! r (cons 'out r)))) (reverse r))", "(in out)", false),
-    c("values",       "", "(call-with-values (lambda () (values 1 2)) +)", "3", false),
+    // MULTI-SHOT: the continuation is invoked repeatedly to RE-ENTER a
+    // computation that already returned — impossible for an escape continuation.
+    c("call/cc-multishot", "", "(let ((n 0) (k #f)) (call/cc (lambda (c) (set! k c))) (set! n (+ n 1)) (if (< n 5) (k #f) n))", "5", true),
+    // DELIMITED continuations, derived from multi-shot call/cc (see `DELIM`).
+    // `reset*` bounds the continuation; `shift*` captures it up to that bound.
+    c("shift/reset",     DELIM, "(+ 1 (reset* (lambda () (+ 10 (shift* (lambda (k) (k (k 5))))))))", "26", true),
+    c("shift/reset-mul", DELIM, "(* 2 (reset* (lambda () (+ 1 (shift* (lambda (k) (k 5)))))))", "12", true),
+    c("shift/reset-abort", DELIM, "(reset* (lambda () (+ 1 (shift* (lambda (k) 5)))))", "5", true),
+    // MULTI-SHOT delimited: the delimited continuation `k` is invoked TWICE.
+    c("shift/reset-multishot", DELIM, "(reset* (lambda () (+ 1 (shift* (lambda (k) (+ 3 (k 5) (k 5)))))))", "15", true),
+    c("dynamic-wind", "", "(let ((r '())) (dynamic-wind (lambda () (set! r (cons 'in r))) (lambda () 'body) (lambda () (set! r (cons 'out r)))) (reverse r))", "(in out)", true),
+    c("values",       "", "(call-with-values (lambda () (values 1 2)) +)", "3", true),
     c("syntax-rules", "(define-syntax swap (syntax-rules () ((_ a b) (list b a))))", "(swap 1 2)", "(2 1)", true),
     c("syntax-rules-ellipsis", "(define-syntax my-list (syntax-rules () ((_ x ...) (list x ...))))", "(my-list 1 2 3)", "(1 2 3)", true),
     c("syntax-rules-nested", "(define-syntax unless2 (syntax-rules () ((_ c body) (if c (quote skip) body)))) (define-syntax my-list (syntax-rules () ((_ x ...) (list x ...))))", "(unless2 #f (my-list 1 2 3))", "(1 2 3)", true),
     // HYGIENE (pending): the macro's `t` must not capture the user's `t`. A
     // hygienic Scheme returns 5; our unhygienic engine returns #f. This is the
     // marker for the remaining hard piece.
-    c("hygiene", "(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))", "(let ((t 5)) (my-or #f t))", "5", false),
+    c("hygiene", "(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))", "(let ((t 5)) (my-or #f t))", "5", true),
 ];
 
 fn our_output(setup: &str, expr: &str) -> Option<String> {
@@ -101,7 +133,7 @@ fn our_output(setup: &str, expr: &str) -> Option<String> {
     std::panic::set_hook(Box::new(|_| {}));
     let out = std::panic::catch_unwind(|| {
         let mut rt = Runtime::<LowBitModel>::new();
-        let v = scheme::run(&mut rt, &TreeWalk, &prog);
+        let v = scheme::run(&mut rt, &CekMachine, &prog);
         scheme::write_value(&rt, v)
     })
     .ok();

@@ -226,8 +226,8 @@ impl<M: ModelEmit> BytecodeVm<M> {
             Ir::Prim(Prim::Gc, _) => {
                 panic!("bytecode tier: (gc) is a safepoint not modeled here; run it on the tree-walker")
             }
-            Ir::Prim(Prim::CallEc, _) => {
-                panic!("bytecode tier: escape continuations not supported; run on the tree-walker")
+            Ir::Prim(Prim::CallEc, _) | Ir::Prim(Prim::CallCc, _) => {
+                panic!("bytecode tier: continuations not supported; run on the tree-walker / CEK")
             }
             Ir::Prim(p, args) => {
                 for a in args {
