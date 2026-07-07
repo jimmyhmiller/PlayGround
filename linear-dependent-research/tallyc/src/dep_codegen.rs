@@ -2442,6 +2442,22 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     "fmul" => bd.build_float_mul(fa, fb, "fmul").unwrap(),
                     _ => bd.build_float_div(fa, fb, "fdiv").unwrap(),
                 };
+                // Allow LLVM to contract mul+add into a fused multiply-add,
+                // exactly as clang does at its default `-ffp-contract=fast`.
+                // This is the mildest fast-math flag: FMA rounds ONCE instead of
+                // twice (strictly *more* precise), and — unlike reassoc/nnan/ninf
+                // — makes no assumption about NaN, infinities, or signed zero.
+                // Without it, tally emits separate `fmul`/`fadd` and loses ~15-20%
+                // on float kernels versus `cc -O2` (see bench/nbody_aos, mandelbrot).
+                if r.as_instruction().is_some() {
+                    use inkwell::values::AsValueRef;
+                    unsafe {
+                        inkwell::llvm_sys::core::LLVMSetFastMathFlags(
+                            r.as_value_ref(),
+                            inkwell::llvm_sys::LLVMFastMathAllowContract,
+                        );
+                    }
+                }
                 Ok(Val::Int(self.float_to_bits(r, bytes, "f.e")))
             }
             "flt" | "fle" | "feq" => {
@@ -4998,6 +5014,11 @@ impl<'c, 'a> DepCg<'c, 'a> {
         args: &[&Term],
     ) -> Result<Val<'c>, String> {
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        // The callee may declare some params as native `fN` (see `build_fix`); read
+        // that off the LLVM function type and bit-convert the matching i64 argument
+        // component so a float threads as an FP value, not an i64.
+        let ptys = func.get_type().get_param_types();
+        let mut fidx = 0usize;
         for (i, a) in args.iter().enumerate() {
             match params.get(i).copied().unwrap_or(Some(1)) {
                 None => {} // erased: never compiled, never passed.
@@ -5008,7 +5029,14 @@ impl<'c, 'a> DepCg<'c, 'a> {
                     // compiled body cannot serve two layouts.
                     let v = self.expect_width(v, w, "a %partial function argument")?;
                     for c in v.components() {
-                        call_args.push(c.into());
+                        match ptys.get(fidx) {
+                            Some(inkwell::types::BasicTypeEnum::FloatType(ft)) => {
+                                let bytes = if *ft == self.ctx.f64_type() { 8 } else { 4 };
+                                call_args.push(self.bits_to_float(c, bytes, "arg.f").into());
+                            }
+                            _ => call_args.push(c.into()),
+                        }
+                        fidx += 1;
                     }
                 }
             }
@@ -5349,13 +5377,26 @@ impl<'c, 'a> DepCg<'c, 'a> {
         // per-parameter layout: pair each body lambda with its Π binder — `None`
         // for an erased (multiplicity-0) binder, else the domain type's width.
         let mut params: Vec<Option<u32>> = Vec::new();
+        // Per parameter: `Some(bytes)` if it is a SINGLE-SLOT FLOAT scalar — such a
+        // param is threaded as a native `fN` (not an i64), so a loop-carried float
+        // becomes an FP-register phi instead of an i64↔double bitcast round-trip
+        // whose surviving register copy sits on the loop's critical path (that was
+        // the whole mandelbrot-vs-C gap). Everything else stays i64.
+        let mut param_float: Vec<Option<u32>> = Vec::new();
         let mut t_ty = strip_ann(ty);
         let mut t_body = strip_ann(body);
         while let (Term::Lam(inner), Term::Pi(m, d, cod)) = (t_body, t_ty) {
             if *m == Mult::Zero {
                 params.push(None);
+                param_float.push(None);
             } else {
-                params.push(Some(type_width(self.sig, d)));
+                let w = type_width(self.sig, d);
+                params.push(Some(w));
+                param_float.push(if w == 1 {
+                    scalar_full(d).and_then(|(b, _, isf)| isf.then_some(b))
+                } else {
+                    None
+                });
             }
             t_body = strip_ann(inner);
             t_ty = strip_ann(cod);
@@ -5368,9 +5409,18 @@ impl<'c, 'a> DepCg<'c, 'a> {
             return Ok((func, params, ret_width));
         }
 
-        let n_scalar: u32 = params.iter().filter_map(|p| *p).sum();
-        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
-            std::iter::repeat(self.i64t.into()).take(n_scalar as usize).collect();
+        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> = params
+            .iter()
+            .zip(&param_float)
+            .flat_map(|(pw, pf)| match pw {
+                None => vec![],
+                Some(1) => vec![match pf {
+                    Some(b) => self.float_ty(*b).into(),
+                    None => self.i64t.into(),
+                }],
+                Some(w) => vec![self.i64t.into(); *w as usize],
+            })
+            .collect();
         let fname = self.fresh("tally_fix");
         let ret_struct = if ret_width > 1 {
             Some(self.ctx.struct_type(
@@ -5394,12 +5444,19 @@ impl<'c, 'a> DepCg<'c, 'a> {
         self.builder.position_at_end(entry);
         let mut body_env: Vec<Slot<'c>> = vec![None]; // self
         let mut rt = 0u32;
-        for pw in &params {
+        for (pw, pf) in params.iter().zip(&param_float) {
             match pw {
                 None => body_env.push(None),
                 Some(1) => {
-                    body_env
-                        .push(Some(SlotVal::Val(Val::Int(func.get_nth_param(rt).unwrap().into_int_value()))));
+                    let p = func.get_nth_param(rt).unwrap();
+                    // a native float param → back to i64 bits for the Val model
+                    // (immediately re-read as a float by any `f*` op; the round-trip
+                    // is transient and the FP value stays in an FP register).
+                    let iv = match pf {
+                        Some(bytes) => self.float_to_bits(p.into_float_value(), *bytes, "fparam"),
+                        None => p.into_int_value(),
+                    };
+                    body_env.push(Some(SlotVal::Val(Val::Int(iv))));
                     rt += 1;
                 }
                 Some(w) => {
@@ -7547,7 +7604,10 @@ fn fin2nat(i) { match i { FZ => Zero, FS(prev) => Succ(fin2nat(prev)) } }
              }}\n"
         );
         let ir = ir(&src);
-        assert!(ir.contains("fadd double"), "expected a real double add\n{ir}");
+        // The add carries the `contract` fast-math flag now (we allow LLVM to fuse
+        // mul+add into an FMA, matching clang's default `-ffp-contract=fast`), so it
+        // prints as `fadd contract double`.
+        assert!(ir.contains("fadd contract double"), "expected a real double add\n{ir}");
         assert_eq!(run(&src), 5, "2.5 + 2.5 = 5.0");
     }
 
