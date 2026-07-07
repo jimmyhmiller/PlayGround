@@ -1,24 +1,44 @@
 # microlang
 
-A trait sketch that re-cuts the dynamic-language toolkit at the two axes the
-original conflated, with three micro-languages that exercise it. Backed by a
-tree-walking executor so the *traits* are the point, not the codegen.
+A dynamic-language toolkit re-cut at the axes a monolithic interpreter conflates:
+**value representation** and **execution strategy** are orthogonal traits, one
+axis-neutral IR sits between them, and a moving GC runs underneath. Several real
+micro-languages exercise it — including an R7RS-flavored **Scheme** with hygienic
+macros, a numeric tower, and multi-shot **delimited continuations that survive
+garbage collection**.
+
+The thesis: you should not have to choose your value layout, your executor
+(interpreter vs compiler), your dispatch strategy, and your GC as one welded
+bundle. Each is a plug-point; any combination is a valid program that computes
+the same answer; and a whole language can ride on top as a *library*, touching
+only the public API. The `matrix` example proves the orthogonality (45
+combinations, one answer each); the Scheme frontend proves the library claim
+(61/61 conformance, oracle-checked against Chicken Scheme).
 
 ## The two axes as traits
 
 | Axis | Trait(s) | File | Carved at |
 |---|---|---|---|
 | Value model | `Repr`, `ValueModel` | `model.rs` | **immediacy** (`is_immediate(Cat)`), not float-vs-tagged |
-| Execution | `CodeSpace` (+ `TreeWalk`, `ClosureComp`, `Traced`) | `code.rs`, `compiled.rs` | meaning (`Ir`) vs strategy; re-entrant `invoke` |
+| Execution | `CodeSpace` | `code.rs`, `compiled.rs`, `bytecode.rs`, `cek.rs` | meaning (`Ir`) vs strategy; re-entrant `invoke` |
 
-Two real execution tiers, both behind the same `CodeSpace` contract and `Ir`:
-`TreeWalk` (interpreter, re-dispatches the `Ir` each run) and `ClosureComp`
-(`compiled.rs`, compiles each `Ir` subtree to a Rust closure once, caches
-function bodies). `tiers_agree` pins that they produce identical results on every
-program. `ClosureComp` also proves the contract's two hard promises:
-compile-once (`compiled_bodies() == 1` for a 6-deep recursion) and late binding
-(a compiled fn calls one defined later — mutual recursion with a forward
-reference).
+**Five execution engines, one `Ir`, one `CodeSpace` contract.** Interpretation
+vs compilation is itself a point on the axis, not a fork in the design:
+
+| Engine | File | Kind | Notable |
+|---|---|---|---|
+| `TreeWalk` | `code.rs` | recursive interpreter | re-dispatches the `Ir` each run; escape continuations via unwind |
+| `ClosureComp` | `compiled.rs` | closure compiler | compiles each `Ir` subtree to a Rust closure once, caches bodies |
+| `BytecodeVm` | `bytecode.rs` | emit tier | value model emits model-specific bytecode (`ModelEmit`) |
+| `CekMachine` | `cek.rs` | stackless abstract machine | full/delimited **multi-shot continuations**, GC-survivable |
+| `Traced` | `code.rs` | wrapper | counts invocations (feeds speculation) |
+
+`tiers_agree` pins that the general tiers produce identical results on every
+program. `ClosureComp` proves the contract's two hard promises: compile-once
+(`compiled_bodies() == 1` for a 6-deep recursion) and late binding (a compiled fn
+calls one defined later). `CekMachine` proves the deepest one: a *fundamentally
+different* evaluation strategy (explicit heap continuation, not the host stack)
+slots in as just another `CodeSpace` over the same `Ir`.
 
 `value.rs` holds the neutral vocabulary (`Cat`, `Val`, `Obj`) with `Int` a peer
 of `Float`. `runtime.rs` ties it together: reader (code is data), `encode`/
@@ -37,8 +57,14 @@ cargo run --example speculation # speculation/deopt axis: never/always/blacklist
 cargo run --example bytecode    # THE EMIT TIER: value model emits model-specific bytecode
 cargo run --example matrix      # PROOF: all 45 axis combinations run and agree
 cargo run --example standard_ir # one axis-neutral IR, run by interpreter AND JIT
-cargo test                      # locks all seven axes + the grand matrix
+cargo test                      # locks every axis + the grand matrix + Scheme conformance
+cargo run --bin scheme -p scheme    # the R7RS-flavored Scheme, running on the tiers
 ```
+
+See [`docs/`](docs/) for the deep dives: [architecture](docs/ARCHITECTURE.md),
+[continuations](docs/CONTINUATIONS.md), [the Scheme frontend](docs/SCHEME.md),
+[the codegen axes](docs/CODEGEN_AXES.md), and [the library/language
+split](docs/LIBRARY_LANGUAGE_SPLIT.md).
 
 ## One standard IR for interpretation and JIT
 
@@ -165,12 +191,17 @@ compiler surviving `(f (firstof (40)) (h))` where `firstof` GCs mid-expansion.
 
 - Done and moving-safe: the relocation mechanism; the **compiler** (form-609);
   global and lexical-env access across a move; both execution tiers.
-- Not yet: the **evaluator's operand temps**. A bare heap value held in an
-  `argv` vec across a sub-expression that GCs (e.g. `(+ heapval (do (gc) x))`)
-  would use-after-move — the same handle discipline applies, just at the
-  evaluator's operand stack rather than the compiler's. GC only fires at explicit
-  `(gc)` safepoints, so this is reachable only by deliberately placing one there;
-  the general fix is rooting eval temps the way the compiler roots forms.
+- Done on the **`CekMachine`**: the evaluator's operand temps *are* rooted across
+  a move. The machine's continuation (`Kont`) holds its in-flight argument
+  accumulators in `Cell` slots and is traced by `gc::walk_kont` at the `(gc)`
+  safepoint, so `(+ heapval (do (gc) x))` — and captured continuations closing
+  over relocated heap data — survive. This is the moving GC fused with the
+  full-continuation tier, the combination the 45-way matrix deliberately excludes.
+- Not yet on the **host-stack tiers** (`TreeWalk` etc.): a bare heap value held in
+  an `argv` vec across a sub-expression that GCs would use-after-move. The same
+  handle discipline applies; GC only fires at explicit `(gc)` safepoints, so this
+  is reachable only by deliberately placing one there. Run such programs on the
+  CEK tier, which handles it.
 - Simplification vs. production: one growing arena with poisoned from-space
   (so stale reads stay loud) instead of flipping two fixed buffers and reusing
   from-space. The relocation semantics are faithful.
@@ -266,12 +297,74 @@ closures, globals, and list prims (via a `Slow` runtime escape); `let`, records/
 dispatch, and `(gc)` error clearly and run on the tree-walker. It is a focused
 demonstration of the emit interface, not a complete backend.
 
+## Continuations: the CEK tier (`cek.rs`)
+
+The other tiers evaluate on the host (Rust) call stack, so "the current
+continuation" is that native stack — uncapturable, gone once a call returns.
+`CekMachine` makes the continuation an explicit, `Rc`-linked, heap-allocated data
+structure (`Kont`) and evaluates as a loop over `Eval`/`Apply` states with no host
+recursion. Because that continuation is first-class immutable data, it can be
+reified and re-installed *any number of times*. This is the deepest validation of
+the `CodeSpace` axis: a fundamentally different evaluation strategy slots in over
+the same `Ir`.
+
+What that unlocks, all as ordinary `Ir::Prim` nodes the machine interprets:
+
+- **Full `call/cc`** (`%callcc`) — multi-shot, re-entrant undelimited continuations.
+- **Delimited `shift`/`reset`** (`%shift`/`%reset`) — native `Prompt` delimiter +
+  composable `PartialCont`; the captured slice splices onto the caller's
+  continuation under a fresh prompt and *returns* (composes), any number of times.
+
+The dividing line is not interpreter-vs-compiler — it is whether the continuation
+is reifiable data or the host stack. The gradient is visible in the code:
+`TreeWalk` (host stack) already supports *escape* continuations (`call/ec`, via a
+typed panic that unwinds the stack), but cannot do multi-shot ones. On any
+non-CEK tier `%callcc`/`%shift`/`%reset` reach a loud, specific error rather than
+a wrong answer — some `Ir` nodes are only meaningful under some strategies.
+
+**Continuations survive a moving GC.** A production language collects while
+continuations are captured and live on the heap. Here they do: a `Kont`'s
+argument accumulators are `Cell`-backed (rewritten in place like lexical frames),
+`Ir` holds no heap pointers (constant pool), and `gc::walk_kont` traces both the
+live continuation (at the CEK `(gc)` safepoint, via `collect_cek`) and
+heap-captured `Obj::Cont`/`PartialCont`. `scheme/tests/delim_gc.rs` proves it: a
+delimited continuation captured over heap data survives a collection that
+relocates that data, then resumes correctly — twice. See
+[docs/CONTINUATIONS.md](docs/CONTINUATIONS.md).
+
+## A standards-flavored Scheme, as a library (`scheme/`)
+
+The `scheme` crate is an R7RS-flavored Scheme built **entirely on the core's
+public API** — the core has no idea Scheme exists. It is the live proof of the
+library/language split: its own reader (`#t`, `#\c`, strings, quasiquote), a
+`desugar` pass, `syntax-rules`, and then it hands plain core forms to `analyze`.
+The same tiers that run the core's own Lisp run it.
+
+`scheme/tests/conformance.rs` is a **61/61**-passing R7RS suite that doubles as
+the roadmap, and every expected value is oracle-checked against Chicken Scheme
+(`csi`) when installed, so a wrong expectation fails loudly. Coverage: arithmetic
+and a numeric tower up through a dependency-free arbitrary-precision `BigInt`
+(`bigint.rs`), lists/vectors/chars/strings, `let`/`letrec`/named-`let`/`cond`/
+`case`, tail calls, `map`/`append`/`apply`/`call-with-values`, quasiquote,
+**hygienic** `syntax-rules` (introduced bindings are alpha-renamed, so a macro's
+`t` cannot capture the caller's), and the full continuation story above.
+
+Honest edges: `dynamic-wind` is correct for non-escaping use but does not yet
+re-run guards across continuation jumps; hygiene covers introduced bindings for
+the common binding forms; the numeric tower stops at exact integers (no rationals
+yet). See [docs/SCHEME.md](docs/SCHEME.md).
+
 ## What a real toolkit adds on top (not sketched here)
 
 - A JIT `CodeSpace` whose `define`/`invoke` emit machine code (the `ClosureComp`
   tier already proves the incremental + late-bound contract; a native tier would
   reuse it). This is the genuinely hard engineering.
-- Rooting the **evaluator's** operand temps across a move (the compiler is
-  moving-safe; the evaluator is not yet — see the GC section). Same handle
-  discipline, applied pervasively.
+- Rooting the **host-stack** evaluators' operand temps across a move (the
+  compiler and the CEK machine are moving-safe; `TreeWalk` et al. are not yet —
+  see the GC section). Same handle discipline, applied pervasively.
+- Making the CEK tier compose with **dispatch** (it currently errors on method
+  dispatch), and automatic GC on allocation pressure (the mechanism is identical
+  to the explicit `(gc)` safepoint, it just needs an allocation trigger).
+- Fuller Scheme: rationals/the rest of the numeric tower, `dynamic-wind` across
+  continuation jumps, full referential-transparency hygiene.
 - The runtime library (persistent collections, seqs) generic over `ValueModel`.
