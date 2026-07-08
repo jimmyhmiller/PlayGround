@@ -1,0 +1,26 @@
+[package]
+name = "minimal-optchain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone crate — its own workspace root so it isn't pulled into anything above.
+[workspace]
+
+# Thin LTO so the generic transform inlines across the lib→bin boundary.
+# Verified load-bearing: without it oxc's overhead ~doubles (~5% -> ~11%), which
+# is cross-crate call overhead, not the abstraction. (swc is unaffected.)
+[profile.release]
+lto = "thin"
+
+[dependencies]
+# oxc backend
+oxc = { version = "0.138", features = ["full"] }
+oxc_str = "0.138"
+
+# swc backend
+swc_common = { version = "23", features = ["sourcemap"] }
+swc_ecma_ast = "25"
+swc_ecma_parser = "41"
+swc_ecma_codegen = "28"
+swc_ecma_visit = "25"
