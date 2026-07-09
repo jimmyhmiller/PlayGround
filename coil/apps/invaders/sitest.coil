@@ -19,15 +19,15 @@
   (let [s  (alloc-stack Cpu)
         m  (alloc-stack Machine)
         fb (alloc-stack (array u8 57344))]     ; 224*256
-    (if (icmp-lt (cast :i64 argc) 2)
+    (if (< (cast :i64 argc) 2)
         (do (printf c"usage: sitest <invaders.rom> [frames]\n") 1)
         (do (init s) (minit m)
-            (if (icmp-lt (load-com s (load (index argv 1)) 0) 0)
+            (if (< (load-com s (load (index argv 1)) 0) 0)
                 (do (printf c"cannot open %s\n" (load (index argv 1))) 1)
-                (let [frames (if (icmp-ge (cast :i64 argc) 3) (cast :i64 (atoi (load (index argv 2)))) 500)]
+                (let [frames (if (>= (cast :i64 argc) 3) (cast :i64 (atoi (load (index argv 2)))) 500)]
                   (do
                     ; frames==0 (e.g. arg "play") drives a coin+1P-start sequence, else just runs N attract frames
-                    (if (icmp-eq frames 0)
+                    (if (= frames 0)
                         (do (for [i 0 250] (step-frame s m))
                             (set-in1 m 0x01) (for [i 0 10] (step-frame s m)) (clr-in1 m 0x01)   ; insert coin
                             (for [i 0 10] (step-frame s m))
