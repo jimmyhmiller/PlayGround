@@ -152,34 +152,52 @@
           (store! k (iadd (load k) 1)))))
     (dl-done a rest)))
 
-; Walk elements [start, cnt) grouping them into PAIR rows ("k v"). Comments form
-; their own row, unless a same-line trailing comment which sticks to its row.
+(defn trailing-comment? [(ch (ptr Node))] (-> bool)
+  (and (node-comment? ch) (icmp-eq (node-nl ch) 0)))
+
+; One key/value clause as a single row-doc. The value hangs +2 under the key when
+; the clause has a comment between key and value, or when it doesn't fit:
+;   key  ; comment          key value          key
+;     value                                       value   (too long)
+; A comment between key and value forces the hang (nothing may share its line); a
+; comment trailing the value just rides at the end of the line.
+(defn make-pair [(a (ptr Allocator)) (key (ptr Doc)) (keycom (ptr Doc))
+                 (hasval bool) (val (ptr Doc)) (valcom (ptr Doc))] (-> (ptr Doc))
+  (let [dl (dl-new a) (mut forced) false]
+    (dl-push! dl key)
+    (if (icmp-ne (cast i64 keycom) 0)
+        (do (dl-push! dl (d-text a "  ")) (dl-push! dl keycom) (store! forced true) 0) 0)
+    (if hasval
+        (do (let [inner (dl-new a)]
+              (dl-push! inner (d-line a)) (dl-push! inner val)
+              (dl-push! dl (d-nest a 2 (dl-done a inner))))
+            (if (icmp-ne (cast i64 valcom) 0)
+                (do (dl-push! dl (d-text a "  ")) (dl-push! dl valcom) 0) 0))
+        0)
+    (let [body (d-align a 0 (dl-done a dl))]   ; anchor the +2 hang to the key column
+      (if (load forced) (d-group-forced a body) (d-group a body)))))
+
+; Walk elements [start, cnt) into clause rows. Each clause is key + optional
+; same-line comment + value (+ optional same-line comment); a standalone comment
+; is its own row. Comments never shift the key/value cadence.
 (defn build-pair-rows [(a (ptr Allocator)) (n (ptr Node)) (start i64)] (-> (ptr (ArrayList (ptr Doc))))
-  (let [cnt (node-count n) rows (dl-new a) (mut cur) (dl-new a)
-        (mut in-row) 0 (mut have) false (mut closed) false]
-    (let [(mut i) start]
-      (loop (if (icmp-ge (load i) cnt) (break)
-        (let [ch (node-nth n (load i))]
-          (if (node-comment? ch)
-              (if (and (load have) (icmp-eq (node-nl ch) 0))
-                  (do (dl-push! (load cur) (d-text a "  "))       ; trailing: stick to row
-                      (dl-push! (load cur) (node->doc a ch))
-                      (store! closed true) 0)                     ; …but nothing else joins this line
-                (do (flush-row a rows (load cur) (load have))     ; standalone comment row
-                    (store! cur (dl-new a)) (store! in-row 0) (store! have false) (store! closed false)
-                    (dl-push! rows (node->doc a ch))))
-            (do
-              (if (or (icmp-ge (load in-row) 2) (load closed))     ; pair complete or line closed → new row
-                  (do (flush-row a rows (load cur) (load have))
-                      (store! cur (dl-new a)) (store! in-row 0) (store! have false) (store! closed false) 0) 0)
-              (if (icmp-eq (load in-row) 0)
-                  (dl-push! (load cur) (node->doc a ch))           ; key
-                (do (dl-push! (load cur) (d-text a " "))           ; value
-                    (dl-push! (load cur) (node->doc a ch))))
-              (store! in-row (iadd (load in-row) 1))
-              (store! have true) 0))
-          (store! i (iadd (load i) 1)))))
-      (flush-row a rows (load cur) (load have)))
+  (let [cnt (node-count n) rows (dl-new a) (mut i) start]
+    (loop (if (icmp-ge (load i) cnt) (break)
+      (let [ch (node-nth n (load i))]
+        (if (node-comment? ch)
+            (do (dl-push! rows (node->doc a ch)) (store! i (iadd (load i) 1)))   ; standalone comment row
+          (let [key (node->doc a ch) (mut keycom) (cast (ptr Doc) 0)
+                (mut val) (cast (ptr Doc) 0) (mut hasval) false (mut valcom) (cast (ptr Doc) 0)]
+            (store! i (iadd (load i) 1))
+            (if (and (icmp-lt (load i) cnt) (trailing-comment? (node-nth n (load i))))
+                (do (store! keycom (node->doc a (node-nth n (load i)))) (store! i (iadd (load i) 1)) 0) 0)
+            (if (and (icmp-lt (load i) cnt) (not (node-comment? (node-nth n (load i)))))
+                (do (store! val (node->doc a (node-nth n (load i)))) (store! hasval true)
+                    (store! i (iadd (load i) 1))
+                    (if (and (icmp-lt (load i) cnt) (trailing-comment? (node-nth n (load i))))
+                        (do (store! valcom (node->doc a (node-nth n (load i)))) (store! i (iadd (load i) 1)) 0) 0))
+                0)
+            (dl-push! rows (make-pair a key (load keycom) (load hasval) (load val) (load valcom))))))))
     rows))
 
 ; cond / case: clauses laid out in PAIRS, aligned under the first clause.
@@ -202,8 +220,6 @@
         (dl-push! dl (d-text a ")"))
         (seal a dl forced)))))
 
-(defn flush-row [(a (ptr Allocator)) (rows (ptr (ArrayList (ptr Doc)))) (cur (ptr (ArrayList (ptr Doc)))) (have bool)] (-> i64)
-  (if have (dl-push! rows (dl-done a cur)) 0) 0)
 
 ; binding forms: head, a binding vector, then a body indented +2.
 (defn is-binding-form [(h (slice u8))] (-> bool)
