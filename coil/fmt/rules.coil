@@ -26,9 +26,16 @@
 
 (defn is [(h (slice u8)) (lit (slice u8))] (-> bool) (str-eq h lit))
 
+; The def* family: name stays on the head line, body indents +2 (Clojure's
+; :inner-0 shape). When a parameter vector is present it (and an optional (-> …)
+; return) join the head line too — see the DEFN branch of list->doc.
+(defn is-def-family [(h (slice u8))] (-> bool)
+  (or (is h "defn") (or (is h "defn-") (or (is h "defmacro") (or (is h "defmethod")
+      (or (is h "def") (or (is h "defonce") (is h "defmulti"))))))))
+
 ; Look up the layout rule for a list whose head symbol is `h`.
 (defn list-rule [(h (slice u8))] (-> Rule)
-  (if (or (is h "defn") (or (is h "defmacro") (is h "defmethod"))) (mk-rule 2 0)
+  (if (is-def-family h)                                       (mk-rule 2 0)
     (if (is h "do")                                            (mk-rule 1 0)
       (if (or (is h "let") (or (is h "loop") (or (is h "binding") (is h "let*")))) (mk-rule 1 1)
         (if (or (is h "when") (or (is h "when-not") (or (is h "unless") (or (is h "while") (is h "when-let"))))) (mk-rule 1 1)
@@ -244,10 +251,12 @@
               (let [headlen (slice-len (node-raw-flat a (node-nth n 0)))]
                 (layout a n 40 41 1 (iadd headlen 2)))
             (if (icmp-eq style 2)
-                ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2
+                ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2.
+                ; With no param vector (def, defmulti, multi-arity defn): just the
+                ; name on the head line, body +2 — never function-call alignment.
                 (let [vi (defn-vec-index n)]
                   (if (icmp-lt vi 0)
-                      (layout a n 40 41 1 (iadd (slice-len (node-raw-flat a (node-nth n 0))) 2))
+                      (layout a n 40 41 1 2)
                     (let [sig-end (if (and (icmp-lt (iadd vi 1) cnt)
                                            (list-head-is n (iadd vi 1) "->"))
                                       (iadd vi 1) vi)]
