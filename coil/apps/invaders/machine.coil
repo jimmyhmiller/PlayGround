@@ -1,0 +1,83 @@
+; ============================================================================
+; machine.coil — the Space Invaders arcade hardware around the 8080 (ported from
+; SpaceInvadersMachine.m, public domain): the bit-shift register on I/O ports
+; 2/3/4, the input port, two video interrupts per frame (RST 1 at mid-screen,
+; RST 2 at VBlank), and the 256x224 1bpp framebuffer at 0x2400.
+; ============================================================================
+(module machine)
+(export Machine minit machine-in machine-out step-frame set-in1 clr-in1 decode)
+
+(import "i8080.coil"   :use *)
+(import "control.coil" :use *)
+
+; SI runs the 8080 at 2 MHz; at 60 Hz that's 33333 cycles/frame, split into two
+; equal halves so the video interrupt fires at mid-screen and again at VBlank.
+(defn half-frame [] (-> i64) 16667)
+
+(defstruct Machine
+  [(shift0 i64) (shift1 i64) (shift-off i64)   ; the discrete bit-shift chip
+   (in1 i64) (in2 i64) (out3 i64) (out5 i64)]) ; input port + sound latches
+
+(defn minit [(m (ptr Machine))] (-> i64)
+  (do (store! (field m shift0) 0) (store! (field m shift1) 0) (store! (field m shift-off) 0)
+      (store! (field m in1) 0) (store! (field m in2) 0) (store! (field m out3) 0) (store! (field m out5) 0) 0))
+
+; IN p: port 1 = controls; port 3 = shifted result; port 0 = 0x0f (as the ref).
+(defn machine-in [(m (ptr Machine)) (port i64)] (-> i64)
+  (cond
+    (icmp-eq port 0) 0x0F
+    (icmp-eq port 1) (load (field m in1))
+    (icmp-eq port 2) (load (field m in2))
+    (icmp-eq port 3) (let [v (ior (ishl (load (field m shift1)) 8) (load (field m shift0)))]
+                       (iand (ishr v (isub 8 (load (field m shift-off)))) 0xFF))
+    0))
+
+; OUT p: port 2 = shift amount; port 4 = feed the shift register; 3/5 = sound.
+(defn machine-out [(m (ptr Machine)) (port i64) (val i64)] (-> i64)
+  (cond
+    (icmp-eq port 2) (do (store! (field m shift-off) (iand val 7)) 0)
+    (icmp-eq port 3) (do (store! (field m out3) val) 0)
+    (icmp-eq port 4) (do (store! (field m shift0) (load (field m shift1))) (store! (field m shift1) val) 0)
+    (icmp-eq port 5) (do (store! (field m out5) val) 0)
+    0))
+
+; run ~one interrupt-worth of cycles, intercepting IN(0xdb)/OUT(0xd3) at the
+; machine boundary exactly as SpaceInvadersMachine.m's doCPU does.
+(defn run-cycles [(s (ptr Cpu)) (m (ptr Machine)) (target i64)] (-> i64)
+  (let [count (alloc-stack i64)]
+    (do (store! count 0)
+        (while (icmp-lt (load count) target)
+          (let [op (rb s (rpc s))]
+            (cond
+              (icmp-eq op 0xDB) (do (setr s 7 (machine-in m (rb s (iadd (rpc s) 1))))
+                                    (spc s (iadd (rpc s) 2)) (store! count (iadd (load count) 3)))
+              (icmp-eq op 0xD3) (do (machine-out m (rb s (iadd (rpc s) 1)) (reg s 7))
+                                    (spc s (iadd (rpc s) 2)) (store! count (iadd (load count) 3)))
+              (store! count (iadd (load count) (emulate s))))))
+        0)))
+
+; advance one full video frame: two halves, RST 1 then RST 2 (if interrupts on).
+(defn step-frame [(s (ptr Cpu)) (m (ptr Machine))] (-> i64)
+  (do (run-cycles s m (half-frame))
+      (if (icmp-gt (ienabled s) 0) (gen-interrupt s 1) 0)
+      (run-cycles s m (half-frame))
+      (if (icmp-gt (ienabled s) 0) (gen-interrupt s 2) 0)
+      0))
+
+; input helpers: front-ends set/clear bits of port 1 (coin/start/fire/left/right).
+(defn set-in1 [(m (ptr Machine)) (bit i64)] (-> i64) (do (store! (field m in1) (ior (load (field m in1)) bit)) 0))
+(defn clr-in1 [(m (ptr Machine)) (bit i64)] (-> i64) (do (store! (field m in1) (iand (load (field m in1)) (ixor 0xFF bit))) 0))
+
+; decode VRAM (0x2400, 224 memory-columns x 32 bytes) into an upright 224x256
+; 1-byte-per-pixel buffer `out` (0/255), rotated 90 deg like the real CRT.
+(defn decode [(s (ptr Cpu)) (out (ptr u8))] (-> i64)
+  (do (for [col 0 224]
+        (for [byte 0 32]
+          (let [v (rb s (iadd 0x2400 (iadd (imul col 32) byte)))]
+            (for [b 0 8]
+              (let [j   (iadd (imul byte 8) b)                 ; 0..255 along the memory column
+                    lit (if (icmp-ne (iand (ishr v b) 1) 0) 0xFF 0)
+                    x   col
+                    y   (isub 255 j)]                          ; rotate: bottom-of-column -> top
+                (store! (index out (iadd (imul y 224) x)) (cast :u8 lit)))))))
+      0))

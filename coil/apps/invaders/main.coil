@@ -1,0 +1,111 @@
+; ============================================================================
+; Space Invaders in a native macOS window, in Coil. CPU = i8080.coil, hardware =
+; machine.coil; this front-end opens an NSWindow (via lib objc.coil — no wrapper),
+; pushes the 224x256 framebuffer through CoreGraphics each frame, and maps the
+; keyboard onto the arcade's input port.
+;   cd apps/invaders && coil build && ./invaders ../../roms/invaders.rom
+;   keys: 1/C = insert coin   2/Return = 1P start   ← → (or A/D) = move   Space = fire
+; ============================================================================
+(module app)
+(import "objc.coil"    :use *)
+(import "i8080.coil"   :use *)
+(import "machine.coil" :use *)
+(import "control.coil" :use *)
+
+(extern printf                      :cc c [(ptr i8) ...] (-> :i32))
+(extern CGColorSpaceCreateDeviceRGB :cc c [] (-> (ptr i8)))
+(extern CGBitmapContextCreate       :cc c [(ptr i8) :i64 :i64 :i64 :i64 (ptr i8) :i64] (-> (ptr i8)))
+(extern CGBitmapContextCreateImage  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern CGContextRelease            :cc c [(ptr i8)] (-> :i64))
+(extern CGColorSpaceRelease         :cc c [(ptr i8)] (-> :i64))
+(extern CGImageRelease              :cc c [(ptr i8)] (-> :i64))
+(extern usleep                      :cc c [:i64] (-> :i32))
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+
+(defn make-window [(w f64) (h f64)] (-> (ptr i8))
+  (let [rect (alloc-stack CGRect)
+        win  (msg (ptr i8) (class c"NSWindow") (sel c"alloc") [])]
+    (do (store! (field rect x) 200.0) (store! (field rect y) 200.0)
+        (store! (field rect w) w)     (store! (field rect h) h)
+        (msg (ptr i8) win (sel c"initWithContentRect:styleMask:backing:defer:")
+             [CGRect i64 i64 i64] (load rect) 15 2 0))))
+
+; Decode VRAM into an RGBA image and hand it to the layer. The classic gel-strip
+; colour overlay: green along the bottom (player + shields), red near the top,
+; white elsewhere — a pure function of screen row, exactly like the cabinet.
+(defn blit [(s (ptr Cpu)) (layer (ptr i8)) (fb (ptr u8)) (rgba (ptr u8))] (-> i64)
+  (let [space (CGColorSpaceCreateDeviceRGB)]
+    (do
+      (decode s fb)
+      (for [y 0 256]
+        (for [x 0 224]
+          (let [lit (cast :i64 (load (index fb (iadd (imul y 224) x))))
+                o   (imul (iadd (imul y 224) x) 4)]
+            (do
+              ; overlay tint by row band (upright image: y=0 top score, y=255 bottom)
+              (cond
+                (icmp-lt y 32)  (do (store! (index rgba o) (cast :u8 lit)) (store! (index rgba (iadd o 1)) (cast :u8 0)) (store! (index rgba (iadd o 2)) (cast :u8 0)))         ; red score strip
+                (icmp-gt y 183) (do (store! (index rgba o) (cast :u8 0)) (store! (index rgba (iadd o 1)) (cast :u8 lit)) (store! (index rgba (iadd o 2)) (cast :u8 0)))         ; green player/shields
+                (do (store! (index rgba o) (cast :u8 lit)) (store! (index rgba (iadd o 1)) (cast :u8 lit)) (store! (index rgba (iadd o 2)) (cast :u8 lit))))                    ; white
+              (store! (index rgba (iadd o 3)) (cast :u8 0xFF))))))
+      (let [ctx (CGBitmapContextCreate (index rgba 0) 224 256 8 896 space 1)
+            img (CGBitmapContextCreateImage ctx)]
+        (do (msg (ptr i8) layer (sel c"setContents:") [(ptr i8)] img)
+            (CGImageRelease img) (CGContextRelease ctx) (CGColorSpaceRelease space) 0)))))
+
+; macOS hardware keyCode -> Space Invaders port-1 bit (0 = not an input key).
+(defn key-bit [(kc i64)] (-> i64)
+  (cond
+    (icmp-eq kc 18) 0x01  (icmp-eq kc 8)  0x01   ; 1 / C : insert coin
+    (icmp-eq kc 19) 0x04  (icmp-eq kc 36) 0x04   ; 2 / Return : 1P start
+    (icmp-eq kc 49) 0x10                          ; Space : fire
+    (icmp-eq kc 123) 0x20 (icmp-eq kc 0) 0x20    ; Left / A
+    (icmp-eq kc 124) 0x40 (icmp-eq kc 2) 0x40    ; Right / D
+    0))
+
+(defn handle-key [(m (ptr Machine)) (ev (ptr i8)) (down i64)] (-> i64)
+  (let [bit (key-bit (msg i64 ev (sel c"keyCode") []))]
+    (if (icmp-eq bit 0) 0 (if (icmp-eq down 1) (set-in1 m bit) (clr-in1 m bit)))))
+
+(defn pump [(app (ptr i8)) (m (ptr Machine)) (mode (ptr i8))] (-> i64)
+  (while 1
+    (let [ev (msg (ptr i8) app (sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                  [i64 (ptr i8) (ptr i8) i64] -1 (cast (ptr i8) 0) mode 1)]
+      (if (icmp-eq (cast :i64 ev) 0) (break 0)
+          (let [ty (msg i64 ev (sel c"type") [])]
+            (do (if (icmp-eq ty 10) (handle-key m ev 1) 0)
+                (if (icmp-eq ty 11) (handle-key m ev 0) 0)
+                (msg (ptr i8) app (sel c"sendEvent:") [(ptr i8)] ev) 0))))))
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (if (icmp-lt (cast :i64 argc) 2)
+      (do (printf c"usage: invaders <invaders.rom>\n") 1)
+      (let [s    (alloc-stack Cpu)
+            m    (alloc-stack Machine)
+            fbb  (alloc-stack (array u8 57344))
+            rgb  (alloc-stack (array u8 229376))
+            app  (msg (ptr i8) (class c"NSApplication") (sel c"sharedApplication") [])]
+        (do
+          (init s) (minit m)
+          (if (icmp-lt (load-com s (load (index argv 1)) 0) 0)
+              (do (printf c"invaders: cannot open ROM\n") 1)
+              (let [win  (make-window 672.0 768.0)
+                    mode (msg (ptr i8) (class c"NSString") (sel c"stringWithUTF8String:") [(ptr i8)] c"kCFRunLoopDefaultMode")
+                    near (msg (ptr i8) (class c"NSString") (sel c"stringWithUTF8String:") [(ptr i8)] c"nearest")]
+                (do
+                  (msg (ptr i8) app (sel c"setActivationPolicy:") [i64] 0)
+                  (msg (ptr i8) (msg (ptr i8) win (sel c"contentView") []) (sel c"setWantsLayer:") [i64] 1)
+                  (msg (ptr i8) win (sel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+                  (msg (ptr i8) app (sel c"activateIgnoringOtherApps:") [i64] 1)
+                  (msg (ptr i8) app (sel c"finishLaunching") [])
+                  (let [layer (msg (ptr i8) (msg (ptr i8) win (sel c"contentView") []) (sel c"layer") [])]
+                    (do
+                      (msg (ptr i8) layer (sel c"setMagnificationFilter:") [(ptr i8)] near)
+                      (msg (ptr i8) layer (sel c"setMinificationFilter:")  [(ptr i8)] near)
+                      (while 1
+                        (do (pump app m mode)
+                            (step-frame s m)
+                            (blit s layer (index fbb 0) (index rgb 0))
+                            (usleep 16000)))))
+                  0)))))))

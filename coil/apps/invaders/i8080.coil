@@ -12,7 +12,7 @@
 
 (module i8080)
 (export Cpu init load-com emulate gen-interrupt
-        reg setr rb wb rpc spc getf pop16)
+        reg setr rb wb rpc spc getf pop16 ienabled)
 
 (import "control.coil" :use *)   ; cond / for / while
 
@@ -26,6 +26,7 @@
 (defstruct Cpu
   [(mem  (array u8 65536))
    (regs (array u8 8))
+   (cyc  (array u8 256))     ; per-opcode machine-cycle table (for interrupt timing)
    (sp i64) (pc i64) (f i64) (ie i64)])
 
 ; ---- register / memory access ----------------------------------------------
@@ -240,13 +241,45 @@
                                             (setr8 s (iand (ishr op 3) 7) (getr s (iand op 7)))) ; MOV
           (icmp-eq (iand op 0xC0) 0x80) (alu s op)
           (hi s op b1 b2))
-        4)))
+        (cast :i64 (load (index (field s cyc) op))))))
 
 (defn gen-interrupt [(s (ptr Cpu)) (n i64)] (-> i64)
   (do (push16 s (rpc s)) (spc s (imul n 8)) (store! (field s ie) 0) 0))
+(defn ienabled [(s (ptr Cpu))] (-> i64) (load (field s ie)))
 
 ; ---- setup -----------------------------------------------------------------
-(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (sizeof Cpu)) 0))
+; cycles8080[] from the reference, one 16-wide row per call.
+(defn crow [(s (ptr Cpu)) (o i64)
+            (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64)
+            (i i64) (j i64) (k i64) (l i64) (m i64) (n i64) (p i64) (q i64)] (-> i64)
+  (do (store! (index (field s cyc) (iadd o 0)) (cast :u8 a))  (store! (index (field s cyc) (iadd o 1)) (cast :u8 b))
+      (store! (index (field s cyc) (iadd o 2)) (cast :u8 c))  (store! (index (field s cyc) (iadd o 3)) (cast :u8 d))
+      (store! (index (field s cyc) (iadd o 4)) (cast :u8 e))  (store! (index (field s cyc) (iadd o 5)) (cast :u8 f))
+      (store! (index (field s cyc) (iadd o 6)) (cast :u8 g))  (store! (index (field s cyc) (iadd o 7)) (cast :u8 h))
+      (store! (index (field s cyc) (iadd o 8)) (cast :u8 i))  (store! (index (field s cyc) (iadd o 9)) (cast :u8 j))
+      (store! (index (field s cyc) (iadd o 10)) (cast :u8 k)) (store! (index (field s cyc) (iadd o 11)) (cast :u8 l))
+      (store! (index (field s cyc) (iadd o 12)) (cast :u8 m)) (store! (index (field s cyc) (iadd o 13)) (cast :u8 n))
+      (store! (index (field s cyc) (iadd o 14)) (cast :u8 p)) (store! (index (field s cyc) (iadd o 15)) (cast :u8 q)) 0))
+(defn load-cycles [(s (ptr Cpu))] (-> i64)
+  (do
+    (crow s 0x00  4 10 7 5 5 5 7 4 4 10 7 5 5 5 7 4)
+    (crow s 0x10  4 10 7 5 5 5 7 4 4 10 7 5 5 5 7 4)
+    (crow s 0x20  4 10 16 5 5 5 7 4 4 10 16 5 5 5 7 4)
+    (crow s 0x30  4 10 13 5 10 10 10 4 4 10 13 5 5 5 7 4)
+    (crow s 0x40  5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 0x50  5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 0x60  5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 0x70  7 7 7 7 7 7 7 7 5 5 5 5 5 5 7 5)
+    (crow s 0x80  4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 0x90  4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 0xA0  4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 0xB0  4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 0xC0  11 10 10 10 17 11 7 11 11 10 10 10 10 17 7 11)
+    (crow s 0xD0  11 10 10 10 17 11 7 11 11 10 10 10 10 17 7 11)
+    (crow s 0xE0  11 10 10 18 17 11 7 11 11 5 10 5 17 17 7 11)
+    (crow s 0xF0  11 10 10 4 17 11 7 11 11 5 10 4 17 17 7 11) 0))
+
+(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (sizeof Cpu)) (load-cycles s) 0))
 
 ; load a raw image at `at`; returns 0 on success, -1 if the file won't open.
 (defn load-com [(s (ptr Cpu)) (path (ptr i8)) (at i64)] (-> i64)

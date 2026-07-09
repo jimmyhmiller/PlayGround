@@ -1,0 +1,43 @@
+; ============================================================================
+; sitest.coil — headless Space Invaders: boot the ROM, run N frames, dump the
+; decoded 224x256 framebuffer as a binary PGM to /tmp/si.pgm. Lets us verify the
+; machine (video interrupts + shift hardware) reaches the attract screen with no
+; GUI.  coil run sitest.coil -- ../../roms/invaders.rom [frames]
+; ============================================================================
+(module app)
+(import "i8080.coil"   :use *)
+(import "machine.coil" :use *)
+(import "control.coil" :use *)
+
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fwrite :cc c [(ptr i8) :i64 :i64 (ptr i8)] (-> :i64))
+(extern fclose :cc c [(ptr i8)] (-> :i32))
+(extern atoi   :cc c [(ptr i8)] (-> :i32))
+(extern printf :cc c [(ptr i8) ...] (-> :i32))
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (let [s  (alloc-stack Cpu)
+        m  (alloc-stack Machine)
+        fb (alloc-stack (array u8 57344))]     ; 224*256
+    (if (icmp-lt (cast :i64 argc) 2)
+        (do (printf c"usage: sitest <invaders.rom> [frames]\n") 1)
+        (do (init s) (minit m)
+            (if (icmp-lt (load-com s (load (index argv 1)) 0) 0)
+                (do (printf c"cannot open %s\n" (load (index argv 1))) 1)
+                (let [frames (if (icmp-ge (cast :i64 argc) 3) (cast :i64 (atoi (load (index argv 2)))) 500)]
+                  (do
+                    ; frames==0 (e.g. arg "play") drives a coin+1P-start sequence, else just runs N attract frames
+                    (if (icmp-eq frames 0)
+                        (do (for [i 0 250] (step-frame s m))
+                            (set-in1 m 0x01) (for [i 0 10] (step-frame s m)) (clr-in1 m 0x01)   ; insert coin
+                            (for [i 0 10] (step-frame s m))
+                            (set-in1 m 0x04) (for [i 0 10] (step-frame s m)) (clr-in1 m 0x04)   ; 1P start
+                            (for [i 0 220] (step-frame s m)))                                    ; let the round begin
+                        (for [i 0 frames] (step-frame s m)))
+                    (decode s (index fb 0))
+                    (let [f (fopen c"/tmp/si.pgm" c"wb")]
+                      (do (fwrite c"P5\n224 256\n255\n" 1 15 f)
+                          (fwrite (index fb 0) 1 57344 f)
+                          (fclose f)))
+                    (printf c"ran %ld frames -> /tmp/si.pgm\n" frames)
+                    0)))))))
